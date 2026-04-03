@@ -8,7 +8,7 @@ import subprocess
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from collections import OrderedDict
-from threading import Lock, Thread
+from threading import Lock
 from urllib.parse import unquote
 
 ROMS_ROOT = Path("/userdata/roms")
@@ -22,7 +22,6 @@ PASSWORD = os.environ.get("PASSWORD")
 if not USERNAME or not PASSWORD:
     raise RuntimeError("USERNAME and PASSWORD environment variables must be set")
 
-HTTP_PORT = int(os.environ.get("HTTP_PORT", "8000"))
 HTTPS_PORT = int(os.environ.get("HTTPS_PORT", "8443"))
 
 IMAGE_CACHE_TTL_SECONDS = int(os.environ.get("IMAGE_CACHE_TTL_SECONDS", "3600"))
@@ -248,8 +247,15 @@ def ensure_self_signed_cert():
     )
 
 
-class BaseRomHandler(BaseHTTPRequestHandler):
-    server_version = "RomAPI/4.1"
+class RomHandler(BaseHTTPRequestHandler):
+    server_version = "RomAPI/5.0"
+
+    def unauthorized(self):
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="ROM API"')
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json_bytes({"error": "unauthorized"}))
 
     def send_json(self, status_code: int, payload: dict, cache_key: str = None):
         if status_code == 200 and cache_key:
@@ -489,20 +495,17 @@ class BaseRomHandler(BaseHTTPRequestHandler):
 
         self.stream_file(target_path, "application/octet-stream", as_attachment=True)
 
-
-class HttpsRomHandler(BaseRomHandler):
-    def unauthorized(self):
-        self.send_response(401)
-        self.send_header("WWW-Authenticate", 'Basic realm="ROM API"')
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(json_bytes({"error": "unauthorized"}))
-
     def do_GET(self):
         try:
             raw_path = self.path.split("?", 1)[0]
             parts = [unquote(p) for p in raw_path.split("/") if p]
 
+            # Public image route over HTTPS without auth
+            if len(parts) == 5 and parts[0] == "public" and parts[1] == "systems" and parts[3] == "images":
+                self.handle_public_image(parts[2], parts[4])
+                return
+
+            # Everything else requires auth
             if not check_auth(self.headers.get("Authorization")):
                 self.unauthorized()
                 return
@@ -556,7 +559,7 @@ class HttpsRomHandler(BaseRomHandler):
             self.send_json(500, {"error": str(e)})
 
     def handle_root_html(self):
-        self.send_html(200, f"""<!doctype html>
+        self.send_html(200, """<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -564,17 +567,17 @@ class HttpsRomHandler(BaseRomHandler):
   <title>Batocera ROM Browser</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <style>
-    body {{ background: #f8f9fa; }}
-    .tile {{ height: 100%; }}
-    .pointer {{ cursor: pointer; }}
-    .mono {{ font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }}
-    .truncate-2 {{
+    body { background: #f8f9fa; }
+    .tile { height: 100%; }
+    .pointer { cursor: pointer; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .truncate-2 {
       display: -webkit-box;
       -webkit-line-clamp: 2;
       -webkit-box-orient: vertical;
       overflow: hidden;
       min-height: 3em;
-    }}
+    }
   </style>
 </head>
 <body>
@@ -588,7 +591,7 @@ class HttpsRomHandler(BaseRomHandler):
   </div>
 
   <div class="alert alert-warning">
-    Self-signed certificate in use. Public ROM artwork is loaded over plain HTTP on port {HTTP_PORT}.
+    Self-signed certificate in use.
   </div>
 
   <div id="alerts"></div>
@@ -600,121 +603,121 @@ const content = document.getElementById("content");
 const alerts = document.getElementById("alerts");
 const backBtn = document.getElementById("backBtn");
 
-function showError(message) {{
-  alerts.innerHTML = `<div class="alert alert-danger">${{message}}</div>`;
-}}
-function clearError() {{
+function showError(message) {
+  alerts.innerHTML = `<div class="alert alert-danger">${message}</div>`;
+}
+function clearError() {
   alerts.innerHTML = "";
-}}
-function escapeHtml(value) {{
+}
+function escapeHtml(value) {
   return String(value)
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
-}}
-async function api(url) {{
-  const res = await fetch(url, {{ credentials: "same-origin" }});
-  if (!res.ok) {{
-    let msg = `Request failed: ${{res.status}}`;
-    try {{
+}
+async function api(url) {
+  const res = await fetch(url, { credentials: "same-origin" });
+  if (!res.ok) {
+    let msg = `Request failed: ${res.status}`;
+    try {
       const data = await res.json();
       if (data.error) msg = data.error;
-    }} catch (_) {{}}
+    } catch (_) {}
     throw new Error(msg);
-  }}
+  }
   return await res.json();
-}}
-function setHash(hash) {{
+}
+function setHash(hash) {
   window.location.hash = hash;
-}}
-function romDownloadUrl(system, uniqueId) {{
-  return `/systems/${{encodeURIComponent(system)}}/${{encodeURIComponent(uniqueId)}}`;
-}}
-function publicRomImageUrl(system, romName) {{
+}
+function romDownloadUrl(system, uniqueId) {
+  return `/systems/${encodeURIComponent(system)}/${encodeURIComponent(uniqueId)}`;
+}
+function publicRomImageUrl(system, romName) {
   const lastDot = romName.lastIndexOf(".");
   const stem = lastDot >= 0 ? romName.substring(0, lastDot) : romName;
-  const imageFile = `${{stem}}-image.png`;
-  return `http://${{window.location.hostname}}:{HTTP_PORT}/public/systems/${{encodeURIComponent(system)}}/images/${{encodeURIComponent(imageFile)}}`;
-}}
-function renderSystems(data) {{
+  const imageFile = `${stem}-image.png`;
+  return `/public/systems/${encodeURIComponent(system)}/images/${encodeURIComponent(imageFile)}`;
+}
+function renderSystems(data) {
   backBtn.classList.add("d-none");
   const systems = data.systems || [];
   content.innerHTML = `
     <div class="row g-3">
-      ${{systems.map(system => `
+      ${systems.map(system => `
         <div class="col-12 col-sm-6 col-lg-4 col-xl-3">
-          <div class="card shadow-sm tile pointer" onclick="setHash('#system/${{encodeURIComponent(system.name)}}')">
+          <div class="card shadow-sm tile pointer" onclick="setHash('#system/${encodeURIComponent(system.name)}')">
             <div class="card-body">
-              <h2 class="h5 card-title mb-2">${{escapeHtml(system.name)}}</h2>
-              <div class="text-muted">ROMs: ${{system.rom_count}}</div>
+              <h2 class="h5 card-title mb-2">${escapeHtml(system.name)}</h2>
+              <div class="text-muted">ROMs: ${system.rom_count}</div>
             </div>
           </div>
         </div>
-      `).join("")}}
+      `).join("")}
     </div>
   `;
-}}
-function renderRomGrid(system, items) {{
+}
+function renderRomGrid(system, items) {
   return `
     <div class="mb-4">
-      <h3 class="h5 mb-3">ROMs <span class="text-muted">(${{items.length}})</span></h3>
+      <h3 class="h5 mb-3">ROMs <span class="text-muted">(${items.length})</span></h3>
       <div class="row g-3">
-        ${{items.map(item => `
+        ${items.map(item => `
           <div class="col-12 col-md-6 col-xl-4">
             <div class="card shadow-sm tile h-100">
               <img
-                src="${{publicRomImageUrl(system, item.name)}}"
+                src="${publicRomImageUrl(system, item.name)}"
                 class="card-img-top"
-                alt="${{escapeHtml(item.name)}}"
+                alt="${escapeHtml(item.name)}"
                 style="height: 220px; object-fit: contain; background: #111;"
                 onerror="this.style.display='none';"
               >
               <div class="card-body d-flex flex-column">
-                <div class="fw-semibold truncate-2 mb-2">${{escapeHtml(item.name)}}</div>
-                ${{item.byte_count !== undefined ? `<div class="text-muted small mono mb-3">${{item.byte_count}} bytes</div>` : ""}}
+                <div class="fw-semibold truncate-2 mb-2">${escapeHtml(item.name)}</div>
+                ${item.byte_count !== undefined ? `<div class="text-muted small mono mb-3">${item.byte_count} bytes</div>` : ""}
                 <div class="mt-auto">
-                  <a class="btn btn-primary btn-sm" href="${{romDownloadUrl(system, item.unique_id)}}">Download</a>
+                  <a class="btn btn-primary btn-sm" href="${romDownloadUrl(system, item.unique_id)}">Download</a>
                 </div>
               </div>
             </div>
           </div>
-        `).join("") || `<div class="col-12"><div class="text-muted">No roms found.</div></div>`}}
+        `).join("") || `<div class="col-12"><div class="text-muted">No roms found.</div></div>`}
       </div>
     </div>
   `;
-}}
-async function renderSystem(system) {{
+}
+async function renderSystem(system) {
   backBtn.classList.remove("d-none");
-  const romsData = await api(`/systems/${{encodeURIComponent(system)}}`);
+  const romsData = await api(`/systems/${encodeURIComponent(system)}`);
 
   content.innerHTML = `
     <div class="mb-4">
-      <h2 class="h4 mb-1">${{escapeHtml(system)}}</h2>
+      <h2 class="h4 mb-1">${escapeHtml(system)}</h2>
       <div class="text-muted">
-        ROMs: ${{(romsData.roms || []).length}}
+        ROMs: ${(romsData.roms || []).length}
       </div>
     </div>
 
-    ${{renderRomGrid(system, romsData.roms || [])}}
+    ${renderRomGrid(system, romsData.roms || [])}
   `;
-}}
-async function router() {{
+}
+async function router() {
   clearError();
-  try {{
+  try {
     const hash = window.location.hash || "";
-    if (hash.startsWith("#system/")) {{
+    if (hash.startsWith("#system/")) {
       const system = decodeURIComponent(hash.substring("#system/".length));
       await renderSystem(system);
-    }} else {{
+    } else {
       const data = await api("/systems");
       renderSystems(data);
-    }}
-  }} catch (err) {{
+    }
+  } catch (err) {
     showError(err.message || "Unexpected error");
-  }}
-}}
+  }
+}
 backBtn.addEventListener("click", () => setHash(""));
 window.addEventListener("hashchange", router);
 router();
@@ -723,50 +726,19 @@ router();
 </html>""")
 
 
-class PublicImageHandler(BaseRomHandler):
-    def do_GET(self):
-        try:
-            raw_path = self.path.split("?", 1)[0]
-            parts = [unquote(p) for p in raw_path.split("/") if p]
-
-            if len(parts) == 5 and parts[0] == "public" and parts[1] == "systems" and parts[3] == "images":
-                self.handle_public_image(parts[2], parts[4])
-                return
-
-            self.send_json(404, {"error": "not found"})
-        except ValueError as e:
-            self.send_json(400, {"error": str(e)})
-        except FileNotFoundError:
-            self.send_json(404, {"error": "not found"})
-        except ConnectionResetError:
-            pass
-        except BrokenPipeError:
-            pass
-        except Exception as e:
-            self.send_json(500, {"error": str(e)})
-
-
-def run_http_server():
-    httpd = ThreadingHTTPServer(("0.0.0.0", HTTP_PORT), PublicImageHandler)
-    print(f"Serving HTTP public images on port {HTTP_PORT}")
-    httpd.serve_forever()
-
-
 def run_https_server():
     ensure_self_signed_cert()
 
-    httpsd = ThreadingHTTPServer(("0.0.0.0", HTTPS_PORT), HttpsRomHandler)
+    httpsd = ThreadingHTTPServer(("0.0.0.0", HTTPS_PORT), RomHandler)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(certfile=str(CERT_FILE), keyfile=str(KEY_FILE))
     httpsd.socket = context.wrap_socket(httpsd.socket, server_side=True)
 
-    print(f"Serving HTTPS UI/API on port {HTTPS_PORT}")
+    print(f"Serving HTTPS UI/API/images on port {HTTPS_PORT}")
     print(f"Certificate: {CERT_FILE}")
     print(f"Private key: {KEY_FILE}")
     httpsd.serve_forever()
 
 
 if __name__ == "__main__":
-    http_thread = Thread(target=run_http_server, daemon=True)
-    http_thread.start()
     run_https_server()
