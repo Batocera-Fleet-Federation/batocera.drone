@@ -90,6 +90,7 @@ Use [`download_all_roms.sh`](/Users/Jerrod/Documents/git/roms-api/download_all_r
 - The script calls `/systems` then `/systems/{system}`
 - It creates a folder per system under `--output-dir`
 - Each ROM is saved into its system folder
+- Optionally target a single system with `--system`
 
 Example:
 
@@ -98,6 +99,17 @@ Example:
   --base-url "https://72.176.228.250" \
   --username "<username>" \
   --password "<password>" \
+  --output-dir "./rom_downloads"
+```
+
+Single-system example:
+
+```bash
+./download_all_roms.sh \
+  --base-url "https://72.176.228.250" \
+  --username "<username>" \
+  --password "<password>" \
+  --system "snes" \
   --output-dir "./rom_downloads"
 ```
 
@@ -117,6 +129,17 @@ Use [`download_all_roms.ps1`](/Users/Jerrod/Documents/git/roms-api/download_all_
   -BaseUrl "https://72.176.228.250" `
   -Username "<username>" `
   -Password "<password>" `
+  -OutputDir ".\rom_downloads"
+```
+
+Single-system example:
+
+```powershell
+.\download_all_roms.ps1 `
+  -BaseUrl "https://72.176.228.250" `
+  -Username "<username>" `
+  -Password "<password>" `
+  -System "snes" `
   -OutputDir ".\rom_downloads"
 ```
 

@@ -10,6 +10,8 @@ param(
 
     [string]$OutputDir = ".\downloads",
 
+    [string]$System,
+
     [switch]$Overwrite,
 
     [switch]$VerifyTls
@@ -85,6 +87,14 @@ $systems = @($systemsPayload.systems)
 if ($systems.Count -eq 0) {
     Write-Output "No systems returned by API."
     exit 0
+}
+
+if ($System) {
+    $systems = @($systems | Where-Object { $_.name -eq $System })
+    if ($systems.Count -eq 0) {
+        Write-Error "System not found: $System"
+        exit 1
+    }
 }
 
 $downloaded = 0

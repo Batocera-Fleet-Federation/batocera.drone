@@ -15,6 +15,7 @@ Required:
 
 Options:
   --output-dir DIR     Root output directory (default: ./downloads)
+  --system NAME        Download ROMs for only one system (example: snes)
   --overwrite          Overwrite existing files instead of skipping
   --verify-tls         Verify TLS certificate (default is off for self-signed certs)
   -h, --help           Show this help
@@ -32,6 +33,7 @@ BASE_URL=""
 USERNAME=""
 PASSWORD=""
 OUTPUT_DIR="./downloads"
+SYSTEM_NAME=""
 OVERWRITE=0
 VERIFY_TLS=0
 
@@ -51,6 +53,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --output-dir)
       OUTPUT_DIR="${2:-}"
+      shift 2
+      ;;
+    --system)
+      SYSTEM_NAME="${2:-}"
       shift 2
       ;;
     --overwrite)
@@ -127,6 +133,17 @@ fi
 downloaded_count=0
 skipped_count=0
 
+systems_tsv=""
+if [[ -n "$SYSTEM_NAME" ]]; then
+  systems_tsv="$(jq -r --arg s "$SYSTEM_NAME" '.systems[] | select(.name == $s) | [.name, (.name|@uri)] | @tsv' <<<"$systems_json")"
+  if [[ -z "$systems_tsv" ]]; then
+    echo "System not found: $SYSTEM_NAME" >&2
+    exit 1
+  fi
+else
+  systems_tsv="$(jq -r '.systems[] | [.name, (.name|@uri)] | @tsv' <<<"$systems_json")"
+fi
+
 while IFS=$'\t' read -r system_name system_name_enc; do
   [[ -z "$system_name" ]] && continue
   system_dir="${OUTPUT_DIR_ABS}/${system_name}"
@@ -160,8 +177,6 @@ while IFS=$'\t' read -r system_name system_name_enc; do
   done < <(
     jq -r '.roms[] | [.name, .unique_id, (.unique_id|@uri)] | @tsv' <<<"$roms_json"
   )
-done < <(
-  jq -r '.systems[] | [.name, (.name|@uri)] | @tsv' <<<"$systems_json"
-)
+done <<<"$systems_tsv"
 
 echo "Done. Downloaded: ${downloaded_count}, Skipped: ${skipped_count}, Output: ${OUTPUT_DIR_ABS}"
