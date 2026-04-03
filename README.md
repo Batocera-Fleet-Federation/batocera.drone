@@ -4,7 +4,7 @@ Use this API to browse systems, list ROMs, and download files.
 
 ## Base URL And Auth
 
-- Base URL example: `https://72.176.228.250:8000`
+- Base URL example: `https://72.176.228.250`
 - Authentication: HTTP Basic Auth (`<username>` / `<password>`)
 - TLS uses a self-signed certificate
 - Use `-k` with `curl` to skip certificate verification
@@ -16,13 +16,13 @@ Use this API to browse systems, list ROMs, and download files.
 ### List systems
 
 ```bash
-curl -k -u <username>:<password> "https://72.176.228.250:8000/systems"
+curl -k -u <username>:<password> "https://72.176.228.250/systems"
 ```
 
 ### List ROMs for a system
 
 ```bash
-curl -k -u <username>:<password> "https://72.176.228.250:8000/systems/snes"
+curl -k -u <username>:<password> "https://72.176.228.250/systems/snes"
 ```
 
 ### Download a ROM by `unique_id`
@@ -31,14 +31,14 @@ curl -k -u <username>:<password> "https://72.176.228.250:8000/systems/snes"
 2. Download:
 
 ```bash
-curl -k -u <username>:<password> -OJ "https://72.176.228.250:8000/systems/snes/<unique_id>"
+curl -k -u <username>:<password> -OJ "https://72.176.228.250/systems/snes/<unique_id>"
 ```
 
 ### List images/videos for a system
 
 ```bash
-curl -k -u <username>:<password> "https://72.176.228.250:8000/systems/snes/images"
-curl -k -u <username>:<password> "https://72.176.228.250:8000/systems/snes/videos"
+curl -k -u <username>:<password> "https://72.176.228.250/systems/snes/images"
+curl -k -u <username>:<password> "https://72.176.228.250/systems/snes/videos"
 ```
 
 ### Image routes
@@ -53,7 +53,7 @@ curl -k -u <username>:<password> "https://72.176.228.250:8000/systems/snes/video
 Open the root URL in your browser:
 
 ```text
-https://72.176.228.250:8000/
+https://72.176.228.250/
 ```
 
 Sign in with the same `<username>` and `<password>` (browser Basic Auth prompt).  
