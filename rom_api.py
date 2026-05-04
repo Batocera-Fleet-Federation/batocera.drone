@@ -20,6 +20,15 @@ def _require_env(name: str) -> str:
     return value
 
 
+def _require_any_env(*names: str) -> str:
+    for name in names:
+        value = os.environ.get(name)
+        if value:
+            return value
+    joined = " or ".join(names)
+    raise RuntimeError(f"{joined} environment variable must be set")
+
+
 @dataclass(frozen=True)
 class Settings:
     roms_root: Path
@@ -51,8 +60,8 @@ class Settings:
         return cls(
             roms_root=Path(os.environ.get("ROMS_ROOT", "/userdata/roms")),
             bios_root=Path(os.environ.get("BIOS_ROOT", "/userdata/bios")),
-            username=_require_env("USERNAME"),
-            password=_require_env("PASSWORD"),
+            username=_require_any_env("ROM_API_USERNAME", "USERNAME"),
+            password=_require_any_env("ROM_API_PASSWORD", "PASSWORD"),
             https_port=int(https_port_value),
             image_cache_ttl_seconds=int(os.environ.get("IMAGE_CACHE_TTL_SECONDS", "3600")),
             image_miss_cache_ttl_seconds=int(os.environ.get("IMAGE_MISS_CACHE_TTL_SECONDS", "300")),
@@ -877,6 +886,7 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
 def main() -> None:
     settings = Settings.from_env()
     server = create_server(settings)
+    print(f"Auth username: {settings.username}")
     print(f"Serving ROM API on https://0.0.0.0:{settings.https_port}")
     server.serve_forever()
 

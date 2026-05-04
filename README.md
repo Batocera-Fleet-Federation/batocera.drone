@@ -2,6 +2,23 @@
 
 Use this API to browse systems, list ROMs, and download files.
 
+## Run Locally
+
+From the repo root:
+
+```bash
+export ROM_API_USERNAME="admin"
+export ROM_API_PASSWORD="changeme"
+export HTTPS_PORT=8443
+export ROMS_ROOT="./local-data/roms"
+export BIOS_ROOT="./local-data/bios"
+export TLS_SELF_SIGNED_DIR="./local-data/certs"
+mkdir -p "$ROMS_ROOT" "$BIOS_ROOT" "$TLS_SELF_SIGNED_DIR"
+python3 app.py
+```
+
+Then open `https://127.0.0.1:8443` and sign in with the same username/password.
+
 ## Base URL And Auth
 
 - Base URL example: `https://72.176.228.250`
@@ -151,14 +168,28 @@ Notes:
 
 ## Bootstrap Script (Download And Run)
 
-Download [`download_and_run_rom_api.sh`](/Users/Jerrod/Documents/git/roms-api/download_and_run_rom_api.sh), then run:
+Download [`download_and_run_rom_api.sh`](/Users/Jerrod/Documents/gitlab/roms-api/download_and_run_rom_api.sh), then run:
 
 ```bash
-ROM_API_URL="<raw-url-to-rom_api.py>" ./download_and_run_rom_api.sh
+ROM_API_BASE_URL="<raw-base-url-containing-rom_api.py>" ./download_and_run_rom_api.sh
 ```
 
-The script downloads `rom_api.py`, prompts for credentials if not already set, and starts the API with:
+One-shot with `curl`:
 
 ```bash
-USERNAME=<your username> PASSWORD='<your password>' HTTPS_PORT=8443 IMAGE_CACHE_TTL_SECONDS=3600 IMAGE_MISS_CACHE_TTL_SECONDS=300 IMAGE_CACHE_MAX_ITEMS=1000 IMAGE_CACHE_MAX_BYTES=268435456 JSON_CACHE_TTL_SECONDS=3600 JSON_CACHE_MAX_ITEMS=2000 JSON_CACHE_MAX_BYTES=67108864 python3 rom_api.py
+curl -fsSL "<raw-url-to-download_and_run_rom_api.sh>" | \
+ROM_API_BASE_URL="<raw-base-url-containing-rom_api.py>" bash
+```
+
+One-shot with `wget`:
+
+```bash
+wget -qO- "<raw-url-to-download_and_run_rom_api.sh>" | \
+ROM_API_BASE_URL="<raw-base-url-containing-rom_api.py>" bash
+```
+
+The script downloads `rom_api.py` and `templates/index.html`, prompts for credentials if not already set, and starts the API with:
+
+```bash
+ROM_API_USERNAME=<your username> ROM_API_PASSWORD='<your password>' HTTPS_PORT=8443 ROMS_ROOT=~/.rom-api/local-data/roms BIOS_ROOT=~/.rom-api/local-data/bios TLS_SELF_SIGNED_DIR=~/.rom-api/local-data/certs python3 rom_api.py
 ```

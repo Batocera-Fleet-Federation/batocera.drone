@@ -1,0 +1,31 @@
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.venv/
+venv/
+env/
+
+# Local runtime data
+local-data/
+downloads/
+rom_downloads/
+*.log
+
+# TLS cert/key artifacts
+server.crt
+server.key
+*.crt
+*.key
