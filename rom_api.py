@@ -358,6 +358,140 @@ def load_template(name: str) -> str:
 
 
 UI_HTML = load_template("index.html")
+SWAGGER_HTML = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ROM API Swagger</title>
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
+</head>
+<body>
+  <div id="swagger-ui"></div>
+  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+  <script>
+    window.addEventListener("load", function () {
+      SwaggerUIBundle({
+        url: "/openapi.json",
+        dom_id: "#swagger-ui",
+        deepLinking: true,
+        presets: [SwaggerUIBundle.presets.apis]
+      });
+    });
+  </script>
+</body>
+</html>
+"""
+
+OPENAPI_SPEC = {
+    "openapi": "3.0.3",
+    "info": {
+        "title": "ROM API",
+        "version": "4.0",
+        "description": "Browse and download ROM, image, video, and BIOS assets.",
+    },
+    "servers": [{"url": "/"}],
+    "components": {
+        "securitySchemes": {
+            "basicAuth": {
+                "type": "http",
+                "scheme": "basic",
+            }
+        }
+    },
+    "security": [{"basicAuth": []}],
+    "paths": {
+        "/": {"get": {"summary": "Root UI", "responses": {"200": {"description": "HTML UI"}}}},
+        "/systems": {
+            "get": {
+                "summary": "List systems",
+                "responses": {"200": {"description": "Systems list"}},
+            }
+        },
+        "/systems/{system}": {
+            "get": {
+                "summary": "List ROMs for a system",
+                "parameters": [{"name": "system", "in": "path", "required": True, "schema": {"type": "string"}}],
+                "responses": {"200": {"description": "ROM list"}},
+            }
+        },
+        "/systems/{system}/roms/{unique_id}": {
+            "get": {
+                "summary": "Download ROM by unique ID",
+                "parameters": [
+                    {"name": "system", "in": "path", "required": True, "schema": {"type": "string"}},
+                    {"name": "unique_id", "in": "path", "required": True, "schema": {"type": "string"}},
+                ],
+                "responses": {"200": {"description": "ROM file stream"}},
+            }
+        },
+        "/systems/{system}/{unique_id}": {
+            "get": {
+                "summary": "Download ROM by unique ID (legacy route)",
+                "parameters": [
+                    {"name": "system", "in": "path", "required": True, "schema": {"type": "string"}},
+                    {"name": "unique_id", "in": "path", "required": True, "schema": {"type": "string"}},
+                ],
+                "responses": {"200": {"description": "ROM file stream"}},
+            }
+        },
+        "/systems/{system}/images": {
+            "get": {
+                "summary": "List images for a system",
+                "parameters": [{"name": "system", "in": "path", "required": True, "schema": {"type": "string"}}],
+                "responses": {"200": {"description": "Image list"}},
+            }
+        },
+        "/systems/{system}/images/{image_ref}": {
+            "get": {
+                "summary": "Get image or download image asset by reference",
+                "parameters": [
+                    {"name": "system", "in": "path", "required": True, "schema": {"type": "string"}},
+                    {"name": "image_ref", "in": "path", "required": True, "schema": {"type": "string"}},
+                ],
+                "responses": {"200": {"description": "Image bytes or attachment"}},
+            }
+        },
+        "/public/systems/{system}/images/{image_file}": {
+            "get": {
+                "summary": "Public image endpoint (no auth)",
+                "security": [],
+                "parameters": [
+                    {"name": "system", "in": "path", "required": True, "schema": {"type": "string"}},
+                    {"name": "image_file", "in": "path", "required": True, "schema": {"type": "string"}},
+                ],
+                "responses": {"200": {"description": "Image bytes"}},
+            }
+        },
+        "/systems/{system}/videos": {
+            "get": {
+                "summary": "List videos for a system",
+                "parameters": [{"name": "system", "in": "path", "required": True, "schema": {"type": "string"}}],
+                "responses": {"200": {"description": "Video list"}},
+            }
+        },
+        "/systems/{system}/videos/{unique_id}": {
+            "get": {
+                "summary": "Download video by unique ID",
+                "parameters": [
+                    {"name": "system", "in": "path", "required": True, "schema": {"type": "string"}},
+                    {"name": "unique_id", "in": "path", "required": True, "schema": {"type": "string"}},
+                ],
+                "responses": {"200": {"description": "Video file stream"}},
+            }
+        },
+        "/bios": {"get": {"summary": "List BIOS entries", "responses": {"200": {"description": "BIOS list"}}}},
+        "/bios/{unique_id}": {
+            "get": {
+                "summary": "Download BIOS file by unique ID",
+                "parameters": [{"name": "unique_id", "in": "path", "required": True, "schema": {"type": "string"}}],
+                "responses": {"200": {"description": "BIOS file stream"}},
+            }
+        },
+        "/openapi.json": {"get": {"summary": "OpenAPI spec", "responses": {"200": {"description": "OpenAPI JSON"}}}},
+        "/swagger": {"get": {"summary": "Swagger UI", "responses": {"200": {"description": "Swagger HTML"}}}},
+    },
+}
 
 class RomRequestHandler(BaseHTTPRequestHandler):
     server_version = "RomAPI/4.0"
@@ -484,6 +618,12 @@ class RomRequestHandler(BaseHTTPRequestHandler):
     def _handle_root_html(self) -> None:
         self._send_html(200, UI_HTML)
 
+    def _handle_swagger_html(self) -> None:
+        self._send_html(200, SWAGGER_HTML)
+
+    def _handle_openapi_json(self) -> None:
+        self._send_json(200, OPENAPI_SPEC)
+
     def _handle_systems(self) -> None:
         systems = self.repository.list_systems()
         self._send_json(200, {"systems": systems}, cache_key="json:/systems")
@@ -575,6 +715,14 @@ class RomRequestHandler(BaseHTTPRequestHandler):
 
             if raw_path == "/":
                 self._handle_root_html()
+                return
+
+            if raw_path == "/swagger":
+                self._handle_swagger_html()
+                return
+
+            if raw_path == "/openapi.json":
+                self._handle_openapi_json()
                 return
 
             if raw_path == "/systems":
