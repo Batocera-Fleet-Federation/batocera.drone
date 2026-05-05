@@ -4,6 +4,20 @@ HTTPS Basic-Auth API + web UI for browsing Batocera ROMs/BIOS/theme assets.
 
 API base path: `/v1/api`
 
+## TL;DR: Run It Now
+
+On the Batocera machine, run one of these (replace `<raw-base-url>`):
+
+```bash
+curl -fsSL <raw-base-url>/scripts/run_now.sh -o /tmp/run_now.sh && chmod +x /tmp/run_now.sh && ROM_API_BASE_URL=<raw-base-url> /tmp/run_now.sh
+```
+
+```bash
+wget -qO /tmp/run_now.sh <raw-base-url>/scripts/run_now.sh && chmod +x /tmp/run_now.sh && ROM_API_BASE_URL=<raw-base-url> /tmp/run_now.sh
+```
+
+The script prompts for `ROM_API_USERNAME` and `ROM_API_PASSWORD`, then starts the API on port `8443` by default.
+
 ## API Docs (OpenAPI + Swagger)
 
 - `GET /v1/api/openapi.json`
@@ -92,7 +106,7 @@ curl -k -u <u>:<p> "https://<host>/v1/api/swagger"
 
 - `scripts/download_all_roms.sh` - Bash bulk downloader that enumerates systems/ROMs and saves ROM files locally.
 - `scripts/download_all_roms.ps1` - PowerShell version of the bulk ROM downloader.
-- `scripts/download_and_run_rom_api.sh` - Bootstrap script to fetch required app files and start the API quickly.
+- `scripts/run_now.sh` - Bootstrap script to fetch required app files and start the API quickly.
 - `scripts/deploy_to_target.sh` - SCP/SSH deploy helper that uploads app/scripts to a target Batocera host.
 
 ### Deploy Example

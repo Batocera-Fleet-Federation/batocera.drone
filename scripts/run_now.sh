@@ -3,18 +3,26 @@ set -euo pipefail
 
 ROM_API_URL="${ROM_API_URL:-}"
 ROM_API_TEMPLATE_URL="${ROM_API_TEMPLATE_URL:-}"
+ROM_API_API_ROUTES_URL="${ROM_API_API_ROUTES_URL:-}"
+ROM_API_UI_ROUTES_URL="${ROM_API_UI_ROUTES_URL:-}"
+ROM_API_ROUTE_CONFIG_URL="${ROM_API_ROUTE_CONFIG_URL:-}"
 ROM_API_BASE_URL="${ROM_API_BASE_URL:-${1:-}}"
 
 if [[ -z "$ROM_API_URL" && -z "$ROM_API_BASE_URL" ]]; then
   echo "Usage:"
-  echo "  ROM_API_BASE_URL=<raw-base-url> ./download_and_run_rom_api.sh"
-  echo "  ./download_and_run_rom_api.sh <raw-base-url>"
-  echo "  or set ROM_API_URL/ROM_API_TEMPLATE_URL directly"
+  echo "  ROM_API_BASE_URL=<raw-base-url> ./run_now.sh"
+  echo "  ./run_now.sh <raw-base-url>"
+  echo "  or set all required file URLs directly"
   exit 1
 fi
 
-if ! command -v curl >/dev/null 2>&1; then
-  echo "curl is required"
+DOWNLOAD_TOOL=""
+if command -v curl >/dev/null 2>&1; then
+  DOWNLOAD_TOOL="curl"
+elif command -v wget >/dev/null 2>&1; then
+  DOWNLOAD_TOOL="wget"
+else
+  echo "curl or wget is required"
   exit 1
 fi
 
@@ -31,15 +39,40 @@ MAIN_PATH="$APP_DIR/main.py"
 INIT_PATH="$APP_DIR/__init__.py"
 TEMPLATES_DIR="$APP_DIR/templates"
 TEMPLATE_PATH="$TEMPLATES_DIR/index.html"
+API_ROUTES_PATH="$APP_DIR/api_routes.py"
+UI_ROUTES_PATH="$APP_DIR/ui_routes.py"
+ROUTE_CONFIG_PATH="$APP_DIR/route_config.py"
 
 if [[ -n "$ROM_API_BASE_URL" ]]; then
   ROM_API_BASE_URL="${ROM_API_BASE_URL%/}"
   ROM_API_URL="${ROM_API_URL:-$ROM_API_BASE_URL/app/rom_api.py}"
+  ROM_API_API_ROUTES_URL="${ROM_API_API_ROUTES_URL:-$ROM_API_BASE_URL/app/api_routes.py}"
+  ROM_API_UI_ROUTES_URL="${ROM_API_UI_ROUTES_URL:-$ROM_API_BASE_URL/app/ui_routes.py}"
+  ROM_API_ROUTE_CONFIG_URL="${ROM_API_ROUTE_CONFIG_URL:-$ROM_API_BASE_URL/app/route_config.py}"
   ROM_API_TEMPLATE_URL="${ROM_API_TEMPLATE_URL:-$ROM_API_BASE_URL/app/templates/index.html}"
 fi
 
+if [[ -z "$ROM_API_URL" || -z "$ROM_API_API_ROUTES_URL" || -z "$ROM_API_UI_ROUTES_URL" || -z "$ROM_API_ROUTE_CONFIG_URL" ]]; then
+  echo "Missing required app file URL(s)."
+  echo "Provide ROM_API_BASE_URL or set ROM_API_URL, ROM_API_API_ROUTES_URL, ROM_API_UI_ROUTES_URL, and ROM_API_ROUTE_CONFIG_URL."
+  exit 1
+fi
+
+download_file() {
+  local src="$1"
+  local dst="$2"
+  if [[ "$DOWNLOAD_TOOL" == "curl" ]]; then
+    curl -fsSL "$src" -o "$dst"
+  else
+    wget -qO "$dst" "$src"
+  fi
+}
+
 mkdir -p "$APP_DIR"
-curl -fsSL "$ROM_API_URL" -o "$APP_PATH"
+download_file "$ROM_API_URL" "$APP_PATH"
+download_file "$ROM_API_API_ROUTES_URL" "$API_ROUTES_PATH"
+download_file "$ROM_API_UI_ROUTES_URL" "$UI_ROUTES_PATH"
+download_file "$ROM_API_ROUTE_CONFIG_URL" "$ROUTE_CONFIG_PATH"
 mkdir -p "$TEMPLATES_DIR"
 cat > "$INIT_PATH" <<'EOF'
 # package marker
@@ -50,7 +83,7 @@ from app.rom_api import main
 if __name__ == "__main__":
     main()
 EOF
-if ! curl -fsSL "$ROM_API_TEMPLATE_URL" -o "$TEMPLATE_PATH"; then
+if ! download_file "$ROM_API_TEMPLATE_URL" "$TEMPLATE_PATH"; then
   cat > "$TEMPLATE_PATH" <<'EOF'
 <!doctype html>
 <html>
