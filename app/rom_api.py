@@ -1905,14 +1905,22 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             "themes": ["/userdata/themes"],
             "controllers": ["/userdata/system/configs/emulationstation/es_input.cfg"],
         }
+        def _resolve_userdata_path(candidate: str) -> str:
+            if candidate == "/userdata":
+                return str(self.settings.userdata_root.resolve())
+            if candidate.startswith("/userdata/"):
+                suffix = candidate[len("/userdata/") :]
+                return str((self.settings.userdata_root / suffix).resolve())
+            return candidate
 
         if normalized_source not in config_path_candidates:
             self._send_json(404, {"error": f"Unknown config source: {requested_source}"})
             return
 
+        resolved_candidates = [_resolve_userdata_path(path) for path in config_path_candidates[normalized_source]]
         selected_path = None
         selected_is_dir = False
-        for candidate in config_path_candidates[normalized_source]:
+        for candidate in resolved_candidates:
             path = Path(candidate)
             if path.exists():
                 selected_path = path
@@ -1929,9 +1937,9 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         # Fallback discovery for sources with diverse Batocera layouts.
         if selected_path is None and normalized_source == "retroarch":
             search_roots = [
-                Path("/userdata/system/configs"),
-                Path("/userdata/system/.config"),
-                Path("/userdata/system"),
+                Path(_resolve_userdata_path("/userdata/system/configs")),
+                Path(_resolve_userdata_path("/userdata/system/.config")),
+                Path(_resolve_userdata_path("/userdata/system")),
             ]
             target_names = {"retroarch.cfg", "retroarchcustom.cfg"}
             for root in search_roots:
@@ -1994,10 +2002,10 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 targets = discovery_filenames[normalized_source]
                 hints = root_hints.get(normalized_source, set())
                 search_roots = [
-                    Path("/userdata/system/configs"),
-                    Path("/userdata/system/.config"),
-                    Path("/userdata/system"),
-                    Path("/userdata"),
+                    Path(_resolve_userdata_path("/userdata/system/configs")),
+                    Path(_resolve_userdata_path("/userdata/system/.config")),
+                    Path(_resolve_userdata_path("/userdata/system")),
+                    Path(_resolve_userdata_path("/userdata")),
                 ]
                 best_match = None
                 for root in search_roots:
@@ -2027,7 +2035,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
 
         if selected_path is None and normalized_source == "es_gamelists":
             # Prefer actual gamelist XML files from /userdata/roms trees.
-            roms_root = Path("/userdata/roms")
+            roms_root = Path(_resolve_userdata_path("/userdata/roms"))
             if roms_root.exists() and roms_root.is_dir():
                 checked = 0
                 found = []
@@ -2049,22 +2057,22 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         # Last chance for controller config alias.
         if selected_path is None and normalized_source == "controllers":
             selected_path = _find_first_file([
-                "/userdata/system/configs/emulationstation/es_input.cfg",
-                "/userdata/system/.emulationstation/es_input.cfg",
+                _resolve_userdata_path("/userdata/system/configs/emulationstation/es_input.cfg"),
+                _resolve_userdata_path("/userdata/system/.emulationstation/es_input.cfg"),
             ])
             selected_is_dir = bool(selected_path and selected_path.is_dir())
 
         if selected_path is None:
             self._send_json(404, {
                 "error": f"Config path not found for source: {requested_source}",
-                "attempted_paths": config_path_candidates[normalized_source],
+                "attempted_paths": resolved_candidates,
             })
             return
 
         try:
             if selected_is_dir:
                 entries = []
-                if normalized_source == "es_gamelists" and selected_path == Path("/userdata/roms"):
+                if normalized_source == "es_gamelists" and selected_path == Path(_resolve_userdata_path("/userdata/roms")):
                     checked = 0
                     for gamelist in sorted(selected_path.rglob("gamelist.xml")):
                         checked += 1

@@ -69,6 +69,25 @@ python3 app/main.py
 
 Open: `https://127.0.0.1:8443`
 
+## Mock Server (Non-Batocera Local Testing)
+
+Run a local HTTP mock server with realistic fake Batocera-style data:
+
+```bash
+python3 scripts/run_mock_server.py
+```
+
+Default mock server settings:
+- URL: `http://127.0.0.1:8080`
+- Auth: `admin` / `changeme`
+- Data root: `local-data/mock-userdata`
+
+You can override with env vars, for example:
+
+```bash
+MOCK_DATA_ROOT=/tmp/mock-userdata HTTPS_PORT=9090 python3 scripts/run_mock_server.py
+```
+
 ## Auth + TLS
 
 - Auth: HTTP Basic Auth
@@ -136,6 +155,21 @@ curl -k -u <u>:<p> "https://<host>/v1/api/swagger"
 - `scripts/download_all_roms.ps1` - PowerShell version of the bulk ROM downloader.
 - `scripts/run_now.sh` - Bootstrap script to fetch required app files and start the API quickly.
 - `scripts/deploy_to_target.sh` - SCP/SSH deploy helper that uploads app/scripts to a target Batocera host.
+- `scripts/run_mock_server.py` - Start a local HTTP mock server with seeded fake data for development/testing.
+
+## Tests
+
+Run all tests:
+
+```bash
+python3 -m unittest discover -s tests -p "test_*.py" -v
+```
+
+Test suites:
+- `tests/test_unit.py` - Unit tests for auth and repository behavior using mock data.
+- `tests/test_integration_mock_server.py` - Integration tests that start a real local server against mock data and verify HTTP endpoints.
+
+Note: Integration tests require permission to bind a local socket. In restricted environments they auto-skip.
 
 ### Deploy Example
 
