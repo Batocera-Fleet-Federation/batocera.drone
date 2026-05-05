@@ -1592,6 +1592,12 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
 
     def _handle_rom_list(self, system: str) -> None:
         _, roms = self.repository.list_assets(system, "roms")
+        if str(system).strip().lower() == "steam":
+            roms = [
+                item
+                for item in roms
+                if not str(item.get("name", "")).strip().lower().endswith(".sh")
+            ]
         if not self.settings.downloads_enabled:
             for item in roms:
                 item["is_downloadable"] = False
