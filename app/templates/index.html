@@ -112,6 +112,16 @@
       background: #111827;
       color: #fff;
     }
+    #systemInfoBar {
+      font-size: 0.85rem;
+      color: var(--ui-muted);
+    }
+    #systemInfoBar .badge {
+      background: rgba(255, 255, 255, 0.14);
+      color: #fff;
+      border: 1px solid rgba(255, 255, 255, 0.25);
+      font-weight: 500;
+    }
   </style>
 </head>
 <body>
@@ -121,6 +131,7 @@
     <div>
       <h1 class="h3 mb-1">Batocera Library</h1>
       <div class="text-muted">Systems and ROMs</div>
+      <div id="systemInfoBar" class="mt-2 d-flex flex-wrap gap-2"></div>
     </div>
     <div class="d-flex gap-2">
       <a id="systemsMenuBtn" href="#" role="button" class="btn btn-outline-primary">Systems</a>
@@ -189,6 +200,8 @@ let biosFilterInitialized = false;
 let themeFilterInitialized = false;
 let currentLogSource = null;
 let currentConfigSource = null;
+let systemInfoLoaded = false;
+let adminEnabled = true;
 
 function showError(message) {
   alerts.innerHTML = `<div class="alert alert-danger">${message}</div>`;
@@ -214,6 +227,14 @@ function setSearchMode(mode, systemName = "") {
     searchInput.placeholder = `Search ROMS in ${systemName} system`;
   } else {
     searchInput.placeholder = "Search ROMs across all systems";
+  }
+}
+function applyAdminVisibility() {
+  if (!adminMenuBtn) return;
+  if (adminEnabled) {
+    adminMenuBtn.classList.remove("d-none");
+  } else {
+    adminMenuBtn.classList.add("d-none");
   }
 }
 function escapeHtml(value) {
@@ -1114,6 +1135,7 @@ async function renderLogsPage(selectedSource = null, selectedLines = 200) {
   const logSources = [
     ["es_launch_stdout", "ES Launch Stdout", "bi-terminal"],
     ["es_launch_stderr", "ES Launch Stderr", "bi-exclamation-triangle"],
+    ["emulationstation", "EmulationStation Log", "bi-window-stack"],
   ];
   const validSources = new Set(logSources.map(([source]) => source));
   const effectiveSource = validSources.has(selectedSource) ? selectedSource : null;
@@ -1328,6 +1350,51 @@ async function loadThemePage(offset = 0) {
   const data = await api(url);
   renderThemeGallery(data);
 }
+function _extractInfoField(lines, keys) {
+  const lowered = (keys || []).map((k) => String(k).toLowerCase());
+  for (const line of lines || []) {
+    const s = String(line || "");
+    const ls = s.toLowerCase();
+    for (const key of lowered) {
+      if (ls.includes(key) && s.includes(":")) {
+        const value = s.split(":", 2)[1].trim();
+        if (value) return value;
+      }
+    }
+  }
+  return null;
+}
+async function loadSystemInfoBar() {
+  if (systemInfoLoaded) return;
+  const bar = document.getElementById("systemInfoBar");
+  if (!bar) return;
+  if (!adminEnabled) {
+    bar.innerHTML = "";
+    systemInfoLoaded = true;
+    return;
+  }
+  try {
+    const payload = await api("/admin/system-info");
+    const lines = payload.lines || [];
+    const version = _extractInfoField(lines, ["version", "batocera version"]);
+    const board = _extractInfoField(lines, ["board", "device"]);
+    const kernel = _extractInfoField(lines, ["kernel"]);
+    const arch = _extractInfoField(lines, ["arch", "architecture"]);
+    const chips = [];
+    if (version) chips.push(`<span class="badge">Version: ${escapeHtml(version)}</span>`);
+    if (board) chips.push(`<span class="badge">Board: ${escapeHtml(board)}</span>`);
+    if (kernel) chips.push(`<span class="badge">Kernel: ${escapeHtml(kernel)}</span>`);
+    if (arch) chips.push(`<span class="badge">Arch: ${escapeHtml(arch)}</span>`);
+    if (!chips.length && lines.length) {
+      chips.push(`<span class="badge">${escapeHtml(lines[0])}</span>`);
+    }
+    bar.innerHTML = chips.join("");
+  } catch (_) {
+    bar.innerHTML = `<span class="badge">System Info Unavailable</span>`;
+  } finally {
+    systemInfoLoaded = true;
+  }
+}
 async function router() {
   clearError();
   try {
@@ -1337,8 +1404,16 @@ async function router() {
     } else if (hash === "#theme") {
       await renderThemeGalleryPage();
     } else if (hash === "#admin") {
+      if (!adminEnabled) {
+        setHash("");
+        return;
+      }
       await renderAdminPage();
     } else if (hash.startsWith("#admin/logs/")) {
+      if (!adminEnabled) {
+        setHash("");
+        return;
+      }
       const parsed = parseAdminLogsHash(hash);
       if (!parsed) {
         setHash("#admin");
@@ -1346,6 +1421,10 @@ async function router() {
       }
       await renderLogsPage(parsed.source, parsed.lines);
     } else if (hash.startsWith("#admin/configs/")) {
+      if (!adminEnabled) {
+        setHash("");
+        return;
+      }
       const parsed = parseAdminConfigsHash(hash);
       if (!parsed) {
         setHash("#admin");
@@ -1407,6 +1486,7 @@ themeMenuBtn.addEventListener("click", (event) => {
 });
 adminMenuBtn.addEventListener("click", (event) => {
   event.preventDefault();
+  if (!adminEnabled) return;
   setHash("#admin");
 });
 searchForm.addEventListener("submit", (event) => {
@@ -1426,6 +1506,15 @@ clearSearchBtn.addEventListener("click", () => {
 });
 window.addEventListener("hashchange", router);
 async function bootstrap() {
+  try {
+    await api("/admin/configs/sources");
+    adminEnabled = true;
+  } catch (error) {
+    const msg = String(error && error.message ? error.message : "").toLowerCase();
+    adminEnabled = !(msg.includes("admin disabled") || msg.includes("request failed: 403"));
+  }
+  applyAdminVisibility();
+  await loadSystemInfoBar();
   // Render immediately so UI/menu works even if theme discovery is slow.
   await router();
   try {

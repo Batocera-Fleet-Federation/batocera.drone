@@ -80,6 +80,7 @@ class Settings:
     log_backup_count: int
     rom_search_cache_ttl_seconds: int
     downloads_enabled: bool
+    admin_enabled: bool
     themes_root: Path
     batocera_conf_file: Path
     es_settings_file: Path
@@ -117,6 +118,7 @@ class Settings:
             log_backup_count=int(os.environ.get("LOG_BACKUP_COUNT", "5")),
             rom_search_cache_ttl_seconds=int(os.environ.get("ROM_SEARCH_CACHE_TTL_SECONDS", "300")),
             downloads_enabled=_env_bool(True, "ALLOW_CONTENT_DOWNLOAD", "DOWNLOAD", "DOWNLOADS_ENABLED"),
+            admin_enabled=_env_bool(True, "ALLOW_ADMIN"),
             themes_root=Path(os.environ.get("THEMES_ROOT", "/userdata/themes")),
             batocera_conf_file=Path(os.environ.get("BATOCERA_CONF_FILE", "/userdata/system/batocera.conf")),
             es_settings_file=Path(
@@ -907,14 +909,23 @@ OPENAPI_SPEC = {
                         "name": "source",
                         "in": "path",
                         "required": True,
-                        "schema": {"type": "string", "enum": ["es_launch_stdout", "es_launch_stderr"]},
-                        "description": "Log source (case-insensitive): es_launch_stdout or es_launch_stderr",
+                        "schema": {"type": "string", "enum": ["es_launch_stdout", "es_launch_stderr", "emulationstation"]},
+                        "description": "Log source (case-insensitive): es_launch_stdout, es_launch_stderr, emulationstation",
                     },
                     {"name": "lines", "in": "query", "required": False, "schema": {"type": "integer", "default": 200, "minimum": 1, "maximum": 5000}, "description": "Number of lines to return from the end of the log"},
                 ],
                 "responses": {
                     "200": {"description": "Log content"},
                     "404": {"description": "Log source not found or log file doesn't exist"}
+                },
+            }
+        },
+        "/admin/system-info": {
+            "get": {
+                "summary": "Get Batocera system information via batocera-info",
+                "responses": {
+                    "200": {"description": "System information"},
+                    "500": {"description": "Failed to execute batocera-info"},
                 },
             }
         },
@@ -1688,6 +1699,10 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         log_path_candidates = {
             "es_launch_stdout": ["/userdata/system/logs/es_launch_stdout.log"],
             "es_launch_stderr": ["/userdata/system/logs/es_launch_stderr.log"],
+            "emulationstation": [
+                "/userdata/system/configs/emulationstation/es_log.txt",
+                "/userdata/system/logs/es_log.txt",
+            ],
         }
 
         def _resolve_userdata_path(candidate: str) -> str:
@@ -1794,6 +1809,23 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             self._send_json(500, {"error": f"Failed to read log: {str(e)}"})
         except Exception as e:
             self._send_json(500, {"error": f"Internal error: {str(e)}"})
+
+    def _handle_admin_system_info(self) -> None:
+        import subprocess
+
+        try:
+            result = subprocess.run(
+                ["batocera-info"],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=10,
+            )
+            raw = (result.stdout or "").strip()
+            lines = raw.splitlines() if raw else []
+            self._send_json(200, {"raw": raw, "lines": lines})
+        except Exception as error:
+            self._send_json(500, {"error": f"Failed to run batocera-info: {str(error)}"})
 
     def _handle_admin_config(self, config_source: str, max_bytes: int) -> None:
         from pathlib import Path

@@ -101,6 +101,11 @@ MOCK_DATA_ROOT=/tmp/mock-userdata HTTPS_PORT=9090 python3 scripts/run_mock_serve
 - `ALLOW_CONTENT_DOWNLOAD=false`: disable download links/actions and block download routes
 - Backward-compatible aliases: `DOWNLOAD`, `DOWNLOADS_ENABLED`
 
+## Admin Toggle
+
+- `ALLOW_ADMIN=true` (default): enable Admin API endpoints and Admin UI features
+- `ALLOW_ADMIN=false`: disable `/v1/api/admin/*` routes (returns `403`) and hide Admin UI entry points
+
 ## Logging
 
 - Rolling stdout/stderr logs in `LOG_DIR`
