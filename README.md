@@ -9,10 +9,10 @@ API base path: `/v1/api`
 On the Batocera machine, run one of these:
 
 ```bash
-curl -fsSL "https://gitlab.com/batocera_addons/roms-api/-/raw/main/scripts/run_now.sh?ref_type=heads" -o /tmp/run_now.sh && chmod +x /tmp/run_now.sh && ROM_API_BASE_URL="https://gitlab.com/batocera_addons/roms-api/-/raw/main" /tmp/run_now.sh
+curl -fsSL "https://gitlab.com/batocera_addons/roms-api/-/raw/main/scripts/run_now.sh?ref_type=heads" -o /tmp/run_now.sh && chmod +x /tmp/run_now.sh && ROM_API_BASE_URL="https://gitlab.com/batocera_addons/roms-api/-/raw/main" ROM_API_USERNAME="admin" ROM_API_PASSWORD="changeme" /tmp/run_now.sh
 ```
 
-The script prompts for `ROM_API_USERNAME` and `ROM_API_PASSWORD`, then starts the API on port `8443` by default.
+The script uses `ROM_API_USERNAME`/`ROM_API_PASSWORD` (or `USERNAME`/`PASSWORD`) if set, and only prompts when missing.
 It downloads runtime files to `/userdata/system/.rom-api` (or `$HOME/.rom-api`) and removes that folder plus `/tmp/run_now.sh` when the process exits.
 
 ## API Docs (OpenAPI + Swagger)
