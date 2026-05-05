@@ -1725,6 +1725,8 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
     def _handle_download(self, system: str, asset_type: str, unique_id: str) -> None:
         if not self.settings.downloads_enabled:
             raise ValueError("downloads are disabled")
+        if asset_type == "roms" and str(system).strip().lower() == "steam":
+            raise ValueError("steam rom downloads are disabled")
         unique_id = valid_segment(unique_id)
         asset_dir, items = self.repository.list_assets(system, asset_type)
 

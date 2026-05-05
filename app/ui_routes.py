@@ -64,6 +64,8 @@ class UiRoutesMixin:
         total_links = 0
         for system in systems:
             system_name = system["name"]
+            if str(system_name).strip().lower() == "steam":
+                continue
             _, roms = self.repository.list_assets(system_name, "roms")
             downloadable = [rom for rom in roms if rom.get("is_downloadable", True)]
             if not downloadable:
