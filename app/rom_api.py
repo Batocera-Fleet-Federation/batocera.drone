@@ -899,7 +899,13 @@ OPENAPI_SPEC = {
             "get": {
                 "summary": "Get logs from Batocera system or emulators",
                 "parameters": [
-                    {"name": "source", "in": "path", "required": True, "schema": {"type": "string"}, "description": "Log source (case-insensitive, e.g. batocera, emulationstation, retroarch)"},
+                    {
+                        "name": "source",
+                        "in": "path",
+                        "required": True,
+                        "schema": {"type": "string", "enum": ["es_launch_stdout", "es_launch_stderr"]},
+                        "description": "Log source (case-insensitive): es_launch_stdout or es_launch_stderr",
+                    },
                     {"name": "lines", "in": "query", "required": False, "schema": {"type": "integer", "default": 200, "minimum": 1, "maximum": 5000}, "description": "Number of lines to return from the end of the log"},
                 ],
                 "responses": {
@@ -1653,80 +1659,10 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         normalized_source = requested_source.lower()
         safe_lines = max(1, min(int(lines), 5000))
 
-        # Primary expected paths plus known alternates for common Batocera layouts.
+        # For now, only expose EmulationStation launch stdout/stderr logs.
         log_path_candidates = {
-            "batocera": ["/userdata/system/logs/batocera.log"],
-            "emulationstation": ["/userdata/system/logs/es_log.txt", "/userdata/system/logs/emulationstation.log"],
-            "retroarch": [
-                "/userdata/system/logs/retroarch.log",
-                "/userdata/system/configs/retroarch/logs/retroarch.log",
-                "/userdata/system/.config/retroarch/logs/retroarch.log",
-                "/userdata/system/configs/retroarch/retroarch.log",
-            ],
-            "mame": [
-                "/userdata/system/logs/mame.log",
-                "/userdata/system/configs/mame/mame.log",
-                "/userdata/system/configs/mame/log/mame.log",
-            ],
-            "dolphin": ["/userdata/system/logs/dolphin.log"],
-            "pcsx2": ["/userdata/system/logs/pcsx2.log"],
-            "rpcs3": ["/userdata/system/logs/rpcs3.log"],
-            "citra": ["/userdata/system/logs/citra.log"],
-            "yuzu": ["/userdata/system/logs/yuzu.log"],
-            "cemu": ["/userdata/system/logs/cemu.log"],
-            "xemu": ["/userdata/system/logs/xemu.log"],
-            "xenia": ["/userdata/system/logs/xenia.log"],
-            "ryujinx": ["/userdata/system/logs/ryujinx.log"],
-            "melonds": ["/userdata/system/logs/melonDS.log", "/userdata/system/logs/melonds.log"],
-            "flycast": ["/userdata/system/logs/flycast.log"],
-            "ppsspp": ["/userdata/system/logs/ppsspp.log"],
-            "duckstation": ["/userdata/system/logs/duckstation.log"],
-            "mesen": ["/userdata/system/logs/mesen.log"],
-            "snes9x": ["/userdata/system/logs/snes9x.log"],
-            "bsnes": ["/userdata/system/logs/bsnes.log"],
-            "nestopia": ["/userdata/system/logs/nestopia.log"],
-            "fceux": ["/userdata/system/logs/fceux.log"],
-            "mednafen": ["/userdata/system/logs/mednafen.log"],
-            "mgba": ["/userdata/system/logs/mgba.log"],
-            "vbam": ["/userdata/system/logs/vbam.log"],
-            "scummvm": ["/userdata/system/logs/scummvm.log"],
-            "dosbox": ["/userdata/system/logs/dosbox.log"],
-            "fs-uae": ["/userdata/system/logs/fs-uae.log"],
-            "hatari": ["/userdata/system/logs/hatari.log"],
-            "vice": ["/userdata/system/logs/vice.log"],
-            "fuse": ["/userdata/system/logs/fuse.log"],
-            "oricutron": ["/userdata/system/logs/oricutron.log"],
-            "ti99sim": ["/userdata/system/logs/ti99sim.log"],
-            "simcoupe": ["/userdata/system/logs/simcoupe.log"],
-            "zesarux": ["/userdata/system/logs/zesarux.log"],
-            "caprice32": ["/userdata/system/logs/caprice32.log"],
-            "cannonball": ["/userdata/system/logs/cannonball.log"],
-            "openbor": ["/userdata/system/logs/openbor.log"],
-            "solarus": ["/userdata/system/logs/solarus.log"],
-            "easyrpg": ["/userdata/system/logs/easyrpg.log"],
-            "supermodel": ["/userdata/system/logs/supermodel.log"],
-            "demul": ["/userdata/system/logs/demul.log"],
-            "nulldc": ["/userdata/system/logs/nullDC.log", "/userdata/system/logs/nulldc.log"],
-            "reicast": ["/userdata/system/logs/reicast.log"],
-            "redream": ["/userdata/system/logs/redream.log"],
-            "mupen64plus": ["/userdata/system/logs/mupen64plus.log"],
-            "parallel-n64": ["/userdata/system/logs/parallel-n64.log"],
-            "cxd4": ["/userdata/system/logs/cxd4.log"],
-            "play": ["/userdata/system/logs/play.log"],
-            "ares": ["/userdata/system/logs/ares.log"],
-            "sameduck": ["/userdata/system/logs/sameduck.log"],
-            "gearboy": ["/userdata/system/logs/gearboy.log"],
-            "gearsystem": ["/userdata/system/logs/gearsystem.log"],
-            "freej2me": ["/userdata/system/logs/freej2me.log"],
-            "bigpemu": ["/userdata/system/logs/bigpemu.log"],
-            "model2": ["/userdata/system/logs/model2.log"],
-            "teknoparrot": ["/userdata/system/logs/teknoParrot.log", "/userdata/system/logs/teknoparrot.log"],
-            "ruffle": ["/userdata/system/logs/ruffle.log"],
-            "lightspark": ["/userdata/system/logs/lightspark.log"],
-            "box86": ["/userdata/system/logs/box86.log"],
-            "box64": ["/userdata/system/logs/box64.log"],
-            "wine": ["/userdata/system/logs/wine.log"],
-            "proton": ["/userdata/system/logs/proton.log"],
+            "es_launch_stdout": ["/userdata/system/logs/es_launch_stdout.log"],
+            "es_launch_stderr": ["/userdata/system/logs/es_launch_stderr.log"],
         }
 
         if normalized_source not in log_path_candidates:
@@ -1745,13 +1681,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             return result
 
         # Build a list of fallback file-name patterns we can search for in common roots.
-        alias_names = {
-            "emulationstation": ["es_log", "emulationstation"],
-            "melonds": ["melonDS", "melonds"],
-            "nulldc": ["nullDC", "nulldc"],
-            "teknoparrot": ["teknoParrot", "teknoparrot"],
-        }
-        names = alias_names.get(normalized_source, [normalized_source])
+        names = [normalized_source]
         filename_candidates = []
         for name in names:
             filename_candidates.extend([f"{name}.log", f"{name}.txt", f"{name}_log.txt"])

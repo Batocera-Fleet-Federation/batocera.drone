@@ -95,6 +95,23 @@
       border-color: rgba(170, 210, 255, 0.8);
       color: #fff !important;
     }
+    .log-lines-select {
+      width: 130px;
+      display: inline-block;
+      background: rgba(12, 16, 28, 0.95);
+      color: #fff;
+      border: 1px solid var(--ui-border);
+    }
+    .log-lines-select:focus {
+      background: rgba(12, 16, 28, 0.98);
+      color: #fff;
+      border-color: rgba(170, 210, 255, 0.8);
+      box-shadow: 0 0 0 0.2rem rgba(85, 145, 240, 0.25);
+    }
+    .log-lines-select option {
+      background: #111827;
+      color: #fff;
+    }
   </style>
 </head>
 <body>
@@ -1052,73 +1069,12 @@ async function renderAdminMenu() {
 }
 async function renderLogsPage() {
   const logSources = [
-    ["batocera", "Batocera System", "bi-cpu"],
-    ["emulationstation", "EmulationStation", "bi-window-stack"],
-    ["retroarch", "RetroArch", "bi-controller"],
-    ["mame", "MAME", "bi-joystick"],
-    ["dolphin", "Dolphin", "bi-water"],
-    ["pcsx2", "PCSX2", "bi-disc"],
-    ["rpcs3", "RPCS3", "bi-hdd-stack"],
-    ["citra", "Citra", "bi-nintendo-switch"],
-    ["yuzu", "Yuzu", "bi-controller"],
-    ["cemu", "Cemu", "bi-controller"],
-    ["xemu", "Xemu", "bi-xbox"],
-    ["xenia", "Xenia", "bi-xbox"],
-    ["ryujinx", "Ryujinx", "bi-nintendo-switch"],
-    ["melonDS", "melonDS", "bi-controller"],
-    ["flycast", "Flycast", "bi-cloud"],
-    ["ppsspp", "PPSSPP", "bi-phone"],
-    ["duckstation", "DuckStation", "bi-disc"],
-    ["mesen", "Mesen", "bi-cassette"],
-    ["snes9x", "Snes9x", "bi-controller"],
-    ["bsnes", "bsnes", "bi-controller"],
-    ["nestopia", "Nestopia", "bi-cassette"],
-    ["fceux", "FCEUX", "bi-cassette"],
-    ["mednafen", "Mednafen", "bi-cassette"],
-    ["mgba", "mGBA", "bi-controller"],
-    ["vbam", "VBA-M", "bi-controller"],
-    ["scummvm", "ScummVM", "bi-compass"],
-    ["dosbox", "DOSBox", "bi-terminal"],
-    ["fs-uae", "FS-UAE", "bi-cassette"],
-    ["hatari", "Hatari", "bi-cassette"],
-    ["vice", "VICE", "bi-cassette"],
-    ["fuse", "Fuse", "bi-cassette"],
-    ["oricutron", "Oricutron", "bi-cassette"],
-    ["ti99sim", "TI99Sim", "bi-cassette"],
-    ["simcoupe", "SimCoupe", "bi-cassette"],
-    ["zesarux", "ZEsarUX", "bi-cassette"],
-    ["caprice32", "Caprice32", "bi-cassette"],
-    ["cannonball", "Cannonball", "bi-car-front"],
-    ["openbor", "OpenBOR", "bi-lightning"],
-    ["solarus", "Solarus", "bi-sun"],
-    ["easyrpg", "EasyRPG", "bi-dice-5"],
-    ["supermodel", "Supermodel", "bi-cpu"],
-    ["demul", "Demul", "bi-cpu"],
-    ["nullDC", "nullDC", "bi-cpu"],
-    ["reicast", "Reicast", "bi-cpu"],
-    ["redream", "Redream", "bi-cpu"],
-    ["mupen64plus", "Mupen64Plus", "bi-controller"],
-    ["parallel-n64", "Parallel-N64", "bi-controller"],
-    ["cxd4", "CXD4", "bi-controller"],
-    ["play", "Play!", "bi-controller"],
-    ["ares", "Ares", "bi-cpu"],
-    ["sameduck", "SameDuck", "bi-cpu"],
-    ["gearboy", "Gearboy", "bi-controller"],
-    ["gearsystem", "Gearsystem", "bi-controller"],
-    ["freej2me", "FreeJ2ME", "bi-phone"],
-    ["bigpemu", "BigPEmu", "bi-controller"],
-    ["model2", "Model 2", "bi-cpu"],
-    ["teknoParrot", "TeknoParrot", "bi-controller"],
-    ["ruffle", "Ruffle", "bi-file-play"],
-    ["lightspark", "Lightspark", "bi-file-play"],
-    ["box86", "Box86", "bi-box"],
-    ["box64", "Box64", "bi-box"],
-    ["wine", "Wine", "bi-cup-straw"],
-    ["proton", "Proton", "bi-lightning-charge"],
+    ["es_launch_stdout", "ES Launch Stdout", "bi-terminal"],
+    ["es_launch_stderr", "ES Launch Stderr", "bi-exclamation-triangle"],
   ];
 
   titleNode.textContent = "System Logs";
-  subtitleNode.textContent = "View logs from Batocera and emulators";
+  subtitleNode.textContent = "View EmulationStation launch stdout/stderr logs";
   content.innerHTML = `
     <div class="mb-3">
       <button class="btn btn-outline-secondary" onclick="renderAdminPage()">← Back to Admin</button>
@@ -1142,7 +1098,14 @@ async function renderLogsPage() {
             <span id="logTitle">Select a log source</span>
             <div>
               <label for="linesInput" class="form-label me-2">Lines:</label>
-              <input type="number" id="linesInput" class="form-control d-inline-block" style="width: 80px;" value="200" min="1" max="10000">
+              <select id="linesInput" class="form-select log-lines-select">
+                <option value="100">100</option>
+                <option value="200" selected>200</option>
+                <option value="500">500</option>
+                <option value="1000">1000</option>
+                <option value="2000">2000</option>
+                <option value="5000">5000</option>
+              </select>
               <button class="btn btn-sm btn-outline-primary ms-2" onclick="refreshCurrentLog()">Refresh</button>
             </div>
           </div>
