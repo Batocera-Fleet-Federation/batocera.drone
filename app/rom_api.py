@@ -996,6 +996,7 @@ OPENAPI_SPEC = {
                 "parameters": [
                     {"name": "source", "in": "path", "required": True, "schema": {"type": "string"}, "description": "Config source key (batocera, emulationstation, retroarch, ... )"},
                     {"name": "max_bytes", "in": "query", "required": False, "schema": {"type": "integer", "default": 131072, "minimum": 1024, "maximum": 1048576}, "description": "Maximum bytes returned from end of file"},
+                    {"name": "format", "in": "query", "required": False, "schema": {"type": "string", "enum": ["json", "xml"], "default": "json"}, "description": "Only used for source=es_systems. json returns parsed merged systems; xml returns on-disk XML content."},
                 ],
                 "responses": {
                     "200": {"description": "Config file content"},
@@ -1984,12 +1985,13 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         except Exception as error:
             self._send_json(500, {"error": f"Failed to run batocera-info: {str(error)}"})
 
-    def _handle_admin_config(self, config_source: str, max_bytes: int) -> None:
+    def _handle_admin_config(self, config_source: str, max_bytes: int, output_format: str = "json") -> None:
         from pathlib import Path
 
         requested_source = (config_source or "").strip()
         normalized_source = requested_source.lower()
         safe_max_bytes = max(1024, min(int(max_bytes), 1048576))
+        normalized_format = (output_format or "json").strip().lower()
 
         # Curated set of meaningful configs for Batocera/ES/emulators.
         config_path_candidates = {
@@ -2131,6 +2133,26 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                     "attempted_paths": resolved_candidates,
                 })
                 return
+            if normalized_format == "xml":
+                try:
+                    raw_text = source_path.read_text(encoding="utf-8", errors="replace")
+                except Exception as error:
+                    self._send_json(500, {"error": f"Failed to read config: {str(error)}"})
+                    return
+                lines = raw_text.splitlines()
+                self._send_json(
+                    200,
+                    {
+                        "source": normalized_source,
+                        "path": str(source_path),
+                        "type": "xml",
+                        "format": "xml",
+                        "max_bytes": safe_max_bytes,
+                        "truncated": False,
+                        "content": lines,
+                    },
+                )
+                return
             parsed_json = {
                 "source_file": str(source_path),
                 "systems": systems,
@@ -2143,6 +2165,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                     "source": normalized_source,
                     "path": str(source_path),
                     "type": "json",
+                    "format": "json",
                     "max_bytes": safe_max_bytes,
                     "truncated": False,
                     "parsed": parsed_json,

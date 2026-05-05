@@ -1331,7 +1331,8 @@ async function loadConfig(source, triggerEl = null, updateHash = true) {
   }
   setLoading(true, `Loading ${source} config...`);
   try {
-    const data = await api(`/admin/configs/${source}?max_bytes=${maxBytes}`);
+    const formatParam = source === "es_systems" ? "&format=xml" : "";
+    const data = await api(`/admin/configs/${source}?max_bytes=${maxBytes}${formatParam}`);
     document.getElementById("configTitle").textContent = `${data.source} Config (${data.path})`;
     document.getElementById("configContent").textContent = (data.content || []).join("\n");
     document.querySelectorAll("#configSources .list-group-item").forEach(el => el.classList.remove("active"));

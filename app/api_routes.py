@@ -166,11 +166,12 @@ class ApiRoutesMixin:
                     self._handle_admin_config_sources()
                     return
                 max_bytes_raw = query_params.get("max_bytes", ["131072"])[0]
+                format_value = query_params.get("format", ["json"])[0]
                 try:
                     max_bytes = int(max_bytes_raw)
                 except Exception:
                     max_bytes = 131072
-                self._handle_admin_config(parts[2], max_bytes)
+                self._handle_admin_config(parts[2], max_bytes, format_value)
                 return
 
             self._send_json(404, {"error": "not found"})
