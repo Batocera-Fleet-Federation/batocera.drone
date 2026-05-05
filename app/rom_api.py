@@ -14,8 +14,16 @@ from pathlib import Path
 from threading import Lock
 from typing import Dict, Iterable, List, Optional, Tuple
 from urllib.parse import quote
-from urllib.parse import parse_qs
 from urllib.parse import unquote
+
+try:
+    from .api_routes import ApiRoutesMixin
+    from .route_config import API_PREFIX, api_url
+    from .ui_routes import UiRoutesMixin
+except ImportError:
+    from api_routes import ApiRoutesMixin  # type: ignore
+    from route_config import API_PREFIX, api_url  # type: ignore
+    from ui_routes import UiRoutesMixin  # type: ignore
 
 
 def _require_env(name: str) -> str:
@@ -695,39 +703,6 @@ class RomRepository:
 
 
 
-TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
-
-
-def load_template(name: str) -> str:
-    path = TEMPLATES_DIR / name
-    return path.read_text(encoding="utf-8")
-
-
-UI_HTML = load_template("index.html")
-SWAGGER_HTML = """<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ROM API Swagger</title>
-  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
-</head>
-<body>
-  <div id="swagger-ui"></div>
-  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
-  <script>
-    window.addEventListener("load", function () {
-      SwaggerUIBundle({
-        url: "/openapi.json",
-        dom_id: "#swagger-ui",
-        deepLinking: true,
-        presets: [SwaggerUIBundle.presets.apis]
-      });
-    });
-  </script>
-</body>
-</html>
-"""
 
 OPENAPI_SPEC = {
     "openapi": "3.0.3",
@@ -736,7 +711,7 @@ OPENAPI_SPEC = {
         "version": "4.0",
         "description": "Browse and download ROM, image, video, and BIOS assets.",
     },
-    "servers": [{"url": "/"}],
+    "servers": [{"url": API_PREFIX}],
     "components": {
         "securitySchemes": {
             "basicAuth": {
@@ -923,8 +898,9 @@ OPENAPI_SPEC = {
     },
 }
 
-class RomRequestHandler(BaseHTTPRequestHandler):
+class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
     server_version = "RomAPI/4.0"
+    openapi_spec = OPENAPI_SPEC
 
     def __init__(
         self,
@@ -1072,86 +1048,6 @@ class RomRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _handle_root_html(self) -> None:
-        self._send_html(200, UI_HTML)
-
-    def _handle_swagger_html(self) -> None:
-        self._send_html(200, SWAGGER_HTML)
-
-    def _handle_openapi_json(self) -> None:
-        self._send_json(200, OPENAPI_SPEC)
-
-    def _handle_download_sitemap(self) -> None:
-        if not self.settings.downloads_enabled:
-            self._send_html(
-                200,
-                """<!doctype html><html><head><meta charset="utf-8"><title>ROM Download Sitemap</title></head>
-<body><h1>ROM Download Sitemap</h1><p>Downloads are currently disabled by server configuration.</p></body></html>""",
-            )
-            return
-        systems = self.repository.list_systems()
-
-        sections: List[str] = []
-        total_links = 0
-        for system in systems:
-            system_name = system["name"]
-            _, roms = self.repository.list_assets(system_name, "roms")
-            downloadable = [rom for rom in roms if rom.get("is_downloadable", True)]
-            if not downloadable:
-                continue
-
-            total_links += len(downloadable)
-            links_html = "\n".join(
-                (
-                    f'<li><a href="/systems/{quote(system_name, safe="")}/{quote(rom["unique_id"], safe="")}">'
-                    f'{rom["name"]}</a></li>'
-                )
-                for rom in downloadable
-            )
-            sections.append(
-                f"""
-                <section class="system">
-                  <h2>{system_name} <span class="count">({len(downloadable)})</span></h2>
-                  <ul>
-                    {links_html}
-                  </ul>
-                </section>
-                """
-            )
-
-        body = f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ROM Download Sitemap</title>
-  <style>
-    body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f6f7fb; color: #1f2937; }}
-    .wrap {{ max-width: 1100px; margin: 0 auto; padding: 24px; }}
-    .top {{ margin-bottom: 18px; }}
-    h1 {{ margin: 0 0 6px; font-size: 1.7rem; }}
-    .meta {{ color: #6b7280; }}
-    .system {{ background: #fff; border: 1px solid #e5e7eb; border-radius: 10px; padding: 14px 16px; margin: 0 0 14px; }}
-    .system h2 {{ margin: 0 0 10px; font-size: 1.1rem; }}
-    .count {{ color: #6b7280; font-weight: 500; }}
-    ul {{ margin: 0; padding-left: 20px; column-count: 2; column-gap: 24px; }}
-    li {{ break-inside: avoid; margin: 0 0 6px; }}
-    a {{ color: #0d6efd; text-decoration: none; }}
-    a:hover {{ text-decoration: underline; }}
-    @media (max-width: 840px) {{ ul {{ column-count: 1; }} }}
-  </style>
-</head>
-<body>
-  <div class="wrap">
-    <div class="top">
-      <h1>ROM Download Sitemap</h1>
-      <div class="meta">Systems: {len(sections)} · Download links: {total_links}</div>
-    </div>
-    {"".join(sections) if sections else "<p>No downloadable ROM links found.</p>"}
-  </div>
-</body>
-</html>"""
-        self._send_html(200, body)
 
     def _handle_search(self, query: str, system: Optional[str] = None) -> None:
         query = query.strip()
@@ -1253,17 +1149,17 @@ class RomRequestHandler(BaseHTTPRequestHandler):
             "themes_root": str(self.settings.themes_root),
             "es_settings_file": str(resolved_es_settings_file) if resolved_es_settings_file else None,
             "api": {
-                "theme_assets_base": "/theme/assets/",
-                "system_theme_meta": "/theme/system/{system}",
+                "theme_assets_base": api_url("/theme/assets/"),
+                "system_theme_meta": api_url("/theme/system/{system}"),
             },
             "ui": {
-                "css_url": f"/theme/assets/{css_file}" if css_file else None,
-                "background_url": f"/theme/assets/{bg_file}" if bg_file else None,
-                "logo_url": f"/theme/assets/{logo_file}" if logo_file else None,
+                "css_url": api_url(f"/theme/assets/{css_file}") if css_file else None,
+                "background_url": api_url(f"/theme/assets/{bg_file}") if bg_file else None,
+                "logo_url": api_url(f"/theme/assets/{logo_file}") if logo_file else None,
             },
-            "css_url": f"/theme/assets/{css_file}" if css_file else None,
-            "background_url": f"/theme/assets/{bg_file}" if bg_file else None,
-            "logo_url": f"/theme/assets/{logo_file}" if logo_file else None,
+            "css_url": api_url(f"/theme/assets/{css_file}") if css_file else None,
+            "background_url": api_url(f"/theme/assets/{bg_file}") if bg_file else None,
+            "logo_url": api_url(f"/theme/assets/{logo_file}") if logo_file else None,
             "resolved_files": {
                 "css": css_file,
                 "background": bg_file,
@@ -1324,10 +1220,10 @@ class RomRequestHandler(BaseHTTPRequestHandler):
             "system": system,
             "theme_name": theme_dir.name,
             "system_theme_dir": system_dir.relative_to(theme_dir).as_posix(),
-            "theme_xml_url": f"/theme/assets/{theme_xml}" if theme_xml else None,
-            "css_url": f"/theme/assets/{css_file}" if css_file else None,
-            "background_url": f"/theme/assets/{bg_file}" if bg_file else None,
-            "logo_url": f"/theme/assets/{logo_file}" if logo_file else None,
+            "theme_xml_url": api_url(f"/theme/assets/{theme_xml}") if theme_xml else None,
+            "css_url": api_url(f"/theme/assets/{css_file}") if css_file else None,
+            "background_url": api_url(f"/theme/assets/{bg_file}") if bg_file else None,
+            "logo_url": api_url(f"/theme/assets/{logo_file}") if logo_file else None,
             "resolved_files": {
                 "theme_xml": theme_xml,
                 "css": css_file,
@@ -1371,7 +1267,7 @@ class RomRequestHandler(BaseHTTPRequestHandler):
                 candidates.append(rel)
 
         candidates = sorted(set(candidates), key=str.lower)
-        urls = [f"/theme/assets/{quote(rel, safe='/')}" for rel in candidates]
+        urls = [api_url(f"/theme/assets/{quote(rel, safe='/')}") for rel in candidates]
         return {
             "enabled": True,
             "theme_name": theme_dir.name,
@@ -1408,7 +1304,7 @@ class RomRequestHandler(BaseHTTPRequestHandler):
                 candidates.append(rel)
 
         candidates = sorted(set(candidates), key=str.lower)
-        urls = [f"/theme/assets/{quote(rel, safe='/')}" for rel in candidates]
+        urls = [api_url(f"/theme/assets/{quote(rel, safe='/')}") for rel in candidates]
         return {
             "enabled": True,
             "theme_name": theme_dir.name,
@@ -1450,7 +1346,7 @@ class RomRequestHandler(BaseHTTPRequestHandler):
                     "path": rel,
                     "folder": "." if folder == "." else folder,
                     "name": Path(rel).name,
-                    "url": f"/theme/assets/{quote(rel, safe='/')}",
+                    "url": api_url(f"/theme/assets/{quote(rel, safe='/')}"),
                 }
             )
 
@@ -1716,141 +1612,6 @@ class RomRequestHandler(BaseHTTPRequestHandler):
 
         self._handle_download(system, "images", image_ref)
 
-    def do_GET(self) -> None:
-        try:
-            raw_path, _, raw_query = self.path.partition("?")
-            query_params = parse_qs(raw_query, keep_blank_values=True)
-            parts = [part for part in raw_path.split("/") if part]
-
-            if len(parts) == 5 and parts[0] == "public" and parts[1] == "systems" and parts[3] == "images":
-                self._handle_public_image(parts[2], parts[4])
-                return
-
-            if not self.auth.check(self.headers.get("Authorization")):
-                self._send_unauthorized()
-                return
-
-            if raw_path == "/":
-                self._handle_root_html()
-                return
-
-            if raw_path == "/swagger":
-                self._handle_swagger_html()
-                return
-
-            if raw_path == "/openapi.json":
-                self._handle_openapi_json()
-                return
-
-            if raw_path == "/downloads":
-                self._handle_download_sitemap()
-                return
-
-            if raw_path == "/search":
-                self._handle_search((query_params.get("q", [""])[0]), query_params.get("system", [None])[0])
-                return
-
-            if raw_path == "/theme/meta":
-                self._handle_theme_meta()
-                return
-
-            if raw_path == "/theme/backgrounds":
-                self._handle_theme_backgrounds()
-                return
-
-            if raw_path == "/theme/logos":
-                self._handle_theme_logos()
-                return
-
-            if raw_path == "/theme/images":
-                limit_raw = query_params.get("limit", ["500"])[0]
-                offset_raw = query_params.get("offset", ["0"])[0]
-                query = query_params.get("q", [None])[0]
-                system_filter = query_params.get("system", [None])[0]
-                systems_raw = query_params.get("systems", [None])[0]
-                system_filters = [part.strip() for part in (systems_raw or "").split(",") if part.strip()]
-                try:
-                    limit = int(limit_raw)
-                except Exception:
-                    limit = 500
-                try:
-                    offset = int(offset_raw)
-                except Exception:
-                    offset = 0
-                self._handle_theme_images(limit, offset, query, system_filter, system_filters=system_filters)
-                return
-
-            if len(parts) == 3 and parts[0] == "theme" and parts[1] == "system":
-                self._handle_system_theme_meta(parts[2])
-                return
-
-            if raw_path == "/systems":
-                self._handle_systems()
-                return
-
-            if raw_path == "/bios":
-                limit_raw = query_params.get("limit", ["100"])[0]
-                offset_raw = query_params.get("offset", ["0"])[0]
-                query = query_params.get("q", [None])[0]
-                systems_raw = query_params.get("systems", [None])[0]
-                system_filters = [part.strip() for part in (systems_raw or "").split(",") if part.strip()]
-                try:
-                    limit = int(limit_raw)
-                except Exception:
-                    limit = 100
-                try:
-                    offset = int(offset_raw)
-                except Exception:
-                    offset = 0
-                self._handle_bios_list(limit=limit, offset=offset, query=query, system_filters=system_filters)
-                return
-
-            if len(parts) == 2 and parts[0] == "systems":
-                self._handle_rom_list(parts[1])
-                return
-
-            if len(parts) == 2 and parts[0] == "bios":
-                self._handle_bios_download(parts[1])
-                return
-
-            if len(parts) == 3 and parts[0] == "systems" and parts[2] == "images":
-                self._handle_images_list(parts[1])
-                return
-
-            if len(parts) == 3 and parts[0] == "systems" and parts[2] == "videos":
-                self._handle_videos_list(parts[1])
-                return
-
-            if len(parts) == 3 and parts[0] == "systems":
-                self._handle_download(parts[1], "roms", parts[2])
-                return
-
-            if len(parts) == 4 and parts[0] == "systems" and parts[2] == "roms":
-                self._handle_download(parts[1], "roms", parts[3])
-                return
-
-            if len(parts) == 4 and parts[0] == "systems" and parts[2] == "images":
-                self._handle_image_file_or_download(parts[1], parts[3])
-                return
-
-            if len(parts) == 4 and parts[0] == "systems" and parts[2] == "videos":
-                self._handle_download(parts[1], "videos", parts[3])
-                return
-
-            if len(parts) >= 3 and parts[0] == "theme" and parts[1] == "assets":
-                relative_path = "/".join(parts[2:])
-                self._handle_theme_asset(relative_path)
-                return
-
-            self._send_json(404, {"error": "not found"})
-        except ValueError as error:
-            self._send_json(400, {"error": str(error)})
-        except FileNotFoundError:
-            self._send_json(404, {"error": "not found"})
-        except (BrokenPipeError, ConnectionResetError, ssl.SSLError, OSError):
-            pass
-        except Exception as error:
-            self._send_json(500, {"error": str(error)})
 
 
 def _build_handler(

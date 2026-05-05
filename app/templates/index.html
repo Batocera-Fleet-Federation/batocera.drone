@@ -102,7 +102,7 @@
   <div id="content"></div>
 
   <footer class="mt-4 pt-3 border-top text-muted small">
-    <a href="/downloads">Download Sitemap</a>
+    <a href="/v1/api/downloads">Download Sitemap</a>
   </footer>
 </div>
 </div>
@@ -121,6 +121,7 @@ const loading = document.getElementById("loading");
 const loadingText = document.getElementById("loadingText");
 const titleNode = document.querySelector(".h3.mb-1");
 const subtitleNode = document.querySelector(".text-muted");
+const API_BASE = "/v1/api";
 let imageObserver = null;
 let activeThemeMeta = null;
 let activeGlobalThemeCssNode = null;
@@ -179,7 +180,10 @@ function formatBytesToMb(byteCount) {
   return `${(value / (1024 * 1024)).toFixed(2)} MB`;
 }
 async function api(url) {
-  const res = await fetch(url, { credentials: "same-origin" });
+  const absoluteUrl = url.startsWith("http://") || url.startsWith("https://")
+    ? url
+    : `${API_BASE}${url}`;
+  const res = await fetch(absoluteUrl, { credentials: "same-origin" });
   if (!res.ok) {
     let msg = `Request failed: ${res.status}`;
     try {
@@ -483,10 +487,10 @@ function setHash(hash) {
   window.location.hash = hash;
 }
 function romDownloadUrl(system, uniqueId) {
-  return `/systems/${encodeURIComponent(system)}/${encodeURIComponent(uniqueId)}`;
+  return `${API_BASE}/systems/${encodeURIComponent(system)}/${encodeURIComponent(uniqueId)}`;
 }
 function biosDownloadUrl(uniqueId) {
-  return `/bios/${encodeURIComponent(uniqueId)}`;
+  return `${API_BASE}/bios/${encodeURIComponent(uniqueId)}`;
 }
 function publicRomImageUrl(system, romName, imageStem, suffix = ".png", withImageSuffix = true) {
   const stem = imageStem || (() => {
@@ -494,10 +498,10 @@ function publicRomImageUrl(system, romName, imageStem, suffix = ".png", withImag
     return lastDot >= 0 ? romName.substring(0, lastDot) : romName;
   })();
   const imageFile = withImageSuffix ? `${stem}-image${suffix}` : `${stem}${suffix}`;
-  return `/public/systems/${encodeURIComponent(system)}/images/${encodeURIComponent(imageFile)}`;
+  return `${API_BASE}/public/systems/${encodeURIComponent(system)}/images/${encodeURIComponent(imageFile)}`;
 }
 function romImageByIdUrl(system, uniqueId) {
-  return `/systems/${encodeURIComponent(system)}/images/${encodeURIComponent(uniqueId)}`;
+  return `${API_BASE}/systems/${encodeURIComponent(system)}/images/${encodeURIComponent(uniqueId)}`;
 }
 function systemThemeImageCandidates(system) {
   const s = system;
@@ -510,7 +514,7 @@ function systemThemeImageCandidates(system) {
   variants.forEach((variant) => {
     names.forEach((name) => {
       suffixes.forEach((ext) => {
-        candidates.push(`/theme/assets/${encodeURIComponent(variant)}/_inc/${name}${ext}`);
+        candidates.push(`${API_BASE}/theme/assets/${encodeURIComponent(variant)}/_inc/${name}${ext}`);
       });
     });
   });
@@ -695,7 +699,7 @@ function renderBiosList(data) {
             <h3 class="h5 mb-2"><i class="bi bi-folder2-open me-2"></i>${escapeHtml(system === "_root" ? "root" : system)} <span class="text-muted">(${grouped[system].length})</span></h3>
             <div class="row g-3">
               ${grouped[system].map((item) => `
-                <div class="col-12 col-lg-6">
+                <div class="col-12 col-md-6 col-xl-3">
                   <div class="card shadow-sm tile h-100">
                     <div class="card-body">
                       <div class="fw-semibold mb-2">${escapeHtml(item.name)}</div>

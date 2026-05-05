@@ -2,6 +2,18 @@
 
 HTTPS Basic-Auth API + web UI for browsing Batocera ROMs/BIOS/theme assets.
 
+API base path: `/v1/api`
+
+## API Docs (OpenAPI + Swagger)
+
+- `GET /v1/api/openapi.json`
+  - Machine-readable OpenAPI 3 spec for this API.
+  - Use this for code generation, API validation, and tooling/integration workflows.
+
+- `GET /v1/api/swagger`
+  - Browser-based interactive API docs powered by Swagger UI.
+  - Uses `/v1/api/openapi.json` as the source and lets you explore endpoints and test requests.
+
 ## Run
 
 ```bash
@@ -26,7 +38,7 @@ Open: `https://127.0.0.1:8443`
 - Auth: HTTP Basic Auth
 - TLS: self-signed by default
 - `curl` examples use `-k` for self-signed certs
-- Public route without auth: `/public/systems/{system}/images/{image_file}`
+- Public route without auth: `/v1/api/public/systems/{system}/images/{image_file}`
 
 ## Download Toggle
 
@@ -42,21 +54,21 @@ Open: `https://127.0.0.1:8443`
 
 ## Key Endpoints
 
-- `GET /systems` list systems
-- `GET /systems/{system}` list ROMs for system
-- `GET /systems/{system}/{unique_id}` download ROM (legacy)
-- `GET /systems/{system}/roms/{unique_id}` download ROM
-- `GET /search?q=<text>[&system=<name>]` search ROMs
-- `GET /bios?limit=100&offset=0[&q=<text>][&systems=a,b]` paged BIOS list
-- `GET /bios/{unique_id}` download BIOS
-- `GET /theme/meta` active theme metadata
-- `GET /theme/system/{system}` system theme metadata
-- `GET /theme/backgrounds` theme background candidates
-- `GET /theme/logos` theme logo candidates
-- `GET /theme/images?limit=100&offset=0[&q=<text>][&systems=a,b]` paged theme assets
-- `GET /downloads` HTML sitemap of downloadable ROM links
-- `GET /swagger` Swagger UI
-- `GET /openapi.json` OpenAPI spec
+- `GET /v1/api/systems` list systems
+- `GET /v1/api/systems/{system}` list ROMs for system
+- `GET /v1/api/systems/{system}/{unique_id}` download ROM (legacy)
+- `GET /v1/api/systems/{system}/roms/{unique_id}` download ROM
+- `GET /v1/api/search?q=<text>[&system=<name>]` search ROMs
+- `GET /v1/api/bios?limit=100&offset=0[&q=<text>][&systems=a,b]` paged BIOS list
+- `GET /v1/api/bios/{unique_id}` download BIOS
+- `GET /v1/api/theme/meta` active theme metadata
+- `GET /v1/api/theme/system/{system}` system theme metadata
+- `GET /v1/api/theme/backgrounds` theme background candidates
+- `GET /v1/api/theme/logos` theme logo candidates
+- `GET /v1/api/theme/images?limit=100&offset=0[&q=<text>][&systems=a,b]` paged theme assets
+- `GET /v1/api/downloads` HTML sitemap of downloadable ROM links
+- `GET /v1/api/swagger` Swagger UI
+- `GET /v1/api/openapi.json` OpenAPI spec
 
 ## API Notes
 
@@ -68,17 +80,17 @@ Open: `https://127.0.0.1:8443`
 ## Quick cURL
 
 ```bash
-curl -k -u <u>:<p> "https://<host>/systems"
-curl -k -u <u>:<p> "https://<host>/systems/snes"
-curl -k -u <u>:<p> "https://<host>/search?q=zelda"
-curl -k -u <u>:<p> "https://<host>/bios?limit=100&offset=0&q=firmware&systems=ps2,ps3"
-curl -k -u <u>:<p> "https://<host>/theme/images?limit=100&offset=0&q=logo&systems=snes,ps2"
-curl -k -u <u>:<p> "https://<host>/swagger"
+curl -k -u <u>:<p> "https://<host>/v1/api/systems"
+curl -k -u <u>:<p> "https://<host>/v1/api/systems/snes"
+curl -k -u <u>:<p> "https://<host>/v1/api/search?q=zelda"
+curl -k -u <u>:<p> "https://<host>/v1/api/bios?limit=100&offset=0&q=firmware&systems=ps2,ps3"
+curl -k -u <u>:<p> "https://<host>/v1/api/theme/images?limit=100&offset=0&q=logo&systems=snes,ps2"
+curl -k -u <u>:<p> "https://<host>/v1/api/swagger"
 ```
 
 ## Scripts
 
-- `scripts/download_all_roms.sh`
-- `scripts/download_all_roms.ps1`
-- `scripts/download_and_run_rom_api.sh`
-- `scripts/deploy_to_target.sh`
+- `scripts/download_all_roms.sh` - Bash bulk downloader that enumerates systems/ROMs and saves ROM files locally.
+- `scripts/download_all_roms.ps1` - PowerShell version of the bulk ROM downloader.
+- `scripts/download_and_run_rom_api.sh` - Bootstrap script to fetch required app files and start the API quickly.
+- `scripts/deploy_to_target.sh` - SCP/SSH deploy helper that uploads app/scripts to a target Batocera host.
