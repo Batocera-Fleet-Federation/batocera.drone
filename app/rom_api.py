@@ -459,10 +459,6 @@ class RomRepository:
 
     @staticmethod
     def should_include_system(name: str) -> bool:
-        if "." in name:
-            return False
-        if name.lower() == "steam":
-            return False
         return True
 
     @staticmethod
