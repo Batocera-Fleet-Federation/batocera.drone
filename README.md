@@ -8,12 +8,37 @@ API base path: `/v1/api`
 
 On the Batocera machine, run one of these:
 
+### Manually Start
+
 ```bash
 curl -fsSL "https://gitlab.com/batocera_addons/roms-api/-/raw/main/scripts/run_now.sh?ref_type=heads" -o /tmp/run_now.sh && chmod +x /tmp/run_now.sh && ROM_API_BASE_URL="https://gitlab.com/batocera_addons/roms-api/-/raw/main" ROM_API_USERNAME="admin" ROM_API_PASSWORD="changeme" /tmp/run_now.sh
 ```
 
 The script uses `ROM_API_USERNAME`/`ROM_API_PASSWORD` (or `USERNAME`/`PASSWORD`) if set, and only prompts when missing.
 It downloads runtime files to `/userdata/system/.rom-api` (or `$HOME/.rom-api`) and removes that folder plus `/tmp/run_now.sh` when the process exits.
+
+### Batocera Auto-Start (`/userdata/system/custom.sh`)
+
+Add this to `/userdata/system/custom.sh` to start the API automatically once networking is up.
+Update `ROM_API_USERNAME` and `ROM_API_PASSWORD` to your own values before using it.
+
+```bash
+#!/bin/bash
+
+(
+# Loop until we can ping Google's DNS
+while ! ping -c 1 -W 2 8.8.8.8 > /dev/null 2>&1; do
+  sleep 5
+done
+
+# Once online, run your command
+curl -fsSL "https://gitlab.com/batocera_addons/roms-api/-/raw/main/scripts/run_now.sh?ref_type=heads" -o /tmp/run_now.sh && \
+chmod +x /tmp/run_now.sh && \
+ROM_API_BASE_URL="https://gitlab.com/batocera_addons/roms-api/-/raw/main" \
+ROM_API_USERNAME="replace-with-your-username" \
+ROM_API_PASSWORD="replace-with-your-password" /tmp/run_now.sh
+) &
+```
 
 ## API Docs (OpenAPI + Swagger)
 
