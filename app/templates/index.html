@@ -84,6 +84,7 @@
       <a id="systemsMenuBtn" href="#" role="button" class="btn btn-outline-primary">Systems</a>
       <a id="biosBtn" href="#bios" role="button" class="btn btn-outline-primary">BIOS</a>
       <a id="themeMenuBtn" href="#theme" role="button" class="btn btn-outline-primary">Theme</a>
+      <a id="adminMenuBtn" href="#admin" role="button" class="btn btn-outline-primary">Admin</a>
       <a id="backBtn" href="#" role="button" class="btn btn-outline-secondary d-none">Back</a>
     </div>
   </div>
@@ -114,6 +115,7 @@ const backBtn = document.getElementById("backBtn");
 const systemsMenuBtn = document.getElementById("systemsMenuBtn");
 const biosBtn = document.getElementById("biosBtn");
 const themeMenuBtn = document.getElementById("themeMenuBtn");
+const adminMenuBtn = document.getElementById("adminMenuBtn");
 const searchForm = document.getElementById("searchForm");
 const searchInput = document.getElementById("searchInput");
 const clearSearchBtn = document.getElementById("clearSearchBtn");
@@ -996,6 +998,150 @@ async function renderThemeGalleryPage() {
   await loadThemePage(0);
   setLoading(false);
 }
+async function renderAdminPage() {
+  currentSystemContext = null;
+  setSearchMode("hidden");
+  setLoading(true, "Loading admin panel...");
+  clearSystemTheme();
+  await refreshRandomThemeLogo();
+  renderAdminMenu();
+  setLoading(false);
+}
+async function renderAdminMenu() {
+  titleNode.textContent = "Admin Panel";
+  subtitleNode.textContent = "System administration";
+  content.innerHTML = `
+    <div class="row">
+      <div class="col-md-4 mb-3">
+        <div class="card">
+          <div class="card-body">
+            <h5 class="card-title">Logs</h5>
+            <p class="card-text">View system and emulator logs</p>
+            <button class="btn btn-primary" onclick="renderLogsPage()">View Logs</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+async function renderLogsPage() {
+  titleNode.textContent = "System Logs";
+  subtitleNode.textContent = "View logs from Batocera and emulators";
+  content.innerHTML = `
+    <div class="mb-3">
+      <button class="btn btn-outline-secondary" onclick="renderAdminPage()">← Back to Admin</button>
+    </div>
+    <div class="row">
+      <div class="col-md-3">
+        <div class="card">
+          <div class="card-header">Log Sources</div>
+          <div class="list-group list-group-flush" id="logSources">
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('batocera')">Batocera System</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('emulationstation')">EmulationStation</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('retroarch')">RetroArch</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('mame')">MAME</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('dolphin')">Dolphin</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('pcsx2')">PCSX2</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('rpcs3')">RPCS3</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('citra')">Citra</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('yuzu')">Yuzu</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('cemu')">Cemu</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('xemu')">Xemu</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('xenia')">Xenia</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('ryujinx')">Ryujinx</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('melonDS')">melonDS</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('flycast')">Flycast</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('ppsspp')">PPSSPP</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('duckstation')">DuckStation</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('mesen')">Mesen</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('snes9x')">Snes9x</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('bsnes')">bsnes</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('nestopia')">Nestopia</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('fceux')">FCEUX</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('mednafen')">Mednafen</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('mgba')">mGBA</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('vbam')">VBA-M</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('scummvm')">ScummVM</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('dosbox')">DOSBox</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('fs-uae')">FS-UAE</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('hatari')">Hatari</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('vice')">VICE</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('fuse')">Fuse</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('oricutron')">Oricutron</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('ti99sim')">TI99Sim</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('simcoupe')">SimCoupe</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('zesarux')">ZEsarUX</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('caprice32')">Caprice32</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('cannonball')">Cannonball</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('openbor')">OpenBOR</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('solarus')">Solarus</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('easyrpg')">EasyRPG</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('supermodel')">Supermodel</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('demul')">Demul</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('nullDC')">nullDC</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('reicast')">Reicast</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('redream')">Redream</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('mupen64plus')">Mupen64Plus</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('parallel-n64')">Parallel-N64</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('cxd4')">CXD4</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('play')">Play!</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('ares')">Ares</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('sameduck')">SameDuck</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('gearboy')">Gearboy</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('gearsystem')">Gearsystem</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('freej2me')">FreeJ2ME</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('bigpemu')">BigPEmu</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('model2')">Model 2</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('teknoParrot')">TeknoParrot</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('ruffle')">Ruffle</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('lightspark')">Lightspark</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('box86')">Box86</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('box64')">Box64</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('wine')">Wine</a>
+            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('proton')">Proton</a>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-9">
+        <div class="card">
+          <div class="card-header d-flex justify-content-between align-items-center">
+            <span id="logTitle">Select a log source</span>
+            <div>
+              <label for="linesInput" class="form-label me-2">Lines:</label>
+              <input type="number" id="linesInput" class="form-control d-inline-block" style="width: 80px;" value="200" min="1" max="10000">
+              <button class="btn btn-sm btn-outline-primary ms-2" onclick="refreshCurrentLog()">Refresh</button>
+            </div>
+          </div>
+          <div class="card-body">
+            <pre id="logContent" class="mono bg-dark text-light p-3" style="max-height: 600px; overflow-y: auto; white-space: pre-wrap;">Select a log source from the left panel to view its contents.</pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+async function loadLog(source) {
+  const lines = document.getElementById('linesInput').value || 200;
+  setLoading(true, `Loading ${source} logs...`);
+  try {
+    const data = await api(`/admin/logs/${source}?lines=${lines}`);
+    document.getElementById('logTitle').textContent = `${data.source} Log (${data.path})`;
+    document.getElementById('logContent').textContent = data.content.join('\n');
+    // Highlight active source
+    document.querySelectorAll('#logSources .list-group-item').forEach(el => el.classList.remove('active'));
+    event.target.classList.add('active');
+  } catch (err) {
+    document.getElementById('logContent').textContent = `Error loading log: ${err.message}`;
+  }
+  setLoading(false);
+}
+async function refreshCurrentLog() {
+  const activeSource = document.querySelector('#logSources .list-group-item.active');
+  if (activeSource) {
+    const source = activeSource.textContent.toLowerCase().replace(/[^a-z0-9]/g, '');
+    await loadLog(source);
+  }
+}
 async function loadThemePage(offset = 0) {
   const systemsParam = encodeURIComponent((themeFilterSelectedSystems || []).join(","));
   const url = `/theme/images?limit=${THEME_GALLERY_PAGE_SIZE}&offset=${Math.max(0, offset)}&q=${encodeURIComponent(themeFilterQuery || "")}&systems=${systemsParam}`;
@@ -1010,6 +1156,8 @@ async function router() {
       await renderBios();
     } else if (hash === "#theme") {
       await renderThemeGalleryPage();
+    } else if (hash === "#admin") {
+      await renderAdminPage();
     } else if (hash.startsWith("#search-system/")) {
       const rest = hash.substring("#search-system/".length);
       const slashIndex = rest.indexOf("/");
@@ -1062,6 +1210,10 @@ systemsMenuBtn.addEventListener("click", (event) => {
 themeMenuBtn.addEventListener("click", (event) => {
   event.preventDefault();
   setHash("#theme");
+});
+adminMenuBtn.addEventListener("click", (event) => {
+  event.preventDefault();
+  setHash("#admin");
 });
 searchForm.addEventListener("submit", (event) => {
   event.preventDefault();

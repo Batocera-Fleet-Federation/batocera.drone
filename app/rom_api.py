@@ -895,6 +895,19 @@ OPENAPI_SPEC = {
                 "responses": {"200": {"description": "Paged theme image catalog"}},
             }
         },
+        "/admin/logs/{source}": {
+            "get": {
+                "summary": "Get logs from Batocera system or emulators",
+                "parameters": [
+                    {"name": "source", "in": "path", "required": True, "schema": {"type": "string"}, "description": "Log source (case-insensitive, e.g. batocera, emulationstation, retroarch)"},
+                    {"name": "lines", "in": "query", "required": False, "schema": {"type": "integer", "default": 200, "minimum": 1, "maximum": 5000}, "description": "Number of lines to return from the end of the log"},
+                ],
+                "responses": {
+                    "200": {"description": "Log content"},
+                    "404": {"description": "Log source not found or log file doesn't exist"}
+                },
+            }
+        },
     },
 }
 
@@ -1632,6 +1645,109 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
 
         self._handle_download(system, "images", image_ref)
 
+    def _handle_admin_logs(self, log_source: str, lines: int) -> None:
+        import subprocess
+        from pathlib import Path
+
+        requested_source = (log_source or "").strip()
+        normalized_source = requested_source.lower()
+        safe_lines = max(1, min(int(lines), 5000))
+
+        # Define log sources and their paths
+        log_paths = {
+            "batocera": "/userdata/system/logs/batocera.log",
+            "emulationstation": "/userdata/system/logs/es_log.txt",
+            "retroarch": "/userdata/system/logs/retroarch.log",
+            "mame": "/userdata/system/logs/mame.log",
+            "dolphin": "/userdata/system/logs/dolphin.log",
+            "pcsx2": "/userdata/system/logs/pcsx2.log",
+            "rpcs3": "/userdata/system/logs/rpcs3.log",
+            "citra": "/userdata/system/logs/citra.log",
+            "yuzu": "/userdata/system/logs/yuzu.log",
+            "cemu": "/userdata/system/logs/cemu.log",
+            "xemu": "/userdata/system/logs/xemu.log",
+            "xenia": "/userdata/system/logs/xenia.log",
+            "ryujinx": "/userdata/system/logs/ryujinx.log",
+            "melonds": "/userdata/system/logs/melonDS.log",
+            "flycast": "/userdata/system/logs/flycast.log",
+            "ppsspp": "/userdata/system/logs/ppsspp.log",
+            "duckstation": "/userdata/system/logs/duckstation.log",
+            "mesen": "/userdata/system/logs/mesen.log",
+            "snes9x": "/userdata/system/logs/snes9x.log",
+            "bsnes": "/userdata/system/logs/bsnes.log",
+            "nestopia": "/userdata/system/logs/nestopia.log",
+            "fceux": "/userdata/system/logs/fceux.log",
+            "mednafen": "/userdata/system/logs/mednafen.log",
+            "mgba": "/userdata/system/logs/mgba.log",
+            "vbam": "/userdata/system/logs/vbam.log",
+            "scummvm": "/userdata/system/logs/scummvm.log",
+            "dosbox": "/userdata/system/logs/dosbox.log",
+            "fs-uae": "/userdata/system/logs/fs-uae.log",
+            "hatari": "/userdata/system/logs/hatari.log",
+            "vice": "/userdata/system/logs/vice.log",
+            "fuse": "/userdata/system/logs/fuse.log",
+            "oricutron": "/userdata/system/logs/oricutron.log",
+            "ti99sim": "/userdata/system/logs/ti99sim.log",
+            "simcoupe": "/userdata/system/logs/simcoupe.log",
+            "zesarux": "/userdata/system/logs/zesarux.log",
+            "caprice32": "/userdata/system/logs/caprice32.log",
+            "cannonball": "/userdata/system/logs/cannonball.log",
+            "openbor": "/userdata/system/logs/openbor.log",
+            "solarus": "/userdata/system/logs/solarus.log",
+            "easyrpg": "/userdata/system/logs/easyrpg.log",
+            "supermodel": "/userdata/system/logs/supermodel.log",
+            "demul": "/userdata/system/logs/demul.log",
+            "nulldc": "/userdata/system/logs/nullDC.log",
+            "reicast": "/userdata/system/logs/reicast.log",
+            "redream": "/userdata/system/logs/redream.log",
+            "mupen64plus": "/userdata/system/logs/mupen64plus.log",
+            "parallel-n64": "/userdata/system/logs/parallel-n64.log",
+            "cxd4": "/userdata/system/logs/cxd4.log",
+            "play": "/userdata/system/logs/play.log",
+            "ares": "/userdata/system/logs/ares.log",
+            "sameduck": "/userdata/system/logs/sameduck.log",
+            "gearboy": "/userdata/system/logs/gearboy.log",
+            "gearsystem": "/userdata/system/logs/gearsystem.log",
+            "freej2me": "/userdata/system/logs/freej2me.log",
+            "bigpemu": "/userdata/system/logs/bigpemu.log",
+            "model2": "/userdata/system/logs/model2.log",
+            "teknoparrot": "/userdata/system/logs/teknoParrot.log",
+            "ruffle": "/userdata/system/logs/ruffle.log",
+            "lightspark": "/userdata/system/logs/lightspark.log",
+            "box86": "/userdata/system/logs/box86.log",
+            "box64": "/userdata/system/logs/box64.log",
+            "wine": "/userdata/system/logs/wine.log",
+            "proton": "/userdata/system/logs/proton.log",
+        }
+
+        if normalized_source not in log_paths:
+            self._send_json(404, {"error": f"Unknown log source: {requested_source}"})
+            return
+
+        log_path = Path(log_paths[normalized_source])
+        if not log_path.exists():
+            self._send_json(404, {"error": f"Log file not found: {log_path}"})
+            return
+
+        try:
+            # Use tail to get the last N lines
+            result = subprocess.run(
+                ["tail", "-n", str(safe_lines), str(log_path)],
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            log_content = result.stdout.strip()
+            self._send_json(200, {
+                "source": normalized_source,
+                "path": str(log_path),
+                "lines": safe_lines,
+                "content": log_content.split('\n') if log_content else []
+            })
+        except subprocess.CalledProcessError as e:
+            self._send_json(500, {"error": f"Failed to read log: {str(e)}"})
+        except Exception as e:
+            self._send_json(500, {"error": f"Internal error: {str(e)}"})
 
 
 def _build_handler(

@@ -144,6 +144,15 @@ class ApiRoutesMixin:
                 self._handle_theme_asset(relative_path)
                 return
 
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "logs":
+                lines_raw = query_params.get("lines", ["200"])[0]
+                try:
+                    lines = int(lines_raw)
+                except Exception:
+                    lines = 200
+                self._handle_admin_logs(parts[2], lines)
+                return
+
             self._send_json(404, {"error": "not found"})
         except ValueError as error:
             self._send_json(400, {"error": str(error)})
