@@ -931,6 +931,14 @@ OPENAPI_SPEC = {
                 },
             }
         },
+        "/admin/configs/sources": {
+            "get": {
+                "summary": "List config source keys available on this host",
+                "responses": {
+                    "200": {"description": "Detected config sources"},
+                },
+            }
+        },
     },
 }
 
@@ -2118,6 +2126,82 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             })
         except Exception as error:
             self._send_json(500, {"error": f"Failed to read config: {str(error)}"})
+
+    def _handle_admin_config_sources(self) -> None:
+        from pathlib import Path
+
+        def _resolve_userdata_path(candidate: str) -> str:
+            if candidate == "/userdata":
+                return str(self.settings.userdata_root.resolve())
+            if candidate.startswith("/userdata/"):
+                suffix = candidate[len("/userdata/") :]
+                return str((self.settings.userdata_root / suffix).resolve())
+            return candidate
+
+        # Always keep these top-level debugging sources available.
+        base_sources = [
+            "batocera",
+            "emulationstation",
+            "es_input",
+            "es_gamelists",
+            "themes",
+            "controllers",
+        ]
+        # Emulator sources should appear only when detected in /userdata/system/configs.
+        emulator_hints = {
+            "retroarch": ["retroarch"],
+            "mame": ["mame"],
+            "dolphin": ["dolphin"],
+            "pcsx2": ["pcsx2"],
+            "rpcs3": ["rpcs3"],
+            "ppsspp": ["ppsspp"],
+            "duckstation": ["duckstation"],
+            "citra": ["citra"],
+            "yuzu": ["yuzu"],
+            "ryujinx": ["ryujinx"],
+            "cemu": ["cemu"],
+            "xemu": ["xemu"],
+            "xenia": ["xenia"],
+            "flycast": ["flycast"],
+            "dosbox": ["dosbox"],
+            "scummvm": ["scummvm"],
+            "snes9x": ["snes9x"],
+            "bsnes": ["bsnes"],
+            "fceux": ["fceux"],
+            "mednafen": ["mednafen"],
+            "mgba": ["mgba"],
+            "wine": ["wine"],
+            "shadps4": ["shadps4"],
+        }
+
+        configs_root = Path(_resolve_userdata_path("/userdata/system/configs"))
+        discovered = set(base_sources)
+        scan_tokens = set()
+        if configs_root.exists() and configs_root.is_dir():
+            checked = 0
+            try:
+                for entry in configs_root.rglob("*"):
+                    checked += 1
+                    if checked > 12000:
+                        break
+                    scan_tokens.add(str(entry).lower())
+            except Exception:
+                scan_tokens = set()
+
+        for source, hints in emulator_hints.items():
+            for token in scan_tokens:
+                if any(hint in token for hint in hints):
+                    discovered.add(source)
+                    break
+
+        ordered_sources = base_sources + [source for source in emulator_hints.keys() if source in discovered]
+        self._send_json(
+            200,
+            {
+                "sources": ordered_sources,
+                "scan_root": str(configs_root),
+            },
+        )
 
 
 def _build_handler(

@@ -1198,7 +1198,7 @@ async function refreshCurrentLog() {
   await loadLog(currentLogSource, activeSource);
 }
 async function renderConfigsPage(selectedSource = null, selectedMaxBytes = 131072) {
-  const configSources = [
+  const configSourceCatalog = [
     ["batocera", "Batocera Config", "bi-sliders"],
     ["emulationstation", "EmulationStation", "bi-window-stack"],
     ["es_input", "ES Controller Input", "bi-controller"],
@@ -1229,6 +1229,17 @@ async function renderConfigsPage(selectedSource = null, selectedMaxBytes = 13107
     ["themes", "Themes Directory", "bi-palette"],
     ["controllers", "Controllers Config", "bi-usb-symbol"],
   ];
+  const catalogMap = new Map(configSourceCatalog.map((item) => [item[0], item]));
+  let allowedSourceKeys = configSourceCatalog.map((item) => item[0]);
+  try {
+    const sourcePayload = await api("/admin/configs/sources");
+    if (sourcePayload && Array.isArray(sourcePayload.sources) && sourcePayload.sources.length > 0) {
+      allowedSourceKeys = sourcePayload.sources.filter((key) => catalogMap.has(key));
+    }
+  } catch (_) {
+    // Fall back to full list if source scan endpoint is unavailable.
+  }
+  const configSources = allowedSourceKeys.map((key) => catalogMap.get(key)).filter(Boolean);
   const validSources = new Set(configSources.map(([source]) => source));
   const effectiveSource = validSources.has(selectedSource) ? selectedSource : null;
   const effectiveMaxBytes = clampMaxBytes(selectedMaxBytes);

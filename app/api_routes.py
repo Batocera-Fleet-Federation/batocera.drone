@@ -154,6 +154,9 @@ class ApiRoutesMixin:
                 return
 
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "configs":
+                if parts[2] == "sources":
+                    self._handle_admin_config_sources()
+                    return
                 max_bytes_raw = query_params.get("max_bytes", ["131072"])[0]
                 try:
                     max_bytes = int(max_bytes_raw)
