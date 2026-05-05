@@ -1595,8 +1595,9 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         self._stream_file(target_path, "application/octet-stream", as_attachment=True)
 
     def _handle_public_image(self, system: str, image_file: str) -> None:
+        system = valid_segment(unquote(system))
         system_dir = self.repository.get_system_dir(system)
-        image_file = valid_segment(image_file)
+        image_file = valid_segment(unquote(image_file))
         image_path = (system_dir / "images" / image_file).resolve()
         self._stream_cached_image(image_path)
 
