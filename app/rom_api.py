@@ -577,7 +577,7 @@ class RomRepository:
                     "name": display_name,
                     "byte_count": stat.st_size,
                     "entry_type": "file",
-                    "is_downloadable": True,
+                    "is_downloadable": (system_lower != "steam"),
                     "image_stem": display_name,
                 }
             )
