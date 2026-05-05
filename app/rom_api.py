@@ -909,8 +909,8 @@ OPENAPI_SPEC = {
                         "name": "source",
                         "in": "path",
                         "required": True,
-                        "schema": {"type": "string", "enum": ["es_launch_stdout", "es_launch_stderr", "emulationstation"]},
-                        "description": "Log source (case-insensitive): es_launch_stdout, es_launch_stderr, emulationstation",
+                        "schema": {"type": "string", "enum": ["es_launch_stdout", "es_launch_stderr"]},
+                        "description": "Log source (case-insensitive): es_launch_stdout, es_launch_stderr",
                     },
                     {"name": "lines", "in": "query", "required": False, "schema": {"type": "integer", "default": 200, "minimum": 1, "maximum": 5000}, "description": "Number of lines to return from the end of the log"},
                 ],
@@ -1699,10 +1699,6 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         log_path_candidates = {
             "es_launch_stdout": ["/userdata/system/logs/es_launch_stdout.log"],
             "es_launch_stderr": ["/userdata/system/logs/es_launch_stderr.log"],
-            "emulationstation": [
-                "/userdata/system/configs/emulationstation/es_log.txt",
-                "/userdata/system/logs/es_log.txt",
-            ],
         }
 
         def _resolve_userdata_path(candidate: str) -> str:

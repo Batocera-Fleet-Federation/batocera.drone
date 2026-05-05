@@ -453,9 +453,7 @@ function themeUiValue(theme, key) {
 }
 function applyThemeBranding(theme) {
   const logoUrl = activeRandomLogo || themeUiValue(theme, "logo_url");
-  if (logoUrl && titleNode) {
-    titleNode.innerHTML = `<img src="${logoUrl}" alt="Theme Logo" style="max-height:72px; max-width:100%;">`;
-  } else if (titleNode) {
+  if (titleNode) {
     titleNode.textContent = "Batocera Library";
   }
   if (subtitleNode) {
@@ -521,11 +519,8 @@ async function applySystemTheme(system) {
       activeSystemThemeCssNode = null;
       return;
     }
-    if (theme.logo_url && titleNode) {
-      titleNode.innerHTML = `<img src="${theme.logo_url}" alt="${escapeHtml(system)} Logo" style="max-height:72px; max-width:100%;">`;
-    } else if (titleNode) {
-      const fallbackCandidates = systemThemeImageCandidates(system);
-      titleNode.innerHTML = `<img src="${fallbackCandidates[0]}" alt="${escapeHtml(system)} Logo" style="max-height:72px; max-width:100%;" onerror="this.onerror=null; this.src='${fallbackCandidates[1] || ''}'">`;
+    if (titleNode) {
+      titleNode.textContent = "Batocera Library";
     }
     setBackground(theme.background_url || activeRandomBackground || themeUiValue(activeThemeMeta, "background_url"));
     if (activeSystemThemeCssNode) {
@@ -1144,7 +1139,6 @@ async function renderLogsPage(selectedSource = null, selectedLines = 200) {
   const logSources = [
     ["es_launch_stdout", "ES Launch Stdout", "bi-terminal"],
     ["es_launch_stderr", "ES Launch Stderr", "bi-exclamation-triangle"],
-    ["emulationstation", "EmulationStation Log", "bi-window-stack"],
   ];
   const validSources = new Set(logSources.map(([source]) => source));
   const effectiveSource = validSources.has(selectedSource) ? selectedSource : null;
