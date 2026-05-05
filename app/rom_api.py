@@ -2,8 +2,10 @@ import base64
 import hashlib
 import json
 import os
+import re
 import ssl
 import subprocess
+import sys
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -11,6 +13,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Lock
 from typing import Dict, Iterable, List, Optional, Tuple
+from urllib.parse import quote
+from urllib.parse import parse_qs
 
 
 def _require_env(name: str) -> str:
@@ -50,6 +54,16 @@ class Settings:
     tls_key_file: Optional[Path]
     tls_self_signed: bool
     tls_self_signed_dir: Path
+    log_dir: Path
+    stdout_log_file: str
+    stderr_log_file: str
+    log_max_bytes: int
+    log_backup_count: int
+    rom_search_cache_ttl_seconds: int
+    themes_root: Path
+    batocera_conf_file: Path
+    es_settings_file: Path
+    batocera_theme_name: Optional[str]
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -74,7 +88,92 @@ class Settings:
             tls_key_file=Path(key_value) if key_value else None,
             tls_self_signed=os.environ.get("TLS_SELF_SIGNED", "1") not in ("0", "false", "False"),
             tls_self_signed_dir=Path(os.environ.get("TLS_SELF_SIGNED_DIR", "/userdata/system/certs")),
+            log_dir=Path(os.environ.get("LOG_DIR", "./logs")),
+            stdout_log_file=os.environ.get("STDOUT_LOG_FILE", "stdout.log"),
+            stderr_log_file=os.environ.get("STDERR_LOG_FILE", "stderr.log"),
+            log_max_bytes=int(os.environ.get("LOG_MAX_BYTES", str(5 * 1024 * 1024))),
+            log_backup_count=int(os.environ.get("LOG_BACKUP_COUNT", "5")),
+            rom_search_cache_ttl_seconds=int(os.environ.get("ROM_SEARCH_CACHE_TTL_SECONDS", "300")),
+            themes_root=Path(os.environ.get("THEMES_ROOT", "/userdata/themes")),
+            batocera_conf_file=Path(os.environ.get("BATOCERA_CONF_FILE", "/userdata/system/batocera.conf")),
+            es_settings_file=Path(os.environ.get("ES_SETTINGS_FILE", "/userdata/system/.emulationstation/es_settings.cfg")),
+            batocera_theme_name=os.environ.get("BATOCERA_THEME_NAME"),
         )
+
+
+class _TeeRotatingStream:
+    def __init__(self, original_stream, log_path: Path, max_bytes: int, backup_count: int):
+        self._original_stream = original_stream
+        self._log_path = log_path
+        self._max_bytes = max_bytes
+        self._backup_count = backup_count
+        self._file = self._log_path.open("a", encoding="utf-8")
+        self._lock = Lock()
+
+    def _rollover_if_needed(self) -> None:
+        if self._max_bytes <= 0:
+            return
+        self._file.flush()
+        if self._log_path.stat().st_size < self._max_bytes:
+            return
+
+        self._file.close()
+        if self._backup_count > 0:
+            for index in range(self._backup_count - 1, 0, -1):
+                src = self._log_path.with_name(f"{self._log_path.name}.{index}")
+                dst = self._log_path.with_name(f"{self._log_path.name}.{index + 1}")
+                if src.exists():
+                    if dst.exists():
+                        dst.unlink()
+                    src.rename(dst)
+
+            first_backup = self._log_path.with_name(f"{self._log_path.name}.1")
+            if first_backup.exists():
+                first_backup.unlink()
+            if self._log_path.exists():
+                self._log_path.rename(first_backup)
+        else:
+            if self._log_path.exists():
+                self._log_path.unlink()
+
+        self._file = self._log_path.open("a", encoding="utf-8")
+
+    def write(self, data: str) -> int:
+        if not isinstance(data, str):
+            data = str(data)
+        with self._lock:
+            if data:
+                self._file.write(data)
+                self._rollover_if_needed()
+            self._original_stream.write(data)
+            return len(data)
+
+    def flush(self) -> None:
+        with self._lock:
+            self._original_stream.flush()
+            self._file.flush()
+
+    def isatty(self) -> bool:
+        return self._original_stream.isatty()
+
+
+def _configure_rotating_logs(settings: Settings) -> None:
+    settings.log_dir.mkdir(parents=True, exist_ok=True)
+    stdout_path = settings.log_dir / settings.stdout_log_file
+    stderr_path = settings.log_dir / settings.stderr_log_file
+
+    sys.stdout = _TeeRotatingStream(
+        original_stream=sys.stdout,
+        log_path=stdout_path,
+        max_bytes=settings.log_max_bytes,
+        backup_count=settings.log_backup_count,
+    )
+    sys.stderr = _TeeRotatingStream(
+        original_stream=sys.stderr,
+        log_path=stderr_path,
+        max_bytes=settings.log_max_bytes,
+        backup_count=settings.log_backup_count,
+    )
 
 
 class BasicAuth:
@@ -182,10 +281,75 @@ def valid_segment(value: str) -> str:
     return value
 
 
+def _parse_batocera_theme_name(conf_path: Path) -> Optional[str]:
+    if not conf_path.exists() or not conf_path.is_file():
+        return None
+    try:
+        for raw_line in conf_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            if key.strip() in ("global.theme", "system.theme"):
+                candidate = value.strip().strip('"').strip("'")
+                if candidate:
+                    return candidate
+    except Exception:
+        return None
+    return None
+
+
+def _parse_es_theme_name(es_settings_path: Path) -> Optional[str]:
+    if not es_settings_path.exists() or not es_settings_path.is_file():
+        return None
+    try:
+        text = es_settings_path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return None
+
+    # EmulationStation usually stores this as:
+    # <string name="ThemeSet" value="carbon"/>
+    match = re.search(r'<string\s+name="ThemeSet"\s+value="([^"]+)"', text, flags=re.IGNORECASE)
+    if not match:
+        return None
+    theme = match.group(1).strip()
+    return theme or None
+
+
+def _resolve_theme_dir(settings: Settings) -> Optional[Path]:
+    theme_name = (
+        settings.batocera_theme_name
+        or _parse_batocera_theme_name(settings.batocera_conf_file)
+        or _parse_es_theme_name(settings.es_settings_file)
+    )
+    if theme_name:
+        theme_dir = (settings.themes_root / theme_name).resolve()
+        if theme_dir.exists() and theme_dir.is_dir():
+            return theme_dir
+
+    # Batocera installs can omit explicit theme settings.
+    # If exactly one theme directory exists, use it automatically.
+    try:
+        candidates = sorted(
+            [entry.resolve() for entry in settings.themes_root.iterdir() if entry.is_dir()],
+            key=lambda p: p.name.lower(),
+        )
+    except Exception:
+        return None
+
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
+
+
 class RomRepository:
-    def __init__(self, roms_root: Path, bios_root: Path):
+    def __init__(self, roms_root: Path, bios_root: Path, rom_search_cache_ttl_seconds: int = 300):
         self.roms_root = roms_root
         self.bios_root = bios_root
+        self.rom_search_cache_ttl_seconds = rom_search_cache_ttl_seconds
+        self._search_cache_lock = Lock()
+        self._search_index: List[dict] = []
+        self._search_index_expires_at = 0.0
 
     @staticmethod
     def should_include_system(name: str) -> bool:
@@ -203,10 +367,103 @@ class RomRepository:
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
     @staticmethod
+    def build_md5(path: Path) -> str:
+        digest = hashlib.md5()
+        with path.open("rb") as handle:
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    @staticmethod
     def iter_files(path: Path) -> Iterable[Path]:
         if not path.exists() or not path.is_dir():
             return []
         return [entry for entry in sorted(path.iterdir(), key=lambda p: p.name.lower()) if entry.is_file()]
+
+    def _list_rom_items(self, system: str, asset_dir: Path) -> List[dict]:
+        items: List[dict] = []
+        system_lower = system.lower()
+
+        if not asset_dir.exists() or not asset_dir.is_dir():
+            return items
+
+        if system_lower in ("ps3", "ps4"):
+            for entry in sorted(asset_dir.iterdir(), key=lambda p: p.name.lower()):
+                if entry.is_file():
+                    stat = entry.stat()
+                    items.append(
+                        {
+                            "unique_id": self.build_unique_id(entry),
+                            "name": entry.name,
+                            "byte_count": stat.st_size,
+                            "entry_type": "file",
+                            "is_downloadable": True,
+                            "image_stem": Path(entry.name).stem,
+                        }
+                    )
+                    continue
+
+                if not entry.is_dir():
+                    continue
+
+                if system_lower == "ps3":
+                    if not entry.name.lower().endswith(".ps3"):
+                        continue
+                    stat = entry.stat()
+                    display_name = entry.name[:-4]
+                    items.append(
+                        {
+                            "unique_id": self.build_unique_id(entry),
+                            "name": display_name,
+                            "byte_count": stat.st_size,
+                            "entry_type": "folder",
+                            "is_downloadable": False,
+                            "source_folder": entry.name,
+                            "image_stem": display_name,
+                        }
+                    )
+                    continue
+
+                # PS4: each game is a folder and includes a ".ps4" marker file for game name.
+                ps4_name_file = None
+                for child in sorted(entry.iterdir(), key=lambda p: p.name.lower()):
+                    if child.is_file() and child.name.lower().endswith(".ps4"):
+                        ps4_name_file = child
+                        break
+                if not ps4_name_file:
+                    continue
+
+                stat = entry.stat()
+                display_name = ps4_name_file.stem
+                items.append(
+                    {
+                        "unique_id": self.build_unique_id(entry),
+                        "name": display_name,
+                        "byte_count": stat.st_size,
+                        "entry_type": "folder",
+                        "is_downloadable": False,
+                        "source_folder": entry.name,
+                        "image_stem": display_name,
+                    }
+                )
+            return items
+
+        for entry in self.iter_files(asset_dir):
+            stat = entry.stat()
+            items.append(
+                {
+                    "unique_id": self.build_unique_id(entry),
+                    "name": entry.name,
+                    "byte_count": stat.st_size,
+                    "entry_type": "file",
+                    "is_downloadable": True,
+                    "image_stem": Path(entry.name).stem,
+                }
+            )
+        return items
 
     def get_system_dir(self, system: str) -> Path:
         system = valid_segment(system)
@@ -240,13 +497,54 @@ class RomRepository:
             if not target_dir.exists() or not target_dir.is_dir():
                 continue
 
-            rom_count = len(list(self.iter_files(target_dir)))
+            rom_count = len(self._list_rom_items(entry.name, target_dir))
             if rom_count < 2:
                 continue
 
             systems.append({"name": entry.name, "rom_count": rom_count})
 
         return systems
+
+    def _build_search_index(self) -> List[dict]:
+        if not self.roms_root.exists():
+            return []
+        index: List[dict] = []
+        for entry in sorted(self.roms_root.iterdir(), key=lambda p: p.name.lower()):
+            if not (entry.is_dir() or entry.is_symlink()):
+                continue
+            if not self.should_include_system(entry.name):
+                continue
+            system_name = entry.name
+            try:
+                _, roms = self.list_assets(system_name, "roms")
+            except Exception:
+                continue
+            for rom in roms:
+                index.append(
+                    {
+                        "system": system_name,
+                        "name": rom.get("name", ""),
+                        "unique_id": rom.get("unique_id", ""),
+                        "is_downloadable": rom.get("is_downloadable", True),
+                    }
+                )
+        return index
+
+    def search_roms(self, query: str, limit: int = 500) -> List[dict]:
+        normalized = query.strip().lower()
+        if not normalized:
+            return []
+
+        with self._search_cache_lock:
+            now = time.time()
+            if now >= self._search_index_expires_at:
+                self._search_index = self._build_search_index()
+                self._search_index_expires_at = now + self.rom_search_cache_ttl_seconds
+            source = list(self._search_index)
+
+        results = [item for item in source if normalized in item["name"].lower()]
+        results.sort(key=lambda item: (item["system"].lower(), item["name"].lower()))
+        return results[:limit]
 
     def list_assets(self, system: str, asset_type: str) -> Tuple[Path, List[dict]]:
         system_dir = self.get_system_dir(system)
@@ -262,15 +560,20 @@ class RomRepository:
 
         items = []
         if asset_dir.exists() and asset_dir.is_dir():
-            for entry in self.iter_files(asset_dir):
-                stat = entry.stat()
-                items.append(
-                    {
-                        "unique_id": self.build_unique_id(entry),
-                        "name": entry.name,
-                        "byte_count": stat.st_size,
-                    }
-                )
+            if asset_type == "roms":
+                items = self._list_rom_items(system, asset_dir)
+            else:
+                for entry in self.iter_files(asset_dir):
+                    stat = entry.stat()
+                    items.append(
+                        {
+                            "unique_id": self.build_unique_id(entry),
+                            "name": entry.name,
+                            "byte_count": stat.st_size,
+                            "entry_type": "file",
+                            "is_downloadable": True,
+                        }
+                    )
 
         return asset_dir, items
 
@@ -279,53 +582,45 @@ class RomRepository:
             raise FileNotFoundError()
         return self.bios_root.resolve()
 
-    def _build_bios_folder_id(self, path: Path, total_bytes: int) -> str:
-        resolved = path.resolve()
-        stat = resolved.stat()
-        raw = f"{resolved}|{total_bytes}|{int(stat.st_mtime)}"
-        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
-
     def list_bios_entries(self) -> List[dict]:
         bios_root = self.get_bios_root()
-        folder_totals: Dict[Path, int] = {}
-        folders: set[Path] = set()
         files: List[Tuple[Path, int]] = []
+        allowed_extensions = {
+            ".bin",
+            ".rom",
+            ".zip",
+            ".img",
+            ".keys",
+            ".pup",
+            ".gg",
+            ".sms",
+            ".pce",
+            ".col",
+            ".min",
+            ".qcow2",
+            ".nand",
+            ".dat",
+            ".iso",
+            ".chd",
+            ".7z",
+        }
 
         for current_root, dirs, file_names in os.walk(bios_root):
             root_path = Path(current_root)
-
-            for dir_name in dirs:
-                folders.add((root_path / dir_name).resolve())
 
             for file_name in file_names:
                 file_path = (root_path / file_name).resolve()
                 if not file_path.is_file():
                     continue
+                if not (file_path == bios_root or bios_root in file_path.parents):
+                    continue
+                if file_path.suffix.lower() not in allowed_extensions:
+                    continue
 
                 size = file_path.stat().st_size
                 files.append((file_path, size))
 
-                parent = file_path.parent
-                while bios_root in parent.parents or parent == bios_root:
-                    if parent == bios_root:
-                        break
-                    folder_totals[parent] = folder_totals.get(parent, 0) + size
-                    parent = parent.parent
-
         entries: List[dict] = []
-
-        for folder_path in sorted(folders, key=lambda p: str(p.relative_to(bios_root)).lower()):
-            relative_path = folder_path.relative_to(bios_root).as_posix()
-            total_bytes = folder_totals.get(folder_path, 0)
-            entries.append(
-                {
-                    "entry_type": "folder",
-                    "name": folder_path.name,
-                    "path": relative_path,
-                    "unique_id": self._build_bios_folder_id(folder_path, total_bytes),
-                    "byte_count": total_bytes,
-                }
-            )
 
         for file_path, size in sorted(files, key=lambda item: str(item[0].relative_to(bios_root)).lower()):
             relative_path = file_path.relative_to(bios_root).as_posix()
@@ -336,6 +631,7 @@ class RomRepository:
                     "path": relative_path,
                     "unique_id": self.build_unique_id(file_path),
                     "byte_count": size,
+                    "md5": self.build_md5(file_path),
                 }
             )
 
@@ -499,6 +795,32 @@ OPENAPI_SPEC = {
         },
         "/openapi.json": {"get": {"summary": "OpenAPI spec", "responses": {"200": {"description": "OpenAPI JSON"}}}},
         "/swagger": {"get": {"summary": "Swagger UI", "responses": {"200": {"description": "Swagger HTML"}}}},
+        "/downloads": {
+            "get": {
+                "summary": "HTML sitemap of downloadable ROM links grouped by system",
+                "responses": {"200": {"description": "Download sitemap HTML"}},
+            }
+        },
+        "/search": {
+            "get": {
+                "summary": "Search ROMs across all systems",
+                "parameters": [{"name": "q", "in": "query", "required": True, "schema": {"type": "string"}}],
+                "responses": {"200": {"description": "Search results"}},
+            }
+        },
+        "/theme/meta": {
+            "get": {
+                "summary": "Detected Batocera theme metadata and resolved asset URLs",
+                "responses": {"200": {"description": "Theme metadata"}},
+            }
+        },
+        "/theme/assets/{path}": {
+            "get": {
+                "summary": "Serve asset from detected Batocera theme directory",
+                "parameters": [{"name": "path", "in": "path", "required": True, "schema": {"type": "string"}}],
+                "responses": {"200": {"description": "Theme asset bytes"}},
+            }
+        },
     },
 }
 
@@ -524,8 +846,22 @@ class RomRequestHandler(BaseHTTPRequestHandler):
         self.json_cache = json_cache
         super().__init__(*args, **kwargs)
 
+    def log_request(self, code="-", size="-") -> None:
+        client_ip = self.client_address[0] if self.client_address else "-"
+        message = f'{client_ip} - "{self.requestline}" {code} {size}'
+        print(message, file=sys.stdout, flush=True)
+
+    def log_error(self, format: str, *args) -> None:
+        message = format % args if args else format
+        client_ip = self.client_address[0] if self.client_address else "-"
+        print(f"{client_ip} - {message}", file=sys.stderr, flush=True)
+
     def _guess_content_type(self, path: Path) -> str:
         suffix = path.suffix.lower()
+        if suffix == ".css":
+            return "text/css"
+        if suffix == ".svg":
+            return "image/svg+xml"
         if suffix == ".png":
             return "image/png"
         if suffix in (".jpg", ".jpeg"):
@@ -534,11 +870,24 @@ class RomRequestHandler(BaseHTTPRequestHandler):
             return "image/webp"
         if suffix == ".gif":
             return "image/gif"
+        if suffix == ".woff":
+            return "font/woff"
+        if suffix == ".woff2":
+            return "font/woff2"
+        if suffix == ".ttf":
+            return "font/ttf"
+        if suffix == ".otf":
+            return "font/otf"
         if suffix == ".mp4":
             return "video/mp4"
         return "application/octet-stream"
 
     def _send_unauthorized(self) -> None:
+        self.log_error(
+            '401 unauthorized "%s" auth_header_present=%s',
+            self.path.split("?", 1)[0],
+            "yes" if self.headers.get("Authorization") else "no",
+        )
         self.send_response(401)
         self.send_header("WWW-Authenticate", 'Basic realm="ROM API"')
         self.send_header("Content-Type", "application/json")
@@ -633,6 +982,184 @@ class RomRequestHandler(BaseHTTPRequestHandler):
     def _handle_openapi_json(self) -> None:
         self._send_json(200, OPENAPI_SPEC)
 
+    def _handle_download_sitemap(self) -> None:
+        systems = self.repository.list_systems()
+
+        sections: List[str] = []
+        total_links = 0
+        for system in systems:
+            system_name = system["name"]
+            _, roms = self.repository.list_assets(system_name, "roms")
+            downloadable = [rom for rom in roms if rom.get("is_downloadable", True)]
+            if not downloadable:
+                continue
+
+            total_links += len(downloadable)
+            links_html = "\n".join(
+                (
+                    f'<li><a href="/systems/{quote(system_name, safe="")}/{quote(rom["unique_id"], safe="")}">'
+                    f'{rom["name"]}</a></li>'
+                )
+                for rom in downloadable
+            )
+            sections.append(
+                f"""
+                <section class="system">
+                  <h2>{system_name} <span class="count">({len(downloadable)})</span></h2>
+                  <ul>
+                    {links_html}
+                  </ul>
+                </section>
+                """
+            )
+
+        body = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ROM Download Sitemap</title>
+  <style>
+    body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f6f7fb; color: #1f2937; }}
+    .wrap {{ max-width: 1100px; margin: 0 auto; padding: 24px; }}
+    .top {{ margin-bottom: 18px; }}
+    h1 {{ margin: 0 0 6px; font-size: 1.7rem; }}
+    .meta {{ color: #6b7280; }}
+    .system {{ background: #fff; border: 1px solid #e5e7eb; border-radius: 10px; padding: 14px 16px; margin: 0 0 14px; }}
+    .system h2 {{ margin: 0 0 10px; font-size: 1.1rem; }}
+    .count {{ color: #6b7280; font-weight: 500; }}
+    ul {{ margin: 0; padding-left: 20px; column-count: 2; column-gap: 24px; }}
+    li {{ break-inside: avoid; margin: 0 0 6px; }}
+    a {{ color: #0d6efd; text-decoration: none; }}
+    a:hover {{ text-decoration: underline; }}
+    @media (max-width: 840px) {{ ul {{ column-count: 1; }} }}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top">
+      <h1>ROM Download Sitemap</h1>
+      <div class="meta">Systems: {len(sections)} · Download links: {total_links}</div>
+    </div>
+    {"".join(sections) if sections else "<p>No downloadable ROM links found.</p>"}
+  </div>
+</body>
+</html>"""
+        self._send_html(200, body)
+
+    def _handle_search(self, query: str) -> None:
+        query = query.strip()
+        if not query:
+            self._send_json(400, {"error": "missing query parameter q"})
+            return
+        results = self.repository.search_roms(query)
+        self._send_json(200, {"query": query, "results": results}, cache_key=f"json:/search?q={query.lower()}")
+
+    def _build_theme_meta(self) -> dict:
+        explicit = self.settings.batocera_theme_name
+        from_batocera_conf = _parse_batocera_theme_name(self.settings.batocera_conf_file)
+        from_es_settings = _parse_es_theme_name(self.settings.es_settings_file)
+        selected = explicit or from_batocera_conf or from_es_settings
+        theme_dir = _resolve_theme_dir(self.settings)
+        if not theme_dir:
+            return {
+                "enabled": False,
+                "selected_theme_name": selected,
+                "theme_sources": {
+                    "env": explicit,
+                    "batocera_conf": from_batocera_conf,
+                    "es_settings": from_es_settings,
+                },
+                "themes_root": str(self.settings.themes_root),
+            }
+
+        css_candidates = ["theme.css", "style.css", "theme/theme.css", "theme/style.css", "_inc/theme.css", "_inc/style.css"]
+        bg_name_candidates = ["background", "fond", "bg", "backdrop", "wallpaper"]
+        logo_name_candidates = ["logo", "brand", "title", "system-logo"]
+
+        def first_existing(candidates: List[str]) -> Optional[str]:
+            for rel in candidates:
+                target = (theme_dir / rel).resolve()
+                if target.exists() and target.is_file() and theme_dir in target.parents:
+                    return rel
+            return None
+
+        def first_match_recursive(name_fragments: List[str], allowed_suffixes: Tuple[str, ...]) -> Optional[str]:
+            # Keep this bounded for large theme trees.
+            checked = 0
+            for path in theme_dir.rglob("*"):
+                if checked > 5000:
+                    break
+                checked += 1
+                if not path.is_file():
+                    continue
+                suffix = path.suffix.lower()
+                if suffix not in allowed_suffixes:
+                    continue
+                name_lower = path.stem.lower()
+                if any(fragment in name_lower for fragment in name_fragments):
+                    try:
+                        return path.relative_to(theme_dir).as_posix()
+                    except Exception:
+                        continue
+            return None
+
+        css_file = first_existing(css_candidates)
+        if not css_file:
+            css_file = first_match_recursive(["theme", "style"], (".css",))
+
+        bg_file = first_existing(
+            [
+                "art/background.png",
+                "art/background.jpg",
+                "art/fond.png",
+                "art/fond.jpg",
+                "background.png",
+                "background.jpg",
+            ]
+        )
+        if not bg_file:
+            bg_file = first_match_recursive(bg_name_candidates, (".png", ".jpg", ".jpeg", ".webp"))
+
+        logo_file = first_existing(["art/logo.png", "art/logo.svg", "logo.png", "logo.svg"])
+        if not logo_file:
+            logo_file = first_match_recursive(logo_name_candidates, (".png", ".jpg", ".jpeg", ".webp", ".svg"))
+
+        return {
+            "enabled": True,
+            "theme_name": theme_dir.name,
+            "selected_theme_name": selected,
+            "theme_sources": {
+                "env": explicit,
+                "batocera_conf": from_batocera_conf,
+                "es_settings": from_es_settings,
+            },
+            "themes_root": str(self.settings.themes_root),
+            "css_url": f"/theme/assets/{css_file}" if css_file else None,
+            "background_url": f"/theme/assets/{bg_file}" if bg_file else None,
+            "logo_url": f"/theme/assets/{logo_file}" if logo_file else None,
+            "resolved_files": {
+                "css": css_file,
+                "background": bg_file,
+                "logo": logo_file,
+            },
+        }
+
+    def _handle_theme_meta(self) -> None:
+        self._send_json(200, self._build_theme_meta(), cache_key="json:/theme/meta")
+
+    def _handle_theme_asset(self, relative_path: str) -> None:
+        theme_dir = _resolve_theme_dir(self.settings)
+        if not theme_dir:
+            raise FileNotFoundError()
+        requested = relative_path.lstrip("/")
+        if not requested or "\x00" in requested:
+            raise ValueError("invalid theme asset path")
+        asset_path = (theme_dir / requested).resolve()
+        if theme_dir not in asset_path.parents or not asset_path.exists() or not asset_path.is_file():
+            raise FileNotFoundError()
+        self._stream_file(asset_path, self._guess_content_type(asset_path))
+
     def _handle_systems(self) -> None:
         systems = self.repository.list_systems()
         self._send_json(200, {"systems": systems}, cache_key="json:/systems")
@@ -676,13 +1203,17 @@ class RomRequestHandler(BaseHTTPRequestHandler):
         asset_dir, items = self.repository.list_assets(system, asset_type)
 
         target_path = None
+        is_downloadable = True
         for item in items:
             if item["unique_id"] == unique_id:
                 target_path = (asset_dir / item["name"]).resolve()
+                is_downloadable = item.get("is_downloadable", True)
                 break
 
         if not target_path or not target_path.exists():
             raise FileNotFoundError()
+        if not is_downloadable:
+            raise ValueError("asset is not downloadable")
         if not target_path.is_file():
             raise ValueError("not a file")
 
@@ -691,8 +1222,9 @@ class RomRequestHandler(BaseHTTPRequestHandler):
     def _handle_image_file_or_download(self, system: str, image_ref: str) -> None:
         system_dir = self.repository.get_system_dir(system)
         image_ref = valid_segment(image_ref)
+        images_dir = (system_dir / "images").resolve()
 
-        image_path = (system_dir / "images" / image_ref).resolve()
+        image_path = (images_dir / image_ref).resolve()
         if image_path.exists():
             if not image_path.is_file():
                 raise ValueError("not a file")
@@ -702,16 +1234,59 @@ class RomRequestHandler(BaseHTTPRequestHandler):
         _, roms = self.repository.list_assets(system, "roms")
         for rom in roms:
             if rom["unique_id"] == image_ref:
-                rom_stem = Path(rom["name"]).stem
-                mapped_image_path = (system_dir / "images" / f"{rom_stem}-image.png").resolve()
-                self._stream_cached_image(mapped_image_path)
-                return
+                stems: List[str] = []
+                image_stem = rom.get("image_stem")
+                if isinstance(image_stem, str) and image_stem:
+                    stems.append(image_stem)
+                name_stem = Path(rom["name"]).stem
+                if name_stem not in stems:
+                    stems.append(name_stem)
+                source_folder = rom.get("source_folder")
+                if isinstance(source_folder, str) and source_folder:
+                    folder_stem = Path(source_folder).stem
+                    if folder_stem not in stems:
+                        stems.append(folder_stem)
+
+                suffixes = [".png", ".jpg", ".jpeg", ".webp", ".gif"]
+                name_patterns = ["{stem}-image{suffix}", "{stem}{suffix}"]
+                for stem in stems:
+                    for pattern in name_patterns:
+                        for suffix in suffixes:
+                            candidate_name = pattern.format(stem=stem, suffix=suffix)
+                            mapped_image_path = (images_dir / candidate_name).resolve()
+                            try:
+                                self._stream_cached_image(mapped_image_path)
+                                return
+                            except FileNotFoundError:
+                                continue
+
+                # Fallback: recursive + case-insensitive match by stem for theme/artwork packs
+                # that store images in subfolders or mixed-case extensions.
+                allowed_suffixes = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+                normalized_stems = {s.lower() for s in stems}
+                normalized_stems_with_suffix = {f"{s.lower()}-image" for s in stems}
+                checked = 0
+                if images_dir.exists() and images_dir.is_dir():
+                    for candidate in images_dir.rglob("*"):
+                        checked += 1
+                        if checked > 30000:
+                            break
+                        if not candidate.is_file():
+                            continue
+                        if candidate.suffix.lower() not in allowed_suffixes:
+                            continue
+                        candidate_stem = candidate.stem.lower()
+                        if candidate_stem in normalized_stems or candidate_stem in normalized_stems_with_suffix:
+                            self._stream_cached_image(candidate.resolve())
+                            return
+                raise FileNotFoundError()
 
         self._handle_download(system, "images", image_ref)
 
     def do_GET(self) -> None:
         try:
-            raw_path = self.path.split("?", 1)[0]
+            raw_path, _, raw_query = self.path.partition("?")
+            query_params = parse_qs(raw_query, keep_blank_values=True)
             parts = [part for part in raw_path.split("/") if part]
 
             if len(parts) == 5 and parts[0] == "public" and parts[1] == "systems" and parts[3] == "images":
@@ -732,6 +1307,18 @@ class RomRequestHandler(BaseHTTPRequestHandler):
 
             if raw_path == "/openapi.json":
                 self._handle_openapi_json()
+                return
+
+            if raw_path == "/downloads":
+                self._handle_download_sitemap()
+                return
+
+            if raw_path == "/search":
+                self._handle_search((query_params.get("q", [""])[0]))
+                return
+
+            if raw_path == "/theme/meta":
+                self._handle_theme_meta()
                 return
 
             if raw_path == "/systems":
@@ -772,6 +1359,11 @@ class RomRequestHandler(BaseHTTPRequestHandler):
 
             if len(parts) == 4 and parts[0] == "systems" and parts[2] == "videos":
                 self._handle_download(parts[1], "videos", parts[3])
+                return
+
+            if len(parts) >= 3 and parts[0] == "theme" and parts[1] == "assets":
+                relative_path = "/".join(parts[2:])
+                self._handle_theme_asset(relative_path)
                 return
 
             self._send_json(404, {"error": "not found"})
@@ -849,7 +1441,11 @@ def _resolve_tls_material(settings: Settings) -> Tuple[Path, Path]:
 
 
 def create_server(settings: Settings) -> ThreadingHTTPServer:
-    repository = RomRepository(settings.roms_root, settings.bios_root)
+    repository = RomRepository(
+        settings.roms_root,
+        settings.bios_root,
+        rom_search_cache_ttl_seconds=settings.rom_search_cache_ttl_seconds,
+    )
     auth = BasicAuth(settings.username, settings.password)
 
     image_cache = ExpiringLRUCache(
@@ -885,7 +1481,9 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
 
 def main() -> None:
     settings = Settings.from_env()
+    _configure_rotating_logs(settings)
     server = create_server(settings)
+    print(f"Log files: {settings.log_dir / settings.stdout_log_file}, {settings.log_dir / settings.stderr_log_file}")
     print(f"Auth username: {settings.username}")
     print(f"Serving ROM API on https://0.0.0.0:{settings.https_port}")
     server.serve_forever()

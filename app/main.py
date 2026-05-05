@@ -1,4 +1,4 @@
-from rom_api import main
+from app.rom_api import main
 
 
 if __name__ == "__main__":

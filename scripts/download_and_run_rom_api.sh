@@ -25,18 +25,31 @@ fi
 
 WORK_DIR="${ROM_API_WORK_DIR:-$HOME/.rom-api}"
 mkdir -p "$WORK_DIR"
-APP_PATH="$WORK_DIR/rom_api.py"
-TEMPLATES_DIR="$WORK_DIR/templates"
+APP_DIR="$WORK_DIR/app"
+APP_PATH="$APP_DIR/rom_api.py"
+MAIN_PATH="$APP_DIR/main.py"
+INIT_PATH="$APP_DIR/__init__.py"
+TEMPLATES_DIR="$APP_DIR/templates"
 TEMPLATE_PATH="$TEMPLATES_DIR/index.html"
 
 if [[ -n "$ROM_API_BASE_URL" ]]; then
   ROM_API_BASE_URL="${ROM_API_BASE_URL%/}"
-  ROM_API_URL="${ROM_API_URL:-$ROM_API_BASE_URL/rom_api.py}"
-  ROM_API_TEMPLATE_URL="${ROM_API_TEMPLATE_URL:-$ROM_API_BASE_URL/templates/index.html}"
+  ROM_API_URL="${ROM_API_URL:-$ROM_API_BASE_URL/app/rom_api.py}"
+  ROM_API_TEMPLATE_URL="${ROM_API_TEMPLATE_URL:-$ROM_API_BASE_URL/app/templates/index.html}"
 fi
 
+mkdir -p "$APP_DIR"
 curl -fsSL "$ROM_API_URL" -o "$APP_PATH"
 mkdir -p "$TEMPLATES_DIR"
+cat > "$INIT_PATH" <<'EOF'
+# package marker
+EOF
+cat > "$MAIN_PATH" <<'EOF'
+from app.rom_api import main
+
+if __name__ == "__main__":
+    main()
+EOF
 if ! curl -fsSL "$ROM_API_TEMPLATE_URL" -o "$TEMPLATE_PATH"; then
   cat > "$TEMPLATE_PATH" <<'EOF'
 <!doctype html>
@@ -65,6 +78,9 @@ exec env \
   ROMS_ROOT="${ROMS_ROOT:-$WORK_DIR/local-data/roms}" \
   BIOS_ROOT="${BIOS_ROOT:-$WORK_DIR/local-data/bios}" \
   TLS_SELF_SIGNED_DIR="${TLS_SELF_SIGNED_DIR:-$WORK_DIR/local-data/certs}" \
+  LOG_DIR="${LOG_DIR:-$WORK_DIR/logs}" \
+  LOG_MAX_BYTES="${LOG_MAX_BYTES:-5242880}" \
+  LOG_BACKUP_COUNT="${LOG_BACKUP_COUNT:-5}" \
   IMAGE_CACHE_TTL_SECONDS="${IMAGE_CACHE_TTL_SECONDS:-3600}" \
   IMAGE_MISS_CACHE_TTL_SECONDS="${IMAGE_MISS_CACHE_TTL_SECONDS:-300}" \
   IMAGE_CACHE_MAX_ITEMS="${IMAGE_CACHE_MAX_ITEMS:-1000}" \
@@ -72,4 +88,4 @@ exec env \
   JSON_CACHE_TTL_SECONDS="${JSON_CACHE_TTL_SECONDS:-3600}" \
   JSON_CACHE_MAX_ITEMS="${JSON_CACHE_MAX_ITEMS:-2000}" \
   JSON_CACHE_MAX_BYTES="${JSON_CACHE_MAX_BYTES:-67108864}" \
-  python3 "$APP_PATH"
+  python3 "$MAIN_PATH"

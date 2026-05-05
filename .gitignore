@@ -23,6 +23,7 @@ local-data/
 downloads/
 rom_downloads/
 *.log
+*.log.*
 
 # TLS cert/key artifacts
 server.crt

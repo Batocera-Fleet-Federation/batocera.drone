@@ -13,11 +13,15 @@ export HTTPS_PORT=8443
 export ROMS_ROOT="./local-data/roms"
 export BIOS_ROOT="./local-data/bios"
 export TLS_SELF_SIGNED_DIR="./local-data/certs"
-mkdir -p "$ROMS_ROOT" "$BIOS_ROOT" "$TLS_SELF_SIGNED_DIR"
-python3 app.py
+export LOG_DIR="./local-data/logs"
+export LOG_MAX_BYTES=5242880
+export LOG_BACKUP_COUNT=5
+mkdir -p "$ROMS_ROOT" "$BIOS_ROOT" "$TLS_SELF_SIGNED_DIR" "$LOG_DIR"
+python3 app/main.py
 ```
 
 Then open `https://127.0.0.1:8443` and sign in with the same username/password.
+Stdout/stderr are written to rolling files in `LOG_DIR` as `stdout.log` and `stderr.log`.
 
 ## Base URL And Auth
 
@@ -102,7 +106,7 @@ The UI lets you:
 
 ## Download All ROMs Script
 
-Use [`download_all_roms.sh`](/Users/Jerrod/Documents/git/roms-api/download_all_roms.sh) to iterate through all systems and download every ROM.
+Use [`download_all_roms.sh`](/Users/Jerrod/Documents/gitlab/roms-api/scripts/download_all_roms.sh) to iterate through all systems and download every ROM.
 
 - The script calls `/systems` then `/systems/{system}`
 - It creates a folder per system under `--output-dir`
@@ -112,7 +116,7 @@ Use [`download_all_roms.sh`](/Users/Jerrod/Documents/git/roms-api/download_all_r
 Example:
 
 ```bash
-./download_all_roms.sh \
+./scripts/download_all_roms.sh \
   --base-url "https://72.176.228.250" \
   --username "<username>" \
   --password "<password>" \
@@ -122,7 +126,7 @@ Example:
 Single-system example:
 
 ```bash
-./download_all_roms.sh \
+./scripts/download_all_roms.sh \
   --base-url "https://72.176.228.250" \
   --username "<username>" \
   --password "<password>" \
@@ -139,10 +143,10 @@ Notes:
 
 ### PowerShell Version
 
-Use [`download_all_roms.ps1`](/Users/Jerrod/Documents/git/roms-api/download_all_roms.ps1) for a native PowerShell workflow:
+Use [`download_all_roms.ps1`](/Users/Jerrod/Documents/gitlab/roms-api/scripts/download_all_roms.ps1) for a native PowerShell workflow:
 
 ```powershell
-.\download_all_roms.ps1 `
+.\scripts\download_all_roms.ps1 `
   -BaseUrl "https://72.176.228.250" `
   -Username "<username>" `
   -Password "<password>" `
@@ -152,7 +156,7 @@ Use [`download_all_roms.ps1`](/Users/Jerrod/Documents/git/roms-api/download_all_
 Single-system example:
 
 ```powershell
-.\download_all_roms.ps1 `
+.\scripts\download_all_roms.ps1 `
   -BaseUrl "https://72.176.228.250" `
   -Username "<username>" `
   -Password "<password>" `
@@ -168,28 +172,28 @@ Notes:
 
 ## Bootstrap Script (Download And Run)
 
-Download [`download_and_run_rom_api.sh`](/Users/Jerrod/Documents/gitlab/roms-api/download_and_run_rom_api.sh), then run:
+Download [`download_and_run_rom_api.sh`](/Users/Jerrod/Documents/gitlab/roms-api/scripts/download_and_run_rom_api.sh), then run:
 
 ```bash
-ROM_API_BASE_URL="<raw-base-url-containing-rom_api.py>" ./download_and_run_rom_api.sh
+ROM_API_BASE_URL="<raw-base-url-containing-app-folder>" ./scripts/download_and_run_rom_api.sh
 ```
 
 One-shot with `curl`:
 
 ```bash
-curl -fsSL "<raw-url-to-download_and_run_rom_api.sh>" | \
-ROM_API_BASE_URL="<raw-base-url-containing-rom_api.py>" bash
+curl -fsSL "<raw-url-to-scripts/download_and_run_rom_api.sh>" | \
+ROM_API_BASE_URL="<raw-base-url-containing-app-folder>" bash
 ```
 
 One-shot with `wget`:
 
 ```bash
-wget -qO- "<raw-url-to-download_and_run_rom_api.sh>" | \
-ROM_API_BASE_URL="<raw-base-url-containing-rom_api.py>" bash
+wget -qO- "<raw-url-to-scripts/download_and_run_rom_api.sh>" | \
+ROM_API_BASE_URL="<raw-base-url-containing-app-folder>" bash
 ```
 
-The script downloads `rom_api.py` and `templates/index.html`, prompts for credentials if not already set, and starts the API with:
+The script downloads `app/rom_api.py` and `app/templates/index.html`, prompts for credentials if not already set, and starts the API with:
 
 ```bash
-ROM_API_USERNAME=<your username> ROM_API_PASSWORD='<your password>' HTTPS_PORT=8443 ROMS_ROOT=~/.rom-api/local-data/roms BIOS_ROOT=~/.rom-api/local-data/bios TLS_SELF_SIGNED_DIR=~/.rom-api/local-data/certs python3 rom_api.py
+ROM_API_USERNAME=<your username> ROM_API_PASSWORD='<your password>' HTTPS_PORT=8443 ROMS_ROOT=~/.rom-api/local-data/roms BIOS_ROOT=~/.rom-api/local-data/bios TLS_SELF_SIGNED_DIR=~/.rom-api/local-data/certs LOG_DIR=~/.rom-api/logs LOG_MAX_BYTES=5242880 LOG_BACKUP_COUNT=5 python3 app/main.py
 ```
