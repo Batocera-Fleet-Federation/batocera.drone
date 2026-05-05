@@ -480,9 +480,13 @@ class RomRepository:
         return digest.hexdigest()
 
     @staticmethod
-    def should_ignore_rom_file(file_name: str) -> bool:
+    def should_ignore_rom_file(file_name: str, system: Optional[str] = None) -> bool:
         lower = str(file_name or "").strip().lower()
-        return lower in {"_info.txt", "gamelist.xml", ".keep"}
+        if lower in {"_info.txt", "gamelist.xml", ".keep"}:
+            return True
+        if (system or "").strip().lower() == "steam" and lower.endswith(".sh"):
+            return True
+        return False
 
     @staticmethod
     def iter_files(path: Path) -> Iterable[Path]:
@@ -500,7 +504,7 @@ class RomRepository:
         if system_lower in ("ps3", "ps4"):
             for entry in sorted(asset_dir.iterdir(), key=lambda p: p.name.lower()):
                 if entry.is_file():
-                    if self.should_ignore_rom_file(entry.name):
+                    if self.should_ignore_rom_file(entry.name, system=system):
                         continue
                     stat = entry.stat()
                     items.append(
@@ -561,7 +565,7 @@ class RomRepository:
             return items
 
         for entry in self.iter_files(asset_dir):
-            if self.should_ignore_rom_file(entry.name):
+            if self.should_ignore_rom_file(entry.name, system=system):
                 continue
             stat = entry.stat()
             items.append(
