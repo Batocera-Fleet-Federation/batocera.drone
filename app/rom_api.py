@@ -504,6 +504,8 @@ class RomRepository:
         if system_lower in ("ps3", "ps4"):
             for entry in sorted(asset_dir.iterdir(), key=lambda p: p.name.lower()):
                 if entry.is_file():
+                    if system_lower == "steam" and entry.suffix.lower() == ".sh":
+                        continue
                     if self.should_ignore_rom_file(entry.name, system=system):
                         continue
                     stat = entry.stat()
@@ -565,6 +567,8 @@ class RomRepository:
             return items
 
         for entry in self.iter_files(asset_dir):
+            if system_lower == "steam" and entry.suffix.lower() == ".sh":
+                continue
             if self.should_ignore_rom_file(entry.name, system=system):
                 continue
             stat = entry.stat()
