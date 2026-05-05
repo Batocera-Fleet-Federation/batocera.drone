@@ -13,6 +13,7 @@ curl -fsSL "https://gitlab.com/batocera_addons/roms-api/-/raw/main/scripts/run_n
 ```
 
 The script prompts for `ROM_API_USERNAME` and `ROM_API_PASSWORD`, then starts the API on port `8443` by default.
+It downloads runtime files to `/userdata/system/.rom-api` (or `$HOME/.rom-api`) and removes that folder plus `/tmp/run_now.sh` when the process exits.
 
 ## API Docs (OpenAPI + Swagger)
 

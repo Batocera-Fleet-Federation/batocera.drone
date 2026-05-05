@@ -32,6 +32,7 @@ if ! command -v python3 >/dev/null 2>&1; then
 fi
 
 WORK_DIR="${ROM_API_WORK_DIR:-$HOME/.rom-api}"
+SCRIPT_PATH="${0:-}"
 mkdir -p "$WORK_DIR"
 APP_DIR="$WORK_DIR/app"
 APP_PATH="$APP_DIR/rom_api.py"
@@ -95,6 +96,15 @@ fi
 
 echo "Downloaded ROM API to $WORK_DIR"
 
+cleanup() {
+  rm -rf "$WORK_DIR" 2>/dev/null || true
+  if [[ -n "$SCRIPT_PATH" && -f "$SCRIPT_PATH" ]]; then
+    rm -f "$SCRIPT_PATH" 2>/dev/null || true
+  fi
+}
+
+trap cleanup EXIT INT TERM
+
 if [[ -z "${ROM_API_USERNAME:-}" ]]; then
   read -r -p "ROM_API_USERNAME: " ROM_API_USERNAME
 fi
@@ -104,7 +114,7 @@ if [[ -z "${ROM_API_PASSWORD:-}" ]]; then
   echo
 fi
 
-exec env \
+env \
   PYTHONPATH="$WORK_DIR${PYTHONPATH:+:$PYTHONPATH}" \
   ROM_API_USERNAME="$ROM_API_USERNAME" \
   ROM_API_PASSWORD="$ROM_API_PASSWORD" \
