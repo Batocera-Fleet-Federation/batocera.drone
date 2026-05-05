@@ -565,7 +565,10 @@ class RomRepository:
             return items
 
         for entry in self.iter_files(asset_dir):
-            if system_lower == "steam" and entry.suffix.lower() == ".sh":
+            steam_name_lower = entry.name.lower()
+            if system_lower == "steam" and (
+                steam_name_lower.endswith(".sh") or steam_name_lower.endswith(".sh.keys")
+            ):
                 continue
             if self.should_ignore_rom_file(entry.name, system=system):
                 continue
