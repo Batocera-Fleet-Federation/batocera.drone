@@ -70,6 +70,31 @@
       border-radius: 8px;
       padding: 0.5rem;
     }
+    .admin-tile,
+    .admin-tile .card-title,
+    .admin-tile .card-text,
+    .log-card .card-header,
+    .log-card .list-group-item {
+      color: #fff !important;
+    }
+    .log-card .card-header {
+      background: rgba(7, 10, 18, 0.72);
+      border-color: var(--ui-border);
+    }
+    .log-card .list-group-item {
+      background: rgba(16, 20, 34, 0.88);
+      border-color: rgba(255, 255, 255, 0.16);
+    }
+    .log-card .list-group-item:hover,
+    .log-card .list-group-item:focus {
+      background: rgba(33, 40, 62, 0.95);
+      color: #fff !important;
+    }
+    .log-card .list-group-item.active {
+      background: rgba(54, 98, 170, 0.95);
+      border-color: rgba(170, 210, 255, 0.8);
+      color: #fff !important;
+    }
   </style>
 </head>
 <body>
@@ -142,6 +167,7 @@ let filterDropdownGlobalCloseBound = false;
 let filterDropdownState = {};
 let biosFilterInitialized = false;
 let themeFilterInitialized = false;
+let currentLogSource = null;
 
 function showError(message) {
   alerts.innerHTML = `<div class="alert alert-danger">${message}</div>`;
@@ -1013,9 +1039,9 @@ async function renderAdminMenu() {
   content.innerHTML = `
     <div class="row">
       <div class="col-md-4 mb-3">
-        <div class="card">
+        <div class="card admin-tile">
           <div class="card-body">
-            <h5 class="card-title">Logs</h5>
+            <h5 class="card-title"><i class="bi bi-journal-text me-2"></i>Logs</h5>
             <p class="card-text">View system and emulator logs</p>
             <button class="btn btn-primary" onclick="renderLogsPage()">View Logs</button>
           </div>
@@ -1025,6 +1051,72 @@ async function renderAdminMenu() {
   `;
 }
 async function renderLogsPage() {
+  const logSources = [
+    ["batocera", "Batocera System", "bi-cpu"],
+    ["emulationstation", "EmulationStation", "bi-window-stack"],
+    ["retroarch", "RetroArch", "bi-controller"],
+    ["mame", "MAME", "bi-joystick"],
+    ["dolphin", "Dolphin", "bi-water"],
+    ["pcsx2", "PCSX2", "bi-disc"],
+    ["rpcs3", "RPCS3", "bi-hdd-stack"],
+    ["citra", "Citra", "bi-nintendo-switch"],
+    ["yuzu", "Yuzu", "bi-controller"],
+    ["cemu", "Cemu", "bi-controller"],
+    ["xemu", "Xemu", "bi-xbox"],
+    ["xenia", "Xenia", "bi-xbox"],
+    ["ryujinx", "Ryujinx", "bi-nintendo-switch"],
+    ["melonDS", "melonDS", "bi-controller"],
+    ["flycast", "Flycast", "bi-cloud"],
+    ["ppsspp", "PPSSPP", "bi-phone"],
+    ["duckstation", "DuckStation", "bi-disc"],
+    ["mesen", "Mesen", "bi-cassette"],
+    ["snes9x", "Snes9x", "bi-controller"],
+    ["bsnes", "bsnes", "bi-controller"],
+    ["nestopia", "Nestopia", "bi-cassette"],
+    ["fceux", "FCEUX", "bi-cassette"],
+    ["mednafen", "Mednafen", "bi-cassette"],
+    ["mgba", "mGBA", "bi-controller"],
+    ["vbam", "VBA-M", "bi-controller"],
+    ["scummvm", "ScummVM", "bi-compass"],
+    ["dosbox", "DOSBox", "bi-terminal"],
+    ["fs-uae", "FS-UAE", "bi-cassette"],
+    ["hatari", "Hatari", "bi-cassette"],
+    ["vice", "VICE", "bi-cassette"],
+    ["fuse", "Fuse", "bi-cassette"],
+    ["oricutron", "Oricutron", "bi-cassette"],
+    ["ti99sim", "TI99Sim", "bi-cassette"],
+    ["simcoupe", "SimCoupe", "bi-cassette"],
+    ["zesarux", "ZEsarUX", "bi-cassette"],
+    ["caprice32", "Caprice32", "bi-cassette"],
+    ["cannonball", "Cannonball", "bi-car-front"],
+    ["openbor", "OpenBOR", "bi-lightning"],
+    ["solarus", "Solarus", "bi-sun"],
+    ["easyrpg", "EasyRPG", "bi-dice-5"],
+    ["supermodel", "Supermodel", "bi-cpu"],
+    ["demul", "Demul", "bi-cpu"],
+    ["nullDC", "nullDC", "bi-cpu"],
+    ["reicast", "Reicast", "bi-cpu"],
+    ["redream", "Redream", "bi-cpu"],
+    ["mupen64plus", "Mupen64Plus", "bi-controller"],
+    ["parallel-n64", "Parallel-N64", "bi-controller"],
+    ["cxd4", "CXD4", "bi-controller"],
+    ["play", "Play!", "bi-controller"],
+    ["ares", "Ares", "bi-cpu"],
+    ["sameduck", "SameDuck", "bi-cpu"],
+    ["gearboy", "Gearboy", "bi-controller"],
+    ["gearsystem", "Gearsystem", "bi-controller"],
+    ["freej2me", "FreeJ2ME", "bi-phone"],
+    ["bigpemu", "BigPEmu", "bi-controller"],
+    ["model2", "Model 2", "bi-cpu"],
+    ["teknoParrot", "TeknoParrot", "bi-controller"],
+    ["ruffle", "Ruffle", "bi-file-play"],
+    ["lightspark", "Lightspark", "bi-file-play"],
+    ["box86", "Box86", "bi-box"],
+    ["box64", "Box64", "bi-box"],
+    ["wine", "Wine", "bi-cup-straw"],
+    ["proton", "Proton", "bi-lightning-charge"],
+  ];
+
   titleNode.textContent = "System Logs";
   subtitleNode.textContent = "View logs from Batocera and emulators";
   content.innerHTML = `
@@ -1033,77 +1125,19 @@ async function renderLogsPage() {
     </div>
     <div class="row">
       <div class="col-md-3">
-        <div class="card">
+        <div class="card log-card">
           <div class="card-header">Log Sources</div>
           <div class="list-group list-group-flush" id="logSources">
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('batocera')">Batocera System</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('emulationstation')">EmulationStation</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('retroarch')">RetroArch</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('mame')">MAME</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('dolphin')">Dolphin</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('pcsx2')">PCSX2</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('rpcs3')">RPCS3</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('citra')">Citra</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('yuzu')">Yuzu</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('cemu')">Cemu</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('xemu')">Xemu</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('xenia')">Xenia</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('ryujinx')">Ryujinx</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('melonDS')">melonDS</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('flycast')">Flycast</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('ppsspp')">PPSSPP</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('duckstation')">DuckStation</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('mesen')">Mesen</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('snes9x')">Snes9x</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('bsnes')">bsnes</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('nestopia')">Nestopia</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('fceux')">FCEUX</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('mednafen')">Mednafen</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('mgba')">mGBA</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('vbam')">VBA-M</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('scummvm')">ScummVM</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('dosbox')">DOSBox</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('fs-uae')">FS-UAE</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('hatari')">Hatari</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('vice')">VICE</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('fuse')">Fuse</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('oricutron')">Oricutron</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('ti99sim')">TI99Sim</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('simcoupe')">SimCoupe</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('zesarux')">ZEsarUX</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('caprice32')">Caprice32</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('cannonball')">Cannonball</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('openbor')">OpenBOR</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('solarus')">Solarus</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('easyrpg')">EasyRPG</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('supermodel')">Supermodel</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('demul')">Demul</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('nullDC')">nullDC</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('reicast')">Reicast</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('redream')">Redream</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('mupen64plus')">Mupen64Plus</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('parallel-n64')">Parallel-N64</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('cxd4')">CXD4</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('play')">Play!</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('ares')">Ares</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('sameduck')">SameDuck</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('gearboy')">Gearboy</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('gearsystem')">Gearsystem</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('freej2me')">FreeJ2ME</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('bigpemu')">BigPEmu</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('model2')">Model 2</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('teknoParrot')">TeknoParrot</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('ruffle')">Ruffle</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('lightspark')">Lightspark</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('box86')">Box86</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('box64')">Box64</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('wine')">Wine</a>
-            <a href="#" class="list-group-item list-group-item-action" onclick="loadLog('proton')">Proton</a>
+            ${logSources.map(([source, label, icon]) => `
+              <button type="button" class="list-group-item list-group-item-action text-start" data-log-source="${source}" onclick="loadLog('${source}', this)">
+                <i class="bi ${icon} me-2"></i>${label}
+              </button>
+            `).join("")}
           </div>
         </div>
       </div>
       <div class="col-md-9">
-        <div class="card">
+        <div class="card log-card">
           <div class="card-header d-flex justify-content-between align-items-center">
             <span id="logTitle">Select a log source</span>
             <div>
@@ -1120,27 +1154,26 @@ async function renderLogsPage() {
     </div>
   `;
 }
-async function loadLog(source) {
+async function loadLog(source, triggerEl = null) {
+  currentLogSource = source;
   const lines = document.getElementById('linesInput').value || 200;
   setLoading(true, `Loading ${source} logs...`);
   try {
     const data = await api(`/admin/logs/${source}?lines=${lines}`);
     document.getElementById('logTitle').textContent = `${data.source} Log (${data.path})`;
     document.getElementById('logContent').textContent = data.content.join('\n');
-    // Highlight active source
     document.querySelectorAll('#logSources .list-group-item').forEach(el => el.classList.remove('active'));
-    event.target.classList.add('active');
+    const activeEl = triggerEl || document.querySelector(`#logSources .list-group-item[data-log-source="${source}"]`);
+    if (activeEl) activeEl.classList.add('active');
   } catch (err) {
     document.getElementById('logContent').textContent = `Error loading log: ${err.message}`;
   }
   setLoading(false);
 }
 async function refreshCurrentLog() {
+  if (!currentLogSource) return;
   const activeSource = document.querySelector('#logSources .list-group-item.active');
-  if (activeSource) {
-    const source = activeSource.textContent.toLowerCase().replace(/[^a-z0-9]/g, '');
-    await loadLog(source);
-  }
+  await loadLog(currentLogSource, activeSource);
 }
 async function loadThemePage(offset = 0) {
   const systemsParam = encodeURIComponent((themeFilterSelectedSystems || []).join(","));
