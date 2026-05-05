@@ -571,15 +571,18 @@ class RomRepository:
                 continue
             if self.should_ignore_rom_file(entry.name, system=system):
                 continue
+            display_name = Path(entry.name).stem
+            if system_lower == "steam" and entry.name.lower().endswith(".sh"):
+                display_name = entry.name[:-3]
             stat = entry.stat()
             items.append(
                 {
                     "unique_id": self.build_unique_id(entry),
-                    "name": Path(entry.name).stem,
+                    "name": display_name,
                     "byte_count": stat.st_size,
                     "entry_type": "file",
                     "is_downloadable": True,
-                    "image_stem": Path(entry.name).stem,
+                    "image_stem": display_name,
                 }
             )
         return items
