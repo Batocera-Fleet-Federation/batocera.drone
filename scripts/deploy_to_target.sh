@@ -32,9 +32,7 @@ Positional args (override env vars):
   4: TARGET_DIR
 
 Examples:
-  TARGET_PASSWORD='secret' ./deploy_to_target.sh
-  ./deploy_to_target.sh 192.168.0.206 root 'secret'
-  ./deploy_to_target.sh 192.168.0.206 root 'secret' /userdata/system/apps/roms-api
+  TARGET_IP='192.168.0.206' TARGET_USER='root' TARGET_PASSWORD='secret' TARGET_DIR='/userdata/system/apps/roms-api' ./deploy_to_target.sh
 EOF
 }
 

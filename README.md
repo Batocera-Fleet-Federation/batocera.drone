@@ -94,3 +94,26 @@ curl -k -u <u>:<p> "https://<host>/v1/api/swagger"
 - `scripts/download_all_roms.ps1` - PowerShell version of the bulk ROM downloader.
 - `scripts/download_and_run_rom_api.sh` - Bootstrap script to fetch required app files and start the API quickly.
 - `scripts/deploy_to_target.sh` - SCP/SSH deploy helper that uploads app/scripts to a target Batocera host.
+
+### Deploy Example
+
+```bash
+TARGET_IP='192.168.0.206' TARGET_USER='root' TARGET_PASSWORD='secret' TARGET_DIR='/userdata/system/apps/roms-api' ./scripts/deploy_to_target.sh
+```
+
+## UI Preview
+
+### Systems
+![Systems view](content/batocera_addon_systems.png)
+
+### ROMs
+![ROMs view](content/batocera_addon_roms.png)
+
+### BIOS
+![BIOS view](content/batocera_addon_bios.png)
+
+### Theme
+![Theme view](content/batocera_addon_theme.png)
+
+### API
+![API view](content/batocera_addon_api.png)
