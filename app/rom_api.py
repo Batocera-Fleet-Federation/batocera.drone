@@ -2147,18 +2147,19 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             "themes",
             "controllers",
         ]
-        # Emulator sources should appear only when detected in /userdata/system/configs.
-        emulator_hints = {
+        # Emulator sources should appear only when a matching folder or file exists
+        # under /userdata/system/configs (strict detection, no fuzzy substring scan).
+        emulator_presence_rules = {
             "retroarch": ["retroarch"],
             "mame": ["mame"],
-            "dolphin": ["dolphin"],
-            "pcsx2": ["pcsx2"],
+            "dolphin": ["dolphin-emu", "dolphin"],
+            "pcsx2": ["PCSX2", "pcsx2"],
             "rpcs3": ["rpcs3"],
             "ppsspp": ["ppsspp"],
             "duckstation": ["duckstation"],
-            "citra": ["citra"],
+            "citra": ["citra-emu", "citra"],
             "yuzu": ["yuzu"],
-            "ryujinx": ["ryujinx"],
+            "ryujinx": ["Ryujinx", "ryujinx"],
             "cemu": ["cemu"],
             "xemu": ["xemu"],
             "xenia": ["xenia"],
@@ -2171,30 +2172,20 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             "mednafen": ["mednafen"],
             "mgba": ["mgba"],
             "wine": ["wine"],
-            "shadps4": ["shadps4"],
+            "shadps4": ["shadps4", "shadPS4"],
         }
 
         configs_root = Path(_resolve_userdata_path("/userdata/system/configs"))
         discovered = set(base_sources)
-        scan_tokens = set()
         if configs_root.exists() and configs_root.is_dir():
-            checked = 0
-            try:
-                for entry in configs_root.rglob("*"):
-                    checked += 1
-                    if checked > 12000:
+            for source, candidates in emulator_presence_rules.items():
+                for candidate in candidates:
+                    path = configs_root / candidate
+                    if path.exists():
+                        discovered.add(source)
                         break
-                    scan_tokens.add(str(entry).lower())
-            except Exception:
-                scan_tokens = set()
 
-        for source, hints in emulator_hints.items():
-            for token in scan_tokens:
-                if any(hint in token for hint in hints):
-                    discovered.add(source)
-                    break
-
-        ordered_sources = base_sources + [source for source in emulator_hints.keys() if source in discovered]
+        ordered_sources = base_sources + [source for source in emulator_presence_rules.keys() if source in discovered]
         self._send_json(
             200,
             {
