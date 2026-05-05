@@ -53,6 +53,7 @@ def _env_bool(default: bool, *names: str) -> bool:
 
 @dataclass(frozen=True)
 class Settings:
+    userdata_root: Path
     roms_root: Path
     bios_root: Path
     username: str
@@ -83,6 +84,7 @@ class Settings:
     batocera_conf_file: Path
     es_settings_file: Path
     batocera_theme_name: Optional[str]
+    http_only: bool
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -91,6 +93,7 @@ class Settings:
         key_value = os.environ.get("TLS_KEY_FILE")
 
         return cls(
+            userdata_root=Path(os.environ.get("USERDATA_ROOT", "/userdata")),
             roms_root=Path(os.environ.get("ROMS_ROOT", "/userdata/roms")),
             bios_root=Path(os.environ.get("BIOS_ROOT", "/userdata/bios")),
             username=_require_any_env("ROM_API_USERNAME", "USERNAME"),
@@ -120,6 +123,7 @@ class Settings:
                 os.environ.get("ES_SETTINGS_FILE", "/userdata/system/configs/emulationstation/es_settings.cfg")
             ),
             batocera_theme_name=os.environ.get("BATOCERA_THEME_NAME"),
+            http_only=_env_bool(False, "HTTP_ONLY", "ROM_API_HTTP_ONLY"),
         )
 
 
@@ -1678,6 +1682,14 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             "es_launch_stderr": ["/userdata/system/logs/es_launch_stderr.log"],
         }
 
+        def _resolve_userdata_path(candidate: str) -> str:
+            if candidate.startswith("/userdata/"):
+                suffix = candidate[len("/userdata/") :]
+                return str((self.settings.userdata_root / suffix).resolve())
+            if candidate == "/userdata":
+                return str(self.settings.userdata_root.resolve())
+            return candidate
+
         if normalized_source not in log_path_candidates:
             self._send_json(404, {"error": f"Unknown log source: {requested_source}"})
             return
@@ -1699,12 +1711,12 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         for name in names:
             filename_candidates.extend([f"{name}.log", f"{name}.txt", f"{name}_log.txt"])
 
-        candidate_paths = list(log_path_candidates[normalized_source])
+        candidate_paths = [_resolve_userdata_path(path) for path in log_path_candidates[normalized_source]]
         common_roots = [
-            "/userdata/system/logs",
-            "/userdata/system/configs",
-            "/userdata/system/.config",
-            "/userdata/system",
+            _resolve_userdata_path("/userdata/system/logs"),
+            _resolve_userdata_path("/userdata/system/configs"),
+            _resolve_userdata_path("/userdata/system/.config"),
+            _resolve_userdata_path("/userdata/system"),
         ]
         for root in common_roots:
             for filename in filename_candidates:
@@ -1807,25 +1819,89 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             ],
             "mame": ["/userdata/system/configs/mame/mame.ini"],
             "dolphin": ["/userdata/system/configs/dolphin-emu/Dolphin.ini"],
-            "pcsx2": ["/userdata/system/configs/PCSX2/inis/PCSX2_ui.ini"],
+            "psx2": [
+                "/userdata/system/configs/PCSX2/inis/PCSX2_ui.ini",
+                "/userdata/system/configs/PCSX2/inis/PCSX2.ini",
+                "/userdata/system/configs/pcsx2/inis/PCSX2_ui.ini",
+                "/userdata/system/configs/pcsx2/inis/PCSX2.ini",
+            ],
+            "pcsx2": [
+                "/userdata/system/configs/PCSX2/inis/PCSX2_ui.ini",
+                "/userdata/system/configs/PCSX2/inis/PCSX2.ini",
+                "/userdata/system/configs/pcsx2/inis/PCSX2_ui.ini",
+                "/userdata/system/configs/pcsx2/inis/PCSX2.ini",
+            ],
             "rpcs3": ["/userdata/system/configs/rpcs3/config.yml"],
             "ppsspp": ["/userdata/system/configs/ppsspp/PSP/SYSTEM/ppsspp.ini"],
-            "duckstation": ["/userdata/system/configs/duckstation/settings.ini"],
-            "citra": ["/userdata/system/configs/citra-emu/qt-config.ini"],
-            "yuzu": ["/userdata/system/configs/yuzu/qt-config.ini"],
-            "ryujinx": ["/userdata/system/configs/Ryujinx/Config.json"],
+            "duckstation": [
+                "/userdata/system/configs/duckstation/settings.ini",
+                "/userdata/system/configs/duckstation/duckstation.ini",
+                "/userdata/system/configs/duckstation/config/settings.ini",
+            ],
+            "citra": [
+                "/userdata/system/configs/citra-emu/qt-config.ini",
+                "/userdata/system/configs/citra-emu/config/qt-config.ini",
+                "/userdata/system/configs/citra/config/qt-config.ini",
+            ],
+            "yuzu": [
+                "/userdata/system/configs/yuzu/qt-config.ini",
+                "/userdata/system/configs/yuzu/config/qt-config.ini",
+            ],
+            "ryujinx": [
+                "/userdata/system/configs/Ryujinx/Config.json",
+                "/userdata/system/configs/ryujinx/Config.json",
+                "/userdata/system/configs/Ryujinx/config.json",
+                "/userdata/system/configs/ryujinx/config.json",
+            ],
             "cemu": ["/userdata/system/configs/cemu/settings.xml"],
             "xemu": ["/userdata/system/configs/xemu/xemu.toml"],
-            "xenia": ["/userdata/system/configs/xenia/xenia.config.toml"],
+            "xenia": [
+                "/userdata/system/configs/xenia/xenia.config.toml",
+                "/userdata/system/configs/xenia/xenia-canary.config.toml",
+            ],
             "flycast": ["/userdata/system/configs/flycast/emu.cfg"],
-            "dosbox": ["/userdata/system/configs/dosbox/dosbox.conf"],
-            "scummvm": ["/userdata/system/configs/scummvm/scummvm.ini"],
-            "snes9x": ["/userdata/system/configs/snes9x/snes9x.conf"],
-            "bsnes": ["/userdata/system/configs/bsnes/settings.bml"],
-            "fceux": ["/userdata/system/configs/fceux/fceux.cfg"],
-            "mednafen": ["/userdata/system/configs/mednafen/mednafen.cfg"],
-            "mgba": ["/userdata/system/configs/mgba/config.ini"],
-            "wine": ["/userdata/system/configs/wine/user.reg"],
+            "dosbox": [
+                "/userdata/system/configs/dosbox/dosbox.conf",
+                "/userdata/system/configs/dosbox/dosbox-0.74.conf",
+            ],
+            "scummvm": [
+                "/userdata/system/configs/scummvm/scummvm.ini",
+                "/userdata/system/configs/scummvm/scummvmrc",
+                "/userdata/system/.scummvmrc",
+            ],
+            "snes9x": [
+                "/userdata/system/configs/snes9x/snes9x.conf",
+                "/userdata/system/configs/snes9x/snes9x-gtk.conf",
+            ],
+            "bsnes": [
+                "/userdata/system/configs/bsnes/settings.bml",
+                "/userdata/system/configs/bsnes/bsnes.cfg",
+                "/userdata/system/configs/bsnes/config.bml",
+            ],
+            "fceux": [
+                "/userdata/system/configs/fceux/fceux.cfg",
+                "/userdata/system/configs/fceux/fceux.conf",
+            ],
+            "mednafen": [
+                "/userdata/system/configs/mednafen/mednafen.cfg",
+                "/userdata/system/.mednafen/mednafen.cfg",
+            ],
+            "mgba": [
+                "/userdata/system/configs/mgba/config.ini",
+                "/userdata/system/configs/mgba/qt.ini",
+            ],
+            "wine": [
+                "/userdata/system/configs/wine/user.reg",
+                "/userdata/system/configs/wine/system.reg",
+                "/userdata/system/wine-bottles/system.reg",
+                "/userdata/system/wine-bottles/user.reg",
+            ],
+            "shadps4": [
+                "/userdata/system/configs/shadps4/config.toml",
+                "/userdata/system/configs/shadPS4/config.toml",
+                "/userdata/system/configs/shadps4/shadps4.toml",
+                "/userdata/system/configs/shadPS4/shadps4.toml",
+            ],
             "themes": ["/userdata/themes"],
             "controllers": ["/userdata/system/configs/emulationstation/es_input.cfg"],
         }
@@ -1875,6 +1951,79 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                         break
                 except Exception:
                     continue
+
+        # Generic fallback discovery for known emulator config formats.
+        if selected_path is None:
+            discovery_filenames = {
+                "psx2": {"pcsx2_ui.ini", "pcsx2.ini"},
+                "pcsx2": {"pcsx2_ui.ini", "pcsx2.ini"},
+                "duckstation": {"settings.ini", "duckstation.ini"},
+                "citra": {"qt-config.ini"},
+                "yuzu": {"qt-config.ini"},
+                "ryujinx": {"config.json"},
+                "xenia": {"xenia.config.toml", "xenia-canary.config.toml"},
+                "dosbox": {"dosbox.conf", "dosbox-0.74.conf"},
+                "scummvm": {"scummvm.ini", "scummvmrc"},
+                "snes9x": {"snes9x.conf", "snes9x-gtk.conf"},
+                "bsnes": {"settings.bml", "config.bml", "bsnes.cfg"},
+                "fceux": {"fceux.cfg", "fceux.conf"},
+                "mednafen": {"mednafen.cfg"},
+                "mgba": {"config.ini", "qt.ini"},
+                "wine": {"user.reg", "system.reg"},
+                "shadps4": {"config.toml", "shadps4.toml"},
+            }
+            root_hints = {
+                "psx2": {"pcsx2"},
+                "pcsx2": {"pcsx2"},
+                "duckstation": {"duckstation"},
+                "citra": {"citra"},
+                "yuzu": {"yuzu"},
+                "ryujinx": {"ryujinx"},
+                "xenia": {"xenia"},
+                "dosbox": {"dosbox"},
+                "scummvm": {"scummvm"},
+                "snes9x": {"snes9x"},
+                "bsnes": {"bsnes"},
+                "fceux": {"fceux"},
+                "mednafen": {"mednafen"},
+                "mgba": {"mgba"},
+                "wine": {"wine", "wine-bottles"},
+                "shadps4": {"shadps4"},
+            }
+            if normalized_source in discovery_filenames:
+                targets = discovery_filenames[normalized_source]
+                hints = root_hints.get(normalized_source, set())
+                search_roots = [
+                    Path("/userdata/system/configs"),
+                    Path("/userdata/system/.config"),
+                    Path("/userdata/system"),
+                    Path("/userdata"),
+                ]
+                best_match = None
+                for root in search_roots:
+                    if not root.exists() or not root.is_dir():
+                        continue
+                    checked = 0
+                    try:
+                        for path in root.rglob("*"):
+                            checked += 1
+                            if checked > 10000:
+                                break
+                            if not path.is_file():
+                                continue
+                            file_name = path.name.lower()
+                            if file_name not in targets:
+                                continue
+                            full = str(path).lower()
+                            if hints and not any(h in full for h in hints):
+                                continue
+                            if best_match is None or len(str(path)) < len(str(best_match)):
+                                best_match = path
+                    except Exception:
+                        continue
+                if best_match is not None:
+                    selected_path = best_match
+                    selected_is_dir = False
 
         if selected_path is None and normalized_source == "es_gamelists":
             # Prefer actual gamelist XML files from /userdata/roms trees.
@@ -2057,10 +2206,11 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
 
     server = ThreadingHTTPServer(("0.0.0.0", settings.https_port), handler_factory)
 
-    cert_file, key_file = _resolve_tls_material(settings)
-    ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    ssl_context.load_cert_chain(certfile=str(cert_file), keyfile=str(key_file))
-    server.socket = ssl_context.wrap_socket(server.socket, server_side=True)
+    if not settings.http_only:
+        cert_file, key_file = _resolve_tls_material(settings)
+        ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ssl_context.load_cert_chain(certfile=str(cert_file), keyfile=str(key_file))
+        server.socket = ssl_context.wrap_socket(server.socket, server_side=True)
 
     return server
 
@@ -2071,7 +2221,8 @@ def main() -> None:
     server = create_server(settings)
     print(f"Log files: {settings.log_dir / settings.stdout_log_file}, {settings.log_dir / settings.stderr_log_file}")
     print(f"Auth username: {settings.username}")
-    print(f"Serving ROM API on https://0.0.0.0:{settings.https_port}")
+    scheme = "http" if settings.http_only else "https"
+    print(f"Serving ROM API on {scheme}://0.0.0.0:{settings.https_port}")
     server.serve_forever()
 
 
