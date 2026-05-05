@@ -979,8 +979,9 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         # CSP keeps UI/resource loading strict while still allowing bundled Swagger assets.
         self.send_header(
             "Content-Security-Policy",
-            "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline' https://unpkg.com; "
-            "script-src 'self' https://unpkg.com; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+            "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline' https://unpkg.com https://cdn.jsdelivr.net; "
+            "script-src 'self' 'unsafe-inline' https://unpkg.com https://cdn.jsdelivr.net; "
+            "font-src 'self' data: https://cdn.jsdelivr.net; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
         )
 
     def _send_json(self, status_code: int, payload: dict, cache_key: Optional[str] = None) -> None:
