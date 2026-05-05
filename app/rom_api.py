@@ -1793,10 +1793,17 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 "/userdata/system/.emulationstation/es_input.cfg",
                 "/userdata/system/configs/emulationstation/es_input.cfg",
             ],
-            "es_gamelists": ["/userdata/system/.emulationstation/gamelists"],
+            "es_gamelists": [
+                "/userdata/roms",
+                "/userdata/system/.emulationstation/gamelists",
+                "/userdata/system/configs/emulationstation/gamelists",
+            ],
             "retroarch": [
                 "/userdata/system/configs/retroarch/retroarch.cfg",
                 "/userdata/system/.config/retroarch/retroarch.cfg",
+                "/userdata/system/configs/retroarch/retroarchcustom.cfg",
+                "/userdata/system/configs/all/retroarch.cfg",
+                "/userdata/system/.emulationstation/es_settings.cfg",
             ],
             "mame": ["/userdata/system/configs/mame/mame.ini"],
             "dolphin": ["/userdata/system/configs/dolphin-emu/Dolphin.ini"],
@@ -1836,6 +1843,68 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 selected_is_dir = path.is_dir()
                 break
 
+        def _find_first_file(candidates):
+            for candidate in candidates:
+                path = Path(candidate)
+                if path.exists() and path.is_file():
+                    return path
+            return None
+
+        # Fallback discovery for sources with diverse Batocera layouts.
+        if selected_path is None and normalized_source == "retroarch":
+            search_roots = [
+                Path("/userdata/system/configs"),
+                Path("/userdata/system/.config"),
+                Path("/userdata/system"),
+            ]
+            target_names = {"retroarch.cfg", "retroarchcustom.cfg"}
+            for root in search_roots:
+                if not root.exists() or not root.is_dir():
+                    continue
+                checked = 0
+                try:
+                    for path in root.rglob("*"):
+                        checked += 1
+                        if checked > 4000:
+                            break
+                        if path.is_file() and path.name.lower() in target_names:
+                            selected_path = path
+                            selected_is_dir = False
+                            break
+                    if selected_path is not None:
+                        break
+                except Exception:
+                    continue
+
+        if selected_path is None and normalized_source == "es_gamelists":
+            # Prefer actual gamelist XML files from /userdata/roms trees.
+            roms_root = Path("/userdata/roms")
+            if roms_root.exists() and roms_root.is_dir():
+                checked = 0
+                found = []
+                try:
+                    for path in roms_root.rglob("gamelist.xml"):
+                        checked += 1
+                        if checked > 2000:
+                            break
+                        if path.is_file():
+                            found.append(path)
+                            if len(found) >= 100:
+                                break
+                except Exception:
+                    found = []
+                if found:
+                    selected_path = roms_root
+                    selected_is_dir = True
+
+        # Last chance for controller config alias.
+        if selected_path is None and normalized_source == "controllers":
+            selected_path = _find_first_file([
+                "/userdata/system/configs/emulationstation/es_input.cfg",
+                "/userdata/system/.emulationstation/es_input.cfg",
+            ])
+            selected_is_dir = bool(selected_path and selected_path.is_dir())
+
         if selected_path is None:
             self._send_json(404, {
                 "error": f"Config path not found for source: {requested_source}",
@@ -1846,12 +1915,22 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         try:
             if selected_is_dir:
                 entries = []
-                for child in sorted(selected_path.iterdir(), key=lambda p: p.name.lower()):
-                    kind = "dir" if child.is_dir() else "file"
-                    entries.append(f"[{kind}] {child.name}")
-                    if len(entries) >= 500:
-                        entries.append("... (truncated directory listing)")
-                        break
+                if normalized_source == "es_gamelists" and selected_path == Path("/userdata/roms"):
+                    checked = 0
+                    for gamelist in sorted(selected_path.rglob("gamelist.xml")):
+                        checked += 1
+                        if checked > 500:
+                            entries.append("... (truncated gamelist.xml results)")
+                            break
+                        rel = gamelist.relative_to(selected_path)
+                        entries.append(f"[file] {rel}")
+                else:
+                    for child in sorted(selected_path.iterdir(), key=lambda p: p.name.lower()):
+                        kind = "dir" if child.is_dir() else "file"
+                        entries.append(f"[{kind}] {child.name}")
+                        if len(entries) >= 500:
+                            entries.append("... (truncated directory listing)")
+                            break
                 self._send_json(200, {
                     "source": normalized_source,
                     "path": str(selected_path),
