@@ -966,8 +966,22 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         self.send_response(401)
         self.send_header("WWW-Authenticate", 'Basic realm="ROM API"')
         self.send_header("Content-Type", "application/json")
+        self._send_security_headers()
         self.end_headers()
         self.wfile.write(json_bytes({"error": "unauthorized"}))
+
+    def _send_security_headers(self) -> None:
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
+        self.send_header("Cache-Control", "no-store")
+        # CSP keeps UI/resource loading strict while still allowing bundled Swagger assets.
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline' https://unpkg.com; "
+            "script-src 'self' https://unpkg.com; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+        )
 
     def _send_json(self, status_code: int, payload: dict, cache_key: Optional[str] = None) -> None:
         if status_code == 200 and cache_key:
@@ -983,6 +997,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         self.send_response(status_code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        self._send_security_headers()
         if status_code == 200 and cache_key:
             self.send_header("Cache-Control", "private, max-age=3600")
         self.end_headers()
@@ -993,6 +1008,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         self.send_response(status_code)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self._send_security_headers()
         self.end_headers()
         self.wfile.write(body)
 
@@ -1001,6 +1017,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(file_size))
+        self._send_security_headers()
         if as_attachment:
             self.send_header("Content-Disposition", f'attachment; filename="{path.name}"')
         self.end_headers()
@@ -1025,6 +1042,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(data)))
+            self._send_security_headers()
             self.send_header("Cache-Control", "public, max-age=3600")
             self.end_headers()
             self.wfile.write(data)
@@ -1044,6 +1062,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
+        self._send_security_headers()
         self.send_header("Cache-Control", "public, max-age=3600")
         self.end_headers()
         self.wfile.write(data)

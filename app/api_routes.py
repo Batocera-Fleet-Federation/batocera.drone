@@ -152,4 +152,5 @@ class ApiRoutesMixin:
         except (BrokenPipeError, ConnectionResetError, ssl.SSLError, OSError):
             pass
         except Exception as error:
-            self._send_json(500, {"error": str(error)})
+            self.log_error('500 internal error "%s": %s', self.path.split("?", 1)[0], str(error))
+            self._send_json(500, {"error": "internal server error"})
