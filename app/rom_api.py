@@ -1869,6 +1869,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             ],
             "flycast": ["/userdata/system/configs/flycast/emu.cfg"],
             "dosbox": [
+                "/userdata/system/configs/dosbox/dosboxx.conf",
                 "/userdata/system/configs/dosbox/dosbox.conf",
                 "/userdata/system/configs/dosbox/dosbox-0.74.conf",
             ],
@@ -1978,7 +1979,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 "yuzu": {"qt-config.ini"},
                 "ryujinx": {"config.json"},
                 "xenia": {"xenia.config.toml", "xenia-canary.config.toml"},
-                "dosbox": {"dosbox.conf", "dosbox-0.74.conf"},
+                "dosbox": {"dosboxx.conf", "dosbox.conf", "dosbox-0.74.conf"},
                 "scummvm": {"scummvm.ini", "scummvmrc"},
                 "snes9x": {"snes9x.conf", "snes9x-gtk.conf"},
                 "bsnes": {"settings.bml", "config.bml", "bsnes.cfg"},
@@ -2150,38 +2151,106 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         # Emulator sources should appear only when a matching folder or file exists
         # under /userdata/system/configs (strict detection, no fuzzy substring scan).
         emulator_presence_rules = {
-            "retroarch": ["retroarch"],
-            "mame": ["mame"],
-            "dolphin": ["dolphin-emu", "dolphin"],
-            "pcsx2": ["PCSX2", "pcsx2"],
-            "rpcs3": ["rpcs3"],
-            "ppsspp": ["ppsspp"],
-            "duckstation": ["duckstation"],
-            "citra": ["citra-emu", "citra"],
-            "yuzu": ["yuzu"],
-            "ryujinx": ["Ryujinx", "ryujinx"],
-            "cemu": ["cemu"],
-            "xemu": ["xemu"],
-            "xenia": ["xenia"],
-            "flycast": ["flycast"],
-            "dosbox": ["dosbox"],
-            "scummvm": ["scummvm"],
-            "snes9x": ["snes9x"],
-            "bsnes": ["bsnes"],
-            "fceux": ["fceux"],
-            "mednafen": ["mednafen"],
-            "mgba": ["mgba"],
-            "wine": ["wine"],
-            "shadps4": ["shadps4", "shadPS4"],
+            "retroarch": [
+                ("retroarch", "dir"),
+            ],
+            "mame": [
+                ("mame", "dir"),
+            ],
+            "dolphin": [
+                ("dolphin-emu", "dir"),
+                ("dolphin", "dir"),
+            ],
+            "pcsx2": [
+                ("PCSX2", "dir"),
+                ("pcsx2", "dir"),
+            ],
+            "rpcs3": [
+                ("rpcs3", "dir"),
+            ],
+            "ppsspp": [
+                ("ppsspp", "dir"),
+            ],
+            "duckstation": [
+                ("duckstation", "dir"),
+            ],
+            "citra": [
+                ("citra-emu", "dir"),
+                ("citra", "dir"),
+            ],
+            "yuzu": [
+                ("yuzu", "dir"),
+            ],
+            "ryujinx": [
+                ("Ryujinx/Config.json", "file"),
+                ("ryujinx/Config.json", "file"),
+                ("Ryujinx/config.json", "file"),
+                ("ryujinx/config.json", "file"),
+            ],
+            "cemu": [
+                ("cemu", "dir"),
+            ],
+            "xemu": [
+                ("xemu", "dir"),
+            ],
+            "xenia": [
+                ("xenia/xenia.config.toml", "file"),
+                ("xenia/xenia-canary.config.toml", "file"),
+            ],
+            "flycast": [
+                ("flycast", "dir"),
+            ],
+            "dosbox": [
+                ("dosbox/dosboxx.conf", "file"),
+                ("dosbox/dosbox.conf", "file"),
+                ("dosbox/dosbox-0.74.conf", "file"),
+            ],
+            "scummvm": [
+                ("scummvm/scummvm.ini", "file"),
+                ("scummvm/scummvmrc", "file"),
+            ],
+            "snes9x": [
+                ("snes9x/snes9x.conf", "file"),
+                ("snes9x/snes9x-gtk.conf", "file"),
+            ],
+            "bsnes": [
+                ("bsnes/settings.bml", "file"),
+                ("bsnes/config.bml", "file"),
+                ("bsnes/bsnes.cfg", "file"),
+            ],
+            "fceux": [
+                ("fceux/fceux.cfg", "file"),
+                ("fceux/fceux.conf", "file"),
+            ],
+            "mednafen": [
+                ("mednafen/mednafen.cfg", "file"),
+            ],
+            "mgba": [
+                ("mgba/config.ini", "file"),
+                ("mgba/qt.ini", "file"),
+            ],
+            "wine": [
+                ("wine/user.reg", "file"),
+                ("wine/system.reg", "file"),
+            ],
+            "shadps4": [
+                ("shadps4/config.toml", "file"),
+                ("shadPS4/config.toml", "file"),
+                ("shadps4/shadps4.toml", "file"),
+                ("shadPS4/shadps4.toml", "file"),
+            ],
         }
 
         configs_root = Path(_resolve_userdata_path("/userdata/system/configs"))
         discovered = set(base_sources)
         if configs_root.exists() and configs_root.is_dir():
-            for source, candidates in emulator_presence_rules.items():
-                for candidate in candidates:
-                    path = configs_root / candidate
-                    if path.exists():
+            for source, checks in emulator_presence_rules.items():
+                for rel_path, required_kind in checks:
+                    path = configs_root / rel_path
+                    if required_kind == "dir" and path.exists() and path.is_dir():
+                        discovered.add(source)
+                        break
+                    if required_kind == "file" and path.exists() and path.is_file():
                         discovered.add(source)
                         break
 
