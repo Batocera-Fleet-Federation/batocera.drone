@@ -7,6 +7,7 @@ import ssl
 import subprocess
 import sys
 import time
+import xml.etree.ElementTree as ET
 from collections import OrderedDict
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -84,6 +85,7 @@ class Settings:
     themes_root: Path
     batocera_conf_file: Path
     es_settings_file: Path
+    es_systems_file: Path
     batocera_theme_name: Optional[str]
     http_only: bool
 
@@ -123,6 +125,9 @@ class Settings:
             batocera_conf_file=Path(os.environ.get("BATOCERA_CONF_FILE", "/userdata/system/batocera.conf")),
             es_settings_file=Path(
                 os.environ.get("ES_SETTINGS_FILE", "/userdata/system/configs/emulationstation/es_settings.cfg")
+            ),
+            es_systems_file=Path(
+                os.environ.get("ES_SYSTEMS_FILE", "/usr/share/emulationstation/es_systems.cfg")
             ),
             batocera_theme_name=os.environ.get("BATOCERA_THEME_NAME"),
             http_only=_env_bool(False, "HTTP_ONLY", "ROM_API_HTTP_ONLY"),
@@ -357,6 +362,62 @@ def _resolve_es_settings_file(settings: Settings) -> Optional[Path]:
         except Exception:
             continue
     return None
+
+
+def _parse_es_systems_cfg(path: Path) -> List[dict]:
+    if not path.exists() or not path.is_file():
+        return []
+    try:
+        tree = ET.parse(path)
+        root = tree.getroot()
+    except Exception:
+        return []
+
+    systems: List[dict] = []
+    for system_node in root.findall(".//system"):
+        data: dict = {}
+        for tag in ("name", "fullname", "path", "extension", "command", "platform", "theme"):
+            node = system_node.find(tag)
+            if node is not None and node.text is not None:
+                data[tag] = node.text.strip()
+        hidden_attr = system_node.attrib.get("hidden")
+        hidden_node = system_node.find("hidden")
+        hidden_text = hidden_node.text.strip() if hidden_node is not None and hidden_node.text else ""
+        hidden_value = (hidden_attr or hidden_text or "").strip().lower()
+        data["hidden"] = hidden_value in ("1", "true", "yes", "on")
+        if data.get("name"):
+            systems.append(data)
+    return systems
+
+
+def _resolve_es_systems_effective(settings: Settings) -> Tuple[Optional[Path], List[dict]]:
+    userdata_root = settings.userdata_root.resolve()
+    override = (userdata_root / "system" / "configs" / "emulationstation" / "es_systems.cfg").resolve()
+    base = settings.es_systems_file
+
+    source_path = override if override.exists() and override.is_file() else base
+    systems = _parse_es_systems_cfg(source_path)
+
+    # Apply overlays (es_systems_<name>.cfg) by replacing/adding per <name>.
+    overlay_dir = (userdata_root / "system" / "configs" / "emulationstation").resolve()
+    overlays: List[Path] = []
+    if overlay_dir.exists() and overlay_dir.is_dir():
+        overlays = sorted(
+            [p for p in overlay_dir.glob("es_systems_*.cfg") if p.is_file()],
+            key=lambda p: p.name.lower(),
+        )
+
+    by_name = {item.get("name"): item for item in systems if item.get("name")}
+    for overlay in overlays:
+        for item in _parse_es_systems_cfg(overlay):
+            name = item.get("name")
+            if not name:
+                continue
+            by_name[name] = item
+
+    merged = list(by_name.values())
+    merged.sort(key=lambda item: str(item.get("name", "")).lower())
+    return source_path if source_path.exists() else None, merged
 
 
 def _resolve_theme_dir(settings: Settings) -> Optional[Path]:
@@ -1501,6 +1562,15 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
 
     def _handle_systems(self) -> None:
         systems = self.repository.list_systems()
+        _, es_systems = _resolve_es_systems_effective(self.settings)
+        if es_systems:
+            visible = {
+                str(item.get("name", "")).strip().lower()
+                for item in es_systems
+                if item.get("name") and not bool(item.get("hidden"))
+            }
+            if visible:
+                systems = [item for item in systems if str(item.get("name", "")).lower() in visible]
         self._send_json(200, {"systems": systems}, cache_key="json:/systems")
 
     def _handle_rom_list(self, system: str) -> None:
@@ -1924,6 +1994,10 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         # Curated set of meaningful configs for Batocera/ES/emulators.
         config_path_candidates = {
             "batocera": ["/userdata/system/batocera.conf"],
+            "es_systems": [
+                "/userdata/system/configs/emulationstation/es_systems.cfg",
+                "/usr/share/emulationstation/es_systems.cfg",
+            ],
             "emulationstation": [
                 "/userdata/system/.emulationstation/es_settings.cfg",
                 "/userdata/system/configs/emulationstation/es_settings.cfg",
@@ -2048,6 +2122,35 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             return
 
         resolved_candidates = [_resolve_userdata_path(path) for path in config_path_candidates[normalized_source]]
+
+        if normalized_source == "es_systems":
+            source_path, systems = _resolve_es_systems_effective(self.settings)
+            if source_path is None:
+                self._send_json(404, {
+                    "error": f"Config path not found for source: {requested_source}",
+                    "attempted_paths": resolved_candidates,
+                })
+                return
+            parsed_json = {
+                "source_file": str(source_path),
+                "systems": systems,
+                "count": len(systems),
+            }
+            rendered = json.dumps(parsed_json, indent=2)
+            self._send_json(
+                200,
+                {
+                    "source": normalized_source,
+                    "path": str(source_path),
+                    "type": "json",
+                    "max_bytes": safe_max_bytes,
+                    "truncated": False,
+                    "parsed": parsed_json,
+                    "content": rendered.splitlines(),
+                },
+            )
+            return
+
         selected_path = None
         selected_is_dir = False
         for candidate in resolved_candidates:
@@ -2263,6 +2366,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         # Always keep these top-level debugging sources available.
         base_sources = [
             "batocera",
+            "es_systems",
             "emulationstation",
             "es_input",
             "themes",
