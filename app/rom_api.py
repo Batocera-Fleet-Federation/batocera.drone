@@ -480,6 +480,11 @@ class RomRepository:
         return digest.hexdigest()
 
     @staticmethod
+    def should_ignore_rom_file(file_name: str) -> bool:
+        lower = str(file_name or "").strip().lower()
+        return lower in {"_info.txt", "gamelist.xml", ".keep"}
+
+    @staticmethod
     def iter_files(path: Path) -> Iterable[Path]:
         if not path.exists() or not path.is_dir():
             return []
@@ -495,6 +500,8 @@ class RomRepository:
         if system_lower in ("ps3", "ps4"):
             for entry in sorted(asset_dir.iterdir(), key=lambda p: p.name.lower()):
                 if entry.is_file():
+                    if self.should_ignore_rom_file(entry.name):
+                        continue
                     stat = entry.stat()
                     items.append(
                         {
@@ -554,6 +561,8 @@ class RomRepository:
             return items
 
         for entry in self.iter_files(asset_dir):
+            if self.should_ignore_rom_file(entry.name):
+                continue
             stat = entry.stat()
             items.append(
                 {
