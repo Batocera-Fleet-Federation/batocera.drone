@@ -484,6 +484,8 @@ class RomRepository:
         lower = str(file_name or "").strip().lower()
         if lower in {"_info.txt", "gamelist.xml", ".keep"}:
             return True
+        if lower.endswith(".sh.keys"):
+            return True
         return False
 
     @staticmethod
@@ -565,16 +567,9 @@ class RomRepository:
             return items
 
         for entry in self.iter_files(asset_dir):
-            steam_name_lower = entry.name.lower()
-            if system_lower == "steam" and (
-                steam_name_lower.endswith(".sh") or steam_name_lower.endswith(".sh.keys")
-            ):
-                continue
             if self.should_ignore_rom_file(entry.name, system=system):
                 continue
             display_name = Path(entry.name).stem
-            if system_lower == "steam" and entry.name.lower().endswith(".sh"):
-                display_name = entry.name[:-3]
             stat = entry.stat()
             items.append(
                 {
