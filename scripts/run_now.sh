@@ -119,10 +119,10 @@ env \
   ROM_API_USERNAME="$ROM_API_USERNAME" \
   ROM_API_PASSWORD="$ROM_API_PASSWORD" \
   HTTPS_PORT="${HTTPS_PORT:-8443}" \
-  ROMS_ROOT="${ROMS_ROOT:-$WORK_DIR/local-data/roms}" \
-  BIOS_ROOT="${BIOS_ROOT:-$WORK_DIR/local-data/bios}" \
-  TLS_SELF_SIGNED_DIR="${TLS_SELF_SIGNED_DIR:-$WORK_DIR/local-data/certs}" \
-  LOG_DIR="${LOG_DIR:-$WORK_DIR/logs}" \
+  ROMS_ROOT="${ROMS_ROOT:-/userdata/roms}" \
+  BIOS_ROOT="${BIOS_ROOT:-/userdata/bios}" \
+  TLS_SELF_SIGNED_DIR="${TLS_SELF_SIGNED_DIR:-/userdata/system/certs}" \
+  LOG_DIR="${LOG_DIR:-/userdata/system/logs/rom-api}" \
   LOG_MAX_BYTES="${LOG_MAX_BYTES:-5242880}" \
   LOG_BACKUP_COUNT="${LOG_BACKUP_COUNT:-5}" \
   IMAGE_CACHE_TTL_SECONDS="${IMAGE_CACHE_TTL_SECONDS:-3600}" \
