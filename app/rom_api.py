@@ -1598,8 +1598,46 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         system = valid_segment(unquote(system))
         system_dir = self.repository.get_system_dir(system)
         image_file = valid_segment(unquote(image_file))
-        image_path = (system_dir / "images" / image_file).resolve()
-        self._stream_cached_image(image_path)
+        images_dir = (system_dir / "images").resolve()
+        image_path = (images_dir / image_file).resolve()
+
+        # Fast path: exact filename match.
+        if image_path.exists() and image_path.is_file():
+            self._stream_cached_image(image_path)
+            return
+
+        # Fallback 1: case-insensitive filename match in images root.
+        if images_dir.exists() and images_dir.is_dir():
+            requested_lower = image_file.lower()
+            for candidate in images_dir.iterdir():
+                if candidate.is_file() and candidate.name.lower() == requested_lower:
+                    self._stream_cached_image(candidate.resolve())
+                    return
+
+        # Fallback 2: recursive stem-based lookup to handle theme/artwork packs
+        # that use different extensions, case, or nested folders.
+        requested_stem = Path(image_file).stem.lower()
+        allowed_suffixes = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+        preferred_stems = {
+            requested_stem,
+            requested_stem.replace("-image", ""),
+            f"{requested_stem}-image",
+        }
+        checked = 0
+        if images_dir.exists() and images_dir.is_dir():
+            for candidate in images_dir.rglob("*"):
+                checked += 1
+                if checked > 30000:
+                    break
+                if not candidate.is_file():
+                    continue
+                if candidate.suffix.lower() not in allowed_suffixes:
+                    continue
+                if candidate.stem.lower() in preferred_stems:
+                    self._stream_cached_image(candidate.resolve())
+                    return
+
+        raise FileNotFoundError()
 
     def _handle_download(self, system: str, asset_type: str, unique_id: str) -> None:
         if not self.settings.downloads_enabled:
