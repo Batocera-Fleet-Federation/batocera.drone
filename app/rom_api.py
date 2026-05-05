@@ -484,8 +484,6 @@ class RomRepository:
         lower = str(file_name or "").strip().lower()
         if lower in {"_info.txt", "gamelist.xml", ".keep"}:
             return True
-        if (system or "").strip().lower() == "steam" and lower.endswith(".sh"):
-            return True
         return False
 
     @staticmethod
@@ -1592,12 +1590,6 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
 
     def _handle_rom_list(self, system: str) -> None:
         _, roms = self.repository.list_assets(system, "roms")
-        if str(system).strip().lower() == "steam":
-            roms = [
-                item
-                for item in roms
-                if not str(item.get("name", "")).strip().lower().endswith(".sh")
-            ]
         if not self.settings.downloads_enabled:
             for item in roms:
                 item["is_downloadable"] = False
