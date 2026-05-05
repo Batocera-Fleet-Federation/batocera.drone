@@ -15,6 +15,7 @@ from threading import Lock
 from typing import Dict, Iterable, List, Optional, Tuple
 from urllib.parse import quote
 from urllib.parse import parse_qs
+from urllib.parse import unquote
 
 
 def _require_env(name: str) -> str:
@@ -31,6 +32,15 @@ def _require_any_env(*names: str) -> str:
             return value
     joined = " or ".join(names)
     raise RuntimeError(f"{joined} environment variable must be set")
+
+
+def _env_bool(default: bool, *names: str) -> bool:
+    for name in names:
+        value = os.environ.get(name)
+        if value is None:
+            continue
+        return value.strip().lower() not in ("0", "false", "no", "off")
+    return default
 
 
 @dataclass(frozen=True)
@@ -60,6 +70,7 @@ class Settings:
     log_max_bytes: int
     log_backup_count: int
     rom_search_cache_ttl_seconds: int
+    downloads_enabled: bool
     themes_root: Path
     batocera_conf_file: Path
     es_settings_file: Path
@@ -94,9 +105,12 @@ class Settings:
             log_max_bytes=int(os.environ.get("LOG_MAX_BYTES", str(5 * 1024 * 1024))),
             log_backup_count=int(os.environ.get("LOG_BACKUP_COUNT", "5")),
             rom_search_cache_ttl_seconds=int(os.environ.get("ROM_SEARCH_CACHE_TTL_SECONDS", "300")),
+            downloads_enabled=_env_bool(True, "ALLOW_CONTENT_DOWNLOAD", "DOWNLOAD", "DOWNLOADS_ENABLED"),
             themes_root=Path(os.environ.get("THEMES_ROOT", "/userdata/themes")),
             batocera_conf_file=Path(os.environ.get("BATOCERA_CONF_FILE", "/userdata/system/batocera.conf")),
-            es_settings_file=Path(os.environ.get("ES_SETTINGS_FILE", "/userdata/system/.emulationstation/es_settings.cfg")),
+            es_settings_file=Path(
+                os.environ.get("ES_SETTINGS_FILE", "/userdata/system/configs/emulationstation/es_settings.cfg")
+            ),
             batocera_theme_name=os.environ.get("BATOCERA_THEME_NAME"),
         )
 
@@ -316,11 +330,28 @@ def _parse_es_theme_name(es_settings_path: Path) -> Optional[str]:
     return theme or None
 
 
+def _resolve_es_settings_file(settings: Settings) -> Optional[Path]:
+    candidates = [
+        settings.es_settings_file,
+        Path("/userdata/system/configs/emulationstation/es_settings.cfg"),
+        Path("/userdata/system/.emulationstation/es_settings.cfg"),
+    ]
+    for candidate in candidates:
+        try:
+            if candidate.exists() and candidate.is_file():
+                return candidate
+        except Exception:
+            continue
+    return None
+
+
 def _resolve_theme_dir(settings: Settings) -> Optional[Path]:
+    es_settings_file = _resolve_es_settings_file(settings)
+    from_es_settings = _parse_es_theme_name(es_settings_file) if es_settings_file else None
     theme_name = (
         settings.batocera_theme_name
         or _parse_batocera_theme_name(settings.batocera_conf_file)
-        or _parse_es_theme_name(settings.es_settings_file)
+        or from_es_settings
     )
     if theme_name:
         theme_dir = (settings.themes_root / theme_name).resolve()
@@ -456,7 +487,7 @@ class RomRepository:
             items.append(
                 {
                     "unique_id": self.build_unique_id(entry),
-                    "name": entry.name,
+                    "name": Path(entry.name).stem,
                     "byte_count": stat.st_size,
                     "entry_type": "file",
                     "is_downloadable": True,
@@ -526,14 +557,16 @@ class RomRepository:
                         "name": rom.get("name", ""),
                         "unique_id": rom.get("unique_id", ""),
                         "is_downloadable": rom.get("is_downloadable", True),
+                        "image_stem": rom.get("image_stem"),
                     }
                 )
         return index
 
-    def search_roms(self, query: str, limit: int = 500) -> List[dict]:
+    def search_roms(self, query: str, limit: Optional[int] = None, system_filter: Optional[str] = None) -> List[dict]:
         normalized = query.strip().lower()
         if not normalized:
             return []
+        normalized_system_filter = system_filter.strip().lower() if system_filter else None
 
         with self._search_cache_lock:
             now = time.time()
@@ -542,9 +575,17 @@ class RomRepository:
                 self._search_index_expires_at = now + self.rom_search_cache_ttl_seconds
             source = list(self._search_index)
 
-        results = [item for item in source if normalized in item["name"].lower()]
+        results = []
+        for item in source:
+            if normalized not in item["name"].lower():
+                continue
+            if normalized_system_filter and item["system"].lower() != normalized_system_filter:
+                continue
+            results.append(item)
         results.sort(key=lambda item: (item["system"].lower(), item["name"].lower()))
-        return results[:limit]
+        if limit is not None and limit > 0:
+            return results[:limit]
+        return results
 
     def list_assets(self, system: str, asset_type: str) -> Tuple[Path, List[dict]]:
         system_dir = self.get_system_dir(system)
@@ -785,7 +826,24 @@ OPENAPI_SPEC = {
                 "responses": {"200": {"description": "Video file stream"}},
             }
         },
-        "/bios": {"get": {"summary": "List BIOS entries", "responses": {"200": {"description": "BIOS list"}}}},
+        "/bios": {
+            "get": {
+                "summary": "List BIOS entries (paged + searchable)",
+                "parameters": [
+                    {"name": "limit", "in": "query", "required": False, "schema": {"type": "integer", "default": 100}},
+                    {"name": "offset", "in": "query", "required": False, "schema": {"type": "integer", "default": 0}},
+                    {"name": "q", "in": "query", "required": False, "schema": {"type": "string"}},
+                    {
+                        "name": "systems",
+                        "in": "query",
+                        "required": False,
+                        "schema": {"type": "string"},
+                        "description": "Comma-separated list of system filter values (example: snes,ps2,_root)",
+                    },
+                ],
+                "responses": {"200": {"description": "Paged BIOS list"}},
+            }
+        },
         "/bios/{unique_id}": {
             "get": {
                 "summary": "Download BIOS file by unique ID",
@@ -804,7 +862,10 @@ OPENAPI_SPEC = {
         "/search": {
             "get": {
                 "summary": "Search ROMs across all systems",
-                "parameters": [{"name": "q", "in": "query", "required": True, "schema": {"type": "string"}}],
+                "parameters": [
+                    {"name": "q", "in": "query", "required": True, "schema": {"type": "string"}},
+                    {"name": "system", "in": "query", "required": False, "schema": {"type": "string"}},
+                ],
                 "responses": {"200": {"description": "Search results"}},
             }
         },
@@ -819,6 +880,44 @@ OPENAPI_SPEC = {
                 "summary": "Serve asset from detected Batocera theme directory",
                 "parameters": [{"name": "path", "in": "path", "required": True, "schema": {"type": "string"}}],
                 "responses": {"200": {"description": "Theme asset bytes"}},
+            }
+        },
+        "/theme/system/{system}": {
+            "get": {
+                "summary": "Resolved theme metadata for a specific system folder",
+                "parameters": [{"name": "system", "in": "path", "required": True, "schema": {"type": "string"}}],
+                "responses": {"200": {"description": "System theme metadata"}},
+            }
+        },
+        "/theme/backgrounds": {
+            "get": {
+                "summary": "List candidate background images from active Batocera theme",
+                "responses": {"200": {"description": "Theme background candidates"}},
+            }
+        },
+        "/theme/logos": {
+            "get": {
+                "summary": "List candidate logo images from active Batocera theme",
+                "responses": {"200": {"description": "Theme logo candidates"}},
+            }
+        },
+        "/theme/images": {
+            "get": {
+                "summary": "List all image assets from active Batocera theme",
+                "parameters": [
+                    {"name": "limit", "in": "query", "required": False, "schema": {"type": "integer", "default": 100}},
+                    {"name": "offset", "in": "query", "required": False, "schema": {"type": "integer", "default": 0}},
+                    {"name": "q", "in": "query", "required": False, "schema": {"type": "string"}},
+                    {"name": "system", "in": "query", "required": False, "schema": {"type": "string"}},
+                    {
+                        "name": "systems",
+                        "in": "query",
+                        "required": False,
+                        "schema": {"type": "string"},
+                        "description": "Comma-separated list of system filter values (example: snes,ps2,_root)",
+                    },
+                ],
+                "responses": {"200": {"description": "Paged theme image catalog"}},
             }
         },
     },
@@ -983,6 +1082,13 @@ class RomRequestHandler(BaseHTTPRequestHandler):
         self._send_json(200, OPENAPI_SPEC)
 
     def _handle_download_sitemap(self) -> None:
+        if not self.settings.downloads_enabled:
+            self._send_html(
+                200,
+                """<!doctype html><html><head><meta charset="utf-8"><title>ROM Download Sitemap</title></head>
+<body><h1>ROM Download Sitemap</h1><p>Downloads are currently disabled by server configuration.</p></body></html>""",
+            )
+            return
         systems = self.repository.list_systems()
 
         sections: List[str] = []
@@ -1047,18 +1153,26 @@ class RomRequestHandler(BaseHTTPRequestHandler):
 </html>"""
         self._send_html(200, body)
 
-    def _handle_search(self, query: str) -> None:
+    def _handle_search(self, query: str, system: Optional[str] = None) -> None:
         query = query.strip()
         if not query:
             self._send_json(400, {"error": "missing query parameter q"})
             return
-        results = self.repository.search_roms(query)
-        self._send_json(200, {"query": query, "results": results}, cache_key=f"json:/search?q={query.lower()}")
+        system_filter = system.strip() if system else None
+        if system_filter:
+            system_filter = valid_segment(system_filter)
+        results = self.repository.search_roms(query, system_filter=system_filter)
+        if not self.settings.downloads_enabled:
+            for item in results:
+                item["is_downloadable"] = False
+        cache_key = f"json:/search?q={query.lower()}&system={(system_filter or '').lower()}"
+        self._send_json(200, {"query": query, "system": system_filter, "results": results}, cache_key=cache_key)
 
     def _build_theme_meta(self) -> dict:
         explicit = self.settings.batocera_theme_name
         from_batocera_conf = _parse_batocera_theme_name(self.settings.batocera_conf_file)
-        from_es_settings = _parse_es_theme_name(self.settings.es_settings_file)
+        resolved_es_settings_file = _resolve_es_settings_file(self.settings)
+        from_es_settings = _parse_es_theme_name(resolved_es_settings_file) if resolved_es_settings_file else None
         selected = explicit or from_batocera_conf or from_es_settings
         theme_dir = _resolve_theme_dir(self.settings)
         if not theme_dir:
@@ -1071,6 +1185,7 @@ class RomRequestHandler(BaseHTTPRequestHandler):
                     "es_settings": from_es_settings,
                 },
                 "themes_root": str(self.settings.themes_root),
+                "es_settings_file": str(resolved_es_settings_file) if resolved_es_settings_file else None,
             }
 
         css_candidates = ["theme.css", "style.css", "theme/theme.css", "theme/style.css", "_inc/theme.css", "_inc/style.css"]
@@ -1128,6 +1243,7 @@ class RomRequestHandler(BaseHTTPRequestHandler):
         return {
             "enabled": True,
             "theme_name": theme_dir.name,
+            "theme_dir": str(theme_dir),
             "selected_theme_name": selected,
             "theme_sources": {
                 "env": explicit,
@@ -1135,6 +1251,16 @@ class RomRequestHandler(BaseHTTPRequestHandler):
                 "es_settings": from_es_settings,
             },
             "themes_root": str(self.settings.themes_root),
+            "es_settings_file": str(resolved_es_settings_file) if resolved_es_settings_file else None,
+            "api": {
+                "theme_assets_base": "/theme/assets/",
+                "system_theme_meta": "/theme/system/{system}",
+            },
+            "ui": {
+                "css_url": f"/theme/assets/{css_file}" if css_file else None,
+                "background_url": f"/theme/assets/{bg_file}" if bg_file else None,
+                "logo_url": f"/theme/assets/{logo_file}" if logo_file else None,
+            },
             "css_url": f"/theme/assets/{css_file}" if css_file else None,
             "background_url": f"/theme/assets/{bg_file}" if bg_file else None,
             "logo_url": f"/theme/assets/{logo_file}" if logo_file else None,
@@ -1148,11 +1274,253 @@ class RomRequestHandler(BaseHTTPRequestHandler):
     def _handle_theme_meta(self) -> None:
         self._send_json(200, self._build_theme_meta(), cache_key="json:/theme/meta")
 
+    def _build_system_theme_meta(self, system: str) -> dict:
+        theme_dir = _resolve_theme_dir(self.settings)
+        if not theme_dir:
+            return {"enabled": False, "system": system, "reason": "no active theme"}
+
+        candidate_dirs = [
+            theme_dir / system,
+            theme_dir / system.lower(),
+            theme_dir / system.upper(),
+            theme_dir / "default",
+            theme_dir / "_inc",
+        ]
+
+        system_dir: Optional[Path] = None
+        for candidate in candidate_dirs:
+            if candidate.exists() and candidate.is_dir():
+                system_dir = candidate.resolve()
+                break
+
+        if not system_dir:
+            return {"enabled": False, "system": system, "reason": "system theme folder not found"}
+
+        def first_match_recursive(base: Path, name_fragments: List[str], allowed_suffixes: Tuple[str, ...]) -> Optional[str]:
+            checked = 0
+            for path in base.rglob("*"):
+                if checked > 5000:
+                    break
+                checked += 1
+                if not path.is_file():
+                    continue
+                if path.suffix.lower() not in allowed_suffixes:
+                    continue
+                stem = path.stem.lower()
+                if any(fragment in stem for fragment in name_fragments):
+                    try:
+                        return path.relative_to(theme_dir).as_posix()
+                    except Exception:
+                        continue
+            return None
+
+        theme_xml = first_match_recursive(system_dir, ["theme"], (".xml",))
+        css_file = first_match_recursive(system_dir, ["style", "theme"], (".css",))
+        bg_file = first_match_recursive(system_dir, ["background", "bg", "fond"], (".png", ".jpg", ".jpeg", ".webp"))
+        logo_file = first_match_recursive(system_dir, ["logo", "title", "brand"], (".png", ".jpg", ".jpeg", ".webp", ".svg"))
+
+        return {
+            "enabled": True,
+            "system": system,
+            "theme_name": theme_dir.name,
+            "system_theme_dir": system_dir.relative_to(theme_dir).as_posix(),
+            "theme_xml_url": f"/theme/assets/{theme_xml}" if theme_xml else None,
+            "css_url": f"/theme/assets/{css_file}" if css_file else None,
+            "background_url": f"/theme/assets/{bg_file}" if bg_file else None,
+            "logo_url": f"/theme/assets/{logo_file}" if logo_file else None,
+            "resolved_files": {
+                "theme_xml": theme_xml,
+                "css": css_file,
+                "background": bg_file,
+                "logo": logo_file,
+            },
+        }
+
+    def _handle_system_theme_meta(self, system: str) -> None:
+        system = valid_segment(system)
+        self._send_json(200, self._build_system_theme_meta(system), cache_key=f"json:/theme/system/{system}")
+
+    def _build_theme_background_candidates(self) -> dict:
+        theme_dir = _resolve_theme_dir(self.settings)
+        if not theme_dir:
+            return {
+                "enabled": False,
+                "theme_name": None,
+                "count": 0,
+                "backgrounds": [],
+                "cache_seconds": 60,
+            }
+
+        allowed_suffixes = {".png", ".jpg", ".jpeg", ".webp"}
+        # Mirrors requested shell filter semantics.
+        path_pattern = re.compile(
+            r"((_inc|assets|images|art|common).*(background|wallpaper|wall|back|bg))|"
+            r"(/(background|wallpaper|wall|back|bg)[^/]*\.(png|jpg|jpeg|webp)$)",
+            flags=re.IGNORECASE,
+        )
+
+        candidates: List[str] = []
+        for path in theme_dir.rglob("*"):
+            if not path.is_file():
+                continue
+            if path.suffix.lower() not in allowed_suffixes:
+                continue
+            rel = path.relative_to(theme_dir).as_posix()
+            rel_with_slash = f"/{rel}"
+            if path_pattern.search(rel_with_slash):
+                candidates.append(rel)
+
+        candidates = sorted(set(candidates), key=str.lower)
+        urls = [f"/theme/assets/{quote(rel, safe='/')}" for rel in candidates]
+        return {
+            "enabled": True,
+            "theme_name": theme_dir.name,
+            "count": len(urls),
+            "backgrounds": urls,
+            "cache_seconds": 60,
+        }
+
+    def _handle_theme_backgrounds(self) -> None:
+        self._send_json(200, self._build_theme_background_candidates(), cache_key="json:/theme/backgrounds")
+
+    def _build_theme_logo_candidates(self) -> dict:
+        theme_dir = _resolve_theme_dir(self.settings)
+        if not theme_dir:
+            return {
+                "enabled": False,
+                "theme_name": None,
+                "count": 0,
+                "logos": [],
+                "cache_seconds": 60,
+            }
+
+        allowed_suffixes = {".png", ".jpg", ".jpeg", ".webp"}
+        name_pattern = re.compile(r"(logo|logos|system|wheel|marquee|banner)", flags=re.IGNORECASE)
+
+        candidates: List[str] = []
+        for path in theme_dir.rglob("*"):
+            if not path.is_file():
+                continue
+            if path.suffix.lower() not in allowed_suffixes:
+                continue
+            rel = path.relative_to(theme_dir).as_posix()
+            if name_pattern.search(rel):
+                candidates.append(rel)
+
+        candidates = sorted(set(candidates), key=str.lower)
+        urls = [f"/theme/assets/{quote(rel, safe='/')}" for rel in candidates]
+        return {
+            "enabled": True,
+            "theme_name": theme_dir.name,
+            "count": len(urls),
+            "logos": urls[:200],
+            "cache_seconds": 60,
+        }
+
+    def _handle_theme_logos(self) -> None:
+        self._send_json(200, self._build_theme_logo_candidates(), cache_key="json:/theme/logos")
+
+    def _build_theme_image_catalog(
+        self,
+        limit: int = 500,
+        offset: int = 0,
+        query: Optional[str] = None,
+        system_filter: Optional[str] = None,
+        system_filters: Optional[List[str]] = None,
+    ) -> dict:
+        theme_dir = _resolve_theme_dir(self.settings)
+        if not theme_dir:
+            return {"enabled": False, "theme_name": None, "count": 0, "images": []}
+
+        allowed_suffixes = {".png", ".jpg", ".jpeg", ".webp", ".svg", ".gif"}
+        images_all: List[dict] = []
+        checked = 0
+        for path in theme_dir.rglob("*"):
+            checked += 1
+            if checked > 200000:
+                break
+            if not path.is_file():
+                continue
+            if path.suffix.lower() not in allowed_suffixes:
+                continue
+            rel = path.relative_to(theme_dir).as_posix()
+            folder = Path(rel).parent.as_posix()
+            images_all.append(
+                {
+                    "path": rel,
+                    "folder": "." if folder == "." else folder,
+                    "name": Path(rel).name,
+                    "url": f"/theme/assets/{quote(rel, safe='/')}",
+                }
+            )
+
+        images_all.sort(key=lambda item: item["path"].lower())
+        systems_all = sorted(
+            {
+                (item["folder"].split("/")[0] if item["folder"] != "." else "_root").lower()
+                for item in images_all
+            }
+        )
+        if query:
+            q = query.strip().lower()
+            images_all = [item for item in images_all if q in item["path"].lower()]
+        selected_systems: List[str] = []
+        if system_filters:
+            selected_systems = [s.strip().lower() for s in system_filters if s and s.strip()]
+        elif system_filter:
+            selected_systems = [system_filter.strip().lower()]
+
+        if selected_systems:
+            selected_set = set(selected_systems)
+            images_all = [
+                item
+                for item in images_all
+                if ((item["folder"].split("/")[0] if item["folder"] != "." else "_root").lower() in selected_set)
+            ]
+
+        total = len(images_all)
+        offset = max(0, offset)
+        limit = max(1, min(limit, 5000))
+        images = images_all[offset : offset + limit]
+        return {
+            "enabled": True,
+            "theme_name": theme_dir.name,
+            "systems": systems_all,
+            "count": total,
+            "offset": offset,
+            "limit": limit,
+            "returned": len(images),
+            "has_more": (offset + len(images)) < total,
+            "images": images,
+        }
+
+    def _handle_theme_images(
+        self,
+        limit: int,
+        offset: int,
+        query: Optional[str],
+        system_filter: Optional[str],
+        system_filters: Optional[List[str]] = None,
+    ) -> None:
+        payload = self._build_theme_image_catalog(
+            limit=limit,
+            offset=offset,
+            query=query,
+            system_filter=system_filter,
+            system_filters=system_filters,
+        )
+        systems_key = ",".join(sorted([s.lower() for s in (system_filters or [])]))
+        cache_key = (
+            f"json:/theme/images?limit={limit}&offset={offset}&q={(query or '').lower()}"
+            f"&system={(system_filter or '').lower()}&systems={systems_key}"
+        )
+        self._send_json(200, payload, cache_key=cache_key)
+
     def _handle_theme_asset(self, relative_path: str) -> None:
         theme_dir = _resolve_theme_dir(self.settings)
         if not theme_dir:
             raise FileNotFoundError()
-        requested = relative_path.lstrip("/")
+        requested = unquote(relative_path.lstrip("/"))
         if not requested or "\x00" in requested:
             raise ValueError("invalid theme asset path")
         asset_path = (theme_dir / requested).resolve()
@@ -1166,6 +1534,9 @@ class RomRequestHandler(BaseHTTPRequestHandler):
 
     def _handle_rom_list(self, system: str) -> None:
         _, roms = self.repository.list_assets(system, "roms")
+        if not self.settings.downloads_enabled:
+            for item in roms:
+                item["is_downloadable"] = False
         self._send_json(200, {"system": system, "roms": roms}, cache_key=f"json:/systems/{system}")
 
     def _handle_images_list(self, system: str) -> None:
@@ -1184,11 +1555,71 @@ class RomRequestHandler(BaseHTTPRequestHandler):
             cache_key=f"json:/systems/{system}/videos",
         )
 
-    def _handle_bios_list(self) -> None:
+    def _handle_bios_list(
+        self,
+        limit: int = 100,
+        offset: int = 0,
+        query: Optional[str] = None,
+        system_filters: Optional[List[str]] = None,
+    ) -> None:
         entries = self.repository.list_bios_entries()
-        self._send_json(200, {"bios": entries}, cache_key="json:/bios")
+        query_value = (query or "").strip().lower()
+        selected_systems = set((s or "").strip().lower() for s in (system_filters or []) if (s or "").strip())
+
+        def _entry_system(item: dict) -> str:
+            path = item.get("path") or item.get("name") or ""
+            return (path.split("/")[0] if "/" in path else "_root").lower()
+
+        systems_all = sorted({_entry_system(item) for item in entries})
+        filtered = entries
+        if query_value:
+            filtered = [
+                item
+                for item in filtered
+                if (
+                    query_value in (item.get("path") or "").lower()
+                    or query_value in (item.get("name") or "").lower()
+                    or query_value in (item.get("md5") or "").lower()
+                    or query_value in _entry_system(item)
+                )
+            ]
+        if selected_systems:
+            filtered = [item for item in filtered if _entry_system(item) in selected_systems]
+
+        total = len(filtered)
+        offset = max(0, offset)
+        limit = max(1, min(limit, 5000))
+        page_entries = filtered[offset : offset + limit]
+
+        if not self.settings.downloads_enabled:
+            for item in page_entries:
+                item["is_downloadable"] = False
+        else:
+            for item in page_entries:
+                item["is_downloadable"] = True
+        systems_filtered = sorted({_entry_system(item) for item in filtered})
+        cache_key = (
+            f"json:/bios?limit={limit}&offset={offset}&q={query_value}"
+            f"&systems={','.join(sorted(selected_systems))}"
+        )
+        self._send_json(
+            200,
+            {
+                "bios": page_entries,
+                "count": total,
+                "offset": offset,
+                "limit": limit,
+                "returned": len(page_entries),
+                "has_more": (offset + len(page_entries)) < total,
+                "systems": systems_all,
+                "systems_filtered": systems_filtered,
+            },
+            cache_key=cache_key,
+        )
 
     def _handle_bios_download(self, unique_id: str) -> None:
+        if not self.settings.downloads_enabled:
+            raise ValueError("downloads are disabled")
         target_path = self.repository.find_bios_file_by_unique_id(unique_id)
         self._stream_file(target_path, "application/octet-stream", as_attachment=True)
 
@@ -1199,6 +1630,8 @@ class RomRequestHandler(BaseHTTPRequestHandler):
         self._stream_cached_image(image_path)
 
     def _handle_download(self, system: str, asset_type: str, unique_id: str) -> None:
+        if not self.settings.downloads_enabled:
+            raise ValueError("downloads are disabled")
         unique_id = valid_segment(unique_id)
         asset_dir, items = self.repository.list_assets(system, asset_type)
 
@@ -1314,11 +1747,41 @@ class RomRequestHandler(BaseHTTPRequestHandler):
                 return
 
             if raw_path == "/search":
-                self._handle_search((query_params.get("q", [""])[0]))
+                self._handle_search((query_params.get("q", [""])[0]), query_params.get("system", [None])[0])
                 return
 
             if raw_path == "/theme/meta":
                 self._handle_theme_meta()
+                return
+
+            if raw_path == "/theme/backgrounds":
+                self._handle_theme_backgrounds()
+                return
+
+            if raw_path == "/theme/logos":
+                self._handle_theme_logos()
+                return
+
+            if raw_path == "/theme/images":
+                limit_raw = query_params.get("limit", ["500"])[0]
+                offset_raw = query_params.get("offset", ["0"])[0]
+                query = query_params.get("q", [None])[0]
+                system_filter = query_params.get("system", [None])[0]
+                systems_raw = query_params.get("systems", [None])[0]
+                system_filters = [part.strip() for part in (systems_raw or "").split(",") if part.strip()]
+                try:
+                    limit = int(limit_raw)
+                except Exception:
+                    limit = 500
+                try:
+                    offset = int(offset_raw)
+                except Exception:
+                    offset = 0
+                self._handle_theme_images(limit, offset, query, system_filter, system_filters=system_filters)
+                return
+
+            if len(parts) == 3 and parts[0] == "theme" and parts[1] == "system":
+                self._handle_system_theme_meta(parts[2])
                 return
 
             if raw_path == "/systems":
@@ -1326,7 +1789,20 @@ class RomRequestHandler(BaseHTTPRequestHandler):
                 return
 
             if raw_path == "/bios":
-                self._handle_bios_list()
+                limit_raw = query_params.get("limit", ["100"])[0]
+                offset_raw = query_params.get("offset", ["0"])[0]
+                query = query_params.get("q", [None])[0]
+                systems_raw = query_params.get("systems", [None])[0]
+                system_filters = [part.strip() for part in (systems_raw or "").split(",") if part.strip()]
+                try:
+                    limit = int(limit_raw)
+                except Exception:
+                    limit = 100
+                try:
+                    offset = int(offset_raw)
+                except Exception:
+                    offset = 0
+                self._handle_bios_list(limit=limit, offset=offset, query=query, system_filters=system_filters)
                 return
 
             if len(parts) == 2 and parts[0] == "systems":
@@ -1371,7 +1847,7 @@ class RomRequestHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": str(error)})
         except FileNotFoundError:
             self._send_json(404, {"error": "not found"})
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, ssl.SSLError, OSError):
             pass
         except Exception as error:
             self._send_json(500, {"error": str(error)})
