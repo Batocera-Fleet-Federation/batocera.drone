@@ -1986,6 +1986,8 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 "/userdata/system/wine-bottles/user.reg",
             ],
             "shadps4": [
+                "/userdata/system/configs/shadps4/user/config.toml",
+                "/userdata/system/configs/shadPS4/user/config.toml",
                 "/userdata/system/configs/shadps4/config.toml",
                 "/userdata/system/configs/shadPS4/config.toml",
                 "/userdata/system/configs/shadps4/shadps4.toml",
@@ -2313,6 +2315,8 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 ("wine/system.reg", "file"),
             ],
             "shadps4": [
+                ("shadps4/user/config.toml", "file"),
+                ("shadPS4/user/config.toml", "file"),
                 ("shadps4/config.toml", "file"),
                 ("shadPS4/config.toml", "file"),
                 ("shadps4/shadps4.toml", "file"),
