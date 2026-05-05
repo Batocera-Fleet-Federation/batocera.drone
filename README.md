@@ -102,7 +102,8 @@ Open: `https://127.0.0.1:8443`
 - `GET /v1/api/theme/backgrounds` theme background candidates
 - `GET /v1/api/theme/logos` theme logo candidates
 - `GET /v1/api/theme/images?limit=100&offset=0[&q=<text>][&systems=a,b]` paged theme assets
-- `GET /v1/api/admin/logs/{source}?lines=200` tail logs for Batocera/emulators
+- `GET /v1/api/admin/logs/{source}?lines=200` tail logs (`source`: `es_launch_stdout` or `es_launch_stderr`)
+- `GET /v1/api/admin/configs/{source}?max_bytes=131072` view important config file content
 - `GET /v1/api/downloads` HTML sitemap of downloadable ROM links
 - `GET /v1/api/swagger` Swagger UI
 - `GET /v1/api/openapi.json` OpenAPI spec
@@ -114,6 +115,7 @@ Open: `https://127.0.0.1:8443`
 - BIOS list supports search across `name`, `path`, `system`, and `md5`
 - Theme/BIOS paging + filtering is server-side (search runs across full dataset)
 - Admin logs endpoint accepts case-insensitive `source`; `lines` is clamped to `1..5000`
+- Admin configs endpoint accepts case-insensitive `source`; `max_bytes` is clamped to `1024..1048576`
 
 ## Quick cURL
 
@@ -123,7 +125,8 @@ curl -k -u <u>:<p> "https://<host>/v1/api/systems/snes"
 curl -k -u <u>:<p> "https://<host>/v1/api/search?q=zelda"
 curl -k -u <u>:<p> "https://<host>/v1/api/bios?limit=100&offset=0&q=firmware&systems=ps2,ps3"
 curl -k -u <u>:<p> "https://<host>/v1/api/theme/images?limit=100&offset=0&q=logo&systems=snes,ps2"
-curl -k -u <u>:<p> "https://<host>/v1/api/admin/logs/batocera?lines=200"
+curl -k -u <u>:<p> "https://<host>/v1/api/admin/logs/es_launch_stdout?lines=200"
+curl -k -u <u>:<p> "https://<host>/v1/api/admin/configs/batocera?max_bytes=131072"
 curl -k -u <u>:<p> "https://<host>/v1/api/swagger"
 ```
 

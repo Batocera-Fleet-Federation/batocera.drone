@@ -185,6 +185,7 @@ let filterDropdownState = {};
 let biosFilterInitialized = false;
 let themeFilterInitialized = false;
 let currentLogSource = null;
+let currentConfigSource = null;
 
 function showError(message) {
   alerts.innerHTML = `<div class="alert alert-danger">${message}</div>`;
@@ -530,6 +531,36 @@ function clearSystemTheme() {
 }
 function setHash(hash) {
   window.location.hash = hash;
+}
+function clampLogLines(value) {
+  const parsed = Number.parseInt(String(value || "200"), 10);
+  if (!Number.isFinite(parsed)) return 200;
+  return Math.max(1, Math.min(parsed, 5000));
+}
+function parseAdminLogsHash(hash) {
+  if (!hash.startsWith("#admin/logs/")) return null;
+  const raw = hash.substring("#admin/logs/".length);
+  const [sourcePart, queryPart = ""] = raw.split("?", 2);
+  const source = decodeURIComponent(sourcePart || "").trim();
+  if (!source) return null;
+  const params = new URLSearchParams(queryPart);
+  const lines = clampLogLines(params.get("lines") || "200");
+  return { source, lines };
+}
+function clampMaxBytes(value) {
+  const parsed = Number.parseInt(String(value || "131072"), 10);
+  if (!Number.isFinite(parsed)) return 131072;
+  return Math.max(1024, Math.min(parsed, 1048576));
+}
+function parseAdminConfigsHash(hash) {
+  if (!hash.startsWith("#admin/configs/")) return null;
+  const raw = hash.substring("#admin/configs/".length);
+  const [sourcePart, queryPart = ""] = raw.split("?", 2);
+  const source = decodeURIComponent(sourcePart || "").trim();
+  if (!source) return null;
+  const params = new URLSearchParams(queryPart);
+  const maxBytes = clampMaxBytes(params.get("max_bytes") || "131072");
+  return { source, maxBytes };
 }
 function romDownloadUrl(system, uniqueId) {
   return `${API_BASE}/systems/${encodeURIComponent(system)}/${encodeURIComponent(uniqueId)}`;
@@ -1060,18 +1091,30 @@ async function renderAdminMenu() {
           <div class="card-body">
             <h5 class="card-title"><i class="bi bi-journal-text me-2"></i>Logs</h5>
             <p class="card-text">View system and emulator logs</p>
-            <button class="btn btn-primary" onclick="renderLogsPage()">View Logs</button>
+            <button class="btn btn-primary" onclick="setHash('#admin/logs/es_launch_stdout?lines=200')">View Logs</button>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-4 mb-3">
+        <div class="card admin-tile">
+          <div class="card-body">
+            <h5 class="card-title"><i class="bi bi-file-earmark-code me-2"></i>Config Files</h5>
+            <p class="card-text">View important system and emulator config files</p>
+            <button class="btn btn-primary" onclick="setHash('#admin/configs/batocera?max_bytes=131072')">View Configs</button>
           </div>
         </div>
       </div>
     </div>
   `;
 }
-async function renderLogsPage() {
+async function renderLogsPage(selectedSource = null, selectedLines = 200) {
   const logSources = [
     ["es_launch_stdout", "ES Launch Stdout", "bi-terminal"],
     ["es_launch_stderr", "ES Launch Stderr", "bi-exclamation-triangle"],
   ];
+  const validSources = new Set(logSources.map(([source]) => source));
+  const effectiveSource = validSources.has(selectedSource) ? selectedSource : null;
+  const effectiveLines = clampLogLines(selectedLines);
 
   titleNode.textContent = "System Logs";
   subtitleNode.textContent = "View EmulationStation launch stdout/stderr logs";
@@ -1100,7 +1143,7 @@ async function renderLogsPage() {
               <label for="linesInput" class="form-label me-2">Lines:</label>
               <select id="linesInput" class="form-select log-lines-select">
                 <option value="100">100</option>
-                <option value="200" selected>200</option>
+                <option value="200">200</option>
                 <option value="500">500</option>
                 <option value="1000">1000</option>
                 <option value="2000">2000</option>
@@ -1116,10 +1159,23 @@ async function renderLogsPage() {
       </div>
     </div>
   `;
+  const linesInput = document.getElementById("linesInput");
+  if (linesInput) {
+    linesInput.value = String(effectiveLines);
+  }
+  if (effectiveSource) {
+    const sourceBtn = document.querySelector(`#logSources .list-group-item[data-log-source="${effectiveSource}"]`);
+    await loadLog(effectiveSource, sourceBtn, false);
+  }
 }
-async function loadLog(source, triggerEl = null) {
+async function loadLog(source, triggerEl = null, updateHash = true) {
   currentLogSource = source;
-  const lines = document.getElementById('linesInput').value || 200;
+  const lines = clampLogLines(document.getElementById("linesInput")?.value || "200");
+  const targetHash = `#admin/logs/${encodeURIComponent(source)}?lines=${encodeURIComponent(lines)}`;
+  if (updateHash && window.location.hash !== targetHash) {
+    setHash(targetHash);
+    return;
+  }
   setLoading(true, `Loading ${source} logs...`);
   try {
     const data = await api(`/admin/logs/${source}?lines=${lines}`);
@@ -1138,6 +1194,119 @@ async function refreshCurrentLog() {
   const activeSource = document.querySelector('#logSources .list-group-item.active');
   await loadLog(currentLogSource, activeSource);
 }
+async function renderConfigsPage(selectedSource = null, selectedMaxBytes = 131072) {
+  const configSources = [
+    ["batocera", "Batocera Config", "bi-sliders"],
+    ["emulationstation", "EmulationStation", "bi-window-stack"],
+    ["es_input", "ES Controller Input", "bi-controller"],
+    ["es_gamelists", "ES Gamelists Dir", "bi-folder2-open"],
+    ["retroarch", "RetroArch", "bi-controller"],
+    ["mame", "MAME", "bi-joystick"],
+    ["dolphin", "Dolphin", "bi-water"],
+    ["pcsx2", "PCSX2", "bi-disc"],
+    ["rpcs3", "RPCS3", "bi-hdd-stack"],
+    ["ppsspp", "PPSSPP", "bi-phone"],
+    ["duckstation", "DuckStation", "bi-disc"],
+    ["citra", "Citra", "bi-nintendo-switch"],
+    ["yuzu", "Yuzu", "bi-controller"],
+    ["ryujinx", "Ryujinx", "bi-nintendo-switch"],
+    ["cemu", "Cemu", "bi-controller"],
+    ["xemu", "Xemu", "bi-xbox"],
+    ["xenia", "Xenia", "bi-xbox"],
+    ["flycast", "Flycast", "bi-cloud"],
+    ["dosbox", "DOSBox", "bi-terminal"],
+    ["scummvm", "ScummVM", "bi-compass"],
+    ["snes9x", "Snes9x", "bi-controller"],
+    ["bsnes", "bsnes", "bi-controller"],
+    ["fceux", "FCEUX", "bi-cassette"],
+    ["mednafen", "Mednafen", "bi-cassette"],
+    ["mgba", "mGBA", "bi-controller"],
+    ["wine", "Wine", "bi-cup-straw"],
+    ["themes", "Themes Directory", "bi-palette"],
+    ["controllers", "Controllers Config", "bi-usb-symbol"],
+  ];
+  const validSources = new Set(configSources.map(([source]) => source));
+  const effectiveSource = validSources.has(selectedSource) ? selectedSource : null;
+  const effectiveMaxBytes = clampMaxBytes(selectedMaxBytes);
+
+  titleNode.textContent = "Config Files";
+  subtitleNode.textContent = "View important files used for system/emulator debugging";
+  content.innerHTML = `
+    <div class="mb-3">
+      <button class="btn btn-outline-secondary" onclick="setHash('#admin')">← Back to Admin</button>
+    </div>
+    <div class="row">
+      <div class="col-md-3">
+        <div class="card log-card">
+          <div class="card-header">Config Sources</div>
+          <div class="list-group list-group-flush" id="configSources">
+            ${configSources.map(([source, label, icon]) => `
+              <button type="button" class="list-group-item list-group-item-action text-start" data-config-source="${source}" onclick="loadConfig('${source}', this)">
+                <i class="bi ${icon} me-2"></i>${label}
+              </button>
+            `).join("")}
+          </div>
+        </div>
+      </div>
+      <div class="col-md-9">
+        <div class="card log-card">
+          <div class="card-header d-flex justify-content-between align-items-center">
+            <span id="configTitle">Select a config source</span>
+            <div>
+              <label for="maxBytesInput" class="form-label me-2">Max Bytes:</label>
+              <select id="maxBytesInput" class="form-select log-lines-select">
+                <option value="16384">16 KB</option>
+                <option value="65536">64 KB</option>
+                <option value="131072">128 KB</option>
+                <option value="262144">256 KB</option>
+                <option value="524288">512 KB</option>
+                <option value="1048576">1 MB</option>
+              </select>
+              <button class="btn btn-sm btn-outline-primary ms-2" onclick="refreshCurrentConfig()">Refresh</button>
+            </div>
+          </div>
+          <div class="card-body">
+            <pre id="configContent" class="mono bg-dark text-light p-3" style="max-height: 600px; overflow-y: auto; white-space: pre-wrap;">Select a config source from the left panel to view its contents.</pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+  const maxBytesInput = document.getElementById("maxBytesInput");
+  if (maxBytesInput) {
+    maxBytesInput.value = String(effectiveMaxBytes);
+  }
+  if (effectiveSource) {
+    const sourceBtn = document.querySelector(`#configSources .list-group-item[data-config-source="${effectiveSource}"]`);
+    await loadConfig(effectiveSource, sourceBtn, false);
+  }
+}
+async function loadConfig(source, triggerEl = null, updateHash = true) {
+  currentConfigSource = source;
+  const maxBytes = clampMaxBytes(document.getElementById("maxBytesInput")?.value || "131072");
+  const targetHash = `#admin/configs/${encodeURIComponent(source)}?max_bytes=${encodeURIComponent(maxBytes)}`;
+  if (updateHash && window.location.hash !== targetHash) {
+    setHash(targetHash);
+    return;
+  }
+  setLoading(true, `Loading ${source} config...`);
+  try {
+    const data = await api(`/admin/configs/${source}?max_bytes=${maxBytes}`);
+    document.getElementById("configTitle").textContent = `${data.source} Config (${data.path})`;
+    document.getElementById("configContent").textContent = (data.content || []).join("\n");
+    document.querySelectorAll("#configSources .list-group-item").forEach(el => el.classList.remove("active"));
+    const activeEl = triggerEl || document.querySelector(`#configSources .list-group-item[data-config-source="${source}"]`);
+    if (activeEl) activeEl.classList.add("active");
+  } catch (err) {
+    document.getElementById("configContent").textContent = `Error loading config: ${err.message}`;
+  }
+  setLoading(false);
+}
+async function refreshCurrentConfig() {
+  if (!currentConfigSource) return;
+  const activeSource = document.querySelector("#configSources .list-group-item.active");
+  await loadConfig(currentConfigSource, activeSource);
+}
 async function loadThemePage(offset = 0) {
   const systemsParam = encodeURIComponent((themeFilterSelectedSystems || []).join(","));
   const url = `/theme/images?limit=${THEME_GALLERY_PAGE_SIZE}&offset=${Math.max(0, offset)}&q=${encodeURIComponent(themeFilterQuery || "")}&systems=${systemsParam}`;
@@ -1154,6 +1323,20 @@ async function router() {
       await renderThemeGalleryPage();
     } else if (hash === "#admin") {
       await renderAdminPage();
+    } else if (hash.startsWith("#admin/logs/")) {
+      const parsed = parseAdminLogsHash(hash);
+      if (!parsed) {
+        setHash("#admin");
+        return;
+      }
+      await renderLogsPage(parsed.source, parsed.lines);
+    } else if (hash.startsWith("#admin/configs/")) {
+      const parsed = parseAdminConfigsHash(hash);
+      if (!parsed) {
+        setHash("#admin");
+        return;
+      }
+      await renderConfigsPage(parsed.source, parsed.maxBytes);
     } else if (hash.startsWith("#search-system/")) {
       const rest = hash.substring("#search-system/".length);
       const slashIndex = rest.indexOf("/");

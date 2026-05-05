@@ -914,6 +914,19 @@ OPENAPI_SPEC = {
                 },
             }
         },
+        "/admin/configs/{source}": {
+            "get": {
+                "summary": "Get important configuration file content for debugging",
+                "parameters": [
+                    {"name": "source", "in": "path", "required": True, "schema": {"type": "string"}, "description": "Config source key (batocera, emulationstation, retroarch, ... )"},
+                    {"name": "max_bytes", "in": "query", "required": False, "schema": {"type": "integer", "default": 131072, "minimum": 1024, "maximum": 1048576}, "description": "Maximum bytes returned from end of file"},
+                ],
+                "responses": {
+                    "200": {"description": "Config file content"},
+                    "404": {"description": "Config source/path not found"},
+                },
+            }
+        },
     },
 }
 
@@ -1761,6 +1774,114 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             self._send_json(500, {"error": f"Failed to read log: {str(e)}"})
         except Exception as e:
             self._send_json(500, {"error": f"Internal error: {str(e)}"})
+
+    def _handle_admin_config(self, config_source: str, max_bytes: int) -> None:
+        from pathlib import Path
+
+        requested_source = (config_source or "").strip()
+        normalized_source = requested_source.lower()
+        safe_max_bytes = max(1024, min(int(max_bytes), 1048576))
+
+        # Curated set of meaningful configs for Batocera/ES/emulators.
+        config_path_candidates = {
+            "batocera": ["/userdata/system/batocera.conf"],
+            "emulationstation": [
+                "/userdata/system/.emulationstation/es_settings.cfg",
+                "/userdata/system/configs/emulationstation/es_settings.cfg",
+            ],
+            "es_input": [
+                "/userdata/system/.emulationstation/es_input.cfg",
+                "/userdata/system/configs/emulationstation/es_input.cfg",
+            ],
+            "es_gamelists": ["/userdata/system/.emulationstation/gamelists"],
+            "retroarch": [
+                "/userdata/system/configs/retroarch/retroarch.cfg",
+                "/userdata/system/.config/retroarch/retroarch.cfg",
+            ],
+            "mame": ["/userdata/system/configs/mame/mame.ini"],
+            "dolphin": ["/userdata/system/configs/dolphin-emu/Dolphin.ini"],
+            "pcsx2": ["/userdata/system/configs/PCSX2/inis/PCSX2_ui.ini"],
+            "rpcs3": ["/userdata/system/configs/rpcs3/config.yml"],
+            "ppsspp": ["/userdata/system/configs/ppsspp/PSP/SYSTEM/ppsspp.ini"],
+            "duckstation": ["/userdata/system/configs/duckstation/settings.ini"],
+            "citra": ["/userdata/system/configs/citra-emu/qt-config.ini"],
+            "yuzu": ["/userdata/system/configs/yuzu/qt-config.ini"],
+            "ryujinx": ["/userdata/system/configs/Ryujinx/Config.json"],
+            "cemu": ["/userdata/system/configs/cemu/settings.xml"],
+            "xemu": ["/userdata/system/configs/xemu/xemu.toml"],
+            "xenia": ["/userdata/system/configs/xenia/xenia.config.toml"],
+            "flycast": ["/userdata/system/configs/flycast/emu.cfg"],
+            "dosbox": ["/userdata/system/configs/dosbox/dosbox.conf"],
+            "scummvm": ["/userdata/system/configs/scummvm/scummvm.ini"],
+            "snes9x": ["/userdata/system/configs/snes9x/snes9x.conf"],
+            "bsnes": ["/userdata/system/configs/bsnes/settings.bml"],
+            "fceux": ["/userdata/system/configs/fceux/fceux.cfg"],
+            "mednafen": ["/userdata/system/configs/mednafen/mednafen.cfg"],
+            "mgba": ["/userdata/system/configs/mgba/config.ini"],
+            "wine": ["/userdata/system/configs/wine/user.reg"],
+            "themes": ["/userdata/themes"],
+            "controllers": ["/userdata/system/configs/emulationstation/es_input.cfg"],
+        }
+
+        if normalized_source not in config_path_candidates:
+            self._send_json(404, {"error": f"Unknown config source: {requested_source}"})
+            return
+
+        selected_path = None
+        selected_is_dir = False
+        for candidate in config_path_candidates[normalized_source]:
+            path = Path(candidate)
+            if path.exists():
+                selected_path = path
+                selected_is_dir = path.is_dir()
+                break
+
+        if selected_path is None:
+            self._send_json(404, {
+                "error": f"Config path not found for source: {requested_source}",
+                "attempted_paths": config_path_candidates[normalized_source],
+            })
+            return
+
+        try:
+            if selected_is_dir:
+                entries = []
+                for child in sorted(selected_path.iterdir(), key=lambda p: p.name.lower()):
+                    kind = "dir" if child.is_dir() else "file"
+                    entries.append(f"[{kind}] {child.name}")
+                    if len(entries) >= 500:
+                        entries.append("... (truncated directory listing)")
+                        break
+                self._send_json(200, {
+                    "source": normalized_source,
+                    "path": str(selected_path),
+                    "type": "directory",
+                    "max_bytes": safe_max_bytes,
+                    "truncated": len(entries) > 500,
+                    "content": entries,
+                })
+                return
+
+            raw = selected_path.read_bytes()
+            truncated = False
+            if len(raw) > safe_max_bytes:
+                raw = raw[-safe_max_bytes:]
+                truncated = True
+            text = raw.decode("utf-8", errors="replace")
+            lines = text.splitlines()
+            if truncated:
+                lines.insert(0, f"[truncated] showing last {safe_max_bytes} bytes of file")
+
+            self._send_json(200, {
+                "source": normalized_source,
+                "path": str(selected_path),
+                "type": "file",
+                "max_bytes": safe_max_bytes,
+                "truncated": truncated,
+                "content": lines,
+            })
+        except Exception as error:
+            self._send_json(500, {"error": f"Failed to read config: {str(error)}"})
 
 
 def _build_handler(

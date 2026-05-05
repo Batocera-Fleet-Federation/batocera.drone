@@ -153,6 +153,15 @@ class ApiRoutesMixin:
                 self._handle_admin_logs(parts[2], lines)
                 return
 
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "configs":
+                max_bytes_raw = query_params.get("max_bytes", ["131072"])[0]
+                try:
+                    max_bytes = int(max_bytes_raw)
+                except Exception:
+                    max_bytes = 131072
+                self._handle_admin_config(parts[2], max_bytes)
+                return
+
             self._send_json(404, {"error": "not found"})
         except ValueError as error:
             self._send_json(400, {"error": str(error)})
