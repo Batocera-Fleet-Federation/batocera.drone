@@ -6,14 +6,10 @@ API base path: `/v1/api`
 
 ## TL;DR: Run It Now
 
-On the Batocera machine, run one of these (replace `<raw-base-url>`):
+On the Batocera machine, run one of these:
 
 ```bash
-curl -fsSL <raw-base-url>/scripts/run_now.sh -o /tmp/run_now.sh && chmod +x /tmp/run_now.sh && ROM_API_BASE_URL=<raw-base-url> /tmp/run_now.sh
-```
-
-```bash
-wget -qO /tmp/run_now.sh <raw-base-url>/scripts/run_now.sh && chmod +x /tmp/run_now.sh && ROM_API_BASE_URL=<raw-base-url> /tmp/run_now.sh
+curl -fsSL "https://gitlab.com/batocera_addons/roms-api/-/raw/main/scripts/run_now.sh?ref_type=heads" -o /tmp/run_now.sh && chmod +x /tmp/run_now.sh && ROM_API_BASE_URL="https://gitlab.com/batocera_addons/roms-api/-/raw/main" /tmp/run_now.sh
 ```
 
 The script prompts for `ROM_API_USERNAME` and `ROM_API_PASSWORD`, then starts the API on port `8443` by default.
