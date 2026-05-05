@@ -1128,6 +1128,15 @@ async function renderAdminMenu() {
           </div>
         </div>
       </div>
+      <div class="col-md-4 mb-3">
+        <div class="card admin-tile">
+          <div class="card-body">
+            <h5 class="card-title"><i class="bi bi-pc-display me-2"></i>System Info</h5>
+            <p class="card-text">View Batocera host information</p>
+            <button class="btn btn-primary" onclick="setHash('#admin/system-info')">View System Info</button>
+          </div>
+        </div>
+      </div>
     </div>
   `;
 }
@@ -1224,7 +1233,6 @@ async function renderConfigsPage(selectedSource = null, selectedMaxBytes = 13107
     ["batocera", "Batocera Config", "bi-sliders"],
     ["emulationstation", "EmulationStation", "bi-window-stack"],
     ["es_input", "ES Controller Input", "bi-controller"],
-    ["es_gamelists", "ES Gamelists Dir", "bi-folder2-open"],
     ["retroarch", "RetroArch", "bi-controller"],
     ["mame", "MAME", "bi-joystick"],
     ["dolphin", "Dolphin", "bi-water"],
@@ -1344,6 +1352,53 @@ async function refreshCurrentConfig() {
   const activeSource = document.querySelector("#configSources .list-group-item.active");
   await loadConfig(currentConfigSource, activeSource);
 }
+async function renderAdminSystemInfoPage() {
+  titleNode.textContent = "System Info";
+  subtitleNode.textContent = "Live information from batocera-info";
+  setLoading(true, "Loading system information...");
+  try {
+    const payload = await api("/admin/system-info");
+    const entries = Array.isArray(payload.entries) ? payload.entries : [];
+    const renderedRows = entries.length
+      ? entries.map((entry) => `
+          <tr>
+            <th scope="row" style="width: 34%;">${escapeHtml(entry.key || "")}</th>
+            <td>${escapeHtml(entry.value || "")}</td>
+          </tr>
+        `).join("")
+      : `<tr><td colspan="2" class="text-muted">No system information available.</td></tr>`;
+
+    content.innerHTML = `
+      <div class="mb-3">
+        <button class="btn btn-outline-secondary" onclick="setHash('#admin')">← Back to Admin</button>
+      </div>
+      <div class="card log-card">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <span>batocera-info</span>
+          <button class="btn btn-sm btn-outline-primary" onclick="setHash('#admin/system-info')">Refresh</button>
+        </div>
+        <div class="card-body p-0">
+          <div class="table-responsive">
+            <table class="table table-dark table-striped mb-0">
+              <tbody>
+                ${renderedRows}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    `;
+  } catch (err) {
+    content.innerHTML = `
+      <div class="mb-3">
+        <button class="btn btn-outline-secondary" onclick="setHash('#admin')">← Back to Admin</button>
+      </div>
+      <div class="alert alert-danger">Failed to load system information: ${escapeHtml(err.message || "unknown error")}</div>
+    `;
+  } finally {
+    setLoading(false);
+  }
+}
 async function loadThemePage(offset = 0) {
   const systemsParam = encodeURIComponent((themeFilterSelectedSystems || []).join(","));
   const url = `/theme/images?limit=${THEME_GALLERY_PAGE_SIZE}&offset=${Math.max(0, offset)}&q=${encodeURIComponent(themeFilterQuery || "")}&systems=${systemsParam}`;
@@ -1375,11 +1430,12 @@ async function loadSystemInfoBar() {
   }
   try {
     const payload = await api("/admin/system-info");
+    const fields = payload.fields || {};
     const lines = payload.lines || [];
-    const version = _extractInfoField(lines, ["version", "batocera version"]);
-    const board = _extractInfoField(lines, ["board", "device"]);
+    const version = fields.system || _extractInfoField(lines, ["version", "batocera version", "system"]);
+    const board = fields.model || _extractInfoField(lines, ["board", "device", "model"]);
     const kernel = _extractInfoField(lines, ["kernel"]);
-    const arch = _extractInfoField(lines, ["arch", "architecture"]);
+    const arch = fields.architecture || _extractInfoField(lines, ["arch", "architecture"]);
     const chips = [];
     if (version) chips.push(`<span class="badge">Version: ${escapeHtml(version)}</span>`);
     if (board) chips.push(`<span class="badge">Board: ${escapeHtml(board)}</span>`);
@@ -1431,6 +1487,12 @@ async function router() {
         return;
       }
       await renderConfigsPage(parsed.source, parsed.maxBytes);
+    } else if (hash === "#admin/system-info") {
+      if (!adminEnabled) {
+        setHash("");
+        return;
+      }
+      await renderAdminSystemInfoPage();
     } else if (hash.startsWith("#search-system/")) {
       const rest = hash.substring("#search-system/".length);
       const slashIndex = rest.indexOf("/");

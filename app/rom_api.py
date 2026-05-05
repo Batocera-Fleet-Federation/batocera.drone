@@ -924,7 +924,7 @@ OPENAPI_SPEC = {
             "get": {
                 "summary": "Get Batocera system information via batocera-info",
                 "responses": {
-                    "200": {"description": "System information"},
+                    "200": {"description": "Structured system information"},
                     "500": {"description": "Failed to execute batocera-info"},
                 },
             }
@@ -1823,7 +1823,59 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             )
             raw = (result.stdout or "").strip()
             lines = raw.splitlines() if raw else []
-            self._send_json(200, {"raw": raw, "lines": lines})
+
+            entries = []
+            for line in lines:
+                text = str(line or "").strip()
+                if not text:
+                    continue
+                if ":" in text:
+                    key, value = text.split(":", 1)
+                    entries.append({"key": key.strip(), "value": value.strip()})
+                else:
+                    entries.append({"key": text, "value": ""})
+
+            # Canonical fields for common UI needs.
+            fields = {}
+            for entry in entries:
+                key_lower = entry["key"].lower()
+                value = entry["value"]
+                if key_lower == "model":
+                    fields["model"] = value
+                elif key_lower == "system":
+                    fields["system"] = value
+                elif key_lower == "architecture":
+                    fields["architecture"] = value
+                elif key_lower == "cpu model":
+                    fields["cpu_model"] = value
+                elif key_lower.startswith("cpu cores"):
+                    fields["cpu_topology"] = value
+                elif key_lower == "cpu max frequency":
+                    fields["cpu_max_frequency"] = value
+                elif key_lower == "temperature":
+                    fields["temperature"] = value
+                elif key_lower == "available memory":
+                    fields["available_memory"] = value
+                elif key_lower == "display resolution":
+                    fields["display_resolution"] = value
+                elif key_lower == "display refresh rate":
+                    fields["display_refresh_rate"] = value
+                elif key_lower == "data partition available space":
+                    fields["data_partition_available_space"] = value
+                elif key_lower == "network ip address":
+                    fields["network_ip_address"] = value
+                elif key_lower == "battery":
+                    fields["battery"] = value
+
+            self._send_json(
+                200,
+                {
+                    "raw": raw,
+                    "lines": lines,
+                    "entries": entries,
+                    "fields": fields,
+                },
+            )
         except Exception as error:
             self._send_json(500, {"error": f"Failed to run batocera-info: {str(error)}"})
 
@@ -2176,7 +2228,6 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             "batocera",
             "emulationstation",
             "es_input",
-            "es_gamelists",
             "themes",
             "controllers",
         ]
