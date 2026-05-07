@@ -29,6 +29,22 @@
       box-shadow: 0 18px 48px rgba(0, 0, 0, 0.35);
       backdrop-filter: blur(2px);
     }
+    .glass-nav {
+      background: rgba(9, 12, 20, 0.78);
+      border: 1px solid var(--ui-border);
+      border-radius: 12px;
+      backdrop-filter: blur(4px);
+    }
+    .navbar-brand-block {
+      min-width: 0;
+    }
+    .nav-actions .btn {
+      white-space: nowrap;
+    }
+    .search-wrap {
+      width: 100%;
+      max-width: 640px;
+    }
     .card, .input-group .form-control, .input-group .input-group-text, .input-group .btn, footer {
       background: var(--ui-surface-strong);
       border-color: var(--ui-border);
@@ -122,37 +138,59 @@
       border: 1px solid rgba(255, 255, 255, 0.25);
       font-weight: 500;
     }
+    @media (max-width: 991.98px) {
+      .app-shell {
+        padding: 1rem !important;
+      }
+      .search-wrap {
+        max-width: 100%;
+      }
+      .nav-actions {
+        width: 100%;
+      }
+      .nav-actions .btn {
+        width: 100%;
+      }
+    }
   </style>
 </head>
 <body>
-<div class="container py-4">
-<div class="app-shell p-4">
-  <div class="d-flex justify-content-between align-items-center mb-4">
-    <div>
-      <h1 class="h3 mb-1">Batocera Library</h1>
-      <div class="text-muted">Systems and ROMs</div>
-      <div id="systemInfoBar" class="mt-2 d-flex flex-wrap gap-2"></div>
+<div class="container-fluid container-xl py-3 py-md-4">
+<div class="app-shell p-3 p-md-4">
+  <nav class="navbar navbar-expand-lg glass-nav px-2 px-md-3 py-2 mb-3 mb-md-4">
+    <div class="container-fluid px-0">
+      <div class="navbar-brand-block me-2 me-md-3">
+        <h1 class="h3 mb-1">Batocera Library</h1>
+        <div class="text-muted">Systems and ROMs</div>
+      </div>
+      <button class="navbar-toggler border-0 text-light" type="button" data-bs-toggle="collapse" data-bs-target="#topNav" aria-controls="topNav" aria-expanded="false" aria-label="Toggle navigation">
+        <span><i class="bi bi-list fs-3 text-light"></i></span>
+      </button>
+      <div class="collapse navbar-collapse pt-3 pt-lg-0" id="topNav">
+        <div class="nav-actions d-grid d-lg-flex gap-2 ms-lg-auto">
+          <a id="systemsMenuBtn" href="#" role="button" class="btn btn-outline-primary">Systems</a>
+          <a id="biosBtn" href="#bios" role="button" class="btn btn-outline-primary">BIOS</a>
+          <a id="themeMenuBtn" href="#theme" role="button" class="btn btn-outline-primary">Theme</a>
+          <a id="adminMenuBtn" href="#admin" role="button" class="btn btn-outline-primary">Admin</a>
+          <a href="https://gitlab.com/batocera_addons/app_server" target="_blank" rel="noopener noreferrer" role="button" class="btn btn-outline-primary">
+            <i class="bi bi-gitlab me-1"></i>GitLab
+          </a>
+          <a id="backBtn" href="#" role="button" class="btn btn-outline-secondary d-none">Back</a>
+        </div>
+      </div>
     </div>
-    <div class="d-flex gap-2">
-      <a id="systemsMenuBtn" href="#" role="button" class="btn btn-outline-primary">Systems</a>
-      <a id="biosBtn" href="#bios" role="button" class="btn btn-outline-primary">BIOS</a>
-      <a id="themeMenuBtn" href="#theme" role="button" class="btn btn-outline-primary">Theme</a>
-      <a id="adminMenuBtn" href="#admin" role="button" class="btn btn-outline-primary">Admin</a>
-      <a href="https://gitlab.com/batocera_addons/app_server" target="_blank" rel="noopener noreferrer" role="button" class="btn btn-outline-primary">
-        <i class="bi bi-gitlab me-1"></i>GitLab
-      </a>
-      <a id="backBtn" href="#" role="button" class="btn btn-outline-secondary d-none">Back</a>
-    </div>
+  </nav>
+  <div id="systemInfoBar" class="mb-3 d-flex flex-wrap gap-2"></div>
+  <div class="search-wrap mb-3">
+    <form id="searchForm" role="search">
+      <div class="input-group">
+        <span class="input-group-text"><i class="bi bi-search"></i></span>
+        <input id="searchInput" class="form-control" type="search" placeholder="Search ROMs across all systems">
+        <button id="searchBtn" class="btn btn-primary" type="submit">Search</button>
+        <button id="clearSearchBtn" class="btn btn-outline-secondary" type="button">Clear</button>
+      </div>
+    </form>
   </div>
-
-  <form id="searchForm" class="mb-3" role="search">
-    <div class="input-group">
-      <span class="input-group-text"><i class="bi bi-search"></i></span>
-      <input id="searchInput" class="form-control" type="search" placeholder="Search ROMs across all systems">
-      <button id="searchBtn" class="btn btn-primary" type="submit">Search</button>
-      <button id="clearSearchBtn" class="btn btn-outline-secondary" type="button">Clear</button>
-    </div>
-  </form>
 
   <div id="alerts"></div>
   <div id="loading" class="d-none mb-3 text-muted"><div class="spinner-border spinner-border-sm me-2" role="status"></div><span id="loadingText">Loading...</span></div>
@@ -164,6 +202,7 @@
 </div>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
 const content = document.getElementById("content");
 const alerts = document.getElementById("alerts");
