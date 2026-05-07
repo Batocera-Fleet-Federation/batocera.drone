@@ -161,6 +161,10 @@ class ApiRoutesMixin:
                 self._handle_admin_system_info()
                 return
 
+            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "integrations" and parts[2] == "overmind" and parts[3] == "status":
+                self._handle_admin_overmind_status()
+                return
+
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "configs":
                 if parts[2] == "sources":
                     self._handle_admin_config_sources()
@@ -181,6 +185,42 @@ class ApiRoutesMixin:
             self._send_json(404, {"error": "not found"})
         except (BrokenPipeError, ConnectionResetError, ssl.SSLError, OSError):
             pass
+        except Exception as error:
+            self.log_error('500 internal error "%s": %s', self.path.split("?", 1)[0], str(error))
+            self._send_json(500, {"error": "internal server error"})
+
+    def do_POST(self) -> None:
+        try:
+            raw_path, _, _ = self.path.partition("?")
+            if raw_path == API_PREFIX:
+                api_path = "/"
+            elif raw_path.startswith(f"{API_PREFIX}/"):
+                api_path = raw_path[len(API_PREFIX) :]
+            else:
+                api_path = raw_path
+            parts = [part for part in api_path.split("/") if part]
+
+            if not self.auth.check(self.headers.get("Authorization")):
+                self._send_unauthorized()
+                return
+
+            if parts and parts[0] == "admin" and not self.settings.admin_enabled:
+                self._send_json(403, {"error": "admin disabled"})
+                return
+
+            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "integrations" and parts[2] == "overmind" and parts[3] == "config":
+                payload = self._read_json_body()
+                self._handle_admin_overmind_config(payload)
+                return
+
+            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "integrations" and parts[2] == "overmind" and parts[3] == "start":
+                payload = self._read_json_body()
+                self._handle_admin_overmind_start(payload)
+                return
+
+            self._send_json(404, {"error": "not found"})
+        except ValueError as error:
+            self._send_json(400, {"error": str(error)})
         except Exception as error:
             self.log_error('500 internal error "%s": %s', self.path.split("?", 1)[0], str(error))
             self._send_json(500, {"error": "internal server error"})

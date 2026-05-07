@@ -10,12 +10,14 @@ import time
 import xml.etree.ElementTree as ET
 from collections import OrderedDict
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Lock
 from typing import Dict, Iterable, List, Optional, Tuple
 from urllib.parse import quote
 from urllib.parse import unquote
+from urllib.parse import urlparse
 
 try:
     from .api_routes import ApiRoutesMixin
@@ -88,6 +90,11 @@ class Settings:
     es_systems_file: Path
     batocera_theme_name: Optional[str]
     http_only: bool
+    use_fake_data: bool
+    fake_image_base_url: Optional[str]
+    overmind_url: Optional[str]
+    overmind_email: Optional[str]
+    overmind_password: Optional[str]
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -131,6 +138,11 @@ class Settings:
             ),
             batocera_theme_name=os.environ.get("BATOCERA_THEME_NAME"),
             http_only=_env_bool(False, "HTTP_ONLY", "ROM_API_HTTP_ONLY"),
+            use_fake_data=_env_bool(False, "USE_FAKE_DATA"),
+            fake_image_base_url=os.environ.get("FAKE_IMAGE_BASE_URL"),
+            overmind_url=os.environ.get("OVERMIND_URL"),
+            overmind_email=os.environ.get("OVERMIND_EMAIL"),
+            overmind_password=os.environ.get("OVERMIND_PASSWORD"),
         )
 
 
@@ -1100,6 +1112,16 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         self.wfile.write(json_bytes({"error": "unauthorized"}))
 
     def _send_security_headers(self) -> None:
+        image_sources = ["'self'", "data:"]
+        if self.settings.use_fake_data:
+            image_sources.append("https:")
+            fake_base = (self.settings.fake_image_base_url or "").strip()
+            if fake_base:
+                parsed = urlparse(fake_base)
+                if parsed.scheme and parsed.netloc:
+                    image_sources.append(f"{parsed.scheme}://{parsed.netloc}")
+                elif fake_base.startswith("https://") or fake_base.startswith("http://"):
+                    image_sources.append(fake_base.rstrip("/"))
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "no-referrer")
@@ -1108,10 +1130,35 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         # CSP keeps UI/resource loading strict while still allowing bundled Swagger assets.
         self.send_header(
             "Content-Security-Policy",
-            "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline' https://unpkg.com https://cdn.jsdelivr.net; "
+            f"default-src 'self'; img-src {' '.join(image_sources)}; style-src 'self' 'unsafe-inline' https://unpkg.com https://cdn.jsdelivr.net; "
             "script-src 'self' 'unsafe-inline' https://unpkg.com https://cdn.jsdelivr.net; "
             "font-src 'self' data: https://cdn.jsdelivr.net; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
         )
+
+    def _build_fake_image_url(self, seed: str, width: int = 640, height: int = 360) -> str:
+        template = (self.settings.fake_image_base_url or "https://picsum.photos/seed/{seed}/{width}/{height}").strip()
+        safe_seed = re.sub(r"[^a-zA-Z0-9._-]+", "-", seed).strip("-") or "image"
+        if "{" in template and "}" in template:
+            return template.format(seed=quote(safe_seed, safe=""), width=width, height=height)
+        base = template.rstrip("/")
+        return f"{base}/{quote(safe_seed, safe='')}/{width}/{height}"
+
+    def _redirect_to_fake_image(self, seed: str, width: int = 640, height: int = 360) -> None:
+        location = self._build_fake_image_url(seed=seed, width=width, height=height)
+        self.send_response(302)
+        self.send_header("Location", location)
+        self._send_security_headers()
+        self.end_headers()
+
+    def _fake_theme_asset_url(self, relative_path: str) -> str:
+        lowered = relative_path.lower()
+        if lowered.endswith(".svg"):
+            return self._build_fake_image_url(seed=f"theme-{relative_path}", width=800, height=450)
+        if lowered.endswith(".png"):
+            return self._build_fake_image_url(seed=f"theme-{relative_path}", width=800, height=450)
+        if lowered.endswith(".jpg") or lowered.endswith(".jpeg") or lowered.endswith(".webp") or lowered.endswith(".gif"):
+            return self._build_fake_image_url(seed=f"theme-{relative_path}", width=800, height=450)
+        return api_url(f"/theme/assets/{quote(relative_path, safe='/')}")
 
     def _send_json(self, status_code: int, payload: dict, cache_key: Optional[str] = None) -> None:
         if status_code == 200 and cache_key:
@@ -1141,6 +1188,92 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         self._send_security_headers()
         self.end_headers()
         self.wfile.write(body)
+
+    def _read_json_body(self) -> dict:
+        length_value = self.headers.get("Content-Length", "0").strip()
+        try:
+            length = int(length_value or "0")
+        except Exception:
+            raise ValueError("invalid content length")
+        if length < 0 or length > (256 * 1024):
+            raise ValueError("request body too large")
+        raw = self.rfile.read(length) if length > 0 else b"{}"
+        if not raw:
+            return {}
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except Exception:
+            raise ValueError("invalid JSON body")
+        if not isinstance(payload, dict):
+            raise ValueError("JSON body must be an object")
+        return payload
+
+    def _now_iso(self) -> str:
+        return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+    def _overmind_config_path(self) -> Path:
+        return (self.settings.userdata_root / "system" / "rom-api" / "overmind_integration.json").resolve()
+
+    def _mask_secret(self, value: str) -> str:
+        if not value:
+            return ""
+        if len(value) <= 4:
+            return "*" * len(value)
+        return f"{value[:2]}{'*' * (len(value) - 4)}{value[-2:]}"
+
+    def _load_overmind_config(self) -> dict:
+        default = {
+            "overmind_url": (self.settings.overmind_url or "").strip(),
+            "overmind_email": (self.settings.overmind_email or "").strip(),
+            "integration_enabled": False,
+            "integration_state": "not_started",
+            "requested_at": None,
+            "last_started_at": None,
+            "last_error": None,
+            "notes": "Stub integration until batocera.overmind app is available.",
+        }
+
+        if self.settings.overmind_password:
+            default["overmind_password"] = self.settings.overmind_password
+
+        path = self._overmind_config_path()
+        if not path.exists() or not path.is_file():
+            return default
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(loaded, dict):
+                return default
+        except Exception:
+            return default
+
+        merged = dict(default)
+        merged.update(loaded)
+        return merged
+
+    def _save_overmind_config(self, payload: dict) -> None:
+        path = self._overmind_config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+    def _overmind_public_payload(self, config: dict) -> dict:
+        password = str(config.get("overmind_password") or "")
+        email = str(config.get("overmind_email") or "")
+        status = {
+            "configured": bool(config.get("overmind_url")) and bool(email) and bool(password),
+            "integration_enabled": bool(config.get("integration_enabled")),
+            "integration_state": str(config.get("integration_state") or "not_started"),
+            "requested_at": config.get("requested_at"),
+            "last_started_at": config.get("last_started_at"),
+            "last_error": config.get("last_error"),
+            "notes": config.get("notes") or "Stub integration until batocera.overmind app is available.",
+        }
+        return {
+            "overmind_url": config.get("overmind_url") or "",
+            "overmind_email": email,
+            "password_configured": bool(password),
+            "password_masked": self._mask_secret(password) if password else "",
+            "status": status,
+        }
 
     def _stream_file(self, path: Path, content_type: str, as_attachment: bool = False) -> None:
         file_size = path.stat().st_size
@@ -1285,6 +1418,12 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         if not logo_file:
             logo_file = first_match_recursive(logo_name_candidates, (".png", ".jpg", ".jpeg", ".webp", ".svg"))
 
+        css_url = api_url(f"/theme/assets/{css_file}") if css_file else None
+        if self.settings.use_fake_data and css_url:
+            css_url = None
+        background_url = self._fake_theme_asset_url(bg_file) if (self.settings.use_fake_data and bg_file) else (api_url(f"/theme/assets/{bg_file}") if bg_file else None)
+        logo_url = self._fake_theme_asset_url(logo_file) if (self.settings.use_fake_data and logo_file) else (api_url(f"/theme/assets/{logo_file}") if logo_file else None)
+
         return {
             "enabled": True,
             "theme_name": theme_dir.name,
@@ -1302,13 +1441,13 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 "system_theme_meta": api_url("/theme/system/{system}"),
             },
             "ui": {
-                "css_url": api_url(f"/theme/assets/{css_file}") if css_file else None,
-                "background_url": api_url(f"/theme/assets/{bg_file}") if bg_file else None,
-                "logo_url": api_url(f"/theme/assets/{logo_file}") if logo_file else None,
+                "css_url": css_url,
+                "background_url": background_url,
+                "logo_url": logo_url,
             },
-            "css_url": api_url(f"/theme/assets/{css_file}") if css_file else None,
-            "background_url": api_url(f"/theme/assets/{bg_file}") if bg_file else None,
-            "logo_url": api_url(f"/theme/assets/{logo_file}") if logo_file else None,
+            "css_url": css_url,
+            "background_url": background_url,
+            "logo_url": logo_url,
             "resolved_files": {
                 "css": css_file,
                 "background": bg_file,
@@ -1364,15 +1503,22 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         bg_file = first_match_recursive(system_dir, ["background", "bg", "fond"], (".png", ".jpg", ".jpeg", ".webp"))
         logo_file = first_match_recursive(system_dir, ["logo", "title", "brand"], (".png", ".jpg", ".jpeg", ".webp", ".svg"))
 
+        theme_xml_url = api_url(f"/theme/assets/{theme_xml}") if theme_xml else None
+        css_url = api_url(f"/theme/assets/{css_file}") if css_file else None
+        if self.settings.use_fake_data and css_url:
+            css_url = None
+        background_url = self._fake_theme_asset_url(bg_file) if (self.settings.use_fake_data and bg_file) else (api_url(f"/theme/assets/{bg_file}") if bg_file else None)
+        logo_url = self._fake_theme_asset_url(logo_file) if (self.settings.use_fake_data and logo_file) else (api_url(f"/theme/assets/{logo_file}") if logo_file else None)
+
         return {
             "enabled": True,
             "system": system,
             "theme_name": theme_dir.name,
             "system_theme_dir": system_dir.relative_to(theme_dir).as_posix(),
-            "theme_xml_url": api_url(f"/theme/assets/{theme_xml}") if theme_xml else None,
-            "css_url": api_url(f"/theme/assets/{css_file}") if css_file else None,
-            "background_url": api_url(f"/theme/assets/{bg_file}") if bg_file else None,
-            "logo_url": api_url(f"/theme/assets/{logo_file}") if logo_file else None,
+            "theme_xml_url": theme_xml_url,
+            "css_url": css_url,
+            "background_url": background_url,
+            "logo_url": logo_url,
             "resolved_files": {
                 "theme_xml": theme_xml,
                 "css": css_file,
@@ -1416,7 +1562,10 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 candidates.append(rel)
 
         candidates = sorted(set(candidates), key=str.lower)
-        urls = [api_url(f"/theme/assets/{quote(rel, safe='/')}") for rel in candidates]
+        if self.settings.use_fake_data:
+            urls = [self._fake_theme_asset_url(rel) for rel in candidates]
+        else:
+            urls = [api_url(f"/theme/assets/{quote(rel, safe='/')}") for rel in candidates]
         return {
             "enabled": True,
             "theme_name": theme_dir.name,
@@ -1453,7 +1602,10 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 candidates.append(rel)
 
         candidates = sorted(set(candidates), key=str.lower)
-        urls = [api_url(f"/theme/assets/{quote(rel, safe='/')}") for rel in candidates]
+        if self.settings.use_fake_data:
+            urls = [self._fake_theme_asset_url(rel) for rel in candidates]
+        else:
+            urls = [api_url(f"/theme/assets/{quote(rel, safe='/')}") for rel in candidates]
         return {
             "enabled": True,
             "theme_name": theme_dir.name,
@@ -1490,12 +1642,13 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 continue
             rel = path.relative_to(theme_dir).as_posix()
             folder = Path(rel).parent.as_posix()
+            image_url = self._fake_theme_asset_url(rel) if self.settings.use_fake_data else api_url(f"/theme/assets/{quote(rel, safe='/')}")
             images_all.append(
                 {
                     "path": rel,
                     "folder": "." if folder == "." else folder,
                     "name": Path(rel).name,
-                    "url": api_url(f"/theme/assets/{quote(rel, safe='/')}"),
+                    "url": image_url,
                 }
             )
 
@@ -1562,6 +1715,11 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         self._send_json(200, payload, cache_key=cache_key)
 
     def _handle_theme_asset(self, relative_path: str) -> None:
+        if self.settings.use_fake_data:
+            lowered = relative_path.lower()
+            if lowered.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg")):
+                self._redirect_to_fake_image(seed=f"theme-asset-{relative_path}", width=800, height=450)
+                return
         theme_dir = _resolve_theme_dir(self.settings)
         if not theme_dir:
             raise FileNotFoundError()
@@ -1678,6 +1836,9 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         self._stream_file(target_path, "application/octet-stream", as_attachment=True)
 
     def _handle_public_image(self, system: str, image_file: str) -> None:
+        if self.settings.use_fake_data:
+            self._redirect_to_fake_image(seed=f"{system}-{image_file}", width=640, height=360)
+            return
         system = valid_segment(unquote(system))
         system_dir = self.repository.get_system_dir(system)
         image_file = valid_segment(unquote(image_file))
@@ -1748,6 +1909,9 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         self._stream_file(target_path, "application/octet-stream", as_attachment=True)
 
     def _handle_image_file_or_download(self, system: str, image_ref: str) -> None:
+        if self.settings.use_fake_data:
+            self._redirect_to_fake_image(seed=f"{system}-{image_ref}", width=640, height=360)
+            return
         system_dir = self.repository.get_system_dir(system)
         image_ref = valid_segment(image_ref)
         images_dir = (system_dir / "images").resolve()
@@ -1933,6 +2097,49 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
     def _handle_admin_system_info(self) -> None:
         import subprocess
 
+        if self.settings.use_fake_data:
+            entries = [
+                {"key": "Model", "value": "Batocera DevBox (Fake)"},
+                {"key": "System", "value": "Linux 6.6.0-fake"},
+                {"key": "Architecture", "value": "x86_64"},
+                {"key": "CPU model", "value": "AMD Ryzen 7 7800X3D (Fake)"},
+                {"key": "CPU cores / threads", "value": "8 / 16"},
+                {"key": "CPU max frequency", "value": "5.00 GHz"},
+                {"key": "Temperature", "value": "51 C"},
+                {"key": "Available memory", "value": "25.4 GiB / 32 GiB"},
+                {"key": "Display resolution", "value": "1920x1080"},
+                {"key": "Display refresh rate", "value": "60 Hz"},
+                {"key": "Data partition available space", "value": "812 GiB"},
+                {"key": "Network IP address", "value": "192.168.1.123"},
+                {"key": "Battery", "value": "N/A"},
+            ]
+            fields = {
+                "model": "Batocera DevBox (Fake)",
+                "system": "Linux 6.6.0-fake",
+                "architecture": "x86_64",
+                "cpu_model": "AMD Ryzen 7 7800X3D (Fake)",
+                "cpu_topology": "8 / 16",
+                "cpu_max_frequency": "5.00 GHz",
+                "temperature": "51 C",
+                "available_memory": "25.4 GiB / 32 GiB",
+                "display_resolution": "1920x1080",
+                "display_refresh_rate": "60 Hz",
+                "data_partition_available_space": "812 GiB",
+                "network_ip_address": "192.168.1.123",
+                "battery": "N/A",
+            }
+            raw = "\n".join(f"{item['key']}: {item['value']}" for item in entries)
+            self._send_json(
+                200,
+                {
+                    "raw": raw,
+                    "lines": raw.splitlines(),
+                    "entries": entries,
+                    "fields": fields,
+                },
+            )
+            return
+
         try:
             result = subprocess.run(
                 ["batocera-info"],
@@ -1998,6 +2205,70 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             )
         except Exception as error:
             self._send_json(500, {"error": f"Failed to run batocera-info: {str(error)}"})
+
+    def _handle_admin_overmind_status(self) -> None:
+        config = self._load_overmind_config()
+        self._send_json(200, self._overmind_public_payload(config))
+
+    def _handle_admin_overmind_config(self, payload: dict) -> None:
+        raw_url = str(payload.get("overmind_url") or "").strip()
+        raw_email = str(payload.get("overmind_email") or "").strip()
+        raw_password = payload.get("overmind_password")
+
+        if not raw_url:
+            raise ValueError("overmind_url is required")
+        parsed = urlparse(raw_url)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            raise ValueError("overmind_url must be a valid http/https URL")
+        if not raw_email:
+            raise ValueError("overmind_email is required")
+        if "@" not in raw_email or raw_email.startswith("@") or raw_email.endswith("@"):
+            raise ValueError("overmind_email must be a valid email address")
+
+        existing = self._load_overmind_config()
+        new_config = dict(existing)
+        new_config["overmind_url"] = raw_url.rstrip("/")
+        new_config["overmind_email"] = raw_email
+        if raw_password is not None:
+            password_value = str(raw_password)
+            if not password_value:
+                raise ValueError("overmind_password cannot be empty when provided")
+            new_config["overmind_password"] = password_value
+        new_config["requested_at"] = self._now_iso()
+        new_config["integration_state"] = "configured"
+        new_config["last_error"] = None
+        new_config["notes"] = "Stub configuration saved. Start Integration to simulate handshake."
+        self._save_overmind_config(new_config)
+        self._send_json(200, self._overmind_public_payload(new_config))
+
+    def _handle_admin_overmind_start(self, payload: dict) -> None:
+        config = self._load_overmind_config()
+        email = str(config.get("overmind_email") or "").strip()
+        password = str(config.get("overmind_password") or "")
+        if not str(config.get("overmind_url") or "").strip():
+            raise ValueError("overmind_url is not configured")
+        if not email:
+            raise ValueError("overmind_email is not configured")
+        if not password:
+            raise ValueError("overmind_password is not configured")
+
+        if "overmind_password" in payload:
+            supplied = str(payload.get("overmind_password") or "")
+            if not supplied:
+                raise ValueError("overmind_password cannot be empty")
+            config["overmind_password"] = supplied
+            password = supplied
+
+        config["integration_enabled"] = True
+        config["integration_state"] = "stub_connected"
+        config["last_started_at"] = self._now_iso()
+        config["last_error"] = None
+        config["notes"] = (
+            "Stub integration active. This simulates a successful handshake with batocera.overmind. "
+            "Replace with real client calls when overmind API is available."
+        )
+        self._save_overmind_config(config)
+        self._send_json(200, self._overmind_public_payload(config))
 
     def _handle_admin_config(self, config_source: str, max_bytes: int, output_format: str = "json") -> None:
         from pathlib import Path
@@ -2632,6 +2903,14 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
 
 def main() -> None:
     settings = Settings.from_env()
+    if settings.use_fake_data:
+        try:
+            from .mock_data import seed_mock_userdata
+        except ImportError:
+            from mock_data import seed_mock_userdata  # type: ignore
+
+        seed_mock_userdata(settings.userdata_root)
+        print(f"USE_FAKE_DATA enabled: seeded fake dataset at {settings.userdata_root}")
     _configure_rotating_logs(settings)
     server = create_server(settings)
     print(f"Log files: {settings.log_dir / settings.stdout_log_file}, {settings.log_dir / settings.stderr_log_file}")

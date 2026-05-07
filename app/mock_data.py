@@ -14,23 +14,36 @@ def _write_bytes(path: Path, content: bytes) -> None:
 def seed_mock_userdata(userdata_root: Path) -> None:
     userdata_root.mkdir(parents=True, exist_ok=True)
 
-    # ROMs + artwork
+    # ROMs + artwork + video previews (systems, search, rom lists, image/video routes, downloads)
     roms_root = userdata_root / "roms"
     _write_bytes(roms_root / "snes" / "Chrono Trigger (USA).zip", b"FAKE-SNES-ROM-1")
     _write_bytes(roms_root / "snes" / "Super Mario World (USA).zip", b"FAKE-SNES-ROM-2")
+    _write_bytes(roms_root / "snes" / "The Legend of Zelda - A Link to the Past (USA).zip", b"FAKE-SNES-ROM-3")
     _write_bytes(roms_root / "snes" / "images" / "Chrono Trigger (USA)-image.png", b"\x89PNG\r\n")
     _write_bytes(roms_root / "snes" / "images" / "Super Mario World (USA)-image.png", b"\x89PNG\r\n")
+    _write_bytes(roms_root / "snes" / "images" / "The Legend of Zelda - A Link to the Past (USA)-image.png", b"\x89PNG\r\n")
+    _write_bytes(roms_root / "snes" / "videos" / "Chrono Trigger (USA)-video.mp4", b"\x00\x00\x00\x18ftypmp42")
+    _write_bytes(roms_root / "snes" / "videos" / "Super Mario World (USA)-video.mp4", b"\x00\x00\x00\x18ftypmp42")
     _write_bytes(roms_root / "gba" / "Metroid Fusion (USA).zip", b"FAKE-GBA-ROM-1")
     _write_bytes(roms_root / "gba" / "Mario Kart Super Circuit (USA).zip", b"FAKE-GBA-ROM-2")
+    _write_bytes(roms_root / "psx" / "Castlevania - Symphony of the Night (USA).chd", b"FAKE-PSX-ROM-1")
+    _write_bytes(roms_root / "psx" / "images" / "Castlevania - Symphony of the Night (USA)-image.jpg", b"\xff\xd8\xff")
+    _write_bytes(roms_root / "psx" / "videos" / "Castlevania - Symphony of the Night (USA)-video.mp4", b"\x00\x00\x00\x18ftypmp42")
     _write_text(roms_root / "snes" / "gamelist.xml", "<gameList><game><name>Chrono Trigger</name></game></gameList>\n")
     _write_text(roms_root / "gba" / "gamelist.xml", "<gameList><game><name>Metroid Fusion</name></game></gameList>\n")
+    _write_text(
+        roms_root / "psx" / "gamelist.xml",
+        "<gameList><game><name>Castlevania - Symphony of the Night</name></game></gameList>\n",
+    )
 
-    # BIOS
+    # BIOS (bios list + bios download)
     bios_root = userdata_root / "bios"
     _write_bytes(bios_root / "scph1001.bin", b"BIOS-DATA-PSX")
     _write_bytes(bios_root / "gba_bios.bin", b"BIOS-DATA-GBA")
+    _write_bytes(bios_root / "dc" / "dc_boot.bin", b"BIOS-DATA-DC")
+    _write_bytes(bios_root / "dc" / "dc_flash.bin", b"BIOS-DATA-DC-FLASH")
 
-    # Logs used by admin endpoint
+    # Logs used by admin logs endpoint
     logs_root = userdata_root / "system" / "logs"
     _write_text(logs_root / "es_launch_stdout.log", "INFO launch emulator=snes\nINFO rom=Chrono Trigger\n")
     _write_text(logs_root / "es_launch_stderr.log", "WARN no joystick hotplug event\n")
@@ -43,6 +56,41 @@ def seed_mock_userdata(userdata_root: Path) -> None:
     _write_text(
         userdata_root / "system" / "configs" / "emulationstation" / "es_settings.cfg",
         "<bool name=\"ScrapeRatings\" value=\"true\" />\n<string name=\"ThemeSet\" value=\"carbon\" />\n",
+    )
+    _write_text(
+        userdata_root / "system" / "configs" / "emulationstation" / "es_systems.cfg",
+        """
+<systemList>
+  <system>
+    <name>snes</name>
+    <fullname>Super Nintendo Entertainment System</fullname>
+    <path>/userdata/roms/snes</path>
+    <extension>.zip .7z</extension>
+    <command>retroarch -L snes9x_libretro.so %ROM%</command>
+    <platform>snes</platform>
+    <theme>snes</theme>
+  </system>
+  <system>
+    <name>gba</name>
+    <fullname>Game Boy Advance</fullname>
+    <path>/userdata/roms/gba</path>
+    <extension>.zip .7z</extension>
+    <command>retroarch -L mgba_libretro.so %ROM%</command>
+    <platform>gba</platform>
+    <theme>gba</theme>
+  </system>
+  <system>
+    <name>psx</name>
+    <fullname>Sony PlayStation</fullname>
+    <path>/userdata/roms/psx</path>
+    <extension>.chd .cue .bin</extension>
+    <command>retroarch -L pcsx_rearmed_libretro.so %ROM%</command>
+    <platform>psx</platform>
+    <theme>psx</theme>
+  </system>
+</systemList>
+""".strip()
+        + "\n",
     )
     _write_text(
         userdata_root / "system" / "configs" / "emulationstation" / "es_input.cfg",
@@ -70,8 +118,16 @@ def seed_mock_userdata(userdata_root: Path) -> None:
     _write_text(userdata_root / "system" / "configs" / "wine" / "user.reg", "REGEDIT4\n")
     _write_text(userdata_root / "system" / "configs" / "shadps4" / "config.toml", "renderer = \"vulkan\"\n")
 
-    # Theme assets
+    # Theme assets (theme/meta, theme/system/{system}, backgrounds, logos, images, assets)
     theme_root = userdata_root / "themes" / "carbon"
-    _write_text(theme_root / "theme.xml", "<theme></theme>\n")
+    _write_text(theme_root / "theme.xml", "<theme><view name=\"system\"></view></theme>\n")
+    _write_text(theme_root / "_inc" / "theme.css", "body { background: #101820; color: #f2aa4c; }\n")
     _write_bytes(theme_root / "_inc" / "logo.png", b"\x89PNG\r\n")
     _write_bytes(theme_root / "_inc" / "background.jpg", b"\xff\xd8\xff")
+    _write_bytes(theme_root / "_inc" / "background-alt.png", b"\x89PNG\r\n")
+    _write_text(theme_root / "snes" / "theme.xml", "<theme><view name=\"detailed\"></view></theme>\n")
+    _write_bytes(theme_root / "snes" / "logo-snes.png", b"\x89PNG\r\n")
+    _write_bytes(theme_root / "snes" / "background-snes.jpg", b"\xff\xd8\xff")
+    _write_text(theme_root / "gba" / "theme.xml", "<theme><view name=\"basic\"></view></theme>\n")
+    _write_bytes(theme_root / "gba" / "logo-gba.png", b"\x89PNG\r\n")
+    _write_bytes(theme_root / "gba" / "background-gba.jpg", b"\xff\xd8\xff")
