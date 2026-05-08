@@ -4,62 +4,109 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Batocera ROM Browser</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet">
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
   <style>
     :root {
-      --ui-surface: rgba(9, 12, 20, 0.48);
-      --ui-surface-strong: rgba(12, 16, 28, 0.56);
-      --ui-border: rgba(255, 255, 255, 0.22);
-      --ui-text: #eef4ff;
-      --ui-muted: rgba(226, 235, 255, 0.82);
+      --admin-bg: #f2f5fa;
+      --admin-surface: #ffffff;
+      --admin-surface-muted: #f8f9fc;
+      --admin-border: #e3e6f0;
+      --admin-sidebar: #24406c;
+      --admin-sidebar-accent: #4e73df;
+      --admin-text: #1f2937;
+      --admin-muted: #6b7280;
     }
     body {
-      background: #0b1020;
-      background-size: cover;
-      background-position: center;
-      background-attachment: fixed;
+      background: radial-gradient(circle at top right, #dbe6ff 0%, #f2f5fa 45%, #eef2f8 100%);
       min-height: 100vh;
-      color: var(--ui-text);
+      color: var(--admin-text);
+      font-family: "Nunito", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    .layout-shell { min-height: 100vh; }
+    .sidebar {
+      background: linear-gradient(180deg, #224abe 0%, var(--admin-sidebar) 100%);
+      color: #fff;
+      min-height: 100vh;
+      border-right: 1px solid rgba(255, 255, 255, 0.14);
+      box-shadow: 0 0.15rem 1rem rgba(0, 0, 0, 0.14);
+    }
+    .brand-block { border-bottom: 1px solid rgba(255, 255, 255, 0.18); }
+    .brand-mark {
+      width: 2rem;
+      height: 2rem;
+      border-radius: 50%;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(255, 255, 255, 0.14);
+      border: 1px solid rgba(255, 255, 255, 0.24);
+    }
+    .menu-label {
+      font-size: 0.72rem;
+      letter-spacing: 0.07em;
+      text-transform: uppercase;
+      color: rgba(255, 255, 255, 0.64);
+      font-weight: 700;
+    }
+    .sidebar .btn {
+      border: 0;
+      text-align: left;
+      color: rgba(255, 255, 255, 0.92);
+      background: transparent;
+      padding: 0.62rem 0.8rem;
+      border-radius: 0.45rem;
+      font-weight: 700;
+      font-size: 0.92rem;
+    }
+    .sidebar .btn:hover,
+    .sidebar .btn:focus {
+      background: rgba(255, 255, 255, 0.14);
+      color: #fff;
+    }
+    .topbar {
+      background: var(--admin-surface);
+      border: 1px solid var(--admin-border);
+      border-radius: 0.75rem;
+      box-shadow: 0 0.15rem 1rem rgba(58, 59, 69, 0.08);
+      min-height: 4.1rem;
     }
     .app-shell {
-      background: var(--ui-surface);
-      border: 1px solid var(--ui-border);
-      border-radius: 16px;
-      box-shadow: 0 18px 48px rgba(0, 0, 0, 0.35);
-      backdrop-filter: blur(2px);
+      background: var(--admin-surface);
+      border: 1px solid var(--admin-border);
+      border-radius: 0.75rem;
+      box-shadow: 0 0.15rem 1rem rgba(58, 59, 69, 0.08);
     }
-    .glass-nav {
-      background: rgba(9, 12, 20, 0.78);
-      border: 1px solid var(--ui-border);
-      border-radius: 12px;
-      backdrop-filter: blur(4px);
+    .nav-actions .btn { white-space: nowrap; }
+    .card, .input-group .form-control, .input-group .input-group-text, .input-group .btn, footer, .form-select {
+      background: var(--admin-surface);
+      border-color: var(--admin-border);
     }
-    .navbar-brand-block {
-      min-width: 0;
+    .input-group .form-control,
+    .input-group .input-group-text {
+      padding-top: 0.65rem;
+      padding-bottom: 0.65rem;
     }
-    .nav-actions .btn {
-      white-space: nowrap;
-    }
-    .search-wrap {
-      width: 100%;
-      max-width: 640px;
-    }
-    .card, .input-group .form-control, .input-group .input-group-text, .input-group .btn, footer {
-      background: var(--ui-surface-strong);
-      border-color: var(--ui-border);
-    }
-    .text-muted { color: var(--ui-muted) !important; }
-    .card-title, .fw-semibold, h1, h2, h3 { color: var(--ui-text); }
-    .form-control::placeholder { color: rgba(230, 238, 255, 0.75); }
-    .form-control, .input-group-text { color: var(--ui-text); }
-    .form-label, .form-check-label { color: var(--ui-text); }
+    .text-muted { color: var(--admin-muted) !important; }
+    .card-title, .fw-semibold, h1, h2, h3 { color: var(--admin-text); }
+    .form-control::placeholder { color: #9aa3b2; }
     .btn-outline-secondary, .btn-outline-primary {
-      color: var(--ui-text);
-      border-color: var(--ui-border);
+      color: #4b5563;
+      border-color: var(--admin-border);
     }
-    a { color: #9fd0ff; }
-    a:hover { color: #c6e3ff; }
+    .btn-primary {
+      background: var(--admin-sidebar-accent);
+      border-color: var(--admin-sidebar-accent);
+    }
+    .btn-primary:hover {
+      background: #2e59d9;
+      border-color: #2e59d9;
+    }
+    a { color: var(--admin-sidebar-accent); }
+    a:hover { color: #3559bc; }
     .tile { height: 100%; }
     .pointer { cursor: pointer; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
@@ -74,15 +121,16 @@
       width: 100%;
       min-width: 260px;
       max-width: 100%;
-      background: rgba(0, 0, 0, 0.96);
-      border: 1px solid rgba(255, 255, 255, 0.35);
+      background: var(--admin-surface);
+      border: 1px solid var(--admin-border);
       padding: 0.6rem;
       z-index: 2000;
+      box-shadow: 0 0.25rem 1rem rgba(0, 0, 0, 0.12);
     }
     .filter-options-scroll {
       max-height: 220px;
       overflow-y: auto;
-      border: 1px solid var(--ui-border);
+      border: 1px solid var(--admin-border);
       border-radius: 8px;
       padding: 0.5rem;
     }
@@ -91,117 +139,111 @@
     .admin-tile .card-text,
     .log-card .card-header,
     .log-card .list-group-item {
-      color: #fff !important;
+      color: var(--admin-text) !important;
     }
     .log-card .card-header {
-      background: rgba(7, 10, 18, 0.72);
-      border-color: var(--ui-border);
+      background: var(--admin-surface-muted);
+      border-color: var(--admin-border);
     }
     .log-card .list-group-item {
-      background: rgba(16, 20, 34, 0.88);
-      border-color: rgba(255, 255, 255, 0.16);
+      background: var(--admin-surface);
+      border-color: var(--admin-border);
     }
     .log-card .list-group-item:hover,
     .log-card .list-group-item:focus {
-      background: rgba(33, 40, 62, 0.95);
-      color: #fff !important;
+      background: #edf2ff;
+      color: var(--admin-text) !important;
     }
     .log-card .list-group-item.active {
-      background: rgba(54, 98, 170, 0.95);
-      border-color: rgba(170, 210, 255, 0.8);
-      color: #fff !important;
+      background: #d9e4ff;
+      border-color: #b4c7fb;
+      color: var(--admin-text) !important;
     }
     .log-lines-select {
       width: 130px;
       display: inline-block;
-      background: rgba(12, 16, 28, 0.95);
-      color: #fff;
-      border: 1px solid var(--ui-border);
+      background: #fff;
+      color: var(--admin-text);
+      border: 1px solid var(--admin-border);
     }
     .log-lines-select:focus {
-      background: rgba(12, 16, 28, 0.98);
-      color: #fff;
-      border-color: rgba(170, 210, 255, 0.8);
-      box-shadow: 0 0 0 0.2rem rgba(85, 145, 240, 0.25);
-    }
-    .log-lines-select option {
-      background: #111827;
-      color: #fff;
+      border-color: #9bb3f5;
+      box-shadow: 0 0 0 0.2rem rgba(78, 115, 223, 0.2);
     }
     #systemInfoBar {
       font-size: 0.85rem;
-      color: var(--ui-muted);
+      color: var(--admin-muted);
     }
     #systemInfoBar .badge {
-      background: rgba(255, 255, 255, 0.14);
-      color: #fff;
-      border: 1px solid rgba(255, 255, 255, 0.25);
+      background: #eef2ff;
+      color: #334155;
+      border: 1px solid #dbe2ff;
       font-weight: 500;
+      padding: 0.38rem 0.58rem;
     }
     @media (max-width: 991.98px) {
-      .app-shell {
-        padding: 1rem !important;
-      }
-      .search-wrap {
-        max-width: 100%;
-      }
-      .nav-actions {
-        width: 100%;
-      }
-      .nav-actions .btn {
-        width: 100%;
-      }
+      .sidebar { min-height: auto; }
+      .nav-actions .btn { width: 100%; }
     }
   </style>
 </head>
 <body>
-<div class="container-fluid container-xl py-3 py-md-4">
-<div class="app-shell p-3 p-md-4">
-  <nav class="navbar navbar-expand-lg glass-nav px-2 px-md-3 py-2 mb-3 mb-md-4">
-    <div class="container-fluid px-0">
-      <div class="navbar-brand-block me-2 me-md-3">
-        <h1 class="h3 mb-1">Batocera Library</h1>
-        <div class="text-muted">Systems and ROMs</div>
-      </div>
-      <button class="navbar-toggler border-0 text-light" type="button" data-bs-toggle="collapse" data-bs-target="#topNav" aria-controls="topNav" aria-expanded="false" aria-label="Toggle navigation">
-        <span><i class="bi bi-list fs-3 text-light"></i></span>
-      </button>
-      <div class="collapse navbar-collapse pt-3 pt-lg-0" id="topNav">
-        <div class="nav-actions d-grid d-lg-flex gap-2 ms-lg-auto">
-          <a id="systemsMenuBtn" href="#" role="button" class="btn btn-outline-primary">Systems</a>
-          <a id="biosBtn" href="#bios" role="button" class="btn btn-outline-primary">BIOS</a>
-          <a id="themeMenuBtn" href="#theme" role="button" class="btn btn-outline-primary">Theme</a>
-          <a id="adminMenuBtn" href="#admin" role="button" class="btn btn-outline-primary">Admin</a>
-          <a href="https://gitlab.com/batocera_addons/app_server" target="_blank" rel="noopener noreferrer" role="button" class="btn btn-outline-primary">
-            <i class="bi bi-gitlab me-1"></i>GitLab
+<div class="container-fluid layout-shell py-3 py-lg-4">
+  <div class="row g-3">
+    <aside class="col-12 col-lg-3 col-xl-2">
+      <div class="sidebar rounded-3 h-100 p-3">
+        <div class="brand-block pb-3 mb-3">
+          <div class="d-flex align-items-center gap-2 mb-1">
+            <span class="brand-mark"><i class="bi bi-controller"></i></span>
+            <div class="h5 mb-0 text-white">Batocera Admin</div>
+          </div>
+          <div class="small text-white-50">Systems and ROMs</div>
+        </div>
+        <div class="menu-label mb-2">Navigation</div>
+        <div class="d-grid gap-1 nav-actions">
+          <a id="systemsMenuBtn" href="#" role="button" class="btn"><i class="bi bi-grid me-2"></i>Systems</a>
+          <a id="biosBtn" href="#bios" role="button" class="btn"><i class="bi bi-cpu me-2"></i>BIOS</a>
+          <a id="themeMenuBtn" href="#theme" role="button" class="btn"><i class="bi bi-brush me-2"></i>Theme</a>
+          <a id="adminMenuBtn" href="#admin" role="button" class="btn"><i class="bi bi-shield-check me-2"></i>Admin</a>
+          <a href="https://github.com/Batocera-Fleet-Federation/batocera.drone" target="_blank" rel="noopener noreferrer" role="button" class="btn">
+            <i class="bi bi-github me-2"></i>GitHub
           </a>
-          <a id="backBtn" href="#" role="button" class="btn btn-outline-secondary d-none">Back</a>
+          <a id="backBtn" href="#" role="button" class="btn btn-outline-light d-none">Back</a>
         </div>
       </div>
-    </div>
-  </nav>
-  <div id="systemInfoBar" class="mb-3 d-flex flex-wrap gap-2"></div>
-  <div class="search-wrap mb-3">
-    <form id="searchForm" role="search">
-      <div class="input-group">
-        <span class="input-group-text"><i class="bi bi-search"></i></span>
-        <input id="searchInput" class="form-control" type="search" placeholder="Search ROMs across all systems">
-        <button id="searchBtn" class="btn btn-primary" type="submit">Search</button>
-        <button id="clearSearchBtn" class="btn btn-outline-secondary" type="button">Clear</button>
+    </aside>
+    <main class="col-12 col-lg-9 col-xl-10">
+      <nav class="topbar px-3 py-2 mb-3 d-flex align-items-center justify-content-between">
+        <div>
+          <h1 class="h3 mb-1">Batocera Library</h1>
+          <div class="text-muted">Systems and ROMs</div>
+        </div>
+        <div class="d-none d-md-inline-flex align-items-center justify-content-center rounded-circle border" style="width:2.25rem;height:2.25rem;border-color:var(--admin-border)!important;color:#9aa3b2;">
+          <i class="bi bi-person"></i>
+        </div>
+      </nav>
+      <div class="app-shell p-3 p-md-4">
+        <div id="systemInfoBar" class="mb-3 d-flex flex-wrap gap-2"></div>
+        <div class="mb-3">
+          <form id="searchForm" role="search">
+            <div class="input-group">
+              <span class="input-group-text"><i class="bi bi-search"></i></span>
+              <input id="searchInput" class="form-control" type="search" placeholder="Search ROMs across all systems">
+              <button id="searchBtn" class="btn btn-primary" type="submit">Search</button>
+              <button id="clearSearchBtn" class="btn btn-outline-secondary" type="button">Clear</button>
+            </div>
+          </form>
+        </div>
+        <div id="alerts"></div>
+        <div id="loading" class="d-none mb-3 text-muted"><div class="spinner-border spinner-border-sm me-2" role="status"></div><span id="loadingText">Loading...</span></div>
+        <div id="content"></div>
+        <footer class="mt-4 pt-3 border-top text-muted small">
+          <a href="/v1/api/downloads">Download Sitemap</a>
+        </footer>
       </div>
-    </form>
+    </main>
   </div>
-
-  <div id="alerts"></div>
-  <div id="loading" class="d-none mb-3 text-muted"><div class="spinner-border spinner-border-sm me-2" role="status"></div><span id="loadingText">Loading...</span></div>
-  <div id="content"></div>
-
-  <footer class="mt-4 pt-3 border-top text-muted small">
-    <a href="/v1/api/downloads">Download Sitemap</a>
-  </footer>
 </div>
-</div>
-
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
 const content = document.getElementById("content");

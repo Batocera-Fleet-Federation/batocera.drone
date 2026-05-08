@@ -11,7 +11,7 @@ On the Batocera machine, run one of these:
 ### Manually Start
 
 ```bash
-curl -fsSL "https://gitlab.com/batocera_addons/roms-api/-/raw/main/scripts/run_now.sh?ref_type=heads" -o /tmp/run_now.sh && chmod +x /tmp/run_now.sh && ROM_API_BASE_URL="https://gitlab.com/batocera_addons/roms-api/-/raw/main" ROM_API_USERNAME="admin" ROM_API_PASSWORD="changeme" /tmp/run_now.sh
+curl -fsSL "https://raw.githubusercontent.com/Batocera-Fleet-Federation/batocera.drone/main/scripts/run_now.sh" -o /tmp/run_now.sh && chmod +x /tmp/run_now.sh && ROM_API_BASE_URL="https://raw.githubusercontent.com/Batocera-Fleet-Federation/batocera.drone/main" ROM_API_USERNAME="admin" ROM_API_PASSWORD="changeme" /tmp/run_now.sh
 ```
 
 The script uses `ROM_API_USERNAME`/`ROM_API_PASSWORD` (or `USERNAME`/`PASSWORD`) if set, and only prompts when missing.
@@ -32,9 +32,9 @@ while ! ping -c 1 -W 2 8.8.8.8 > /dev/null 2>&1; do
 done
 
 # Once online, run your command
-curl -fsSL "https://gitlab.com/batocera_addons/roms-api/-/raw/main/scripts/run_now.sh?ref_type=heads" -o /tmp/run_now.sh && \
+curl -fsSL "https://raw.githubusercontent.com/Batocera-Fleet-Federation/batocera.drone/main/scripts/run_now.sh" -o /tmp/run_now.sh && \
 chmod +x /tmp/run_now.sh && \
-ROM_API_BASE_URL="https://gitlab.com/batocera_addons/roms-api/-/raw/main" \
+ROM_API_BASE_URL="https://raw.githubusercontent.com/Batocera-Fleet-Federation/batocera.drone/main" \
 ROM_API_USERNAME="replace-with-your-username" \
 ROM_API_PASSWORD="replace-with-your-password" /tmp/run_now.sh
 ) &
