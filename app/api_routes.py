@@ -162,13 +162,16 @@ class ApiRoutesMixin:
                 return
 
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "artwork" and parts[2] == "missing":
-                self._handle_admin_artwork_missing()
+                include_filesystem = str(query_params.get("include_filesystem", ["0"])[0]).strip().lower() in ("1", "true", "yes", "on")
+                refresh = str(query_params.get("refresh", ["0"])[0]).strip().lower() in ("1", "true", "yes", "on")
+                self._handle_admin_artwork_missing(include_filesystem=include_filesystem, refresh=refresh)
                 return
 
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "artwork" and parts[2] == "launchbox" and parts[3] == "search":
                 self._handle_admin_launchbox_search(
                     query_params.get("system", [""])[0],
                     query_params.get("rom_id", [""])[0],
+                    query_params.get("rom_path", [""])[0],
                     query_params.get("q", [""])[0],
                 )
                 return

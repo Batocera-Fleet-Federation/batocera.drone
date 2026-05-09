@@ -201,6 +201,13 @@ def _relative_artwork_path(system_dir: Path, path: Path) -> str:
         return str(path)
 
 
+def _normalize_gamelist_rom_path(value: str) -> str:
+    raw = str(value or "").strip().replace("\\", "/")
+    while raw.startswith("./"):
+        raw = raw[2:]
+    return raw.lstrip("/")
+
+
 class LaunchBoxClient:
     def __init__(self, timeout_seconds: int = 15):
         self.timeout_seconds = timeout_seconds
@@ -729,6 +736,8 @@ class RomRepository:
         self._search_cache_lock = Lock()
         self._search_index: List[dict] = []
         self._search_index_expires_at = 0.0
+        self._missing_artwork_cache_lock = Lock()
+        self._missing_artwork_cache: Dict[str, dict] = {}
 
     @staticmethod
     def should_include_system(name: str) -> bool:
@@ -980,6 +989,16 @@ class RomRepository:
                 return game
         return None
 
+    def _find_gamelist_entry_by_path(self, root: ET.Element, rom_path: str) -> Optional[ET.Element]:
+        normalized = _normalize_gamelist_rom_path(rom_path).lower()
+        if not normalized:
+            return None
+        for game in root.findall("game"):
+            path_value = _normalize_gamelist_rom_path(_text_or_empty(game, "path")).lower()
+            if path_value == normalized:
+                return game
+        return None
+
     def _entry_missing_artwork(self, game: Optional[ET.Element]) -> List[str]:
         missing = []
         for field in ARTWORK_FIELDS:
@@ -987,7 +1006,50 @@ class RomRepository:
                 missing.append(field)
         return missing
 
-    def list_missing_artwork(self) -> List[dict]:
+    def _list_missing_artwork_from_gamelists(self) -> List[dict]:
+        if not self.roms_root.exists():
+            return []
+        missing_items: List[dict] = []
+        for entry in sorted(self.roms_root.iterdir(), key=lambda p: p.name.lower()):
+            if not (entry.is_dir() or entry.is_symlink()):
+                continue
+            if not self.should_include_system(entry.name):
+                continue
+            system = entry.name
+            system_dir = entry.resolve()
+            if not system_dir.exists() or not system_dir.is_dir():
+                continue
+            try:
+                _, root = self._read_gamelist(system_dir)
+            except Exception:
+                continue
+            for game in root.findall("game"):
+                missing = self._entry_missing_artwork(game)
+                if not missing:
+                    continue
+                rom_path = _normalize_gamelist_rom_path(_text_or_empty(game, "path"))
+                if not rom_path:
+                    continue
+                rom_name = Path(rom_path).name
+                title = _text_or_empty(game, "name") or Path(rom_name).stem
+                missing_items.append(
+                    {
+                        "system": system,
+                        "name": title,
+                        "rom_name": rom_name,
+                        "rom_path": rom_path,
+                        "title": title,
+                        "search_title": _clean_rom_title(title or rom_name),
+                        "unique_id": "",
+                        "missing": missing,
+                        "existing": {field: _text_or_empty(game, field) for field in ARTWORK_FIELDS},
+                        "has_gamelist_entry": True,
+                    }
+                )
+        missing_items.sort(key=lambda item: (str(item["system"]).lower(), str(item["name"]).lower()))
+        return missing_items
+
+    def _list_missing_artwork_from_filesystem(self) -> List[dict]:
         if not self.roms_root.exists():
             return []
         missing_items: List[dict] = []
@@ -1016,6 +1078,7 @@ class RomRepository:
                         "system": system,
                         "name": rom.get("name"),
                         "rom_name": rom_file,
+                        "rom_path": rom_file,
                         "title": _text_or_empty(game, "name") if game is not None else str(rom.get("image_stem") or rom.get("name") or ""),
                         "search_title": _clean_rom_title(str(rom.get("image_stem") or rom.get("name") or "")),
                         "unique_id": rom.get("unique_id"),
@@ -1027,6 +1090,22 @@ class RomRepository:
         missing_items.sort(key=lambda item: (str(item["system"]).lower(), str(item["name"]).lower()))
         return missing_items
 
+    def list_missing_artwork(self, include_filesystem: bool = False, force_refresh: bool = False) -> List[dict]:
+        cache_key = "filesystem" if include_filesystem else "gamelist"
+        now = time.time()
+        with self._missing_artwork_cache_lock:
+            cached = self._missing_artwork_cache.get(cache_key)
+            if cached and not force_refresh and cached.get("expires_at", 0) > now:
+                return [dict(item) for item in cached.get("items", [])]
+
+        items = self._list_missing_artwork_from_filesystem() if include_filesystem else self._list_missing_artwork_from_gamelists()
+        with self._missing_artwork_cache_lock:
+            self._missing_artwork_cache[cache_key] = {
+                "items": [dict(item) for item in items],
+                "expires_at": time.time() + 120,
+            }
+        return items
+
     def find_rom_by_unique_id(self, system: str, unique_id: str) -> dict:
         _, roms = self.list_assets(system, "roms")
         for rom in roms:
@@ -1034,16 +1113,45 @@ class RomRepository:
                 return rom
         raise FileNotFoundError()
 
-    def apply_launchbox_artwork(self, system: str, unique_id: str, game_key: str, client: LaunchBoxClient) -> dict:
+    def find_rom_by_path(self, system: str, rom_path: str) -> dict:
         system_dir = self.get_system_dir(system)
-        rom = self.find_rom_by_unique_id(system, unique_id)
+        normalized_path = _normalize_gamelist_rom_path(rom_path)
+        if not normalized_path or "\x00" in normalized_path:
+            raise ValueError("invalid rom_path")
+        target_path = (system_dir / normalized_path).resolve()
+        if target_path != system_dir and system_dir not in target_path.parents:
+            raise ValueError("rom_path is outside system directory")
+        if not target_path.exists():
+            raise FileNotFoundError()
+        name = target_path.stem if target_path.is_file() else target_path.name
+        return {
+            "unique_id": "",
+            "name": name,
+            "rom_file": target_path.name,
+            "rom_path": normalized_path,
+            "image_stem": name,
+            "entry_type": "folder" if target_path.is_dir() else "file",
+            "is_downloadable": target_path.is_file(),
+        }
+
+    def apply_launchbox_artwork(
+        self,
+        system: str,
+        unique_id: str,
+        game_key: str,
+        client: LaunchBoxClient,
+        rom_path: Optional[str] = None,
+    ) -> dict:
+        system_dir = self.get_system_dir(system)
+        rom = self.find_rom_by_path(system, rom_path) if rom_path else self.find_rom_by_unique_id(system, unique_id)
         tree, root = self._read_gamelist(system_dir)
         rom_name = str(rom.get("rom_file") or rom.get("rom_name") or rom.get("name") or "")
+        normalized_rom_path = str(rom.get("rom_path") or rom_name)
         display_name = str(rom.get("image_stem") or rom.get("name") or "")
-        game = self._find_gamelist_entry(root, rom_name, display_name)
+        game = self._find_gamelist_entry_by_path(root, normalized_rom_path) or self._find_gamelist_entry(root, rom_name, display_name)
         if game is None:
             game = ET.SubElement(root, "game")
-            _set_child_text(game, "path", f"./{rom_name}")
+            _set_child_text(game, "path", f"./{normalized_rom_path}")
             _set_child_text(game, "name", _clean_rom_title(display_name))
 
         missing = self._entry_missing_artwork(game)
@@ -1103,6 +1211,7 @@ class RomRepository:
             "system": system,
             "unique_id": unique_id,
             "rom_name": rom_name,
+            "rom_path": normalized_rom_path,
             "launchbox": {
                 "game_key": details.get("game_key"),
                 "name": details.get("name"),
@@ -2305,8 +2414,9 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         target_path = self.repository.find_bios_file_by_unique_id(unique_id)
         self._stream_file(target_path, "application/octet-stream", as_attachment=True)
 
-    def _handle_admin_artwork_missing(self) -> None:
-        items = self.repository.list_missing_artwork()
+    def _handle_admin_artwork_missing(self, include_filesystem: bool = False, refresh: bool = False) -> None:
+        started_at = time.time()
+        items = self.repository.list_missing_artwork(include_filesystem=include_filesystem, force_refresh=refresh)
         systems = sorted({str(item.get("system") or "") for item in items if item.get("system")})
         field_counts = {field: 0 for field in ARTWORK_FIELDS}
         for item in items:
@@ -2321,18 +2431,22 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 "systems": systems,
                 "fields": list(ARTWORK_FIELDS),
                 "field_counts": field_counts,
+                "mode": "filesystem" if include_filesystem else "gamelist",
+                "cached": not refresh,
+                "elapsed_ms": int((time.time() - started_at) * 1000),
             },
         )
 
-    def _handle_admin_launchbox_search(self, system: str, rom_id: str, query: str) -> None:
+    def _handle_admin_launchbox_search(self, system: str, rom_id: str, rom_path: str, query: str) -> None:
         system_value = (system or "").strip()
         rom_id_value = (rom_id or "").strip()
+        rom_path_value = _normalize_gamelist_rom_path(rom_path)
         query_value = (query or "").strip()
-        if system_value and rom_id_value and not query_value:
-            rom = self.repository.find_rom_by_unique_id(system_value, rom_id_value)
+        if system_value and not query_value and (rom_path_value or rom_id_value):
+            rom = self.repository.find_rom_by_path(system_value, rom_path_value) if rom_path_value else self.repository.find_rom_by_unique_id(system_value, rom_id_value)
             query_value = _clean_rom_title(str(rom.get("image_stem") or rom.get("name") or ""))
         if not query_value:
-            raise ValueError("q or system+rom_id is required")
+            raise ValueError("q or system+rom_id/rom_path is required")
         client = LaunchBoxClient()
         matches = client.search(query_value, system=system_value or None)
         self._send_json(
@@ -2342,6 +2456,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 "system": system_value,
                 "launchbox_platform": _launchbox_platform_for_system(system_value),
                 "rom_id": rom_id_value,
+                "rom_path": rom_path_value,
                 "matches": matches,
             },
         )
@@ -2349,17 +2464,20 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
     def _handle_admin_launchbox_apply(self, payload: dict) -> None:
         system = str(payload.get("system") or "").strip()
         rom_id = str(payload.get("rom_id") or payload.get("unique_id") or "").strip()
+        rom_path = _normalize_gamelist_rom_path(str(payload.get("rom_path") or ""))
         game_key = str(payload.get("game_key") or "").strip()
         if not system:
             raise ValueError("system is required")
-        if not rom_id:
-            raise ValueError("rom_id is required")
+        if not rom_id and not rom_path:
+            raise ValueError("rom_id or rom_path is required")
         if not game_key:
             raise ValueError("game_key is required")
         client = LaunchBoxClient()
-        result = self.repository.apply_launchbox_artwork(system, rom_id, game_key, client)
+        result = self.repository.apply_launchbox_artwork(system, rom_id, game_key, client, rom_path=rom_path or None)
         with self.repository._search_cache_lock:
             self.repository._search_index_expires_at = 0
+        with self.repository._missing_artwork_cache_lock:
+            self.repository._missing_artwork_cache.clear()
         self._send_json(200, result)
 
     def _handle_public_image(self, system: str, image_file: str) -> None:

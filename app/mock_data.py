@@ -29,11 +29,17 @@ def seed_mock_userdata(userdata_root: Path) -> None:
     _write_bytes(roms_root / "psx" / "Castlevania - Symphony of the Night (USA).chd", b"FAKE-PSX-ROM-1")
     _write_bytes(roms_root / "psx" / "images" / "Castlevania - Symphony of the Night (USA)-image.jpg", b"\xff\xd8\xff")
     _write_bytes(roms_root / "psx" / "videos" / "Castlevania - Symphony of the Night (USA)-video.mp4", b"\x00\x00\x00\x18ftypmp42")
-    _write_text(roms_root / "snes" / "gamelist.xml", "<gameList><game><name>Chrono Trigger</name></game></gameList>\n")
-    _write_text(roms_root / "gba" / "gamelist.xml", "<gameList><game><name>Metroid Fusion</name></game></gameList>\n")
+    _write_text(
+        roms_root / "snes" / "gamelist.xml",
+        "<gameList><game><path>./Chrono Trigger (USA).zip</path><name>Chrono Trigger</name></game></gameList>\n",
+    )
+    _write_text(
+        roms_root / "gba" / "gamelist.xml",
+        "<gameList><game><path>./Metroid Fusion (USA).zip</path><name>Metroid Fusion</name></game></gameList>\n",
+    )
     _write_text(
         roms_root / "psx" / "gamelist.xml",
-        "<gameList><game><name>Castlevania - Symphony of the Night</name></game></gameList>\n",
+        "<gameList><game><path>./Castlevania - Symphony of the Night (USA).chd</path><name>Castlevania - Symphony of the Night</name></game></gameList>\n",
     )
 
     # BIOS (bios list + bios download)
