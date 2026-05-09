@@ -272,6 +272,7 @@ let themeFilterSelectedSystems = [];
 let themeFilterQuery = "";
 const THEME_GALLERY_PAGE_SIZE = 100;
 const BIOS_PAGE_SIZE = 100;
+const ARTWORK_PAGE_SIZE = 200;
 let biosCurrentPage = 1;
 let biosFilterQuery = "";
 let biosFilterSelectedSystems = [];
@@ -281,6 +282,8 @@ let biosFilterInitialized = false;
 let themeFilterInitialized = false;
 let currentLogSource = null;
 let currentConfigSource = null;
+let artworkCurrentOffset = 0;
+let artworkIncludeFilesystem = false;
 let systemInfoLoaded = false;
 let adminEnabled = true;
 
@@ -1265,26 +1268,37 @@ async function renderAdminMenu() {
     </div>
   `;
 }
-async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh = false) {
+async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh = false, offset = 0) {
   titleNode.textContent = "Missing Artwork";
   subtitleNode.textContent = "ROMs with incomplete gamelist.xml artwork";
+  artworkIncludeFilesystem = !!includeFilesystem;
+  artworkCurrentOffset = Math.max(0, Number(offset || 0));
   setSearchMode("hidden");
   setLoading(true, includeFilesystem ? "Scanning ROM directories..." : "Scanning gamelists...");
   clearSystemTheme();
   await refreshRandomThemeLogo();
   try {
-    const payload = await api(`/admin/artwork/missing?refresh=${forceRefresh ? "1" : "0"}${includeFilesystem ? "&include_filesystem=1" : ""}`);
+    const payload = await api(`/admin/artwork/missing?limit=${ARTWORK_PAGE_SIZE}&offset=${artworkCurrentOffset}&refresh=${forceRefresh ? "1" : "0"}${includeFilesystem ? "&include_filesystem=1" : ""}`);
     const roms = payload.roms || [];
     const fieldCounts = payload.field_counts || {};
+    const total = Number(payload.count || 0);
+    const limit = Number(payload.limit || ARTWORK_PAGE_SIZE);
+    const pageOffset = Number(payload.offset || 0);
+    const page = Math.floor(pageOffset / limit) + 1;
+    const totalPages = Math.max(1, Math.ceil(total / limit));
+    const firstItem = total ? pageOffset + 1 : 0;
+    const lastItem = pageOffset + roms.length;
     content.innerHTML = `
       <div class="mb-3 d-flex flex-wrap gap-2">
         <button class="btn btn-outline-secondary" onclick="setHash('#admin')">← Back to Admin</button>
-        <button class="btn btn-outline-primary" onclick="renderMissingArtworkPage(false, true)">Refresh</button>
-        <button class="btn btn-outline-secondary" onclick="renderMissingArtworkPage(true, true)">Full Filesystem Scan</button>
+        <button class="btn btn-outline-primary" onclick="renderMissingArtworkPage(false, true, 0)">Refresh</button>
+        <button class="btn btn-outline-secondary" onclick="renderMissingArtworkPage(true, true, 0)">Full Filesystem Scan</button>
       </div>
       <div id="artworkAlert"></div>
       <div class="mb-3 d-flex flex-wrap gap-2">
-        <span class="badge text-bg-secondary">ROMs: ${roms.length}</span>
+        <span class="badge text-bg-secondary">ROMs: ${total}</span>
+        <span class="badge text-bg-light border">Showing: ${firstItem}-${lastItem}</span>
+        <span class="badge text-bg-light border">Page: ${page}/${totalPages}</span>
         <span class="badge text-bg-light border">Mode: ${escapeHtml(payload.mode || "gamelist")}</span>
         <span class="badge text-bg-light border">Scan: ${Number(payload.elapsed_ms || 0)} ms</span>
         ${(payload.fields || []).map((field) => `<span class="badge text-bg-light border">${escapeHtml(field)}: ${Number(fieldCounts[field] || 0)}</span>`).join("")}
@@ -1295,6 +1309,11 @@ async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh 
             <div class="card-header d-flex justify-content-between align-items-center">
               <span>Missing Artwork</span>
               <input id="artworkFilter" class="form-control form-control-sm" style="max-width: 260px;" type="search" placeholder="Filter table">
+            </div>
+            <div class="card-header d-flex justify-content-between align-items-center gap-2">
+              <button id="artworkPrevBtn" class="btn btn-sm btn-outline-primary" type="button" ${pageOffset <= 0 ? "disabled" : ""}>Previous</button>
+              <span class="text-muted small">Filter applies to the current 200-row page.</span>
+              <button id="artworkNextBtn" class="btn btn-sm btn-outline-primary" type="button" ${!payload.has_more ? "disabled" : ""}>Next</button>
             </div>
             <div class="card-body p-0">
               <div class="table-responsive" style="max-height: 620px;">
@@ -1338,6 +1357,18 @@ async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh 
       </div>
     `;
     window.missingArtworkRoms = roms;
+    const prevBtn = document.getElementById("artworkPrevBtn");
+    const nextBtn = document.getElementById("artworkNextBtn");
+    if (prevBtn) {
+      prevBtn.addEventListener("click", async () => {
+        await renderMissingArtworkPage(artworkIncludeFilesystem, false, Math.max(0, pageOffset - ARTWORK_PAGE_SIZE));
+      });
+    }
+    if (nextBtn) {
+      nextBtn.addEventListener("click", async () => {
+        await renderMissingArtworkPage(artworkIncludeFilesystem, false, pageOffset + ARTWORK_PAGE_SIZE);
+      });
+    }
     const filter = document.getElementById("artworkFilter");
     if (filter) {
       filter.addEventListener("input", () => {

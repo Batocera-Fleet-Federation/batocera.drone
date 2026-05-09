@@ -80,8 +80,11 @@ class MockServerIntegrationTests(unittest.TestCase):
         self.assertTrue(any("menu_driver" in line for line in payload["content"]))
 
     def test_admin_missing_artwork_endpoint(self) -> None:
-        payload = self._get_json("/v1/api/admin/artwork/missing")
+        payload = self._get_json("/v1/api/admin/artwork/missing?limit=2&offset=0")
         self.assertGreater(payload["count"], 0)
+        self.assertLessEqual(payload["returned"], 2)
+        self.assertEqual(payload["limit"], 2)
+        self.assertEqual(payload["offset"], 0)
         self.assertIn("snes", payload["systems"])
         self.assertTrue(any("image" in item["missing"] for item in payload["roms"]))
 

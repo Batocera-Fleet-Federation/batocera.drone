@@ -164,7 +164,20 @@ class ApiRoutesMixin:
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "artwork" and parts[2] == "missing":
                 include_filesystem = str(query_params.get("include_filesystem", ["0"])[0]).strip().lower() in ("1", "true", "yes", "on")
                 refresh = str(query_params.get("refresh", ["0"])[0]).strip().lower() in ("1", "true", "yes", "on")
-                self._handle_admin_artwork_missing(include_filesystem=include_filesystem, refresh=refresh)
+                try:
+                    limit = int(query_params.get("limit", ["200"])[0])
+                except Exception:
+                    limit = 200
+                try:
+                    offset = int(query_params.get("offset", ["0"])[0])
+                except Exception:
+                    offset = 0
+                self._handle_admin_artwork_missing(
+                    include_filesystem=include_filesystem,
+                    refresh=refresh,
+                    limit=limit,
+                    offset=offset,
+                )
                 return
 
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "artwork" and parts[2] == "launchbox" and parts[3] == "search":

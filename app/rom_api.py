@@ -2414,9 +2414,19 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         target_path = self.repository.find_bios_file_by_unique_id(unique_id)
         self._stream_file(target_path, "application/octet-stream", as_attachment=True)
 
-    def _handle_admin_artwork_missing(self, include_filesystem: bool = False, refresh: bool = False) -> None:
+    def _handle_admin_artwork_missing(
+        self,
+        include_filesystem: bool = False,
+        refresh: bool = False,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> None:
         started_at = time.time()
         items = self.repository.list_missing_artwork(include_filesystem=include_filesystem, force_refresh=refresh)
+        total = len(items)
+        safe_limit = max(1, min(int(limit), 500))
+        safe_offset = max(0, int(offset))
+        page_items = items[safe_offset : safe_offset + safe_limit]
         systems = sorted({str(item.get("system") or "") for item in items if item.get("system")})
         field_counts = {field: 0 for field in ARTWORK_FIELDS}
         for item in items:
@@ -2426,8 +2436,12 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         self._send_json(
             200,
             {
-                "roms": items,
-                "count": len(items),
+                "roms": page_items,
+                "count": total,
+                "returned": len(page_items),
+                "limit": safe_limit,
+                "offset": safe_offset,
+                "has_more": (safe_offset + len(page_items)) < total,
                 "systems": systems,
                 "fields": list(ARTWORK_FIELDS),
                 "field_counts": field_counts,
