@@ -1220,8 +1220,8 @@ async function renderAdminMenu() {
       <div class="col-md-4 mb-3">
         <div class="card admin-tile">
           <div class="card-body">
-            <h5 class="card-title"><i class="bi bi-file-earmark-code me-2"></i>Config Files</h5>
-            <p class="card-text">View important system and emulator config files</p>
+            <h5 class="card-title"><i class="bi bi-file-earmark-code me-2"></i>Emulators</h5>
+            <p class="card-text">View emulator config files and detected versions</p>
             <button class="btn btn-primary" onclick="setHash('#admin/configs/batocera?max_bytes=131072')">View Configs</button>
           </div>
         </div>
@@ -1238,18 +1238,173 @@ async function renderAdminMenu() {
       <div class="col-md-4 mb-3">
         <div class="card admin-tile">
           <div class="card-body">
+            <h5 class="card-title"><i class="bi bi-images me-2"></i>Missing Artwork</h5>
+            <p class="card-text">Find ROMs with incomplete gamelist artwork and fill gaps from LaunchBox.</p>
+            <button class="btn btn-primary" onclick="setHash('#admin/artwork')">Open Artwork Tool</button>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-4 mb-3">
+        <div class="card admin-tile">
+          <div class="card-body">
             <h5 class="card-title"><i class="bi bi-diagram-3 me-2"></i>Overmind Integration</h5>
-            <p class="card-text">Configure batocera.overmind endpoint, email, and password (stub).</p>
+            <p class="card-text">Configure batocera.overmind endpoint, email, and password.</p>
             <button class="btn btn-primary" onclick="setHash('#admin/overmind')">Configure</button>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-4 mb-3">
+        <div class="card admin-tile">
+          <div class="card-body">
+            <h5 class="card-title"><i class="bi bi-lightning-charge me-2"></i>Processed Actions</h5>
+            <p class="card-text">View Overmind actions processed by this drone</p>
+            <button class="btn btn-primary" onclick="setHash('#admin/overmind/actions')">View Actions</button>
           </div>
         </div>
       </div>
     </div>
   `;
 }
+async function renderMissingArtworkPage() {
+  titleNode.textContent = "Missing Artwork";
+  subtitleNode.textContent = "ROMs with incomplete gamelist.xml artwork";
+  setSearchMode("hidden");
+  setLoading(true, "Scanning gamelists...");
+  clearSystemTheme();
+  await refreshRandomThemeLogo();
+  try {
+    const payload = await api("/admin/artwork/missing");
+    const roms = payload.roms || [];
+    const fieldCounts = payload.field_counts || {};
+    content.innerHTML = `
+      <div class="mb-3 d-flex flex-wrap gap-2">
+        <button class="btn btn-outline-secondary" onclick="setHash('#admin')">← Back to Admin</button>
+        <button class="btn btn-outline-primary" onclick="renderMissingArtworkPage()">Refresh</button>
+      </div>
+      <div id="artworkAlert"></div>
+      <div class="mb-3 d-flex flex-wrap gap-2">
+        <span class="badge text-bg-secondary">ROMs: ${roms.length}</span>
+        ${(payload.fields || []).map((field) => `<span class="badge text-bg-light border">${escapeHtml(field)}: ${Number(fieldCounts[field] || 0)}</span>`).join("")}
+      </div>
+      <div class="row g-3">
+        <div class="col-12 col-xl-7">
+          <div class="card log-card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+              <span>Missing Artwork</span>
+              <input id="artworkFilter" class="form-control form-control-sm" style="max-width: 260px;" type="search" placeholder="Filter table">
+            </div>
+            <div class="card-body p-0">
+              <div class="table-responsive" style="max-height: 620px;">
+                <table class="table table-sm table-hover align-middle mb-0">
+                  <thead class="table-light">
+                    <tr>
+                      <th>System</th>
+                      <th>ROM</th>
+                      <th>Missing</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody id="artworkRows">
+                    ${roms.map((rom, idx) => `
+                      <tr data-filter="${escapeHtml(`${rom.system} ${rom.name} ${(rom.missing || []).join(" ")}`.toLowerCase())}">
+                        <td class="mono small">${escapeHtml(rom.system || "")}</td>
+                        <td>
+                          <div class="fw-semibold">${escapeHtml(rom.title || rom.name || "")}</div>
+                          <div class="text-muted small">${escapeHtml(rom.rom_name || rom.name || "")}</div>
+                          ${rom.has_gamelist_entry ? "" : `<span class="badge text-bg-warning">new gamelist entry needed</span>`}
+                        </td>
+                        <td>${(rom.missing || []).map((field) => `<span class="badge text-bg-danger me-1">${escapeHtml(field)}</span>`).join("")}</td>
+                        <td class="text-end"><button class="btn btn-sm btn-primary" type="button" onclick="selectArtworkRom(${idx})">Select</button></td>
+                      </tr>
+                    `).join("") || `<tr><td colspan="4" class="text-muted p-3">No missing artwork found.</td></tr>`}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="col-12 col-xl-5">
+          <div class="card log-card">
+            <div class="card-header">LaunchBox Matches</div>
+            <div class="card-body">
+              <div id="selectedArtworkRom" class="text-muted">Select a ROM to search LaunchBox.</div>
+              <div id="launchboxMatches" class="mt-3"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+    window.missingArtworkRoms = roms;
+    const filter = document.getElementById("artworkFilter");
+    if (filter) {
+      filter.addEventListener("input", () => {
+        const q = (filter.value || "").trim().toLowerCase();
+        document.querySelectorAll("#artworkRows tr[data-filter]").forEach((row) => {
+          row.style.display = !q || (row.getAttribute("data-filter") || "").includes(q) ? "" : "none";
+        });
+      });
+    }
+  } catch (err) {
+    content.innerHTML = `<div class="alert alert-danger">Failed to scan artwork: ${escapeHtml(err.message || "unknown error")}</div>`;
+  } finally {
+    setLoading(false);
+  }
+}
+async function selectArtworkRom(index) {
+  const roms = window.missingArtworkRoms || [];
+  const rom = roms[index];
+  if (!rom) return;
+  const selected = document.getElementById("selectedArtworkRom");
+  const matchesEl = document.getElementById("launchboxMatches");
+  selected.innerHTML = `
+    <div class="fw-semibold">${escapeHtml(rom.title || rom.name || "")}</div>
+    <div class="text-muted small">${escapeHtml(rom.system || "")} · Missing ${(rom.missing || []).join(", ")}</div>
+  `;
+  matchesEl.innerHTML = `<div class="text-muted"><span class="spinner-border spinner-border-sm me-2"></span>Searching LaunchBox...</div>`;
+  try {
+    const data = await api(`/admin/artwork/launchbox/search?system=${encodeURIComponent(rom.system || "")}&rom_id=${encodeURIComponent(rom.unique_id || "")}&q=${encodeURIComponent(rom.search_title || rom.title || rom.name || "")}`);
+    const matches = data.matches || [];
+    const platformNote = data.launchbox_platform
+      ? `<div class="text-muted small mb-2">Filtered by LaunchBox platform: ${escapeHtml(data.launchbox_platform)}</div>`
+      : `<div class="text-muted small mb-2">No LaunchBox platform mapping found for this system; showing title matches.</div>`;
+    matchesEl.innerHTML = platformNote + (matches.length ? `
+      <div class="list-group">
+        ${matches.map((match) => `
+          <button type="button" class="list-group-item list-group-item-action" onclick='applyLaunchboxArtwork(${JSON.stringify(rom.system || "")}, ${JSON.stringify(rom.unique_id || "")}, ${JSON.stringify(String(match.game_key || ""))})'>
+            <div class="d-flex gap-3 align-items-center">
+              ${match.thumbnail_url ? `<img src="${match.thumbnail_url}" alt="" style="width: 56px; height: 56px; object-fit: cover; background:#111;">` : `<div style="width:56px;height:56px;background:#111;"></div>`}
+              <div>
+                <div class="fw-semibold">${escapeHtml(match.name || "")}</div>
+                <div class="text-muted small">${escapeHtml(match.platform || "unknown platform")}</div>
+              </div>
+            </div>
+          </button>
+        `).join("")}
+      </div>
+    ` : `<div class="text-muted">No LaunchBox matches found.</div>`);
+  } catch (err) {
+    matchesEl.innerHTML = `<div class="alert alert-danger py-2">LaunchBox search failed: ${escapeHtml(err.message || "unknown error")}</div>`;
+  }
+}
+async function applyLaunchboxArtwork(system, romId, gameKey) {
+  const alertEl = document.getElementById("artworkAlert");
+  const matchesEl = document.getElementById("launchboxMatches");
+  if (alertEl) alertEl.innerHTML = "";
+  if (matchesEl) matchesEl.insertAdjacentHTML("afterbegin", `<div class="text-muted mb-2"><span class="spinner-border spinner-border-sm me-2"></span>Downloading missing artwork...</div>`);
+  try {
+    const result = await apiPost("/admin/artwork/launchbox/apply", { system, rom_id: romId, game_key: gameKey });
+    const updated = result.updated || [];
+    if (alertEl) {
+      alertEl.innerHTML = `<div class="alert alert-success">Updated ${updated.length} artwork field${updated.length === 1 ? "" : "s"} for ${escapeHtml(result.rom_name || "ROM")}.</div>`;
+    }
+    await renderMissingArtworkPage();
+  } catch (err) {
+    if (alertEl) alertEl.innerHTML = `<div class="alert alert-danger">Artwork update failed: ${escapeHtml(err.message || "unknown error")}</div>`;
+  }
+}
 async function renderOvermindIntegrationPage() {
   titleNode.textContent = "Overmind Integration";
-  subtitleNode.textContent = "Configure endpoint, email, and password for stub integration with batocera.overmind";
+  subtitleNode.textContent = "Configure endpoint, email, and password for batocera.overmind polling";
   content.innerHTML = `
     <div class="mb-3">
       <button class="btn btn-outline-secondary" onclick="setHash('#admin')">← Back to Admin</button>
@@ -1378,6 +1533,59 @@ async function renderOvermindIntegrationPage() {
     alertEl.innerHTML = `<div class="alert alert-danger py-2">${escapeHtml(err.message || "Failed to load status")}</div>`;
   }
 }
+async function renderOvermindActionsPage() {
+  titleNode.textContent = "Processed Actions";
+  subtitleNode.textContent = "Actions polled from batocera.overmind and processed locally";
+  setSearchMode("hidden");
+  setLoading(true, "Loading processed actions...");
+  clearSystemTheme();
+  await refreshRandomThemeLogo();
+  try {
+    const payload = await api("/admin/integrations/overmind/actions");
+    const actions = payload.actions || [];
+    content.innerHTML = `
+      <div class="mb-3">
+        <button class="btn btn-outline-secondary" onclick="setHash('#admin')">← Back to Admin</button>
+        <button class="btn btn-outline-primary ms-2" onclick="renderOvermindActionsPage()">Refresh</button>
+      </div>
+      <div class="card log-card">
+        <div class="card-header">Processed Overmind Actions</div>
+        <div class="card-body">
+          ${actions.length ? `
+            <div class="table-responsive">
+              <table class="table table-sm align-middle">
+                <thead>
+                  <tr>
+                    <th>Processed</th>
+                    <th>Action</th>
+                    <th>Status</th>
+                    <th>Device</th>
+                    <th>Message</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${actions.map(action => `
+                    <tr>
+                      <td>${escapeHtml(action.processed_at || "n/a")}</td>
+                      <td>${escapeHtml(action.action || "n/a")}</td>
+                      <td><span class="badge text-bg-secondary">${escapeHtml(action.status || "n/a")}</span></td>
+                      <td class="mono small">${escapeHtml(action.device_id || "n/a")}</td>
+                      <td>${escapeHtml(action.message || "")}${action.fake_data ? ' <span class="badge text-bg-info ms-1">fake data</span>' : ''}</td>
+                    </tr>
+                  `).join("")}
+                </tbody>
+              </table>
+            </div>
+          ` : `<div class="text-muted">No processed actions yet.</div>`}
+        </div>
+      </div>
+    `;
+  } catch (err) {
+    showError(`Failed to load processed actions: ${err.message}`);
+  } finally {
+    setLoading(false);
+  }
+}
 async function renderLogsPage(selectedSource = null, selectedLines = 200) {
   const logSources = [
     ["es_launch_stdout", "ES Launch Stdout", "bi-terminal"],
@@ -1499,10 +1707,14 @@ async function renderConfigsPage(selectedSource = null, selectedMaxBytes = 13107
   ];
   const catalogMap = new Map(configSourceCatalog.map((item) => [item[0], item]));
   let allowedSourceKeys = configSourceCatalog.map((item) => item[0]);
+  let sourceVersions = {};
   try {
     const sourcePayload = await api("/admin/configs/sources");
     if (sourcePayload && Array.isArray(sourcePayload.sources) && sourcePayload.sources.length > 0) {
       allowedSourceKeys = sourcePayload.sources.filter((key) => catalogMap.has(key));
+    }
+    if (sourcePayload && sourcePayload.versions && typeof sourcePayload.versions === "object") {
+      sourceVersions = sourcePayload.versions;
     }
   } catch (_) {
     // Fall back to full list if source scan endpoint is unavailable.
@@ -1512,8 +1724,8 @@ async function renderConfigsPage(selectedSource = null, selectedMaxBytes = 13107
   const effectiveSource = validSources.has(selectedSource) ? selectedSource : null;
   const effectiveMaxBytes = clampMaxBytes(selectedMaxBytes);
 
-  titleNode.textContent = "Config Files";
-  subtitleNode.textContent = "View important files used for system/emulator debugging";
+  titleNode.textContent = "Emulators";
+  subtitleNode.textContent = "View emulator config files and detected versions";
   content.innerHTML = `
     <div class="mb-3">
       <button class="btn btn-outline-secondary" onclick="setHash('#admin')">← Back to Admin</button>
@@ -1521,11 +1733,14 @@ async function renderConfigsPage(selectedSource = null, selectedMaxBytes = 13107
     <div class="row">
       <div class="col-md-3">
         <div class="card log-card">
-          <div class="card-header">Config Sources</div>
+          <div class="card-header">Emulators</div>
           <div class="list-group list-group-flush" id="configSources">
             ${configSources.map(([source, label, icon]) => `
               <button type="button" class="list-group-item list-group-item-action text-start" data-config-source="${source}" onclick="loadConfig('${source}', this)">
-                <i class="bi ${icon} me-2"></i>${label}
+                <div class="d-flex align-items-start justify-content-between gap-2">
+                  <span><i class="bi ${icon} me-2"></i>${label}</span>
+                  ${sourceVersions[source] ? `<span class="badge text-bg-secondary text-wrap text-end">${escapeHtml(sourceVersions[source])}</span>` : ''}
+                </div>
               </button>
             `).join("")}
           </div>
@@ -1534,7 +1749,7 @@ async function renderConfigsPage(selectedSource = null, selectedMaxBytes = 13107
       <div class="col-md-9">
         <div class="card log-card">
           <div class="card-header d-flex justify-content-between align-items-center">
-            <span id="configTitle">Select a config source</span>
+            <span id="configTitle">Select an emulator</span>
             <div>
               <label for="maxBytesInput" class="form-label me-2">Max Bytes:</label>
               <select id="maxBytesInput" class="form-select log-lines-select">
@@ -1549,7 +1764,7 @@ async function renderConfigsPage(selectedSource = null, selectedMaxBytes = 13107
             </div>
           </div>
           <div class="card-body">
-            <pre id="configContent" class="mono bg-dark text-light p-3" style="max-height: 600px; overflow-y: auto; white-space: pre-wrap;">Select a config source from the left panel to view its contents.</pre>
+            <pre id="configContent" class="mono bg-dark text-light p-3" style="max-height: 600px; overflow-y: auto; white-space: pre-wrap;">Select an emulator from the left panel to view its config.</pre>
           </div>
         </div>
       </div>
@@ -1732,12 +1947,24 @@ async function router() {
         return;
       }
       await renderAdminSystemInfoPage();
+    } else if (hash === "#admin/artwork") {
+      if (!adminEnabled) {
+        setHash("");
+        return;
+      }
+      await renderMissingArtworkPage();
     } else if (hash === "#admin/overmind") {
       if (!adminEnabled) {
         setHash("");
         return;
       }
       await renderOvermindIntegrationPage();
+    } else if (hash === "#admin/overmind/actions") {
+      if (!adminEnabled) {
+        setHash("");
+        return;
+      }
+      await renderOvermindActionsPage();
     } else if (hash.startsWith("#search-system/")) {
       const rest = hash.substring("#search-system/".length);
       const slashIndex = rest.indexOf("/");

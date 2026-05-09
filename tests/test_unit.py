@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 from app.mock_data import seed_mock_userdata
-from app.rom_api import BasicAuth, RomRepository
+from app.rom_api import BasicAuth, LaunchBoxClient, RomRepository, _launchbox_platform_for_system
 
 
 class BasicAuthTests(unittest.TestCase):
@@ -38,6 +38,79 @@ class RepositoryTests(unittest.TestCase):
             repo = RomRepository(root / "roms", root / "bios")
             results = repo.search_roms("mario")
             self.assertTrue(any(item["name"].lower().startswith("mario") for item in results))
+
+    def test_list_missing_artwork_from_gamelist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            seed_mock_userdata(root)
+            repo = RomRepository(root / "roms", root / "bios")
+            results = repo.list_missing_artwork()
+            chrono = next(item for item in results if item["system"] == "snes" and "Chrono" in item["name"])
+            self.assertIn("image", chrono["missing"])
+            self.assertIn("marquee", chrono["missing"])
+            self.assertEqual(chrono["rom_name"], "Chrono Trigger (USA).zip")
+
+    def test_apply_launchbox_artwork_only_missing_fields(self) -> None:
+        class FakeLaunchBoxClient:
+            def details(self, game_key: str) -> dict:
+                return {
+                    "game_key": game_key,
+                    "name": "Chrono Trigger",
+                    "platform": "Super Nintendo Entertainment System",
+                    "images": [
+                        {"url": "https://example.test/front.jpg", "file_name": "front.jpg", "type": "Box - Front"},
+                        {"url": "https://example.test/logo.png", "file_name": "logo.png", "type": "Clear Logo"},
+                        {"url": "https://example.test/fanart.jpg", "file_name": "fanart.jpg", "type": "Fanart - Background"},
+                    ],
+                }
+
+            def choose_image_for_field(self, details: dict, field: str) -> dict:
+                for image in details["images"]:
+                    if field == "marquee" and image["type"] == "Clear Logo":
+                        return image
+                    if field != "marquee" and image["type"] == "Box - Front":
+                        return image
+                return details["images"][0]
+
+            def download_image(self, url: str):
+                return b"image-bytes", "image/jpeg"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            seed_mock_userdata(root)
+            gamelist = root / "roms" / "snes" / "gamelist.xml"
+            gamelist.write_text(
+                "<gameList><game><path>./Chrono Trigger (USA).zip</path><name>Chrono Trigger</name><image>./images/existing.png</image></game></gameList>\n",
+                encoding="utf-8",
+            )
+            repo = RomRepository(root / "roms", root / "bios")
+            rom = next(item for item in repo.search_roms("chrono") if item["system"] == "snes")
+            result = repo.apply_launchbox_artwork("snes", rom["unique_id"], "123", FakeLaunchBoxClient())
+            updated_fields = {item["field"] for item in result["updated"]}
+            self.assertNotIn("image", updated_fields)
+            self.assertIn("thumbnail", updated_fields)
+            self.assertIn("marquee", updated_fields)
+            text = gamelist.read_text(encoding="utf-8")
+            self.assertIn("./images/existing.png", text)
+            self.assertIn("launchbox-marquee", text)
+
+
+class LaunchBoxMappingTests(unittest.TestCase):
+    def test_batocera_system_maps_to_launchbox_platform_name(self) -> None:
+        self.assertEqual(_launchbox_platform_for_system("ps2"), "Sony Playstation 2")
+        self.assertEqual(_launchbox_platform_for_system("snes"), "Super Nintendo Entertainment System")
+
+    def test_launchbox_search_supplies_platform_filter(self) -> None:
+        urls = []
+
+        class FakeLaunchBoxClient(LaunchBoxClient):
+            def _get_json(self, url: str) -> dict:
+                urls.append(url)
+                return {"data": []}
+
+        FakeLaunchBoxClient().search("Chrono Trigger", system="ps2")
+        self.assertTrue(urls)
+        self.assertIn("platform=Sony%20Playstation%202", urls[0])
 
 
 if __name__ == "__main__":

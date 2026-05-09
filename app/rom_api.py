@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import ssl
 import subprocess
 import sys
@@ -13,8 +14,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from threading import Lock
+from threading import Lock, Thread
 from typing import Dict, Iterable, List, Optional, Tuple
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 from urllib.parse import quote
 from urllib.parse import unquote
 from urllib.parse import urlparse
@@ -27,6 +30,112 @@ except ImportError:
     from api_routes import ApiRoutesMixin  # type: ignore
     from route_config import API_PREFIX, api_url  # type: ignore
     from ui_routes import UiRoutesMixin  # type: ignore
+
+
+FAKE_OVERMIND_EMAIL = "arcade@example.com"
+FAKE_OVERMIND_PASSWORD = "ArcadePass123"
+FAKE_OVERMIND_DEVICE_ID = "arcade-cabinet-002"
+LAUNCHBOX_API_BASE = "https://api.gamesdb.launchbox-app.com/api"
+LAUNCHBOX_IMAGE_BASE = "https://images.launchbox-app.com"
+ARTWORK_FIELDS = ("image", "thumbnail", "marquee", "fanart", "boxart")
+LAUNCHBOX_PLATFORM_ALIASES = {
+    "3do": "3DO Interactive Multiplayer",
+    "adam": "Coleco ADAM",
+    "amiga": "Commodore Amiga",
+    "amigacd32": "Commodore Amiga CD32",
+    "amstradcpc": "Amstrad CPC",
+    "apple2": "Apple II",
+    "arcade": "Arcade",
+    "atari2600": "Atari 2600",
+    "atari5200": "Atari 5200",
+    "atari7800": "Atari 7800",
+    "atari800": "Atari 8-bit",
+    "atarijaguar": "Atari Jaguar",
+    "atarijaguarcd": "Atari Jaguar CD",
+    "atarilynx": "Atari Lynx",
+    "atarist": "Atari ST",
+    "atomiswave": "Sammy Atomiswave",
+    "c128": "Commodore 128",
+    "c20": "Commodore VIC-20",
+    "c64": "Commodore 64",
+    "cavestory": "Cave Story",
+    "cdimono1": "Philips CD-i",
+    "chailove": "ChaiLove",
+    "channel_f": "Fairchild Channel F",
+    "colecovision": "ColecoVision",
+    "cps1": "Capcom CPS-1",
+    "cps2": "Capcom CPS-2",
+    "cps3": "Capcom CPS-3",
+    "daphne": "Daphne",
+    "dos": "MS-DOS",
+    "nes": "Nintendo Entertainment System",
+    "snes": "Super Nintendo Entertainment System",
+    "n64": "Nintendo 64",
+    "gba": "Nintendo Game Boy Advance",
+    "gb": "Nintendo Game Boy",
+    "gbc": "Nintendo Game Boy Color",
+    "nds": "Nintendo DS",
+    "3ds": "Nintendo 3DS",
+    "gamecube": "Nintendo GameCube",
+    "wii": "Nintendo Wii",
+    "wiiu": "Nintendo Wii U",
+    "switch": "Nintendo Switch",
+    "famicom": "Nintendo Famicom",
+    "fds": "Nintendo Famicom Disk System",
+    "genesis": "Sega Genesis",
+    "megadrive": "Sega Genesis",
+    "megadrive-japan": "Sega Mega Drive",
+    "sega32x": "Sega 32X",
+    "segacd": "Sega CD",
+    "mastersystem": "Sega Master System",
+    "sg1000": "Sega SG-1000",
+    "gamegear": "Sega Game Gear",
+    "dreamcast": "Sega Dreamcast",
+    "saturn": "Sega Saturn",
+    "psx": "Sony Playstation",
+    "ps1": "Sony Playstation",
+    "ps2": "Sony Playstation 2",
+    "ps3": "Sony Playstation 3",
+    "ps4": "Sony Playstation 4",
+    "ps5": "Sony Playstation 5",
+    "psp": "Sony PSP",
+    "psvita": "Sony Playstation Vita",
+    "mame": "Arcade",
+    "fbneo": "Arcade",
+    "neogeo": "SNK Neo Geo MVS",
+    "neogeocd": "SNK Neo Geo CD",
+    "ngp": "SNK Neo Geo Pocket",
+    "ngpc": "SNK Neo Geo Pocket Color",
+    "odyssey2": "Magnavox Odyssey 2",
+    "openbor": "OpenBOR",
+    "pc": "Windows",
+    "pcengine": "NEC TurboGrafx-16",
+    "pcenginecd": "NEC TurboGrafx-CD",
+    "pcfx": "NEC PC-FX",
+    "ports": "Ports",
+    "satellaview": "Nintendo Satellaview",
+    "scummvm": "ScummVM",
+    "steam": "Windows",
+    "supergrafx": "NEC SuperGrafx",
+    "tic80": "TIC-80",
+    "triforce": "Namco Sega Nintendo Triforce",
+    "vectrex": "GCE Vectrex",
+    "virtualboy": "Nintendo Virtual Boy",
+    "windows": "Windows",
+    "wswan": "Bandai WonderSwan",
+    "wswanc": "Bandai WonderSwan Color",
+    "xbox": "Microsoft Xbox",
+    "xbox360": "Microsoft Xbox 360",
+    "xboxone": "Microsoft Xbox One",
+    "zxspectrum": "Sinclair ZX Spectrum",
+}
+LAUNCHBOX_FIELD_TYPES = {
+    "image": ("Box - Front",),
+    "thumbnail": ("Box - Front", "Screenshot - Game Title", "Screenshot - Gameplay"),
+    "marquee": ("Clear Logo",),
+    "fanart": ("Fanart - Background",),
+    "boxart": ("Box - Front",),
+}
 
 
 def _require_env(name: str) -> str:
@@ -52,6 +161,150 @@ def _env_bool(default: bool, *names: str) -> bool:
             continue
         return value.strip().lower() not in ("0", "false", "no", "off")
     return default
+
+
+def _clean_rom_title(value: str) -> str:
+    name = Path(value or "").stem
+    name = re.sub(r"\[[^\]]*\]", " ", name)
+    name = re.sub(r"\([^)]*\)", " ", name)
+    name = re.sub(r"\s+", " ", name.replace("_", " ")).strip()
+    return name or Path(value or "").stem or value
+
+
+def _normalize_platform_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
+def _launchbox_platform_for_system(system: Optional[str]) -> Optional[str]:
+    key = _normalize_platform_key(system or "")
+    if not key:
+        return None
+    return LAUNCHBOX_PLATFORM_ALIASES.get(key)
+
+
+def _text_or_empty(parent: ET.Element, tag: str) -> str:
+    child = parent.find(tag)
+    return (child.text or "").strip() if child is not None else ""
+
+
+def _set_child_text(parent: ET.Element, tag: str, value: str) -> None:
+    child = parent.find(tag)
+    if child is None:
+        child = ET.SubElement(parent, tag)
+    child.text = value
+
+
+def _relative_artwork_path(system_dir: Path, path: Path) -> str:
+    try:
+        return f"./{path.resolve().relative_to(system_dir.resolve()).as_posix()}"
+    except Exception:
+        return str(path)
+
+
+class LaunchBoxClient:
+    def __init__(self, timeout_seconds: int = 15):
+        self.timeout_seconds = timeout_seconds
+
+    def _get_json(self, url: str) -> dict:
+        request = Request(url, headers={"User-Agent": "batocera-drone-rom-api/4.0"})
+        with urlopen(request, timeout=self.timeout_seconds) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def search(self, query: str, system: Optional[str] = None, limit: int = 20) -> List[dict]:
+        normalized_query = (query or "").strip()
+        if not normalized_query:
+            return []
+        expected_platform = _launchbox_platform_for_system(system)
+
+        def _search_payload(platform: Optional[str]) -> dict:
+            url = f"{LAUNCHBOX_API_BASE}/search/{quote(normalized_query, safe='')}"
+            if platform:
+                url = f"{url}?platform={quote(platform, safe='')}"
+            return self._get_json(url)
+
+        payload = _search_payload(expected_platform)
+        results = payload.get("data") if isinstance(payload, dict) else []
+        if not isinstance(results, list):
+            return []
+        if expected_platform and not results:
+            payload = _search_payload(None)
+            results = payload.get("data") if isinstance(payload, dict) else []
+            if not isinstance(results, list):
+                return []
+
+        output = []
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            platform = str(item.get("platformName") or "")
+            score = 0
+            if expected_platform and platform.lower() == expected_platform.lower():
+                score -= 20
+            name = str(item.get("name") or "")
+            if name.lower() == normalized_query.lower():
+                score -= 10
+            thumb = str(item.get("thumbName") or "")
+            output.append(
+                {
+                    "game_key": item.get("gameKey"),
+                    "name": name,
+                    "platform": platform,
+                    "platform_filter": expected_platform,
+                    "thumbnail_url": f"{LAUNCHBOX_IMAGE_BASE}/{quote(thumb, safe='')}" if thumb else None,
+                    "details_url": f"https://gamesdb.launchbox-app.com/games/details/{item.get('gameKey')}",
+                    "_score": score,
+                }
+            )
+        output.sort(key=lambda item: (item["_score"], item["platform"].lower(), item["name"].lower()))
+        for item in output:
+            item.pop("_score", None)
+        return output[: max(1, min(limit, 50))]
+
+    def details(self, game_key: str) -> dict:
+        safe_key = re.sub(r"[^0-9]", "", str(game_key or ""))
+        if not safe_key:
+            raise ValueError("game_key is required")
+        payload = self._get_json(f"{LAUNCHBOX_API_BASE}/games/details/{safe_key}")
+        images = []
+        for item in payload.get("gameImages") or []:
+            if not isinstance(item, dict):
+                continue
+            file_name = item.get("fullGameImageFileName") or item.get("imageFileName")
+            if not file_name:
+                continue
+            images.append(
+                {
+                    "file_name": str(file_name),
+                    "type": str(item.get("imageTypeName") or "").replace(" Thumb", ""),
+                    "region": item.get("regionName"),
+                    "width": item.get("fullGameImageWidth") or item.get("width"),
+                    "height": item.get("fullGameImageHeight") or item.get("height"),
+                    "url": f"{LAUNCHBOX_IMAGE_BASE}/{quote(str(file_name), safe='')}",
+                }
+            )
+        return {
+            "game_key": payload.get("gameKey"),
+            "name": payload.get("name"),
+            "platform": (payload.get("platform") or {}).get("name") if isinstance(payload.get("platform"), dict) else None,
+            "release_date": payload.get("releaseDate"),
+            "overview": payload.get("overview"),
+            "images": images,
+        }
+
+    def choose_image_for_field(self, details: dict, field: str) -> Optional[dict]:
+        wanted = LAUNCHBOX_FIELD_TYPES.get(field, ())
+        images = details.get("images") or []
+        for image_type in wanted:
+            for image in images:
+                if str(image.get("type") or "").lower() == image_type.lower():
+                    return image
+        return images[0] if field in ("image", "thumbnail", "boxart") and images else None
+
+    def download_image(self, url: str) -> Tuple[bytes, str]:
+        request = Request(url, headers={"User-Agent": "batocera-drone-rom-api/4.0"})
+        with urlopen(request, timeout=self.timeout_seconds) as response:
+            content_type = response.headers.get_content_type()
+            return response.read(), content_type
 
 
 @dataclass(frozen=True)
@@ -95,12 +348,15 @@ class Settings:
     overmind_url: Optional[str]
     overmind_email: Optional[str]
     overmind_password: Optional[str]
+    overmind_device_id: str
+    overmind_poll_seconds: int
 
     @classmethod
     def from_env(cls) -> "Settings":
         https_port_value = os.environ.get("HTTPS_PORT", os.environ.get("PORT", "8443"))
         cert_value = os.environ.get("TLS_CERT_FILE")
         key_value = os.environ.get("TLS_KEY_FILE")
+        use_fake_data = _env_bool(False, "USE_FAKE_DATA")
 
         return cls(
             userdata_root=Path(os.environ.get("USERDATA_ROOT", "/userdata")),
@@ -138,11 +394,16 @@ class Settings:
             ),
             batocera_theme_name=os.environ.get("BATOCERA_THEME_NAME"),
             http_only=_env_bool(False, "HTTP_ONLY", "ROM_API_HTTP_ONLY"),
-            use_fake_data=_env_bool(False, "USE_FAKE_DATA"),
+            use_fake_data=use_fake_data,
             fake_image_base_url=os.environ.get("FAKE_IMAGE_BASE_URL"),
             overmind_url=os.environ.get("OVERMIND_URL"),
             overmind_email=os.environ.get("OVERMIND_EMAIL"),
             overmind_password=os.environ.get("OVERMIND_PASSWORD"),
+            overmind_device_id=os.environ.get(
+                "OVERMIND_DEVICE_ID",
+                os.environ.get("DEVICE_ID", FAKE_OVERMIND_DEVICE_ID if use_fake_data else "batocera-drone"),
+            ),
+            overmind_poll_seconds=int(os.environ.get("OVERMIND_POLL_SECONDS", "5")),
         )
 
 
@@ -525,6 +786,7 @@ class RomRepository:
                         {
                             "unique_id": self.build_unique_id(entry),
                             "name": entry.name,
+                            "rom_file": entry.name,
                             "byte_count": stat.st_size,
                             "entry_type": "file",
                             "is_downloadable": True,
@@ -545,6 +807,7 @@ class RomRepository:
                         {
                             "unique_id": self.build_unique_id(entry),
                             "name": display_name,
+                            "rom_file": entry.name,
                             "byte_count": stat.st_size,
                             "entry_type": "folder",
                             "is_downloadable": False,
@@ -567,8 +830,9 @@ class RomRepository:
                 display_name = ps4_name_file.stem
                 items.append(
                     {
-                        "unique_id": self.build_unique_id(entry),
-                        "name": display_name,
+                            "unique_id": self.build_unique_id(entry),
+                            "name": display_name,
+                            "rom_file": entry.name,
                         "byte_count": stat.st_size,
                         "entry_type": "folder",
                         "is_downloadable": False,
@@ -587,6 +851,7 @@ class RomRepository:
                 {
                     "unique_id": self.build_unique_id(entry),
                     "name": display_name,
+                    "rom_file": entry.name,
                     "byte_count": stat.st_size,
                     "entry_type": "file",
                     "is_downloadable": (system_lower != "steam"),
@@ -685,6 +950,167 @@ class RomRepository:
         if limit is not None and limit > 0:
             return results[:limit]
         return results
+
+    def _read_gamelist(self, system_dir: Path) -> Tuple[ET.ElementTree, ET.Element]:
+        gamelist_path = system_dir / "gamelist.xml"
+        if gamelist_path.exists() and gamelist_path.is_file():
+            try:
+                tree = ET.parse(gamelist_path)
+                root = tree.getroot()
+                if root.tag != "gameList":
+                    raise ValueError("gamelist root is not gameList")
+                return tree, root
+            except ET.ParseError as error:
+                raise ValueError(f"invalid gamelist.xml: {error}") from error
+        root = ET.Element("gameList")
+        return ET.ElementTree(root), root
+
+    def _find_gamelist_entry(self, root: ET.Element, rom_name: str, rom_display_name: str) -> Optional[ET.Element]:
+        normalized_file = rom_name.lower()
+        normalized_file_stem = Path(rom_name).stem.lower()
+        normalized_display = rom_display_name.lower()
+        for game in root.findall("game"):
+            path_value = _text_or_empty(game, "path")
+            if path_value:
+                path_name = Path(path_value.replace("\\", "/")).name.lower()
+                if path_name == normalized_file or Path(path_name).stem.lower() in (normalized_file_stem, normalized_display):
+                    return game
+            name_value = _text_or_empty(game, "name").lower()
+            if name_value and name_value in (normalized_display, normalized_file, normalized_file_stem):
+                return game
+        return None
+
+    def _entry_missing_artwork(self, game: Optional[ET.Element]) -> List[str]:
+        missing = []
+        for field in ARTWORK_FIELDS:
+            if game is None or not _text_or_empty(game, field):
+                missing.append(field)
+        return missing
+
+    def list_missing_artwork(self) -> List[dict]:
+        if not self.roms_root.exists():
+            return []
+        missing_items: List[dict] = []
+        for entry in sorted(self.roms_root.iterdir(), key=lambda p: p.name.lower()):
+            if not (entry.is_dir() or entry.is_symlink()):
+                continue
+            if not self.should_include_system(entry.name):
+                continue
+            system = entry.name
+            system_dir = entry.resolve()
+            if not system_dir.exists() or not system_dir.is_dir():
+                continue
+            try:
+                _, roms = self.list_assets(system, "roms")
+                _, root = self._read_gamelist(system_dir)
+            except Exception:
+                continue
+            for rom in roms:
+                rom_file = str(rom.get("rom_file") or rom.get("name") or "")
+                game = self._find_gamelist_entry(root, rom_file, str(rom.get("image_stem") or rom.get("name") or ""))
+                missing = self._entry_missing_artwork(game)
+                if not missing:
+                    continue
+                missing_items.append(
+                    {
+                        "system": system,
+                        "name": rom.get("name"),
+                        "rom_name": rom_file,
+                        "title": _text_or_empty(game, "name") if game is not None else str(rom.get("image_stem") or rom.get("name") or ""),
+                        "search_title": _clean_rom_title(str(rom.get("image_stem") or rom.get("name") or "")),
+                        "unique_id": rom.get("unique_id"),
+                        "missing": missing,
+                        "existing": {field: _text_or_empty(game, field) if game is not None else "" for field in ARTWORK_FIELDS},
+                        "has_gamelist_entry": game is not None,
+                    }
+                )
+        missing_items.sort(key=lambda item: (str(item["system"]).lower(), str(item["name"]).lower()))
+        return missing_items
+
+    def find_rom_by_unique_id(self, system: str, unique_id: str) -> dict:
+        _, roms = self.list_assets(system, "roms")
+        for rom in roms:
+            if str(rom.get("unique_id")) == str(unique_id):
+                return rom
+        raise FileNotFoundError()
+
+    def apply_launchbox_artwork(self, system: str, unique_id: str, game_key: str, client: LaunchBoxClient) -> dict:
+        system_dir = self.get_system_dir(system)
+        rom = self.find_rom_by_unique_id(system, unique_id)
+        tree, root = self._read_gamelist(system_dir)
+        rom_name = str(rom.get("rom_file") or rom.get("rom_name") or rom.get("name") or "")
+        display_name = str(rom.get("image_stem") or rom.get("name") or "")
+        game = self._find_gamelist_entry(root, rom_name, display_name)
+        if game is None:
+            game = ET.SubElement(root, "game")
+            _set_child_text(game, "path", f"./{rom_name}")
+            _set_child_text(game, "name", _clean_rom_title(display_name))
+
+        missing = self._entry_missing_artwork(game)
+        if not missing:
+            return {"system": system, "unique_id": unique_id, "updated": [], "skipped": list(ARTWORK_FIELDS)}
+
+        details = client.details(game_key)
+        images_dir = system_dir / "images"
+        images_dir.mkdir(parents=True, exist_ok=True)
+        safe_stem = re.sub(r"[^a-zA-Z0-9._-]+", "-", Path(display_name).stem).strip("-") or "rom"
+        updated = []
+        skipped = []
+        for field in missing:
+            selected = client.choose_image_for_field(details, field)
+            if not selected:
+                skipped.append(field)
+                continue
+            source_url = str(selected.get("url") or "")
+            try:
+                data, content_type = client.download_image(source_url)
+            except Exception:
+                skipped.append(field)
+                continue
+            source_suffix = Path(str(selected.get("file_name") or "")).suffix.lower()
+            if source_suffix not in (".png", ".jpg", ".jpeg", ".webp", ".gif"):
+                source_suffix = {
+                    "image/png": ".png",
+                    "image/jpeg": ".jpg",
+                    "image/webp": ".webp",
+                    "image/gif": ".gif",
+                }.get(content_type, ".jpg")
+            target_path = images_dir / f"{safe_stem}-launchbox-{field}{source_suffix}"
+            target_path.write_bytes(data)
+            relative_path = _relative_artwork_path(system_dir, target_path)
+            _set_child_text(game, field, relative_path)
+            updated.append(
+                {
+                    "field": field,
+                    "path": relative_path,
+                    "source_url": source_url,
+                    "type": selected.get("type"),
+                    "region": selected.get("region"),
+                }
+            )
+
+        if updated:
+            gamelist_path = system_dir / "gamelist.xml"
+            try:
+                ET.indent(tree, space="  ")
+            except Exception:
+                pass
+            tree.write(gamelist_path, encoding="utf-8", xml_declaration=True)
+            with gamelist_path.open("a", encoding="utf-8") as handle:
+                handle.write("\n")
+
+        return {
+            "system": system,
+            "unique_id": unique_id,
+            "rom_name": rom_name,
+            "launchbox": {
+                "game_key": details.get("game_key"),
+                "name": details.get("name"),
+                "platform": details.get("platform"),
+            },
+            "updated": updated,
+            "skipped": skipped,
+        }
 
     def list_assets(self, system: str, asset_type: str) -> Tuple[Path, List[dict]]:
         system_dir = self.get_system_dir(system)
@@ -1014,6 +1440,29 @@ OPENAPI_SPEC = {
                 },
             }
         },
+        "/admin/artwork/missing": {
+            "get": {
+                "summary": "List ROMs whose gamelist.xml entries are missing artwork fields",
+                "responses": {"200": {"description": "Missing artwork report"}},
+            }
+        },
+        "/admin/artwork/launchbox/search": {
+            "get": {
+                "summary": "Search LaunchBox Games Database for artwork candidates",
+                "parameters": [
+                    {"name": "system", "in": "query", "required": False, "schema": {"type": "string"}},
+                    {"name": "rom_id", "in": "query", "required": False, "schema": {"type": "string"}},
+                    {"name": "q", "in": "query", "required": False, "schema": {"type": "string"}},
+                ],
+                "responses": {"200": {"description": "LaunchBox search matches"}},
+            }
+        },
+        "/admin/artwork/launchbox/apply": {
+            "post": {
+                "summary": "Download selected LaunchBox artwork and update only missing gamelist.xml fields",
+                "responses": {"200": {"description": "Artwork update result"}},
+            }
+        },
         "/admin/configs/{source}": {
             "get": {
                 "summary": "Get important configuration file content for debugging",
@@ -1112,7 +1561,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         self.wfile.write(json_bytes({"error": "unauthorized"}))
 
     def _send_security_headers(self) -> None:
-        image_sources = ["'self'", "data:"]
+        image_sources = ["'self'", "data:", "https://images.launchbox-app.com"]
         if self.settings.use_fake_data:
             image_sources.append("https:")
             fake_base = (self.settings.fake_image_base_url or "").strip()
@@ -1214,6 +1663,9 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
     def _overmind_config_path(self) -> Path:
         return (self.settings.userdata_root / "system" / "rom-api" / "overmind_integration.json").resolve()
 
+    def _overmind_actions_path(self) -> Path:
+        return (self.settings.userdata_root / "system" / "rom-api" / "overmind_processed_actions.json").resolve()
+
     def _mask_secret(self, value: str) -> str:
         if not value:
             return ""
@@ -1222,9 +1674,11 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         return f"{value[:2]}{'*' * (len(value) - 4)}{value[-2:]}"
 
     def _load_overmind_config(self) -> dict:
+        fake_email = FAKE_OVERMIND_EMAIL if self.settings.use_fake_data else ""
+        fake_password = FAKE_OVERMIND_PASSWORD if self.settings.use_fake_data else ""
         default = {
             "overmind_url": (self.settings.overmind_url or "").strip(),
-            "overmind_email": (self.settings.overmind_email or "").strip(),
+            "overmind_email": (fake_email if self.settings.use_fake_data else self.settings.overmind_email or "").strip(),
             "integration_enabled": False,
             "integration_state": "not_started",
             "requested_at": None,
@@ -1233,8 +1687,8 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             "notes": "Stub integration until batocera.overmind app is available.",
         }
 
-        if self.settings.overmind_password:
-            default["overmind_password"] = self.settings.overmind_password
+        if self.settings.overmind_password or fake_password:
+            default["overmind_password"] = fake_password if self.settings.use_fake_data else self.settings.overmind_password
 
         path = self._overmind_config_path()
         if not path.exists() or not path.is_file():
@@ -1248,6 +1702,9 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
 
         merged = dict(default)
         merged.update(loaded)
+        if self.settings.use_fake_data:
+            merged["overmind_email"] = FAKE_OVERMIND_EMAIL
+            merged["overmind_password"] = FAKE_OVERMIND_PASSWORD
         return merged
 
     def _save_overmind_config(self, payload: dict) -> None:
@@ -1274,6 +1731,19 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             "password_masked": self._mask_secret(password) if password else "",
             "status": status,
         }
+
+    def _load_processed_overmind_actions(self) -> List[dict]:
+        path = self._overmind_actions_path()
+        if not path.exists() or not path.is_file():
+            return []
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+        return loaded if isinstance(loaded, list) else []
+
+    def _handle_admin_overmind_actions(self) -> None:
+        self._send_json(200, {"actions": list(reversed(self._load_processed_overmind_actions()))})
 
     def _stream_file(self, path: Path, content_type: str, as_attachment: bool = False) -> None:
         file_size = path.stat().st_size
@@ -1834,6 +2304,63 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             raise ValueError("downloads are disabled")
         target_path = self.repository.find_bios_file_by_unique_id(unique_id)
         self._stream_file(target_path, "application/octet-stream", as_attachment=True)
+
+    def _handle_admin_artwork_missing(self) -> None:
+        items = self.repository.list_missing_artwork()
+        systems = sorted({str(item.get("system") or "") for item in items if item.get("system")})
+        field_counts = {field: 0 for field in ARTWORK_FIELDS}
+        for item in items:
+            for field in item.get("missing") or []:
+                if field in field_counts:
+                    field_counts[field] += 1
+        self._send_json(
+            200,
+            {
+                "roms": items,
+                "count": len(items),
+                "systems": systems,
+                "fields": list(ARTWORK_FIELDS),
+                "field_counts": field_counts,
+            },
+        )
+
+    def _handle_admin_launchbox_search(self, system: str, rom_id: str, query: str) -> None:
+        system_value = (system or "").strip()
+        rom_id_value = (rom_id or "").strip()
+        query_value = (query or "").strip()
+        if system_value and rom_id_value and not query_value:
+            rom = self.repository.find_rom_by_unique_id(system_value, rom_id_value)
+            query_value = _clean_rom_title(str(rom.get("image_stem") or rom.get("name") or ""))
+        if not query_value:
+            raise ValueError("q or system+rom_id is required")
+        client = LaunchBoxClient()
+        matches = client.search(query_value, system=system_value or None)
+        self._send_json(
+            200,
+            {
+                "query": query_value,
+                "system": system_value,
+                "launchbox_platform": _launchbox_platform_for_system(system_value),
+                "rom_id": rom_id_value,
+                "matches": matches,
+            },
+        )
+
+    def _handle_admin_launchbox_apply(self, payload: dict) -> None:
+        system = str(payload.get("system") or "").strip()
+        rom_id = str(payload.get("rom_id") or payload.get("unique_id") or "").strip()
+        game_key = str(payload.get("game_key") or "").strip()
+        if not system:
+            raise ValueError("system is required")
+        if not rom_id:
+            raise ValueError("rom_id is required")
+        if not game_key:
+            raise ValueError("game_key is required")
+        client = LaunchBoxClient()
+        result = self.repository.apply_launchbox_artwork(system, rom_id, game_key, client)
+        with self.repository._search_cache_lock:
+            self.repository._search_index_expires_at = 0
+        self._send_json(200, result)
 
     def _handle_public_image(self, system: str, image_file: str) -> None:
         if self.settings.use_fake_data:
@@ -2660,6 +3187,54 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         except Exception as error:
             self._send_json(500, {"error": f"Failed to read config: {str(error)}"})
 
+    def _detect_emulator_version(self, source: str) -> Optional[str]:
+        if self.settings.use_fake_data and source not in {"batocera", "es_systems", "emulationstation", "es_input", "themes", "controllers"}:
+            return "Mock 1.0"
+
+        command_candidates = {
+            "retroarch": [["retroarch", "--version"]],
+            "mame": [["mame", "-help"]],
+            "dolphin": [["dolphin-emu", "--version"], ["dolphin", "--version"]],
+            "pcsx2": [["pcsx2", "--version"], ["PCSX2", "--version"]],
+            "rpcs3": [["rpcs3", "--version"]],
+            "ppsspp": [["PPSSPPSDL", "--version"], ["ppsspp", "--version"]],
+            "duckstation": [["duckstation-qt", "--version"], ["duckstation", "--version"]],
+            "citra": [["citra", "--version"]],
+            "yuzu": [["yuzu", "--version"]],
+            "ryujinx": [["Ryujinx", "--version"], ["ryujinx", "--version"]],
+            "cemu": [["cemu", "--version"]],
+            "xemu": [["xemu", "--version"]],
+            "xenia": [["xenia", "--version"]],
+            "flycast": [["flycast", "--version"]],
+            "dosbox": [["dosbox", "--version"], ["dosbox-x", "--version"]],
+            "scummvm": [["scummvm", "--version"]],
+            "snes9x": [["snes9x", "--version"]],
+            "bsnes": [["bsnes", "--version"]],
+            "fceux": [["fceux", "--version"]],
+            "mednafen": [["mednafen", "-help"]],
+            "mgba": [["mgba-qt", "--version"], ["mgba", "--version"]],
+            "wine": [["wine", "--version"]],
+            "shadps4": [["shadps4", "--version"], ["shadPS4", "--version"]],
+        }
+        for command in command_candidates.get(source, []):
+            executable = shutil.which(command[0])
+            if not executable:
+                continue
+            try:
+                result = subprocess.run(
+                    [executable, *command[1:]],
+                    capture_output=True,
+                    text=True,
+                    timeout=3,
+                    check=False,
+                )
+            except Exception:
+                continue
+            output = (result.stdout or result.stderr or "").strip().splitlines()
+            if output:
+                return output[0][:120]
+        return None
+
     def _handle_admin_config_sources(self) -> None:
         from pathlib import Path
 
@@ -2789,10 +3364,12 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                         break
 
         ordered_sources = base_sources + [source for source in emulator_presence_rules.keys() if source in discovered]
+        versions = {source: self._detect_emulator_version(source) for source in ordered_sources}
         self._send_json(
             200,
             {
                 "sources": ordered_sources,
+                "versions": versions,
                 "scan_root": str(configs_root),
             },
         )
@@ -2861,6 +3438,160 @@ def _resolve_tls_material(settings: Settings) -> Tuple[Path, Path]:
     return cert_file, key_file
 
 
+def _overmind_config_path_for_settings(settings: Settings) -> Path:
+    return (settings.userdata_root / "system" / "rom-api" / "overmind_integration.json").resolve()
+
+
+def _overmind_actions_path_for_settings(settings: Settings) -> Path:
+    return (settings.userdata_root / "system" / "rom-api" / "overmind_processed_actions.json").resolve()
+
+
+def _load_overmind_config_for_settings(settings: Settings) -> dict:
+    fake_email = FAKE_OVERMIND_EMAIL if settings.use_fake_data else ""
+    fake_password = FAKE_OVERMIND_PASSWORD if settings.use_fake_data else ""
+    default = {
+        "overmind_url": (settings.overmind_url or "").strip(),
+        "overmind_email": (fake_email if settings.use_fake_data else settings.overmind_email or "").strip(),
+        "overmind_password": fake_password if settings.use_fake_data else settings.overmind_password or "",
+        "integration_enabled": bool(settings.overmind_url and (settings.overmind_email or fake_email) and (settings.overmind_password or fake_password)),
+    }
+    path = _overmind_config_path_for_settings(settings)
+    if not path.exists() or not path.is_file():
+        return default
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return default
+    if not isinstance(loaded, dict):
+        return default
+    merged = dict(default)
+    merged.update(loaded)
+    if settings.use_fake_data:
+        merged["overmind_email"] = FAKE_OVERMIND_EMAIL
+        merged["overmind_password"] = FAKE_OVERMIND_PASSWORD
+    return merged
+
+
+def _record_processed_overmind_action(settings: Settings, action: dict, status_value: str, message: str) -> None:
+    path = _overmind_actions_path_for_settings(settings)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+    except Exception:
+        loaded = []
+    actions = loaded if isinstance(loaded, list) else []
+    actions.append(
+        {
+            "id": action.get("id"),
+            "device_id": settings.overmind_device_id,
+            "action": action.get("action"),
+            "status": status_value,
+            "message": message,
+            "processed_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+            "fake_data": settings.use_fake_data,
+        }
+    )
+    path.write_text(json.dumps(actions[-200:], indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _overmind_post_json(url: str, payload: dict) -> dict:
+    body = json.dumps(payload).encode("utf-8")
+    request = Request(
+        url,
+        data=body,
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        method="POST",
+    )
+    context = ssl._create_unverified_context() if url.startswith("https://") else None
+    with urlopen(request, timeout=10, context=context) as response:
+        raw = response.read()
+    if not raw:
+        return {}
+    parsed = json.loads(raw.decode("utf-8"))
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _execute_overmind_action(settings: Settings, action: dict) -> Tuple[str, str]:
+    action_name = str(action.get("action") or "").strip().lower()
+    if settings.use_fake_data:
+        return "completed", f"Simulated {action_name} action because USE_FAKE_DATA is enabled."
+
+    if action_name == "shutdown":
+        if not shutil.which("shutdown"):
+            return "failed", "shutdown command was not found"
+        subprocess.Popen(["shutdown", "-h", "now"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return "completed", "Shutdown command issued."
+
+    if action_name == "restart":
+        if shutil.which("reboot"):
+            subprocess.Popen(["reboot"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return "completed", "Reboot command issued."
+        if shutil.which("shutdown"):
+            subprocess.Popen(["shutdown", "-r", "now"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return "completed", "Restart command issued."
+        return "failed", "reboot/shutdown command was not found"
+
+    if action_name == "update":
+        updater = shutil.which("batocera-upgrade")
+        if not updater:
+            return "failed", "batocera-upgrade command was not found"
+        subprocess.Popen([updater], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return "completed", "Batocera update command issued."
+
+    return "failed", f"Unsupported action: {action_name}"
+
+
+def _start_overmind_action_poller(settings: Settings) -> None:
+    poll_seconds = max(5, int(settings.overmind_poll_seconds or 15))
+
+    def loop() -> None:
+        while True:
+            try:
+                config = _load_overmind_config_for_settings(settings)
+                base_url = str(config.get("overmind_url") or "").strip().rstrip("/")
+                email = str(config.get("overmind_email") or "").strip()
+                password = str(config.get("overmind_password") or "")
+                if not base_url or not email or not password:
+                    time.sleep(poll_seconds)
+                    continue
+
+                device_id = quote(settings.overmind_device_id, safe="")
+                credentials = {"email": email, "password": password}
+                claim_url = f"{base_url}/api/devices/{device_id}/actions/claim"
+                response = _overmind_post_json(claim_url, credentials)
+                action = response.get("action")
+                if not isinstance(action, dict):
+                    time.sleep(poll_seconds)
+                    continue
+
+                status_value, message = _execute_overmind_action(settings, action)
+                _record_processed_overmind_action(settings, action, status_value, message)
+                print(
+                    f"Processed Overmind action {action.get('action')} ({action.get('id')}): {status_value} - {message}",
+                    file=sys.stdout,
+                    flush=True,
+                )
+                action_id = quote(str(action.get("id") or ""), safe="")
+                if action_id:
+                    complete_url = f"{base_url}/api/devices/{device_id}/actions/{action_id}/complete"
+                    _overmind_post_json(
+                        complete_url,
+                        {**credentials, "status": status_value, "message": message},
+                    )
+            except HTTPError as error:
+                print(f"Overmind action poll failed: {error}", file=sys.stderr, flush=True)
+            except URLError:
+                pass
+            except (TimeoutError, OSError, ValueError, json.JSONDecodeError) as error:
+                print(f"Overmind action poll failed: {error}", file=sys.stderr, flush=True)
+            except Exception as error:
+                print(f"Overmind action poll unexpected error: {error}", file=sys.stderr, flush=True)
+            time.sleep(poll_seconds)
+
+    thread = Thread(target=loop, name="overmind-action-poller", daemon=True)
+    thread.start()
+
+
 def create_server(settings: Settings) -> ThreadingHTTPServer:
     repository = RomRepository(
         settings.roms_root,
@@ -2917,6 +3648,7 @@ def main() -> None:
     print(f"Auth username: {settings.username}")
     scheme = "http" if settings.http_only else "https"
     print(f"Serving ROM API on {scheme}://0.0.0.0:{settings.https_port}")
+    _start_overmind_action_poller(settings)
     server.serve_forever()
 
 

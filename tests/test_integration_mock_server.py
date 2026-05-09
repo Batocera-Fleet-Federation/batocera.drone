@@ -79,6 +79,12 @@ class MockServerIntegrationTests(unittest.TestCase):
         self.assertEqual(payload["type"], "file")
         self.assertTrue(any("menu_driver" in line for line in payload["content"]))
 
+    def test_admin_missing_artwork_endpoint(self) -> None:
+        payload = self._get_json("/v1/api/admin/artwork/missing")
+        self.assertGreater(payload["count"], 0)
+        self.assertIn("snes", payload["systems"])
+        self.assertTrue(any("image" in item["missing"] for item in payload["roms"]))
+
 
 if __name__ == "__main__":
     unittest.main()

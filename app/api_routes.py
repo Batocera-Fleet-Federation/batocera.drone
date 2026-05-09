@@ -161,8 +161,24 @@ class ApiRoutesMixin:
                 self._handle_admin_system_info()
                 return
 
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "artwork" and parts[2] == "missing":
+                self._handle_admin_artwork_missing()
+                return
+
+            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "artwork" and parts[2] == "launchbox" and parts[3] == "search":
+                self._handle_admin_launchbox_search(
+                    query_params.get("system", [""])[0],
+                    query_params.get("rom_id", [""])[0],
+                    query_params.get("q", [""])[0],
+                )
+                return
+
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "integrations" and parts[2] == "overmind" and parts[3] == "status":
                 self._handle_admin_overmind_status()
+                return
+
+            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "integrations" and parts[2] == "overmind" and parts[3] == "actions":
+                self._handle_admin_overmind_actions()
                 return
 
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "configs":
@@ -216,6 +232,11 @@ class ApiRoutesMixin:
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "integrations" and parts[2] == "overmind" and parts[3] == "start":
                 payload = self._read_json_body()
                 self._handle_admin_overmind_start(payload)
+                return
+
+            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "artwork" and parts[2] == "launchbox" and parts[3] == "apply":
+                payload = self._read_json_body()
+                self._handle_admin_launchbox_apply(payload)
                 return
 
             self._send_json(404, {"error": "not found"})
