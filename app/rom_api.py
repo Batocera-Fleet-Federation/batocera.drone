@@ -1152,17 +1152,24 @@ class RomRepository:
 
         removed = []
         not_found = []
+        failed = []
         for system, paths in grouped.items():
-            system_dir = self.get_system_dir(system)
-            tree, root = self._read_gamelist(system_dir)
+            try:
+                system_dir = self.get_system_dir(system)
+                tree, root = self._read_gamelist(system_dir)
+            except Exception as error:
+                for rom_path in paths:
+                    failed.append({"system": system, "rom_path": rom_path, "error": str(error)})
+                continue
             changed = False
+            pending_removed = []
             for rom_path in paths:
                 game = self._find_gamelist_entry_by_path(root, rom_path)
                 if game is None:
                     not_found.append({"system": system, "rom_path": rom_path})
                     continue
                 root.remove(game)
-                removed.append({"system": system, "rom_path": rom_path})
+                pending_removed.append({"system": system, "rom_path": rom_path})
                 changed = True
             if changed:
                 gamelist_path = system_dir / "gamelist.xml"
@@ -1170,14 +1177,19 @@ class RomRepository:
                     ET.indent(tree, space="  ")
                 except Exception:
                     pass
-                tree.write(gamelist_path, encoding="utf-8", xml_declaration=True)
-                with gamelist_path.open("a", encoding="utf-8") as handle:
-                    handle.write("\n")
+                try:
+                    tree.write(gamelist_path, encoding="utf-8", xml_declaration=True)
+                    with gamelist_path.open("a", encoding="utf-8") as handle:
+                        handle.write("\n")
+                    removed.extend(pending_removed)
+                except Exception as error:
+                    for item in pending_removed:
+                        failed.append({**item, "path": str(gamelist_path), "error": str(error)})
 
         if removed:
             with self._missing_artwork_cache_lock:
                 self._missing_artwork_cache.clear()
-        return {"removed": removed, "removed_count": len(removed), "not_found": not_found}
+        return {"removed": removed, "removed_count": len(removed), "not_found": not_found, "failed": failed, "failed_count": len(failed)}
 
     def find_rom_by_unique_id(self, system: str, unique_id: str) -> dict:
         _, roms = self.list_assets(system, "roms")

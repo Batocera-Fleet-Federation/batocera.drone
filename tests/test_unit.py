@@ -1,6 +1,7 @@
 import base64
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from app.mock_data import seed_mock_userdata
@@ -110,6 +111,20 @@ class RepositoryTests(unittest.TestCase):
             self.assertTrue(result["removed"])
             text = (root / "roms" / "snes" / "gamelist.xml").read_text(encoding="utf-8")
             self.assertNotIn("Chrono Trigger", text)
+
+    def test_remove_gamelist_entries_reports_write_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            seed_mock_userdata(root)
+            repo = RomRepository(root / "roms", root / "bios")
+            with mock.patch("xml.etree.ElementTree.ElementTree.write", side_effect=PermissionError("Operation not permitted")):
+                result = repo.remove_gamelist_entries([{"system": "snes", "rom_path": "Chrono Trigger (USA).zip"}])
+
+            self.assertEqual(result["removed_count"], 0)
+            self.assertEqual(result["failed_count"], 1)
+            self.assertIn("Operation not permitted", result["failed"][0]["error"])
+            text = (root / "roms" / "snes" / "gamelist.xml").read_text(encoding="utf-8")
+            self.assertIn("Chrono Trigger", text)
 
 
 class LaunchBoxMappingTests(unittest.TestCase):
