@@ -187,6 +187,26 @@ def _text_or_empty(parent: ET.Element, tag: str) -> str:
     return (child.text or "").strip() if child is not None else ""
 
 
+def _gamelist_details(game: Optional[ET.Element]) -> dict:
+    if game is None:
+        return {}
+    details = {}
+    for child in list(game):
+        tag = child.tag
+        value = (child.text or "").strip()
+        if child.attrib:
+            value = {"text": value, "attributes": dict(child.attrib)}
+        if tag in details:
+            existing = details[tag]
+            if isinstance(existing, list):
+                existing.append(value)
+            else:
+                details[tag] = [existing, value]
+        else:
+            details[tag] = value
+    return details
+
+
 def _set_child_text(parent: ET.Element, tag: str, value: str) -> None:
     child = parent.find(tag)
     if child is None:
@@ -1056,6 +1076,7 @@ class RomRepository:
                         "unique_id": "",
                         "missing": missing,
                         "existing": {field: _text_or_empty(game, field) for field in ARTWORK_FIELDS},
+                        "gamelist": _gamelist_details(game),
                         "has_gamelist_entry": True,
                     }
                 )
@@ -1097,6 +1118,7 @@ class RomRepository:
                         "unique_id": rom.get("unique_id"),
                         "missing": missing,
                         "existing": {field: _text_or_empty(game, field) if game is not None else "" for field in ARTWORK_FIELDS},
+                        "gamelist": _gamelist_details(game),
                         "has_gamelist_entry": game is not None,
                     }
                 )

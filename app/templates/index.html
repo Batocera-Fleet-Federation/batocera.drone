@@ -20,12 +20,14 @@
       --admin-text: #1f2937;
       --admin-muted: #6b7280;
     }
-    body {
-      background: radial-gradient(circle at top right, #dbe6ff 0%, #f2f5fa 45%, #eef2f8 100%);
-      min-height: 100vh;
-      color: var(--admin-text);
-      font-family: "Nunito", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    }
+	    body {
+	      background: radial-gradient(circle at top right, #dbe6ff 0%, #f2f5fa 45%, #eef2f8 100%);
+	      background-attachment: fixed;
+	      background-size: cover;
+	      min-height: 100vh;
+	      color: var(--admin-text);
+	      font-family: "Nunito", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+	    }
     .layout-shell { min-height: 100vh; }
     .sidebar {
       background: linear-gradient(180deg, #224abe 0%, var(--admin-sidebar) 100%);
@@ -68,21 +70,23 @@
       color: #fff;
     }
     .topbar {
-      background: var(--admin-surface);
+      background: rgba(255, 255, 255, 0.9);
       border: 1px solid var(--admin-border);
       border-radius: 0.75rem;
       box-shadow: 0 0.15rem 1rem rgba(58, 59, 69, 0.08);
       min-height: 4.1rem;
+      backdrop-filter: blur(10px);
     }
     .app-shell {
-      background: var(--admin-surface);
+      background: rgba(255, 255, 255, 0.86);
       border: 1px solid var(--admin-border);
       border-radius: 0.75rem;
       box-shadow: 0 0.15rem 1rem rgba(58, 59, 69, 0.08);
+      backdrop-filter: blur(10px);
     }
     .nav-actions .btn { white-space: nowrap; }
     .card, .input-group .form-control, .input-group .input-group-text, .input-group .btn, footer, .form-select {
-      background: var(--admin-surface);
+      background: rgba(255, 255, 255, 0.9);
       border-color: var(--admin-border);
     }
     .input-group .form-control,
@@ -121,11 +125,12 @@
       width: 100%;
       min-width: 260px;
       max-width: 100%;
-      background: var(--admin-surface);
+      background: rgba(255, 255, 255, 0.96);
       border: 1px solid var(--admin-border);
       padding: 0.6rem;
       z-index: 2000;
       box-shadow: 0 0.25rem 1rem rgba(0, 0, 0, 0.12);
+      backdrop-filter: blur(10px);
     }
     .filter-options-scroll {
       max-height: 220px;
@@ -142,11 +147,11 @@
       color: var(--admin-text) !important;
     }
     .log-card .card-header {
-      background: var(--admin-surface-muted);
+      background: rgba(248, 249, 252, 0.86);
       border-color: var(--admin-border);
     }
     .log-card .list-group-item {
-      background: var(--admin-surface);
+      background: rgba(255, 255, 255, 0.82);
       border-color: var(--admin-border);
     }
     .log-card .list-group-item:hover,
@@ -179,8 +184,39 @@
       color: #334155;
       border: 1px solid #dbe2ff;
       font-weight: 500;
-      padding: 0.38rem 0.58rem;
-    }
+	      padding: 0.38rem 0.58rem;
+	    }
+	    .artwork-page .topbar {
+	      display: none !important;
+	    }
+	    .artwork-page .app-shell {
+	      min-height: calc(100vh - 2rem);
+	    }
+	    .artwork-page .log-card,
+	    .artwork-page .admin-tile {
+	      background: rgba(255, 255, 255, 0.84);
+	      backdrop-filter: blur(10px);
+	    }
+	    .artwork-page .table,
+	    .artwork-page .table td,
+	    .artwork-page .table th {
+	      background-color: transparent;
+	    }
+	    .artwork-page .table-light th {
+	      background-color: rgba(248, 249, 252, 0.72);
+	    }
+	    .gamelist-details {
+	      max-height: 330px;
+	      overflow-y: auto;
+	    }
+	    .gamelist-details dt {
+	      color: var(--admin-muted);
+	      font-size: 0.74rem;
+	      text-transform: uppercase;
+	    }
+	    .gamelist-details dd {
+	      overflow-wrap: anywhere;
+	    }
     @media (max-width: 991.98px) {
       .sidebar { min-height: auto; }
       .nav-actions .btn { width: 100%; }
@@ -1365,6 +1401,48 @@ function artworkMissingRowsHtml(roms) {
     </tr>
   `).join("") || `<tr><td colspan="4" class="text-muted p-3">No missing artwork found.</td></tr>`;
 }
+function artworkGamelistValueHtml(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => artworkGamelistValueHtml(item)).join(`<div class="border-top my-1"></div>`);
+  }
+  if (value && typeof value === "object") {
+    const text = value.text ? `<div>${escapeHtml(value.text)}</div>` : "";
+    const attrs = value.attributes
+      ? Object.entries(value.attributes).map(([key, attrValue]) => `<div class="text-muted small">${escapeHtml(key)}: ${escapeHtml(attrValue)}</div>`).join("")
+      : "";
+    return text + attrs;
+  }
+  const normalized = String(value || "").trim();
+  return normalized ? escapeHtml(normalized) : `<span class="text-muted">empty</span>`;
+}
+function artworkGamelistDetailsHtml(rom) {
+  const details = rom && rom.gamelist ? rom.gamelist : {};
+  const entries = Object.entries(details);
+  const statusBadge = `<span class="badge ${rom.rom_exists ? "text-bg-success" : "text-bg-danger"}">${rom.rom_exists ? "ROM exists" : "ROM missing"}</span>`;
+  if (!rom.has_gamelist_entry) {
+    return `
+      <div class="fw-semibold">${escapeHtml(rom.title || rom.name || "")}</div>
+      <div class="text-muted small mb-2">${escapeHtml(rom.system || "")} · ${escapeHtml(rom.rom_path || rom.rom_name || "")}</div>
+      <div class="mb-3">${statusBadge}</div>
+      <div class="alert alert-warning py-2 mb-0">No gamelist.xml entry exists for this ROM.</div>
+    `;
+  }
+  return `
+    <div class="d-flex justify-content-between align-items-start gap-2 mb-2">
+      <div>
+        <div class="fw-semibold">${escapeHtml(rom.title || rom.name || "")}</div>
+        <div class="text-muted small">${escapeHtml(rom.system || "")} · Missing ${(rom.missing || []).map(escapeHtml).join(", ")}</div>
+      </div>
+      ${statusBadge}
+    </div>
+    <dl class="gamelist-details mb-0">
+      ${entries.map(([key, value]) => `
+        <dt>${escapeHtml(key)}</dt>
+        <dd class="small mb-2">${artworkGamelistValueHtml(value)}</dd>
+      `).join("") || `<dd class="text-muted small mb-0">No gamelist details found.</dd>`}
+    </dl>
+  `;
+}
 function artworkPayloadUrl(forceRefresh = false) {
   const fieldsParam = encodeURIComponent((artworkSelectedFields || []).join(","));
   const systemsParam = encodeURIComponent((artworkSelectedSystems || []).join(","));
@@ -1537,16 +1615,18 @@ async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh 
               </div>
             </div>
           </div>
-        </div>
-        <div class="col-12 col-xl-5">
-          <div class="card log-card">
-            <div class="card-header">LaunchBox Matches</div>
-            <div class="card-body">
-              <div id="selectedArtworkRom" class="text-muted">Select a ROM to search LaunchBox.</div>
-              <div id="launchboxMatches" class="mt-3"></div>
-            </div>
-          </div>
-        </div>
+	        </div>
+	        <div class="col-12 col-xl-5">
+	          <div class="card log-card">
+	            <div class="card-body">
+	              <div id="selectedArtworkRom" class="text-muted">Select a ROM to view gamelist details and search LaunchBox.</div>
+	              <div class="border-top mt-3 pt-3">
+	                <div class="fw-semibold mb-2">LaunchBox Matches</div>
+	                <div id="launchboxMatches" class="mt-2"></div>
+	              </div>
+	            </div>
+	          </div>
+	        </div>
       </div>
     `;
     window.missingArtworkRoms = roms;
@@ -1644,10 +1724,7 @@ async function selectArtworkRom(index) {
   if (!rom) return;
   const selected = document.getElementById("selectedArtworkRom");
   const matchesEl = document.getElementById("launchboxMatches");
-  selected.innerHTML = `
-    <div class="fw-semibold">${escapeHtml(rom.title || rom.name || "")}</div>
-    <div class="text-muted small">${escapeHtml(rom.system || "")} · Missing ${(rom.missing || []).join(", ")}</div>
-  `;
+  selected.innerHTML = artworkGamelistDetailsHtml(rom);
   matchesEl.innerHTML = `<div class="text-muted"><span class="spinner-border spinner-border-sm me-2"></span>Searching LaunchBox...</div>`;
   try {
     const data = await api(`/admin/artwork/launchbox/search?system=${encodeURIComponent(rom.system || "")}&rom_id=${encodeURIComponent(rom.unique_id || "")}&rom_path=${encodeURIComponent(rom.rom_path || "")}&q=${encodeURIComponent(rom.search_title || rom.title || rom.name || "")}`);
@@ -2265,6 +2342,7 @@ async function router() {
   clearError();
   try {
     const hash = window.location.hash || "";
+    document.body.classList.toggle("artwork-page", hash.startsWith("#admin/artwork"));
     if (hash === "#bios") {
       await renderBios();
     } else if (hash === "#theme") {
