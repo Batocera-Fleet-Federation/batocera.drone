@@ -330,6 +330,11 @@ let themeFilterQuery = "";
 const THEME_GALLERY_PAGE_SIZE = 100;
 const BIOS_PAGE_SIZE = 100;
 const ARTWORK_PAGE_SIZE = 200;
+const GAMELIST_EDIT_FIELDS = [
+  "name", "sortname", "desc", "genre", "developer", "publisher", "releasedate",
+  "players", "rating", "favorite", "hidden", "kidgame", "adult",
+  "image", "thumbnail", "marquee", "fanart", "boxart", "video"
+];
 let biosCurrentPage = 1;
 let biosFilterQuery = "";
 let biosFilterSelectedSystems = [];
@@ -1436,16 +1441,45 @@ function artworkGamelistValueHtml(value) {
   const normalized = String(value || "").trim();
   return normalized ? escapeHtml(normalized) : `<span class="text-muted">empty</span>`;
 }
+function artworkGamelistEditValue(value) {
+  if (Array.isArray(value)) return value.map((item) => artworkGamelistEditValue(item)).filter(Boolean).join("\n");
+  if (value && typeof value === "object") return String(value.text || "");
+  return String(value || "");
+}
+function artworkGamelistFieldControl(field, value) {
+  const normalized = artworkGamelistEditValue(value);
+  const label = field === "desc" ? "Description" : field;
+  if (field === "desc") {
+    return `
+      <div class="mb-2">
+        <label class="form-label small text-muted mb-1">${escapeHtml(label)}</label>
+        <textarea class="form-control form-control-sm gamelist-edit-field" data-gamelist-field="${escapeHtml(field)}" rows="4">${escapeHtml(normalized)}</textarea>
+      </div>
+    `;
+  }
+  return `
+    <div class="mb-2">
+      <label class="form-label small text-muted mb-1">${escapeHtml(label)}</label>
+      <input class="form-control form-control-sm gamelist-edit-field" data-gamelist-field="${escapeHtml(field)}" value="${escapeHtml(normalized)}">
+    </div>
+  `;
+}
 function artworkGamelistDetailsHtml(rom) {
   const details = rom && rom.gamelist ? rom.gamelist : {};
   const entries = Object.entries(details);
+  const editableFields = Array.from(new Set(GAMELIST_EDIT_FIELDS.concat(Object.keys(details).filter((key) => key !== "path"))));
   const statusBadge = `<span class="badge ${rom.rom_exists ? "text-bg-success" : "text-bg-danger"}">${rom.rom_exists ? "ROM exists" : "ROM missing"}</span>`;
   if (!rom.has_gamelist_entry) {
     return `
       <div class="fw-semibold">${escapeHtml(rom.title || rom.name || "")}</div>
       <div class="text-muted small mb-2">${escapeHtml(rom.system || "")} · ${escapeHtml(rom.rom_path || rom.rom_name || "")}</div>
       <div class="mb-3">${statusBadge}</div>
-      <div class="alert alert-warning py-2 mb-0">No gamelist.xml entry exists for this ROM.</div>
+      <div class="alert alert-warning py-2">No gamelist.xml entry exists for this ROM. Saving will create one for this path.</div>
+      <form id="gamelistEditForm">
+        ${artworkGamelistFieldControl("name", rom.title || rom.name || "")}
+        ${artworkGamelistFieldControl("desc", "")}
+        <button class="btn btn-sm btn-primary" type="button" onclick="saveSelectedArtworkGamelist()">Save Gamelist Data</button>
+      </form>
     `;
   }
   return `
@@ -1456,7 +1490,11 @@ function artworkGamelistDetailsHtml(rom) {
       </div>
       ${statusBadge}
     </div>
-    <dl class="gamelist-details mb-0">
+    <form id="gamelistEditForm" class="mb-3">
+      ${editableFields.map((field) => artworkGamelistFieldControl(field, details[field])).join("")}
+      <button class="btn btn-sm btn-primary" type="button" onclick="saveSelectedArtworkGamelist()">Save Gamelist Data</button>
+    </form>
+    <dl class="gamelist-details mb-0 border-top pt-3">
       ${entries.map(([key, value]) => `
         <dt>${escapeHtml(key)}</dt>
         <dd class="small mb-2">${artworkGamelistValueHtml(value)}</dd>
@@ -1743,6 +1781,7 @@ async function selectArtworkRom(index) {
   const roms = window.missingArtworkRoms || [];
   const rom = roms[index];
   if (!rom) return;
+  window.selectedArtworkRomIndex = index;
   const selected = document.getElementById("selectedArtworkRom");
   const matchesEl = document.getElementById("launchboxMatches");
   selected.innerHTML = artworkGamelistDetailsHtml(rom);
@@ -1805,6 +1844,40 @@ async function applyLaunchboxArtwork(rowIndex, system, romId, romPath, gameKey) 
   } finally {
     const progressEl = document.getElementById(progressId);
     if (progressEl) progressEl.remove();
+	  }
+	}
+async function saveSelectedArtworkGamelist() {
+  const index = Number(window.selectedArtworkRomIndex);
+  const rom = (window.missingArtworkRoms || [])[index];
+  if (!rom) return;
+  const alertEl = document.getElementById("artworkAlert");
+  const selected = document.getElementById("selectedArtworkRom");
+  const fields = {};
+  document.querySelectorAll("#gamelistEditForm .gamelist-edit-field").forEach((node) => {
+    const field = node.getAttribute("data-gamelist-field");
+    if (field) fields[field] = node.value || "";
+  });
+  if (alertEl) alertEl.innerHTML = "";
+  try {
+    const result = await apiPost("/admin/artwork/gamelist/update", {
+      system: rom.system,
+      rom_path: rom.rom_path,
+      fields,
+    });
+    rom.has_gamelist_entry = true;
+    rom.gamelist = result.gamelist || {};
+    rom.existing = result.existing || rom.existing || {};
+    rom.missing = result.missing || rom.missing || [];
+    rom.title = result.title || rom.title || rom.name;
+    rom.name = rom.title || rom.name;
+    if (selected) selected.innerHTML = artworkGamelistDetailsHtml(rom);
+    const rows = document.getElementById("artworkRows");
+    if (rows) rows.innerHTML = artworkMissingRowsHtml(window.missingArtworkRoms || []);
+    if (alertEl) {
+      alertEl.innerHTML = `<div class="alert alert-success">Saved gamelist data for ${escapeHtml(rom.title || rom.name || "ROM")}.</div>`;
+    }
+  } catch (err) {
+    if (alertEl) alertEl.innerHTML = `<div class="alert alert-danger">Gamelist update failed: ${escapeHtml(err.message || "unknown error")}</div>`;
   }
 }
 async function removeArtworkGamelistEntry(index) {

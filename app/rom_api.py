@@ -213,6 +213,12 @@ def _set_child_text(parent: ET.Element, tag: str, value: str) -> None:
     child.text = value
 
 
+def _remove_child(parent: ET.Element, tag: str) -> None:
+    child = parent.find(tag)
+    if child is not None:
+        parent.remove(child)
+
+
 def _relative_artwork_path(system_dir: Path, path: Path) -> str:
     try:
         return f"./{path.resolve().relative_to(system_dir.resolve()).as_posix()}"
@@ -1211,6 +1217,61 @@ class RomRepository:
             with self._missing_artwork_cache_lock:
                 self._missing_artwork_cache.clear()
         return {"removed": removed, "removed_count": len(removed), "not_found": not_found, "failed": failed, "failed_count": len(failed)}
+
+    def update_gamelist_entry(self, system: str, rom_path: str, fields: dict) -> dict:
+        system_dir = self.get_system_dir(system)
+        normalized_rom_path = _normalize_gamelist_rom_path(rom_path)
+        if not normalized_rom_path:
+            raise ValueError("rom_path is required")
+        if not isinstance(fields, dict):
+            raise ValueError("fields must be an object")
+        tree, root = self._read_gamelist(system_dir)
+        game = self._find_gamelist_entry_by_path(root, normalized_rom_path)
+        created = False
+        if game is None:
+            game = ET.SubElement(root, "game")
+            _set_child_text(game, "path", f"./{normalized_rom_path}")
+            created = True
+
+        updated = {}
+        removed = []
+        for raw_tag, raw_value in fields.items():
+            tag = str(raw_tag or "").strip()
+            if not tag or tag == "path":
+                continue
+            if not re.match(r"^[A-Za-z0-9_.-]+$", tag):
+                raise ValueError(f"invalid gamelist field: {tag}")
+            value = str(raw_value if raw_value is not None else "").strip()
+            if value:
+                _set_child_text(game, tag, value)
+                updated[tag] = value
+            else:
+                _remove_child(game, tag)
+                removed.append(tag)
+
+        gamelist_path = system_dir / "gamelist.xml"
+        try:
+            ET.indent(tree, space="  ")
+        except Exception:
+            pass
+        tree.write(gamelist_path, encoding="utf-8", xml_declaration=True)
+        with gamelist_path.open("a", encoding="utf-8") as handle:
+            handle.write("\n")
+        with self._missing_artwork_cache_lock:
+            self._missing_artwork_cache.clear()
+
+        return {
+            "system": system,
+            "rom_path": normalized_rom_path,
+            "created": created,
+            "updated": updated,
+            "removed": removed,
+            "title": _text_or_empty(game, "name") or Path(normalized_rom_path).stem,
+            "missing": self._entry_missing_artwork(game),
+            "existing": {field: _text_or_empty(game, field) for field in ARTWORK_FIELDS},
+            "gamelist": _gamelist_details(game),
+            "has_gamelist_entry": True,
+        }
 
     def find_rom_by_unique_id(self, system: str, unique_id: str) -> dict:
         _, roms = self.list_assets(system, "roms")
@@ -2681,6 +2742,19 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         if not rom_path:
             raise ValueError("rom_path is required")
         result = self.repository.remove_gamelist_entry(system, rom_path)
+        self._send_json(200, result)
+
+    def _handle_admin_gamelist_update(self, payload: dict) -> None:
+        system = str(payload.get("system") or "").strip()
+        rom_path = _normalize_gamelist_rom_path(str(payload.get("rom_path") or ""))
+        fields = payload.get("fields")
+        if not system:
+            raise ValueError("system is required")
+        if not rom_path:
+            raise ValueError("rom_path is required")
+        if not isinstance(fields, dict):
+            raise ValueError("fields must be an object")
+        result = self.repository.update_gamelist_entry(system, rom_path, fields)
         self._send_json(200, result)
 
     def _handle_admin_gamelist_remove_missing(self, payload: dict) -> None:

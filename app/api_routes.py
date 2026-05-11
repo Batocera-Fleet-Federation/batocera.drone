@@ -276,6 +276,11 @@ class ApiRoutesMixin:
                 self._handle_admin_gamelist_remove(payload)
                 return
 
+            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "artwork" and parts[2] == "gamelist" and parts[3] == "update":
+                payload = self._read_json_body()
+                self._handle_admin_gamelist_update(payload)
+                return
+
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "artwork" and parts[2] == "gamelist" and parts[3] == "remove-missing":
                 payload = self._read_json_body()
                 self._handle_admin_gamelist_remove_missing(payload)

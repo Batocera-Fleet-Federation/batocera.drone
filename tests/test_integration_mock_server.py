@@ -136,6 +136,21 @@ class MockServerIntegrationTests(unittest.TestCase):
         titles = {item["title"] for item in payload["roms"]}
         self.assertNotIn("Chrono Trigger", titles)
 
+    def test_admin_update_gamelist_entry_endpoint(self) -> None:
+        result = self._post_json(
+            "/v1/api/admin/artwork/gamelist/update",
+            {
+                "system": "snes",
+                "rom_path": "Chrono Trigger (USA).zip",
+                "fields": {"name": "Chrono Trigger Admin Edit", "desc": "Updated from artwork admin."},
+            },
+        )
+        self.assertEqual(result["title"], "Chrono Trigger Admin Edit")
+        self.assertEqual(result["gamelist"]["desc"], "Updated from artwork admin.")
+        text = (self._root / "roms" / "snes" / "gamelist.xml").read_text(encoding="utf-8")
+        self.assertIn("Chrono Trigger Admin Edit", text)
+        self.assertIn("Updated from artwork admin.", text)
+
     def test_admin_remove_missing_gamelist_entries_endpoint(self) -> None:
         gamelist = self._root / "roms" / "snes" / "gamelist.xml"
         gamelist.write_text(

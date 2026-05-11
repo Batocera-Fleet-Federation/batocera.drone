@@ -126,6 +126,24 @@ class RepositoryTests(unittest.TestCase):
             text = (root / "roms" / "snes" / "gamelist.xml").read_text(encoding="utf-8")
             self.assertIn("Chrono Trigger", text)
 
+    def test_update_gamelist_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            seed_mock_userdata(root)
+            repo = RomRepository(root / "roms", root / "bios")
+            result = repo.update_gamelist_entry(
+                "snes",
+                "Chrono Trigger (USA).zip",
+                {"name": "Chrono Trigger Updated", "desc": "A time travel RPG.", "genre": ""},
+            )
+
+            self.assertEqual(result["title"], "Chrono Trigger Updated")
+            self.assertEqual(result["gamelist"]["desc"], "A time travel RPG.")
+            text = (root / "roms" / "snes" / "gamelist.xml").read_text(encoding="utf-8")
+            self.assertIn("Chrono Trigger Updated", text)
+            self.assertIn("A time travel RPG.", text)
+            self.assertNotIn("<genre>", text)
+
 
 class LaunchBoxMappingTests(unittest.TestCase):
     def test_launchbox_title_cleanup_replaces_special_separators(self) -> None:
