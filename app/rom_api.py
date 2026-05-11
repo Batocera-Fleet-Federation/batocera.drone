@@ -1267,6 +1267,7 @@ class RomRepository:
             "updated": updated,
             "removed": removed,
             "title": _text_or_empty(game, "name") or Path(normalized_rom_path).stem,
+            "search_title": _clean_rom_title(_text_or_empty(game, "name") or Path(normalized_rom_path).stem),
             "missing": self._entry_missing_artwork(game),
             "existing": {field: _text_or_empty(game, field) for field in ARTWORK_FIELDS},
             "gamelist": _gamelist_details(game),
@@ -2782,6 +2783,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         field_name = None
         system = None
         rom_id = None
+        rom_path = None
         file_data = None
         filename = None
         for part in parts:
@@ -2821,20 +2823,25 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                     system = value
                 elif fname == "rom_id":
                     rom_id = value
-        if not file_data or not field_name or not system or not rom_id:
-            raise ValueError("file, field, system, and rom_id are required")
+                elif fname == "rom_path":
+                    rom_path = _normalize_gamelist_rom_path(value)
+        if not file_data or not field_name or not system or (not rom_id and not rom_path):
+            raise ValueError("file, field, system, and rom_id or rom_path are required")
+        if field_name not in ARTWORK_FIELDS:
+            raise ValueError("invalid artwork field")
         filename = filename or f"{field_name}.png"
         # Find the ROM to update its gamelist and images
         system_dir = self.repository.get_system_dir(system)
         # Try to find the ROM by unique_id first, then by path
         try:
-            rom = self.repository.find_rom_by_unique_id(system, rom_id)
+            rom = self.repository.find_rom_by_unique_id(system, rom_id) if rom_id else self.repository.find_rom_by_path(system, rom_path or "")
         except FileNotFoundError:
             try:
-                rom = self.repository.find_rom_by_path(system, rom_id)
+                rom = self.repository.find_rom_by_path(system, rom_path or rom_id)
             except FileNotFoundError:
                 # Just use rom_id as a name stem if not found
-                rom = {"name": Path(rom_id).stem or rom_id, "image_stem": Path(rom_id).stem or rom_id}
+                fallback = rom_path or rom_id
+                rom = {"name": Path(fallback).stem or fallback, "image_stem": Path(fallback).stem or fallback, "rom_path": rom_path or fallback}
         images_dir = (system_dir / "images").resolve()
         images_dir.mkdir(parents=True, exist_ok=True)
         display_name = str(rom.get("image_stem") or rom.get("name") or rom_id)
@@ -2843,14 +2850,27 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         dest_path = images_dir / dest_filename
         with open(dest_path, "wb") as f:
             f.write(file_data)
+        relative_path = _relative_artwork_path(system_dir, dest_path)
+        normalized_rom_path = _normalize_gamelist_rom_path(rom_path or str(rom.get("rom_path") or ""))
+        game = None
+        gamelist_details = {}
+        existing = {field: "" for field in ARTWORK_FIELDS}
+        missing = list(ARTWORK_FIELDS)
+        has_gamelist_entry = False
         # Update gamelist if possible
         try:
             tree, root = self.repository._read_gamelist(system_dir)
-            game = self.repository._find_gamelist_entry_by_path(root, rom_id)
+            game = self.repository._find_gamelist_entry_by_path(root, normalized_rom_path)
             if game is None:
-                game = self.repository._find_gamelist_entry(root, Path(rom_id).name, Path(rom_id).stem)
+                rom_name = str(rom.get("rom_file") or Path(normalized_rom_path or rom_id).name)
+                display_name = str(rom.get("image_stem") or rom.get("name") or Path(rom_name).stem)
+                game = self.repository._find_gamelist_entry(root, rom_name, display_name)
+            if game is None and normalized_rom_path:
+                display_name = str(rom.get("image_stem") or rom.get("name") or Path(normalized_rom_path).stem)
+                game = ET.SubElement(root, "game")
+                _set_child_text(game, "path", f"./{normalized_rom_path}")
+                _set_child_text(game, "name", _clean_rom_title(display_name))
             if game is not None:
-                relative_path = _relative_artwork_path(system_dir, dest_path)
                 _set_child_text(game, field_name, relative_path)
                 gamelist_path = system_dir / "gamelist.xml"
                 try:
@@ -2860,13 +2880,27 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 tree.write(gamelist_path, encoding="utf-8", xml_declaration=True)
                 with gamelist_path.open("a", encoding="utf-8") as handle:
                     handle.write("\n")
+                gamelist_details = _gamelist_details(game)
+                existing = {field: _text_or_empty(game, field) for field in ARTWORK_FIELDS}
+                missing = self.repository._entry_missing_artwork(game)
+                has_gamelist_entry = True
         except Exception:
             pass  # Gamelist write is best-effort for manual uploads
         # Invalidate caches
         with self.repository._missing_artwork_cache_lock:
             self.repository._missing_artwork_cache.clear()
-        rom_name = str(rom.get("name") or Path(rom_id).stem or rom_id)
-        self._send_json(200, {"rom_name": rom_name, "field": field_name, "path": str(dest_path), "url": f"/v1/api/systems/{quote(system)}/images/{quote(dest_filename)}"})
+        rom_name = str(rom.get("name") or Path(rom_path or rom_id).stem or rom_path or rom_id)
+        self._send_json(200, {
+            "rom_name": rom_name,
+            "field": field_name,
+            "path": str(dest_path),
+            "relative_path": relative_path,
+            "url": api_url(f"/systems/{quote(system)}/images/{quote(dest_filename)}"),
+            "existing": existing,
+            "missing": missing,
+            "gamelist": gamelist_details,
+            "has_gamelist_entry": has_gamelist_entry,
+        })
 
     def _handle_admin_gamelist_remove(self, payload: dict) -> None:
         system = str(payload.get("system") or "").strip()

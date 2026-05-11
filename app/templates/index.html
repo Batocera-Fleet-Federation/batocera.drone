@@ -1666,7 +1666,6 @@ function artworkGamelistEditFormHtml(rom) {
       ${editableFields.map((field) => artworkGamelistFieldControl(field, details[field])).join("")}
       <div class="d-flex gap-2 mt-3">
         <button class="btn btn-sm btn-primary" type="button" onclick="saveSelectedArtworkGamelist()">Save Metadata</button>
-        <button class="btn btn-sm btn-outline-primary" type="button" onclick="rescanLaunchboxAndRefresh()">Save & Rescan Matches</button>
       </div>
     </form>
   `;
@@ -1952,20 +1951,33 @@ const LAUNCHBOX_METADATA_FIELDS = [
   "platform", "esrb", "overview", "playmode", "regional", "favorites"
 ];
 function artworkImageUploadHtml(rom, field) {
-  const existingUrl = rom.existing && rom.existing[field] ? rom.existing[field] : null;
-  const existingDisplay = existingUrl ? `<span class="text-muted small ms-1">has ${escapeHtml(field)}</span>` : `<span class="text-muted small ms-1">no ${escapeHtml(field)}</span>`;
+  const existingValue = rom.existing && rom.existing[field] ? rom.existing[field] : null;
+  const existingUrl = artworkExistingImageUrl(rom, existingValue);
+  const existingDisplay = existingValue ? `<span class="text-muted small ms-1">has ${escapeHtml(field)}</span>` : `<span class="text-muted small ms-1">no ${escapeHtml(field)}</span>`;
   const viewBtn = existingUrl
-    ? `<button class="btn btn-sm btn-outline-secondary btn-icon" type="button" onclick="showImageLightbox('${escapeHtml(existingUrl)}', '${escapeHtml(field)}')" title="View existing ${escapeHtml(field)}"><i class="bi bi-eye"></i></button>`
+    ? `<button class="btn btn-sm btn-outline-secondary btn-icon artwork-view-btn" type="button" data-image-url="${escapeHtml(existingUrl)}" data-image-title="${escapeHtml(field)}" title="View existing ${escapeHtml(field)}"><i class="bi bi-eye"></i></button>`
     : `<button class="btn btn-sm btn-outline-secondary btn-icon" type="button" disabled title="No ${escapeHtml(field)} to view"><i class="bi bi-eye-slash"></i></button>`;
   return `
     <div class="artwork-upload-item">
       <span class="small text-muted" style="min-width: 80px;">${escapeHtml(field)}</span>
       <input type="file" class="form-control form-control-sm artwork-upload-file" accept="image/*" data-field="${escapeHtml(field)}" style="max-width: 150px; font-size: 0.75rem;">
-      <button class="btn btn-sm btn-primary btn-icon" type="button" onclick="uploadArtworkImage(${JSON.stringify(rom.unique_id || rom.rom_path || "")}, ${JSON.stringify(rom.system || "")}, '${escapeHtml(field)}', this)" title="Upload"><i class="bi bi-upload"></i></button>
+      <button class="btn btn-sm btn-primary btn-icon artwork-upload-btn" type="button" data-field="${escapeHtml(field)}" title="Upload"><i class="bi bi-upload"></i></button>
       ${viewBtn}
       ${existingDisplay}
     </div>
   `;
+}
+function artworkExistingImageUrl(rom, value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  if (/^(https?:)?\/\//i.test(raw) || raw.startsWith("data:") || raw.startsWith("/")) return raw;
+  const normalized = raw.replace(/\\/g, "/").replace(/^\.\//, "");
+  const imagePrefix = "images/";
+  const imageFile = normalized.toLowerCase().startsWith(imagePrefix)
+    ? normalized.substring(imagePrefix.length)
+    : normalized.split("/").pop();
+  if (!imageFile) return raw;
+  return `${API_BASE}/systems/${encodeURIComponent(rom.system || "")}/images/${encodeURIComponent(imageFile)}`;
 }
 function artworkEditableImageFields(rom) {
   const fieldSet = new Set(rom.missing || []);
@@ -1997,10 +2009,23 @@ function setArtworkSelectedRomHash(index) {
   }
 }
 // Upload image for a given field
-async function uploadArtworkImage(romIdOrPath, system, field, btnEl) {
+function bindArtworkEditButtons(rom) {
+  document.querySelectorAll(".artwork-upload-btn").forEach((button) => {
+    button.addEventListener("click", () => {
+      uploadArtworkImage(rom, button.getAttribute("data-field") || "", button);
+    });
+  });
+  document.querySelectorAll(".artwork-view-btn").forEach((button) => {
+    button.addEventListener("click", () => {
+      showImageLightbox(button.getAttribute("data-image-url") || "", button.getAttribute("data-image-title") || "");
+    });
+  });
+}
+async function uploadArtworkImage(rom, field, btnEl) {
   const fileInput = btnEl.closest(".artwork-upload-item").querySelector(".artwork-upload-file");
   const file = fileInput && fileInput.files[0];
   if (!file) { showToast("Please select an image file first.", "warning"); return; }
+  const system = rom.system || "";
   btnEl.disabled = true;
   btnEl.innerHTML = `<span class="spinner-border spinner-border-sm"></span>`;
   setLoading(true, `Uploading ${field}...`);
@@ -2009,7 +2034,8 @@ async function uploadArtworkImage(romIdOrPath, system, field, btnEl) {
     formData.append("file", file);
     formData.append("field", field);
     formData.append("system", system);
-    formData.append("rom_id", romIdOrPath);
+    formData.append("rom_id", rom.unique_id || "");
+    formData.append("rom_path", rom.rom_path || "");
     const res = await fetch(`${API_BASE}/admin/artwork/upload`, {
       method: "POST",
       credentials: "same-origin",
@@ -2021,9 +2047,13 @@ async function uploadArtworkImage(romIdOrPath, system, field, btnEl) {
       throw new Error(msg);
     }
     const result = await res.json();
+    if (result.existing) rom.existing = result.existing;
+    if (result.gamelist) rom.gamelist = result.gamelist;
+    if (result.missing) rom.missing = result.missing;
+    if (result.has_gamelist_entry !== undefined) rom.has_gamelist_entry = !!result.has_gamelist_entry;
     showToast(`Uploaded ${escapeHtml(field)} for ${escapeHtml(result.rom_name || "ROM")}.`, "success");
     // Refresh the selected rom view
-    await selectArtworkRom(window.selectedArtworkRomIndex);
+    await selectArtworkRom(window.selectedArtworkRomIndex, "edit");
   } catch (err) {
     showToast(`Upload failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
   } finally {
@@ -2032,7 +2062,7 @@ async function uploadArtworkImage(romIdOrPath, system, field, btnEl) {
     btnEl.innerHTML = `<i class="bi bi-upload"></i>`;
   }
 }
-async function selectArtworkRom(index) {
+async function selectArtworkRom(index, activeTab = "matches") {
   const roms = window.missingArtworkRoms || [];
   const rom = roms[index];
   if (!rom) return;
@@ -2079,9 +2109,10 @@ async function selectArtworkRom(index) {
   tabEls.forEach(el => {
     el.addEventListener('shown.bs.tab', () => { /* no-op */ });
   });
+  bindArtworkEditButtons(rom);
   // Switch to matches tab by default
-  const matchesTab = document.getElementById('matches-tab');
-  if (matchesTab) matchesTab.click();
+  const tabToShow = activeTab === "edit" ? document.getElementById("edit-tab") : document.getElementById("matches-tab");
+  if (tabToShow) tabToShow.click();
   // Search LaunchBox for matches - query fresh from DOM since it was just created
   const matchesEl = document.getElementById("launchboxMatches");
   if (!matchesEl) return;
@@ -2127,32 +2158,6 @@ async function selectArtworkRom(index) {
   } catch (err) {
     showToast(`LaunchBox search failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
     matchesEl.innerHTML = `<div class="text-muted">LaunchBox matches could not be loaded.</div>`;
-  } finally {
-    setLoading(false);
-  }
-}
-async function rescanLaunchboxAndRefresh() {
-  const index = Number(window.selectedArtworkRomIndex);
-  const rom = (window.missingArtworkRoms || [])[index];
-  if (!rom) return;
-  // Save gamelist first, then rescan
-  const fields = {};
-  document.querySelectorAll("#gamelistEditForm .gamelist-edit-field").forEach((node) => {
-    const field = node.getAttribute("data-gamelist-field");
-    if (field) fields[field] = node.value || "";
-  });
-  setLoading(true, "Saving metadata...");
-  try {
-    await apiPost("/admin/artwork/gamelist/update", {
-      system: rom.system,
-      rom_path: rom.rom_path,
-      fields,
-    });
-    showToast(`Saved metadata, rescanning LaunchBox matches...`, "info");
-    // Re-select the rom to trigger a fresh LaunchBox search
-    await selectArtworkRom(index);
-  } catch (err) {
-    showToast(`Save failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
   } finally {
     setLoading(false);
   }
@@ -2203,7 +2208,6 @@ async function saveSelectedArtworkGamelist() {
   const index = Number(window.selectedArtworkRomIndex);
   const rom = (window.missingArtworkRoms || [])[index];
   if (!rom) return;
-  const selected = document.getElementById("selectedArtworkRom");
   const fields = {};
   document.querySelectorAll("#gamelistEditForm .gamelist-edit-field").forEach((node) => {
     const field = node.getAttribute("data-gamelist-field");
@@ -2222,7 +2226,8 @@ async function saveSelectedArtworkGamelist() {
     rom.missing = result.missing || rom.missing || [];
     rom.title = result.title || rom.title || rom.name;
     rom.name = rom.title || rom.name;
-    if (selected) selected.innerHTML = artworkGamelistDetailsHtml(rom);
+    rom.search_title = result.search_title || rom.title || rom.name || rom.search_title || "";
+    await selectArtworkRom(index, "edit");
     const rows = document.getElementById("artworkRows");
     if (rows) rows.innerHTML = artworkMissingRowsHtml(window.missingArtworkRoms || []);
     showToast(`Saved gamelist data for ${escapeHtml(rom.title || rom.name || "ROM")}.`, "success");
