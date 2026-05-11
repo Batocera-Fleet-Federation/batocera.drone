@@ -5,7 +5,7 @@ from unittest import mock
 from pathlib import Path
 
 from app.mock_data import seed_mock_userdata
-from app.rom_api import BasicAuth, LaunchBoxClient, RomRepository, _launchbox_platform_for_system
+from app.rom_api import BasicAuth, LaunchBoxClient, RomRepository, _clean_rom_title, _launchbox_platform_for_system
 
 
 class BasicAuthTests(unittest.TestCase):
@@ -128,6 +128,9 @@ class RepositoryTests(unittest.TestCase):
 
 
 class LaunchBoxMappingTests(unittest.TestCase):
+    def test_launchbox_title_cleanup_replaces_special_separators(self) -> None:
+        self.assertEqual(_clean_rom_title("Mega Man: The-Wily;Wars [USA] <Rev 1>.zip"), "Mega Man The Wily Wars USA Rev 1")
+
     def test_batocera_system_maps_to_launchbox_platform_name(self) -> None:
         self.assertEqual(_launchbox_platform_for_system("ps2"), "Sony Playstation 2")
         self.assertEqual(_launchbox_platform_for_system("snes"), "Super Nintendo Entertainment System")

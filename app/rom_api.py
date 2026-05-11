@@ -165,9 +165,8 @@ def _env_bool(default: bool, *names: str) -> bool:
 
 def _clean_rom_title(value: str) -> str:
     name = Path(value or "").stem
-    name = re.sub(r"\[[^\]]*\]", " ", name)
-    name = re.sub(r"\([^)]*\)", " ", name)
-    name = re.sub(r"\s+", " ", name.replace("_", " ")).strip()
+    name = re.sub(r"[:,\-;\[\]\(\)<>_]+", " ", name)
+    name = re.sub(r"\s+", " ", name).strip()
     return name or Path(value or "").stem or value
 
 
@@ -2637,6 +2636,8 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         if system_value and not query_value and (rom_path_value or rom_id_value):
             rom = self.repository.find_rom_by_path(system_value, rom_path_value) if rom_path_value else self.repository.find_rom_by_unique_id(system_value, rom_id_value)
             query_value = _clean_rom_title(str(rom.get("image_stem") or rom.get("name") or ""))
+        elif query_value:
+            query_value = _clean_rom_title(query_value)
         if not query_value:
             raise ValueError("q or system+rom_id/rom_path is required")
         client = LaunchBoxClient()
