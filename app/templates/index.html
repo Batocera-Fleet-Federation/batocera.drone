@@ -1479,7 +1479,7 @@ function updateArtworkPageFromPayload(payload) {
   if (prevBtn) prevBtn.disabled = pageOffset <= 0;
   if (nextBtn) nextBtn.disabled = !payload.has_more;
   const cleanupBtn = document.getElementById("removeMissingGamelistBtn");
-  if (cleanupBtn) cleanupBtn.disabled = artworkRomStatus !== "missing" || total <= 0;
+  if (cleanupBtn) cleanupBtn.disabled = total <= 0;
 }
 async function refreshArtworkResults(forceRefresh = false) {
   setLoading(true, "Updating artwork results...");
@@ -1667,7 +1667,7 @@ async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh 
     });
     const removeMissingBtn = document.getElementById("removeMissingGamelistBtn");
     if (removeMissingBtn) {
-      removeMissingBtn.disabled = artworkRomStatus !== "missing" || total <= 0;
+      removeMissingBtn.disabled = total <= 0;
       removeMissingBtn.addEventListener("click", removeMissingGamelistEntriesForCurrentFilters);
     }
     document.querySelectorAll(".artwork-field-filter").forEach((node) => {
@@ -1804,10 +1804,6 @@ async function removeArtworkGamelistEntry(index) {
 }
 async function removeMissingGamelistEntriesForCurrentFilters() {
   const alertEl = document.getElementById("artworkAlert");
-  if (artworkRomStatus !== "missing") {
-    if (alertEl) alertEl.innerHTML = `<div class="alert alert-warning">Select ROM status: Missing before bulk removing gamelist entries.</div>`;
-    return;
-  }
   const confirmed = window.confirm(
     "Remove all gamelist.xml entries matching the current filters where the ROM file is missing on disk? ROM files are not deleted."
   );
