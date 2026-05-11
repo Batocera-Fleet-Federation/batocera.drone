@@ -323,24 +323,86 @@
       min-height: 100px;
     }
     /* Compact edit fields */
+    .compact-edit-section-title {
+      color: var(--admin-muted);
+      font-size: 0.68rem;
+      font-weight: 800;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      margin-bottom: 0.35rem;
+    }
+    .gamelist-edit-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0.35rem 0.55rem;
+    }
+    .gamelist-edit-field-row {
+      display: grid;
+      grid-template-columns: minmax(4.5rem, 34%) minmax(0, 1fr);
+      align-items: center;
+      gap: 0.35rem;
+      min-width: 0;
+    }
+    .gamelist-edit-field-wide {
+      grid-column: 1 / -1;
+      align-items: start;
+      grid-template-columns: 4.5rem minmax(0, 1fr);
+    }
+    .gamelist-edit-label {
+      color: var(--admin-muted);
+      font-size: 0.68rem;
+      font-weight: 700;
+      margin: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      text-transform: capitalize;
+    }
     .compact-edit .form-label {
       font-size: 0.72rem;
       margin-bottom: 0.1rem;
     }
     .compact-edit .form-control,
     .compact-edit .form-control-sm {
-      font-size: 0.82rem;
-      padding: 0.3rem 0.5rem;
+      font-size: 0.78rem;
+      min-height: 1.85rem;
+      padding: 0.22rem 0.42rem;
     }
     .compact-edit textarea.form-control-sm {
-      padding: 0.3rem 0.5rem;
+      padding: 0.3rem 0.42rem;
     }
     /* Image upload row */
+    .artwork-upload-grid {
+      display: grid;
+      gap: 0.25rem;
+    }
     .artwork-upload-item {
       display: flex;
       align-items: center;
       gap: 0.4rem;
-      margin-bottom: 0.3rem;
+      min-width: 0;
+    }
+    .artwork-upload-label {
+      color: var(--admin-muted);
+      flex: 0 0 4.5rem;
+      font-size: 0.72rem;
+      font-weight: 700;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      text-transform: capitalize;
+      white-space: nowrap;
+    }
+    .artwork-upload-file {
+      min-width: 0;
+      max-width: 145px;
+      font-size: 0.72rem !important;
+      padding-left: 0.35rem;
+      padding-right: 0.35rem;
+    }
+    .artwork-upload-status {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
     .artwork-upload-item .btn-icon {
       width: 1.6rem;
@@ -350,6 +412,15 @@
       align-items: center;
       justify-content: center;
       border-radius: 0.25rem;
+    }
+    @media (max-width: 575.98px) {
+      .gamelist-edit-grid {
+        grid-template-columns: 1fr;
+      }
+      .gamelist-edit-field-row,
+      .gamelist-edit-field-wide {
+        grid-template-columns: 4.5rem minmax(0, 1fr);
+      }
     }
     @media (max-width: 991.98px) {
       .sidebar { min-height: auto; }
@@ -1605,15 +1676,15 @@ function artworkGamelistFieldControl(field, value) {
   const label = field === "desc" ? "Description" : field;
   if (field === "desc") {
     return `
-      <div class="mb-2">
-        <label class="form-label small text-muted mb-1">${escapeHtml(label)}</label>
-        <textarea class="form-control form-control-sm gamelist-edit-field" data-gamelist-field="${escapeHtml(field)}" rows="4">${escapeHtml(normalized)}</textarea>
+      <div class="gamelist-edit-field-row gamelist-edit-field-wide">
+        <label class="gamelist-edit-label">${escapeHtml(label)}</label>
+        <textarea class="form-control form-control-sm gamelist-edit-field" data-gamelist-field="${escapeHtml(field)}" rows="3">${escapeHtml(normalized)}</textarea>
       </div>
     `;
   }
   return `
-    <div class="mb-2">
-      <label class="form-label small text-muted mb-1">${escapeHtml(label)}</label>
+    <div class="gamelist-edit-field-row">
+      <label class="gamelist-edit-label" title="${escapeHtml(label)}">${escapeHtml(label)}</label>
       <input class="form-control form-control-sm gamelist-edit-field" data-gamelist-field="${escapeHtml(field)}" value="${escapeHtml(normalized)}">
     </div>
   `;
@@ -1653,9 +1724,11 @@ function artworkGamelistEditFormHtml(rom) {
   if (!rom.has_gamelist_entry) {
     return `
       <form id="gamelistEditForm" class="compact-edit">
-        ${artworkGamelistFieldControl("name", rom.title || rom.name || "")}
-        ${artworkGamelistFieldControl("desc", "")}
-        <div class="d-flex gap-2 mt-3">
+        <div class="gamelist-edit-grid">
+          ${artworkGamelistFieldControl("name", rom.title || rom.name || "")}
+          ${artworkGamelistFieldControl("desc", "")}
+        </div>
+        <div class="d-flex gap-2 mt-2">
           <button class="btn btn-sm btn-primary" type="button" onclick="saveSelectedArtworkGamelist()">Save Gamelist Data</button>
         </div>
       </form>
@@ -1663,8 +1736,10 @@ function artworkGamelistEditFormHtml(rom) {
   }
   return `
     <form id="gamelistEditForm" class="compact-edit">
-      ${editableFields.map((field) => artworkGamelistFieldControl(field, details[field])).join("")}
-      <div class="d-flex gap-2 mt-3">
+      <div class="gamelist-edit-grid">
+        ${editableFields.map((field) => artworkGamelistFieldControl(field, details[field])).join("")}
+      </div>
+      <div class="d-flex gap-2 mt-2">
         <button class="btn btn-sm btn-primary" type="button" onclick="saveSelectedArtworkGamelist()">Save Metadata</button>
       </div>
     </form>
@@ -1953,14 +2028,14 @@ const LAUNCHBOX_METADATA_FIELDS = [
 function artworkImageUploadHtml(rom, field) {
   const existingValue = rom.existing && rom.existing[field] ? rom.existing[field] : null;
   const existingUrl = artworkExistingImageUrl(rom, existingValue);
-  const existingDisplay = existingValue ? `<span class="text-muted small ms-1">has ${escapeHtml(field)}</span>` : `<span class="text-muted small ms-1">no ${escapeHtml(field)}</span>`;
+  const existingDisplay = existingValue ? `<span class="text-muted small artwork-upload-status">has ${escapeHtml(field)}</span>` : `<span class="text-muted small artwork-upload-status">no ${escapeHtml(field)}</span>`;
   const viewBtn = existingUrl
     ? `<button class="btn btn-sm btn-outline-secondary btn-icon artwork-view-btn" type="button" data-image-url="${escapeHtml(existingUrl)}" data-image-title="${escapeHtml(field)}" title="View existing ${escapeHtml(field)}"><i class="bi bi-eye"></i></button>`
     : `<button class="btn btn-sm btn-outline-secondary btn-icon" type="button" disabled title="No ${escapeHtml(field)} to view"><i class="bi bi-eye-slash"></i></button>`;
   return `
     <div class="artwork-upload-item">
-      <span class="small text-muted" style="min-width: 80px;">${escapeHtml(field)}</span>
-      <input type="file" class="form-control form-control-sm artwork-upload-file" accept="image/*" data-field="${escapeHtml(field)}" style="max-width: 150px; font-size: 0.75rem;">
+      <span class="artwork-upload-label" title="${escapeHtml(field)}">${escapeHtml(field)}</span>
+      <input type="file" class="form-control form-control-sm artwork-upload-file" accept="image/*" data-field="${escapeHtml(field)}">
       <button class="btn btn-sm btn-primary btn-icon artwork-upload-btn" type="button" data-field="${escapeHtml(field)}" title="Upload"><i class="bi bi-upload"></i></button>
       ${viewBtn}
       ${existingDisplay}
@@ -1982,7 +2057,7 @@ function artworkExistingImageUrl(rom, value) {
 function artworkEditableImageFields(rom) {
   const fieldSet = new Set(rom.missing || []);
   const withExisting = new Set(GAMELIST_EDIT_FIELDS.filter(f => ["image","thumbnail","marquee","fanart","boxart","video"].includes(f)));
-  return Array.from(withExisting).map(f => artworkImageUploadHtml(rom, f)).join("");
+  return `<div class="artwork-upload-grid">${Array.from(withExisting).map(f => artworkImageUploadHtml(rom, f)).join("")}</div>`;
 }
 function artworkMetadataEditFields(rom) {
   const details = rom.gamelist || {};
@@ -2094,11 +2169,11 @@ async function selectArtworkRom(index, activeTab = "matches") {
           ${rom.has_gamelist_entry ? `<button class="btn btn-sm btn-outline-danger" type="button" onclick="removeArtworkGamelistEntry(${index})">Remove from gamelist</button>` : ""}
         </div>
         <div class="mb-2">
-          <label class="form-label text-muted mb-1">Metadata Fields</label>
+          <div class="compact-edit-section-title">Metadata</div>
           ${artworkGamelistEditFormHtml(rom)}
         </div>
         <div class="mb-2">
-          <label class="form-label text-muted mb-1">Image / Artwork Uploads</label>
+          <div class="compact-edit-section-title">Artwork Uploads</div>
           ${artworkEditableImageFields(rom)}
         </div>
       </div>
