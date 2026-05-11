@@ -184,39 +184,60 @@
       color: #334155;
       border: 1px solid #dbe2ff;
       font-weight: 500;
-	      padding: 0.38rem 0.58rem;
-	    }
-	    .artwork-page .topbar {
-	      display: none !important;
-	    }
-	    .artwork-page .app-shell {
-	      min-height: calc(100vh - 2rem);
-	    }
-	    .artwork-page .log-card,
-	    .artwork-page .admin-tile {
-	      background: rgba(255, 255, 255, 0.84);
-	      backdrop-filter: blur(10px);
-	    }
-	    .artwork-page .table,
-	    .artwork-page .table td,
-	    .artwork-page .table th {
-	      background-color: transparent;
-	    }
-	    .artwork-page .table-light th {
-	      background-color: rgba(248, 249, 252, 0.72);
-	    }
-	    .gamelist-details {
-	      max-height: 330px;
-	      overflow-y: auto;
-	    }
-	    .gamelist-details dt {
-	      color: var(--admin-muted);
-	      font-size: 0.74rem;
-	      text-transform: uppercase;
-	    }
-	    .gamelist-details dd {
-	      overflow-wrap: anywhere;
-	    }
+      padding: 0.38rem 0.58rem;
+    }
+    .artwork-page .topbar {
+      display: none !important;
+    }
+    .artwork-page .app-shell {
+      background: rgba(255, 255, 255, 0.66);
+      min-height: calc(100vh - 2rem);
+    }
+    .artwork-page .log-card,
+    .artwork-page .admin-tile {
+      background: rgba(255, 255, 255, 0.58);
+      backdrop-filter: blur(12px);
+    }
+    .artwork-page .log-card .card-header {
+      background: rgba(248, 249, 252, 0.58);
+    }
+    .artwork-page .artwork-filter-panel {
+      overflow: visible;
+      position: relative;
+      z-index: 40;
+    }
+    .artwork-page .artwork-results-row {
+      position: relative;
+      z-index: 1;
+    }
+    .artwork-page .filter-dropdown-menu {
+      background: rgba(255, 255, 255, 0.94);
+      z-index: 6000;
+    }
+    .artwork-page .dropdown {
+      position: relative;
+      z-index: 6001;
+    }
+    .artwork-page .table,
+    .artwork-page .table td,
+    .artwork-page .table th {
+      background-color: transparent;
+    }
+    .artwork-page .table-light th {
+      background-color: rgba(248, 249, 252, 0.48);
+    }
+    .gamelist-details {
+      max-height: 330px;
+      overflow-y: auto;
+    }
+    .gamelist-details dt {
+      color: var(--admin-muted);
+      font-size: 0.74rem;
+      text-transform: uppercase;
+    }
+    .gamelist-details dd {
+      overflow-wrap: anywhere;
+    }
     @media (max-width: 991.98px) {
       .sidebar { min-height: auto; }
       .nav-actions .btn { width: 100%; }
@@ -1568,7 +1589,7 @@ async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh 
         <span class="badge text-bg-light border">Scan: ${Number(payload.elapsed_ms || 0)} ms</span>
         ${(payload.fields || []).map((field) => `<span class="badge text-bg-light border">${escapeHtml(field)}: ${Number(fieldCounts[field] || 0)}</span>`).join("")}
       </div>
-      <div class="card log-card mb-3">
+      <div class="card log-card artwork-filter-panel mb-3">
         <div class="card-body">
           <div class="row g-3">
             <div class="col-12 col-lg-4">
@@ -1587,7 +1608,7 @@ async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh 
           </div>
         </div>
       </div>
-      <div class="row g-3">
+      <div class="row g-3 artwork-results-row">
         <div class="col-12 col-xl-7">
           <div class="card log-card">
             <div class="card-header d-flex justify-content-between align-items-center">
