@@ -1006,6 +1006,19 @@ class RomRepository:
                 missing.append(field)
         return missing
 
+    def _rom_path_exists(self, system: str, rom_path: str) -> bool:
+        try:
+            system_dir = self.get_system_dir(system)
+            normalized = _normalize_gamelist_rom_path(rom_path)
+            if not normalized or "\x00" in normalized:
+                return False
+            target_path = (system_dir / normalized).resolve()
+            if target_path != system_dir and system_dir not in target_path.parents:
+                return False
+            return target_path.exists()
+        except Exception:
+            return False
+
     def _list_missing_artwork_from_gamelists(self) -> List[dict]:
         if not self.roms_root.exists():
             return []
@@ -2497,7 +2510,12 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         total = len(filtered_items)
         safe_limit = max(1, min(int(limit), 500))
         safe_offset = max(0, int(offset))
-        page_items = filtered_items[safe_offset : safe_offset + safe_limit]
+        page_items = [dict(item) for item in filtered_items[safe_offset : safe_offset + safe_limit]]
+        for item in page_items:
+            item["rom_exists"] = self.repository._rom_path_exists(
+                str(item.get("system") or ""),
+                str(item.get("rom_path") or item.get("rom_name") or ""),
+            )
         systems_filtered = sorted({str(item.get("system") or "") for item in filtered_items if item.get("system")})
         field_counts = {field: 0 for field in ARTWORK_FIELDS}
         for item in filtered_items:

@@ -99,6 +99,8 @@ class MockServerIntegrationTests(unittest.TestCase):
         self.assertEqual(payload["systems_filtered"], ["snes"])
         self.assertEqual(payload["selected_fields"], ["image", "marquee"])
         self.assertTrue(any("image" in item["missing"] for item in payload["roms"]))
+        self.assertIn("rom_exists", payload["roms"][0])
+        self.assertTrue(payload["roms"][0]["rom_exists"])
 
         filtered = self._get_json("/v1/api/admin/artwork/missing?limit=2&offset=0&fields=any&q=castlevania")
         self.assertEqual(filtered["count"], 1)

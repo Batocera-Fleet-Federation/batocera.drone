@@ -1340,6 +1340,77 @@ function renderArtworkCheckboxDropdown(kind, label, options, selected, allLabel 
 function selectedArtworkCheckboxValues(selector) {
   return Array.from(document.querySelectorAll(`${selector}:checked`)).map((el) => el.value);
 }
+function artworkMissingRowsHtml(roms) {
+  return (roms || []).map((rom, idx) => `
+    <tr id="artwork-row-${idx}" data-filter="${escapeHtml(`${rom.system} ${rom.name} ${(rom.missing || []).join(" ")}`.toLowerCase())}">
+      <td class="mono small">${escapeHtml(rom.system || "")}</td>
+      <td>
+        <div class="fw-semibold">${escapeHtml(rom.title || rom.name || "")}</div>
+        <div class="text-muted small">${escapeHtml(rom.rom_name || rom.name || "")}</div>
+        <div class="mt-1">
+          <span class="badge ${rom.rom_exists ? "text-bg-success" : "text-bg-danger"}">${rom.rom_exists ? "ROM exists" : "ROM missing"}</span>
+          ${rom.has_gamelist_entry ? "" : `<span class="badge text-bg-warning ms-1">new gamelist entry needed</span>`}
+        </div>
+      </td>
+      <td>${(rom.missing || []).map((field) => `<span class="badge text-bg-danger me-1">${escapeHtml(field)}</span>`).join("")}</td>
+      <td class="text-end">
+        <div class="d-inline-flex gap-1">
+          <button class="btn btn-sm btn-primary" type="button" onclick="selectArtworkRom(${idx})">Select</button>
+          ${rom.has_gamelist_entry ? `<button class="btn btn-sm btn-outline-danger" type="button" onclick="removeArtworkGamelistEntry(${idx})">Remove</button>` : ""}
+        </div>
+      </td>
+    </tr>
+  `).join("") || `<tr><td colspan="4" class="text-muted p-3">No missing artwork found.</td></tr>`;
+}
+function artworkPayloadUrl(forceRefresh = false) {
+  const fieldsParam = encodeURIComponent((artworkSelectedFields || []).join(","));
+  const systemsParam = encodeURIComponent((artworkSelectedSystems || []).join(","));
+  return `/admin/artwork/missing?limit=${ARTWORK_PAGE_SIZE}&offset=${artworkCurrentOffset}&refresh=${forceRefresh ? "1" : "0"}&fields=${fieldsParam}&systems=${systemsParam}&q=${encodeURIComponent(artworkFilterQuery)}${artworkIncludeFilesystem ? "&include_filesystem=1" : ""}`;
+}
+function updateArtworkPageFromPayload(payload) {
+  const roms = payload.roms || [];
+  const fieldCounts = payload.field_counts || {};
+  const total = Number(payload.count || 0);
+  const limit = Number(payload.limit || ARTWORK_PAGE_SIZE);
+  const pageOffset = Number(payload.offset || 0);
+  const page = Math.floor(pageOffset / limit) + 1;
+  const totalPages = Math.max(1, Math.ceil(total / limit));
+  const firstItem = total ? pageOffset + 1 : 0;
+  const lastItem = pageOffset + roms.length;
+  artworkCurrentOffset = pageOffset;
+  window.missingArtworkRoms = roms;
+
+  const rows = document.getElementById("artworkRows");
+  if (rows) rows.innerHTML = artworkMissingRowsHtml(roms);
+  const summary = document.getElementById("artworkSummary");
+  if (summary) {
+    summary.innerHTML = `
+      <span class="badge text-bg-secondary">ROMs: ${total}</span>
+      <span class="badge text-bg-light border">Showing: ${firstItem}-${lastItem}</span>
+      <span class="badge text-bg-light border">Page: ${page}/${totalPages}</span>
+      <span class="badge text-bg-light border">Mode: ${escapeHtml(payload.mode || "gamelist")}</span>
+      <span class="badge text-bg-light border">Scan: ${Number(payload.elapsed_ms || 0)} ms</span>
+      ${(payload.fields || []).map((field) => `<span class="badge text-bg-light border">${escapeHtml(field)}: ${Number(fieldCounts[field] || 0)}</span>`).join("")}
+    `;
+  }
+  const prevBtn = document.getElementById("artworkPrevBtn");
+  const nextBtn = document.getElementById("artworkNextBtn");
+  if (prevBtn) prevBtn.disabled = pageOffset <= 0;
+  if (nextBtn) nextBtn.disabled = !payload.has_more;
+}
+async function refreshArtworkResults(forceRefresh = false) {
+  setLoading(true, "Updating artwork results...");
+  try {
+    const payload = await api(artworkPayloadUrl(forceRefresh));
+    updateArtworkPageFromPayload(payload);
+    history.replaceState(null, "", artworkHash());
+  } catch (err) {
+    const alertEl = document.getElementById("artworkAlert");
+    if (alertEl) alertEl.innerHTML = `<div class="alert alert-danger">Failed to update artwork results: ${escapeHtml(err.message || "unknown error")}</div>`;
+  } finally {
+    setLoading(false);
+  }
+}
 function setupArtworkDropdownTools(kind, onApply) {
   const search = document.getElementById(`artwork-${kind}-search`);
   const selectAll = document.getElementById(`artwork-${kind}-select-all`);
@@ -1385,9 +1456,7 @@ async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh 
   clearSystemTheme();
   await refreshRandomThemeLogo();
   try {
-    const fieldsParam = encodeURIComponent((artworkSelectedFields || []).join(","));
-    const systemsParam = encodeURIComponent((artworkSelectedSystems || []).join(","));
-    const payload = await api(`/admin/artwork/missing?limit=${ARTWORK_PAGE_SIZE}&offset=${artworkCurrentOffset}&refresh=${forceRefresh ? "1" : "0"}&fields=${fieldsParam}&systems=${systemsParam}&q=${encodeURIComponent(artworkFilterQuery)}${includeFilesystem ? "&include_filesystem=1" : ""}`);
+    const payload = await api(artworkPayloadUrl(forceRefresh));
     const roms = payload.roms || [];
     const fieldCounts = payload.field_counts || {};
     const availableFields = [{ value: "any", label: "Any" }].concat((payload.fields || []).map((field) => ({ value: field, label: field })));
@@ -1406,7 +1475,7 @@ async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh 
         <button class="btn btn-outline-secondary" onclick="renderMissingArtworkPage(true, true, 0, artworkSelectedFields, artworkSelectedSystems, artworkFilterQuery)">Full Filesystem Scan</button>
       </div>
       <div id="artworkAlert"></div>
-      <div class="mb-3 d-flex flex-wrap gap-2">
+      <div id="artworkSummary" class="mb-3 d-flex flex-wrap gap-2">
         <span class="badge text-bg-secondary">ROMs: ${total}</span>
         <span class="badge text-bg-light border">Showing: ${firstItem}-${lastItem}</span>
         <span class="badge text-bg-light border">Page: ${page}/${totalPages}</span>
@@ -1449,25 +1518,7 @@ async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh 
                       <th></th>
                     </tr>
                   </thead>
-                  <tbody id="artworkRows">
-                    ${roms.map((rom, idx) => `
-                      <tr id="artwork-row-${idx}" data-filter="${escapeHtml(`${rom.system} ${rom.name} ${(rom.missing || []).join(" ")}`.toLowerCase())}">
-                        <td class="mono small">${escapeHtml(rom.system || "")}</td>
-                        <td>
-                          <div class="fw-semibold">${escapeHtml(rom.title || rom.name || "")}</div>
-                          <div class="text-muted small">${escapeHtml(rom.rom_name || rom.name || "")}</div>
-                          ${rom.has_gamelist_entry ? "" : `<span class="badge text-bg-warning">new gamelist entry needed</span>`}
-                        </td>
-                        <td>${(rom.missing || []).map((field) => `<span class="badge text-bg-danger me-1">${escapeHtml(field)}</span>`).join("")}</td>
-                        <td class="text-end">
-                          <div class="d-inline-flex gap-1">
-                            <button class="btn btn-sm btn-primary" type="button" onclick="selectArtworkRom(${idx})">Select</button>
-                            ${rom.has_gamelist_entry ? `<button class="btn btn-sm btn-outline-danger" type="button" onclick="removeArtworkGamelistEntry(${idx})">Remove</button>` : ""}
-                          </div>
-                        </td>
-                      </tr>
-                    `).join("") || `<tr><td colspan="4" class="text-muted p-3">No missing artwork found.</td></tr>`}
-                  </tbody>
+                  <tbody id="artworkRows">${artworkMissingRowsHtml(roms)}</tbody>
                 </table>
               </div>
             </div>
@@ -1491,7 +1542,10 @@ async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh 
       const selectedSystems = selectedArtworkCheckboxValues(".artwork-system-filter");
       const allSystems = availableSystems.map((item) => item.value);
       const normalizedSystems = selectedSystems.length === allSystems.length ? [] : (selectedSystems.length ? selectedSystems : ["__none__"]);
-      setArtworkHash(artworkIncludeFilesystem, 0, selectedFields, normalizedSystems, artworkFilterQuery);
+      artworkSelectedFields = selectedFields;
+      artworkSelectedSystems = normalizedSystems;
+      artworkCurrentOffset = 0;
+      refreshArtworkResults(false);
     };
     document.querySelectorAll(".artwork-field-filter").forEach((node) => {
       node.addEventListener("change", () => {
@@ -1514,12 +1568,14 @@ async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh 
     const nextBtn = document.getElementById("artworkNextBtn");
     if (prevBtn) {
       prevBtn.addEventListener("click", async () => {
-        setArtworkHash(artworkIncludeFilesystem, Math.max(0, pageOffset - ARTWORK_PAGE_SIZE), artworkSelectedFields, artworkSelectedSystems, artworkFilterQuery);
+        artworkCurrentOffset = Math.max(0, artworkCurrentOffset - ARTWORK_PAGE_SIZE);
+        await refreshArtworkResults(false);
       });
     }
     if (nextBtn) {
       nextBtn.addEventListener("click", async () => {
-        setArtworkHash(artworkIncludeFilesystem, pageOffset + ARTWORK_PAGE_SIZE, artworkSelectedFields, artworkSelectedSystems, artworkFilterQuery);
+        artworkCurrentOffset = artworkCurrentOffset + ARTWORK_PAGE_SIZE;
+        await refreshArtworkResults(false);
       });
     }
     const filter = document.getElementById("artworkFilter");
@@ -1528,7 +1584,8 @@ async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh 
         artworkFilterQuery = (filter.value || "").trim();
         if (artworkFilterDebounceTimer) window.clearTimeout(artworkFilterDebounceTimer);
         artworkFilterDebounceTimer = window.setTimeout(() => {
-          setArtworkHash(artworkIncludeFilesystem, 0, artworkSelectedFields, artworkSelectedSystems, artworkFilterQuery);
+          artworkCurrentOffset = 0;
+          refreshArtworkResults(false);
         }, 300);
       });
     }
@@ -1578,7 +1635,8 @@ async function applyLaunchboxArtwork(rowIndex, system, romId, romPath, gameKey) 
   const alertEl = document.getElementById("artworkAlert");
   const matchesEl = document.getElementById("launchboxMatches");
   if (alertEl) alertEl.innerHTML = "";
-  if (matchesEl) matchesEl.insertAdjacentHTML("afterbegin", `<div class="text-muted mb-2"><span class="spinner-border spinner-border-sm me-2"></span>Downloading missing artwork...</div>`);
+  const progressId = `launchbox-progress-${Date.now()}`;
+  if (matchesEl) matchesEl.insertAdjacentHTML("afterbegin", `<div id="${progressId}" class="text-muted mb-2"><span class="spinner-border spinner-border-sm me-2"></span>Downloading missing artwork...</div>`);
   try {
     const result = await apiPost("/admin/artwork/launchbox/apply", { system, rom_id: romId, rom_path: romPath, game_key: gameKey });
     const updated = result.updated || [];
@@ -1603,6 +1661,9 @@ async function applyLaunchboxArtwork(rowIndex, system, romId, romPath, gameKey) 
     }
   } catch (err) {
     if (alertEl) alertEl.innerHTML = `<div class="alert alert-danger">Artwork update failed: ${escapeHtml(err.message || "unknown error")}</div>`;
+  } finally {
+    const progressEl = document.getElementById(progressId);
+    if (progressEl) progressEl.remove();
   }
 }
 async function removeArtworkGamelistEntry(index) {
