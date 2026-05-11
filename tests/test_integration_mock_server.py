@@ -90,6 +90,16 @@ class MockServerIntegrationTests(unittest.TestCase):
         self.assertTrue(any("menu_driver" in line for line in payload["content"]))
 
     def test_admin_missing_artwork_endpoint(self) -> None:
+        missing_rom = self._root / "roms" / "snes" / "Missing Game (USA).zip"
+        gamelist = self._root / "roms" / "snes" / "gamelist.xml"
+        text = gamelist.read_text(encoding="utf-8").replace(
+            "</gameList>",
+            "<game><path>./Missing Game (USA).zip</path><name>Missing Game</name></game></gameList>",
+        )
+        gamelist.write_text(text, encoding="utf-8")
+        if missing_rom.exists():
+            missing_rom.unlink()
+
         payload = self._get_json("/v1/api/admin/artwork/missing?limit=2&offset=0&fields=image,marquee&systems=snes")
         self.assertGreater(payload["count"], 0)
         self.assertLessEqual(payload["returned"], 2)
@@ -107,6 +117,15 @@ class MockServerIntegrationTests(unittest.TestCase):
         self.assertEqual(filtered["query"], "castlevania")
         self.assertEqual(filtered["roms"][0]["system"], "psx")
 
+        missing = self._get_json("/v1/api/admin/artwork/missing?fields=any&systems=snes&rom_status=missing&refresh=1")
+        self.assertEqual(missing["rom_status"], "missing")
+        self.assertTrue(all(not item["rom_exists"] for item in missing["roms"]))
+        self.assertTrue(any(item["title"] == "Missing Game" for item in missing["roms"]))
+
+        existing = self._get_json("/v1/api/admin/artwork/missing?fields=any&systems=snes&rom_status=exists&refresh=1")
+        self.assertEqual(existing["rom_status"], "exists")
+        self.assertTrue(all(item["rom_exists"] for item in existing["roms"]))
+
     def test_admin_remove_gamelist_entry_endpoint(self) -> None:
         result = self._post_json(
             "/v1/api/admin/artwork/gamelist/remove",
@@ -116,6 +135,27 @@ class MockServerIntegrationTests(unittest.TestCase):
         payload = self._get_json("/v1/api/admin/artwork/missing?fields=any&systems=snes&refresh=1")
         titles = {item["title"] for item in payload["roms"]}
         self.assertNotIn("Chrono Trigger", titles)
+
+    def test_admin_remove_missing_gamelist_entries_endpoint(self) -> None:
+        gamelist = self._root / "roms" / "snes" / "gamelist.xml"
+        gamelist.write_text(
+            gamelist.read_text(encoding="utf-8").replace(
+                "</gameList>",
+                "<game><path>./Missing Bulk Game.zip</path><name>Missing Bulk Game</name></game></gameList>",
+            ),
+            encoding="utf-8",
+        )
+        result = self._post_json(
+            "/v1/api/admin/artwork/gamelist/remove-missing",
+            {
+                "confirm": "DELETE_MISSING_GAMELIST_ENTRIES",
+                "fields": ["any"],
+                "systems": ["snes"],
+                "q": "Missing Bulk",
+            },
+        )
+        self.assertEqual(result["removed_count"], 1)
+        self.assertNotIn("Missing Bulk Game", gamelist.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

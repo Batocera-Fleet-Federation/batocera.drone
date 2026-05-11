@@ -287,6 +287,7 @@ let artworkIncludeFilesystem = false;
 let artworkSelectedFields = ["image", "marquee"];
 let artworkSelectedSystems = [];
 let artworkFilterQuery = "";
+let artworkRomStatus = "any";
 let artworkFilterDebounceTimer = null;
 let systemInfoLoaded = false;
 let adminEnabled = true;
@@ -704,19 +705,21 @@ function parseArtworkHash(hash) {
   const systemsRaw = params.get("systems") || "";
   const systems = systemsRaw.split(",").map((item) => item.trim()).filter(Boolean);
   const q = params.get("q") || "";
-  return { offset, includeFilesystem, fields, systems, q };
+  const romStatus = ["any", "exists", "missing"].includes(params.get("rom_status")) ? params.get("rom_status") : "any";
+  return { offset, includeFilesystem, fields, systems, q, romStatus };
 }
-function artworkHash(includeFilesystem = artworkIncludeFilesystem, offset = artworkCurrentOffset, fields = artworkSelectedFields, systems = artworkSelectedSystems, query = artworkFilterQuery) {
+function artworkHash(includeFilesystem = artworkIncludeFilesystem, offset = artworkCurrentOffset, fields = artworkSelectedFields, systems = artworkSelectedSystems, query = artworkFilterQuery, romStatus = artworkRomStatus) {
   const params = new URLSearchParams();
   params.set("offset", String(Math.max(0, Number(offset || 0))));
   params.set("fields", (fields && fields.length ? fields : ["any"]).join(","));
   if (systems && systems.length) params.set("systems", systems.join(","));
   if (query) params.set("q", query);
+  if (romStatus && romStatus !== "any") params.set("rom_status", romStatus);
   if (includeFilesystem) params.set("include_filesystem", "1");
   return `#admin/artwork?${params.toString()}`;
 }
-function setArtworkHash(includeFilesystem = artworkIncludeFilesystem, offset = artworkCurrentOffset, fields = artworkSelectedFields, systems = artworkSelectedSystems, query = artworkFilterQuery) {
-  setHash(artworkHash(includeFilesystem, offset, fields, systems, query));
+function setArtworkHash(includeFilesystem = artworkIncludeFilesystem, offset = artworkCurrentOffset, fields = artworkSelectedFields, systems = artworkSelectedSystems, query = artworkFilterQuery, romStatus = artworkRomStatus) {
+  setHash(artworkHash(includeFilesystem, offset, fields, systems, query, romStatus));
 }
 function syncArtworkHash() {
   const nextHash = artworkHash();
@@ -1340,6 +1343,15 @@ function renderArtworkCheckboxDropdown(kind, label, options, selected, allLabel 
 function selectedArtworkCheckboxValues(selector) {
   return Array.from(document.querySelectorAll(`${selector}:checked`)).map((el) => el.value);
 }
+function renderArtworkStatusDropdown(selected) {
+  const value = ["any", "exists", "missing"].includes(selected) ? selected : "any";
+  const labels = { any: "Any", exists: "Exists", missing: "Missing" };
+  return `
+    <select id="artworkRomStatusFilter" class="form-select">
+      ${Object.entries(labels).map(([key, label]) => `<option value="${key}" ${value === key ? "selected" : ""}>${label}</option>`).join("")}
+    </select>
+  `;
+}
 function artworkMissingRowsHtml(roms) {
   return (roms || []).map((rom, idx) => `
     <tr id="artwork-row-${idx}" data-filter="${escapeHtml(`${rom.system} ${rom.name} ${(rom.missing || []).join(" ")}`.toLowerCase())}">
@@ -1365,7 +1377,7 @@ function artworkMissingRowsHtml(roms) {
 function artworkPayloadUrl(forceRefresh = false) {
   const fieldsParam = encodeURIComponent((artworkSelectedFields || []).join(","));
   const systemsParam = encodeURIComponent((artworkSelectedSystems || []).join(","));
-  return `/admin/artwork/missing?limit=${ARTWORK_PAGE_SIZE}&offset=${artworkCurrentOffset}&refresh=${forceRefresh ? "1" : "0"}&fields=${fieldsParam}&systems=${systemsParam}&q=${encodeURIComponent(artworkFilterQuery)}${artworkIncludeFilesystem ? "&include_filesystem=1" : ""}`;
+  return `/admin/artwork/missing?limit=${ARTWORK_PAGE_SIZE}&offset=${artworkCurrentOffset}&refresh=${forceRefresh ? "1" : "0"}&fields=${fieldsParam}&systems=${systemsParam}&q=${encodeURIComponent(artworkFilterQuery)}&rom_status=${encodeURIComponent(artworkRomStatus)}${artworkIncludeFilesystem ? "&include_filesystem=1" : ""}`;
 }
 function updateArtworkPageFromPayload(payload) {
   const roms = payload.roms || [];
@@ -1397,6 +1409,8 @@ function updateArtworkPageFromPayload(payload) {
   const nextBtn = document.getElementById("artworkNextBtn");
   if (prevBtn) prevBtn.disabled = pageOffset <= 0;
   if (nextBtn) nextBtn.disabled = !payload.has_more;
+  const cleanupBtn = document.getElementById("removeMissingGamelistBtn");
+  if (cleanupBtn) cleanupBtn.disabled = artworkRomStatus !== "missing" || total <= 0;
 }
 async function refreshArtworkResults(forceRefresh = false) {
   setLoading(true, "Updating artwork results...");
@@ -1442,7 +1456,7 @@ function setupArtworkDropdownTools(kind, onApply) {
     });
   }
 }
-async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh = false, offset = 0, fields = artworkSelectedFields, systems = artworkSelectedSystems, query = artworkFilterQuery) {
+async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh = false, offset = 0, fields = artworkSelectedFields, systems = artworkSelectedSystems, query = artworkFilterQuery, romStatus = artworkRomStatus) {
   titleNode.textContent = "Missing Artwork";
   subtitleNode.textContent = "ROMs with incomplete gamelist.xml artwork";
   artworkIncludeFilesystem = !!includeFilesystem;
@@ -1450,6 +1464,7 @@ async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh 
   artworkSelectedFields = fields && fields.length ? fields : ["any"];
   artworkSelectedSystems = systems || [];
   artworkFilterQuery = query || "";
+  artworkRomStatus = ["any", "exists", "missing"].includes(romStatus) ? romStatus : "any";
   syncArtworkHash();
   setSearchMode("hidden");
   setLoading(true, includeFilesystem ? "Scanning ROM directories..." : "Scanning gamelists...");
@@ -1471,8 +1486,9 @@ async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh 
     content.innerHTML = `
       <div class="mb-3 d-flex flex-wrap gap-2">
         <button class="btn btn-outline-secondary" onclick="setHash('#admin')">← Back to Admin</button>
-        <button class="btn btn-outline-primary" onclick="renderMissingArtworkPage(false, true, 0, artworkSelectedFields, artworkSelectedSystems, artworkFilterQuery)">Refresh</button>
-        <button class="btn btn-outline-secondary" onclick="renderMissingArtworkPage(true, true, 0, artworkSelectedFields, artworkSelectedSystems, artworkFilterQuery)">Full Filesystem Scan</button>
+        <button class="btn btn-outline-primary" onclick="renderMissingArtworkPage(false, true, 0, artworkSelectedFields, artworkSelectedSystems, artworkFilterQuery, artworkRomStatus)">Refresh</button>
+        <button class="btn btn-outline-secondary" onclick="renderMissingArtworkPage(true, true, 0, artworkSelectedFields, artworkSelectedSystems, artworkFilterQuery, artworkRomStatus)">Full Filesystem Scan</button>
+        <button id="removeMissingGamelistBtn" class="btn btn-outline-danger" type="button">Remove Missing ROM Entries</button>
       </div>
       <div id="artworkAlert"></div>
       <div id="artworkSummary" class="mb-3 d-flex flex-wrap gap-2">
@@ -1486,11 +1502,15 @@ async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh 
       <div class="card log-card mb-3">
         <div class="card-body">
           <div class="row g-3">
-            <div class="col-12 col-lg-6">
+            <div class="col-12 col-lg-4">
               ${renderArtworkCheckboxDropdown("field", "Missing Type", availableFields, artworkSelectedFields, "Any")}
             </div>
-            <div class="col-12 col-lg-6">
+            <div class="col-12 col-lg-4">
               ${renderArtworkCheckboxDropdown("system", "System", availableSystems, artworkSelectedSystems.length ? artworkSelectedSystems : availableSystems.map((item) => item.value), "All systems", true)}
+            </div>
+            <div class="col-12 col-lg-4">
+              <label class="form-label mb-1" for="artworkRomStatusFilter">ROM status</label>
+              ${renderArtworkStatusDropdown(artworkRomStatus)}
             </div>
           </div>
         </div>
@@ -1547,6 +1567,19 @@ async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh 
       artworkCurrentOffset = 0;
       refreshArtworkResults(false);
     };
+    const romStatusFilter = document.getElementById("artworkRomStatusFilter");
+    if (romStatusFilter) {
+      romStatusFilter.addEventListener("change", () => {
+        artworkRomStatus = romStatusFilter.value || "any";
+        artworkCurrentOffset = 0;
+        refreshArtworkResults(false);
+      });
+    }
+    const removeMissingBtn = document.getElementById("removeMissingGamelistBtn");
+    if (removeMissingBtn) {
+      removeMissingBtn.disabled = artworkRomStatus !== "missing" || total <= 0;
+      removeMissingBtn.addEventListener("click", removeMissingGamelistEntriesForCurrentFilters);
+    }
     document.querySelectorAll(".artwork-field-filter").forEach((node) => {
       node.addEventListener("change", () => {
         if (node.value === "any" && node.checked) {
@@ -1680,6 +1713,33 @@ async function removeArtworkGamelistEntry(index) {
     if (alertEl) alertEl.innerHTML = `<div class="alert alert-success">Removed ${escapeHtml(label)} from gamelist.xml.</div>`;
   } catch (err) {
     if (alertEl) alertEl.innerHTML = `<div class="alert alert-danger">Remove failed: ${escapeHtml(err.message || "unknown error")}</div>`;
+  }
+}
+async function removeMissingGamelistEntriesForCurrentFilters() {
+  const alertEl = document.getElementById("artworkAlert");
+  if (artworkRomStatus !== "missing") {
+    if (alertEl) alertEl.innerHTML = `<div class="alert alert-warning">Select ROM status: Missing before bulk removing gamelist entries.</div>`;
+    return;
+  }
+  const confirmed = window.confirm(
+    "Remove all gamelist.xml entries matching the current filters where the ROM file is missing on disk? ROM files are not deleted."
+  );
+  if (!confirmed) return;
+  try {
+    const result = await apiPost("/admin/artwork/gamelist/remove-missing", {
+      confirm: "DELETE_MISSING_GAMELIST_ENTRIES",
+      include_filesystem: artworkIncludeFilesystem,
+      fields: artworkSelectedFields || ["any"],
+      systems: artworkSelectedSystems || [],
+      q: artworkFilterQuery || "",
+    });
+    if (alertEl) {
+      alertEl.innerHTML = `<div class="alert alert-success">Removed ${Number(result.removed_count || 0)} missing-ROM gamelist entr${Number(result.removed_count || 0) === 1 ? "y" : "ies"}.</div>`;
+    }
+    artworkCurrentOffset = 0;
+    await refreshArtworkResults(true);
+  } catch (err) {
+    if (alertEl) alertEl.innerHTML = `<div class="alert alert-danger">Bulk remove failed: ${escapeHtml(err.message || "unknown error")}</div>`;
   }
 }
 async function renderOvermindIntegrationPage() {
@@ -2232,8 +2292,8 @@ async function router() {
         setHash("");
         return;
       }
-      const parsed = parseArtworkHash(hash) || { offset: 0, includeFilesystem: false, fields: ["image", "marquee"], systems: [], q: "" };
-      await renderMissingArtworkPage(parsed.includeFilesystem, false, parsed.offset, parsed.fields, parsed.systems, parsed.q);
+      const parsed = parseArtworkHash(hash) || { offset: 0, includeFilesystem: false, fields: ["image", "marquee"], systems: [], q: "", romStatus: "any" };
+      await renderMissingArtworkPage(parsed.includeFilesystem, false, parsed.offset, parsed.fields, parsed.systems, parsed.q, parsed.romStatus);
     } else if (hash === "#admin/overmind") {
       if (!adminEnabled) {
         setHash("");

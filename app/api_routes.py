@@ -192,6 +192,7 @@ class ApiRoutesMixin:
                     art_fields=art_fields,
                     system_filters=system_filters,
                     query=query_params.get("q", [""])[0],
+                    rom_status=query_params.get("rom_status", ["any"])[0],
                 )
                 return
 
@@ -273,6 +274,11 @@ class ApiRoutesMixin:
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "artwork" and parts[2] == "gamelist" and parts[3] == "remove":
                 payload = self._read_json_body()
                 self._handle_admin_gamelist_remove(payload)
+                return
+
+            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "artwork" and parts[2] == "gamelist" and parts[3] == "remove-missing":
+                payload = self._read_json_body()
+                self._handle_admin_gamelist_remove_missing(payload)
                 return
 
             self._send_json(404, {"error": "not found"})

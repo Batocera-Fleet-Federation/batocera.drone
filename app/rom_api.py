@@ -1141,6 +1141,44 @@ class RomRepository:
             self._missing_artwork_cache.clear()
         return {"system": system, "rom_path": normalized_rom_path, "removed": True}
 
+    def remove_gamelist_entries(self, entries: List[dict]) -> dict:
+        grouped: Dict[str, List[str]] = {}
+        for entry in entries:
+            system = str(entry.get("system") or "").strip()
+            rom_path = _normalize_gamelist_rom_path(str(entry.get("rom_path") or ""))
+            if not system or not rom_path:
+                continue
+            grouped.setdefault(system, []).append(rom_path)
+
+        removed = []
+        not_found = []
+        for system, paths in grouped.items():
+            system_dir = self.get_system_dir(system)
+            tree, root = self._read_gamelist(system_dir)
+            changed = False
+            for rom_path in paths:
+                game = self._find_gamelist_entry_by_path(root, rom_path)
+                if game is None:
+                    not_found.append({"system": system, "rom_path": rom_path})
+                    continue
+                root.remove(game)
+                removed.append({"system": system, "rom_path": rom_path})
+                changed = True
+            if changed:
+                gamelist_path = system_dir / "gamelist.xml"
+                try:
+                    ET.indent(tree, space="  ")
+                except Exception:
+                    pass
+                tree.write(gamelist_path, encoding="utf-8", xml_declaration=True)
+                with gamelist_path.open("a", encoding="utf-8") as handle:
+                    handle.write("\n")
+
+        if removed:
+            with self._missing_artwork_cache_lock:
+                self._missing_artwork_cache.clear()
+        return {"removed": removed, "removed_count": len(removed), "not_found": not_found}
+
     def find_rom_by_unique_id(self, system: str, unique_id: str) -> dict:
         _, roms = self.list_assets(system, "roms")
         for rom in roms:
@@ -2458,6 +2496,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         art_fields: Optional[List[str]] = None,
         system_filters: Optional[List[str]] = None,
         query: Optional[str] = None,
+        rom_status: Optional[str] = None,
     ) -> None:
         started_at = time.time()
         items = self.repository.list_missing_artwork(include_filesystem=include_filesystem, force_refresh=refresh)
@@ -2476,8 +2515,20 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             if str(system or "").strip()
         }
         normalized_query = str(query or "").strip().lower()
+        normalized_rom_status = str(rom_status or "any").strip().lower()
+        if normalized_rom_status not in ("any", "exists", "missing"):
+            normalized_rom_status = "any"
 
         filtered_items = items
+        items_with_status = []
+        for item in filtered_items:
+            next_item = dict(item)
+            next_item["rom_exists"] = self.repository._rom_path_exists(
+                str(next_item.get("system") or ""),
+                str(next_item.get("rom_path") or next_item.get("rom_name") or ""),
+            )
+            items_with_status.append(next_item)
+        filtered_items = items_with_status
         if normalized_art_fields:
             filtered_items = [
                 item
@@ -2506,16 +2557,15 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                     ]
                 ).lower()
             ]
+        if normalized_rom_status == "exists":
+            filtered_items = [item for item in filtered_items if bool(item.get("rom_exists"))]
+        elif normalized_rom_status == "missing":
+            filtered_items = [item for item in filtered_items if not bool(item.get("rom_exists"))]
 
         total = len(filtered_items)
         safe_limit = max(1, min(int(limit), 500))
         safe_offset = max(0, int(offset))
         page_items = [dict(item) for item in filtered_items[safe_offset : safe_offset + safe_limit]]
-        for item in page_items:
-            item["rom_exists"] = self.repository._rom_path_exists(
-                str(item.get("system") or ""),
-                str(item.get("rom_path") or item.get("rom_name") or ""),
-            )
         systems_filtered = sorted({str(item.get("system") or "") for item in filtered_items if item.get("system")})
         field_counts = {field: 0 for field in ARTWORK_FIELDS}
         for item in filtered_items:
@@ -2537,6 +2587,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 "field_counts": field_counts,
                 "selected_fields": sorted(normalized_art_fields) if normalized_art_fields else ["any"],
                 "selected_systems": sorted(normalized_systems),
+                "rom_status": normalized_rom_status,
                 "query": normalized_query,
                 "mode": "filesystem" if include_filesystem else "gamelist",
                 "cached": not refresh,
@@ -2595,6 +2646,55 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         if not rom_path:
             raise ValueError("rom_path is required")
         result = self.repository.remove_gamelist_entry(system, rom_path)
+        self._send_json(200, result)
+
+    def _handle_admin_gamelist_remove_missing(self, payload: dict) -> None:
+        confirm = str(payload.get("confirm") or "").strip()
+        if confirm != "DELETE_MISSING_GAMELIST_ENTRIES":
+            raise ValueError("confirm must be DELETE_MISSING_GAMELIST_ENTRIES")
+        include_filesystem = bool(payload.get("include_filesystem"))
+        art_fields = payload.get("fields") if isinstance(payload.get("fields"), list) else []
+        system_filters = payload.get("systems") if isinstance(payload.get("systems"), list) else []
+        query = str(payload.get("q") or "")
+
+        items = self.repository.list_missing_artwork(include_filesystem=include_filesystem, force_refresh=False)
+        normalized_art_fields = {str(field or "").strip().lower() for field in art_fields if str(field or "").strip()}
+        if "any" in normalized_art_fields:
+            normalized_art_fields = set()
+        normalized_art_fields = {field for field in normalized_art_fields if field in ARTWORK_FIELDS}
+        normalized_systems = {str(system or "").strip().lower() for system in system_filters if str(system or "").strip()}
+        normalized_query = query.strip().lower()
+
+        filtered = []
+        for item in items:
+            candidate = dict(item)
+            candidate["rom_exists"] = self.repository._rom_path_exists(
+                str(candidate.get("system") or ""),
+                str(candidate.get("rom_path") or candidate.get("rom_name") or ""),
+            )
+            if candidate["rom_exists"]:
+                continue
+            if normalized_art_fields and not normalized_art_fields.intersection({str(field).lower() for field in (candidate.get("missing") or [])}):
+                continue
+            if normalized_systems and str(candidate.get("system") or "").strip().lower() not in normalized_systems:
+                continue
+            if normalized_query:
+                haystack = " ".join(
+                    [
+                        str(candidate.get("system") or ""),
+                        str(candidate.get("name") or ""),
+                        str(candidate.get("title") or ""),
+                        str(candidate.get("rom_name") or ""),
+                        str(candidate.get("rom_path") or ""),
+                        " ".join(str(field) for field in (candidate.get("missing") or [])),
+                    ]
+                ).lower()
+                if normalized_query not in haystack:
+                    continue
+            filtered.append(candidate)
+
+        result = self.repository.remove_gamelist_entries(filtered)
+        result["matched_count"] = len(filtered)
         self._send_json(200, result)
 
     def _handle_public_image(self, system: str, image_file: str) -> None:
