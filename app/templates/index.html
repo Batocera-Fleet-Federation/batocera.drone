@@ -271,6 +271,7 @@
     .toast-alert.alert-danger { background: #dc2626; color: #fff; border: none; }
     .toast-alert.alert-warning { background: #d97706; color: #fff; border: none; }
     .toast-alert.alert-info { background: #2563eb; color: #fff; border: none; }
+    .toast-alert.alert-loading { background: #334155; color: #fff; border: none; }
 
     /* Image lightbox modal */
     .image-lightbox-overlay {
@@ -403,8 +404,6 @@
             </div>
           </form>
         </div>
-        <div id="alerts"></div>
-        <div id="loading" class="d-none mb-3 text-muted"><div class="spinner-border spinner-border-sm me-2" role="status"></div><span id="loadingText">Loading...</span></div>
         <div id="content"></div>
         <footer class="mt-4 pt-3 border-top text-muted small">
           <a href="/v1/api/downloads">Download Sitemap</a>
@@ -416,7 +415,6 @@
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
 const content = document.getElementById("content");
-const alerts = document.getElementById("alerts");
 const backBtn = document.getElementById("backBtn");
 const systemsMenuBtn = document.getElementById("systemsMenuBtn");
 const biosBtn = document.getElementById("biosBtn");
@@ -425,8 +423,6 @@ const adminMenuBtn = document.getElementById("adminMenuBtn");
 const searchForm = document.getElementById("searchForm");
 const searchInput = document.getElementById("searchInput");
 const clearSearchBtn = document.getElementById("clearSearchBtn");
-const loading = document.getElementById("loading");
-const loadingText = document.getElementById("loadingText");
 const titleNode = document.querySelector(".h3.mb-1");
 const subtitleNode = document.querySelector(".text-muted");
 const API_BASE = "/v1/api";
@@ -465,6 +461,7 @@ let artworkRomStatus = "any";
 let artworkFilterDebounceTimer = null;
 let systemInfoLoaded = false;
 let adminEnabled = true;
+let loadingToastEl = null;
 
 // Toast notification system (appears at top-right)
 function ensureToastContainer() {
@@ -482,14 +479,32 @@ function showToast(message, type = "success", durationMs = 5000) {
   const icon = icons[type] || "bi-info-circle-fill";
   const toast = document.createElement("div");
   toast.className = `toast-alert alert-${type}`;
-  toast.innerHTML = `<i class="bi ${icon}"></i> ${message}`;
+  const iconHtml = type === "loading" ? "" : `<i class="bi ${icon}"></i> `;
+  toast.innerHTML = `${iconHtml}${message}`;
   container.appendChild(toast);
-  setTimeout(() => {
-    toast.style.transition = "opacity 0.3s, transform 0.3s";
-    toast.style.opacity = "0";
-    toast.style.transform = "translateX(30px)";
-    setTimeout(() => toast.remove(), 300);
-  }, durationMs);
+  if (durationMs === null) return toast;
+  setTimeout(() => dismissToast(toast), durationMs);
+  return toast;
+}
+function dismissToast(toast) {
+  if (!toast || !toast.isConnected) return;
+  toast.style.transition = "opacity 0.3s, transform 0.3s";
+  toast.style.opacity = "0";
+  toast.style.transform = "translateX(30px)";
+  setTimeout(() => toast.remove(), 300);
+}
+function showLoadingToast(text = "Loading...") {
+  if (!loadingToastEl || !loadingToastEl.isConnected) {
+    loadingToastEl = showToast(`<span class="spinner-border spinner-border-sm me-2" role="status"></span><span class="loading-toast-text"></span>`, "loading", null);
+  }
+  const label = loadingToastEl.querySelector(".loading-toast-text");
+  if (label) label.textContent = text;
+}
+function hideLoadingToast() {
+  if (loadingToastEl) {
+    dismissToast(loadingToastEl);
+    loadingToastEl = null;
+  }
 }
 // Image lightbox viewer
 function showImageLightbox(url, title = "") {
@@ -501,17 +516,16 @@ function showImageLightbox(url, title = "") {
   document.body.appendChild(overlay);
 }
 function showError(message) {
-  alerts.innerHTML = `<div class="alert alert-danger">${message}</div>`;
+  showToast(message, "danger", 8000);
 }
 function clearError() {
-  alerts.innerHTML = "";
+  // Popup notifications dismiss themselves; this keeps older route code harmless.
 }
 function setLoading(isLoading, text = "Loading...") {
   if (isLoading) {
-    loadingText.textContent = text;
-    loading.classList.remove("d-none");
+    showLoadingToast(text);
   } else {
-    loading.classList.add("d-none");
+    hideLoadingToast();
   }
 }
 function setSearchMode(mode, systemName = "") {
@@ -1553,7 +1567,7 @@ function selectedArtworkCheckboxValues(selector) {
 }
 function artworkMissingRowsHtml(roms) {
   return (roms || []).map((rom, idx) => `
-    <tr id="artwork-row-${idx}" data-filter="${escapeHtml(`${rom.system} ${rom.name} ${(rom.missing || []).join(" ")}`.toLowerCase())}">
+    <tr id="artwork-row-${idx}" data-filter="${escapeHtml(`${rom.system} ${rom.name} ${(rom.missing || []).join(" ")}`.toLowerCase())}" onclick="selectArtworkRom(${idx})" style="cursor: pointer;">
       <td class="mono small">${escapeHtml(rom.system || "")}</td>
       <td>
         <div class="fw-semibold">${escapeHtml(rom.title || rom.name || "")}</div>
@@ -1564,14 +1578,8 @@ function artworkMissingRowsHtml(roms) {
         </div>
       </td>
       <td>${(rom.missing || []).map((field) => `<span class="badge text-bg-danger me-1">${escapeHtml(field)}</span>`).join("")}</td>
-      <td class="text-end">
-        <div class="d-inline-flex gap-1">
-          <button class="btn btn-sm btn-primary" type="button" onclick="selectArtworkRom(${idx})">Select</button>
-          ${rom.has_gamelist_entry ? `<button class="btn btn-sm btn-outline-danger" type="button" onclick="removeArtworkGamelistEntry(${idx})">Remove</button>` : ""}
-        </div>
-      </td>
     </tr>
-  `).join("") || `<tr><td colspan="4" class="text-muted p-3">No missing artwork found.</td></tr>`;
+  `).join("") || `<tr><td colspan="3" class="text-muted p-3">No missing artwork found.</td></tr>`;
 }
 function artworkGamelistValueHtml(value) {
   if (Array.isArray(value)) {
@@ -1619,7 +1627,7 @@ function artworkGamelistDetailsHtml(rom) {
       <div class="fw-semibold">${escapeHtml(rom.title || rom.name || "")}</div>
       <div class="text-muted small mb-2">${escapeHtml(rom.system || "")} · ${escapeHtml(rom.rom_path || rom.rom_name || "")}</div>
       <div class="mb-3">${statusBadge}</div>
-      <div class="alert alert-warning py-2">No gamelist.xml entry exists for this ROM.</div>
+      <div class="text-warning small fw-semibold">No gamelist.xml entry exists for this ROM.</div>
       <div class="text-muted small">Use the <strong>Edit</strong> tab to create one.</div>
     `;
   }
@@ -1708,8 +1716,7 @@ async function refreshArtworkResults(forceRefresh = false) {
     updateArtworkPageFromPayload(payload);
     history.replaceState(null, "", artworkHash());
   } catch (err) {
-    const alertEl = document.getElementById("artworkAlert");
-    if (alertEl) alertEl.innerHTML = `<div class="alert alert-danger">Failed to update artwork results: ${escapeHtml(err.message || "unknown error")}</div>`;
+    showToast(`Failed to update artwork results: ${escapeHtml(err.message || "unknown error")}`, "danger");
   } finally {
     setLoading(false);
   }
@@ -1779,7 +1786,6 @@ async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh 
         <button class="btn btn-outline-secondary" onclick="renderMissingArtworkPage(true, true, 0, artworkSelectedFields, artworkSelectedSystems, artworkFilterQuery, artworkRomStatus)">Full Filesystem Scan</button>
         <button id="removeMissingGamelistBtn" class="btn btn-outline-danger" type="button">Remove Missing ROM Entries</button>
       </div>
-      <div id="artworkAlert"></div>
       <div id="artworkSummary" class="mb-3 d-flex flex-wrap gap-2">
         <span class="badge text-bg-secondary">ROMs: ${total}</span>
         <span class="badge text-bg-light border">Showing: ${firstItem}-${lastItem}</span>
@@ -1827,7 +1833,6 @@ async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh 
                       <th>System</th>
                       <th>ROM</th>
                       <th>Missing</th>
-                      <th></th>
                     </tr>
                   </thead>
                   <tbody id="artworkRows">${artworkMissingRowsHtml(roms)}</tbody>
@@ -1929,7 +1934,13 @@ async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh 
       });
     }
   } catch (err) {
-    content.innerHTML = `<div class="alert alert-danger">Failed to scan artwork: ${escapeHtml(err.message || "unknown error")}</div>`;
+    showToast(`Failed to scan artwork: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    content.innerHTML = `
+      <div class="mb-3">
+        <button class="btn btn-outline-secondary" onclick="setHash('#admin')">← Back to Admin</button>
+      </div>
+      <div class="text-muted">Artwork results could not be loaded.</div>
+    `;
   } finally {
     setLoading(false);
   }
@@ -1992,6 +2003,7 @@ async function uploadArtworkImage(romIdOrPath, system, field, btnEl) {
   if (!file) { showToast("Please select an image file first.", "warning"); return; }
   btnEl.disabled = true;
   btnEl.innerHTML = `<span class="spinner-border spinner-border-sm"></span>`;
+  setLoading(true, `Uploading ${field}...`);
   try {
     const formData = new FormData();
     formData.append("file", file);
@@ -2011,10 +2023,11 @@ async function uploadArtworkImage(romIdOrPath, system, field, btnEl) {
     const result = await res.json();
     showToast(`Uploaded ${escapeHtml(field)} for ${escapeHtml(result.rom_name || "ROM")}.`, "success");
     // Refresh the selected rom view
-    selectArtworkRom(window.selectedArtworkRomIndex);
+    await selectArtworkRom(window.selectedArtworkRomIndex);
   } catch (err) {
     showToast(`Upload failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
   } finally {
+    setLoading(false);
     btnEl.disabled = false;
     btnEl.innerHTML = `<i class="bi bi-upload"></i>`;
   }
@@ -2042,11 +2055,14 @@ async function selectArtworkRom(index) {
         ${artworkGamelistDetailsHtml(rom)}
         <div class="border-top mt-3 pt-3">
           <div class="fw-semibold mb-2">LaunchBox Matches</div>
-          <div id="launchboxMatches" class="mt-2"><div class="text-muted"><span class="spinner-border spinner-border-sm me-2"></span>Searching...</div></div>
+          <div id="launchboxMatches" class="mt-2"></div>
         </div>
       </div>
       <div class="tab-pane fade compact-edit" id="edit-panel" role="tabpanel" aria-labelledby="edit-tab">
-        <div class="mb-2"><span class="fw-semibold">${escapeHtml(rom.title || rom.name || "")}</span> <span class="text-muted small">${escapeHtml(rom.system || "")}</span></div>
+        <div class="mb-2 d-flex justify-content-between align-items-center">
+          <div><span class="fw-semibold">${escapeHtml(rom.title || rom.name || "")}</span> <span class="text-muted small">${escapeHtml(rom.system || "")}</span></div>
+          ${rom.has_gamelist_entry ? `<button class="btn btn-sm btn-outline-danger" type="button" onclick="removeArtworkGamelistEntry(${index})">Remove from gamelist</button>` : ""}
+        </div>
         <div class="mb-2">
           <label class="form-label text-muted mb-1">Metadata Fields</label>
           ${artworkGamelistEditFormHtml(rom)}
@@ -2069,6 +2085,7 @@ async function selectArtworkRom(index) {
   // Search LaunchBox for matches - query fresh from DOM since it was just created
   const matchesEl = document.getElementById("launchboxMatches");
   if (!matchesEl) return;
+  setLoading(true, "Searching LaunchBox matches...");
   try {
     const data = await api(`/admin/artwork/launchbox/search?system=${encodeURIComponent(rom.system || "")}&rom_id=${encodeURIComponent(rom.unique_id || "")}&rom_path=${encodeURIComponent(rom.rom_path || "")}&q=${encodeURIComponent(rom.search_title || rom.title || rom.name || "")}`);
     const matches = data.matches || [];
@@ -2097,7 +2114,10 @@ async function selectArtworkRom(index) {
       </div>
     ` : `<div class="text-muted">No LaunchBox matches found.</div>`);
   } catch (err) {
-    matchesEl.innerHTML = `<div class="alert alert-danger py-2">LaunchBox search failed: ${escapeHtml(err.message || "unknown error")}</div>`;
+    showToast(`LaunchBox search failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    matchesEl.innerHTML = `<div class="text-muted">LaunchBox matches could not be loaded.</div>`;
+  } finally {
+    setLoading(false);
   }
 }
 async function rescanLaunchboxAndRefresh() {
@@ -2110,6 +2130,7 @@ async function rescanLaunchboxAndRefresh() {
     const field = node.getAttribute("data-gamelist-field");
     if (field) fields[field] = node.value || "";
   });
+  setLoading(true, "Saving metadata...");
   try {
     await apiPost("/admin/artwork/gamelist/update", {
       system: rom.system,
@@ -2118,20 +2139,18 @@ async function rescanLaunchboxAndRefresh() {
     });
     showToast(`Saved metadata, rescanning LaunchBox matches...`, "info");
     // Re-select the rom to trigger a fresh LaunchBox search
-    selectArtworkRom(index);
+    await selectArtworkRom(index);
   } catch (err) {
     showToast(`Save failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  } finally {
+    setLoading(false);
   }
 }
 async function applyLaunchboxArtwork(rowIndex, system, romId, romPath, gameKey) {
-  const alertEl = document.getElementById("artworkAlert");
-  const matchesEl = document.getElementById("launchboxMatches");
-  if (alertEl) alertEl.innerHTML = "";
   // Check override existing checkbox
   const overrideCheckbox = document.getElementById("launchboxOverrideExisting");
   const overrideExisting = overrideCheckbox ? overrideCheckbox.checked : false;
-  const progressId = `launchbox-progress-${Date.now()}`;
-  if (matchesEl) matchesEl.insertAdjacentHTML("afterbegin", `<div id="${progressId}" class="text-muted mb-2"><span class="spinner-border spinner-border-sm me-2"></span>Downloading missing artwork and metadata...</div>`);
+  setLoading(true, "Downloading missing artwork and metadata...");
   try {
     const result = await apiPost("/admin/artwork/launchbox/apply", {
       system,
@@ -2164,24 +2183,22 @@ async function applyLaunchboxArtwork(rowIndex, system, romId, romPath, gameKey) 
       }
     }
   } catch (err) {
-    if (alertEl) alertEl.innerHTML = `<div class="alert alert-danger">Artwork update failed: ${escapeHtml(err.message || "unknown error")}</div>`;
+    showToast(`Artwork update failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
   } finally {
-    const progressEl = document.getElementById(progressId);
-    if (progressEl) progressEl.remove();
-	  }
-	}
+    setLoading(false);
+  }
+}
 async function saveSelectedArtworkGamelist() {
   const index = Number(window.selectedArtworkRomIndex);
   const rom = (window.missingArtworkRoms || [])[index];
   if (!rom) return;
-  const alertEl = document.getElementById("artworkAlert");
   const selected = document.getElementById("selectedArtworkRom");
   const fields = {};
   document.querySelectorAll("#gamelistEditForm .gamelist-edit-field").forEach((node) => {
     const field = node.getAttribute("data-gamelist-field");
     if (field) fields[field] = node.value || "";
   });
-  if (alertEl) alertEl.innerHTML = "";
+  setLoading(true, "Saving gamelist data...");
   try {
     const result = await apiPost("/admin/artwork/gamelist/update", {
       system: rom.system,
@@ -2197,11 +2214,11 @@ async function saveSelectedArtworkGamelist() {
     if (selected) selected.innerHTML = artworkGamelistDetailsHtml(rom);
     const rows = document.getElementById("artworkRows");
     if (rows) rows.innerHTML = artworkMissingRowsHtml(window.missingArtworkRoms || []);
-    if (alertEl) {
-      alertEl.innerHTML = `<div class="alert alert-success">Saved gamelist data for ${escapeHtml(rom.title || rom.name || "ROM")}.</div>`;
-    }
+    showToast(`Saved gamelist data for ${escapeHtml(rom.title || rom.name || "ROM")}.`, "success");
   } catch (err) {
-    if (alertEl) alertEl.innerHTML = `<div class="alert alert-danger">Gamelist update failed: ${escapeHtml(err.message || "unknown error")}</div>`;
+    showToast(`Gamelist update failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  } finally {
+    setLoading(false);
   }
 }
 async function removeArtworkGamelistEntry(index) {
@@ -2209,23 +2226,25 @@ async function removeArtworkGamelistEntry(index) {
   if (!rom) return;
   const label = rom.title || rom.name || rom.rom_path || "this ROM";
   if (!window.confirm(`Remove "${label}" from gamelist.xml? The ROM file will not be deleted.`)) return;
-  const alertEl = document.getElementById("artworkAlert");
+  setLoading(true, "Removing gamelist entry...");
   try {
     await apiPost("/admin/artwork/gamelist/remove", { system: rom.system, rom_path: rom.rom_path });
     const row = document.getElementById(`artwork-row-${index}`);
     if (row) row.remove();
     window.missingArtworkRoms[index] = null;
-    if (alertEl) alertEl.innerHTML = `<div class="alert alert-success">Removed ${escapeHtml(label)} from gamelist.xml.</div>`;
+    showToast(`Removed ${escapeHtml(label)} from gamelist.xml.`, "success");
   } catch (err) {
-    if (alertEl) alertEl.innerHTML = `<div class="alert alert-danger">Remove failed: ${escapeHtml(err.message || "unknown error")}</div>`;
+    showToast(`Remove failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  } finally {
+    setLoading(false);
   }
 }
 async function removeMissingGamelistEntriesForCurrentFilters() {
-  const alertEl = document.getElementById("artworkAlert");
   const confirmed = window.confirm(
     "Remove all gamelist.xml entries matching the current filters where the ROM file is missing on disk? ROM files are not deleted."
   );
   if (!confirmed) return;
+  setLoading(true, "Removing missing-ROM gamelist entries...");
   try {
     const result = await apiPost("/admin/artwork/gamelist/remove-missing", {
       confirm: "DELETE_MISSING_GAMELIST_ENTRIES",
@@ -2234,19 +2253,16 @@ async function removeMissingGamelistEntriesForCurrentFilters() {
       systems: artworkSelectedSystems || [],
       q: artworkFilterQuery || "",
     });
-    if (alertEl) {
-      alertEl.innerHTML = `<div class="alert alert-success">Removed ${Number(result.removed_count || 0)} missing-ROM gamelist entr${Number(result.removed_count || 0) === 1 ? "y" : "ies"}.</div>`;
-    }
+    showToast(`Removed ${Number(result.removed_count || 0)} missing-ROM gamelist entr${Number(result.removed_count || 0) === 1 ? "y" : "ies"}.`, "success");
     artworkCurrentOffset = 0;
     await refreshArtworkResults(true);
-    if (result.failed_count && alertEl) {
-      alertEl.insertAdjacentHTML(
-        "beforeend",
-        `<div class="alert alert-warning">Skipped ${Number(result.failed_count || 0)} entr${Number(result.failed_count || 0) === 1 ? "y" : "ies"} because their gamelist.xml could not be written.</div>`
-      );
+    if (result.failed_count) {
+      showToast(`Skipped ${Number(result.failed_count || 0)} entr${Number(result.failed_count || 0) === 1 ? "y" : "ies"} because their gamelist.xml could not be written.`, "warning", 8000);
     }
   } catch (err) {
-    if (alertEl) alertEl.innerHTML = `<div class="alert alert-danger">Bulk remove failed: ${escapeHtml(err.message || "unknown error")}</div>`;
+    showToast(`Bulk remove failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  } finally {
+    setLoading(false);
   }
 }
 async function renderOvermindIntegrationPage() {
@@ -2262,7 +2278,6 @@ async function renderOvermindIntegrationPage() {
         <button id="overmindRefreshBtn" class="btn btn-sm btn-outline-primary" type="button">Refresh</button>
       </div>
       <div class="card-body">
-        <div id="overmindAlert" class="mb-3"></div>
         <div class="mb-3">
           <label class="form-label">Overmind URL</label>
           <input id="overmindUrlInput" class="form-control" type="url" placeholder="https://overmind.local:9443">
@@ -2286,7 +2301,6 @@ async function renderOvermindIntegrationPage() {
     </div>
   `;
 
-  const alertEl = document.getElementById("overmindAlert");
   const statusEl = document.getElementById("overmindStatus");
   const urlInput = document.getElementById("overmindUrlInput");
   const emailInput = document.getElementById("overmindEmailInput");
@@ -2335,7 +2349,7 @@ async function renderOvermindIntegrationPage() {
     }
     const payload = await apiPost("/admin/integrations/overmind/config", body);
     passwordInput.value = "";
-    alertEl.innerHTML = `<div class="alert alert-success py-2">Overmind configuration saved.</div>`;
+    showToast("Overmind configuration saved.", "success");
     renderStatus(payload);
   }
 
@@ -2347,37 +2361,48 @@ async function renderOvermindIntegrationPage() {
     }
     const payload = await apiPost("/admin/integrations/overmind/start", body);
     passwordInput.value = "";
-    alertEl.innerHTML = `<div class="alert alert-success py-2">Stub integration started.</div>`;
+    showToast("Stub integration started.", "success");
     renderStatus(payload);
   }
 
   saveBtn.addEventListener("click", async () => {
+    setLoading(true, "Saving Overmind configuration...");
     try {
       await saveConfig();
     } catch (err) {
-      alertEl.innerHTML = `<div class="alert alert-danger py-2">${escapeHtml(err.message || "Failed to save config")}</div>`;
+      showToast(escapeHtml(err.message || "Failed to save config"), "danger");
+    } finally {
+      setLoading(false);
     }
   });
   startBtn.addEventListener("click", async () => {
+    setLoading(true, "Starting Overmind integration...");
     try {
       await startIntegration();
     } catch (err) {
-      alertEl.innerHTML = `<div class="alert alert-danger py-2">${escapeHtml(err.message || "Failed to start integration")}</div>`;
+      showToast(escapeHtml(err.message || "Failed to start integration"), "danger");
+    } finally {
+      setLoading(false);
     }
   });
   refreshBtn.addEventListener("click", async () => {
+    setLoading(true, "Loading Overmind status...");
     try {
       await loadStatus();
-      alertEl.innerHTML = "";
     } catch (err) {
-      alertEl.innerHTML = `<div class="alert alert-danger py-2">${escapeHtml(err.message || "Failed to load status")}</div>`;
+      showToast(escapeHtml(err.message || "Failed to load status"), "danger");
+    } finally {
+      setLoading(false);
     }
   });
 
+  setLoading(true, "Loading Overmind status...");
   try {
     await loadStatus();
   } catch (err) {
-    alertEl.innerHTML = `<div class="alert alert-danger py-2">${escapeHtml(err.message || "Failed to load status")}</div>`;
+    showToast(escapeHtml(err.message || "Failed to load status"), "danger");
+  } finally {
+    setLoading(false);
   }
 }
 async function renderOvermindActionsPage() {
@@ -2511,7 +2536,8 @@ async function loadLog(source, triggerEl = null, updateHash = true) {
     const activeEl = triggerEl || document.querySelector(`#logSources .list-group-item[data-log-source="${source}"]`);
     if (activeEl) activeEl.classList.add('active');
   } catch (err) {
-    document.getElementById('logContent').textContent = `Error loading log: ${err.message}`;
+    showToast(`Error loading log: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    document.getElementById('logContent').textContent = "";
   }
   setLoading(false);
 }
@@ -2644,7 +2670,8 @@ async function loadConfig(source, triggerEl = null, updateHash = true) {
     const activeEl = triggerEl || document.querySelector(`#configSources .list-group-item[data-config-source="${source}"]`);
     if (activeEl) activeEl.classList.add("active");
   } catch (err) {
-    document.getElementById("configContent").textContent = `Error loading config: ${err.message}`;
+    showToast(`Error loading config: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    document.getElementById("configContent").textContent = "";
   }
   setLoading(false);
 }
@@ -2690,11 +2717,12 @@ async function renderAdminSystemInfoPage() {
       </div>
     `;
   } catch (err) {
+    showToast(`Failed to load system information: ${escapeHtml(err.message || "unknown error")}`, "danger");
     content.innerHTML = `
       <div class="mb-3">
         <button class="btn btn-outline-secondary" onclick="setHash('#admin')">← Back to Admin</button>
       </div>
-      <div class="alert alert-danger">Failed to load system information: ${escapeHtml(err.message || "unknown error")}</div>
+      <div class="text-muted">System information could not be loaded.</div>
     `;
   } finally {
     setLoading(false);
