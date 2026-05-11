@@ -741,7 +741,7 @@ class RomRepository:
 
     @staticmethod
     def should_include_system(name: str) -> bool:
-        return True
+        return not str(name or "").strip().lower().endswith(".old")
 
     @staticmethod
     def build_unique_id(path: Path) -> str:
@@ -1105,6 +1105,28 @@ class RomRepository:
                 "expires_at": time.time() + 120,
             }
         return items
+
+    def remove_gamelist_entry(self, system: str, rom_path: str) -> dict:
+        system_dir = self.get_system_dir(system)
+        normalized_rom_path = _normalize_gamelist_rom_path(rom_path)
+        if not normalized_rom_path:
+            raise ValueError("rom_path is required")
+        tree, root = self._read_gamelist(system_dir)
+        game = self._find_gamelist_entry_by_path(root, normalized_rom_path)
+        if game is None:
+            raise FileNotFoundError()
+        root.remove(game)
+        gamelist_path = system_dir / "gamelist.xml"
+        try:
+            ET.indent(tree, space="  ")
+        except Exception:
+            pass
+        tree.write(gamelist_path, encoding="utf-8", xml_declaration=True)
+        with gamelist_path.open("a", encoding="utf-8") as handle:
+            handle.write("\n")
+        with self._missing_artwork_cache_lock:
+            self._missing_artwork_cache.clear()
+        return {"system": system, "rom_path": normalized_rom_path, "removed": True}
 
     def find_rom_by_unique_id(self, system: str, unique_id: str) -> dict:
         _, roms = self.list_assets(system, "roms")
@@ -2420,16 +2442,47 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         refresh: bool = False,
         limit: int = 200,
         offset: int = 0,
+        art_fields: Optional[List[str]] = None,
+        system_filters: Optional[List[str]] = None,
     ) -> None:
         started_at = time.time()
         items = self.repository.list_missing_artwork(include_filesystem=include_filesystem, force_refresh=refresh)
-        total = len(items)
+        systems_all = sorted({str(item.get("system") or "") for item in items if item.get("system")})
+        normalized_art_fields = {
+            str(field or "").strip().lower()
+            for field in (art_fields or [])
+            if str(field or "").strip()
+        }
+        if "any" in normalized_art_fields:
+            normalized_art_fields = set()
+        normalized_art_fields = {field for field in normalized_art_fields if field in ARTWORK_FIELDS}
+        normalized_systems = {
+            str(system or "").strip().lower()
+            for system in (system_filters or [])
+            if str(system or "").strip()
+        }
+
+        filtered_items = items
+        if normalized_art_fields:
+            filtered_items = [
+                item
+                for item in filtered_items
+                if normalized_art_fields.intersection({str(field).lower() for field in (item.get("missing") or [])})
+            ]
+        if normalized_systems:
+            filtered_items = [
+                item
+                for item in filtered_items
+                if str(item.get("system") or "").strip().lower() in normalized_systems
+            ]
+
+        total = len(filtered_items)
         safe_limit = max(1, min(int(limit), 500))
         safe_offset = max(0, int(offset))
-        page_items = items[safe_offset : safe_offset + safe_limit]
-        systems = sorted({str(item.get("system") or "") for item in items if item.get("system")})
+        page_items = filtered_items[safe_offset : safe_offset + safe_limit]
+        systems_filtered = sorted({str(item.get("system") or "") for item in filtered_items if item.get("system")})
         field_counts = {field: 0 for field in ARTWORK_FIELDS}
-        for item in items:
+        for item in filtered_items:
             for field in item.get("missing") or []:
                 if field in field_counts:
                     field_counts[field] += 1
@@ -2442,9 +2495,12 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 "limit": safe_limit,
                 "offset": safe_offset,
                 "has_more": (safe_offset + len(page_items)) < total,
-                "systems": systems,
+                "systems": systems_all,
+                "systems_filtered": systems_filtered,
                 "fields": list(ARTWORK_FIELDS),
                 "field_counts": field_counts,
+                "selected_fields": sorted(normalized_art_fields) if normalized_art_fields else ["any"],
+                "selected_systems": sorted(normalized_systems),
                 "mode": "filesystem" if include_filesystem else "gamelist",
                 "cached": not refresh,
                 "elapsed_ms": int((time.time() - started_at) * 1000),
@@ -2492,6 +2548,16 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             self.repository._search_index_expires_at = 0
         with self.repository._missing_artwork_cache_lock:
             self.repository._missing_artwork_cache.clear()
+        self._send_json(200, result)
+
+    def _handle_admin_gamelist_remove(self, payload: dict) -> None:
+        system = str(payload.get("system") or "").strip()
+        rom_path = _normalize_gamelist_rom_path(str(payload.get("rom_path") or ""))
+        if not system:
+            raise ValueError("system is required")
+        if not rom_path:
+            raise ValueError("rom_path is required")
+        result = self.repository.remove_gamelist_entry(system, rom_path)
         self._send_json(200, result)
 
     def _handle_public_image(self, system: str, image_file: str) -> None:

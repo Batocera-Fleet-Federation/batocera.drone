@@ -25,11 +25,18 @@ class RepositoryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
             seed_mock_userdata(root)
+            (root / "roms" / "snes.old").mkdir(parents=True)
+            (root / "roms" / "snes.old" / "Old Game.zip").write_bytes(b"old")
+            (root / "roms" / "snes.old" / "gamelist.xml").write_text(
+                "<gameList><game><path>./Old Game.zip</path><name>Old Game</name></game></gameList>\n",
+                encoding="utf-8",
+            )
             repo = RomRepository(root / "roms", root / "bios")
             systems = repo.list_systems()
             names = {item["name"] for item in systems}
             self.assertIn("snes", names)
             self.assertIn("gba", names)
+            self.assertNotIn("snes.old", names)
 
     def test_search_roms_from_mock_data(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -93,6 +100,16 @@ class RepositoryTests(unittest.TestCase):
             text = gamelist.read_text(encoding="utf-8")
             self.assertIn("./images/existing.png", text)
             self.assertIn("launchbox-marquee", text)
+
+    def test_remove_gamelist_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            seed_mock_userdata(root)
+            repo = RomRepository(root / "roms", root / "bios")
+            result = repo.remove_gamelist_entry("snes", "Chrono Trigger (USA).zip")
+            self.assertTrue(result["removed"])
+            text = (root / "roms" / "snes" / "gamelist.xml").read_text(encoding="utf-8")
+            self.assertNotIn("Chrono Trigger", text)
 
 
 class LaunchBoxMappingTests(unittest.TestCase):

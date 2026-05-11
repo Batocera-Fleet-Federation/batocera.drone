@@ -172,11 +172,25 @@ class ApiRoutesMixin:
                     offset = int(query_params.get("offset", ["0"])[0])
                 except Exception:
                     offset = 0
+                art_fields = [
+                    part.strip()
+                    for value in query_params.get("fields", [])
+                    for part in value.split(",")
+                    if part.strip()
+                ]
+                system_filters = [
+                    part.strip()
+                    for value in query_params.get("systems", [])
+                    for part in value.split(",")
+                    if part.strip()
+                ]
                 self._handle_admin_artwork_missing(
                     include_filesystem=include_filesystem,
                     refresh=refresh,
                     limit=limit,
                     offset=offset,
+                    art_fields=art_fields,
+                    system_filters=system_filters,
                 )
                 return
 
@@ -253,6 +267,11 @@ class ApiRoutesMixin:
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "artwork" and parts[2] == "launchbox" and parts[3] == "apply":
                 payload = self._read_json_body()
                 self._handle_admin_launchbox_apply(payload)
+                return
+
+            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "artwork" and parts[2] == "gamelist" and parts[3] == "remove":
+                payload = self._read_json_body()
+                self._handle_admin_gamelist_remove(payload)
                 return
 
             self._send_json(404, {"error": "not found"})

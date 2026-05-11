@@ -63,6 +63,16 @@ class MockServerIntegrationTests(unittest.TestCase):
             body = resp.read().decode("utf-8")
         return json.loads(body)
 
+    def _post_json(self, path: str, payload: dict) -> dict:
+        url = f"http://127.0.0.1:{self.port}{path}"
+        body = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(url, data=body, method="POST")
+        req.add_header("Authorization", _auth_header("admin", "changeme"))
+        req.add_header("Content-Type", "application/json")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            response_body = resp.read().decode("utf-8")
+        return json.loads(response_body)
+
     def test_systems_endpoint(self) -> None:
         payload = self._get_json("/v1/api/systems")
         names = {item["name"] for item in payload["systems"]}
@@ -80,13 +90,25 @@ class MockServerIntegrationTests(unittest.TestCase):
         self.assertTrue(any("menu_driver" in line for line in payload["content"]))
 
     def test_admin_missing_artwork_endpoint(self) -> None:
-        payload = self._get_json("/v1/api/admin/artwork/missing?limit=2&offset=0")
+        payload = self._get_json("/v1/api/admin/artwork/missing?limit=2&offset=0&fields=image,marquee&systems=snes")
         self.assertGreater(payload["count"], 0)
         self.assertLessEqual(payload["returned"], 2)
         self.assertEqual(payload["limit"], 2)
         self.assertEqual(payload["offset"], 0)
         self.assertIn("snes", payload["systems"])
+        self.assertEqual(payload["systems_filtered"], ["snes"])
+        self.assertEqual(payload["selected_fields"], ["image", "marquee"])
         self.assertTrue(any("image" in item["missing"] for item in payload["roms"]))
+
+    def test_admin_remove_gamelist_entry_endpoint(self) -> None:
+        result = self._post_json(
+            "/v1/api/admin/artwork/gamelist/remove",
+            {"system": "snes", "rom_path": "Chrono Trigger (USA).zip"},
+        )
+        self.assertTrue(result["removed"])
+        payload = self._get_json("/v1/api/admin/artwork/missing?fields=any&systems=snes&refresh=1")
+        titles = {item["title"] for item in payload["roms"]}
+        self.assertNotIn("Chrono Trigger", titles)
 
 
 if __name__ == "__main__":
