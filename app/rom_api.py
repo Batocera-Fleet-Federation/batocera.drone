@@ -2444,6 +2444,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         offset: int = 0,
         art_fields: Optional[List[str]] = None,
         system_filters: Optional[List[str]] = None,
+        query: Optional[str] = None,
     ) -> None:
         started_at = time.time()
         items = self.repository.list_missing_artwork(include_filesystem=include_filesystem, force_refresh=refresh)
@@ -2461,6 +2462,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             for system in (system_filters or [])
             if str(system or "").strip()
         }
+        normalized_query = str(query or "").strip().lower()
 
         filtered_items = items
         if normalized_art_fields:
@@ -2474,6 +2476,22 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 item
                 for item in filtered_items
                 if str(item.get("system") or "").strip().lower() in normalized_systems
+            ]
+        if normalized_query:
+            filtered_items = [
+                item
+                for item in filtered_items
+                if normalized_query
+                in " ".join(
+                    [
+                        str(item.get("system") or ""),
+                        str(item.get("name") or ""),
+                        str(item.get("title") or ""),
+                        str(item.get("rom_name") or ""),
+                        str(item.get("rom_path") or ""),
+                        " ".join(str(field) for field in (item.get("missing") or [])),
+                    ]
+                ).lower()
             ]
 
         total = len(filtered_items)
@@ -2501,6 +2519,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 "field_counts": field_counts,
                 "selected_fields": sorted(normalized_art_fields) if normalized_art_fields else ["any"],
                 "selected_systems": sorted(normalized_systems),
+                "query": normalized_query,
                 "mode": "filesystem" if include_filesystem else "gamelist",
                 "cached": not refresh,
                 "elapsed_ms": int((time.time() - started_at) * 1000),

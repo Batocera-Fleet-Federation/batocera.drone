@@ -191,6 +191,7 @@ class ApiRoutesMixin:
                     offset=offset,
                     art_fields=art_fields,
                     system_filters=system_filters,
+                    query=query_params.get("q", [""])[0],
                 )
                 return
 

@@ -286,6 +286,8 @@ let artworkCurrentOffset = 0;
 let artworkIncludeFilesystem = false;
 let artworkSelectedFields = ["image", "marquee"];
 let artworkSelectedSystems = [];
+let artworkFilterQuery = "";
+let artworkFilterDebounceTimer = null;
 let systemInfoLoaded = false;
 let adminEnabled = true;
 
@@ -701,18 +703,20 @@ function parseArtworkHash(hash) {
     : ["image", "marquee"];
   const systemsRaw = params.get("systems") || "";
   const systems = systemsRaw.split(",").map((item) => item.trim()).filter(Boolean);
-  return { offset, includeFilesystem, fields, systems };
+  const q = params.get("q") || "";
+  return { offset, includeFilesystem, fields, systems, q };
 }
-function artworkHash(includeFilesystem = artworkIncludeFilesystem, offset = artworkCurrentOffset, fields = artworkSelectedFields, systems = artworkSelectedSystems) {
+function artworkHash(includeFilesystem = artworkIncludeFilesystem, offset = artworkCurrentOffset, fields = artworkSelectedFields, systems = artworkSelectedSystems, query = artworkFilterQuery) {
   const params = new URLSearchParams();
   params.set("offset", String(Math.max(0, Number(offset || 0))));
   params.set("fields", (fields && fields.length ? fields : ["any"]).join(","));
   if (systems && systems.length) params.set("systems", systems.join(","));
+  if (query) params.set("q", query);
   if (includeFilesystem) params.set("include_filesystem", "1");
   return `#admin/artwork?${params.toString()}`;
 }
-function setArtworkHash(includeFilesystem = artworkIncludeFilesystem, offset = artworkCurrentOffset, fields = artworkSelectedFields, systems = artworkSelectedSystems) {
-  setHash(artworkHash(includeFilesystem, offset, fields, systems));
+function setArtworkHash(includeFilesystem = artworkIncludeFilesystem, offset = artworkCurrentOffset, fields = artworkSelectedFields, systems = artworkSelectedSystems, query = artworkFilterQuery) {
+  setHash(artworkHash(includeFilesystem, offset, fields, systems, query));
 }
 function syncArtworkHash() {
   const nextHash = artworkHash();
@@ -1301,7 +1305,7 @@ async function renderAdminMenu() {
     </div>
   `;
 }
-function renderArtworkCheckboxDropdown(kind, label, options, selected, allLabel = "Any") {
+function renderArtworkCheckboxDropdown(kind, label, options, selected, allLabel = "Any", enableTools = false) {
   const selectedSet = new Set(selected || []);
   const buttonLabel = selectedSet.has("__none__")
     ? "None"
@@ -1314,9 +1318,16 @@ function renderArtworkCheckboxDropdown(kind, label, options, selected, allLabel 
     <div class="dropdown">
       <button class="btn btn-outline-primary dropdown-toggle w-100 text-start" type="button" id="${kind}ArtworkFilterToggle" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false">${escapeHtml(label)}: ${escapeHtml(buttonLabel)}</button>
       <div class="dropdown-menu filter-dropdown-menu" style="max-width: 360px;">
+        ${enableTools ? `
+          <input id="artwork-${kind}-search" type="search" class="form-control form-control-sm mb-2" placeholder="Search ${escapeHtml(label.toLowerCase())}...">
+          <div class="d-flex gap-2 mb-2">
+            <button type="button" class="btn btn-outline-primary btn-sm" id="artwork-${kind}-select-all">Select all</button>
+            <button type="button" class="btn btn-outline-secondary btn-sm" id="artwork-${kind}-unselect-all">Unselect all</button>
+          </div>
+        ` : ""}
         <div class="filter-options-scroll">
           ${options.map((option) => `
-            <div class="form-check m-0 mb-1">
+            <div class="form-check m-0 mb-1 artwork-${kind}-option" data-value="${escapeHtml(String(option.label || option.value).toLowerCase())}">
               <input class="form-check-input artwork-${kind}-filter" type="checkbox" value="${escapeHtml(option.value)}" id="artwork-${kind}-${escapeHtml(option.value)}" ${selectedSet.has(option.value) ? "checked" : ""}>
               <label class="form-check-label small" for="artwork-${kind}-${escapeHtml(option.value)}">${escapeHtml(option.label)}</label>
             </div>
@@ -1329,13 +1340,45 @@ function renderArtworkCheckboxDropdown(kind, label, options, selected, allLabel 
 function selectedArtworkCheckboxValues(selector) {
   return Array.from(document.querySelectorAll(`${selector}:checked`)).map((el) => el.value);
 }
-async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh = false, offset = 0, fields = artworkSelectedFields, systems = artworkSelectedSystems) {
+function setupArtworkDropdownTools(kind, onApply) {
+  const search = document.getElementById(`artwork-${kind}-search`);
+  const selectAll = document.getElementById(`artwork-${kind}-select-all`);
+  const unselectAll = document.getElementById(`artwork-${kind}-unselect-all`);
+  if (search) {
+    search.addEventListener("input", () => {
+      const q = (search.value || "").trim().toLowerCase();
+      document.querySelectorAll(`.artwork-${kind}-option`).forEach((node) => {
+        node.style.display = !q || (node.getAttribute("data-value") || "").includes(q) ? "" : "none";
+      });
+    });
+  }
+  if (selectAll) {
+    selectAll.addEventListener("click", (event) => {
+      event.preventDefault();
+      document.querySelectorAll(`.artwork-${kind}-filter`).forEach((node) => {
+        node.checked = true;
+      });
+      onApply();
+    });
+  }
+  if (unselectAll) {
+    unselectAll.addEventListener("click", (event) => {
+      event.preventDefault();
+      document.querySelectorAll(`.artwork-${kind}-filter`).forEach((node) => {
+        node.checked = false;
+      });
+      onApply();
+    });
+  }
+}
+async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh = false, offset = 0, fields = artworkSelectedFields, systems = artworkSelectedSystems, query = artworkFilterQuery) {
   titleNode.textContent = "Missing Artwork";
   subtitleNode.textContent = "ROMs with incomplete gamelist.xml artwork";
   artworkIncludeFilesystem = !!includeFilesystem;
   artworkCurrentOffset = Math.max(0, Number(offset || 0));
   artworkSelectedFields = fields && fields.length ? fields : ["any"];
   artworkSelectedSystems = systems || [];
+  artworkFilterQuery = query || "";
   syncArtworkHash();
   setSearchMode("hidden");
   setLoading(true, includeFilesystem ? "Scanning ROM directories..." : "Scanning gamelists...");
@@ -1344,7 +1387,7 @@ async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh 
   try {
     const fieldsParam = encodeURIComponent((artworkSelectedFields || []).join(","));
     const systemsParam = encodeURIComponent((artworkSelectedSystems || []).join(","));
-    const payload = await api(`/admin/artwork/missing?limit=${ARTWORK_PAGE_SIZE}&offset=${artworkCurrentOffset}&refresh=${forceRefresh ? "1" : "0"}&fields=${fieldsParam}&systems=${systemsParam}${includeFilesystem ? "&include_filesystem=1" : ""}`);
+    const payload = await api(`/admin/artwork/missing?limit=${ARTWORK_PAGE_SIZE}&offset=${artworkCurrentOffset}&refresh=${forceRefresh ? "1" : "0"}&fields=${fieldsParam}&systems=${systemsParam}&q=${encodeURIComponent(artworkFilterQuery)}${includeFilesystem ? "&include_filesystem=1" : ""}`);
     const roms = payload.roms || [];
     const fieldCounts = payload.field_counts || {};
     const availableFields = [{ value: "any", label: "Any" }].concat((payload.fields || []).map((field) => ({ value: field, label: field })));
@@ -1359,8 +1402,8 @@ async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh 
     content.innerHTML = `
       <div class="mb-3 d-flex flex-wrap gap-2">
         <button class="btn btn-outline-secondary" onclick="setHash('#admin')">← Back to Admin</button>
-        <button class="btn btn-outline-primary" onclick="renderMissingArtworkPage(false, true, 0)">Refresh</button>
-        <button class="btn btn-outline-secondary" onclick="renderMissingArtworkPage(true, true, 0)">Full Filesystem Scan</button>
+        <button class="btn btn-outline-primary" onclick="renderMissingArtworkPage(false, true, 0, artworkSelectedFields, artworkSelectedSystems, artworkFilterQuery)">Refresh</button>
+        <button class="btn btn-outline-secondary" onclick="renderMissingArtworkPage(true, true, 0, artworkSelectedFields, artworkSelectedSystems, artworkFilterQuery)">Full Filesystem Scan</button>
       </div>
       <div id="artworkAlert"></div>
       <div class="mb-3 d-flex flex-wrap gap-2">
@@ -1378,7 +1421,7 @@ async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh 
               ${renderArtworkCheckboxDropdown("field", "Missing Type", availableFields, artworkSelectedFields, "Any")}
             </div>
             <div class="col-12 col-lg-6">
-              ${renderArtworkCheckboxDropdown("system", "System", availableSystems, artworkSelectedSystems.length ? artworkSelectedSystems : availableSystems.map((item) => item.value), "All systems")}
+              ${renderArtworkCheckboxDropdown("system", "System", availableSystems, artworkSelectedSystems.length ? artworkSelectedSystems : availableSystems.map((item) => item.value), "All systems", true)}
             </div>
           </div>
         </div>
@@ -1388,11 +1431,11 @@ async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh 
           <div class="card log-card">
             <div class="card-header d-flex justify-content-between align-items-center">
               <span>Missing Artwork</span>
-              <input id="artworkFilter" class="form-control form-control-sm" style="max-width: 260px;" type="search" placeholder="Filter table">
+              <input id="artworkFilter" class="form-control form-control-sm" style="max-width: 260px;" type="search" value="${escapeHtml(artworkFilterQuery)}" placeholder="Filter all results">
             </div>
             <div class="card-header d-flex justify-content-between align-items-center gap-2">
               <button id="artworkPrevBtn" class="btn btn-sm btn-outline-primary" type="button" ${pageOffset <= 0 ? "disabled" : ""}>Previous</button>
-              <span class="text-muted small">Filter applies to the current 200-row page.</span>
+              <span class="text-muted small">Search and dropdown filters apply before paging.</span>
               <button id="artworkNextBtn" class="btn btn-sm btn-outline-primary" type="button" ${!payload.has_more ? "disabled" : ""}>Next</button>
             </div>
             <div class="card-body p-0">
@@ -1448,7 +1491,7 @@ async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh 
       const selectedSystems = selectedArtworkCheckboxValues(".artwork-system-filter");
       const allSystems = availableSystems.map((item) => item.value);
       const normalizedSystems = selectedSystems.length === allSystems.length ? [] : (selectedSystems.length ? selectedSystems : ["__none__"]);
-      setArtworkHash(artworkIncludeFilesystem, 0, selectedFields, normalizedSystems);
+      setArtworkHash(artworkIncludeFilesystem, 0, selectedFields, normalizedSystems, artworkFilterQuery);
     };
     document.querySelectorAll(".artwork-field-filter").forEach((node) => {
       node.addEventListener("change", () => {
@@ -1466,25 +1509,27 @@ async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh 
     document.querySelectorAll(".artwork-system-filter").forEach((node) => {
       node.addEventListener("change", applyArtworkFilters);
     });
+    setupArtworkDropdownTools("system", applyArtworkFilters);
     const prevBtn = document.getElementById("artworkPrevBtn");
     const nextBtn = document.getElementById("artworkNextBtn");
     if (prevBtn) {
       prevBtn.addEventListener("click", async () => {
-        setArtworkHash(artworkIncludeFilesystem, Math.max(0, pageOffset - ARTWORK_PAGE_SIZE));
+        setArtworkHash(artworkIncludeFilesystem, Math.max(0, pageOffset - ARTWORK_PAGE_SIZE), artworkSelectedFields, artworkSelectedSystems, artworkFilterQuery);
       });
     }
     if (nextBtn) {
       nextBtn.addEventListener("click", async () => {
-        setArtworkHash(artworkIncludeFilesystem, pageOffset + ARTWORK_PAGE_SIZE);
+        setArtworkHash(artworkIncludeFilesystem, pageOffset + ARTWORK_PAGE_SIZE, artworkSelectedFields, artworkSelectedSystems, artworkFilterQuery);
       });
     }
     const filter = document.getElementById("artworkFilter");
     if (filter) {
       filter.addEventListener("input", () => {
-        const q = (filter.value || "").trim().toLowerCase();
-        document.querySelectorAll("#artworkRows tr[data-filter]").forEach((row) => {
-          row.style.display = !q || (row.getAttribute("data-filter") || "").includes(q) ? "" : "none";
-        });
+        artworkFilterQuery = (filter.value || "").trim();
+        if (artworkFilterDebounceTimer) window.clearTimeout(artworkFilterDebounceTimer);
+        artworkFilterDebounceTimer = window.setTimeout(() => {
+          setArtworkHash(artworkIncludeFilesystem, 0, artworkSelectedFields, artworkSelectedSystems, artworkFilterQuery);
+        }, 300);
       });
     }
   } catch (err) {
@@ -2126,8 +2171,8 @@ async function router() {
         setHash("");
         return;
       }
-      const parsed = parseArtworkHash(hash) || { offset: 0, includeFilesystem: false, fields: ["image", "marquee"], systems: [] };
-      await renderMissingArtworkPage(parsed.includeFilesystem, false, parsed.offset, parsed.fields, parsed.systems);
+      const parsed = parseArtworkHash(hash) || { offset: 0, includeFilesystem: false, fields: ["image", "marquee"], systems: [], q: "" };
+      await renderMissingArtworkPage(parsed.includeFilesystem, false, parsed.offset, parsed.fields, parsed.systems, parsed.q);
     } else if (hash === "#admin/overmind") {
       if (!adminEnabled) {
         setHash("");

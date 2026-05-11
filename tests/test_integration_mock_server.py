@@ -100,6 +100,11 @@ class MockServerIntegrationTests(unittest.TestCase):
         self.assertEqual(payload["selected_fields"], ["image", "marquee"])
         self.assertTrue(any("image" in item["missing"] for item in payload["roms"]))
 
+        filtered = self._get_json("/v1/api/admin/artwork/missing?limit=2&offset=0&fields=any&q=castlevania")
+        self.assertEqual(filtered["count"], 1)
+        self.assertEqual(filtered["query"], "castlevania")
+        self.assertEqual(filtered["roms"][0]["system"], "psx")
+
     def test_admin_remove_gamelist_entry_endpoint(self) -> None:
         result = self._post_json(
             "/v1/api/admin/artwork/gamelist/remove",
