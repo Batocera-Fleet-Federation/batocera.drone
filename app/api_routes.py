@@ -286,6 +286,10 @@ class ApiRoutesMixin:
                 self._handle_admin_gamelist_remove_missing(payload)
                 return
 
+            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "artwork" and parts[2] == "upload":
+                self._handle_admin_artwork_upload()
+                return
+
             self._send_json(404, {"error": "not found"})
         except ValueError as error:
             self._send_json(400, {"error": str(error)})

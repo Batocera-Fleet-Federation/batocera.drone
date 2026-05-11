@@ -238,6 +238,118 @@
     .gamelist-details dd {
       overflow-wrap: anywhere;
     }
+    /* Toast-style alert at top right */
+    .toast-alert-container {
+      position: fixed;
+      top: 1rem;
+      right: 1rem;
+      z-index: 99999;
+      max-width: 420px;
+      width: 100%;
+      pointer-events: none;
+    }
+    .toast-alert-container > * {
+      pointer-events: auto;
+    }
+    .toast-alert {
+      padding: 0.75rem 1rem;
+      border-radius: 0.6rem;
+      box-shadow: 0 0.5rem 1.5rem rgba(0,0,0,0.15);
+      margin-bottom: 0.5rem;
+      animation: toastSlideIn 0.25s ease-out;
+      font-weight: 600;
+      font-size: 0.9rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    @keyframes toastSlideIn {
+      from { opacity: 0; transform: translateX(30px); }
+      to { opacity: 1; transform: translateX(0); }
+    }
+    .toast-alert.alert-success { background: #059669; color: #fff; border: none; }
+    .toast-alert.alert-danger { background: #dc2626; color: #fff; border: none; }
+    .toast-alert.alert-warning { background: #d97706; color: #fff; border: none; }
+    .toast-alert.alert-info { background: #2563eb; color: #fff; border: none; }
+
+    /* Image lightbox modal */
+    .image-lightbox-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.8);
+      z-index: 99990;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+    }
+    .image-lightbox-overlay img {
+      max-width: 90vw;
+      max-height: 90vh;
+      object-fit: contain;
+      border-radius: 0.5rem;
+      box-shadow: 0 1rem 3rem rgba(0,0,0,0.5);
+    }
+    .image-lightbox-overlay .image-lightbox-close {
+      position: fixed;
+      top: 1rem;
+      right: 1rem;
+      color: #fff;
+      font-size: 2rem;
+      cursor: pointer;
+      background: rgba(0,0,0,0.5);
+      width: 2.5rem;
+      height: 2.5rem;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border: none;
+    }
+    .image-lightbox-overlay .image-lightbox-close:hover {
+      background: rgba(0,0,0,0.8);
+    }
+
+    /* Metadata panel tabs */
+    .meta-panel-tabs .nav-link {
+      font-size: 0.85rem;
+      padding: 0.4rem 0.8rem;
+    }
+    .meta-panel-tabs .nav-link.active {
+      font-weight: 700;
+    }
+    .meta-panel-content {
+      min-height: 100px;
+    }
+    /* Compact edit fields */
+    .compact-edit .form-label {
+      font-size: 0.72rem;
+      margin-bottom: 0.1rem;
+    }
+    .compact-edit .form-control,
+    .compact-edit .form-control-sm {
+      font-size: 0.82rem;
+      padding: 0.3rem 0.5rem;
+    }
+    .compact-edit textarea.form-control-sm {
+      padding: 0.3rem 0.5rem;
+    }
+    /* Image upload row */
+    .artwork-upload-item {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      margin-bottom: 0.3rem;
+    }
+    .artwork-upload-item .btn-icon {
+      width: 1.6rem;
+      height: 1.6rem;
+      padding: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 0.25rem;
+    }
     @media (max-width: 991.98px) {
       .sidebar { min-height: auto; }
       .nav-actions .btn { width: 100%; }
@@ -354,6 +466,40 @@ let artworkFilterDebounceTimer = null;
 let systemInfoLoaded = false;
 let adminEnabled = true;
 
+// Toast notification system (appears at top-right)
+function ensureToastContainer() {
+  let container = document.querySelector(".toast-alert-container");
+  if (!container) {
+    container = document.createElement("div");
+    container.className = "toast-alert-container";
+    document.body.appendChild(container);
+  }
+  return container;
+}
+function showToast(message, type = "success", durationMs = 5000) {
+  const container = ensureToastContainer();
+  const icons = { success: "bi-check-circle-fill", danger: "bi-exclamation-triangle-fill", warning: "bi-exclamation-circle-fill", info: "bi-info-circle-fill" };
+  const icon = icons[type] || "bi-info-circle-fill";
+  const toast = document.createElement("div");
+  toast.className = `toast-alert alert-${type}`;
+  toast.innerHTML = `<i class="bi ${icon}"></i> ${message}`;
+  container.appendChild(toast);
+  setTimeout(() => {
+    toast.style.transition = "opacity 0.3s, transform 0.3s";
+    toast.style.opacity = "0";
+    toast.style.transform = "translateX(30px)";
+    setTimeout(() => toast.remove(), 300);
+  }, durationMs);
+}
+// Image lightbox viewer
+function showImageLightbox(url, title = "") {
+  const overlay = document.createElement("div");
+  overlay.className = "image-lightbox-overlay";
+  overlay.innerHTML = `<button class="image-lightbox-close" onclick="this.parentElement.remove()">&times;</button><img src="${escapeHtml(url)}" alt="${escapeHtml(title)}">`;
+  overlay.addEventListener("click", (e) => { if (e.target === overlay) overlay.remove(); });
+  document.addEventListener("keydown", function escHandler(ev) { if (ev.key === "Escape") { overlay.remove(); document.removeEventListener("keydown", escHandler); } });
+  document.body.appendChild(overlay);
+}
 function showError(message) {
   alerts.innerHTML = `<div class="alert alert-danger">${message}</div>`;
 }
@@ -1467,19 +1613,14 @@ function artworkGamelistFieldControl(field, value) {
 function artworkGamelistDetailsHtml(rom) {
   const details = rom && rom.gamelist ? rom.gamelist : {};
   const entries = Object.entries(details);
-  const editableFields = Array.from(new Set(GAMELIST_EDIT_FIELDS.concat(Object.keys(details).filter((key) => key !== "path"))));
   const statusBadge = `<span class="badge ${rom.rom_exists ? "text-bg-success" : "text-bg-danger"}">${rom.rom_exists ? "ROM exists" : "ROM missing"}</span>`;
   if (!rom.has_gamelist_entry) {
     return `
       <div class="fw-semibold">${escapeHtml(rom.title || rom.name || "")}</div>
       <div class="text-muted small mb-2">${escapeHtml(rom.system || "")} · ${escapeHtml(rom.rom_path || rom.rom_name || "")}</div>
       <div class="mb-3">${statusBadge}</div>
-      <div class="alert alert-warning py-2">No gamelist.xml entry exists for this ROM. Saving will create one for this path.</div>
-      <form id="gamelistEditForm">
-        ${artworkGamelistFieldControl("name", rom.title || rom.name || "")}
-        ${artworkGamelistFieldControl("desc", "")}
-        <button class="btn btn-sm btn-primary" type="button" onclick="saveSelectedArtworkGamelist()">Save Gamelist Data</button>
-      </form>
+      <div class="alert alert-warning py-2">No gamelist.xml entry exists for this ROM.</div>
+      <div class="text-muted small">Use the <strong>Edit</strong> tab to create one.</div>
     `;
   }
   return `
@@ -1490,16 +1631,36 @@ function artworkGamelistDetailsHtml(rom) {
       </div>
       ${statusBadge}
     </div>
-    <form id="gamelistEditForm" class="mb-3">
-      ${editableFields.map((field) => artworkGamelistFieldControl(field, details[field])).join("")}
-      <button class="btn btn-sm btn-primary" type="button" onclick="saveSelectedArtworkGamelist()">Save Gamelist Data</button>
-    </form>
-    <dl class="gamelist-details mb-0 border-top pt-3">
+    <dl class="gamelist-details mb-0">
       ${entries.map(([key, value]) => `
         <dt>${escapeHtml(key)}</dt>
         <dd class="small mb-2">${artworkGamelistValueHtml(value)}</dd>
       `).join("") || `<dd class="text-muted small mb-0">No gamelist details found.</dd>`}
     </dl>
+  `;
+}
+function artworkGamelistEditFormHtml(rom) {
+  const details = rom && rom.gamelist ? rom.gamelist : {};
+  const editableFields = Array.from(new Set(GAMELIST_EDIT_FIELDS.concat(Object.keys(details).filter((key) => key !== "path"))));
+  if (!rom.has_gamelist_entry) {
+    return `
+      <form id="gamelistEditForm" class="compact-edit">
+        ${artworkGamelistFieldControl("name", rom.title || rom.name || "")}
+        ${artworkGamelistFieldControl("desc", "")}
+        <div class="d-flex gap-2 mt-3">
+          <button class="btn btn-sm btn-primary" type="button" onclick="saveSelectedArtworkGamelist()">Save Gamelist Data</button>
+        </div>
+      </form>
+    `;
+  }
+  return `
+    <form id="gamelistEditForm" class="compact-edit">
+      ${editableFields.map((field) => artworkGamelistFieldControl(field, details[field])).join("")}
+      <div class="d-flex gap-2 mt-3">
+        <button class="btn btn-sm btn-primary" type="button" onclick="saveSelectedArtworkGamelist()">Save Metadata</button>
+        <button class="btn btn-sm btn-outline-primary" type="button" onclick="rescanLaunchboxAndRefresh()">Save & Rescan Matches</button>
+      </div>
+    </form>
   `;
 }
 function artworkPayloadUrl(forceRefresh = false) {
@@ -1679,10 +1840,6 @@ async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh 
 	          <div class="card log-card">
 	            <div class="card-body">
 	              <div id="selectedArtworkRom" class="text-muted">Select a ROM to view gamelist details and search LaunchBox.</div>
-	              <div class="border-top mt-3 pt-3">
-	                <div class="fw-semibold mb-2">LaunchBox Matches</div>
-	                <div id="launchboxMatches" class="mt-2"></div>
-	              </div>
 	            </div>
 	          </div>
 	        </div>
@@ -1777,22 +1934,154 @@ async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh 
     setLoading(false);
   }
 }
+const LAUNCHBOX_METADATA_FIELDS = [
+  "name", "desc", "genre", "developer", "publisher", "releasedate",
+  "players", "rating", "favorite", "hidden", "kidgame", "adult",
+  "image", "thumbnail", "marquee", "fanart", "boxart", "video",
+  "platform", "esrb", "overview", "playmode", "regional", "favorites"
+];
+function artworkImageUploadHtml(rom, field) {
+  const existingUrl = rom.existing && rom.existing[field] ? rom.existing[field] : null;
+  const existingDisplay = existingUrl ? `<span class="text-muted small ms-1">has ${escapeHtml(field)}</span>` : `<span class="text-muted small ms-1">no ${escapeHtml(field)}</span>`;
+  const viewBtn = existingUrl
+    ? `<button class="btn btn-sm btn-outline-secondary btn-icon" type="button" onclick="showImageLightbox('${escapeHtml(existingUrl)}', '${escapeHtml(field)}')" title="View existing ${escapeHtml(field)}"><i class="bi bi-eye"></i></button>`
+    : `<button class="btn btn-sm btn-outline-secondary btn-icon" type="button" disabled title="No ${escapeHtml(field)} to view"><i class="bi bi-eye-slash"></i></button>`;
+  return `
+    <div class="artwork-upload-item">
+      <span class="small text-muted" style="min-width: 80px;">${escapeHtml(field)}</span>
+      <input type="file" class="form-control form-control-sm artwork-upload-file" accept="image/*" data-field="${escapeHtml(field)}" style="max-width: 150px; font-size: 0.75rem;">
+      <button class="btn btn-sm btn-primary btn-icon" type="button" onclick="uploadArtworkImage(${JSON.stringify(rom.unique_id || rom.rom_path || "")}, ${JSON.stringify(rom.system || "")}, '${escapeHtml(field)}', this)" title="Upload"><i class="bi bi-upload"></i></button>
+      ${viewBtn}
+      ${existingDisplay}
+    </div>
+  `;
+}
+function artworkEditableImageFields(rom) {
+  const fieldSet = new Set(rom.missing || []);
+  const withExisting = new Set(GAMELIST_EDIT_FIELDS.filter(f => ["image","thumbnail","marquee","fanart","boxart","video"].includes(f)));
+  return Array.from(withExisting).map(f => artworkImageUploadHtml(rom, f)).join("");
+}
+function artworkMetadataEditFields(rom) {
+  const details = rom.gamelist || {};
+  const metaFields = ["name","desc","genre","developer","publisher","releasedate","players","rating"];
+  return metaFields.map(field => `
+    <div class="mb-2">
+      <label class="form-label text-muted mb-1">${escapeHtml(field === "desc" ? "Description" : field)}</label>
+      ${field === "desc"
+        ? `<textarea class="form-control form-control-sm gamelist-edit-field" data-gamelist-field="${escapeHtml(field)}" rows="3">${escapeHtml(artworkGamelistEditValue(details[field]))}</textarea>`
+        : `<input class="form-control form-control-sm gamelist-edit-field" data-gamelist-field="${escapeHtml(field)}" value="${escapeHtml(artworkGamelistEditValue(details[field]))}">`
+      }
+    </div>
+  `).join("");
+}
+// Update URL when a rom is selected in artwork page
+function setArtworkSelectedRomHash(index) {
+  const rom = (window.missingArtworkRoms || [])[index];
+  if (!rom) return;
+  const params = new URLSearchParams(window.location.hash.split("?")[1] || "");
+  params.set("selected", String(index));
+  const newHash = `#admin/artwork?${params.toString()}`;
+  if (window.location.hash !== newHash) {
+    history.replaceState(null, "", newHash);
+  }
+}
+// Upload image for a given field
+async function uploadArtworkImage(romIdOrPath, system, field, btnEl) {
+  const fileInput = btnEl.closest(".artwork-upload-item").querySelector(".artwork-upload-file");
+  const file = fileInput && fileInput.files[0];
+  if (!file) { showToast("Please select an image file first.", "warning"); return; }
+  btnEl.disabled = true;
+  btnEl.innerHTML = `<span class="spinner-border spinner-border-sm"></span>`;
+  try {
+    const formData = new FormData();
+    formData.append("file", file);
+    formData.append("field", field);
+    formData.append("system", system);
+    formData.append("rom_id", romIdOrPath);
+    const res = await fetch(`${API_BASE}/admin/artwork/upload`, {
+      method: "POST",
+      credentials: "same-origin",
+      body: formData,
+    });
+    if (!res.ok) {
+      let msg = `Upload failed: ${res.status}`;
+      try { const d = await res.json(); if (d.error) msg = d.error; } catch(_) {}
+      throw new Error(msg);
+    }
+    const result = await res.json();
+    showToast(`Uploaded ${escapeHtml(field)} for ${escapeHtml(result.rom_name || "ROM")}.`, "success");
+    // Refresh the selected rom view
+    selectArtworkRom(window.selectedArtworkRomIndex);
+  } catch (err) {
+    showToast(`Upload failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  } finally {
+    btnEl.disabled = false;
+    btnEl.innerHTML = `<i class="bi bi-upload"></i>`;
+  }
+}
 async function selectArtworkRom(index) {
   const roms = window.missingArtworkRoms || [];
   const rom = roms[index];
   if (!rom) return;
   window.selectedArtworkRomIndex = index;
+  // Update URL for bookmarking
+  setArtworkSelectedRomHash(index);
   const selected = document.getElementById("selectedArtworkRom");
+  // Render tabbed panel with Matches (default) and Edit tabs
+  selected.innerHTML = `
+    <ul class="nav nav-tabs meta-panel-tabs mb-2" id="metaPanelTabs" role="tablist">
+      <li class="nav-item" role="presentation">
+        <button class="nav-link active" id="matches-tab" data-bs-toggle="tab" data-bs-target="#matches-panel" type="button" role="tab" aria-controls="matches-panel" aria-selected="true">Matches</button>
+      </li>
+      <li class="nav-item" role="presentation">
+        <button class="nav-link" id="edit-tab" data-bs-toggle="tab" data-bs-target="#edit-panel" type="button" role="tab" aria-controls="edit-panel" aria-selected="false">Edit</button>
+      </li>
+    </ul>
+    <div class="tab-content meta-panel-content">
+      <div class="tab-pane fade show active compact-edit" id="matches-panel" role="tabpanel" aria-labelledby="matches-tab">
+        ${artworkGamelistDetailsHtml(rom)}
+        <div class="border-top mt-3 pt-3">
+          <div class="fw-semibold mb-2">LaunchBox Matches</div>
+          <div id="launchboxMatches" class="mt-2"><div class="text-muted"><span class="spinner-border spinner-border-sm me-2"></span>Searching...</div></div>
+        </div>
+      </div>
+      <div class="tab-pane fade compact-edit" id="edit-panel" role="tabpanel" aria-labelledby="edit-tab">
+        <div class="mb-2"><span class="fw-semibold">${escapeHtml(rom.title || rom.name || "")}</span> <span class="text-muted small">${escapeHtml(rom.system || "")}</span></div>
+        <div class="mb-2">
+          <label class="form-label text-muted mb-1">Metadata Fields</label>
+          ${artworkGamelistEditFormHtml(rom)}
+        </div>
+        <div class="mb-2">
+          <label class="form-label text-muted mb-1">Image / Artwork Uploads</label>
+          ${artworkEditableImageFields(rom)}
+        </div>
+      </div>
+    </div>
+  `;
+  // Initialize Bootstrap tabs
+  const tabEls = document.querySelectorAll('#metaPanelTabs .nav-link');
+  tabEls.forEach(el => {
+    el.addEventListener('shown.bs.tab', () => { /* no-op */ });
+  });
+  // Switch to matches tab by default
+  const matchesTab = document.getElementById('matches-tab');
+  if (matchesTab) matchesTab.click();
+  // Search LaunchBox for matches - query fresh from DOM since it was just created
   const matchesEl = document.getElementById("launchboxMatches");
-  selected.innerHTML = artworkGamelistDetailsHtml(rom);
-  matchesEl.innerHTML = `<div class="text-muted"><span class="spinner-border spinner-border-sm me-2"></span>Searching LaunchBox...</div>`;
+  if (!matchesEl) return;
   try {
     const data = await api(`/admin/artwork/launchbox/search?system=${encodeURIComponent(rom.system || "")}&rom_id=${encodeURIComponent(rom.unique_id || "")}&rom_path=${encodeURIComponent(rom.rom_path || "")}&q=${encodeURIComponent(rom.search_title || rom.title || rom.name || "")}`);
     const matches = data.matches || [];
     const platformNote = data.launchbox_platform
       ? `<div class="text-muted small mb-2">Filtered by LaunchBox platform: ${escapeHtml(data.launchbox_platform)}</div>`
       : `<div class="text-muted small mb-2">No LaunchBox platform mapping found for this system; showing title matches.</div>`;
-    matchesEl.innerHTML = platformNote + (matches.length ? `
+    const overrideCheckbox = `
+      <div class="form-check mb-2">
+        <input class="form-check-input" type="checkbox" id="launchboxOverrideExisting">
+        <label class="form-check-label small" for="launchboxOverrideExisting">Override existing data (re-imports all gamelist metadata)</label>
+      </div>
+    `;
+    matchesEl.innerHTML = platformNote + overrideCheckbox + (matches.length ? `
       <div class="list-group">
         ${matches.map((match) => `
           <button type="button" class="list-group-item list-group-item-action" onclick='applyLaunchboxArtwork(${index}, ${JSON.stringify(rom.system || "")}, ${JSON.stringify(rom.unique_id || "")}, ${JSON.stringify(rom.rom_path || "")}, ${JSON.stringify(String(match.game_key || ""))})'>
@@ -1811,18 +2100,53 @@ async function selectArtworkRom(index) {
     matchesEl.innerHTML = `<div class="alert alert-danger py-2">LaunchBox search failed: ${escapeHtml(err.message || "unknown error")}</div>`;
   }
 }
+async function rescanLaunchboxAndRefresh() {
+  const index = Number(window.selectedArtworkRomIndex);
+  const rom = (window.missingArtworkRoms || [])[index];
+  if (!rom) return;
+  // Save gamelist first, then rescan
+  const fields = {};
+  document.querySelectorAll("#gamelistEditForm .gamelist-edit-field").forEach((node) => {
+    const field = node.getAttribute("data-gamelist-field");
+    if (field) fields[field] = node.value || "";
+  });
+  try {
+    await apiPost("/admin/artwork/gamelist/update", {
+      system: rom.system,
+      rom_path: rom.rom_path,
+      fields,
+    });
+    showToast(`Saved metadata, rescanning LaunchBox matches...`, "info");
+    // Re-select the rom to trigger a fresh LaunchBox search
+    selectArtworkRom(index);
+  } catch (err) {
+    showToast(`Save failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  }
+}
 async function applyLaunchboxArtwork(rowIndex, system, romId, romPath, gameKey) {
   const alertEl = document.getElementById("artworkAlert");
   const matchesEl = document.getElementById("launchboxMatches");
   if (alertEl) alertEl.innerHTML = "";
+  // Check override existing checkbox
+  const overrideCheckbox = document.getElementById("launchboxOverrideExisting");
+  const overrideExisting = overrideCheckbox ? overrideCheckbox.checked : false;
   const progressId = `launchbox-progress-${Date.now()}`;
-  if (matchesEl) matchesEl.insertAdjacentHTML("afterbegin", `<div id="${progressId}" class="text-muted mb-2"><span class="spinner-border spinner-border-sm me-2"></span>Downloading missing artwork...</div>`);
+  if (matchesEl) matchesEl.insertAdjacentHTML("afterbegin", `<div id="${progressId}" class="text-muted mb-2"><span class="spinner-border spinner-border-sm me-2"></span>Downloading missing artwork and metadata...</div>`);
   try {
-    const result = await apiPost("/admin/artwork/launchbox/apply", { system, rom_id: romId, rom_path: romPath, game_key: gameKey });
+    const result = await apiPost("/admin/artwork/launchbox/apply", {
+      system,
+      rom_id: romId,
+      rom_path: romPath,
+      game_key: gameKey,
+      override_existing: overrideExisting,
+      import_metadata: overrideExisting, // Import comprehensive metadata when override is on
+    });
     const updated = result.updated || [];
-    if (alertEl) {
-      alertEl.innerHTML = `<div class="alert alert-success">Updated ${updated.length} artwork field${updated.length === 1 ? "" : "s"} for ${escapeHtml(result.rom_name || "ROM")}.</div>`;
+    let successMsg = `Updated ${updated.length} artwork field${updated.length === 1 ? "" : "s"} for ${escapeHtml(result.rom_name || "ROM")}.`;
+    if (overrideExisting && result.metadata_imported) {
+      successMsg += ` Also imported ${result.metadata_imported} metadata fields.`;
     }
+    showToast(successMsg, "success");
     const rom = (window.missingArtworkRoms || [])[rowIndex];
     if (rom) {
       const updatedFields = new Set(updated.map((item) => item.field));

@@ -1308,6 +1308,8 @@ class RomRepository:
         game_key: str,
         client: LaunchBoxClient,
         rom_path: Optional[str] = None,
+        override_existing: bool = False,
+        import_metadata: bool = False,
     ) -> dict:
         system_dir = self.get_system_dir(system)
         rom = self.find_rom_by_path(system, rom_path) if rom_path else self.find_rom_by_unique_id(system, unique_id)
@@ -1321,8 +1323,11 @@ class RomRepository:
             _set_child_text(game, "path", f"./{normalized_rom_path}")
             _set_child_text(game, "name", _clean_rom_title(display_name))
 
-        missing = self._entry_missing_artwork(game)
-        if not missing:
+        if override_existing:
+            fields_to_fetch = list(ARTWORK_FIELDS)
+        else:
+            fields_to_fetch = self._entry_missing_artwork(game)
+        if not fields_to_fetch and not import_metadata:
             return {"system": system, "unique_id": unique_id, "updated": [], "skipped": list(ARTWORK_FIELDS)}
 
         details = client.details(game_key)
@@ -1331,7 +1336,23 @@ class RomRepository:
         safe_stem = re.sub(r"[^a-zA-Z0-9._-]+", "-", Path(display_name).stem).strip("-") or "rom"
         updated = []
         skipped = []
-        for field in missing:
+
+        # Import metadata if requested
+        if import_metadata and details:
+            meta_fields_map = {
+                "name": details.get("name"),
+                "desc": details.get("overview"),
+                "releasedate": details.get("release_date"),
+                "genre": None,  # not available from basic details
+                "developer": None,
+                "publisher": None,
+            }
+            for mfield, mvalue in meta_fields_map.items():
+                if mvalue:
+                    _set_child_text(game, mfield, str(mvalue))
+                    updated.append({"field": mfield, "value": str(mvalue), "source": "launchbox_metadata"})
+
+        for field in fields_to_fetch:
             selected = client.choose_image_for_field(details, field)
             if not selected:
                 skipped.append(field)
@@ -2720,6 +2741,8 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         rom_id = str(payload.get("rom_id") or payload.get("unique_id") or "").strip()
         rom_path = _normalize_gamelist_rom_path(str(payload.get("rom_path") or ""))
         game_key = str(payload.get("game_key") or "").strip()
+        override_existing = bool(payload.get("override_existing", False))
+        import_metadata = bool(payload.get("import_metadata", False))
         if not system:
             raise ValueError("system is required")
         if not rom_id and not rom_path:
@@ -2727,12 +2750,123 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         if not game_key:
             raise ValueError("game_key is required")
         client = LaunchBoxClient()
-        result = self.repository.apply_launchbox_artwork(system, rom_id, game_key, client, rom_path=rom_path or None)
+        result = self.repository.apply_launchbox_artwork(
+            system, rom_id, game_key, client, rom_path=rom_path or None,
+            override_existing=override_existing, import_metadata=import_metadata
+        )
         with self.repository._search_cache_lock:
             self.repository._search_index_expires_at = 0
         with self.repository._missing_artwork_cache_lock:
             self.repository._missing_artwork_cache.clear()
+        result["override_existing"] = override_existing
+        result["metadata_imported"] = import_metadata
         self._send_json(200, result)
+
+    def _handle_admin_artwork_upload(self) -> None:
+        import urllib.parse
+        content_type = self.headers.get("Content-Type", "")
+        if "multipart/form-data" not in content_type:
+            raise ValueError("multipart/form-data expected")
+        # Read raw multipart body
+        content_length = int(self.headers.get("Content-Length", 0))
+        if content_length <= 0 or content_length > 50 * 1024 * 1024:
+            raise ValueError("invalid content size")
+        raw_body = self.rfile.read(content_length)
+        # Parse using simple field extraction for file upload
+        boundary = content_type.split("boundary=")[1].strip() if "boundary=" in content_type else None
+        if not boundary:
+            raise ValueError("boundary not found in content-type")
+        boundary = boundary.strip('"').strip("'")
+        # Simple multipart parser for file + fields
+        parts = raw_body.split(f"--{boundary}".encode())
+        field_name = None
+        system = None
+        rom_id = None
+        file_data = None
+        filename = None
+        for part in parts:
+            if b"Content-Disposition" not in part:
+                continue
+            lines = part.split(b"\r\n")
+            disposition = b""
+            for line in lines:
+                if b"Content-Disposition" in line:
+                    disposition = line
+                    break
+            disp_str = disposition.decode("utf-8", errors="replace")
+            # Determine field name
+            fname = None
+            if ' name="' in disp_str:
+                fname = disp_str.split(' name="')[1].split('"')[0]
+            # Check for filename
+            has_file = ' filename="' in disp_str
+            fn = None
+            if has_file:
+                fn = disp_str.split(' filename="')[1].split('"')[0]
+            # Find payload (after headers)
+            header_end = part.find(b"\r\n\r\n")
+            payload_start = header_end + 4 if header_end >= 0 else 0
+            payload = lines[-1:] if len(lines) == 1 else raw_body  # simplified
+            # Re-extract payload properly
+            payload = part[part.find(b"\r\n\r\n")+4:] if b"\r\n\r\n" in part else b""
+            payload = payload.rstrip(b"\r\n").rstrip(b"--")
+            if has_file and fn:
+                file_data = payload
+                filename = fn
+            elif fname:
+                value = payload.decode("utf-8", errors="replace").strip()
+                if fname == "field":
+                    field_name = value
+                elif fname == "system":
+                    system = value
+                elif fname == "rom_id":
+                    rom_id = value
+        if not file_data or not field_name or not system or not rom_id:
+            raise ValueError("file, field, system, and rom_id are required")
+        filename = filename or f"{field_name}.png"
+        # Find the ROM to update its gamelist and images
+        system_dir = self.repository.get_system_dir(system)
+        # Try to find the ROM by unique_id first, then by path
+        try:
+            rom = self.repository.find_rom_by_unique_id(system, rom_id)
+        except FileNotFoundError:
+            try:
+                rom = self.repository.find_rom_by_path(system, rom_id)
+            except FileNotFoundError:
+                # Just use rom_id as a name stem if not found
+                rom = {"name": Path(rom_id).stem or rom_id, "image_stem": Path(rom_id).stem or rom_id}
+        images_dir = (system_dir / "images").resolve()
+        images_dir.mkdir(parents=True, exist_ok=True)
+        display_name = str(rom.get("image_stem") or rom.get("name") or rom_id)
+        safe_stem = re.sub(r"[^a-zA-Z0-9._-]+", "-", Path(display_name).stem).strip("-") or "rom"
+        dest_filename = f"{safe_stem}-{field_name}{Path(filename).suffix}"
+        dest_path = images_dir / dest_filename
+        with open(dest_path, "wb") as f:
+            f.write(file_data)
+        # Update gamelist if possible
+        try:
+            tree, root = self.repository._read_gamelist(system_dir)
+            game = self.repository._find_gamelist_entry_by_path(root, rom_id)
+            if game is None:
+                game = self.repository._find_gamelist_entry(root, Path(rom_id).name, Path(rom_id).stem)
+            if game is not None:
+                relative_path = _relative_artwork_path(system_dir, dest_path)
+                _set_child_text(game, field_name, relative_path)
+                gamelist_path = system_dir / "gamelist.xml"
+                try:
+                    ET.indent(tree, space="  ")
+                except Exception:
+                    pass
+                tree.write(gamelist_path, encoding="utf-8", xml_declaration=True)
+                with gamelist_path.open("a", encoding="utf-8") as handle:
+                    handle.write("\n")
+        except Exception:
+            pass  # Gamelist write is best-effort for manual uploads
+        # Invalidate caches
+        with self.repository._missing_artwork_cache_lock:
+            self.repository._missing_artwork_cache.clear()
+        rom_name = str(rom.get("name") or Path(rom_id).stem or rom_id)
+        self._send_json(200, {"rom_name": rom_name, "field": field_name, "path": str(dest_path), "url": f"/v1/api/systems/{quote(system)}/images/{quote(dest_filename)}"})
 
     def _handle_admin_gamelist_remove(self, payload: dict) -> None:
         system = str(payload.get("system") or "").strip()
