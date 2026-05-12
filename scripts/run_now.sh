@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROM_API_URL="${ROM_API_URL:-}"
-ROM_API_TEMPLATE_URL="${ROM_API_TEMPLATE_URL:-}"
-ROM_API_API_ROUTES_URL="${ROM_API_API_ROUTES_URL:-}"
-ROM_API_UI_ROUTES_URL="${ROM_API_UI_ROUTES_URL:-}"
-ROM_API_ROUTE_CONFIG_URL="${ROM_API_ROUTE_CONFIG_URL:-}"
-ROM_API_BASE_URL="${ROM_API_BASE_URL:-${1:-}}"
+DRONE_APP_URL="${DRONE_APP_URL:-}"
+DRONE_APP_TEMPLATE_URL="${DRONE_APP_TEMPLATE_URL:-}"
+DRONE_APP_API_ROUTES_URL="${DRONE_APP_API_ROUTES_URL:-}"
+DRONE_APP_UI_ROUTES_URL="${DRONE_APP_UI_ROUTES_URL:-}"
+DRONE_APP_ROUTE_CONFIG_URL="${DRONE_APP_ROUTE_CONFIG_URL:-}"
+DRONE_APP_BASE_URL="${DRONE_APP_BASE_URL:-${1:-}}"
 
-if [[ -z "$ROM_API_URL" && -z "$ROM_API_BASE_URL" ]]; then
+if [[ -z "$DRONE_APP_URL" && -z "$DRONE_APP_BASE_URL" ]]; then
   echo "Usage:"
-  echo "  ROM_API_BASE_URL=<raw-base-url> ./run_now.sh"
+  echo "  DRONE_APP_BASE_URL=<raw-base-url> ./run_now.sh"
   echo "  ./run_now.sh <raw-base-url>"
   echo "  or set all required file URLs directly"
   exit 1
@@ -31,7 +31,7 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 1
 fi
 
-WORK_DIR="${ROM_API_WORK_DIR:-$HOME/.rom-api}"
+WORK_DIR="${DRONE_APP_WORK_DIR:-$HOME/.drone-app}"
 SCRIPT_PATH="${0:-}"
 mkdir -p "$WORK_DIR"
 APP_DIR="$WORK_DIR/app"
@@ -44,18 +44,18 @@ API_ROUTES_PATH="$APP_DIR/api_routes.py"
 UI_ROUTES_PATH="$APP_DIR/ui_routes.py"
 ROUTE_CONFIG_PATH="$APP_DIR/route_config.py"
 
-if [[ -n "$ROM_API_BASE_URL" ]]; then
-  ROM_API_BASE_URL="${ROM_API_BASE_URL%/}"
-  ROM_API_URL="${ROM_API_URL:-$ROM_API_BASE_URL/app/rom_api.py}"
-  ROM_API_API_ROUTES_URL="${ROM_API_API_ROUTES_URL:-$ROM_API_BASE_URL/app/api_routes.py}"
-  ROM_API_UI_ROUTES_URL="${ROM_API_UI_ROUTES_URL:-$ROM_API_BASE_URL/app/ui_routes.py}"
-  ROM_API_ROUTE_CONFIG_URL="${ROM_API_ROUTE_CONFIG_URL:-$ROM_API_BASE_URL/app/route_config.py}"
-  ROM_API_TEMPLATE_URL="${ROM_API_TEMPLATE_URL:-$ROM_API_BASE_URL/app/templates/index.html}"
+if [[ -n "$DRONE_APP_BASE_URL" ]]; then
+  DRONE_APP_BASE_URL="${DRONE_APP_BASE_URL%/}"
+  DRONE_APP_URL="${DRONE_APP_URL:-$DRONE_APP_BASE_URL/app/rom_api.py}"
+  DRONE_APP_API_ROUTES_URL="${DRONE_APP_API_ROUTES_URL:-$DRONE_APP_BASE_URL/app/api_routes.py}"
+  DRONE_APP_UI_ROUTES_URL="${DRONE_APP_UI_ROUTES_URL:-$DRONE_APP_BASE_URL/app/ui_routes.py}"
+  DRONE_APP_ROUTE_CONFIG_URL="${DRONE_APP_ROUTE_CONFIG_URL:-$DRONE_APP_BASE_URL/app/route_config.py}"
+  DRONE_APP_TEMPLATE_URL="${DRONE_APP_TEMPLATE_URL:-$DRONE_APP_BASE_URL/app/templates/index.html}"
 fi
 
-if [[ -z "$ROM_API_URL" || -z "$ROM_API_API_ROUTES_URL" || -z "$ROM_API_UI_ROUTES_URL" || -z "$ROM_API_ROUTE_CONFIG_URL" ]]; then
+if [[ -z "$DRONE_APP_URL" || -z "$DRONE_APP_API_ROUTES_URL" || -z "$DRONE_APP_UI_ROUTES_URL" || -z "$DRONE_APP_ROUTE_CONFIG_URL" ]]; then
   echo "Missing required app file URL(s)."
-  echo "Provide ROM_API_BASE_URL or set ROM_API_URL, ROM_API_API_ROUTES_URL, ROM_API_UI_ROUTES_URL, and ROM_API_ROUTE_CONFIG_URL."
+  echo "Provide DRONE_APP_BASE_URL or set DRONE_APP_URL, DRONE_APP_API_ROUTES_URL, DRONE_APP_UI_ROUTES_URL, and DRONE_APP_ROUTE_CONFIG_URL."
   exit 1
 fi
 
@@ -70,10 +70,10 @@ download_file() {
 }
 
 mkdir -p "$APP_DIR"
-download_file "$ROM_API_URL" "$APP_PATH"
-download_file "$ROM_API_API_ROUTES_URL" "$API_ROUTES_PATH"
-download_file "$ROM_API_UI_ROUTES_URL" "$UI_ROUTES_PATH"
-download_file "$ROM_API_ROUTE_CONFIG_URL" "$ROUTE_CONFIG_PATH"
+download_file "$DRONE_APP_URL" "$APP_PATH"
+download_file "$DRONE_APP_API_ROUTES_URL" "$API_ROUTES_PATH"
+download_file "$DRONE_APP_UI_ROUTES_URL" "$UI_ROUTES_PATH"
+download_file "$DRONE_APP_ROUTE_CONFIG_URL" "$ROUTE_CONFIG_PATH"
 mkdir -p "$TEMPLATES_DIR"
 cat > "$INIT_PATH" <<'EOF'
 # package marker
@@ -84,17 +84,17 @@ from app.rom_api import main
 if __name__ == "__main__":
     main()
 EOF
-if ! download_file "$ROM_API_TEMPLATE_URL" "$TEMPLATE_PATH"; then
+if ! download_file "$DRONE_APP_TEMPLATE_URL" "$TEMPLATE_PATH"; then
   cat > "$TEMPLATE_PATH" <<'EOF'
 <!doctype html>
 <html>
-  <head><meta charset="utf-8"><title>ROM API</title></head>
-  <body><h1>ROM API Running</h1></body>
+  <head><meta charset="utf-8"><title>Drone App</title></head>
+  <body><h1>Drone App Running</h1></body>
 </html>
 EOF
 fi
 
-echo "Downloaded ROM API to $WORK_DIR"
+echo "Downloaded Drone App to $WORK_DIR"
 
 cleanup() {
   rm -rf "$WORK_DIR" 2>/dev/null || true
@@ -105,18 +105,18 @@ cleanup() {
 
 trap cleanup EXIT INT TERM
 
-ROM_API_USERNAME="${ROM_API_USERNAME:-${USERNAME:-}}"
-ROM_API_PASSWORD="${ROM_API_PASSWORD:-${PASSWORD:-}}"
+DRONE_APP_USERNAME="${DRONE_APP_USERNAME:-${USERNAME:-}}"
+DRONE_APP_PASSWORD="${DRONE_APP_PASSWORD:-${PASSWORD:-}}"
 
 env \
   PYTHONPATH="$WORK_DIR${PYTHONPATH:+:$PYTHONPATH}" \
-  ROM_API_USERNAME="$ROM_API_USERNAME" \
-  ROM_API_PASSWORD="$ROM_API_PASSWORD" \
+  DRONE_APP_USERNAME="$DRONE_APP_USERNAME" \
+  DRONE_APP_PASSWORD="$DRONE_APP_PASSWORD" \
   HTTPS_PORT="${HTTPS_PORT:-8443}" \
   ROMS_ROOT="${ROMS_ROOT:-/userdata/roms}" \
   BIOS_ROOT="${BIOS_ROOT:-/userdata/bios}" \
   TLS_SELF_SIGNED_DIR="${TLS_SELF_SIGNED_DIR:-/userdata/system/certs}" \
-  LOG_DIR="${LOG_DIR:-/userdata/system/logs/rom-api}" \
+  LOG_DIR="${LOG_DIR:-/userdata/system/logs/drone-app}" \
   LOG_MAX_BYTES="${LOG_MAX_BYTES:-5242880}" \
   LOG_BACKUP_COUNT="${LOG_BACKUP_COUNT:-5}" \
   IMAGE_CACHE_TTL_SECONDS="${IMAGE_CACHE_TTL_SECONDS:-3600}" \

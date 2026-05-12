@@ -10,7 +10,7 @@
 #   chmod +x /tmp/batocera_install.sh && /tmp/batocera_install.sh
 #
 # For v43+ Batocera:
-#   Creates /userdata/system/services/ENABLE_WEB_SERVER
+#   Creates /userdata/system/services/DRONE_SERVER
 # For < v43 Batocera:
 #   Appends startup block to /userdata/system/custom.sh
 # -------------------------------------------------------------------
@@ -54,7 +54,7 @@ if [ "$USE_LEGACY_METHOD" = false ]; then
   # ── Batocera v43+ method ──────────────────────────────────────────
   echo "Installing for Batocera v43+ ..."
   SERVICES_DIR="/userdata/system/services"
-  SERVICE_FILE="${SERVICES_DIR}/ENABLE_WEB_SERVER"
+  SERVICE_FILE="${SERVICES_DIR}/DRONE_SERVER"
 
   # Create services directory if it doesn't exist
   mkdir -p "$SERVICES_DIR"
@@ -169,7 +169,7 @@ echo "Web Server URL: https://$(hostname):8443"
 echo ""
 echo "To uninstall:"
 if [ "$USE_LEGACY_METHOD" = false ]; then
-  echo "  rm -f ${SERVICES_DIR}/ENABLE_WEB_SERVER"
+  echo "  rm -f ${SERVICES_DIR}/DRONE_SERVER"
 else
   echo "  Edit $CUSTOM_SH and remove the Drone Web Server block"
 fi

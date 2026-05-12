@@ -254,7 +254,7 @@ class LaunchBoxClient:
         self.timeout_seconds = timeout_seconds
 
     def _get_json(self, url: str) -> dict:
-        request = Request(url, headers={"User-Agent": "batocera-drone-rom-api/4.0"})
+        request = Request(url, headers={"User-Agent": "batocera-drone-app/4.0"})
         with urlopen(request, timeout=self.timeout_seconds) as response:
             return json.loads(response.read().decode("utf-8"))
 
@@ -349,7 +349,7 @@ class LaunchBoxClient:
         return None
 
     def download_image(self, url: str) -> Tuple[bytes, str]:
-        request = Request(url, headers={"User-Agent": "batocera-drone-rom-api/4.0"})
+        request = Request(url, headers={"User-Agent": "batocera-drone-app/4.0"})
         with urlopen(request, timeout=self.timeout_seconds) as response:
             content_type = response.headers.get_content_type()
             return response.read(), content_type
@@ -571,8 +571,8 @@ class Settings:
             userdata_root=Path(os.environ.get("USERDATA_ROOT", "/userdata")),
             roms_root=Path(os.environ.get("ROMS_ROOT", "/userdata/roms")),
             bios_root=Path(os.environ.get("BIOS_ROOT", "/userdata/bios")),
-            username=os.environ.get("ROM_API_USERNAME") or os.environ.get("USERNAME"),
-            password=os.environ.get("ROM_API_PASSWORD") or os.environ.get("PASSWORD"),
+            username=os.environ.get("DRONE_APP_USERNAME") or os.environ.get("USERNAME"),
+            password=os.environ.get("DRONE_APP_PASSWORD") or os.environ.get("PASSWORD"),
             https_port=int(https_port_value),
             image_cache_ttl_seconds=int(os.environ.get("IMAGE_CACHE_TTL_SECONDS", "3600")),
             image_miss_cache_ttl_seconds=int(os.environ.get("IMAGE_MISS_CACHE_TTL_SECONDS", "300")),
@@ -602,7 +602,7 @@ class Settings:
                 os.environ.get("ES_SYSTEMS_FILE", "/usr/share/emulationstation/es_systems.cfg")
             ),
             batocera_theme_name=os.environ.get("BATOCERA_THEME_NAME"),
-            http_only=_env_bool(False, "HTTP_ONLY", "ROM_API_HTTP_ONLY"),
+            http_only=_env_bool(False, "HTTP_ONLY", "DRONE_APP_HTTP_ONLY"),
             use_fake_data=use_fake_data,
             fake_image_base_url=os.environ.get("FAKE_IMAGE_BASE_URL"),
             overmind_url=os.environ.get("OVERMIND_URL"),
@@ -613,6 +613,16 @@ class Settings:
         )
 
 
+class _TimestampFormatter:
+    """Thread-safe ISO-8601 timestamp provider."""
+    _lock = Lock()
+
+    @classmethod
+    def now(cls) -> str:
+        with cls._lock:
+            return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S") + "Z"
+
+
 class _TeeRotatingStream:
     def __init__(self, original_stream, log_path: Path, max_bytes: int, backup_count: int):
         self._original_stream = original_stream
@@ -621,6 +631,7 @@ class _TeeRotatingStream:
         self._backup_count = backup_count
         self._file = self._log_path.open("a", encoding="utf-8")
         self._lock = Lock()
+        self._partial = ""  # buffer for partial-line writes
 
     def _rollover_if_needed(self) -> None:
         if self._max_bytes <= 0:
@@ -650,12 +661,25 @@ class _TeeRotatingStream:
 
         self._file = self._log_path.open("a", encoding="utf-8")
 
+    def _timestamped_line(self, line: str) -> str:
+        ts = _TimestampFormatter.now()
+        return f"[{ts}] {line}"
+
     def write(self, data: str) -> int:
         if not isinstance(data, str):
             data = str(data)
         with self._lock:
             if data:
-                self._file.write(data)
+                # Prepend timestamp to each complete line in the data
+                self._partial += data
+                lines = self._partial.split("\n")
+                # All complete lines (except possibly the last partial)
+                complete = lines[:-1]
+                self._partial = lines[-1]
+                for line in complete:
+                    ts_line = self._timestamped_line(line + "\n")
+                    self._file.write(ts_line)
+                    self._file.flush()
                 self._rollover_if_needed()
             self._original_stream.write(data)
             return len(data)
@@ -1894,7 +1918,7 @@ class RomRepository:
 OPENAPI_SPEC = {
     "openapi": "3.0.3",
     "info": {
-        "title": "ROM API",
+        "title": "Drone App",
         "version": "4.0",
         "description": "Browse and download ROM, image, video, and BIOS assets.",
     },
@@ -2159,7 +2183,7 @@ OPENAPI_SPEC = {
 }
 
 class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
-    server_version = "RomAPI/4.0"
+    server_version = "DroneApp/4.0"
     openapi_spec = OPENAPI_SPEC
 
     def __init__(
@@ -2224,7 +2248,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             "yes" if self.headers.get("Authorization") else "no",
         )
         self.send_response(401)
-        self.send_header("WWW-Authenticate", 'Basic realm="ROM API"')
+        self.send_header("WWW-Authenticate", 'Basic realm="Drone App"')
         self.send_header("Content-Type", "application/json")
         self._send_security_headers()
         self.end_headers()
@@ -2331,10 +2355,10 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
     def _overmind_config_path(self) -> Path:
-        return (self.settings.userdata_root / "system" / "rom-api" / "overmind_integration.json").resolve()
+        return (self.settings.userdata_root / "system" / "drone-app" / "overmind_integration.json").resolve()
 
     def _overmind_actions_path(self) -> Path:
-        return (self.settings.userdata_root / "system" / "rom-api" / "overmind_processed_actions.json").resolve()
+        return (self.settings.userdata_root / "system" / "drone-app" / "overmind_processed_actions.json").resolve()
 
     def _mask_secret(self, value: str) -> str:
         if not value:
@@ -4534,11 +4558,11 @@ def _resolve_tls_material(settings: Settings) -> Tuple[Path, Path]:
 
 
 def _overmind_config_path_for_settings(settings: Settings) -> Path:
-    return (settings.userdata_root / "system" / "rom-api" / "overmind_integration.json").resolve()
+    return (settings.userdata_root / "system" / "drone-app" / "overmind_integration.json").resolve()
 
 
 def _overmind_actions_path_for_settings(settings: Settings) -> Path:
-    return (settings.userdata_root / "system" / "rom-api" / "overmind_processed_actions.json").resolve()
+    return (settings.userdata_root / "system" / "drone-app" / "overmind_processed_actions.json").resolve()
 
 
 def _load_overmind_config_for_settings(settings: Settings) -> dict:
@@ -4742,7 +4766,7 @@ def main() -> None:
     print(f"Log files: {settings.log_dir / settings.stdout_log_file}, {settings.log_dir / settings.stderr_log_file}")
     print(f"Auth username: {settings.username}")
     scheme = "http" if settings.http_only else "https"
-    print(f"Serving ROM API on {scheme}://0.0.0.0:{settings.https_port}")
+    print(f"Serving Drone App on {scheme}://0.0.0.0:{settings.https_port}")
     _start_overmind_action_poller(settings)
     server.serve_forever()
 
