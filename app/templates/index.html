@@ -27,11 +27,9 @@
 	      background:
           linear-gradient(rgba(255,255,255,0.035) 1px, transparent 1px),
           linear-gradient(90deg, rgba(255,255,255,0.035) 1px, transparent 1px),
-          radial-gradient(circle at 20% 0%, rgba(255, 62, 165, 0.28) 0%, transparent 32%),
-          radial-gradient(circle at 88% 12%, rgba(0, 194, 255, 0.22) 0%, transparent 34%),
           #101828;
 	      background-attachment: fixed;
-	      background-size: 42px 42px, 42px 42px, cover, cover, cover;
+	      background-size: 42px 42px, 42px 42px, cover;
 	      min-height: 100vh;
 	      color: var(--admin-text);
 	      font-family: "Nunito", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -47,10 +45,9 @@
     }
     .layout-shell { position: relative; z-index: 1; }
     .sidebar {
-      background: linear-gradient(180deg, #111936 0%, var(--admin-sidebar) 100%);
+      background: linear-gradient(90deg, #111936 0%, var(--admin-sidebar) 100%);
       color: #fff;
-      min-height: 100vh;
-      border-right: 1px solid rgba(255, 255, 255, 0.14);
+      border: 1px solid rgba(255, 255, 255, 0.14);
       box-shadow: 0 0.15rem 1rem rgba(0, 0, 0, 0.14);
     }
     .brand-block { border-bottom: 1px solid rgba(255, 255, 255, 0.18); }
@@ -103,6 +100,18 @@
       backdrop-filter: blur(10px);
     }
     .nav-actions .btn { white-space: nowrap; }
+    .nav-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.35rem;
+      align-items: center;
+    }
+    .machine-id-label {
+      max-width: 24rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
     .card, .input-group .form-control, .input-group .input-group-text, .input-group .btn, footer, .form-select {
       background: rgba(21, 31, 50, 0.9);
       border-color: var(--admin-border);
@@ -290,6 +299,10 @@
       background-color: rgba(31, 42, 68, 0.72);
       color: #ffffff;
       --bs-table-color: #ffffff;
+    }
+    .artwork-page tr.artwork-selected-row td {
+      background-color: rgba(0, 194, 255, 0.18) !important;
+      color: #ffffff;
     }
     .gamelist-details {
       max-height: 330px;
@@ -590,65 +603,61 @@
       }
     }
     @media (max-width: 991.98px) {
-      .sidebar { min-height: auto; }
-      .nav-actions .btn { width: 100%; }
+      .nav-actions {
+        width: 100%;
+        overflow-x: auto;
+        flex-wrap: nowrap;
+        padding-bottom: 0.15rem;
+      }
+      .nav-actions .btn { flex: 0 0 auto; }
+      .machine-id-label { max-width: 12rem; }
     }
   </style>
 </head>
 <body>
 <div class="container-fluid layout-shell py-3 py-lg-4">
-  <div class="row g-3">
-    <aside class="col-12 col-lg-3 col-xl-2">
-      <div class="sidebar rounded-3 h-100 p-3">
-        <div class="brand-block pb-3 mb-3">
-          <div class="d-flex align-items-center gap-2 mb-1">
-            <span class="brand-mark"><i class="bi bi-controller"></i></span>
-            <div class="h5 mb-0 text-white">Batocera Drone</div>
-          </div>
-          <div class="small text-white-50">Systems and ROMs</div>
-        </div>
-        <div class="menu-label mb-2">Navigation</div>
-        <div class="d-grid gap-1 nav-actions">
-          <a id="systemsMenuBtn" href="#" role="button" class="btn"><i class="bi bi-grid me-2"></i>Systems</a>
-          <a id="biosBtn" href="#bios" role="button" class="btn"><i class="bi bi-cpu me-2"></i>BIOS</a>
-          <a id="themeMenuBtn" href="#theme" role="button" class="btn"><i class="bi bi-brush me-2"></i>Theme</a>
-          <a id="adminMenuBtn" href="#admin" role="button" class="btn"><i class="bi bi-shield-check me-2"></i>Admin</a>
-          <a href="https://github.com/Batocera-Fleet-Federation/batocera.drone" target="_blank" rel="noopener noreferrer" role="button" class="btn">
-            <i class="bi bi-github me-2"></i>GitHub
-          </a>
-          <a id="backBtn" href="#" role="button" class="btn btn-outline-light d-none">Back</a>
-        </div>
-      </div>
-    </aside>
-    <main class="col-12 col-lg-9 col-xl-10">
-      <nav class="topbar px-3 py-2 mb-3 d-flex align-items-center justify-content-between">
+  <div class="sidebar rounded-3 p-2 p-md-3 mb-3">
+    <div class="d-flex flex-column flex-lg-row align-items-lg-center gap-2 gap-lg-3">
+      <div class="d-flex align-items-center gap-2 me-lg-auto">
+        <span class="brand-mark"><i class="bi bi-controller"></i></span>
         <div>
-          <h1 class="h3 mb-1">Batocera Library</h1>
-          <div class="text-muted">Systems and ROMs</div>
+          <div class="h5 mb-0 text-white">Batocera Drone</div>
+          <div id="machineIdNav" class="small text-white-50 machine-id-label">Machine ID loading...</div>
         </div>
-        <div class="d-none d-md-inline-flex align-items-center justify-content-center rounded-circle border" style="width:2.25rem;height:2.25rem;border-color:var(--admin-border)!important;color:#9aa3b2;">
-          <i class="bi bi-person"></i>
-        </div>
-      </nav>
-      <div class="app-shell p-3 p-md-4">
-        <div id="systemInfoBar" class="mb-3 d-flex flex-wrap gap-2"></div>
-        <div class="mb-3">
-          <form id="searchForm" role="search">
-            <div class="input-group">
-              <span class="input-group-text"><i class="bi bi-search"></i></span>
-              <input id="searchInput" class="form-control" type="search" placeholder="Search ROMs across all systems">
-              <button id="searchBtn" class="btn btn-primary" type="submit">Search</button>
-              <button id="clearSearchBtn" class="btn btn-outline-secondary" type="button">Clear</button>
-            </div>
-          </form>
-        </div>
-        <div id="content"></div>
-        <footer class="mt-4 pt-3 border-top text-muted small">
-          <a href="/v1/api/downloads">Download Sitemap</a>
-        </footer>
       </div>
-    </main>
+      <div class="nav-actions">
+        <a id="systemsMenuBtn" href="#" role="button" class="btn"><i class="bi bi-grid me-2"></i>Systems</a>
+        <a id="biosBtn" href="#bios" role="button" class="btn"><i class="bi bi-cpu me-2"></i>BIOS</a>
+        <a id="themeMenuBtn" href="#theme" role="button" class="btn"><i class="bi bi-brush me-2"></i>Theme</a>
+        <a id="systemInfoMenuBtn" href="#admin/system-info" role="button" class="btn"><i class="bi bi-pc-display me-2"></i>System Info</a>
+        <a id="adminMenuBtn" href="#admin" role="button" class="btn"><i class="bi bi-shield-check me-2"></i>Admin</a>
+        <a href="https://github.com/Batocera-Fleet-Federation/batocera.drone" target="_blank" rel="noopener noreferrer" role="button" class="btn">
+          <i class="bi bi-github me-2"></i>GitHub
+        </a>
+        <a id="backBtn" href="#" role="button" class="btn btn-outline-light d-none">Back</a>
+      </div>
+    </div>
   </div>
+  <div class="d-none">
+    <h1 class="h3 mb-1"></h1>
+    <div id="pageSubtitle" class="text-muted"></div>
+  </div>
+  <main>
+    <div class="app-shell p-3 p-md-4">
+      <div id="systemInfoBar" class="mb-3 d-flex flex-wrap gap-2"></div>
+      <div class="mb-3">
+        <form id="searchForm" role="search">
+          <div class="input-group">
+            <span class="input-group-text"><i class="bi bi-search"></i></span>
+            <input id="searchInput" class="form-control" type="search" placeholder="Search ROMs across all systems">
+            <button id="searchBtn" class="btn btn-primary" type="submit">Search</button>
+            <button id="clearSearchBtn" class="btn btn-outline-secondary" type="button">Clear</button>
+          </div>
+        </form>
+      </div>
+      <div id="content"></div>
+    </div>
+  </main>
 </div>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
@@ -657,12 +666,13 @@ const backBtn = document.getElementById("backBtn");
 const systemsMenuBtn = document.getElementById("systemsMenuBtn");
 const biosBtn = document.getElementById("biosBtn");
 const themeMenuBtn = document.getElementById("themeMenuBtn");
+const systemInfoMenuBtn = document.getElementById("systemInfoMenuBtn");
 const adminMenuBtn = document.getElementById("adminMenuBtn");
 const searchForm = document.getElementById("searchForm");
 const searchInput = document.getElementById("searchInput");
 const clearSearchBtn = document.getElementById("clearSearchBtn");
 const titleNode = document.querySelector(".h3.mb-1");
-const subtitleNode = document.querySelector(".text-muted");
+const subtitleNode = document.getElementById("pageSubtitle");
 const API_BASE = "/v1/api";
 let imageObserver = null;
 let activeThemeMeta = null;
@@ -675,6 +685,7 @@ let themeFilterSelectedSystems = [];
 let themeFilterQuery = "";
 const THEME_GALLERY_PAGE_SIZE = 100;
 const BIOS_PAGE_SIZE = 100;
+const SYSTEM_ROM_PAGE_SIZE = 200;
 const ARTWORK_PAGE_SIZE = 200;
 const GAMELIST_EDIT_FIELDS = [
   "name", "sortname", "desc", "genre", "developer", "publisher", "releasedate",
@@ -747,12 +758,18 @@ function hideLoadingToast() {
 }
 // Image lightbox viewer
 function showImageLightbox(url, title = "") {
+  const imageUrl = appendCacheBust(url);
   const overlay = document.createElement("div");
   overlay.className = "image-lightbox-overlay";
-  overlay.innerHTML = `<button class="image-lightbox-close" onclick="this.parentElement.remove()">&times;</button><img src="${escapeHtml(url)}" alt="${escapeHtml(title)}">`;
+  overlay.innerHTML = `<button class="image-lightbox-close" onclick="this.parentElement.remove()">&times;</button><img src="${escapeHtml(imageUrl)}" alt="${escapeHtml(title)}" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'text-light p-4',textContent:'Image could not be loaded'}))">`;
   overlay.addEventListener("click", (e) => { if (e.target === overlay) overlay.remove(); });
   document.addEventListener("keydown", function escHandler(ev) { if (ev.key === "Escape") { overlay.remove(); document.removeEventListener("keydown", escHandler); } });
   document.body.appendChild(overlay);
+}
+function appendCacheBust(url) {
+  const value = String(url || "");
+  if (!value || value.startsWith("data:")) return value;
+  return `${value}${value.includes("?") ? "&" : "?"}v=${Date.now()}`;
 }
 function showError(message) {
   showToast(message, "danger", 8000);
@@ -780,11 +797,11 @@ function setSearchMode(mode, systemName = "") {
   }
 }
 function applyAdminVisibility() {
-  if (!adminMenuBtn) return;
+  const adminLinks = [adminMenuBtn, systemInfoMenuBtn].filter(Boolean);
   if (adminEnabled) {
-    adminMenuBtn.classList.remove("d-none");
+    adminLinks.forEach((link) => link.classList.remove("d-none"));
   } else {
-    adminMenuBtn.classList.add("d-none");
+    adminLinks.forEach((link) => link.classList.add("d-none"));
   }
 }
 function escapeHtml(value) {
@@ -949,11 +966,7 @@ function setupFilterDropdown(prefix, onSelectionChange) {
   document.addEventListener(`filter-apply-${prefix}`, onSelectionChange);
 }
 function setBackground(url) {
-  if (url) {
-    document.body.style.backgroundImage = `url("${url}")`;
-  } else {
-    document.body.style.backgroundImage = "";
-  }
+  document.body.style.backgroundImage = "";
 }
 function pickRandomThemeBackground(payload) {
   if (!payload || !payload.enabled || !Array.isArray(payload.backgrounds) || !payload.backgrounds.length) {
@@ -1024,13 +1037,7 @@ function themeUiValue(theme, key) {
   return null;
 }
 function applyThemeBranding(theme) {
-  const logoUrl = activeRandomLogo || themeUiValue(theme, "logo_url");
-  if (titleNode) {
-    titleNode.textContent = "Batocera Library";
-  }
-  if (subtitleNode) {
-    subtitleNode.textContent = "Systems and ROMs";
-  }
+  // The shell uses fixed Drone branding; theme art stays in content cards.
 }
 async function refreshRandomThemeLogo() {
   if (!activeThemeMeta || !activeThemeMeta.enabled) return;
@@ -1057,8 +1064,8 @@ async function initializeTheme() {
       logoUrl = pickRandomThemeLogo(logoPayload);
     } catch (_) {}
     activeRandomLogo = logoUrl;
-    activeRandomBackground = bgUrl || themeUiValue(theme, "background_url");
-    setBackground(activeRandomBackground);
+    activeRandomBackground = null;
+    setBackground(null);
     if (activeGlobalThemeCssNode) {
       activeGlobalThemeCssNode.remove();
       activeGlobalThemeCssNode = null;
@@ -1082,7 +1089,7 @@ async function applySystemTheme(system) {
     const theme = await api(`/theme/system/${encodeURIComponent(system)}`);
     if (!theme || !theme.enabled) {
       if (activeThemeMeta) {
-        setBackground(activeRandomBackground || themeUiValue(activeThemeMeta, "background_url"));
+        setBackground(null);
       }
       if (activeSystemThemeCssNode) {
         activeSystemThemeCssNode.remove();
@@ -1091,10 +1098,7 @@ async function applySystemTheme(system) {
       activeSystemThemeCssNode = null;
       return;
     }
-    if (titleNode) {
-      titleNode.textContent = "Batocera Library";
-    }
-    setBackground(theme.background_url || activeRandomBackground || themeUiValue(activeThemeMeta, "background_url"));
+    setBackground(null);
     if (activeSystemThemeCssNode) {
       activeSystemThemeCssNode.remove();
       activeSystemThemeCssNode = null;
@@ -1116,7 +1120,7 @@ function clearSystemTheme() {
     activeSystemThemeCssNode = null;
   }
   if (activeThemeMeta) {
-    setBackground(activeRandomBackground || themeUiValue(activeThemeMeta, "background_url"));
+    setBackground(null);
     applyThemeBranding(activeThemeMeta);
   }
 }
@@ -1301,12 +1305,54 @@ function renderSystems(data) {
   `;
   setupLazyImages();
 }
-function renderRomGrid(system, items) {
+function systemHash(system, page = 1) {
+  const safePage = Math.max(1, Number(page || 1));
+  return `#system/${encodeURIComponent(system)}${safePage > 1 ? `?page=${safePage}` : ""}`;
+}
+function parseSystemHash(hash) {
+  if (!hash.startsWith("#system/") || hash.includes("/rom/")) return null;
+  const raw = hash.substring("#system/".length);
+  const [systemPart, queryPart = ""] = raw.split("?", 2);
+  const params = new URLSearchParams(queryPart);
+  return {
+    system: decodeURIComponent(systemPart),
+    page: Math.max(1, Number.parseInt(params.get("page") || "1", 10) || 1),
+  };
+}
+function renderSystemPagination(system, page, totalPages) {
+  if (totalPages <= 1) return "";
+  const pages = [];
+  const start = Math.max(1, page - 3);
+  const end = Math.min(totalPages, page + 3);
+  for (let item = start; item <= end; item += 1) pages.push(item);
+  return `
+    <div class="d-flex flex-wrap gap-2 align-items-center justify-content-between mt-3">
+      <div class="text-muted small">Page ${page} of ${totalPages}</div>
+      <div class="btn-group flex-wrap" role="group" aria-label="ROM pages">
+        <button class="btn btn-sm btn-outline-primary" type="button" ${page <= 1 ? "disabled" : ""} onclick="setHash('${systemHash(system, page - 1)}')">Previous</button>
+        ${start > 1 ? `<button class="btn btn-sm btn-outline-primary" type="button" onclick="setHash('${systemHash(system, 1)}')">1</button>${start > 2 ? `<button class="btn btn-sm btn-outline-secondary" type="button" disabled>...</button>` : ""}` : ""}
+        ${pages.map((item) => `<button class="btn btn-sm ${item === page ? "btn-primary" : "btn-outline-primary"}" type="button" onclick="setHash('${systemHash(system, item)}')">${item}</button>`).join("")}
+        ${end < totalPages ? `${end < totalPages - 1 ? `<button class="btn btn-sm btn-outline-secondary" type="button" disabled>...</button>` : ""}<button class="btn btn-sm btn-outline-primary" type="button" onclick="setHash('${systemHash(system, totalPages)}')">${totalPages}</button>` : ""}
+        <button class="btn btn-sm btn-outline-primary" type="button" ${page >= totalPages ? "disabled" : ""} onclick="setHash('${systemHash(system, page + 1)}')">Next</button>
+      </div>
+    </div>
+  `;
+}
+function renderRomGrid(system, items, page = 1, total = items.length) {
+  const totalPages = Math.max(1, Math.ceil(total / SYSTEM_ROM_PAGE_SIZE));
   return `
     <div class="mb-4">
-      <h3 class="h5 mb-3">ROMs <span class="text-muted">(${items.length})</span></h3>
+      <div class="d-flex flex-wrap gap-2 justify-content-between align-items-center mb-3">
+        <h3 class="h5 mb-0">ROMs <span class="text-muted">(${total})</span></h3>
+        <div class="text-muted small">Showing ${total ? ((page - 1) * SYSTEM_ROM_PAGE_SIZE) + 1 : 0}-${Math.min(total, page * SYSTEM_ROM_PAGE_SIZE)} of ${total}</div>
+      </div>
       <div class="row g-3">
         ${items.map(item => {
+          const existing = item.existing || {};
+          const gamelistImage = ["image", "thumbnail", "boxart", "fanart", "marquee"]
+            .map((field) => artworkExistingImageUrl({ ...item, system }, existing[field] || ""))
+            .find(Boolean) || "";
+          const primaryImage = gamelistImage || romImageByIdUrl(system, item.unique_id);
           const fallbacks = [
             publicRomImageUrl(system, item.name, item.image_stem, ".png", true),
             publicRomImageUrl(system, item.name, item.image_stem, ".jpg", true),
@@ -1322,7 +1368,7 @@ function renderRomGrid(system, items) {
             <div class="card shadow-sm tile h-100 pointer" onclick="setHash('#system/${encodeURIComponent(system)}/rom/${encodeURIComponent(item.unique_id)}')">
               <img
                 src=""
-                data-src="${romImageByIdUrl(system, item.unique_id)}"
+                data-src="${primaryImage}"
                 data-fallbacks='${JSON.stringify(fallbacks)}'
                 class="card-img-top"
                 alt="${escapeHtml(item.name)}"
@@ -1346,6 +1392,7 @@ function renderRomGrid(system, items) {
         `;
         }).join("") || `<div class="col-12"><div class="text-muted">No roms found.</div></div>`}
       </div>
+      ${renderSystemPagination(system, page, totalPages)}
     </div>
   `;
 }
@@ -1759,7 +1806,7 @@ function renderSearchResults(data) {
   `;
   setupLazyImages();
 }
-async function renderSystem(system) {
+async function renderSystem(system, page = 1) {
   currentSystemContext = system;
   backBtn.classList.remove("d-none");
   setSearchMode("system", system);
@@ -1767,16 +1814,20 @@ async function renderSystem(system) {
   await applySystemTheme(system);
   const romsData = await api(`/systems/${encodeURIComponent(system)}`);
   systemRomCache[system] = romsData;
+  const allRoms = romsData.roms || [];
+  const totalPages = Math.max(1, Math.ceil(allRoms.length / SYSTEM_ROM_PAGE_SIZE));
+  const safePage = Math.max(1, Math.min(Number(page || 1), totalPages));
+  const pageRoms = allRoms.slice((safePage - 1) * SYSTEM_ROM_PAGE_SIZE, safePage * SYSTEM_ROM_PAGE_SIZE);
 
   content.innerHTML = `
     <div class="mb-4">
       <h2 class="h4 mb-1">${escapeHtml(system)}</h2>
       <div class="text-muted">
-        ROMs: ${(romsData.roms || []).length}
+        ROMs: ${allRoms.length} · Page ${safePage}/${totalPages}
       </div>
     </div>
 
-    ${renderRomGrid(system, romsData.roms || [])}
+    ${renderRomGrid(system, pageRoms, safePage, allRoms.length)}
   `;
   setupLazyImages();
   setLoading(false);
@@ -1840,47 +1891,34 @@ async function renderAdminMenu() {
   content.innerHTML = `
     <div class="row">
       <div class="col-md-4 mb-3">
-        <div class="card admin-tile">
+        <div class="card admin-tile pointer h-100" onclick="setHash('#admin/logs/es_launch_stdout?lines=200')">
           <div class="card-body">
             <h5 class="card-title"><i class="bi bi-journal-text me-2"></i>Logs</h5>
             <p class="card-text">View system and emulator logs</p>
-            <button class="btn btn-primary" onclick="setHash('#admin/logs/es_launch_stdout?lines=200')">View Logs</button>
           </div>
         </div>
       </div>
       <div class="col-md-4 mb-3">
-        <div class="card admin-tile">
+        <div class="card admin-tile pointer h-100" onclick="setHash('#admin/configs/batocera?max_bytes=131072')">
           <div class="card-body">
             <h5 class="card-title"><i class="bi bi-file-earmark-code me-2"></i>Emulators</h5>
             <p class="card-text">View emulator config files and detected versions</p>
-            <button class="btn btn-primary" onclick="setHash('#admin/configs/batocera?max_bytes=131072')">View Configs</button>
           </div>
         </div>
       </div>
       <div class="col-md-4 mb-3">
-        <div class="card admin-tile">
-          <div class="card-body">
-            <h5 class="card-title"><i class="bi bi-pc-display me-2"></i>System Info</h5>
-            <p class="card-text">View Batocera host information</p>
-            <button class="btn btn-primary" onclick="setHash('#admin/system-info')">View System Info</button>
-          </div>
-        </div>
-      </div>
-      <div class="col-md-4 mb-3">
-        <div class="card admin-tile">
+        <div class="card admin-tile pointer h-100" onclick="setHash('#admin/artwork')">
           <div class="card-body">
             <h5 class="card-title"><i class="bi bi-images me-2"></i>Artwork & Metadata</h5>
             <p class="card-text">Manage gamelist artwork, metadata, imports, uploads, and marquee crops.</p>
-            <button class="btn btn-primary" onclick="setHash('#admin/artwork')">Open Hub</button>
           </div>
         </div>
       </div>
       <div class="col-md-4 mb-3">
-        <div class="card admin-tile">
+        <div class="card admin-tile pointer h-100" onclick="setHash('#admin/overmind')">
           <div class="card-body">
             <h5 class="card-title"><i class="bi bi-diagram-3 me-2"></i>Overmind Integration</h5>
             <p class="card-text">Configure batocera.overmind and review processed actions.</p>
-            <button class="btn btn-primary" onclick="setHash('#admin/overmind')">Configure</button>
           </div>
         </div>
       </div>
@@ -1939,6 +1977,15 @@ function artworkMissingRowsHtml(roms) {
       <td>${(rom.missing || []).length ? (rom.missing || []).map((field) => `<span class="badge text-bg-danger me-1">${escapeHtml(field)}</span>`).join("") : `<span class="badge text-bg-success">complete</span>`}</td>
     </tr>
   `).join("") || `<tr><td colspan="3" class="text-muted p-3">No artwork or metadata results found.</td></tr>`;
+}
+function refreshArtworkTableRows() {
+  const rows = document.getElementById("artworkRows");
+  if (!rows) return;
+  rows.innerHTML = artworkMissingRowsHtml(window.missingArtworkRoms || []);
+  if (window.selectedArtworkRomIndex !== undefined) {
+    const row = document.getElementById(`artwork-row-${window.selectedArtworkRomIndex}`);
+    if (row) row.classList.add("artwork-selected-row");
+  }
 }
 function artworkGamelistValueHtml(value) {
   if (Array.isArray(value)) {
@@ -2053,7 +2100,11 @@ function updateArtworkPageFromPayload(payload) {
   window.missingArtworkRoms = roms;
 
   const rows = document.getElementById("artworkRows");
-  if (rows) rows.innerHTML = artworkMissingRowsHtml(roms);
+  if (rows) {
+    rows.innerHTML = artworkMissingRowsHtml(roms);
+    const row = document.getElementById(`artwork-row-${window.selectedArtworkRomIndex}`);
+    if (row) row.classList.add("artwork-selected-row");
+  }
   const summary = document.getElementById("artworkSummary");
   if (summary) {
     summary.innerHTML = `
@@ -2336,7 +2387,8 @@ function artworkImageUploadHtml(rom, field) {
 function artworkExistingImageUrl(rom, value) {
   const raw = String(value || "").trim();
   if (!raw) return "";
-  if (/^(https?:)?\/\//i.test(raw) || raw.startsWith("data:") || raw.startsWith("/")) return raw;
+  if (/^(https?:)?\/\//i.test(raw) || raw.startsWith("data:")) return raw;
+  if (raw.startsWith(API_BASE) || raw.startsWith("/public/")) return raw;
   const normalized = raw.replace(/\\/g, "/").replace(/^\.\//, "");
   const imagePrefix = "images/";
   const imageFile = normalized.toLowerCase().startsWith(imagePrefix)
@@ -2377,6 +2429,10 @@ function artworkMetadataEditFields(rom) {
       }
     </div>
   `).join("");
+}
+function googleImageSearchUrl(rom) {
+  const query = `${rom.search_title || rom.title || rom.name || ""} ${rom.system || ""} images`.trim();
+  return `https://www.google.com/search?tbm=isch&q=${encodeURIComponent(query)}`;
 }
 // Update URL when a rom is selected in artwork page
 function setArtworkSelectedRomHash(index) {
@@ -2437,6 +2493,7 @@ async function uploadArtworkImage(rom, field, btnEl) {
     if (result.gamelist) rom.gamelist = result.gamelist;
     if (result.missing) rom.missing = result.missing;
     if (result.has_gamelist_entry !== undefined) rom.has_gamelist_entry = !!result.has_gamelist_entry;
+    refreshArtworkTableRows();
     showToast(`Uploaded ${escapeHtml(field)} for ${escapeHtml(result.rom_name || "ROM")}.`, "success");
     // Refresh the selected rom view
     await selectArtworkRom(window.selectedArtworkRomIndex, "edit");
@@ -2617,6 +2674,7 @@ function openMarqueeCropper(rowIndex, sourceUrl, sourceLabel) {
       rom.gamelist = result.gamelist || rom.gamelist || {};
       rom.missing = result.missing || rom.missing || [];
       rom.has_gamelist_entry = result.has_gamelist_entry !== undefined ? !!result.has_gamelist_entry : rom.has_gamelist_entry;
+      refreshArtworkTableRows();
       showToast(`Saved marquee for ${escapeHtml(result.rom_name || "ROM")}.`, "success");
       close();
       await selectArtworkRom(rowIndex, "edit");
@@ -2642,6 +2700,9 @@ async function selectArtworkRom(index, activeTab = "matches") {
   const roms = window.missingArtworkRoms || [];
   const rom = roms[index];
   if (!rom) return;
+  document.querySelectorAll("#artworkRows tr").forEach((row) => row.classList.remove("artwork-selected-row"));
+  const selectedRow = document.getElementById(`artwork-row-${index}`);
+  if (selectedRow) selectedRow.classList.add("artwork-selected-row");
   window.selectedArtworkRomIndex = index;
   // Update URL for bookmarking
   setArtworkSelectedRomHash(index);
@@ -2678,7 +2739,10 @@ async function selectArtworkRom(index, activeTab = "matches") {
       <div class="tab-pane fade compact-edit" id="edit-panel" role="tabpanel" aria-labelledby="edit-tab">
         <div class="mb-2 d-flex justify-content-between align-items-center">
           <div><span class="fw-semibold">${escapeHtml(rom.title || rom.name || "")}</span> <span class="text-muted small">${escapeHtml(rom.system || "")}</span></div>
-          ${rom.has_gamelist_entry ? `<button class="btn btn-sm btn-outline-danger" type="button" onclick="removeArtworkGamelistEntry(${index})">Remove from gamelist</button>` : ""}
+          <div class="d-flex gap-1">
+            <a class="btn btn-sm btn-outline-primary" href="${escapeHtml(googleImageSearchUrl(rom))}" target="_blank" rel="noopener noreferrer" title="Search Google Images"><i class="bi bi-google"></i></a>
+            ${rom.has_gamelist_entry ? `<button class="btn btn-sm btn-outline-danger" type="button" onclick="removeArtworkGamelistEntry(${index})">Remove from gamelist</button>` : ""}
+          </div>
         </div>
         <div class="mb-2">
           <div class="compact-edit-section-title">Metadata</div>
@@ -2815,6 +2879,7 @@ async function applyTheGamesDBArtwork(rowIndex, gameId, button) {
     rom.gamelist = result.gamelist || rom.gamelist || {};
     rom.missing = result.missing || rom.missing || [];
     rom.has_gamelist_entry = result.has_gamelist_entry !== undefined ? !!result.has_gamelist_entry : rom.has_gamelist_entry;
+    refreshArtworkTableRows();
     const updated = result.updated || [];
     const artCount = updated.filter((item) => item.path).length;
     const metaCount = Number(result.metadata_imported || 0);
@@ -2863,6 +2928,7 @@ async function applyLaunchboxArtwork(rowIndex, system, romId, romPath, gameKey) 
     if (rom) {
       const updatedFields = new Set(updated.map((item) => item.field));
       rom.missing = (rom.missing || []).filter((field) => !updatedFields.has(field));
+      refreshArtworkTableRows();
       const row = document.getElementById(`artwork-row-${rowIndex}`);
       if (row) {
         if (!rom.missing.length) {
@@ -3023,9 +3089,11 @@ async function renderOvermindIntegrationPage() {
     const errorMsg = status.last_error || "none";
     const passwordMask = payload.password_masked || "(not set)";
     const emailValue = payload.overmind_email || "(not set)";
+    const machineId = payload.machine_id || "n/a";
     statusEl.innerHTML = `
       <div><strong>Configured:</strong> ${escapeHtml(configured)}</div>
       <div><strong>Integration Enabled:</strong> ${escapeHtml(enabled)}</div>
+      <div><strong>Machine ID:</strong> ${escapeHtml(machineId)}</div>
       <div><strong>State:</strong> ${escapeHtml(state)}</div>
       <div><strong>Email:</strong> ${escapeHtml(emailValue)}</div>
       <div><strong>Saved Password:</strong> ${escapeHtml(passwordMask)}</div>
@@ -3156,6 +3224,8 @@ async function renderOvermindIntegrationPage() {
 }
 async function renderLogsPage(selectedSource = null, selectedLines = 200) {
   const logSources = [
+    ["drone_stdout", "Drone Stdout", "bi-file-text"],
+    ["drone_stderr", "Drone Stderr", "bi-bug"],
     ["es_launch_stdout", "ES Launch Stdout", "bi-terminal"],
     ["es_launch_stderr", "ES Launch Stderr", "bi-exclamation-triangle"],
   ];
@@ -3164,7 +3234,7 @@ async function renderLogsPage(selectedSource = null, selectedLines = 200) {
   const effectiveLines = clampLogLines(selectedLines);
 
   titleNode.textContent = "System Logs";
-  subtitleNode.textContent = "View EmulationStation launch stdout/stderr logs";
+  subtitleNode.textContent = "View Drone application and EmulationStation launch logs";
   content.innerHTML = `
     <div class="mb-3">
       <button class="btn btn-outline-secondary" onclick="renderAdminPage()">← Back to Admin</button>
@@ -3243,6 +3313,7 @@ async function refreshCurrentLog() {
   await loadLog(currentLogSource, activeSource);
 }
 async function renderConfigsPage(selectedSource = null, selectedMaxBytes = 131072) {
+  setLoading(true, "Loading emulator config sources...");
   const configSourceCatalog = [
     ["batocera", "Batocera Config", "bi-sliders"],
     ["es_systems", "ES Systems", "bi-diagram-3"],
@@ -3276,14 +3347,10 @@ async function renderConfigsPage(selectedSource = null, selectedMaxBytes = 13107
   ];
   const catalogMap = new Map(configSourceCatalog.map((item) => [item[0], item]));
   let allowedSourceKeys = configSourceCatalog.map((item) => item[0]);
-  let sourceVersions = {};
   try {
     const sourcePayload = await api("/admin/configs/sources");
     if (sourcePayload && Array.isArray(sourcePayload.sources) && sourcePayload.sources.length > 0) {
       allowedSourceKeys = sourcePayload.sources.filter((key) => catalogMap.has(key));
-    }
-    if (sourcePayload && sourcePayload.versions && typeof sourcePayload.versions === "object") {
-      sourceVersions = sourcePayload.versions;
     }
   } catch (_) {
     // Fall back to full list if source scan endpoint is unavailable.
@@ -3306,10 +3373,7 @@ async function renderConfigsPage(selectedSource = null, selectedMaxBytes = 13107
           <div class="list-group list-group-flush" id="configSources">
             ${configSources.map(([source, label, icon]) => `
               <button type="button" class="list-group-item list-group-item-action text-start" data-config-source="${source}" onclick="loadConfig('${source}', this)">
-                <div class="d-flex align-items-start justify-content-between gap-2">
-                  <span><i class="bi ${icon} me-2"></i>${label}</span>
-                  ${sourceVersions[source] ? `<span class="badge text-bg-secondary text-wrap text-end">${escapeHtml(sourceVersions[source])}</span>` : ''}
-                </div>
+                <i class="bi ${icon} me-2"></i>${label}
               </button>
             `).join("")}
           </div>
@@ -3346,17 +3410,19 @@ async function renderConfigsPage(selectedSource = null, selectedMaxBytes = 13107
   if (effectiveSource) {
     const sourceBtn = document.querySelector(`#configSources .list-group-item[data-config-source="${effectiveSource}"]`);
     await loadConfig(effectiveSource, sourceBtn, false);
+  } else {
+    setLoading(false);
   }
 }
 async function loadConfig(source, triggerEl = null, updateHash = true) {
   currentConfigSource = source;
   const maxBytes = clampMaxBytes(document.getElementById("maxBytesInput")?.value || "131072");
   const targetHash = `#admin/configs/${encodeURIComponent(source)}?max_bytes=${encodeURIComponent(maxBytes)}`;
+  setLoading(true, `Loading ${source} config...`);
   if (updateHash && window.location.hash !== targetHash) {
     setHash(targetHash);
     return;
   }
-  setLoading(true, `Loading ${source} config...`);
   try {
     const formatParam = source === "es_systems" ? "&format=xml" : "";
     const data = await api(`/admin/configs/${source}?max_bytes=${maxBytes}${formatParam}`);
@@ -3447,9 +3513,11 @@ function _extractInfoField(lines, keys) {
 async function loadSystemInfoBar() {
   if (systemInfoLoaded) return;
   const bar = document.getElementById("systemInfoBar");
+  const machineNav = document.getElementById("machineIdNav");
   if (!bar) return;
   if (!adminEnabled) {
     bar.innerHTML = "";
+    if (machineNav) machineNav.textContent = "Machine ID unavailable";
     systemInfoLoaded = true;
     return;
   }
@@ -3458,20 +3526,20 @@ async function loadSystemInfoBar() {
     const fields = payload.fields || {};
     const lines = payload.lines || [];
     const version = fields.system || _extractInfoField(lines, ["version", "batocera version", "system"]);
-    const board = fields.model || _extractInfoField(lines, ["board", "device", "model"]);
-    const kernel = _extractInfoField(lines, ["kernel"]);
-    const arch = fields.architecture || _extractInfoField(lines, ["arch", "architecture"]);
+    const machineId = fields.machine_id || "";
+    const overmindIntegrated = fields.overmind_integrated || "no";
     const chips = [];
-    if (version) chips.push(`<span class="badge">Version: ${escapeHtml(version)}</span>`);
-    if (board) chips.push(`<span class="badge">Board: ${escapeHtml(board)}</span>`);
-    if (kernel) chips.push(`<span class="badge">Kernel: ${escapeHtml(kernel)}</span>`);
-    if (arch) chips.push(`<span class="badge">Arch: ${escapeHtml(arch)}</span>`);
+    if (version) chips.push(`<span class="badge">Batocera: ${escapeHtml(version)}</span>`);
+    if (machineId) chips.push(`<span class="badge">Machine ID: ${escapeHtml(machineId)}</span>`);
+    chips.push(`<span class="badge">Overmind: ${escapeHtml(overmindIntegrated)}</span>`);
+    if (machineNav && machineId) machineNav.textContent = `Machine ID: ${machineId}`;
     if (!chips.length && lines.length) {
       chips.push(`<span class="badge">${escapeHtml(lines[0])}</span>`);
     }
     bar.innerHTML = chips.join("");
   } catch (_) {
     bar.innerHTML = `<span class="badge">System Info Unavailable</span>`;
+    if (machineNav) machineNav.textContent = "Machine ID unavailable";
   } finally {
     systemInfoLoaded = true;
   }
@@ -3560,9 +3628,9 @@ async function router() {
       await refreshRandomThemeLogo();
       searchInput.value = q;
       await renderSearch(q);
-    } else if (hash.startsWith("#system/")) {
-      const system = decodeURIComponent(hash.substring("#system/".length));
-      await renderSystem(system);
+    } else if (parseSystemHash(hash)) {
+      const parsed = parseSystemHash(hash);
+      await renderSystem(parsed.system, parsed.page);
     } else {
       currentSystemContext = null;
       setSearchMode("global");
@@ -3593,6 +3661,11 @@ systemsMenuBtn.addEventListener("click", (event) => {
 themeMenuBtn.addEventListener("click", (event) => {
   event.preventDefault();
   setHash("#theme");
+});
+systemInfoMenuBtn.addEventListener("click", (event) => {
+  event.preventDefault();
+  if (!adminEnabled) return;
+  setHash("#admin/system-info");
 });
 adminMenuBtn.addEventListener("click", (event) => {
   event.preventDefault();

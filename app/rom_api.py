@@ -9,6 +9,7 @@ import ssl
 import subprocess
 import sys
 import time
+import uuid
 import xml.etree.ElementTree as ET
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -35,7 +36,6 @@ except ImportError:
 
 FAKE_OVERMIND_EMAIL = "arcade@example.com"
 FAKE_OVERMIND_PASSWORD = "ArcadePass123"
-FAKE_OVERMIND_DEVICE_ID = "arcade-cabinet-002"
 LAUNCHBOX_API_BASE = "https://api.gamesdb.launchbox-app.com/api"
 LAUNCHBOX_IMAGE_BASE = "https://images.launchbox-app.com"
 ARTWORK_FIELDS = ("image", "thumbnail", "marquee", "fanart", "boxart")
@@ -131,8 +131,8 @@ LAUNCHBOX_PLATFORM_ALIASES = {
     "zxspectrum": "Sinclair ZX Spectrum",
 }
 LAUNCHBOX_FIELD_TYPES = {
-    "image": ("Box - Front",),
-    "thumbnail": ("Box - Front", "Screenshot - Game Title", "Screenshot - Gameplay"),
+    "image": ("Screenshot - Gameplay", "Screenshot - Game Title"),
+    "thumbnail": ("Screenshot - Game Title", "Screenshot - Gameplay", "Box - Front"),
     "marquee": ("Clear Logo",),
     "fanart": ("Fanart - Background",),
     "boxart": ("Box - Front",),
@@ -162,6 +162,21 @@ def _env_bool(default: bool, *names: str) -> bool:
             continue
         return value.strip().lower() not in ("0", "false", "no", "off")
     return default
+
+
+def _machine_id() -> str:
+    for candidate in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
+        try:
+            value = Path(candidate).read_text(encoding="utf-8", errors="ignore").strip()
+            if value:
+                return value
+        except Exception:
+            continue
+    return "unknown-machine"
+
+
+def _fake_machine_id() -> str:
+    return str(uuid.uuid4())
 
 
 def _clean_rom_title(value: str) -> str:
@@ -331,7 +346,7 @@ class LaunchBoxClient:
             for image in images:
                 if str(image.get("type") or "").lower() == image_type.lower():
                     return image
-        return images[0] if field in ("image", "thumbnail", "boxart") and images else None
+        return None
 
     def download_image(self, url: str) -> Tuple[bytes, str]:
         request = Request(url, headers={"User-Agent": "batocera-drone-rom-api/4.0"})
@@ -506,8 +521,8 @@ class Settings:
     userdata_root: Path
     roms_root: Path
     bios_root: Path
-    username: str
-    password: str
+    username: Optional[str]
+    password: Optional[str]
     https_port: int
 
     image_cache_ttl_seconds: int
@@ -556,8 +571,8 @@ class Settings:
             userdata_root=Path(os.environ.get("USERDATA_ROOT", "/userdata")),
             roms_root=Path(os.environ.get("ROMS_ROOT", "/userdata/roms")),
             bios_root=Path(os.environ.get("BIOS_ROOT", "/userdata/bios")),
-            username=_require_any_env("ROM_API_USERNAME", "USERNAME"),
-            password=_require_any_env("ROM_API_PASSWORD", "PASSWORD"),
+            username=os.environ.get("ROM_API_USERNAME") or os.environ.get("USERNAME"),
+            password=os.environ.get("ROM_API_PASSWORD") or os.environ.get("PASSWORD"),
             https_port=int(https_port_value),
             image_cache_ttl_seconds=int(os.environ.get("IMAGE_CACHE_TTL_SECONDS", "3600")),
             image_miss_cache_ttl_seconds=int(os.environ.get("IMAGE_MISS_CACHE_TTL_SECONDS", "300")),
@@ -593,10 +608,7 @@ class Settings:
             overmind_url=os.environ.get("OVERMIND_URL"),
             overmind_email=os.environ.get("OVERMIND_EMAIL"),
             overmind_password=os.environ.get("OVERMIND_PASSWORD"),
-            overmind_device_id=os.environ.get(
-                "OVERMIND_DEVICE_ID",
-                os.environ.get("DEVICE_ID", FAKE_OVERMIND_DEVICE_ID if use_fake_data else "batocera-drone"),
-            ),
+            overmind_device_id=_fake_machine_id() if use_fake_data else _machine_id(),
             overmind_poll_seconds=int(os.environ.get("OVERMIND_POLL_SECONDS", "5")),
         )
 
@@ -677,11 +689,13 @@ def _configure_rotating_logs(settings: Settings) -> None:
 
 
 class BasicAuth:
-    def __init__(self, username: str, password: str):
+    def __init__(self, username: Optional[str], password: Optional[str]):
         self.username = username
         self.password = password
 
     def check(self, header_value: Optional[str]) -> bool:
+        if not self.username or not self.password:
+            return True
         if not header_value or not header_value.startswith("Basic "):
             return False
 
@@ -2383,6 +2397,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         return {
             "overmind_url": config.get("overmind_url") or "",
             "overmind_email": email,
+            "machine_id": self.settings.overmind_device_id,
             "password_configured": bool(password),
             "password_masked": self._mask_secret(password) if password else "",
             "status": status,
@@ -2425,7 +2440,8 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             raise FileNotFoundError()
 
         cached = self.image_cache.get(key)
-        if cached:
+        current_mtime = path.stat().st_mtime if path.exists() else None
+        if cached and cached["meta"].get("mtime") == current_mtime:
             data = cached["data"]
             content_type = cached["meta"]["content_type"]
             self.send_response(200)
@@ -2446,7 +2462,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
 
         data = path.read_bytes()
         content_type = self._guess_content_type(path)
-        self.image_cache.put(key, data, meta={"content_type": content_type})
+        self.image_cache.put(key, data, meta={"content_type": content_type, "mtime": path.stat().st_mtime})
 
         self.send_response(200)
         self.send_header("Content-Type", content_type)
@@ -3440,6 +3456,21 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                     self._stream_cached_image(candidate.resolve())
                     return
 
+        # Some gamelist.xml files store artwork in nested media folders instead
+        # of the standard images directory. Keep the lookup scoped to the system.
+        checked = 0
+        if system_dir.exists() and system_dir.is_dir():
+            requested_lower = image_file.lower()
+            for candidate in system_dir.rglob("*"):
+                checked += 1
+                if checked > 30000:
+                    break
+                if not candidate.is_file() or candidate.suffix.lower() not in allowed_suffixes:
+                    continue
+                if candidate.name.lower() == requested_lower:
+                    self._stream_cached_image(candidate.resolve())
+                    return
+
         raise FileNotFoundError()
 
     def _handle_download(self, system: str, asset_type: str, unique_id: str) -> None:
@@ -3547,6 +3578,8 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         log_path_candidates = {
             "es_launch_stdout": ["/userdata/system/logs/es_launch_stdout.log"],
             "es_launch_stderr": ["/userdata/system/logs/es_launch_stderr.log"],
+            "drone_stdout": [str((self.settings.log_dir / self.settings.stdout_log_file).resolve())],
+            "drone_stderr": [str((self.settings.log_dir / self.settings.stderr_log_file).resolve())],
         }
 
         def _resolve_userdata_path(candidate: str) -> str:
@@ -3659,6 +3692,8 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
 
         if self.settings.use_fake_data:
             entries = [
+                {"key": "Machine ID", "value": self.settings.overmind_device_id},
+                {"key": "Integrated with Overmind", "value": "yes" if self._load_overmind_config().get("integration_enabled") else "no"},
                 {"key": "Model", "value": "Batocera DevBox (Fake)"},
                 {"key": "System", "value": "Linux 6.6.0-fake"},
                 {"key": "Architecture", "value": "x86_64"},
@@ -3687,6 +3722,8 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 "data_partition_available_space": "812 GiB",
                 "network_ip_address": "192.168.1.123",
                 "battery": "N/A",
+                "machine_id": self.settings.overmind_device_id,
+                "overmind_integrated": "yes" if self._load_overmind_config().get("integration_enabled") else "no",
             }
             raw = "\n".join(f"{item['key']}: {item['value']}" for item in entries)
             self._send_json(
@@ -3754,6 +3791,12 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 elif key_lower == "battery":
                     fields["battery"] = value
 
+            overmind_integrated = "yes" if self._load_overmind_config().get("integration_enabled") else "no"
+            entries.insert(0, {"key": "Integrated with Overmind", "value": overmind_integrated})
+            entries.insert(0, {"key": "Machine ID", "value": self.settings.overmind_device_id})
+            fields["machine_id"] = self.settings.overmind_device_id
+            fields["overmind_integrated"] = overmind_integrated
+
             self._send_json(
                 200,
                 {
@@ -3764,7 +3807,26 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 },
             )
         except Exception as error:
-            self._send_json(500, {"error": f"Failed to run batocera-info: {str(error)}"})
+            overmind_integrated = "yes" if self._load_overmind_config().get("integration_enabled") else "no"
+            entries = [
+                {"key": "Machine ID", "value": self.settings.overmind_device_id},
+                {"key": "Integrated with Overmind", "value": overmind_integrated},
+                {"key": "System Info", "value": f"batocera-info unavailable: {str(error)}"},
+            ]
+            raw = "\n".join(f"{item['key']}: {item['value']}" for item in entries)
+            self._send_json(
+                200,
+                {
+                    "raw": raw,
+                    "lines": raw.splitlines(),
+                    "entries": entries,
+                    "fields": {
+                        "machine_id": self.settings.overmind_device_id,
+                        "overmind_integrated": overmind_integrated,
+                    },
+                    "warning": f"Failed to run batocera-info: {str(error)}",
+                },
+            )
 
     def _handle_admin_overmind_status(self) -> None:
         config = self._load_overmind_config()

@@ -105,22 +105,8 @@ cleanup() {
 
 trap cleanup EXIT INT TERM
 
-if [[ -z "${ROM_API_USERNAME:-}" ]]; then
-  ROM_API_USERNAME="${USERNAME:-}"
-fi
-
-if [[ -z "${ROM_API_USERNAME:-}" ]]; then
-  read -r -p "ROM_API_USERNAME (or set ROM_API_USERNAME/USERNAME env var): " ROM_API_USERNAME
-fi
-
-if [[ -z "${ROM_API_PASSWORD:-}" ]]; then
-  ROM_API_PASSWORD="${PASSWORD:-}"
-fi
-
-if [[ -z "${ROM_API_PASSWORD:-}" ]]; then
-  read -r -s -p "ROM_API_PASSWORD (or set ROM_API_PASSWORD/PASSWORD env var): " ROM_API_PASSWORD
-  echo
-fi
+ROM_API_USERNAME="${ROM_API_USERNAME:-${USERNAME:-}}"
+ROM_API_PASSWORD="${ROM_API_PASSWORD:-${PASSWORD:-}}"
 
 env \
   PYTHONPATH="$WORK_DIR${PYTHONPATH:+:$PYTHONPATH}" \
