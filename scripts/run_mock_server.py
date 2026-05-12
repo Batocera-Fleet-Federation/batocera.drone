@@ -23,8 +23,8 @@ def main() -> None:
         "ES_SETTINGS_FILE",
         str(mock_root / "system" / "configs" / "emulationstation" / "es_settings.cfg"),
     )
-    os.environ.setdefault("ROM_API_USERNAME", "admin")
-    os.environ.setdefault("ROM_API_PASSWORD", "changeme")
+    os.environ.setdefault("DRONE_APP_USERNAME", "admin")
+    os.environ.setdefault("DRONE_APP_PASSWORD", "changeme")
     os.environ.setdefault("HTTPS_PORT", "8080")
     os.environ.setdefault("HTTP_ONLY", "1")
     os.environ.setdefault("LOG_DIR", str(ROOT / "local-data" / "logs"))

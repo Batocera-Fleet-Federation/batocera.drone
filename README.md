@@ -21,16 +21,16 @@ On the Batocera machine, run one of these:
 ### Manually Start
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/Batocera-Fleet-Federation/batocera.drone/main/scripts/run_now.sh" -o /tmp/run_now.sh && chmod +x /tmp/run_now.sh && ROM_API_BASE_URL="https://raw.githubusercontent.com/Batocera-Fleet-Federation/batocera.drone/main" ROM_API_USERNAME="admin" ROM_API_PASSWORD="changeme" /tmp/run_now.sh
+curl -fsSL "https://raw.githubusercontent.com/Batocera-Fleet-Federation/batocera.drone/main/scripts/run_now.sh" -o /tmp/run_now.sh && chmod +x /tmp/run_now.sh && DRONE_APP_BASE_URL="https://raw.githubusercontent.com/Batocera-Fleet-Federation/batocera.drone/main" DRONE_APP_USERNAME="admin" DRONE_APP_PASSWORD="changeme" /tmp/run_now.sh
 ```
 
-The script uses `ROM_API_USERNAME`/`ROM_API_PASSWORD` (or `USERNAME`/`PASSWORD`) if set, and only prompts when missing.
-It downloads runtime files to `/userdata/system/.rom-api` (or `$HOME/.rom-api`) and removes that folder plus `/tmp/run_now.sh` when the process exits.
+The script uses `DRONE_APP_USERNAME`/`DRONE_APP_PASSWORD` (or `USERNAME`/`PASSWORD`) if set, and only prompts when missing.
+It downloads runtime files to `/userdata/system/.drone-app` (or `$HOME/.drone-app`) and removes that folder plus `/tmp/run_now.sh` when the process exits.
 
 ### Batocera Auto-Start (`/userdata/system/custom.sh`)
 
 Add this to `/userdata/system/custom.sh` to start the API automatically once networking is up.
-Update `ROM_API_USERNAME` and `ROM_API_PASSWORD` to your own values before using it.
+Update `DRONE_APP_USERNAME` and `DRONE_APP_PASSWORD` to your own values before using it.
 
 ```bash
 #!/bin/bash
@@ -44,9 +44,9 @@ done
 # Once online, run your command
 curl -fsSL "https://raw.githubusercontent.com/Batocera-Fleet-Federation/batocera.drone/main/scripts/run_now.sh" -o /tmp/run_now.sh && \
 chmod +x /tmp/run_now.sh && \
-ROM_API_BASE_URL="https://raw.githubusercontent.com/Batocera-Fleet-Federation/batocera.drone/main" \
-ROM_API_USERNAME="replace-with-your-username" \
-ROM_API_PASSWORD="replace-with-your-password" /tmp/run_now.sh
+DRONE_APP_BASE_URL="https://raw.githubusercontent.com/Batocera-Fleet-Federation/batocera.drone/main" \
+DRONE_APP_USERNAME="replace-with-your-username" \
+DRONE_APP_PASSWORD="replace-with-your-password" /tmp/run_now.sh
 ) &
 ```
 
@@ -63,8 +63,8 @@ ROM_API_PASSWORD="replace-with-your-password" /tmp/run_now.sh
 ## Run
 
 ```bash
-export ROM_API_USERNAME="admin"
-export ROM_API_PASSWORD="changeme"
+export DRONE_APP_USERNAME="admin"
+export DRONE_APP_PASSWORD="changeme"
 export HTTPS_PORT=8443
 export ROMS_ROOT="./local-data/roms"
 export BIOS_ROOT="./local-data/bios"

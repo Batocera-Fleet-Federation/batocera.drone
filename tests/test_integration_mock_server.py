@@ -31,8 +31,8 @@ class MockServerIntegrationTests(unittest.TestCase):
         os.environ["ES_SETTINGS_FILE"] = str(
             self._root / "system" / "configs" / "emulationstation" / "es_settings.cfg"
         )
-        os.environ["ROM_API_USERNAME"] = "admin"
-        os.environ["ROM_API_PASSWORD"] = "changeme"
+        os.environ["DRONE_APP_USERNAME"] = "admin"
+        os.environ["DRONE_APP_PASSWORD"] = "changeme"
         os.environ["HTTPS_PORT"] = "0"
         os.environ["HTTP_ONLY"] = "1"
         os.environ["LOG_DIR"] = str(Path(self._tmp.name) / "logs")
