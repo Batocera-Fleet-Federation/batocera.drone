@@ -57,8 +57,90 @@ echo ""
 echo "Detected Batocera version: ${BATOCERA_VERSION:-unknown}"
 echo ""
 
+# ── Create dedicated drone user (MUST succeed) ──────────────────────
+# The drone-app user is required — the app will only run under this user,
+# never as root. If this fails, installation aborts.
+DRONE_USER="drone-app"
+if ! id -u "$DRONE_USER" >/dev/null 2>&1; then
+    echo "---------------------------------------------"
+    echo " Creating dedicated '${DRONE_USER}' user"
+    echo "---------------------------------------------"
+    echo ""
+    CREATED=false
+    # BusyBox (Batocera) adduser: -S = system account, -H = no home dir
+    if command -v adduser >/dev/null 2>&1; then
+        adduser -S -H -s /bin/false "$DRONE_USER" && CREATED=true
+    fi
+    if [ "$CREATED" = false ] && command -v useradd >/dev/null 2>&1; then
+        useradd -r -s /bin/false "$DRONE_USER" && CREATED=true
+    fi
+    if [ "$CREATED" = false ]; then
+        # Last resort: manual /etc/passwd entry
+        if ! grep -q "^${DRONE_USER}:" /etc/passwd 2>/dev/null; then
+            echo "${DRONE_USER}:x:999:999:drone-app:/:/bin/false" >> /etc/passwd
+            CREATED=true
+        fi
+    fi
+    if [ "$CREATED" = false ]; then
+        echo ""
+        echo "FATAL: Could not create user '${DRONE_USER}'."
+        echo "The drone-app user is required for process isolation."
+        echo "Installation aborted."
+        exit 1
+    fi
+    echo "✓ Created system user: $DRONE_USER"
+fi
+
+# ── Set up process-level permissions ──────────────────────────────────
+# The Python app runs exclusively as the 'drone-app' user via su.
+# Standard Unix file ownership and permissions limit what that user
+# can write to. Root retains full access to everything.
+echo ""
+echo "---------------------------------------------"
+echo " Process-Level Permissions"
+echo "---------------------------------------------"
+echo ""
+
+# Grant the drone-app user write access to ROM asset directories
+echo "  Granting write access to ROM assets for ${DRONE_USER}..."
+find /userdata/roms -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while read romdir; do
+    for subdir in images videos manuals; do
+        target="${romdir}/${subdir}"
+        if [ -d "$target" ]; then
+            chown -R "$DRONE_USER:$DRONE_USER" "$target" 2>/dev/null || true
+            chmod -R u+rwX,go+rX "$target" 2>/dev/null || true
+        fi
+    done
+    gamelist="${romdir}/gamelist.xml"
+    if [ -f "$gamelist" ]; then
+        chown "$DRONE_USER:$DRONE_USER" "$gamelist" 2>/dev/null || true
+        chmod u+rw,go+r "$gamelist" 2>/dev/null || true
+    fi
+done
+
+# Create and set ownership for app working directory
+WORK_DIR="${DRONE_APP_WORK_DIR:-/userdata/system/.drone-app}"
+mkdir -p "$WORK_DIR"
+chown -R "$DRONE_USER:$DRONE_USER" "$WORK_DIR" 2>/dev/null || true
+
+# Create and set ownership for certs and logs directories
+mkdir -p /userdata/system/certs /userdata/system/logs/drone-app
+chown -R "$DRONE_USER:$DRONE_USER" /userdata/system/certs /userdata/system/logs/drone-app 2>/dev/null || true
+
+echo ""
+echo "✓ Permissions applied"
+echo "  The Python app runs as user '${DRONE_USER}' with write access only to:"
+echo "    /userdata/roms/*/{images,videos,manuals}/"
+echo "    /userdata/roms/*/gamelist.xml"
+echo "    /userdata/system/.drone-app/"
+echo "    /userdata/system/certs/"
+echo "    /userdata/system/logs/drone-app/"
+echo "  Root retains full access to ALL files and directories."
+
+# ── Install startup method ───────────────────────────────────────────
 if [ "$USE_LEGACY_METHOD" = false ]; then
   # ── Batocera v43+ method ──────────────────────────────────────────
+  echo ""
   echo "Installing for Batocera v43+ ..."
   SERVICES_DIR="/userdata/system/services"
   SERVICE_FILE="${SERVICES_DIR}/DRONE_SERVER"
@@ -81,6 +163,7 @@ start_app() {
       sleep 5
     done
 
+    DRONE_USER="drone-app"
     curl -fsSL "https://raw.githubusercontent.com/Batocera-Fleet-Federation/batocera.drone/main/scripts/run_now.sh" -o /tmp/run_now.sh && \
     chmod +x /tmp/run_now.sh && \
     DRONE_APP_BASE_URL="https://raw.githubusercontent.com/Batocera-Fleet-Federation/batocera.drone/main" \
@@ -121,6 +204,7 @@ SERVICEBLOCK
 
 else
   # ── Legacy Batocera (< v43) method ──────────────────────────────
+  echo ""
   echo "Installing for Batocera < v43 ..."
   CUSTOM_SH="/userdata/system/custom.sh"
 
@@ -167,65 +251,6 @@ SERVICEBLOCK
     echo ""
   fi
 fi
-
-# ── Create dedicated drone user ──────────────────────────────────────
-DRONE_USER="drone-app"
-if ! id -u "$DRONE_USER" >/dev/null 2>&1; then
-    echo ""
-    echo "---------------------------------------------"
-    echo " Creating dedicated '${DRONE_USER}' user"
-    echo "---------------------------------------------"
-    echo ""
-    useradd -r -s /bin/false "$DRONE_USER" 2>/dev/null || true
-    echo "✓ Created system user: $DRONE_USER"
-fi
-
-# ── Set up process-level permissions ──────────────────────────────────
-# Instead of kernel-level immutable flags (which lock out everyone
-# including root), we run the Python app as the 'drone-app' user and
-# use standard Unix permissions to limit what that user can write to.
-# Root retains full access to everything.
-echo ""
-echo "---------------------------------------------"
-echo " Process-Level Permissions"
-echo "---------------------------------------------"
-echo ""
-
-# Grant the drone-app user write access to ROM asset directories
-echo "  Granting write access to ROM assets for ${DRONE_USER}..."
-find /userdata/roms -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while read romdir; do
-    for subdir in images videos manuals; do
-        target="${romdir}/${subdir}"
-        if [ -d "$target" ]; then
-            chown -R "$DRONE_USER:$DRONE_USER" "$target" 2>/dev/null || true
-            chmod -R u+rwX,go+rX "$target" 2>/dev/null || true
-        fi
-    done
-    gamelist="${romdir}/gamelist.xml"
-    if [ -f "$gamelist" ]; then
-        chown "$DRONE_USER:$DRONE_USER" "$gamelist" 2>/dev/null || true
-        chmod u+rw,go+r "$gamelist" 2>/dev/null || true
-    fi
-done
-
-# Create and set ownership for app working directory
-WORK_DIR="${DRONE_APP_WORK_DIR:-/userdata/system/.drone-app}"
-mkdir -p "$WORK_DIR"
-chown -R "$DRONE_USER:$DRONE_USER" "$WORK_DIR" 2>/dev/null || true
-
-# Create and set ownership for certs and logs directories
-mkdir -p /userdata/system/certs /userdata/system/logs/drone-app
-chown -R "$DRONE_USER:$DRONE_USER" /userdata/system/certs /userdata/system/logs/drone-app 2>/dev/null || true
-
-echo ""
-echo "✓ Permissions applied"
-echo "  The Python app runs as user '${DRONE_USER}' with write access only to:"
-echo "    /userdata/roms/*/{images,videos,manuals}/"
-echo "    /userdata/roms/*/gamelist.xml"
-echo "    /userdata/system/.drone-app/"
-echo "    /userdata/system/certs/"
-echo "    /userdata/system/logs/drone-app/"
-echo "  Root retains full access to ALL files and directories."
 
 # ── Done ────────────────────────────────────────────────────────────
 echo ""
