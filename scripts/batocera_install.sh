@@ -1,20 +1,26 @@
 #!/bin/sh
 set -e
 
+DRONE_USER="drone-app"
+DRONE_GROUP="drone-app"
+DRONE_UID="999"
+DRONE_GID="999"
+WORK_DIR="/userdata/system/.drone-app"
+
 BATOCERA_VERSION=""
 if command -v batocera-version >/dev/null 2>&1; then
-  BATOCERA_VERSION=$(batocera-version 2>/dev/null | head -1 | tr -d '[:space:]')
+  BATOCERA_VERSION="$(batocera-version 2>/dev/null | head -1 | tr -d '[:space:]')"
 fi
 
 if [ -z "$BATOCERA_VERSION" ]; then
   if [ -f /usr/share/batocera/batocera.version ]; then
-    BATOCERA_VERSION=$(cat /usr/share/batocera/batocera.version | head -1 | tr -d '[:space:]')
+    BATOCERA_VERSION="$(cat /usr/share/batocera/batocera.version | head -1 | tr -d '[:space:]')"
   elif [ -f /etc/batocera-release ]; then
-    BATOCERA_VERSION=$(cat /etc/batocera-release | head -1 | tr -d '[:space:]')
+    BATOCERA_VERSION="$(cat /etc/batocera-release | head -1 | tr -d '[:space:]')"
   fi
 fi
 
-MAJOR_VERSION=$(echo "$BATOCERA_VERSION" | sed 's/^\([0-9]*\).*/\1/')
+MAJOR_VERSION="$(echo "$BATOCERA_VERSION" | sed 's/^\([0-9]*\).*/\1/')"
 
 USE_LEGACY_METHOD=false
 if [ -n "$MAJOR_VERSION" ] && [ "$MAJOR_VERSION" -lt 43 ] 2>/dev/null; then
@@ -27,40 +33,49 @@ echo "============================================"
 echo "Detected Batocera version: ${BATOCERA_VERSION:-unknown}"
 echo ""
 
-DRONE_USER="drone-app"
-DRONE_GROUP="drone-app"
-DRONE_UID="999"
-DRONE_GID="999"
-
 echo "---------------------------------------------"
-echo " Creating dedicated ${DRONE_USER} user/group"
+echo " Creating/fixing ${DRONE_USER} user"
 echo "---------------------------------------------"
 
-if ! grep -q "^${DRONE_GROUP}:" /etc/group 2>/dev/null; then
+mkdir -p "$WORK_DIR"
+
+# Ensure group exists
+if grep -q "^${DRONE_GROUP}:" /etc/group 2>/dev/null; then
+  sed -i "s#^${DRONE_GROUP}:.*#${DRONE_GROUP}:x:${DRONE_GID}:#" /etc/group
+else
   echo "${DRONE_GROUP}:x:${DRONE_GID}:" >> /etc/group
 fi
 
-if ! id -u "$DRONE_USER" >/dev/null 2>&1; then
-  if command -v adduser >/dev/null 2>&1; then
-    adduser -S -H -s /bin/sh "$DRONE_USER" 2>/dev/null || true
-  fi
+# Ensure passwd entry exists and is usable by su
+if grep -q "^${DRONE_USER}:" /etc/passwd 2>/dev/null; then
+  sed -i "s#^${DRONE_USER}:.*#${DRONE_USER}:x:${DRONE_UID}:${DRONE_GID}:drone-app:${WORK_DIR}:/bin/sh#" /etc/passwd
+else
+  echo "${DRONE_USER}:x:${DRONE_UID}:${DRONE_GID}:drone-app:${WORK_DIR}:/bin/sh" >> /etc/passwd
+fi
 
-  if ! id -u "$DRONE_USER" >/dev/null 2>&1; then
-    echo "${DRONE_USER}:x:${DRONE_UID}:${DRONE_GID}:drone-app:/userdata/system/.drone-app:/bin/sh" >> /etc/passwd
-    echo "${DRONE_USER}:!:19000:0:99999:7:::" >> /etc/shadow 2>/dev/null || true
+# Ensure shadow entry exists; this fixes:
+# su: Authentication service cannot retrieve authentication info
+if [ -f /etc/shadow ]; then
+  if grep -q "^${DRONE_USER}:" /etc/shadow 2>/dev/null; then
+    sed -i "s#^${DRONE_USER}:.*#${DRONE_USER}:*:19000:0:99999:7::: #" /etc/shadow
+    sed -i "s#^${DRONE_USER}:\\*:19000:0:99999:7::: #${DRONE_USER}:*:19000:0:99999:7:::#" /etc/shadow
+  else
+    echo "${DRONE_USER}:*:19000:0:99999:7:::" >> /etc/shadow
   fi
 fi
 
-if ! id -u "$DRONE_USER" >/dev/null 2>&1; then
-  echo "FATAL: Could not create ${DRONE_USER}"
+if ! su -s /bin/sh -c "whoami" "$DRONE_USER" >/tmp/drone-user-test.out 2>/tmp/drone-user-test.err; then
+  echo "FATAL: ${DRONE_USER} exists but su still cannot switch to it."
+  echo "stderr:"
+  cat /tmp/drone-user-test.err 2>/dev/null || true
   exit 1
 fi
 
-echo "✓ User ready: ${DRONE_USER}"
+echo "✓ User ready: $(cat /tmp/drone-user-test.out 2>/dev/null)"
 
 echo ""
 echo "---------------------------------------------"
-echo " Applying filesystem permissions"
+echo " Applying targeted filesystem permissions"
 echo "---------------------------------------------"
 
 mkdir -p \
@@ -78,12 +93,7 @@ chmod -R 775 \
   /userdata/system/certs \
   /userdata/system/logs/drone-app 2>/dev/null || true
 
-# ROM tree default: readable, not writable by drone-app
-chown -R root:root /userdata/roms 2>/dev/null || true
-find /userdata/roms -type d -exec chmod 755 {} \; 2>/dev/null || true
-find /userdata/roms -type f -exec chmod 644 {} \; 2>/dev/null || true
-
-# Writable areas for drone-app
+# Only touch writable app areas. Do not rewrite all ROM permissions.
 find /userdata/roms -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while read romdir; do
   for subdir in images videos manuals; do
     target="${romdir}/${subdir}"
@@ -99,7 +109,7 @@ find /userdata/roms -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while read rom
   fi
 done
 
-# Batocera config read-only to drone-app
+# Keep Batocera config owned by root
 chown root:root /userdata/batocera.conf 2>/dev/null || true
 chmod 644 /userdata/batocera.conf 2>/dev/null || true
 
@@ -122,15 +132,7 @@ ACTION="$1"
 PID_FILE="/tmp/drone-server.pid"
 
 run_as_drone() {
-  if command -v runuser >/dev/null 2>&1; then
-    runuser -u "$DRONE_USER" -- "$@"
-  elif command -v chpst >/dev/null 2>&1; then
-    chpst -u "$DRONE_USER" "$@"
-  elif command -v sudo >/dev/null 2>&1; then
-    sudo -u "$DRONE_USER" "$@"
-  else
-    su -s /bin/sh -c "$*" "$DRONE_USER"
-  fi
+  su -s /bin/sh -c "$*" "$DRONE_USER"
 }
 
 start_app() {
@@ -142,7 +144,7 @@ start_app() {
     curl -fsSL "https://raw.githubusercontent.com/Batocera-Fleet-Federation/batocera.drone/main/scripts/run_now.sh" -o /tmp/run_now.sh && \
     chmod +x /tmp/run_now.sh && \
     DRONE_APP_BASE_URL="https://raw.githubusercontent.com/Batocera-Fleet-Federation/batocera.drone/main" \
-    run_as_drone /tmp/run_now.sh
+    run_as_drone "/tmp/run_now.sh"
   ) &
 
   echo $! > "$PID_FILE"
@@ -179,7 +181,6 @@ SERVICEBLOCK
   chmod +x "$SERVICE_FILE"
 
   echo "✓ Created service: $SERVICE_FILE"
-  echo ""
   echo "Start now with:"
   echo "  $SERVICE_FILE start"
 
