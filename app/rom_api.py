@@ -1056,6 +1056,22 @@ class RomRepository:
             )
         return items
 
+    def _attach_gamelist_to_rom_items(self, system_dir: Path, items: List[dict]) -> List[dict]:
+        try:
+            _, root = self._read_gamelist(system_dir)
+        except Exception:
+            root = ET.Element("gameList")
+        for item in items:
+            rom_file = str(item.get("rom_file") or item.get("name") or "")
+            display_name = str(item.get("image_stem") or item.get("name") or "")
+            game = self._find_gamelist_entry(root, rom_file, display_name)
+            item["rom_path"] = _normalize_gamelist_rom_path(_text_or_empty(game, "path")) if game is not None else rom_file
+            item["title"] = _text_or_empty(game, "name") if game is not None else str(item.get("name") or display_name)
+            item["existing"] = {field: _text_or_empty(game, field) if game is not None else "" for field in ARTWORK_FIELDS}
+            item["gamelist"] = _gamelist_details(game)
+            item["has_gamelist_entry"] = game is not None
+        return items
+
     def get_system_dir(self, system: str) -> Path:
         system = valid_segment(system)
         system_link = self.roms_root / system
@@ -1767,6 +1783,7 @@ class RomRepository:
         if asset_dir.exists() and asset_dir.is_dir():
             if asset_type == "roms":
                 items = self._list_rom_items(system, asset_dir)
+                items = self._attach_gamelist_to_rom_items(system_dir, items)
             else:
                 for entry in self.iter_files(asset_dir):
                     stat = entry.stat()

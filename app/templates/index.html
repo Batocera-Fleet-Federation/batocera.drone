@@ -535,6 +535,51 @@
       border: 1px solid var(--admin-border);
       border-radius: 0.35rem;
     }
+    .rom-media-hero {
+      display: grid;
+      grid-template-columns: minmax(0, 320px) minmax(0, 1fr);
+      gap: 1rem;
+      align-items: stretch;
+    }
+    .rom-media-primary {
+      width: 100%;
+      aspect-ratio: 4 / 3;
+      object-fit: contain;
+      background: #050814;
+      border: 1px solid var(--admin-border);
+      border-radius: 0.45rem;
+    }
+    .rom-media-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0.75rem;
+    }
+    .rom-media-tile {
+      border: 1px solid var(--admin-border);
+      border-radius: 0.45rem;
+      background: rgba(21, 31, 50, 0.72);
+      overflow: hidden;
+    }
+    .rom-media-tile img {
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      object-fit: contain;
+      background: #050814;
+      display: block;
+    }
+    .rom-media-label {
+      display: flex;
+      justify-content: space-between;
+      gap: 0.5rem;
+      padding: 0.5rem 0.65rem;
+      min-width: 0;
+    }
+    @media (max-width: 767.98px) {
+      .rom-media-hero,
+      .rom-media-grid {
+        grid-template-columns: 1fr;
+      }
+    }
     @media (max-width: 575.98px) {
       .gamelist-edit-grid {
         grid-template-columns: 1fr;
@@ -652,6 +697,7 @@ let artworkSelectedSystems = [];
 let artworkFilterQuery = "";
 let artworkRomStatus = "any";
 let artworkFilterDebounceTimer = null;
+let systemRomCache = {};
 let systemInfoLoaded = false;
 let adminEnabled = true;
 let loadingToastEl = null;
@@ -1273,7 +1319,7 @@ function renderRomGrid(system, items) {
           ];
           return `
           <div class="col-12 col-md-6 col-xl-3">
-            <div class="card shadow-sm tile h-100">
+            <div class="card shadow-sm tile h-100 pointer" onclick="setHash('#system/${encodeURIComponent(system)}/rom/${encodeURIComponent(item.unique_id)}')">
               <img
                 src=""
                 data-src="${romImageByIdUrl(system, item.unique_id)}"
@@ -1284,13 +1330,14 @@ function renderRomGrid(system, items) {
                 loading="lazy"
               >
               <div class="card-body d-flex flex-column">
-                <div class="fw-semibold truncate-2 mb-2">${escapeHtml(item.name)}</div>
+                <div class="fw-semibold truncate-2 mb-2">${escapeHtml(item.title || item.name)}</div>
                 ${item.byte_count !== undefined ? `<div class="text-muted small mono mb-3">${formatBytesToMb(item.byte_count)}</div>` : ""}
+                <div class="text-muted small mb-3">${item.has_gamelist_entry ? "gamelist.xml media available" : "no gamelist.xml entry"}</div>
                 <div class="mt-auto">
                   ${
                     item.is_downloadable === false
                       ? `<button class="btn btn-secondary btn-sm" type="button" disabled><i class="bi bi-folder2-open me-1"></i>Folder ROM (No Download)</button>`
-                      : `<a class="btn btn-primary btn-sm" href="${romDownloadUrl(system, item.unique_id)}"><i class="bi bi-download me-1"></i>Download</a>`
+                      : `<a class="btn btn-primary btn-sm" href="${romDownloadUrl(system, item.unique_id)}" onclick="event.stopPropagation()"><i class="bi bi-download me-1"></i>Download</a>`
                   }
                 </div>
               </div>
@@ -1301,6 +1348,128 @@ function renderRomGrid(system, items) {
       </div>
     </div>
   `;
+}
+function parseSystemRomHash(hash) {
+  if (!hash.startsWith("#system/")) return null;
+  const rest = hash.substring("#system/".length);
+  const marker = "/rom/";
+  const markerIndex = rest.indexOf(marker);
+  if (markerIndex < 0) return null;
+  return {
+    system: decodeURIComponent(rest.substring(0, markerIndex)),
+    uniqueId: decodeURIComponent(rest.substring(markerIndex + marker.length)),
+  };
+}
+function romMediaItems(system, rom) {
+  const labels = {
+    image: "Image",
+    thumbnail: "Thumbnail",
+    marquee: "Marquee",
+    fanart: "Fanart",
+    boxart: "Boxart",
+  };
+  return Object.keys(labels).map((field) => {
+    const value = rom.existing && rom.existing[field] ? rom.existing[field] : "";
+    const url = artworkExistingImageUrl({ ...rom, system }, value);
+    return { field, label: labels[field], value, url };
+  }).filter((item) => item.url);
+}
+function romGamelistSummaryHtml(rom) {
+  const details = rom.gamelist || {};
+  const fields = [
+    ["name", "Name"],
+    ["desc", "Description"],
+    ["genre", "Genre"],
+    ["developer", "Developer"],
+    ["publisher", "Publisher"],
+    ["releasedate", "Release Date"],
+    ["players", "Players"],
+    ["rating", "Rating"],
+  ];
+  return fields.map(([field, label]) => {
+    const value = artworkGamelistEditValue(details[field]);
+    if (!value) return "";
+    return `
+      <div class="${field === "desc" ? "col-12" : "col-12 col-md-6"}">
+        <div class="text-muted small">${escapeHtml(label)}</div>
+        <div class="small">${escapeHtml(value)}</div>
+      </div>
+    `;
+  }).filter(Boolean).join("");
+}
+async function renderRomMediaPage(system, uniqueId) {
+  currentSystemContext = system;
+  backBtn.classList.remove("d-none");
+  setSearchMode("system", system);
+  setLoading(true, "Loading ROM media...");
+  await applySystemTheme(system);
+  try {
+    if (!systemRomCache[system]) {
+      systemRomCache[system] = await api(`/systems/${encodeURIComponent(system)}`);
+    }
+    const roms = systemRomCache[system].roms || [];
+    const rom = roms.find((item) => String(item.unique_id || "") === String(uniqueId || ""));
+    if (!rom) throw new Error("ROM not found");
+    const media = romMediaItems(system, rom);
+    const primary = media.find((item) => item.field === "image") || media[0];
+    titleNode.textContent = rom.title || rom.name || "ROM Media";
+    subtitleNode.textContent = `${system} artwork and gamelist.xml metadata`;
+    content.innerHTML = `
+      <div class="mb-3 d-flex flex-wrap gap-2">
+        <button class="btn btn-outline-secondary" onclick="setHash('#system/${encodeURIComponent(system)}')">← Back to ${escapeHtml(system)}</button>
+        ${
+          rom.is_downloadable === false
+            ? `<button class="btn btn-outline-secondary" type="button" disabled><i class="bi bi-folder2-open me-1"></i>Folder ROM</button>`
+            : `<a class="btn btn-primary" href="${romDownloadUrl(system, rom.unique_id)}"><i class="bi bi-download me-1"></i>Download</a>`
+        }
+      </div>
+      <div class="card log-card mb-3">
+        <div class="card-body">
+          <div class="rom-media-hero">
+            <div>
+              ${primary ? `<button type="button" class="border-0 p-0 bg-transparent w-100" onclick="showImageLightbox('${escapeHtml(primary.url)}', '${escapeHtml(primary.label)}')"><img class="rom-media-primary" src="${escapeHtml(primary.url)}" alt="${escapeHtml(primary.label)}"></button>` : `<div class="rom-media-primary d-flex align-items-center justify-content-center text-muted">No artwork in gamelist.xml</div>`}
+            </div>
+            <div>
+              <div class="d-flex justify-content-between gap-2 align-items-start mb-2">
+                <div>
+                  <h2 class="h4 mb-1">${escapeHtml(rom.title || rom.name || "")}</h2>
+                  <div class="text-muted small mono">${escapeHtml(rom.rom_file || rom.name || "")}</div>
+                </div>
+                <span class="badge ${rom.has_gamelist_entry ? "text-bg-success" : "text-bg-warning"}">${rom.has_gamelist_entry ? "gamelist.xml entry" : "no gamelist.xml entry"}</span>
+              </div>
+              <div class="row g-2">
+                ${romGamelistSummaryHtml(rom) || `<div class="col-12 text-muted small">No gamelist metadata found.</div>`}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="mb-3">
+        <h3 class="h5 mb-2">Gamelist Artwork</h3>
+        <div class="rom-media-grid">
+          ${media.map((item) => `
+            <div class="rom-media-tile">
+              <button type="button" class="border-0 p-0 bg-transparent w-100" onclick="showImageLightbox('${escapeHtml(item.url)}', '${escapeHtml(item.label)}')">
+                <img src="${escapeHtml(item.url)}" alt="${escapeHtml(item.label)}">
+              </button>
+              <div class="rom-media-label">
+                <div>
+                  <div class="fw-semibold">${escapeHtml(item.label)}</div>
+                  <div class="text-muted small text-truncate" title="${escapeHtml(item.value)}">${escapeHtml(item.value)}</div>
+                </div>
+                <a class="btn btn-sm btn-outline-primary" href="${escapeHtml(item.url)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()"><i class="bi bi-box-arrow-up-right"></i></a>
+              </div>
+            </div>
+          `).join("") || `<div class="text-muted">No image fields are set in gamelist.xml for this ROM.</div>`}
+        </div>
+      </div>
+    `;
+  } catch (err) {
+    showToast(`Failed to load ROM media: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    setHash(`#system/${encodeURIComponent(system)}`);
+  } finally {
+    setLoading(false);
+  }
 }
 function renderBiosList(data) {
   backBtn.classList.remove("d-none");
@@ -1597,6 +1766,7 @@ async function renderSystem(system) {
   setLoading(true, `Loading ${system} ROMs...`);
   await applySystemTheme(system);
   const romsData = await api(`/systems/${encodeURIComponent(system)}`);
+  systemRomCache[system] = romsData;
 
   content.innerHTML = `
     <div class="mb-4">
@@ -3368,6 +3538,9 @@ async function router() {
         return;
       }
       await renderOvermindIntegrationPage();
+    } else if (parseSystemRomHash(hash)) {
+      const parsed = parseSystemRomHash(hash);
+      await renderRomMediaPage(parsed.system, parsed.uniqueId);
     } else if (hash.startsWith("#search-system/")) {
       const rest = hash.substring("#search-system/".length);
       const slashIndex = rest.indexOf("/");
