@@ -18,30 +18,29 @@ set -e
 
 # ── Detect Batocera version ─────────────────────────────────────────
 BATOCERA_VERSION=""
-if [ -f /usr/share/batocera/batocera.version ]; then
-  BATOCERA_VERSION=$(cat /usr/share/batocera/batocera.version | head -1 | tr -d '[:space:]')
-elif [ -f /etc/batocera-release ]; then
-  BATOCERA_VERSION=$(cat /etc/batocera-release | head -1 | tr -d '[:space:]')
+# Try the batocera-version command first (most reliable)
+if command -v batocera-version >/dev/null 2>&1; then
+  BATOCERA_VERSION=$(batocera-version 2>/dev/null | head -1 | tr -d '[:space:]')
+fi
+# Fall back to version files if command not available
+if [ -z "$BATOCERA_VERSION" ]; then
+  if [ -f /usr/share/batocera/batocera.version ]; then
+    BATOCERA_VERSION=$(cat /usr/share/batocera/batocera.version | head -1 | tr -d '[:space:]')
+  elif [ -f /etc/batocera-release ]; then
+    BATOCERA_VERSION=$(cat /etc/batocera-release | head -1 | tr -d '[:space:]')
+  fi
 fi
 
-# Extract major version number (e.g., "43" from "43", "43av", "43.1", or "2024.43")
-MAJOR_VERSION=""
-RAW_NUMERIC=$(echo "$BATOCERA_VERSION" | grep -oE '^[0-9]+(\.[0-9]+)?|[0-9]{4}\.[0-9]+' | head -1)
-if echo "$RAW_NUMERIC" | grep -qE '^[0-9]{4}\.[0-9]+'; then
-  # Year-style version like "2024.43" – take second field as major
-  MAJOR_VERSION=$(echo "$RAW_NUMERIC" | cut -d. -f2)
-elif echo "$RAW_NUMERIC" | grep -qE '^[0-9]+(\.[0-9]+)?$'; then
-  # Numeric version like "43" or "43.1"
-  MAJOR_VERSION=$(echo "$RAW_NUMERIC" | cut -d. -f1)
-fi
+# Extract leading numeric major version (handles "43av", "43.1", "2024.43", etc.)
+MAJOR_VERSION=$(echo "$BATOCERA_VERSION" | sed 's/^\([0-9]*\).*/\1/')
 
 # Default to legacy path if we can't determine version
 USE_LEGACY_METHOD=false
 if [ -n "$MAJOR_VERSION" ] && [ "$MAJOR_VERSION" -lt 43 ] 2>/dev/null; then
   USE_LEGACY_METHOD=true
 elif [ -z "$MAJOR_VERSION" ]; then
-  # Cannot determine version; assume legacy to be safe
-  USE_LEGACY_METHOD=true
+  # Cannot determine version; assume v43+ (safer default for modern Batocera)
+  USE_LEGACY_METHOD=false
 fi
 
 echo "============================================"
