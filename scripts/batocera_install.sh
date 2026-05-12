@@ -39,26 +39,21 @@ echo "---------------------------------------------"
 
 mkdir -p "$WORK_DIR"
 
-# Ensure group exists
 if grep -q "^${DRONE_GROUP}:" /etc/group 2>/dev/null; then
   sed -i "s#^${DRONE_GROUP}:.*#${DRONE_GROUP}:x:${DRONE_GID}:#" /etc/group
 else
   echo "${DRONE_GROUP}:x:${DRONE_GID}:" >> /etc/group
 fi
 
-# Ensure passwd entry exists and is usable by su
 if grep -q "^${DRONE_USER}:" /etc/passwd 2>/dev/null; then
   sed -i "s#^${DRONE_USER}:.*#${DRONE_USER}:x:${DRONE_UID}:${DRONE_GID}:drone-app:${WORK_DIR}:/bin/sh#" /etc/passwd
 else
   echo "${DRONE_USER}:x:${DRONE_UID}:${DRONE_GID}:drone-app:${WORK_DIR}:/bin/sh" >> /etc/passwd
 fi
 
-# Ensure shadow entry exists; this fixes:
-# su: Authentication service cannot retrieve authentication info
 if [ -f /etc/shadow ]; then
   if grep -q "^${DRONE_USER}:" /etc/shadow 2>/dev/null; then
-    sed -i "s#^${DRONE_USER}:.*#${DRONE_USER}:*:19000:0:99999:7::: #" /etc/shadow
-    sed -i "s#^${DRONE_USER}:\\*:19000:0:99999:7::: #${DRONE_USER}:*:19000:0:99999:7:::#" /etc/shadow
+    sed -i "s#^${DRONE_USER}:.*#${DRONE_USER}:*:19000:0:99999:7:::#" /etc/shadow
   else
     echo "${DRONE_USER}:*:19000:0:99999:7:::" >> /etc/shadow
   fi
@@ -66,7 +61,6 @@ fi
 
 if ! su -s /bin/sh -c "whoami" "$DRONE_USER" >/tmp/drone-user-test.out 2>/tmp/drone-user-test.err; then
   echo "FATAL: ${DRONE_USER} exists but su still cannot switch to it."
-  echo "stderr:"
   cat /tmp/drone-user-test.err 2>/dev/null || true
   exit 1
 fi
@@ -93,6 +87,14 @@ chmod -R 775 \
   /userdata/system/certs \
   /userdata/system/logs/drone-app 2>/dev/null || true
 
+# Allow drone-app to read Batocera system configs recursively.
+# Directories need execute permission for traversal.
+# Files need read permission.
+if [ -d /userdata/system/configs ]; then
+  find /userdata/system/configs -type d -exec chmod o+rx {} \; 2>/dev/null || true
+  find /userdata/system/configs -type f -exec chmod o+r {} \; 2>/dev/null || true
+fi
+
 # Only touch writable app areas. Do not rewrite all ROM permissions.
 find /userdata/roms -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while read romdir; do
   for subdir in images videos manuals; do
@@ -109,7 +111,7 @@ find /userdata/roms -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while read rom
   fi
 done
 
-# Keep Batocera config owned by root
+# Keep Batocera config owned by root and readable only
 chown root:root /userdata/batocera.conf 2>/dev/null || true
 chmod 644 /userdata/batocera.conf 2>/dev/null || true
 
@@ -145,13 +147,10 @@ start_app() {
     DRONE_APP_BASE_URL="https://raw.githubusercontent.com/Batocera-Fleet-Federation/batocera.drone/main" \
     run_as_drone "/tmp/run_now.sh"
   ) &
-
-  echo "Web Server running on https://$(hostname).local:8443"
 }
 
 stop_app() {
-  kill -9 $(lsof -t -i:8443)  
-  echo "Web Server stopped"
+  kill -9 $(lsof -t -i:8443) 2>/dev/null || true
 }
 
 case "$ACTION" in
@@ -214,6 +213,9 @@ fi
 echo ""
 echo "Installation complete!"
 echo "Web Server URL: https://$(hostname):8443"
+echo ""
+echo "drone-app can read:"
+echo "  /userdata/system/configs/**"
 echo ""
 echo "drone-app can write to:"
 echo "  /userdata/roms/*/images/"
