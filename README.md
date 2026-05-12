@@ -1,8 +1,18 @@
-# ROMS API
+# Batocera Drone
 
-HTTPS Basic-Auth API + web UI for browsing Batocera ROMs/BIOS/theme assets.
+**Batocera Drone** is a web-based library browser and admin tool for Batocera systems.  
+**Main features:**
 
-API base path: `/v1/api`
+- **Browse ROMs and Systems:** Easily view all your games and supported systems in a modern web interface.
+- **Search:** Quickly find ROMs across all systems with instant search.
+- **Download ROMs & BIOS:** Download games and BIOS files directly from your browser.
+- **View & Edit Metadata:** See and update game details like title, genre, and artwork.
+- **Artwork Management:** Upload, crop, and manage images (boxart, screenshots, marquees, etc.) for your games.
+- **Theme Gallery:** Preview and manage theme images for your Batocera setup.
+- **Admin Tools:** Access logs, emulator configs, and system info for troubleshooting.
+- **Bulk Operations:** Remove missing ROM entries or update metadata in batches.
+- **Integrations:** Connect with external tools like LaunchBox and TheGamesDB for automatic metadata and artwork imports.
+- **Modern UI:** Responsive, mobile-friendly design with dark mode and theme support.
 
 ## TL;DR: Run It Now
 
