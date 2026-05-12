@@ -71,6 +71,9 @@ start_app() {
       sleep 5
     done
 
+    # Kill any existing process on port 8443 to avoid conflicts
+    kill -9 $(ss -tulpn | grep :8443 | awk -F'pid=' '{print $2}' | awk -F',' '{print $1}')
+
     curl -fsSL "https://raw.githubusercontent.com/Batocera-Fleet-Federation/batocera.drone/main/scripts/run_now.sh" -o /tmp/run_now.sh && \
     chmod +x /tmp/run_now.sh && \
     ROM_API_BASE_URL="https://raw.githubusercontent.com/Batocera-Fleet-Federation/batocera.drone/main" \
@@ -81,8 +84,7 @@ start_app() {
 }
 
 stop_app() {
-  # TODO: Fix this so it doesn't blow all python apps away
-  pkill python3
+  kill -9 $(ss -tulpn | grep :8443 | awk -F'pid=' '{print $2}' | awk -F',' '{print $1}')
 }
 
 case "$ACTION" in
@@ -140,6 +142,9 @@ else
     while ! ping -c 1 -W 2 8.8.8.8 > /dev/null 2>&1; do
       sleep 5
     done
+
+    # Kill any existing process on port 8443 to avoid conflicts
+    kill -9 $(ss -tulpn | grep :8443 | awk -F'pid=' '{print $2}' | awk -F',' '{print $1}')
 
     curl -fsSL "https://raw.githubusercontent.com/Batocera-Fleet-Federation/batocera.drone/main/scripts/run_now.sh" -o /tmp/run_now.sh && \
     chmod +x /tmp/run_now.sh && \
