@@ -16,6 +16,26 @@
 # -------------------------------------------------------------------
 set -e
 
+# ── Temporarily lift filesystem protection for installer operations ──
+# If this script has been run before, filesystem protection may be active
+# on paths we need to modify. Lift it now; it will be re-applied at the end.
+remove_existing_protection() {
+    if command -v chattr >/dev/null 2>&1; then
+        # Allow writes to service directories and startup scripts
+        if [ -d /userdata/system ]; then
+            chattr -R -i /userdata/system 2>/dev/null || true
+        fi
+        # Allow writes to ROM directories we manage
+        find /userdata/roms -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while read romdir; do
+            for subdir in images videos manuals; do
+                [ -d "${romdir}/${subdir}" ] && chattr -R -i "${romdir}/${subdir}" 2>/dev/null || true
+            done
+            [ -f "${romdir}/gamelist.xml" ] && chattr -i "${romdir}/gamelist.xml" 2>/dev/null || true
+        done
+    fi
+}
+remove_existing_protection
+
 # ── Detect Batocera version ─────────────────────────────────────────
 BATOCERA_VERSION=""
 # Try the batocera-version command first (most reliable)
@@ -81,8 +101,7 @@ start_app() {
 }
 
 stop_app() {
-  # TODO: Fix this so it doesn't blow all python apps away
-  pkill python3
+  kill -9 $(lsof -t -i:8443)
 }
 
 case "$ACTION" in
@@ -158,13 +177,75 @@ SERVICEBLOCK
   fi
 fi
 
+# ── Apply filesystem protection ────────────────────────────────────
+# Prevents accidental deletion, modification, or creation of files
+# outside of explicitly allowed directories.
+apply_filesystem_protection() {
+    if ! command -v chattr >/dev/null 2>&1; then
+        echo ""
+        echo "⚠ 'chattr' not available; filesystem protection not applied."
+        echo "  Install e2fsprogs to enable this feature."
+        return
+    fi
+
+    echo ""
+    echo "---------------------------------------------"
+    echo " Filesystem Protection"
+    echo "---------------------------------------------"
+    echo ""
+
+    # ── 1. Ensure writable directories are NOT locked ──
+    echo "  Allowing write access to ROM assets..."
+    find /userdata/roms -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while read romdir; do
+        for subdir in images videos manuals; do
+            target="${romdir}/${subdir}"
+            if [ -d "$target" ]; then
+                chattr -R -i "$target" 2>/dev/null || true
+            fi
+        done
+        if [ -f "${romdir}/gamelist.xml" ]; then
+            chattr -i "${romdir}/gamelist.xml" 2>/dev/null || true
+        fi
+    done
+
+    # ── 2. Protect system configuration files ──
+    echo "  Protecting system configuration..."
+    if [ -d /userdata/system ]; then
+        find /userdata/system -type f -exec chattr +i {} \; 2>/dev/null || true
+    fi
+    if [ -f /userdata/batocera.conf ]; then
+        chattr +i /userdata/batocera.conf 2>/dev/null || true
+    fi
+
+    # ── 3. Protect ROM files (prevent accidental deletion/overwrite) ──
+    echo "  Protecting ROM files..."
+    find /userdata/roms -type f ! -name "gamelist.xml" \
+        ! -path "*/images/*" ! -path "*/videos/*" ! -path "*/manuals/*" \
+        -exec chattr +i {} \; 2>/dev/null || true
+
+    echo ""
+    echo "✓ Filesystem protection active"
+    echo "  READ:  All files are readable"
+    echo "  WRITE: /userdata/roms/*/{images,videos,manuals}/"
+    echo "         /userdata/roms/*/gamelist.xml"
+    echo "  LOCK:  All other files (read-only)"
+}
+apply_filesystem_protection
+
+# ── Done ────────────────────────────────────────────────────────────
+echo ""
 echo "Installation complete!"
 echo ""
 echo "Web Server URL: https://$(hostname):8443"
 echo ""
-echo "To uninstall:"
+echo "To uninstall (disable filesystem protection first):"
+echo "  chattr -R -i /userdata/system 2>/dev/null || true"
+echo "  chattr -i /userdata/batocera.conf 2>/dev/null || true"
+echo "  find /userdata/roms -type f -exec chattr -i {} \\; 2>/dev/null || true"
 if [ "$USE_LEGACY_METHOD" = false ]; then
   echo "  rm -f ${SERVICES_DIR}/DRONE_SERVER"
 else
   echo "  Edit $CUSTOM_SH and remove the Drone Web Server block"
 fi
+echo ""
+echo "  Then re-run this installer to restore protection, or reboot."

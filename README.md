@@ -14,6 +14,40 @@
 - **Integrations:** Connect with external tools like LaunchBox and TheGamesDB for automatic metadata and artwork imports.
 - **Modern UI:** Responsive, mobile-friendly design with dark mode and theme support.
 
+## Installation (Recommended)
+
+Install Batocera Drone as a persistent auto-start service on your Batocera machine:
+
+```bash
+curl -fsSL "https://raw.githubusercontent.com/Batocera-Fleet-Federation/batocera.drone/main/scripts/batocera_install.sh" -o /tmp/batocera_install.sh && chmod +x /tmp/batocera_install.sh && /tmp/batocera_install.sh
+```
+
+The installer detects your Batocera version and:
+
+- **Batocera v43+:** Creates `/userdata/system/services/DRONE_SERVER` — a system service that starts the drone web server automatically on boot.
+- **Batocera < v43:** Appends a startup block to `/userdata/system/custom.sh` to run the drone on boot.
+
+After installation, restart Batocera or start the service immediately:
+
+```bash
+/userdata/system/services/DRONE_SERVER start
+```
+
+The web server will be available at `https://<hostname>.local:8443`.
+
+### Uninstall
+
+Disable filesystem protection first, then remove the service file:
+
+```bash
+chattr -R -i /userdata/system 2>/dev/null || true
+chattr -i /userdata/batocera.conf 2>/dev/null || true
+find /userdata/roms -type f -exec chattr -i {} \; 2>/dev/null || true
+rm -f /userdata/system/services/DRONE_SERVER
+```
+
+Then re-run the installer to restore filesystem protection, or reboot.
+
 ## TL;DR: Run It Now
 
 On the Batocera machine, run one of these:
@@ -162,6 +196,30 @@ curl -k -u <u>:<p> "https://<host>/v1/api/theme/images?limit=100&offset=0&q=logo
 curl -k -u <u>:<p> "https://<host>/v1/api/admin/logs/es_launch_stdout?lines=200"
 curl -k -u <u>:<p> "https://<host>/v1/api/admin/configs/batocera?max_bytes=131072"
 curl -k -u <u>:<p> "https://<host>/v1/api/swagger"
+```
+
+## Filesystem Protection
+
+The installer applies immutable (`chattr +i`) protection to prevent accidental deletion or modification of critical files. Here is the protection scheme:
+
+| Path | Access |
+|------|--------|
+| `/userdata/system/` config files | Locked (immutable) — read-only after installation |
+| `/userdata/batocera.conf` | Locked (immutable) — read-only after installation |
+| `/userdata/roms/*` (ROM files: `.iso`, `.sfc`, etc.) | Locked (immutable) — read-only after installation |
+| `/userdata/roms/*/images/` | Writable — artwork uploads and management |
+| `/userdata/roms/*/videos/` | Writable — video previews |
+| `/userdata/roms/*/manuals/` | Writable — manual/guide uploads |
+| `/userdata/roms/*/gamelist.xml` | Writable — metadata updates |
+| `/userdata/system/certs/` | Writable — TLS certificate generation (created at runtime) |
+| `/userdata/system/logs/drone-app/` | Writable — rolling log files (created at runtime) |
+
+Before uninstalling, you must disable filesystem protection:
+
+```bash
+chattr -R -i /userdata/system 2>/dev/null || true
+chattr -i /userdata/batocera.conf 2>/dev/null || true
+find /userdata/roms -type f -exec chattr -i {} \; 2>/dev/null || true
 ```
 
 ## Scripts
