@@ -3525,13 +3525,17 @@ async function loadSystemInfoBar() {
     const payload = await api("/admin/system-info");
     const fields = payload.fields || {};
     const lines = payload.lines || [];
-    const version = fields.system || _extractInfoField(lines, ["version", "batocera version", "system"]);
+    const version = fields.batocera_version || fields.system || _extractInfoField(lines, ["version", "batocera version", "system"]);
     const machineId = fields.machine_id || "";
     const overmindIntegrated = fields.overmind_integrated || "no";
     const chips = [];
     if (version) chips.push(`<span class="badge">Batocera: ${escapeHtml(version)}</span>`);
     if (machineId) chips.push(`<span class="badge">Machine ID: ${escapeHtml(machineId)}</span>`);
-    chips.push(`<span class="badge">Overmind: ${escapeHtml(overmindIntegrated)}</span>`);
+    if (overmindIntegrated === "yes") {
+      chips.push(`<span class="badge" style="background:rgba(52,211,153,0.15);color:#34d399;border-color:rgba(52,211,153,0.4)">Overmind: linked</span>`);
+    } else {
+      chips.push(`<span class="badge" style="background:rgba(239,68,68,0.15);color:#ef4444;border-color:rgba(239,68,68,0.4)">Overmind: disconnected</span>`);
+    }
     if (machineNav && machineId) machineNav.textContent = `Machine ID: ${machineId}`;
     if (!chips.length && lines.length) {
       chips.push(`<span class="badge">${escapeHtml(lines[0])}</span>`);

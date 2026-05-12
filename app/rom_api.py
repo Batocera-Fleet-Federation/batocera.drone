@@ -175,8 +175,15 @@ def _machine_id() -> str:
     return "unknown-machine"
 
 
+# Fake device ID that matches the device owned by "arcade@example.com"
+# in Overmind's populate_fake_data() (i.e., "arcade-cabinet-002").
+# Using a deterministic value ensures the drone's action poller can
+# successfully claim actions against the locally-running overmind server.
+FAKE_OVERMIND_DEVICE_ID = "arcade-cabinet-002"
+
+
 def _fake_machine_id() -> str:
-    return str(uuid.uuid4())
+    return FAKE_OVERMIND_DEVICE_ID
 
 
 def _clean_rom_title(value: str) -> str:
@@ -3718,6 +3725,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             entries = [
                 {"key": "Machine ID", "value": self.settings.overmind_device_id},
                 {"key": "Integrated with Overmind", "value": "yes" if self._load_overmind_config().get("integration_enabled") else "no"},
+                {"key": "Batocera Version", "value": "v43-dev (Fake)"},
                 {"key": "Model", "value": "Batocera DevBox (Fake)"},
                 {"key": "System", "value": "Linux 6.6.0-fake"},
                 {"key": "Architecture", "value": "x86_64"},
@@ -3733,6 +3741,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 {"key": "Battery", "value": "N/A"},
             ]
             fields = {
+                "batocera_version": "v43-dev (Fake)",
                 "model": "Batocera DevBox (Fake)",
                 "system": "Linux 6.6.0-fake",
                 "architecture": "x86_64",
@@ -3788,7 +3797,9 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             for entry in entries:
                 key_lower = entry["key"].lower()
                 value = entry["value"]
-                if key_lower == "model":
+                if key_lower in ("version", "batocera version"):
+                    fields["batocera_version"] = value
+                elif key_lower == "model":
                     fields["model"] = value
                 elif key_lower == "system":
                     fields["system"] = value
