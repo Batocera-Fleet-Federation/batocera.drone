@@ -37,16 +37,12 @@ The web server will be available at `https://<hostname>.local:8443`.
 
 ### Uninstall
 
-Disable filesystem protection first, then remove the service file:
-
 ```bash
-chattr -R -i /userdata/system 2>/dev/null || true
-chattr -i /userdata/batocera.conf 2>/dev/null || true
-find /userdata/roms -type f -exec chattr -i {} \; 2>/dev/null || true
+userdel drone-app 2>/dev/null || true
 rm -f /userdata/system/services/DRONE_SERVER
 ```
 
-Then re-run the installer to restore filesystem protection, or reboot.
+Note: File ownership changes on `/userdata/roms/*/{images,videos,manuals}/` and `gamelist.xml` will persist until manually reverted with `chown`.
 
 ## TL;DR: Run It Now
 
@@ -198,29 +194,40 @@ curl -k -u <u>:<p> "https://<host>/v1/api/admin/configs/batocera?max_bytes=13107
 curl -k -u <u>:<p> "https://<host>/v1/api/swagger"
 ```
 
-## Filesystem Protection
+## Process-Level Permissions
 
-The installer applies immutable (`chattr +i`) protection to prevent accidental deletion or modification of critical files. Here is the protection scheme:
+The installer uses **process-level isolation** to protect files — it restricts the Python application by running it as a dedicated low-privilege user rather than applying system-wide kernel locks.
 
-| Path | Access |
-|------|--------|
-| `/userdata/system/` config files | Locked (immutable) — read-only after installation |
-| `/userdata/batocera.conf` | Locked (immutable) — read-only after installation |
-| `/userdata/roms/*` (ROM files: `.iso`, `.sfc`, etc.) | Locked (immutable) — read-only after installation |
-| `/userdata/roms/*/images/` | Writable — artwork uploads and management |
-| `/userdata/roms/*/videos/` | Writable — video previews |
-| `/userdata/roms/*/manuals/` | Writable — manual/guide uploads |
-| `/userdata/roms/*/gamelist.xml` | Writable — metadata updates |
-| `/userdata/system/certs/` | Writable — TLS certificate generation (created at runtime) |
-| `/userdata/system/logs/drone-app/` | Writable — rolling log files (created at runtime) |
+### Mechanism
 
-Before uninstalling, you must disable filesystem protection:
+1. **Creates a `drone-app` system user** with no login shell (`/bin/false`) — a service account that cannot be used for interactive logins.
 
-```bash
-chattr -R -i /userdata/system 2>/dev/null || true
-chattr -i /userdata/batocera.conf 2>/dev/null || true
-find /userdata/roms -type f -exec chattr -i {} \; 2>/dev/null || true
-```
+2. **Switches to that user at runtime** — Both the service file (`DRONE_SERVER`) and the legacy `custom.sh` block use `su -s /bin/sh -c "/tmp/run_now.sh" drone-app` to execute the app as the restricted user.
+
+3. **Sets Unix file ownership/permissions** — `chown` makes `drone-app` the owner of only the directories it needs to write to. Everything else is read-only for that user by default.
+
+### Scope
+
+| Path | `drone-app` Access | `root` Access |
+|------|--------------------|---------------|
+| `/userdata/roms/*/images/` | Read + Write (artwork uploads) | Full access |
+| `/userdata/roms/*/videos/` | Read + Write (video previews) | Full access |
+| `/userdata/roms/*/manuals/` | Read + Write (manual uploads) | Full access |
+| `/userdata/roms/*/gamelist.xml` | Read + Write (metadata updates) | Full access |
+| `/userdata/system/.drone-app/` | Read + Write (app runtime files) | Full access |
+| `/userdata/system/certs/` | Read + Write (TLS certs, created at runtime) | Full access |
+| `/userdata/system/logs/drone-app/` | Read + Write (log files, created at runtime) | Full access |
+| `/userdata/roms/*` (ROM `.iso`, `.sfc`, etc.) | **Read-only** — cannot modify or delete ROMs | Full access |
+| `/userdata/system/` (config files) | **Read-only** — cannot modify system config | Full access |
+| `/userdata/batocera.conf` | **Read-only** — cannot modify Batocera config | Full access |
+| Everything else on the system | **Read-only** by default (unprivileged user) | Full access |
+
+### Key point
+
+The protection is **process-scoped**, not system-scoped:
+- **Root can do anything** — no restrictions apply to root
+- The `drone-app` user cannot accidentally (or maliciously) delete ROMs, modify system configs, or touch anything outside its explicitly permitted paths
+- The app only has write access to the specific subdirectories it needs for artwork, metadata, logs, and TLS certs
 
 ## Scripts
 

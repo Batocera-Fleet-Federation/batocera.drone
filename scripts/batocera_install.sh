@@ -16,25 +16,12 @@
 # -------------------------------------------------------------------
 set -e
 
-# ── Temporarily lift filesystem protection for installer operations ──
-# If this script has been run before, filesystem protection may be active
-# on paths we need to modify. Lift it now; it will be re-applied at the end.
-remove_existing_protection() {
-    if command -v chattr >/dev/null 2>&1; then
-        # Allow writes to service directories and startup scripts
-        if [ -d /userdata/system ]; then
-            chattr -R -i /userdata/system 2>/dev/null || true
-        fi
-        # Allow writes to ROM directories we manage
-        find /userdata/roms -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while read romdir; do
-            for subdir in images videos manuals; do
-                [ -d "${romdir}/${subdir}" ] && chattr -R -i "${romdir}/${subdir}" 2>/dev/null || true
-            done
-            [ -f "${romdir}/gamelist.xml" ] && chattr -i "${romdir}/gamelist.xml" 2>/dev/null || true
-        done
-    fi
-}
-remove_existing_protection
+# ── No legacy cleanup ───────────────────────────────────────────────
+# If upgrading from a previous version that used chattr +i, remove
+# those flags manually before running this installer:
+#   chattr -R -i /userdata/system 2>/dev/null || true
+#   chattr -i /userdata/batocera.conf 2>/dev/null || true
+#   find /userdata/roms -type f -exec chattr -i {} \; 2>/dev/null || true
 
 # ── Detect Batocera version ─────────────────────────────────────────
 BATOCERA_VERSION=""
@@ -80,9 +67,12 @@ if [ "$USE_LEGACY_METHOD" = false ]; then
   mkdir -p "$SERVICES_DIR"
 
   # Write the service file
+  # Note: 'SERVICEBLOCK' is single-quoted to prevent variable expansion
+  # at install time — the service file uses its own variables at runtime.
   cat > "$SERVICE_FILE" << 'SERVICEBLOCK'
 #!/bin/sh
 
+DRONE_USER="drone-app"
 ACTION="$1"
 
 start_app() {
@@ -94,7 +84,7 @@ start_app() {
     curl -fsSL "https://raw.githubusercontent.com/Batocera-Fleet-Federation/batocera.drone/main/scripts/run_now.sh" -o /tmp/run_now.sh && \
     chmod +x /tmp/run_now.sh && \
     DRONE_APP_BASE_URL="https://raw.githubusercontent.com/Batocera-Fleet-Federation/batocera.drone/main" \
-    /tmp/run_now.sh
+    su -s /bin/sh -c "/tmp/run_now.sh" "$DRONE_USER"
   ) &
 
   echo "Web Server running on https://$(hostname).local:8443"
@@ -160,10 +150,11 @@ else
       sleep 5
     done
 
+    DRONE_USER="drone-app"
     curl -fsSL "https://raw.githubusercontent.com/Batocera-Fleet-Federation/batocera.drone/main/scripts/run_now.sh" -o /tmp/run_now.sh && \
     chmod +x /tmp/run_now.sh && \
     DRONE_APP_BASE_URL="https://raw.githubusercontent.com/Batocera-Fleet-Federation/batocera.drone/main" \
-    /tmp/run_now.sh
+    su -s /bin/sh -c "/tmp/run_now.sh" "$DRONE_USER"
   ) &
 
   echo "Web Server running on https://$(hostname).local:8443"
@@ -177,60 +168,64 @@ SERVICEBLOCK
   fi
 fi
 
-# ── Apply filesystem protection ────────────────────────────────────
-# Prevents accidental deletion, modification, or creation of files
-# outside of explicitly allowed directories.
-apply_filesystem_protection() {
-    if ! command -v chattr >/dev/null 2>&1; then
-        echo ""
-        echo "⚠ 'chattr' not available; filesystem protection not applied."
-        echo "  Install e2fsprogs to enable this feature."
-        return
-    fi
-
+# ── Create dedicated drone user ──────────────────────────────────────
+DRONE_USER="drone-app"
+if ! id -u "$DRONE_USER" >/dev/null 2>&1; then
     echo ""
     echo "---------------------------------------------"
-    echo " Filesystem Protection"
+    echo " Creating dedicated '${DRONE_USER}' user"
     echo "---------------------------------------------"
     echo ""
+    useradd -r -s /bin/false "$DRONE_USER" 2>/dev/null || true
+    echo "✓ Created system user: $DRONE_USER"
+fi
 
-    # ── 1. Ensure writable directories are NOT locked ──
-    echo "  Allowing write access to ROM assets..."
-    find /userdata/roms -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while read romdir; do
-        for subdir in images videos manuals; do
-            target="${romdir}/${subdir}"
-            if [ -d "$target" ]; then
-                chattr -R -i "$target" 2>/dev/null || true
-            fi
-        done
-        if [ -f "${romdir}/gamelist.xml" ]; then
-            chattr -i "${romdir}/gamelist.xml" 2>/dev/null || true
+# ── Set up process-level permissions ──────────────────────────────────
+# Instead of kernel-level immutable flags (which lock out everyone
+# including root), we run the Python app as the 'drone-app' user and
+# use standard Unix permissions to limit what that user can write to.
+# Root retains full access to everything.
+echo ""
+echo "---------------------------------------------"
+echo " Process-Level Permissions"
+echo "---------------------------------------------"
+echo ""
+
+# Grant the drone-app user write access to ROM asset directories
+echo "  Granting write access to ROM assets for ${DRONE_USER}..."
+find /userdata/roms -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while read romdir; do
+    for subdir in images videos manuals; do
+        target="${romdir}/${subdir}"
+        if [ -d "$target" ]; then
+            chown -R "$DRONE_USER:$DRONE_USER" "$target" 2>/dev/null || true
+            chmod -R u+rwX,go+rX "$target" 2>/dev/null || true
         fi
     done
-
-    # ── 2. Protect system configuration files ──
-    echo "  Protecting system configuration..."
-    if [ -d /userdata/system ]; then
-        find /userdata/system -type f -exec chattr +i {} \; 2>/dev/null || true
+    gamelist="${romdir}/gamelist.xml"
+    if [ -f "$gamelist" ]; then
+        chown "$DRONE_USER:$DRONE_USER" "$gamelist" 2>/dev/null || true
+        chmod u+rw,go+r "$gamelist" 2>/dev/null || true
     fi
-    if [ -f /userdata/batocera.conf ]; then
-        chattr +i /userdata/batocera.conf 2>/dev/null || true
-    fi
+done
 
-    # ── 3. Protect ROM files (prevent accidental deletion/overwrite) ──
-    echo "  Protecting ROM files..."
-    find /userdata/roms -type f ! -name "gamelist.xml" \
-        ! -path "*/images/*" ! -path "*/videos/*" ! -path "*/manuals/*" \
-        -exec chattr +i {} \; 2>/dev/null || true
+# Create and set ownership for app working directory
+WORK_DIR="${DRONE_APP_WORK_DIR:-/userdata/system/.drone-app}"
+mkdir -p "$WORK_DIR"
+chown -R "$DRONE_USER:$DRONE_USER" "$WORK_DIR" 2>/dev/null || true
 
-    echo ""
-    echo "✓ Filesystem protection active"
-    echo "  READ:  All files are readable"
-    echo "  WRITE: /userdata/roms/*/{images,videos,manuals}/"
-    echo "         /userdata/roms/*/gamelist.xml"
-    echo "  LOCK:  All other files (read-only)"
-}
-apply_filesystem_protection
+# Create and set ownership for certs and logs directories
+mkdir -p /userdata/system/certs /userdata/system/logs/drone-app
+chown -R "$DRONE_USER:$DRONE_USER" /userdata/system/certs /userdata/system/logs/drone-app 2>/dev/null || true
+
+echo ""
+echo "✓ Permissions applied"
+echo "  The Python app runs as user '${DRONE_USER}' with write access only to:"
+echo "    /userdata/roms/*/{images,videos,manuals}/"
+echo "    /userdata/roms/*/gamelist.xml"
+echo "    /userdata/system/.drone-app/"
+echo "    /userdata/system/certs/"
+echo "    /userdata/system/logs/drone-app/"
+echo "  Root retains full access to ALL files and directories."
 
 # ── Done ────────────────────────────────────────────────────────────
 echo ""
@@ -238,14 +233,13 @@ echo "Installation complete!"
 echo ""
 echo "Web Server URL: https://$(hostname):8443"
 echo ""
-echo "To uninstall (disable filesystem protection first):"
-echo "  chattr -R -i /userdata/system 2>/dev/null || true"
-echo "  chattr -i /userdata/batocera.conf 2>/dev/null || true"
-echo "  find /userdata/roms -type f -exec chattr -i {} \\; 2>/dev/null || true"
+echo "To uninstall:"
+echo "  userdel ${DRONE_USER} 2>/dev/null || true"
 if [ "$USE_LEGACY_METHOD" = false ]; then
   echo "  rm -f ${SERVICES_DIR}/DRONE_SERVER"
 else
   echo "  Edit $CUSTOM_SH and remove the Drone Web Server block"
 fi
 echo ""
-echo "  Then re-run this installer to restore protection, or reboot."
+echo "  Note: Permissions on /userdata/roms/*/{images,videos,manuals}/"
+echo "  and gamelist.xml will persist until manually reverted with chown."
