@@ -1,4 +1,5 @@
 import base64
+import html
 import hashlib
 import json
 import os
@@ -337,6 +338,167 @@ class LaunchBoxClient:
         with urlopen(request, timeout=self.timeout_seconds) as response:
             content_type = response.headers.get_content_type()
             return response.read(), content_type
+
+
+class TheGamesDBScraper:
+    BASE_URL = "https://thegamesdb.net"
+    CDN_HOST = "cdn.thegamesdb.net"
+
+    def __init__(self, timeout_seconds: int = 15):
+        self.timeout_seconds = timeout_seconds
+
+    def _get_text(self, url: str) -> str:
+        request = Request(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+                "Accept-Language": "en-US,en;q=0.9",
+            },
+        )
+        with urlopen(request, timeout=self.timeout_seconds) as response:
+            return response.read().decode("utf-8", errors="replace")
+
+    def _strip_tags(self, value: str) -> str:
+        return re.sub(r"\s+", " ", html.unescape(re.sub(r"<.*?>", " ", value or ""))).strip()
+
+    def search(self, title: str, system: str = "", limit: int = 10) -> List[dict]:
+        normalized_title = _clean_rom_title(title or "")
+        if not normalized_title:
+            return []
+        search_url = f"{self.BASE_URL}/search.php?name={quote(normalized_title, safe='')}"
+        text = self._get_text(search_url)
+        cards = []
+        for match in re.finditer(r'<a\s+href="\./game\.php\?id=(\d+)">(.*?)(?=<div class="col-6 col-md-2">|</div>\s*</div>\s*</div>\s*</div>)', text, flags=re.DOTALL):
+            game_id = match.group(1)
+            card_html = match.group(2)
+            title_match = re.search(r'<div class="card-footer.*?</div>', card_html, flags=re.DOTALL)
+            footer = title_match.group(0) if title_match else card_html
+            paragraphs = [
+                re.sub(r"\s+", " ", html.unescape(re.sub(r"<.*?>", " ", item))).strip()
+                for item in re.findall(r"<p[^>]*>(.*?)</p>", footer, flags=re.DOTALL)
+            ]
+            game_title = paragraphs[0] if paragraphs else title
+            platform = paragraphs[-1] if paragraphs else ""
+            score = 0
+            expected_platform = _launchbox_platform_for_system(system) or system
+            if expected_platform and platform and expected_platform.lower() in platform.lower():
+                score -= 20
+            if game_title.lower() == normalized_title.lower():
+                score -= 10
+            thumb_match = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', card_html, flags=re.DOTALL)
+            thumbnail_url = html.unescape(thumb_match.group(1)) if thumb_match else ""
+            if thumbnail_url.startswith("./"):
+                thumbnail_url = f"{self.BASE_URL}/{thumbnail_url[2:]}"
+            cards.append(
+                {
+                    "game_id": game_id,
+                    "name": game_title,
+                    "title": game_title,
+                    "platform": platform,
+                    "thumbnail_url": thumbnail_url,
+                    "details_url": f"{self.BASE_URL}/game.php?id={game_id}",
+                    "_score": score,
+                }
+            )
+        cards.sort(key=lambda item: (item["_score"], item["title"].lower(), item["platform"].lower()))
+        return [{key: value for key, value in item.items() if key != "_score"} for item in cards[: max(1, min(limit, 10))]]
+
+    def details(self, game_id: str) -> dict:
+        normalized_id = str(game_id or "").strip()
+        if not normalized_id.isdigit():
+            raise ValueError("game_id is required")
+        text = self._get_text(f"{self.BASE_URL}/game.php?id={quote(normalized_id, safe='')}")
+        title_match = re.search(r"<h1[^>]*>(.*?)</h1>", text, flags=re.DOTALL)
+        overview_match = re.search(r'<p[^>]+class=["\'][^"\']*game-overview[^"\']*["\'][^>]*>(.*?)</p>', text, flags=re.DOTALL)
+        metadata = {
+            "game_id": normalized_id,
+            "name": self._strip_tags(title_match.group(1)) if title_match else "",
+            "overview": self._strip_tags(overview_match.group(1)) if overview_match else "",
+        }
+        meta_patterns = {
+            "developer": r"Developers?\(s\):\s*(?:</strong>)?\s*(.*?)(?:</p>|<br\s*/?>)",
+            "publisher": r"Publishers?\(s\):\s*(?:</strong>)?\s*(.*?)(?:</p>|<br\s*/?>)",
+            "release_date": r"Release\s*Date:\s*(?:</strong>)?\s*(.*?)(?:</p>|<br\s*/?>)",
+            "players": r"Players:\s*(?:</strong>)?\s*(.*?)(?:</p>|<br\s*/?>)",
+            "rating": r"ESRB Rating:\s*(?:</strong>)?\s*(.*?)(?:</p>|<br\s*/?>)",
+            "genre": r"Genre\(s\):\s*(?:</strong>)?\s*(.*?)(?:</p>|<br\s*/?>)",
+        }
+        for key, pattern in meta_patterns.items():
+            match = re.search(pattern, text, flags=re.DOTALL | re.IGNORECASE)
+            if match:
+                metadata[key] = self._strip_tags(match.group(1))
+        output = []
+        seen = set()
+        for image_url in re.findall(r'href=["\'](https://cdn\.thegamesdb\.net/images/original/[^"\']+)["\']', text):
+            image_url = html.unescape(image_url)
+            if image_url in seen:
+                continue
+            seen.add(image_url)
+            image_type = "artwork"
+            path = urlparse(image_url).path.lower()
+            if "/boxart/front/" in path:
+                image_type = "boxart front"
+            elif "/boxart/back/" in path:
+                image_type = "boxart back"
+            elif "/fanart/" in path:
+                image_type = "fanart"
+            elif "/clearlogo/" in path:
+                image_type = "clearlogo"
+            elif "/graphical/" in path or "/banner/" in path or "/banners/" in path:
+                image_type = "banner"
+            elif "/screenshot/" in path or "/screenshots/" in path:
+                image_type = "screenshot"
+            elif "/titlescreen/" in path:
+                image_type = "titlescreen"
+            thumbnail_url = image_url.replace("/images/original/", "/images/thumb/")
+            if any(part in path for part in ("/fanart/", "/screenshot/", "/screenshots/", "/titlescreen/", "/graphical/", "/banner/", "/banners/")):
+                thumbnail_url = image_url.replace("/images/original/", "/images/cropped_center_thumb/")
+            output.append(
+                {
+                    "url": image_url,
+                    "image_url": image_url,
+                    "thumbnail_url": thumbnail_url,
+                    "type": image_type,
+                    "file_name": Path(urlparse(image_url).path).name,
+                }
+            )
+        metadata["images"] = output
+        return metadata
+
+    def choose_image_for_field(self, details: dict, field: str) -> Optional[dict]:
+        images = details.get("images") if isinstance(details, dict) else []
+        if not isinstance(images, list):
+            return None
+        preferred = {
+            "boxart": ("boxart front",),
+            "fanart": ("fanart",),
+            "marquee": ("clearlogo", "banner"),
+            "image": ("screenshot", "titlescreen", "fanart", "boxart front"),
+            "thumbnail": ("screenshot", "titlescreen", "boxart front", "fanart"),
+        }.get(field, ())
+        for image_type in preferred:
+            for image in images:
+                if str(image.get("type") or "").lower() == image_type:
+                    return image
+        return None
+
+    def download_image(self, url: str) -> Tuple[bytes, str]:
+        parsed = urlparse(str(url or ""))
+        if parsed.scheme != "https" or parsed.netloc != self.CDN_HOST:
+            raise ValueError("image_url must be a TheGamesDB CDN URL")
+        request = Request(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36"},
+        )
+        with urlopen(request, timeout=self.timeout_seconds) as response:
+            content_type = response.headers.get_content_type()
+            if not str(content_type or "").startswith("image/"):
+                raise ValueError("image_url did not return an image")
+            max_bytes = 20 * 1024 * 1024
+            data = response.read(max_bytes + 1)
+            if len(data) > max_bytes:
+                raise ValueError("image is too large")
+            return data, content_type
 
 
 @dataclass(frozen=True)
@@ -1302,6 +1464,71 @@ class RomRepository:
             "is_downloadable": target_path.is_file(),
         }
 
+    def apply_remote_artwork(
+        self,
+        system: str,
+        unique_id: str,
+        rom_path: Optional[str],
+        field: str,
+        image_data: bytes,
+        content_type: str,
+        source_url: str,
+        source_label: str = "remote",
+    ) -> dict:
+        if field not in ARTWORK_FIELDS:
+            raise ValueError("invalid artwork field")
+        system_dir = self.get_system_dir(system)
+        rom = self.find_rom_by_path(system, rom_path) if rom_path else self.find_rom_by_unique_id(system, unique_id)
+        tree, root = self._read_gamelist(system_dir)
+        rom_name = str(rom.get("rom_file") or rom.get("rom_name") or rom.get("name") or "")
+        normalized_rom_path = str(rom.get("rom_path") or rom_path or rom_name)
+        display_name = str(rom.get("image_stem") or rom.get("name") or Path(normalized_rom_path).stem)
+        game = self._find_gamelist_entry_by_path(root, normalized_rom_path) or self._find_gamelist_entry(root, rom_name, display_name)
+        if game is None:
+            game = ET.SubElement(root, "game")
+            _set_child_text(game, "path", f"./{normalized_rom_path}")
+            _set_child_text(game, "name", _clean_rom_title(display_name))
+
+        parsed_suffix = Path(urlparse(source_url).path).suffix.lower()
+        if parsed_suffix not in (".png", ".jpg", ".jpeg", ".webp", ".gif"):
+            parsed_suffix = {
+                "image/png": ".png",
+                "image/jpeg": ".jpg",
+                "image/webp": ".webp",
+                "image/gif": ".gif",
+            }.get(content_type, ".jpg")
+        images_dir = system_dir / "images"
+        images_dir.mkdir(parents=True, exist_ok=True)
+        safe_stem = re.sub(r"[^a-zA-Z0-9._-]+", "-", Path(display_name).stem).strip("-") or "rom"
+        safe_label = re.sub(r"[^a-zA-Z0-9._-]+", "-", source_label).strip("-") or "remote"
+        target_path = images_dir / f"{safe_stem}-{safe_label}-{field}{parsed_suffix}"
+        target_path.write_bytes(image_data)
+        relative_path = _relative_artwork_path(system_dir, target_path)
+        _set_child_text(game, field, relative_path)
+
+        gamelist_path = system_dir / "gamelist.xml"
+        try:
+            ET.indent(tree, space="  ")
+        except Exception:
+            pass
+        tree.write(gamelist_path, encoding="utf-8", xml_declaration=True)
+        with gamelist_path.open("a", encoding="utf-8") as handle:
+            handle.write("\n")
+        with self._missing_artwork_cache_lock:
+            self._missing_artwork_cache.clear()
+
+        return {
+            "system": system,
+            "unique_id": unique_id,
+            "rom_name": rom_name or display_name,
+            "rom_path": normalized_rom_path,
+            "updated": [{"field": field, "path": relative_path, "source_url": source_url}],
+            "missing": self._entry_missing_artwork(game),
+            "existing": {item: _text_or_empty(game, item) for item in ARTWORK_FIELDS},
+            "gamelist": _gamelist_details(game),
+            "has_gamelist_entry": True,
+        }
+
     def apply_launchbox_artwork(
         self,
         system: str,
@@ -1408,6 +1635,116 @@ class RomRepository:
             },
             "updated": updated,
             "skipped": skipped,
+        }
+
+    def apply_thegamesdb_artwork(
+        self,
+        system: str,
+        unique_id: str,
+        game_id: str,
+        scraper: TheGamesDBScraper,
+        rom_path: Optional[str] = None,
+        override_existing: bool = False,
+        import_metadata: bool = True,
+    ) -> dict:
+        system_dir = self.get_system_dir(system)
+        rom = self.find_rom_by_path(system, rom_path) if rom_path else self.find_rom_by_unique_id(system, unique_id)
+        tree, root = self._read_gamelist(system_dir)
+        rom_name = str(rom.get("rom_file") or rom.get("rom_name") or rom.get("name") or "")
+        normalized_rom_path = str(rom.get("rom_path") or rom_path or rom_name)
+        display_name = str(rom.get("image_stem") or rom.get("name") or Path(normalized_rom_path).stem)
+        game = self._find_gamelist_entry_by_path(root, normalized_rom_path) or self._find_gamelist_entry(root, rom_name, display_name)
+        if game is None:
+            game = ET.SubElement(root, "game")
+            _set_child_text(game, "path", f"./{normalized_rom_path}")
+            _set_child_text(game, "name", _clean_rom_title(display_name))
+
+        fields_to_fetch = list(ARTWORK_FIELDS) if override_existing else self._entry_missing_artwork(game)
+        details = scraper.details(game_id)
+        images_dir = system_dir / "images"
+        images_dir.mkdir(parents=True, exist_ok=True)
+        safe_stem = re.sub(r"[^a-zA-Z0-9._-]+", "-", Path(display_name).stem).strip("-") or "rom"
+        updated = []
+        skipped = []
+
+        if import_metadata and details:
+            meta_fields_map = {
+                "name": details.get("name"),
+                "desc": details.get("overview"),
+                "releasedate": details.get("release_date"),
+                "genre": details.get("genre"),
+                "developer": details.get("developer"),
+                "publisher": details.get("publisher"),
+                "players": details.get("players"),
+                "rating": details.get("rating"),
+            }
+            for mfield, mvalue in meta_fields_map.items():
+                if not mvalue:
+                    continue
+                existing_value = _text_or_empty(game, mfield)
+                if override_existing or not existing_value:
+                    _set_child_text(game, mfield, str(mvalue))
+                    updated.append({"field": mfield, "value": str(mvalue), "source": "thegamesdb_metadata"})
+
+        for field in fields_to_fetch:
+            selected = scraper.choose_image_for_field(details, field)
+            if not selected:
+                skipped.append(field)
+                continue
+            source_url = str(selected.get("url") or selected.get("image_url") or "")
+            try:
+                data, content_type = scraper.download_image(source_url)
+            except Exception:
+                skipped.append(field)
+                continue
+            source_suffix = Path(str(selected.get("file_name") or urlparse(source_url).path)).suffix.lower()
+            if source_suffix not in (".png", ".jpg", ".jpeg", ".webp", ".gif"):
+                source_suffix = {
+                    "image/png": ".png",
+                    "image/jpeg": ".jpg",
+                    "image/webp": ".webp",
+                    "image/gif": ".gif",
+                }.get(content_type, ".jpg")
+            target_path = images_dir / f"{safe_stem}-thegamesdb-{field}{source_suffix}"
+            target_path.write_bytes(data)
+            relative_path = _relative_artwork_path(system_dir, target_path)
+            _set_child_text(game, field, relative_path)
+            updated.append(
+                {
+                    "field": field,
+                    "path": relative_path,
+                    "source_url": source_url,
+                    "type": selected.get("type"),
+                }
+            )
+
+        if updated:
+            gamelist_path = system_dir / "gamelist.xml"
+            try:
+                ET.indent(tree, space="  ")
+            except Exception:
+                pass
+            tree.write(gamelist_path, encoding="utf-8", xml_declaration=True)
+            with gamelist_path.open("a", encoding="utf-8") as handle:
+                handle.write("\n")
+            with self._missing_artwork_cache_lock:
+                self._missing_artwork_cache.clear()
+
+        return {
+            "system": system,
+            "unique_id": unique_id,
+            "rom_name": rom_name or display_name,
+            "rom_path": normalized_rom_path,
+            "thegamesdb": {
+                "game_id": details.get("game_id"),
+                "name": details.get("name"),
+            },
+            "updated": updated,
+            "skipped": skipped,
+            "missing": self._entry_missing_artwork(game),
+            "existing": {item: _text_or_empty(game, item) for item in ARTWORK_FIELDS},
+            "gamelist": _gamelist_details(game),
+            "has_gamelist_entry": True,
         }
 
     def list_assets(self, system: str, asset_type: str) -> Tuple[Path, List[dict]]:
@@ -1859,7 +2196,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         self.wfile.write(json_bytes({"error": "unauthorized"}))
 
     def _send_security_headers(self) -> None:
-        image_sources = ["'self'", "data:", "https://images.launchbox-app.com"]
+        image_sources = ["'self'", "data:", "https:"]
         if self.settings.use_fake_data:
             image_sources.append("https:")
             fake_base = (self.settings.fake_image_base_url or "").strip()
@@ -2763,6 +3100,62 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         result["metadata_imported"] = import_metadata
         self._send_json(200, result)
 
+    def _handle_admin_thegamesdb_artwork_search(self, system: str, rom_id: str, rom_path: str, query: str) -> None:
+        system_value = (system or "").strip()
+        rom_id_value = (rom_id or "").strip()
+        rom_path_value = _normalize_gamelist_rom_path(rom_path)
+        query_value = (query or "").strip()
+        title_value = query_value
+        if system_value and not title_value and (rom_path_value or rom_id_value):
+            rom = self.repository.find_rom_by_path(system_value, rom_path_value) if rom_path_value else self.repository.find_rom_by_unique_id(system_value, rom_id_value)
+            title_value = str(rom.get("image_stem") or rom.get("name") or "")
+        title_value = _clean_rom_title(title_value)
+        if not title_value:
+            raise ValueError("q or system+rom_id/rom_path is required")
+        scraper = TheGamesDBScraper()
+        matches = scraper.search(title_value, system=system_value, limit=10)
+        self._send_json(
+            200,
+            {
+                "query": title_value,
+                "system": system_value,
+                "rom_id": rom_id_value,
+                "rom_path": rom_path_value,
+                "matches": matches,
+                "fields": list(ARTWORK_FIELDS),
+            },
+        )
+
+    def _handle_admin_thegamesdb_artwork_apply(self, payload: dict) -> None:
+        system = str(payload.get("system") or "").strip()
+        rom_id = str(payload.get("rom_id") or payload.get("unique_id") or "").strip()
+        rom_path = _normalize_gamelist_rom_path(str(payload.get("rom_path") or ""))
+        game_id = str(payload.get("game_id") or "").strip()
+        override_existing = bool(payload.get("override_existing", False))
+        import_metadata = bool(payload.get("import_metadata", True))
+        if not system:
+            raise ValueError("system is required")
+        if not rom_id and not rom_path:
+            raise ValueError("rom_id or rom_path is required")
+        if not game_id:
+            raise ValueError("game_id is required")
+        scraper = TheGamesDBScraper()
+        result = self.repository.apply_thegamesdb_artwork(
+            system,
+            rom_id,
+            game_id,
+            scraper,
+            rom_path=rom_path or None,
+            override_existing=override_existing,
+            import_metadata=import_metadata,
+        )
+        with self.repository._search_cache_lock:
+            self.repository._search_index_expires_at = 0
+        result["source"] = "thegamesdb"
+        result["override_existing"] = override_existing
+        result["metadata_imported"] = len([item for item in result.get("updated", []) if str(item.get("source") or "") == "thegamesdb_metadata"])
+        self._send_json(200, result)
+
     def _handle_admin_artwork_upload(self) -> None:
         import urllib.parse
         content_type = self.headers.get("Content-Type", "")
@@ -2895,7 +3288,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             "field": field_name,
             "path": str(dest_path),
             "relative_path": relative_path,
-            "url": api_url(f"/systems/{quote(system)}/images/{quote(dest_filename)}"),
+            "url": api_url(f"/public/systems/{quote(system, safe='')}/images/{quote(dest_filename, safe='')}"),
             "existing": existing,
             "missing": missing,
             "gamelist": gamelist_details,
@@ -3051,8 +3444,9 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         if self.settings.use_fake_data:
             self._redirect_to_fake_image(seed=f"{system}-{image_ref}", width=640, height=360)
             return
+        system = valid_segment(unquote(system))
         system_dir = self.repository.get_system_dir(system)
-        image_ref = valid_segment(image_ref)
+        image_ref = valid_segment(unquote(image_ref))
         images_dir = (system_dir / "images").resolve()
 
         image_path = (images_dir / image_ref).resolve()

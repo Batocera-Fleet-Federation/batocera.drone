@@ -11,26 +11,43 @@
   <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
   <style>
     :root {
-      --admin-bg: #f2f5fa;
-      --admin-surface: #ffffff;
-      --admin-surface-muted: #f8f9fc;
-      --admin-border: #e3e6f0;
-      --admin-sidebar: #24406c;
-      --admin-sidebar-accent: #4e73df;
-      --admin-text: #1f2937;
-      --admin-muted: #6b7280;
+      --admin-bg: #101828;
+      --admin-surface: #151f32;
+      --admin-surface-muted: #1f2a44;
+      --admin-border: #31405f;
+      --admin-sidebar: #0b1020;
+      --admin-sidebar-accent: #00c2ff;
+      --admin-accent-hot: #ff3ea5;
+      --admin-accent-coin: #ffbf3f;
+      --admin-accent-green: #34d399;
+      --admin-text: #ecf6ff;
+      --admin-muted: #9fb0c9;
     }
 	    body {
-	      background: radial-gradient(circle at top right, #dbe6ff 0%, #f2f5fa 45%, #eef2f8 100%);
+	      background:
+          linear-gradient(rgba(255,255,255,0.035) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(255,255,255,0.035) 1px, transparent 1px),
+          radial-gradient(circle at 20% 0%, rgba(255, 62, 165, 0.28) 0%, transparent 32%),
+          radial-gradient(circle at 88% 12%, rgba(0, 194, 255, 0.22) 0%, transparent 34%),
+          #101828;
 	      background-attachment: fixed;
-	      background-size: cover;
+	      background-size: 42px 42px, 42px 42px, cover, cover, cover;
 	      min-height: 100vh;
 	      color: var(--admin-text);
 	      font-family: "Nunito", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 	    }
-    .layout-shell { min-height: 100vh; }
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 0;
+      background: repeating-linear-gradient(180deg, rgba(255,255,255,0.035), rgba(255,255,255,0.035) 1px, transparent 1px, transparent 4px);
+      opacity: 0.35;
+    }
+    .layout-shell { position: relative; z-index: 1; }
     .sidebar {
-      background: linear-gradient(180deg, #224abe 0%, var(--admin-sidebar) 100%);
+      background: linear-gradient(180deg, #111936 0%, var(--admin-sidebar) 100%);
       color: #fff;
       min-height: 100vh;
       border-right: 1px solid rgba(255, 255, 255, 0.14);
@@ -44,8 +61,9 @@
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      background: rgba(255, 255, 255, 0.14);
-      border: 1px solid rgba(255, 255, 255, 0.24);
+      background: rgba(0, 194, 255, 0.15);
+      border: 1px solid rgba(0, 194, 255, 0.55);
+      box-shadow: 0 0 18px rgba(0, 194, 255, 0.24);
     }
     .menu-label {
       font-size: 0.72rem;
@@ -70,7 +88,7 @@
       color: #fff;
     }
     .topbar {
-      background: rgba(255, 255, 255, 0.9);
+      background: rgba(21, 31, 50, 0.86);
       border: 1px solid var(--admin-border);
       border-radius: 0.75rem;
       box-shadow: 0 0.15rem 1rem rgba(58, 59, 69, 0.08);
@@ -78,7 +96,7 @@
       backdrop-filter: blur(10px);
     }
     .app-shell {
-      background: rgba(255, 255, 255, 0.86);
+      background: rgba(21, 31, 50, 0.84);
       border: 1px solid var(--admin-border);
       border-radius: 0.75rem;
       box-shadow: 0 0.15rem 1rem rgba(58, 59, 69, 0.08);
@@ -86,8 +104,41 @@
     }
     .nav-actions .btn { white-space: nowrap; }
     .card, .input-group .form-control, .input-group .input-group-text, .input-group .btn, footer, .form-select {
-      background: rgba(255, 255, 255, 0.9);
+      background: rgba(21, 31, 50, 0.9);
       border-color: var(--admin-border);
+      color: var(--admin-text);
+    }
+    .form-control,
+    .form-select,
+    .list-group-item,
+    .dropdown-menu {
+      background-color: rgba(21, 31, 50, 0.92);
+      border-color: var(--admin-border);
+      color: var(--admin-text);
+    }
+    .form-control:focus,
+    .form-select:focus {
+      background-color: rgba(21, 31, 50, 0.98);
+      border-color: var(--admin-sidebar-accent);
+      color: var(--admin-text);
+      box-shadow: 0 0 0 0.18rem rgba(0, 194, 255, 0.18);
+    }
+    .list-group-item-action:hover,
+    .list-group-item-action:focus {
+      background-color: rgba(0, 194, 255, 0.12);
+      color: var(--admin-text);
+    }
+    .nav-tabs {
+      border-bottom-color: var(--admin-border);
+    }
+    .nav-tabs .nav-link {
+      color: var(--admin-muted);
+      border-color: transparent;
+    }
+    .nav-tabs .nav-link.active {
+      color: var(--admin-text);
+      background-color: rgba(0, 194, 255, 0.12);
+      border-color: var(--admin-border) var(--admin-border) rgba(21, 31, 50, 0.92);
     }
     .input-group .form-control,
     .input-group .input-group-text {
@@ -96,18 +147,26 @@
     }
     .text-muted { color: var(--admin-muted) !important; }
     .card-title, .fw-semibold, h1, h2, h3 { color: var(--admin-text); }
-    .form-control::placeholder { color: #9aa3b2; }
+    .form-control::placeholder { color: #73849e; }
     .btn-outline-secondary, .btn-outline-primary {
-      color: #4b5563;
+      color: #c8d7ee;
       border-color: var(--admin-border);
+    }
+    .btn-outline-secondary:hover, .btn-outline-primary:hover {
+      background: rgba(0, 194, 255, 0.12);
+      border-color: var(--admin-sidebar-accent);
+      color: #fff;
     }
     .btn-primary {
       background: var(--admin-sidebar-accent);
       border-color: var(--admin-sidebar-accent);
+      color: #06111f;
+      font-weight: 800;
     }
     .btn-primary:hover {
-      background: #2e59d9;
-      border-color: #2e59d9;
+      background: var(--admin-accent-hot);
+      border-color: var(--admin-accent-hot);
+      color: #fff;
     }
     a { color: var(--admin-sidebar-accent); }
     a:hover { color: #3559bc; }
@@ -125,7 +184,7 @@
       width: 100%;
       min-width: 260px;
       max-width: 100%;
-      background: rgba(255, 255, 255, 0.96);
+      background: rgba(21, 31, 50, 0.96);
       border: 1px solid var(--admin-border);
       padding: 0.6rem;
       z-index: 2000;
@@ -147,27 +206,27 @@
       color: var(--admin-text) !important;
     }
     .log-card .card-header {
-      background: rgba(248, 249, 252, 0.86);
+      background: rgba(31, 42, 68, 0.86);
       border-color: var(--admin-border);
     }
     .log-card .list-group-item {
-      background: rgba(255, 255, 255, 0.82);
+      background: rgba(21, 31, 50, 0.82);
       border-color: var(--admin-border);
     }
     .log-card .list-group-item:hover,
     .log-card .list-group-item:focus {
-      background: #edf2ff;
+      background: rgba(0, 194, 255, 0.12);
       color: var(--admin-text) !important;
     }
     .log-card .list-group-item.active {
-      background: #d9e4ff;
-      border-color: #b4c7fb;
+      background: rgba(255, 62, 165, 0.18);
+      border-color: rgba(255, 62, 165, 0.48);
       color: var(--admin-text) !important;
     }
     .log-lines-select {
       width: 130px;
       display: inline-block;
-      background: #fff;
+      background: var(--admin-surface);
       color: var(--admin-text);
       border: 1px solid var(--admin-border);
     }
@@ -180,9 +239,9 @@
       color: var(--admin-muted);
     }
     #systemInfoBar .badge {
-      background: #eef2ff;
-      color: #334155;
-      border: 1px solid #dbe2ff;
+      background: rgba(0, 194, 255, 0.12);
+      color: #d7f4ff;
+      border: 1px solid rgba(0, 194, 255, 0.26);
       font-weight: 500;
       padding: 0.38rem 0.58rem;
     }
@@ -190,16 +249,16 @@
       display: none !important;
     }
     .artwork-page .app-shell {
-      background: rgba(255, 255, 255, 0.66);
+      background: rgba(21, 31, 50, 0.72);
       min-height: calc(100vh - 2rem);
     }
     .artwork-page .log-card,
     .artwork-page .admin-tile {
-      background: rgba(255, 255, 255, 0.58);
+      background: rgba(21, 31, 50, 0.72);
       backdrop-filter: blur(12px);
     }
     .artwork-page .log-card .card-header {
-      background: rgba(248, 249, 252, 0.58);
+      background: rgba(31, 42, 68, 0.72);
     }
     .artwork-page .artwork-filter-panel {
       overflow: visible;
@@ -211,7 +270,7 @@
       z-index: 1;
     }
     .artwork-page .filter-dropdown-menu {
-      background: rgba(255, 255, 255, 0.94);
+      background: rgba(21, 31, 50, 0.94);
       z-index: 6000;
     }
     .artwork-page .dropdown {
@@ -224,7 +283,7 @@
       background-color: transparent;
     }
     .artwork-page .table-light th {
-      background-color: rgba(248, 249, 252, 0.48);
+      background-color: rgba(31, 42, 68, 0.72);
     }
     .gamelist-details {
       max-height: 330px;
@@ -412,6 +471,63 @@
       align-items: center;
       justify-content: center;
       border-radius: 0.25rem;
+    }
+    .match-thumb {
+      width: 56px;
+      height: 56px;
+      object-fit: cover;
+      background: #090d18;
+      border: 1px solid var(--admin-border);
+      border-radius: 0.35rem;
+    }
+    .match-thumb-placeholder {
+      width: 56px;
+      height: 56px;
+      background: #090d18;
+      border: 1px solid var(--admin-border);
+      border-radius: 0.35rem;
+    }
+    .marquee-source-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0.4rem;
+    }
+    .cropper-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 99991;
+      background: rgba(2, 6, 23, 0.86);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 1rem;
+    }
+    .cropper-panel {
+      width: min(920px, 100%);
+      max-height: 94vh;
+      overflow: auto;
+      background: var(--admin-surface);
+      border: 1px solid var(--admin-border);
+      border-radius: 0.5rem;
+      box-shadow: 0 1rem 3rem rgba(0,0,0,0.45);
+      padding: 1rem;
+    }
+    .marquee-crop-canvas {
+      width: 100%;
+      max-height: 520px;
+      background: #050814;
+      border: 1px solid var(--admin-border);
+      border-radius: 0.35rem;
+      cursor: move;
+      touch-action: none;
+    }
+    .cropper-preview {
+      width: 100%;
+      aspect-ratio: 4 / 1;
+      object-fit: contain;
+      background: #050814;
+      border: 1px solid var(--admin-border);
+      border-radius: 0.35rem;
     }
     @media (max-width: 575.98px) {
       .gamelist-edit-grid {
@@ -2052,12 +2168,27 @@ function artworkExistingImageUrl(rom, value) {
     ? normalized.substring(imagePrefix.length)
     : normalized.split("/").pop();
   if (!imageFile) return raw;
-  return `${API_BASE}/systems/${encodeURIComponent(rom.system || "")}/images/${encodeURIComponent(imageFile)}`;
+  return `${API_BASE}/public/systems/${encodeURIComponent(rom.system || "")}/images/${encodeURIComponent(imageFile)}`;
 }
 function artworkEditableImageFields(rom) {
   const fieldSet = new Set(rom.missing || []);
   const withExisting = new Set(GAMELIST_EDIT_FIELDS.filter(f => ["image","thumbnail","marquee","fanart","boxart","video"].includes(f)));
   return `<div class="artwork-upload-grid">${Array.from(withExisting).map(f => artworkImageUploadHtml(rom, f)).join("")}</div>`;
+}
+function artworkMarqueeCropperHtml(rom) {
+  const fields = ["image", "thumbnail", "fanart", "boxart", "marquee"];
+  const buttons = fields.map((field) => {
+    const existingValue = rom.existing && rom.existing[field] ? rom.existing[field] : "";
+    const url = artworkExistingImageUrl(rom, existingValue);
+    if (!url) return "";
+    return `
+      <button class="btn btn-sm btn-outline-primary marquee-crop-source-btn" type="button" data-source-field="${escapeHtml(field)}" data-image-url="${escapeHtml(url)}">
+        <i class="bi bi-crop me-1"></i>${escapeHtml(field)}
+      </button>
+    `;
+  }).filter(Boolean).join("");
+  if (!buttons) return `<div class="text-muted small">Add or import an image, fanart, boxart, or thumbnail first.</div>`;
+  return `<div class="marquee-source-grid">${buttons}</div>`;
 }
 function artworkMetadataEditFields(rom) {
   const details = rom.gamelist || {};
@@ -2084,7 +2215,7 @@ function setArtworkSelectedRomHash(index) {
   }
 }
 // Upload image for a given field
-function bindArtworkEditButtons(rom) {
+function bindArtworkEditButtons(rom, index) {
   document.querySelectorAll(".artwork-upload-btn").forEach((button) => {
     button.addEventListener("click", () => {
       uploadArtworkImage(rom, button.getAttribute("data-field") || "", button);
@@ -2093,6 +2224,11 @@ function bindArtworkEditButtons(rom) {
   document.querySelectorAll(".artwork-view-btn").forEach((button) => {
     button.addEventListener("click", () => {
       showImageLightbox(button.getAttribute("data-image-url") || "", button.getAttribute("data-image-title") || "");
+    });
+  });
+  document.querySelectorAll(".marquee-crop-source-btn").forEach((button) => {
+    button.addEventListener("click", () => {
+      openMarqueeCropper(index, button.getAttribute("data-image-url") || "", button.getAttribute("data-source-field") || "image");
     });
   });
 }
@@ -2137,6 +2273,196 @@ async function uploadArtworkImage(rom, field, btnEl) {
     btnEl.innerHTML = `<i class="bi bi-upload"></i>`;
   }
 }
+function openMarqueeCropper(rowIndex, sourceUrl, sourceLabel) {
+  const rom = (window.missingArtworkRoms || [])[rowIndex];
+  if (!rom || !sourceUrl) return;
+  const existing = document.getElementById("marqueeCropperOverlay");
+  if (existing) existing.remove();
+  const overlay = document.createElement("div");
+  overlay.className = "cropper-overlay";
+  overlay.id = "marqueeCropperOverlay";
+  overlay.innerHTML = `
+    <div class="cropper-panel">
+      <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+        <div>
+          <div class="fw-semibold">Crop Marquee</div>
+          <div class="text-muted small">${escapeHtml(rom.title || rom.name || "Selected ROM")} · ${escapeHtml(sourceLabel)}</div>
+        </div>
+        <button class="btn btn-sm btn-outline-secondary" type="button" id="marqueeCropClose"><i class="bi bi-x-lg"></i></button>
+      </div>
+      <canvas id="marqueeCropCanvas" class="marquee-crop-canvas" width="860" height="520"></canvas>
+      <div class="row g-2 align-items-center mt-2">
+        <div class="col-12 col-md-8">
+          <label class="form-label text-muted small mb-1" for="marqueeCropSize">Crop width</label>
+          <input id="marqueeCropSize" class="form-range" type="range" min="160" max="860" value="720">
+        </div>
+        <div class="col-12 col-md-4">
+          <img id="marqueeCropPreview" class="cropper-preview" alt="">
+        </div>
+      </div>
+      <div class="d-flex justify-content-end gap-2 mt-3">
+        <button class="btn btn-sm btn-outline-secondary" type="button" id="marqueeCropCancel">Cancel</button>
+        <button class="btn btn-sm btn-primary" type="button" id="marqueeCropSave"><i class="bi bi-save me-1"></i>Save Marquee</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  const canvas = overlay.querySelector("#marqueeCropCanvas");
+  const preview = overlay.querySelector("#marqueeCropPreview");
+  const sizeInput = overlay.querySelector("#marqueeCropSize");
+  const saveBtn = overlay.querySelector("#marqueeCropSave");
+  const close = () => overlay.remove();
+  overlay.querySelector("#marqueeCropClose").addEventListener("click", close);
+  overlay.querySelector("#marqueeCropCancel").addEventListener("click", close);
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay) close();
+  });
+
+  const ctx = canvas.getContext("2d");
+  const image = new Image();
+  image.crossOrigin = "anonymous";
+  const state = { scale: 1, offsetX: 0, offsetY: 0, crop: { x: 70, y: 180, w: 720, h: 180 }, drag: null };
+
+  function fitImage() {
+    const scale = Math.min(canvas.width / image.naturalWidth, canvas.height / image.naturalHeight);
+    state.scale = scale;
+    state.offsetX = (canvas.width - image.naturalWidth * scale) / 2;
+    state.offsetY = (canvas.height - image.naturalHeight * scale) / 2;
+    const maxW = Math.min(canvas.width - 40, image.naturalWidth * scale);
+    const cropW = Math.max(160, Math.min(maxW, Number(sizeInput.value || 720)));
+    state.crop.w = cropW;
+    state.crop.h = cropW / 4;
+    state.crop.x = (canvas.width - state.crop.w) / 2;
+    state.crop.y = (canvas.height - state.crop.h) / 2;
+    sizeInput.max = String(Math.floor(Math.min(canvas.width - 20, image.naturalWidth * scale)));
+    sizeInput.value = String(Math.floor(state.crop.w));
+  }
+  function clampCrop() {
+    state.crop.w = Math.max(160, Math.min(Number(sizeInput.max || 860), state.crop.w));
+    state.crop.h = state.crop.w / 4;
+    state.crop.x = Math.max(0, Math.min(canvas.width - state.crop.w, state.crop.x));
+    state.crop.y = Math.max(0, Math.min(canvas.height - state.crop.h, state.crop.y));
+  }
+  function draw() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "#050814";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(image, state.offsetX, state.offsetY, image.naturalWidth * state.scale, image.naturalHeight * state.scale);
+    ctx.fillStyle = "rgba(0,0,0,0.54)";
+    ctx.fillRect(0, 0, canvas.width, state.crop.y);
+    ctx.fillRect(0, state.crop.y + state.crop.h, canvas.width, canvas.height - state.crop.y - state.crop.h);
+    ctx.fillRect(0, state.crop.y, state.crop.x, state.crop.h);
+    ctx.fillRect(state.crop.x + state.crop.w, state.crop.y, canvas.width - state.crop.x - state.crop.w, state.crop.h);
+    ctx.strokeStyle = "#00c2ff";
+    ctx.lineWidth = 3;
+    ctx.strokeRect(state.crop.x, state.crop.y, state.crop.w, state.crop.h);
+    updatePreview();
+  }
+  function cropToSourceRect() {
+    return {
+      sx: Math.max(0, (state.crop.x - state.offsetX) / state.scale),
+      sy: Math.max(0, (state.crop.y - state.offsetY) / state.scale),
+      sw: Math.min(image.naturalWidth, state.crop.w / state.scale),
+      sh: Math.min(image.naturalHeight, state.crop.h / state.scale),
+    };
+  }
+  function updatePreview() {
+    const output = document.createElement("canvas");
+    output.width = 640;
+    output.height = 160;
+    const outCtx = output.getContext("2d");
+    const rect = cropToSourceRect();
+    outCtx.fillStyle = "#000";
+    outCtx.fillRect(0, 0, output.width, output.height);
+    outCtx.drawImage(image, rect.sx, rect.sy, rect.sw, rect.sh, 0, 0, output.width, output.height);
+    preview.src = output.toDataURL("image/png");
+  }
+  function pointerPosition(event) {
+    const bounds = canvas.getBoundingClientRect();
+    return {
+      x: (event.clientX - bounds.left) * (canvas.width / bounds.width),
+      y: (event.clientY - bounds.top) * (canvas.height / bounds.height),
+    };
+  }
+  canvas.addEventListener("pointerdown", (event) => {
+    const pos = pointerPosition(event);
+    if (pos.x < state.crop.x || pos.x > state.crop.x + state.crop.w || pos.y < state.crop.y || pos.y > state.crop.y + state.crop.h) return;
+    state.drag = { startX: pos.x, startY: pos.y, cropX: state.crop.x, cropY: state.crop.y };
+    canvas.setPointerCapture(event.pointerId);
+  });
+  canvas.addEventListener("pointermove", (event) => {
+    if (!state.drag) return;
+    const pos = pointerPosition(event);
+    state.crop.x = state.drag.cropX + pos.x - state.drag.startX;
+    state.crop.y = state.drag.cropY + pos.y - state.drag.startY;
+    clampCrop();
+    draw();
+  });
+  canvas.addEventListener("pointerup", () => { state.drag = null; });
+  sizeInput.addEventListener("input", () => {
+    const centerX = state.crop.x + state.crop.w / 2;
+    const centerY = state.crop.y + state.crop.h / 2;
+    state.crop.w = Number(sizeInput.value || 720);
+    state.crop.h = state.crop.w / 4;
+    state.crop.x = centerX - state.crop.w / 2;
+    state.crop.y = centerY - state.crop.h / 2;
+    clampCrop();
+    draw();
+  });
+  saveBtn.addEventListener("click", async () => {
+    saveBtn.disabled = true;
+    saveBtn.innerHTML = `<span class="spinner-border spinner-border-sm"></span>`;
+    setLoading(true, "Saving marquee crop...");
+    try {
+      const output = document.createElement("canvas");
+      output.width = 1280;
+      output.height = 320;
+      const outCtx = output.getContext("2d");
+      const rect = cropToSourceRect();
+      outCtx.fillStyle = "#000";
+      outCtx.fillRect(0, 0, output.width, output.height);
+      outCtx.drawImage(image, rect.sx, rect.sy, rect.sw, rect.sh, 0, 0, output.width, output.height);
+      const blob = await new Promise((resolve) => output.toBlob(resolve, "image/png"));
+      if (!blob) throw new Error("Could not render crop");
+      const formData = new FormData();
+      formData.append("file", new File([blob], "marquee.png", { type: "image/png" }));
+      formData.append("field", "marquee");
+      formData.append("system", rom.system || "");
+      formData.append("rom_id", rom.unique_id || "");
+      formData.append("rom_path", rom.rom_path || "");
+      const res = await fetch(`${API_BASE}/admin/artwork/upload`, { method: "POST", credentials: "same-origin", body: formData });
+      if (!res.ok) {
+        let msg = `Upload failed: ${res.status}`;
+        try { const d = await res.json(); if (d.error) msg = d.error; } catch(_) {}
+        throw new Error(msg);
+      }
+      const result = await res.json();
+      rom.existing = result.existing || rom.existing || {};
+      rom.gamelist = result.gamelist || rom.gamelist || {};
+      rom.missing = result.missing || rom.missing || [];
+      rom.has_gamelist_entry = result.has_gamelist_entry !== undefined ? !!result.has_gamelist_entry : rom.has_gamelist_entry;
+      showToast(`Saved marquee for ${escapeHtml(result.rom_name || "ROM")}.`, "success");
+      close();
+      await selectArtworkRom(rowIndex, "edit");
+    } catch (err) {
+      showToast(`Marquee crop failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
+      saveBtn.disabled = false;
+      saveBtn.innerHTML = `<i class="bi bi-save me-1"></i>Save Marquee`;
+    } finally {
+      setLoading(false);
+    }
+  });
+  image.onload = () => {
+    fitImage();
+    draw();
+  };
+  image.onerror = () => {
+    showToast("Could not load image for cropping.", "danger");
+    close();
+  };
+  image.src = sourceUrl;
+}
 async function selectArtworkRom(index, activeTab = "matches") {
   const roms = window.missingArtworkRoms || [];
   const rom = roms[index];
@@ -2162,6 +2488,16 @@ async function selectArtworkRom(index, activeTab = "matches") {
           <div class="fw-semibold mb-2">LaunchBox Matches</div>
           <div id="launchboxMatches" class="mt-2"></div>
         </div>
+        <div class="border-top mt-3 pt-3">
+          <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+            <div>
+              <div class="fw-semibold">TheGamesDB Matches</div>
+              <div class="text-muted small" id="theGamesDBImageQuery"></div>
+            </div>
+            <button class="btn btn-sm btn-outline-primary" type="button" id="theGamesDBImageRefreshBtn">Refresh</button>
+          </div>
+          <div id="theGamesDBImageMatches" class="mt-2"></div>
+        </div>
       </div>
       <div class="tab-pane fade compact-edit" id="edit-panel" role="tabpanel" aria-labelledby="edit-tab">
         <div class="mb-2 d-flex justify-content-between align-items-center">
@@ -2176,6 +2512,10 @@ async function selectArtworkRom(index, activeTab = "matches") {
           <div class="compact-edit-section-title">Artwork Uploads</div>
           ${artworkEditableImageFields(rom)}
         </div>
+        <div class="mb-2">
+          <div class="compact-edit-section-title">Marquee Cropper</div>
+          ${artworkMarqueeCropperHtml(rom)}
+        </div>
       </div>
     </div>
   `;
@@ -2184,10 +2524,14 @@ async function selectArtworkRom(index, activeTab = "matches") {
   tabEls.forEach(el => {
     el.addEventListener('shown.bs.tab', () => { /* no-op */ });
   });
-  bindArtworkEditButtons(rom);
+  bindArtworkEditButtons(rom, index);
   // Switch to matches tab by default
-  const tabToShow = activeTab === "edit" ? document.getElementById("edit-tab") : document.getElementById("matches-tab");
+  const tabToShow = activeTab === "edit"
+    ? document.getElementById("edit-tab")
+    : document.getElementById("matches-tab");
   if (tabToShow) tabToShow.click();
+  const theGamesDBRefreshBtn = document.getElementById("theGamesDBImageRefreshBtn");
+  if (theGamesDBRefreshBtn) theGamesDBRefreshBtn.addEventListener("click", () => searchTheGamesDBImagesForRom(index, true));
   // Search LaunchBox for matches - query fresh from DOM since it was just created
   const matchesEl = document.getElementById("launchboxMatches");
   if (!matchesEl) return;
@@ -2235,6 +2579,96 @@ async function selectArtworkRom(index, activeTab = "matches") {
     matchesEl.innerHTML = `<div class="text-muted">LaunchBox matches could not be loaded.</div>`;
   } finally {
     setLoading(false);
+  }
+  await searchTheGamesDBImagesForRom(index, false);
+}
+async function searchTheGamesDBImagesForRom(index, forceRefresh = false) {
+  const rom = (window.missingArtworkRoms || [])[index];
+  const matchesEl = document.getElementById("theGamesDBImageMatches");
+  if (!rom || !matchesEl) return;
+  if (matchesEl.getAttribute("data-loaded") === "1" && !forceRefresh) return;
+  const queryEl = document.getElementById("theGamesDBImageQuery");
+  matchesEl.innerHTML = "";
+  setLoading(true, "Searching TheGamesDB matches...");
+  try {
+    const data = await api(`/admin/artwork/thegamesdb/search?system=${encodeURIComponent(rom.system || "")}&rom_id=${encodeURIComponent(rom.unique_id || "")}&rom_path=${encodeURIComponent(rom.rom_path || "")}&q=${encodeURIComponent(rom.search_title || rom.title || rom.name || "")}`);
+    const matches = data.matches || [];
+    if (queryEl) queryEl.textContent = data.query || "";
+    matchesEl.setAttribute("data-loaded", "1");
+    matchesEl.innerHTML = matches.length ? `
+      <div class="text-muted small mb-2">Imports missing artwork and fills empty metadata from the selected TheGamesDB page. Marquee uses clear logo first, then banner.</div>
+      <div class="list-group">
+        ${matches.map((match) => `
+          <button type="button" class="list-group-item list-group-item-action thegamesdb-match-btn" data-thegamesdb-game-id="${escapeHtml(String(match.game_id || ""))}">
+            <div class="d-flex gap-3 align-items-center">
+              ${match.thumbnail_url ? `<img class="match-thumb" src="${escapeHtml(match.thumbnail_url)}" alt="">` : `<div class="match-thumb-placeholder"></div>`}
+              <div>
+                <div class="fw-semibold">${escapeHtml(match.name || match.title || "")}</div>
+                <div class="text-muted small">${escapeHtml(match.platform || "unknown platform")}</div>
+              </div>
+            </div>
+          </button>
+        `).join("")}
+      </div>
+    ` : `<div class="text-muted">No TheGamesDB matches found.</div>`;
+    matchesEl.querySelectorAll(".thegamesdb-match-btn").forEach((button) => {
+      button.addEventListener("click", () => {
+        applyTheGamesDBArtwork(index, button.getAttribute("data-thegamesdb-game-id") || "", button);
+      });
+    });
+  } catch (err) {
+    showToast(`TheGamesDB search failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    matchesEl.innerHTML = `<div class="text-muted">TheGamesDB matches could not be loaded.</div>`;
+  } finally {
+    setLoading(false);
+  }
+}
+async function applyTheGamesDBArtwork(rowIndex, gameId, button) {
+  const rom = (window.missingArtworkRoms || [])[rowIndex];
+  if (!rom || !gameId) return;
+  const overrideCheckbox = document.getElementById("launchboxOverrideExisting");
+  const overrideExisting = overrideCheckbox ? overrideCheckbox.checked : false;
+  const originalHtml = button ? button.innerHTML : "";
+  if (button) {
+    button.disabled = true;
+    button.innerHTML = `<span class="spinner-border spinner-border-sm"></span>`;
+  }
+  setLoading(true, "Downloading TheGamesDB artwork and metadata...");
+  try {
+    const result = await apiPost("/admin/artwork/thegamesdb/apply", {
+      system: rom.system || "",
+      rom_id: rom.unique_id || "",
+      rom_path: rom.rom_path || "",
+      game_id: gameId,
+      override_existing: overrideExisting,
+      import_metadata: true,
+    });
+    rom.existing = result.existing || rom.existing || {};
+    rom.gamelist = result.gamelist || rom.gamelist || {};
+    rom.missing = result.missing || rom.missing || [];
+    rom.has_gamelist_entry = result.has_gamelist_entry !== undefined ? !!result.has_gamelist_entry : rom.has_gamelist_entry;
+    const updated = result.updated || [];
+    const artCount = updated.filter((item) => item.path).length;
+    const metaCount = Number(result.metadata_imported || 0);
+    showToast(`Imported ${artCount} artwork field${artCount === 1 ? "" : "s"}${metaCount ? ` and ${metaCount} metadata field${metaCount === 1 ? "" : "s"}` : ""} for ${escapeHtml(result.rom_name || "ROM")}.`, "success");
+    const row = document.getElementById(`artwork-row-${rowIndex}`);
+    if (row) {
+      if (!rom.missing.length) {
+        row.remove();
+      } else {
+        const missingCell = row.children[2];
+        if (missingCell) missingCell.innerHTML = rom.missing.map((item) => `<span class="badge text-bg-danger me-1">${escapeHtml(item)}</span>`).join("");
+      }
+    }
+    await selectArtworkRom(rowIndex, "matches");
+  } catch (err) {
+    showToast(`TheGamesDB import failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  } finally {
+    setLoading(false);
+    if (button) {
+      button.disabled = false;
+      button.innerHTML = originalHtml;
+    }
   }
 }
 async function applyLaunchboxArtwork(rowIndex, system, romId, romPath, gameKey) {
