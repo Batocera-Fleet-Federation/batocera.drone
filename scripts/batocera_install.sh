@@ -77,7 +77,7 @@ start_app() {
     /tmp/run_now.sh
   ) &
 
-  echo "Web Server running on https://$(hostname):8443"
+  echo "Web Server running on https://$(hostname).local:8443"
 }
 
 stop_app() {
@@ -147,7 +147,7 @@ else
     /tmp/run_now.sh
   ) &
 
-  echo "Web Server running on https://$(hostname):8443"
+  echo "Web Server running on https://$(hostname).local:8443"
 SERVICEBLOCK
 
     echo ""
