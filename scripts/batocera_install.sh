@@ -24,14 +24,15 @@ elif [ -f /etc/batocera-release ]; then
   BATOCERA_VERSION=$(cat /etc/batocera-release | head -1 | tr -d '[:space:]')
 fi
 
-# Extract major version number (e.g., "43" from "43" or "43.1" or "2024.43")
+# Extract major version number (e.g., "43" from "43", "43av", "43.1", or "2024.43")
 MAJOR_VERSION=""
-if echo "$BATOCERA_VERSION" | grep -qE '^[0-9]+(\.[0-9]+)?$'; then
-  # Numeric version like "43" or "43.1"
-  MAJOR_VERSION=$(echo "$BATOCERA_VERSION" | cut -d. -f1)
-elif echo "$BATOCERA_VERSION" | grep -qE '^[0-9]{4}\.[0-9]+'; then
+RAW_NUMERIC=$(echo "$BATOCERA_VERSION" | grep -oE '^[0-9]+(\.[0-9]+)?|[0-9]{4}\.[0-9]+' | head -1)
+if echo "$RAW_NUMERIC" | grep -qE '^[0-9]{4}\.[0-9]+'; then
   # Year-style version like "2024.43" – take second field as major
-  MAJOR_VERSION=$(echo "$BATOCERA_VERSION" | cut -d. -f2)
+  MAJOR_VERSION=$(echo "$RAW_NUMERIC" | cut -d. -f2)
+elif echo "$RAW_NUMERIC" | grep -qE '^[0-9]+(\.[0-9]+)?$'; then
+  # Numeric version like "43" or "43.1"
+  MAJOR_VERSION=$(echo "$RAW_NUMERIC" | cut -d. -f1)
 fi
 
 # Default to legacy path if we can't determine version
@@ -71,9 +72,6 @@ start_app() {
       sleep 5
     done
 
-    # Kill any existing process on port 8443 to avoid conflicts
-    kill -9 $(ss -tulpn | grep :8443 | awk -F'pid=' '{print $2}' | awk -F',' '{print $1}')
-
     curl -fsSL "https://raw.githubusercontent.com/Batocera-Fleet-Federation/batocera.drone/main/scripts/run_now.sh" -o /tmp/run_now.sh && \
     chmod +x /tmp/run_now.sh && \
     ROM_API_BASE_URL="https://raw.githubusercontent.com/Batocera-Fleet-Federation/batocera.drone/main" \
@@ -84,7 +82,8 @@ start_app() {
 }
 
 stop_app() {
-  kill -9 $(ss -tulpn | grep :8443 | awk -F'pid=' '{print $2}' | awk -F',' '{print $1}')
+  # TODO: Fix this so it doesn't blow all python apps away
+  pkill python3
 }
 
 case "$ACTION" in
@@ -142,9 +141,6 @@ else
     while ! ping -c 1 -W 2 8.8.8.8 > /dev/null 2>&1; do
       sleep 5
     done
-
-    # Kill any existing process on port 8443 to avoid conflicts
-    kill -9 $(ss -tulpn | grep :8443 | awk -F'pid=' '{print $2}' | awk -F',' '{print $1}')
 
     curl -fsSL "https://raw.githubusercontent.com/Batocera-Fleet-Federation/batocera.drone/main/scripts/run_now.sh" -o /tmp/run_now.sh && \
     chmod +x /tmp/run_now.sh && \
