@@ -1206,7 +1206,7 @@ class RomRepository:
         except Exception:
             return False
 
-    def _list_missing_artwork_from_gamelists(self) -> List[dict]:
+    def _list_missing_artwork_from_gamelists(self, include_complete: bool = False) -> List[dict]:
         if not self.roms_root.exists():
             return []
         missing_items: List[dict] = []
@@ -1225,7 +1225,7 @@ class RomRepository:
                 continue
             for game in root.findall("game"):
                 missing = self._entry_missing_artwork(game)
-                if not missing:
+                if not missing and not include_complete:
                     continue
                 rom_path = _normalize_gamelist_rom_path(_text_or_empty(game, "path"))
                 if not rom_path:
@@ -1250,7 +1250,7 @@ class RomRepository:
         missing_items.sort(key=lambda item: (str(item["system"]).lower(), str(item["name"]).lower()))
         return missing_items
 
-    def _list_missing_artwork_from_filesystem(self) -> List[dict]:
+    def _list_missing_artwork_from_filesystem(self, include_complete: bool = False) -> List[dict]:
         if not self.roms_root.exists():
             return []
         missing_items: List[dict] = []
@@ -1272,7 +1272,7 @@ class RomRepository:
                 rom_file = str(rom.get("rom_file") or rom.get("name") or "")
                 game = self._find_gamelist_entry(root, rom_file, str(rom.get("image_stem") or rom.get("name") or ""))
                 missing = self._entry_missing_artwork(game)
-                if not missing:
+                if not missing and not include_complete:
                     continue
                 missing_items.append(
                     {
@@ -1292,15 +1292,19 @@ class RomRepository:
         missing_items.sort(key=lambda item: (str(item["system"]).lower(), str(item["name"]).lower()))
         return missing_items
 
-    def list_missing_artwork(self, include_filesystem: bool = False, force_refresh: bool = False) -> List[dict]:
-        cache_key = "filesystem" if include_filesystem else "gamelist"
+    def list_missing_artwork(self, include_filesystem: bool = False, force_refresh: bool = False, include_complete: bool = False) -> List[dict]:
+        cache_key = f"{'filesystem' if include_filesystem else 'gamelist'}:{'all' if include_complete else 'missing'}"
         now = time.time()
         with self._missing_artwork_cache_lock:
             cached = self._missing_artwork_cache.get(cache_key)
             if cached and not force_refresh and cached.get("expires_at", 0) > now:
                 return [dict(item) for item in cached.get("items", [])]
 
-        items = self._list_missing_artwork_from_filesystem() if include_filesystem else self._list_missing_artwork_from_gamelists()
+        items = (
+            self._list_missing_artwork_from_filesystem(include_complete=include_complete)
+            if include_filesystem
+            else self._list_missing_artwork_from_gamelists(include_complete=include_complete)
+        )
         with self._missing_artwork_cache_lock:
             self._missing_artwork_cache[cache_key] = {
                 "items": [dict(item) for item in items],
@@ -2077,7 +2081,7 @@ OPENAPI_SPEC = {
         },
         "/admin/artwork/missing": {
             "get": {
-                "summary": "List ROMs whose gamelist.xml entries are missing artwork fields",
+                "summary": "List ROMs for the artwork and metadata hub",
                 "responses": {"200": {"description": "Missing artwork report"}},
             }
         },
@@ -2952,14 +2956,19 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         rom_status: Optional[str] = None,
     ) -> None:
         started_at = time.time()
-        items = self.repository.list_missing_artwork(include_filesystem=include_filesystem, force_refresh=refresh)
-        systems_all = sorted({str(item.get("system") or "") for item in items if item.get("system")})
         normalized_art_fields = {
             str(field or "").strip().lower()
             for field in (art_fields or [])
             if str(field or "").strip()
         }
-        if "any" in normalized_art_fields:
+        include_complete = "show_all" in normalized_art_fields
+        items = self.repository.list_missing_artwork(
+            include_filesystem=include_filesystem,
+            force_refresh=refresh,
+            include_complete=include_complete,
+        )
+        systems_all = sorted({str(item.get("system") or "") for item in items if item.get("system")})
+        if "any" in normalized_art_fields or include_complete:
             normalized_art_fields = set()
         normalized_art_fields = {field for field in normalized_art_fields if field in ARTWORK_FIELDS}
         normalized_systems = {
@@ -3038,11 +3047,12 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 "systems_filtered": systems_filtered,
                 "fields": list(ARTWORK_FIELDS),
                 "field_counts": field_counts,
-                "selected_fields": sorted(normalized_art_fields) if normalized_art_fields else ["any"],
+                "selected_fields": ["show_all"] if include_complete else (sorted(normalized_art_fields) if normalized_art_fields else ["any"]),
                 "selected_systems": sorted(normalized_systems),
                 "rom_status": normalized_rom_status,
                 "query": normalized_query,
                 "mode": "filesystem" if include_filesystem else "gamelist",
+                "show_all": include_complete,
                 "cached": not refresh,
                 "elapsed_ms": int((time.time() - started_at) * 1000),
             },
@@ -3113,7 +3123,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         if not title_value:
             raise ValueError("q or system+rom_id/rom_path is required")
         scraper = TheGamesDBScraper()
-        matches = scraper.search(title_value, system=system_value, limit=10)
+        matches = scraper.search(title_value, system=system_value, limit=5)
         self._send_json(
             200,
             {

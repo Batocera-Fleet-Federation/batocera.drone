@@ -281,9 +281,15 @@
     .artwork-page .table td,
     .artwork-page .table th {
       background-color: transparent;
+      color: var(--admin-text);
+      --bs-table-color: var(--admin-text);
+      --bs-table-hover-color: #ffffff;
+      --bs-table-hover-bg: rgba(0, 194, 255, 0.1);
     }
     .artwork-page .table-light th {
       background-color: rgba(31, 42, 68, 0.72);
+      color: #ffffff;
+      --bs-table-color: #ffffff;
     }
     .gamelist-details {
       max-height: 330px;
@@ -1117,6 +1123,9 @@ function parseArtworkHash(hash) {
   const romStatus = ["any", "exists", "missing"].includes(params.get("rom_status")) ? params.get("rom_status") : "any";
   return { offset, includeFilesystem, fields, systems, q, romStatus };
 }
+function artworkShowAllSelected(fields = artworkSelectedFields) {
+  return (fields || []).includes("show_all");
+}
 function artworkHash(includeFilesystem = artworkIncludeFilesystem, offset = artworkCurrentOffset, fields = artworkSelectedFields, systems = artworkSelectedSystems, query = artworkFilterQuery, romStatus = artworkRomStatus) {
   const params = new URLSearchParams();
   params.set("offset", String(Math.max(0, Number(offset || 0))));
@@ -1124,7 +1133,7 @@ function artworkHash(includeFilesystem = artworkIncludeFilesystem, offset = artw
   if (systems && systems.length) params.set("systems", systems.join(","));
   if (query) params.set("q", query);
   if (romStatus && romStatus !== "any") params.set("rom_status", romStatus);
-  if (includeFilesystem) params.set("include_filesystem", "1");
+  if (includeFilesystem || artworkShowAllSelected(fields)) params.set("include_filesystem", "1");
   return `#admin/artwork?${params.toString()}`;
 }
 function setArtworkHash(includeFilesystem = artworkIncludeFilesystem, offset = artworkCurrentOffset, fields = artworkSelectedFields, systems = artworkSelectedSystems, query = artworkFilterQuery, romStatus = artworkRomStatus) {
@@ -1690,9 +1699,9 @@ async function renderAdminMenu() {
       <div class="col-md-4 mb-3">
         <div class="card admin-tile">
           <div class="card-body">
-            <h5 class="card-title"><i class="bi bi-images me-2"></i>Missing Artwork</h5>
-            <p class="card-text">Find ROMs with incomplete gamelist artwork and fill gaps from LaunchBox.</p>
-            <button class="btn btn-primary" onclick="setHash('#admin/artwork')">Open Artwork Tool</button>
+            <h5 class="card-title"><i class="bi bi-images me-2"></i>Artwork & Metadata</h5>
+            <p class="card-text">Manage gamelist artwork, metadata, imports, uploads, and marquee crops.</p>
+            <button class="btn btn-primary" onclick="setHash('#admin/artwork')">Open Hub</button>
           </div>
         </div>
       </div>
@@ -1700,17 +1709,8 @@ async function renderAdminMenu() {
         <div class="card admin-tile">
           <div class="card-body">
             <h5 class="card-title"><i class="bi bi-diagram-3 me-2"></i>Overmind Integration</h5>
-            <p class="card-text">Configure batocera.overmind endpoint, email, and password.</p>
+            <p class="card-text">Configure batocera.overmind and review processed actions.</p>
             <button class="btn btn-primary" onclick="setHash('#admin/overmind')">Configure</button>
-          </div>
-        </div>
-      </div>
-      <div class="col-md-4 mb-3">
-        <div class="card admin-tile">
-          <div class="card-body">
-            <h5 class="card-title"><i class="bi bi-lightning-charge me-2"></i>Processed Actions</h5>
-            <p class="card-text">View Overmind actions processed by this drone</p>
-            <button class="btn btn-primary" onclick="setHash('#admin/overmind/actions')">View Actions</button>
           </div>
         </div>
       </div>
@@ -1721,6 +1721,8 @@ function renderArtworkCheckboxDropdown(kind, label, options, selected, allLabel 
   const selectedSet = new Set(selected || []);
   const buttonLabel = selectedSet.has("__none__")
     ? "None"
+    : selectedSet.has("show_all")
+    ? "Show All"
     : selectedSet.has("any")
     ? allLabel
     : selectedSet.size
@@ -1764,9 +1766,9 @@ function artworkMissingRowsHtml(roms) {
           ${rom.has_gamelist_entry ? "" : `<span class="badge text-bg-warning ms-1">new gamelist entry needed</span>`}
         </div>
       </td>
-      <td>${(rom.missing || []).map((field) => `<span class="badge text-bg-danger me-1">${escapeHtml(field)}</span>`).join("")}</td>
+      <td>${(rom.missing || []).length ? (rom.missing || []).map((field) => `<span class="badge text-bg-danger me-1">${escapeHtml(field)}</span>`).join("") : `<span class="badge text-bg-success">complete</span>`}</td>
     </tr>
-  `).join("") || `<tr><td colspan="3" class="text-muted p-3">No missing artwork found.</td></tr>`;
+  `).join("") || `<tr><td colspan="3" class="text-muted p-3">No artwork or metadata results found.</td></tr>`;
 }
 function artworkGamelistValueHtml(value) {
   if (Array.isArray(value)) {
@@ -1864,7 +1866,8 @@ function artworkGamelistEditFormHtml(rom) {
 function artworkPayloadUrl(forceRefresh = false) {
   const fieldsParam = encodeURIComponent((artworkSelectedFields || []).join(","));
   const systemsParam = encodeURIComponent((artworkSelectedSystems || []).join(","));
-  return `/admin/artwork/missing?limit=${ARTWORK_PAGE_SIZE}&offset=${artworkCurrentOffset}&refresh=${forceRefresh ? "1" : "0"}&fields=${fieldsParam}&systems=${systemsParam}&q=${encodeURIComponent(artworkFilterQuery)}&rom_status=${encodeURIComponent(artworkRomStatus)}${artworkIncludeFilesystem ? "&include_filesystem=1" : ""}`;
+  const includeFilesystem = artworkIncludeFilesystem || artworkShowAllSelected();
+  return `/admin/artwork/missing?limit=${ARTWORK_PAGE_SIZE}&offset=${artworkCurrentOffset}&refresh=${forceRefresh ? "1" : "0"}&fields=${fieldsParam}&systems=${systemsParam}&q=${encodeURIComponent(artworkFilterQuery)}&rom_status=${encodeURIComponent(artworkRomStatus)}${includeFilesystem ? "&include_filesystem=1" : ""}`;
 }
 function updateArtworkPageFromPayload(payload) {
   const roms = payload.roms || [];
@@ -1943,8 +1946,8 @@ function setupArtworkDropdownTools(kind, onApply) {
   }
 }
 async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh = false, offset = 0, fields = artworkSelectedFields, systems = artworkSelectedSystems, query = artworkFilterQuery, romStatus = artworkRomStatus) {
-  titleNode.textContent = "Missing Artwork";
-  subtitleNode.textContent = "ROMs with incomplete gamelist.xml artwork";
+  titleNode.textContent = "Artwork & Metadata";
+  subtitleNode.textContent = "Manage gamelist.xml artwork, metadata, imports, uploads, and marquee crops";
   artworkIncludeFilesystem = !!includeFilesystem;
   artworkCurrentOffset = Math.max(0, Number(offset || 0));
   artworkSelectedFields = fields && fields.length ? fields : ["any"];
@@ -1960,7 +1963,7 @@ async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh 
     const payload = await api(artworkPayloadUrl(forceRefresh));
     const roms = payload.roms || [];
     const fieldCounts = payload.field_counts || {};
-    const availableFields = [{ value: "any", label: "Any" }].concat((payload.fields || []).map((field) => ({ value: field, label: field })));
+    const availableFields = [{ value: "any", label: "Any" }, { value: "show_all", label: "Show All" }].concat((payload.fields || []).map((field) => ({ value: field, label: field })));
     const availableSystems = (payload.systems || []).map((system) => ({ value: system, label: system }));
     const total = Number(payload.count || 0);
     const limit = Number(payload.limit || ARTWORK_PAGE_SIZE);
@@ -1973,7 +1976,6 @@ async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh 
       <div class="mb-3 d-flex flex-wrap gap-2">
         <button class="btn btn-outline-secondary" onclick="setHash('#admin')">← Back to Admin</button>
         <button class="btn btn-outline-primary" onclick="renderMissingArtworkPage(false, true, 0, artworkSelectedFields, artworkSelectedSystems, artworkFilterQuery, artworkRomStatus)">Refresh</button>
-        <button class="btn btn-outline-secondary" onclick="renderMissingArtworkPage(true, true, 0, artworkSelectedFields, artworkSelectedSystems, artworkFilterQuery, artworkRomStatus)">Full Filesystem Scan</button>
         <button id="removeMissingGamelistBtn" class="btn btn-outline-danger" type="button">Remove Missing ROM Entries</button>
       </div>
       <div id="artworkSummary" class="mb-3 d-flex flex-wrap gap-2">
@@ -2007,7 +2009,7 @@ async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh 
         <div class="col-12 col-xl-7">
           <div class="card log-card">
             <div class="card-header d-flex justify-content-between align-items-center">
-              <span>Missing Artwork</span>
+              <span>Artwork & Metadata</span>
               <input id="artworkFilter" class="form-control form-control-sm" style="max-width: 260px;" type="search" value="${escapeHtml(artworkFilterQuery)}" placeholder="Filter all results">
             </div>
             <div class="card-header d-flex justify-content-between align-items-center gap-2">
@@ -2043,7 +2045,8 @@ async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh 
     window.missingArtworkRoms = roms;
     const applyArtworkFilters = () => {
       let selectedFields = selectedArtworkCheckboxValues(".artwork-field-filter");
-      if (selectedFields.includes("any") || !selectedFields.length) selectedFields = ["any"];
+      if (selectedFields.includes("show_all")) selectedFields = ["show_all"];
+      else if (selectedFields.includes("any") || !selectedFields.length) selectedFields = ["any"];
       const selectedSystems = selectedArtworkCheckboxValues(".artwork-system-filter");
       const allSystems = availableSystems.map((item) => item.value);
       const normalizedSystems = selectedSystems.length === allSystems.length ? [] : (selectedSystems.length ? selectedSystems : ["__none__"]);
@@ -2083,13 +2086,15 @@ async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh 
     }
     document.querySelectorAll(".artwork-field-filter").forEach((node) => {
       node.addEventListener("change", () => {
-        if (node.value === "any" && node.checked) {
+        if ((node.value === "any" || node.value === "show_all") && node.checked) {
           document.querySelectorAll(".artwork-field-filter").forEach((item) => {
-            if (item.value !== "any") item.checked = false;
+            if (item !== node) item.checked = false;
           });
-        } else if (node.value !== "any" && node.checked) {
+        } else if (node.value !== "any" && node.value !== "show_all" && node.checked) {
           const anyNode = document.querySelector('.artwork-field-filter[value="any"]');
           if (anyNode) anyNode.checked = false;
+          const showAllNode = document.querySelector('.artwork-field-filter[value="show_all"]');
+          if (showAllNode) showAllNode.checked = false;
         }
         applyArtworkFilters();
       });
@@ -2484,17 +2489,18 @@ async function selectArtworkRom(index, activeTab = "matches") {
     <div class="tab-content meta-panel-content">
       <div class="tab-pane fade show active compact-edit" id="matches-panel" role="tabpanel" aria-labelledby="matches-tab">
         ${artworkGamelistDetailsHtml(rom)}
+        <div class="form-check border-top mt-3 pt-3">
+          <input class="form-check-input" type="checkbox" id="artworkMatchOverrideExisting">
+          <label class="form-check-label small" for="artworkMatchOverrideExisting">Override existing data (re-imports all gamelist metadata)</label>
+        </div>
         <div class="border-top mt-3 pt-3">
           <div class="fw-semibold mb-2">LaunchBox Matches</div>
           <div id="launchboxMatches" class="mt-2"></div>
         </div>
         <div class="border-top mt-3 pt-3">
-          <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
-            <div>
-              <div class="fw-semibold">TheGamesDB Matches</div>
-              <div class="text-muted small" id="theGamesDBImageQuery"></div>
-            </div>
-            <button class="btn btn-sm btn-outline-primary" type="button" id="theGamesDBImageRefreshBtn">Refresh</button>
+          <div class="mb-2">
+            <div class="fw-semibold">TheGamesDB Matches</div>
+            <div class="text-muted small" id="theGamesDBImageQuery"></div>
           </div>
           <div id="theGamesDBImageMatches" class="mt-2"></div>
         </div>
@@ -2530,8 +2536,6 @@ async function selectArtworkRom(index, activeTab = "matches") {
     ? document.getElementById("edit-tab")
     : document.getElementById("matches-tab");
   if (tabToShow) tabToShow.click();
-  const theGamesDBRefreshBtn = document.getElementById("theGamesDBImageRefreshBtn");
-  if (theGamesDBRefreshBtn) theGamesDBRefreshBtn.addEventListener("click", () => searchTheGamesDBImagesForRom(index, true));
   // Search LaunchBox for matches - query fresh from DOM since it was just created
   const matchesEl = document.getElementById("launchboxMatches");
   if (!matchesEl) return;
@@ -2542,13 +2546,7 @@ async function selectArtworkRom(index, activeTab = "matches") {
     const platformNote = data.launchbox_platform
       ? `<div class="text-muted small mb-2">Filtered by LaunchBox platform: ${escapeHtml(data.launchbox_platform)}</div>`
       : `<div class="text-muted small mb-2">No LaunchBox platform mapping found for this system; showing title matches.</div>`;
-    const overrideCheckbox = `
-      <div class="form-check mb-2">
-        <input class="form-check-input" type="checkbox" id="launchboxOverrideExisting">
-        <label class="form-check-label small" for="launchboxOverrideExisting">Override existing data (re-imports all gamelist metadata)</label>
-      </div>
-    `;
-    matchesEl.innerHTML = platformNote + overrideCheckbox + (matches.length ? `
+    matchesEl.innerHTML = platformNote + (matches.length ? `
       <div class="list-group">
         ${matches.map((match) => `
           <button type="button" class="list-group-item list-group-item-action launchbox-match-btn" data-launchbox-game-key="${escapeHtml(String(match.game_key || ""))}">
@@ -2592,11 +2590,11 @@ async function searchTheGamesDBImagesForRom(index, forceRefresh = false) {
   setLoading(true, "Searching TheGamesDB matches...");
   try {
     const data = await api(`/admin/artwork/thegamesdb/search?system=${encodeURIComponent(rom.system || "")}&rom_id=${encodeURIComponent(rom.unique_id || "")}&rom_path=${encodeURIComponent(rom.rom_path || "")}&q=${encodeURIComponent(rom.search_title || rom.title || rom.name || "")}`);
-    const matches = data.matches || [];
+    const matches = (data.matches || []).slice(0, 5);
     if (queryEl) queryEl.textContent = data.query || "";
     matchesEl.setAttribute("data-loaded", "1");
     matchesEl.innerHTML = matches.length ? `
-      <div class="text-muted small mb-2">Imports missing artwork and fills empty metadata from the selected TheGamesDB page. Marquee uses clear logo first, then banner.</div>
+      <div class="text-muted small mb-2">Imports artwork and fills empty metadata from the selected TheGamesDB page. Marquee uses clear logo first, then banner.</div>
       <div class="list-group">
         ${matches.map((match) => `
           <button type="button" class="list-group-item list-group-item-action thegamesdb-match-btn" data-thegamesdb-game-id="${escapeHtml(String(match.game_id || ""))}">
@@ -2626,7 +2624,7 @@ async function searchTheGamesDBImagesForRom(index, forceRefresh = false) {
 async function applyTheGamesDBArtwork(rowIndex, gameId, button) {
   const rom = (window.missingArtworkRoms || [])[rowIndex];
   if (!rom || !gameId) return;
-  const overrideCheckbox = document.getElementById("launchboxOverrideExisting");
+  const overrideCheckbox = document.getElementById("artworkMatchOverrideExisting") || document.getElementById("launchboxOverrideExisting");
   const overrideExisting = overrideCheckbox ? overrideCheckbox.checked : false;
   const originalHtml = button ? button.innerHTML : "";
   if (button) {
@@ -2673,9 +2671,9 @@ async function applyTheGamesDBArtwork(rowIndex, gameId, button) {
 }
 async function applyLaunchboxArtwork(rowIndex, system, romId, romPath, gameKey) {
   // Check override existing checkbox
-  const overrideCheckbox = document.getElementById("launchboxOverrideExisting");
+  const overrideCheckbox = document.getElementById("artworkMatchOverrideExisting") || document.getElementById("launchboxOverrideExisting");
   const overrideExisting = overrideCheckbox ? overrideCheckbox.checked : false;
-  setLoading(true, "Downloading missing artwork and metadata...");
+  setLoading(true, "Downloading artwork and metadata...");
   try {
     const result = await apiPost("/admin/artwork/launchbox/apply", {
       system,
@@ -2792,7 +2790,7 @@ async function removeMissingGamelistEntriesForCurrentFilters() {
 }
 async function renderOvermindIntegrationPage() {
   titleNode.textContent = "Overmind Integration";
-  subtitleNode.textContent = "Configure endpoint, email, and password for batocera.overmind polling";
+  subtitleNode.textContent = "Configure batocera.overmind polling and review processed actions";
   content.innerHTML = `
     <div class="mb-3">
       <button class="btn btn-outline-secondary" onclick="setHash('#admin')">← Back to Admin</button>
@@ -2824,6 +2822,15 @@ async function renderOvermindIntegrationPage() {
         <div class="small" id="overmindStatus"></div>
       </div>
     </div>
+    <div class="card log-card mt-3">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <span>Processed Overmind Actions</span>
+        <button id="overmindActionsRefreshBtn" class="btn btn-sm btn-outline-primary" type="button">Refresh</button>
+      </div>
+      <div class="card-body" id="overmindActionsBody">
+        <div class="text-muted">Loading processed actions...</div>
+      </div>
+    </div>
   `;
 
   const statusEl = document.getElementById("overmindStatus");
@@ -2833,6 +2840,8 @@ async function renderOvermindIntegrationPage() {
   const saveBtn = document.getElementById("overmindSaveBtn");
   const startBtn = document.getElementById("overmindStartBtn");
   const refreshBtn = document.getElementById("overmindRefreshBtn");
+  const actionsRefreshBtn = document.getElementById("overmindActionsRefreshBtn");
+  const actionsBody = document.getElementById("overmindActionsBody");
 
   function renderStatus(payload) {
     const status = payload.status || {};
@@ -2862,6 +2871,40 @@ async function renderOvermindIntegrationPage() {
   async function loadStatus() {
     const payload = await api("/admin/integrations/overmind/status");
     renderStatus(payload);
+  }
+
+  function renderActions(actions) {
+    actionsBody.innerHTML = actions.length ? `
+      <div class="table-responsive">
+        <table class="table table-sm align-middle">
+          <thead>
+            <tr>
+              <th>Processed</th>
+              <th>Action</th>
+              <th>Status</th>
+              <th>Device</th>
+              <th>Message</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${actions.map(action => `
+              <tr>
+                <td>${escapeHtml(action.processed_at || "n/a")}</td>
+                <td>${escapeHtml(action.action || "n/a")}</td>
+                <td><span class="badge text-bg-secondary">${escapeHtml(action.status || "n/a")}</span></td>
+                <td class="mono small">${escapeHtml(action.device_id || "n/a")}</td>
+                <td>${escapeHtml(action.message || "")}${action.fake_data ? ' <span class="badge text-bg-info ms-1">fake data</span>' : ''}</td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      </div>
+    ` : `<div class="text-muted">No processed actions yet.</div>`;
+  }
+
+  async function loadActions() {
+    const payload = await api("/admin/integrations/overmind/actions");
+    renderActions(payload.actions || []);
   }
 
   async function saveConfig() {
@@ -2920,65 +2963,23 @@ async function renderOvermindIntegrationPage() {
       setLoading(false);
     }
   });
+  actionsRefreshBtn.addEventListener("click", async () => {
+    setLoading(true, "Loading processed actions...");
+    try {
+      await loadActions();
+    } catch (err) {
+      showToast(escapeHtml(err.message || "Failed to load processed actions"), "danger");
+    } finally {
+      setLoading(false);
+    }
+  });
 
   setLoading(true, "Loading Overmind status...");
   try {
     await loadStatus();
+    await loadActions();
   } catch (err) {
-    showToast(escapeHtml(err.message || "Failed to load status"), "danger");
-  } finally {
-    setLoading(false);
-  }
-}
-async function renderOvermindActionsPage() {
-  titleNode.textContent = "Processed Actions";
-  subtitleNode.textContent = "Actions polled from batocera.overmind and processed locally";
-  setSearchMode("hidden");
-  setLoading(true, "Loading processed actions...");
-  clearSystemTheme();
-  await refreshRandomThemeLogo();
-  try {
-    const payload = await api("/admin/integrations/overmind/actions");
-    const actions = payload.actions || [];
-    content.innerHTML = `
-      <div class="mb-3">
-        <button class="btn btn-outline-secondary" onclick="setHash('#admin')">← Back to Admin</button>
-        <button class="btn btn-outline-primary ms-2" onclick="renderOvermindActionsPage()">Refresh</button>
-      </div>
-      <div class="card log-card">
-        <div class="card-header">Processed Overmind Actions</div>
-        <div class="card-body">
-          ${actions.length ? `
-            <div class="table-responsive">
-              <table class="table table-sm align-middle">
-                <thead>
-                  <tr>
-                    <th>Processed</th>
-                    <th>Action</th>
-                    <th>Status</th>
-                    <th>Device</th>
-                    <th>Message</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  ${actions.map(action => `
-                    <tr>
-                      <td>${escapeHtml(action.processed_at || "n/a")}</td>
-                      <td>${escapeHtml(action.action || "n/a")}</td>
-                      <td><span class="badge text-bg-secondary">${escapeHtml(action.status || "n/a")}</span></td>
-                      <td class="mono small">${escapeHtml(action.device_id || "n/a")}</td>
-                      <td>${escapeHtml(action.message || "")}${action.fake_data ? ' <span class="badge text-bg-info ms-1">fake data</span>' : ''}</td>
-                    </tr>
-                  `).join("")}
-                </tbody>
-              </table>
-            </div>
-          ` : `<div class="text-muted">No processed actions yet.</div>`}
-        </div>
-      </div>
-    `;
-  } catch (err) {
-    showError(`Failed to load processed actions: ${err.message}`);
+    showToast(escapeHtml(err.message || "Failed to load Overmind integration"), "danger");
   } finally {
     setLoading(false);
   }
@@ -3366,7 +3367,7 @@ async function router() {
         setHash("");
         return;
       }
-      await renderOvermindActionsPage();
+      await renderOvermindIntegrationPage();
     } else if (hash.startsWith("#search-system/")) {
       const rest = hash.substring("#search-system/".length);
       const slashIndex = rest.indexOf("/");
