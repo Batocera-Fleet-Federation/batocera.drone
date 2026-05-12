@@ -129,7 +129,6 @@ if [ "$USE_LEGACY_METHOD" = false ]; then
 
 DRONE_USER="drone-app"
 ACTION="$1"
-PID_FILE="/tmp/drone-server.pid"
 
 run_as_drone() {
   su -s /bin/sh -c "$*" "$DRONE_USER"
@@ -147,21 +146,12 @@ start_app() {
     run_as_drone "/tmp/run_now.sh"
   ) &
 
-  echo $! > "$PID_FILE"
   echo "Web Server running on https://$(hostname).local:8443"
 }
 
 stop_app() {
-  if command -v lsof >/dev/null 2>&1; then
-    PIDS="$(lsof -t -i:8443 2>/dev/null || true)"
-    if [ -n "$PIDS" ]; then
-      kill $PIDS 2>/dev/null || true
-      sleep 2
-      kill -9 $PIDS 2>/dev/null || true
-    fi
-  fi
-
-  rm -f "$PID_FILE"
+  kill -9 $(lsof -t -i:8443)  
+  echo "Web Server stopped"
 }
 
 case "$ACTION" in
