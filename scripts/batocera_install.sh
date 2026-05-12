@@ -68,11 +68,13 @@ if ! id -u "$DRONE_USER" >/dev/null 2>&1; then
     echo ""
     CREATED=false
     # BusyBox (Batocera) adduser: -S = system account, -H = no home dir
+    # Use /bin/sh as shell so privilege-drop tools (su, runuser, etc.)
+    # can execute commands without PAM authentication errors.
     if command -v adduser >/dev/null 2>&1; then
-        adduser -S -H -s /bin/false "$DRONE_USER" && CREATED=true
+        adduser -S -H -s /bin/sh "$DRONE_USER" && CREATED=true
     fi
     if [ "$CREATED" = false ] && command -v useradd >/dev/null 2>&1; then
-        useradd -r -s /bin/false "$DRONE_USER" && CREATED=true
+        useradd -r -s /bin/sh "$DRONE_USER" && CREATED=true
     fi
     if [ "$CREATED" = false ]; then
         # Last resort: manual /etc/passwd entry
@@ -157,17 +159,30 @@ if [ "$USE_LEGACY_METHOD" = false ]; then
 DRONE_USER="drone-app"
 ACTION="$1"
 
+run_as_drone() {
+  # Find a working privilege-drop command on this system
+  if command -v runuser >/dev/null 2>&1; then
+    runuser -u "$DRONE_USER" -- "$@"
+  elif command -v chpst >/dev/null 2>&1; then
+    chpst -u "$DRONE_USER" "$@"
+  elif command -v sudo >/dev/null 2>&1; then
+    sudo -u "$DRONE_USER" "$@"
+  else
+    # Last resort: BusyBox su with non-PAM flags
+    su -s /bin/sh -p -c "$*" "$DRONE_USER"
+  fi
+}
+
 start_app() {
   (
     while ! ping -c 1 -W 2 8.8.8.8 > /dev/null 2>&1; do
       sleep 5
     done
 
-    DRONE_USER="drone-app"
     curl -fsSL "https://raw.githubusercontent.com/Batocera-Fleet-Federation/batocera.drone/main/scripts/run_now.sh" -o /tmp/run_now.sh && \
     chmod +x /tmp/run_now.sh && \
     DRONE_APP_BASE_URL="https://raw.githubusercontent.com/Batocera-Fleet-Federation/batocera.drone/main" \
-    su -s /bin/sh -c "/tmp/run_now.sh" "$DRONE_USER"
+    run_as_drone /tmp/run_now.sh
   ) &
 
   echo "Web Server running on https://$(hostname).local:8443"
@@ -234,11 +249,22 @@ else
       sleep 5
     done
 
+    # Find a working privilege-drop command on this system
     DRONE_USER="drone-app"
+    DROP_CMD=""
+    if command -v runuser >/dev/null 2>&1; then
+      DROP_CMD="runuser -u $DRONE_USER -- /tmp/run_now.sh"
+    elif command -v chpst >/dev/null 2>&1; then
+      DROP_CMD="chpst -u $DRONE_USER /tmp/run_now.sh"
+    elif command -v sudo >/dev/null 2>&1; then
+      DROP_CMD="sudo -u $DRONE_USER /tmp/run_now.sh"
+    else
+      DROP_CMD="su -s /bin/sh -p -c '/tmp/run_now.sh' $DRONE_USER"
+    fi
     curl -fsSL "https://raw.githubusercontent.com/Batocera-Fleet-Federation/batocera.drone/main/scripts/run_now.sh" -o /tmp/run_now.sh && \
     chmod +x /tmp/run_now.sh && \
     DRONE_APP_BASE_URL="https://raw.githubusercontent.com/Batocera-Fleet-Federation/batocera.drone/main" \
-    su -s /bin/sh -c "/tmp/run_now.sh" "$DRONE_USER"
+    eval "$DROP_CMD"
   ) &
 
   echo "Web Server running on https://$(hostname).local:8443"
