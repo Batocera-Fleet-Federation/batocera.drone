@@ -77,31 +77,34 @@ mkdir -p \
   /userdata/system/certs \
   /userdata/system/logs/drone-app
 
-chown -R root:"$DRONE_GROUP" \
+chown root:"$DRONE_GROUP" \
   /userdata/system/.drone-app \
   /userdata/system/certs \
   /userdata/system/logs/drone-app 2>/dev/null || true
 
-chmod -R 775 \
+chmod 775 \
   /userdata/system/.drone-app \
   /userdata/system/certs \
   /userdata/system/logs/drone-app 2>/dev/null || true
 
 # Allow drone-app to read Batocera system configs recursively.
-# Directories need execute permission for traversal.
-# Files need read permission.
-if [ -d /userdata/system/configs ]; then
+# Uses marker so this expensive recursive pass only runs once.
+CONFIG_MARKER="/userdata/system/.drone-app/.configs-read-perms-applied"
+
+if [ -d /userdata/system/configs ] && [ ! -f "$CONFIG_MARKER" ]; then
   find /userdata/system/configs -type d -exec chmod o+rx {} \; 2>/dev/null || true
   find /userdata/system/configs -type f -exec chmod o+r {} \; 2>/dev/null || true
+  touch "$CONFIG_MARKER" 2>/dev/null || true
 fi
 
-# Only touch writable app areas. Do not rewrite all ROM permissions.
+# Only touch top-level writable app areas.
+# Do not recursively rewrite every artwork/video/manual file.
 find /userdata/roms -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while read romdir; do
   for subdir in images videos manuals; do
     target="${romdir}/${subdir}"
     mkdir -p "$target"
-    chown -R root:"$DRONE_GROUP" "$target" 2>/dev/null || true
-    chmod -R 775 "$target" 2>/dev/null || true
+    chown root:"$DRONE_GROUP" "$target" 2>/dev/null || true
+    chmod 775 "$target" 2>/dev/null || true
   done
 
   gamelist="${romdir}/gamelist.xml"
@@ -111,7 +114,6 @@ find /userdata/roms -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while read rom
   fi
 done
 
-# Keep Batocera config owned by root and readable only
 chown root:root /userdata/batocera.conf 2>/dev/null || true
 chmod 644 /userdata/batocera.conf 2>/dev/null || true
 
@@ -131,6 +133,7 @@ if [ "$USE_LEGACY_METHOD" = false ]; then
 
 DRONE_USER="drone-app"
 ACTION="$1"
+PID_FILE="/tmp/drone-server.pid"
 
 run_as_drone() {
   su -s /bin/sh -c "$*" "$DRONE_USER"
@@ -147,10 +150,14 @@ start_app() {
     DRONE_APP_BASE_URL="https://raw.githubusercontent.com/Batocera-Fleet-Federation/batocera.drone/main" \
     run_as_drone "/tmp/run_now.sh"
   ) &
+
+  echo $! > "$PID_FILE"
+  echo "Web Server running on https://$(hostname).local:8443"
 }
 
 stop_app() {
   kill -9 $(lsof -t -i:8443) 2>/dev/null || true
+  rm -f "$PID_FILE"
 }
 
 case "$ACTION" in
