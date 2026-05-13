@@ -9,7 +9,6 @@ import ssl
 import subprocess
 import sys
 import time
-import uuid
 import xml.etree.ElementTree as ET
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -254,6 +253,40 @@ def _normalize_gamelist_rom_path(value: str) -> str:
     while raw.startswith("./"):
         raw = raw[2:]
     return raw.lstrip("/")
+
+
+def _read_file_tail(path: Path, max_bytes: int) -> Tuple[bytes, bool]:
+    safe_max = max(1, int(max_bytes))
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
+    fd = os.open(str(path), flags)
+    try:
+        stat_result = os.fstat(fd)
+        size = int(stat_result.st_size)
+        start = max(0, size - safe_max)
+        if start:
+            os.lseek(fd, start, os.SEEK_SET)
+        chunks = []
+        remaining = min(size, safe_max)
+        while remaining > 0:
+            chunk = os.read(fd, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks), size > safe_max
+    finally:
+        os.close(fd)
+
+
+def _tail_lines(path: Path, line_count: int, max_bytes: int = 1024 * 1024) -> List[str]:
+    raw, truncated = _read_file_tail(path, max_bytes)
+    lines = raw.decode("utf-8", errors="replace").splitlines()
+    output = lines[-max(1, int(line_count)) :]
+    if truncated and output:
+        output.insert(0, f"[truncated] showing last {max_bytes} bytes of file")
+    return output
 
 
 class LaunchBoxClient:
@@ -523,6 +556,268 @@ class TheGamesDBScraper:
             return data, content_type
 
 
+MOBYGAMES_PLATFORM_ALIASES = {
+    "3do": ("3DO",),
+    "amiga": ("Amiga",),
+    "amstradcpc": ("Amstrad CPC",),
+    "arcade": ("Arcade",),
+    "atari2600": ("Atari 2600",),
+    "atari5200": ("Atari 5200",),
+    "atari7800": ("Atari 7800",),
+    "atarijaguar": ("Jaguar",),
+    "atarilynx": ("Lynx",),
+    "atarist": ("Atari ST",),
+    "c64": ("Commodore 64",),
+    "dos": ("DOS",),
+    "dreamcast": ("Dreamcast",),
+    "gamecube": ("GameCube",),
+    "gb": ("Game Boy",),
+    "gba": ("Game Boy Advance",),
+    "gbc": ("Game Boy Color",),
+    "genesis": ("Genesis",),
+    "megadrive": ("Genesis", "SEGA Mega Drive"),
+    "n64": ("Nintendo 64",),
+    "nds": ("Nintendo DS",),
+    "nes": ("NES", "Nintendo Entertainment System"),
+    "ps1": ("PlayStation",),
+    "ps2": ("PlayStation 2",),
+    "ps3": ("PlayStation 3",),
+    "ps4": ("PlayStation 4",),
+    "psp": ("PSP",),
+    "psvita": ("PS Vita",),
+    "saturn": ("SEGA Saturn", "Saturn"),
+    "segacd": ("SEGA CD",),
+    "snes": ("SNES", "SNES (Super Famicom)", "Super Nintendo Entertainment System"),
+    "switch": ("Nintendo Switch",),
+    "wii": ("Wii",),
+    "wiiu": ("Wii U",),
+    "windows": ("Windows",),
+    "xbox": ("Xbox",),
+    "xbox360": ("Xbox 360",),
+    "zxspectrum": ("ZX Spectrum",),
+}
+
+
+class MobyGamesClient:
+    WEB_BASE = "https://www.mobygames.com"
+
+    def __init__(self, timeout_seconds: int = 15):
+        self.timeout_seconds = timeout_seconds
+
+    def platform_name_for_system(self, system: Optional[str]) -> Optional[str]:
+        aliases = MOBYGAMES_PLATFORM_ALIASES.get(_normalize_platform_key(system or ""), ())
+        return aliases[0] if aliases else None
+
+    def _get_text(self, url: str) -> Tuple[str, str]:
+        request = Request(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+            },
+        )
+        with urlopen(request, timeout=self.timeout_seconds) as response:
+            final_url = response.geturl()
+            text = response.read().decode("utf-8", errors="replace")
+        if "Just a moment..." in text or "__cf_chl_" in text or "Enable JavaScript and cookies to continue" in text:
+            raise ValueError("MobyGames blocked the request with a browser challenge.")
+        return text, final_url
+
+    def _strip_tags(self, value: str) -> str:
+        return re.sub(r"\s+", " ", html.unescape(re.sub(r"<.*?>", " ", value or ""))).strip()
+
+    def _absolute_url(self, value: str) -> str:
+        raw = html.unescape(str(value or "")).strip()
+        if raw.startswith("//"):
+            return f"https:{raw}"
+        if raw.startswith("/"):
+            return f"{self.WEB_BASE}{raw}"
+        return raw
+
+    def _game_match_from_page(self, text: str, final_url: str) -> Optional[dict]:
+        url_match = re.search(r"/game/(\d+)/([^/?#]+)", final_url)
+        id_match = re.search(r"Moby ID:\s*(\d+)", text, flags=re.IGNORECASE)
+        game_id = (url_match.group(1) if url_match else None) or (id_match.group(1) if id_match else None)
+        title_match = re.search(r"<h1[^>]*>(.*?)</h1>", text, flags=re.DOTALL | re.IGNORECASE)
+        if not game_id or not title_match:
+            return None
+        return {
+            "game_id": game_id,
+            "name": self._strip_tags(title_match.group(1)),
+            "title": self._strip_tags(title_match.group(1)),
+            "platform": "MobyGames page",
+            "thumbnail_url": self._first_image_url(text),
+            "details_url": f"{self.WEB_BASE}/game/{game_id}/{url_match.group(2) if url_match else ''}".rstrip("/"),
+        }
+
+    def _first_image_url(self, text: str) -> Optional[str]:
+        for pattern in (
+            r'(https?://[^"\']*mobygames\.com/images/(?:covers|shots)/[^"\']+)',
+            r'["\'](/images/(?:covers|shots)/[^"\']+)["\']',
+        ):
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if match:
+                return self._absolute_url(match.group(1))
+        return None
+
+    def _collect_image_links(self, text: str, image_type: str) -> List[dict]:
+        output = []
+        seen = set()
+        patterns = [
+            r'(https?://[^"\']*mobygames\.com/images/(?:covers|shots)/[^"\']+)',
+            r'["\'](/images/(?:covers|shots)/[^"\']+)["\']',
+        ]
+        for pattern in patterns:
+            for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+                url = self._absolute_url(match.group(1))
+                clean_url = url.split("?", 1)[0]
+                if clean_url in seen:
+                    continue
+                seen.add(clean_url)
+                lower = clean_url.lower()
+                detected_type = image_type
+                if "/covers/" in lower:
+                    detected_type = "front cover" if any(part in lower for part in ("front", "cover")) else "cover"
+                if "/shots/" in lower:
+                    detected_type = "screenshot"
+                output.append(
+                    {
+                        "url": clean_url,
+                        "image_url": clean_url,
+                        "thumbnail_url": clean_url,
+                        "type": detected_type,
+                        "file_name": Path(urlparse(clean_url).path).name,
+                    }
+                )
+        return output
+
+    def search(self, title: str, system: str = "", limit: int = 5) -> List[dict]:
+        normalized_title = _clean_rom_title(title or "")
+        if not normalized_title:
+            return []
+        text, final_url = self._get_text(f"{self.WEB_BASE}/search/?q={quote(normalized_title, safe='')}")
+        direct_match = self._game_match_from_page(text, final_url)
+        expected_aliases = [alias.lower() for alias in MOBYGAMES_PLATFORM_ALIASES.get(_normalize_platform_key(system or ""), ())]
+        if direct_match:
+            direct_match["platform"] = self.platform_name_for_system(system) or "MobyGames page"
+            return [direct_match]
+        output = []
+        seen = set()
+        for match in re.finditer(r'<a[^>]+href=["\'](/game/(\d+)/[^"\']+)["\'][^>]*>(.*?)</a>', text, flags=re.DOTALL | re.IGNORECASE):
+            href, game_id, label_html = match.group(1), match.group(2), match.group(3)
+            if game_id in seen:
+                continue
+            seen.add(game_id)
+            label = self._strip_tags(label_html)
+            surrounding = self._strip_tags(text[max(0, match.start() - 300):match.end() + 300])
+            score = 0
+            if label.lower() == normalized_title.lower():
+                score -= 10
+            if expected_aliases and any(alias in surrounding.lower() for alias in expected_aliases):
+                score -= 20
+            output.append(
+                {
+                    "game_id": game_id,
+                    "name": label,
+                    "title": label,
+                    "platform": self.platform_name_for_system(system) or "MobyGames",
+                    "thumbnail_url": None,
+                    "details_url": self._absolute_url(href),
+                    "_score": score,
+                }
+            )
+        output.sort(key=lambda item: (item["_score"], item["name"].lower()))
+        for item in output:
+            item.pop("_score", None)
+        return output[: max(1, min(int(limit), 5))]
+
+    def details(self, game_id: str, system: str = "") -> dict:
+        safe_id = re.sub(r"[^0-9]", "", str(game_id or ""))
+        if not safe_id:
+            raise ValueError("game_id is required")
+        text, final_url = self._get_text(f"{self.WEB_BASE}/game/{safe_id}/")
+        title_match = re.search(r"<h1[^>]*>(.*?)</h1>", text, flags=re.DOTALL | re.IGNORECASE)
+        title = self._strip_tags(title_match.group(1)) if title_match else ""
+        description = ""
+        desc_match = re.search(r"<h2[^>]*>\s*Description.*?</h2>(.*?)(?:<h2|<h3|$)", text, flags=re.DOTALL | re.IGNORECASE)
+        if desc_match:
+            description = self._strip_tags(desc_match.group(1))
+        genre = ""
+        genre_match = re.search(r"Genre\s*</[^>]+>\s*<[^>]+>(.*?)</", text, flags=re.DOTALL | re.IGNORECASE)
+        if genre_match:
+            genre = self._strip_tags(genre_match.group(1))
+        release_date = ""
+        release_match = re.search(r"Released\s*</[^>]+>\s*<[^>]+>(.*?)</", text, flags=re.DOTALL | re.IGNORECASE)
+        if release_match:
+            release_date = self._strip_tags(release_match.group(1))
+        images = self._collect_image_links(text, "artwork")
+        page_urls = [f"{self.WEB_BASE}/game/{safe_id}/covers/", f"{self.WEB_BASE}/game/{safe_id}/screenshots/"]
+        for href in re.findall(r'href=["\'](/game/%s/[^"\']*(?:covers|screenshots)[^"\']*)["\']' % re.escape(safe_id), text, flags=re.IGNORECASE):
+            page_urls.append(self._absolute_url(href))
+        seen_pages = set()
+        for page_url in page_urls:
+            if page_url in seen_pages:
+                continue
+            seen_pages.add(page_url)
+            try:
+                page_text, _ = self._get_text(page_url)
+            except Exception:
+                continue
+            page_type = "screenshot" if "screenshots" in page_url else "cover"
+            images.extend(self._collect_image_links(page_text, page_type))
+        deduped = []
+        seen_images = set()
+        for image in images:
+            url = image.get("url")
+            if not url or url in seen_images:
+                continue
+            seen_images.add(url)
+            deduped.append(image)
+        return {
+            "game_id": safe_id,
+            "name": title,
+            "overview": description,
+            "release_date": release_date,
+            "genre": genre,
+            "developer": None,
+            "publisher": None,
+            "images": deduped,
+        }
+
+    def choose_image_for_field(self, details: dict, field: str) -> Optional[dict]:
+        images = details.get("images") if isinstance(details, dict) else []
+        if not isinstance(images, list):
+            return None
+        preferred = {
+            "boxart": ("front cover", "cover"),
+            "thumbnail": ("screenshot", "front cover", "cover"),
+            "image": ("screenshot", "front cover", "cover"),
+            "fanart": ("screenshot",),
+            "marquee": (),
+        }.get(field, ())
+        for image_type in preferred:
+            for image in images:
+                if image_type in str(image.get("type") or "").lower():
+                    return image
+        return None
+
+    def download_image(self, url: str) -> Tuple[bytes, str]:
+        parsed = urlparse(str(url or ""))
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc.endswith("mobygames.com"):
+            raise ValueError("image_url must be a MobyGames image URL")
+        request = Request(url, headers={"User-Agent": "batocera-drone-app/4.0"})
+        with urlopen(request, timeout=self.timeout_seconds) as response:
+            content_type = response.headers.get_content_type()
+            if not str(content_type or "").startswith("image/"):
+                raise ValueError("image_url did not return an image")
+            max_bytes = 20 * 1024 * 1024
+            data = response.read(max_bytes + 1)
+            if len(data) > max_bytes:
+                raise ValueError("image is too large")
+            return data, content_type
+
+
 @dataclass(frozen=True)
 class Settings:
     userdata_root: Path
@@ -578,8 +873,8 @@ class Settings:
             userdata_root=Path(os.environ.get("USERDATA_ROOT", "/userdata")),
             roms_root=Path(os.environ.get("ROMS_ROOT", "/userdata/roms")),
             bios_root=Path(os.environ.get("BIOS_ROOT", "/userdata/bios")),
-            username=os.environ.get("DRONE_APP_USERNAME") or os.environ.get("USERNAME"),
-            password=os.environ.get("DRONE_APP_PASSWORD") or os.environ.get("PASSWORD"),
+            username=os.environ.get("DRONE_APP_USERNAME") or None,
+            password=os.environ.get("DRONE_APP_PASSWORD") or None,
             https_port=int(https_port_value),
             image_cache_ttl_seconds=int(os.environ.get("IMAGE_CACHE_TTL_SECONDS", "3600")),
             image_miss_cache_ttl_seconds=int(os.environ.get("IMAGE_MISS_CACHE_TTL_SECONDS", "300")),
@@ -1700,6 +1995,10 @@ class RomRepository:
             },
             "updated": updated,
             "skipped": skipped,
+            "missing": self._entry_missing_artwork(game),
+            "existing": {item: _text_or_empty(game, item) for item in ARTWORK_FIELDS},
+            "gamelist": _gamelist_details(game),
+            "has_gamelist_entry": True,
         }
 
     def apply_thegamesdb_artwork(
@@ -1801,6 +2100,114 @@ class RomRepository:
             "rom_name": rom_name or display_name,
             "rom_path": normalized_rom_path,
             "thegamesdb": {
+                "game_id": details.get("game_id"),
+                "name": details.get("name"),
+            },
+            "updated": updated,
+            "skipped": skipped,
+            "missing": self._entry_missing_artwork(game),
+            "existing": {item: _text_or_empty(game, item) for item in ARTWORK_FIELDS},
+            "gamelist": _gamelist_details(game),
+            "has_gamelist_entry": True,
+        }
+
+    def apply_mobygames_artwork(
+        self,
+        system: str,
+        unique_id: str,
+        game_id: str,
+        client: MobyGamesClient,
+        rom_path: Optional[str] = None,
+        override_existing: bool = False,
+        import_metadata: bool = True,
+    ) -> dict:
+        system_dir = self.get_system_dir(system)
+        rom = self.find_rom_by_path(system, rom_path) if rom_path else self.find_rom_by_unique_id(system, unique_id)
+        tree, root = self._read_gamelist(system_dir)
+        rom_name = str(rom.get("rom_file") or rom.get("rom_name") or rom.get("name") or "")
+        normalized_rom_path = str(rom.get("rom_path") or rom_path or rom_name)
+        display_name = str(rom.get("image_stem") or rom.get("name") or Path(normalized_rom_path).stem)
+        game = self._find_gamelist_entry_by_path(root, normalized_rom_path) or self._find_gamelist_entry(root, rom_name, display_name)
+        if game is None:
+            game = ET.SubElement(root, "game")
+            _set_child_text(game, "path", f"./{normalized_rom_path}")
+            _set_child_text(game, "name", _clean_rom_title(display_name))
+
+        fields_to_fetch = list(ARTWORK_FIELDS) if override_existing else self._entry_missing_artwork(game)
+        details = client.details(game_id, system=system)
+        images_dir = system_dir / "images"
+        images_dir.mkdir(parents=True, exist_ok=True)
+        safe_stem = re.sub(r"[^a-zA-Z0-9._-]+", "-", Path(display_name).stem).strip("-") or "rom"
+        updated = []
+        skipped = []
+
+        if import_metadata and details:
+            meta_fields_map = {
+                "name": details.get("name"),
+                "desc": details.get("overview"),
+                "releasedate": details.get("release_date"),
+                "genre": details.get("genre"),
+                "developer": details.get("developer"),
+                "publisher": details.get("publisher"),
+            }
+            for mfield, mvalue in meta_fields_map.items():
+                if not mvalue:
+                    continue
+                existing_value = _text_or_empty(game, mfield)
+                if override_existing or not existing_value:
+                    _set_child_text(game, mfield, str(mvalue))
+                    updated.append({"field": mfield, "value": str(mvalue), "source": "mobygames_metadata"})
+
+        for field in fields_to_fetch:
+            selected = client.choose_image_for_field(details, field)
+            if not selected:
+                skipped.append(field)
+                continue
+            source_url = str(selected.get("url") or selected.get("image_url") or "")
+            try:
+                data, content_type = client.download_image(source_url)
+            except Exception:
+                skipped.append(field)
+                continue
+            source_suffix = Path(str(selected.get("file_name") or urlparse(source_url).path)).suffix.lower()
+            if source_suffix not in (".png", ".jpg", ".jpeg", ".webp", ".gif"):
+                source_suffix = {
+                    "image/png": ".png",
+                    "image/jpeg": ".jpg",
+                    "image/webp": ".webp",
+                    "image/gif": ".gif",
+                }.get(content_type, ".jpg")
+            target_path = images_dir / f"{safe_stem}-mobygames-{field}{source_suffix}"
+            target_path.write_bytes(data)
+            relative_path = _relative_artwork_path(system_dir, target_path)
+            _set_child_text(game, field, relative_path)
+            updated.append(
+                {
+                    "field": field,
+                    "path": relative_path,
+                    "source_url": source_url,
+                    "type": selected.get("type"),
+                }
+            )
+
+        if updated:
+            gamelist_path = system_dir / "gamelist.xml"
+            try:
+                ET.indent(tree, space="  ")
+            except Exception:
+                pass
+            tree.write(gamelist_path, encoding="utf-8", xml_declaration=True)
+            with gamelist_path.open("a", encoding="utf-8") as handle:
+                handle.write("\n")
+            with self._missing_artwork_cache_lock:
+                self._missing_artwork_cache.clear()
+
+        return {
+            "system": system,
+            "unique_id": unique_id,
+            "rom_name": rom_name or display_name,
+            "rom_path": normalized_rom_path,
+            "mobygames": {
                 "game_id": details.get("game_id"),
                 "name": details.get("name"),
             },
@@ -3230,6 +3637,81 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         result["metadata_imported"] = len([item for item in result.get("updated", []) if str(item.get("source") or "") == "thegamesdb_metadata"])
         self._send_json(200, result)
 
+    def _handle_admin_mobygames_artwork_search(self, system: str, rom_id: str, rom_path: str, query: str) -> None:
+        system_value = (system or "").strip()
+        rom_id_value = (rom_id or "").strip()
+        rom_path_value = _normalize_gamelist_rom_path(rom_path)
+        query_value = (query or "").strip()
+        title_value = query_value
+        if system_value and not title_value and (rom_path_value or rom_id_value):
+            rom = self.repository.find_rom_by_path(system_value, rom_path_value) if rom_path_value else self.repository.find_rom_by_unique_id(system_value, rom_id_value)
+            title_value = str(rom.get("image_stem") or rom.get("name") or "")
+        title_value = _clean_rom_title(title_value)
+        if not title_value:
+            raise ValueError("q or system+rom_id/rom_path is required")
+        client = MobyGamesClient()
+        try:
+            matches = client.search(title_value, system=system_value, limit=5)
+        except Exception as error:
+            self._send_json(
+                200,
+                {
+                    "query": title_value,
+                    "system": system_value,
+                    "mobygames_platform": client.platform_name_for_system(system_value),
+                    "rom_id": rom_id_value,
+                    "rom_path": rom_path_value,
+                    "matches": [],
+                    "configured": False,
+                    "message": f"MobyGames could not be scraped right now: {str(error)}",
+                    "fields": list(ARTWORK_FIELDS),
+                },
+            )
+            return
+        self._send_json(
+            200,
+            {
+                "query": title_value,
+                "system": system_value,
+                "mobygames_platform": client.platform_name_for_system(system_value),
+                "rom_id": rom_id_value,
+                "rom_path": rom_path_value,
+                "matches": matches,
+                "configured": True,
+                "fields": list(ARTWORK_FIELDS),
+            },
+        )
+
+    def _handle_admin_mobygames_artwork_apply(self, payload: dict) -> None:
+        system = str(payload.get("system") or "").strip()
+        rom_id = str(payload.get("rom_id") or payload.get("unique_id") or "").strip()
+        rom_path = _normalize_gamelist_rom_path(str(payload.get("rom_path") or ""))
+        game_id = str(payload.get("game_id") or "").strip()
+        override_existing = bool(payload.get("override_existing", False))
+        import_metadata = bool(payload.get("import_metadata", True))
+        if not system:
+            raise ValueError("system is required")
+        if not rom_id and not rom_path:
+            raise ValueError("rom_id or rom_path is required")
+        if not game_id:
+            raise ValueError("game_id is required")
+        client = MobyGamesClient()
+        result = self.repository.apply_mobygames_artwork(
+            system,
+            rom_id,
+            game_id,
+            client,
+            rom_path=rom_path or None,
+            override_existing=override_existing,
+            import_metadata=import_metadata,
+        )
+        with self.repository._search_cache_lock:
+            self.repository._search_index_expires_at = 0
+        result["source"] = "mobygames"
+        result["override_existing"] = override_existing
+        result["metadata_imported"] = len([item for item in result.get("updated", []) if str(item.get("source") or "") == "mobygames_metadata"])
+        self._send_json(200, result)
+
     def _handle_admin_artwork_upload(self) -> None:
         import urllib.parse
         content_type = self.headers.get("Content-Type", "")
@@ -3699,22 +4181,13 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             return
 
         try:
-            # Use tail to get the last N lines
-            result = subprocess.run(
-                ["tail", "-n", str(safe_lines), str(log_path)],
-                capture_output=True,
-                text=True,
-                check=True
-            )
-            log_content = result.stdout.strip()
+            log_content = _tail_lines(log_path, safe_lines)
             self._send_json(200, {
                 "source": normalized_source,
                 "path": str(log_path),
                 "lines": safe_lines,
-                "content": log_content.split('\n') if log_content else []
+                "content": log_content,
             })
-        except subprocess.CalledProcessError as e:
-            self._send_json(500, {"error": f"Failed to read log: {str(e)}"})
         except Exception as e:
             self._send_json(500, {"error": f"Internal error: {str(e)}"})
 
@@ -4077,11 +4550,14 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 return
             if normalized_format == "xml":
                 try:
-                    raw_text = source_path.read_text(encoding="utf-8", errors="replace")
+                    raw_bytes, truncated = _read_file_tail(source_path, safe_max_bytes)
+                    raw_text = raw_bytes.decode("utf-8", errors="replace")
                 except Exception as error:
                     self._send_json(500, {"error": f"Failed to read config: {str(error)}"})
                     return
                 lines = raw_text.splitlines()
+                if truncated:
+                    lines.insert(0, f"[truncated] showing last {safe_max_bytes} bytes of file")
                 self._send_json(
                     200,
                     {
@@ -4090,7 +4566,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                         "type": "xml",
                         "format": "xml",
                         "max_bytes": safe_max_bytes,
-                        "truncated": False,
+                        "truncated": truncated,
                         "content": lines,
                     },
                 )
@@ -4296,11 +4772,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 })
                 return
 
-            raw = selected_path.read_bytes()
-            truncated = False
-            if len(raw) > safe_max_bytes:
-                raw = raw[-safe_max_bytes:]
-                truncated = True
+            raw, truncated = _read_file_tail(selected_path, safe_max_bytes)
             text = raw.decode("utf-8", errors="replace")
             lines = text.splitlines()
             if truncated:

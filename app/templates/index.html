@@ -2434,6 +2434,28 @@ function googleImageSearchUrl(rom) {
   const query = `${rom.search_title || rom.title || rom.name || ""} ${rom.system || ""} images`.trim();
   return `https://www.google.com/search?tbm=isch&q=${encodeURIComponent(query)}`;
 }
+function scraperSearchQuery(rom) {
+  return `${rom.search_title || rom.title || rom.name || ""} ${rom.system || ""}`.trim();
+}
+function launchBoxSearchUrl(rom) {
+  return `https://gamesdb.launchbox-app.com/games/search?search=${encodeURIComponent(scraperSearchQuery(rom))}`;
+}
+function theGamesDBSearchUrl(rom) {
+  return `https://thegamesdb.net/search.php?name=${encodeURIComponent(scraperSearchQuery(rom))}`;
+}
+function mobyGamesSearchUrl(rom) {
+  return `https://www.mobygames.com/search/?q=${encodeURIComponent(scraperSearchQuery(rom))}`;
+}
+function artworkExternalLinksHtml(rom) {
+  return `
+    <div class="d-flex flex-wrap gap-2 align-items-center mb-3">
+      <a class="btn btn-sm btn-outline-primary" href="${escapeHtml(googleImageSearchUrl(rom))}" target="_blank" rel="noopener noreferrer" title="Search Google Images"><i class="bi bi-google me-1"></i>Google</a>
+      <a class="btn btn-sm btn-outline-primary" href="${escapeHtml(launchBoxSearchUrl(rom))}" target="_blank" rel="noopener noreferrer" title="Open LaunchBox search"><i class="bi bi-box-arrow-up-right me-1"></i>LaunchBox</a>
+      <a class="btn btn-sm btn-outline-primary" href="${escapeHtml(theGamesDBSearchUrl(rom))}" target="_blank" rel="noopener noreferrer" title="Open TheGamesDB search"><i class="bi bi-box-arrow-up-right me-1"></i>TheGamesDB</a>
+      <a class="btn btn-sm btn-outline-primary" href="${escapeHtml(mobyGamesSearchUrl(rom))}" target="_blank" rel="noopener noreferrer" title="Open MobyGames search"><i class="bi bi-box-arrow-up-right me-1"></i>MobyGames</a>
+    </div>
+  `;
+}
 // Update URL when a rom is selected in artwork page
 function setArtworkSelectedRomHash(index) {
   const rom = (window.missingArtworkRoms || [])[index];
@@ -2720,7 +2742,10 @@ async function selectArtworkRom(index, activeTab = "matches") {
     <div class="tab-content meta-panel-content">
       <div class="tab-pane fade show active compact-edit" id="matches-panel" role="tabpanel" aria-labelledby="matches-tab">
         ${artworkGamelistDetailsHtml(rom)}
-        <div class="form-check border-top mt-3 pt-3">
+        <div class="border-top mt-3 pt-3">
+          ${artworkExternalLinksHtml(rom)}
+        </div>
+        <div class="form-check">
           <input class="form-check-input" type="checkbox" id="artworkMatchOverrideExisting">
           <label class="form-check-label small" for="artworkMatchOverrideExisting">Override existing data (re-imports all gamelist metadata)</label>
         </div>
@@ -2735,14 +2760,18 @@ async function selectArtworkRom(index, activeTab = "matches") {
           </div>
           <div id="theGamesDBImageMatches" class="mt-2"></div>
         </div>
+        <div class="border-top mt-3 pt-3">
+          <div class="mb-2">
+            <div class="fw-semibold">MobyGames Matches</div>
+            <div class="text-muted small" id="mobyGamesImageQuery"></div>
+          </div>
+          <div id="mobyGamesImageMatches" class="mt-2"></div>
+        </div>
       </div>
       <div class="tab-pane fade compact-edit" id="edit-panel" role="tabpanel" aria-labelledby="edit-tab">
-        <div class="mb-2 d-flex justify-content-between align-items-center">
+        <div class="mb-2">
           <div><span class="fw-semibold">${escapeHtml(rom.title || rom.name || "")}</span> <span class="text-muted small">${escapeHtml(rom.system || "")}</span></div>
-          <div class="d-flex gap-1">
-            <a class="btn btn-sm btn-outline-primary" href="${escapeHtml(googleImageSearchUrl(rom))}" target="_blank" rel="noopener noreferrer" title="Search Google Images"><i class="bi bi-google"></i></a>
-            ${rom.has_gamelist_entry ? `<button class="btn btn-sm btn-outline-danger" type="button" onclick="removeArtworkGamelistEntry(${index})">Remove from gamelist</button>` : ""}
-          </div>
+          ${rom.has_gamelist_entry ? `<button class="btn btn-sm btn-outline-danger mt-2" type="button" onclick="removeArtworkGamelistEntry(${index})"><i class="bi bi-trash me-1"></i>Remove from gamelist</button>` : ""}
         </div>
         <div class="mb-2">
           <div class="compact-edit-section-title">Metadata</div>
@@ -2813,6 +2842,7 @@ async function selectArtworkRom(index, activeTab = "matches") {
     setLoading(false);
   }
   await searchTheGamesDBImagesForRom(index, false);
+  await searchMobyGamesImagesForRom(index, false);
 }
 async function searchTheGamesDBImagesForRom(index, forceRefresh = false) {
   const rom = (window.missingArtworkRoms || [])[index];
@@ -2904,6 +2934,94 @@ async function applyTheGamesDBArtwork(rowIndex, gameId, button) {
     }
   }
 }
+async function searchMobyGamesImagesForRom(index, forceRefresh = false) {
+  const rom = (window.missingArtworkRoms || [])[index];
+  const matchesEl = document.getElementById("mobyGamesImageMatches");
+  if (!rom || !matchesEl) return;
+  if (matchesEl.getAttribute("data-loaded") === "1" && !forceRefresh) return;
+  const queryEl = document.getElementById("mobyGamesImageQuery");
+  matchesEl.innerHTML = "";
+  setLoading(true, "Searching MobyGames matches...");
+  try {
+    const data = await api(`/admin/artwork/mobygames/search?system=${encodeURIComponent(rom.system || "")}&rom_id=${encodeURIComponent(rom.unique_id || "")}&rom_path=${encodeURIComponent(rom.rom_path || "")}&q=${encodeURIComponent(rom.search_title || rom.title || rom.name || "")}`);
+    const matches = (data.matches || []).slice(0, 5);
+    if (queryEl) {
+      const platform = data.mobygames_platform ? ` · ${data.mobygames_platform}` : "";
+      queryEl.textContent = `${data.query || ""}${platform}`;
+    }
+    matchesEl.setAttribute("data-loaded", "1");
+    if (data.configured === false || data.message) {
+      matchesEl.innerHTML = `<div class="text-muted">${escapeHtml(data.message || "MobyGames scraper is not available right now.")}</div>`;
+      return;
+    }
+    matchesEl.innerHTML = matches.length ? `
+      <div class="text-muted small mb-2">Imports MobyGames cover scans, screenshots, and available metadata from the selected match.</div>
+      <div class="list-group">
+        ${matches.map((match) => `
+          <button type="button" class="list-group-item list-group-item-action mobygames-match-btn" data-mobygames-game-id="${escapeHtml(String(match.game_id || ""))}">
+            <div class="d-flex gap-3 align-items-center">
+              ${match.thumbnail_url ? `<img class="match-thumb" src="${escapeHtml(match.thumbnail_url)}" alt="">` : `<div class="match-thumb-placeholder"></div>`}
+              <div>
+                <div class="fw-semibold">${escapeHtml(match.name || match.title || "")}</div>
+                <div class="text-muted small">${escapeHtml(match.platform || "unknown platform")}</div>
+              </div>
+            </div>
+          </button>
+        `).join("")}
+      </div>
+    ` : `<div class="text-muted">No MobyGames matches found.</div>`;
+    matchesEl.querySelectorAll(".mobygames-match-btn").forEach((button) => {
+      button.addEventListener("click", () => {
+        applyMobyGamesArtwork(index, button.getAttribute("data-mobygames-game-id") || "", button);
+      });
+    });
+  } catch (err) {
+    showToast(`MobyGames search failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    matchesEl.innerHTML = `<div class="text-muted">MobyGames matches could not be loaded.</div>`;
+  } finally {
+    setLoading(false);
+  }
+}
+async function applyMobyGamesArtwork(rowIndex, gameId, button) {
+  const rom = (window.missingArtworkRoms || [])[rowIndex];
+  if (!rom || !gameId) return;
+  const overrideCheckbox = document.getElementById("artworkMatchOverrideExisting") || document.getElementById("launchboxOverrideExisting");
+  const overrideExisting = overrideCheckbox ? overrideCheckbox.checked : false;
+  const originalHtml = button ? button.innerHTML : "";
+  if (button) {
+    button.disabled = true;
+    button.innerHTML = `<span class="spinner-border spinner-border-sm"></span>`;
+  }
+  setLoading(true, "Downloading MobyGames artwork and metadata...");
+  try {
+    const result = await apiPost("/admin/artwork/mobygames/apply", {
+      system: rom.system || "",
+      rom_id: rom.unique_id || "",
+      rom_path: rom.rom_path || "",
+      game_id: gameId,
+      override_existing: overrideExisting,
+      import_metadata: true,
+    });
+    rom.existing = result.existing || rom.existing || {};
+    rom.gamelist = result.gamelist || rom.gamelist || {};
+    rom.missing = result.missing || rom.missing || [];
+    rom.has_gamelist_entry = result.has_gamelist_entry !== undefined ? !!result.has_gamelist_entry : rom.has_gamelist_entry;
+    refreshArtworkTableRows();
+    const updated = result.updated || [];
+    const artCount = updated.filter((item) => item.path).length;
+    const metaCount = Number(result.metadata_imported || 0);
+    showToast(`Imported ${artCount} artwork field${artCount === 1 ? "" : "s"}${metaCount ? ` and ${metaCount} metadata field${metaCount === 1 ? "" : "s"}` : ""} for ${escapeHtml(result.rom_name || "ROM")}.`, "success");
+    await selectArtworkRom(rowIndex, "matches");
+  } catch (err) {
+    showToast(`MobyGames import failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  } finally {
+    setLoading(false);
+    if (button) {
+      button.disabled = false;
+      button.innerHTML = originalHtml;
+    }
+  }
+}
 async function applyLaunchboxArtwork(rowIndex, system, romId, romPath, gameKey) {
   // Check override existing checkbox
   const overrideCheckbox = document.getElementById("artworkMatchOverrideExisting") || document.getElementById("launchboxOverrideExisting");
@@ -2927,7 +3045,11 @@ async function applyLaunchboxArtwork(rowIndex, system, romId, romPath, gameKey) 
     const rom = (window.missingArtworkRoms || [])[rowIndex];
     if (rom) {
       const updatedFields = new Set(updated.map((item) => item.field));
+      rom.existing = result.existing || rom.existing || {};
+      rom.gamelist = result.gamelist || rom.gamelist || {};
       rom.missing = (rom.missing || []).filter((field) => !updatedFields.has(field));
+      if (Array.isArray(result.missing)) rom.missing = result.missing;
+      rom.has_gamelist_entry = result.has_gamelist_entry !== undefined ? !!result.has_gamelist_entry : rom.has_gamelist_entry;
       refreshArtworkTableRows();
       const row = document.getElementById(`artwork-row-${rowIndex}`);
       if (row) {

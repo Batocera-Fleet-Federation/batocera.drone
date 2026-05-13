@@ -214,6 +214,15 @@ class ApiRoutesMixin:
                 )
                 return
 
+            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "artwork" and parts[2] == "mobygames" and parts[3] == "search":
+                self._handle_admin_mobygames_artwork_search(
+                    query_params.get("system", [""])[0],
+                    query_params.get("rom_id", [""])[0],
+                    query_params.get("rom_path", [""])[0],
+                    query_params.get("q", [""])[0],
+                )
+                return
+
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "integrations" and parts[2] == "overmind" and parts[3] == "status":
                 self._handle_admin_overmind_status()
                 return
@@ -283,6 +292,11 @@ class ApiRoutesMixin:
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "artwork" and parts[2] == "thegamesdb" and parts[3] == "apply":
                 payload = self._read_json_body()
                 self._handle_admin_thegamesdb_artwork_apply(payload)
+                return
+
+            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "artwork" and parts[2] == "mobygames" and parts[3] == "apply":
+                payload = self._read_json_body()
+                self._handle_admin_mobygames_artwork_apply(payload)
                 return
 
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "artwork" and parts[2] == "gamelist" and parts[3] == "remove":
