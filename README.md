@@ -1,5 +1,5 @@
 # Batocera Drone
-![Batocera Fleet Federation](./file_00000000151c71f5ae4dc16686a4cea1.png)
+![Batocera Fleet Federation](./main.jpeg)
 Batocera Drone is a web control panel for your Batocera game system.
 
 After it is installed, you open Drone from a browser on your computer, phone, or tablet. From there you can browse your Batocera library, search games, manage artwork, edit game details, inspect BIOS and theme files, and use admin tools without sitting at the Batocera machine itself.
