@@ -1,31 +1,19 @@
 #!/usr/bin/env bash
-# -------------------------------------------------------------------
-# create-release.sh – Batocera Drone release helper
-#
-# Creates a signed tag for the given version, updates CHANGELOG.md,
-# pushes the tag, and optionally triggers the GitHub Actions release
-# workflow.
-#
-# Usage:
-#   ./scripts/create-release.sh v1.2.3              # dry-run by default
-#   ./scripts/create-release.sh v1.2.3 --push       # push tag & trigger CI
-#   ./scripts/create-release.sh v1.2.3 --dry-run    # explicit dry-run
-#
-# Requirements:
-#   - git, gh (GitHub CLI), optionally jq for JSON parsing
-# -------------------------------------------------------------------
 set -euo pipefail
 
 PROJECT="Batocera Drone"
 REPO="Batocera-Fleet-Federation/batocera.drone"
+DEFAULT_BRANCH="main"
 
-# ── Colour helpers ──────────────────────────────────────────────────
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
 info()  { echo -e "${GREEN}[INFO]${NC}  $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 error() { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
 
-# ── Parse arguments ─────────────────────────────────────────────────
 VERSION=""
 PUSH_MODE="dry-run"
 
@@ -43,44 +31,54 @@ if [[ -z "$VERSION" ]]; then
   echo "Usage: $0 <version> [--push|--dry-run]"
   echo ""
   echo "Examples:"
-  echo "  $0 v1.2.3             # dry-run (default)"
-  echo "  $0 v1.2.3 --push      # create tag, update CHANGELOG, push"
+  echo "  $0 v0.0.1"
+  echo "  $0 v0.0.1 --push"
   exit 1
 fi
 
-# Validate version format
-if ! echo "$VERSION" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+'; then
-  error "Version must match vMAJOR.MINOR.PATCH (e.g., v1.2.3)"
+if ! echo "$VERSION" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+  error "Version must match vMAJOR.MINOR.PATCH, example: v0.0.1"
 fi
 
-# ── Pre-flight checks ───────────────────────────────────────────────
 if ! git rev-parse --git-dir >/dev/null 2>&1; then
   error "Not inside a Git repository."
 fi
 
-if ! command -v gh &>/dev/null; then
-  error "GitHub CLI (gh) is required. Install it from https://cli.github.com/"
+if ! command -v gh >/dev/null 2>&1; then
+  error "GitHub CLI gh is required."
 fi
 
-# Ensure we're on the default branch (main) and it's clean
-CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
-if [[ "$CURRENT_BRANCH" != "main" ]]; then
-  error "Releases must be cut from the 'main' branch (currently on '$CURRENT_BRANCH')."
+CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+if [[ "$CURRENT_BRANCH" != "$DEFAULT_BRANCH" ]]; then
+  error "Releases must be cut from '$DEFAULT_BRANCH'. Current branch: '$CURRENT_BRANCH'"
 fi
 
 if ! git diff-index --quiet HEAD --; then
   error "Working tree has uncommitted changes. Commit or stash them first."
 fi
 
-# Fetch latest tags
-git fetch --tags origin 2>/dev/null || true
+info "Fetching latest refs and tags..."
+git fetch origin "$DEFAULT_BRANCH" --tags --quiet
 
-# Check if tag already exists
-if git rev-parse "$VERSION" >/dev/null 2>&1; then
-  error "Tag $VERSION already exists."
+LOCAL_SHA="$(git rev-parse HEAD)"
+REMOTE_SHA="$(git rev-parse "origin/$DEFAULT_BRANCH")"
+
+if [[ "$LOCAL_SHA" != "$REMOTE_SHA" ]]; then
+  error "Local $DEFAULT_BRANCH is not up to date with origin/$DEFAULT_BRANCH. Pull/rebase first."
 fi
 
-# ── Summary ─────────────────────────────────────────────────────────
+if git rev-parse "$VERSION" >/dev/null 2>&1; then
+  error "Local tag $VERSION already exists."
+fi
+
+if git ls-remote --exit-code --tags origin "refs/tags/$VERSION" >/dev/null 2>&1; then
+  error "Remote tag $VERSION already exists."
+fi
+
+if gh release view "$VERSION" --repo "$REPO" >/dev/null 2>&1; then
+  error "GitHub Release $VERSION already exists."
+fi
+
 echo "══════════════════════════════════════════════════════════════"
 echo "  $PROJECT Release"
 echo "  Version : $VERSION"
@@ -89,66 +87,71 @@ echo "  Repo    : $REPO"
 echo "══════════════════════════════════════════════════════════════"
 echo ""
 
-# ── Update CHANGELOG.md ────────────────────────────────────────────
 CHANGELOG="CHANGELOG.md"
-if [[ -f "$CHANGELOG" ]]; then
-  # Find the Unreleased section and add a new heading for this version
-  TODAY=$(date +%Y-%m-%d)
-  # Insert "## [$VERSION] - $TODAY" after the "## [Unreleased]" line
-  if grep -q "^## \[Unreleased\]" "$CHANGELOG"; then
-    if [[ "$(uname)" == "Darwin" ]]; then
-      sed -i '' "/^## \[Unreleased\]/a\\
-## [$VERSION] - $TODAY
-" "$CHANGELOG"
-    else
-      sed -i "/^## \[Unreleased\]/a ## [$VERSION] - $TODAY" "$CHANGELOG"
-    fi
-    info "Updated $CHANGELOG with version $VERSION"
-  else
-    warn "[Unreleased] section not found in $CHANGELOG. Skipping automatic update."
-  fi
-else
-  warn "$CHANGELOG not found. Skipping."
-fi
+TODAY="$(date +%Y-%m-%d)"
 
-# ── Dry-run: just show what would happen ────────────────────────────
+update_changelog() {
+  if [[ ! -f "$CHANGELOG" ]]; then
+    warn "$CHANGELOG not found. Skipping changelog update."
+    return
+  fi
+
+  if grep -qE "^## \[$VERSION\]" "$CHANGELOG"; then
+    warn "$VERSION already exists in $CHANGELOG. Skipping changelog update."
+    return
+  fi
+
+  if ! grep -qE "^## \[Unreleased\]" "$CHANGELOG"; then
+    warn "[Unreleased] section not found in $CHANGELOG. Skipping changelog update."
+    return
+  fi
+
+  tmp_file="$(mktemp)"
+
+  awk -v version="$VERSION" -v today="$TODAY" '
+    /^## \[Unreleased\]/ {
+      print
+      print ""
+      print "## [" version "] - " today
+      next
+    }
+    { print }
+  ' "$CHANGELOG" > "$tmp_file"
+
+  mv "$tmp_file" "$CHANGELOG"
+
+  info "Updated $CHANGELOG with $VERSION"
+}
+
 if [[ "$PUSH_MODE" == "dry-run" ]]; then
+  info "DRY-RUN mode. No files, tags, or releases will be created."
+  info "Would validate repo, update CHANGELOG.md, commit, tag, push, and create GitHub Release."
   echo ""
-  info "DRY-RUN mode – no changes were pushed."
-  info "To actually release, re-run with the --push flag:"
-  echo ""
-  echo "    $0 $VERSION --push"
-  echo ""
+  echo "To release:"
+  echo "  $0 $VERSION --push"
   exit 0
 fi
 
-# ── Commit CHANGELOG changes (if any) ───────────────────────────────
-if ! git diff-index --quiet HEAD -- "$CHANGELOG" 2>/dev/null; then
+update_changelog
+
+if [[ -f "$CHANGELOG" ]] && ! git diff --quiet -- "$CHANGELOG"; then
   git add "$CHANGELOG"
   git commit -m "chore: bump version to $VERSION"
-  git push origin "$CURRENT_BRANCH"
+  git push origin "$DEFAULT_BRANCH"
   info "Committed and pushed $CHANGELOG update."
+else
+  info "No changelog changes to commit."
 fi
 
-# ── Create & push tag ───────────────────────────────────────────────
-info "Creating tag: $VERSION"
+info "Creating annotated tag: $VERSION"
 git tag -a "$VERSION" -m "Release $VERSION"
 git push origin "$VERSION"
 
-info "Tag $VERSION pushed."
+info "Creating GitHub Release..."
+gh release create "$VERSION" \
+  --title "$VERSION" \
+  --generate-notes \
+  --repo "$REPO"
 
-# ── Create GitHub Release ───────────────────────────────────────────
-if command -v gh &>/dev/null; then
-  info "Creating GitHub Release..."
-  gh release create "$VERSION" \
-    --title "$VERSION" \
-    --generate-notes \
-    --repo "$REPO"
-  info "GitHub Release created: https://github.com/$REPO/releases/tag/$VERSION"
-else
-  warn "GitHub CLI (gh) not available. Skipping release creation."
-  warn "Create the release manually at https://github.com/$REPO/releases/new?tag=$VERSION"
-fi
-
-echo ""
-info "Release $VERSION completed successfully!"
+info "Release created: https://github.com/$REPO/releases/tag/$VERSION"
+info "Release $VERSION completed successfully."
