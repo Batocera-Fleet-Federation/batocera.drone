@@ -35,6 +35,7 @@ except ImportError:
 
 FAKE_OVERMIND_EMAIL = "arcade@example.com"
 FAKE_OVERMIND_PASSWORD = "ArcadePass123"
+_OVERMIND_POLLER_STARTED = False
 LAUNCHBOX_API_BASE = "https://api.gamesdb.launchbox-app.com/api"
 LAUNCHBOX_IMAGE_BASE = "https://images.launchbox-app.com"
 ARTWORK_FIELDS = ("image", "thumbnail", "marquee", "fanart", "boxart")
@@ -4365,7 +4366,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         new_config["requested_at"] = self._now_iso()
         new_config["integration_state"] = "configured"
         new_config["last_error"] = None
-        new_config["notes"] = "Stub configuration saved. Start Integration to simulate handshake."
+        new_config["notes"] = "Configuration saved. Drone will report alive and collect Overmind actions on its polling interval."
         self._save_overmind_config(new_config)
         self._send_json(200, self._overmind_public_payload(new_config))
 
@@ -4388,12 +4389,12 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             password = supplied
 
         config["integration_enabled"] = True
-        config["integration_state"] = "stub_connected"
+        config["integration_state"] = "polling"
         config["last_started_at"] = self._now_iso()
         config["last_error"] = None
         config["notes"] = (
-            "Stub integration active. This simulates a successful handshake with batocera.overmind. "
-            "Replace with real client calls when overmind API is available."
+            "Integration active. Drone periodically calls Overmind, claims actions, performs local collection, "
+            "and posts completion results back to the Overmind API."
         )
         self._save_overmind_config(config)
         self._send_json(200, self._overmind_public_payload(config))
@@ -5072,7 +5073,13 @@ def _load_overmind_config_for_settings(settings: Settings) -> dict:
     return merged
 
 
-def _record_processed_overmind_action(settings: Settings, action: dict, status_value: str, message: str) -> None:
+def _record_processed_overmind_action(
+    settings: Settings,
+    action: dict,
+    status_value: str,
+    message: str,
+    result: Optional[dict] = None,
+) -> None:
     path = _overmind_actions_path_for_settings(settings)
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -5087,6 +5094,7 @@ def _record_processed_overmind_action(settings: Settings, action: dict, status_v
             "action": action.get("action"),
             "status": status_value,
             "message": message,
+            "result_summary": _summarize_overmind_result(result),
             "processed_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
             "fake_data": settings.use_fake_data,
         }
@@ -5111,37 +5119,208 @@ def _overmind_post_json(url: str, payload: dict) -> dict:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _execute_overmind_action(settings: Settings, action: dict) -> Tuple[str, str]:
+def _read_text_file(path: Path, max_bytes: int = 262144) -> dict:
+    try:
+        raw = path.read_bytes()[:max_bytes + 1]
+        truncated = len(raw) > max_bytes
+        if truncated:
+            raw = raw[:max_bytes]
+        return {
+            "path": str(path),
+            "size": path.stat().st_size,
+            "truncated": truncated,
+            "content": raw.decode("utf-8", errors="replace"),
+        }
+    except Exception as error:
+        return {"path": str(path), "error": str(error)}
+
+
+def _resolve_userdata_path(settings: Settings, candidate: str) -> Path:
+    if candidate == "/userdata":
+        return settings.userdata_root.resolve()
+    if candidate.startswith("/userdata/"):
+        return (settings.userdata_root / candidate[len("/userdata/") :]).resolve()
+    return Path(candidate).resolve()
+
+
+def _collect_rom_metadata(settings: Settings, repository: "RomRepository") -> dict:
+    systems = repository.list_systems()
+    roms = []
+    gamelists = []
+    for system in systems:
+        system_name = str(system.get("name") or "").strip()
+        if not system_name:
+            continue
+        try:
+            _, system_roms = repository.list_assets(system_name, "roms")
+        except Exception as error:
+            roms.append({"system": system_name, "error": str(error)})
+            continue
+        for rom in system_roms:
+            item = dict(rom)
+            item["system"] = system_name
+            roms.append(item)
+        gamelist_path = settings.roms_root / system_name / "gamelist.xml"
+        if gamelist_path.exists() and gamelist_path.is_file():
+            gamelist = _read_text_file(gamelist_path, max_bytes=524288)
+            gamelist["system"] = system_name
+            gamelists.append(gamelist)
+    return {
+        "type": "rom_metadata",
+        "collected_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "systems": systems,
+        "roms": roms,
+        "gamelists": gamelists,
+    }
+
+
+def _collect_log_sources(settings: Settings) -> dict:
+    candidates = {
+        "es_launch_stdout": ["/userdata/system/logs/es_launch_stdout.log"],
+        "es_launch_stderr": ["/userdata/system/logs/es_launch_stderr.log"],
+        "drone_stdout": [str((settings.log_dir / settings.stdout_log_file).resolve())],
+        "drone_stderr": [str((settings.log_dir / settings.stderr_log_file).resolve())],
+    }
+    logs = []
+    for source, paths in candidates.items():
+        entry = {"source": source, "files": []}
+        for raw_path in paths:
+            path = _resolve_userdata_path(settings, raw_path)
+            if path.exists() and path.is_file():
+                entry["files"].append(_read_text_file(path, max_bytes=262144))
+        logs.append(entry)
+    return {
+        "type": "log_sources",
+        "collected_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "logs": logs,
+    }
+
+
+def _collect_game_logs(settings: Settings) -> dict:
+    log_data = _collect_log_sources(settings)
+    sessions = []
+    for source in log_data.get("logs", []):
+        if source.get("source") != "es_launch_stdout":
+            continue
+        for file_info in source.get("files", []):
+            current = {}
+            for line in str(file_info.get("content") or "").splitlines():
+                lowered = line.lower()
+                if "emulator=" in lowered:
+                    current["raw_emulator_line"] = line
+                    match = re.search(r"emulator=([^\\s]+)", line, re.IGNORECASE)
+                    if match:
+                        current["system_name"] = match.group(1)
+                if "rom=" in lowered:
+                    current["raw_rom_line"] = line
+                    match = re.search(r"rom=(.+)$", line, re.IGNORECASE)
+                    if match:
+                        current["game_name"] = match.group(1).strip()
+                    if current:
+                        sessions.append(dict(current))
+                        current = {}
+    return {
+        "type": "game_logs",
+        "collected_at": log_data["collected_at"],
+        "sessions": sessions,
+        "logs": log_data.get("logs", []),
+    }
+
+
+def _collect_emulator_configs(settings: Settings) -> dict:
+    roots = [
+        settings.userdata_root / "system" / "configs",
+        settings.userdata_root / "system" / ".config",
+    ]
+    allowed_suffixes = {".cfg", ".conf", ".ini", ".json", ".toml", ".xml", ".yml", ".yaml", ".bml", ".reg"}
+    configs = []
+    for root in roots:
+        if not root.exists() or not root.is_dir():
+            continue
+        for path in sorted(root.rglob("*")):
+            if len(configs) >= 250:
+                break
+            if not path.is_file() or path.suffix.lower() not in allowed_suffixes:
+                continue
+            item = _read_text_file(path, max_bytes=131072)
+            try:
+                item["relative_path"] = str(path.relative_to(root))
+            except Exception:
+                item["relative_path"] = path.name
+            item["root"] = str(root)
+            configs.append(item)
+    return {
+        "type": "emulator_configs",
+        "collected_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "configs": configs,
+    }
+
+
+def _summarize_overmind_result(result: Optional[dict]) -> str:
+    if not isinstance(result, dict):
+        return ""
+    if result.get("type") == "rom_metadata":
+        return f"{len(result.get('systems') or [])} systems, {len(result.get('roms') or [])} ROMs, {len(result.get('gamelists') or [])} gamelists"
+    if result.get("type") == "game_logs":
+        return f"{len(result.get('sessions') or [])} parsed sessions, {len(result.get('logs') or [])} logs"
+    if result.get("type") == "emulator_configs":
+        return f"{len(result.get('configs') or [])} config files"
+    if result.get("type") == "log_sources":
+        return f"{len(result.get('logs') or [])} log sources"
+    return "data returned"
+
+
+def _execute_overmind_action(settings: Settings, repository: "RomRepository", action: dict) -> Tuple[str, str, Optional[dict]]:
     action_name = str(action.get("action") or "").strip().lower()
-    if settings.use_fake_data:
-        return "completed", f"Simulated {action_name} action because USE_FAKE_DATA is enabled."
+
+    if action_name == "collect_rom_metadata":
+        result = _collect_rom_metadata(settings, repository)
+        return "completed", f"Collected {_summarize_overmind_result(result)}.", result
+
+    if action_name == "collect_game_logs":
+        result = _collect_game_logs(settings)
+        return "completed", f"Collected {_summarize_overmind_result(result)}.", result
+
+    if action_name == "collect_emulator_configs":
+        result = _collect_emulator_configs(settings)
+        return "completed", f"Collected {_summarize_overmind_result(result)}.", result
+
+    if action_name == "collect_log_sources":
+        result = _collect_log_sources(settings)
+        return "completed", f"Collected {_summarize_overmind_result(result)}.", result
 
     if action_name == "shutdown":
+        if settings.use_fake_data:
+            return "completed", "Simulated shutdown action because USE_FAKE_DATA is enabled.", None
         if not shutil.which("shutdown"):
-            return "failed", "shutdown command was not found"
+            return "failed", "shutdown command was not found", None
         subprocess.Popen(["shutdown", "-h", "now"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return "completed", "Shutdown command issued."
+        return "completed", "Shutdown command issued.", None
 
     if action_name == "restart":
+        if settings.use_fake_data:
+            return "completed", "Simulated restart action because USE_FAKE_DATA is enabled.", None
         if shutil.which("reboot"):
             subprocess.Popen(["reboot"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            return "completed", "Reboot command issued."
+            return "completed", "Reboot command issued.", None
         if shutil.which("shutdown"):
             subprocess.Popen(["shutdown", "-r", "now"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            return "completed", "Restart command issued."
-        return "failed", "reboot/shutdown command was not found"
+            return "completed", "Restart command issued.", None
+        return "failed", "reboot/shutdown command was not found", None
 
     if action_name == "update":
+        if settings.use_fake_data:
+            return "completed", "Simulated update action because USE_FAKE_DATA is enabled.", None
         updater = shutil.which("batocera-upgrade")
         if not updater:
-            return "failed", "batocera-upgrade command was not found"
+            return "failed", "batocera-upgrade command was not found", None
         subprocess.Popen([updater], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return "completed", "Batocera update command issued."
+        return "completed", "Batocera update command issued.", None
 
-    return "failed", f"Unsupported action: {action_name}"
+    return "failed", f"Unsupported action: {action_name}", None
 
 
-def _start_overmind_action_poller(settings: Settings) -> None:
+def _start_overmind_action_poller(settings: Settings, repository: "RomRepository") -> None:
     poll_seconds = max(5, int(settings.overmind_poll_seconds or 15))
 
     def loop() -> None:
@@ -5157,15 +5336,15 @@ def _start_overmind_action_poller(settings: Settings) -> None:
 
                 device_id = quote(settings.overmind_device_id, safe="")
                 credentials = {"email": email, "password": password}
-                claim_url = f"{base_url}/api/devices/{device_id}/actions/claim"
-                response = _overmind_post_json(claim_url, credentials)
+                alive_url = f"{base_url}/api/devices/{device_id}/alive"
+                response = _overmind_post_json(alive_url, credentials)
                 action = response.get("action")
                 if not isinstance(action, dict):
                     time.sleep(poll_seconds)
                     continue
 
-                status_value, message = _execute_overmind_action(settings, action)
-                _record_processed_overmind_action(settings, action, status_value, message)
+                status_value, message, result = _execute_overmind_action(settings, repository, action)
+                _record_processed_overmind_action(settings, action, status_value, message, result)
                 print(
                     f"Processed Overmind action {action.get('action')} ({action.get('id')}): {status_value} - {message}",
                     file=sys.stdout,
@@ -5174,10 +5353,10 @@ def _start_overmind_action_poller(settings: Settings) -> None:
                 action_id = quote(str(action.get("id") or ""), safe="")
                 if action_id:
                     complete_url = f"{base_url}/api/devices/{device_id}/actions/{action_id}/complete"
-                    _overmind_post_json(
-                        complete_url,
-                        {**credentials, "status": status_value, "message": message},
-                    )
+                    completion_payload = {**credentials, "status": status_value, "message": message}
+                    if result is not None:
+                        completion_payload["result"] = result
+                    _overmind_post_json(complete_url, completion_payload)
             except HTTPError as error:
                 print(f"Overmind action poll failed: {error}", file=sys.stderr, flush=True)
             except URLError:
@@ -5193,6 +5372,7 @@ def _start_overmind_action_poller(settings: Settings) -> None:
 
 
 def create_server(settings: Settings) -> ThreadingHTTPServer:
+    global _OVERMIND_POLLER_STARTED
     repository = RomRepository(
         settings.roms_root,
         settings.bios_root,
@@ -5229,6 +5409,10 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
         ssl_context.load_cert_chain(certfile=str(cert_file), keyfile=str(key_file))
         server.socket = ssl_context.wrap_socket(server.socket, server_side=True)
 
+    if not _OVERMIND_POLLER_STARTED:
+        _start_overmind_action_poller(settings, repository)
+        _OVERMIND_POLLER_STARTED = True
+
     return server
 
 
@@ -5248,7 +5432,6 @@ def main() -> None:
     print(f"Auth username: {settings.username}")
     scheme = "http" if settings.http_only else "https"
     print(f"Serving Drone App on {scheme}://0.0.0.0:{settings.https_port}")
-    _start_overmind_action_poller(settings)
     server.serve_forever()
 
 
