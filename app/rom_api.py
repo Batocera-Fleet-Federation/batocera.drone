@@ -235,6 +235,32 @@ def _set_child_text(parent: ET.Element, tag: str, value: str) -> None:
     child.text = value
 
 
+def _first_metadata_value(*values) -> str:
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, dict):
+            nested = _first_metadata_value(
+                value.get("name"),
+                value.get("title"),
+                value.get("value"),
+                value.get("displayName"),
+            )
+            if nested:
+                return nested
+            continue
+        if isinstance(value, (list, tuple, set)):
+            parts = [_first_metadata_value(item) for item in value]
+            joined = ", ".join(part for part in parts if part)
+            if joined:
+                return joined
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
 def _remove_child(parent: ET.Element, tag: str) -> None:
     child = parent.find(tag)
     if child is not None:
@@ -376,6 +402,11 @@ class LaunchBoxClient:
             "platform": (payload.get("platform") or {}).get("name") if isinstance(payload.get("platform"), dict) else None,
             "release_date": payload.get("releaseDate"),
             "overview": payload.get("overview"),
+            "genre": _first_metadata_value(payload.get("genres"), payload.get("genre"), payload.get("genreName")),
+            "developer": _first_metadata_value(payload.get("developers"), payload.get("developer"), payload.get("developerName")),
+            "publisher": _first_metadata_value(payload.get("publishers"), payload.get("publisher"), payload.get("publisherName")),
+            "players": _first_metadata_value(payload.get("players"), payload.get("maxPlayers"), payload.get("numberOfPlayers")),
+            "rating": _first_metadata_value(payload.get("communityStarRating"), payload.get("esrb"), payload.get("rating")),
             "images": images,
         }
 
@@ -1637,7 +1668,7 @@ class RomRepository:
                         "rom_name": rom_file,
                         "rom_path": rom_file,
                         "title": _text_or_empty(game, "name") if game is not None else str(rom.get("image_stem") or rom.get("name") or ""),
-                        "search_title": _clean_rom_title(str(rom.get("image_stem") or rom.get("name") or "")),
+                        "search_title": _clean_rom_title(_text_or_empty(game, "name") if game is not None else str(rom.get("image_stem") or rom.get("name") or "")),
                         "unique_id": rom.get("unique_id"),
                         "missing": missing,
                         "existing": {field: _text_or_empty(game, field) if game is not None else "" for field in ARTWORK_FIELDS},
@@ -1931,12 +1962,14 @@ class RomRepository:
                 "name": details.get("name"),
                 "desc": details.get("overview"),
                 "releasedate": details.get("release_date"),
-                "genre": None,  # not available from basic details
-                "developer": None,
-                "publisher": None,
+                "genre": details.get("genre"),
+                "developer": details.get("developer"),
+                "publisher": details.get("publisher"),
+                "players": details.get("players"),
+                "rating": details.get("rating"),
             }
             for mfield, mvalue in meta_fields_map.items():
-                if mvalue:
+                if mvalue and (override_existing or not _text_or_empty(game, mfield)):
                     _set_child_text(game, mfield, str(mvalue))
                     updated.append({"field": mfield, "value": str(mvalue), "source": "launchbox_metadata"})
 
@@ -3578,7 +3611,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         with self.repository._missing_artwork_cache_lock:
             self.repository._missing_artwork_cache.clear()
         result["override_existing"] = override_existing
-        result["metadata_imported"] = import_metadata
+        result["metadata_imported"] = len([item for item in result.get("updated", []) if str(item.get("source") or "") == "launchbox_metadata"])
         self._send_json(200, result)
 
     def _handle_admin_thegamesdb_artwork_search(self, system: str, rom_id: str, rom_path: str, query: str) -> None:
@@ -3649,35 +3682,17 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         title_value = _clean_rom_title(title_value)
         if not title_value:
             raise ValueError("q or system+rom_id/rom_path is required")
-        client = MobyGamesClient()
-        try:
-            matches = client.search(title_value, system=system_value, limit=5)
-        except Exception as error:
-            self._send_json(
-                200,
-                {
-                    "query": title_value,
-                    "system": system_value,
-                    "mobygames_platform": client.platform_name_for_system(system_value),
-                    "rom_id": rom_id_value,
-                    "rom_path": rom_path_value,
-                    "matches": [],
-                    "configured": False,
-                    "message": f"MobyGames could not be scraped right now: {str(error)}",
-                    "fields": list(ARTWORK_FIELDS),
-                },
-            )
-            return
         self._send_json(
             200,
             {
                 "query": title_value,
                 "system": system_value,
-                "mobygames_platform": client.platform_name_for_system(system_value),
+                "mobygames_platform": MobyGamesClient().platform_name_for_system(system_value),
                 "rom_id": rom_id_value,
                 "rom_path": rom_path_value,
-                "matches": matches,
-                "configured": True,
+                "matches": [],
+                "configured": False,
+                "message": "MobyGames scraping is disabled because the site often requires a browser challenge. Use the MobyGames link to search manually.",
                 "fields": list(ARTWORK_FIELDS),
             },
         )
@@ -3687,30 +3702,13 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         rom_id = str(payload.get("rom_id") or payload.get("unique_id") or "").strip()
         rom_path = _normalize_gamelist_rom_path(str(payload.get("rom_path") or ""))
         game_id = str(payload.get("game_id") or "").strip()
-        override_existing = bool(payload.get("override_existing", False))
-        import_metadata = bool(payload.get("import_metadata", True))
         if not system:
             raise ValueError("system is required")
         if not rom_id and not rom_path:
             raise ValueError("rom_id or rom_path is required")
         if not game_id:
             raise ValueError("game_id is required")
-        client = MobyGamesClient()
-        result = self.repository.apply_mobygames_artwork(
-            system,
-            rom_id,
-            game_id,
-            client,
-            rom_path=rom_path or None,
-            override_existing=override_existing,
-            import_metadata=import_metadata,
-        )
-        with self.repository._search_cache_lock:
-            self.repository._search_index_expires_at = 0
-        result["source"] = "mobygames"
-        result["override_existing"] = override_existing
-        result["metadata_imported"] = len([item for item in result.get("updated", []) if str(item.get("source") or "") == "mobygames_metadata"])
-        self._send_json(200, result)
+        raise ValueError("MobyGames scraping is disabled because the site often requires a browser challenge. Use the MobyGames link to search manually.")
 
     def _handle_admin_artwork_upload(self) -> None:
         import urllib.parse

@@ -102,6 +102,49 @@ class RepositoryTests(unittest.TestCase):
             self.assertIn("./images/existing.png", text)
             self.assertIn("launchbox-marquee", text)
 
+    def test_apply_launchbox_artwork_imports_missing_metadata(self) -> None:
+        class FakeLaunchBoxClient:
+            def details(self, game_key: str) -> dict:
+                return {
+                    "game_key": game_key,
+                    "name": "Chrono Trigger",
+                    "platform": "Super Nintendo Entertainment System",
+                    "overview": "A time travel RPG.",
+                    "release_date": "1995-08-22",
+                    "genre": "Role-Playing",
+                    "developer": "Square",
+                    "publisher": "Square",
+                    "images": [],
+                }
+
+            def choose_image_for_field(self, details: dict, field: str):
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            seed_mock_userdata(root)
+            gamelist = root / "roms" / "snes" / "gamelist.xml"
+            gamelist.write_text(
+                "<gameList><game><path>./Chrono Trigger (USA).zip</path><name>Existing Name</name></game></gameList>\n",
+                encoding="utf-8",
+            )
+            repo = RomRepository(root / "roms", root / "bios")
+            rom = next(item for item in repo.search_roms("chrono") if item["system"] == "snes")
+            result = repo.apply_launchbox_artwork(
+                "snes",
+                rom["unique_id"],
+                "123",
+                FakeLaunchBoxClient(),
+                import_metadata=True,
+            )
+            metadata_fields = {item["field"] for item in result["updated"] if item.get("source") == "launchbox_metadata"}
+            self.assertNotIn("name", metadata_fields)
+            self.assertIn("desc", metadata_fields)
+            self.assertIn("genre", metadata_fields)
+            text = gamelist.read_text(encoding="utf-8")
+            self.assertIn("<name>Existing Name</name>", text)
+            self.assertIn("<desc>A time travel RPG.</desc>", text)
+
     def test_remove_gamelist_entry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"

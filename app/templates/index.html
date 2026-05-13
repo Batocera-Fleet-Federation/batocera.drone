@@ -2431,20 +2431,24 @@ function artworkMetadataEditFields(rom) {
   `).join("");
 }
 function googleImageSearchUrl(rom) {
-  const query = `${rom.search_title || rom.title || rom.name || ""} ${rom.system || ""} images`.trim();
+  const query = `${artworkRomSearchTitle(rom)} ${rom.system || ""} images`.trim();
   return `https://www.google.com/search?tbm=isch&q=${encodeURIComponent(query)}`;
 }
-function scraperSearchQuery(rom) {
-  return `${rom.search_title || rom.title || rom.name || ""} ${rom.system || ""}`.trim();
+function artworkRomSearchTitle(rom) {
+  const gamelistName = rom && rom.gamelist && typeof rom.gamelist.name === "string" ? rom.gamelist.name : "";
+  return (gamelistName || rom.search_title || rom.title || rom.name || "").trim();
+}
+function scraperSearchQuery(rom, includeSystem = true) {
+  return `${artworkRomSearchTitle(rom)} ${includeSystem ? (rom.system || "") : ""}`.trim();
 }
 function launchBoxSearchUrl(rom) {
-  return `https://gamesdb.launchbox-app.com/games/search?search=${encodeURIComponent(scraperSearchQuery(rom))}`;
+  return `https://gamesdb.launchbox-app.com/games/results/${encodeURIComponent(scraperSearchQuery(rom, false))}`;
 }
 function theGamesDBSearchUrl(rom) {
-  return `https://thegamesdb.net/search.php?name=${encodeURIComponent(scraperSearchQuery(rom))}`;
+  return `https://thegamesdb.net/search.php?name=${encodeURIComponent(scraperSearchQuery(rom, false))}`;
 }
 function mobyGamesSearchUrl(rom) {
-  return `https://www.mobygames.com/search/?q=${encodeURIComponent(scraperSearchQuery(rom))}`;
+  return `https://www.mobygames.com/search/?q=${encodeURIComponent(scraperSearchQuery(rom, false))}`;
 }
 function artworkExternalLinksHtml(rom) {
   return `
@@ -2760,13 +2764,6 @@ async function selectArtworkRom(index, activeTab = "matches") {
           </div>
           <div id="theGamesDBImageMatches" class="mt-2"></div>
         </div>
-        <div class="border-top mt-3 pt-3">
-          <div class="mb-2">
-            <div class="fw-semibold">MobyGames Matches</div>
-            <div class="text-muted small" id="mobyGamesImageQuery"></div>
-          </div>
-          <div id="mobyGamesImageMatches" class="mt-2"></div>
-        </div>
       </div>
       <div class="tab-pane fade compact-edit" id="edit-panel" role="tabpanel" aria-labelledby="edit-tab">
         <div class="mb-2">
@@ -2804,7 +2801,7 @@ async function selectArtworkRom(index, activeTab = "matches") {
   if (!matchesEl) return;
   setLoading(true, "Searching LaunchBox matches...");
   try {
-    const data = await api(`/admin/artwork/launchbox/search?system=${encodeURIComponent(rom.system || "")}&rom_id=${encodeURIComponent(rom.unique_id || "")}&rom_path=${encodeURIComponent(rom.rom_path || "")}&q=${encodeURIComponent(rom.search_title || rom.title || rom.name || "")}`);
+    const data = await api(`/admin/artwork/launchbox/search?system=${encodeURIComponent(rom.system || "")}&rom_id=${encodeURIComponent(rom.unique_id || "")}&rom_path=${encodeURIComponent(rom.rom_path || "")}&q=${encodeURIComponent(artworkRomSearchTitle(rom))}`);
     const matches = data.matches || [];
     const platformNote = data.launchbox_platform
       ? `<div class="text-muted small mb-2">Filtered by LaunchBox platform: ${escapeHtml(data.launchbox_platform)}</div>`
@@ -2842,7 +2839,6 @@ async function selectArtworkRom(index, activeTab = "matches") {
     setLoading(false);
   }
   await searchTheGamesDBImagesForRom(index, false);
-  await searchMobyGamesImagesForRom(index, false);
 }
 async function searchTheGamesDBImagesForRom(index, forceRefresh = false) {
   const rom = (window.missingArtworkRoms || [])[index];
@@ -2853,7 +2849,7 @@ async function searchTheGamesDBImagesForRom(index, forceRefresh = false) {
   matchesEl.innerHTML = "";
   setLoading(true, "Searching TheGamesDB matches...");
   try {
-    const data = await api(`/admin/artwork/thegamesdb/search?system=${encodeURIComponent(rom.system || "")}&rom_id=${encodeURIComponent(rom.unique_id || "")}&rom_path=${encodeURIComponent(rom.rom_path || "")}&q=${encodeURIComponent(rom.search_title || rom.title || rom.name || "")}`);
+    const data = await api(`/admin/artwork/thegamesdb/search?system=${encodeURIComponent(rom.system || "")}&rom_id=${encodeURIComponent(rom.unique_id || "")}&rom_path=${encodeURIComponent(rom.rom_path || "")}&q=${encodeURIComponent(artworkRomSearchTitle(rom))}`);
     const matches = (data.matches || []).slice(0, 5);
     if (queryEl) queryEl.textContent = data.query || "";
     matchesEl.setAttribute("data-loaded", "1");
@@ -3034,12 +3030,14 @@ async function applyLaunchboxArtwork(rowIndex, system, romId, romPath, gameKey) 
       rom_path: romPath,
       game_key: gameKey,
       override_existing: overrideExisting,
-      import_metadata: overrideExisting, // Import comprehensive metadata when override is on
+      import_metadata: true,
     });
     const updated = result.updated || [];
-    let successMsg = `Updated ${updated.length} artwork field${updated.length === 1 ? "" : "s"} for ${escapeHtml(result.rom_name || "ROM")}.`;
-    if (overrideExisting && result.metadata_imported) {
-      successMsg += ` Also imported ${result.metadata_imported} metadata fields.`;
+    const artCount = updated.filter((item) => item.path).length;
+    const metaCount = Number(result.metadata_imported || 0);
+    let successMsg = `Updated ${artCount} artwork field${artCount === 1 ? "" : "s"} for ${escapeHtml(result.rom_name || "ROM")}.`;
+    if (metaCount) {
+      successMsg += ` Also imported ${metaCount} metadata field${metaCount === 1 ? "" : "s"}.`;
     }
     showToast(successMsg, "success");
     const rom = (window.missingArtworkRoms || [])[rowIndex];
