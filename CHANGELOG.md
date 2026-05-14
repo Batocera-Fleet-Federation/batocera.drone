@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.8] - 2026-05-14
+
+- Adding back in DRONE_APP_BASE_URL as it is required for github link out.
+
 ## [v0.0.7] - 2026-05-14
 
 - One last update for latest release to work properly.
