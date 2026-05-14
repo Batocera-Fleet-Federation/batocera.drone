@@ -4,6 +4,7 @@ set -euo pipefail
 PROJECT="Batocera Drone"
 REPO="Batocera-Fleet-Federation/batocera.drone"
 DEFAULT_BRANCH="main"
+LATEST_TAG="latest"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -81,9 +82,10 @@ fi
 
 echo "══════════════════════════════════════════════════════════════"
 echo "  $PROJECT Release"
-echo "  Version : $VERSION"
-echo "  Mode    : $PUSH_MODE"
-echo "  Repo    : $REPO"
+echo "  Version    : $VERSION"
+echo "  Latest Tag : $LATEST_TAG"
+echo "  Mode       : $PUSH_MODE"
+echo "  Repo       : $REPO"
 echo "══════════════════════════════════════════════════════════════"
 echo ""
 
@@ -96,93 +98,6 @@ update_changelog() {
     return
   fi
 
-  if grep -qE "^## \[$VERSION\]" "$CHANGELOG"; then
+  if grep -qE "^## $VERSION" "$CHANGELOG"; then
     warn "$VERSION already exists in $CHANGELOG. Skipping changelog update."
     return
-  fi
-
-  if ! grep -qE "^## \[Unreleased\]" "$CHANGELOG"; then
-    warn "[Unreleased] section not found in $CHANGELOG. Skipping changelog update."
-    return
-  fi
-
-  tmp_file="$(mktemp)"
-
-  awk -v version="$VERSION" -v today="$TODAY" '
-    /^## \[Unreleased\]/ {
-      print
-      print ""
-      print "## [" version "] - " today
-      next
-    }
-    { print }
-  ' "$CHANGELOG" > "$tmp_file"
-
-  mv "$tmp_file" "$CHANGELOG"
-
-  info "Updated $CHANGELOG with $VERSION"
-}
-
-get_previous_tag() {
-  git tag --sort=-v:refname \
-    | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
-    | grep -v "^${VERSION}$" \
-    | head -1 || true
-}
-
-if [[ "$PUSH_MODE" == "dry-run" ]]; then
-  PREVIOUS_TAG="$(get_previous_tag)"
-
-  info "DRY-RUN mode. No files, tags, or releases will be created."
-  info "Would validate repo, update CHANGELOG.md, commit, tag, push, and create GitHub Release."
-
-  if [[ -n "$PREVIOUS_TAG" ]]; then
-    info "Would generate release notes from $PREVIOUS_TAG to $VERSION."
-  else
-    info "No previous version tag found. Would generate initial release notes."
-  fi
-
-  echo ""
-  echo "To release:"
-  echo "  $0 $VERSION --push"
-  exit 0
-fi
-
-update_changelog
-
-if [[ -f "$CHANGELOG" ]] && ! git diff --quiet -- "$CHANGELOG"; then
-  git add "$CHANGELOG"
-  git commit -m "chore: bump version to $VERSION"
-  git push origin "$DEFAULT_BRANCH"
-  info "Committed and pushed $CHANGELOG update."
-else
-  info "No changelog changes to commit."
-fi
-
-info "Creating annotated tag: $VERSION"
-git tag -a "$VERSION" -m "Release $VERSION"
-git push origin "$VERSION"
-
-PREVIOUS_TAG="$(get_previous_tag)"
-
-info "Creating GitHub Release..."
-
-if [[ -n "$PREVIOUS_TAG" ]]; then
-  info "Generating release notes from $PREVIOUS_TAG to $VERSION."
-
-  gh release create "$VERSION" \
-    --title "$VERSION" \
-    --generate-notes \
-    --notes-start-tag "$PREVIOUS_TAG" \
-    --repo "$REPO"
-else
-  info "No previous version tag found. Creating initial generated release notes."
-
-  gh release create "$VERSION" \
-    --title "$VERSION" \
-    --generate-notes \
-    --repo "$REPO"
-fi
-
-info "Release created: https://github.com/$REPO/releases/tag/$VERSION"
-info "Release $VERSION completed successfully."
