@@ -5,10 +5,12 @@ import json
 import os
 import re
 import shutil
+import socket
 import ssl
 import subprocess
 import sys
 import time
+import uuid
 import xml.etree.ElementTree as ET
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -33,8 +35,9 @@ except ImportError:
     from ui_routes import UiRoutesMixin  # type: ignore
 
 
-FAKE_OVERMIND_EMAIL = "arcade@example.com"
-FAKE_OVERMIND_PASSWORD = "ArcadePass123"
+FAKE_OVERMIND_EMAIL = "demo@example.com"
+FAKE_OVERMIND_PASSWORD = "DemoPass123"
+FAKE_OVERMIND_TOKEN = "demo-local-drone-token"
 _OVERMIND_POLLER_STARTED = False
 LAUNCHBOX_API_BASE = "https://api.gamesdb.launchbox-app.com/api"
 LAUNCHBOX_IMAGE_BASE = "https://images.launchbox-app.com"
@@ -165,25 +168,12 @@ def _env_bool(default: bool, *names: str) -> bool:
 
 
 def _machine_id() -> str:
-    for candidate in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
-        try:
-            value = Path(candidate).read_text(encoding="utf-8", errors="ignore").strip()
-            if value:
-                return value
-        except Exception:
-            continue
-    return "unknown-machine"
-
-
-# Fake device ID that matches the device owned by "arcade@example.com"
-# in Overmind's populate_fake_data() (i.e., "arcade-cabinet-002").
-# Using a deterministic value ensures the drone's action poller can
-# successfully claim actions against the locally-running overmind server.
-FAKE_OVERMIND_DEVICE_ID = "arcade-cabinet-002"
+    node = uuid.getnode()
+    return ":".join(f"{(node >> shift) & 0xff:02x}" for shift in range(40, -1, -8))
 
 
 def _fake_machine_id() -> str:
-    return FAKE_OVERMIND_DEVICE_ID
+    return _machine_id()
 
 
 def _clean_rom_title(value: str) -> str:
@@ -891,6 +881,7 @@ class Settings:
     overmind_url: Optional[str]
     overmind_email: Optional[str]
     overmind_password: Optional[str]
+    overmind_token: Optional[str]
     overmind_device_id: str
     overmind_poll_seconds: int
 
@@ -942,8 +933,9 @@ class Settings:
             overmind_url=os.environ.get("OVERMIND_URL"),
             overmind_email=os.environ.get("OVERMIND_EMAIL"),
             overmind_password=os.environ.get("OVERMIND_PASSWORD"),
+            overmind_token=os.environ.get("OVERMIND_DRONE_TOKEN"),
             overmind_device_id=_fake_machine_id() if use_fake_data else _machine_id(),
-            overmind_poll_seconds=int(os.environ.get("OVERMIND_POLL_SECONDS", "5")),
+            overmind_poll_seconds=int(os.environ.get("OVERMIND_POLL_SECONDS", "30")),
         )
 
 
@@ -2806,7 +2798,10 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         return (self.settings.userdata_root / "system" / "drone-app" / "overmind_integration.json").resolve()
 
     def _overmind_actions_path(self) -> Path:
-        return (self.settings.userdata_root / "system" / "drone-app" / "overmind_processed_actions.json").resolve()
+        return Path(os.environ.get(
+            "OVERMIND_ACTION_LOG_FILE",
+            str(self.settings.userdata_root / "system" / "drone-app" / "overmind_actions.log"),
+        )).resolve()
 
     def _mask_secret(self, value: str) -> str:
         if not value:
@@ -2818,6 +2813,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
     def _load_overmind_config(self) -> dict:
         fake_email = FAKE_OVERMIND_EMAIL if self.settings.use_fake_data else ""
         fake_password = FAKE_OVERMIND_PASSWORD if self.settings.use_fake_data else ""
+        fake_token = FAKE_OVERMIND_TOKEN if self.settings.use_fake_data else ""
         default = {
             "overmind_url": (self.settings.overmind_url or "").strip(),
             "overmind_email": (fake_email if self.settings.use_fake_data else self.settings.overmind_email or "").strip(),
@@ -2831,6 +2827,8 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
 
         if self.settings.overmind_password or fake_password:
             default["overmind_password"] = fake_password if self.settings.use_fake_data else self.settings.overmind_password
+        if self.settings.overmind_token or fake_token:
+            default["overmind_token"] = fake_token if self.settings.use_fake_data else self.settings.overmind_token
 
         path = self._overmind_config_path()
         if not path.exists() or not path.is_file():
@@ -2847,6 +2845,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         if self.settings.use_fake_data:
             merged["overmind_email"] = FAKE_OVERMIND_EMAIL
             merged["overmind_password"] = FAKE_OVERMIND_PASSWORD
+            merged["overmind_token"] = FAKE_OVERMIND_TOKEN
         return merged
 
     def _save_overmind_config(self, payload: dict) -> None:
@@ -2856,9 +2855,10 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
 
     def _overmind_public_payload(self, config: dict) -> dict:
         password = str(config.get("overmind_password") or "")
+        token = str(config.get("overmind_token") or "")
         email = str(config.get("overmind_email") or "")
         status = {
-            "configured": bool(config.get("overmind_url")) and bool(email) and bool(password),
+            "configured": bool(config.get("overmind_url")) and bool(token),
             "integration_enabled": bool(config.get("integration_enabled")),
             "integration_state": str(config.get("integration_state") or "not_started"),
             "requested_at": config.get("requested_at"),
@@ -2872,6 +2872,8 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             "machine_id": self.settings.overmind_device_id,
             "password_configured": bool(password),
             "password_masked": self._mask_secret(password) if password else "",
+            "token_configured": bool(token),
+            "token_masked": self._mask_secret(token) if token else "",
             "status": status,
         }
 
@@ -2880,7 +2882,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         if not path.exists() or not path.is_file():
             return []
         try:
-            loaded = json.loads(path.read_text(encoding="utf-8"))
+            loaded = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
         except Exception:
             return []
         return loaded if isinstance(loaded, list) else []
@@ -4343,6 +4345,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         raw_url = str(payload.get("overmind_url") or "").strip()
         raw_email = str(payload.get("overmind_email") or "").strip()
         raw_password = payload.get("overmind_password")
+        raw_token = payload.get("overmind_token")
 
         if not raw_url:
             raise ValueError("overmind_url is required")
@@ -4363,6 +4366,11 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             if not password_value:
                 raise ValueError("overmind_password cannot be empty when provided")
             new_config["overmind_password"] = password_value
+        if raw_token is not None:
+            token_value = str(raw_token)
+            if not token_value:
+                raise ValueError("overmind_token cannot be empty when provided")
+            new_config["overmind_token"] = token_value
         new_config["requested_at"] = self._now_iso()
         new_config["integration_state"] = "configured"
         new_config["last_error"] = None
@@ -4374,12 +4382,13 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         config = self._load_overmind_config()
         email = str(config.get("overmind_email") or "").strip()
         password = str(config.get("overmind_password") or "")
+        token = str(config.get("overmind_token") or "")
         if not str(config.get("overmind_url") or "").strip():
             raise ValueError("overmind_url is not configured")
         if not email:
             raise ValueError("overmind_email is not configured")
-        if not password:
-            raise ValueError("overmind_password is not configured")
+        if not token:
+            raise ValueError("overmind_token is not configured")
 
         if "overmind_password" in payload:
             supplied = str(payload.get("overmind_password") or "")
@@ -4387,6 +4396,11 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 raise ValueError("overmind_password cannot be empty")
             config["overmind_password"] = supplied
             password = supplied
+        if "overmind_token" in payload:
+            supplied_token = str(payload.get("overmind_token") or "")
+            if not supplied_token:
+                raise ValueError("overmind_token cannot be empty")
+            config["overmind_token"] = supplied_token
 
         config["integration_enabled"] = True
         config["integration_state"] = "polling"
@@ -5044,17 +5058,22 @@ def _overmind_config_path_for_settings(settings: Settings) -> Path:
 
 
 def _overmind_actions_path_for_settings(settings: Settings) -> Path:
-    return (settings.userdata_root / "system" / "drone-app" / "overmind_processed_actions.json").resolve()
+    return Path(os.environ.get(
+        "OVERMIND_ACTION_LOG_FILE",
+        str(settings.userdata_root / "system" / "drone-app" / "overmind_actions.log"),
+    )).resolve()
 
 
 def _load_overmind_config_for_settings(settings: Settings) -> dict:
     fake_email = FAKE_OVERMIND_EMAIL if settings.use_fake_data else ""
     fake_password = FAKE_OVERMIND_PASSWORD if settings.use_fake_data else ""
+    fake_token = FAKE_OVERMIND_TOKEN if settings.use_fake_data else ""
     default = {
         "overmind_url": (settings.overmind_url or "").strip(),
         "overmind_email": (fake_email if settings.use_fake_data else settings.overmind_email or "").strip(),
         "overmind_password": fake_password if settings.use_fake_data else settings.overmind_password or "",
-        "integration_enabled": bool(settings.overmind_url and (settings.overmind_email or fake_email) and (settings.overmind_password or fake_password)),
+        "overmind_token": fake_token if settings.use_fake_data else settings.overmind_token or "",
+        "integration_enabled": bool(settings.overmind_url and (settings.overmind_token or fake_token)),
     }
     path = _overmind_config_path_for_settings(settings)
     if not path.exists() or not path.is_file():
@@ -5070,6 +5089,7 @@ def _load_overmind_config_for_settings(settings: Settings) -> dict:
     if settings.use_fake_data:
         merged["overmind_email"] = FAKE_OVERMIND_EMAIL
         merged["overmind_password"] = FAKE_OVERMIND_PASSWORD
+        merged["overmind_token"] = FAKE_OVERMIND_TOKEN
     return merged
 
 
@@ -5082,13 +5102,7 @@ def _record_processed_overmind_action(
 ) -> None:
     path = _overmind_actions_path_for_settings(settings)
     path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        loaded = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
-    except Exception:
-        loaded = []
-    actions = loaded if isinstance(loaded, list) else []
-    actions.append(
-        {
+    entry = {
             "id": action.get("id"),
             "device_id": settings.overmind_device_id,
             "action": action.get("action"),
@@ -5097,17 +5111,29 @@ def _record_processed_overmind_action(
             "result_summary": _summarize_overmind_result(result),
             "processed_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
             "fake_data": settings.use_fake_data,
-        }
-    )
-    path.write_text(json.dumps(actions[-200:], indent=2, sort_keys=True), encoding="utf-8")
+    }
+    max_bytes = int(os.environ.get("OVERMIND_ACTION_LOG_MAX_BYTES", str(settings.log_max_bytes)))
+    if path.exists() and max_bytes > 0 and path.stat().st_size > max_bytes:
+        backup = path.with_name(f"{path.name}.1")
+        try:
+            if backup.exists():
+                backup.unlink()
+            path.replace(backup)
+        except OSError:
+            path.unlink(missing_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(entry, sort_keys=True) + "\n")
 
 
-def _overmind_post_json(url: str, payload: dict) -> dict:
+def _overmind_post_json(url: str, payload: dict, token: Optional[str] = None) -> dict:
     body = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     request = Request(
         url,
         data=body,
-        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        headers=headers,
         method="POST",
     )
     context = ssl._create_unverified_context() if url.startswith("https://") else None
@@ -5117,6 +5143,69 @@ def _overmind_post_json(url: str, payload: dict) -> dict:
         return {}
     parsed = json.loads(raw.decode("utf-8"))
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _get_local_ip_addresses() -> dict:
+    """Resolve local IPv4/IPv6 addresses for Overmind alive pings."""
+    ipv4: List[str] = []
+    ipv6: List[str] = []
+
+    def add(value: str) -> None:
+        value = str(value or "").split("%", 1)[0].strip()
+        if not value:
+            return
+        target = ipv6 if ":" in value else ipv4
+        if value not in target:
+            target.append(value)
+
+    try:
+        hostname = socket.gethostname()
+        for info in socket.getaddrinfo(hostname, None):
+            add(info[4][0])
+    except OSError as error:
+        print(f"Overmind network resolution failed for hostname: {error}", file=sys.stderr, flush=True)
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.connect(("8.8.8.8", 80))
+            add(probe.getsockname()[0])
+    except OSError as error:
+        print(f"Overmind IPv4 route resolution failed: {error}", file=sys.stderr, flush=True)
+
+    try:
+        with socket.socket(socket.AF_INET6, socket.SOCK_DGRAM) as probe6:
+            probe6.connect(("2001:4860:4860::8888", 80))
+            add(probe6.getsockname()[0])
+    except OSError as error:
+        print(f"Overmind IPv6 route resolution failed: {error}", file=sys.stderr, flush=True)
+
+    if "127.0.0.1" not in ipv4:
+        ipv4.append("127.0.0.1")
+    gateway_ip = None
+    try:
+        result = subprocess.run(["sh", "-c", "ip route show default 2>/dev/null | awk '{print $3; exit}'"], capture_output=True, text=True, timeout=2)
+        gateway_ip = (result.stdout or "").strip() or None
+    except Exception:
+        gateway_ip = None
+    public_ip = None
+    try:
+        with urlopen(Request("https://api.ipify.org", headers={"User-Agent": "batocera-drone-app/4.0"}), timeout=3) as response:
+            public_ip = response.read().decode("utf-8", errors="replace").strip() or None
+    except Exception:
+        public_ip = None
+    print(f"Overmind network resolved ipv4={ipv4} ipv6={ipv6} gateway={gateway_ip} public={public_ip}", file=sys.stdout, flush=True)
+    return {"ipv4": ipv4, "ipv6": ipv6, "gateway_ip": gateway_ip, "public_ip": public_ip}
+
+
+def _sample_speed() -> dict:
+    """Return a lightweight local speed sample without running invasive tests."""
+    return {
+        "upload_mbps": 0,
+        "download_mbps": 0,
+        "latency_ms": 0,
+        "source": "simulated-local",
+        "sampled_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+    }
 
 
 def _read_text_file(path: Path, max_bytes: int = 262144) -> dict:
@@ -5321,23 +5410,37 @@ def _execute_overmind_action(settings: Settings, repository: "RomRepository", ac
 
 
 def _start_overmind_action_poller(settings: Settings, repository: "RomRepository") -> None:
-    poll_seconds = max(5, int(settings.overmind_poll_seconds or 15))
+    poll_seconds = max(5, int(settings.overmind_poll_seconds or 30))
+    speed_sample_seconds = int(os.environ.get("OVERMIND_SPEED_SAMPLE_SECONDS", "1800"))
+    last_speed_sample_at = 0.0
 
     def loop() -> None:
+        nonlocal last_speed_sample_at
         while True:
             try:
                 config = _load_overmind_config_for_settings(settings)
                 base_url = str(config.get("overmind_url") or "").strip().rstrip("/")
-                email = str(config.get("overmind_email") or "").strip()
-                password = str(config.get("overmind_password") or "")
-                if not base_url or not email or not password:
+                token = str(config.get("overmind_token") or "").strip()
+                if not base_url or not token:
                     time.sleep(poll_seconds)
                     continue
 
                 device_id = quote(settings.overmind_device_id, safe="")
-                credentials = {"email": email, "password": password}
+                rom_systems = repository.list_systems()
+                alive_payload = {
+                    "device_id": settings.overmind_device_id,
+                    "network": _get_local_ip_addresses(),
+                    "rom_systems": rom_systems,
+                }
                 alive_url = f"{base_url}/api/devices/{device_id}/alive"
-                response = _overmind_post_json(alive_url, credentials)
+                response = _overmind_post_json(alive_url, alive_payload, token=token)
+
+                now = time.monotonic()
+                if speed_sample_seconds > 0 and now - last_speed_sample_at >= speed_sample_seconds:
+                    speed_url = f"{base_url}/api/devices/{device_id}/speed"
+                    _overmind_post_json(speed_url, _sample_speed(), token=token)
+                    last_speed_sample_at = now
+
                 action = response.get("action")
                 if not isinstance(action, dict):
                     time.sleep(poll_seconds)
@@ -5353,10 +5456,10 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                 action_id = quote(str(action.get("id") or ""), safe="")
                 if action_id:
                     complete_url = f"{base_url}/api/devices/{device_id}/actions/{action_id}/complete"
-                    completion_payload = {**credentials, "status": status_value, "message": message}
+                    completion_payload = {"status": status_value, "message": message}
                     if result is not None:
                         completion_payload["result"] = result
-                    _overmind_post_json(complete_url, completion_payload)
+                    _overmind_post_json(complete_url, completion_payload, token=token)
             except HTTPError as error:
                 print(f"Overmind action poll failed: {error}", file=sys.stderr, flush=True)
             except URLError:

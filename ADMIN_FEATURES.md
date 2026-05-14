@@ -153,7 +153,7 @@ curl -u admin:password https://your-server/v1/api/admin/logs/pcsx2?lines=100
 
 ## Implementation Details
 
-### Backend (`rom_api.py`)
+### Backend (`drone_api.py`)
 - Added `_handle_admin_logs(log_source, lines)` method to `RomRequestHandler` class
 - Maps log source names to file paths in `/userdata/system/logs/`
 - Uses `tail` command to efficiently retrieve last N lines

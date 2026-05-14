@@ -8,7 +8,7 @@ import urllib.request
 from pathlib import Path
 
 from app.mock_data import seed_mock_userdata
-from app.rom_api import Settings, create_server
+from app.drone_api import Settings, create_server
 
 
 def _auth_header(username: str, password: str) -> str:

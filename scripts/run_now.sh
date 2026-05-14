@@ -35,7 +35,7 @@ WORK_DIR="${DRONE_APP_WORK_DIR:-$HOME/.drone-app}"
 SCRIPT_PATH="${0:-}"
 mkdir -p "$WORK_DIR"
 APP_DIR="$WORK_DIR/app"
-APP_PATH="$APP_DIR/rom_api.py"
+APP_PATH="$APP_DIR/drone_api.py"
 MAIN_PATH="$APP_DIR/main.py"
 INIT_PATH="$APP_DIR/__init__.py"
 TEMPLATES_DIR="$APP_DIR/templates"
@@ -46,7 +46,7 @@ ROUTE_CONFIG_PATH="$APP_DIR/route_config.py"
 
 if [[ -n "$DRONE_APP_BASE_URL" ]]; then
   DRONE_APP_BASE_URL="${DRONE_APP_BASE_URL%/}"
-  DRONE_APP_URL="${DRONE_APP_URL:-$DRONE_APP_BASE_URL/app/rom_api.py}"
+  DRONE_APP_URL="${DRONE_APP_URL:-$DRONE_APP_BASE_URL/app/drone_api.py}"
   DRONE_APP_API_ROUTES_URL="${DRONE_APP_API_ROUTES_URL:-$DRONE_APP_BASE_URL/app/api_routes.py}"
   DRONE_APP_UI_ROUTES_URL="${DRONE_APP_UI_ROUTES_URL:-$DRONE_APP_BASE_URL/app/ui_routes.py}"
   DRONE_APP_ROUTE_CONFIG_URL="${DRONE_APP_ROUTE_CONFIG_URL:-$DRONE_APP_BASE_URL/app/route_config.py}"
@@ -79,7 +79,7 @@ cat > "$INIT_PATH" <<'EOF'
 # package marker
 EOF
 cat > "$MAIN_PATH" <<'EOF'
-from app.rom_api import main
+from app.drone_api import main
 
 if __name__ == "__main__":
     main()
@@ -126,4 +126,7 @@ env \
   JSON_CACHE_TTL_SECONDS="${JSON_CACHE_TTL_SECONDS:-3600}" \
   JSON_CACHE_MAX_ITEMS="${JSON_CACHE_MAX_ITEMS:-2000}" \
   JSON_CACHE_MAX_BYTES="${JSON_CACHE_MAX_BYTES:-67108864}" \
+  OVERMIND_DRONE_TOKEN="${OVERMIND_DRONE_TOKEN:-}" \
+  OVERMIND_POLL_SECONDS="${OVERMIND_POLL_SECONDS:-30}" \
+  OVERMIND_SPEED_SAMPLE_SECONDS="${OVERMIND_SPEED_SAMPLE_SECONDS:-1800}" \
   python3 -m app.main

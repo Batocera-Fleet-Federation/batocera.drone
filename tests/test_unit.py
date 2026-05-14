@@ -5,7 +5,7 @@ from unittest import mock
 from pathlib import Path
 
 from app.mock_data import seed_mock_userdata
-from app.rom_api import BasicAuth, LaunchBoxClient, RomRepository, _clean_rom_title, _launchbox_platform_for_system
+from app.drone_api import BasicAuth, LaunchBoxClient, RomRepository, _clean_rom_title, _launchbox_platform_for_system
 
 
 class BasicAuthTests(unittest.TestCase):

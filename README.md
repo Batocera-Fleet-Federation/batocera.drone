@@ -89,9 +89,15 @@ https://<your-batocera-name>.local:8443/v1/api/openapi.json
 
 ## Overmind Integration
 
-Batocera Drone includes early Overmind integration screens and settings.
+Batocera Drone is the local Batocera agent. Overmind owns the Overlord UI, Drone authorization tokens, action queue, and per-Drone auto-sync policy.
 
-Full batocera.overmind coordination is coming soon. The goal is for Drone to act as the local Batocera agent while Overmind coordinates devices, actions, and fleet-level automation.
+Drone calls Overmind every 30 seconds by default. The alive payload includes the MAC-address `device_id`, discovered IPv4/IPv6 addresses, router/gateway IP when available, public IP when available, and ROM systems. Overmind validates `Authorization: Bearer <drone_token>` before accepting alive, action-status, metadata, logs, or speed samples.
+
+Actions use a pull model because Overmind usually cannot connect inward to a Drone on a home network. The Overlord queues an action in Overmind, the Drone receives it during alive polling, performs the local work, then posts the result back to Overmind. Restart, shutdown, and update are simulated in fake/demo mode.
+
+Drone action processing state is not stored in a persistent database. Processed action history is written to a separate rotating log file, configurable with `OVERMIND_ACTION_LOG_FILE` and `OVERMIND_ACTION_LOG_MAX_BYTES`. Normal Drone logs also rotate with `LOG_MAX_BYTES` and `LOG_BACKUP_COUNT`, and log APIs default to a reasonable recent tail.
+
+Local fake mode is configured for `demo@example.com` with `OVERMIND_DRONE_TOKEN=demo-local-drone-token`, matching the local MAC-address Drone registered in Overmind fake data.
 
 ## Advanced Users
 

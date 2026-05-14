@@ -634,7 +634,6 @@
         <a href="https://github.com/Batocera-Fleet-Federation/batocera.drone" target="_blank" rel="noopener noreferrer" role="button" class="btn">
           <i class="bi bi-github me-2"></i>GitHub
         </a>
-        <a id="backBtn" href="#" role="button" class="btn btn-outline-light d-none">Back</a>
       </div>
     </div>
   </div>
@@ -662,7 +661,10 @@
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
 const content = document.getElementById("content");
-const backBtn = document.getElementById("backBtn");
+const backBtn = document.getElementById("backBtn") || {
+  classList: { add() {}, remove() {} },
+  addEventListener() {},
+};
 const systemsMenuBtn = document.getElementById("systemsMenuBtn");
 const biosBtn = document.getElementById("biosBtn");
 const themeMenuBtn = document.getElementById("themeMenuBtn");
@@ -973,7 +975,7 @@ function pickRandomThemeBackground(payload) {
     return null;
   }
 
-  const cacheKey = "rom_api_theme_bg_choice_v1";
+  const cacheKey = "drone_api_theme_bg_choice_v1";
   const now = Date.now();
   const cacheMs = (payload.cache_seconds || 60) * 1000;
   try {
@@ -1004,7 +1006,7 @@ function pickRandomThemeLogo(payload) {
     return null;
   }
 
-  const cacheKey = "rom_api_theme_logo_choice_v1";
+  const cacheKey = "drone_api_theme_logo_choice_v1";
   const now = Date.now();
   const cacheMs = (payload.cache_seconds || 60) * 1000;
   try {

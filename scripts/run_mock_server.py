@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from app.mock_data import seed_mock_userdata
-from app.rom_api import Settings, create_server
+from app.drone_api import Settings, create_server
 
 
 def main() -> None:
@@ -29,6 +29,12 @@ def main() -> None:
     os.environ.setdefault("HTTP_ONLY", "1")
     os.environ.setdefault("LOG_DIR", str(ROOT / "local-data" / "logs"))
     os.environ.setdefault("ALLOW_CONTENT_DOWNLOAD", "true")
+    os.environ.setdefault("USE_FAKE_DATA", "true")
+    os.environ.setdefault("OVERMIND_URL", "http://127.0.0.1:8000")
+    os.environ.setdefault("OVERMIND_EMAIL", "demo@example.com")
+    os.environ.setdefault("OVERMIND_PASSWORD", "DemoPass123")
+    os.environ.setdefault("OVERMIND_DRONE_TOKEN", "demo-local-drone-token")
+    os.environ.setdefault("OVERMIND_POLL_SECONDS", "30")
 
     settings = Settings.from_env()
     server = create_server(settings)

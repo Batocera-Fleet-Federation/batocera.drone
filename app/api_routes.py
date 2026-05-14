@@ -149,11 +149,11 @@ class ApiRoutesMixin:
                 return
 
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "logs":
-                lines_raw = query_params.get("lines", ["200"])[0]
+                lines_raw = query_params.get("lines", ["100"])[0]
                 try:
                     lines = int(lines_raw)
                 except Exception:
-                    lines = 200
+                    lines = 100
                 self._handle_admin_logs(parts[2], lines)
                 return
 
