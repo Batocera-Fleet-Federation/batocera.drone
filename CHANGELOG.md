@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.7] - 2026-05-14
+
+- One last update for latest release to work properly.
+
 ## [v0.0.6] - 2026-05-14
 
 - updating create release script to fix "latest" bug
