@@ -21,7 +21,7 @@ You install Drone by running one command on the Batocera machine.
 Open a terminal or SSH session to Batocera, then paste this:
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/Batocera-Fleet-Federation/batocera.drone/main/scripts/batocera_install.sh" -o /tmp/batocera_install.sh && chmod +x /tmp/batocera_install.sh && /tmp/batocera_install.sh
+curl -fsSL https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/batocera_install.sh | bash
 ```
 
 The installer will ask for the username and password you want to use when opening Drone in your browser.
