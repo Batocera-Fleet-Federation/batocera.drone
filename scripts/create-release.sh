@@ -5,7 +5,11 @@ PROJECT="Batocera Drone"
 REPO="Batocera-Fleet-Federation/batocera.drone"
 DEFAULT_BRANCH="main"
 LATEST_TAG="latest"
-INSTALL_SCRIPT="scripts/batocera_install.sh"
+
+RELEASE_ASSETS=(
+  "scripts/batocera_install.sh"
+  "scripts/run_now.sh"
+)
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -33,13 +37,13 @@ if [[ -z "$VERSION" ]]; then
   echo "Usage: $0 <version> [--push|--dry-run]"
   echo ""
   echo "Examples:"
-  echo "  $0 v0.0.6"
-  echo "  $0 v0.0.6 --push"
+  echo "  $0 v0.0.7"
+  echo "  $0 v0.0.7 --push"
   exit 1
 fi
 
 if ! echo "$VERSION" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
-  error "Version must match vMAJOR.MINOR.PATCH, example: v0.0.6"
+  error "Version must match vMAJOR.MINOR.PATCH, example: v0.0.7"
 fi
 
 if ! git rev-parse --git-dir >/dev/null 2>&1; then
@@ -50,9 +54,11 @@ if ! command -v gh >/dev/null 2>&1; then
   error "GitHub CLI gh is required."
 fi
 
-if [[ ! -f "$INSTALL_SCRIPT" ]]; then
-  error "Install script not found: $INSTALL_SCRIPT"
-fi
+for asset in "${RELEASE_ASSETS[@]}"; do
+  if [[ ! -f "$asset" ]]; then
+    error "Release asset not found: $asset"
+  fi
+done
 
 CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 if [[ "$CURRENT_BRANCH" != "$DEFAULT_BRANCH" ]]; then
@@ -90,11 +96,11 @@ TODAY="$(date +%Y-%m-%d)"
 
 echo "══════════════════════════════════════════════════════════════"
 echo "  $PROJECT Release"
-echo "  Version        : $VERSION"
-echo "  Latest Tag     : $LATEST_TAG"
-echo "  Install Asset  : $INSTALL_SCRIPT"
-echo "  Mode           : $PUSH_MODE"
-echo "  Repo           : $REPO"
+echo "  Version    : $VERSION"
+echo "  Latest Tag : $LATEST_TAG"
+echo "  Mode       : $PUSH_MODE"
+echo "  Repo       : $REPO"
+echo "  Assets     : ${RELEASE_ASSETS[*]}"
 echo "══════════════════════════════════════════════════════════════"
 echo ""
 
@@ -185,8 +191,8 @@ if [[ "$PUSH_MODE" == "dry-run" ]]; then
   echo "Would create GitHub release:"
   echo "  gh release create $VERSION --repo $REPO --title \"$PROJECT $VERSION\" --notes-file $RELEASE_NOTES_FILE"
   echo ""
-  echo "Would upload release asset:"
-  echo "  gh release upload $VERSION $INSTALL_SCRIPT --repo $REPO --clobber"
+  echo "Would upload release assets:"
+  echo "  gh release upload $VERSION ${RELEASE_ASSETS[*]} --repo $REPO --clobber"
   rm -f "$RELEASE_NOTES_FILE"
   exit 0
 fi
@@ -204,11 +210,17 @@ gh release create "$VERSION" \
   --title "$PROJECT $VERSION" \
   --notes-file "$RELEASE_NOTES_FILE"
 
-info "Uploading install script release asset..."
+info "Uploading release assets..."
 gh release upload "$VERSION" \
-  "$INSTALL_SCRIPT" \
+  "${RELEASE_ASSETS[@]}" \
   --repo "$REPO" \
   --clobber
+
+info "Verifying uploaded assets..."
+gh release view "$VERSION" \
+  --repo "$REPO" \
+  --json assets \
+  --jq '.assets[].name'
 
 if git rev-parse "$LATEST_TAG" >/dev/null 2>&1; then
   info "Updating local $LATEST_TAG tag..."
@@ -228,3 +240,6 @@ git push origin "$LATEST_TAG"
 rm -f "$RELEASE_NOTES_FILE"
 
 info "Release complete: $VERSION"
+echo ""
+echo "Installer:"
+echo "curl -fsSL https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/batocera_install.sh | bash"
