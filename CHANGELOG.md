@@ -1,5 +1,10 @@
 # Changelog
 
+## [v0.0.6] - 2026-05-14
+
+- updating create release script to fix "latest" bug
+- Cleaning up curl request to run the app on batocera machines.
+
 ## [v0.0.5] - 2026-05-14
 
 - Updating create-release.sh
