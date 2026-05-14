@@ -32,13 +32,13 @@ if [[ -z "$VERSION" ]]; then
   echo "Usage: $0 <version> [--push|--dry-run]"
   echo ""
   echo "Examples:"
-  echo "  $0 v0.0.1"
-  echo "  $0 v0.0.1 --push"
+  echo "  $0 v0.0.5"
+  echo "  $0 v0.0.5 --push"
   exit 1
 fi
 
 if ! echo "$VERSION" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
-  error "Version must match vMAJOR.MINOR.PATCH, example: v0.0.1"
+  error "Version must match vMAJOR.MINOR.PATCH, example: v0.0.5"
 fi
 
 if ! git rev-parse --git-dir >/dev/null 2>&1; then
@@ -80,6 +80,9 @@ if gh release view "$VERSION" --repo "$REPO" >/dev/null 2>&1; then
   error "GitHub Release $VERSION already exists."
 fi
 
+CHANGELOG="CHANGELOG.md"
+TODAY="$(date +%Y-%m-%d)"
+
 echo "══════════════════════════════════════════════════════════════"
 echo "  $PROJECT Release"
 echo "  Version    : $VERSION"
@@ -89,15 +92,124 @@ echo "  Repo       : $REPO"
 echo "══════════════════════════════════════════════════════════════"
 echo ""
 
-CHANGELOG="CHANGELOG.md"
-TODAY="$(date +%Y-%m-%d)"
-
 update_changelog() {
   if [[ ! -f "$CHANGELOG" ]]; then
     warn "$CHANGELOG not found. Skipping changelog update."
     return
   fi
 
-  if grep -qE "^## $VERSION" "$CHANGELOG"; then
+  if grep -qE "^## \[$VERSION\]" "$CHANGELOG"; then
     warn "$VERSION already exists in $CHANGELOG. Skipping changelog update."
     return
+  fi
+
+  PREVIOUS_TAG="$(git tag --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)"
+
+  if [[ -n "$PREVIOUS_TAG" ]]; then
+    NOTES="$(git log "${PREVIOUS_TAG}..HEAD" --pretty=format:'- %s' || true)"
+  else
+    NOTES="$(git log --pretty=format:'- %s' || true)"
+  fi
+
+  if [[ -z "$NOTES" ]]; then
+    NOTES="- Initial release."
+  fi
+
+  TMP_FILE="$(mktemp)"
+
+  {
+    echo "# Changelog"
+    echo ""
+    echo "## [$VERSION] - $TODAY"
+    echo ""
+    echo "$NOTES"
+    echo ""
+  } > "$TMP_FILE"
+
+  if grep -qE '^# Changelog' "$CHANGELOG"; then
+    tail -n +3 "$CHANGELOG" >> "$TMP_FILE"
+  else
+    cat "$CHANGELOG" >> "$TMP_FILE"
+  fi
+
+  mv "$TMP_FILE" "$CHANGELOG"
+  info "Updated $CHANGELOG"
+}
+
+update_changelog
+
+if ! git diff --quiet -- "$CHANGELOG" 2>/dev/null; then
+  info "Committing changelog update..."
+  git add "$CHANGELOG"
+
+  if [[ "$PUSH_MODE" == "push" ]]; then
+    git commit -m "Update changelog for $VERSION"
+  else
+    warn "Dry-run: would commit changelog update."
+    git diff --cached -- "$CHANGELOG"
+    git reset -- "$CHANGELOG" >/dev/null
+  fi
+fi
+
+RELEASE_NOTES_FILE="$(mktemp)"
+PREVIOUS_TAG="$(git tag --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)"
+
+{
+  echo "$PROJECT $VERSION"
+  echo ""
+  if [[ -n "$PREVIOUS_TAG" ]]; then
+    echo "Changes since $PREVIOUS_TAG:"
+    echo ""
+    git log "${PREVIOUS_TAG}..HEAD" --pretty=format:'- %s' || true
+  else
+    echo "Initial release."
+  fi
+} > "$RELEASE_NOTES_FILE"
+
+if [[ "$PUSH_MODE" == "dry-run" ]]; then
+  warn "Dry-run only. No tag, release, or push will be created."
+  echo ""
+  echo "Would create tag:"
+  echo "  git tag -a $VERSION -m \"$PROJECT $VERSION\""
+  echo ""
+  echo "Would push:"
+  echo "  git push origin $DEFAULT_BRANCH"
+  echo "  git push origin $VERSION"
+  echo ""
+  echo "Would create GitHub release:"
+  echo "  gh release create $VERSION --repo $REPO --title \"$PROJECT $VERSION\" --notes-file $RELEASE_NOTES_FILE"
+  rm -f "$RELEASE_NOTES_FILE"
+  exit 0
+fi
+
+info "Creating annotated tag $VERSION..."
+git tag -a "$VERSION" -m "$PROJECT $VERSION"
+
+info "Pushing branch and tag..."
+git push origin "$DEFAULT_BRANCH"
+git push origin "$VERSION"
+
+info "Creating GitHub release..."
+gh release create "$VERSION" \
+  --repo "$REPO" \
+  --title "$PROJECT $VERSION" \
+  --notes-file "$RELEASE_NOTES_FILE"
+
+if git rev-parse "$LATEST_TAG" >/dev/null 2>&1; then
+  info "Updating local $LATEST_TAG tag..."
+  git tag -d "$LATEST_TAG" >/dev/null
+fi
+
+info "Creating/updating $LATEST_TAG tag..."
+git tag -a "$LATEST_TAG" -m "$PROJECT latest release: $VERSION"
+
+if git ls-remote --exit-code --tags origin "refs/tags/$LATEST_TAG" >/dev/null 2>&1; then
+  info "Deleting remote $LATEST_TAG tag..."
+  git push origin ":refs/tags/$LATEST_TAG"
+fi
+
+git push origin "$LATEST_TAG"
+
+rm -f "$RELEASE_NOTES_FILE"
+
+info "Release complete: $VERSION"
