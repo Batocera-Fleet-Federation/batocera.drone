@@ -1,5 +1,17 @@
 # Changelog
 
+## [v0.0.5] - 2026-05-14
+
+- Updating create-release.sh
+- Enhance create-release.sh with latest tag and changelog updates
+- Context: There are two apps: - batocera.drone: runs on each Batocera device - batocera.overmind: central fleet management app - Overlord = user - Swarm = group of drones under an overlord - Drone device_id should be the MAC address - Demo user: demo@example.com
+- Updating project image.
+- Add logo image to README
+- Uploading Hive Mind image
+- Adding more overmind integration code for different action processing.
+- Updating README to not be as technical.  Adding more technical pieces to bottom under Advanced User.
+- for Drone: Update the scraper import to also pull any metadata info as well as media if available.  It looks like scraping mobygames might not be possible due to captcha / cloudflare.  We can remove the scraping for mobygames but let's leave the link out so people can navigate to the site manually.  admin artwork rom matches panel contains launchbox but isn’t defaulting <name> search like it should.  remove <system> from TheGamesDB link out.  Remove <system> from mobygames link out.
+
 All notable changes to Batocera Drone will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
