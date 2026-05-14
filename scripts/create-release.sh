@@ -5,6 +5,7 @@ PROJECT="Batocera Drone"
 REPO="Batocera-Fleet-Federation/batocera.drone"
 DEFAULT_BRANCH="main"
 LATEST_TAG="latest"
+INSTALL_SCRIPT="scripts/batocera_install.sh"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -32,13 +33,13 @@ if [[ -z "$VERSION" ]]; then
   echo "Usage: $0 <version> [--push|--dry-run]"
   echo ""
   echo "Examples:"
-  echo "  $0 v0.0.5"
-  echo "  $0 v0.0.5 --push"
+  echo "  $0 v0.0.6"
+  echo "  $0 v0.0.6 --push"
   exit 1
 fi
 
 if ! echo "$VERSION" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
-  error "Version must match vMAJOR.MINOR.PATCH, example: v0.0.5"
+  error "Version must match vMAJOR.MINOR.PATCH, example: v0.0.6"
 fi
 
 if ! git rev-parse --git-dir >/dev/null 2>&1; then
@@ -47,6 +48,10 @@ fi
 
 if ! command -v gh >/dev/null 2>&1; then
   error "GitHub CLI gh is required."
+fi
+
+if [[ ! -f "$INSTALL_SCRIPT" ]]; then
+  error "Install script not found: $INSTALL_SCRIPT"
 fi
 
 CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
@@ -85,10 +90,11 @@ TODAY="$(date +%Y-%m-%d)"
 
 echo "══════════════════════════════════════════════════════════════"
 echo "  $PROJECT Release"
-echo "  Version    : $VERSION"
-echo "  Latest Tag : $LATEST_TAG"
-echo "  Mode       : $PUSH_MODE"
-echo "  Repo       : $REPO"
+echo "  Version        : $VERSION"
+echo "  Latest Tag     : $LATEST_TAG"
+echo "  Install Asset  : $INSTALL_SCRIPT"
+echo "  Mode           : $PUSH_MODE"
+echo "  Repo           : $REPO"
 echo "══════════════════════════════════════════════════════════════"
 echo ""
 
@@ -167,7 +173,7 @@ PREVIOUS_TAG="$(git tag --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-
 } > "$RELEASE_NOTES_FILE"
 
 if [[ "$PUSH_MODE" == "dry-run" ]]; then
-  warn "Dry-run only. No tag, release, or push will be created."
+  warn "Dry-run only. No tag, release, asset upload, or push will be created."
   echo ""
   echo "Would create tag:"
   echo "  git tag -a $VERSION -m \"$PROJECT $VERSION\""
@@ -178,6 +184,9 @@ if [[ "$PUSH_MODE" == "dry-run" ]]; then
   echo ""
   echo "Would create GitHub release:"
   echo "  gh release create $VERSION --repo $REPO --title \"$PROJECT $VERSION\" --notes-file $RELEASE_NOTES_FILE"
+  echo ""
+  echo "Would upload release asset:"
+  echo "  gh release upload $VERSION $INSTALL_SCRIPT --repo $REPO --clobber"
   rm -f "$RELEASE_NOTES_FILE"
   exit 0
 fi
@@ -194,6 +203,12 @@ gh release create "$VERSION" \
   --repo "$REPO" \
   --title "$PROJECT $VERSION" \
   --notes-file "$RELEASE_NOTES_FILE"
+
+info "Uploading install script release asset..."
+gh release upload "$VERSION" \
+  "$INSTALL_SCRIPT" \
+  --repo "$REPO" \
+  --clobber
 
 if git rev-parse "$LATEST_TAG" >/dev/null 2>&1; then
   info "Updating local $LATEST_TAG tag..."
