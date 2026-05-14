@@ -162,7 +162,7 @@ start_app() {
       sleep 5
     done
 
-    curl -fsSL https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/run_now.sh | run_as_drone bash
+    curl -fsSL https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/run_now.sh | DRONE_APP_BASE_URL="https://raw.githubusercontent.com/Batocera-Fleet-Federation/batocera.drone/main" run_as_drone bash
   ) &
 
   echo $! > "$PID_FILE"
@@ -218,7 +218,7 @@ else
     sleep 5
   done
 
-  curl -fsSL https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/run_now.sh | su -s /bin/sh -c "bash" drone-app
+  curl -fsSL https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/run_now.sh | DRONE_APP_BASE_URL="https://raw.githubusercontent.com/Batocera-Fleet-Federation/batocera.drone/main" su -s /bin/sh -c "bash" drone-app
 ) &
 
 SERVICEBLOCK
