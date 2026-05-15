@@ -146,10 +146,10 @@ run_as_drone() {
 }
 
 start_app() {
-  ensure_permissions
-  ensure_drone_user
-
   (
+    ensure_permissions
+    ensure_drone_user
+    
     while ! ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; do
       sleep 5
     done
