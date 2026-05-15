@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.9] - 2026-05-15
+
+- Moving sandbox user creation into service instead of running in batocera_install.sh to ensure user is always created before running app on machine.
+
 ## [v0.0.8] - 2026-05-14
 
 - Adding back in DRONE_APP_BASE_URL as it is required for github link out.
