@@ -33,43 +33,7 @@ echo "============================================"
 echo "Detected Batocera version: ${BATOCERA_VERSION:-unknown}"
 echo ""
 
-echo "---------------------------------------------"
-echo " Creating/fixing ${DRONE_USER} user"
-echo "---------------------------------------------"
-
 mkdir -p "$WORK_DIR"
-
-echo "[1/4] Ensuring group exists..."
-if grep -q "^${DRONE_GROUP}:" /etc/group 2>/dev/null; then
-  sed -i "s#^${DRONE_GROUP}:.*#${DRONE_GROUP}:x:${DRONE_GID}:#" /etc/group
-else
-  echo "${DRONE_GROUP}:x:${DRONE_GID}:" >> /etc/group
-fi
-
-echo "[2/4] Ensuring user exists..."
-if grep -q "^${DRONE_USER}:" /etc/passwd 2>/dev/null; then
-  sed -i "s#^${DRONE_USER}:.*#${DRONE_USER}:x:${DRONE_UID}:${DRONE_GID}:drone-app:${WORK_DIR}:/bin/sh#" /etc/passwd
-else
-  echo "${DRONE_USER}:x:${DRONE_UID}:${DRONE_GID}:drone-app:${WORK_DIR}:/bin/sh" >> /etc/passwd
-fi
-
-echo "[3/4] Ensuring shadow entry exists..."
-if [ -f /etc/shadow ]; then
-  if grep -q "^${DRONE_USER}:" /etc/shadow 2>/dev/null; then
-    sed -i "s#^${DRONE_USER}:.*#${DRONE_USER}:*:19000:0:99999:7:::#" /etc/shadow
-  else
-    echo "${DRONE_USER}:*:19000:0:99999:7:::" >> /etc/shadow
-  fi
-fi
-
-echo "[4/4] Verifying user switch works..."
-if ! su -s /bin/sh -c "whoami" "$DRONE_USER" >/tmp/drone-user-test.out 2>/tmp/drone-user-test.err; then
-  echo "FATAL: ${DRONE_USER} exists but su still cannot switch to it."
-  cat /tmp/drone-user-test.err 2>/dev/null || true
-  exit 1
-fi
-
-echo "✓ User ready: $(cat /tmp/drone-user-test.out 2>/dev/null)"
 
 echo ""
 echo "---------------------------------------------"
@@ -141,8 +105,38 @@ if [ "$USE_LEGACY_METHOD" = false ]; then
 #!/bin/sh
 
 DRONE_USER="drone-app"
+DRONE_GROUP="drone-app"
+DRONE_UID="999"
+DRONE_GID="999"
+WORK_DIR="/userdata/system/.drone-app"
 ACTION="$1"
 PID_FILE="/tmp/drone-server.pid"
+
+ensure_drone_user() {
+  echo "[drone-service] Ensuring ${DRONE_USER} user/group exists..."
+
+  if grep -q "^${DRONE_GROUP}:" /etc/group 2>/dev/null; then
+    sed -i "s#^${DRONE_GROUP}:.*#${DRONE_GROUP}:x:${DRONE_GID}:#" /etc/group
+  else
+    echo "${DRONE_GROUP}:x:${DRONE_GID}:" >> /etc/group
+  fi
+
+  if grep -q "^${DRONE_USER}:" /etc/passwd 2>/dev/null; then
+    sed -i "s#^${DRONE_USER}:.*#${DRONE_USER}:x:${DRONE_UID}:${DRONE_GID}:drone-app:${WORK_DIR}:/bin/sh#" /etc/passwd
+  else
+    echo "${DRONE_USER}:x:${DRONE_UID}:${DRONE_GID}:drone-app:${WORK_DIR}:/bin/sh" >> /etc/passwd
+  fi
+
+  if [ -f /etc/shadow ]; then
+    if grep -q "^${DRONE_USER}:" /etc/shadow 2>/dev/null; then
+      sed -i "s#^${DRONE_USER}:.*#${DRONE_USER}:*:19000:0:99999:7:::#" /etc/shadow
+    else
+      echo "${DRONE_USER}:*:19000:0:99999:7:::" >> /etc/shadow
+    fi
+  fi
+
+  echo "[drone-service] ✓ User ${DRONE_USER} ready"
+}
 
 run_as_drone() {
   if command -v runuser >/dev/null 2>&1; then
@@ -157,6 +151,8 @@ run_as_drone() {
 }
 
 start_app() {
+  ensure_drone_user
+
   (
     while ! ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; do
       sleep 5
