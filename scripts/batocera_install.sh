@@ -36,61 +36,8 @@ echo ""
 mkdir -p "$WORK_DIR"
 
 echo ""
-echo "---------------------------------------------"
-echo " Applying targeted filesystem permissions"
-echo "---------------------------------------------"
-echo "This may take a moment on large ROM collections..."
-
-echo "[1/6] Creating runtime directories..."
-mkdir -p \
-  /userdata/system/.drone-app \
-  /userdata/system/certs \
-  /userdata/system/logs/drone-app
-
-echo "[2/6] Applying runtime directory ownership..."
-chown root:"$DRONE_GROUP" \
-  /userdata/system/.drone-app \
-  /userdata/system/certs \
-  /userdata/system/logs/drone-app 2>/dev/null || true
-
-echo "[3/6] Applying runtime directory permissions..."
-chmod 775 \
-  /userdata/system/.drone-app \
-  /userdata/system/certs \
-  /userdata/system/logs/drone-app 2>/dev/null || true
-
-echo "[4/6] Applying read access to PCSX2 configs only..."
-chmod o+rx /userdata/system 2>/dev/null || true
-chmod o+rx /userdata/system/configs 2>/dev/null || true
-
-if [ -d /userdata/system/configs/PCSX2 ]; then
-  chmod -R o+rX /userdata/system/configs/PCSX2 2>/dev/null || true
-fi
-
-echo "[5/6] Applying ROM asset permissions by system..."
-find /userdata/roms -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while read romdir; do
-  system_name="$(basename "$romdir")"
-  echo "  Processing ${system_name}..."
-
-  for subdir in images videos manuals; do
-    target="${romdir}/${subdir}"
-    mkdir -p "$target"
-    chown root:"$DRONE_GROUP" "$target" 2>/dev/null || true
-    chmod 775 "$target" 2>/dev/null || true
-  done
-
-  gamelist="${romdir}/gamelist.xml"
-  if [ -f "$gamelist" ]; then
-    chown root:"$DRONE_GROUP" "$gamelist" 2>/dev/null || true
-    chmod 664 "$gamelist" 2>/dev/null || true
-  fi
-done
-
-echo "[6/6] Ensuring Batocera config remains root-owned/read-only to app..."
-chown root:root /userdata/batocera.conf 2>/dev/null || true
-chmod 644 /userdata/batocera.conf 2>/dev/null || true
-
-echo "✓ Permissions applied"
+echo "Permissions are applied at service startup via"
+echo "the ensure_permissions() function in DRONE_SERVER."
 
 if [ "$USE_LEGACY_METHOD" = false ]; then
   echo ""
@@ -138,6 +85,54 @@ ensure_drone_user() {
   echo "[drone-service] ✓ User ${DRONE_USER} ready"
 }
 
+ensure_permissions() {
+  echo "[drone-service] Applying filesystem permissions..."
+
+  mkdir -p \
+    /userdata/system/.drone-app \
+    /userdata/system/certs \
+    /userdata/system/logs/drone-app
+
+  chown root:"$DRONE_GROUP" \
+    /userdata/system/.drone-app \
+    /userdata/system/certs \
+    /userdata/system/logs/drone-app 2>/dev/null || true
+
+  chmod 775 \
+    /userdata/system/.drone-app \
+    /userdata/system/certs \
+    /userdata/system/logs/drone-app 2>/dev/null || true
+
+  chmod o+rx /userdata/system 2>/dev/null || true
+  chmod o+rx /userdata/system/configs 2>/dev/null || true
+
+  if [ -d /userdata/system/configs/PCSX2 ]; then
+    chmod -R o+rX /userdata/system/configs/PCSX2 2>/dev/null || true
+  fi
+
+  find /userdata/roms -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while read romdir; do
+    system_name="$(basename "$romdir")"
+
+    for subdir in images videos manuals; do
+      target="${romdir}/${subdir}"
+      mkdir -p "$target"
+      chown root:"$DRONE_GROUP" "$target" 2>/dev/null || true
+      chmod 775 "$target" 2>/dev/null || true
+    done
+
+    gamelist="${romdir}/gamelist.xml"
+    if [ -f "$gamelist" ]; then
+      chown root:"$DRONE_GROUP" "$gamelist" 2>/dev/null || true
+      chmod 664 "$gamelist" 2>/dev/null || true
+    fi
+  done
+
+  chown root:root /userdata/batocera.conf 2>/dev/null || true
+  chmod 644 /userdata/batocera.conf 2>/dev/null || true
+
+  echo "[drone-service] ✓ Permissions applied"
+}
+
 run_as_drone() {
   if command -v runuser >/dev/null 2>&1; then
     runuser -u "$DRONE_USER" -- "$@"
@@ -151,6 +146,7 @@ run_as_drone() {
 }
 
 start_app() {
+  ensure_permissions
   ensure_drone_user
 
   (
