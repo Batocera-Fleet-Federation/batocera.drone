@@ -28,6 +28,10 @@ class ApiRoutesMixin:
                 self._handle_public_image(parts[2], parts[4])
                 return
 
+            if len(parts) == 2 and parts[0] == "peer" and parts[1] == "health":
+                self._handle_peer_health()
+                return
+
             if not self.auth.check(self.headers.get("Authorization")):
                 self._send_unauthorized()
                 return
@@ -129,6 +133,10 @@ class ApiRoutesMixin:
 
             if len(parts) == 4 and parts[0] == "systems" and parts[2] == "roms":
                 self._handle_download(parts[1], "roms", parts[3])
+                return
+
+            if len(parts) == 5 and parts[0] == "systems" and parts[2] == "roms" and parts[4] == "md5":
+                self._handle_rom_md5(parts[1], parts[3])
                 return
 
             if len(parts) == 4 and parts[0] == "systems" and parts[2] == "images":

@@ -41,7 +41,22 @@ FAKE_OVERMIND_TOKEN = "demo-local-drone-token"
 _OVERMIND_POLLER_STARTED = False
 LAUNCHBOX_API_BASE = "https://api.gamesdb.launchbox-app.com/api"
 LAUNCHBOX_IMAGE_BASE = "https://images.launchbox-app.com"
+SCRAPER_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
 ARTWORK_FIELDS = ("image", "thumbnail", "marquee", "fanart", "boxart")
+ARTWORK_DUPLICATE_FILTER = "duplicate_artwork"
+OVERMIND_EVENT_TYPES = {
+    "gameplay": "gameplay_activity",
+    "rom_update": "rom_update",
+    "filesystem": "filesystem_event",
+    "speed": "speed_sample",
+    "peer": "peer_health",
+}
+PEER_CHECK_TIMEOUT_SECONDS = float(os.environ.get("DRONE_PEER_CHECK_TIMEOUT_SECONDS", "3"))
+PEER_CHECK_INTERVAL_SECONDS = int(os.environ.get("DRONE_PEER_CHECK_INTERVAL_SECONDS", "300"))
+OVERMIND_SPEED_SAMPLE_SECONDS = int(os.environ.get("OVERMIND_SPEED_SAMPLE_SECONDS", "300"))
 LAUNCHBOX_PLATFORM_ALIASES = {
     "3do": "3DO Interactive Multiplayer",
     "adam": "Coleco ADAM",
@@ -252,6 +267,34 @@ def _first_metadata_value(*values) -> str:
     return ""
 
 
+def _looks_like_placeholder_image(data: bytes) -> bool:
+    """Catch common tiny/blank scraper placeholders before assigning them to ROM art."""
+    if not data or len(data) < 128:
+        return True
+    sample = data[: min(len(data), 8192)]
+    if sample and len(set(sample)) <= 3:
+        return True
+    digest = hashlib.sha256(data).hexdigest()
+    known_bad = {
+        # LaunchBox and CDN placeholders can shift, so keep this list small and
+        # combine it with the tiny/flat image checks above.
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    }
+    return digest in known_bad
+
+
+def _artwork_identity(value: str) -> str:
+    raw = str(value or "").strip().replace("\\", "/").lower()
+    if not raw:
+        return ""
+    parsed = urlparse(raw)
+    if parsed.scheme and parsed.netloc:
+        return f"{parsed.netloc}{parsed.path}".rstrip("/")
+    while raw.startswith("./"):
+        raw = raw[2:]
+    return raw.lstrip("/")
+
+
 def _remove_child(parent: ET.Element, tag: str) -> None:
     child = parent.find(tag)
     if child is not None:
@@ -311,7 +354,7 @@ class LaunchBoxClient:
         self.timeout_seconds = timeout_seconds
 
     def _get_json(self, url: str) -> dict:
-        request = Request(url, headers={"User-Agent": "batocera-drone-app/4.0"})
+        request = Request(url, headers={"User-Agent": SCRAPER_USER_AGENT, "Accept": "application/json"})
         with urlopen(request, timeout=self.timeout_seconds) as response:
             return json.loads(response.read().decode("utf-8"))
 
@@ -406,15 +449,25 @@ class LaunchBoxClient:
         images = details.get("images") or []
         for image_type in wanted:
             for image in images:
+                candidate_url = str(image.get("url") or image.get("file_name") or "").lower()
+                if any(marker in candidate_url for marker in ("placeholder", "no-image", "no_image", "default-image", "missing")):
+                    continue
                 if str(image.get("type") or "").lower() == image_type.lower():
                     return image
         return None
 
     def download_image(self, url: str) -> Tuple[bytes, str]:
-        request = Request(url, headers={"User-Agent": "batocera-drone-app/4.0"})
+        request = Request(url, headers={"User-Agent": SCRAPER_USER_AGENT, "Accept": "image/avif,image/webp,image/*,*/*;q=0.8"})
         with urlopen(request, timeout=self.timeout_seconds) as response:
             content_type = response.headers.get_content_type()
-            return response.read(), content_type
+            data = response.read(20 * 1024 * 1024 + 1)
+            if len(data) > 20 * 1024 * 1024:
+                raise ValueError("image is too large")
+            if not str(content_type or "").startswith("image/"):
+                raise ValueError("image_url did not return an image")
+            if _looks_like_placeholder_image(data):
+                raise ValueError("LaunchBox returned a placeholder image")
+            return data, content_type
 
 
 class TheGamesDBScraper:
@@ -428,7 +481,7 @@ class TheGamesDBScraper:
         request = Request(
             url,
             headers={
-                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+                "User-Agent": SCRAPER_USER_AGENT,
                 "Accept-Language": "en-US,en;q=0.9",
             },
         )
@@ -565,7 +618,7 @@ class TheGamesDBScraper:
             raise ValueError("image_url must be a TheGamesDB CDN URL")
         request = Request(
             url,
-            headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36"},
+            headers={"User-Agent": SCRAPER_USER_AGENT},
         )
         with urlopen(request, timeout=self.timeout_seconds) as response:
             content_type = response.headers.get_content_type()
@@ -634,7 +687,7 @@ class MobyGamesClient:
         request = Request(
             url,
             headers={
-                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+                "User-Agent": SCRAPER_USER_AGENT,
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "Accept-Language": "en-US,en;q=0.9",
             },
@@ -828,7 +881,7 @@ class MobyGamesClient:
         parsed = urlparse(str(url or ""))
         if parsed.scheme not in {"http", "https"} or not parsed.netloc.endswith("mobygames.com"):
             raise ValueError("image_url must be a MobyGames image URL")
-        request = Request(url, headers={"User-Agent": "batocera-drone-app/4.0"})
+        request = Request(url, headers={"User-Agent": SCRAPER_USER_AGENT})
         with urlopen(request, timeout=self.timeout_seconds) as response:
             content_type = response.headers.get_content_type()
             if not str(content_type or "").startswith("image/"):
@@ -884,6 +937,11 @@ class Settings:
     overmind_token: Optional[str]
     overmind_device_id: str
     overmind_poll_seconds: int
+    drone_cert_file: Path
+    drone_key_file: Path
+    drone_cert_days: int
+    drone_mtls_enabled: bool
+    drone_mtls_ca_file: Optional[Path]
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -891,9 +949,12 @@ class Settings:
         cert_value = os.environ.get("TLS_CERT_FILE")
         key_value = os.environ.get("TLS_KEY_FILE")
         use_fake_data = _env_bool(False, "USE_FAKE_DATA")
+        userdata_root = Path(os.environ.get("USERDATA_ROOT", "/userdata"))
+        default_drone_cert = userdata_root / "system" / "drone-app" / "certs" / "drone.crt"
+        default_drone_key = userdata_root / "system" / "drone-app" / "certs" / "drone.key"
 
         return cls(
-            userdata_root=Path(os.environ.get("USERDATA_ROOT", "/userdata")),
+            userdata_root=userdata_root,
             roms_root=Path(os.environ.get("ROMS_ROOT", "/userdata/roms")),
             bios_root=Path(os.environ.get("BIOS_ROOT", "/userdata/bios")),
             username=os.environ.get("DRONE_APP_USERNAME") or None,
@@ -936,6 +997,11 @@ class Settings:
             overmind_token=os.environ.get("OVERMIND_DRONE_TOKEN"),
             overmind_device_id=_fake_machine_id() if use_fake_data else _machine_id(),
             overmind_poll_seconds=int(os.environ.get("OVERMIND_POLL_SECONDS", "30")),
+            drone_cert_file=Path(os.environ.get("DRONE_CERT_FILE", os.environ.get("TLS_CERT_FILE", str(default_drone_cert)))),
+            drone_key_file=Path(os.environ.get("DRONE_KEY_FILE", os.environ.get("TLS_KEY_FILE", str(default_drone_key)))),
+            drone_cert_days=int(os.environ.get("DRONE_CERT_DAYS", "825")),
+            drone_mtls_enabled=_env_bool(False, "DRONE_MTLS_ENABLED", "DRONE_TO_DRONE_MTLS_ENABLED"),
+            drone_mtls_ca_file=Path(os.environ["DRONE_MTLS_CA_FILE"]) if os.environ.get("DRONE_MTLS_CA_FILE") else None,
         )
 
 
@@ -1571,7 +1637,22 @@ class RomRepository:
         for field in ARTWORK_FIELDS:
             if game is None or not _text_or_empty(game, field):
                 missing.append(field)
+        if self._entry_has_duplicate_artwork(game):
+            missing.append(ARTWORK_DUPLICATE_FILTER)
         return missing
+
+    def _entry_has_duplicate_artwork(self, game: Optional[ET.Element]) -> bool:
+        if game is None:
+            return False
+        seen = {}
+        for field in ARTWORK_FIELDS:
+            identity = _artwork_identity(_text_or_empty(game, field))
+            if not identity:
+                continue
+            if identity in seen:
+                return True
+            seen[identity] = field
+        return False
 
     def _rom_path_exists(self, system: str, rom_path: str) -> bool:
         try:
@@ -1948,6 +2029,11 @@ class RomRepository:
         safe_stem = re.sub(r"[^a-zA-Z0-9._-]+", "-", Path(display_name).stem).strip("-") or "rom"
         updated = []
         skipped = []
+        used_source_urls = {
+            _artwork_identity(_text_or_empty(game, field))
+            for field in ARTWORK_FIELDS
+            if _text_or_empty(game, field)
+        }
 
         # Import metadata if requested
         if import_metadata and details:
@@ -1972,6 +2058,10 @@ class RomRepository:
                 skipped.append(field)
                 continue
             source_url = str(selected.get("url") or "")
+            source_identity = _artwork_identity(source_url)
+            if source_identity and source_identity in used_source_urls:
+                skipped.append(field)
+                continue
             try:
                 data, content_type = client.download_image(source_url)
             except Exception:
@@ -1989,6 +2079,7 @@ class RomRepository:
             target_path.write_bytes(data)
             relative_path = _relative_artwork_path(system_dir, target_path)
             _set_child_text(game, field, relative_path)
+            used_source_urls.update({source_identity, _artwork_identity(relative_path)})
             updated.append(
                 {
                     "field": field,
@@ -2803,6 +2894,15 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             str(self.settings.userdata_root / "system" / "drone-app" / "overmind_actions.log"),
         )).resolve()
 
+    def _overmind_swarm_path(self) -> Path:
+        return (self.settings.userdata_root / "system" / "drone-app" / "overmind_swarm.json").resolve()
+
+    def _overmind_peer_results_path(self) -> Path:
+        return (self.settings.userdata_root / "system" / "drone-app" / "peer_checks.json").resolve()
+
+    def _rom_md5_cache_path(self) -> Path:
+        return (self.settings.userdata_root / "system" / "drone-app" / "rom_md5_cache.json").resolve()
+
     def _mask_secret(self, value: str) -> str:
         if not value:
             return ""
@@ -2853,6 +2953,15 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
+    def _load_json_file(self, path: Path, fallback):
+        try:
+            if path.exists() and path.is_file():
+                loaded = json.loads(path.read_text(encoding="utf-8"))
+                return loaded if loaded is not None else fallback
+        except Exception:
+            pass
+        return fallback
+
     def _overmind_public_payload(self, config: dict) -> dict:
         password = str(config.get("overmind_password") or "")
         token = str(config.get("overmind_token") or "")
@@ -2875,6 +2984,9 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             "token_configured": bool(token),
             "token_masked": self._mask_secret(token) if token else "",
             "status": status,
+            "swarm": self._load_json_file(self._overmind_swarm_path(), []),
+            "peer_checks": self._load_json_file(self._overmind_peer_results_path(), []),
+            "certificate": DroneCertificateManager(self.settings).metadata(),
         }
 
     def _load_processed_overmind_actions(self) -> List[dict]:
@@ -2889,6 +3001,40 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
 
     def _handle_admin_overmind_actions(self) -> None:
         self._send_json(200, {"actions": list(reversed(self._load_processed_overmind_actions()))})
+
+    def _handle_rom_md5(self, system: str, unique_id: str) -> None:
+        system_dir = self.repository.get_system_dir(system)
+        rom = self.repository.find_rom_by_unique_id(system, unique_id)
+        rom_file = str(rom.get("rom_file") or rom.get("name") or "")
+        target = (system_dir / rom_file).resolve()
+        if not target.exists() or not target.is_file() or (target != system_dir and system_dir not in target.parents):
+            raise FileNotFoundError()
+        stat = target.stat()
+        cache_path = self._rom_md5_cache_path()
+        cache = self._load_json_file(cache_path, {})
+        key = f"{system}:{unique_id}:{stat.st_size}:{int(stat.st_mtime)}"
+        md5_value = cache.get(key) if isinstance(cache, dict) else None
+        if not md5_value:
+            md5_value = self.repository.build_md5(target)
+            cache = {key: md5_value}
+            _write_json_file(cache_path, cache)
+        self._send_json(200, {"system": system, "unique_id": unique_id, "md5": md5_value, "cached": bool(cache.get(key))})
+
+    def _handle_peer_health(self) -> None:
+        if self.settings.drone_mtls_enabled:
+            cert = self.connection.getpeercert() if hasattr(self.connection, "getpeercert") else None
+            if not cert:
+                self._send_json(403, {"error": "client certificate required"})
+                return
+        self._send_json(
+            200,
+            {
+                "status": "ok",
+                "drone_id": self.settings.overmind_device_id,
+                "checked_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                "mtls": bool(self.settings.drone_mtls_enabled),
+            },
+        )
 
     def _stream_file(self, path: Path, content_type: str, as_attachment: bool = False) -> None:
         file_size = path.stat().st_size
@@ -3477,7 +3623,8 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         systems_all = sorted({str(item.get("system") or "") for item in items if item.get("system")})
         if "any" in normalized_art_fields or include_complete:
             normalized_art_fields = set()
-        normalized_art_fields = {field for field in normalized_art_fields if field in ARTWORK_FIELDS}
+        valid_art_filters = set(ARTWORK_FIELDS) | {ARTWORK_DUPLICATE_FILTER}
+        normalized_art_fields = {field for field in normalized_art_fields if field in valid_art_filters}
         normalized_systems = {
             str(system or "").strip().lower()
             for system in (system_filters or [])
@@ -3536,7 +3683,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         safe_offset = max(0, int(offset))
         page_items = [dict(item) for item in filtered_items[safe_offset : safe_offset + safe_limit]]
         systems_filtered = sorted({str(item.get("system") or "") for item in filtered_items if item.get("system")})
-        field_counts = {field: 0 for field in ARTWORK_FIELDS}
+        field_counts = {field: 0 for field in (*ARTWORK_FIELDS, ARTWORK_DUPLICATE_FILTER)}
         for item in filtered_items:
             for field in item.get("missing") or []:
                 if field in field_counts:
@@ -3552,7 +3699,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 "has_more": (safe_offset + len(page_items)) < total,
                 "systems": systems_all,
                 "systems_filtered": systems_filtered,
-                "fields": list(ARTWORK_FIELDS),
+                "fields": list(ARTWORK_FIELDS) + [ARTWORK_DUPLICATE_FILTER],
                 "field_counts": field_counts,
                 "selected_fields": ["show_all"] if include_complete else (sorted(normalized_art_fields) if normalized_art_fields else ["any"]),
                 "selected_systems": sorted(normalized_systems),
@@ -5053,6 +5200,106 @@ def _resolve_tls_material(settings: Settings) -> Tuple[Path, Path]:
     return cert_file, key_file
 
 
+class DroneCertificateManager:
+    def __init__(self, settings: Settings):
+        self.settings = settings
+
+    def ensure_certificate(self) -> dict:
+        cert_file = self.settings.drone_cert_file
+        key_file = self.settings.drone_key_file
+        if cert_file.exists() and key_file.exists():
+            metadata = self.metadata()
+            if metadata.get("status") == "loaded" and metadata.get("renewal_status") != "expired":
+                return metadata
+        self._generate_local_certificate(cert_file, key_file)
+        return self.metadata()
+
+    def _generate_local_certificate(self, cert_file: Path, key_file: Path) -> None:
+        cert_file.parent.mkdir(parents=True, exist_ok=True)
+        identity = re.sub(r"[^A-Za-z0-9_.:-]+", "-", self.settings.overmind_device_id).strip("-") or "drone"
+        common_name = f"batocera-drone-{identity}"
+        alt_names = [
+            f"DNS:{common_name}",
+            "DNS:localhost",
+            "IP:127.0.0.1",
+        ]
+        for ip in _get_local_certificate_ips():
+            alt_names.append(f"IP:{ip}")
+        san = ",".join(dict.fromkeys(alt_names))
+        command = [
+            "openssl",
+            "req",
+            "-x509",
+            "-nodes",
+            "-newkey",
+            "rsa:2048",
+            "-keyout",
+            str(key_file),
+            "-out",
+            str(cert_file),
+            "-days",
+            str(max(1, int(self.settings.drone_cert_days))),
+            "-subj",
+            f"/CN={common_name}",
+            "-addext",
+            f"subjectAltName={san}",
+            "-addext",
+            "extendedKeyUsage=serverAuth,clientAuth",
+        ]
+        try:
+            subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except (FileNotFoundError, subprocess.CalledProcessError) as error:
+            raise RuntimeError(f"failed to generate Drone certificate with openssl: {error}") from error
+
+    def metadata(self) -> dict:
+        cert_file = self.settings.drone_cert_file
+        if not cert_file.exists():
+            return {"status": "missing", "cert_file": str(cert_file)}
+        try:
+            pem = cert_file.read_text(encoding="utf-8", errors="ignore")
+            der = ssl.PEM_cert_to_DER_cert(pem)
+            decoded = ssl._ssl._test_decode_cert(str(cert_file))  # type: ignore[attr-defined]
+        except Exception as error:
+            return {"status": "invalid", "error": str(error), "cert_file": str(cert_file)}
+
+        def _name(items) -> str:
+            parts = []
+            for group in items or []:
+                for key, value in group:
+                    parts.append(f"{key}={value}")
+            return ", ".join(parts)
+
+        san = []
+        for kind, value in decoded.get("subjectAltName", ()):
+            if kind.lower() == "dns":
+                san.append(value)
+        not_after = decoded.get("notAfter")
+        renewal_status = "unknown"
+        try:
+            expires_at = datetime.strptime(not_after, "%b %d %H:%M:%S %Y %Z").replace(tzinfo=timezone.utc)
+            days_left = (expires_at - datetime.now(timezone.utc)).days
+            renewal_status = "expired" if days_left < 0 else ("renew_soon" if days_left <= 30 else "valid")
+        except Exception:
+            days_left = None
+        return {
+            "status": "loaded",
+            "source": "local_self_signed",
+            "fingerprint": hashlib.sha256(der).hexdigest(),
+            "subject": _name(decoded.get("subject")),
+            "issuer": _name(decoded.get("issuer")),
+            "serial_number": decoded.get("serialNumber"),
+            "san": san,
+            "valid_from": decoded.get("notBefore"),
+            "valid_until": not_after,
+            "days_until_expiry": days_left,
+            "registered_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+            "last_seen": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+            "renewal_status": renewal_status,
+            "identity": self.settings.overmind_device_id,
+            "mtls_enabled": self.settings.drone_mtls_enabled,
+        }
+
+
 def _overmind_config_path_for_settings(settings: Settings) -> Path:
     return (settings.userdata_root / "system" / "drone-app" / "overmind_integration.json").resolve()
 
@@ -5062,6 +5309,19 @@ def _overmind_actions_path_for_settings(settings: Settings) -> Path:
         "OVERMIND_ACTION_LOG_FILE",
         str(settings.userdata_root / "system" / "drone-app" / "overmind_actions.log"),
     )).resolve()
+
+
+def _overmind_swarm_path_for_settings(settings: Settings) -> Path:
+    return (settings.userdata_root / "system" / "drone-app" / "overmind_swarm.json").resolve()
+
+
+def _overmind_peer_results_path_for_settings(settings: Settings) -> Path:
+    return (settings.userdata_root / "system" / "drone-app" / "peer_checks.json").resolve()
+
+
+def _write_json_file(path: Path, payload) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def _load_overmind_config_for_settings(settings: Settings) -> dict:
@@ -5125,7 +5385,16 @@ def _record_processed_overmind_action(
         handle.write(json.dumps(entry, sort_keys=True) + "\n")
 
 
-def _overmind_post_json(url: str, payload: dict, token: Optional[str] = None) -> dict:
+def _drone_client_ssl_context(settings: Settings, url: str, verify: bool = False) -> Optional[ssl.SSLContext]:
+    if not url.startswith("https://"):
+        return None
+    context = ssl.create_default_context() if verify else ssl._create_unverified_context()
+    if settings.drone_mtls_enabled and settings.drone_cert_file.exists() and settings.drone_key_file.exists():
+        context.load_cert_chain(certfile=str(settings.drone_cert_file), keyfile=str(settings.drone_key_file))
+    return context
+
+
+def _overmind_post_json(url: str, payload: dict, token: Optional[str] = None, settings: Optional[Settings] = None) -> dict:
     body = json.dumps(payload).encode("utf-8")
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     if token:
@@ -5136,13 +5405,62 @@ def _overmind_post_json(url: str, payload: dict, token: Optional[str] = None) ->
         headers=headers,
         method="POST",
     )
-    context = ssl._create_unverified_context() if url.startswith("https://") else None
+    context = _drone_client_ssl_context(settings, url) if settings else (ssl._create_unverified_context() if url.startswith("https://") else None)
     with urlopen(request, timeout=10, context=context) as response:
         raw = response.read()
     if not raw:
         return {}
     parsed = json.loads(raw.decode("utf-8"))
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _peer_get_json(url: str, settings: Settings) -> dict:
+    request = Request(url, headers={"Accept": "application/json", "User-Agent": "batocera-drone-peer/1.0"})
+    with urlopen(request, timeout=PEER_CHECK_TIMEOUT_SECONDS, context=_drone_client_ssl_context(settings, url)) as response:
+        raw = response.read()
+    parsed = json.loads(raw.decode("utf-8")) if raw else {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _peer_address(peer: dict) -> Optional[str]:
+    scheme = str(peer.get("scheme") or peer.get("protocol") or "https").strip() or "https"
+    port = peer.get("api_port") or peer.get("port") or 8443
+    for key in ("local_ip", "private_ip", "public_ip"):
+        value = peer.get(key)
+        if isinstance(value, list):
+            value = next((item for item in value if item), None)
+        if value:
+            host = str(value).strip()
+            if ":" in host and not host.startswith("["):
+                host = f"[{host}]"
+            return f"{scheme}://{host}:{port}"
+    return None
+
+
+def _check_peer(settings: Settings, peer: dict) -> dict:
+    target_id = str(peer.get("drone_id") or peer.get("device_id") or peer.get("id") or "")
+    address = _peer_address(peer)
+    checked_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    result = {
+        "source_drone_id": settings.overmind_device_id,
+        "target_drone_id": target_id,
+        "target_address": address,
+        "status": "fail",
+        "latency_ms": None,
+        "failure_reason": None,
+        "checked_at": checked_at,
+    }
+    if not address:
+        result["failure_reason"] = "no peer address available"
+        return result
+    started = time.monotonic()
+    try:
+        _peer_get_json(f"{address}/v1/api/peer/health", settings)
+        result["status"] = "pass"
+        result["latency_ms"] = int((time.monotonic() - started) * 1000)
+    except Exception as error:
+        result["failure_reason"] = str(error)
+    return result
 
 
 def _get_local_ip_addresses() -> dict:
@@ -5195,6 +5513,27 @@ def _get_local_ip_addresses() -> dict:
         public_ip = None
     print(f"Overmind network resolved ipv4={ipv4} ipv6={ipv6} gateway={gateway_ip} public={public_ip}", file=sys.stdout, flush=True)
     return {"ipv4": ipv4, "ipv6": ipv6, "gateway_ip": gateway_ip, "public_ip": public_ip}
+
+
+def _get_local_certificate_ips() -> List[str]:
+    ips = ["127.0.0.1"]
+    try:
+        hostname = socket.gethostname()
+        for info in socket.getaddrinfo(hostname, None):
+            value = str(info[4][0] or "").split("%", 1)[0].strip()
+            if value and ":" not in value and value not in ips:
+                ips.append(value)
+    except OSError:
+        pass
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.connect(("8.8.8.8", 80))
+            value = probe.getsockname()[0]
+            if value and value not in ips:
+                ips.append(value)
+    except OSError:
+        pass
+    return ips
 
 
 def _sample_speed() -> dict:
@@ -5283,6 +5622,65 @@ def _collect_log_sources(settings: Settings) -> dict:
         "collected_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
         "logs": logs,
     }
+
+
+def _filesystem_watch_roots(settings: Settings) -> List[Path]:
+    return [
+        settings.roms_root,
+        settings.userdata_root / "system" / "configs",
+        settings.userdata_root / "system" / "logs",
+        settings.log_dir,
+    ]
+
+
+def _filesystem_snapshot(settings: Settings, max_files: int = 5000) -> Dict[str, dict]:
+    snapshot: Dict[str, dict] = {}
+    checked = 0
+    for root in _filesystem_watch_roots(settings):
+        if not root.exists():
+            continue
+        try:
+            for path in root.rglob("*"):
+                checked += 1
+                if checked > max_files:
+                    return snapshot
+                if not path.is_file():
+                    continue
+                stat = path.stat()
+                snapshot[str(path.resolve())] = {"size": stat.st_size, "mtime": int(stat.st_mtime)}
+        except Exception:
+            continue
+    return snapshot
+
+
+def _filesystem_events(settings: Settings, previous: Dict[str, dict], current: Dict[str, dict]) -> List[dict]:
+    now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    events = []
+    for path, meta in current.items():
+        old = previous.get(path)
+        if not old:
+            action = "create"
+        elif old != meta:
+            action = "update"
+        else:
+            continue
+        events.append({
+            "drone_id": settings.overmind_device_id,
+            "event_type": OVERMIND_EVENT_TYPES["filesystem"],
+            "timestamp": now,
+            "path": path,
+            "metadata": {"action": action, **meta, "old": old},
+        })
+    for path, old in previous.items():
+        if path not in current:
+            events.append({
+                "drone_id": settings.overmind_device_id,
+                "event_type": OVERMIND_EVENT_TYPES["filesystem"],
+                "timestamp": now,
+                "path": path,
+                "metadata": {"action": "delete", "old": old},
+            })
+    return events[:100]
 
 
 def _collect_game_logs(settings: Settings) -> dict:
@@ -5411,11 +5809,13 @@ def _execute_overmind_action(settings: Settings, repository: "RomRepository", ac
 
 def _start_overmind_action_poller(settings: Settings, repository: "RomRepository") -> None:
     poll_seconds = max(5, int(settings.overmind_poll_seconds or 30))
-    speed_sample_seconds = int(os.environ.get("OVERMIND_SPEED_SAMPLE_SECONDS", "1800"))
-    last_speed_sample_at = 0.0
+    speed_sample_seconds = OVERMIND_SPEED_SAMPLE_SECONDS
+    last_speed_sample_at = -float(speed_sample_seconds)
+    last_peer_check_at = -float(PEER_CHECK_INTERVAL_SECONDS)
+    fs_snapshot = _filesystem_snapshot(settings)
 
     def loop() -> None:
-        nonlocal last_speed_sample_at
+        nonlocal last_speed_sample_at, last_peer_check_at, fs_snapshot
         while True:
             try:
                 config = _load_overmind_config_for_settings(settings)
@@ -5431,15 +5831,55 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                     "device_id": settings.overmind_device_id,
                     "network": _get_local_ip_addresses(),
                     "rom_systems": rom_systems,
+                    "api_port": settings.https_port,
+                    "scheme": "http" if settings.http_only else "https",
+                    "certificate": DroneCertificateManager(settings).metadata(),
                 }
                 alive_url = f"{base_url}/api/devices/{device_id}/alive"
-                response = _overmind_post_json(alive_url, alive_payload, token=token)
+                response = _overmind_post_json(alive_url, alive_payload, token=token, settings=settings)
+                swarm = response.get("swarm") if isinstance(response.get("swarm"), list) else []
+                _write_json_file(_overmind_swarm_path_for_settings(settings), swarm)
 
                 now = time.monotonic()
                 if speed_sample_seconds > 0 and now - last_speed_sample_at >= speed_sample_seconds:
                     speed_url = f"{base_url}/api/devices/{device_id}/speed"
-                    _overmind_post_json(speed_url, _sample_speed(), token=token)
+                    speed_sample = _sample_speed()
+                    _overmind_post_json(speed_url, speed_sample, token=token, settings=settings)
+                    _overmind_post_json(
+                        f"{base_url}/api/devices/{device_id}/events",
+                        {
+                            "drone_id": settings.overmind_device_id,
+                            "event_type": OVERMIND_EVENT_TYPES["speed"],
+                            "timestamp": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                            "metadata": {"speed_result": speed_sample},
+                        },
+                        token=token,
+                        settings=settings,
+                    )
                     last_speed_sample_at = now
+
+                if swarm and now - last_peer_check_at >= PEER_CHECK_INTERVAL_SECONDS:
+                    peer_results = []
+                    for peer in swarm:
+                        peer_id = str(peer.get("drone_id") or peer.get("device_id") or peer.get("id") or "")
+                        if not peer_id or peer_id == settings.overmind_device_id:
+                            continue
+                        peer_results.append(_check_peer(settings, peer))
+                    if peer_results:
+                        _write_json_file(_overmind_peer_results_path_for_settings(settings), peer_results)
+                        _overmind_post_json(
+                            f"{base_url}/api/devices/{device_id}/peer-checks",
+                            {"results": peer_results},
+                            token=token,
+                            settings=settings,
+                        )
+                    last_peer_check_at = now
+
+                next_fs_snapshot = _filesystem_snapshot(settings)
+                for event in _filesystem_events(settings, fs_snapshot, next_fs_snapshot):
+                    print(f"Filesystem event: {event.get('metadata', {}).get('action')} {event.get('path')}", file=sys.stdout, flush=True)
+                    _overmind_post_json(f"{base_url}/api/devices/{device_id}/events", event, token=token, settings=settings)
+                fs_snapshot = next_fs_snapshot
 
                 action = response.get("action")
                 if not isinstance(action, dict):
@@ -5459,7 +5899,7 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                     completion_payload = {"status": status_value, "message": message}
                     if result is not None:
                         completion_payload["result"] = result
-                    _overmind_post_json(complete_url, completion_payload, token=token)
+                    _overmind_post_json(complete_url, completion_payload, token=token, settings=settings)
             except HTTPError as error:
                 print(f"Overmind action poll failed: {error}", file=sys.stderr, flush=True)
             except URLError:
@@ -5482,6 +5922,9 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
         rom_search_cache_ttl_seconds=settings.rom_search_cache_ttl_seconds,
     )
     auth = BasicAuth(settings.username, settings.password)
+    cert_state = DroneCertificateManager(settings).ensure_certificate()
+    if cert_state.get("error"):
+        print(f"Drone certificate setup: {cert_state.get('error')}", file=sys.stderr, flush=True)
 
     image_cache = ExpiringLRUCache(
         ttl_seconds=settings.image_cache_ttl_seconds,
@@ -5507,9 +5950,16 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
     server = ThreadingHTTPServer(("0.0.0.0", settings.https_port), handler_factory)
 
     if not settings.http_only:
-        cert_file, key_file = _resolve_tls_material(settings)
+        if settings.drone_cert_file.exists() and settings.drone_key_file.exists():
+            cert_file, key_file = settings.drone_cert_file, settings.drone_key_file
+        else:
+            cert_file, key_file = _resolve_tls_material(settings)
         ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ssl_context.load_cert_chain(certfile=str(cert_file), keyfile=str(key_file))
+        if settings.drone_mtls_enabled:
+            ssl_context.verify_mode = ssl.CERT_OPTIONAL
+            if settings.drone_mtls_ca_file and settings.drone_mtls_ca_file.exists():
+                ssl_context.load_verify_locations(cafile=str(settings.drone_mtls_ca_file))
         server.socket = ssl_context.wrap_socket(server.socket, server_side=True)
 
     if not _OVERMIND_POLLER_STARTED:

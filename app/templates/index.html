@@ -218,6 +218,31 @@
       background: rgba(31, 42, 68, 0.86);
       border-color: var(--admin-border);
     }
+    .themed-table {
+      --bs-table-bg: transparent;
+      --bs-table-color: var(--admin-text);
+      --bs-table-border-color: var(--admin-border);
+      --bs-table-hover-bg: rgba(0, 194, 255, 0.10);
+      color: var(--admin-text);
+      margin-bottom: 0;
+    }
+    .themed-table thead th {
+      background: rgba(31, 42, 68, 0.94);
+      color: var(--admin-text);
+      border-color: var(--admin-border);
+    }
+    .themed-table tbody td {
+      background: rgba(21, 31, 50, 0.54);
+      border-color: var(--admin-border);
+      color: var(--admin-text);
+    }
+    .themed-empty {
+      color: var(--admin-muted);
+      background: rgba(21, 31, 50, 0.58);
+      border: 1px solid var(--admin-border);
+      border-radius: 8px;
+      padding: 0.85rem;
+    }
     .log-card .list-group-item {
       background: rgba(21, 31, 50, 0.82);
       border-color: var(--admin-border);
@@ -1381,13 +1406,7 @@ function renderRomGrid(system, items, page = 1, total = items.length) {
                 <div class="fw-semibold truncate-2 mb-2">${escapeHtml(item.title || item.name)}</div>
                 ${item.byte_count !== undefined ? `<div class="text-muted small mono mb-3">${formatBytesToMb(item.byte_count)}</div>` : ""}
                 <div class="text-muted small mb-3">${item.has_gamelist_entry ? "gamelist.xml media available" : "no gamelist.xml entry"}</div>
-                <div class="mt-auto">
-                  ${
-                    item.is_downloadable === false
-                      ? `<button class="btn btn-secondary btn-sm" type="button" disabled><i class="bi bi-folder2-open me-1"></i>Folder ROM (No Download)</button>`
-                      : `<a class="btn btn-primary btn-sm" href="${romDownloadUrl(system, item.unique_id)}" onclick="event.stopPropagation()"><i class="bi bi-download me-1"></i>Download</a>`
-                  }
-                </div>
+                <div class="mt-auto text-muted small">${item.is_downloadable === false ? "Folder ROM" : "Open details to download"}</div>
               </div>
             </div>
           </div>
@@ -1459,6 +1478,7 @@ async function renderRomMediaPage(system, uniqueId) {
     const roms = systemRomCache[system].roms || [];
     const rom = roms.find((item) => String(item.unique_id || "") === String(uniqueId || ""));
     if (!rom) throw new Error("ROM not found");
+    rom.system = system;
     const media = romMediaItems(system, rom);
     const primary = media.find((item) => item.field === "image") || media[0];
     titleNode.textContent = rom.title || rom.name || "ROM Media";
@@ -1483,6 +1503,7 @@ async function renderRomMediaPage(system, uniqueId) {
                 <div>
                   <h2 class="h4 mb-1">${escapeHtml(rom.title || rom.name || "")}</h2>
                   <div class="text-muted small mono">${escapeHtml(rom.rom_file || rom.name || "")}</div>
+                  <div id="romMd5Hash" class="text-muted small mono mt-1">MD5: loading...</div>
                 </div>
                 <span class="badge ${rom.has_gamelist_entry ? "text-bg-success" : "text-bg-warning"}">${rom.has_gamelist_entry ? "gamelist.xml entry" : "no gamelist.xml entry"}</span>
               </div>
@@ -1512,7 +1533,33 @@ async function renderRomMediaPage(system, uniqueId) {
           `).join("") || `<div class="text-muted">No image fields are set in gamelist.xml for this ROM.</div>`}
         </div>
       </div>
+      <div class="card log-card mb-3">
+        <div class="card-header">Artwork Tools</div>
+        <div class="card-body">
+          <div class="mb-3">${artworkExternalLinksHtml(rom)}</div>
+          <div class="mb-3">
+            <div class="fw-semibold mb-2">Manual Upload</div>
+            ${artworkEditableImageFields(rom)}
+          </div>
+          <div>
+            <div class="fw-semibold mb-2">Marquee Crop</div>
+            ${artworkMarqueeCropperHtml(rom)}
+          </div>
+        </div>
+      </div>
     `;
+    window.missingArtworkRoms = [rom];
+    window.selectedArtworkRomIndex = 0;
+    bindArtworkEditButtons(rom, 0);
+    api(`/systems/${encodeURIComponent(system)}/roms/${encodeURIComponent(rom.unique_id)}/md5`)
+      .then((data) => {
+        const node = document.getElementById("romMd5Hash");
+        if (node) node.textContent = `MD5: ${data.md5 || "unavailable"}`;
+      })
+      .catch(() => {
+        const node = document.getElementById("romMd5Hash");
+        if (node) node.textContent = "MD5: unavailable";
+      });
   } catch (err) {
     showToast(`Failed to load ROM media: ${escapeHtml(err.message || "unknown error")}`, "danger");
     setHash(`#system/${encodeURIComponent(system)}`);
@@ -2186,7 +2233,7 @@ async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh 
     const payload = await api(artworkPayloadUrl(forceRefresh));
     const roms = payload.roms || [];
     const fieldCounts = payload.field_counts || {};
-    const availableFields = [{ value: "any", label: "Any" }, { value: "show_all", label: "Show All" }].concat((payload.fields || []).map((field) => ({ value: field, label: field })));
+    const availableFields = [{ value: "any", label: "Any" }, { value: "show_all", label: "Show All" }].concat((payload.fields || []).map((field) => ({ value: field, label: field === "duplicate_artwork" ? "Duplicate Artwork" : field })));
     const availableSystems = (payload.systems || []).map((system) => ({ value: system, label: system }));
     const total = Number(payload.count || 0);
     const limit = Number(payload.limit || ARTWORK_PAGE_SIZE);
@@ -3212,6 +3259,9 @@ async function renderOvermindIntegrationPage() {
     const passwordMask = payload.password_masked || "(not set)";
     const emailValue = payload.overmind_email || "(not set)";
     const machineId = payload.machine_id || "n/a";
+    const cert = payload.certificate || {};
+    const swarm = payload.swarm || [];
+    const peerChecks = payload.peer_checks || [];
     statusEl.innerHTML = `
       <div><strong>Configured:</strong> ${escapeHtml(configured)}</div>
       <div><strong>Integration Enabled:</strong> ${escapeHtml(enabled)}</div>
@@ -3223,7 +3273,21 @@ async function renderOvermindIntegrationPage() {
       <div><strong>Requested At:</strong> ${escapeHtml(requestedAt)}</div>
       <div><strong>Last Started At:</strong> ${escapeHtml(startedAt)}</div>
       <div><strong>Last Error:</strong> ${escapeHtml(errorMsg)}</div>
+      <div><strong>Certificate:</strong> ${escapeHtml(cert.status || "unknown")}${cert.fingerprint ? ` · ${escapeHtml(String(cert.fingerprint).slice(0, 16))}` : ""}</div>
+      <div><strong>Swarm Drones:</strong> ${swarm.length}</div>
       <div class="mt-2"><strong>Notes:</strong> ${escapeHtml(status.notes || "")}</div>
+      ${swarm.length ? `<div class="mt-3"><strong>Last Swarm Snapshot</strong>${swarm.map((drone) => {
+        const checks = peerChecks.filter((item) => String(item.target_drone_id || "") === String(drone.drone_id || drone.device_id || ""));
+        const latest = checks[0] || {};
+        const passed = latest.status === "pass";
+        return `<div class="mt-2 p-2 rounded border" style="border-color:var(--admin-border)!important;background:rgba(31,42,68,.45)">
+          <div class="d-flex justify-content-between gap-2"><span>${escapeHtml(drone.name || drone.hostname || drone.device_name || drone.drone_id || "Drone")}</span><span class="badge ${passed ? "text-bg-success" : "text-bg-danger"}">${latest.status ? (passed ? "GREEN" : "RED") : "unchecked"}</span></div>
+          <div class="small text-muted mono">${escapeHtml(drone.drone_id || drone.device_id || "")}</div>
+          <div class="small text-muted">Address: ${escapeHtml(latest.target_address || drone.local_ip || drone.public_ip || "n/a")}</div>
+          <div class="small text-muted">Checked: ${escapeHtml(latest.checked_at || "n/a")}</div>
+          ${latest.failure_reason ? `<div class="small text-danger">${escapeHtml(latest.failure_reason)}</div>` : ""}
+        </div>`;
+      }).join("")}</div>` : ""}
     `;
     urlInput.value = payload.overmind_url || "";
     emailInput.value = payload.overmind_email || "";
@@ -3237,7 +3301,7 @@ async function renderOvermindIntegrationPage() {
   function renderActions(actions) {
     actionsBody.innerHTML = actions.length ? `
       <div class="table-responsive">
-        <table class="table table-sm align-middle">
+        <table class="table table-sm align-middle themed-table">
           <thead>
             <tr>
               <th>Processed</th>
@@ -3262,7 +3326,7 @@ async function renderOvermindIntegrationPage() {
           </tbody>
         </table>
       </div>
-    ` : `<div class="text-muted">No processed actions yet.</div>`;
+    ` : `<div class="themed-empty">No processed actions yet.</div>`;
   }
 
   async function loadActions() {
