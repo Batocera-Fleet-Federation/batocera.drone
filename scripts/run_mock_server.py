@@ -34,7 +34,7 @@ def main() -> None:
     os.environ.setdefault("OVERMIND_EMAIL", "demo@example.com")
     os.environ.setdefault("OVERMIND_PASSWORD", "DemoPass123")
     os.environ.setdefault("OVERMIND_DRONE_TOKEN", "demo-local-drone-token")
-    os.environ.setdefault("OVERMIND_POLL_SECONDS", "30")
+    os.environ.setdefault("OVERMIND_POLL_SECONDS", "60")
 
     settings = Settings.from_env()
     server = create_server(settings)

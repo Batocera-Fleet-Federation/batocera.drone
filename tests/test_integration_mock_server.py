@@ -63,6 +63,13 @@ class MockServerIntegrationTests(unittest.TestCase):
             body = resp.read().decode("utf-8")
         return json.loads(body)
 
+    def _get_bytes(self, path: str) -> bytes:
+        url = f"http://127.0.0.1:{self.port}{path}"
+        req = urllib.request.Request(url)
+        req.add_header("Authorization", _auth_header("admin", "changeme"))
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.read()
+
     def _post_json(self, path: str, payload: dict) -> dict:
         url = f"http://127.0.0.1:{self.port}{path}"
         body = json.dumps(payload).encode("utf-8")
@@ -77,6 +84,21 @@ class MockServerIntegrationTests(unittest.TestCase):
         payload = self._get_json("/v1/api/systems")
         names = {item["name"] for item in payload["systems"]}
         self.assertIn("snes", names)
+
+    def test_rom_download_by_unique_id(self) -> None:
+        payload = self._get_json("/v1/api/systems/snes")
+        rom = next(item for item in payload["roms"] if item["rom_file"] == "Chrono Trigger (USA).zip")
+        data = self._get_bytes(f"/v1/api/systems/snes/roms/{rom['unique_id']}")
+        self.assertEqual(data, b"FAKE-SNES-ROM-1")
+
+    def test_api_admin_status_and_openapi_mtls_guidance(self) -> None:
+        payload = self._get_json("/v1/api/admin/api/status")
+        self.assertIn("/v1/api/swagger", payload["swagger_url"])
+        self.assertIn("certificate", payload)
+        self.assertNotIn("private_key", json.dumps(payload).lower())
+
+        spec = self._get_json("/v1/api/openapi.json")
+        self.assertIn("mtls", json.dumps(spec).lower())
 
     def test_admin_logs_endpoint(self) -> None:
         payload = self._get_json("/v1/api/admin/logs/es_launch_stdout?lines=20")

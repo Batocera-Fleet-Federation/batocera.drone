@@ -57,6 +57,7 @@ OVERMIND_EVENT_TYPES = {
 PEER_CHECK_TIMEOUT_SECONDS = float(os.environ.get("DRONE_PEER_CHECK_TIMEOUT_SECONDS", "3"))
 PEER_CHECK_INTERVAL_SECONDS = int(os.environ.get("DRONE_PEER_CHECK_INTERVAL_SECONDS", "300"))
 OVERMIND_SPEED_SAMPLE_SECONDS = int(os.environ.get("OVERMIND_SPEED_SAMPLE_SECONDS", "300"))
+OVERMIND_HEARTBEAT_SECONDS = int(os.environ.get("OVERMIND_POLL_SECONDS", "60"))
 LAUNCHBOX_PLATFORM_ALIASES = {
     "3do": "3DO Interactive Multiplayer",
     "adam": "Coleco ADAM",
@@ -995,8 +996,8 @@ class Settings:
             overmind_email=os.environ.get("OVERMIND_EMAIL"),
             overmind_password=os.environ.get("OVERMIND_PASSWORD"),
             overmind_token=os.environ.get("OVERMIND_DRONE_TOKEN"),
-            overmind_device_id=_fake_machine_id() if use_fake_data else _machine_id(),
-            overmind_poll_seconds=int(os.environ.get("OVERMIND_POLL_SECONDS", "30")),
+            overmind_device_id=os.environ.get("OVERMIND_DEVICE_ID") or os.environ.get("DRONE_DEVICE_ID") or (_fake_machine_id() if use_fake_data else _machine_id()),
+            overmind_poll_seconds=OVERMIND_HEARTBEAT_SECONDS,
             drone_cert_file=Path(os.environ.get("DRONE_CERT_FILE", os.environ.get("TLS_CERT_FILE", str(default_drone_cert)))),
             drone_key_file=Path(os.environ.get("DRONE_KEY_FILE", os.environ.get("TLS_KEY_FILE", str(default_drone_key)))),
             drone_cert_days=int(os.environ.get("DRONE_CERT_DAYS", "825")),
@@ -2451,7 +2452,7 @@ OPENAPI_SPEC = {
     "info": {
         "title": "Drone App",
         "version": "4.0",
-        "description": "Browse and download ROM, image, video, and BIOS assets.",
+        "description": "Browse and download ROM, image, video, and BIOS assets. Peer API routes can require mTLS. For manual testing use a client certificate/key with curl, for example: curl --cert client.crt --key client.key -k https://drone-host:8443/v1/api/peer/health. The admin API page exposes certificate metadata and the public certificate only; private key material must stay on the Drone.",
     },
     "servers": [{"url": API_PREFIX}],
     "components": {
@@ -2663,6 +2664,19 @@ OPENAPI_SPEC = {
                     "200": {"description": "Structured system information"},
                     "500": {"description": "Failed to execute batocera-info"},
                 },
+            }
+        },
+        "/admin/api/status": {
+            "get": {
+                "summary": "API access, Swagger, and mTLS certificate guidance",
+                "responses": {"200": {"description": "API admin status and certificate metadata"}},
+            }
+        },
+        "/admin/api/certificate": {
+            "get": {
+                "summary": "Download Drone public certificate",
+                "description": "Downloads the public certificate only. Private key material is not exposed.",
+                "responses": {"200": {"description": "Public certificate PEM"}},
             }
         },
         "/admin/artwork/missing": {
@@ -3001,6 +3015,31 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
 
     def _handle_admin_overmind_actions(self) -> None:
         self._send_json(200, {"actions": list(reversed(self._load_processed_overmind_actions()))})
+
+    def _handle_admin_api_status(self) -> None:
+        metadata = DroneCertificateManager(self.settings).ensure_certificate()
+        self._send_json(
+            200,
+            {
+                "swagger_url": api_url("/swagger"),
+                "openapi_url": api_url("/openapi.json"),
+                "certificate_download_url": api_url("/admin/api/certificate"),
+                "mtls_enabled": self.settings.drone_mtls_enabled,
+                "certificate": metadata,
+                "guidance": {
+                    "curl": "curl --cert /path/to/client.crt --key /path/to/client.key -k https://drone-host:8443/v1/api/peer/health",
+                    "warning": "Do not share Drone private key material. The download endpoint provides the public certificate only.",
+                    "lifecycle": f"Drone creates or reuses a local certificate on startup. Default lifetime is {self.settings.drone_cert_days} days; expired certificates are recreated on restart.",
+                },
+            },
+        )
+
+    def _handle_admin_api_certificate(self) -> None:
+        metadata = DroneCertificateManager(self.settings).ensure_certificate()
+        cert_file = self.settings.drone_cert_file
+        if metadata.get("status") != "loaded" or not cert_file.exists():
+            raise FileNotFoundError()
+        self._stream_file(cert_file, "application/x-pem-file", as_attachment=True)
 
     def _handle_rom_md5(self, system: str, unique_id: str) -> None:
         system_dir = self.repository.get_system_dir(system)
@@ -4146,15 +4185,25 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         is_downloadable = True
         for item in items:
             if item["unique_id"] == unique_id:
-                target_path = (asset_dir / item["name"]).resolve()
+                file_name = str(item.get("rom_file") or item.get("name") or "")
+                target_path = (asset_dir / file_name).resolve()
                 is_downloadable = item.get("is_downloadable", True)
                 break
 
         if not target_path or not target_path.exists():
+            self.log_error(
+                "download lookup failed system=%s asset_type=%s requested=%s resolved=%s reason=not_found",
+                system,
+                asset_type,
+                unique_id,
+                str(target_path) if target_path else "",
+            )
             raise FileNotFoundError()
         if not is_downloadable:
+            self.log_error("download lookup failed system=%s asset_type=%s requested=%s resolved=%s reason=not_downloadable", system, asset_type, unique_id, str(target_path))
             raise ValueError("asset is not downloadable")
         if not target_path.is_file():
+            self.log_error("download lookup failed system=%s asset_type=%s requested=%s resolved=%s reason=not_file", system, asset_type, unique_id, str(target_path))
             raise ValueError("not a file")
 
         self._stream_file(target_path, "application/octet-stream", as_attachment=True)
@@ -5538,12 +5587,66 @@ def _get_local_certificate_ips() -> List[str]:
 
 def _sample_speed() -> dict:
     """Return a lightweight local speed sample without running invasive tests."""
-    return {
+    sample = {
         "upload_mbps": 0,
         "download_mbps": 0,
         "latency_ms": 0,
         "source": "simulated-local",
         "sampled_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+    }
+    print(f"Speed sample created: source={sample['source']} down={sample['download_mbps']} up={sample['upload_mbps']}", file=sys.stdout, flush=True)
+    return sample
+
+
+def _collect_system_info_payload(settings: Settings) -> dict:
+    hostname = socket.gethostname()
+    network = _get_local_ip_addresses()
+    memory = {}
+    try:
+        raw = Path("/proc/meminfo").read_text(encoding="utf-8", errors="ignore").splitlines()
+        parsed = {}
+        for line in raw:
+            if ":" in line:
+                key, value = line.split(":", 1)
+                parsed[key.strip()] = value.strip()
+        memory = {"total": parsed.get("MemTotal"), "available": parsed.get("MemAvailable")}
+    except Exception:
+        memory = {}
+    disk = {}
+    try:
+        usage = shutil.disk_usage(settings.userdata_root)
+        disk = {"total_bytes": usage.total, "used_bytes": usage.used, "free_bytes": usage.free}
+    except Exception:
+        disk = {}
+    uptime = None
+    try:
+        uptime = float(Path("/proc/uptime").read_text(encoding="utf-8").split()[0])
+    except Exception:
+        uptime = None
+    batocera_version = None
+    for candidate in (settings.userdata_root / "system" / "batocera.version", Path("/usr/share/batocera/batocera.version")):
+        try:
+            if candidate.exists():
+                batocera_version = candidate.read_text(encoding="utf-8", errors="ignore").splitlines()[0].strip()
+                break
+        except Exception:
+            continue
+    return {
+        "hostname": hostname,
+        "device_name": hostname,
+        "platform": sys.platform,
+        "os": os.uname().sysname if hasattr(os, "uname") else sys.platform,
+        "os_release": os.uname().release if hasattr(os, "uname") else "",
+        "batocera_version": batocera_version,
+        "drone_app_version": OPENAPI_SPEC.get("info", {}).get("version"),
+        "architecture": os.uname().machine if hasattr(os, "uname") else "",
+        "cpu": {"model": os.environ.get("DRONE_CPU_MODEL", ""), "count": os.cpu_count()},
+        "memory": memory,
+        "disk": disk,
+        "network": network,
+        "uptime_seconds": uptime,
+        "container": Path("/.dockerenv").exists() or os.environ.get("RUNNING_IN_DOCKER") == "1",
+        "updated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
     }
 
 
@@ -5808,14 +5911,17 @@ def _execute_overmind_action(settings: Settings, repository: "RomRepository", ac
 
 
 def _start_overmind_action_poller(settings: Settings, repository: "RomRepository") -> None:
-    poll_seconds = max(5, int(settings.overmind_poll_seconds or 30))
+    poll_seconds = max(5, int(settings.overmind_poll_seconds or OVERMIND_HEARTBEAT_SECONDS))
     speed_sample_seconds = OVERMIND_SPEED_SAMPLE_SECONDS
+    system_info_refresh_seconds = max(300, int(os.environ.get("DRONE_SYSTEM_INFO_REFRESH_SECONDS", "3600")))
     last_speed_sample_at = -float(speed_sample_seconds)
     last_peer_check_at = -float(PEER_CHECK_INTERVAL_SECONDS)
+    last_system_info_at = -float(system_info_refresh_seconds)
+    system_info_payload: dict = {}
     fs_snapshot = _filesystem_snapshot(settings)
 
     def loop() -> None:
-        nonlocal last_speed_sample_at, last_peer_check_at, fs_snapshot
+        nonlocal last_speed_sample_at, last_peer_check_at, last_system_info_at, system_info_payload, fs_snapshot
         while True:
             try:
                 config = _load_overmind_config_for_settings(settings)
@@ -5827,6 +5933,10 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
 
                 device_id = quote(settings.overmind_device_id, safe="")
                 rom_systems = repository.list_systems()
+                now = time.monotonic()
+                if not system_info_payload or now - last_system_info_at >= system_info_refresh_seconds:
+                    system_info_payload = _collect_system_info_payload(settings)
+                    last_system_info_at = now
                 alive_payload = {
                     "device_id": settings.overmind_device_id,
                     "network": _get_local_ip_addresses(),
@@ -5834,17 +5944,22 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                     "api_port": settings.https_port,
                     "scheme": "http" if settings.http_only else "https",
                     "certificate": DroneCertificateManager(settings).metadata(),
+                    "system_info": system_info_payload,
                 }
                 alive_url = f"{base_url}/api/devices/{device_id}/alive"
                 response = _overmind_post_json(alive_url, alive_payload, token=token, settings=settings)
                 swarm = response.get("swarm") if isinstance(response.get("swarm"), list) else []
                 _write_json_file(_overmind_swarm_path_for_settings(settings), swarm)
 
-                now = time.monotonic()
                 if speed_sample_seconds > 0 and now - last_speed_sample_at >= speed_sample_seconds:
                     speed_url = f"{base_url}/api/devices/{device_id}/speed"
                     speed_sample = _sample_speed()
-                    _overmind_post_json(speed_url, speed_sample, token=token, settings=settings)
+                    try:
+                        _overmind_post_json(speed_url, speed_sample, token=token, settings=settings)
+                        print(f"Speed sample sent to Overmind for {settings.overmind_device_id}", file=sys.stdout, flush=True)
+                    except Exception as error:
+                        print(f"Speed sample failed for {settings.overmind_device_id}: {error}", file=sys.stderr, flush=True)
+                        raise
                     _overmind_post_json(
                         f"{base_url}/api/devices/{device_id}/events",
                         {

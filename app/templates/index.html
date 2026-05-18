@@ -1971,6 +1971,14 @@ async function renderAdminMenu() {
           </div>
         </div>
       </div>
+      <div class="col-md-4 mb-3">
+        <div class="card admin-tile pointer h-100" onclick="setHash('#admin/api')">
+          <div class="card-body">
+            <h5 class="card-title"><i class="bi bi-braces me-2"></i>API Access</h5>
+            <p class="card-text">Open Swagger docs, view certificate metadata, and download the public certificate.</p>
+          </div>
+        </div>
+      </div>
     </div>
   `;
 }
@@ -3281,7 +3289,7 @@ async function renderOvermindIntegrationPage() {
         const latest = checks[0] || {};
         const passed = latest.status === "pass";
         return `<div class="mt-2 p-2 rounded border" style="border-color:var(--admin-border)!important;background:rgba(31,42,68,.45)">
-          <div class="d-flex justify-content-between gap-2"><span>${escapeHtml(drone.name || drone.hostname || drone.device_name || drone.drone_id || "Drone")}</span><span class="badge ${passed ? "text-bg-success" : "text-bg-danger"}">${latest.status ? (passed ? "GREEN" : "RED") : "unchecked"}</span></div>
+          <div class="d-flex justify-content-between gap-2"><span>${escapeHtml(drone.name || drone.hostname || drone.device_name || drone.drone_id || "Drone")}</span><span class="badge ${passed ? "text-bg-success" : "text-bg-danger"}">${latest.status ? (passed ? "RESOLVED" : "FAILED") : "unchecked"}</span></div>
           <div class="small text-muted mono">${escapeHtml(drone.drone_id || drone.device_id || "")}</div>
           <div class="small text-muted">Address: ${escapeHtml(latest.target_address || drone.local_ip || drone.public_ip || "n/a")}</div>
           <div class="small text-muted">Checked: ${escapeHtml(latest.checked_at || "n/a")}</div>
@@ -3407,6 +3415,65 @@ async function renderOvermindIntegrationPage() {
     await loadActions();
   } catch (err) {
     showToast(escapeHtml(err.message || "Failed to load Overmind integration"), "danger");
+  } finally {
+    setLoading(false);
+  }
+}
+async function renderApiAdminPage() {
+  titleNode.textContent = "API Access";
+  subtitleNode.textContent = "Swagger documentation and mTLS certificate guidance";
+  setLoading(true, "Loading API status...");
+  try {
+    const payload = await api("/admin/api/status");
+    const cert = payload.certificate || {};
+    const rows = [
+      ["Fingerprint", cert.fingerprint],
+      ["Subject", cert.subject],
+      ["Issuer", cert.issuer],
+      ["Serial Number", cert.serial_number],
+      ["SAN", (cert.san || []).join(", ")],
+      ["Valid From", cert.valid_from],
+      ["Valid Until", cert.valid_until],
+      ["Renewal", cert.renewal_status],
+      ["Source", cert.source],
+    ];
+    content.innerHTML = `
+      <div class="mb-3"><button class="btn btn-outline-secondary" onclick="setHash('#admin')">← Back to Admin</button></div>
+      <div class="card log-card mb-3">
+        <div class="card-header">API Documentation</div>
+        <div class="card-body">
+          <div class="d-flex flex-wrap gap-2 mb-3">
+            <a class="btn btn-primary" href="${escapeHtml(payload.swagger_url || `${API_BASE}/swagger`)}" target="_blank" rel="noopener noreferrer"><i class="bi bi-braces me-1"></i>Open Swagger</a>
+            <a class="btn btn-outline-primary" href="${escapeHtml(payload.openapi_url || `${API_BASE}/openapi.json`)}" target="_blank" rel="noopener noreferrer">Open OpenAPI JSON</a>
+            <a class="btn btn-outline-primary" href="${escapeHtml(payload.certificate_download_url || `${API_BASE}/admin/api/certificate`)}"><i class="bi bi-download me-1"></i>Download Public Certificate</a>
+          </div>
+          <div class="alert alert-warning mb-0">Do not share Drone private key material. Store certificates safely, rotate them if exposed, and only call protected peer APIs from trusted systems.</div>
+        </div>
+      </div>
+      <div class="card log-card mb-3">
+        <div class="card-header">Certificate Metadata</div>
+        <div class="card-body">
+          <div class="row g-2">
+            ${rows.map(([label, value]) => `
+              <div class="col-12 col-md-6">
+                <div class="text-muted small">${escapeHtml(label)}</div>
+                <div class="mono small text-break">${escapeHtml(String(value || "n/a"))}</div>
+              </div>
+            `).join("")}
+          </div>
+        </div>
+      </div>
+      <div class="card log-card">
+        <div class="card-header">mTLS Example</div>
+        <div class="card-body">
+          <p class="text-muted small">Peer API routes can require a client certificate. The public certificate download does not include the private key.</p>
+          <pre class="mono small p-3 rounded" style="background:rgba(0,0,0,.25);white-space:pre-wrap">${escapeHtml((payload.guidance || {}).curl || "")}</pre>
+          <div class="text-muted small">${escapeHtml((payload.guidance || {}).lifecycle || "")}</div>
+        </div>
+      </div>
+    `;
+  } catch (err) {
+    showToast(`Failed to load API status: ${escapeHtml(err.message || "unknown error")}`, "danger");
   } finally {
     setLoading(false);
   }
@@ -3799,6 +3866,12 @@ async function router() {
         return;
       }
       await renderOvermindIntegrationPage();
+    } else if (hash === "#admin/api") {
+      if (!adminEnabled) {
+        setHash("");
+        return;
+      }
+      await renderApiAdminPage();
     } else if (parseSystemRomHash(hash)) {
       const parsed = parseSystemRomHash(hash);
       await renderRomMediaPage(parsed.system, parsed.uniqueId);

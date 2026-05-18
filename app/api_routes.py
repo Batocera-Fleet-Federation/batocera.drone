@@ -169,6 +169,14 @@ class ApiRoutesMixin:
                 self._handle_admin_system_info()
                 return
 
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "api" and parts[2] == "status":
+                self._handle_admin_api_status()
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "api" and parts[2] == "certificate":
+                self._handle_admin_api_certificate()
+                return
+
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "artwork" and parts[2] == "missing":
                 include_filesystem = str(query_params.get("include_filesystem", ["0"])[0]).strip().lower() in ("1", "true", "yes", "on")
                 refresh = str(query_params.get("refresh", ["0"])[0]).strip().lower() in ("1", "true", "yes", "on")
