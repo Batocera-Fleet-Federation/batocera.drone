@@ -3223,9 +3223,9 @@ async function renderOvermindIntegrationPage() {
           <input id="overmindEmailInput" class="form-control" type="email" placeholder="you@example.com">
         </div>
         <div class="mb-3">
-          <label class="form-label">Integration Password</label>
-          <input id="overmindPasswordInput" class="form-control" type="password" placeholder="Password from overmind app">
-          <div class="text-muted small mt-1">Leave blank to keep the currently saved password.</div>
+          <label class="form-label">Authorization Token</label>
+          <input id="overmindAuthTokenInput" class="form-control" type="password" placeholder="Token generated in Overmind">
+          <div class="text-muted small mt-1">Generate this token in Overmind, paste it here, then start integration.</div>
         </div>
         <div class="d-flex gap-2">
           <button id="overmindSaveBtn" class="btn btn-primary" type="button">Save Configuration</button>
@@ -3249,7 +3249,7 @@ async function renderOvermindIntegrationPage() {
   const statusEl = document.getElementById("overmindStatus");
   const urlInput = document.getElementById("overmindUrlInput");
   const emailInput = document.getElementById("overmindEmailInput");
-  const passwordInput = document.getElementById("overmindPasswordInput");
+  const authTokenInput = document.getElementById("overmindAuthTokenInput");
   const saveBtn = document.getElementById("overmindSaveBtn");
   const startBtn = document.getElementById("overmindStartBtn");
   const refreshBtn = document.getElementById("overmindRefreshBtn");
@@ -3264,7 +3264,7 @@ async function renderOvermindIntegrationPage() {
     const requestedAt = status.requested_at || "n/a";
     const startedAt = status.last_started_at || "n/a";
     const errorMsg = status.last_error || "none";
-    const passwordMask = payload.password_masked || "(not set)";
+    const authTokenMask = payload.auth_token_masked || "(not set)";
     const emailValue = payload.overmind_email || "(not set)";
     const machineId = payload.machine_id || "n/a";
     const cert = payload.certificate || {};
@@ -3277,7 +3277,7 @@ async function renderOvermindIntegrationPage() {
       <div><strong>Action Polling:</strong> Drone sends an alive request and receives one pending action per poll.</div>
       <div><strong>State:</strong> ${escapeHtml(state)}</div>
       <div><strong>Email:</strong> ${escapeHtml(emailValue)}</div>
-      <div><strong>Saved Password:</strong> ${escapeHtml(passwordMask)}</div>
+      <div><strong>Authorization Token:</strong> ${escapeHtml(authTokenMask)}</div>
       <div><strong>Requested At:</strong> ${escapeHtml(requestedAt)}</div>
       <div><strong>Last Started At:</strong> ${escapeHtml(startedAt)}</div>
       <div><strong>Last Error:</strong> ${escapeHtml(errorMsg)}</div>
@@ -3345,25 +3345,25 @@ async function renderOvermindIntegrationPage() {
   async function saveConfig() {
     const overmindUrl = (urlInput.value || "").trim();
     const overmindEmail = (emailInput.value || "").trim();
-    const overmindPassword = passwordInput.value || "";
+    const overmindAuthToken = authTokenInput.value || "";
     const body = { overmind_url: overmindUrl, overmind_email: overmindEmail };
-    if (overmindPassword) {
-      body.overmind_password = overmindPassword;
+    if (overmindAuthToken) {
+      body.overmind_auth_token = overmindAuthToken;
     }
     const payload = await apiPost("/admin/integrations/overmind/config", body);
-    passwordInput.value = "";
+    authTokenInput.value = "";
     showToast("Overmind configuration saved.", "success");
     renderStatus(payload);
   }
 
   async function startIntegration() {
-    const overmindPassword = passwordInput.value || "";
+    const overmindAuthToken = authTokenInput.value || "";
     const body = {};
-    if (overmindPassword) {
-      body.overmind_password = overmindPassword;
+    if (overmindAuthToken) {
+      body.overmind_auth_token = overmindAuthToken;
     }
     const payload = await apiPost("/admin/integrations/overmind/start", body);
-    passwordInput.value = "";
+    authTokenInput.value = "";
     showToast("Overmind polling started.", "success");
     renderStatus(payload);
   }

@@ -92,6 +92,10 @@ export DRONE_APP_PASSWORD="${DRONE_APP_PASSWORD:-${ROM_API_PASSWORD:-changeme}}"
 export BATOCERA_CONF_FILE="${BATOCERA_CONF_FILE:-$USERDATA_ROOT/system/batocera.conf}"
 export ES_SETTINGS_FILE="${ES_SETTINGS_FILE:-$USERDATA_ROOT/system/configs/emulationstation/es_settings.cfg}"
 export OVERMIND_DEVICE_ID="${OVERMIND_DEVICE_ID:-$DRONE_DEVICE_ID}"
+export DRONE_CERT_FILE="${DRONE_CERT_FILE:-$USERDATA_ROOT/system/drone-app/certs/drone.crt}"
+export DRONE_KEY_FILE="${DRONE_KEY_FILE:-$USERDATA_ROOT/system/drone-app/certs/drone.key}"
+export TLS_CERT_FILE="${TLS_CERT_FILE:-$DRONE_CERT_FILE}"
+export TLS_KEY_FILE="${TLS_KEY_FILE:-$DRONE_KEY_FILE}"
 export RUNNING_IN_DOCKER=1
 
 exec "$@"

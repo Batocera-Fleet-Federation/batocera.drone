@@ -100,6 +100,11 @@ class MockServerIntegrationTests(unittest.TestCase):
         spec = self._get_json("/v1/api/openapi.json")
         self.assertIn("mtls", json.dumps(spec).lower())
 
+    def test_overmind_integration_uses_authorization_token_label(self) -> None:
+        html = self._get_bytes("/")
+        self.assertIn(b"Authorization Token", html)
+        self.assertNotIn(b"Integration Password", html)
+
     def test_admin_logs_endpoint(self) -> None:
         payload = self._get_json("/v1/api/admin/logs/es_launch_stdout?lines=20")
         self.assertEqual(payload["source"], "es_launch_stdout")

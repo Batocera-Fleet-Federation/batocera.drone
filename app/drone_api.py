@@ -935,6 +935,7 @@ class Settings:
     overmind_url: Optional[str]
     overmind_email: Optional[str]
     overmind_password: Optional[str]
+    overmind_auth_token: Optional[str]
     overmind_token: Optional[str]
     overmind_device_id: str
     overmind_poll_seconds: int
@@ -995,6 +996,7 @@ class Settings:
             overmind_url=os.environ.get("OVERMIND_URL"),
             overmind_email=os.environ.get("OVERMIND_EMAIL"),
             overmind_password=os.environ.get("OVERMIND_PASSWORD"),
+            overmind_auth_token=os.environ.get("OVERMIND_AUTH_TOKEN") or os.environ.get("OVERMIND_AUTHORIZATION_TOKEN"),
             overmind_token=os.environ.get("OVERMIND_DRONE_TOKEN"),
             overmind_device_id=os.environ.get("OVERMIND_DEVICE_ID") or os.environ.get("DRONE_DEVICE_ID") or (_fake_machine_id() if use_fake_data else _machine_id()),
             overmind_poll_seconds=OVERMIND_HEARTBEAT_SECONDS,
@@ -2928,6 +2930,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         fake_email = FAKE_OVERMIND_EMAIL if self.settings.use_fake_data else ""
         fake_password = FAKE_OVERMIND_PASSWORD if self.settings.use_fake_data else ""
         fake_token = FAKE_OVERMIND_TOKEN if self.settings.use_fake_data else ""
+        auth_token = self.settings.overmind_auth_token or ""
         default = {
             "overmind_url": (self.settings.overmind_url or "").strip(),
             "overmind_email": (fake_email if self.settings.use_fake_data else self.settings.overmind_email or "").strip(),
@@ -2943,6 +2946,8 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             default["overmind_password"] = fake_password if self.settings.use_fake_data else self.settings.overmind_password
         if self.settings.overmind_token or fake_token:
             default["overmind_token"] = fake_token if self.settings.use_fake_data else self.settings.overmind_token
+        if auth_token:
+            default["overmind_auth_token"] = auth_token
 
         path = self._overmind_config_path()
         if not path.exists() or not path.is_file():
@@ -2978,10 +2983,11 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
 
     def _overmind_public_payload(self, config: dict) -> dict:
         password = str(config.get("overmind_password") or "")
+        auth_token = str(config.get("overmind_auth_token") or "")
         token = str(config.get("overmind_token") or "")
         email = str(config.get("overmind_email") or "")
         status = {
-            "configured": bool(config.get("overmind_url")) and bool(token),
+            "configured": bool(config.get("overmind_url")) and bool(token or auth_token),
             "integration_enabled": bool(config.get("integration_enabled")),
             "integration_state": str(config.get("integration_state") or "not_started"),
             "requested_at": config.get("requested_at"),
@@ -2995,6 +3001,8 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             "machine_id": self.settings.overmind_device_id,
             "password_configured": bool(password),
             "password_masked": self._mask_secret(password) if password else "",
+            "auth_token_configured": bool(auth_token),
+            "auth_token_masked": self._mask_secret(auth_token) if auth_token else "",
             "token_configured": bool(token),
             "token_masked": self._mask_secret(token) if token else "",
             "status": status,
@@ -3074,6 +3082,25 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 "mtls": bool(self.settings.drone_mtls_enabled),
             },
         )
+
+    def _handle_peer_rom_download(self, system: str, relative_path: str) -> None:
+        if self.settings.drone_mtls_enabled:
+            cert = self.connection.getpeercert() if hasattr(self.connection, "getpeercert") else None
+            if not cert:
+                self._send_json(403, {"error": "client certificate required"})
+                return
+        system_dir = self.repository.get_system_dir(system).resolve()
+        rel = unquote(relative_path or "").replace("\\", "/").lstrip("/")
+        if not rel or ".." in Path(rel).parts:
+            self._send_json(400, {"error": "invalid rom path"})
+            return
+        target = (system_dir / rel).resolve()
+        if not target.exists() or not target.is_file() or (target != system_dir and system_dir not in target.parents):
+            self.log_error("peer rom download failed system=%s rom=%s resolved=%s reason=not_found", system, rel, str(target))
+            self._send_json(404, {"error": "not found"})
+            return
+        self.log_message("peer rom download system=%s rom=%s bytes=%s", system, rel, target.stat().st_size)
+        self._stream_file(target, "application/octet-stream", as_attachment=True)
 
     def _stream_file(self, path: Path, content_type: str, as_attachment: bool = False) -> None:
         file_size = path.stat().st_size
@@ -4541,6 +4568,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         raw_url = str(payload.get("overmind_url") or "").strip()
         raw_email = str(payload.get("overmind_email") or "").strip()
         raw_password = payload.get("overmind_password")
+        raw_auth_token = payload.get("overmind_auth_token")
         raw_token = payload.get("overmind_token")
 
         if not raw_url:
@@ -4562,6 +4590,11 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             if not password_value:
                 raise ValueError("overmind_password cannot be empty when provided")
             new_config["overmind_password"] = password_value
+        if raw_auth_token is not None:
+            auth_token_value = str(raw_auth_token)
+            if not auth_token_value:
+                raise ValueError("overmind_auth_token cannot be empty when provided")
+            new_config["overmind_auth_token"] = auth_token_value
         if raw_token is not None:
             token_value = str(raw_token)
             if not token_value:
@@ -4578,13 +4611,14 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         config = self._load_overmind_config()
         email = str(config.get("overmind_email") or "").strip()
         password = str(config.get("overmind_password") or "")
+        auth_token = str(config.get("overmind_auth_token") or "")
         token = str(config.get("overmind_token") or "")
         if not str(config.get("overmind_url") or "").strip():
             raise ValueError("overmind_url is not configured")
         if not email:
             raise ValueError("overmind_email is not configured")
-        if not token:
-            raise ValueError("overmind_token is not configured")
+        if not token and not auth_token:
+            raise ValueError("overmind authorization token is not configured")
 
         if "overmind_password" in payload:
             supplied = str(payload.get("overmind_password") or "")
@@ -4597,6 +4631,11 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             if not supplied_token:
                 raise ValueError("overmind_token cannot be empty")
             config["overmind_token"] = supplied_token
+        if "overmind_auth_token" in payload:
+            supplied_auth = str(payload.get("overmind_auth_token") or "")
+            if not supplied_auth:
+                raise ValueError("overmind_auth_token cannot be empty")
+            config["overmind_auth_token"] = supplied_auth
 
         config["integration_enabled"] = True
         config["integration_state"] = "polling"
@@ -5334,6 +5373,7 @@ class DroneCertificateManager:
             "status": "loaded",
             "source": "local_self_signed",
             "fingerprint": hashlib.sha256(der).hexdigest(),
+            "public_certificate": pem,
             "subject": _name(decoded.get("subject")),
             "issuer": _name(decoded.get("issuer")),
             "serial_number": decoded.get("serialNumber"),
@@ -5373,6 +5413,15 @@ def _write_json_file(path: Path, payload) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
+def _read_json_file(path: Path, fallback):
+    try:
+        if path.exists() and path.is_file():
+            return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return fallback
+
+
 def _load_overmind_config_for_settings(settings: Settings) -> dict:
     fake_email = FAKE_OVERMIND_EMAIL if settings.use_fake_data else ""
     fake_password = FAKE_OVERMIND_PASSWORD if settings.use_fake_data else ""
@@ -5381,8 +5430,9 @@ def _load_overmind_config_for_settings(settings: Settings) -> dict:
         "overmind_url": (settings.overmind_url or "").strip(),
         "overmind_email": (fake_email if settings.use_fake_data else settings.overmind_email or "").strip(),
         "overmind_password": fake_password if settings.use_fake_data else settings.overmind_password or "",
+        "overmind_auth_token": "" if settings.use_fake_data else settings.overmind_auth_token or "",
         "overmind_token": fake_token if settings.use_fake_data else settings.overmind_token or "",
-        "integration_enabled": bool(settings.overmind_url and (settings.overmind_token or fake_token)),
+        "integration_enabled": bool(settings.overmind_url and (settings.overmind_token or settings.overmind_auth_token or fake_token)),
     }
     path = _overmind_config_path_for_settings(settings)
     if not path.exists() or not path.is_file():
@@ -5434,10 +5484,26 @@ def _record_processed_overmind_action(
         handle.write(json.dumps(entry, sort_keys=True) + "\n")
 
 
-def _drone_client_ssl_context(settings: Settings, url: str, verify: bool = False) -> Optional[ssl.SSLContext]:
+def _peer_cert_cache_dir(settings: Settings) -> Path:
+    return (settings.userdata_root / "system" / "drone-app" / "peer-certs").resolve()
+
+
+def _peer_cert_cache_path(settings: Settings, peer_id: str) -> Path:
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", peer_id)
+    return _peer_cert_cache_dir(settings) / f"{safe}.crt"
+
+
+def _peer_cert_meta_path(settings: Settings, peer_id: str) -> Path:
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", peer_id)
+    return _peer_cert_cache_dir(settings) / f"{safe}.json"
+
+
+def _drone_client_ssl_context(settings: Settings, url: str, verify: bool = False, cafile: Optional[Path] = None) -> Optional[ssl.SSLContext]:
     if not url.startswith("https://"):
         return None
-    context = ssl.create_default_context() if verify else ssl._create_unverified_context()
+    context = ssl.create_default_context(cafile=str(cafile) if cafile else None) if verify else ssl._create_unverified_context()
+    if verify and cafile:
+        context.check_hostname = False
     if settings.drone_mtls_enabled and settings.drone_cert_file.exists() and settings.drone_key_file.exists():
         context.load_cert_chain(certfile=str(settings.drone_cert_file), keyfile=str(settings.drone_key_file))
     return context
@@ -5463,9 +5529,113 @@ def _overmind_post_json(url: str, payload: dict, token: Optional[str] = None, se
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _peer_get_json(url: str, settings: Settings) -> dict:
+def _overmind_get_json(url: str, token: Optional[str] = None, settings: Optional[Settings] = None) -> dict:
+    headers = {"Accept": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = Request(url, headers=headers, method="GET")
+    context = _drone_client_ssl_context(settings, url) if settings else (ssl._create_unverified_context() if url.startswith("https://") else None)
+    with urlopen(request, timeout=10, context=context) as response:
+        raw = response.read()
+    parsed = json.loads(raw.decode("utf-8")) if raw else {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _save_overmind_runtime_config(settings: Settings, config: dict) -> None:
+    _write_json_file(_overmind_config_path_for_settings(settings), config)
+
+
+def _register_or_claim_overmind_token(settings: Settings, repository: "RomRepository", config: dict, base_url: str) -> Optional[str]:
+    auth_token = str(config.get("overmind_auth_token") or "").strip()
+    email = str(config.get("overmind_email") or "").strip()
+    payload = {
+        "device_id": settings.overmind_device_id,
+        "device_name": socket.gethostname(),
+        "batocera_info": {
+            "model": "Batocera Drone",
+            "system": sys.platform,
+            "architecture": os.uname().machine if hasattr(os, "uname") else "",
+            "cpu_model": os.environ.get("DRONE_CPU_MODEL", "unknown"),
+            "cpu_cores": os.cpu_count() or 1,
+            "cpu_threads": os.cpu_count() or 1,
+            "cpu_max_frequency": "unknown",
+            "memory_available": "unknown",
+            "memory_total": "unknown",
+            "ip_address": (_get_local_ip_addresses().get("ipv4") or ["127.0.0.1"])[0],
+            "network": _get_local_ip_addresses(),
+            "system_info": _collect_system_info_payload(settings),
+            "certificate": DroneCertificateManager(settings).metadata(),
+        },
+    }
+    if email:
+        payload["email"] = email
+    if auth_token:
+        payload["authorization_token"] = auth_token
+    try:
+        response = _overmind_post_json(f"{base_url}/api/devices/register", payload, settings=settings)
+    except Exception as error:
+        config["integration_state"] = "pending_failed"
+        config["last_error"] = str(error)
+        _save_overmind_runtime_config(settings, config)
+        print(f"Overmind onboarding request failed for {settings.overmind_device_id}: {error}", file=sys.stderr, flush=True)
+        return None
+    if response.get("drone_token"):
+        config["overmind_token"] = str(response["drone_token"])
+        config["integration_enabled"] = True
+        config["integration_state"] = "polling"
+        config["last_error"] = None
+        config["notes"] = "Drone approved by Overmind and polling is active."
+        _save_overmind_runtime_config(settings, config)
+        print(f"Overmind onboarding approved for {settings.overmind_device_id}", file=sys.stdout, flush=True)
+        return config["overmind_token"]
+    config["integration_state"] = "pending_approval"
+    config["notes"] = response.get("message") or "Psionic connection detected. Awaiting Overlord approval."
+    config["last_error"] = None
+    _save_overmind_runtime_config(settings, config)
+    return None
+
+
+def _fetch_peer_certificate(settings: Settings, config: dict, peer_id: str) -> Optional[Path]:
+    base_url = str(config.get("overmind_url") or "").strip().rstrip("/")
+    token = str(config.get("overmind_token") or "").strip()
+    if not base_url or not token or not peer_id:
+        return None
+    try:
+        payload = _overmind_get_json(
+            f"{base_url}/api/devices/{quote(settings.overmind_device_id, safe='')}/peer-certificate/{quote(peer_id, safe='')}",
+            token=token,
+            settings=settings,
+        )
+        pem = str(payload.get("certificate_pem") or "")
+        if "BEGIN CERTIFICATE" not in pem:
+            return None
+        cert_path = _peer_cert_cache_path(settings, peer_id)
+        cert_path.parent.mkdir(parents=True, exist_ok=True)
+        cert_path.write_text(pem, encoding="utf-8")
+        meta = dict(payload.get("metadata") or {})
+        meta["peer_drone_id"] = peer_id
+        meta["fetched_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        meta["source_overmind_url"] = base_url
+        _peer_cert_meta_path(settings, peer_id).write_text(json.dumps(meta, indent=2, sort_keys=True), encoding="utf-8")
+        print(f"Fetched peer certificate for {peer_id}", file=sys.stdout, flush=True)
+        return cert_path
+    except Exception as error:
+        print(f"Failed to fetch peer certificate for {peer_id}: {error}", file=sys.stderr, flush=True)
+        return None
+
+
+def _peer_get_json(url: str, settings: Settings, peer_id: Optional[str] = None, config: Optional[dict] = None, refresh_cert: bool = False) -> dict:
+    cafile = None
+    if peer_id:
+        if refresh_cert and config:
+            cafile = _fetch_peer_certificate(settings, config, peer_id)
+        else:
+            cached = _peer_cert_cache_path(settings, peer_id)
+            cafile = cached if cached.exists() else (_fetch_peer_certificate(settings, config or {}, peer_id) if config else None)
+    if url.startswith("https://") and peer_id and not cafile:
+        raise ssl.SSLError(f"no trusted certificate cached for peer {peer_id}")
     request = Request(url, headers={"Accept": "application/json", "User-Agent": "batocera-drone-peer/1.0"})
-    with urlopen(request, timeout=PEER_CHECK_TIMEOUT_SECONDS, context=_drone_client_ssl_context(settings, url)) as response:
+    with urlopen(request, timeout=PEER_CHECK_TIMEOUT_SECONDS, context=_drone_client_ssl_context(settings, url, verify=bool(cafile), cafile=cafile)) as response:
         raw = response.read()
     parsed = json.loads(raw.decode("utf-8")) if raw else {}
     return parsed if isinstance(parsed, dict) else {}
@@ -5486,7 +5656,7 @@ def _peer_address(peer: dict) -> Optional[str]:
     return None
 
 
-def _check_peer(settings: Settings, peer: dict) -> dict:
+def _check_peer(settings: Settings, peer: dict, config: Optional[dict] = None) -> dict:
     target_id = str(peer.get("drone_id") or peer.get("device_id") or peer.get("id") or "")
     address = _peer_address(peer)
     checked_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -5504,9 +5674,21 @@ def _check_peer(settings: Settings, peer: dict) -> dict:
         return result
     started = time.monotonic()
     try:
-        _peer_get_json(f"{address}/v1/api/peer/health", settings)
+        _peer_get_json(f"{address}/v1/api/peer/health", settings, peer_id=peer_id, config=config)
         result["status"] = "pass"
         result["latency_ms"] = int((time.monotonic() - started) * 1000)
+    except ssl.SSLError as error:
+        message = str(error)
+        if config and any(term in message.lower() for term in ("unknown ca", "certificate", "cert")):
+            try:
+                _peer_get_json(f"{address}/v1/api/peer/health", settings, peer_id=peer_id, config=config, refresh_cert=True)
+                result["status"] = "pass"
+                result["latency_ms"] = int((time.monotonic() - started) * 1000)
+                return result
+            except Exception as retry_error:
+                result["failure_reason"] = f"{message}; retry after cert refresh failed: {retry_error}"
+                return result
+        result["failure_reason"] = message
     except Exception as error:
         result["failure_reason"] = str(error)
     return result
@@ -5846,6 +6028,117 @@ def _collect_emulator_configs(settings: Settings) -> dict:
     }
 
 
+def _safe_rom_relative_path(value: str) -> str:
+    rel = str(value or "").replace("\\", "/").lstrip("/")
+    if not rel or ".." in Path(rel).parts:
+        raise ValueError("invalid rom path")
+    return rel
+
+
+def _rom_exists(repository: "RomRepository", system: str, relative_path: str) -> bool:
+    try:
+        system_dir = repository.get_system_dir(system).resolve()
+        target = (system_dir / _safe_rom_relative_path(relative_path)).resolve()
+        return target.exists() and target.is_file() and (target == system_dir or system_dir in target.parents)
+    except Exception:
+        return False
+
+
+def _best_peer_for_rom(settings: Settings, repository: "RomRepository", config: dict, system: str, relative_path: str) -> Optional[dict]:
+    swarm = _read_json_file(_overmind_swarm_path_for_settings(settings), [])
+    peer_checks = _read_json_file(_overmind_peer_results_path_for_settings(settings), [])
+    checks = {str(row.get("target_drone_id") or ""): row for row in peer_checks if isinstance(row, dict)}
+    candidates = []
+    for peer in swarm if isinstance(swarm, list) else []:
+        peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
+        if not peer_id or peer_id == settings.overmind_device_id or not peer.get("online", True):
+            continue
+        systems = peer.get("rom_systems") or peer.get("systems") or []
+        system_names = {str(item.get("name") if isinstance(item, dict) else item).lower() for item in systems}
+        if system_names and system.lower() not in system_names:
+            continue
+        check = checks.get(peer_id) or {}
+        if check.get("status") == "fail":
+            continue
+        score = 0
+        sample = peer.get("last_speed_sample") or {}
+        try:
+            score += float(sample.get("upload_mbps") or 0)
+        except Exception:
+            pass
+        if check.get("status") == "pass":
+            score += 1000
+        candidates.append((score, peer_id, peer))
+    candidates.sort(key=lambda item: (-item[0], item[1]))
+    return candidates[0][2] if candidates else None
+
+
+def _download_rom_from_peer(settings: Settings, config: dict, peer: dict, system: str, relative_path: str, expected_size=None) -> dict:
+    peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
+    address = _peer_address(peer)
+    if not address:
+        raise RuntimeError("selected peer has no address")
+    rel = _safe_rom_relative_path(relative_path)
+    url = f"{address}/v1/api/peer/roms/{quote(system, safe='')}/{quote(rel, safe='/')}"
+    target = (settings.roms_root / system / rel).resolve()
+    system_dir = (settings.roms_root / system).resolve()
+    if target.exists():
+        raise FileExistsError("ROM already exists locally")
+    if system_dir not in target.parents:
+        raise ValueError("invalid target path")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    cafile = _peer_cert_cache_path(settings, peer_id)
+    if not cafile.exists():
+        _fetch_peer_certificate(settings, config, peer_id)
+    if address.startswith("https://") and not cafile.exists():
+        raise ssl.SSLError(f"no trusted certificate cached for peer {peer_id}")
+    context = _drone_client_ssl_context(settings, url, verify=cafile.exists(), cafile=cafile if cafile.exists() else None)
+    started = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    bytes_written = 0
+    request = Request(url, headers={"User-Agent": "batocera-drone-rom-sync/1.0"})
+    try:
+        with urlopen(request, timeout=max(10, PEER_CHECK_TIMEOUT_SECONDS * 4), context=context) as response, target.open("wb") as handle:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                handle.write(chunk)
+                bytes_written += len(chunk)
+    except ssl.SSLError:
+        _fetch_peer_certificate(settings, config, peer_id)
+        if target.exists():
+            target.unlink()
+        cafile = _peer_cert_cache_path(settings, peer_id)
+        context = _drone_client_ssl_context(settings, url, verify=cafile.exists(), cafile=cafile if cafile.exists() else None)
+        bytes_written = 0
+        with urlopen(request, timeout=max(10, PEER_CHECK_TIMEOUT_SECONDS * 4), context=context) as response, target.open("wb") as handle:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                handle.write(chunk)
+                bytes_written += len(chunk)
+    if expected_size not in (None, ""):
+        try:
+            if int(expected_size) != bytes_written:
+                raise RuntimeError(f"size mismatch expected={expected_size} actual={bytes_written}")
+        except ValueError:
+            pass
+    return {
+        "source_drone_id": peer_id,
+        "target_drone_id": settings.overmind_device_id,
+        "system": system,
+        "rom_name": rel,
+        "action": "download",
+        "status": "completed",
+        "bytes_transferred": bytes_written,
+        "file_size": expected_size or bytes_written,
+        "started_at": started,
+        "completed_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "selected_peer_reason": "healthy peer with requested system and best sampled score",
+    }
+
+
 def _summarize_overmind_result(result: Optional[dict]) -> str:
     if not isinstance(result, dict):
         return ""
@@ -5878,6 +6171,52 @@ def _execute_overmind_action(settings: Settings, repository: "RomRepository", ac
     if action_name == "collect_log_sources":
         result = _collect_log_sources(settings)
         return "completed", f"Collected {_summarize_overmind_result(result)}.", result
+
+    if action_name in {"sync_rom", "sync_system"}:
+        config = _load_overmind_config_for_settings(settings)
+        payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
+        requested = []
+        if action_name == "sync_rom":
+            requested = [payload]
+        else:
+            requested = payload.get("roms") if isinstance(payload.get("roms"), list) else []
+        activities = []
+        failures = 0
+        for item in requested:
+            system = str(item.get("system_name") or item.get("system") or payload.get("system_name") or "").strip()
+            rel = str(item.get("file_path") or item.get("rom_name") or "").strip()
+            if not system or not rel:
+                continue
+            sync_id = str(uuid.uuid4())
+            if _rom_exists(repository, system, rel):
+                activities.append({"sync_id": sync_id, "target_drone_id": settings.overmind_device_id, "system": system, "rom_name": rel, "action": "download", "status": "skipped", "failure_reason": "ROM already exists locally"})
+                continue
+            peer = _best_peer_for_rom(settings, repository, config, system, rel)
+            if not peer:
+                failures += 1
+                activities.append({"sync_id": sync_id, "target_drone_id": settings.overmind_device_id, "system": system, "rom_name": rel, "action": "download", "status": "failed", "failure_reason": "No healthy source peer found"})
+                continue
+            try:
+                activity = _download_rom_from_peer(settings, config, peer, system, rel, expected_size=item.get("file_size"))
+                activity["sync_id"] = sync_id
+                activity["rom_md5"] = item.get("rom_md5")
+                activities.append(activity)
+            except Exception as error:
+                failures += 1
+                activities.append({
+                    "sync_id": sync_id,
+                    "source_drone_id": str(peer.get("drone_id") or peer.get("device_id") or ""),
+                    "target_drone_id": settings.overmind_device_id,
+                    "system": system,
+                    "rom_name": rel,
+                    "action": "download",
+                    "status": "failed",
+                    "failure_reason": str(error),
+                })
+        result = {"type": "rom_sync", "activity": activities}
+        if failures and failures == len(activities):
+            return "failed", f"ROM sync failed for {failures} item(s).", result
+        return "completed", f"ROM sync processed {len(activities)} item(s) with {failures} failure(s).", result
 
     if action_name == "shutdown":
         if settings.use_fake_data:
@@ -5927,9 +6266,14 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                 config = _load_overmind_config_for_settings(settings)
                 base_url = str(config.get("overmind_url") or "").strip().rstrip("/")
                 token = str(config.get("overmind_token") or "").strip()
-                if not base_url or not token:
+                if not base_url:
                     time.sleep(poll_seconds)
                     continue
+                if not token:
+                    token = _register_or_claim_overmind_token(settings, repository, config, base_url) or ""
+                    if not token:
+                        time.sleep(poll_seconds)
+                        continue
 
                 device_id = quote(settings.overmind_device_id, safe="")
                 rom_systems = repository.list_systems()
@@ -5979,7 +6323,7 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                         peer_id = str(peer.get("drone_id") or peer.get("device_id") or peer.get("id") or "")
                         if not peer_id or peer_id == settings.overmind_device_id:
                             continue
-                        peer_results.append(_check_peer(settings, peer))
+                        peer_results.append(_check_peer(settings, peer, config=config))
                     if peer_results:
                         _write_json_file(_overmind_peer_results_path_for_settings(settings), peer_results)
                         _overmind_post_json(

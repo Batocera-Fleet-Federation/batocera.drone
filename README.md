@@ -13,6 +13,8 @@ After it is installed, you open Drone from a browser on your computer, phone, or
 - Drone reports live telemetry back to Overmind, including speed samples, filesystem changes, peer checks, gameplay, and ROM/library changes.
 - Containers are supported for local swarm testing. The Drone container creates a Batocera-like `/userdata` tree and copies a varied set of ROMs from `.github/data/roms/<system>/<files>`.
 - Drone checks in with Overmind every 60 seconds by default.
+- Overmind integration now uses an Overmind-generated authorization token instead of an integration password.
+- Drone caches approved peer certificates from Overmind before Drone-to-Drone mTLS calls.
 
 ## What You Can Do With It
 
@@ -117,7 +119,7 @@ System information is collected at startup and refreshed occasionally. It can in
 
 Drone action processing state is not stored in a persistent database. Processed action history is written to a separate rotating log file, configurable with `OVERMIND_ACTION_LOG_FILE` and `OVERMIND_ACTION_LOG_MAX_BYTES`. Normal Drone logs also rotate with `LOG_MAX_BYTES` and `LOG_BACKUP_COUNT`, and log APIs default to a reasonable recent tail.
 
-Local fake mode is configured for `demo@example.com` with `OVERMIND_DRONE_TOKEN=demo-local-drone-token`, matching the local MAC-address Drone registered in Overmind fake data.
+Local fake mode is opt-in with `USE_FAKE_DATA=true`. Normal local Compose starts Drones unapproved so Overmind can show the pending Psionic connection.
 
 ## Drone-to-Drone Security
 
@@ -136,6 +138,8 @@ DRONE_CERT_DAYS=825
 
 If you use your own certificate authority, set `DRONE_MTLS_CA_FILE` so Drone can ask the TLS layer to verify peer certificates.
 
+For local peer trust, Drone fetches approved peer public certificates from Overmind and caches them in `/userdata/system/drone-app/peer-certs/`. If a peer call fails with an unknown CA or certificate mismatch, Drone refreshes that peer certificate and retries once.
+
 For API clients that need mTLS, use your client certificate and key from a trusted system:
 
 ```bash
@@ -153,6 +157,12 @@ docker build -t ghcr.io/batocera-fleet-federation/batocera-drone:local .
 ```
 
 The container entrypoint creates the folders, configs, logs, and ROM mount points Drone expects on Batocera. For swarm testing, run it through the shared Compose setup in the `.github` repo so each Drone gets a different identity and a copied subset of ROM files.
+
+The shared Compose swarm runs four lightweight Drones with unique hostnames, device ids, MAC addresses, ports, and volumes. Fake data is disabled unless `USE_FAKE_DATA=true` is set.
+
+## ROM Sync
+
+ROM sync is requested from Overmind, not by choosing a source Drone manually. The target Drone receives a `sync_rom` or `sync_system` action, checks its stored swarm list, picks a healthy peer with the requested ROM, downloads one file at a time through the peer API, and reports sync activity back to Overmind.
 
 Publish a multi-arch GHCR image:
 
