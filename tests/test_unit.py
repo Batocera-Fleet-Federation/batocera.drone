@@ -1,4 +1,5 @@
 import base64
+import socket
 import tempfile
 import unittest
 from unittest import mock
@@ -14,6 +15,10 @@ from app.drone_api import (
     Settings,
     _clean_rom_title,
     _drone_reachable_url,
+    _drone_report_host,
+    _peer_address,
+    _get_local_ip_addresses,
+    _collect_gpu_info,
     _format_overmind_error,
     _launchbox_platform_for_system,
     _load_overmind_config_for_settings,
@@ -52,6 +57,46 @@ class SettingsTests(unittest.TestCase):
 
         self.assertEqual(settings.hostname_override, "bff-drone-a")
         self.assertEqual(_drone_reachable_url(settings, {"ipv4": ["192.168.1.50"]}), "https://bff-drone-a:8443")
+
+    def test_host_preference_order_is_override_ipv4_ipv6(self) -> None:
+        with mock.patch.dict("os.environ", {"HOSTNAME_OVERRIDE": "bff-drone-a", "HTTPS_PORT": "8443"}, clear=True):
+            settings = Settings.from_env()
+        network = {"ipv4": ["192.168.1.50"], "ipv6": ["fd00::50"]}
+        self.assertEqual(_drone_report_host(settings, network), "bff-drone-a")
+
+        with mock.patch.dict("os.environ", {"HTTPS_PORT": "8443"}, clear=True):
+            settings = Settings.from_env()
+        self.assertEqual(_drone_report_host(settings, network), "192.168.1.50")
+        self.assertEqual(_drone_report_host(settings, {"ipv6": ["fd00::50"]}), "fd00::50")
+        self.assertEqual(_drone_reachable_url(settings, {"ipv6": ["fd00::50"]}), "https://[fd00::50]:8443")
+
+    def test_ipv6_route_failure_is_quiet_without_debug(self) -> None:
+        real_socket = socket.socket
+
+        def fake_socket(family, *args, **kwargs):
+            if family == socket.AF_INET6:
+                raise OSError("No route to host")
+            return real_socket(family, *args, **kwargs)
+
+        with mock.patch("app.drone_api.socket.socket", side_effect=fake_socket), mock.patch("builtins.print") as printed:
+            network = _get_local_ip_addresses()
+
+        self.assertIn("127.0.0.1", network["ipv4"])
+        self.assertFalse(any("IPv6 route resolution failed" in str(call) for call in printed.mock_calls))
+
+    def test_peer_address_uses_reachable_url_before_ips(self) -> None:
+        peer = {
+            "reachable_url": "https://bff-drone-b:8443",
+            "resolved_network": {"ipv4": ["172.20.0.4"], "ipv6": ["fd00::4"]},
+            "api_port": 8443,
+        }
+        self.assertEqual(_peer_address(peer), "https://bff-drone-b:8443")
+
+    def test_gpu_info_tolerates_unavailable_detection(self) -> None:
+        with mock.patch("app.drone_api.subprocess.run", side_effect=FileNotFoundError()):
+            info = _collect_gpu_info()
+        self.assertIn("vendor", info)
+        self.assertIn("pci_devices", info)
 
     def test_fake_overmind_config_is_ignored_when_fake_data_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

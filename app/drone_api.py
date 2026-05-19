@@ -5323,6 +5323,8 @@ class DroneCertificateManager:
             "DNS:localhost",
             "IP:127.0.0.1",
         ]
+        if self.settings.hostname_override:
+            alt_names.append(f"DNS:{self.settings.hostname_override}")
         for ip in _get_local_certificate_ips():
             alt_names.append(f"IP:{ip}")
         san = ",".join(dict.fromkeys(alt_names))
@@ -5488,11 +5490,19 @@ def _drone_report_host(settings: Settings, network: Optional[dict] = None) -> st
         return settings.hostname_override
     network = network if isinstance(network, dict) else _get_local_ip_addresses()
     ipv4 = network.get("ipv4") if isinstance(network.get("ipv4"), list) else []
-    return str((ipv4 or ["127.0.0.1"])[0])
+    ipv6 = network.get("ipv6") if isinstance(network.get("ipv6"), list) else []
+    if ipv4:
+        return str(ipv4[0])
+    if ipv6:
+        return str(ipv6[0])
+    return "127.0.0.1"
 
 
 def _drone_reachable_url(settings: Settings, network: Optional[dict] = None) -> str:
-    return f"{_drone_scheme(settings)}://{_drone_report_host(settings, network)}:{settings.https_port}"
+    host = _drone_report_host(settings, network)
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"{_drone_scheme(settings)}://{host}:{settings.https_port}"
 
 
 def _drone_network_payload(settings: Settings) -> dict:
@@ -5788,8 +5798,22 @@ def _peer_get_json(url: str, settings: Settings, peer_id: Optional[str] = None, 
 
 
 def _peer_address(peer: dict) -> Optional[str]:
+    reachable_url = str(peer.get("reachable_url") or "").strip().rstrip("/")
+    if reachable_url:
+        return reachable_url
     scheme = str(peer.get("scheme") or peer.get("protocol") or "https").strip() or "https"
     port = peer.get("api_port") or peer.get("port") or 8443
+    resolved = peer.get("resolved_network") if isinstance(peer.get("resolved_network"), dict) else {}
+    for value in resolved.get("ipv4") or []:
+        host = str(value or "").strip()
+        if host:
+            return f"{scheme}://{host}:{port}"
+    for value in resolved.get("ipv6") or []:
+        host = str(value or "").strip()
+        if host:
+            if ":" in host and not host.startswith("["):
+                host = f"[{host}]"
+            return f"{scheme}://{host}:{port}"
     for key in ("local_ip", "private_ip", "public_ip"):
         value = peer.get(key)
         if isinstance(value, list):
@@ -5873,7 +5897,8 @@ def _get_local_ip_addresses() -> dict:
             probe6.connect(("2001:4860:4860::8888", 80))
             add(probe6.getsockname()[0])
     except OSError as error:
-        print(f"Overmind IPv6 route resolution failed: {error}", file=sys.stderr, flush=True)
+        if os.environ.get("DRONE_DEBUG_NETWORK", "").strip().lower() in {"1", "true", "yes", "on"}:
+            print(f"Overmind IPv6 route unavailable; skipping IPv6 detection: {error}", file=sys.stderr, flush=True)
 
     if "127.0.0.1" not in ipv4:
         ipv4.append("127.0.0.1")
@@ -5948,6 +5973,74 @@ def _sample_speed(settings: Settings, base_url: str, token: str) -> dict:
     return sample
 
 
+def _collect_gpu_info() -> dict:
+    info = {
+        "vendor": None,
+        "model": None,
+        "driver": None,
+        "renderer": None,
+        "pci_devices": [],
+    }
+    try:
+        result = subprocess.run(["lspci", "-nnk"], capture_output=True, text=True, timeout=2)
+        if result.returncode == 0:
+            current = None
+            for line in (result.stdout or "").splitlines():
+                lower = line.lower()
+                if " vga compatible controller" in lower or " 3d controller" in lower or " display controller" in lower:
+                    current = {"description": line.strip(), "driver": None}
+                    parts = line.split(":", 2)
+                    description = parts[-1].strip() if parts else line.strip()
+                    if not info["model"]:
+                        info["model"] = description
+                    if " nvidia " in f" {lower} ":
+                        info["vendor"] = info["vendor"] or "NVIDIA"
+                    elif " amd " in f" {lower} " or " advanced micro devices" in lower or " ati " in f" {lower} ":
+                        info["vendor"] = info["vendor"] or "AMD"
+                    elif " intel " in f" {lower} ":
+                        info["vendor"] = info["vendor"] or "Intel"
+                    info["pci_devices"].append(current)
+                    continue
+                if current and "kernel driver in use:" in lower:
+                    driver = line.split(":", 1)[1].strip()
+                    current["driver"] = driver
+                    info["driver"] = info["driver"] or driver
+    except Exception:
+        pass
+
+    for card in sorted(Path("/sys/class/drm").glob("card*/device")):
+        try:
+            vendor_id = (card / "vendor").read_text(encoding="utf-8", errors="ignore").strip()
+            device_id = (card / "device").read_text(encoding="utf-8", errors="ignore").strip()
+            driver = card.resolve().parts[-2] if card.exists() else None
+            entry = {"path": str(card), "vendor_id": vendor_id, "device_id": device_id}
+            if driver:
+                entry["driver"] = driver
+            info["pci_devices"].append(entry)
+        except Exception:
+            continue
+
+    try:
+        result = subprocess.run(["sh", "-c", "glxinfo -B 2>/dev/null"], capture_output=True, text=True, timeout=2)
+        if result.returncode == 0:
+            for line in (result.stdout or "").splitlines():
+                if ":" not in line:
+                    continue
+                key, value = [part.strip() for part in line.split(":", 1)]
+                lower = key.lower()
+                if lower == "opengl vendor string":
+                    info["vendor"] = info["vendor"] or value
+                elif lower == "opengl renderer string":
+                    info["renderer"] = value
+                    info["model"] = info["model"] or value
+        elif not info["renderer"]:
+            info["renderer"] = None
+    except Exception:
+        pass
+
+    return info
+
+
 def _collect_system_info_payload(settings: Settings) -> dict:
     hostname = socket.gethostname()
     network = _get_local_ip_addresses()
@@ -5993,6 +6086,7 @@ def _collect_system_info_payload(settings: Settings) -> dict:
         "cpu": {"model": os.environ.get("DRONE_CPU_MODEL", ""), "count": os.cpu_count()},
         "memory": memory,
         "disk": disk,
+        "gpu": _collect_gpu_info(),
         "network": network,
         "uptime_seconds": uptime,
         "container": Path("/.dockerenv").exists() or os.environ.get("RUNNING_IN_DOCKER") == "1",
@@ -6049,13 +6143,20 @@ def _collect_rom_metadata(settings: Settings, repository: "RomRepository") -> di
             gamelist = _read_text_file(gamelist_path, max_bytes=524288)
             gamelist["system"] = system_name
             gamelists.append(gamelist)
-    return {
+    result = {
         "type": "rom_metadata",
         "collected_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "roms_root": str(settings.roms_root),
         "systems": systems,
         "roms": roms,
         "gamelists": gamelists,
     }
+    print(
+        f"ROM metadata scan root={settings.roms_root} systems={len(systems)} roms={len(roms)} gamelists={len(gamelists)}",
+        file=sys.stdout,
+        flush=True,
+    )
+    return result
 
 
 def _collect_log_sources(settings: Settings) -> dict:
@@ -6429,10 +6530,11 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
     last_system_info_at = -float(system_info_refresh_seconds)
     last_missing_roms_warning_at = -float(3600)
     system_info_payload: dict = {}
+    rom_metadata_payload: dict = {}
     fs_snapshot = _filesystem_snapshot(settings)
 
     def loop() -> None:
-        nonlocal last_speed_sample_at, last_peer_check_at, last_system_info_at, last_missing_roms_warning_at, system_info_payload, fs_snapshot
+        nonlocal last_speed_sample_at, last_peer_check_at, last_system_info_at, last_missing_roms_warning_at, system_info_payload, rom_metadata_payload, fs_snapshot
         while True:
             try:
                 config = _load_overmind_config_for_settings(settings)
@@ -6450,8 +6552,17 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                 device_id = quote(settings.overmind_device_id, safe="")
                 now = time.monotonic()
                 try:
-                    rom_systems = repository.list_systems()
+                    rom_metadata_payload = _collect_rom_metadata(settings, repository)
+                    rom_systems = rom_metadata_payload.get("systems") or []
                 except FileNotFoundError as error:
+                    rom_metadata_payload = {
+                        "type": "rom_metadata",
+                        "roms_root": str(settings.roms_root),
+                        "systems": [],
+                        "roms": [],
+                        "gamelists": [],
+                        "error": str(error),
+                    }
                     rom_systems = []
                     if now - last_missing_roms_warning_at >= 3600:
                         print(
@@ -6473,9 +6584,15 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                     "reachable_url": _drone_reachable_url(settings, network_payload),
                     "certificate": DroneCertificateManager(settings).metadata(),
                     "system_info": system_info_payload,
+                    "rom_metadata": rom_metadata_payload,
                 }
                 alive_url = f"{base_url}/api/devices/{device_id}/alive"
                 response = _overmind_post_json(alive_url, alive_payload, token=token, settings=settings)
+                print(
+                    f"ROM metadata sent to Overmind for {settings.overmind_device_id}: root={rom_metadata_payload.get('roms_root')} systems={len(rom_metadata_payload.get('systems') or [])} roms={len(rom_metadata_payload.get('roms') or [])}",
+                    file=sys.stdout,
+                    flush=True,
+                )
                 swarm = response.get("swarm") if isinstance(response.get("swarm"), list) else []
                 _write_json_file(_overmind_swarm_path_for_settings(settings), swarm)
 

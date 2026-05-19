@@ -5,6 +5,7 @@ USERDATA_ROOT="${USERDATA_ROOT:-/userdata}"
 ROMS_ROOT="${ROMS_ROOT:-${USERDATA_ROOT}/roms}"
 BIOS_ROOT="${BIOS_ROOT:-${USERDATA_ROOT}/bios}"
 ROM_SOURCE_ROOT="${ROM_SOURCE_ROOT:-/rom-source}"
+BATOCERA_TEST_DATA_ROOT="${BATOCERA_TEST_DATA_ROOT:-}"
 DRONE_DEVICE_ID="${DRONE_DEVICE_ID:-${OVERMIND_DEVICE_ID:-drone-container}}"
 DRONE_ROM_MIN="${DRONE_ROM_MIN:-6}"
 DRONE_ROM_MAX="${DRONE_ROM_MAX:-18}"
@@ -16,6 +17,17 @@ mkdir -p \
   "$USERDATA_ROOT/system/logs" \
   "$USERDATA_ROOT/system/drone-app/logs" \
   "$USERDATA_ROOT/themes/default"
+
+if [[ -n "$BATOCERA_TEST_DATA_ROOT" && -d "$BATOCERA_TEST_DATA_ROOT" ]]; then
+  for name in bios themes; do
+    if [[ -d "$BATOCERA_TEST_DATA_ROOT/$name" ]]; then
+      cp -Rn "$BATOCERA_TEST_DATA_ROOT/$name/." "$USERDATA_ROOT/$name/" 2>/dev/null || true
+    fi
+  done
+  if [[ -d "$BATOCERA_TEST_DATA_ROOT/system" ]]; then
+    cp -Rn "$BATOCERA_TEST_DATA_ROOT/system/." "$USERDATA_ROOT/system/" 2>/dev/null || true
+  fi
+fi
 
 cat > "$USERDATA_ROOT/system/batocera.conf" <<EOF
 global.theme=default
@@ -37,7 +49,7 @@ if [[ ! -d "$ROM_SOURCE_ROOT" ]] || ! find "$ROM_SOURCE_ROOT" -mindepth 2 -type 
 ERROR: No ROM files found at ${ROM_SOURCE_ROOT}.
 Mount the shared ROM source at ${ROM_SOURCE_ROOT}.
 Expected layout: .github/data/roms/<system>/<files>
-Run .github/scripts/import-roms-remotely.sh first if the folder is empty.
+Run .github/scripts/import-batocera-test-data.sh --generate-only first if the folder is empty.
 EOF
   exit 2
 fi
