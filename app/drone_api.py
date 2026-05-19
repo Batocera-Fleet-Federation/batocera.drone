@@ -1,6 +1,7 @@
 import base64
 import html
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -5323,8 +5324,11 @@ class DroneCertificateManager:
             "DNS:localhost",
             "IP:127.0.0.1",
         ]
-        if self.settings.hostname_override:
-            alt_names.append(f"DNS:{self.settings.hostname_override}")
+        for override in _hostname_override_values(self.settings):
+            if _is_ip_literal(override):
+                alt_names.append(f"IP:{override.strip('[]')}")
+            else:
+                alt_names.append(f"DNS:{override}")
         for ip in _get_local_certificate_ips():
             alt_names.append(f"IP:{ip}")
         san = ",".join(dict.fromkeys(alt_names))
@@ -5485,9 +5489,23 @@ def _drone_scheme(settings: Settings) -> str:
     return "http" if settings.http_only else "https"
 
 
+def _hostname_override_values(settings: Settings) -> List[str]:
+    value = settings.hostname_override or ""
+    return [item.strip() for item in re.split(r"[,;\s]+", value) if item.strip()]
+
+
+def _is_ip_literal(value: str) -> bool:
+    try:
+        ipaddress.ip_address(value.strip("[]"))
+        return True
+    except ValueError:
+        return False
+
+
 def _drone_report_host(settings: Settings, network: Optional[dict] = None) -> str:
-    if settings.hostname_override:
-        return settings.hostname_override
+    overrides = _hostname_override_values(settings)
+    if overrides:
+        return overrides[0]
     network = network if isinstance(network, dict) else _get_local_ip_addresses()
     ipv4 = network.get("ipv4") if isinstance(network.get("ipv4"), list) else []
     ipv6 = network.get("ipv6") if isinstance(network.get("ipv6"), list) else []
@@ -5508,6 +5526,7 @@ def _drone_reachable_url(settings: Settings, network: Optional[dict] = None) -> 
 def _drone_network_payload(settings: Settings) -> dict:
     network = _get_local_ip_addresses()
     network["hostname_override"] = settings.hostname_override or None
+    network["hostname_overrides"] = _hostname_override_values(settings)
     network["reachable_url"] = _drone_reachable_url(settings, network)
     return network
 
@@ -5611,8 +5630,6 @@ def _drone_client_ssl_context(settings: Settings, url: str, verify: bool = False
     if not url.startswith("https://"):
         return None
     context = ssl.create_default_context(cafile=str(cafile) if cafile else None) if verify else ssl._create_unverified_context()
-    if verify and cafile:
-        context.check_hostname = False
     if settings.drone_mtls_enabled and settings.drone_cert_file.exists() and settings.drone_key_file.exists():
         context.load_cert_chain(certfile=str(settings.drone_cert_file), keyfile=str(settings.drone_key_file))
     return context
@@ -5782,7 +5799,11 @@ def _fetch_peer_certificate(settings: Settings, config: dict, peer_id: str) -> O
 
 def _peer_get_json(url: str, settings: Settings, peer_id: Optional[str] = None, config: Optional[dict] = None, refresh_cert: bool = False) -> dict:
     cafile = None
-    if peer_id:
+    if settings.drone_mtls_ca_file and settings.drone_mtls_ca_file.exists():
+        cafile = settings.drone_mtls_ca_file
+        if peer_id and refresh_cert and config:
+            _fetch_peer_certificate(settings, config, peer_id)
+    elif peer_id:
         if refresh_cert and config:
             cafile = _fetch_peer_certificate(settings, config, peer_id)
         else:
