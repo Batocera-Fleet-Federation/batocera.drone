@@ -945,6 +945,7 @@ class Settings:
     drone_key_file: Path
     drone_cert_days: int
     drone_mtls_enabled: bool
+    drone_mtls_mode: str
     drone_mtls_ca_file: Optional[Path]
 
     @classmethod
@@ -1007,6 +1008,7 @@ class Settings:
             drone_key_file=Path(os.environ.get("DRONE_KEY_FILE", os.environ.get("TLS_KEY_FILE", str(default_drone_key)))),
             drone_cert_days=int(os.environ.get("DRONE_CERT_DAYS", "825")),
             drone_mtls_enabled=_env_bool(False, "DRONE_MTLS_ENABLED", "DRONE_TO_DRONE_MTLS_ENABLED"),
+            drone_mtls_mode=(os.environ.get("DRONE_MTLS_MODE") or "self-signed").strip().lower(),
             drone_mtls_ca_file=Path(os.environ["DRONE_MTLS_CA_FILE"]) if os.environ.get("DRONE_MTLS_CA_FILE") else None,
         )
 
@@ -5312,6 +5314,13 @@ class DroneCertificateManager:
             metadata = self.metadata()
             if metadata.get("status") == "loaded" and metadata.get("renewal_status") != "expired":
                 return metadata
+        if self.settings.drone_mtls_mode == "managed":
+            return {
+                "status": "invalid",
+                "error": "managed Drone mTLS mode requires pre-provisioned, unexpired certificate and key files",
+                "cert_file": str(cert_file),
+                "key_file": str(key_file),
+            }
         self._generate_local_certificate(cert_file, key_file)
         return self.metadata()
 
@@ -5404,6 +5413,7 @@ class DroneCertificateManager:
             "renewal_status": renewal_status,
             "identity": self.settings.overmind_device_id,
             "mtls_enabled": self.settings.drone_mtls_enabled,
+            "mtls_mode": self.settings.drone_mtls_mode,
         }
 
 
@@ -5626,6 +5636,48 @@ def _peer_cert_meta_path(settings: Settings, peer_id: str) -> Path:
     return _peer_cert_cache_dir(settings) / f"{safe}.json"
 
 
+def _peer_trust_cafile(
+    settings: Settings,
+    peer_id: Optional[str] = None,
+    config: Optional[dict] = None,
+    refresh_cert: bool = False,
+) -> Optional[Path]:
+    if settings.drone_mtls_ca_file and settings.drone_mtls_ca_file.exists():
+        if peer_id and refresh_cert and config:
+            _fetch_peer_certificate(settings, config, peer_id)
+        return settings.drone_mtls_ca_file
+    if not peer_id:
+        return None
+    if refresh_cert and config:
+        return _fetch_peer_certificate(settings, config, peer_id)
+    cached = _peer_cert_cache_path(settings, peer_id)
+    if cached.exists():
+        return cached
+    return _fetch_peer_certificate(settings, config or {}, peer_id) if config else None
+
+
+def _peer_ssl_diagnostic(url: str, cafile: Optional[Path], error: BaseException) -> str:
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    ca_configured = bool(cafile)
+    ca_path = str(cafile) if cafile else "none"
+    reason = str(error).strip() or error.__class__.__name__
+    hint = "certificate validation failed"
+    lower = reason.lower()
+    if "hostname" in lower or "not valid for" in lower or "ip address mismatch" in lower:
+        hint = "hostname/SAN mismatch"
+    elif "self-signed" in lower or "unknown ca" in lower or "unable to get local issuer" in lower:
+        hint = "missing or incorrect trusted CA bundle"
+    elif "expired" in lower or "not yet valid" in lower:
+        hint = "expired or not-yet-valid certificate"
+    return f"{hint}: peer_url={url} hostname={host or 'unknown'} ca_configured={str(ca_configured).lower()} cafile={ca_path} error={reason}"
+
+
+def _is_ssl_url_error(error: URLError) -> bool:
+    reason = getattr(error, "reason", None)
+    return isinstance(reason, ssl.SSLError)
+
+
 def _drone_client_ssl_context(settings: Settings, url: str, verify: bool = False, cafile: Optional[Path] = None) -> Optional[ssl.SSLContext]:
     if not url.startswith("https://"):
         return None
@@ -5798,22 +5850,20 @@ def _fetch_peer_certificate(settings: Settings, config: dict, peer_id: str) -> O
 
 
 def _peer_get_json(url: str, settings: Settings, peer_id: Optional[str] = None, config: Optional[dict] = None, refresh_cert: bool = False) -> dict:
-    cafile = None
-    if settings.drone_mtls_ca_file and settings.drone_mtls_ca_file.exists():
-        cafile = settings.drone_mtls_ca_file
-        if peer_id and refresh_cert and config:
-            _fetch_peer_certificate(settings, config, peer_id)
-    elif peer_id:
-        if refresh_cert and config:
-            cafile = _fetch_peer_certificate(settings, config, peer_id)
-        else:
-            cached = _peer_cert_cache_path(settings, peer_id)
-            cafile = cached if cached.exists() else (_fetch_peer_certificate(settings, config or {}, peer_id) if config else None)
+    cafile = _peer_trust_cafile(settings, peer_id=peer_id, config=config, refresh_cert=refresh_cert)
     if url.startswith("https://") and peer_id and not cafile:
         raise ssl.SSLError(f"no trusted certificate cached for peer {peer_id}")
     request = Request(url, headers={"Accept": "application/json", "User-Agent": "batocera-drone-peer/1.0"})
-    with urlopen(request, timeout=PEER_CHECK_TIMEOUT_SECONDS, context=_drone_client_ssl_context(settings, url, verify=bool(cafile), cafile=cafile)) as response:
-        raw = response.read()
+    try:
+        with urlopen(request, timeout=PEER_CHECK_TIMEOUT_SECONDS, context=_drone_client_ssl_context(settings, url, verify=bool(cafile), cafile=cafile)) as response:
+            raw = response.read()
+    except ssl.SSLError as error:
+        raise ssl.SSLError(_peer_ssl_diagnostic(url, cafile, error)) from error
+    except URLError as error:
+        reason = getattr(error, "reason", None)
+        if isinstance(reason, ssl.SSLError):
+            raise URLError(_peer_ssl_diagnostic(url, cafile, reason)) from error
+        raise
     parsed = json.loads(raw.decode("utf-8")) if raw else {}
     return parsed if isinstance(parsed, dict) else {}
 
@@ -6380,12 +6430,10 @@ def _download_rom_from_peer(settings: Settings, config: dict, peer: dict, system
     if system_dir not in target.parents:
         raise ValueError("invalid target path")
     target.parent.mkdir(parents=True, exist_ok=True)
-    cafile = _peer_cert_cache_path(settings, peer_id)
-    if not cafile.exists():
-        _fetch_peer_certificate(settings, config, peer_id)
-    if address.startswith("https://") and not cafile.exists():
+    cafile = _peer_trust_cafile(settings, peer_id=peer_id, config=config)
+    if address.startswith("https://") and not cafile:
         raise ssl.SSLError(f"no trusted certificate cached for peer {peer_id}")
-    context = _drone_client_ssl_context(settings, url, verify=cafile.exists(), cafile=cafile if cafile.exists() else None)
+    context = _drone_client_ssl_context(settings, url, verify=bool(cafile), cafile=cafile)
     started = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     bytes_written = 0
     request = Request(url, headers={"User-Agent": "batocera-drone-rom-sync/1.0"})
@@ -6397,20 +6445,34 @@ def _download_rom_from_peer(settings: Settings, config: dict, peer: dict, system
                     break
                 handle.write(chunk)
                 bytes_written += len(chunk)
-    except ssl.SSLError:
-        _fetch_peer_certificate(settings, config, peer_id)
+    except (ssl.SSLError, URLError) as error:
+        if isinstance(error, URLError) and not _is_ssl_url_error(error):
+            raise
+        ssl_error = getattr(error, "reason", error)
+        print(f"ROM sync SSL validation failed: {_peer_ssl_diagnostic(url, cafile, ssl_error)}", file=sys.stderr, flush=True)
         if target.exists():
             target.unlink()
-        cafile = _peer_cert_cache_path(settings, peer_id)
-        context = _drone_client_ssl_context(settings, url, verify=cafile.exists(), cafile=cafile if cafile.exists() else None)
+        cafile = _peer_trust_cafile(settings, peer_id=peer_id, config=config, refresh_cert=True)
+        if address.startswith("https://") and not cafile:
+            raise ssl.SSLError(f"no trusted certificate cached for peer {peer_id}") from error
+        context = _drone_client_ssl_context(settings, url, verify=bool(cafile), cafile=cafile)
         bytes_written = 0
-        with urlopen(request, timeout=max(10, PEER_CHECK_TIMEOUT_SECONDS * 4), context=context) as response, target.open("wb") as handle:
-            while True:
-                chunk = response.read(1024 * 1024)
-                if not chunk:
-                    break
-                handle.write(chunk)
-                bytes_written += len(chunk)
+        try:
+            with urlopen(request, timeout=max(10, PEER_CHECK_TIMEOUT_SECONDS * 4), context=context) as response, target.open("wb") as handle:
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    handle.write(chunk)
+                    bytes_written += len(chunk)
+        except (ssl.SSLError, URLError) as retry_error:
+            if isinstance(retry_error, URLError) and not _is_ssl_url_error(retry_error):
+                raise
+            retry_ssl_error = getattr(retry_error, "reason", retry_error)
+            print(f"ROM sync SSL validation retry failed: {_peer_ssl_diagnostic(url, cafile, retry_ssl_error)}", file=sys.stderr, flush=True)
+            if target.exists():
+                target.unlink()
+            raise ssl.SSLError(_peer_ssl_diagnostic(url, cafile, retry_ssl_error)) from retry_error
     if expected_size not in (None, ""):
         try:
             if int(expected_size) != bytes_written:
@@ -6704,7 +6766,10 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
     auth = BasicAuth(settings.username, settings.password)
     cert_state = DroneCertificateManager(settings).ensure_certificate()
     if cert_state.get("error"):
-        print(f"Drone certificate setup: {cert_state.get('error')}", file=sys.stderr, flush=True)
+        message = f"Drone certificate setup: {cert_state.get('error')}"
+        if settings.drone_mtls_mode == "managed":
+            raise RuntimeError(message)
+        print(message, file=sys.stderr, flush=True)
 
     image_cache = ExpiringLRUCache(
         ttl_seconds=settings.image_cache_ttl_seconds,
@@ -6730,6 +6795,8 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
     server = ThreadingHTTPServer(("0.0.0.0", settings.https_port), handler_factory)
 
     if not settings.http_only:
+        if settings.drone_mtls_mode == "managed" and not (settings.drone_cert_file.exists() and settings.drone_key_file.exists()):
+            raise RuntimeError("managed Drone mTLS mode requires DRONE_CERT_FILE and DRONE_KEY_FILE")
         if settings.drone_cert_file.exists() and settings.drone_key_file.exists():
             cert_file, key_file = settings.drone_cert_file, settings.drone_key_file
         else:

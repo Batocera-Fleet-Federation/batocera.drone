@@ -25,6 +25,9 @@ from app.drone_api import (
     _collect_rom_metadata,
     _sample_speed,
     _real_data_roots,
+    _peer_ssl_diagnostic,
+    _peer_trust_cafile,
+    _download_rom_from_peer,
 )
 from urllib.error import URLError
 
@@ -91,6 +94,89 @@ class SettingsTests(unittest.TestCase):
             "api_port": 8443,
         }
         self.assertEqual(_peer_address(peer), "https://bff-drone-b:8443")
+
+    def test_peer_trust_prefers_configured_ca_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ca_file = Path(tmp) / "ca.crt"
+            ca_file.write_text("test-ca", encoding="utf-8")
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(Path(tmp) / "userdata"), "DRONE_MTLS_CA_FILE": str(ca_file)},
+                clear=True,
+            ):
+                settings = Settings.from_env()
+
+            with mock.patch("app.drone_api._fetch_peer_certificate") as fetch:
+                self.assertEqual(_peer_trust_cafile(settings, peer_id="bff-drone-b", config={}), ca_file)
+                fetch.assert_not_called()
+
+    def test_peer_ssl_diagnostic_identifies_hostname_mismatch(self) -> None:
+        diagnostic = _peer_ssl_diagnostic(
+            "https://bff-drone-b:8443/v1/api/peer/health",
+            Path("/tmp/local-ca.crt"),
+            Exception("Hostname mismatch, certificate is not valid for 'bff-drone-b'"),
+        )
+        self.assertIn("hostname/SAN mismatch", diagnostic)
+        self.assertIn("hostname=bff-drone-b", diagnostic)
+        self.assertIn("cafile=/tmp/local-ca.crt", diagnostic)
+
+    def test_download_rom_from_peer_uses_configured_ca_bundle_and_reachable_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            ca_file = Path(tmp) / "ca.crt"
+            ca_file.write_text("test-ca", encoding="utf-8")
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "USERDATA_ROOT": str(root),
+                    "ROMS_ROOT": str(root / "roms"),
+                    "BIOS_ROOT": str(root / "bios"),
+                    "DRONE_MTLS_CA_FILE": str(ca_file),
+                },
+                clear=True,
+            ):
+                settings = Settings.from_env()
+
+            class FakeResponse:
+                def __init__(self):
+                    self._chunks = [b"ROMDATA", b""]
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self, _size=-1):
+                    return self._chunks.pop(0)
+
+            contexts = []
+            requests = []
+
+            def fake_context(_settings, url, verify=False, cafile=None):
+                contexts.append((url, verify, cafile))
+                return object()
+
+            def fake_urlopen(request, timeout=None, context=None):
+                requests.append((request.full_url, timeout, context))
+                return FakeResponse()
+
+            peer = {
+                "drone_id": "bff-drone-b",
+                "reachable_url": "https://bff-drone-b:8443",
+                "resolved_network": {"ipv4": ["172.20.0.4"]},
+            }
+            with mock.patch("app.drone_api._drone_client_ssl_context", side_effect=fake_context), mock.patch(
+                "app.drone_api.urlopen", side_effect=fake_urlopen
+            ), mock.patch("app.drone_api._fetch_peer_certificate") as fetch:
+                result = _download_rom_from_peer(settings, {}, peer, "atari7800", "Asteroids (USA).zip", expected_size=7)
+
+            self.assertEqual(result["source_drone_id"], "bff-drone-b")
+            self.assertEqual(requests[0][0], "https://bff-drone-b:8443/v1/api/peer/roms/atari7800/Asteroids%20%28USA%29.zip")
+            self.assertEqual(contexts[0][1], True)
+            self.assertEqual(contexts[0][2], ca_file)
+            self.assertEqual((root / "roms" / "atari7800" / "Asteroids (USA).zip").read_bytes(), b"ROMDATA")
+            fetch.assert_not_called()
 
     def test_gpu_info_tolerates_unavailable_detection(self) -> None:
         with mock.patch("app.drone_api.subprocess.run", side_effect=FileNotFoundError()):
