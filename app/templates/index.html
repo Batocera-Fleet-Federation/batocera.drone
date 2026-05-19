@@ -3225,11 +3225,10 @@ async function renderOvermindIntegrationPage() {
         <div class="mb-3">
           <label class="form-label">Authorization Token</label>
           <input id="overmindAuthTokenInput" class="form-control" type="password" placeholder="Token generated in Overmind">
-          <div class="text-muted small mt-1">Generate this token in Overmind, paste it here, then start integration.</div>
+          <div class="text-muted small mt-1">Generate this token in Overmind and paste it here. Saving immediately registers this Drone.</div>
         </div>
         <div class="d-flex gap-2">
           <button id="overmindSaveBtn" class="btn btn-primary" type="button">Save Configuration</button>
-          <button id="overmindStartBtn" class="btn btn-outline-primary" type="button">Start Polling</button>
         </div>
         <hr>
         <div class="small" id="overmindStatus"></div>
@@ -3251,7 +3250,6 @@ async function renderOvermindIntegrationPage() {
   const emailInput = document.getElementById("overmindEmailInput");
   const authTokenInput = document.getElementById("overmindAuthTokenInput");
   const saveBtn = document.getElementById("overmindSaveBtn");
-  const startBtn = document.getElementById("overmindStartBtn");
   const refreshBtn = document.getElementById("overmindRefreshBtn");
   const actionsRefreshBtn = document.getElementById("overmindActionsRefreshBtn");
   const actionsBody = document.getElementById("overmindActionsBody");
@@ -3352,19 +3350,9 @@ async function renderOvermindIntegrationPage() {
     }
     const payload = await apiPost("/admin/integrations/overmind/config", body);
     authTokenInput.value = "";
-    showToast("Overmind configuration saved.", "success");
-    renderStatus(payload);
-  }
-
-  async function startIntegration() {
-    const overmindAuthToken = authTokenInput.value || "";
-    const body = {};
-    if (overmindAuthToken) {
-      body.overmind_auth_token = overmindAuthToken;
-    }
-    const payload = await apiPost("/admin/integrations/overmind/start", body);
-    authTokenInput.value = "";
-    showToast("Overmind polling started.", "success");
+    const state = payload.status?.integration_state || "";
+    const isActive = payload.status?.integration_enabled && state !== "pending_failed";
+    showToast(isActive ? "Overmind registered and polling is active." : "Overmind configuration saved. Check status for registration details.", isActive ? "success" : "warning");
     renderStatus(payload);
   }
 
@@ -3374,16 +3362,6 @@ async function renderOvermindIntegrationPage() {
       await saveConfig();
     } catch (err) {
       showToast(escapeHtml(err.message || "Failed to save config"), "danger");
-    } finally {
-      setLoading(false);
-    }
-  });
-  startBtn.addEventListener("click", async () => {
-    setLoading(true, "Starting Overmind integration...");
-    try {
-      await startIntegration();
-    } catch (err) {
-      showToast(escapeHtml(err.message || "Failed to start integration"), "danger");
     } finally {
       setLoading(false);
     }

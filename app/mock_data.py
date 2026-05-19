@@ -13,6 +13,7 @@ def _write_bytes(path: Path, content: bytes) -> None:
 
 def seed_mock_userdata(userdata_root: Path) -> None:
     userdata_root.mkdir(parents=True, exist_ok=True)
+    _write_text(userdata_root / "system" / "drone-app" / "mock_userdata_seeded.json", '{"source":"batocera.drone mock_data"}\n')
 
     # ROMs + artwork + video previews (systems, search, rom lists, image/video routes, downloads)
     roms_root = userdata_root / "roms"

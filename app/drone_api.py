@@ -939,6 +939,7 @@ class Settings:
     overmind_token: Optional[str]
     overmind_device_id: str
     overmind_poll_seconds: int
+    hostname_override: Optional[str]
     drone_cert_file: Path
     drone_key_file: Path
     drone_cert_days: int
@@ -1000,6 +1001,7 @@ class Settings:
             overmind_token=os.environ.get("OVERMIND_DRONE_TOKEN"),
             overmind_device_id=os.environ.get("OVERMIND_DEVICE_ID") or os.environ.get("DRONE_DEVICE_ID") or (_fake_machine_id() if use_fake_data else _machine_id()),
             overmind_poll_seconds=OVERMIND_HEARTBEAT_SECONDS,
+            hostname_override=(os.environ.get("HOSTNAME_OVERRIDE") or "").strip() or None,
             drone_cert_file=Path(os.environ.get("DRONE_CERT_FILE", os.environ.get("TLS_CERT_FILE", str(default_drone_cert)))),
             drone_key_file=Path(os.environ.get("DRONE_KEY_FILE", os.environ.get("TLS_KEY_FILE", str(default_drone_key)))),
             drone_cert_days=int(os.environ.get("DRONE_CERT_DAYS", "825")),
@@ -1524,7 +1526,7 @@ class RomRepository:
 
     def list_systems(self) -> List[dict]:
         if not self.roms_root.exists():
-            raise FileNotFoundError()
+            raise FileNotFoundError(str(self.roms_root))
 
         systems = []
         for entry in sorted(self.roms_root.iterdir(), key=lambda p: p.name.lower()):
@@ -2965,6 +2967,8 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             merged["overmind_email"] = FAKE_OVERMIND_EMAIL
             merged["overmind_password"] = FAKE_OVERMIND_PASSWORD
             merged["overmind_token"] = FAKE_OVERMIND_TOKEN
+        else:
+            _strip_fake_overmind_values(merged)
         return merged
 
     def _save_overmind_config(self, payload: dict) -> None:
@@ -4604,6 +4608,14 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         new_config["integration_state"] = "configured"
         new_config["last_error"] = None
         new_config["notes"] = "Configuration saved. Drone will report alive and collect Overmind actions on its polling interval."
+        if new_config.get("overmind_auth_token"):
+            base_url = str(new_config.get("overmind_url") or "").strip().rstrip("/")
+            new_config["integration_enabled"] = True
+            token = _register_or_claim_overmind_token(self.settings, self.repository, new_config, base_url)
+            if token:
+                new_config = self._load_overmind_config()
+            else:
+                new_config["integration_enabled"] = False
         self._save_overmind_config(new_config)
         self._send_json(200, self._overmind_public_payload(new_config))
 
@@ -5449,7 +5461,94 @@ def _load_overmind_config_for_settings(settings: Settings) -> dict:
         merged["overmind_email"] = FAKE_OVERMIND_EMAIL
         merged["overmind_password"] = FAKE_OVERMIND_PASSWORD
         merged["overmind_token"] = FAKE_OVERMIND_TOKEN
+    else:
+        _strip_fake_overmind_values(merged)
     return merged
+
+
+def _strip_fake_overmind_values(config: dict) -> None:
+    """Keep previously seeded demo credentials out of real Drone state."""
+    if config.get("overmind_email") == FAKE_OVERMIND_EMAIL:
+        config["overmind_email"] = ""
+    if config.get("overmind_password") == FAKE_OVERMIND_PASSWORD:
+        config.pop("overmind_password", None)
+    if config.get("overmind_token") == FAKE_OVERMIND_TOKEN:
+        config.pop("overmind_token", None)
+    if config.get("integration_enabled") and not (config.get("overmind_token") or config.get("overmind_auth_token")):
+        config["integration_enabled"] = False
+        config["integration_state"] = "not_started"
+
+
+def _drone_scheme(settings: Settings) -> str:
+    return "http" if settings.http_only else "https"
+
+
+def _drone_report_host(settings: Settings, network: Optional[dict] = None) -> str:
+    if settings.hostname_override:
+        return settings.hostname_override
+    network = network if isinstance(network, dict) else _get_local_ip_addresses()
+    ipv4 = network.get("ipv4") if isinstance(network.get("ipv4"), list) else []
+    return str((ipv4 or ["127.0.0.1"])[0])
+
+
+def _drone_reachable_url(settings: Settings, network: Optional[dict] = None) -> str:
+    return f"{_drone_scheme(settings)}://{_drone_report_host(settings, network)}:{settings.https_port}"
+
+
+def _drone_network_payload(settings: Settings) -> dict:
+    network = _get_local_ip_addresses()
+    network["hostname_override"] = settings.hostname_override or None
+    network["reachable_url"] = _drone_reachable_url(settings, network)
+    return network
+
+
+def _mock_userdata_marker(userdata_root: Path) -> Path:
+    return userdata_root / "system" / "drone-app" / "mock_userdata_seeded.json"
+
+
+def _looks_like_pure_mock_userdata(userdata_root: Path) -> bool:
+    roms_root = userdata_root / "roms"
+    if not roms_root.exists():
+        return False
+    known_fake_files = {
+        roms_root / "snes" / "Chrono Trigger (USA).zip": b"FAKE-SNES-ROM-1",
+        roms_root / "snes" / "Super Mario World (USA).zip": b"FAKE-SNES-ROM-2",
+        roms_root / "snes" / "The Legend of Zelda - A Link to the Past (USA).zip": b"FAKE-SNES-ROM-3",
+        roms_root / "gba" / "Metroid Fusion (USA).zip": b"FAKE-GBA-ROM-1",
+        roms_root / "gba" / "Mario Kart Super Circuit (USA).zip": b"FAKE-GBA-ROM-2",
+        roms_root / "psx" / "Castlevania - Symphony of the Night (USA).chd": b"FAKE-PSX-ROM-1",
+    }
+    has_known_fake = False
+    for path, expected in known_fake_files.items():
+        try:
+            if path.exists() and path.read_bytes() == expected:
+                has_known_fake = True
+        except OSError:
+            continue
+    if not (has_known_fake or _mock_userdata_marker(userdata_root).exists()):
+        return False
+
+    for path in roms_root.rglob("*"):
+        if not path.is_file():
+            continue
+        if path.name.lower() == "gamelist.xml" or "/images/" in path.as_posix() or "/videos/" in path.as_posix():
+            continue
+        expected = known_fake_files.get(path)
+        if expected is None:
+            return False
+        try:
+            if path.read_bytes() != expected:
+                return False
+        except OSError:
+            return False
+    return True
+
+
+def _real_data_roots(settings: Settings) -> Tuple[Path, Path]:
+    if settings.use_fake_data or not _looks_like_pure_mock_userdata(settings.userdata_root):
+        return settings.roms_root, settings.bios_root
+    empty_root = settings.userdata_root / "system" / "drone-app" / "real-data-empty"
+    return empty_root / "roms", empty_root / "bios"
 
 
 def _record_processed_overmind_action(
@@ -5541,6 +5640,45 @@ def _overmind_get_json(url: str, token: Optional[str] = None, settings: Optional
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _overmind_raw_request(
+    url: str,
+    token: Optional[str] = None,
+    settings: Optional[Settings] = None,
+    data: Optional[bytes] = None,
+    content_type: str = "application/octet-stream",
+) -> bytes:
+    headers = {"Accept": "application/octet-stream"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    if data is not None:
+        headers["Content-Type"] = content_type
+    request = Request(url, data=data, headers=headers, method="POST" if data is not None else "GET")
+    context = _drone_client_ssl_context(settings, url) if settings else (ssl._create_unverified_context() if url.startswith("https://") else None)
+    with urlopen(request, timeout=10, context=context) as response:
+        return response.read()
+
+
+def _format_overmind_error(error: BaseException) -> str:
+    if isinstance(error, HTTPError):
+        detail = ""
+        try:
+            raw = error.read()
+            detail = raw.decode("utf-8", errors="replace").strip() if raw else ""
+        except Exception:
+            detail = ""
+        if len(detail) > 500:
+            detail = detail[:500] + "..."
+        suffix = f" body={detail}" if detail else ""
+        return f"HTTPError status={error.code} reason={error.reason or error.msg or 'unknown'} url={error.geturl()}{suffix}"
+    if isinstance(error, URLError):
+        reason = getattr(error, "reason", None)
+        return f"URLError reason={reason!r}" if reason else f"URLError {error!r}"
+    message = str(error).strip()
+    if message:
+        return f"{error.__class__.__name__}: {message}"
+    return repr(error)
+
+
 def _save_overmind_runtime_config(settings: Settings, config: dict) -> None:
     _write_json_file(_overmind_config_path_for_settings(settings), config)
 
@@ -5548,9 +5686,14 @@ def _save_overmind_runtime_config(settings: Settings, config: dict) -> None:
 def _register_or_claim_overmind_token(settings: Settings, repository: "RomRepository", config: dict, base_url: str) -> Optional[str]:
     auth_token = str(config.get("overmind_auth_token") or "").strip()
     email = str(config.get("overmind_email") or "").strip()
+    network = _drone_network_payload(settings)
+    reachable_url = _drone_reachable_url(settings, network)
     payload = {
         "device_id": settings.overmind_device_id,
         "device_name": socket.gethostname(),
+        "api_port": settings.https_port,
+        "scheme": _drone_scheme(settings),
+        "reachable_url": reachable_url,
         "batocera_info": {
             "model": "Batocera Drone",
             "system": sys.platform,
@@ -5561,8 +5704,11 @@ def _register_or_claim_overmind_token(settings: Settings, repository: "RomReposi
             "cpu_max_frequency": "unknown",
             "memory_available": "unknown",
             "memory_total": "unknown",
-            "ip_address": (_get_local_ip_addresses().get("ipv4") or ["127.0.0.1"])[0],
-            "network": _get_local_ip_addresses(),
+            "ip_address": _drone_report_host(settings, network),
+            "network": network,
+            "api_port": settings.https_port,
+            "scheme": _drone_scheme(settings),
+            "reachable_url": reachable_url,
             "system_info": _collect_system_info_payload(settings),
             "certificate": DroneCertificateManager(settings).metadata(),
         },
@@ -5572,12 +5718,12 @@ def _register_or_claim_overmind_token(settings: Settings, repository: "RomReposi
     if auth_token:
         payload["authorization_token"] = auth_token
     try:
-        response = _overmind_post_json(f"{base_url}/api/devices/register", payload, settings=settings)
+        response = _overmind_post_json(f"{base_url}/api/devices/register", payload, token=auth_token or None, settings=settings)
     except Exception as error:
         config["integration_state"] = "pending_failed"
-        config["last_error"] = str(error)
+        config["last_error"] = _format_overmind_error(error)
         _save_overmind_runtime_config(settings, config)
-        print(f"Overmind onboarding request failed for {settings.overmind_device_id}: {error}", file=sys.stderr, flush=True)
+        print(f"Overmind onboarding request failed for {settings.overmind_device_id}: {config['last_error']}", file=sys.stderr, flush=True)
         return None
     if response.get("drone_token"):
         config["overmind_token"] = str(response["drone_token"])
@@ -5620,7 +5766,7 @@ def _fetch_peer_certificate(settings: Settings, config: dict, peer_id: str) -> O
         print(f"Fetched peer certificate for {peer_id}", file=sys.stdout, flush=True)
         return cert_path
     except Exception as error:
-        print(f"Failed to fetch peer certificate for {peer_id}: {error}", file=sys.stderr, flush=True)
+        print(f"Failed to fetch peer certificate for {peer_id}: {_format_overmind_error(error)}", file=sys.stderr, flush=True)
         return None
 
 
@@ -5658,6 +5804,7 @@ def _peer_address(peer: dict) -> Optional[str]:
 
 def _check_peer(settings: Settings, peer: dict, config: Optional[dict] = None) -> dict:
     target_id = str(peer.get("drone_id") or peer.get("device_id") or peer.get("id") or "")
+    peer_id = target_id
     address = _peer_address(peer)
     checked_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     result = {
@@ -5767,15 +5914,36 @@ def _get_local_certificate_ips() -> List[str]:
     return ips
 
 
-def _sample_speed() -> dict:
-    """Return a lightweight local speed sample without running invasive tests."""
+def _sample_speed(settings: Settings, base_url: str, token: str) -> dict:
+    """Measure lightweight Drone <-> Overmind throughput."""
+    sampled_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    size = max(1024, min(int(os.environ.get("OVERMIND_SPEED_SAMPLE_BYTES", "262144")), 2 * 1024 * 1024))
+    device_id = quote(settings.overmind_device_id, safe="")
     sample = {
         "upload_mbps": 0,
         "download_mbps": 0,
         "latency_ms": 0,
-        "source": "simulated-local",
-        "sampled_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "source": "overmind-probe",
+        "sampled_at": sampled_at,
+        "bytes": size,
     }
+    try:
+        download_url = f"{base_url}/api/devices/{device_id}/speed/download?bytes={size}"
+        started = time.monotonic()
+        downloaded = _overmind_raw_request(download_url, token=token, settings=settings)
+        elapsed = max(time.monotonic() - started, 0.001)
+        sample["download_mbps"] = round((len(downloaded) * 8) / elapsed / 1_000_000, 3)
+        sample["latency_ms"] = int(elapsed * 1000)
+
+        upload_url = f"{base_url}/api/devices/{device_id}/speed/upload"
+        payload = b"1" * size
+        started = time.monotonic()
+        _overmind_raw_request(upload_url, token=token, settings=settings, data=payload)
+        elapsed = max(time.monotonic() - started, 0.001)
+        sample["upload_mbps"] = round((len(payload) * 8) / elapsed / 1_000_000, 3)
+    except Exception as error:
+        sample["source"] = "overmind-probe-failed"
+        sample["error"] = _format_overmind_error(error)
     print(f"Speed sample created: source={sample['source']} down={sample['download_mbps']} up={sample['upload_mbps']}", file=sys.stdout, flush=True)
     return sample
 
@@ -5857,7 +6025,10 @@ def _resolve_userdata_path(settings: Settings, candidate: str) -> Path:
 
 
 def _collect_rom_metadata(settings: Settings, repository: "RomRepository") -> dict:
-    systems = repository.list_systems()
+    try:
+        systems = repository.list_systems()
+    except FileNotFoundError:
+        systems = []
     roms = []
     gamelists = []
     for system in systems:
@@ -6256,11 +6427,12 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
     last_speed_sample_at = -float(speed_sample_seconds)
     last_peer_check_at = -float(PEER_CHECK_INTERVAL_SECONDS)
     last_system_info_at = -float(system_info_refresh_seconds)
+    last_missing_roms_warning_at = -float(3600)
     system_info_payload: dict = {}
     fs_snapshot = _filesystem_snapshot(settings)
 
     def loop() -> None:
-        nonlocal last_speed_sample_at, last_peer_check_at, last_system_info_at, system_info_payload, fs_snapshot
+        nonlocal last_speed_sample_at, last_peer_check_at, last_system_info_at, last_missing_roms_warning_at, system_info_payload, fs_snapshot
         while True:
             try:
                 config = _load_overmind_config_for_settings(settings)
@@ -6276,17 +6448,29 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                         continue
 
                 device_id = quote(settings.overmind_device_id, safe="")
-                rom_systems = repository.list_systems()
                 now = time.monotonic()
+                try:
+                    rom_systems = repository.list_systems()
+                except FileNotFoundError as error:
+                    rom_systems = []
+                    if now - last_missing_roms_warning_at >= 3600:
+                        print(
+                            f"Overmind action poll warning: local ROM root unavailable; reporting no ROM systems ({_format_overmind_error(error)})",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                        last_missing_roms_warning_at = now
                 if not system_info_payload or now - last_system_info_at >= system_info_refresh_seconds:
                     system_info_payload = _collect_system_info_payload(settings)
                     last_system_info_at = now
+                network_payload = _drone_network_payload(settings)
                 alive_payload = {
                     "device_id": settings.overmind_device_id,
-                    "network": _get_local_ip_addresses(),
+                    "network": network_payload,
                     "rom_systems": rom_systems,
                     "api_port": settings.https_port,
-                    "scheme": "http" if settings.http_only else "https",
+                    "scheme": _drone_scheme(settings),
+                    "reachable_url": _drone_reachable_url(settings, network_payload),
                     "certificate": DroneCertificateManager(settings).metadata(),
                     "system_info": system_info_payload,
                 }
@@ -6297,12 +6481,12 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
 
                 if speed_sample_seconds > 0 and now - last_speed_sample_at >= speed_sample_seconds:
                     speed_url = f"{base_url}/api/devices/{device_id}/speed"
-                    speed_sample = _sample_speed()
+                    speed_sample = _sample_speed(settings, base_url, token)
                     try:
                         _overmind_post_json(speed_url, speed_sample, token=token, settings=settings)
                         print(f"Speed sample sent to Overmind for {settings.overmind_device_id}", file=sys.stdout, flush=True)
                     except Exception as error:
-                        print(f"Speed sample failed for {settings.overmind_device_id}: {error}", file=sys.stderr, flush=True)
+                        print(f"Speed sample failed for {settings.overmind_device_id}: {_format_overmind_error(error)}", file=sys.stderr, flush=True)
                         raise
                     _overmind_post_json(
                         f"{base_url}/api/devices/{device_id}/events",
@@ -6359,14 +6543,12 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                     if result is not None:
                         completion_payload["result"] = result
                     _overmind_post_json(complete_url, completion_payload, token=token, settings=settings)
-            except HTTPError as error:
-                print(f"Overmind action poll failed: {error}", file=sys.stderr, flush=True)
-            except URLError:
-                pass
+            except (HTTPError, URLError) as error:
+                print(f"Overmind action poll failed: {_format_overmind_error(error)}", file=sys.stderr, flush=True)
             except (TimeoutError, OSError, ValueError, json.JSONDecodeError) as error:
-                print(f"Overmind action poll failed: {error}", file=sys.stderr, flush=True)
+                print(f"Overmind action poll failed: {_format_overmind_error(error)}", file=sys.stderr, flush=True)
             except Exception as error:
-                print(f"Overmind action poll unexpected error: {error}", file=sys.stderr, flush=True)
+                print(f"Overmind action poll unexpected error: {_format_overmind_error(error)}", file=sys.stderr, flush=True)
             time.sleep(poll_seconds)
 
     thread = Thread(target=loop, name="overmind-action-poller", daemon=True)
@@ -6375,9 +6557,10 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
 
 def create_server(settings: Settings) -> ThreadingHTTPServer:
     global _OVERMIND_POLLER_STARTED
+    roms_root, bios_root = _real_data_roots(settings)
     repository = RomRepository(
-        settings.roms_root,
-        settings.bios_root,
+        roms_root,
+        bios_root,
         rom_search_cache_ttl_seconds=settings.rom_search_cache_ttl_seconds,
     )
     auth = BasicAuth(settings.username, settings.password)

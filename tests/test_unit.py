@@ -5,7 +5,23 @@ from unittest import mock
 from pathlib import Path
 
 from app.mock_data import seed_mock_userdata
-from app.drone_api import BasicAuth, LaunchBoxClient, RomRepository, _clean_rom_title, _launchbox_platform_for_system
+from app.drone_api import (
+    FAKE_OVERMIND_EMAIL,
+    FAKE_OVERMIND_TOKEN,
+    BasicAuth,
+    LaunchBoxClient,
+    RomRepository,
+    Settings,
+    _clean_rom_title,
+    _drone_reachable_url,
+    _format_overmind_error,
+    _launchbox_platform_for_system,
+    _load_overmind_config_for_settings,
+    _collect_rom_metadata,
+    _sample_speed,
+    _real_data_roots,
+)
+from urllib.error import URLError
 
 
 class BasicAuthTests(unittest.TestCase):
@@ -19,6 +35,128 @@ class BasicAuthTests(unittest.TestCase):
         token = base64.b64encode(b"admin:wrong").decode("ascii")
         self.assertFalse(auth.check(f"Basic {token}"))
         self.assertFalse(auth.check(None))
+
+
+class SettingsTests(unittest.TestCase):
+    def test_overmind_error_format_includes_class_when_message_is_blank(self) -> None:
+        self.assertEqual(_format_overmind_error(TimeoutError()), "TimeoutError()")
+        self.assertIn("URLError reason=", _format_overmind_error(URLError(TimeoutError())))
+
+    def test_hostname_override_builds_reported_drone_url(self) -> None:
+        with mock.patch.dict(
+            "os.environ",
+            {"HOSTNAME_OVERRIDE": "bff-drone-a", "HTTPS_PORT": "8443"},
+            clear=True,
+        ):
+            settings = Settings.from_env()
+
+        self.assertEqual(settings.hostname_override, "bff-drone-a")
+        self.assertEqual(_drone_reachable_url(settings, {"ipv4": ["192.168.1.50"]}), "https://bff-drone-a:8443")
+
+    def test_fake_overmind_config_is_ignored_when_fake_data_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            config_path = root / "system" / "drone-app" / "overmind_integration.json"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text(
+                '{"overmind_url":"https://overmind.local:9443","overmind_email":"%s","overmind_token":"%s","integration_enabled":true}'
+                % (FAKE_OVERMIND_EMAIL, FAKE_OVERMIND_TOKEN),
+                encoding="utf-8",
+            )
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "USE_FAKE_DATA": "false"},
+                clear=True,
+            ):
+                settings = Settings.from_env()
+
+            loaded = _load_overmind_config_for_settings(settings)
+            self.assertEqual(loaded.get("overmind_email"), "")
+            self.assertFalse(loaded.get("overmind_token"))
+            self.assertFalse(loaded.get("integration_enabled"))
+
+    def test_seeded_mock_userdata_is_not_used_as_real_data(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            seed_mock_userdata(root)
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "USERDATA_ROOT": str(root),
+                    "ROMS_ROOT": str(root / "roms"),
+                    "BIOS_ROOT": str(root / "bios"),
+                    "USE_FAKE_DATA": "false",
+                },
+                clear=True,
+            ):
+                settings = Settings.from_env()
+
+            roms_root, bios_root = _real_data_roots(settings)
+            self.assertNotEqual(roms_root, root / "roms")
+            self.assertNotEqual(bios_root, root / "bios")
+            self.assertFalse(RomRepository(roms_root, bios_root).search_roms("mario"))
+
+    def test_seeded_mock_userdata_with_real_roms_keeps_real_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            seed_mock_userdata(root)
+            (root / "roms" / "dreamcast").mkdir(parents=True)
+            (root / "roms" / "dreamcast" / "Real Game.chd").write_bytes(b"REAL-ROM")
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "USERDATA_ROOT": str(root),
+                    "ROMS_ROOT": str(root / "roms"),
+                    "BIOS_ROOT": str(root / "bios"),
+                    "USE_FAKE_DATA": "false",
+                },
+                clear=True,
+            ):
+                settings = Settings.from_env()
+
+            roms_root, bios_root = _real_data_roots(settings)
+            self.assertEqual(roms_root, root / "roms")
+            self.assertEqual(bios_root, root / "bios")
+
+    def test_collect_rom_metadata_tolerates_missing_rom_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "USERDATA_ROOT": str(root),
+                    "ROMS_ROOT": str(root / "missing-roms"),
+                    "BIOS_ROOT": str(root / "bios"),
+                    "USE_FAKE_DATA": "false",
+                },
+                clear=True,
+            ):
+                settings = Settings.from_env()
+
+            result = _collect_rom_metadata(settings, RomRepository(settings.roms_root, settings.bios_root))
+            self.assertEqual(result["systems"], [])
+            self.assertEqual(result["roms"], [])
+
+    def test_sample_speed_uses_overmind_probe_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(Path(tmp) / "userdata")}, clear=True):
+                settings = Settings.from_env()
+
+            calls = []
+
+            def fake_raw_request(url, token=None, settings=None, data=None, content_type="application/octet-stream"):
+                calls.append((url, data))
+                if data is None:
+                    return b"0" * 262144
+                return b'{"bytes_received":262144}'
+
+            with mock.patch("app.drone_api._overmind_raw_request", side_effect=fake_raw_request):
+                sample = _sample_speed(settings, "https://overmind.local:8000", "drone-token")
+
+            self.assertEqual(sample["source"], "overmind-probe")
+            self.assertGreater(sample["download_mbps"], 0)
+            self.assertGreater(sample["upload_mbps"], 0)
+            self.assertEqual(len(calls), 2)
 
 
 class RepositoryTests(unittest.TestCase):
