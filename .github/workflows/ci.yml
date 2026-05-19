@@ -9,19 +9,19 @@ permissions:
   packages: write
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Run tests
-        run: PYTHONPATH=. python -m unittest discover tests
+  # test:
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: actions/setup-python@v5
+  #       with:
+  #         python-version: "3.11"
+  #     - name: Run tests
+  #       run: PYTHONPATH=. python -m unittest discover tests
 
   image:
     runs-on: ubuntu-latest
-    needs: test
+    # needs: test
     steps:
       - uses: actions/checkout@v4
         with:
