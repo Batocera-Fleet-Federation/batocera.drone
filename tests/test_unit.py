@@ -28,6 +28,8 @@ from app.drone_api import (
     _peer_ssl_diagnostic,
     _peer_trust_cafile,
     _download_rom_from_peer,
+    _collision_safe_target,
+    _rom_md5_exists,
 )
 from urllib.error import URLError
 
@@ -177,6 +179,55 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(contexts[0][2], ca_file)
             self.assertEqual((root / "roms" / "atari7800" / "Asteroids (USA).zip").read_bytes(), b"ROMDATA")
             fetch.assert_not_called()
+
+    def test_disk_rom_without_gamelist_is_listed_with_md5(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rom = root / "roms" / "snes" / "Loose Game (USA).zip"
+            rom.parent.mkdir(parents=True)
+            rom.write_bytes(b"loose-rom")
+            repo = RomRepository(root / "roms", root / "bios")
+
+            _, roms = repo.list_assets("snes", "roms")
+
+            self.assertEqual(len(roms), 1)
+            self.assertEqual(roms[0]["rom_path"], "Loose Game (USA).zip")
+            self.assertEqual(roms[0]["source"], "disk")
+            self.assertFalse(roms[0]["has_gamelist_entry"])
+            self.assertEqual(roms[0]["md5"], RomRepository.build_md5(rom))
+
+    def test_gamelist_metadata_enriches_matching_disk_rom_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            system = root / "roms" / "snes"
+            system.mkdir(parents=True)
+            (system / "Chrono Trigger (USA).zip").write_bytes(b"chrono")
+            (system / "gamelist.xml").write_text(
+                """<gameList>
+  <game><path>./Chrono Trigger (USA).zip</path><name>Chrono Trigger Deluxe</name></game>
+  <game><path>./Missing Game.zip</path><name>Missing Game</name></game>
+</gameList>""",
+                encoding="utf-8",
+            )
+            repo = RomRepository(root / "roms", root / "bios")
+
+            _, roms = repo.list_assets("snes", "roms")
+
+            self.assertEqual([rom["title"] for rom in roms], ["Chrono Trigger Deluxe"])
+            self.assertEqual(roms[0]["metadata_source"], "gamelist.xml")
+
+    def test_md5_identity_and_collision_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            system = root / "roms" / "snes"
+            system.mkdir(parents=True)
+            existing = system / "Asteroids (USA).zip"
+            existing.write_bytes(b"one")
+            (system / "Renamed Asteroids.zip").write_bytes(b"one")
+            repo = RomRepository(root / "roms", root / "bios")
+
+            self.assertTrue(_rom_md5_exists(repo, RomRepository.build_md5(existing)))
+            self.assertEqual(_collision_safe_target(system, "Asteroids (USA).zip").name, "Asteroids (USA) (2).zip")
 
     def test_gpu_info_tolerates_unavailable_detection(self) -> None:
         with mock.patch("app.drone_api.subprocess.run", side_effect=FileNotFoundError()):

@@ -58,7 +58,9 @@ EOF
 touch "$USERDATA_ROOT/system/logs/es_launch_stdout.log" "$USERDATA_ROOT/system/logs/es_launch_stderr.log"
 echo "launch emulator container=${DRONE_DEVICE_ID}" >> "$USERDATA_ROOT/system/logs/es_launch_stdout.log"
 
-if [[ ! -d "$ROM_SOURCE_ROOT" ]] || [[ -z "$(find "$ROM_SOURCE_ROOT" -mindepth 2 -type f -print -quit)" ]]; then
+if [[ "${DRONE_SKIP_ROM_SEED:-false}" == "true" ]]; then
+  echo "Skipping container ROM seeding for ${DRONE_DEVICE_ID}; using mounted /userdata/roms data."
+elif [[ ! -d "$ROM_SOURCE_ROOT" ]] || [[ -z "$(find "$ROM_SOURCE_ROOT" -mindepth 2 -type f -print -quit)" ]]; then
   cat >&2 <<EOF
 ERROR: No ROM files found at ${ROM_SOURCE_ROOT}.
 Mount the shared ROM source at ${ROM_SOURCE_ROOT}.
@@ -66,7 +68,7 @@ Expected layout: .github/data/roms/<system>/<files>
 Run .github/scripts/import-batocera-test-data.sh --generate-only first if the folder is empty.
 EOF
   exit 2
-fi
+else
 
 python - <<'PY'
 import hashlib
@@ -112,6 +114,7 @@ for system in sorted(systems):
 
 print(f"Seeded {len(selected)} ROM files for {device_id}: {', '.join(sorted(systems))}")
 PY
+fi
 
 export DRONE_APP_USERNAME="${DRONE_APP_USERNAME:-${ROM_API_USERNAME:-admin}}"
 export DRONE_APP_PASSWORD="${DRONE_APP_PASSWORD:-${ROM_API_PASSWORD:-changeme}}"

@@ -1389,11 +1389,27 @@ class RomRepository:
     @staticmethod
     def should_ignore_rom_file(file_name: str, system: Optional[str] = None) -> bool:
         lower = str(file_name or "").strip().lower()
-        if lower in {"_info.txt", "gamelist.xml", ".keep"}:
+        if lower.startswith(".") or lower in {"_info.txt", "gamelist.xml", ".keep", ".gitkeep", "readme.md"}:
             return True
         if lower.endswith(".sh.keys"):
             return True
+        ignored_extensions = {
+            ".xml", ".txt", ".md", ".nfo", ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp",
+            ".mp4", ".mkv", ".avi", ".mov", ".pdf", ".cue", ".m3u", ".json", ".db",
+        }
+        if lower.endswith(tuple(ignored_extensions)):
+            return True
         return False
+
+    @staticmethod
+    def should_ignore_rom_path(path: Path) -> bool:
+        ignored_dirs = {
+            "images", "videos", "manuals", "media", "downloaded_images", "covers",
+            "boxart", "fanart", "marquee", "thumbs", "screenshots",
+        }
+        if any(part.startswith(".") or part.lower() in ignored_dirs for part in path.parts):
+            return True
+        return RomRepository.should_ignore_rom_file(path.name)
 
     @staticmethod
     def iter_files(path: Path) -> Iterable[Path]:
@@ -1476,17 +1492,34 @@ class RomRepository:
                 )
             return items
 
-        for entry in self.iter_files(asset_dir):
-            if self.should_ignore_rom_file(entry.name, system=system):
+        for entry in sorted(asset_dir.rglob("*"), key=lambda p: p.relative_to(asset_dir).as_posix().lower()):
+            if not entry.is_file():
+                continue
+            relative_path = entry.relative_to(asset_dir).as_posix()
+            if self.should_ignore_rom_path(Path(relative_path)):
                 continue
             display_name = Path(entry.name).stem
             stat = entry.stat()
+            md5_value = self.build_md5(entry)
             items.append(
                 {
                     "unique_id": self.build_unique_id(entry),
                     "name": display_name,
                     "rom_file": entry.name,
+                    "filename": entry.name,
+                    "relative_path": relative_path,
+                    "absolute_path": str(entry.resolve()),
+                    "rom_path": relative_path,
+                    "file_path": relative_path,
                     "byte_count": stat.st_size,
+                    "size": stat.st_size,
+                    "file_size": stat.st_size,
+                    "modified_time": int(stat.st_mtime),
+                    "mtime": int(stat.st_mtime),
+                    "md5": md5_value,
+                    "rom_md5": md5_value,
+                    "source": "disk",
+                    "metadata_source": None,
                     "entry_type": "file",
                     "is_downloadable": (system_lower != "steam"),
                     "image_stem": display_name,
@@ -1502,12 +1535,14 @@ class RomRepository:
         for item in items:
             rom_file = str(item.get("rom_file") or item.get("name") or "")
             display_name = str(item.get("image_stem") or item.get("name") or "")
-            game = self._find_gamelist_entry(root, rom_file, display_name)
-            item["rom_path"] = _normalize_gamelist_rom_path(_text_or_empty(game, "path")) if game is not None else rom_file
+            relative_path = str(item.get("relative_path") or item.get("rom_path") or rom_file)
+            game = self._find_gamelist_entry_by_path(root, relative_path) or self._find_gamelist_entry(root, rom_file, display_name)
+            item["rom_path"] = relative_path
             item["title"] = _text_or_empty(game, "name") if game is not None else str(item.get("name") or display_name)
             item["existing"] = {field: _text_or_empty(game, field) if game is not None else "" for field in ARTWORK_FIELDS}
             item["gamelist"] = _gamelist_details(game)
             item["has_gamelist_entry"] = game is not None
+            item["metadata_source"] = "gamelist.xml" if game is not None else item.get("metadata_source")
         return items
 
     def get_system_dir(self, system: str) -> Path:
@@ -1543,7 +1578,7 @@ class RomRepository:
                 continue
 
             rom_count = len(self._list_rom_items(entry.name, target_dir))
-            if rom_count < 2:
+            if rom_count < 1:
                 continue
 
             systems.append({"name": entry.name, "rom_count": rom_count})
@@ -1572,6 +1607,7 @@ class RomRepository:
                         "unique_id": rom.get("unique_id", ""),
                         "is_downloadable": rom.get("is_downloadable", True),
                         "image_stem": rom.get("image_stem"),
+                        "md5": rom.get("md5") or rom.get("rom_md5"),
                     }
                 )
         return index
@@ -3059,8 +3095,8 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
     def _handle_rom_md5(self, system: str, unique_id: str) -> None:
         system_dir = self.repository.get_system_dir(system)
         rom = self.repository.find_rom_by_unique_id(system, unique_id)
-        rom_file = str(rom.get("rom_file") or rom.get("name") or "")
-        target = (system_dir / rom_file).resolve()
+        rom_path = str(rom.get("relative_path") or rom.get("rom_path") or rom.get("rom_file") or rom.get("name") or "")
+        target = (system_dir / rom_path).resolve()
         if not target.exists() or not target.is_file() or (target != system_dir and system_dir not in target.parents):
             raise FileNotFoundError()
         stat = target.stat()
@@ -6387,6 +6423,45 @@ def _rom_exists(repository: "RomRepository", system: str, relative_path: str) ->
         return False
 
 
+def _rom_md5_exists(repository: "RomRepository", expected_md5: Optional[str]) -> bool:
+    expected = str(expected_md5 or "").strip().lower()
+    if not expected:
+        return False
+    try:
+        for system in repository.list_systems():
+            system_name = str(system.get("name") or "").strip()
+            if not system_name:
+                continue
+            _, roms = repository.list_assets(system_name, "roms")
+            for rom in roms:
+                if str(rom.get("md5") or rom.get("rom_md5") or "").strip().lower() == expected:
+                    return True
+    except Exception:
+        return False
+    return False
+
+
+def _collision_safe_target(system_dir: Path, relative_path: str) -> Path:
+    system_dir = system_dir.resolve()
+    rel = _safe_rom_relative_path(relative_path)
+    requested = (system_dir / rel).resolve()
+    if requested == system_dir or system_dir not in requested.parents:
+        raise ValueError("invalid target path")
+    if not requested.exists():
+        return requested
+    parent = requested.parent
+    stem = requested.stem
+    suffix = requested.suffix
+    index = 2
+    while True:
+        candidate = (parent / f"{stem} ({index}){suffix}").resolve()
+        if candidate == system_dir or system_dir not in candidate.parents:
+            raise ValueError("invalid target path")
+        if not candidate.exists():
+            return candidate
+        index += 1
+
+
 def _best_peer_for_rom(settings: Settings, repository: "RomRepository", config: dict, system: str, relative_path: str) -> Optional[dict]:
     swarm = _read_json_file(_overmind_swarm_path_for_settings(settings), [])
     peer_checks = _read_json_file(_overmind_peer_results_path_for_settings(settings), [])
@@ -6416,25 +6491,23 @@ def _best_peer_for_rom(settings: Settings, repository: "RomRepository", config: 
     return candidates[0][2] if candidates else None
 
 
-def _download_rom_from_peer(settings: Settings, config: dict, peer: dict, system: str, relative_path: str, expected_size=None) -> dict:
+def _download_rom_from_peer(settings: Settings, config: dict, peer: dict, system: str, relative_path: str, expected_size=None, expected_md5=None) -> dict:
     peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
     address = _peer_address(peer)
     if not address:
         raise RuntimeError("selected peer has no address")
     rel = _safe_rom_relative_path(relative_path)
     url = f"{address}/v1/api/peer/roms/{quote(system, safe='')}/{quote(rel, safe='/')}"
-    target = (settings.roms_root / system / rel).resolve()
     system_dir = (settings.roms_root / system).resolve()
-    if target.exists():
-        raise FileExistsError("ROM already exists locally")
-    if system_dir not in target.parents:
-        raise ValueError("invalid target path")
+    target = _collision_safe_target(system_dir, rel)
     target.parent.mkdir(parents=True, exist_ok=True)
     cafile = _peer_trust_cafile(settings, peer_id=peer_id, config=config)
     if address.startswith("https://") and not cafile:
         raise ssl.SSLError(f"no trusted certificate cached for peer {peer_id}")
     context = _drone_client_ssl_context(settings, url, verify=bool(cafile), cafile=cafile)
-    started = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    started_dt = datetime.now(timezone.utc).replace(microsecond=0)
+    started = started_dt.isoformat()
+    started_mono = time.monotonic()
     bytes_written = 0
     request = Request(url, headers={"User-Agent": "batocera-drone-rom-sync/1.0"})
     try:
@@ -6479,17 +6552,32 @@ def _download_rom_from_peer(settings: Settings, config: dict, peer: dict, system
                 raise RuntimeError(f"size mismatch expected={expected_size} actual={bytes_written}")
         except ValueError:
             pass
+    actual_md5 = RomRepository.build_md5(target)
+    expected_md5_clean = str(expected_md5 or "").strip().lower()
+    if expected_md5_clean and actual_md5.lower() != expected_md5_clean:
+        if target.exists():
+            target.unlink()
+        raise RuntimeError(f"md5 mismatch expected={expected_md5_clean} actual={actual_md5}")
+    completed_dt = datetime.now(timezone.utc).replace(microsecond=0)
+    duration_ms = int((time.monotonic() - started_mono) * 1000)
     return {
         "source_drone_id": peer_id,
         "target_drone_id": settings.overmind_device_id,
         "system": system,
         "rom_name": rel,
+        "relative_path": target.relative_to(system_dir).as_posix(),
         "action": "download",
         "status": "completed",
         "bytes_transferred": bytes_written,
         "file_size": expected_size or bytes_written,
+        "md5": actual_md5,
+        "rom_md5": expected_md5_clean or actual_md5,
+        "download_started_at": started,
+        "download_completed_at": completed_dt.isoformat(),
         "started_at": started,
-        "completed_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "completed_at": completed_dt.isoformat(),
+        "duration_ms": duration_ms,
+        "duration_seconds": round(duration_ms / 1000, 3),
         "selected_peer_reason": "healthy peer with requested system and best sampled score",
     }
 
@@ -6540,21 +6628,59 @@ def _execute_overmind_action(settings: Settings, repository: "RomRepository", ac
         for item in requested:
             system = str(item.get("system_name") or item.get("system") or payload.get("system_name") or "").strip()
             rel = str(item.get("file_path") or item.get("rom_name") or "").strip()
+            expected_md5 = item.get("rom_md5") or item.get("md5")
             if not system or not rel:
                 continue
             sync_id = str(uuid.uuid4())
-            if _rom_exists(repository, system, rel):
-                activities.append({"sync_id": sync_id, "target_drone_id": settings.overmind_device_id, "system": system, "rom_name": rel, "action": "download", "status": "skipped", "failure_reason": "ROM already exists locally"})
+            started_wall = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+            started_mono = time.monotonic()
+            if expected_md5 and _rom_md5_exists(repository, expected_md5):
+                activities.append({
+                    "sync_id": sync_id,
+                    "target_drone_id": settings.overmind_device_id,
+                    "system": system,
+                    "rom_name": rel,
+                    "relative_path": rel,
+                    "action": "download",
+                    "status": "skipped",
+                    "failure_reason": "ROM md5 already exists locally",
+                    "rom_md5": expected_md5,
+                    "download_started_at": started_wall,
+                    "download_completed_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                    "duration_ms": int((time.monotonic() - started_mono) * 1000),
+                })
                 continue
             peer = _best_peer_for_rom(settings, repository, config, system, rel)
             if not peer:
                 failures += 1
-                activities.append({"sync_id": sync_id, "target_drone_id": settings.overmind_device_id, "system": system, "rom_name": rel, "action": "download", "status": "failed", "failure_reason": "No healthy source peer found"})
+                activities.append({
+                    "sync_id": sync_id,
+                    "target_drone_id": settings.overmind_device_id,
+                    "system": system,
+                    "rom_name": rel,
+                    "relative_path": rel,
+                    "action": "download",
+                    "status": "failed",
+                    "failure_reason": "No healthy source peer found",
+                    "rom_md5": expected_md5,
+                    "download_started_at": started_wall,
+                    "download_completed_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                    "duration_ms": int((time.monotonic() - started_mono) * 1000),
+                })
                 continue
             try:
-                activity = _download_rom_from_peer(settings, config, peer, system, rel, expected_size=item.get("file_size"))
+                activity = _download_rom_from_peer(settings, config, peer, system, rel, expected_size=item.get("file_size"), expected_md5=expected_md5)
                 activity["sync_id"] = sync_id
-                activity["rom_md5"] = item.get("rom_md5")
+                activity["rom_md5"] = activity.get("rom_md5") or expected_md5
+                refresh_started = time.monotonic()
+                try:
+                    _, refreshed = repository.list_assets(system, "roms")
+                    activity["inventory_refresh_status"] = "succeeded"
+                    activity["inventory_refresh_count"] = len(refreshed)
+                except Exception as refresh_error:
+                    activity["inventory_refresh_status"] = "failed"
+                    activity["inventory_refresh_error"] = str(refresh_error)
+                activity["inventory_refresh_duration_ms"] = int((time.monotonic() - refresh_started) * 1000)
                 activities.append(activity)
             except Exception as error:
                 failures += 1
@@ -6564,9 +6690,14 @@ def _execute_overmind_action(settings: Settings, repository: "RomRepository", ac
                     "target_drone_id": settings.overmind_device_id,
                     "system": system,
                     "rom_name": rel,
+                    "relative_path": rel,
                     "action": "download",
                     "status": "failed",
                     "failure_reason": str(error),
+                    "rom_md5": expected_md5,
+                    "download_started_at": started_wall,
+                    "download_completed_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                    "duration_ms": int((time.monotonic() - started_mono) * 1000),
                 })
         result = {"type": "rom_sync", "activity": activities}
         if failures and failures == len(activities):
