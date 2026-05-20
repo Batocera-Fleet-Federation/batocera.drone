@@ -30,6 +30,7 @@ from app.drone_api import (
     _download_rom_from_peer,
     _collision_safe_target,
     _rom_md5_exists,
+    _execute_overmind_action,
 )
 from urllib.error import URLError
 
@@ -228,6 +229,19 @@ class SettingsTests(unittest.TestCase):
 
             self.assertTrue(_rom_md5_exists(repo, RomRepository.build_md5(existing)))
             self.assertEqual(_collision_safe_target(system, "Asteroids (USA).zip").name, "Asteroids (USA) (2).zip")
+
+    def test_legacy_shutdown_action_is_rejected_without_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
+                settings = Settings.from_env()
+            repo = RomRepository(root / "roms", root / "bios")
+            with mock.patch("app.drone_api.subprocess.Popen") as popen:
+                status, message, result = _execute_overmind_action(settings, repo, {"action": "shutdown"})
+            self.assertEqual(status, "failed")
+            self.assertIn("disabled", message)
+            self.assertIsNone(result)
+            popen.assert_not_called()
 
     def test_gpu_info_tolerates_unavailable_detection(self) -> None:
         with mock.patch("app.drone_api.subprocess.run", side_effect=FileNotFoundError()):

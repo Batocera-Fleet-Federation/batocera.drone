@@ -111,7 +111,7 @@ Drone calls Overmind every 60 seconds by default. The alive payload includes the
 
 Overmind responds with the current swarm list. Drone stores that list locally, skips itself, and checks each other Drone with a short API health request. The admin Overmind page shows whether the last peer check passed or failed, when it was checked, and the failure reason if there was one.
 
-Actions use a pull model because Overmind usually cannot connect inward to a Drone on a home network. The Overlord queues an action in Overmind, the Drone receives it during alive polling, performs the local work, then posts the result back to Overmind. Restart, shutdown, and update are simulated in fake/demo mode.
+Actions use a pull model because Overmind usually cannot connect inward to a Drone on a home network. The Overlord queues actions in Overmind, the Drone receives the current pending batch during alive polling, performs each action sequentially, then posts each result back to Overmind. Restart and update are simulated in fake/demo mode. Remote shutdown is not supported; legacy shutdown actions are rejected without execution.
 
 Drone also reports live events to Overmind. These include filesystem create/update/delete events for watched ROM/config/artwork/log paths, ROM/library changes, gameplay activity when available, and speed samples. The first speed sample is sent soon after startup, then every 5 minutes by default.
 

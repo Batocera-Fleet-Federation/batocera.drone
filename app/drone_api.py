@@ -6705,12 +6705,7 @@ def _execute_overmind_action(settings: Settings, repository: "RomRepository", ac
         return "completed", f"ROM sync processed {len(activities)} item(s) with {failures} failure(s).", result
 
     if action_name == "shutdown":
-        if settings.use_fake_data:
-            return "completed", "Simulated shutdown action because USE_FAKE_DATA is enabled.", None
-        if not shutil.which("shutdown"):
-            return "failed", "shutdown command was not found", None
-        subprocess.Popen(["shutdown", "-h", "now"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return "completed", "Shutdown command issued.", None
+        return "failed", "Unsupported action: shutdown is disabled by Overmind safety policy.", None
 
     if action_name == "restart":
         if settings.use_fake_data:
@@ -6855,25 +6850,38 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                     _overmind_post_json(f"{base_url}/api/devices/{device_id}/events", event, token=token, settings=settings)
                 fs_snapshot = next_fs_snapshot
 
-                action = response.get("action")
-                if not isinstance(action, dict):
+                actions = response.get("actions") if isinstance(response.get("actions"), list) else None
+                if actions is None:
+                    legacy_action = response.get("action")
+                    actions = [legacy_action] if isinstance(legacy_action, dict) else []
+                actions = [action for action in actions if isinstance(action, dict)]
+                if not actions:
                     time.sleep(poll_seconds)
                     continue
 
-                status_value, message, result = _execute_overmind_action(settings, repository, action)
-                _record_processed_overmind_action(settings, action, status_value, message, result)
-                print(
-                    f"Processed Overmind action {action.get('action')} ({action.get('id')}): {status_value} - {message}",
-                    file=sys.stdout,
-                    flush=True,
-                )
-                action_id = quote(str(action.get("id") or ""), safe="")
-                if action_id:
-                    complete_url = f"{base_url}/api/devices/{device_id}/actions/{action_id}/complete"
-                    completion_payload = {"status": status_value, "message": message}
-                    if result is not None:
-                        completion_payload["result"] = result
-                    _overmind_post_json(complete_url, completion_payload, token=token, settings=settings)
+                print(f"Processing {len(actions)} Overmind action(s) for {settings.overmind_device_id}", file=sys.stdout, flush=True)
+                for action in actions:
+                    status_value, message, result = _execute_overmind_action(settings, repository, action)
+                    _record_processed_overmind_action(settings, action, status_value, message, result)
+                    print(
+                        f"Processed Overmind action {action.get('action')} ({action.get('id')}): {status_value} - {message}",
+                        file=sys.stdout,
+                        flush=True,
+                    )
+                    action_id = quote(str(action.get("id") or ""), safe="")
+                    if action_id:
+                        complete_url = f"{base_url}/api/devices/{device_id}/actions/{action_id}/complete"
+                        completion_payload = {"status": status_value, "message": message}
+                        if result is not None:
+                            completion_payload["result"] = result
+                        try:
+                            _overmind_post_json(complete_url, completion_payload, token=token, settings=settings)
+                        except Exception as error:
+                            print(
+                                f"Failed to report Overmind action completion {action.get('id')}: {_format_overmind_error(error)}",
+                                file=sys.stderr,
+                                flush=True,
+                            )
             except (HTTPError, URLError) as error:
                 print(f"Overmind action poll failed: {_format_overmind_error(error)}", file=sys.stderr, flush=True)
             except (TimeoutError, OSError, ValueError, json.JSONDecodeError) as error:
