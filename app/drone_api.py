@@ -5856,6 +5856,23 @@ def _register_or_claim_overmind_token(settings: Settings, repository: "RomReposi
     return None
 
 
+def _reclaim_overmind_token_after_unauthorized(settings: Settings, repository: "RomRepository", config: dict, base_url: str, error: HTTPError) -> Optional[str]:
+    auth_token = str(config.get("overmind_auth_token") or "").strip()
+    if not auth_token:
+        return None
+    config.pop("overmind_token", None)
+    config["integration_state"] = "credential_reclaim"
+    config["last_error"] = _format_overmind_error(error)
+    config["notes"] = "Stored Drone bearer token was rejected; reclaiming with bound authorization token."
+    _save_overmind_runtime_config(settings, config)
+    print(
+        f"Overmind bearer token rejected for {settings.overmind_device_id}; reclaiming with bound authorization token.",
+        file=sys.stderr,
+        flush=True,
+    )
+    return _register_or_claim_overmind_token(settings, repository, config, base_url)
+
+
 def _fetch_peer_certificate(settings: Settings, config: dict, peer_id: str) -> Optional[Path]:
     base_url = str(config.get("overmind_url") or "").strip().rstrip("/")
     token = str(config.get("overmind_token") or "").strip()
@@ -6796,7 +6813,18 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                     "rom_metadata": rom_metadata_payload,
                 }
                 alive_url = f"{base_url}/api/devices/{device_id}/alive"
-                response = _overmind_post_json(alive_url, alive_payload, token=token, settings=settings)
+                try:
+                    response = _overmind_post_json(alive_url, alive_payload, token=token, settings=settings)
+                except HTTPError as error:
+                    if error.code == 401:
+                        replacement_token = _reclaim_overmind_token_after_unauthorized(settings, repository, config, base_url, error)
+                        if replacement_token:
+                            token = replacement_token
+                            response = _overmind_post_json(alive_url, alive_payload, token=token, settings=settings)
+                        else:
+                            raise
+                    else:
+                        raise
                 print(
                     f"ROM metadata sent to Overmind for {settings.overmind_device_id}: root={rom_metadata_payload.get('roms_root')} systems={len(rom_metadata_payload.get('systems') or [])} roms={len(rom_metadata_payload.get('roms') or [])}",
                     file=sys.stdout,

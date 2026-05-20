@@ -1,4 +1,5 @@
 import base64
+import io
 import socket
 import tempfile
 import unittest
@@ -31,8 +32,9 @@ from app.drone_api import (
     _collision_safe_target,
     _rom_md5_exists,
     _execute_overmind_action,
+    _reclaim_overmind_token_after_unauthorized,
 )
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 
 
 class BasicAuthTests(unittest.TestCase):
@@ -242,6 +244,37 @@ class SettingsTests(unittest.TestCase):
             self.assertIn("disabled", message)
             self.assertIsNone(result)
             popen.assert_not_called()
+
+    def test_reclaim_overmind_token_after_alive_unauthorized_uses_bound_auth_token(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root), "DRONE_DEVICE_ID": "bff-drone-a"}, clear=True):
+                settings = Settings.from_env()
+            config = {
+                "overmind_url": "https://bff-overmind:8000",
+                "overmind_auth_token": "onboarding-token",
+                "overmind_token": "stale-drone-token",
+            }
+            error = HTTPError(
+                "https://bff-overmind:8000/api/devices/bff-drone-a/alive",
+                401,
+                "Unauthorized",
+                {},
+                io.BytesIO(b'{"detail":"Invalid Drone token"}'),
+            )
+            with mock.patch("app.drone_api._register_or_claim_overmind_token", return_value="onboarding-token") as register:
+                token = _reclaim_overmind_token_after_unauthorized(
+                    settings,
+                    RomRepository(root / "roms", root / "bios"),
+                    config,
+                    "https://bff-overmind:8000",
+                    error,
+                )
+
+            self.assertEqual(token, "onboarding-token")
+            self.assertNotIn("overmind_token", config)
+            self.assertEqual(config["integration_state"], "credential_reclaim")
+            register.assert_called_once()
 
     def test_gpu_info_tolerates_unavailable_detection(self) -> None:
         with mock.patch("app.drone_api.subprocess.run", side_effect=FileNotFoundError()):
