@@ -4654,7 +4654,12 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             if token:
                 new_config = self._load_overmind_config()
             else:
-                new_config["integration_enabled"] = False
+                refreshed = self._load_overmind_config()
+                if refreshed.get("integration_state") == "pending_approval":
+                    new_config = refreshed
+                    new_config["integration_enabled"] = True
+                else:
+                    new_config["integration_enabled"] = False
         self._save_overmind_config(new_config)
         self._send_json(200, self._overmind_public_payload(new_config))
 
@@ -5850,6 +5855,7 @@ def _register_or_claim_overmind_token(settings: Settings, repository: "RomReposi
         print(f"Overmind onboarding approved for {settings.overmind_device_id}", file=sys.stdout, flush=True)
         return config["overmind_token"]
     config["integration_state"] = "pending_approval"
+    config["integration_enabled"] = True
     config["notes"] = response.get("message") or "Psionic connection detected. Awaiting Overlord approval."
     config["last_error"] = None
     _save_overmind_runtime_config(settings, config)

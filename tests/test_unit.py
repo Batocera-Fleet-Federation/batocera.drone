@@ -32,6 +32,7 @@ from app.drone_api import (
     _collision_safe_target,
     _rom_md5_exists,
     _execute_overmind_action,
+    _register_or_claim_overmind_token,
     _reclaim_overmind_token_after_unauthorized,
 )
 from urllib.error import HTTPError, URLError
@@ -275,6 +276,37 @@ class SettingsTests(unittest.TestCase):
             self.assertNotIn("overmind_token", config)
             self.assertEqual(config["integration_state"], "credential_reclaim")
             register.assert_called_once()
+
+    def test_pending_overmind_approval_keeps_integration_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root), "DRONE_DEVICE_ID": "bff-drone-a"}, clear=True):
+                settings = Settings.from_env()
+            config = {
+                "overmind_url": "https://bff-overmind:8000",
+                "overmind_email": "overlord@example.com",
+                "overmind_auth_token": "onboarding-token",
+                "integration_enabled": True,
+            }
+            with mock.patch(
+                "app.drone_api._overmind_post_json",
+                return_value={
+                    "status": "pending",
+                    "message": "Psionic connection detected. Awaiting Overlord approval.",
+                },
+            ):
+                token = _register_or_claim_overmind_token(
+                    settings,
+                    RomRepository(root / "roms", root / "bios"),
+                    config,
+                    "https://bff-overmind:8000",
+                )
+
+            self.assertIsNone(token)
+            saved = _load_overmind_config_for_settings(settings)
+            self.assertTrue(saved.get("integration_enabled"))
+            self.assertEqual(saved.get("integration_state"), "pending_approval")
+            self.assertEqual(saved.get("overmind_auth_token"), "onboarding-token")
 
     def test_gpu_info_tolerates_unavailable_detection(self) -> None:
         with mock.patch("app.drone_api.subprocess.run", side_effect=FileNotFoundError()):
