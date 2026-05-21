@@ -294,6 +294,11 @@ class ApiRoutesMixin:
                 self._send_json(403, {"error": "admin disabled"})
                 return
 
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "credentials" and parts[2] == "update":
+                payload = self._read_json_body()
+                self._handle_admin_credentials_update(payload)
+                return
+
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "integrations" and parts[2] == "overmind" and parts[3] == "config":
                 payload = self._read_json_body()
                 self._handle_admin_overmind_config(payload)

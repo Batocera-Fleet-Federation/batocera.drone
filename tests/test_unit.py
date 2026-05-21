@@ -11,6 +11,7 @@ from app.drone_api import (
     FAKE_OVERMIND_EMAIL,
     FAKE_OVERMIND_TOKEN,
     BasicAuth,
+    DroneCredentialStore,
     LaunchBoxClient,
     RomRepository,
     Settings,
@@ -49,6 +50,22 @@ class BasicAuthTests(unittest.TestCase):
         token = base64.b64encode(b"admin:wrong").decode("ascii")
         self.assertFalse(auth.check(f"Basic {token}"))
         self.assertFalse(auth.check(None))
+
+    def test_default_drone_credentials_and_hashed_update(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = DroneCredentialStore(Path(tmp) / "credentials.json")
+            auth = BasicAuth(None, None, credential_store=store)
+            default_token = base64.b64encode(b"batocera:linux").decode("ascii")
+            self.assertTrue(auth.check(f"Basic {default_token}"))
+
+            result = store.update("arcade-admin", "BetterPass123")
+            self.assertTrue(result["stored"])
+            saved = (Path(tmp) / "credentials.json").read_text(encoding="utf-8")
+            self.assertIn("password_hash", saved)
+            self.assertNotIn("BetterPass123", saved)
+            self.assertFalse(auth.check(f"Basic {default_token}"))
+            updated_token = base64.b64encode(b"arcade-admin:BetterPass123").decode("ascii")
+            self.assertTrue(auth.check(f"Basic {updated_token}"))
 
 
 class SettingsTests(unittest.TestCase):

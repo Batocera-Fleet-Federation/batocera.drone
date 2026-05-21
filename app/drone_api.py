@@ -1,10 +1,12 @@
 import base64
+import hmac
 import html
 import hashlib
 import ipaddress
 import json
 import os
 import re
+import secrets
 import shutil
 import socket
 import ssl
@@ -902,6 +904,7 @@ class Settings:
     bios_root: Path
     username: Optional[str]
     password: Optional[str]
+    credentials_file: Path
     https_port: int
 
     image_cache_ttl_seconds: int
@@ -964,6 +967,7 @@ class Settings:
             bios_root=Path(os.environ.get("BIOS_ROOT", "/userdata/bios")),
             username=os.environ.get("DRONE_APP_USERNAME") or None,
             password=os.environ.get("DRONE_APP_PASSWORD") or None,
+            credentials_file=Path(os.environ.get("DRONE_CREDENTIALS_FILE", str(userdata_root / "system" / "drone-app" / "credentials.json"))),
             https_port=int(https_port_value),
             image_cache_ttl_seconds=int(os.environ.get("IMAGE_CACHE_TTL_SECONDS", "3600")),
             image_miss_cache_ttl_seconds=int(os.environ.get("IMAGE_MISS_CACHE_TTL_SECONDS", "300")),
@@ -1112,14 +1116,80 @@ def _configure_rotating_logs(settings: Settings) -> None:
     )
 
 
+class DroneCredentialStore:
+    DEFAULT_USERNAME = "batocera"
+    DEFAULT_PASSWORD = "linux"
+
+    def __init__(self, path: Path, env_username: Optional[str] = None, env_password: Optional[str] = None):
+        self.path = path
+        self.env_username = env_username
+        self.env_password = env_password
+        self._lock = Lock()
+
+    def _hash_password(self, password: str, salt: Optional[str] = None) -> str:
+        salt_value = salt or secrets.token_hex(16)
+        digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt_value.encode("ascii"), 240000)
+        return f"pbkdf2_sha256$240000${salt_value}${digest.hex()}"
+
+    def _verify_hash(self, password: str, stored: str) -> bool:
+        try:
+            scheme, rounds, salt, digest = stored.split("$", 3)
+            if scheme != "pbkdf2_sha256":
+                return False
+            candidate = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("ascii"), int(rounds))
+            return hmac.compare_digest(candidate.hex(), digest)
+        except Exception:
+            return False
+
+    def load(self) -> dict:
+        if self.path.exists():
+            try:
+                data = json.loads(self.path.read_text(encoding="utf-8"))
+                if data.get("username") and data.get("password_hash"):
+                    return data
+            except Exception:
+                pass
+        username = self.env_username or self.DEFAULT_USERNAME
+        password = self.env_password or self.DEFAULT_PASSWORD
+        return {"username": username, "password_plain_fallback": password, "source": "default"}
+
+    def check(self, username: str, password: str) -> bool:
+        data = self.load()
+        if not hmac.compare_digest(username, str(data.get("username") or "")):
+            return False
+        password_hash = data.get("password_hash")
+        if password_hash:
+            return self._verify_hash(password, str(password_hash))
+        return hmac.compare_digest(password, str(data.get("password_plain_fallback") or ""))
+
+    def update(self, username: str, password: str) -> dict:
+        username = username.strip()
+        if not re.fullmatch(r"[A-Za-z0-9._@-]{3,64}", username):
+            raise ValueError("username must be 3-64 characters using letters, numbers, dot, dash, underscore, or @")
+        if len(password) < 8:
+            raise ValueError("password must be at least 8 characters")
+        with self._lock:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            data = {
+                "username": username,
+                "password_hash": self._hash_password(password),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            temp_path = self.path.with_suffix(self.path.suffix + ".tmp")
+            temp_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+            os.chmod(temp_path, 0o600)
+            temp_path.replace(self.path)
+            os.chmod(self.path, 0o600)
+            return {"username": username, "updated_at": data["updated_at"], "stored": True}
+
+
 class BasicAuth:
-    def __init__(self, username: Optional[str], password: Optional[str]):
+    def __init__(self, username: Optional[str], password: Optional[str], credential_store: Optional[DroneCredentialStore] = None):
         self.username = username
         self.password = password
+        self.credential_store = credential_store
 
     def check(self, header_value: Optional[str]) -> bool:
-        if not self.username or not self.password:
-            return True
         if not header_value or not header_value.startswith("Basic "):
             return False
 
@@ -1127,6 +1197,10 @@ class BasicAuth:
             encoded = header_value.split(" ", 1)[1].strip()
             decoded = base64.b64decode(encoded).decode("utf-8")
             user, pw = decoded.split(":", 1)
+            if self.credential_store:
+                return self.credential_store.check(user, pw)
+            if not self.username or not self.password:
+                return True
             return user == self.username and pw == self.password
         except Exception:
             return False
@@ -4607,6 +4681,14 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         config = self._load_overmind_config()
         self._send_json(200, self._overmind_public_payload(config))
 
+    def _handle_admin_credentials_update(self, payload: dict) -> None:
+        username = str(payload.get("username") or "").strip()
+        password = str(payload.get("password") or "")
+        if not getattr(self.auth, "credential_store", None):
+            raise ValueError("credential storage is not available")
+        result = self.auth.credential_store.update(username, password)
+        self._send_json(200, {"credentials": result, "message": "Drone credentials updated."})
+
     def _handle_admin_overmind_config(self, payload: dict) -> None:
         raw_url = str(payload.get("overmind_url") or "").strip()
         raw_email = str(payload.get("overmind_email") or "").strip()
@@ -5625,6 +5707,8 @@ def _looks_like_pure_mock_userdata(userdata_root: Path) -> bool:
 
 
 def _real_data_roots(settings: Settings) -> Tuple[Path, Path]:
+    if os.environ.get("ROMS_ROOT") or os.environ.get("BIOS_ROOT"):
+        return settings.roms_root, settings.bios_root
     if settings.use_fake_data or not _looks_like_pure_mock_userdata(settings.userdata_root):
         return settings.roms_root, settings.bios_root
     empty_root = settings.userdata_root / "system" / "drone-app" / "real-data-empty"
@@ -6936,7 +7020,8 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
         bios_root,
         rom_search_cache_ttl_seconds=settings.rom_search_cache_ttl_seconds,
     )
-    auth = BasicAuth(settings.username, settings.password)
+    credential_store = DroneCredentialStore(settings.credentials_file, settings.username, settings.password)
+    auth = BasicAuth(settings.username, settings.password, credential_store=credential_store)
     cert_state = DroneCertificateManager(settings).ensure_certificate()
     if cert_state.get("error"):
         message = f"Drone certificate setup: {cert_state.get('error')}"
@@ -6966,6 +7051,7 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
     )
 
     server = ThreadingHTTPServer(("0.0.0.0", settings.https_port), handler_factory)
+    server.auth = auth  # type: ignore[attr-defined]
 
     if not settings.http_only:
         if settings.drone_mtls_mode == "managed" and not (settings.drone_cert_file.exists() and settings.drone_key_file.exists()):
@@ -7002,7 +7088,10 @@ def main() -> None:
     _configure_rotating_logs(settings)
     server = create_server(settings)
     print(f"Log files: {settings.log_dir / settings.stdout_log_file}, {settings.log_dir / settings.stderr_log_file}")
-    print(f"Auth username: {settings.username}")
+    server_auth = getattr(server, "auth", None)
+    credential_store = getattr(server_auth, "credential_store", None)
+    safe_username = credential_store.load().get("username") if credential_store else settings.username
+    print(f"Auth username: {safe_username}")
     scheme = "http" if settings.http_only else "https"
     print(f"Serving Drone App on {scheme}://0.0.0.0:{settings.https_port}")
     server.serve_forever()
