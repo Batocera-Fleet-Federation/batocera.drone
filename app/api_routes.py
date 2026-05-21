@@ -309,6 +309,18 @@ class ApiRoutesMixin:
                 self._handle_admin_overmind_start(payload)
                 return
 
+            if len(parts) == 5 and parts[0] == "admin" and parts[1] == "integrations" and parts[2] == "overmind" and parts[3] == "swarm" and parts[4] == "connect":
+                self._handle_admin_overmind_swarm_connect()
+                return
+
+            if len(parts) == 5 and parts[0] == "admin" and parts[1] == "integrations" and parts[2] == "overmind" and parts[3] == "swarm" and parts[4] == "disconnect":
+                self._handle_admin_overmind_swarm_disconnect()
+                return
+
+            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "api" and parts[2] == "certificate" and parts[3] == "rotate":
+                self._handle_admin_api_certificate_rotate()
+                return
+
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "artwork" and parts[2] == "launchbox" and parts[3] == "apply":
                 payload = self._read_json_body()
                 self._handle_admin_launchbox_apply(payload)

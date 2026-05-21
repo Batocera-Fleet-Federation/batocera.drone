@@ -263,7 +263,7 @@ class SettingsTests(unittest.TestCase):
             self.assertIsNone(result)
             popen.assert_not_called()
 
-    def test_reclaim_overmind_token_after_alive_unauthorized_uses_bound_auth_token(self) -> None:
+    def test_reclaim_overmind_token_after_heartbeat_unauthorized_uses_bound_auth_token(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root), "DRONE_DEVICE_ID": "bff-drone-a"}, clear=True):
@@ -274,7 +274,7 @@ class SettingsTests(unittest.TestCase):
                 "overmind_token": "stale-drone-token",
             }
             error = HTTPError(
-                "https://bff-overmind:8000/api/devices/bff-drone-a/alive",
+                "https://bff-overmind:8000/api/devices/bff-drone-a/heartbeat",
                 401,
                 "Unauthorized",
                 {},

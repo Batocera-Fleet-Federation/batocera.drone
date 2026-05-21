@@ -3107,6 +3107,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             "configured": bool(config.get("overmind_url")) and bool(token or auth_token),
             "integration_enabled": bool(config.get("integration_enabled")),
             "integration_state": str(config.get("integration_state") or "not_started"),
+            "swarm_connection_status": str(config.get("swarm_connection_status") or ("connected" if token and config.get("integration_enabled") else ("pending approval" if str(config.get("integration_state") or "") == "pending_approval" else "disconnected"))),
             "requested_at": config.get("requested_at"),
             "last_started_at": config.get("last_started_at"),
             "last_error": config.get("last_error"),
@@ -4728,7 +4729,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         new_config["requested_at"] = self._now_iso()
         new_config["integration_state"] = "configured"
         new_config["last_error"] = None
-        new_config["notes"] = "Configuration saved. Drone will report alive and collect Overmind actions on its polling interval."
+        new_config["notes"] = "Configuration saved. Drone will report heartbeat and collect Overmind actions on its polling interval."
         if new_config.get("overmind_auth_token"):
             base_url = str(new_config.get("overmind_url") or "").strip().rstrip("/")
             new_config["integration_enabled"] = True
@@ -4777,6 +4778,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
 
         config["integration_enabled"] = True
         config["integration_state"] = "polling"
+        config["swarm_connection_status"] = "connected"
         config["last_started_at"] = self._now_iso()
         config["last_error"] = None
         config["notes"] = (
@@ -4785,6 +4787,73 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         )
         self._save_overmind_config(config)
         self._send_json(200, self._overmind_public_payload(config))
+
+    def _handle_admin_overmind_swarm_connect(self) -> None:
+        config = self._load_overmind_config()
+        base_url = str(config.get("overmind_url") or "").strip().rstrip("/")
+        if not base_url:
+            raise ValueError("overmind_url is not configured")
+        if not str(config.get("overmind_auth_token") or "").strip():
+            raise ValueError("overmind authorization token is not configured")
+        config["integration_enabled"] = True
+        config["requested_at"] = self._now_iso()
+        config["integration_state"] = "approval_requested"
+        config["swarm_connection_status"] = "approval requested"
+        token = _register_or_claim_overmind_token(self.settings, self.repository, config, base_url)
+        refreshed = self._load_overmind_config()
+        self._send_json(200, self._overmind_public_payload(refreshed if token or refreshed else config))
+
+    def _handle_admin_overmind_swarm_disconnect(self) -> None:
+        config = self._load_overmind_config()
+        base_url = str(config.get("overmind_url") or "").strip().rstrip("/")
+        token = str(config.get("overmind_token") or "").strip()
+        if base_url and token:
+            try:
+                _overmind_post_json(f"{base_url}/api/devices/{quote(self.settings.overmind_device_id, safe='')}/disconnect", {}, token=token, settings=self.settings)
+            except Exception as error:
+                config["integration_state"] = "disconnect_failed"
+                config["swarm_connection_status"] = "disconnect failed"
+                config["last_error"] = _format_overmind_error(error)
+                self._save_overmind_config(config)
+                self._send_json(502, self._overmind_public_payload(config))
+                return
+        config.pop("overmind_token", None)
+        config["integration_enabled"] = False
+        config["integration_state"] = "disconnected"
+        config["swarm_connection_status"] = "disconnected"
+        config["notes"] = "Drone disconnected from its Overmind swarm."
+        self._save_overmind_config(config)
+        _write_json_file(self._overmind_swarm_path(), [])
+        self._send_json(200, self._overmind_public_payload(config))
+
+    def _handle_admin_api_certificate_rotate(self) -> None:
+        config = self._load_overmind_config()
+        base_url = str(config.get("overmind_url") or "").strip().rstrip("/")
+        token = str(config.get("overmind_token") or "").strip()
+        if not base_url or not token:
+            raise ValueError("approved Overmind connection is required before certificate rotation")
+        manager = DroneCertificateManager(self.settings)
+        csr = manager.generate_rotation_csr()
+        try:
+            signed = _overmind_post_json(
+                f"{base_url}/api/devices/{quote(self.settings.overmind_device_id, safe='')}/certificate/sign",
+                {"csr_pem": csr["csr_pem"], "days": max(1, int(self.settings.drone_cert_days))},
+                token=token,
+                settings=self.settings,
+            )
+            metadata = manager.install_signed_certificate(
+                str(signed.get("certificate_pem") or ""),
+                csr["pending_key"],
+                str(signed.get("ca_certificate_pem") or "") or None,
+            )
+            self._send_json(200, {"status": "rotated", "certificate": metadata})
+        except Exception as error:
+            try:
+                csr["pending_key"].unlink(missing_ok=True)
+                csr["pending_csr"].unlink(missing_ok=True)
+            except Exception:
+                pass
+            self._send_json(502, {"status": "failed", "error": _format_overmind_error(error), "certificate": manager.metadata()})
 
     def _handle_admin_config(self, config_source: str, max_bytes: int, output_format: str = "json") -> None:
         from pathlib import Path
@@ -5489,6 +5558,48 @@ class DroneCertificateManager:
         except (FileNotFoundError, subprocess.CalledProcessError) as error:
             raise RuntimeError(f"failed to generate Drone certificate with openssl: {error}") from error
 
+    def generate_rotation_csr(self) -> dict:
+        cert_file = self.settings.drone_cert_file
+        key_file = self.settings.drone_key_file
+        pending_key = key_file.with_suffix(key_file.suffix + ".pending")
+        pending_csr = cert_file.with_suffix(cert_file.suffix + ".csr")
+        cert_file.parent.mkdir(parents=True, exist_ok=True)
+        identity = re.sub(r"[^A-Za-z0-9_.:-]+", "-", self.settings.overmind_device_id).strip("-") or "drone"
+        common_name = f"batocera-drone-{identity}"
+        alt_names = ["DNS:localhost", "IP:127.0.0.1"]
+        for override in _hostname_override_values(self.settings):
+            alt_names.append(f"IP:{override.strip('[]')}" if _is_ip_literal(override) else f"DNS:{override}")
+        for ip in _get_local_certificate_ips():
+            alt_names.append(f"IP:{ip}")
+        command = [
+            "openssl", "req", "-nodes", "-newkey", "rsa:2048",
+            "-keyout", str(pending_key), "-out", str(pending_csr),
+            "-subj", f"/CN={common_name}",
+            "-addext", f"subjectAltName={','.join(dict.fromkeys(alt_names))}",
+            "-addext", "extendedKeyUsage=serverAuth,clientAuth",
+        ]
+        subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        os.chmod(pending_key, 0o600)
+        return {"csr_pem": pending_csr.read_text(encoding="utf-8"), "pending_key": pending_key, "pending_csr": pending_csr}
+
+    def install_signed_certificate(self, certificate_pem: str, pending_key: Path, ca_certificate_pem: Optional[str] = None) -> dict:
+        cert_file = self.settings.drone_cert_file
+        key_file = self.settings.drone_key_file
+        pending_cert = cert_file.with_suffix(cert_file.suffix + ".signed")
+        pending_cert.write_text(certificate_pem, encoding="utf-8")
+        ssl.PEM_cert_to_DER_cert(certificate_pem)
+        if not pending_key.exists():
+            raise RuntimeError("pending private key is missing")
+        pending_key.replace(key_file)
+        pending_cert.replace(cert_file)
+        os.chmod(key_file, 0o600)
+        os.chmod(cert_file, 0o644)
+        if ca_certificate_pem:
+            ca_file = cert_file.with_name("overmind-ca.crt")
+            ca_file.write_text(ca_certificate_pem, encoding="utf-8")
+            os.chmod(ca_file, 0o644)
+        return self.metadata()
+
     def metadata(self) -> dict:
         cert_file = self.settings.drone_cert_file
         if not cert_file.exists():
@@ -5844,6 +5955,18 @@ def _overmind_get_json(url: str, token: Optional[str] = None, settings: Optional
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _overmind_delete_json(url: str, token: Optional[str] = None, settings: Optional[Settings] = None) -> dict:
+    headers = {"Accept": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = Request(url, headers=headers, method="DELETE")
+    context = _drone_client_ssl_context(settings, url) if settings else (ssl._create_unverified_context() if url.startswith("https://") else None)
+    with urlopen(request, timeout=10, context=context) as response:
+        raw = response.read()
+    parsed = json.loads(raw.decode("utf-8")) if raw else {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def _overmind_raw_request(
     url: str,
     token: Optional[str] = None,
@@ -5933,12 +6056,14 @@ def _register_or_claim_overmind_token(settings: Settings, repository: "RomReposi
         config["overmind_token"] = str(response["drone_token"])
         config["integration_enabled"] = True
         config["integration_state"] = "polling"
+        config["swarm_connection_status"] = "connected"
         config["last_error"] = None
         config["notes"] = "Drone approved by Overmind and polling is active."
         _save_overmind_runtime_config(settings, config)
         print(f"Overmind onboarding approved for {settings.overmind_device_id}", file=sys.stdout, flush=True)
         return config["overmind_token"]
     config["integration_state"] = "pending_approval"
+    config["swarm_connection_status"] = "pending approval"
     config["integration_enabled"] = True
     config["notes"] = response.get("message") or "Psionic connection detected. Awaiting Overlord approval."
     config["last_error"] = None
@@ -6080,7 +6205,7 @@ def _check_peer(settings: Settings, peer: dict, config: Optional[dict] = None) -
 
 
 def _get_local_ip_addresses() -> dict:
-    """Resolve local IPv4/IPv6 addresses for Overmind alive pings."""
+    """Resolve local IPv4/IPv6 addresses for Overmind heartbeat pings."""
     ipv4: List[str] = []
     ipv6: List[str] = []
 
@@ -6891,7 +7016,7 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                     system_info_payload = _collect_system_info_payload(settings)
                     last_system_info_at = now
                 network_payload = _drone_network_payload(settings)
-                alive_payload = {
+                heartbeat_payload = {
                     "device_id": settings.overmind_device_id,
                     "network": network_payload,
                     "rom_systems": rom_systems,
@@ -6902,15 +7027,15 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                     "system_info": system_info_payload,
                     "rom_metadata": rom_metadata_payload,
                 }
-                alive_url = f"{base_url}/api/devices/{device_id}/alive"
+                heartbeat_url = f"{base_url}/api/devices/{device_id}/heartbeat"
                 try:
-                    response = _overmind_post_json(alive_url, alive_payload, token=token, settings=settings)
+                    response = _overmind_post_json(heartbeat_url, heartbeat_payload, token=token, settings=settings)
                 except HTTPError as error:
                     if error.code == 401:
                         replacement_token = _reclaim_overmind_token_after_unauthorized(settings, repository, config, base_url, error)
                         if replacement_token:
                             token = replacement_token
-                            response = _overmind_post_json(alive_url, alive_payload, token=token, settings=settings)
+                            response = _overmind_post_json(heartbeat_url, heartbeat_payload, token=token, settings=settings)
                         else:
                             raise
                     else:

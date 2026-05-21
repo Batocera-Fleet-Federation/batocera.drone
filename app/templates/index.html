@@ -3229,6 +3229,8 @@ async function renderOvermindIntegrationPage() {
         </div>
         <div class="d-flex gap-2">
           <button id="overmindSaveBtn" class="btn btn-primary" type="button">Save Configuration</button>
+          <button id="overmindConnectBtn" class="btn btn-outline-success" type="button">Connect to Swarm</button>
+          <button id="overmindDisconnectBtn" class="btn btn-outline-danger" type="button">Disconnect Swarm</button>
         </div>
         <hr>
         <div class="small" id="overmindStatus"></div>
@@ -3250,6 +3252,8 @@ async function renderOvermindIntegrationPage() {
   const emailInput = document.getElementById("overmindEmailInput");
   const authTokenInput = document.getElementById("overmindAuthTokenInput");
   const saveBtn = document.getElementById("overmindSaveBtn");
+  const connectBtn = document.getElementById("overmindConnectBtn");
+  const disconnectBtn = document.getElementById("overmindDisconnectBtn");
   const refreshBtn = document.getElementById("overmindRefreshBtn");
   const actionsRefreshBtn = document.getElementById("overmindActionsRefreshBtn");
   const actionsBody = document.getElementById("overmindActionsBody");
@@ -3259,6 +3263,7 @@ async function renderOvermindIntegrationPage() {
     const configured = status.configured ? "yes" : "no";
     const enabled = status.integration_enabled ? "yes" : "no";
     const state = status.integration_state || "not_started";
+    const swarmStatus = status.swarm_connection_status || "disconnected";
     const requestedAt = status.requested_at || "n/a";
     const startedAt = status.last_started_at || "n/a";
     const errorMsg = status.last_error || "none";
@@ -3269,10 +3274,14 @@ async function renderOvermindIntegrationPage() {
     const swarm = payload.swarm || [];
     const peerChecks = payload.peer_checks || [];
     statusEl.innerHTML = `
+      <div class="d-flex flex-wrap gap-2 mb-2">
+        <span class="badge ${status.configured ? "text-bg-success" : "text-bg-secondary"}">Overmind: ${status.configured ? "linked" : "disconnected"}</span>
+        <span class="badge ${swarmStatus === "connected" ? "text-bg-success" : swarmStatus.includes("pending") || swarmStatus.includes("requested") ? "text-bg-warning" : "text-bg-secondary"}">Connected to Swarm: ${escapeHtml(swarmStatus)}</span>
+      </div>
       <div><strong>Configured:</strong> ${escapeHtml(configured)}</div>
       <div><strong>Integration Enabled:</strong> ${escapeHtml(enabled)}</div>
       <div><strong>Machine ID:</strong> ${escapeHtml(machineId)}</div>
-      <div><strong>Action Polling:</strong> Drone sends an alive request and receives one pending action per poll.</div>
+      <div><strong>Action Polling:</strong> Drone sends a heartbeat request and receives one pending action per poll.</div>
       <div><strong>State:</strong> ${escapeHtml(state)}</div>
       <div><strong>Email:</strong> ${escapeHtml(emailValue)}</div>
       <div><strong>Authorization Token:</strong> ${escapeHtml(authTokenMask)}</div>
@@ -3366,6 +3375,31 @@ async function renderOvermindIntegrationPage() {
       setLoading(false);
     }
   });
+  connectBtn.addEventListener("click", async () => {
+    setLoading(true, "Requesting swarm approval...");
+    try {
+      const payload = await apiPost("/admin/integrations/overmind/swarm/connect", {});
+      renderStatus(payload);
+      showToast("Swarm connection requested.", "success");
+    } catch (err) {
+      showToast(escapeHtml(err.message || "Failed to connect swarm"), "danger");
+    } finally {
+      setLoading(false);
+    }
+  });
+  disconnectBtn.addEventListener("click", async () => {
+    if (!window.confirm("Disconnect this Drone from its Overmind swarm?")) return;
+    setLoading(true, "Disconnecting from swarm...");
+    try {
+      const payload = await apiPost("/admin/integrations/overmind/swarm/disconnect", {});
+      renderStatus(payload);
+      showToast("Disconnected from swarm.", "success");
+    } catch (err) {
+      showToast(escapeHtml(err.message || "Failed to disconnect swarm"), "danger");
+    } finally {
+      setLoading(false);
+    }
+  });
   refreshBtn.addEventListener("click", async () => {
     setLoading(true, "Loading Overmind status...");
     try {
@@ -3424,6 +3458,7 @@ async function renderApiAdminPage() {
             <a class="btn btn-primary" href="${escapeHtml(payload.swagger_url || `${API_BASE}/swagger`)}" target="_blank" rel="noopener noreferrer"><i class="bi bi-braces me-1"></i>Open Swagger</a>
             <a class="btn btn-outline-primary" href="${escapeHtml(payload.openapi_url || `${API_BASE}/openapi.json`)}" target="_blank" rel="noopener noreferrer">Open OpenAPI JSON</a>
             <a class="btn btn-outline-primary" href="${escapeHtml(payload.certificate_download_url || `${API_BASE}/admin/api/certificate`)}"><i class="bi bi-download me-1"></i>Download Public Certificate</a>
+            <button class="btn btn-outline-warning" type="button" id="rotateDroneCertBtn"><i class="bi bi-arrow-repeat me-1"></i>Rotate Drone Certificate</button>
           </div>
           <div class="alert alert-warning mb-0">Do not share Drone private key material. Store certificates safely, rotate them if exposed, and only call protected peer APIs from trusted systems.</div>
         </div>
@@ -3450,6 +3485,19 @@ async function renderApiAdminPage() {
         </div>
       </div>
     `;
+    document.getElementById("rotateDroneCertBtn")?.addEventListener("click", async () => {
+      if (!window.confirm("Rotate this Drone mTLS certificate through Overmind signing?")) return;
+      setLoading(true, "Rotating Drone certificate...");
+      try {
+        await apiPost("/admin/api/certificate/rotate", {});
+        showToast("Drone certificate rotated.", "success");
+        await renderApiAdminPage();
+      } catch (err) {
+        showToast(`Certificate rotation failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
+      } finally {
+        setLoading(false);
+      }
+    });
   } catch (err) {
     showToast(`Failed to load API status: ${escapeHtml(err.message || "unknown error")}`, "danger");
   } finally {
