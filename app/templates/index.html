@@ -647,7 +647,6 @@
         <span class="brand-mark"><i class="bi bi-controller"></i></span>
         <div>
           <div class="h5 mb-0 text-white">Batocera Drone</div>
-          <div id="machineIdNav" class="small text-white-50 machine-id-label">Machine ID loading...</div>
         </div>
       </div>
       <div class="nav-actions">
@@ -3817,6 +3816,14 @@ async function loadSystemInfoBar() {
       chips.push(`<span class="badge" style="background:rgba(52,211,153,0.15);color:#34d399;border-color:rgba(52,211,153,0.4)">Overmind: linked</span>`);
     } else {
       chips.push(`<span class="badge" style="background:rgba(239,68,68,0.15);color:#ef4444;border-color:rgba(239,68,68,0.4)">Overmind: disconnected</span>`);
+    }
+    try {
+      const overmindPayload = await api("/admin/integrations/overmind/status");
+      const swarmStatus = (overmindPayload.status || {}).swarm_connection_status || "disconnected";
+      const swarmConnected = String(swarmStatus).toLowerCase() === "connected";
+      chips.push(`<span class="badge" style="background:${swarmConnected ? "rgba(52,211,153,0.15)" : "rgba(239,68,68,0.15)"};color:${swarmConnected ? "#34d399" : "#ef4444"};border-color:${swarmConnected ? "rgba(52,211,153,0.4)" : "rgba(239,68,68,0.4)"}">Swarm: ${swarmConnected ? "Connected" : "Disconnected"}</span>`);
+    } catch (_) {
+      chips.push(`<span class="badge" style="background:rgba(239,68,68,0.15);color:#ef4444;border-color:rgba(239,68,68,0.4)">Swarm: Disconnected</span>`);
     }
     if (machineNav && machineId) machineNav.textContent = `Machine ID: ${machineId}`;
     if (!chips.length && lines.length) {
