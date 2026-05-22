@@ -229,6 +229,22 @@ class SettingsTests(unittest.TestCase):
             self.assertFalse(roms[0]["has_gamelist_entry"])
             self.assertEqual(roms[0]["md5"], RomRepository.build_md5(rom))
 
+    def test_rom_list_can_skip_md5_for_fast_ui_loads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rom = root / "roms" / "snes" / "Loose Game (USA).zip"
+            rom.parent.mkdir(parents=True)
+            rom.write_bytes(b"loose-rom")
+            repo = RomRepository(root / "roms", root / "bios")
+
+            with mock.patch.object(RomRepository, "build_md5", side_effect=AssertionError("should not hash")):
+                _, roms = repo.list_assets("snes", "roms", include_md5=False)
+
+            self.assertEqual(len(roms), 1)
+            self.assertNotIn("md5", roms[0])
+            self.assertNotIn("rom_md5", roms[0])
+            self.assertEqual(roms[0]["rom_path"], "Loose Game (USA).zip")
+
     def test_gamelist_metadata_enriches_matching_disk_rom_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -1491,7 +1491,7 @@ class RomRepository:
             return []
         return [entry for entry in sorted(path.iterdir(), key=lambda p: p.name.lower()) if entry.is_file()]
 
-    def _list_rom_items(self, system: str, asset_dir: Path) -> List[dict]:
+    def _list_rom_items(self, system: str, asset_dir: Path, include_md5: bool = True) -> List[dict]:
         items: List[dict] = []
         system_lower = system.lower()
 
@@ -1574,31 +1574,31 @@ class RomRepository:
                 continue
             display_name = Path(entry.name).stem
             stat = entry.stat()
-            md5_value = self.build_md5(entry)
-            items.append(
-                {
-                    "unique_id": self.build_unique_id(entry),
-                    "name": display_name,
-                    "rom_file": entry.name,
-                    "filename": entry.name,
-                    "relative_path": relative_path,
-                    "absolute_path": str(entry.resolve()),
-                    "rom_path": relative_path,
-                    "file_path": relative_path,
-                    "byte_count": stat.st_size,
-                    "size": stat.st_size,
-                    "file_size": stat.st_size,
-                    "modified_time": int(stat.st_mtime),
-                    "mtime": int(stat.st_mtime),
-                    "md5": md5_value,
-                    "rom_md5": md5_value,
-                    "source": "disk",
-                    "metadata_source": None,
-                    "entry_type": "file",
-                    "is_downloadable": (system_lower != "steam"),
-                    "image_stem": display_name,
-                }
-            )
+            item = {
+                "unique_id": self.build_unique_id(entry),
+                "name": display_name,
+                "rom_file": entry.name,
+                "filename": entry.name,
+                "relative_path": relative_path,
+                "absolute_path": str(entry.resolve()),
+                "rom_path": relative_path,
+                "file_path": relative_path,
+                "byte_count": stat.st_size,
+                "size": stat.st_size,
+                "file_size": stat.st_size,
+                "modified_time": int(stat.st_mtime),
+                "mtime": int(stat.st_mtime),
+                "source": "disk",
+                "metadata_source": None,
+                "entry_type": "file",
+                "is_downloadable": (system_lower != "steam"),
+                "image_stem": display_name,
+            }
+            if include_md5:
+                md5_value = self.build_md5(entry)
+                item["md5"] = md5_value
+                item["rom_md5"] = md5_value
+            items.append(item)
         return items
 
     def _count_rom_items(self, system: str, asset_dir: Path) -> int:
@@ -2494,7 +2494,7 @@ class RomRepository:
             "has_gamelist_entry": True,
         }
 
-    def list_assets(self, system: str, asset_type: str) -> Tuple[Path, List[dict]]:
+    def list_assets(self, system: str, asset_type: str, include_md5: bool = True) -> Tuple[Path, List[dict]]:
         system_dir = self.get_system_dir(system)
 
         if asset_type == "roms":
@@ -2509,7 +2509,7 @@ class RomRepository:
         items = []
         if asset_dir.exists() and asset_dir.is_dir():
             if asset_type == "roms":
-                items = self._list_rom_items(system, asset_dir)
+                items = self._list_rom_items(system, asset_dir, include_md5=include_md5)
                 items = self._attach_gamelist_to_rom_items(system_dir, items)
             else:
                 for entry in self.iter_files(asset_dir):
@@ -3731,11 +3731,11 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         self._send_json(200, {"systems": systems}, cache_key="json:/systems")
 
     def _handle_rom_list(self, system: str) -> None:
-        _, roms = self.repository.list_assets(system, "roms")
+        _, roms = self.repository.list_assets(system, "roms", include_md5=False)
         if not self.settings.downloads_enabled:
             for item in roms:
                 item["is_downloadable"] = False
-        self._send_json(200, {"system": system, "roms": roms}, cache_key=f"json:/systems/{system}")
+        self._send_json(200, {"system": system, "roms": roms}, cache_key=f"json:/systems/{system}?md5=0")
 
     def _handle_images_list(self, system: str) -> None:
         _, images = self.repository.list_assets(system, "images")
