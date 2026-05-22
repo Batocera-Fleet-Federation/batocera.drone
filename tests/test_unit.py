@@ -20,6 +20,7 @@ from app.drone_api import (
     _drone_report_host,
     _peer_address,
     _get_local_ip_addresses,
+    _get_router_ip_address,
     _collect_gpu_info,
     _format_overmind_error,
     _launchbox_platform_for_system,
@@ -109,6 +110,17 @@ class SettingsTests(unittest.TestCase):
 
         self.assertIn("127.0.0.1", network["ipv4"])
         self.assertFalse(any("IPv6 route resolution failed" in str(call) for call in printed.mock_calls))
+
+    def test_router_ip_address_uses_route_fallback(self) -> None:
+        results = [
+            mock.Mock(stdout=""),
+            mock.Mock(stdout="192.168.50.1\n"),
+        ]
+
+        with mock.patch("app.drone_api.subprocess.run", side_effect=results) as run:
+            self.assertEqual(_get_router_ip_address(), "192.168.50.1")
+
+        self.assertEqual(run.call_count, 2)
 
     def test_peer_address_uses_reachable_url_before_ips(self) -> None:
         peer = {

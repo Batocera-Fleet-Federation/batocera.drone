@@ -4534,9 +4534,9 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             self._send_json(500, {"error": f"Internal error: {str(e)}"})
 
     def _handle_admin_system_info(self) -> None:
-        import subprocess
-
+        router_ip_address = _get_router_ip_address() or "Unavailable"
         if self.settings.use_fake_data:
+            fake_router_ip_address = router_ip_address if router_ip_address != "Unavailable" else "192.168.1.1"
             entries = [
                 {"key": "Machine ID", "value": self.settings.overmind_device_id},
                 {"key": "Integrated with Overmind", "value": "yes" if self._load_overmind_config().get("integration_enabled") else "no"},
@@ -4553,6 +4553,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 {"key": "Display refresh rate", "value": "60 Hz"},
                 {"key": "Data partition available space", "value": "812 GiB"},
                 {"key": "Network IP address", "value": "192.168.1.123"},
+                {"key": "Router IP Address", "value": fake_router_ip_address},
                 {"key": "Battery", "value": "N/A"},
             ]
             fields = {
@@ -4569,6 +4570,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 "display_refresh_rate": "60 Hz",
                 "data_partition_available_space": "812 GiB",
                 "network_ip_address": "192.168.1.123",
+                "router_ip_address": fake_router_ip_address,
                 "battery": "N/A",
                 "machine_id": self.settings.overmind_device_id,
                 "overmind_integrated": "yes" if self._load_overmind_config().get("integration_enabled") else "no",
@@ -4638,12 +4640,29 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                     fields["data_partition_available_space"] = value
                 elif key_lower == "network ip address":
                     fields["network_ip_address"] = value
+                elif key_lower == "router ip address":
+                    fields["router_ip_address"] = value
                 elif key_lower == "battery":
                     fields["battery"] = value
 
             overmind_integrated = "yes" if self._load_overmind_config().get("integration_enabled") else "no"
             entries.insert(0, {"key": "Integrated with Overmind", "value": overmind_integrated})
             entries.insert(0, {"key": "Machine ID", "value": self.settings.overmind_device_id})
+            if not fields.get("router_ip_address"):
+                router_entry = {"key": "Router IP Address", "value": router_ip_address}
+                network_index = next(
+                    (
+                        index
+                        for index, entry in enumerate(entries)
+                        if str(entry.get("key", "")).lower() == "network ip address"
+                    ),
+                    None,
+                )
+                if network_index is None:
+                    entries.insert(2, router_entry)
+                else:
+                    entries.insert(network_index + 1, router_entry)
+                fields["router_ip_address"] = router_ip_address
             fields["machine_id"] = self.settings.overmind_device_id
             fields["overmind_integrated"] = overmind_integrated
 
@@ -4661,6 +4680,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             entries = [
                 {"key": "Machine ID", "value": self.settings.overmind_device_id},
                 {"key": "Integrated with Overmind", "value": overmind_integrated},
+                {"key": "Router IP Address", "value": router_ip_address},
                 {"key": "System Info", "value": f"batocera-info unavailable: {str(error)}"},
             ]
             raw = "\n".join(f"{item['key']}: {item['value']}" for item in entries)
@@ -4673,6 +4693,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                     "fields": {
                         "machine_id": self.settings.overmind_device_id,
                         "overmind_integrated": overmind_integrated,
+                        "router_ip_address": router_ip_address,
                     },
                     "warning": f"Failed to run batocera-info: {str(error)}",
                 },
@@ -5775,6 +5796,23 @@ def _drone_network_payload(settings: Settings) -> dict:
     return network
 
 
+def _get_router_ip_address() -> Optional[str]:
+    """Return the default gateway IP used to reach the local router."""
+    commands = (
+        ["sh", "-c", "ip route show default 2>/dev/null | awk '{print $3; exit}'"],
+        ["sh", "-c", "route -n 2>/dev/null | awk '$1 == \"0.0.0.0\" {print $2; exit}'"],
+    )
+    for command in commands:
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=2)
+            gateway_ip = (result.stdout or "").strip()
+            if gateway_ip:
+                return gateway_ip
+        except Exception:
+            continue
+    return None
+
+
 def _mock_userdata_marker(userdata_root: Path) -> Path:
     return userdata_root / "system" / "drone-app" / "mock_userdata_seeded.json"
 
@@ -6241,12 +6279,7 @@ def _get_local_ip_addresses() -> dict:
 
     if "127.0.0.1" not in ipv4:
         ipv4.append("127.0.0.1")
-    gateway_ip = None
-    try:
-        result = subprocess.run(["sh", "-c", "ip route show default 2>/dev/null | awk '{print $3; exit}'"], capture_output=True, text=True, timeout=2)
-        gateway_ip = (result.stdout or "").strip() or None
-    except Exception:
-        gateway_ip = None
+    gateway_ip = _get_router_ip_address()
     public_ip = None
     try:
         with urlopen(Request("https://api.ipify.org", headers={"User-Agent": "batocera-drone-app/4.0"}), timeout=3) as response:
