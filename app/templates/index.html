@@ -734,10 +734,12 @@ let artworkSelectedSystems = [];
 let artworkFilterQuery = "";
 let artworkRomStatus = "any";
 let artworkFilterDebounceTimer = null;
+let systemsCache = null;
 let systemRomCache = {};
 let systemInfoLoaded = false;
 let adminEnabled = true;
 let loadingToastEl = null;
+const UI_DATA_CACHE_TTL_MS = 5 * 60 * 1000;
 
 // Toast notification system (appears at top-right)
 function ensureToastContainer() {
@@ -886,6 +888,23 @@ async function apiPost(url, payload) {
     throw new Error(msg);
   }
   return await res.json();
+}
+function isUiCacheFresh(entry) {
+  return entry && entry.data && (Date.now() - entry.loadedAt) < UI_DATA_CACHE_TTL_MS;
+}
+async function getSystemsData(forceRefresh = false) {
+  if (!forceRefresh && isUiCacheFresh(systemsCache)) return systemsCache.data;
+  const data = await api("/systems");
+  systemsCache = { data, loadedAt: Date.now() };
+  return data;
+}
+async function getSystemRomData(system, forceRefresh = false) {
+  const key = String(system || "");
+  const cached = systemRomCache[key];
+  if (!forceRefresh && isUiCacheFresh(cached)) return cached.data;
+  const data = await api(`/systems/${encodeURIComponent(key)}`);
+  systemRomCache[key] = { data, loadedAt: Date.now() };
+  return data;
 }
 function wildcardToRegExp(pattern) {
   const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&");
@@ -1477,12 +1496,12 @@ async function renderRomMediaPage(system, uniqueId) {
   backBtn.classList.remove("d-none");
   setSearchMode("system", system);
   setLoading(true, "Loading ROM media...");
-  await applySystemTheme(system);
   try {
-    if (!systemRomCache[system]) {
-      systemRomCache[system] = await api(`/systems/${encodeURIComponent(system)}`);
-    }
-    const roms = systemRomCache[system].roms || [];
+    const [romsData] = await Promise.all([
+      getSystemRomData(system),
+      applySystemTheme(system),
+    ]);
+    const roms = romsData.roms || [];
     const rom = roms.find((item) => String(item.unique_id || "") === String(uniqueId || ""));
     if (!rom) throw new Error("ROM not found");
     rom.system = system;
@@ -1867,9 +1886,10 @@ async function renderSystem(system, page = 1) {
   backBtn.classList.remove("d-none");
   setSearchMode("system", system);
   setLoading(true, `Loading ${system} ROMs...`);
-  await applySystemTheme(system);
-  const romsData = await api(`/systems/${encodeURIComponent(system)}`);
-  systemRomCache[system] = romsData;
+  const [romsData] = await Promise.all([
+    getSystemRomData(system),
+    applySystemTheme(system),
+  ]);
   const allRoms = romsData.roms || [];
   const totalPages = Math.max(1, Math.ceil(allRoms.length / SYSTEM_ROM_PAGE_SIZE));
   const safePage = Math.max(1, Math.min(Number(page || 1), totalPages));
@@ -3951,8 +3971,10 @@ async function router() {
       setSearchMode("global");
       setLoading(true, "Loading systems...");
       clearSystemTheme();
-      await refreshRandomThemeLogo();
-      const data = await api("/systems");
+      const [data] = await Promise.all([
+        getSystemsData(),
+        refreshRandomThemeLogo(),
+      ]);
       renderSystems(data);
       setLoading(false);
     }
