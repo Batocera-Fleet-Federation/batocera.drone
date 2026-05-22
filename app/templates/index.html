@@ -846,7 +846,11 @@ async function api(url) {
   const absoluteUrl = url.startsWith("http://") || url.startsWith("https://")
     ? url
     : `${API_BASE}${url}`;
-  const res = await fetch(absoluteUrl, { credentials: "same-origin" });
+  const res = await fetch(absoluteUrl, { credentials: "include" });
+  if (res.status === 401) {
+    window.location.reload();
+    throw new Error("Authentication required");
+  }
   if (!res.ok) {
     let msg = `Request failed: ${res.status}`;
     try {
@@ -863,12 +867,16 @@ async function apiPost(url, payload) {
     : `${API_BASE}${url}`;
   const res = await fetch(absoluteUrl, {
     method: "POST",
-    credentials: "same-origin",
+    credentials: "include",
     headers: {
       "Content-Type": "application/json",
     },
     body: JSON.stringify(payload || {}),
   });
+  if (res.status === 401) {
+    window.location.reload();
+    throw new Error("Authentication required");
+  }
   if (!res.ok) {
     let msg = `Request failed: ${res.status}`;
     try {
@@ -2562,9 +2570,13 @@ async function uploadArtworkImage(rom, field, btnEl) {
     formData.append("rom_path", rom.rom_path || "");
     const res = await fetch(`${API_BASE}/admin/artwork/upload`, {
       method: "POST",
-      credentials: "same-origin",
+      credentials: "include",
       body: formData,
     });
+    if (res.status === 401) {
+      window.location.reload();
+      throw new Error("Authentication required");
+    }
     if (!res.ok) {
       let msg = `Upload failed: ${res.status}`;
       try { const d = await res.json(); if (d.error) msg = d.error; } catch(_) {}
@@ -2745,7 +2757,11 @@ function openMarqueeCropper(rowIndex, sourceUrl, sourceLabel) {
       formData.append("system", rom.system || "");
       formData.append("rom_id", rom.unique_id || "");
       formData.append("rom_path", rom.rom_path || "");
-      const res = await fetch(`${API_BASE}/admin/artwork/upload`, { method: "POST", credentials: "same-origin", body: formData });
+      const res = await fetch(`${API_BASE}/admin/artwork/upload`, { method: "POST", credentials: "include", body: formData });
+      if (res.status === 401) {
+        window.location.reload();
+        throw new Error("Authentication required");
+      }
       if (!res.ok) {
         let msg = `Upload failed: ${res.status}`;
         try { const d = await res.json(); if (d.error) msg = d.error; } catch(_) {}
