@@ -467,6 +467,19 @@ class RepositoryTests(unittest.TestCase):
             self.assertIn("gba", names)
             self.assertNotIn("snes.old", names)
 
+    def test_list_systems_does_not_hash_rom_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            rom = root / "roms" / "snes" / "Large Game.zip"
+            rom.parent.mkdir(parents=True)
+            rom.write_bytes(b"rom")
+            repo = RomRepository(root / "roms", root / "bios")
+
+            with mock.patch.object(RomRepository, "build_md5", side_effect=AssertionError("should not hash")):
+                systems = repo.list_systems()
+
+            self.assertEqual(systems, [{"name": "snes", "rom_count": 1}])
+
     def test_search_roms_from_mock_data(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"

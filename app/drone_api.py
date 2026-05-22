@@ -1601,6 +1601,46 @@ class RomRepository:
             )
         return items
 
+    def _count_rom_items(self, system: str, asset_dir: Path) -> int:
+        system_lower = system.lower()
+        if not asset_dir.exists() or not asset_dir.is_dir():
+            return 0
+
+        if system_lower in ("ps3", "ps4"):
+            count = 0
+            for entry in sorted(asset_dir.iterdir(), key=lambda p: p.name.lower()):
+                if entry.is_file():
+                    if system_lower == "steam" and entry.suffix.lower() == ".sh":
+                        continue
+                    if self.should_ignore_rom_file(entry.name, system=system):
+                        continue
+                    count += 1
+                    continue
+
+                if not entry.is_dir():
+                    continue
+
+                if system_lower == "ps3":
+                    if entry.name.lower().endswith(".ps3"):
+                        count += 1
+                    continue
+
+                for child in sorted(entry.iterdir(), key=lambda p: p.name.lower()):
+                    if child.is_file() and child.name.lower().endswith(".ps4"):
+                        count += 1
+                        break
+            return count
+
+        count = 0
+        for entry in sorted(asset_dir.rglob("*"), key=lambda p: p.relative_to(asset_dir).as_posix().lower()):
+            if not entry.is_file():
+                continue
+            relative_path = entry.relative_to(asset_dir).as_posix()
+            if self.should_ignore_rom_path(Path(relative_path)):
+                continue
+            count += 1
+        return count
+
     def _attach_gamelist_to_rom_items(self, system_dir: Path, items: List[dict]) -> List[dict]:
         try:
             _, root = self._read_gamelist(system_dir)
@@ -1651,7 +1691,7 @@ class RomRepository:
             if not target_dir.exists() or not target_dir.is_dir():
                 continue
 
-            rom_count = len(self._list_rom_items(entry.name, target_dir))
+            rom_count = self._count_rom_items(entry.name, target_dir)
             if rom_count < 1:
                 continue
 
