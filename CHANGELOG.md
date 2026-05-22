@@ -1,5 +1,26 @@
 # Changelog
 
+## [v0.0.11] - 2026-05-21
+
+- Updating create-release.sh to work from any folder when executed.
+- Tightening up UI and adding help.
+- Adding ip address for router in system info page.
+- - Add swarm connection controls and cert rotation - Rename active /alive references to /heartbeat - Add Overmind linked and Connected to Swarm admin badges - Add Overmind swarm connect and disconnect controls - Add connect, disconnect, and certificate rotation admin endpoints - Generate private key and CSR locally - Request signed certificate from Overmind with approved Drone bearer token - Preserve existing certificate unless signed certificate installation succeeds
+- Fix Drone startup auth credential reference - Fix startup NameError caused by main() referencing auth outside create_server() - Attach auth object to server instance for safe startup logging - Read safe username from server-owned auth reference - Touch Drone API route wiring as needed
+- More fixes for drone registration error with auth token
+- Fixing bug where auth token was not being used after being accepted into swarm by overmind.
+- Drone action polling now handles a batch per poll. Overmind returns actions: [...] while keeping legacy action for compatibility. Drone processes the returned batch sequentially, reports each action independently, and one completion-reporting failure does not stop the rest of that batch.
+- - Drone ROM inventory is now disk-authoritative.   - Recursively scans `/userdata/roms/{system}`.   - Excludes sidecar, media, and metadata files.   - Includes ROMs that are missing from `gamelist.xml`.   - Enriches ROM records from `gamelist.xml` only when matched.   - ROM records now include:     - `md5`     - `size`     - `mtime`     - `relative_path`     - `source`     - `metadata_source`
+- batocera.drone
+- Updating to use shared mTLS cert for drones (may revise later)
+- - Fixed host preference order to use `HOSTNAME_OVERRIDE`, then IPv4, then IPv6.
+- Commenting out CI tests for now.
+- - Overmind now requires a valid Drone authorization token for initial registration. - `/alive` remains bearer-token protected. - Valid Drone registration immediately creates the Drone and returns a Drone bearer token. - Fake/demo Overmind config is ignored when `USE_FAKE_DATA=false`. - Rotate Token now reuses the copy-friendly token modal UI. - Overmind accepts `certificate` and `system_info` in the Drone registration model. - New device creation now persists certificate metadata immediately. - Private key fields are stripped before storage. - Existing alive updates continue refreshing/storing certificate metadata. - Overmind exposes the stored public cert through: GET /api/devices/{requesting_drone_id}/peer-certificate/{peer_drone_id}
+- feat: add local swarm onboarding, mTLS peer trust, and automatic ROM sync
+- feat: add container support, swarm telemetry, and Batocera-like test runtime
+- - Store swarm state returned from Overmind heartbeat responses - Run peer-to-peer connectivity checks against other swarm drones - Show peer status in admin Overmind integration page with pass/fail, failure reason, and last checked time - Report peer health results back to Overmind - Stream gameplay, ROM update, filesystem, and speed sample events to Overmind - Send speed samples every 5 minutes, including first startup/fake-data sample - Add certificate configuration/metadata support for Drone-to-Drone mTLS - Display certificate metadata in Drone admin page without exposing private key material - Improve LaunchBox artwork scraping and prevent duplicate media assignments - Add duplicate artwork detection/filtering across image, thumbnail, marquee, fanart, and boxart - Add admin artwork tools to non-admin ROM artwork pages - Show ROM MD5 hash on detail page and move download action to ROM detail only - Update Processed Overmind Actions table styling to match page theme
+- Esuring permission and drone user are run async as to not hold up SERVICE ui.
+
 ## [v0.0.10] - 2026-05-15
 
 - Moving all filesystem + securityt into SERVICE instead of root batocera_install.sh script.
