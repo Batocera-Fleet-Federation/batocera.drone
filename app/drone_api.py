@@ -1000,7 +1000,7 @@ class Settings:
             http_only=_env_bool(False, "HTTP_ONLY", "DRONE_APP_HTTP_ONLY"),
             use_fake_data=use_fake_data,
             fake_image_base_url=os.environ.get("FAKE_IMAGE_BASE_URL"),
-            overmind_url=os.environ.get("OVERMIND_URL"),
+            overmind_url=os.environ.get("OVERMIND_URL", "https://www.batocera-swarm.com"),
             overmind_email=os.environ.get("OVERMIND_EMAIL"),
             overmind_password=os.environ.get("OVERMIND_PASSWORD"),
             overmind_auth_token=os.environ.get("OVERMIND_AUTH_TOKEN") or os.environ.get("OVERMIND_AUTHORIZATION_TOKEN"),
@@ -3089,6 +3089,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         default = {
             "overmind_url": (self.settings.overmind_url or "").strip(),
             "overmind_email": (fake_email if self.settings.use_fake_data else self.settings.overmind_email or "").strip(),
+            "drone_name": socket.gethostname(),
             "integration_enabled": False,
             "integration_state": "not_started",
             "requested_at": None,
@@ -3156,6 +3157,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         return {
             "overmind_url": config.get("overmind_url") or "",
             "overmind_email": email,
+            "drone_name": config.get("drone_name") or socket.gethostname(),
             "machine_id": self.settings.overmind_device_id,
             "password_configured": bool(password),
             "password_masked": self._mask_secret(password) if password else "",
@@ -4754,6 +4756,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
     def _handle_admin_overmind_config(self, payload: dict) -> None:
         raw_url = str(payload.get("overmind_url") or "").strip()
         raw_email = str(payload.get("overmind_email") or "").strip()
+        raw_drone_name = str(payload.get("drone_name") or "").strip()
         raw_password = payload.get("overmind_password")
         raw_auth_token = payload.get("overmind_auth_token")
         raw_token = payload.get("overmind_token")
@@ -4763,15 +4766,14 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         parsed = urlparse(raw_url)
         if parsed.scheme not in ("http", "https") or not parsed.netloc:
             raise ValueError("overmind_url must be a valid http/https URL")
-        if not raw_email:
-            raise ValueError("overmind_email is required")
-        if "@" not in raw_email or raw_email.startswith("@") or raw_email.endswith("@"):
+        if raw_email and ("@" not in raw_email or raw_email.startswith("@") or raw_email.endswith("@")):
             raise ValueError("overmind_email must be a valid email address")
 
         existing = self._load_overmind_config()
         new_config = dict(existing)
         new_config["overmind_url"] = raw_url.rstrip("/")
         new_config["overmind_email"] = raw_email
+        new_config["drone_name"] = raw_drone_name or socket.gethostname()
         if raw_password is not None:
             password_value = str(raw_password)
             if not password_value:
@@ -4809,14 +4811,11 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
 
     def _handle_admin_overmind_start(self, payload: dict) -> None:
         config = self._load_overmind_config()
-        email = str(config.get("overmind_email") or "").strip()
         password = str(config.get("overmind_password") or "")
         auth_token = str(config.get("overmind_auth_token") or "")
         token = str(config.get("overmind_token") or "")
         if not str(config.get("overmind_url") or "").strip():
             raise ValueError("overmind_url is not configured")
-        if not email:
-            raise ValueError("overmind_email is not configured")
         if not token and not auth_token:
             raise ValueError("overmind authorization token is not configured")
 
@@ -5752,6 +5751,7 @@ def _load_overmind_config_for_settings(settings: Settings) -> dict:
     default = {
         "overmind_url": (settings.overmind_url or "").strip(),
         "overmind_email": (fake_email if settings.use_fake_data else settings.overmind_email or "").strip(),
+        "drone_name": socket.gethostname(),
         "overmind_password": fake_password if settings.use_fake_data else settings.overmind_password or "",
         "overmind_auth_token": "" if settings.use_fake_data else settings.overmind_auth_token or "",
         "overmind_token": fake_token if settings.use_fake_data else settings.overmind_token or "",
@@ -6091,11 +6091,12 @@ def _save_overmind_runtime_config(settings: Settings, config: dict) -> None:
 def _register_or_claim_overmind_token(settings: Settings, repository: "RomRepository", config: dict, base_url: str) -> Optional[str]:
     auth_token = str(config.get("overmind_auth_token") or "").strip()
     email = str(config.get("overmind_email") or "").strip()
+    drone_name = str(config.get("drone_name") or "").strip() or socket.gethostname()
     network = _drone_network_payload(settings)
     reachable_url = _drone_reachable_url(settings, network)
     payload = {
         "device_id": settings.overmind_device_id,
-        "device_name": socket.gethostname(),
+        "device_name": drone_name,
         "api_port": settings.https_port,
         "scheme": _drone_scheme(settings),
         "reachable_url": reachable_url,
@@ -7091,6 +7092,7 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                 network_payload = _drone_network_payload(settings)
                 heartbeat_payload = {
                     "device_id": settings.overmind_device_id,
+                    "device_name": str(config.get("drone_name") or "").strip() or socket.gethostname(),
                     "network": network_payload,
                     "rom_systems": rom_systems,
                     "api_port": settings.https_port,

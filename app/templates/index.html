@@ -3251,11 +3251,11 @@ async function renderOvermindIntegrationPage() {
       <div class="card-body">
         <div class="mb-3">
           <label class="form-label">Overmind URL</label>
-          <input id="overmindUrlInput" class="form-control" type="url" placeholder="https://overmind.local:9443">
+          <input id="overmindUrlInput" class="form-control" type="url" placeholder="https://www.batocera-swarm.com">
         </div>
         <div class="mb-3">
-          <label class="form-label">Overmind Email</label>
-          <input id="overmindEmailInput" class="form-control" type="email" placeholder="you@example.com">
+          <label class="form-label">Drone Name</label>
+          <input id="droneNameInput" class="form-control" type="text" placeholder="Arcade Cabinet">
         </div>
         <div class="mb-3">
           <label class="form-label">Authorization Token</label>
@@ -3284,7 +3284,7 @@ async function renderOvermindIntegrationPage() {
 
   const statusEl = document.getElementById("overmindStatus");
   const urlInput = document.getElementById("overmindUrlInput");
-  const emailInput = document.getElementById("overmindEmailInput");
+  const droneNameInput = document.getElementById("droneNameInput");
   const authTokenInput = document.getElementById("overmindAuthTokenInput");
   const saveBtn = document.getElementById("overmindSaveBtn");
   const connectBtn = document.getElementById("overmindConnectBtn");
@@ -3303,7 +3303,7 @@ async function renderOvermindIntegrationPage() {
     const startedAt = status.last_started_at || "n/a";
     const errorMsg = status.last_error || "none";
     const authTokenMask = payload.auth_token_masked || "(not set)";
-    const emailValue = payload.overmind_email || "(not set)";
+    const droneName = payload.drone_name || "(not set)";
     const machineId = payload.machine_id || "n/a";
     const cert = payload.certificate || {};
     const swarm = payload.swarm || [];
@@ -3318,7 +3318,7 @@ async function renderOvermindIntegrationPage() {
       <div><strong>Machine ID:</strong> ${escapeHtml(machineId)}</div>
       <div><strong>Action Polling:</strong> Drone sends a heartbeat request and receives one pending action per poll.</div>
       <div><strong>State:</strong> ${escapeHtml(state)}</div>
-      <div><strong>Email:</strong> ${escapeHtml(emailValue)}</div>
+      <div><strong>Drone Name:</strong> ${escapeHtml(droneName)}</div>
       <div><strong>Authorization Token:</strong> ${escapeHtml(authTokenMask)}</div>
       <div><strong>Requested At:</strong> ${escapeHtml(requestedAt)}</div>
       <div><strong>Last Started At:</strong> ${escapeHtml(startedAt)}</div>
@@ -3339,8 +3339,8 @@ async function renderOvermindIntegrationPage() {
         </div>`;
       }).join("")}</div>` : ""}
     `;
-    urlInput.value = payload.overmind_url || "";
-    emailInput.value = payload.overmind_email || "";
+    urlInput.value = payload.overmind_url || "https://www.batocera-swarm.com";
+    droneNameInput.value = payload.drone_name || "";
   }
 
   async function loadStatus() {
@@ -3386,9 +3386,9 @@ async function renderOvermindIntegrationPage() {
 
   async function saveConfig() {
     const overmindUrl = (urlInput.value || "").trim();
-    const overmindEmail = (emailInput.value || "").trim();
+    const droneName = (droneNameInput.value || "").trim();
     const overmindAuthToken = authTokenInput.value || "";
-    const body = { overmind_url: overmindUrl, overmind_email: overmindEmail };
+    const body = { overmind_url: overmindUrl, drone_name: droneName };
     if (overmindAuthToken) {
       body.overmind_auth_token = overmindAuthToken;
     }
