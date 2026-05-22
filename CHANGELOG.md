@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.12] - 2026-05-21
+
+- Fixing bug with loading system on drone.
+
 ## [v0.0.11] - 2026-05-21
 
 - Updating create-release.sh to work from any folder when executed.
