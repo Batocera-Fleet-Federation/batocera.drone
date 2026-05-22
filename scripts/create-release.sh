@@ -5,6 +5,8 @@ PROJECT="Batocera Drone"
 REPO="Batocera-Fleet-Federation/batocera.drone"
 DEFAULT_BRANCH="main"
 LATEST_TAG="latest"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 RELEASE_ASSETS=(
   "scripts/batocera_install.sh"
@@ -49,6 +51,8 @@ fi
 if ! git rev-parse --git-dir >/dev/null 2>&1; then
   error "Not inside a Git repository."
 fi
+
+cd "$REPO_ROOT"
 
 if ! command -v gh >/dev/null 2>&1; then
   error "GitHub CLI gh is required."
