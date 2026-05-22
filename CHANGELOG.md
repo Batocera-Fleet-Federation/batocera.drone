@@ -1,5 +1,10 @@
 # Changelog
 
+## [v0.0.14] - 2026-05-21
+
+- Enhancing UI by removing md5 hashing where not required.
+- Adding caching and speeding up UI
+
 ## [v0.0.13] - 2026-05-21
 
 - Fixing load system bug
