@@ -4884,6 +4884,85 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         self._save_overmind_config(config)
         self._send_json(200, self._overmind_public_payload(config))
 
+    def _handle_admin_overmind_claim_ownership(self, payload: dict) -> None:
+        raw_url = str(payload.get("overmind_url") or "").strip()
+        email = str(payload.get("email") or "").strip()
+        password = str(payload.get("password") or "")
+        drone_name = str(payload.get("drone_name") or "").strip() or socket.gethostname()
+        if not raw_url:
+            raise ValueError("overmind_url is required")
+        parsed = urlparse(raw_url)
+        if parsed.scheme != "https" or not parsed.netloc:
+            raise ValueError("claim ownership requires an https Overmind URL")
+        if not email or "@" not in email or email.startswith("@") or email.endswith("@"):
+            raise ValueError("email must be a valid email address")
+        if not password:
+            raise ValueError("password is required")
+
+        base_url = raw_url.rstrip("/")
+        network_payload = _drone_network_payload(self.settings)
+        claim_payload = {
+            "device_id": self.settings.overmind_device_id,
+            "device_name": drone_name,
+            "email": email,
+            "password": password,
+            "network": network_payload,
+            "api_port": self.settings.https_port,
+            "scheme": _drone_scheme(self.settings),
+            "reachable_url": _drone_reachable_url(self.settings, network_payload),
+            "certificate": DroneCertificateManager(self.settings).metadata(),
+            "system_info": _collect_system_info_payload(self.settings),
+        }
+        print(
+            f"Overmind ownership claim requested for {self.settings.overmind_device_id}: endpoint={base_url}/api/drones/claim-ownership",
+            file=sys.stdout,
+            flush=True,
+        )
+        try:
+            status_code, response = _overmind_post_json_with_status(
+                f"{base_url}/api/drones/claim-ownership",
+                claim_payload,
+                settings=self.settings,
+            )
+        except HTTPError as error:
+            print(
+                f"Overmind ownership claim failed for {self.settings.overmind_device_id}: status={error.code}",
+                file=sys.stderr,
+                flush=True,
+            )
+            self._send_json(error.code if 400 <= error.code < 600 else 502, {"error": "ownership claim failed"})
+            return
+        except Exception as error:
+            print(
+                f"Overmind ownership claim failed for {self.settings.overmind_device_id}: {_format_overmind_error(error)}",
+                file=sys.stderr,
+                flush=True,
+            )
+            self._send_json(502, {"error": "ownership claim failed"})
+            return
+        token = str(response.get("drone_token") or "").strip()
+        if status_code >= 400 or not token:
+            self._send_json(status_code if status_code >= 400 else 502, {"error": "ownership claim failed"})
+            return
+
+        config = self._load_overmind_config()
+        config.update({
+            "overmind_url": base_url,
+            "overmind_email": email,
+            "drone_name": drone_name,
+            "overmind_token": token,
+            "integration_enabled": True,
+            "integration_state": "polling",
+            "swarm_connection_status": "connected",
+            "claimed_at": self._now_iso(),
+            "last_error": None,
+            "notes": "Ownership claimed through Overmind credentials. Drone heartbeat and ROM metadata polling are active.",
+        })
+        config.pop("overmind_password", None)
+        self._save_overmind_config(config)
+        print(f"Overmind ownership claim succeeded for {self.settings.overmind_device_id}", file=sys.stdout, flush=True)
+        self._send_json(200, self._overmind_public_payload(config))
+
     def _handle_admin_overmind_swarm_connect(self) -> None:
         config = self._load_overmind_config()
         base_url = str(config.get("overmind_url") or "").strip().rstrip("/")

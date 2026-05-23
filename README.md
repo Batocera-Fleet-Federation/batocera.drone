@@ -208,6 +208,8 @@ ALLOW_CONTENT_DOWNLOAD=false
 
 ### Overmind Heartbeat and ROM Metadata
 
+The Drone admin Overmind Integration page supports two onboarding paths. The token flow uses an authorization token generated in Overmind. The Claim Ownership flow asks for Overmind URL, email, and password, sends them to Overmind over HTTPS, and stores only the returned Drone bearer token. Passwords are not logged or persisted by Drone.
+
 Drone heartbeats are intentionally lightweight. They report Drone identity, name, reachable network details, certificate metadata, downloads, and basic system health/status. Heartbeats do not scan ROM folders and do not calculate ROM MD5 hashes.
 
 Each heartbeat logs the send start, Overmind heartbeat endpoint, success or failure, response status when available, and duration.

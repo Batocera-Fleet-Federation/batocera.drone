@@ -3357,6 +3357,31 @@ async function renderOvermindIntegrationPage() {
       </div>
     </div>
     <div class="card log-card mt-3">
+      <div class="card-header">
+        <span>Claim Ownership</span>
+      </div>
+      <div class="card-body">
+        <div class="mb-3">
+          <label class="form-label">Overmind URL <span class="text-danger">*</span></label>
+          <input id="claimOvermindUrlInput" class="form-control" type="url" placeholder="https://www.batocera-swarm.com">
+        </div>
+        <div class="mb-3">
+          <label class="form-label">Drone Name <span class="text-muted small">Optional</span></label>
+          <input id="claimDroneNameInput" class="form-control" type="text" placeholder="Arcade Cabinet">
+        </div>
+        <div class="mb-3">
+          <label class="form-label">Overmind Email <span class="text-danger">*</span></label>
+          <input id="claimEmailInput" class="form-control" type="email" autocomplete="username">
+        </div>
+        <div class="mb-3">
+          <label class="form-label">Overmind Password <span class="text-danger">*</span></label>
+          <input id="claimPasswordInput" class="form-control" type="password" autocomplete="current-password">
+        </div>
+        <button id="claimOwnershipBtn" class="btn btn-primary" type="button">Claim Ownership</button>
+        <div class="text-muted small mt-2">Credentials are sent to Overmind over HTTPS and are not stored or logged by Drone.</div>
+      </div>
+    </div>
+    <div class="card log-card mt-3">
       <div class="card-header d-flex justify-content-between align-items-center">
         <span>Processed Overmind Actions</span>
         <button id="overmindActionsRefreshBtn" class="btn btn-sm btn-outline-primary" type="button">Refresh</button>
@@ -3374,6 +3399,11 @@ async function renderOvermindIntegrationPage() {
   const saveBtn = document.getElementById("overmindSaveBtn");
   const connectBtn = document.getElementById("overmindConnectBtn");
   const disconnectBtn = document.getElementById("overmindDisconnectBtn");
+  const claimUrlInput = document.getElementById("claimOvermindUrlInput");
+  const claimDroneNameInput = document.getElementById("claimDroneNameInput");
+  const claimEmailInput = document.getElementById("claimEmailInput");
+  const claimPasswordInput = document.getElementById("claimPasswordInput");
+  const claimOwnershipBtn = document.getElementById("claimOwnershipBtn");
   const refreshBtn = document.getElementById("overmindRefreshBtn");
   const actionsRefreshBtn = document.getElementById("overmindActionsRefreshBtn");
   const actionsBody = document.getElementById("overmindActionsBody");
@@ -3426,6 +3456,9 @@ async function renderOvermindIntegrationPage() {
     `;
     urlInput.value = payload.overmind_url || "https://www.batocera-swarm.com";
     droneNameInput.value = payload.drone_name || "";
+    claimUrlInput.value = payload.overmind_url || "https://www.batocera-swarm.com";
+    claimDroneNameInput.value = payload.drone_name || "";
+    claimEmailInput.value = payload.overmind_email || "";
   }
 
   async function loadStatus() {
@@ -3504,6 +3537,25 @@ async function renderOvermindIntegrationPage() {
     } catch (err) {
       showToast(escapeHtml(err.message || "Failed to connect swarm"), "danger");
     } finally {
+      setLoading(false);
+    }
+  });
+  claimOwnershipBtn.addEventListener("click", async () => {
+    setLoading(true, "Claiming Drone ownership...");
+    try {
+      const payload = await apiPost("/admin/integrations/overmind/claim-ownership", {
+        overmind_url: (claimUrlInput.value || "").trim(),
+        drone_name: (claimDroneNameInput.value || "").trim(),
+        email: (claimEmailInput.value || "").trim(),
+        password: claimPasswordInput.value || "",
+      });
+      claimPasswordInput.value = "";
+      renderStatus(payload);
+      showToast("Ownership claimed. Drone is connected to Overmind.", "success");
+    } catch (err) {
+      showToast(escapeHtml(err.message || "Failed to claim ownership"), "danger");
+    } finally {
+      claimPasswordInput.value = "";
       setLoading(false);
     }
   });

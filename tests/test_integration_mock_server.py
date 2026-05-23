@@ -103,6 +103,7 @@ class MockServerIntegrationTests(unittest.TestCase):
     def test_overmind_integration_uses_authorization_token_label(self) -> None:
         html = self._get_bytes("/")
         self.assertIn(b"Authorization Token", html)
+        self.assertIn(b"Claim Ownership", html)
         self.assertNotIn(b"Integration Password", html)
 
     def test_admin_logs_endpoint(self) -> None:

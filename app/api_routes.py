@@ -316,6 +316,11 @@ class ApiRoutesMixin:
                 self._handle_admin_overmind_start(payload)
                 return
 
+            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "integrations" and parts[2] == "overmind" and parts[3] == "claim-ownership":
+                payload = self._read_json_body()
+                self._handle_admin_overmind_claim_ownership(payload)
+                return
+
             if len(parts) == 5 and parts[0] == "admin" and parts[1] == "integrations" and parts[2] == "overmind" and parts[3] == "swarm" and parts[4] == "connect":
                 self._handle_admin_overmind_swarm_connect()
                 return
