@@ -1,5 +1,13 @@
 # Changelog
 
+## [v0.0.15] - 2026-05-23
+
+- - Add mascot image from `content/batocera-swarm-mascot.jpg` in a common, polished UI location. - Use a placement consistent with Overmind where practical. - Ensure mascot is responsive and accessible with appropriate alt text. - Preserve existing Drone workflows and UI usability. - Manually verify mascot placement at desktop and mobile widths.
+- feat: add download queue progress and cancellation
+- Updating overmind integration page to indicate what is required and optional.
+- Adding batocera swarm mascot image.
+- feat: simplify Overmind linking with Drone-controlled naming
+
 ## [v0.0.14] - 2026-05-21
 
 - Enhancing UI by removing md5 hashing where not required.
