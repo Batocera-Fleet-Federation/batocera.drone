@@ -15,6 +15,7 @@ After it is installed, you open Drone from a browser on your computer, phone, or
 - Drone checks in with Overmind every 60 seconds by default.
 - Overmind integration now uses an Overmind-generated authorization token instead of an integration password.
 - Drone caches approved peer certificates from Overmind before Drone-to-Drone mTLS calls.
+- The Drone admin header uses the shared project mascot at `content/batocera-swarm-mascot.jpg`, matching Overmind's landing and header branding without interfering with core workflows.
 
 ## What You Can Do With It
 

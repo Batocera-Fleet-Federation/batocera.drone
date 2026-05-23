@@ -61,6 +61,13 @@
       background: rgba(0, 194, 255, 0.15);
       border: 1px solid rgba(0, 194, 255, 0.55);
       box-shadow: 0 0 18px rgba(0, 194, 255, 0.24);
+      overflow: hidden;
+    }
+    .brand-mark img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
     }
     .menu-label {
       font-size: 0.72rem;
@@ -644,7 +651,7 @@
   <div class="sidebar rounded-3 p-2 p-md-3 mb-3">
     <div class="d-flex flex-column flex-lg-row align-items-lg-center gap-2 gap-lg-3">
       <div class="d-flex align-items-center gap-2 me-lg-auto">
-        <span class="brand-mark"><i class="bi bi-controller"></i></span>
+        <span class="brand-mark"><img src="/content/batocera-swarm-mascot.jpg" alt="Batocera Fleet Federation mascot"></span>
         <div>
           <div class="h5 mb-0 text-white">Batocera Drone</div>
         </div>

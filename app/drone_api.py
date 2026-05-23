@@ -3053,6 +3053,16 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _handle_content_file(self, relative_path: str) -> None:
+        content_root = Path(__file__).resolve().parent.parent / "content"
+        rel = str(relative_path or "").replace("\\", "/").lstrip("/")
+        if not rel or ".." in Path(rel).parts:
+            raise FileNotFoundError()
+        target = (content_root / rel).resolve()
+        if content_root.resolve() not in target.parents or not target.exists() or not target.is_file():
+            raise FileNotFoundError()
+        self._stream_file(target, self._guess_content_type(target))
+
     def _read_json_body(self) -> dict:
         length_value = self.headers.get("Content-Length", "0").strip()
         try:
