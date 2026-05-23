@@ -1991,6 +1991,14 @@ async function renderAdminMenu() {
         </div>
       </div>
       <div class="col-md-4 mb-3">
+        <div class="card admin-tile pointer h-100" onclick="setHash('#admin/downloads')">
+          <div class="card-body">
+            <h5 class="card-title"><i class="bi bi-cloud-arrow-down me-2"></i>Downloads</h5>
+            <p class="card-text">Monitor active and queued ROM/file transfers for this Drone.</p>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-4 mb-3">
         <div class="card admin-tile pointer h-100" onclick="setHash('#admin/overmind')">
           <div class="card-body">
             <h5 class="card-title"><i class="bi bi-diagram-3 me-2"></i>Overmind Integration</h5>
@@ -2008,6 +2016,76 @@ async function renderAdminMenu() {
       </div>
     </div>
   `;
+}
+
+function formatBytes(value) {
+  const n = Number(value || 0);
+  if (!Number.isFinite(n) || n <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let size = n;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  return `${size.toFixed(unit ? 1 : 0)} ${units[unit]}`;
+}
+
+function renderDownloadRows(rows, allowCancel = true) {
+  if (!rows.length) return '<div class="small text-muted">No downloads in this group.</div>';
+  return `<div class="table-responsive"><table class="table table-sm align-middle">
+    <thead><tr><th>Status</th><th>Source</th><th>Target</th><th>File</th><th>Progress</th><th>Speed</th><th>Started</th><th></th></tr></thead>
+    <tbody>${rows.map(row => {
+      const pct = Number(row.percentage || 0);
+      const active = ["queued", "downloading"].includes(String(row.status || ""));
+      return `<tr>
+        <td><span class="badge text-bg-${row.status === "failed" ? "danger" : row.status === "completed" ? "success" : row.status === "cancelled" ? "secondary" : "primary"}">${escapeHtml(row.status || "queued")}</span>${row.queue_position ? `<div class="small text-muted">#${row.queue_position}</div>` : ""}</td>
+        <td class="small mono">${escapeHtml(row.source_drone_id || "n/a")}</td>
+        <td class="small mono">${escapeHtml(row.target_drone_id || "local")}</td>
+        <td class="small">${escapeHtml(row.file_type || "other")} · ${escapeHtml(row.file_path || row.relative_path || row.rom_name || "")}${row.error_message || row.failure_reason ? `<div class="text-danger">${escapeHtml(row.error_message || row.failure_reason)}</div>` : ""}</td>
+        <td style="min-width:170px"><div class="progress" style="height:.55rem"><div class="progress-bar" style="width:${Math.max(0, Math.min(100, pct))}%"></div></div><div class="small text-muted">${formatBytes(row.downloaded_bytes || row.bytes_transferred)} / ${formatBytes(row.total_bytes || row.file_size)} · ${pct.toFixed(1)}%</div></td>
+        <td class="small">${row.transfer_speed_bps ? `${formatBytes(row.transfer_speed_bps)}/s` : ""}</td>
+        <td class="small text-muted">${escapeHtml(row.started_at || row.download_started_at || row.created_at || "")}</td>
+        <td>${allowCancel && active ? `<button class="btn btn-sm btn-outline-danger" onclick="cancelDroneDownload('${escapeHtml(row.job_id || row.id)}')"><i class="bi bi-x-circle"></i></button>` : ""}</td>
+      </tr>`;
+    }).join("")}</tbody></table></div>`;
+}
+
+async function renderDownloadsPage() {
+  currentSystemContext = null;
+  setSearchMode("hidden");
+  setLoading(true, "Loading downloads...");
+  clearSystemTheme();
+  titleNode.textContent = "Downloads";
+  subtitleNode.textContent = "One active transfer at a time on this Drone";
+  try {
+    const payload = await api("/admin/downloads");
+    const active = payload.active || [];
+    const queued = payload.queued || [];
+    const recent = payload.recent || [];
+    content.innerHTML = `
+      <div class="mb-3"><button class="btn btn-outline-secondary" onclick="setHash('#admin')">Back to Admin</button></div>
+      <div class="card mb-3"><div class="card-body py-3">
+        <div class="d-flex flex-wrap justify-content-between gap-2 mb-2">
+          <div><strong>${escapeHtml(payload.target_drone_id || "This Drone")}</strong><div class="small text-muted">Concurrency limit: one active download per target Drone</div></div>
+          <button class="btn btn-sm btn-outline-primary" onclick="renderDownloadsPage()"><i class="bi bi-arrow-repeat"></i></button>
+        </div>
+        <h6>Active</h6>${renderDownloadRows(active)}
+        <h6 class="mt-3">Queued</h6>${renderDownloadRows(queued)}
+        <h6 class="mt-3">Recent</h6>${renderDownloadRows(recent, false)}
+        ${active.length || queued.length || recent.length ? "" : '<div class="empty-state">No active or queued downloads.</div>'}
+      </div></div>`;
+  } catch (error) {
+    content.innerHTML = '<div class="empty-state">Unable to load downloads.</div>';
+  } finally {
+    setLoading(false);
+  }
+}
+
+async function cancelDroneDownload(jobId) {
+  if (!jobId || !window.confirm("Cancel this download?")) return;
+  await apiPost(`/admin/downloads/${encodeURIComponent(jobId)}/cancel`, {});
+  await renderDownloadsPage();
 }
 function renderArtworkCheckboxDropdown(kind, label, options, selected, allLabel = "Any", enableTools = false) {
   const selectedSet = new Set(selected || []);
@@ -3923,6 +4001,12 @@ async function router() {
       }
       const parsed = parseArtworkHash(hash) || { offset: 0, includeFilesystem: false, fields: ["image", "marquee"], systems: [], q: "", romStatus: "any" };
       await renderMissingArtworkPage(parsed.includeFilesystem, false, parsed.offset, parsed.fields, parsed.systems, parsed.q, parsed.romStatus);
+    } else if (hash === "#admin/downloads") {
+      if (!adminEnabled) {
+        setHash("");
+        return;
+      }
+      await renderDownloadsPage();
     } else if (hash === "#admin/overmind") {
       if (!adminEnabled) {
         setHash("");

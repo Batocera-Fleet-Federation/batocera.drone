@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Lock, Thread
+from threading import Event
 from typing import Dict, Iterable, List, Optional, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -42,6 +43,7 @@ FAKE_OVERMIND_EMAIL = "demo@example.com"
 FAKE_OVERMIND_PASSWORD = "DemoPass123"
 FAKE_OVERMIND_TOKEN = "demo-local-drone-token"
 _OVERMIND_POLLER_STARTED = False
+_DOWNLOAD_MANAGER = None
 LAUNCHBOX_API_BASE = "https://api.gamesdb.launchbox-app.com/api"
 LAUNCHBOX_IMAGE_BASE = "https://images.launchbox-app.com"
 SCRAPER_USER_AGENT = (
@@ -57,6 +59,7 @@ OVERMIND_EVENT_TYPES = {
     "speed": "speed_sample",
     "peer": "peer_health",
 }
+DOWNLOAD_TERMINAL_STATUSES = {"completed", "failed", "cancelled", "skipped"}
 PEER_CHECK_TIMEOUT_SECONDS = float(os.environ.get("DRONE_PEER_CHECK_TIMEOUT_SECONDS", "3"))
 PEER_CHECK_INTERVAL_SECONDS = int(os.environ.get("DRONE_PEER_CHECK_INTERVAL_SECONDS", "300"))
 OVERMIND_SPEED_SAMPLE_SECONDS = int(os.environ.get("OVERMIND_SPEED_SAMPLE_SECONDS", "300"))
@@ -3024,6 +3027,22 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "private, max-age=3600")
         self.end_headers()
         self.wfile.write(body)
+
+    def _handle_admin_downloads(self) -> None:
+        manager = _get_download_manager()
+        if manager is None:
+            self._send_json(200, {"target_drone_id": self.settings.overmind_device_id, "downloads": [], "active": [], "queued": [], "recent": []})
+            return
+        self._send_json(200, manager.snapshot())
+
+    def _handle_admin_download_cancel(self, job_id: str) -> None:
+        manager = _get_download_manager()
+        if manager is None:
+            self._send_json(503, {"error": "download manager unavailable"})
+            return
+        result = manager.cancel(job_id, "cancelled from Drone admin")
+        status_code = 404 if result.get("status") == "not_found" else 200
+        self._send_json(status_code, result)
 
     def _send_html(self, status_code: int, html: str) -> None:
         body = html_bytes(html)
@@ -6747,6 +6766,234 @@ def _rom_md5_exists(repository: "RomRepository", expected_md5: Optional[str]) ->
     return False
 
 
+class DownloadCancelled(RuntimeError):
+    pass
+
+
+class DownloadManager:
+    """Per-target Drone download queue with one active worker."""
+
+    def __init__(self, settings: Settings, repository: "RomRepository") -> None:
+        self.settings = settings
+        self.repository = repository
+        self._lock = Lock()
+        self._jobs: OrderedDict[str, dict] = OrderedDict()
+        self._cancel_events: Dict[str, Event] = {}
+        self._wake = Event()
+        self._thread = Thread(target=self._worker, name="drone-download-worker", daemon=True)
+        self._thread.start()
+
+    def enqueue_rom(self, config: dict, peer: dict, system: str, relative_path: str, expected_size=None, expected_md5=None, source_action_id: Optional[str] = None) -> dict:
+        job_id = str(uuid.uuid4())
+        peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        job = {
+            "id": job_id,
+            "job_id": job_id,
+            "sync_id": job_id,
+            "source_action_id": source_action_id,
+            "source_drone_id": peer_id,
+            "target_drone_id": self.settings.overmind_device_id,
+            "file_path": relative_path,
+            "file_name": Path(relative_path).name,
+            "file_type": "ROM",
+            "system": system,
+            "rom_name": relative_path,
+            "relative_path": relative_path,
+            "total_bytes": expected_size,
+            "file_size": expected_size,
+            "downloaded_bytes": 0,
+            "bytes_transferred": 0,
+            "percentage": 0,
+            "transfer_speed_bps": 0,
+            "status": "queued",
+            "queue_position": None,
+            "started_at": None,
+            "download_started_at": None,
+            "completed_at": None,
+            "download_completed_at": None,
+            "error_message": None,
+            "failure_reason": None,
+            "cancellation_requested": False,
+            "created_at": now,
+            "_config": config,
+            "_peer": peer,
+            "_expected_md5": expected_md5,
+        }
+        with self._lock:
+            self._jobs[job_id] = job
+            self._cancel_events[job_id] = Event()
+            self._update_queue_positions_locked()
+            snapshot = self._public_job_locked(job)
+        self._wake.set()
+        return snapshot
+
+    def cancel(self, job_id: str, reason: str = "cancelled by user") -> dict:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if not job:
+                return {"status": "not_found", "job_id": job_id}
+            if job.get("status") in DOWNLOAD_TERMINAL_STATUSES:
+                return {"status": job.get("status"), "job": self._public_job_locked(job)}
+            job["cancellation_requested"] = True
+            job["cancel_reason"] = reason
+            event = self._cancel_events.get(job_id)
+            if event:
+                event.set()
+            if job.get("status") == "queued":
+                job["status"] = "cancelled"
+                job["completed_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+                job["download_completed_at"] = job["completed_at"]
+                job["failure_reason"] = reason
+                job["error_message"] = reason
+                self._update_queue_positions_locked()
+            snapshot = self._public_job_locked(job)
+        self._wake.set()
+        return {"status": snapshot.get("status"), "job": snapshot}
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            jobs = [self._public_job_locked(job) for job in self._jobs.values()]
+        active = [job for job in jobs if job.get("status") == "downloading"]
+        queued = [job for job in jobs if job.get("status") == "queued"]
+        recent = [job for job in jobs if job.get("status") in DOWNLOAD_TERMINAL_STATUSES][-25:]
+        return {
+            "target_drone_id": self.settings.overmind_device_id,
+            "concurrency": {"scope": "target_drone", "active_limit": 1},
+            "active": active,
+            "queued": queued,
+            "recent": list(reversed(recent)),
+            "downloads": active + queued + list(reversed(recent)),
+        }
+
+    def _public_job_locked(self, job: dict) -> dict:
+        public = {key: value for key, value in job.items() if not key.startswith("_")}
+        downloaded = int(public.get("downloaded_bytes") or 0)
+        total = public.get("total_bytes") or public.get("file_size")
+        try:
+            total_int = int(total)
+        except Exception:
+            total_int = 0
+        public["total_bytes"] = total_int or None
+        public["file_size"] = total_int or public.get("file_size")
+        public["downloaded_bytes"] = downloaded
+        public["bytes_transferred"] = downloaded
+        public["percentage"] = round((downloaded / total_int) * 100, 1) if total_int else 0
+        return public
+
+    def _update_queue_positions_locked(self) -> None:
+        position = 1
+        for job in self._jobs.values():
+            if job.get("status") == "queued":
+                job["queue_position"] = position
+                position += 1
+            else:
+                job["queue_position"] = None
+
+    def _worker(self) -> None:
+        while True:
+            job_id = None
+            with self._lock:
+                for candidate_id, candidate in self._jobs.items():
+                    if candidate.get("status") == "queued":
+                        job_id = candidate_id
+                        break
+                if job_id:
+                    job = self._jobs[job_id]
+                    now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+                    job["status"] = "downloading"
+                    job["started_at"] = now
+                    job["download_started_at"] = now
+                    job["_started_mono"] = time.monotonic()
+                    self._update_queue_positions_locked()
+            if not job_id:
+                self._wake.wait(1)
+                self._wake.clear()
+                continue
+            self._run_job(job_id)
+
+    def _run_job(self, job_id: str) -> None:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if not job:
+                return
+            config = job.get("_config") or {}
+            peer = job.get("_peer") or {}
+            system = str(job.get("system") or "")
+            rel = str(job.get("relative_path") or job.get("file_path") or "")
+            expected_size = job.get("file_size") or job.get("total_bytes")
+            expected_md5 = job.get("_expected_md5")
+            cancel_event = self._cancel_events.get(job_id) or Event()
+
+        def progress(downloaded: int, total: Optional[int]) -> None:
+            with self._lock:
+                current = self._jobs.get(job_id)
+                if not current:
+                    return
+                current["downloaded_bytes"] = downloaded
+                current["bytes_transferred"] = downloaded
+                if total:
+                    current["total_bytes"] = total
+                    current["file_size"] = total
+                started = float(current.get("_started_mono") or time.monotonic())
+                elapsed = max(0.001, time.monotonic() - started)
+                current["transfer_speed_bps"] = int(downloaded / elapsed)
+
+        try:
+            activity = _download_rom_from_peer(
+                self.settings,
+                config,
+                peer,
+                system,
+                rel,
+                expected_size=expected_size,
+                expected_md5=expected_md5,
+                progress_callback=progress,
+                cancellation_event=cancel_event,
+            )
+            refresh_started = time.monotonic()
+            try:
+                _, refreshed = self.repository.list_assets(system, "roms")
+                activity["inventory_refresh_status"] = "succeeded"
+                activity["inventory_refresh_count"] = len(refreshed)
+            except Exception as refresh_error:
+                activity["inventory_refresh_status"] = "failed"
+                activity["inventory_refresh_error"] = str(refresh_error)
+            activity["inventory_refresh_duration_ms"] = int((time.monotonic() - refresh_started) * 1000)
+            with self._lock:
+                current = self._jobs.get(job_id)
+                if current:
+                    current.update(activity)
+                    current["id"] = job_id
+                    current["job_id"] = job_id
+                    current["sync_id"] = job_id
+        except DownloadCancelled as error:
+            with self._lock:
+                current = self._jobs.get(job_id)
+                if current:
+                    current["status"] = "cancelled"
+                    current["failure_reason"] = str(error) or current.get("cancel_reason") or "cancelled"
+                    current["error_message"] = current["failure_reason"]
+                    current["completed_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+                    current["download_completed_at"] = current["completed_at"]
+        except Exception as error:
+            with self._lock:
+                current = self._jobs.get(job_id)
+                if current:
+                    current["status"] = "failed"
+                    current["failure_reason"] = str(error)
+                    current["error_message"] = str(error)
+                    current["completed_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+                    current["download_completed_at"] = current["completed_at"]
+        finally:
+            with self._lock:
+                self._update_queue_positions_locked()
+
+
+def _get_download_manager() -> Optional[DownloadManager]:
+    return _DOWNLOAD_MANAGER
+
+
 def _collision_safe_target(system_dir: Path, relative_path: str) -> Path:
     system_dir = system_dir.resolve()
     rel = _safe_rom_relative_path(relative_path)
@@ -6797,7 +7044,17 @@ def _best_peer_for_rom(settings: Settings, repository: "RomRepository", config: 
     return candidates[0][2] if candidates else None
 
 
-def _download_rom_from_peer(settings: Settings, config: dict, peer: dict, system: str, relative_path: str, expected_size=None, expected_md5=None) -> dict:
+def _download_rom_from_peer(
+    settings: Settings,
+    config: dict,
+    peer: dict,
+    system: str,
+    relative_path: str,
+    expected_size=None,
+    expected_md5=None,
+    progress_callback=None,
+    cancellation_event: Optional[Event] = None,
+) -> dict:
     peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
     address = _peer_address(peer)
     if not address:
@@ -6806,6 +7063,7 @@ def _download_rom_from_peer(settings: Settings, config: dict, peer: dict, system
     url = f"{address}/v1/api/peer/roms/{quote(system, safe='')}/{quote(rel, safe='/')}"
     system_dir = (settings.roms_root / system).resolve()
     target = _collision_safe_target(system_dir, rel)
+    partial_target = target.with_name(f"{target.name}.part")
     target.parent.mkdir(parents=True, exist_ok=True)
     cafile = _peer_trust_cafile(settings, peer_id=peer_id, config=config)
     if address.startswith("https://") and not cafile:
@@ -6816,54 +7074,88 @@ def _download_rom_from_peer(settings: Settings, config: dict, peer: dict, system
     started_mono = time.monotonic()
     bytes_written = 0
     request = Request(url, headers={"User-Agent": "batocera-drone-rom-sync/1.0"})
+    def ensure_not_cancelled() -> None:
+        if cancellation_event is not None and cancellation_event.is_set():
+            if partial_target.exists():
+                partial_target.unlink()
+            raise DownloadCancelled("download cancelled")
+
+    def response_total(response) -> Optional[int]:
+        if expected_size not in (None, ""):
+            try:
+                return int(expected_size)
+            except Exception:
+                pass
+        try:
+            return int(response.headers.get("Content-Length") or 0) or None
+        except Exception:
+            return None
+
     try:
-        with urlopen(request, timeout=max(10, PEER_CHECK_TIMEOUT_SECONDS * 4), context=context) as response, target.open("wb") as handle:
+        with urlopen(request, timeout=max(10, PEER_CHECK_TIMEOUT_SECONDS * 4), context=context) as response, partial_target.open("wb") as handle:
+            total_bytes = response_total(response)
             while True:
+                ensure_not_cancelled()
                 chunk = response.read(1024 * 1024)
                 if not chunk:
                     break
                 handle.write(chunk)
                 bytes_written += len(chunk)
+                if progress_callback:
+                    progress_callback(bytes_written, total_bytes)
     except (ssl.SSLError, URLError) as error:
         if isinstance(error, URLError) and not _is_ssl_url_error(error):
             raise
         ssl_error = getattr(error, "reason", error)
         print(f"ROM sync SSL validation failed: {_peer_ssl_diagnostic(url, cafile, ssl_error)}", file=sys.stderr, flush=True)
-        if target.exists():
-            target.unlink()
+        if partial_target.exists():
+            partial_target.unlink()
         cafile = _peer_trust_cafile(settings, peer_id=peer_id, config=config, refresh_cert=True)
         if address.startswith("https://") and not cafile:
             raise ssl.SSLError(f"no trusted certificate cached for peer {peer_id}") from error
         context = _drone_client_ssl_context(settings, url, verify=bool(cafile), cafile=cafile)
         bytes_written = 0
         try:
-            with urlopen(request, timeout=max(10, PEER_CHECK_TIMEOUT_SECONDS * 4), context=context) as response, target.open("wb") as handle:
+            with urlopen(request, timeout=max(10, PEER_CHECK_TIMEOUT_SECONDS * 4), context=context) as response, partial_target.open("wb") as handle:
+                total_bytes = response_total(response)
                 while True:
+                    ensure_not_cancelled()
                     chunk = response.read(1024 * 1024)
                     if not chunk:
                         break
                     handle.write(chunk)
                     bytes_written += len(chunk)
+                    if progress_callback:
+                        progress_callback(bytes_written, total_bytes)
         except (ssl.SSLError, URLError) as retry_error:
             if isinstance(retry_error, URLError) and not _is_ssl_url_error(retry_error):
                 raise
             retry_ssl_error = getattr(retry_error, "reason", retry_error)
             print(f"ROM sync SSL validation retry failed: {_peer_ssl_diagnostic(url, cafile, retry_ssl_error)}", file=sys.stderr, flush=True)
-            if target.exists():
-                target.unlink()
+            if partial_target.exists():
+                partial_target.unlink()
             raise ssl.SSLError(_peer_ssl_diagnostic(url, cafile, retry_ssl_error)) from retry_error
+    except DownloadCancelled:
+        if partial_target.exists():
+            partial_target.unlink()
+        raise
+    except Exception:
+        if partial_target.exists():
+            partial_target.unlink()
+        raise
     if expected_size not in (None, ""):
         try:
             if int(expected_size) != bytes_written:
                 raise RuntimeError(f"size mismatch expected={expected_size} actual={bytes_written}")
         except ValueError:
             pass
-    actual_md5 = RomRepository.build_md5(target)
+    actual_md5 = RomRepository.build_md5(partial_target)
     expected_md5_clean = str(expected_md5 or "").strip().lower()
     if expected_md5_clean and actual_md5.lower() != expected_md5_clean:
-        if target.exists():
-            target.unlink()
+        if partial_target.exists():
+            partial_target.unlink()
         raise RuntimeError(f"md5 mismatch expected={expected_md5_clean} actual={actual_md5}")
+    partial_target.replace(target)
     completed_dt = datetime.now(timezone.utc).replace(microsecond=0)
     duration_ms = int((time.monotonic() - started_mono) * 1000)
     return {
@@ -6923,6 +7215,9 @@ def _execute_overmind_action(settings: Settings, repository: "RomRepository", ac
 
     if action_name in {"sync_rom", "sync_system"}:
         config = _load_overmind_config_for_settings(settings)
+        manager = _get_download_manager()
+        if manager is None:
+            return "failed", "Download manager is not available.", None
         payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
         requested = []
         if action_name == "sync_rom":
@@ -6975,18 +7270,17 @@ def _execute_overmind_action(settings: Settings, repository: "RomRepository", ac
                 })
                 continue
             try:
-                activity = _download_rom_from_peer(settings, config, peer, system, rel, expected_size=item.get("file_size"), expected_md5=expected_md5)
-                activity["sync_id"] = sync_id
+                activity = manager.enqueue_rom(
+                    config,
+                    peer,
+                    system,
+                    rel,
+                    expected_size=item.get("file_size"),
+                    expected_md5=expected_md5,
+                    source_action_id=str(action.get("id") or ""),
+                )
+                activity["sync_id"] = activity.get("job_id") or sync_id
                 activity["rom_md5"] = activity.get("rom_md5") or expected_md5
-                refresh_started = time.monotonic()
-                try:
-                    _, refreshed = repository.list_assets(system, "roms")
-                    activity["inventory_refresh_status"] = "succeeded"
-                    activity["inventory_refresh_count"] = len(refreshed)
-                except Exception as refresh_error:
-                    activity["inventory_refresh_status"] = "failed"
-                    activity["inventory_refresh_error"] = str(refresh_error)
-                activity["inventory_refresh_duration_ms"] = int((time.monotonic() - refresh_started) * 1000)
                 activities.append(activity)
             except Exception as error:
                 failures += 1
@@ -7008,7 +7302,19 @@ def _execute_overmind_action(settings: Settings, repository: "RomRepository", ac
         result = {"type": "rom_sync", "activity": activities}
         if failures and failures == len(activities):
             return "failed", f"ROM sync failed for {failures} item(s).", result
-        return "completed", f"ROM sync processed {len(activities)} item(s) with {failures} failure(s).", result
+        return "completed", f"ROM sync queued {len(activities)} item(s) with {failures} failure(s).", result
+
+    if action_name == "cancel_download":
+        payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
+        job_id = str(payload.get("job_id") or payload.get("download_id") or "").strip()
+        if not job_id:
+            return "failed", "job_id is required.", None
+        manager = _get_download_manager()
+        if manager is None:
+            return "failed", "Download manager is not available.", None
+        result = manager.cancel(job_id, "cancelled from Overmind")
+        status_value = "completed" if result.get("status") != "not_found" else "failed"
+        return status_value, f"Cancel request for download {job_id}: {result.get('status')}.", {"type": "download_cancel", **result}
 
     if action_name == "shutdown":
         return "failed", "Unsupported action: shutdown is disabled by Overmind safety policy.", None
@@ -7101,6 +7407,7 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                     "certificate": DroneCertificateManager(settings).metadata(),
                     "system_info": system_info_payload,
                     "rom_metadata": rom_metadata_payload,
+                    "downloads": _get_download_manager().snapshot() if _get_download_manager() else {},
                 }
                 heartbeat_url = f"{base_url}/api/devices/{device_id}/heartbeat"
                 try:
@@ -7213,7 +7520,7 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
 
 
 def create_server(settings: Settings) -> ThreadingHTTPServer:
-    global _OVERMIND_POLLER_STARTED
+    global _OVERMIND_POLLER_STARTED, _DOWNLOAD_MANAGER
     roms_root, bios_root = _real_data_roots(settings)
     repository = RomRepository(
         roms_root,
@@ -7240,6 +7547,8 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
         max_items=settings.json_cache_max_items,
         max_bytes=settings.json_cache_max_bytes,
     )
+    if _DOWNLOAD_MANAGER is None:
+        _DOWNLOAD_MANAGER = DownloadManager(settings, repository)
 
     handler_factory = _build_handler(
         settings=settings,

@@ -3,6 +3,7 @@ import io
 import socket
 import tempfile
 import unittest
+from threading import Event
 from unittest import mock
 from pathlib import Path
 
@@ -11,6 +12,8 @@ from app.drone_api import (
     FAKE_OVERMIND_EMAIL,
     FAKE_OVERMIND_TOKEN,
     BasicAuth,
+    DownloadCancelled,
+    DownloadManager,
     DroneCredentialStore,
     LaunchBoxClient,
     RomRepository,
@@ -212,6 +215,86 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(contexts[0][2], ca_file)
             self.assertEqual((root / "roms" / "atari7800" / "Asteroids (USA).zip").read_bytes(), b"ROMDATA")
             fetch.assert_not_called()
+
+    def test_cancelled_download_uses_part_file_and_is_not_inventoried(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
+                clear=True,
+            ):
+                settings = Settings.from_env()
+
+            class FakeResponse:
+                headers = {"Content-Length": "14"}
+
+                def __init__(self):
+                    self._chunks = [b"PARTIAL", b"ROMDATA", b""]
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self, _size=-1):
+                    return self._chunks.pop(0)
+
+            cancel = Event()
+
+            def progress(_downloaded, _total):
+                cancel.set()
+
+            peer = {"drone_id": "source-a", "reachable_url": "http://source-a:8080"}
+            with mock.patch("app.drone_api.urlopen", return_value=FakeResponse()):
+                with self.assertRaises(DownloadCancelled):
+                    _download_rom_from_peer(
+                        settings,
+                        {},
+                        peer,
+                        "snes",
+                        "Cancel Me.zip",
+                        progress_callback=progress,
+                        cancellation_event=cancel,
+                    )
+
+            repo = RomRepository(root / "roms", root / "bios")
+            self.assertFalse((root / "roms" / "snes" / "Cancel Me.zip").exists())
+            self.assertFalse((root / "roms" / "snes" / "Cancel Me.zip.part").exists())
+            self.assertEqual(repo.list_assets("snes", "roms")[1], [])
+
+    def test_download_manager_tracks_queue_and_idempotent_cancel(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "USERDATA_ROOT": str(root),
+                    "ROMS_ROOT": str(root / "roms"),
+                    "BIOS_ROOT": str(root / "bios"),
+                    "OVERMIND_DEVICE_ID": "target-a",
+                },
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            repo = RomRepository(root / "roms", root / "bios")
+            with mock.patch("app.drone_api.Thread.start"):
+                manager = DownloadManager(settings, repo)
+
+            first = manager.enqueue_rom({}, {"drone_id": "source-a"}, "snes", "One.zip")
+            second = manager.enqueue_rom({}, {"drone_id": "source-a"}, "snes", "Two.zip")
+            snapshot = manager.snapshot()
+            self.assertEqual([job["queue_position"] for job in snapshot["queued"]], [1, 2])
+            self.assertEqual(first["target_drone_id"], "target-a")
+            self.assertEqual(second["source_drone_id"], "source-a")
+
+            result = manager.cancel(second["job_id"])
+            self.assertEqual(result["status"], "cancelled")
+            self.assertEqual(manager.cancel(second["job_id"])["status"], "cancelled")
+            snapshot = manager.snapshot()
+            self.assertEqual(len(snapshot["queued"]), 1)
+            self.assertEqual(snapshot["recent"][0]["status"], "cancelled")
 
     def test_disk_rom_without_gamelist_is_listed_with_md5(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
