@@ -1,5 +1,6 @@
 import base64
 import io
+import json
 import socket
 import tempfile
 import unittest
@@ -29,6 +30,8 @@ from app.drone_api import (
     _launchbox_platform_for_system,
     _load_overmind_config_for_settings,
     _collect_rom_metadata,
+    _poll_rom_metadata_cache,
+    _rom_metadata_cache_path,
     _sample_speed,
     _real_data_roots,
     _peer_ssl_diagnostic,
@@ -525,6 +528,60 @@ class SettingsTests(unittest.TestCase):
             result = _collect_rom_metadata(settings, RomRepository(settings.roms_root, settings.bios_root))
             self.assertEqual(result["systems"], [])
             self.assertEqual(result["roms"], [])
+
+    def test_rom_metadata_cache_reuses_md5_and_detects_deletes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            rom = root / "roms" / "snes" / "Game.zip"
+            rom.parent.mkdir(parents=True)
+            rom.write_bytes(b"first")
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            repo = RomRepository(settings.roms_root, settings.bios_root)
+
+            snapshot, changed, stats = _poll_rom_metadata_cache(settings, repo)
+            self.assertTrue(changed)
+            self.assertEqual(stats["new_or_changed"], 1)
+            first_md5 = snapshot["roms"][0]["rom_md5"]
+            cache = _rom_metadata_cache_path(settings)
+            cache_data = json.loads(cache.read_text(encoding="utf-8"))
+            cache_data["dirty"] = False
+            cache.write_text(json.dumps(cache_data), encoding="utf-8")
+
+            with mock.patch.object(RomRepository, "build_md5", side_effect=AssertionError("unchanged ROM should not hash")):
+                snapshot, changed, stats = _poll_rom_metadata_cache(settings, repo)
+            self.assertFalse(changed)
+            self.assertEqual(snapshot["roms"][0]["rom_md5"], first_md5)
+
+            rom.unlink()
+            snapshot, changed, stats = _poll_rom_metadata_cache(settings, repo)
+            self.assertTrue(changed)
+            self.assertEqual(stats["deleted"], 1)
+            self.assertEqual(snapshot["roms"], [])
+
+    def test_corrupt_rom_metadata_cache_rebuilds(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            rom = root / "roms" / "snes" / "Game.zip"
+            rom.parent.mkdir(parents=True)
+            rom.write_bytes(b"first")
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            _rom_metadata_cache_path(settings).parent.mkdir(parents=True)
+            _rom_metadata_cache_path(settings).write_text("{broken", encoding="utf-8")
+
+            snapshot, changed, stats = _poll_rom_metadata_cache(settings, RomRepository(settings.roms_root, settings.bios_root))
+            self.assertTrue(changed)
+            self.assertTrue(stats["rebuilt"])
+            self.assertEqual(len(snapshot["roms"]), 1)
 
     def test_sample_speed_uses_overmind_probe_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

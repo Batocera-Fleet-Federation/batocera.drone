@@ -43,6 +43,7 @@ FAKE_OVERMIND_EMAIL = "demo@example.com"
 FAKE_OVERMIND_PASSWORD = "DemoPass123"
 FAKE_OVERMIND_TOKEN = "demo-local-drone-token"
 _OVERMIND_POLLER_STARTED = False
+_ROM_METADATA_POLLER_STARTED = False
 _DOWNLOAD_MANAGER = None
 LAUNCHBOX_API_BASE = "https://api.gamesdb.launchbox-app.com/api"
 LAUNCHBOX_IMAGE_BASE = "https://images.launchbox-app.com"
@@ -64,6 +65,10 @@ PEER_CHECK_TIMEOUT_SECONDS = float(os.environ.get("DRONE_PEER_CHECK_TIMEOUT_SECO
 PEER_CHECK_INTERVAL_SECONDS = int(os.environ.get("DRONE_PEER_CHECK_INTERVAL_SECONDS", "300"))
 OVERMIND_SPEED_SAMPLE_SECONDS = int(os.environ.get("OVERMIND_SPEED_SAMPLE_SECONDS", "300"))
 OVERMIND_HEARTBEAT_SECONDS = int(os.environ.get("OVERMIND_POLL_SECONDS", "60"))
+ROM_METADATA_CACHE_VERSION = 1
+ROM_METADATA_POLL_SECONDS = int(os.environ.get("ROM_METADATA_POLL_SECONDS", "900"))
+ROM_METADATA_PROGRESS_SECONDS = float(os.environ.get("ROM_METADATA_PROGRESS_SECONDS", "5"))
+ROM_METADATA_PROGRESS_FILES = int(os.environ.get("ROM_METADATA_PROGRESS_FILES", "25"))
 LAUNCHBOX_PLATFORM_ALIASES = {
     "3do": "3DO Interactive Multiplayer",
     "adam": "Coleco ADAM",
@@ -946,6 +951,7 @@ class Settings:
     overmind_token: Optional[str]
     overmind_device_id: str
     overmind_poll_seconds: int
+    rom_metadata_poll_seconds: int
     hostname_override: Optional[str]
     drone_cert_file: Path
     drone_key_file: Path
@@ -1010,6 +1016,7 @@ class Settings:
             overmind_token=os.environ.get("OVERMIND_DRONE_TOKEN"),
             overmind_device_id=os.environ.get("OVERMIND_DEVICE_ID") or os.environ.get("DRONE_DEVICE_ID") or (_fake_machine_id() if use_fake_data else _machine_id()),
             overmind_poll_seconds=OVERMIND_HEARTBEAT_SECONDS,
+            rom_metadata_poll_seconds=max(0, int(os.environ.get("ROM_METADATA_POLL_SECONDS", str(ROM_METADATA_POLL_SECONDS)))),
             hostname_override=(os.environ.get("HOSTNAME_OVERRIDE") or "").strip() or None,
             drone_cert_file=Path(os.environ.get("DRONE_CERT_FILE", os.environ.get("TLS_CERT_FILE", str(default_drone_cert)))),
             drone_key_file=Path(os.environ.get("DRONE_KEY_FILE", os.environ.get("TLS_KEY_FILE", str(default_drone_key)))),
@@ -5761,7 +5768,9 @@ def _overmind_peer_results_path_for_settings(settings: Settings) -> Path:
 
 def _write_json_file(path: Path, payload) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    tmp.replace(path)
 
 
 def _read_json_file(path: Path, fallback):
@@ -6048,6 +6057,20 @@ def _overmind_post_json(url: str, payload: dict, token: Optional[str] = None, se
         return {}
     parsed = json.loads(raw.decode("utf-8"))
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _overmind_post_json_with_status(url: str, payload: dict, token: Optional[str] = None, settings: Optional[Settings] = None) -> Tuple[int, dict]:
+    body = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = Request(url, data=body, headers=headers, method="POST")
+    context = _drone_client_ssl_context(settings, url) if settings else (ssl._create_unverified_context() if url.startswith("https://") else None)
+    with urlopen(request, timeout=10, context=context) as response:
+        status_code = int(getattr(response, "status", 200) or 200)
+        raw = response.read()
+    parsed = json.loads(raw.decode("utf-8")) if raw else {}
+    return status_code, parsed if isinstance(parsed, dict) else {}
 
 
 def _overmind_get_json(url: str, token: Optional[str] = None, settings: Optional[Settings] = None) -> dict:
@@ -6599,6 +6622,172 @@ def _collect_rom_metadata(settings: Settings, repository: "RomRepository") -> di
         flush=True,
     )
     return result
+
+
+def _rom_metadata_cache_path(settings: Settings) -> Path:
+    return (settings.userdata_root / "system" / "drone-app" / "rom_metadata_cache.json").resolve()
+
+
+def _empty_rom_metadata_cache() -> dict:
+    return {
+        "schema_version": ROM_METADATA_CACHE_VERSION,
+        "last_full_scan_at": None,
+        "last_successful_upload_at": None,
+        "entries": {},
+        "systems": [],
+        "gamelists": [],
+        "dirty": True,
+    }
+
+
+def _load_rom_metadata_cache(settings: Settings) -> Tuple[dict, bool]:
+    path = _rom_metadata_cache_path(settings)
+    try:
+        cache = _read_json_file(path, None)
+        if not isinstance(cache, dict) or cache.get("schema_version") != ROM_METADATA_CACHE_VERSION:
+            raise ValueError("cache schema mismatch")
+        entries = cache.get("entries")
+        if not isinstance(entries, dict):
+            raise ValueError("cache entries missing")
+        cache.setdefault("systems", [])
+        cache.setdefault("gamelists", [])
+        cache.setdefault("dirty", False)
+        return cache, False
+    except Exception as error:
+        print(f"ROM metadata cache rebuild required: {path} ({_format_overmind_error(error)})", file=sys.stderr, flush=True)
+        return _empty_rom_metadata_cache(), True
+
+
+def _rom_cache_entry_key(system: str, relative_path: str) -> str:
+    normalized_path = str(relative_path or "").replace("\\", "/").lstrip("./")
+    return f"{system.strip().lower()}:{normalized_path}"
+
+
+def _build_rom_metadata_snapshot_from_cache(settings: Settings, cache: dict) -> dict:
+    entries = cache.get("entries") if isinstance(cache.get("entries"), dict) else {}
+    roms = []
+    for entry in entries.values():
+        if not isinstance(entry, dict):
+            continue
+        roms.append({k: v for k, v in entry.items() if k != "absolute_path"})
+    roms.sort(key=lambda row: (str(row.get("system") or ""), str(row.get("file_path") or "")))
+    return {
+        "type": "rom_metadata",
+        "collected_at": cache.get("last_full_scan_at") or datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "roms_root": str(settings.roms_root),
+        "systems": cache.get("systems") if isinstance(cache.get("systems"), list) else [],
+        "roms": roms,
+        "gamelists": cache.get("gamelists") if isinstance(cache.get("gamelists"), list) else [],
+        "cache": {"schema_version": ROM_METADATA_CACHE_VERSION},
+    }
+
+
+def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") -> Tuple[dict, bool, dict]:
+    started = time.monotonic()
+    print("ROM metadata poll started: phase=cache_load", file=sys.stdout, flush=True)
+    cache, rebuilt = _load_rom_metadata_cache(settings)
+    existing_entries = cache.get("entries") if isinstance(cache.get("entries"), dict) else {}
+    previous_keys = set(existing_entries.keys())
+    next_entries: Dict[str, dict] = {}
+    new_or_changed: List[Tuple[str, Path, dict]] = []
+    systems_scanned = 0
+    discovered = 0
+    now_iso = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+    print("ROM metadata poll phase=scan", file=sys.stdout, flush=True)
+    try:
+        systems = repository.list_systems()
+    except FileNotFoundError:
+        systems = []
+    gamelists = []
+    for system in systems:
+        system_name = str(system.get("name") or "").strip()
+        if not system_name:
+            continue
+        systems_scanned += 1
+        try:
+            _, roms = repository.list_assets(system_name, "roms", include_md5=False)
+        except Exception as error:
+            print(f"ROM metadata scan warning: system={system_name} error={_format_overmind_error(error)}", file=sys.stderr, flush=True)
+            continue
+        for rom in roms:
+            file_path = str(rom.get("file_path") or rom.get("relative_path") or rom.get("rom_path") or rom.get("rom_file") or "").strip()
+            absolute = Path(str(rom.get("absolute_path") or ""))
+            if not file_path or not absolute.exists() or not absolute.is_file():
+                continue
+            discovered += 1
+            key = _rom_cache_entry_key(system_name, file_path)
+            stat_size = int(rom.get("file_size") or rom.get("byte_count") or absolute.stat().st_size)
+            stat_mtime = int(rom.get("modified_time") or rom.get("mtime") or absolute.stat().st_mtime)
+            previous = existing_entries.get(key) if isinstance(existing_entries.get(key), dict) else {}
+            base_entry = {
+                **{k: v for k, v in rom.items() if k not in {"md5", "rom_md5"}},
+                "system": system_name,
+                "system_name": system_name,
+                "rom_name": str(rom.get("rom_name") or rom.get("title") or rom.get("name") or Path(file_path).stem),
+                "file_path": file_path,
+                "relative_path": file_path,
+                "file_size": stat_size,
+                "byte_count": stat_size,
+                "modified_time": stat_mtime,
+                "mtime": stat_mtime,
+                "absolute_path": str(absolute),
+            }
+            if previous and previous.get("file_size") == stat_size and previous.get("modified_time") == stat_mtime and previous.get("rom_md5"):
+                next_entries[key] = {**base_entry, "md5": previous.get("md5") or previous.get("rom_md5"), "rom_md5": previous.get("rom_md5")}
+            else:
+                new_or_changed.append((key, absolute, base_entry))
+        gamelist_path = settings.roms_root / system_name / "gamelist.xml"
+        if gamelist_path.exists() and gamelist_path.is_file():
+            gamelist = _read_text_file(gamelist_path, max_bytes=524288)
+            gamelist["system"] = system_name
+            gamelists.append(gamelist)
+
+    deleted = previous_keys - set(next_entries.keys()) - {key for key, _, _ in new_or_changed}
+    print(
+        f"ROM metadata poll scan complete: systems={systems_scanned} roms={discovered} new_or_changed={len(new_or_changed)} deleted={len(deleted)}",
+        file=sys.stdout,
+        flush=True,
+    )
+
+    if new_or_changed:
+        hash_started = time.monotonic()
+        last_log = hash_started
+        print(f"ROM metadata poll phase=md5_hashing count={len(new_or_changed)}", file=sys.stdout, flush=True)
+        for index, (key, absolute, entry) in enumerate(new_or_changed, start=1):
+            md5_value = RomRepository.build_md5(absolute)
+            next_entries[key] = {**entry, "md5": md5_value, "rom_md5": md5_value}
+            now = time.monotonic()
+            if index == len(new_or_changed) or index % max(1, ROM_METADATA_PROGRESS_FILES) == 0 or now - last_log >= ROM_METADATA_PROGRESS_SECONDS:
+                print(f"ROM metadata md5 progress: {index}/{len(new_or_changed)} files", file=sys.stdout, flush=True)
+                last_log = now
+        print(
+            f"ROM metadata md5 hashing completed: count={len(new_or_changed)} duration_ms={int((time.monotonic() - hash_started) * 1000)}",
+            file=sys.stdout,
+            flush=True,
+        )
+
+    changed = rebuilt or bool(new_or_changed) or bool(deleted) or bool(cache.get("dirty"))
+    cache["entries"] = next_entries
+    cache["systems"] = systems
+    cache["gamelists"] = gamelists
+    cache["last_full_scan_at"] = now_iso
+    cache["dirty"] = changed
+    print("ROM metadata poll phase=cache_write", file=sys.stdout, flush=True)
+    _write_json_file(_rom_metadata_cache_path(settings), cache)
+    print(
+        f"ROM metadata cache write completed: entries={len(next_entries)} changed={changed} duration_ms={int((time.monotonic() - started) * 1000)}",
+        file=sys.stdout,
+        flush=True,
+    )
+    stats = {
+        "systems_scanned": systems_scanned,
+        "roms_discovered": discovered,
+        "new_or_changed": len(new_or_changed),
+        "deleted": len(deleted),
+        "rebuilt": rebuilt,
+    }
+    return _build_rom_metadata_snapshot_from_cache(settings, cache), changed, stats
 
 
 def _collect_log_sources(settings: Settings) -> dict:
@@ -7359,13 +7548,11 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
     last_speed_sample_at = -float(speed_sample_seconds)
     last_peer_check_at = -float(PEER_CHECK_INTERVAL_SECONDS)
     last_system_info_at = -float(system_info_refresh_seconds)
-    last_missing_roms_warning_at = -float(3600)
     system_info_payload: dict = {}
-    rom_metadata_payload: dict = {}
     fs_snapshot = _filesystem_snapshot(settings)
 
     def loop() -> None:
-        nonlocal last_speed_sample_at, last_peer_check_at, last_system_info_at, last_missing_roms_warning_at, system_info_payload, rom_metadata_payload, fs_snapshot
+        nonlocal last_speed_sample_at, last_peer_check_at, last_system_info_at, system_info_payload, fs_snapshot
         while True:
             try:
                 config = _load_overmind_config_for_settings(settings)
@@ -7382,26 +7569,6 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
 
                 device_id = quote(settings.overmind_device_id, safe="")
                 now = time.monotonic()
-                try:
-                    rom_metadata_payload = _collect_rom_metadata(settings, repository)
-                    rom_systems = rom_metadata_payload.get("systems") or []
-                except FileNotFoundError as error:
-                    rom_metadata_payload = {
-                        "type": "rom_metadata",
-                        "roms_root": str(settings.roms_root),
-                        "systems": [],
-                        "roms": [],
-                        "gamelists": [],
-                        "error": str(error),
-                    }
-                    rom_systems = []
-                    if now - last_missing_roms_warning_at >= 3600:
-                        print(
-                            f"Overmind action poll warning: local ROM root unavailable; reporting no ROM systems ({_format_overmind_error(error)})",
-                            file=sys.stderr,
-                            flush=True,
-                        )
-                        last_missing_roms_warning_at = now
                 if not system_info_payload or now - last_system_info_at >= system_info_refresh_seconds:
                     system_info_payload = _collect_system_info_payload(settings)
                     last_system_info_at = now
@@ -7410,30 +7577,43 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                     "device_id": settings.overmind_device_id,
                     "device_name": str(config.get("drone_name") or "").strip() or socket.gethostname(),
                     "network": network_payload,
-                    "rom_systems": rom_systems,
                     "api_port": settings.https_port,
                     "scheme": _drone_scheme(settings),
                     "reachable_url": _drone_reachable_url(settings, network_payload),
                     "certificate": DroneCertificateManager(settings).metadata(),
                     "system_info": system_info_payload,
-                    "rom_metadata": rom_metadata_payload,
                     "downloads": _get_download_manager().snapshot() if _get_download_manager() else {},
                 }
                 heartbeat_url = f"{base_url}/api/devices/{device_id}/heartbeat"
+                heartbeat_started = time.monotonic()
+                print(
+                    f"Heartbeat send started: endpoint={heartbeat_url} device_id={settings.overmind_device_id}",
+                    file=sys.stdout,
+                    flush=True,
+                )
                 try:
-                    response = _overmind_post_json(heartbeat_url, heartbeat_payload, token=token, settings=settings)
-                except HTTPError as error:
-                    if error.code == 401:
-                        replacement_token = _reclaim_overmind_token_after_unauthorized(settings, repository, config, base_url, error)
-                        if replacement_token:
-                            token = replacement_token
-                            response = _overmind_post_json(heartbeat_url, heartbeat_payload, token=token, settings=settings)
+                    try:
+                        status_code, response = _overmind_post_json_with_status(heartbeat_url, heartbeat_payload, token=token, settings=settings)
+                    except HTTPError as error:
+                        if error.code == 401:
+                            replacement_token = _reclaim_overmind_token_after_unauthorized(settings, repository, config, base_url, error)
+                            if replacement_token:
+                                token = replacement_token
+                                status_code, response = _overmind_post_json_with_status(heartbeat_url, heartbeat_payload, token=token, settings=settings)
+                            else:
+                                raise
                         else:
                             raise
-                    else:
-                        raise
+                except Exception as error:
+                    status_part = f" status={error.code}" if isinstance(error, HTTPError) else ""
+                    print(
+                        f"Heartbeat send failed: endpoint={heartbeat_url}{status_part} error={_format_overmind_error(error)} duration_ms={int((time.monotonic() - heartbeat_started) * 1000)}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    raise
                 print(
-                    f"ROM metadata sent to Overmind for {settings.overmind_device_id}: root={rom_metadata_payload.get('roms_root')} systems={len(rom_metadata_payload.get('systems') or [])} roms={len(rom_metadata_payload.get('roms') or [])}",
+                    f"Heartbeat send succeeded: endpoint={heartbeat_url} status={status_code} duration_ms={int((time.monotonic() - heartbeat_started) * 1000)}",
                     file=sys.stdout,
                     flush=True,
                 )
@@ -7529,8 +7709,85 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
     thread.start()
 
 
+def _start_rom_metadata_poller(settings: Settings, repository: "RomRepository") -> None:
+    poll_seconds = max(30, int(settings.rom_metadata_poll_seconds or ROM_METADATA_POLL_SECONDS))
+
+    def loop() -> None:
+        while True:
+            poll_started = time.monotonic()
+            try:
+                config = _load_overmind_config_for_settings(settings)
+                base_url = str(config.get("overmind_url") or "").strip().rstrip("/")
+                token = str(config.get("overmind_token") or "").strip()
+                if not base_url:
+                    time.sleep(poll_seconds)
+                    continue
+                if not token:
+                    token = _register_or_claim_overmind_token(settings, repository, config, base_url) or ""
+                    if not token:
+                        time.sleep(poll_seconds)
+                        continue
+
+                snapshot, changed, stats = _poll_rom_metadata_cache(settings, repository)
+                if not changed:
+                    print(
+                        f"ROM metadata upload skipped: no changes detected systems={stats.get('systems_scanned')} roms={stats.get('roms_discovered')} duration_ms={int((time.monotonic() - poll_started) * 1000)}",
+                        file=sys.stdout,
+                        flush=True,
+                    )
+                    time.sleep(poll_seconds)
+                    continue
+
+                device_id = quote(settings.overmind_device_id, safe="")
+                upload_url = f"{base_url}/api/devices/{device_id}/rom-metadata"
+                payload = {"device_id": settings.overmind_device_id, **snapshot}
+                print(
+                    f"ROM metadata poll phase=upload endpoint={upload_url} roms={len(snapshot.get('roms') or [])}",
+                    file=sys.stdout,
+                    flush=True,
+                )
+                try:
+                    status_code, response = _overmind_post_json_with_status(upload_url, payload, token=token, settings=settings)
+                except HTTPError as error:
+                    if error.code == 401:
+                        replacement_token = _reclaim_overmind_token_after_unauthorized(settings, repository, config, base_url, error)
+                        if replacement_token:
+                            token = replacement_token
+                            status_code, response = _overmind_post_json_with_status(upload_url, payload, token=token, settings=settings)
+                        else:
+                            raise
+                    else:
+                        raise
+                cache, _ = _load_rom_metadata_cache(settings)
+                cache["last_successful_upload_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+                cache["dirty"] = False
+                _write_json_file(_rom_metadata_cache_path(settings), cache)
+                print(
+                    f"ROM metadata upload succeeded: status={status_code} accepted_roms={response.get('rom_count')} duration_ms={int((time.monotonic() - poll_started) * 1000)}",
+                    file=sys.stdout,
+                    flush=True,
+                )
+            except (HTTPError, URLError) as error:
+                status_part = f" status={error.code}" if isinstance(error, HTTPError) else ""
+                print(
+                    f"ROM metadata upload failed:{status_part} error={_format_overmind_error(error)} duration_ms={int((time.monotonic() - poll_started) * 1000)}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            except Exception as error:
+                print(
+                    f"ROM metadata poll failed: error={_format_overmind_error(error)} duration_ms={int((time.monotonic() - poll_started) * 1000)}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            time.sleep(poll_seconds)
+
+    thread = Thread(target=loop, name="rom-metadata-poller", daemon=True)
+    thread.start()
+
+
 def create_server(settings: Settings) -> ThreadingHTTPServer:
-    global _OVERMIND_POLLER_STARTED, _DOWNLOAD_MANAGER
+    global _OVERMIND_POLLER_STARTED, _ROM_METADATA_POLLER_STARTED, _DOWNLOAD_MANAGER
     roms_root, bios_root = _real_data_roots(settings)
     repository = RomRepository(
         roms_root,
@@ -7590,6 +7847,9 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
     if not _OVERMIND_POLLER_STARTED:
         _start_overmind_action_poller(settings, repository)
         _OVERMIND_POLLER_STARTED = True
+    if not _ROM_METADATA_POLLER_STARTED and settings.rom_metadata_poll_seconds != 0:
+        _start_rom_metadata_poller(settings, repository)
+        _ROM_METADATA_POLLER_STARTED = True
 
     return server
 

@@ -206,6 +206,28 @@ To prevent ROM and BIOS downloads through Drone:
 ALLOW_CONTENT_DOWNLOAD=false
 ```
 
+### Overmind Heartbeat and ROM Metadata
+
+Drone heartbeats are intentionally lightweight. They report Drone identity, name, reachable network details, certificate metadata, downloads, and basic system health/status. Heartbeats do not scan ROM folders and do not calculate ROM MD5 hashes.
+
+Each heartbeat logs the send start, Overmind heartbeat endpoint, success or failure, response status when available, and duration.
+
+ROM inventory is handled by a separate poller. Configure the interval with:
+
+```bash
+ROM_METADATA_POLL_SECONDS=900
+```
+
+The poller stores its JSON cache at:
+
+```text
+/userdata/system/drone-app/rom_metadata_cache.json
+```
+
+The cache includes a schema version, last scan/upload timestamps, systems, gamelist snapshots, and ROM entries keyed by system plus relative path. On each poll Drone scans file size and modified time first, hashes only new or changed ROM files, removes deleted ROMs from the cache, and uploads a full metadata snapshot to Overmind only when something changed or the cache had to be rebuilt. Cache writes are atomic; missing, corrupt, or incompatible cache files are rebuilt safely.
+
+ROM metadata logs show cache load, scan, MD5 hashing, cache write, upload/skip, counts, and durations. MD5 progress is throttled by `ROM_METADATA_PROGRESS_FILES` and `ROM_METADATA_PROGRESS_SECONDS`, and individual ROM paths are not logged by default.
+
 ### API Example
 
 ```bash
