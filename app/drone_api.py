@@ -3012,6 +3012,8 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
 
     def _guess_content_type(self, path: Path) -> str:
         suffix = path.suffix.lower()
+        if suffix == ".js":
+            return "application/javascript"
         if suffix == ".css":
             return "text/css"
         if suffix == ".svg":
@@ -3068,9 +3070,9 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         # CSP keeps UI/resource loading strict while still allowing bundled Swagger assets.
         self.send_header(
             "Content-Security-Policy",
-            f"default-src 'self'; img-src {' '.join(image_sources)}; style-src 'self' 'unsafe-inline' https://unpkg.com https://cdn.jsdelivr.net; "
+            f"default-src 'self'; img-src {' '.join(image_sources)}; style-src 'self' 'unsafe-inline' https://unpkg.com https://cdn.jsdelivr.net https://fonts.googleapis.com; "
             "script-src 'self' 'unsafe-inline' https://unpkg.com https://cdn.jsdelivr.net; "
-            "font-src 'self' data: https://cdn.jsdelivr.net; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+            "font-src 'self' data: https://cdn.jsdelivr.net https://fonts.gstatic.com; connect-src 'self' https://unpkg.com https://cdn.jsdelivr.net; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
         )
 
     def _build_fake_image_url(self, seed: str, width: int = 640, height: int = 360) -> str:
@@ -3142,6 +3144,12 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         self._send_security_headers()
         self.end_headers()
         self.wfile.write(body)
+
+    def _send_empty(self, status_code: int) -> None:
+        self.send_response(status_code)
+        self.send_header("Content-Length", "0")
+        self._send_security_headers()
+        self.end_headers()
 
     def _handle_content_file(self, relative_path: str) -> None:
         content_root = Path(__file__).resolve().parent.parent / "content"

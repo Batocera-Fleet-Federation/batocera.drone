@@ -21,8 +21,14 @@ class ApiRoutesMixin:
             parts = [part for part in api_path.split("/") if part]
 
             public_parts = [part for part in raw_path.split("/") if part]
+            if len(public_parts) >= 2 and public_parts[0] == "static":
+                self._handle_static_file("/".join(public_parts[1:]))
+                return
             if len(public_parts) >= 2 and public_parts[0] == "content":
                 self._handle_content_file("/".join(public_parts[1:]))
+                return
+            if raw_path == "/favicon.ico":
+                self._send_empty(204)
                 return
             if len(public_parts) == 5 and public_parts[0] == "public" and public_parts[1] == "systems" and public_parts[3] == "images":
                 self._handle_public_image(public_parts[2], public_parts[4])

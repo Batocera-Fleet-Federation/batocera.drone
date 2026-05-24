@@ -101,10 +101,10 @@ class MockServerIntegrationTests(unittest.TestCase):
         self.assertIn("mtls", json.dumps(spec).lower())
 
     def test_overmind_integration_uses_authorization_token_label(self) -> None:
-        html = self._get_bytes("/")
-        self.assertIn(b"Authorization Token", html)
-        self.assertIn(b"Claim Ownership", html)
-        self.assertNotIn(b"Integration Password", html)
+        js = self._get_bytes("/static/js/drone.js")
+        self.assertIn(b"Authorization Token", js)
+        self.assertIn(b"Claim Ownership", js)
+        self.assertNotIn(b"Integration Password", js)
 
     def test_admin_logs_endpoint(self) -> None:
         payload = self._get_json("/v1/api/admin/logs/es_launch_stdout?lines=20")

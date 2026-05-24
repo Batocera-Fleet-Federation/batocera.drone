@@ -7,6 +7,7 @@ except ImportError:
     from route_config import API_PREFIX, api_url  # type: ignore
 
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
+STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
 def load_template(name: str) -> str:
@@ -43,6 +44,15 @@ SWAGGER_HTML = f"""<!doctype html>
 class UiRoutesMixin:
     def _handle_root_html(self) -> None:
         self._send_html(200, UI_HTML)
+
+    def _handle_static_file(self, relative_path: str) -> None:
+        rel = str(relative_path or "").replace("\\", "/").lstrip("/")
+        if not rel or ".." in Path(rel).parts:
+            raise FileNotFoundError()
+        target = (STATIC_DIR / rel).resolve()
+        if STATIC_DIR.resolve() not in target.parents or not target.exists() or not target.is_file():
+            raise FileNotFoundError()
+        self._stream_file(target, self._guess_content_type(target))
 
     def _handle_swagger_html(self) -> None:
         self._send_html(200, SWAGGER_HTML)
