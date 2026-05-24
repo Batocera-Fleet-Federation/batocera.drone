@@ -51,7 +51,7 @@ SCRAPER_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
-ARTWORK_FIELDS = ("image", "thumbnail", "marquee", "fanart", "boxart")
+ARTWORK_FIELDS = ("image", "thumbnail", "marquee", "fanart", "boxart", "video", "wheel", "manual")
 ARTWORK_DUPLICATE_FILTER = "duplicate_artwork"
 OVERMIND_EVENT_TYPES = {
     "gameplay": "gameplay_activity",
@@ -1823,6 +1823,88 @@ class RomRepository:
             seen[identity] = field
         return False
 
+    def list_artwork_metadata(self) -> List[dict]:
+        if not self.roms_root.exists():
+            return []
+        rows: List[dict] = []
+        for entry in sorted(self.roms_root.iterdir(), key=lambda p: p.name.lower()):
+            if not (entry.is_dir() or entry.is_symlink()):
+                continue
+            if not self.should_include_system(entry.name):
+                continue
+            system = entry.name
+            system_dir = entry.resolve()
+            try:
+                _, root = self._read_gamelist(system_dir)
+            except Exception:
+                continue
+            for game in root.findall("game"):
+                rom_path = _normalize_gamelist_rom_path(_text_or_empty(game, "path"))
+                if not rom_path:
+                    continue
+                artwork_types = [
+                    field for field in ARTWORK_FIELDS
+                    if _text_or_empty(game, field)
+                ]
+                if not artwork_types:
+                    continue
+                rows.append({
+                    "asset_type": "artwork",
+                    "system": system,
+                    "system_name": system,
+                    "rom_path": rom_path,
+                    "file_path": rom_path,
+                    "rom_name": Path(rom_path).name,
+                    "title": _text_or_empty(game, "name") or Path(rom_path).stem,
+                    "artwork_types": artwork_types,
+                    "metadata_source": "gamelist.xml",
+                })
+        rows.sort(key=lambda item: (str(item.get("system") or "").lower(), str(item.get("rom_path") or "").lower()))
+        return rows
+
+    def resolve_artwork_file(self, system: str, rom_path: str, artwork_type: str) -> Tuple[Path, str, str]:
+        system_dir = self.get_system_dir(system).resolve()
+        field = str(artwork_type or "").strip()
+        if field not in ARTWORK_FIELDS:
+            raise ValueError("invalid artwork type")
+        tree, root = self._read_gamelist(system_dir)
+        game = self._find_gamelist_entry_by_path(root, rom_path)
+        if game is None:
+            raise FileNotFoundError()
+        artwork_ref = _normalize_gamelist_rom_path(_text_or_empty(game, field))
+        if not artwork_ref:
+            raise FileNotFoundError()
+        target = (system_dir / artwork_ref).resolve()
+        if not target.exists() or not target.is_file() or (target != system_dir and system_dir not in target.parents):
+            raise FileNotFoundError()
+        return target, target.relative_to(system_dir).as_posix(), artwork_ref
+
+    def update_gamelist_artwork_reference(self, system: str, rom_path: str, artwork_type: str, artwork_relative_path: str) -> dict:
+        system_dir = self.get_system_dir(system).resolve()
+        field = str(artwork_type or "").strip()
+        if field not in ARTWORK_FIELDS:
+            raise ValueError("invalid artwork type")
+        normalized_rom_path = _normalize_gamelist_rom_path(rom_path)
+        normalized_artwork_path = _normalize_gamelist_rom_path(artwork_relative_path)
+        if not normalized_rom_path or not normalized_artwork_path:
+            raise ValueError("rom_path and artwork path are required")
+        tree, root = self._read_gamelist(system_dir)
+        game = self._find_gamelist_entry_by_path(root, normalized_rom_path)
+        if game is None:
+            game = ET.SubElement(root, "game")
+            _set_child_text(game, "path", f"./{normalized_rom_path}")
+            _set_child_text(game, "name", Path(normalized_rom_path).stem)
+        _set_child_text(game, field, f"./{normalized_artwork_path}")
+        gamelist_path = system_dir / "gamelist.xml"
+        try:
+            ET.indent(tree, space="  ")
+        except Exception:
+            pass
+        tree.write(gamelist_path, encoding="utf-8", xml_declaration=True)
+        with gamelist_path.open("a", encoding="utf-8") as handle:
+            handle.write("\n")
+        return {"system": system, "rom_path": normalized_rom_path, "artwork_type": field, "artwork_path": normalized_artwork_path}
+
     def _rom_path_exists(self, system: str, rom_path: str) -> bool:
         try:
             system_dir = self.get_system_dir(system)
@@ -3329,7 +3411,29 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         self.log_message("peer bios download bios=%s bytes=%s", rel, target.stat().st_size)
         self._stream_file(target, "application/octet-stream", as_attachment=True)
 
-    def _stream_file(self, path: Path, content_type: str, as_attachment: bool = False) -> None:
+    def _handle_peer_artwork_download(self, system: str, artwork_type: str, rom_path: str) -> None:
+        if self.settings.drone_mtls_enabled:
+            cert = self.connection.getpeercert() if hasattr(self.connection, "getpeercert") else None
+            if not cert:
+                self._send_json(403, {"error": "client certificate required"})
+                return
+        try:
+            target, relative_path, gamelist_ref = self.repository.resolve_artwork_file(system, unquote(rom_path or ""), unquote(artwork_type or ""))
+        except ValueError as error:
+            self._send_json(400, {"error": str(error)})
+            return
+        except Exception:
+            self._send_json(404, {"error": "not found"})
+            return
+        self.log_message("peer artwork download system=%s type=%s rom=%s artwork=%s bytes=%s", system, artwork_type, rom_path, relative_path, target.stat().st_size)
+        self._stream_file(
+            target,
+            "application/octet-stream",
+            as_attachment=True,
+            extra_headers={"X-Asset-Relative-Path": relative_path, "X-Gamelist-Reference": gamelist_ref},
+        )
+
+    def _stream_file(self, path: Path, content_type: str, as_attachment: bool = False, extra_headers: Optional[dict] = None) -> None:
         file_size = path.stat().st_size
         self.send_response(200)
         self.send_header("Content-Type", content_type)
@@ -3337,6 +3441,8 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         self._send_security_headers()
         if as_attachment:
             self.send_header("Content-Disposition", f'attachment; filename="{path.name}"')
+        for key, value in (extra_headers or {}).items():
+            self.send_header(str(key), str(value))
         self.end_headers()
 
         with path.open("rb") as handle:
@@ -6771,6 +6877,10 @@ def _collect_rom_metadata(settings: Settings, repository: "RomRepository") -> di
         bios = repository.list_bios_entries()
     except FileNotFoundError:
         bios = []
+    try:
+        artwork = repository.list_artwork_metadata()
+    except Exception:
+        artwork = []
     roms = []
     gamelists = []
     for system in systems:
@@ -6792,17 +6902,19 @@ def _collect_rom_metadata(settings: Settings, repository: "RomRepository") -> di
             gamelist["system"] = system_name
             gamelists.append(gamelist)
     result = {
-        "type": "rom_metadata",
+        "type": "asset_metadata",
         "collected_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
         "roms_root": str(settings.roms_root),
         "bios_root": str(settings.bios_root),
         "systems": systems,
         "roms": roms,
         "bios": bios,
+        "artwork": artwork,
+        "assets": {"roms": roms, "bios": bios, "artwork": artwork},
         "gamelists": gamelists,
     }
     print(
-        f"ROM metadata scan root={settings.roms_root} systems={len(systems)} roms={len(roms)} bios={len(bios)} gamelists={len(gamelists)}",
+        f"Asset metadata scan root={settings.roms_root} systems={len(systems)} roms={len(roms)} bios={len(bios)} artwork={len(artwork)} gamelists={len(gamelists)}",
         file=sys.stdout,
         flush=True,
     )
@@ -6820,6 +6932,7 @@ def _empty_rom_metadata_cache() -> dict:
         "last_successful_upload_at": None,
         "entries": {},
         "bios_entries": {},
+        "artwork_entries": {},
         "systems": [],
         "gamelists": [],
         "dirty": True,
@@ -6838,13 +6951,17 @@ def _load_rom_metadata_cache(settings: Settings) -> Tuple[dict, bool]:
         bios_entries = cache.get("bios_entries")
         if bios_entries is not None and not isinstance(bios_entries, dict):
             raise ValueError("cache bios entries invalid")
+        artwork_entries = cache.get("artwork_entries")
+        if artwork_entries is not None and not isinstance(artwork_entries, dict):
+            raise ValueError("cache artwork entries invalid")
         cache.setdefault("bios_entries", {})
+        cache.setdefault("artwork_entries", {})
         cache.setdefault("systems", [])
         cache.setdefault("gamelists", [])
         cache.setdefault("dirty", False)
         return cache, False
     except Exception as error:
-        print(f"ROM metadata cache rebuild required: {path} ({_format_overmind_error(error)})", file=sys.stderr, flush=True)
+        print(f"Asset metadata cache rebuild required: {path} ({_format_overmind_error(error)})", file=sys.stderr, flush=True)
         return _empty_rom_metadata_cache(), True
 
 
@@ -6855,6 +6972,10 @@ def _rom_cache_entry_key(system: str, relative_path: str) -> str:
 
 def _bios_cache_entry_key(relative_path: str) -> str:
     return str(relative_path or "").replace("\\", "/").lstrip("./").lower()
+
+
+def _artwork_cache_entry_key(system: str, rom_path: str) -> str:
+    return f"{str(system or '').strip().lower()}:{str(rom_path or '').replace(chr(92), '/').lstrip('./').lower()}"
 
 
 def _build_rom_metadata_snapshot_from_cache(settings: Settings, cache: dict) -> dict:
@@ -6872,14 +6993,23 @@ def _build_rom_metadata_snapshot_from_cache(settings: Settings, cache: dict) -> 
             continue
         bios.append({k: v for k, v in entry.items() if k != "absolute_path"})
     bios.sort(key=lambda row: str(row.get("file_path") or row.get("path") or ""))
+    artwork_entries = cache.get("artwork_entries") if isinstance(cache.get("artwork_entries"), dict) else {}
+    artwork = []
+    for entry in artwork_entries.values():
+        if not isinstance(entry, dict):
+            continue
+        artwork.append(dict(entry))
+    artwork.sort(key=lambda row: (str(row.get("system") or ""), str(row.get("rom_path") or "")))
     return {
-        "type": "rom_metadata",
+        "type": "asset_metadata",
         "collected_at": cache.get("last_full_scan_at") or datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
         "roms_root": str(settings.roms_root),
         "bios_root": str(settings.bios_root),
         "systems": cache.get("systems") if isinstance(cache.get("systems"), list) else [],
         "roms": roms,
         "bios": bios,
+        "artwork": artwork,
+        "assets": {"roms": roms, "bios": bios, "artwork": artwork},
         "gamelists": cache.get("gamelists") if isinstance(cache.get("gamelists"), list) else [],
         "cache": {"schema_version": ROM_METADATA_CACHE_VERSION},
     }
@@ -6887,22 +7017,26 @@ def _build_rom_metadata_snapshot_from_cache(settings: Settings, cache: dict) -> 
 
 def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") -> Tuple[dict, bool, dict]:
     started = time.monotonic()
-    print("ROM metadata poll started: phase=cache_load", file=sys.stdout, flush=True)
+    print("Asset metadata poll started: phase=cache_load", file=sys.stdout, flush=True)
     cache, rebuilt = _load_rom_metadata_cache(settings)
     existing_entries = cache.get("entries") if isinstance(cache.get("entries"), dict) else {}
     existing_bios_entries = cache.get("bios_entries") if isinstance(cache.get("bios_entries"), dict) else {}
+    existing_artwork_entries = cache.get("artwork_entries") if isinstance(cache.get("artwork_entries"), dict) else {}
     previous_keys = set(existing_entries.keys())
     previous_bios_keys = set(existing_bios_entries.keys())
+    previous_artwork_keys = set(existing_artwork_entries.keys())
     next_entries: Dict[str, dict] = {}
     next_bios_entries: Dict[str, dict] = {}
+    next_artwork_entries: Dict[str, dict] = {}
     new_or_changed: List[Tuple[str, Path, dict]] = []
     bios_new_or_changed: List[Tuple[str, Path, dict]] = []
     systems_scanned = 0
     discovered = 0
     bios_discovered = 0
+    artwork_discovered = 0
     now_iso = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
-    print("ROM metadata poll phase=scan", file=sys.stdout, flush=True)
+    print("Asset metadata poll phase=scan", file=sys.stdout, flush=True)
     try:
         systems = repository.list_systems()
     except FileNotFoundError:
@@ -6987,8 +7121,21 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
     except Exception as error:
         print(f"BIOS metadata scan warning: error={_format_overmind_error(error)}", file=sys.stderr, flush=True)
     bios_deleted = previous_bios_keys - set(next_bios_entries.keys()) - {key for key, _, _ in bios_new_or_changed}
+    try:
+        for artwork in repository.list_artwork_metadata():
+            key = _artwork_cache_entry_key(str(artwork.get("system") or ""), str(artwork.get("rom_path") or artwork.get("file_path") or ""))
+            if not key.split(":", 1)[-1]:
+                continue
+            artwork_discovered += 1
+            clean = dict(artwork)
+            clean["asset_type"] = "artwork"
+            next_artwork_entries[key] = clean
+    except Exception as error:
+        print(f"Artwork metadata scan warning: error={_format_overmind_error(error)}", file=sys.stderr, flush=True)
+    artwork_deleted = previous_artwork_keys - set(next_artwork_entries.keys())
+    artwork_changed = next_artwork_entries != existing_artwork_entries
     print(
-        f"ROM metadata poll scan complete: systems={systems_scanned} roms={discovered} bios={bios_discovered} new_or_changed={len(new_or_changed)} bios_new_or_changed={len(bios_new_or_changed)} deleted={len(deleted)} bios_deleted={len(bios_deleted)}",
+        f"Asset metadata poll scan complete: systems={systems_scanned} roms={discovered} bios={bios_discovered} artwork={artwork_discovered} new_or_changed={len(new_or_changed)} bios_new_or_changed={len(bios_new_or_changed)} deleted={len(deleted)} bios_deleted={len(bios_deleted)} artwork_deleted={len(artwork_deleted)}",
         file=sys.stdout,
         flush=True,
     )
@@ -7015,22 +7162,23 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
                 print(f"ROM metadata md5 progress: {index}/{len(files_to_hash)} files", file=sys.stdout, flush=True)
                 last_log = now
         print(
-            f"ROM metadata md5 hashing completed: count={len(files_to_hash)} roms={len(new_or_changed)} bios={len(bios_new_or_changed)} duration_ms={int((time.monotonic() - hash_started) * 1000)}",
+            f"Asset metadata md5 hashing completed: count={len(files_to_hash)} roms={len(new_or_changed)} bios={len(bios_new_or_changed)} duration_ms={int((time.monotonic() - hash_started) * 1000)}",
             file=sys.stdout,
             flush=True,
         )
 
-    changed = rebuilt or bool(new_or_changed) or bool(deleted) or bool(bios_new_or_changed) or bool(bios_deleted) or bool(cache.get("dirty"))
+    changed = rebuilt or bool(new_or_changed) or bool(deleted) or bool(bios_new_or_changed) or bool(bios_deleted) or artwork_changed or bool(cache.get("dirty"))
     cache["entries"] = next_entries
     cache["bios_entries"] = next_bios_entries
+    cache["artwork_entries"] = next_artwork_entries
     cache["systems"] = systems
     cache["gamelists"] = gamelists
     cache["last_full_scan_at"] = now_iso
     cache["dirty"] = changed
-    print("ROM metadata poll phase=cache_write", file=sys.stdout, flush=True)
+    print("Asset metadata poll phase=cache_write", file=sys.stdout, flush=True)
     _write_json_file(_rom_metadata_cache_path(settings), cache)
     print(
-        f"ROM metadata cache write completed: entries={len(next_entries)} bios_entries={len(next_bios_entries)} changed={changed} duration_ms={int((time.monotonic() - started) * 1000)}",
+        f"Asset metadata cache write completed: entries={len(next_entries)} bios_entries={len(next_bios_entries)} artwork_entries={len(next_artwork_entries)} changed={changed} duration_ms={int((time.monotonic() - started) * 1000)}",
         file=sys.stdout,
         flush=True,
     )
@@ -7038,10 +7186,13 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
         "systems_scanned": systems_scanned,
         "roms_discovered": discovered,
         "bios_discovered": bios_discovered,
+        "artwork_discovered": artwork_discovered,
         "new_or_changed": len(new_or_changed),
         "bios_new_or_changed": len(bios_new_or_changed),
         "deleted": len(deleted),
         "bios_deleted": len(bios_deleted),
+        "artwork_deleted": len(artwork_deleted),
+        "artwork_changed": artwork_changed,
         "rebuilt": rebuilt,
     }
     return _build_rom_metadata_snapshot_from_cache(settings, cache), changed, stats
@@ -7347,6 +7498,55 @@ class DownloadManager:
         self._wake.set()
         return snapshot
 
+    def enqueue_artwork(self, config: dict, peer: dict, system: str, rom_path: str, artwork_type: str, source_action_id: Optional[str] = None) -> dict:
+        job_id = str(uuid.uuid4())
+        peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        label = f"{rom_path}:{artwork_type}"
+        job = {
+            "id": job_id,
+            "job_id": job_id,
+            "sync_id": job_id,
+            "source_action_id": source_action_id,
+            "source_drone_id": peer_id,
+            "target_drone_id": self.settings.overmind_device_id,
+            "asset_type": "artwork",
+            "file_path": label,
+            "file_name": Path(rom_path).name,
+            "file_type": "ARTWORK",
+            "system": system,
+            "rom_name": rom_path,
+            "rom_path": rom_path,
+            "artwork_type": artwork_type,
+            "relative_path": label,
+            "total_bytes": None,
+            "file_size": None,
+            "downloaded_bytes": 0,
+            "bytes_transferred": 0,
+            "percentage": 0,
+            "transfer_speed_bps": 0,
+            "status": "queued",
+            "queue_position": None,
+            "started_at": None,
+            "download_started_at": None,
+            "completed_at": None,
+            "download_completed_at": None,
+            "error_message": None,
+            "failure_reason": None,
+            "cancellation_requested": False,
+            "created_at": now,
+            "_asset_type": "artwork",
+            "_config": config,
+            "_peer": peer,
+        }
+        with self._lock:
+            self._jobs[job_id] = job
+            self._cancel_events[job_id] = Event()
+            self._update_queue_positions_locked()
+            snapshot = self._public_job_locked(job)
+        self._wake.set()
+        return snapshot
+
     def cancel(self, job_id: str, reason: str = "cancelled by user") -> dict:
         with self._lock:
             job = self._jobs.get(job_id)
@@ -7440,6 +7640,8 @@ class DownloadManager:
             peer = job.get("_peer") or {}
             system = str(job.get("system") or "")
             rel = str(job.get("relative_path") or job.get("file_path") or "")
+            rom_path = str(job.get("rom_path") or job.get("rom_name") or rel)
+            artwork_type = str(job.get("artwork_type") or "")
             expected_size = job.get("file_size") or job.get("total_bytes")
             expected_md5 = job.get("_expected_md5")
             cancel_event = self._cancel_events.get(job_id) or Event()
@@ -7468,7 +7670,19 @@ class DownloadManager:
                 self._push_download_state(config, "progress", force=True)
 
         try:
-            if asset_type == "bios":
+            if asset_type == "artwork":
+                activity = _download_artwork_from_peer(
+                    self.settings,
+                    self.repository,
+                    config,
+                    peer,
+                    system,
+                    rom_path,
+                    artwork_type,
+                    progress_callback=progress,
+                    cancellation_event=cancel_event,
+                )
+            elif asset_type == "bios":
                 activity = _download_bios_from_peer(
                     self.settings,
                     config,
@@ -7493,7 +7707,7 @@ class DownloadManager:
                 )
             refresh_started = time.monotonic()
             try:
-                refreshed = self.repository.list_bios_entries() if asset_type == "bios" else self.repository.list_assets(system, "roms")[1]
+                refreshed = self.repository.list_artwork_metadata() if asset_type == "artwork" else (self.repository.list_bios_entries() if asset_type == "bios" else self.repository.list_assets(system, "roms")[1])
                 activity["inventory_refresh_status"] = "succeeded"
                 activity["inventory_refresh_count"] = len(refreshed)
             except Exception as refresh_error:
@@ -7980,11 +8194,114 @@ def _download_bios_from_peer(
     }
 
 
+def _download_artwork_from_peer(
+    settings: Settings,
+    repository: "RomRepository",
+    config: dict,
+    peer: dict,
+    system: str,
+    rom_path: str,
+    artwork_type: str,
+    progress_callback=None,
+    cancellation_event: Optional[Event] = None,
+) -> dict:
+    peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
+    address = _peer_address(peer)
+    if not address:
+        raise RuntimeError("selected peer has no address")
+    system = valid_segment(system)
+    field = str(artwork_type or "").strip()
+    if field not in ARTWORK_FIELDS:
+        raise ValueError("invalid artwork type")
+    rom_rel = _safe_rom_relative_path(rom_path)
+    url = f"{address}/v1/api/peer/artwork/{quote(system, safe='')}/{quote(field, safe='')}/{quote(rom_rel, safe='/')}"
+    system_dir = (settings.roms_root / system).resolve()
+    cafile = _peer_trust_cafile(settings, peer_id=peer_id, config=config)
+    if address.startswith("https://") and not cafile:
+        raise ssl.SSLError(f"no trusted certificate cached for peer {peer_id}")
+    context = _drone_client_ssl_context(settings, url, verify=bool(cafile), cafile=cafile)
+    started_dt = datetime.now(timezone.utc).replace(microsecond=0)
+    started = started_dt.isoformat()
+    started_mono = time.monotonic()
+    bytes_written = 0
+    request = Request(url, headers={"User-Agent": "batocera-drone-artwork-sync/1.0"})
+
+    def ensure_not_cancelled() -> None:
+        if cancellation_event is not None and cancellation_event.is_set():
+            raise DownloadCancelled("download cancelled")
+
+    partial_target = None
+    target = None
+    artwork_relative_path = ""
+    try:
+        with urlopen(request, timeout=max(10, PEER_CHECK_TIMEOUT_SECONDS * 4), context=context) as response:
+            artwork_relative_path = _safe_rom_relative_path(response.headers.get("X-Asset-Relative-Path") or f"images/{Path(rom_rel).stem}-{field}{Path(urlparse(response.geturl()).path).suffix or '.bin'}")
+            target = _collision_safe_target(system_dir, artwork_relative_path)
+            partial_target = target.with_name(f"{target.name}.part")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                total_bytes = int(response.headers.get("Content-Length") or 0) or None
+            except Exception:
+                total_bytes = None
+            with partial_target.open("wb") as handle:
+                while True:
+                    ensure_not_cancelled()
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    handle.write(chunk)
+                    bytes_written += len(chunk)
+                    if progress_callback:
+                        progress_callback(bytes_written, total_bytes)
+    except DownloadCancelled:
+        if partial_target and partial_target.exists():
+            partial_target.unlink()
+        raise
+    except Exception:
+        if partial_target and partial_target.exists():
+            partial_target.unlink()
+        raise
+    if not partial_target or not target:
+        raise RuntimeError("artwork download failed")
+    actual_md5 = RomRepository.build_md5(partial_target)
+    partial_target.replace(target)
+    repository.update_gamelist_artwork_reference(system, rom_rel, field, target.relative_to(system_dir).as_posix())
+    completed_dt = datetime.now(timezone.utc).replace(microsecond=0)
+    duration_ms = int((time.monotonic() - started_mono) * 1000)
+    return {
+        "asset_type": "artwork",
+        "file_type": "ARTWORK",
+        "source_drone_id": peer_id,
+        "target_drone_id": settings.overmind_device_id,
+        "system": system,
+        "rom_name": rom_rel,
+        "rom_path": rom_rel,
+        "artwork_type": field,
+        "relative_path": target.relative_to(system_dir).as_posix(),
+        "action": "download",
+        "status": "completed",
+        "bytes_transferred": bytes_written,
+        "file_size": bytes_written,
+        "md5": actual_md5,
+        "download_started_at": started,
+        "download_completed_at": completed_dt.isoformat(),
+        "started_at": started,
+        "completed_at": completed_dt.isoformat(),
+        "duration_ms": duration_ms,
+        "duration_seconds": round(duration_ms / 1000, 3),
+        "selected_peer_reason": "healthy peer from Overmind artwork source list with best sampled score",
+    }
+
+
 def _summarize_overmind_result(result: Optional[dict]) -> str:
     if not isinstance(result, dict):
         return ""
-    if result.get("type") == "rom_metadata":
-        return f"{len(result.get('systems') or [])} systems, {len(result.get('roms') or [])} ROMs, {len(result.get('gamelists') or [])} gamelists"
+    if result.get("type") in {"rom_metadata", "asset_metadata"}:
+        return (
+            f"{len(result.get('systems') or [])} systems, {len(result.get('roms') or [])} ROMs, "
+            f"{len(result.get('bios') or [])} BIOS files, {len(result.get('artwork') or [])} artwork rows, "
+            f"{len(result.get('gamelists') or [])} gamelists"
+        )
     if result.get("type") == "game_logs":
         return f"{len(result.get('sessions') or [])} parsed sessions, {len(result.get('logs') or [])} logs"
     if result.get("type") == "emulator_configs":
@@ -8105,6 +8422,53 @@ def _execute_overmind_action(settings: Settings, repository: "RomRepository", ac
                 }],
             }
             return "failed", "BIOS sync failed for 1 item.", result
+
+    if action_name == "sync_artwork":
+        config = _load_overmind_config_for_settings(settings)
+        manager = _get_download_manager()
+        if manager is None:
+            return "failed", "Download manager is not available.", None
+        payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
+        system = str(payload.get("system_name") or payload.get("system") or "").strip()
+        rom_path = str(payload.get("rom_path") or payload.get("file_path") or payload.get("rom_name") or "").strip()
+        artwork_type = str(payload.get("artwork_type") or "").strip()
+        source_device_ids = {
+            str(device.get("device_id") or device.get("drone_id") or "")
+            for device in payload.get("devices", [])
+            if isinstance(device, dict)
+        }
+        if not system or not rom_path or artwork_type not in ARTWORK_FIELDS:
+            return "failed", "system, rom_path, and artwork_type are required.", None
+        sync_id = str(uuid.uuid4())
+        started_wall = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        peer = _best_peer_for_bios(settings, config, rom_path, source_device_ids=source_device_ids)
+        if not peer:
+            result = {"type": "artwork_sync", "activity": [{
+                "asset_type": "artwork",
+                "sync_id": sync_id,
+                "target_drone_id": settings.overmind_device_id,
+                "system": system,
+                "rom_name": rom_path,
+                "rom_path": rom_path,
+                "artwork_type": artwork_type,
+                "relative_path": rom_path,
+                "action": "download",
+                "status": "failed",
+                "failure_reason": "No healthy source peer with requested artwork found",
+                "download_started_at": started_wall,
+                "download_completed_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+            }]}
+            return "failed", "Artwork sync failed: no healthy source peer.", result
+        activity = manager.enqueue_artwork(
+            config,
+            peer,
+            system,
+            rom_path,
+            artwork_type,
+            source_action_id=str(action.get("id") or ""),
+        )
+        activity["sync_id"] = activity.get("job_id") or sync_id
+        return "completed", "Artwork sync queued 1 item.", {"type": "artwork_sync", "activity": [activity]}
 
     if action_name in {"sync_rom", "sync_system"}:
         config = _load_overmind_config_for_settings(settings)
@@ -8413,9 +8777,10 @@ def _sync_rom_metadata_to_overmind(settings: Settings, repository: "RomRepositor
     snapshot, changed, stats = _poll_rom_metadata_cache(settings, repository)
     rom_count = len(snapshot.get("roms") or [])
     bios_count = len(snapshot.get("bios") or [])
+    artwork_count = len(snapshot.get("artwork") or [])
     if not changed:
         print(
-            f"ROM metadata sync skipped: no changes detected systems={stats.get('systems_scanned')} roms={stats.get('roms_discovered')} bios={stats.get('bios_discovered')} duration_ms={int((time.monotonic() - poll_started) * 1000)}",
+            f"Asset metadata sync skipped: no changes detected systems={stats.get('systems_scanned')} roms={stats.get('roms_discovered')} bios={stats.get('bios_discovered')} artwork={stats.get('artwork_discovered')} duration_ms={int((time.monotonic() - poll_started) * 1000)}",
             file=sys.stdout,
             flush=True,
         )
@@ -8424,6 +8789,7 @@ def _sync_rom_metadata_to_overmind(settings: Settings, repository: "RomRepositor
             "reason": "no_changes",
             "rom_count": rom_count,
             "bios_count": bios_count,
+            "artwork_count": artwork_count,
             "changed": changed,
             "stats": stats,
         }
@@ -8431,7 +8797,7 @@ def _sync_rom_metadata_to_overmind(settings: Settings, repository: "RomRepositor
     upload_url = f"{base_url}/api/devices/{device_id}/rom-metadata"
     payload = {"device_id": settings.overmind_device_id, **snapshot}
     print(
-        f"ROM metadata sync started: endpoint={upload_url} roms={rom_count} bios={bios_count} cache_changed={changed}",
+        f"Asset metadata sync started: endpoint={upload_url} roms={rom_count} bios={bios_count} artwork={artwork_count} cache_changed={changed}",
         file=sys.stdout,
         flush=True,
     )
@@ -8452,7 +8818,7 @@ def _sync_rom_metadata_to_overmind(settings: Settings, repository: "RomRepositor
     cache["dirty"] = False
     _write_json_file(_rom_metadata_cache_path(settings), cache)
     print(
-        f"ROM metadata sync succeeded: status={status_code} sent_roms={rom_count} sent_bios={bios_count} accepted_roms={response.get('rom_count')} accepted_bios={response.get('bios_count')} duration_ms={int((time.monotonic() - poll_started) * 1000)}",
+        f"Asset metadata sync succeeded: status={status_code} sent_roms={rom_count} sent_bios={bios_count} sent_artwork={artwork_count} accepted_roms={response.get('rom_count')} accepted_bios={response.get('bios_count')} accepted_artwork={response.get('artwork_count')} duration_ms={int((time.monotonic() - poll_started) * 1000)}",
         file=sys.stdout,
         flush=True,
     )
@@ -8462,6 +8828,7 @@ def _sync_rom_metadata_to_overmind(settings: Settings, repository: "RomRepositor
         "response": response,
         "rom_count": rom_count,
         "bios_count": bios_count,
+        "artwork_count": artwork_count,
         "changed": changed,
         "stats": stats,
     }

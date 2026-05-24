@@ -696,6 +696,34 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(result["bios"][0]["path"], "dc/flash.bin")
             self.assertTrue(result["bios"][0]["md5"])
 
+    def test_collect_asset_metadata_includes_artwork_types_from_gamelist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            system = root / "roms" / "snes"
+            system.mkdir(parents=True)
+            (system / "Game.zip").write_bytes(b"rom-data")
+            (system / "gamelist.xml").write_text(
+                "<gameList><game><path>./Game.zip</path><name>Game</name>"
+                "<image>./images/game.png</image><marquee>./images/game-marquee.png</marquee>"
+                "</game></gameList>\n",
+                encoding="utf-8",
+            )
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
+                clear=True,
+            ):
+                settings = Settings.from_env()
+
+            result = _collect_rom_metadata(settings, RomRepository(settings.roms_root, settings.bios_root))
+
+            self.assertEqual(len(result["artwork"]), 1)
+            self.assertEqual(result["artwork"][0]["asset_type"], "artwork")
+            self.assertEqual(result["artwork"][0]["system"], "snes")
+            self.assertEqual(result["artwork"][0]["rom_path"], "Game.zip")
+            self.assertEqual(result["artwork"][0]["artwork_types"], ["image", "marquee"])
+            self.assertNotIn("artwork_paths", result["artwork"][0])
+
     def test_rom_metadata_cache_reuses_md5_and_detects_deletes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
@@ -738,6 +766,44 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(stats["bios_deleted"], 1)
             self.assertEqual(snapshot["roms"], [])
             self.assertEqual(snapshot["bios"], [])
+
+    def test_asset_metadata_cache_detects_artwork_updates_without_rehashing_roms(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            system = root / "roms" / "snes"
+            system.mkdir(parents=True)
+            (system / "Game.zip").write_bytes(b"rom-data")
+            gamelist = system / "gamelist.xml"
+            gamelist.write_text(
+                "<gameList><game><path>./Game.zip</path><name>Game</name>"
+                "<image>./images/game.png</image>"
+                "</game></gameList>\n",
+                encoding="utf-8",
+            )
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            repo = RomRepository(settings.roms_root, settings.bios_root)
+            _poll_rom_metadata_cache(settings, repo)
+            cache_data = json.loads(_rom_metadata_cache_path(settings).read_text(encoding="utf-8"))
+            cache_data["dirty"] = False
+            _rom_metadata_cache_path(settings).write_text(json.dumps(cache_data), encoding="utf-8")
+            gamelist.write_text(
+                "<gameList><game><path>./Game.zip</path><name>Game</name>"
+                "<image>./images/game.png</image><marquee>./images/game-marquee.png</marquee>"
+                "</game></gameList>\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(RomRepository, "build_md5", side_effect=AssertionError("unchanged ROM should not hash")):
+                snapshot, changed, stats = _poll_rom_metadata_cache(settings, repo)
+
+            self.assertTrue(changed)
+            self.assertTrue(stats["artwork_changed"])
+            self.assertEqual(snapshot["artwork"][0]["artwork_types"], ["image", "marquee"])
 
     def test_corrupt_rom_metadata_cache_rebuilds(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -786,7 +852,11 @@ class SettingsTests(unittest.TestCase):
 
             def fake_post(url, payload, token=None, settings=None):
                 uploads.append((url, payload, token))
-                return 200, {"rom_count": len(payload.get("roms") or []), "bios_count": len(payload.get("bios") or [])}
+                return 200, {
+                    "rom_count": len(payload.get("roms") or []),
+                    "bios_count": len(payload.get("bios") or []),
+                    "artwork_count": len(payload.get("artwork") or []),
+                }
 
             with mock.patch.object(RomRepository, "build_md5", side_effect=AssertionError("unchanged ROM should not hash")), mock.patch(
                 "app.drone_api._overmind_post_json_with_status", side_effect=fake_post
@@ -804,6 +874,7 @@ class SettingsTests(unittest.TestCase):
             self.assertFalse(result["changed"])
             self.assertEqual(result["rom_count"], 1)
             self.assertEqual(result["bios_count"], 0)
+            self.assertEqual(result["artwork_count"], 0)
             self.assertEqual(len(uploads), 0)
             cache_after = json.loads(_rom_metadata_cache_path(settings).read_text(encoding="utf-8"))
             self.assertFalse(cache_after["dirty"])
