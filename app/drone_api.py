@@ -61,6 +61,7 @@ OVERMIND_EVENT_TYPES = {
     "peer": "peer_health",
 }
 DOWNLOAD_TERMINAL_STATUSES = {"completed", "failed", "cancelled", "skipped"}
+DOWNLOAD_PROGRESS_PUSH_SECONDS = float(os.environ.get("DOWNLOAD_PROGRESS_PUSH_SECONDS", "5"))
 PEER_CHECK_TIMEOUT_SECONDS = float(os.environ.get("DRONE_PEER_CHECK_TIMEOUT_SECONDS", "3"))
 PEER_CHECK_INTERVAL_SECONDS = int(os.environ.get("DRONE_PEER_CHECK_INTERVAL_SECONDS", "300"))
 OVERMIND_SPEED_SAMPLE_SECONDS = int(os.environ.get("OVERMIND_SPEED_SAMPLE_SECONDS", "300"))
@@ -7058,6 +7059,7 @@ class DownloadManager:
         self._jobs: OrderedDict[str, dict] = OrderedDict()
         self._cancel_events: Dict[str, Event] = {}
         self._wake = Event()
+        self._last_download_state_push_at = 0.0
         self._thread = Thread(target=self._worker, name="drone-download-worker", daemon=True)
         self._thread.start()
 
@@ -7202,8 +7204,10 @@ class DownloadManager:
             expected_size = job.get("file_size") or job.get("total_bytes")
             expected_md5 = job.get("_expected_md5")
             cancel_event = self._cancel_events.get(job_id) or Event()
+        self._push_download_state(config, "started", force=True)
 
         def progress(downloaded: int, total: Optional[int]) -> None:
+            should_push = False
             with self._lock:
                 current = self._jobs.get(job_id)
                 if not current:
@@ -7216,6 +7220,12 @@ class DownloadManager:
                 started = float(current.get("_started_mono") or time.monotonic())
                 elapsed = max(0.001, time.monotonic() - started)
                 current["transfer_speed_bps"] = int(downloaded / elapsed)
+                now = time.monotonic()
+                if now - self._last_download_state_push_at >= DOWNLOAD_PROGRESS_PUSH_SECONDS:
+                    self._last_download_state_push_at = now
+                    should_push = True
+            if should_push:
+                self._push_download_state(config, "progress", force=True)
 
         try:
             activity = _download_rom_from_peer(
@@ -7264,12 +7274,90 @@ class DownloadManager:
                     current["completed_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
                     current["download_completed_at"] = current["completed_at"]
         finally:
+            terminal_activity = None
             with self._lock:
+                current = self._jobs.get(job_id)
+                if current and current.get("status") in DOWNLOAD_TERMINAL_STATUSES:
+                    terminal_activity = self._public_job_locked(current)
                 self._update_queue_positions_locked()
+            self._push_download_state(config, "completed", force=True)
+            if terminal_activity:
+                _post_rom_sync_activity(self.settings, config, terminal_activity)
+
+    def _push_download_state(self, config: dict, reason: str, force: bool = False) -> None:
+        if not force:
+            now = time.monotonic()
+            with self._lock:
+                if now - self._last_download_state_push_at < DOWNLOAD_PROGRESS_PUSH_SECONDS:
+                    return
+                self._last_download_state_push_at = now
+        _post_download_state(self.settings, config, self.snapshot(), reason=reason)
 
 
 def _get_download_manager() -> Optional[DownloadManager]:
     return _DOWNLOAD_MANAGER
+
+
+def _post_download_state(settings: Settings, config: dict, snapshot: dict, reason: str = "progress") -> None:
+    base_url = str(config.get("overmind_url") or "").strip().rstrip("/")
+    token = str(config.get("overmind_token") or "").strip()
+    if not base_url or not token:
+        return
+    device_id = quote(settings.overmind_device_id, safe="")
+    endpoint = f"{base_url}/api/devices/{device_id}/downloads"
+    try:
+        active_count = len(snapshot.get("active") or [])
+        queued_count = len(snapshot.get("queued") or [])
+        recent_count = len(snapshot.get("recent") or [])
+        print(
+            f"Download state push started: endpoint={endpoint} reason={reason} active={active_count} queued={queued_count} recent={recent_count}",
+            file=sys.stdout,
+            flush=True,
+        )
+        _overmind_post_json(endpoint, snapshot, token=token, settings=settings)
+        print(
+            f"Download state push succeeded: reason={reason} active={active_count} queued={queued_count} recent={recent_count}",
+            file=sys.stdout,
+            flush=True,
+        )
+    except Exception as error:
+        print(
+            f"Download state push failed: reason={reason} error={_format_overmind_error(error)}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+
+def _post_rom_sync_activity(settings: Settings, config: dict, activity: dict) -> None:
+    base_url = str(config.get("overmind_url") or "").strip().rstrip("/")
+    token = str(config.get("overmind_token") or "").strip()
+    if not base_url or not token:
+        print(
+            f"ROM sync activity push skipped: overmind not configured status={activity.get('status')} rom={activity.get('system')}/{activity.get('relative_path') or activity.get('rom_name')}",
+            file=sys.stdout,
+            flush=True,
+        )
+        return
+    device_id = quote(settings.overmind_device_id, safe="")
+    endpoint = f"{base_url}/api/devices/{device_id}/sync-activity"
+    try:
+        print(
+            f"ROM sync activity push started: endpoint={endpoint} status={activity.get('status')} rom={activity.get('system')}/{activity.get('relative_path') or activity.get('rom_name')}",
+            file=sys.stdout,
+            flush=True,
+        )
+        _overmind_post_json(endpoint, activity, token=token, settings=settings)
+        print(
+            f"ROM sync activity push succeeded: status={activity.get('status')} bytes={activity.get('bytes_transferred')} rom={activity.get('system')}/{activity.get('relative_path') or activity.get('rom_name')}",
+            file=sys.stdout,
+            flush=True,
+        )
+    except Exception as error:
+        print(
+            f"ROM sync activity push failed: status={activity.get('status')} error={_format_overmind_error(error)} rom={activity.get('system')}/{activity.get('relative_path') or activity.get('rom_name')}",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 def _collision_safe_target(system_dir: Path, relative_path: str) -> Path:
@@ -7293,14 +7381,24 @@ def _collision_safe_target(system_dir: Path, relative_path: str) -> Path:
         index += 1
 
 
-def _best_peer_for_rom(settings: Settings, repository: "RomRepository", config: dict, system: str, relative_path: str) -> Optional[dict]:
+def _best_peer_for_rom(
+    settings: Settings,
+    repository: "RomRepository",
+    config: dict,
+    system: str,
+    relative_path: str,
+    source_device_ids: Optional[set] = None,
+) -> Optional[dict]:
     swarm = _read_json_file(_overmind_swarm_path_for_settings(settings), [])
     peer_checks = _read_json_file(_overmind_peer_results_path_for_settings(settings), [])
     checks = {str(row.get("target_drone_id") or ""): row for row in peer_checks if isinstance(row, dict)}
+    allowed_sources = {str(item) for item in (source_device_ids or set()) if str(item)}
     candidates = []
     for peer in swarm if isinstance(swarm, list) else []:
         peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
         if not peer_id or peer_id == settings.overmind_device_id or not peer.get("online", True):
+            continue
+        if allowed_sources and peer_id not in allowed_sources:
             continue
         systems = peer.get("rom_systems") or peer.get("systems") or []
         system_names = {str(item.get("name") if isinstance(item, dict) else item).lower() for item in systems}
@@ -7508,6 +7606,11 @@ def _execute_overmind_action(settings: Settings, repository: "RomRepository", ac
             system = str(item.get("system_name") or item.get("system") or payload.get("system_name") or "").strip()
             rel = str(item.get("file_path") or item.get("rom_name") or "").strip()
             expected_md5 = item.get("rom_md5") or item.get("md5")
+            source_device_ids = {
+                str(device.get("device_id") or device.get("drone_id") or "")
+                for device in item.get("devices", [])
+                if isinstance(device, dict)
+            }
             if not system or not rel:
                 continue
             sync_id = str(uuid.uuid4())
@@ -7529,7 +7632,7 @@ def _execute_overmind_action(settings: Settings, repository: "RomRepository", ac
                     "duration_ms": int((time.monotonic() - started_mono) * 1000),
                 })
                 continue
-            peer = _best_peer_for_rom(settings, repository, config, system, rel)
+            peer = _best_peer_for_rom(settings, repository, config, system, rel, source_device_ids=source_device_ids)
             if not peer:
                 failures += 1
                 activities.append({
@@ -7540,7 +7643,7 @@ def _execute_overmind_action(settings: Settings, repository: "RomRepository", ac
                     "relative_path": rel,
                     "action": "download",
                     "status": "failed",
-                    "failure_reason": "No healthy source peer found",
+                    "failure_reason": "No healthy source peer with requested ROM found",
                     "rom_md5": expected_md5,
                     "download_started_at": started_wall,
                     "download_completed_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),

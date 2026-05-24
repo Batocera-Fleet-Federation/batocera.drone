@@ -40,6 +40,7 @@ from app.drone_api import (
     _download_rom_from_peer,
     _collision_safe_target,
     _rom_md5_exists,
+    _best_peer_for_rom,
     _execute_overmind_action,
     _register_or_claim_overmind_token,
     _reclaim_overmind_token_after_unauthorized,
@@ -299,6 +300,111 @@ class SettingsTests(unittest.TestCase):
             snapshot = manager.snapshot()
             self.assertEqual(len(snapshot["queued"]), 1)
             self.assertEqual(snapshot["recent"][0]["status"], "cancelled")
+
+    def test_download_manager_pushes_terminal_sync_activity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "USERDATA_ROOT": str(root),
+                    "ROMS_ROOT": str(root / "roms"),
+                    "BIOS_ROOT": str(root / "bios"),
+                    "OVERMIND_DEVICE_ID": "target-a",
+                },
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            repo = RomRepository(root / "roms", root / "bios")
+            with mock.patch("app.drone_api.Thread.start"):
+                manager = DownloadManager(settings, repo)
+
+            config = {"overmind_url": "https://overmind.local", "overmind_token": "drone-token"}
+            queued = manager.enqueue_rom(config, {"drone_id": "source-a"}, "snes", "Game.zip", expected_size=8, expected_md5="abc")
+            completed = {
+                "source_drone_id": "source-a",
+                "target_drone_id": "target-a",
+                "system": "snes",
+                "rom_name": "Game.zip",
+                "relative_path": "Game.zip",
+                "action": "download",
+                "status": "completed",
+                "bytes_transferred": 8,
+                "file_size": 8,
+                "rom_md5": "abc",
+                "download_started_at": "2026-01-01T00:00:00+00:00",
+                "download_completed_at": "2026-01-01T00:00:01+00:00",
+                "duration_ms": 1000,
+            }
+            def fake_download(*args, **kwargs):
+                progress = kwargs.get("progress_callback")
+                if progress:
+                    progress(4, 8)
+                    progress(8, 8)
+                return dict(completed)
+
+            with mock.patch("app.drone_api.DOWNLOAD_PROGRESS_PUSH_SECONDS", 0), mock.patch(
+                "app.drone_api._download_rom_from_peer", side_effect=fake_download
+            ), mock.patch.object(repo, "list_assets", return_value=(root / "roms" / "snes", [])), mock.patch(
+                "app.drone_api._post_download_state"
+            ) as post_download_state, mock.patch("app.drone_api._post_rom_sync_activity") as post_activity:
+                manager._run_job(queued["job_id"])
+
+            push_reasons = [call.kwargs.get("reason") for call in post_download_state.call_args_list]
+            self.assertEqual(push_reasons[0], "started")
+            self.assertIn("progress", push_reasons)
+            self.assertEqual(push_reasons[-1], "completed")
+            post_activity.assert_called_once()
+            pushed = post_activity.call_args.args[2]
+            self.assertEqual(pushed["status"], "completed")
+            self.assertEqual(pushed["sync_id"], queued["job_id"])
+            self.assertEqual(pushed["rom_md5"], "abc")
+
+    def test_best_peer_for_rom_respects_source_device_inventory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "USERDATA_ROOT": str(root),
+                    "ROMS_ROOT": str(root / "roms"),
+                    "BIOS_ROOT": str(root / "bios"),
+                    "OVERMIND_DEVICE_ID": "target-a",
+                },
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            swarm_path = root / "system" / "drone-app" / "overmind_swarm.json"
+            swarm_path.parent.mkdir(parents=True)
+            swarm_path.write_text(
+                json.dumps(
+                    [
+                        {
+                            "device_id": "source-without-rom",
+                            "online": True,
+                            "rom_systems": ["snes"],
+                            "last_speed_sample": {"upload_mbps": 500},
+                        },
+                        {
+                            "device_id": "source-with-rom",
+                            "online": True,
+                            "rom_systems": ["snes"],
+                            "last_speed_sample": {"upload_mbps": 10},
+                        },
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            peer = _best_peer_for_rom(
+                settings,
+                RomRepository(settings.roms_root, settings.bios_root),
+                {},
+                "snes",
+                "Game.zip",
+                source_device_ids={"source-with-rom"},
+            )
+            self.assertIsNotNone(peer)
+            self.assertEqual(peer["device_id"], "source-with-rom")
 
     def test_disk_rom_without_gamelist_is_listed_with_md5(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -250,6 +250,30 @@
       border-radius: 8px;
       padding: 0.85rem;
     }
+    .download-table .download-file {
+      color: var(--admin-text);
+      font-weight: 700;
+      overflow-wrap: anywhere;
+    }
+    .download-table .download-meta {
+      color: var(--admin-muted);
+      font-size: 0.82rem;
+      overflow-wrap: anywhere;
+    }
+    .download-table .progress {
+      background: rgba(5, 12, 22, 0.72);
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      height: 0.55rem;
+    }
+    .download-table .progress-bar {
+      background: linear-gradient(90deg, #00c2ff, #45e3b6);
+    }
+    .download-table th:last-child,
+    .download-table td:last-child {
+      width: 1%;
+      white-space: nowrap;
+      text-align: right;
+    }
     .log-card .list-group-item {
       background: rgba(21, 31, 50, 0.82);
       border-color: var(--admin-border);
@@ -2039,21 +2063,28 @@ function formatBytes(value) {
 }
 
 function renderDownloadRows(rows, allowCancel = true) {
-  if (!rows.length) return '<div class="small text-muted">No downloads in this group.</div>';
-  return `<div class="table-responsive"><table class="table table-sm align-middle">
-    <thead><tr><th>Status</th><th>Source</th><th>Target</th><th>File</th><th>Progress</th><th>Speed</th><th>Started</th><th></th></tr></thead>
+  if (!rows.length) return '<div class="themed-empty">No downloads in this group.</div>';
+  return `<div class="table-responsive"><table class="table table-sm table-hover align-middle themed-table download-table">
+    <thead><tr><th>Status</th><th>Source</th><th>File</th><th>Progress</th><th>Speed</th><th>Started</th><th></th></tr></thead>
     <tbody>${rows.map(row => {
       const pct = Number(row.percentage || 0);
       const active = ["queued", "downloading"].includes(String(row.status || ""));
+      const statusClass = row.status === "failed" ? "danger" : row.status === "completed" ? "success" : row.status === "cancelled" ? "secondary" : row.status === "downloading" ? "info" : "primary";
+      const filePath = row.file_path || row.relative_path || row.rom_name || "";
+      const fileType = row.file_type || "ROM";
+      const errorText = row.error_message || row.failure_reason || "";
       return `<tr>
-        <td><span class="badge text-bg-${row.status === "failed" ? "danger" : row.status === "completed" ? "success" : row.status === "cancelled" ? "secondary" : "primary"}">${escapeHtml(row.status || "queued")}</span>${row.queue_position ? `<div class="small text-muted">#${row.queue_position}</div>` : ""}</td>
+        <td><span class="badge text-bg-${statusClass}">${escapeHtml(row.status || "queued")}</span>${row.queue_position ? `<div class="download-meta">Queue #${row.queue_position}</div>` : ""}</td>
         <td class="small mono">${escapeHtml(row.source_drone_id || "n/a")}</td>
-        <td class="small mono">${escapeHtml(row.target_drone_id || "local")}</td>
-        <td class="small">${escapeHtml(row.file_type || "other")} · ${escapeHtml(row.file_path || row.relative_path || row.rom_name || "")}${row.error_message || row.failure_reason ? `<div class="text-danger">${escapeHtml(row.error_message || row.failure_reason)}</div>` : ""}</td>
-        <td style="min-width:170px"><div class="progress" style="height:.55rem"><div class="progress-bar" style="width:${Math.max(0, Math.min(100, pct))}%"></div></div><div class="small text-muted">${formatBytes(row.downloaded_bytes || row.bytes_transferred)} / ${formatBytes(row.total_bytes || row.file_size)} · ${pct.toFixed(1)}%</div></td>
+        <td>
+          <div class="download-file">${escapeHtml(filePath)}</div>
+          <div class="download-meta">${escapeHtml(fileType)}${row.system ? ` · ${escapeHtml(row.system)}` : ""}${row.rom_md5 ? ` · md5 ${escapeHtml(row.rom_md5)}` : ""}</div>
+          ${errorText ? `<div class="text-danger small">${escapeHtml(errorText)}</div>` : ""}
+        </td>
+        <td style="min-width:190px"><div class="progress"><div class="progress-bar" style="width:${Math.max(0, Math.min(100, pct))}%"></div></div><div class="download-meta">${formatBytes(row.downloaded_bytes || row.bytes_transferred)} / ${formatBytes(row.total_bytes || row.file_size)} · ${pct.toFixed(1)}%</div></td>
         <td class="small">${row.transfer_speed_bps ? `${formatBytes(row.transfer_speed_bps)}/s` : ""}</td>
-        <td class="small text-muted">${escapeHtml(row.started_at || row.download_started_at || row.created_at || "")}</td>
-        <td>${allowCancel && active ? `<button class="btn btn-sm btn-outline-danger" onclick="cancelDroneDownload('${escapeHtml(row.job_id || row.id)}')"><i class="bi bi-x-circle"></i></button>` : ""}</td>
+        <td class="download-meta">${escapeHtml(row.started_at || row.download_started_at || row.created_at || "")}</td>
+        <td>${allowCancel && active ? `<button class="btn btn-sm btn-outline-danger" title="Cancel download" aria-label="Cancel download" onclick="cancelDroneDownload('${escapeHtml(row.job_id || row.id)}')"><i class="bi bi-x-circle"></i></button>` : ""}</td>
       </tr>`;
     }).join("")}</tbody></table></div>`;
 }
@@ -2072,10 +2103,10 @@ async function renderDownloadsPage() {
     const recent = payload.recent || [];
     content.innerHTML = `
       <div class="mb-3"><button class="btn btn-outline-secondary" onclick="setHash('#admin')">Back to Admin</button></div>
-      <div class="card mb-3"><div class="card-body py-3">
-        <div class="d-flex flex-wrap justify-content-between gap-2 mb-2">
+      <div class="card log-card mb-3"><div class="card-body py-3">
+        <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
           <div><strong>${escapeHtml(payload.target_drone_id || "This Drone")}</strong><div class="small text-muted">Concurrency limit: one active download per target Drone</div></div>
-          <button class="btn btn-sm btn-outline-primary" onclick="renderDownloadsPage()"><i class="bi bi-arrow-repeat"></i></button>
+          <button class="btn btn-sm btn-outline-primary" title="Refresh downloads" aria-label="Refresh downloads" onclick="renderDownloadsPage()"><i class="bi bi-arrow-repeat"></i></button>
         </div>
         <h6>Active</h6>${renderDownloadRows(active)}
         <h6 class="mt-3">Queued</h6>${renderDownloadRows(queued)}
