@@ -678,12 +678,33 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(result["systems"], [])
             self.assertEqual(result["roms"], [])
 
+    def test_collect_rom_metadata_includes_bios_md5(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            bios = root / "bios" / "dc" / "flash.bin"
+            bios.parent.mkdir(parents=True)
+            bios.write_bytes(b"bios-data")
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
+                clear=True,
+            ):
+                settings = Settings.from_env()
+
+            result = _collect_rom_metadata(settings, RomRepository(settings.roms_root, settings.bios_root))
+            self.assertEqual(len(result["bios"]), 1)
+            self.assertEqual(result["bios"][0]["path"], "dc/flash.bin")
+            self.assertTrue(result["bios"][0]["md5"])
+
     def test_rom_metadata_cache_reuses_md5_and_detects_deletes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
             rom = root / "roms" / "snes" / "Game.zip"
             rom.parent.mkdir(parents=True)
             rom.write_bytes(b"first")
+            bios = root / "bios" / "dc" / "flash.bin"
+            bios.parent.mkdir(parents=True)
+            bios.write_bytes(b"bios-data")
             with mock.patch.dict(
                 "os.environ",
                 {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
@@ -695,22 +716,28 @@ class SettingsTests(unittest.TestCase):
             snapshot, changed, stats = _poll_rom_metadata_cache(settings, repo)
             self.assertTrue(changed)
             self.assertEqual(stats["new_or_changed"], 1)
+            self.assertEqual(stats["bios_new_or_changed"], 1)
             first_md5 = snapshot["roms"][0]["rom_md5"]
+            first_bios_md5 = snapshot["bios"][0]["bios_md5"]
             cache = _rom_metadata_cache_path(settings)
             cache_data = json.loads(cache.read_text(encoding="utf-8"))
             cache_data["dirty"] = False
             cache.write_text(json.dumps(cache_data), encoding="utf-8")
 
-            with mock.patch.object(RomRepository, "build_md5", side_effect=AssertionError("unchanged ROM should not hash")):
+            with mock.patch.object(RomRepository, "build_md5", side_effect=AssertionError("unchanged metadata should not hash")):
                 snapshot, changed, stats = _poll_rom_metadata_cache(settings, repo)
             self.assertFalse(changed)
             self.assertEqual(snapshot["roms"][0]["rom_md5"], first_md5)
+            self.assertEqual(snapshot["bios"][0]["bios_md5"], first_bios_md5)
 
             rom.unlink()
+            bios.unlink()
             snapshot, changed, stats = _poll_rom_metadata_cache(settings, repo)
             self.assertTrue(changed)
             self.assertEqual(stats["deleted"], 1)
+            self.assertEqual(stats["bios_deleted"], 1)
             self.assertEqual(snapshot["roms"], [])
+            self.assertEqual(snapshot["bios"], [])
 
     def test_corrupt_rom_metadata_cache_rebuilds(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -759,7 +786,7 @@ class SettingsTests(unittest.TestCase):
 
             def fake_post(url, payload, token=None, settings=None):
                 uploads.append((url, payload, token))
-                return 200, {"rom_count": len(payload.get("roms") or [])}
+                return 200, {"rom_count": len(payload.get("roms") or []), "bios_count": len(payload.get("bios") or [])}
 
             with mock.patch.object(RomRepository, "build_md5", side_effect=AssertionError("unchanged ROM should not hash")), mock.patch(
                 "app.drone_api._overmind_post_json_with_status", side_effect=fake_post
@@ -776,6 +803,7 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(result["reason"], "no_changes")
             self.assertFalse(result["changed"])
             self.assertEqual(result["rom_count"], 1)
+            self.assertEqual(result["bios_count"], 0)
             self.assertEqual(len(uploads), 0)
             cache_after = json.loads(_rom_metadata_cache_path(settings).read_text(encoding="utf-8"))
             self.assertFalse(cache_after["dirty"])

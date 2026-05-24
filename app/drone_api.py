@@ -3306,6 +3306,29 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         self.log_message("peer rom download system=%s rom=%s bytes=%s", system, rel, target.stat().st_size)
         self._stream_file(target, "application/octet-stream", as_attachment=True)
 
+    def _handle_peer_bios_download(self, relative_path: str) -> None:
+        if self.settings.drone_mtls_enabled:
+            cert = self.connection.getpeercert() if hasattr(self.connection, "getpeercert") else None
+            if not cert:
+                self._send_json(403, {"error": "client certificate required"})
+                return
+        try:
+            bios_root = self.repository.get_bios_root().resolve()
+        except FileNotFoundError:
+            self._send_json(404, {"error": "not found"})
+            return
+        rel = unquote(relative_path or "").replace("\\", "/").lstrip("/")
+        if not rel or ".." in Path(rel).parts:
+            self._send_json(400, {"error": "invalid bios path"})
+            return
+        target = (bios_root / rel).resolve()
+        if not target.exists() or not target.is_file() or (target != bios_root and bios_root not in target.parents):
+            self.log_error("peer bios download failed bios=%s resolved=%s reason=not_found", rel, str(target))
+            self._send_json(404, {"error": "not found"})
+            return
+        self.log_message("peer bios download bios=%s bytes=%s", rel, target.stat().st_size)
+        self._stream_file(target, "application/octet-stream", as_attachment=True)
+
     def _stream_file(self, path: Path, content_type: str, as_attachment: bool = False) -> None:
         file_size = path.stat().st_size
         self.send_response(200)
@@ -4818,11 +4841,9 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         new_config["overmind_url"] = raw_url.rstrip("/")
         new_config["overmind_email"] = raw_email
         new_config["drone_name"] = raw_drone_name or socket.gethostname()
-        if raw_password is not None:
-            password_value = str(raw_password)
-            if not password_value:
-                raise ValueError("overmind_password cannot be empty when provided")
-            new_config["overmind_password"] = password_value
+        claim_password = str(raw_password or "") if raw_password is not None else ""
+        if raw_password is not None and not claim_password:
+            raise ValueError("overmind_password cannot be empty when provided")
         if raw_auth_token is not None:
             auth_token_value = str(raw_auth_token)
             if not auth_token_value:
@@ -4837,6 +4858,8 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             if not token_value:
                 raise ValueError("overmind_token cannot be empty when provided")
             new_config["overmind_token"] = token_value
+        if not str(new_config.get("overmind_auth_token") or "").strip() and not str(new_config.get("overmind_token") or "").strip():
+            raise ValueError("authorization token is required to connect this Drone to Overmind")
         new_config["requested_at"] = self._now_iso()
         new_config["integration_state"] = "configured"
         new_config["last_error"] = None
@@ -4854,6 +4877,61 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                     new_config["integration_enabled"] = True
                 else:
                     new_config["integration_enabled"] = False
+        if raw_password is not None:
+            if parsed.scheme != "https":
+                raise ValueError("claim ownership requires an https Overmind URL")
+            if not raw_email:
+                raise ValueError("overmind_email is required to claim ownership")
+            if not str(new_config.get("overmind_token") or "").strip():
+                raise ValueError("authorization token is required before claiming ownership")
+            base_url = raw_url.rstrip("/")
+            network_payload = _drone_network_payload(self.settings)
+            claim_payload = {
+                "device_id": self.settings.overmind_device_id,
+                "device_name": new_config["drone_name"],
+                "email": raw_email,
+                "password": claim_password,
+                "network": network_payload,
+                "api_port": self.settings.https_port,
+                "scheme": _drone_scheme(self.settings),
+                "reachable_url": _drone_reachable_url(self.settings, network_payload),
+                "certificate": DroneCertificateManager(self.settings).metadata(),
+                "system_info": _collect_system_info_payload(self.settings),
+            }
+            print(
+                f"Overmind ownership claim requested for {self.settings.overmind_device_id}: endpoint={base_url}/api/drones/claim-ownership",
+                file=sys.stdout,
+                flush=True,
+            )
+            try:
+                status_code, response = _overmind_post_json_with_status(
+                    f"{base_url}/api/drones/claim-ownership",
+                    claim_payload,
+                    settings=self.settings,
+                )
+            except HTTPError as error:
+                print(
+                    f"Overmind ownership claim failed for {self.settings.overmind_device_id}: status={error.code}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                self._send_json(error.code if 400 <= error.code < 600 else 502, {"error": "ownership claim failed"})
+                return
+            except Exception as error:
+                print(
+                    f"Overmind ownership claim failed for {self.settings.overmind_device_id}: {_format_overmind_error(error)}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                self._send_json(502, {"error": "ownership claim failed"})
+                return
+            if status_code >= 400:
+                self._send_json(status_code, {"error": "ownership claim failed"})
+                return
+            new_config["claimed_at"] = self._now_iso()
+            new_config["ownership_claim_status"] = response.get("status") or "claimed"
+            new_config["notes"] = "Configuration saved. Ownership claim recorded in Overmind; authorization token remains the Drone connection credential."
+            new_config.pop("overmind_password", None)
         self._save_overmind_config(new_config)
         self._send_json(200, self._overmind_public_payload(new_config))
 
@@ -6689,6 +6767,10 @@ def _collect_rom_metadata(settings: Settings, repository: "RomRepository") -> di
         systems = repository.list_systems()
     except FileNotFoundError:
         systems = []
+    try:
+        bios = repository.list_bios_entries()
+    except FileNotFoundError:
+        bios = []
     roms = []
     gamelists = []
     for system in systems:
@@ -6713,12 +6795,14 @@ def _collect_rom_metadata(settings: Settings, repository: "RomRepository") -> di
         "type": "rom_metadata",
         "collected_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
         "roms_root": str(settings.roms_root),
+        "bios_root": str(settings.bios_root),
         "systems": systems,
         "roms": roms,
+        "bios": bios,
         "gamelists": gamelists,
     }
     print(
-        f"ROM metadata scan root={settings.roms_root} systems={len(systems)} roms={len(roms)} gamelists={len(gamelists)}",
+        f"ROM metadata scan root={settings.roms_root} systems={len(systems)} roms={len(roms)} bios={len(bios)} gamelists={len(gamelists)}",
         file=sys.stdout,
         flush=True,
     )
@@ -6735,6 +6819,7 @@ def _empty_rom_metadata_cache() -> dict:
         "last_full_scan_at": None,
         "last_successful_upload_at": None,
         "entries": {},
+        "bios_entries": {},
         "systems": [],
         "gamelists": [],
         "dirty": True,
@@ -6750,6 +6835,10 @@ def _load_rom_metadata_cache(settings: Settings) -> Tuple[dict, bool]:
         entries = cache.get("entries")
         if not isinstance(entries, dict):
             raise ValueError("cache entries missing")
+        bios_entries = cache.get("bios_entries")
+        if bios_entries is not None and not isinstance(bios_entries, dict):
+            raise ValueError("cache bios entries invalid")
+        cache.setdefault("bios_entries", {})
         cache.setdefault("systems", [])
         cache.setdefault("gamelists", [])
         cache.setdefault("dirty", False)
@@ -6764,6 +6853,10 @@ def _rom_cache_entry_key(system: str, relative_path: str) -> str:
     return f"{system.strip().lower()}:{normalized_path}"
 
 
+def _bios_cache_entry_key(relative_path: str) -> str:
+    return str(relative_path or "").replace("\\", "/").lstrip("./").lower()
+
+
 def _build_rom_metadata_snapshot_from_cache(settings: Settings, cache: dict) -> dict:
     entries = cache.get("entries") if isinstance(cache.get("entries"), dict) else {}
     roms = []
@@ -6772,12 +6865,21 @@ def _build_rom_metadata_snapshot_from_cache(settings: Settings, cache: dict) -> 
             continue
         roms.append({k: v for k, v in entry.items() if k != "absolute_path"})
     roms.sort(key=lambda row: (str(row.get("system") or ""), str(row.get("file_path") or "")))
+    bios_entries = cache.get("bios_entries") if isinstance(cache.get("bios_entries"), dict) else {}
+    bios = []
+    for entry in bios_entries.values():
+        if not isinstance(entry, dict):
+            continue
+        bios.append({k: v for k, v in entry.items() if k != "absolute_path"})
+    bios.sort(key=lambda row: str(row.get("file_path") or row.get("path") or ""))
     return {
         "type": "rom_metadata",
         "collected_at": cache.get("last_full_scan_at") or datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
         "roms_root": str(settings.roms_root),
+        "bios_root": str(settings.bios_root),
         "systems": cache.get("systems") if isinstance(cache.get("systems"), list) else [],
         "roms": roms,
+        "bios": bios,
         "gamelists": cache.get("gamelists") if isinstance(cache.get("gamelists"), list) else [],
         "cache": {"schema_version": ROM_METADATA_CACHE_VERSION},
     }
@@ -6788,11 +6890,16 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
     print("ROM metadata poll started: phase=cache_load", file=sys.stdout, flush=True)
     cache, rebuilt = _load_rom_metadata_cache(settings)
     existing_entries = cache.get("entries") if isinstance(cache.get("entries"), dict) else {}
+    existing_bios_entries = cache.get("bios_entries") if isinstance(cache.get("bios_entries"), dict) else {}
     previous_keys = set(existing_entries.keys())
+    previous_bios_keys = set(existing_bios_entries.keys())
     next_entries: Dict[str, dict] = {}
+    next_bios_entries: Dict[str, dict] = {}
     new_or_changed: List[Tuple[str, Path, dict]] = []
+    bios_new_or_changed: List[Tuple[str, Path, dict]] = []
     systems_scanned = 0
     discovered = 0
+    bios_discovered = 0
     now_iso = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
     print("ROM metadata poll phase=scan", file=sys.stdout, flush=True)
@@ -6845,31 +6952,77 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
             gamelists.append(gamelist)
 
     deleted = previous_keys - set(next_entries.keys()) - {key for key, _, _ in new_or_changed}
+    try:
+        bios_root = repository.get_bios_root()
+        for bios_path in sorted(bios_root.rglob("*"), key=lambda item: str(item.relative_to(bios_root)).lower()):
+            if not bios_path.is_file():
+                continue
+            relative_path = bios_path.relative_to(bios_root).as_posix()
+            bios_discovered += 1
+            key = _bios_cache_entry_key(relative_path)
+            stat = bios_path.stat()
+            stat_size = int(stat.st_size)
+            stat_mtime = int(stat.st_mtime)
+            previous = existing_bios_entries.get(key) if isinstance(existing_bios_entries.get(key), dict) else {}
+            base_entry = {
+                "entry_type": "file",
+                "name": bios_path.name,
+                "path": relative_path,
+                "file_path": relative_path,
+                "relative_path": relative_path,
+                "unique_id": repository.build_unique_id(bios_path),
+                "file_size": stat_size,
+                "byte_count": stat_size,
+                "size": stat_size,
+                "modified_time": stat_mtime,
+                "mtime": stat_mtime,
+                "absolute_path": str(bios_path),
+            }
+            if previous and previous.get("file_size") == stat_size and previous.get("modified_time") == stat_mtime and previous.get("md5"):
+                next_bios_entries[key] = {**base_entry, "md5": previous.get("md5"), "bios_md5": previous.get("bios_md5") or previous.get("md5")}
+            else:
+                bios_new_or_changed.append((key, bios_path, base_entry))
+    except FileNotFoundError:
+        pass
+    except Exception as error:
+        print(f"BIOS metadata scan warning: error={_format_overmind_error(error)}", file=sys.stderr, flush=True)
+    bios_deleted = previous_bios_keys - set(next_bios_entries.keys()) - {key for key, _, _ in bios_new_or_changed}
     print(
-        f"ROM metadata poll scan complete: systems={systems_scanned} roms={discovered} new_or_changed={len(new_or_changed)} deleted={len(deleted)}",
+        f"ROM metadata poll scan complete: systems={systems_scanned} roms={discovered} bios={bios_discovered} new_or_changed={len(new_or_changed)} bios_new_or_changed={len(bios_new_or_changed)} deleted={len(deleted)} bios_deleted={len(bios_deleted)}",
         file=sys.stdout,
         flush=True,
     )
 
-    if new_or_changed:
+    files_to_hash = new_or_changed + bios_new_or_changed
+    if files_to_hash:
         hash_started = time.monotonic()
         last_log = hash_started
-        print(f"ROM metadata poll phase=md5_hashing count={len(new_or_changed)}", file=sys.stdout, flush=True)
+        print(f"ROM metadata poll phase=md5_hashing count={len(files_to_hash)}", file=sys.stdout, flush=True)
         for index, (key, absolute, entry) in enumerate(new_or_changed, start=1):
             md5_value = RomRepository.build_md5(absolute)
             next_entries[key] = {**entry, "md5": md5_value, "rom_md5": md5_value}
             now = time.monotonic()
-            if index == len(new_or_changed) or index % max(1, ROM_METADATA_PROGRESS_FILES) == 0 or now - last_log >= ROM_METADATA_PROGRESS_SECONDS:
-                print(f"ROM metadata md5 progress: {index}/{len(new_or_changed)} files", file=sys.stdout, flush=True)
+            if index == len(files_to_hash) or index % max(1, ROM_METADATA_PROGRESS_FILES) == 0 or now - last_log >= ROM_METADATA_PROGRESS_SECONDS:
+                print(f"ROM metadata md5 progress: {index}/{len(files_to_hash)} files", file=sys.stdout, flush=True)
+                last_log = now
+        offset = len(new_or_changed)
+        for bios_index, (key, absolute, entry) in enumerate(bios_new_or_changed, start=1):
+            md5_value = RomRepository.build_md5(absolute)
+            next_bios_entries[key] = {**entry, "md5": md5_value, "bios_md5": md5_value}
+            index = offset + bios_index
+            now = time.monotonic()
+            if index == len(files_to_hash) or index % max(1, ROM_METADATA_PROGRESS_FILES) == 0 or now - last_log >= ROM_METADATA_PROGRESS_SECONDS:
+                print(f"ROM metadata md5 progress: {index}/{len(files_to_hash)} files", file=sys.stdout, flush=True)
                 last_log = now
         print(
-            f"ROM metadata md5 hashing completed: count={len(new_or_changed)} duration_ms={int((time.monotonic() - hash_started) * 1000)}",
+            f"ROM metadata md5 hashing completed: count={len(files_to_hash)} roms={len(new_or_changed)} bios={len(bios_new_or_changed)} duration_ms={int((time.monotonic() - hash_started) * 1000)}",
             file=sys.stdout,
             flush=True,
         )
 
-    changed = rebuilt or bool(new_or_changed) or bool(deleted) or bool(cache.get("dirty"))
+    changed = rebuilt or bool(new_or_changed) or bool(deleted) or bool(bios_new_or_changed) or bool(bios_deleted) or bool(cache.get("dirty"))
     cache["entries"] = next_entries
+    cache["bios_entries"] = next_bios_entries
     cache["systems"] = systems
     cache["gamelists"] = gamelists
     cache["last_full_scan_at"] = now_iso
@@ -6877,15 +7030,18 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
     print("ROM metadata poll phase=cache_write", file=sys.stdout, flush=True)
     _write_json_file(_rom_metadata_cache_path(settings), cache)
     print(
-        f"ROM metadata cache write completed: entries={len(next_entries)} changed={changed} duration_ms={int((time.monotonic() - started) * 1000)}",
+        f"ROM metadata cache write completed: entries={len(next_entries)} bios_entries={len(next_bios_entries)} changed={changed} duration_ms={int((time.monotonic() - started) * 1000)}",
         file=sys.stdout,
         flush=True,
     )
     stats = {
         "systems_scanned": systems_scanned,
         "roms_discovered": discovered,
+        "bios_discovered": bios_discovered,
         "new_or_changed": len(new_or_changed),
+        "bios_new_or_changed": len(bios_new_or_changed),
         "deleted": len(deleted),
+        "bios_deleted": len(bios_deleted),
         "rebuilt": rebuilt,
     }
     return _build_rom_metadata_snapshot_from_cache(settings, cache), changed, stats
@@ -7062,6 +7218,19 @@ def _rom_md5_exists(repository: "RomRepository", expected_md5: Optional[str]) ->
                 if str(rom.get("md5") or rom.get("rom_md5") or "").strip().lower() == expected:
                     return True
     except Exception:
+            return False
+    return False
+
+
+def _bios_md5_exists(repository: "RomRepository", expected_md5: Optional[str]) -> bool:
+    expected = str(expected_md5 or "").strip().lower()
+    if not expected:
+        return False
+    try:
+        for bios in repository.list_bios_entries():
+            if str(bios.get("md5") or bios.get("bios_md5") or "").strip().lower() == expected:
+                return True
+    except Exception:
         return False
     return False
 
@@ -7117,6 +7286,55 @@ class DownloadManager:
             "failure_reason": None,
             "cancellation_requested": False,
             "created_at": now,
+            "_config": config,
+            "_peer": peer,
+            "_expected_md5": expected_md5,
+        }
+        with self._lock:
+            self._jobs[job_id] = job
+            self._cancel_events[job_id] = Event()
+            self._update_queue_positions_locked()
+            snapshot = self._public_job_locked(job)
+        self._wake.set()
+        return snapshot
+
+    def enqueue_bios(self, config: dict, peer: dict, relative_path: str, expected_size=None, expected_md5=None, source_action_id: Optional[str] = None) -> dict:
+        job_id = str(uuid.uuid4())
+        peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        job = {
+            "id": job_id,
+            "job_id": job_id,
+            "sync_id": job_id,
+            "source_action_id": source_action_id,
+            "source_drone_id": peer_id,
+            "target_drone_id": self.settings.overmind_device_id,
+            "asset_type": "bios",
+            "file_path": relative_path,
+            "file_name": Path(relative_path).name,
+            "file_type": "BIOS",
+            "system": "bios",
+            "bios_name": relative_path,
+            "rom_name": relative_path,
+            "relative_path": relative_path,
+            "total_bytes": expected_size,
+            "file_size": expected_size,
+            "downloaded_bytes": 0,
+            "bytes_transferred": 0,
+            "percentage": 0,
+            "transfer_speed_bps": 0,
+            "status": "queued",
+            "queue_position": None,
+            "started_at": None,
+            "download_started_at": None,
+            "completed_at": None,
+            "download_completed_at": None,
+            "error_message": None,
+            "failure_reason": None,
+            "cancellation_requested": False,
+            "created_at": now,
+            "bios_md5": expected_md5,
+            "_asset_type": "bios",
             "_config": config,
             "_peer": peer,
             "_expected_md5": expected_md5,
@@ -7225,6 +7443,7 @@ class DownloadManager:
             expected_size = job.get("file_size") or job.get("total_bytes")
             expected_md5 = job.get("_expected_md5")
             cancel_event = self._cancel_events.get(job_id) or Event()
+            asset_type = str(job.get("_asset_type") or "rom").lower()
         self._push_download_state(config, "started", force=True)
 
         def progress(downloaded: int, total: Optional[int]) -> None:
@@ -7249,20 +7468,32 @@ class DownloadManager:
                 self._push_download_state(config, "progress", force=True)
 
         try:
-            activity = _download_rom_from_peer(
-                self.settings,
-                config,
-                peer,
-                system,
-                rel,
-                expected_size=expected_size,
-                expected_md5=expected_md5,
-                progress_callback=progress,
-                cancellation_event=cancel_event,
-            )
+            if asset_type == "bios":
+                activity = _download_bios_from_peer(
+                    self.settings,
+                    config,
+                    peer,
+                    rel,
+                    expected_size=expected_size,
+                    expected_md5=expected_md5,
+                    progress_callback=progress,
+                    cancellation_event=cancel_event,
+                )
+            else:
+                activity = _download_rom_from_peer(
+                    self.settings,
+                    config,
+                    peer,
+                    system,
+                    rel,
+                    expected_size=expected_size,
+                    expected_md5=expected_md5,
+                    progress_callback=progress,
+                    cancellation_event=cancel_event,
+                )
             refresh_started = time.monotonic()
             try:
-                _, refreshed = self.repository.list_assets(system, "roms")
+                refreshed = self.repository.list_bios_entries() if asset_type == "bios" else self.repository.list_assets(system, "roms")[1]
                 activity["inventory_refresh_status"] = "succeeded"
                 activity["inventory_refresh_count"] = len(refreshed)
             except Exception as refresh_error:
@@ -7441,6 +7672,39 @@ def _best_peer_for_rom(
     return candidates[0][2] if candidates else None
 
 
+def _best_peer_for_bios(
+    settings: Settings,
+    config: dict,
+    relative_path: str,
+    source_device_ids: Optional[set] = None,
+) -> Optional[dict]:
+    swarm = _read_json_file(_overmind_swarm_path_for_settings(settings), [])
+    peer_checks = _read_json_file(_overmind_peer_results_path_for_settings(settings), [])
+    checks = {str(row.get("target_drone_id") or ""): row for row in peer_checks if isinstance(row, dict)}
+    allowed_sources = {str(item) for item in (source_device_ids or set()) if str(item)}
+    candidates = []
+    for peer in swarm if isinstance(swarm, list) else []:
+        peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
+        if not peer_id or peer_id == settings.overmind_device_id or not peer.get("online", True):
+            continue
+        if allowed_sources and peer_id not in allowed_sources:
+            continue
+        check = checks.get(peer_id) or {}
+        if check.get("status") == "fail":
+            continue
+        score = 0
+        sample = peer.get("last_speed_sample") or {}
+        try:
+            score += float(sample.get("upload_mbps") or 0)
+        except Exception:
+            pass
+        if check.get("status") == "pass":
+            score += 1000
+        candidates.append((score, peer_id, peer))
+    candidates.sort(key=lambda item: (-item[0], item[1]))
+    return candidates[0][2] if candidates else None
+
+
 def _download_rom_from_peer(
     settings: Settings,
     config: dict,
@@ -7577,6 +7841,145 @@ def _download_rom_from_peer(
     }
 
 
+def _download_bios_from_peer(
+    settings: Settings,
+    config: dict,
+    peer: dict,
+    relative_path: str,
+    expected_size=None,
+    expected_md5=None,
+    progress_callback=None,
+    cancellation_event: Optional[Event] = None,
+) -> dict:
+    peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
+    address = _peer_address(peer)
+    if not address:
+        raise RuntimeError("selected peer has no address")
+    rel = _safe_rom_relative_path(relative_path)
+    url = f"{address}/v1/api/peer/bios/{quote(rel, safe='/')}"
+    bios_root = settings.bios_root.resolve()
+    target = _collision_safe_target(bios_root, rel)
+    partial_target = target.with_name(f"{target.name}.part")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    cafile = _peer_trust_cafile(settings, peer_id=peer_id, config=config)
+    if address.startswith("https://") and not cafile:
+        raise ssl.SSLError(f"no trusted certificate cached for peer {peer_id}")
+    context = _drone_client_ssl_context(settings, url, verify=bool(cafile), cafile=cafile)
+    started_dt = datetime.now(timezone.utc).replace(microsecond=0)
+    started = started_dt.isoformat()
+    started_mono = time.monotonic()
+    bytes_written = 0
+    request = Request(url, headers={"User-Agent": "batocera-drone-bios-sync/1.0"})
+
+    def ensure_not_cancelled() -> None:
+        if cancellation_event is not None and cancellation_event.is_set():
+            if partial_target.exists():
+                partial_target.unlink()
+            raise DownloadCancelled("download cancelled")
+
+    def response_total(response) -> Optional[int]:
+        if expected_size not in (None, ""):
+            try:
+                return int(expected_size)
+            except Exception:
+                pass
+        try:
+            return int(response.headers.get("Content-Length") or 0) or None
+        except Exception:
+            return None
+
+    try:
+        with urlopen(request, timeout=max(10, PEER_CHECK_TIMEOUT_SECONDS * 4), context=context) as response, partial_target.open("wb") as handle:
+            total_bytes = response_total(response)
+            while True:
+                ensure_not_cancelled()
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                handle.write(chunk)
+                bytes_written += len(chunk)
+                if progress_callback:
+                    progress_callback(bytes_written, total_bytes)
+    except (ssl.SSLError, URLError) as error:
+        if isinstance(error, URLError) and not _is_ssl_url_error(error):
+            raise
+        ssl_error = getattr(error, "reason", error)
+        print(f"BIOS sync SSL validation failed: {_peer_ssl_diagnostic(url, cafile, ssl_error)}", file=sys.stderr, flush=True)
+        if partial_target.exists():
+            partial_target.unlink()
+        cafile = _peer_trust_cafile(settings, peer_id=peer_id, config=config, refresh_cert=True)
+        if address.startswith("https://") and not cafile:
+            raise ssl.SSLError(f"no trusted certificate cached for peer {peer_id}") from error
+        context = _drone_client_ssl_context(settings, url, verify=bool(cafile), cafile=cafile)
+        bytes_written = 0
+        try:
+            with urlopen(request, timeout=max(10, PEER_CHECK_TIMEOUT_SECONDS * 4), context=context) as response, partial_target.open("wb") as handle:
+                total_bytes = response_total(response)
+                while True:
+                    ensure_not_cancelled()
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    handle.write(chunk)
+                    bytes_written += len(chunk)
+                    if progress_callback:
+                        progress_callback(bytes_written, total_bytes)
+        except (ssl.SSLError, URLError) as retry_error:
+            if isinstance(retry_error, URLError) and not _is_ssl_url_error(retry_error):
+                raise
+            retry_ssl_error = getattr(retry_error, "reason", retry_error)
+            print(f"BIOS sync SSL validation retry failed: {_peer_ssl_diagnostic(url, cafile, retry_ssl_error)}", file=sys.stderr, flush=True)
+            if partial_target.exists():
+                partial_target.unlink()
+            raise ssl.SSLError(_peer_ssl_diagnostic(url, cafile, retry_ssl_error)) from retry_error
+    except DownloadCancelled:
+        if partial_target.exists():
+            partial_target.unlink()
+        raise
+    except Exception:
+        if partial_target.exists():
+            partial_target.unlink()
+        raise
+    if expected_size not in (None, ""):
+        try:
+            if int(expected_size) != bytes_written:
+                raise RuntimeError(f"size mismatch expected={expected_size} actual={bytes_written}")
+        except ValueError:
+            pass
+    actual_md5 = RomRepository.build_md5(partial_target)
+    expected_md5_clean = str(expected_md5 or "").strip().lower()
+    if expected_md5_clean and actual_md5.lower() != expected_md5_clean:
+        if partial_target.exists():
+            partial_target.unlink()
+        raise RuntimeError(f"md5 mismatch expected={expected_md5_clean} actual={actual_md5}")
+    partial_target.replace(target)
+    completed_dt = datetime.now(timezone.utc).replace(microsecond=0)
+    duration_ms = int((time.monotonic() - started_mono) * 1000)
+    return {
+        "asset_type": "bios",
+        "file_type": "BIOS",
+        "source_drone_id": peer_id,
+        "target_drone_id": settings.overmind_device_id,
+        "system": "bios",
+        "bios_name": rel,
+        "rom_name": rel,
+        "relative_path": target.relative_to(bios_root).as_posix(),
+        "action": "download",
+        "status": "completed",
+        "bytes_transferred": bytes_written,
+        "file_size": expected_size or bytes_written,
+        "md5": actual_md5,
+        "bios_md5": expected_md5_clean or actual_md5,
+        "download_started_at": started,
+        "download_completed_at": completed_dt.isoformat(),
+        "started_at": started,
+        "completed_at": completed_dt.isoformat(),
+        "duration_ms": duration_ms,
+        "duration_seconds": round(duration_ms / 1000, 3),
+        "selected_peer_reason": "healthy peer from Overmind BIOS source list with best sampled score",
+    }
+
+
 def _summarize_overmind_result(result: Optional[dict]) -> str:
     if not isinstance(result, dict):
         return ""
@@ -7609,6 +8012,99 @@ def _execute_overmind_action(settings: Settings, repository: "RomRepository", ac
     if action_name == "collect_log_sources":
         result = _collect_log_sources(settings)
         return "completed", f"Collected {_summarize_overmind_result(result)}.", result
+
+    if action_name == "sync_bios":
+        config = _load_overmind_config_for_settings(settings)
+        manager = _get_download_manager()
+        if manager is None:
+            return "failed", "Download manager is not available.", None
+        payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
+        rel = str(payload.get("file_path") or payload.get("relative_path") or payload.get("bios_name") or payload.get("name") or "").strip()
+        expected_md5 = payload.get("bios_md5") or payload.get("md5")
+        source_device_ids = {
+            str(device.get("device_id") or device.get("drone_id") or "")
+            for device in payload.get("devices", [])
+            if isinstance(device, dict)
+        }
+        if not rel:
+            return "failed", "BIOS path is required.", None
+        sync_id = str(uuid.uuid4())
+        started_wall = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        started_mono = time.monotonic()
+        if expected_md5 and _bios_md5_exists(repository, expected_md5):
+            result = {
+                "type": "bios_sync",
+                "activity": [{
+                    "asset_type": "bios",
+                    "sync_id": sync_id,
+                    "target_drone_id": settings.overmind_device_id,
+                    "system": "bios",
+                    "bios_name": rel,
+                    "relative_path": rel,
+                    "action": "download",
+                    "status": "skipped",
+                    "failure_reason": "BIOS md5 already exists locally",
+                    "bios_md5": expected_md5,
+                    "download_started_at": started_wall,
+                    "download_completed_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                    "duration_ms": int((time.monotonic() - started_mono) * 1000),
+                }],
+            }
+            return "completed", "BIOS sync skipped because matching file already exists.", result
+        peer = _best_peer_for_bios(settings, config, rel, source_device_ids=source_device_ids)
+        if not peer:
+            result = {
+                "type": "bios_sync",
+                "activity": [{
+                    "asset_type": "bios",
+                    "sync_id": sync_id,
+                    "target_drone_id": settings.overmind_device_id,
+                    "system": "bios",
+                    "bios_name": rel,
+                    "relative_path": rel,
+                    "action": "download",
+                    "status": "failed",
+                    "failure_reason": "No healthy source peer with requested BIOS found",
+                    "bios_md5": expected_md5,
+                    "download_started_at": started_wall,
+                    "download_completed_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                    "duration_ms": int((time.monotonic() - started_mono) * 1000),
+                }],
+            }
+            return "failed", "BIOS sync failed: no healthy source peer.", result
+        try:
+            activity = manager.enqueue_bios(
+                config,
+                peer,
+                rel,
+                expected_size=payload.get("file_size"),
+                expected_md5=expected_md5,
+                source_action_id=str(action.get("id") or ""),
+            )
+            activity["sync_id"] = activity.get("job_id") or sync_id
+            activity["bios_md5"] = activity.get("bios_md5") or expected_md5
+            return "completed", "BIOS sync queued 1 item.", {"type": "bios_sync", "activity": [activity]}
+        except Exception as error:
+            result = {
+                "type": "bios_sync",
+                "activity": [{
+                    "asset_type": "bios",
+                    "sync_id": sync_id,
+                    "source_drone_id": str(peer.get("drone_id") or peer.get("device_id") or ""),
+                    "target_drone_id": settings.overmind_device_id,
+                    "system": "bios",
+                    "bios_name": rel,
+                    "relative_path": rel,
+                    "action": "download",
+                    "status": "failed",
+                    "failure_reason": str(error),
+                    "bios_md5": expected_md5,
+                    "download_started_at": started_wall,
+                    "download_completed_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                    "duration_ms": int((time.monotonic() - started_mono) * 1000),
+                }],
+            }
+            return "failed", "BIOS sync failed for 1 item.", result
 
     if action_name in {"sync_rom", "sync_system"}:
         config = _load_overmind_config_for_settings(settings)
@@ -7916,9 +8412,10 @@ def _sync_rom_metadata_to_overmind(settings: Settings, repository: "RomRepositor
     poll_started = time.monotonic()
     snapshot, changed, stats = _poll_rom_metadata_cache(settings, repository)
     rom_count = len(snapshot.get("roms") or [])
+    bios_count = len(snapshot.get("bios") or [])
     if not changed:
         print(
-            f"ROM metadata sync skipped: no changes detected systems={stats.get('systems_scanned')} roms={stats.get('roms_discovered')} duration_ms={int((time.monotonic() - poll_started) * 1000)}",
+            f"ROM metadata sync skipped: no changes detected systems={stats.get('systems_scanned')} roms={stats.get('roms_discovered')} bios={stats.get('bios_discovered')} duration_ms={int((time.monotonic() - poll_started) * 1000)}",
             file=sys.stdout,
             flush=True,
         )
@@ -7926,6 +8423,7 @@ def _sync_rom_metadata_to_overmind(settings: Settings, repository: "RomRepositor
             "status": "skipped",
             "reason": "no_changes",
             "rom_count": rom_count,
+            "bios_count": bios_count,
             "changed": changed,
             "stats": stats,
         }
@@ -7933,7 +8431,7 @@ def _sync_rom_metadata_to_overmind(settings: Settings, repository: "RomRepositor
     upload_url = f"{base_url}/api/devices/{device_id}/rom-metadata"
     payload = {"device_id": settings.overmind_device_id, **snapshot}
     print(
-        f"ROM metadata sync started: endpoint={upload_url} roms={rom_count} cache_changed={changed}",
+        f"ROM metadata sync started: endpoint={upload_url} roms={rom_count} bios={bios_count} cache_changed={changed}",
         file=sys.stdout,
         flush=True,
     )
@@ -7954,7 +8452,7 @@ def _sync_rom_metadata_to_overmind(settings: Settings, repository: "RomRepositor
     cache["dirty"] = False
     _write_json_file(_rom_metadata_cache_path(settings), cache)
     print(
-        f"ROM metadata sync succeeded: status={status_code} sent_roms={rom_count} accepted_roms={response.get('rom_count')} duration_ms={int((time.monotonic() - poll_started) * 1000)}",
+        f"ROM metadata sync succeeded: status={status_code} sent_roms={rom_count} sent_bios={bios_count} accepted_roms={response.get('rom_count')} accepted_bios={response.get('bios_count')} duration_ms={int((time.monotonic() - poll_started) * 1000)}",
         file=sys.stdout,
         flush=True,
     )
@@ -7963,6 +8461,7 @@ def _sync_rom_metadata_to_overmind(settings: Settings, repository: "RomRepositor
         "status_code": status_code,
         "response": response,
         "rom_count": rom_count,
+        "bios_count": bios_count,
         "changed": changed,
         "stats": stats,
     }

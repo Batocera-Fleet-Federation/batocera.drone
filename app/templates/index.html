@@ -3365,51 +3365,43 @@ async function renderOvermindIntegrationPage() {
         <button id="overmindRefreshBtn" class="btn btn-sm btn-outline-primary" type="button">Refresh</button>
       </div>
       <div class="card-body">
-        <div class="mb-3">
-          <label class="form-label">Overmind URL <span class="text-danger">*</span> <span class="text-muted small">Required</span></label>
-          <input id="overmindUrlInput" class="form-control" type="url" placeholder="https://www.batocera-swarm.com">
-        </div>
-        <div class="mb-3">
-          <label class="form-label">Drone Name  <span class="text-muted small">Optional</span></label>
-          <input id="droneNameInput" class="form-control" type="text" placeholder="Arcade Cabinet">
-        </div>
-        <div class="mb-3">
-          <label class="form-label">Authorization Token  <span class="text-danger">*</span> <span class="text-muted small">Required</span></label>
-          <input id="overmindAuthTokenInput" class="form-control" type="password" placeholder="Token generated in Overmind">
-          <div class="text-muted small mt-1">Generate this token in Overmind and paste it here. Saving immediately registers this Drone.</div>
+        <div class="row g-3">
+          <div class="col-12 col-lg-6">
+            <div class="mb-3">
+              <label class="form-label">Overmind URL <span class="text-danger">*</span> <span class="text-muted small">Required</span></label>
+              <input id="overmindUrlInput" class="form-control" type="url" placeholder="https://www.batocera-swarm.com">
+            </div>
+            <div class="mb-3">
+              <label class="form-label">Authorization Token <span class="text-danger">*</span> <span class="text-muted small">Required</span></label>
+              <input id="overmindAuthTokenInput" class="form-control" type="password" placeholder="Token generated in Overmind">
+              <div class="text-muted small mt-1">Paste an authorization token from Overmind. This token is required to connect this Drone.</div>
+            </div>
+            <div class="mb-3">
+              <label class="form-label">Drone Name  <span class="text-muted small">Optional</span></label>
+              <input id="droneNameInput" class="form-control" type="text" placeholder="Arcade Cabinet">
+            </div>
+          </div>
+          <div class="col-12 col-lg-6">
+            <div class="p-3 rounded border h-100" style="border-color:var(--admin-border)!important;background:rgba(31,42,68,.35)">
+              <div class="fw-semibold mb-1">Claim Ownership <span class="text-muted small">Optional</span></div>
+              <div class="text-muted small mb-3">Use your Overmind account to identify this Drone as yours. This grants your Overmind account admin access to this Drone even when it belongs to another swarm.</div>
+              <div class="mb-3">
+                <label class="form-label">Overmind Email</label>
+                <input id="claimEmailInput" class="form-control" type="email" autocomplete="username">
+              </div>
+              <div class="mb-0">
+                <label class="form-label">Overmind Password</label>
+                <input id="claimPasswordInput" class="form-control" type="password" autocomplete="current-password">
+              </div>
+            </div>
+          </div>
         </div>
         <div class="d-flex gap-2">
           <button id="overmindSaveBtn" class="btn btn-primary" type="button">Save Configuration</button>
-          <button id="overmindConnectBtn" class="btn btn-outline-success" type="button">Connect to Swarm</button>
           <button id="overmindDisconnectBtn" class="btn btn-outline-danger" type="button">Disconnect Swarm</button>
         </div>
         <hr>
         <div class="small" id="overmindStatus"></div>
-      </div>
-    </div>
-    <div class="card log-card mt-3">
-      <div class="card-header">
-        <span>Claim Ownership</span>
-      </div>
-      <div class="card-body">
-        <div class="mb-3">
-          <label class="form-label">Overmind URL <span class="text-danger">*</span></label>
-          <input id="claimOvermindUrlInput" class="form-control" type="url" placeholder="https://www.batocera-swarm.com">
-        </div>
-        <div class="mb-3">
-          <label class="form-label">Drone Name <span class="text-muted small">Optional</span></label>
-          <input id="claimDroneNameInput" class="form-control" type="text" placeholder="Arcade Cabinet">
-        </div>
-        <div class="mb-3">
-          <label class="form-label">Overmind Email <span class="text-danger">*</span></label>
-          <input id="claimEmailInput" class="form-control" type="email" autocomplete="username">
-        </div>
-        <div class="mb-3">
-          <label class="form-label">Overmind Password <span class="text-danger">*</span></label>
-          <input id="claimPasswordInput" class="form-control" type="password" autocomplete="current-password">
-        </div>
-        <button id="claimOwnershipBtn" class="btn btn-primary" type="button">Claim Ownership</button>
-        <div class="text-muted small mt-2">Credentials are sent to Overmind over HTTPS and are not stored or logged by Drone.</div>
       </div>
     </div>
     <div class="card log-card mt-3">
@@ -3428,13 +3420,9 @@ async function renderOvermindIntegrationPage() {
   const droneNameInput = document.getElementById("droneNameInput");
   const authTokenInput = document.getElementById("overmindAuthTokenInput");
   const saveBtn = document.getElementById("overmindSaveBtn");
-  const connectBtn = document.getElementById("overmindConnectBtn");
   const disconnectBtn = document.getElementById("overmindDisconnectBtn");
-  const claimUrlInput = document.getElementById("claimOvermindUrlInput");
-  const claimDroneNameInput = document.getElementById("claimDroneNameInput");
   const claimEmailInput = document.getElementById("claimEmailInput");
   const claimPasswordInput = document.getElementById("claimPasswordInput");
-  const claimOwnershipBtn = document.getElementById("claimOwnershipBtn");
   const refreshBtn = document.getElementById("overmindRefreshBtn");
   const actionsRefreshBtn = document.getElementById("overmindActionsRefreshBtn");
   const actionsBody = document.getElementById("overmindActionsBody");
@@ -3487,8 +3475,6 @@ async function renderOvermindIntegrationPage() {
     `;
     urlInput.value = payload.overmind_url || "https://www.batocera-swarm.com";
     droneNameInput.value = payload.drone_name || "";
-    claimUrlInput.value = payload.overmind_url || "https://www.batocera-swarm.com";
-    claimDroneNameInput.value = payload.drone_name || "";
     claimEmailInput.value = payload.overmind_email || "";
   }
 
@@ -3537,12 +3523,22 @@ async function renderOvermindIntegrationPage() {
     const overmindUrl = (urlInput.value || "").trim();
     const droneName = (droneNameInput.value || "").trim();
     const overmindAuthToken = authTokenInput.value || "";
+    const claimEmail = (claimEmailInput.value || "").trim();
+    const claimPassword = claimPasswordInput.value || "";
     const body = { overmind_url: overmindUrl, drone_name: droneName };
     if (overmindAuthToken) {
       body.overmind_auth_token = overmindAuthToken;
     }
+    if (claimEmail) {
+      body.overmind_email = claimEmail;
+    }
+    if (claimPassword) {
+      body.overmind_email = claimEmail;
+      body.overmind_password = claimPassword;
+    }
     const payload = await apiPost("/admin/integrations/overmind/config", body);
     authTokenInput.value = "";
+    claimPasswordInput.value = "";
     const state = payload.status?.integration_state || "";
     const isActive = payload.status?.integration_enabled && state !== "pending_failed";
     if (state === "pending_failed") {
@@ -3559,38 +3555,8 @@ async function renderOvermindIntegrationPage() {
       await saveConfig();
     } catch (err) {
       showToast(escapeHtml(err.message || "Failed to save config"), "danger");
-    } finally {
-      setLoading(false);
-    }
-  });
-  connectBtn.addEventListener("click", async () => {
-    setLoading(true, "Requesting swarm approval...");
-    try {
-      const payload = await apiPost("/admin/integrations/overmind/swarm/connect", {});
-      renderStatus(payload);
-      showToast("Swarm connection requested.", "success");
-    } catch (err) {
-      showToast(escapeHtml(err.message || "Failed to connect swarm"), "danger");
-    } finally {
-      setLoading(false);
-    }
-  });
-  claimOwnershipBtn.addEventListener("click", async () => {
-    setLoading(true, "Claiming Drone ownership...");
-    try {
-      const payload = await apiPost("/admin/integrations/overmind/claim-ownership", {
-        overmind_url: (claimUrlInput.value || "").trim(),
-        drone_name: (claimDroneNameInput.value || "").trim(),
-        email: (claimEmailInput.value || "").trim(),
-        password: claimPasswordInput.value || "",
-      });
       claimPasswordInput.value = "";
-      renderStatus(payload);
-      showToast("Ownership claimed. Drone is connected to Overmind.", "success");
-    } catch (err) {
-      showToast(escapeHtml(err.message || "Failed to claim ownership"), "danger");
     } finally {
-      claimPasswordInput.value = "";
       setLoading(false);
     }
   });

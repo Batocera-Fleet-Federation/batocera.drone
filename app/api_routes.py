@@ -39,6 +39,10 @@ class ApiRoutesMixin:
                 self._handle_peer_rom_download(parts[2], "/".join(parts[3:]))
                 return
 
+            if len(parts) >= 3 and parts[0] == "peer" and parts[1] == "bios":
+                self._handle_peer_bios_download("/".join(parts[2:]))
+                return
+
             if not self.auth.check(self.headers.get("Authorization")):
                 self._send_unauthorized()
                 return
