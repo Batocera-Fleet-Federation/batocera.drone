@@ -32,6 +32,7 @@ from app.drone_api import (
     _collect_rom_metadata,
     _poll_rom_metadata_cache,
     _rom_metadata_cache_path,
+    _sync_rom_metadata_to_overmind,
     _sample_speed,
     _real_data_roots,
     _peer_ssl_diagnostic,
@@ -582,6 +583,55 @@ class SettingsTests(unittest.TestCase):
             self.assertTrue(changed)
             self.assertTrue(stats["rebuilt"])
             self.assertEqual(len(snapshot["roms"]), 1)
+
+    def test_rom_metadata_sync_skips_unchanged_cache_without_rehashing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            rom = root / "roms" / "snes" / "Game.zip"
+            rom.parent.mkdir(parents=True)
+            rom.write_bytes(b"first")
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "USERDATA_ROOT": str(root),
+                    "ROMS_ROOT": str(root / "roms"),
+                    "BIOS_ROOT": str(root / "bios"),
+                    "OVERMIND_DEVICE_ID": "drone-a",
+                },
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            repo = RomRepository(settings.roms_root, settings.bios_root)
+            _poll_rom_metadata_cache(settings, repo)
+            cache_data = json.loads(_rom_metadata_cache_path(settings).read_text(encoding="utf-8"))
+            cache_data["dirty"] = False
+            _rom_metadata_cache_path(settings).write_text(json.dumps(cache_data), encoding="utf-8")
+
+            uploads = []
+
+            def fake_post(url, payload, token=None, settings=None):
+                uploads.append((url, payload, token))
+                return 200, {"rom_count": len(payload.get("roms") or [])}
+
+            with mock.patch.object(RomRepository, "build_md5", side_effect=AssertionError("unchanged ROM should not hash")), mock.patch(
+                "app.drone_api._overmind_post_json_with_status", side_effect=fake_post
+            ):
+                result = _sync_rom_metadata_to_overmind(
+                    settings,
+                    repo,
+                    {"overmind_token": "drone-token"},
+                    "https://overmind.local",
+                    "drone-token",
+                )
+
+            self.assertEqual(result["status"], "skipped")
+            self.assertEqual(result["reason"], "no_changes")
+            self.assertFalse(result["changed"])
+            self.assertEqual(result["rom_count"], 1)
+            self.assertEqual(len(uploads), 0)
+            cache_after = json.loads(_rom_metadata_cache_path(settings).read_text(encoding="utf-8"))
+            self.assertFalse(cache_after["dirty"])
+            self.assertFalse(cache_after["last_successful_upload_at"])
 
     def test_sample_speed_uses_overmind_probe_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

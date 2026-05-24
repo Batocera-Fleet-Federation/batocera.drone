@@ -66,7 +66,7 @@ PEER_CHECK_INTERVAL_SECONDS = int(os.environ.get("DRONE_PEER_CHECK_INTERVAL_SECO
 OVERMIND_SPEED_SAMPLE_SECONDS = int(os.environ.get("OVERMIND_SPEED_SAMPLE_SECONDS", "300"))
 OVERMIND_HEARTBEAT_SECONDS = int(os.environ.get("OVERMIND_POLL_SECONDS", "60"))
 ROM_METADATA_CACHE_VERSION = 1
-ROM_METADATA_POLL_SECONDS = int(os.environ.get("ROM_METADATA_POLL_SECONDS", "900"))
+ROM_METADATA_POLL_SECONDS = int(os.environ.get("ROM_METADATA_POLL_SECONDS", "30"))
 ROM_METADATA_PROGRESS_SECONDS = float(os.environ.get("ROM_METADATA_PROGRESS_SECONDS", "5"))
 ROM_METADATA_PROGRESS_FILES = int(os.environ.get("ROM_METADATA_PROGRESS_FILES", "25"))
 LAUNCHBOX_PLATFORM_ALIASES = {
@@ -7788,6 +7788,62 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
     thread.start()
 
 
+def _sync_rom_metadata_to_overmind(settings: Settings, repository: "RomRepository", config: dict, base_url: str, token: str) -> dict:
+    poll_started = time.monotonic()
+    snapshot, changed, stats = _poll_rom_metadata_cache(settings, repository)
+    rom_count = len(snapshot.get("roms") or [])
+    if not changed:
+        print(
+            f"ROM metadata sync skipped: no changes detected systems={stats.get('systems_scanned')} roms={stats.get('roms_discovered')} duration_ms={int((time.monotonic() - poll_started) * 1000)}",
+            file=sys.stdout,
+            flush=True,
+        )
+        return {
+            "status": "skipped",
+            "reason": "no_changes",
+            "rom_count": rom_count,
+            "changed": changed,
+            "stats": stats,
+        }
+    device_id = quote(settings.overmind_device_id, safe="")
+    upload_url = f"{base_url}/api/devices/{device_id}/rom-metadata"
+    payload = {"device_id": settings.overmind_device_id, **snapshot}
+    print(
+        f"ROM metadata sync started: endpoint={upload_url} roms={rom_count} cache_changed={changed}",
+        file=sys.stdout,
+        flush=True,
+    )
+    try:
+        status_code, response = _overmind_post_json_with_status(upload_url, payload, token=token, settings=settings)
+    except HTTPError as error:
+        if error.code == 401:
+            replacement_token = _reclaim_overmind_token_after_unauthorized(settings, repository, config, base_url, error)
+            if replacement_token:
+                token = replacement_token
+                status_code, response = _overmind_post_json_with_status(upload_url, payload, token=token, settings=settings)
+            else:
+                raise
+        else:
+            raise
+    cache, _ = _load_rom_metadata_cache(settings)
+    cache["last_successful_upload_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    cache["dirty"] = False
+    _write_json_file(_rom_metadata_cache_path(settings), cache)
+    print(
+        f"ROM metadata sync succeeded: status={status_code} sent_roms={rom_count} accepted_roms={response.get('rom_count')} duration_ms={int((time.monotonic() - poll_started) * 1000)}",
+        file=sys.stdout,
+        flush=True,
+    )
+    return {
+        "status": "uploaded",
+        "status_code": status_code,
+        "response": response,
+        "rom_count": rom_count,
+        "changed": changed,
+        "stats": stats,
+    }
+
+
 def _start_rom_metadata_poller(settings: Settings, repository: "RomRepository") -> None:
     poll_seconds = max(30, int(settings.rom_metadata_poll_seconds or ROM_METADATA_POLL_SECONDS))
 
@@ -7807,55 +7863,17 @@ def _start_rom_metadata_poller(settings: Settings, repository: "RomRepository") 
                         time.sleep(poll_seconds)
                         continue
 
-                snapshot, changed, stats = _poll_rom_metadata_cache(settings, repository)
-                if not changed:
-                    print(
-                        f"ROM metadata upload skipped: no changes detected systems={stats.get('systems_scanned')} roms={stats.get('roms_discovered')} duration_ms={int((time.monotonic() - poll_started) * 1000)}",
-                        file=sys.stdout,
-                        flush=True,
-                    )
-                    time.sleep(poll_seconds)
-                    continue
-
-                device_id = quote(settings.overmind_device_id, safe="")
-                upload_url = f"{base_url}/api/devices/{device_id}/rom-metadata"
-                payload = {"device_id": settings.overmind_device_id, **snapshot}
-                print(
-                    f"ROM metadata poll phase=upload endpoint={upload_url} roms={len(snapshot.get('roms') or [])}",
-                    file=sys.stdout,
-                    flush=True,
-                )
-                try:
-                    status_code, response = _overmind_post_json_with_status(upload_url, payload, token=token, settings=settings)
-                except HTTPError as error:
-                    if error.code == 401:
-                        replacement_token = _reclaim_overmind_token_after_unauthorized(settings, repository, config, base_url, error)
-                        if replacement_token:
-                            token = replacement_token
-                            status_code, response = _overmind_post_json_with_status(upload_url, payload, token=token, settings=settings)
-                        else:
-                            raise
-                    else:
-                        raise
-                cache, _ = _load_rom_metadata_cache(settings)
-                cache["last_successful_upload_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-                cache["dirty"] = False
-                _write_json_file(_rom_metadata_cache_path(settings), cache)
-                print(
-                    f"ROM metadata upload succeeded: status={status_code} accepted_roms={response.get('rom_count')} duration_ms={int((time.monotonic() - poll_started) * 1000)}",
-                    file=sys.stdout,
-                    flush=True,
-                )
+                _sync_rom_metadata_to_overmind(settings, repository, config, base_url, token)
             except (HTTPError, URLError) as error:
                 status_part = f" status={error.code}" if isinstance(error, HTTPError) else ""
                 print(
-                    f"ROM metadata upload failed:{status_part} error={_format_overmind_error(error)} duration_ms={int((time.monotonic() - poll_started) * 1000)}",
+                    f"ROM metadata sync failed:{status_part} error={_format_overmind_error(error)} duration_ms={int((time.monotonic() - poll_started) * 1000)}",
                     file=sys.stderr,
                     flush=True,
                 )
             except Exception as error:
                 print(
-                    f"ROM metadata poll failed: error={_format_overmind_error(error)} duration_ms={int((time.monotonic() - poll_started) * 1000)}",
+                    f"ROM metadata sync failed: error={_format_overmind_error(error)} duration_ms={int((time.monotonic() - poll_started) * 1000)}",
                     file=sys.stderr,
                     flush=True,
                 )
