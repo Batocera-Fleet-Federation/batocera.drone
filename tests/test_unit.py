@@ -546,6 +546,48 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(saved.get("integration_state"), "pending_approval")
             self.assertEqual(saved.get("overmind_auth_token"), "onboarding-token")
 
+    def test_rejected_overmind_authorization_token_clears_connected_swarm_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root), "DRONE_DEVICE_ID": "bff-drone-b"}, clear=True):
+                settings = Settings.from_env()
+            config = {
+                "overmind_url": "https://bff-overmind:8000",
+                "overmind_auth_token": "shared-token",
+                "overmind_token": "old-drone-token",
+                "integration_enabled": True,
+                "integration_state": "polling",
+                "swarm_connection_status": "connected",
+            }
+            swarm_path = root / "system" / "drone-app" / "overmind_swarm.json"
+            swarm_path.parent.mkdir(parents=True)
+            swarm_path.write_text(json.dumps([{"device_id": "peer-a"}]), encoding="utf-8")
+
+            error = HTTPError(
+                "https://bff-overmind:8000/api/devices/register",
+                401,
+                "Unauthorized",
+                hdrs=None,
+                fp=None,
+            )
+            error.url = "https://bff-overmind:8000/api/devices/register"
+            with mock.patch("app.drone_api._overmind_post_json", side_effect=error):
+                token = _register_or_claim_overmind_token(
+                    settings,
+                    RomRepository(root / "roms", root / "bios"),
+                    config,
+                    "https://bff-overmind:8000",
+                )
+
+            self.assertIsNone(token)
+            saved = _load_overmind_config_for_settings(settings)
+            self.assertFalse(saved.get("overmind_token"))
+            self.assertFalse(saved.get("integration_enabled"))
+            self.assertEqual(saved.get("integration_state"), "pending_failed")
+            self.assertEqual(saved.get("swarm_connection_status"), "disconnected")
+            self.assertIn("HTTPError status=401", saved.get("last_error") or "")
+            self.assertEqual(json.loads(swarm_path.read_text(encoding="utf-8")), [])
+
     def test_gpu_info_tolerates_unavailable_detection(self) -> None:
         with mock.patch("app.drone_api.subprocess.run", side_effect=FileNotFoundError()):
             info = _collect_gpu_info()

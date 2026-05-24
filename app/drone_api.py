@@ -3181,11 +3181,18 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         auth_token = str(config.get("overmind_auth_token") or "")
         token = str(config.get("overmind_token") or "")
         email = str(config.get("overmind_email") or "")
+        state = str(config.get("integration_state") or "not_started")
+        connected = bool(token) and bool(config.get("integration_enabled")) and state not in {"pending_failed", "not_started"}
+        swarm_status = str(config.get("swarm_connection_status") or "")
+        if state == "pending_failed" or not config.get("integration_enabled"):
+            swarm_status = "disconnected"
+        elif not swarm_status:
+            swarm_status = "connected" if connected else ("pending approval" if state == "pending_approval" else "disconnected")
         status = {
-            "configured": bool(config.get("overmind_url")) and bool(token or auth_token),
+            "configured": connected,
             "integration_enabled": bool(config.get("integration_enabled")),
-            "integration_state": str(config.get("integration_state") or "not_started"),
-            "swarm_connection_status": str(config.get("swarm_connection_status") or ("connected" if token and config.get("integration_enabled") else ("pending approval" if str(config.get("integration_state") or "") == "pending_approval" else "disconnected"))),
+            "integration_state": state,
+            "swarm_connection_status": swarm_status,
             "requested_at": config.get("requested_at"),
             "last_started_at": config.get("last_started_at"),
             "last_error": config.get("last_error"),
@@ -4821,6 +4828,10 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             if not auth_token_value:
                 raise ValueError("overmind_auth_token cannot be empty when provided")
             new_config["overmind_auth_token"] = auth_token_value
+            new_config.pop("overmind_token", None)
+            new_config["swarm_connection_status"] = "disconnected"
+            _write_json_file(self._overmind_swarm_path(), [])
+            _write_json_file(self._overmind_peer_results_path(), [])
         if raw_token is not None:
             token_value = str(raw_token)
             if not token_value:
@@ -5908,6 +5919,18 @@ def _strip_fake_overmind_values(config: dict) -> None:
         config["integration_state"] = "not_started"
 
 
+def _mark_overmind_auth_failed(settings: Settings, config: dict, error: BaseException) -> None:
+    config.pop("overmind_token", None)
+    config["integration_enabled"] = False
+    config["integration_state"] = "pending_failed"
+    config["swarm_connection_status"] = "disconnected"
+    config["last_error"] = _format_overmind_error(error)
+    config["notes"] = "Overmind authorization token was rejected. Generate a new authorization token and try again."
+    _save_overmind_runtime_config(settings, config)
+    _write_json_file(_overmind_swarm_path_for_settings(settings), [])
+    _write_json_file(_overmind_peer_results_path_for_settings(settings), [])
+
+
 def _drone_scheme(settings: Settings) -> str:
     return "http" if settings.http_only else "https"
 
@@ -6258,9 +6281,7 @@ def _register_or_claim_overmind_token(settings: Settings, repository: "RomReposi
     try:
         response = _overmind_post_json(f"{base_url}/api/devices/register", payload, token=auth_token or None, settings=settings)
     except Exception as error:
-        config["integration_state"] = "pending_failed"
-        config["last_error"] = _format_overmind_error(error)
-        _save_overmind_runtime_config(settings, config)
+        _mark_overmind_auth_failed(settings, config, error)
         print(f"Overmind onboarding request failed for {settings.overmind_device_id}: {config['last_error']}", file=sys.stderr, flush=True)
         return None
     if response.get("drone_token"):
