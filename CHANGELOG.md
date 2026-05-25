@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.17] - 2026-05-25
+
+- Fixing script to pull all proper newly created content folders down for js / css
+
 ## [v0.0.16] - 2026-05-25
 
 - Refactor time.  Time to break out the css/html/javascript.
