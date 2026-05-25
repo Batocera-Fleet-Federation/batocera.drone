@@ -1,5 +1,16 @@
 # Changelog
 
+## [v0.0.16] - 2026-05-25
+
+- Refactor time.  Time to break out the css/html/javascript.
+- Consolidating rom-metadata, bios, and artwork into a new streamoined assets api.  Adding artwork syncing for roms.
+- Adding ability to claim ownership of drone with overmind email/password.  Adding BIOS sync capaibilities across drones.
+- Enhancing duplicate auth token usage validation.  Adding bulk sync across drones.
+- Enhancing drone selection for downloads.  Fixing downloads/sync state so the UI shows closer to live data.
+- Fixing rom sync from drone to overmind
+- Added a Claim Ownership section to the Overmind Integration page. Added local admin route POST /admin/integrations/overmind/claim-ownership. Claim requires an https:// Overmind URL, email, and password. Drone sends credentials to Overmind over HTTPS, stores only the returned Drone bearer token, and does not log or persist the password.
+- Heartbeat no longer scans ROMs, sends ROM metadata, or hashes MD5s. Heartbeat now logs send start, endpoint, success/failure, status, and duration. Added independent ROM metadata poller with disk cache at /userdata/system/drone-app/rom_metadata_cache.json. Poller uses ROM_METADATA_POLL_SECONDS, detects new/changed/deleted ROMs, hashes only new/changed files, writes cache atomically, skips uploads when clean, and logs scan/hash/upload progress. Added tests for cache rebuild, deleted ROM handling, and MD5 reuse.
+
 ## [v0.0.15] - 2026-05-23
 
 - - Add mascot image from `content/batocera-swarm-mascot.jpg` in a common, polished UI location. - Use a placement consistent with Overmind where practical. - Ensure mascot is responsive and accessible with appropriate alt text. - Preserve existing Drone workflows and UI usability. - Manually verify mascot placement at desktop and mobile widths.
