@@ -106,6 +106,10 @@ class MockServerIntegrationTests(unittest.TestCase):
         self.assertIn(b"Claim Ownership", js)
         self.assertNotIn(b"Integration Password", js)
 
+    def test_content_mascot_is_served(self) -> None:
+        image = self._get_bytes("/content/batocera-swarm-mascot.jpg")
+        self.assertTrue(image.startswith(b"\xff\xd8\xff"))
+
     def test_admin_logs_endpoint(self) -> None:
         payload = self._get_json("/v1/api/admin/logs/es_launch_stdout?lines=20")
         self.assertEqual(payload["source"], "es_launch_stdout")

@@ -8,6 +8,8 @@ DRONE_APP_UI_ROUTES_URL="${DRONE_APP_UI_ROUTES_URL:-}"
 DRONE_APP_ROUTE_CONFIG_URL="${DRONE_APP_ROUTE_CONFIG_URL:-}"
 DRONE_APP_CSS_URL="${DRONE_APP_CSS_URL:-}"
 DRONE_APP_JS_URL="${DRONE_APP_JS_URL:-}"
+DRONE_APP_CONTENT_URL="${DRONE_APP_CONTENT_URL:-}"
+DRONE_APP_ARCHIVE_URL="${DRONE_APP_ARCHIVE_URL:-}"
 DRONE_APP_BASE_URL="${DRONE_APP_BASE_URL:-${1:-}}"
 
 if [[ -z "$DRONE_APP_URL" && -z "$DRONE_APP_BASE_URL" ]]; then
@@ -34,7 +36,6 @@ if ! command -v python3 >/dev/null 2>&1; then
 fi
 
 WORK_DIR="${DRONE_APP_WORK_DIR:-$HOME/.drone-app}"
-SCRIPT_PATH="${0:-}"
 mkdir -p "$WORK_DIR"
 APP_DIR="$WORK_DIR/app"
 APP_PATH="$APP_DIR/drone_api.py"
@@ -45,6 +46,7 @@ TEMPLATE_PATH="$TEMPLATES_DIR/index.html"
 STATIC_DIR="$APP_DIR/static"
 CSS_PATH="$STATIC_DIR/css/drone.css"
 JS_PATH="$STATIC_DIR/js/drone.js"
+CONTENT_DIR="$WORK_DIR/content"
 API_ROUTES_PATH="$APP_DIR/api_routes.py"
 UI_ROUTES_PATH="$APP_DIR/ui_routes.py"
 ROUTE_CONFIG_PATH="$APP_DIR/route_config.py"
@@ -58,6 +60,19 @@ if [[ -n "$DRONE_APP_BASE_URL" ]]; then
   DRONE_APP_TEMPLATE_URL="${DRONE_APP_TEMPLATE_URL:-$DRONE_APP_BASE_URL/app/templates/index.html}"
   DRONE_APP_CSS_URL="${DRONE_APP_CSS_URL:-$DRONE_APP_BASE_URL/app/static/css/drone.css}"
   DRONE_APP_JS_URL="${DRONE_APP_JS_URL:-$DRONE_APP_BASE_URL/app/static/js/drone.js}"
+  DRONE_APP_CONTENT_URL="${DRONE_APP_CONTENT_URL:-$DRONE_APP_BASE_URL/content}"
+
+  if [[ -z "$DRONE_APP_ARCHIVE_URL" && "$DRONE_APP_BASE_URL" == https://raw.githubusercontent.com/* ]]; then
+    raw_path="${DRONE_APP_BASE_URL#https://raw.githubusercontent.com/}"
+    owner="${raw_path%%/*}"
+    raw_path="${raw_path#*/}"
+    repo="${raw_path%%/*}"
+    raw_path="${raw_path#*/}"
+    ref="${raw_path%%/*}"
+    if [[ -n "$owner" && -n "$repo" && -n "$ref" ]]; then
+      DRONE_APP_ARCHIVE_URL="https://codeload.github.com/$owner/$repo/tar.gz/$ref"
+    fi
+  fi
 fi
 
 if [[ -z "$DRONE_APP_URL" || -z "$DRONE_APP_API_ROUTES_URL" || -z "$DRONE_APP_UI_ROUTES_URL" || -z "$DRONE_APP_ROUTE_CONFIG_URL" || -z "$DRONE_APP_CSS_URL" || -z "$DRONE_APP_JS_URL" ]]; then
@@ -76,23 +91,99 @@ download_file() {
   fi
 }
 
-mkdir -p "$APP_DIR"
-download_file "$DRONE_APP_URL" "$APP_PATH"
-download_file "$DRONE_APP_API_ROUTES_URL" "$API_ROUTES_PATH"
-download_file "$DRONE_APP_UI_ROUTES_URL" "$UI_ROUTES_PATH"
-download_file "$DRONE_APP_ROUTE_CONFIG_URL" "$ROUTE_CONFIG_PATH"
-mkdir -p "$TEMPLATES_DIR"
-mkdir -p "$(dirname "$CSS_PATH")" "$(dirname "$JS_PATH")"
-cat > "$INIT_PATH" <<'EOF'
+download_archive_dirs() {
+  local archive_path="$WORK_DIR/source.tar.gz"
+  download_file "$DRONE_APP_ARCHIVE_URL" "$archive_path"
+  python3 - "$archive_path" "$WORK_DIR" <<'PY'
+import shutil
+import sys
+import tarfile
+from pathlib import Path
+
+archive_path = Path(sys.argv[1])
+work_dir = Path(sys.argv[2]).resolve()
+wanted_roots = ("app/", "content/")
+
+with tarfile.open(archive_path, "r:gz") as archive:
+    for member in archive.getmembers():
+        parts = member.name.split("/", 1)
+        if len(parts) != 2:
+            continue
+        relative = parts[1]
+        if not relative.startswith(wanted_roots):
+            continue
+        relative_path = Path(relative)
+        if "__pycache__" in relative_path.parts:
+            continue
+        target = (work_dir / relative_path).resolve()
+        if work_dir not in target.parents and target != work_dir:
+            raise RuntimeError(f"archive member escapes work dir: {member.name}")
+        if member.isdir():
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+        source = archive.extractfile(member)
+        if source is None:
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with source, target.open("wb") as output:
+            shutil.copyfileobj(source, output)
+PY
+  rm -f "$archive_path"
+}
+
+copy_local_dirs() {
+  local base_path="${DRONE_APP_BASE_URL#file://}"
+  python3 - "$base_path" "$WORK_DIR" <<'PY'
+import shutil
+import sys
+from pathlib import Path
+from urllib.parse import unquote
+
+source_root = Path(unquote(sys.argv[1])).resolve()
+work_dir = Path(sys.argv[2]).resolve()
+
+for name in ("app", "content"):
+    source = source_root / name
+    target = work_dir / name
+    if not source.exists() or not source.is_dir():
+        raise RuntimeError(f"missing required source directory: {source}")
+    if target.exists():
+        shutil.rmtree(target)
+    ignore = shutil.ignore_patterns("__pycache__", "*.pyc")
+    shutil.copytree(source, target, ignore=ignore)
+PY
+}
+
+if [[ -n "$DRONE_APP_BASE_URL" ]]; then
+  if [[ -n "$DRONE_APP_ARCHIVE_URL" ]] && download_archive_dirs; then
+    :
+  elif [[ "$DRONE_APP_BASE_URL" == file://* ]]; then
+    copy_local_dirs
+  else
+    echo "DRONE_APP_BASE_URL must be a GitHub raw URL, a file:// URL, or be paired with DRONE_APP_ARCHIVE_URL so app/ and content/ can be staged completely."
+    exit 1
+  fi
+else
+  mkdir -p "$APP_DIR"
+  download_file "$DRONE_APP_URL" "$APP_PATH"
+  download_file "$DRONE_APP_API_ROUTES_URL" "$API_ROUTES_PATH"
+  download_file "$DRONE_APP_UI_ROUTES_URL" "$UI_ROUTES_PATH"
+  download_file "$DRONE_APP_ROUTE_CONFIG_URL" "$ROUTE_CONFIG_PATH"
+  mkdir -p "$TEMPLATES_DIR"
+  mkdir -p "$(dirname "$CSS_PATH")" "$(dirname "$JS_PATH")"
+  cat > "$INIT_PATH" <<'EOF'
 # package marker
 EOF
-cat > "$MAIN_PATH" <<'EOF'
+  cat > "$MAIN_PATH" <<'EOF'
 from app.drone_api import main
 
 if __name__ == "__main__":
     main()
 EOF
-if ! download_file "$DRONE_APP_TEMPLATE_URL" "$TEMPLATE_PATH"; then
+fi
+
+if [[ -z "$DRONE_APP_BASE_URL" && ! -f "$TEMPLATE_PATH" ]] && ! download_file "$DRONE_APP_TEMPLATE_URL" "$TEMPLATE_PATH"; then
+  mkdir -p "$(dirname "$TEMPLATE_PATH")"
   cat > "$TEMPLATE_PATH" <<'EOF'
 <!doctype html>
 <html>
@@ -101,16 +192,31 @@ if ! download_file "$DRONE_APP_TEMPLATE_URL" "$TEMPLATE_PATH"; then
 </html>
 EOF
 fi
-download_file "$DRONE_APP_CSS_URL" "$CSS_PATH"
-download_file "$DRONE_APP_JS_URL" "$JS_PATH"
+
+if [[ -z "$DRONE_APP_BASE_URL" && ! -f "$CSS_PATH" ]]; then
+  mkdir -p "$(dirname "$CSS_PATH")"
+  download_file "$DRONE_APP_CSS_URL" "$CSS_PATH"
+fi
+
+if [[ -z "$DRONE_APP_BASE_URL" && ! -f "$JS_PATH" ]]; then
+  mkdir -p "$(dirname "$JS_PATH")"
+  download_file "$DRONE_APP_JS_URL" "$JS_PATH"
+fi
+
+if [[ -z "$DRONE_APP_BASE_URL" && -n "$DRONE_APP_CONTENT_URL" && ! -f "$CONTENT_DIR/batocera-swarm-mascot.jpg" ]]; then
+  mkdir -p "$CONTENT_DIR"
+  download_file "$DRONE_APP_CONTENT_URL/batocera-swarm-mascot.jpg" "$CONTENT_DIR/batocera-swarm-mascot.jpg"
+fi
+
+if [[ ! -f "$APP_PATH" || ! -d "$STATIC_DIR" || ! -d "$CONTENT_DIR" ]]; then
+  echo "Downloaded Drone App is incomplete. Expected app/, app/static/, and content/ under $WORK_DIR."
+  exit 1
+fi
 
 echo "Downloaded Drone App to $WORK_DIR"
 
 cleanup() {
   rm -rf "$WORK_DIR" 2>/dev/null || true
-  if [[ -n "$SCRIPT_PATH" && -f "$SCRIPT_PATH" ]]; then
-    rm -f "$SCRIPT_PATH" 2>/dev/null || true
-  fi
 }
 
 trap cleanup EXIT INT TERM
