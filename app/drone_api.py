@@ -52,7 +52,15 @@ try:
         commit_emulator_config_fingerprints as _commit_emulator_config_fingerprints,
         commit_log_cursors as _commit_log_cursors,
     )
+    from .peer_selection import select_best_peer as _select_best_peer
     from .route_config import API_PREFIX, api_url
+    from .transfer_files import (
+        bios_md5_exists as _bios_md5_exists,
+        collision_safe_target as _collision_safe_target,
+        rom_exists as _rom_exists,
+        rom_md5_exists as _rom_md5_exists,
+        safe_rom_relative_path as _safe_rom_relative_path,
+    )
     from .ui_routes import UiRoutesMixin
 except ImportError:
     from api_routes import ApiRoutesMixin  # type: ignore
@@ -78,7 +86,15 @@ except ImportError:
         commit_emulator_config_fingerprints as _commit_emulator_config_fingerprints,
         commit_log_cursors as _commit_log_cursors,
     )
+    from peer_selection import select_best_peer as _select_best_peer  # type: ignore
     from route_config import API_PREFIX, api_url  # type: ignore
+    from transfer_files import (  # type: ignore
+        bios_md5_exists as _bios_md5_exists,
+        collision_safe_target as _collision_safe_target,
+        rom_exists as _rom_exists,
+        rom_md5_exists as _rom_md5_exists,
+        safe_rom_relative_path as _safe_rom_relative_path,
+    )
     from ui_routes import UiRoutesMixin  # type: ignore
 
 
@@ -7204,53 +7220,6 @@ def _collect_game_logs(settings: Settings, repository: Optional["RomRepository"]
     )
 
 
-def _safe_rom_relative_path(value: str) -> str:
-    rel = str(value or "").replace("\\", "/").lstrip("/")
-    if not rel or ".." in Path(rel).parts:
-        raise ValueError("invalid rom path")
-    return rel
-
-
-def _rom_exists(repository: "RomRepository", system: str, relative_path: str) -> bool:
-    try:
-        system_dir = repository.get_system_dir(system).resolve()
-        target = (system_dir / _safe_rom_relative_path(relative_path)).resolve()
-        return target.exists() and target.is_file() and (target == system_dir or system_dir in target.parents)
-    except Exception:
-        return False
-
-
-def _rom_md5_exists(repository: "RomRepository", expected_md5: Optional[str]) -> bool:
-    expected = str(expected_md5 or "").strip().lower()
-    if not expected:
-        return False
-    try:
-        for system in repository.list_systems():
-            system_name = str(system.get("name") or "").strip()
-            if not system_name:
-                continue
-            _, roms = repository.list_assets(system_name, "roms")
-            for rom in roms:
-                if str(rom.get("md5") or rom.get("rom_md5") or "").strip().lower() == expected:
-                    return True
-    except Exception:
-            return False
-    return False
-
-
-def _bios_md5_exists(repository: "RomRepository", expected_md5: Optional[str]) -> bool:
-    expected = str(expected_md5 or "").strip().lower()
-    if not expected:
-        return False
-    try:
-        for bios in repository.list_bios_entries():
-            if str(bios.get("md5") or bios.get("bios_md5") or "").strip().lower() == expected:
-                return True
-    except Exception:
-        return False
-    return False
-
-
 class DownloadCancelled(RuntimeError):
     pass
 
@@ -7691,27 +7660,6 @@ def _post_rom_sync_activity(settings: Settings, config: dict, activity: dict) ->
         )
 
 
-def _collision_safe_target(system_dir: Path, relative_path: str) -> Path:
-    system_dir = system_dir.resolve()
-    rel = _safe_rom_relative_path(relative_path)
-    requested = (system_dir / rel).resolve()
-    if requested == system_dir or system_dir not in requested.parents:
-        raise ValueError("invalid target path")
-    if not requested.exists():
-        return requested
-    parent = requested.parent
-    stem = requested.stem
-    suffix = requested.suffix
-    index = 2
-    while True:
-        candidate = (parent / f"{stem} ({index}){suffix}").resolve()
-        if candidate == system_dir or system_dir not in candidate.parents:
-            raise ValueError("invalid target path")
-        if not candidate.exists():
-            return candidate
-        index += 1
-
-
 def _best_peer_for_rom(
     settings: Settings,
     repository: "RomRepository",
@@ -7722,33 +7670,13 @@ def _best_peer_for_rom(
 ) -> Optional[dict]:
     swarm = _read_json_file(_overmind_swarm_path_for_settings(settings), [])
     peer_checks = _read_json_file(_overmind_peer_results_path_for_settings(settings), [])
-    checks = {str(row.get("target_drone_id") or ""): row for row in peer_checks if isinstance(row, dict)}
-    allowed_sources = {str(item) for item in (source_device_ids or set()) if str(item)}
-    candidates = []
-    for peer in swarm if isinstance(swarm, list) else []:
-        peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
-        if not peer_id or peer_id == settings.overmind_device_id or not peer.get("online", True):
-            continue
-        if allowed_sources and peer_id not in allowed_sources:
-            continue
-        systems = peer.get("rom_systems") or peer.get("systems") or []
-        system_names = {str(item.get("name") if isinstance(item, dict) else item).lower() for item in systems}
-        if system_names and system.lower() not in system_names:
-            continue
-        check = checks.get(peer_id) or {}
-        if check.get("status") == "fail":
-            continue
-        score = 0
-        sample = peer.get("last_speed_sample") or {}
-        try:
-            score += float(sample.get("upload_mbps") or 0)
-        except Exception:
-            pass
-        if check.get("status") == "pass":
-            score += 1000
-        candidates.append((score, peer_id, peer))
-    candidates.sort(key=lambda item: (-item[0], item[1]))
-    return candidates[0][2] if candidates else None
+    return _select_best_peer(
+        swarm,
+        peer_checks,
+        settings.overmind_device_id,
+        source_device_ids=source_device_ids,
+        required_system=system,
+    )
 
 
 def _best_peer_for_bios(
@@ -7759,29 +7687,7 @@ def _best_peer_for_bios(
 ) -> Optional[dict]:
     swarm = _read_json_file(_overmind_swarm_path_for_settings(settings), [])
     peer_checks = _read_json_file(_overmind_peer_results_path_for_settings(settings), [])
-    checks = {str(row.get("target_drone_id") or ""): row for row in peer_checks if isinstance(row, dict)}
-    allowed_sources = {str(item) for item in (source_device_ids or set()) if str(item)}
-    candidates = []
-    for peer in swarm if isinstance(swarm, list) else []:
-        peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
-        if not peer_id or peer_id == settings.overmind_device_id or not peer.get("online", True):
-            continue
-        if allowed_sources and peer_id not in allowed_sources:
-            continue
-        check = checks.get(peer_id) or {}
-        if check.get("status") == "fail":
-            continue
-        score = 0
-        sample = peer.get("last_speed_sample") or {}
-        try:
-            score += float(sample.get("upload_mbps") or 0)
-        except Exception:
-            pass
-        if check.get("status") == "pass":
-            score += 1000
-        candidates.append((score, peer_id, peer))
-    candidates.sort(key=lambda item: (-item[0], item[1]))
-    return candidates[0][2] if candidates else None
+    return _select_best_peer(swarm, peer_checks, settings.overmind_device_id, source_device_ids=source_device_ids)
 
 
 def _download_rom_from_peer(
