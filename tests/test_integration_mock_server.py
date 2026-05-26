@@ -110,6 +110,13 @@ class MockServerIntegrationTests(unittest.TestCase):
         image = self._get_bytes("/content/batocera-swarm-mascot.jpg")
         self.assertTrue(image.startswith(b"\xff\xd8\xff"))
 
+    def test_header_places_github_icon_beside_drone_brand(self) -> None:
+        html = self._get_bytes("/").decode("utf-8")
+        self.assertIn("Batocera Drone", html)
+        self.assertIn('class="resource-links"', html)
+        self.assertIn('class="resource-icon-link" title="GitHub" aria-label="GitHub"', html)
+        self.assertNotIn('<i class="bi bi-github me-2"></i>GitHub', html)
+
     def test_admin_logs_endpoint(self) -> None:
         payload = self._get_json("/v1/api/admin/logs/es_launch_stdout?lines=20")
         self.assertEqual(payload["source"], "es_launch_stdout")

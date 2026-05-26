@@ -57,6 +57,32 @@
       object-fit: cover;
       display: block;
     }
+    .resource-links {
+      display: inline-flex;
+      align-items: center;
+      margin-left: 0.25rem;
+      padding-left: 0.65rem;
+      border-left: 1px solid rgba(255, 255, 255, 0.18);
+    }
+    .resource-icon-link {
+      width: 2.35rem;
+      height: 2.35rem;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      color: rgba(255, 255, 255, 0.72);
+      background: rgba(21, 31, 50, 0.42);
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 0.45rem;
+      text-decoration: none;
+      transition: color .2s ease, background .2s ease, border-color .2s ease;
+    }
+    .resource-icon-link:hover,
+    .resource-icon-link:focus {
+      color: #fff;
+      background: rgba(255, 255, 255, 0.14);
+      border-color: rgba(255, 255, 255, 0.28);
+    }
     .menu-label {
       font-size: 0.72rem;
       letter-spacing: 0.07em;
