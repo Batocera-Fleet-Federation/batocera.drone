@@ -35,6 +35,7 @@ from app.drone_api import (
     _poll_rom_metadata_once,
     _rom_metadata_cache_path,
     _sync_rom_metadata_to_overmind,
+    _write_json_file,
     _sample_speed,
     _real_data_roots,
     _peer_ssl_diagnostic,
@@ -1014,6 +1015,131 @@ class SettingsTests(unittest.TestCase):
             self.assertTrue(changed)
             self.assertTrue(stats["rebuilt"])
             self.assertEqual(len(snapshot["roms"]), 1)
+
+    def test_rom_metadata_scan_checkpoint_survives_interruption(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            system = root / "roms" / "snes"
+            system.mkdir(parents=True)
+            (system / "First.zip").write_bytes(b"first")
+            (system / "Second.zip").write_bytes(b"second")
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            repo = RomRepository(settings.roms_root, settings.bios_root)
+            interrupted = False
+
+            def interrupt_after_checkpoint(path, payload):
+                nonlocal interrupted
+                _write_json_file(path, payload)
+                if payload.get("scan_in_progress") and not interrupted:
+                    interrupted = True
+                    raise RuntimeError("simulated reset")
+
+            with mock.patch("app.drone_api.ROM_METADATA_PROGRESS_FILES", 1), mock.patch(
+                "app.drone_api._write_json_file", side_effect=interrupt_after_checkpoint
+            ):
+                with self.assertRaisesRegex(RuntimeError, "simulated reset"):
+                    _poll_rom_metadata_cache(settings, repo)
+
+            partial = json.loads(_rom_metadata_cache_path(settings).read_text(encoding="utf-8"))
+            self.assertTrue(partial["scan_in_progress"])
+            self.assertEqual(len(partial["entries"]), 1)
+
+            snapshot, changed, _ = _poll_rom_metadata_cache(settings, repo)
+            self.assertTrue(changed)
+            self.assertEqual(len(snapshot["roms"]), 2)
+
+    def test_bios_hash_checkpoint_resumes_without_rehashing_completed_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            bios = root / "bios"
+            bios.mkdir(parents=True)
+            (bios / "A.bin").write_bytes(b"a")
+            (bios / "B.bin").write_bytes(b"b")
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(bios)},
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            repo = RomRepository(settings.roms_root, settings.bios_root)
+            original_md5 = RomRepository.build_md5
+
+            def interrupted_hash(path):
+                if path.name == "B.bin":
+                    raise RuntimeError("simulated reset")
+                return original_md5(path)
+
+            with mock.patch("app.drone_api.ROM_METADATA_PROGRESS_FILES", 1), mock.patch.object(
+                RomRepository, "build_md5", side_effect=interrupted_hash
+            ):
+                with self.assertRaisesRegex(RuntimeError, "simulated reset"):
+                    _poll_rom_metadata_cache(settings, repo)
+
+            partial = json.loads(_rom_metadata_cache_path(settings).read_text(encoding="utf-8"))
+            self.assertTrue(partial["bios_entries"]["a.bin"]["bios_md5"])
+            self.assertNotIn("bios_md5", partial["bios_entries"]["b.bin"])
+
+            hashed_after_restart = []
+
+            def track_hash(path):
+                hashed_after_restart.append(path.name)
+                return original_md5(path)
+
+            with mock.patch.object(RomRepository, "build_md5", side_effect=track_hash):
+                snapshot, _, _ = _poll_rom_metadata_cache(settings, repo)
+
+            self.assertEqual(hashed_after_restart, ["B.bin"])
+            self.assertEqual(len(snapshot["bios"]), 2)
+
+    def test_rom_hash_checkpoint_resumes_inside_large_upload_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            system = root / "roms" / "snes"
+            system.mkdir(parents=True)
+            (system / "A.zip").write_bytes(b"a")
+            (system / "B.zip").write_bytes(b"b")
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            repo = RomRepository(settings.roms_root, settings.bios_root)
+            _poll_rom_metadata_cache(settings, repo)
+            original_md5 = RomRepository.build_md5
+
+            def interrupted_hash(path):
+                if path.name == "B.zip":
+                    raise RuntimeError("simulated reset")
+                return original_md5(path)
+
+            with mock.patch("app.drone_api.ROM_METADATA_PROGRESS_FILES", 1), mock.patch.object(
+                repo, "build_md5", side_effect=interrupted_hash
+            ):
+                with self.assertRaisesRegex(RuntimeError, "simulated reset"):
+                    list(_hash_rom_metadata_batches(settings, repo, batch_size=1000))
+
+            partial = json.loads(_rom_metadata_cache_path(settings).read_text(encoding="utf-8"))
+            self.assertTrue(partial["entries"]["snes:A.zip"]["rom_md5"])
+            self.assertNotIn("rom_md5", partial["entries"]["snes:B.zip"])
+
+            hashed_after_restart = []
+
+            def track_hash(path):
+                hashed_after_restart.append(path.name)
+                return original_md5(path)
+
+            with mock.patch.object(repo, "build_md5", side_effect=track_hash):
+                patches = list(_hash_rom_metadata_batches(settings, repo, batch_size=1000))
+
+            self.assertEqual(hashed_after_restart, ["B.zip"])
+            self.assertEqual(len(patches), 1)
+            self.assertEqual(patches[0]["roms"][0]["file_path"], "B.zip")
 
     def test_rom_metadata_sync_skips_unchanged_cache_without_rehashing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

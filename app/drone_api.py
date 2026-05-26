@@ -7063,6 +7063,8 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
     started = time.monotonic()
     print("Asset metadata poll started: phase=cache_load", file=sys.stdout, flush=True)
     cache, rebuilt = _load_rom_metadata_cache(settings)
+    was_dirty = bool(cache.get("dirty"))
+    resuming_scan = bool(cache.get("scan_in_progress"))
     existing_entries = cache.get("entries") if isinstance(cache.get("entries"), dict) else {}
     existing_bios_entries = cache.get("bios_entries") if isinstance(cache.get("bios_entries"), dict) else {}
     existing_artwork_entries = cache.get("artwork_entries") if isinstance(cache.get("artwork_entries"), dict) else {}
@@ -7079,6 +7081,35 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
     bios_discovered = 0
     artwork_discovered = 0
     now_iso = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    last_checkpoint = started
+
+    def checkpoint_scan(phase: str, *, force: bool = False) -> None:
+        nonlocal last_checkpoint
+        has_new_work = bool(new_or_changed) or bool(bios_new_or_changed)
+        if not (rebuilt or resuming_scan or has_new_work):
+            return
+        processed = discovered + bios_discovered
+        now = time.monotonic()
+        if (
+            not force
+            and processed % max(1, ROM_METADATA_PROGRESS_FILES) != 0
+            and now - last_checkpoint < ROM_METADATA_PROGRESS_SECONDS
+        ):
+            return
+        cache["entries"] = {**existing_entries, **next_entries}
+        cache["bios_entries"] = {**existing_bios_entries, **next_bios_entries}
+        cache["systems"] = systems
+        cache["gamelists"] = gamelists
+        cache["dirty"] = True
+        cache["scan_in_progress"] = True
+        cache["scan_checkpoint_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        _write_json_file(_rom_metadata_cache_path(settings), cache)
+        print(
+            f"Asset metadata checkpoint saved: phase={phase} roms={len(next_entries)} bios={len(next_bios_entries)}",
+            file=sys.stdout,
+            flush=True,
+        )
+        last_checkpoint = now
 
     print("Asset metadata poll phase=scan", file=sys.stdout, flush=True)
     try:
@@ -7128,12 +7159,14 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
                 next_entries[key] = base_entry
                 if entry_type != "folder":
                     new_or_changed.append((key, absolute, base_entry))
+            checkpoint_scan("rom_scan")
         gamelist_path = settings.roms_root / system_name / "gamelist.xml"
         if gamelist_path.exists() and gamelist_path.is_file():
             gamelist = _read_text_file(gamelist_path, max_bytes=524288)
             gamelist["system"] = system_name
             gamelists.append(gamelist)
 
+    checkpoint_scan("rom_scan_complete", force=bool(discovered))
     deleted = previous_keys - set(next_entries.keys())
     try:
         bios_root = repository.get_bios_root()
@@ -7164,11 +7197,14 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
             if previous and previous.get("file_size") == stat_size and previous.get("modified_time") == stat_mtime and previous.get("md5"):
                 next_bios_entries[key] = {**base_entry, "md5": previous.get("md5"), "bios_md5": previous.get("bios_md5") or previous.get("md5")}
             else:
+                next_bios_entries[key] = base_entry
                 bios_new_or_changed.append((key, bios_path, base_entry))
+            checkpoint_scan("bios_scan")
     except FileNotFoundError:
         pass
     except Exception as error:
         print(f"BIOS metadata scan warning: error={_format_overmind_error(error)}", file=sys.stderr, flush=True)
+    checkpoint_scan("bios_scan_complete", force=bool(bios_discovered))
     bios_deleted = previous_bios_keys - set(next_bios_entries.keys()) - {key for key, _, _ in bios_new_or_changed}
     try:
         for artwork in repository.list_artwork_metadata():
@@ -7198,6 +7234,7 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
             next_bios_entries[key] = {**entry, "md5": md5_value, "bios_md5": md5_value}
             now = time.monotonic()
             if bios_index == len(bios_new_or_changed) or bios_index % max(1, ROM_METADATA_PROGRESS_FILES) == 0 or now - last_log >= ROM_METADATA_PROGRESS_SECONDS:
+                checkpoint_scan("bios_md5", force=True)
                 print(f"BIOS metadata md5 progress: {bios_index}/{len(bios_new_or_changed)} files", file=sys.stdout, flush=True)
                 last_log = now
         print(
@@ -7206,7 +7243,7 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
             flush=True,
         )
 
-    changed = rebuilt or bool(new_or_changed) or bool(deleted) or bool(bios_new_or_changed) or bool(bios_deleted) or artwork_changed or bool(cache.get("dirty"))
+    changed = rebuilt or bool(new_or_changed) or bool(deleted) or bool(bios_new_or_changed) or bool(bios_deleted) or artwork_changed or was_dirty
     cache["entries"] = next_entries
     cache["bios_entries"] = next_bios_entries
     cache["artwork_entries"] = next_artwork_entries
@@ -7214,6 +7251,7 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
     cache["gamelists"] = gamelists
     cache["last_full_scan_at"] = now_iso
     cache["dirty"] = changed
+    cache["scan_in_progress"] = False
     print("Asset metadata poll phase=cache_write", file=sys.stdout, flush=True)
     _write_json_file(_rom_metadata_cache_path(settings), cache)
     print(
@@ -7252,6 +7290,7 @@ def _hash_rom_metadata_batches(settings: Settings, repository: "RomRepository", 
         return
     batch_size = max(1, int(batch_size))
     started = time.monotonic()
+    last_checkpoint = started
     print(f"ROM metadata phase=md5_hashing count={total} batch_size={batch_size}", file=sys.stdout, flush=True)
     patch = []
     for processed, (key, entry) in enumerate(pending, start=1):
@@ -7261,11 +7300,27 @@ def _hash_rom_metadata_batches(settings: Settings, repository: "RomRepository", 
             updated = {**entry, "md5": md5_value, "rom_md5": md5_value}
             entries[key] = updated
             patch.append({k: v for k, v in updated.items() if k != "absolute_path"})
+        now = time.monotonic()
+        checkpoint_due = (
+            bool(patch)
+            and (
+                processed == total
+                or processed % max(1, ROM_METADATA_PROGRESS_FILES) == 0
+                or now - last_checkpoint >= ROM_METADATA_PROGRESS_SECONDS
+            )
+        )
+        if checkpoint_due:
+            cache["entries"] = entries
+            cache["dirty"] = True
+            _write_json_file(_rom_metadata_cache_path(settings), cache)
+            print(f"ROM metadata cache checkpoint: {processed}/{total} files", file=sys.stdout, flush=True)
+            last_checkpoint = now
         if not patch or (len(patch) < batch_size and processed != total):
             continue
-        cache["entries"] = entries
-        cache["dirty"] = True
-        _write_json_file(_rom_metadata_cache_path(settings), cache)
+        if not checkpoint_due:
+            cache["entries"] = entries
+            cache["dirty"] = True
+            _write_json_file(_rom_metadata_cache_path(settings), cache)
         print(f"ROM metadata md5 progress: {processed}/{total} files", file=sys.stdout, flush=True)
         yield {
             "type": "asset_metadata",
