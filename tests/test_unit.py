@@ -2,6 +2,7 @@ import base64
 import io
 import json
 import socket
+import subprocess
 import tempfile
 import unittest
 from threading import Event
@@ -670,6 +671,45 @@ class SettingsTests(unittest.TestCase):
             self.assertIn("disabled", message)
             self.assertIsNone(result)
             popen.assert_not_called()
+
+    def test_kiosk_actions_update_es_settings_and_restart_emulationstation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            es_settings = root / "system" / "configs" / "emulationstation" / "es_settings.cfg"
+            es_settings.parent.mkdir(parents=True)
+            es_settings.write_text('<string name="ThemeSet" value="carbon" />\n', encoding="utf-8")
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "ES_SETTINGS_FILE": str(es_settings)},
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            repo = RomRepository(root / "roms", root / "bios")
+
+            with mock.patch("app.drone_api.shutil.which", return_value="/usr/bin/batocera-es-swissknife"), mock.patch(
+                "app.drone_api.subprocess.Popen"
+            ) as popen:
+                enabled_status, enabled_message, enabled_result = _execute_overmind_action(
+                    settings, repo, {"action": "enable_kiosk"}
+                )
+                self.assertIn('name="UIMode" value="Kiosk"', es_settings.read_text(encoding="utf-8"))
+                disabled_status, disabled_message, disabled_result = _execute_overmind_action(
+                    settings, repo, {"action": "disable_kiosk"}
+                )
+
+            self.assertEqual(enabled_status, "completed")
+            self.assertIn("Kiosk mode enabled", enabled_message)
+            self.assertTrue(enabled_result["enabled"])
+            self.assertEqual(disabled_status, "completed")
+            self.assertIn("Kiosk mode disabled", disabled_message)
+            self.assertFalse(disabled_result["enabled"])
+            self.assertNotIn('name="UIMode"', es_settings.read_text(encoding="utf-8"))
+            self.assertEqual(popen.call_count, 2)
+            popen.assert_any_call(
+                ["/usr/bin/batocera-es-swissknife", "--restart"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
 
     def test_reclaim_overmind_token_after_heartbeat_unauthorized_uses_bound_auth_token(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

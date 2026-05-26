@@ -1400,6 +1400,55 @@ def _parse_es_theme_name(es_settings_path: Path) -> Optional[str]:
     return theme or None
 
 
+def _set_kiosk_mode(settings: Settings, enabled: bool) -> Path:
+    path = _resolve_es_settings_file(settings) or settings.es_settings_file
+    text = path.read_text(encoding="utf-8", errors="ignore") if path.exists() else ""
+    wrapped = False
+    try:
+        root = ET.fromstring(text) if text.strip() else ET.Element("settings")
+        if root.tag in {"bool", "int", "string"}:
+            root = ET.fromstring(f"<settings>{text}</settings>")
+            wrapped = True
+    except ET.ParseError:
+        root = ET.fromstring(f"<settings>{text}</settings>")
+        wrapped = True
+
+    parent_by_child = {child: parent for parent in root.iter() for child in parent}
+    ui_mode_nodes = [
+        node for node in root.iter("string")
+        if str(node.attrib.get("name") or "").lower() == "uimode"
+    ]
+    if enabled:
+        if ui_mode_nodes:
+            ui_mode_nodes[0].set("value", "Kiosk")
+            for extra in ui_mode_nodes[1:]:
+                parent_by_child.get(extra, root).remove(extra)
+        else:
+            ET.SubElement(root, "string", {"name": "UIMode", "value": "Kiosk"})
+    else:
+        for node in ui_mode_nodes:
+            parent_by_child.get(node, root).remove(node)
+
+    if wrapped or not text.strip():
+        updated = "\n".join(ET.tostring(node, encoding="unicode") for node in list(root))
+        updated = f"{updated}\n" if updated else ""
+    else:
+        updated = ET.tostring(root, encoding="unicode") + "\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    temp_path.write_text(updated, encoding="utf-8")
+    temp_path.replace(path)
+    return path
+
+
+def _restart_emulationstation() -> bool:
+    restart_tool = shutil.which("batocera-es-swissknife")
+    if not restart_tool:
+        return False
+    subprocess.Popen([restart_tool, "--restart"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return True
+
+
 def _resolve_es_settings_file(settings: Settings) -> Optional[Path]:
     candidates = [
         settings.es_settings_file,
@@ -8651,6 +8700,22 @@ def _execute_overmind_action(settings: Settings, repository: "RomRepository", ac
             subprocess.Popen(["shutdown", "-r", "now"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             return "completed", "Restart command issued.", None
         return "failed", "reboot/shutdown command was not found", None
+
+    if action_name in {"enable_kiosk", "disable_kiosk"}:
+        enabled = action_name == "enable_kiosk"
+        try:
+            settings_path = _set_kiosk_mode(settings, enabled)
+        except (OSError, ET.ParseError, ValueError) as error:
+            return "failed", f"Unable to update Kiosk mode settings: {error}", None
+        restarted = False if settings.use_fake_data else _restart_emulationstation()
+        state = "enabled" if enabled else "disabled"
+        suffix = " EmulationStation restart issued." if restarted else " Applies on the next EmulationStation restart."
+        return "completed", f"Kiosk mode {state}.{suffix}", {
+            "type": "kiosk_mode",
+            "enabled": enabled,
+            "settings_file": str(settings_path),
+            "emulationstation_restarted": restarted,
+        }
 
     if action_name == "update":
         if settings.use_fake_data:
