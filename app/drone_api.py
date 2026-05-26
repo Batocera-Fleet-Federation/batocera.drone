@@ -2,7 +2,6 @@ import base64
 import hmac
 import html
 import hashlib
-import ipaddress
 import json
 import os
 import re
@@ -31,10 +30,54 @@ from urllib.parse import urlparse
 
 try:
     from .api_routes import ApiRoutesMixin
+    from .network_identity import (
+        drone_network_payload as _build_drone_network_payload,
+        drone_reachable_url as _build_drone_reachable_url,
+        drone_report_host as _build_drone_report_host,
+        drone_scheme as _drone_scheme,
+        get_local_certificate_ips as _build_local_certificate_ips,
+        get_local_ip_addresses as _build_local_ip_addresses,
+        get_router_ip_address as _build_router_ip_address,
+        hostname_override_values as _hostname_override_values,
+        is_ip_literal as _is_ip_literal,
+    )
+    from .overmind_filesystem import (
+        filesystem_events as _build_filesystem_events,
+        filesystem_snapshot as _filesystem_snapshot,
+    )
+    from .overmind_game_logs import collect_game_logs as _build_game_log_payload
+    from .overmind_reporting import (
+        collect_emulator_configs as _collect_emulator_configs,
+        collect_log_sources as _collect_log_sources,
+        commit_emulator_config_fingerprints as _commit_emulator_config_fingerprints,
+        commit_log_cursors as _commit_log_cursors,
+    )
     from .route_config import API_PREFIX, api_url
     from .ui_routes import UiRoutesMixin
 except ImportError:
     from api_routes import ApiRoutesMixin  # type: ignore
+    from network_identity import (  # type: ignore
+        drone_network_payload as _build_drone_network_payload,
+        drone_reachable_url as _build_drone_reachable_url,
+        drone_report_host as _build_drone_report_host,
+        drone_scheme as _drone_scheme,
+        get_local_certificate_ips as _build_local_certificate_ips,
+        get_local_ip_addresses as _build_local_ip_addresses,
+        get_router_ip_address as _build_router_ip_address,
+        hostname_override_values as _hostname_override_values,
+        is_ip_literal as _is_ip_literal,
+    )
+    from overmind_filesystem import (  # type: ignore
+        filesystem_events as _build_filesystem_events,
+        filesystem_snapshot as _filesystem_snapshot,
+    )
+    from overmind_game_logs import collect_game_logs as _build_game_log_payload  # type: ignore
+    from overmind_reporting import (  # type: ignore
+        collect_emulator_configs as _collect_emulator_configs,
+        collect_log_sources as _collect_log_sources,
+        commit_emulator_config_fingerprints as _commit_emulator_config_fingerprints,
+        commit_log_cursors as _commit_log_cursors,
+    )
     from route_config import API_PREFIX, api_url  # type: ignore
     from ui_routes import UiRoutesMixin  # type: ignore
 
@@ -6049,44 +6092,6 @@ def _overmind_peer_results_path_for_settings(settings: Settings) -> Path:
     return (settings.userdata_root / "system" / "drone-app" / "peer_checks.json").resolve()
 
 
-def _overmind_log_cursor_path_for_settings(settings: Settings) -> Path:
-    return (settings.userdata_root / "system" / "drone-app" / "overmind_log_cursors.json").resolve()
-
-
-def _overmind_config_fingerprint_path_for_settings(settings: Settings) -> Path:
-    return (settings.userdata_root / "system" / "drone-app" / "overmind_config_fingerprints.json").resolve()
-
-
-def _load_uploaded_log_cursors(settings: Settings) -> dict:
-    state = _read_json_file(_overmind_log_cursor_path_for_settings(settings), {})
-    if not isinstance(state, dict) or state.get("schema_version") != 2:
-        return {}
-    cursors = state.get("cursors")
-    return cursors if isinstance(cursors, dict) else {}
-
-
-def _commit_log_cursors(settings: Settings, cursors: dict) -> None:
-    _write_json_file(
-        _overmind_log_cursor_path_for_settings(settings),
-        {"schema_version": 2, "cursors": dict(cursors or {})},
-    )
-
-
-def _load_uploaded_emulator_config_fingerprints(settings: Settings) -> dict:
-    state = _read_json_file(_overmind_config_fingerprint_path_for_settings(settings), {})
-    if not isinstance(state, dict) or state.get("schema_version") != 2:
-        return {}
-    fingerprints = state.get("fingerprints")
-    return fingerprints if isinstance(fingerprints, dict) else {}
-
-
-def _commit_emulator_config_fingerprints(settings: Settings, fingerprints: dict) -> None:
-    _write_json_file(
-        _overmind_config_fingerprint_path_for_settings(settings),
-        {"schema_version": 2, "fingerprints": dict(fingerprints or {})},
-    )
-
-
 def _write_json_file(path: Path, payload) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
@@ -6161,67 +6166,33 @@ def _mark_overmind_auth_failed(settings: Settings, config: dict, error: BaseExce
     _write_json_file(_overmind_peer_results_path_for_settings(settings), [])
 
 
-def _drone_scheme(settings: Settings) -> str:
-    return "http" if settings.http_only else "https"
+def _get_router_ip_address() -> Optional[str]:
+    return _build_router_ip_address(run_command=subprocess.run)
 
 
-def _hostname_override_values(settings: Settings) -> List[str]:
-    value = settings.hostname_override or ""
-    return [item.strip() for item in re.split(r"[,;\s]+", value) if item.strip()]
+def _get_local_ip_addresses() -> dict:
+    return _build_local_ip_addresses(
+        socket_module=socket,
+        gateway_loader=_get_router_ip_address,
+        open_url=urlopen,
+        request_factory=Request,
+    )
 
 
-def _is_ip_literal(value: str) -> bool:
-    try:
-        ipaddress.ip_address(value.strip("[]"))
-        return True
-    except ValueError:
-        return False
+def _get_local_certificate_ips() -> List[str]:
+    return _build_local_certificate_ips(socket_module=socket)
 
 
 def _drone_report_host(settings: Settings, network: Optional[dict] = None) -> str:
-    overrides = _hostname_override_values(settings)
-    if overrides:
-        return overrides[0]
-    network = network if isinstance(network, dict) else _get_local_ip_addresses()
-    ipv4 = network.get("ipv4") if isinstance(network.get("ipv4"), list) else []
-    ipv6 = network.get("ipv6") if isinstance(network.get("ipv6"), list) else []
-    if ipv4:
-        return str(ipv4[0])
-    if ipv6:
-        return str(ipv6[0])
-    return "127.0.0.1"
+    return _build_drone_report_host(settings, network, network_loader=_get_local_ip_addresses)
 
 
 def _drone_reachable_url(settings: Settings, network: Optional[dict] = None) -> str:
-    host = _drone_report_host(settings, network)
-    if ":" in host and not host.startswith("["):
-        host = f"[{host}]"
-    return f"{_drone_scheme(settings)}://{host}:{settings.https_port}"
+    return _build_drone_reachable_url(settings, network, report_host=_drone_report_host)
 
 
 def _drone_network_payload(settings: Settings) -> dict:
-    network = _get_local_ip_addresses()
-    network["hostname_override"] = settings.hostname_override or None
-    network["hostname_overrides"] = _hostname_override_values(settings)
-    network["reachable_url"] = _drone_reachable_url(settings, network)
-    return network
-
-
-def _get_router_ip_address() -> Optional[str]:
-    """Return the default gateway IP used to reach the local router."""
-    commands = (
-        ["sh", "-c", "ip route show default 2>/dev/null | awk '{print $3; exit}'"],
-        ["sh", "-c", "route -n 2>/dev/null | awk '$1 == \"0.0.0.0\" {print $2; exit}'"],
-    )
-    for command in commands:
-        try:
-            result = subprocess.run(command, capture_output=True, text=True, timeout=2)
-            gateway_ip = (result.stdout or "").strip()
-            if gateway_ip:
-                return gateway_ip
-        except Exception:
-            continue
-    return None
+    return _build_drone_network_payload(settings, network_loader=_get_local_ip_addresses)
 
 
 def _mock_userdata_marker(userdata_root: Path) -> Path:
@@ -6666,75 +6637,6 @@ def _check_peer(settings: Settings, peer: dict, config: Optional[dict] = None) -
     return result
 
 
-def _get_local_ip_addresses() -> dict:
-    """Resolve local IPv4/IPv6 addresses for Overmind heartbeat pings."""
-    ipv4: List[str] = []
-    ipv6: List[str] = []
-
-    def add(value: str) -> None:
-        value = str(value or "").split("%", 1)[0].strip()
-        if not value:
-            return
-        target = ipv6 if ":" in value else ipv4
-        if value not in target:
-            target.append(value)
-
-    try:
-        hostname = socket.gethostname()
-        for info in socket.getaddrinfo(hostname, None):
-            add(info[4][0])
-    except OSError as error:
-        print(f"Overmind network resolution failed for hostname: {error}", file=sys.stderr, flush=True)
-
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
-            probe.connect(("8.8.8.8", 80))
-            add(probe.getsockname()[0])
-    except OSError as error:
-        print(f"Overmind IPv4 route resolution failed: {error}", file=sys.stderr, flush=True)
-
-    try:
-        with socket.socket(socket.AF_INET6, socket.SOCK_DGRAM) as probe6:
-            probe6.connect(("2001:4860:4860::8888", 80))
-            add(probe6.getsockname()[0])
-    except OSError as error:
-        if os.environ.get("DRONE_DEBUG_NETWORK", "").strip().lower() in {"1", "true", "yes", "on"}:
-            print(f"Overmind IPv6 route unavailable; skipping IPv6 detection: {error}", file=sys.stderr, flush=True)
-
-    if "127.0.0.1" not in ipv4:
-        ipv4.append("127.0.0.1")
-    gateway_ip = _get_router_ip_address()
-    public_ip = None
-    try:
-        with urlopen(Request("https://api.ipify.org", headers={"User-Agent": "batocera-drone-app/4.0"}), timeout=3) as response:
-            public_ip = response.read().decode("utf-8", errors="replace").strip() or None
-    except Exception:
-        public_ip = None
-    print(f"Overmind network resolved ipv4={ipv4} ipv6={ipv6} gateway={gateway_ip} public={public_ip}", file=sys.stdout, flush=True)
-    return {"ipv4": ipv4, "ipv6": ipv6, "gateway_ip": gateway_ip, "public_ip": public_ip}
-
-
-def _get_local_certificate_ips() -> List[str]:
-    ips = ["127.0.0.1"]
-    try:
-        hostname = socket.gethostname()
-        for info in socket.getaddrinfo(hostname, None):
-            value = str(info[4][0] or "").split("%", 1)[0].strip()
-            if value and ":" not in value and value not in ips:
-                ips.append(value)
-    except OSError:
-        pass
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
-            probe.connect(("8.8.8.8", 80))
-            value = probe.getsockname()[0]
-            if value and value not in ips:
-                ips.append(value)
-    except OSError:
-        pass
-    return ips
-
-
 def _sample_speed(settings: Settings, base_url: str, token: str) -> dict:
     """Measure lightweight Drone <-> Overmind throughput."""
     sampled_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -6904,40 +6806,6 @@ def _read_text_file(path: Path, max_bytes: int = 262144) -> dict:
         }
     except Exception as error:
         return {"path": str(path), "error": str(error)}
-
-
-def _read_text_file_delta(path: Path, cursor: dict, max_bytes: int = 262144) -> Tuple[dict, dict]:
-    try:
-        stat = path.stat()
-        key = str(path.resolve())
-        previous = cursor.get(key) if isinstance(cursor.get(key), dict) else {}
-        previous_size = int(previous.get("size") or 0)
-        size = int(stat.st_size)
-        previous_mtime_ns = int(previous.get("mtime_ns") or 0)
-        mtime_ns = int(stat.st_mtime_ns)
-        if size > previous_size >= 0:
-            start = previous_size
-        elif size == previous_size and mtime_ns == previous_mtime_ns:
-            start = size
-        else:
-            start = max(0, size - max_bytes)
-        with path.open("rb") as handle:
-            handle.seek(start)
-            raw = handle.read(max_bytes + 1)
-        truncated = len(raw) > max_bytes
-        if truncated:
-            raw = raw[:max_bytes]
-        next_cursor = {"size": start + len(raw), "mtime_ns": mtime_ns}
-        return {
-            "path": str(path),
-            "size": size,
-            "offset": start,
-            "truncated": truncated,
-            "content": raw.decode("utf-8", errors="replace"),
-            "delta": True,
-        }, next_cursor
-    except Exception as error:
-        return {"path": str(path), "error": str(error), "delta": True}, {}
 
 
 def _resolve_userdata_path(settings: Settings, candidate: str) -> Path:
@@ -7278,231 +7146,23 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
     return _build_rom_metadata_snapshot_from_cache(settings, cache), changed, stats
 
 
-def _collect_log_sources(settings: Settings, include_unchanged: bool = False) -> dict:
-    candidates = {
-        "es_launch_stdout": ["/userdata/system/logs/es_launch_stdout.log"],
-        "es_launch_stderr": ["/userdata/system/logs/es_launch_stderr.log"],
-        "drone_stdout": [str((settings.log_dir / settings.stdout_log_file).resolve())],
-        "drone_stderr": [str((settings.log_dir / settings.stderr_log_file).resolve())],
-    }
-    cursor = {} if include_unchanged else _load_uploaded_log_cursors(settings)
-    next_cursor = dict(cursor) if isinstance(cursor, dict) else {}
-    logs = []
-    for source, paths in candidates.items():
-        entry = {"source": source, "files": []}
-        for raw_path in paths:
-            path = _resolve_userdata_path(settings, raw_path)
-            if path.exists() and path.is_file():
-                file_info, file_cursor = _read_text_file_delta(path, cursor, max_bytes=262144)
-                if file_cursor:
-                    next_cursor[str(path.resolve())] = file_cursor
-                if str(file_info.get("content") or "") or file_info.get("error"):
-                    entry["files"].append(file_info)
-        if entry["files"]:
-            logs.append(entry)
-    return {
-        "type": "log_sources",
-        "collected_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
-        "logs": logs,
-        "append": True,
-        "_cursors": next_cursor,
-    }
-
-
-def _filesystem_watch_roots(settings: Settings) -> List[Path]:
-    return [
-        settings.roms_root,
-        settings.userdata_root / "system" / "configs",
-        settings.userdata_root / "system" / "logs",
-        settings.log_dir,
-    ]
-
-
-def _filesystem_snapshot(settings: Settings, max_files: int = 5000) -> Dict[str, dict]:
-    snapshot: Dict[str, dict] = {}
-    checked = 0
-    for root in _filesystem_watch_roots(settings):
-        if not root.exists():
-            continue
-        try:
-            for path in root.rglob("*"):
-                checked += 1
-                if checked > max_files:
-                    return snapshot
-                if not path.is_file():
-                    continue
-                stat = path.stat()
-                snapshot[str(path.resolve())] = {"size": stat.st_size, "mtime": int(stat.st_mtime)}
-        except Exception:
-            continue
-    return snapshot
-
-
 def _filesystem_events(settings: Settings, previous: Dict[str, dict], current: Dict[str, dict]) -> List[dict]:
-    now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-    events = []
-    for path, meta in current.items():
-        old = previous.get(path)
-        if not old:
-            action = "create"
-        elif old != meta:
-            action = "update"
-        else:
-            continue
-        events.append({
-            "drone_id": settings.overmind_device_id,
-            "event_type": OVERMIND_EVENT_TYPES["filesystem"],
-            "timestamp": now,
-            "path": path,
-            "metadata": {"action": action, **meta, "old": old},
-        })
-    for path, old in previous.items():
-        if path not in current:
-            events.append({
-                "drone_id": settings.overmind_device_id,
-                "event_type": OVERMIND_EVENT_TYPES["filesystem"],
-                "timestamp": now,
-                "path": path,
-                "metadata": {"action": "delete", "old": old},
-            })
-    return events[:100]
-
-
-def _parse_launch_timestamp(line: str, fallback: str) -> str:
-    patterns = [
-        r"(?P<stamp>\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?)",
-        r"\[(?P<stamp>\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?)\]",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, line)
-        if not match:
-            continue
-        value = match.group("stamp").replace(",", ".")
-        try:
-            parsed = datetime.fromisoformat(value.replace(" ", "T"))
-            if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=timezone.utc)
-            return parsed.astimezone(timezone.utc).replace(microsecond=0).isoformat()
-        except ValueError:
-            continue
-    return fallback
-
-
-def _resolve_launch_rom_path(settings: Settings, system_name: str, rom_value: str) -> Optional[Path]:
-    rom_text = str(rom_value or "").strip().strip('"')
-    if not rom_text:
-        return None
-    candidates = [Path(rom_text)]
-    if rom_text.startswith("/userdata/"):
-        candidates.append((settings.userdata_root / rom_text[len("/userdata/") :]).resolve())
-    if system_name:
-        candidates.append((settings.roms_root / system_name / rom_text).resolve())
-    candidates.append((settings.roms_root / rom_text).resolve())
-    for candidate in candidates:
-        try:
-            resolved = candidate.resolve()
-        except Exception:
-            resolved = candidate
-        if resolved.exists() and resolved.is_file():
-            return resolved
-    return None
-
-
-def _system_from_launch_rom_path(settings: Settings, rom_path: Optional[Path], fallback: str) -> str:
-    fallback = str(fallback or "").strip()
-    if fallback:
-        return fallback
-    if not rom_path:
-        return ""
-    try:
-        relative = rom_path.resolve().relative_to(settings.roms_root.resolve())
-        return relative.parts[0] if relative.parts else ""
-    except Exception:
-        return ""
+    return _build_filesystem_events(
+        settings,
+        previous,
+        current,
+        event_type=OVERMIND_EVENT_TYPES["filesystem"],
+    )
 
 
 def _collect_game_logs(settings: Settings, repository: Optional["RomRepository"] = None, log_data: Optional[dict] = None) -> dict:
-    log_data = log_data or _collect_log_sources(settings)
-    sessions = []
-    collected_at = log_data["collected_at"]
-    for source in log_data.get("logs", []):
-        if source.get("source") != "es_launch_stdout":
-            continue
-        for file_info in source.get("files", []):
-            current = {}
-            for line in str(file_info.get("content") or "").splitlines():
-                lowered = line.lower()
-                if "emulator=" in lowered:
-                    current["raw_emulator_line"] = line
-                    match = re.search(r"emulator=([^\s]+)", line, re.IGNORECASE)
-                    if match:
-                        current["system_name"] = match.group(1)
-                if "rom=" in lowered:
-                    current["raw_rom_line"] = line
-                    current["played_at"] = _parse_launch_timestamp(line, current.get("played_at") or collected_at)
-                    match = re.search(r"rom=(.+)$", line, re.IGNORECASE)
-                    if match:
-                        rom_value = match.group(1).strip()
-                        rom_path = _resolve_launch_rom_path(settings, str(current.get("system_name") or ""), rom_value)
-                        system_name = _system_from_launch_rom_path(settings, rom_path, str(current.get("system_name") or ""))
-                        current["system_name"] = system_name
-                        current["rom_path"] = rom_path.as_posix() if rom_path else rom_value
-                        current["game_name"] = Path(rom_value).name
-                        if rom_path and repository:
-                            try:
-                                current["rom_md5"] = repository.build_md5(rom_path)
-                            except Exception as error:
-                                current["rom_md5_error"] = _format_overmind_error(error)
-                    if current.get("system_name") and current.get("game_name"):
-                        sessions.append(dict(current))
-                        current = {}
-    return {
-        "type": "game_logs",
-        "collected_at": collected_at,
-        "sessions": sessions,
-        "logs": log_data.get("logs", []),
-    }
-
-
-def _collect_emulator_configs(settings: Settings, include_unchanged: bool = False) -> dict:
-    roots = [
-        settings.userdata_root / "system" / "configs",
-        settings.userdata_root / "system" / ".config",
-    ]
-    allowed_suffixes = {".cfg", ".conf", ".ini", ".json", ".toml", ".xml", ".yml", ".yaml", ".bml", ".reg"}
-    previous_fingerprints = _load_uploaded_emulator_config_fingerprints(settings)
-    next_fingerprints = {}
-    configs = []
-    for root in roots:
-        if not root.exists() or not root.is_dir():
-            continue
-        for path in sorted(root.rglob("*")):
-            if len(configs) >= 250:
-                break
-            if not path.is_file() or path.suffix.lower() not in allowed_suffixes:
-                continue
-            if ".bak" in path.name.lower() or ".bak" in str(path.relative_to(root)).lower():
-                continue
-            item = _read_text_file(path, max_bytes=131072)
-            try:
-                item["relative_path"] = str(path.relative_to(root))
-            except Exception:
-                item["relative_path"] = path.name
-            item["root"] = str(root)
-            key = f"{item['root']}:{item['relative_path']}"
-            fingerprint = hashlib.sha256(str(item.get("content") or "").encode("utf-8", errors="replace")).hexdigest()
-            next_fingerprints[key] = fingerprint
-            if include_unchanged or previous_fingerprints.get(key) != fingerprint:
-                item["fingerprint"] = fingerprint
-                configs.append(item)
-    return {
-        "type": "emulator_configs",
-        "collected_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
-        "configs": configs,
-        "changed": bool(configs),
-        "incremental": not include_unchanged,
-        "_fingerprints": next_fingerprints,
-    }
+    return _build_game_log_payload(
+        settings,
+        repository,
+        log_data,
+        collect_log_sources=_collect_log_sources,
+        format_error=_format_overmind_error,
+    )
 
 
 def _safe_rom_relative_path(value: str) -> str:
