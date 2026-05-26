@@ -123,7 +123,8 @@ DOWNLOAD_TERMINAL_STATUSES = {"completed", "failed", "cancelled", "skipped"}
 DOWNLOAD_PROGRESS_PUSH_SECONDS = float(os.environ.get("DOWNLOAD_PROGRESS_PUSH_SECONDS", "5"))
 PEER_CHECK_TIMEOUT_SECONDS = float(os.environ.get("DRONE_PEER_CHECK_TIMEOUT_SECONDS", "3"))
 PEER_CHECK_INTERVAL_SECONDS = int(os.environ.get("DRONE_PEER_CHECK_INTERVAL_SECONDS", "300"))
-OVERMIND_SPEED_SAMPLE_SECONDS = int(os.environ.get("OVERMIND_SPEED_SAMPLE_SECONDS", "300"))
+OVERMIND_SPEED_SAMPLE_SECONDS = int(os.environ.get("OVERMIND_SPEED_SAMPLE_SECONDS", "600"))
+SPEED_TEST_DEFAULT_BASE_URL = "https://speed.cloudflare.com"
 OVERMIND_HEARTBEAT_SECONDS = int(os.environ.get("OVERMIND_POLL_SECONDS", "30"))
 ROM_METADATA_CACHE_VERSION = 1
 ROM_METADATA_POLL_SECONDS = int(os.environ.get("ROM_METADATA_POLL_SECONDS", "30"))
@@ -6497,24 +6498,6 @@ def _overmind_delete_json(url: str, token: Optional[str] = None, settings: Optio
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _overmind_raw_request(
-    url: str,
-    token: Optional[str] = None,
-    settings: Optional[Settings] = None,
-    data: Optional[bytes] = None,
-    content_type: str = "application/octet-stream",
-) -> bytes:
-    headers = {"Accept": "application/octet-stream"}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    if data is not None:
-        headers["Content-Type"] = content_type
-    request = Request(url, data=data, headers=headers, method="POST" if data is not None else "GET")
-    context = _drone_client_ssl_context(settings, url) if settings else (ssl._create_unverified_context() if url.startswith("https://") else None)
-    with urlopen(request, timeout=10, context=context) as response:
-        return response.read()
-
-
 def _format_overmind_error(error: BaseException) -> str:
     if isinstance(error, HTTPError):
         detail = ""
@@ -6733,35 +6716,56 @@ def _check_peer(settings: Settings, peer: dict, config: Optional[dict] = None) -
     return result
 
 
-def _sample_speed(settings: Settings, base_url: str, token: str) -> dict:
-    """Measure lightweight Drone <-> Overmind throughput."""
+def _speed_test_raw_request(url: str, data: Optional[bytes] = None) -> bytes:
+    headers = {
+        "Accept": "application/octet-stream",
+        "User-Agent": "batocera-drone-speed-test/1.0",
+    }
+    if data is not None:
+        headers["Content-Type"] = "application/octet-stream"
+    request = Request(url, data=data, headers=headers, method="POST" if data is not None else "GET")
+    timeout = max(1, int(os.environ.get("DRONE_SPEED_TEST_TIMEOUT_SECONDS", "15")))
+    with urlopen(request, timeout=timeout, context=ssl.create_default_context()) as response:
+        return response.read()
+
+
+def _sample_speed() -> dict:
+    """Measure Internet throughput against Cloudflare's public speed-test edge."""
     sampled_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-    size = max(1024, min(int(os.environ.get("OVERMIND_SPEED_SAMPLE_BYTES", "262144")), 2 * 1024 * 1024))
-    device_id = quote(settings.overmind_device_id, safe="")
+    base_url = (
+        os.environ.get("DRONE_SPEED_TEST_BASE_URL", SPEED_TEST_DEFAULT_BASE_URL).strip().rstrip("/")
+        or SPEED_TEST_DEFAULT_BASE_URL
+    )
+    source = "cloudflare-speed-test" if base_url == SPEED_TEST_DEFAULT_BASE_URL else "external-speed-test"
+    size = max(1024, min(int(os.environ.get("DRONE_SPEED_TEST_BYTES", "1000000")), 25 * 1000 * 1000))
     sample = {
         "upload_mbps": 0,
         "download_mbps": 0,
         "latency_ms": 0,
-        "source": "overmind-probe",
+        "source": source,
         "sampled_at": sampled_at,
         "bytes": size,
     }
     try:
-        download_url = f"{base_url}/api/devices/{device_id}/speed/download?bytes={size}"
+        latency_url = f"{base_url}/__down?bytes=0"
         started = time.monotonic()
-        downloaded = _overmind_raw_request(download_url, token=token, settings=settings)
+        _speed_test_raw_request(latency_url)
+        sample["latency_ms"] = int(max(time.monotonic() - started, 0.001) * 1000)
+
+        download_url = f"{base_url}/__down?bytes={size}"
+        started = time.monotonic()
+        downloaded = _speed_test_raw_request(download_url)
         elapsed = max(time.monotonic() - started, 0.001)
         sample["download_mbps"] = round((len(downloaded) * 8) / elapsed / 1_000_000, 3)
-        sample["latency_ms"] = int(elapsed * 1000)
 
-        upload_url = f"{base_url}/api/devices/{device_id}/speed/upload"
+        upload_url = f"{base_url}/__up"
         payload = b"1" * size
         started = time.monotonic()
-        _overmind_raw_request(upload_url, token=token, settings=settings, data=payload)
+        _speed_test_raw_request(upload_url, data=payload)
         elapsed = max(time.monotonic() - started, 0.001)
         sample["upload_mbps"] = round((len(payload) * 8) / elapsed / 1_000_000, 3)
     except Exception as error:
-        sample["source"] = "overmind-probe-failed"
+        sample["source"] = f"{source}-failed"
         sample["error"] = _format_overmind_error(error)
     print(f"Speed sample created: source={sample['source']} down={sample['download_mbps']} up={sample['upload_mbps']}", file=sys.stdout, flush=True)
     return sample
@@ -8664,7 +8668,7 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
     poll_seconds = max(5, int(settings.overmind_poll_seconds or OVERMIND_HEARTBEAT_SECONDS))
     speed_sample_seconds = OVERMIND_SPEED_SAMPLE_SECONDS
     system_info_refresh_seconds = max(300, int(os.environ.get("DRONE_SYSTEM_INFO_REFRESH_SECONDS", "3600")))
-    last_speed_sample_at = -float(speed_sample_seconds)
+    last_speed_sample_at: Optional[float] = None
     last_peer_check_at = -float(PEER_CHECK_INTERVAL_SECONDS)
     last_system_info_at = -float(system_info_refresh_seconds)
     system_info_payload: dict = {}
@@ -8739,9 +8743,11 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                 swarm = response.get("swarm") if isinstance(response.get("swarm"), list) else []
                 _write_json_file(_overmind_swarm_path_for_settings(settings), swarm)
 
-                if speed_sample_seconds > 0 and now - last_speed_sample_at >= speed_sample_seconds:
+                if speed_sample_seconds > 0 and (
+                    last_speed_sample_at is None or now - last_speed_sample_at >= speed_sample_seconds
+                ):
                     speed_url = f"{base_url}/api/devices/{device_id}/speed"
-                    speed_sample = _sample_speed(settings, base_url, token)
+                    speed_sample = _sample_speed()
                     try:
                         _overmind_post_json(speed_url, speed_sample, token=token, settings=settings)
                         print(f"Speed sample sent to Overmind for {settings.overmind_device_id}", file=sys.stdout, flush=True)

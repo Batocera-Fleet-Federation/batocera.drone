@@ -1349,26 +1349,44 @@ class SettingsTests(unittest.TestCase):
             self.assertTrue(cache["dirty"])
             self.assertTrue(next(iter(cache["entries"].values()))["rom_md5"])
 
-    def test_sample_speed_uses_overmind_probe_bytes(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(Path(tmp) / "userdata")}, clear=True):
-                settings = Settings.from_env()
-
+    def test_sample_speed_uses_cloudflare_speed_test_endpoints(self) -> None:
             calls = []
 
-            def fake_raw_request(url, token=None, settings=None, data=None, content_type="application/octet-stream"):
+            def fake_raw_request(url, data=None):
                 calls.append((url, data))
                 if data is None:
-                    return b"0" * 262144
-                return b'{"bytes_received":262144}'
+                    return b"0" * 1000000 if "bytes=1000000" in url else b""
+                return b""
 
-            with mock.patch("app.drone_api._overmind_raw_request", side_effect=fake_raw_request):
-                sample = _sample_speed(settings, "https://overmind.local:8000", "drone-token")
+            with mock.patch.dict("os.environ", {}, clear=True), mock.patch(
+                "app.drone_api._speed_test_raw_request", side_effect=fake_raw_request
+            ):
+                sample = _sample_speed()
 
-            self.assertEqual(sample["source"], "overmind-probe")
+            self.assertEqual(sample["source"], "cloudflare-speed-test")
             self.assertGreater(sample["download_mbps"], 0)
             self.assertGreater(sample["upload_mbps"], 0)
-            self.assertEqual(len(calls), 2)
+            self.assertEqual(
+                [call[0] for call in calls],
+                [
+                    "https://speed.cloudflare.com/__down?bytes=0",
+                    "https://speed.cloudflare.com/__down?bytes=1000000",
+                    "https://speed.cloudflare.com/__up",
+                ],
+            )
+            self.assertEqual(len(calls[2][1]), 1000000)
+
+    def test_sample_speed_allows_configured_speed_test_service_and_reports_failure(self) -> None:
+        with mock.patch.dict(
+            "os.environ",
+            {"DRONE_SPEED_TEST_BASE_URL": "https://speed.example.test/", "DRONE_SPEED_TEST_BYTES": "4096"},
+            clear=True,
+        ), mock.patch("app.drone_api._speed_test_raw_request", side_effect=URLError("offline")):
+            sample = _sample_speed()
+
+        self.assertEqual(sample["source"], "external-speed-test-failed")
+        self.assertEqual(sample["bytes"], 4096)
+        self.assertIn("URLError", sample["error"])
 
 
 class RepositoryTests(unittest.TestCase):
