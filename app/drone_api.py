@@ -113,6 +113,7 @@ ROM_METADATA_CACHE_VERSION = 1
 ROM_METADATA_POLL_SECONDS = int(os.environ.get("ROM_METADATA_POLL_SECONDS", "30"))
 ROM_METADATA_PROGRESS_SECONDS = float(os.environ.get("ROM_METADATA_PROGRESS_SECONDS", "5"))
 ROM_METADATA_PROGRESS_FILES = int(os.environ.get("ROM_METADATA_PROGRESS_FILES", "25"))
+ROM_METADATA_MD5_BATCH_SIZE = max(1, int(os.environ.get("ROM_METADATA_MD5_BATCH_SIZE", "1000")))
 LAUNCHBOX_PLATFORM_ALIASES = {
     "3do": "3DO Interactive Multiplayer",
     "adam": "Coleco ADAM",
@@ -6836,7 +6837,7 @@ def _collect_rom_metadata(settings: Settings, repository: "RomRepository") -> di
         if not system_name:
             continue
         try:
-            _, system_roms = repository.list_assets(system_name, "roms")
+            _, system_roms = repository.list_assets(system_name, "roms", include_md5=False)
         except Exception as error:
             roms.append({"system": system_name, "error": str(error)})
             continue
@@ -7023,9 +7024,12 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
                 "mtime": stat_mtime,
                 "absolute_path": str(absolute),
             }
-            if previous and previous.get("file_size") == stat_size and previous.get("modified_time") == stat_mtime and previous.get("rom_md5"):
-                next_entries[key] = {**base_entry, "md5": previous.get("md5") or previous.get("rom_md5"), "rom_md5": previous.get("rom_md5")}
+            if previous and previous.get("file_size") == stat_size and previous.get("modified_time") == stat_mtime:
+                next_entries[key] = dict(base_entry)
+                if previous.get("rom_md5"):
+                    next_entries[key].update({"md5": previous.get("md5") or previous.get("rom_md5"), "rom_md5": previous.get("rom_md5")})
             else:
+                next_entries[key] = base_entry
                 new_or_changed.append((key, absolute, base_entry))
         gamelist_path = settings.roms_root / system_name / "gamelist.xml"
         if gamelist_path.exists() and gamelist_path.is_file():
@@ -7033,7 +7037,7 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
             gamelist["system"] = system_name
             gamelists.append(gamelist)
 
-    deleted = previous_keys - set(next_entries.keys()) - {key for key, _, _ in new_or_changed}
+    deleted = previous_keys - set(next_entries.keys())
     try:
         bios_root = repository.get_bios_root()
         for bios_path in sorted(bios_root.rglob("*"), key=lambda item: str(item.relative_to(bios_root)).lower()):
@@ -7088,29 +7092,19 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
         flush=True,
     )
 
-    files_to_hash = new_or_changed + bios_new_or_changed
-    if files_to_hash:
+    if bios_new_or_changed:
         hash_started = time.monotonic()
         last_log = hash_started
-        print(f"ROM metadata poll phase=md5_hashing count={len(files_to_hash)}", file=sys.stdout, flush=True)
-        for index, (key, absolute, entry) in enumerate(new_or_changed, start=1):
-            md5_value = RomRepository.build_md5(absolute)
-            next_entries[key] = {**entry, "md5": md5_value, "rom_md5": md5_value}
-            now = time.monotonic()
-            if index == len(files_to_hash) or index % max(1, ROM_METADATA_PROGRESS_FILES) == 0 or now - last_log >= ROM_METADATA_PROGRESS_SECONDS:
-                print(f"ROM metadata md5 progress: {index}/{len(files_to_hash)} files", file=sys.stdout, flush=True)
-                last_log = now
-        offset = len(new_or_changed)
+        print(f"BIOS metadata poll phase=md5_hashing count={len(bios_new_or_changed)}", file=sys.stdout, flush=True)
         for bios_index, (key, absolute, entry) in enumerate(bios_new_or_changed, start=1):
             md5_value = RomRepository.build_md5(absolute)
             next_bios_entries[key] = {**entry, "md5": md5_value, "bios_md5": md5_value}
-            index = offset + bios_index
             now = time.monotonic()
-            if index == len(files_to_hash) or index % max(1, ROM_METADATA_PROGRESS_FILES) == 0 or now - last_log >= ROM_METADATA_PROGRESS_SECONDS:
-                print(f"ROM metadata md5 progress: {index}/{len(files_to_hash)} files", file=sys.stdout, flush=True)
+            if bios_index == len(bios_new_or_changed) or bios_index % max(1, ROM_METADATA_PROGRESS_FILES) == 0 or now - last_log >= ROM_METADATA_PROGRESS_SECONDS:
+                print(f"BIOS metadata md5 progress: {bios_index}/{len(bios_new_or_changed)} files", file=sys.stdout, flush=True)
                 last_log = now
         print(
-            f"Asset metadata md5 hashing completed: count={len(files_to_hash)} roms={len(new_or_changed)} bios={len(bios_new_or_changed)} duration_ms={int((time.monotonic() - hash_started) * 1000)}",
+            f"BIOS metadata md5 hashing completed: count={len(bios_new_or_changed)} duration_ms={int((time.monotonic() - hash_started) * 1000)}",
             file=sys.stdout,
             flush=True,
         )
@@ -7136,6 +7130,7 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
         "bios_discovered": bios_discovered,
         "artwork_discovered": artwork_discovered,
         "new_or_changed": len(new_or_changed),
+        "roms_pending_md5": len(new_or_changed),
         "bios_new_or_changed": len(bios_new_or_changed),
         "deleted": len(deleted),
         "bios_deleted": len(bios_deleted),
@@ -7144,6 +7139,50 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
         "rebuilt": rebuilt,
     }
     return _build_rom_metadata_snapshot_from_cache(settings, cache), changed, stats
+
+
+def _hash_rom_metadata_batches(settings: Settings, repository: "RomRepository", batch_size: int = ROM_METADATA_MD5_BATCH_SIZE):
+    """Yield bounded hash patches for ROM entries missing a current MD5 value."""
+    cache, _ = _load_rom_metadata_cache(settings)
+    entries = cache.get("entries") if isinstance(cache.get("entries"), dict) else {}
+    pending = [
+        (key, entry)
+        for key, entry in entries.items()
+        if isinstance(entry, dict) and not entry.get("rom_md5") and entry.get("absolute_path")
+    ]
+    total = len(pending)
+    if not total:
+        return
+    batch_size = max(1, int(batch_size))
+    started = time.monotonic()
+    print(f"ROM metadata phase=md5_hashing count={total} batch_size={batch_size}", file=sys.stdout, flush=True)
+    patch = []
+    for processed, (key, entry) in enumerate(pending, start=1):
+        absolute = Path(str(entry.get("absolute_path") or ""))
+        if absolute.exists() and absolute.is_file():
+            md5_value = repository.build_md5(absolute)
+            updated = {**entry, "md5": md5_value, "rom_md5": md5_value}
+            entries[key] = updated
+            patch.append({k: v for k, v in updated.items() if k != "absolute_path"})
+        if not patch or (len(patch) < batch_size and processed != total):
+            continue
+        cache["entries"] = entries
+        cache["dirty"] = True
+        _write_json_file(_rom_metadata_cache_path(settings), cache)
+        print(f"ROM metadata md5 progress: {processed}/{total} files", file=sys.stdout, flush=True)
+        yield {
+            "type": "asset_metadata",
+            "update_mode": "rom_hash_patch",
+            "collected_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+            "roms": patch,
+            "hash_progress": {"processed": processed, "total": total, "complete": processed == total},
+        }
+        patch = []
+    print(
+        f"ROM metadata md5 hashing completed: count={total} duration_ms={int((time.monotonic() - started) * 1000)}",
+        file=sys.stdout,
+        flush=True,
+    )
 
 
 def _filesystem_events(settings: Settings, previous: Dict[str, dict], current: Dict[str, dict]) -> List[dict]:
@@ -8642,7 +8681,59 @@ def _sync_rom_metadata_to_overmind(settings: Settings, repository: "RomRepositor
     rom_count = len(snapshot.get("roms") or [])
     bios_count = len(snapshot.get("bios") or [])
     artwork_count = len(snapshot.get("artwork") or [])
-    if not changed:
+    device_id = quote(settings.overmind_device_id, safe="")
+    upload_url = f"{base_url}/api/devices/{device_id}/rom-metadata"
+    uploads = []
+
+    def upload(payload: dict, phase: str) -> dict:
+        nonlocal token
+        try:
+            status_code, response = _overmind_post_json_with_status(upload_url, payload, token=token, settings=settings)
+        except HTTPError as error:
+            if error.code != 401:
+                raise
+            replacement_token = _reclaim_overmind_token_after_unauthorized(settings, repository, config, base_url, error)
+            if not replacement_token:
+                raise
+            token = replacement_token
+            status_code, response = _overmind_post_json_with_status(upload_url, payload, token=token, settings=settings)
+        cache, _ = _load_rom_metadata_cache(settings)
+        cache["last_successful_upload_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        cache["dirty"] = False
+        _write_json_file(_rom_metadata_cache_path(settings), cache)
+        uploads.append({"phase": phase, "status_code": status_code, "response": response})
+        return response
+
+    if changed:
+        payload = {"device_id": settings.overmind_device_id, **snapshot, "update_mode": "inventory"}
+        print(
+            f"Asset metadata inventory sync started: endpoint={upload_url} roms={rom_count} bios={bios_count} artwork={artwork_count}",
+            file=sys.stdout,
+            flush=True,
+        )
+        response = upload(payload, "inventory")
+        print(
+            f"Asset metadata inventory sync succeeded: sent_roms={rom_count} sent_bios={bios_count} sent_artwork={artwork_count} accepted_roms={response.get('rom_count')}",
+            file=sys.stdout,
+            flush=True,
+        )
+
+    hash_batches = 0
+    hashed_roms = 0
+    for patch in _hash_rom_metadata_batches(settings, repository, batch_size=ROM_METADATA_MD5_BATCH_SIZE):
+        patch_roms = patch.get("roms") if isinstance(patch.get("roms"), list) else []
+        payload = {"device_id": settings.overmind_device_id, **patch}
+        progress = patch.get("hash_progress") or {}
+        print(
+            f"Asset metadata hash patch sync started: endpoint={upload_url} batch_roms={len(patch_roms)} processed={progress.get('processed')}/{progress.get('total')}",
+            file=sys.stdout,
+            flush=True,
+        )
+        upload(payload, "rom_hash_patch")
+        hash_batches += 1
+        hashed_roms += len(patch_roms)
+
+    if not changed and not hash_batches:
         print(
             f"Asset metadata sync skipped: no changes detected systems={stats.get('systems_scanned')} roms={stats.get('roms_discovered')} bios={stats.get('bios_discovered')} artwork={stats.get('artwork_discovered')} duration_ms={int((time.monotonic() - poll_started) * 1000)}",
             file=sys.stdout,
@@ -8657,42 +8748,19 @@ def _sync_rom_metadata_to_overmind(settings: Settings, repository: "RomRepositor
             "changed": changed,
             "stats": stats,
         }
-    device_id = quote(settings.overmind_device_id, safe="")
-    upload_url = f"{base_url}/api/devices/{device_id}/rom-metadata"
-    payload = {"device_id": settings.overmind_device_id, **snapshot}
     print(
-        f"Asset metadata sync started: endpoint={upload_url} roms={rom_count} bios={bios_count} artwork={artwork_count} cache_changed={changed}",
-        file=sys.stdout,
-        flush=True,
-    )
-    try:
-        status_code, response = _overmind_post_json_with_status(upload_url, payload, token=token, settings=settings)
-    except HTTPError as error:
-        if error.code == 401:
-            replacement_token = _reclaim_overmind_token_after_unauthorized(settings, repository, config, base_url, error)
-            if replacement_token:
-                token = replacement_token
-                status_code, response = _overmind_post_json_with_status(upload_url, payload, token=token, settings=settings)
-            else:
-                raise
-        else:
-            raise
-    cache, _ = _load_rom_metadata_cache(settings)
-    cache["last_successful_upload_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-    cache["dirty"] = False
-    _write_json_file(_rom_metadata_cache_path(settings), cache)
-    print(
-        f"Asset metadata sync succeeded: status={status_code} sent_roms={rom_count} sent_bios={bios_count} sent_artwork={artwork_count} accepted_roms={response.get('rom_count')} accepted_bios={response.get('bios_count')} accepted_artwork={response.get('artwork_count')} duration_ms={int((time.monotonic() - poll_started) * 1000)}",
+        f"Asset metadata sync succeeded: inventory_uploaded={changed} hash_batches={hash_batches} hashed_roms={hashed_roms} duration_ms={int((time.monotonic() - poll_started) * 1000)}",
         file=sys.stdout,
         flush=True,
     )
     return {
         "status": "uploaded",
-        "status_code": status_code,
-        "response": response,
+        "uploads": uploads,
         "rom_count": rom_count,
         "bios_count": bios_count,
         "artwork_count": artwork_count,
+        "hash_batches": hash_batches,
+        "hashed_roms": hashed_roms,
         "changed": changed,
         "stats": stats,
     }

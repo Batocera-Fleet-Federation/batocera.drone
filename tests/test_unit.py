@@ -30,6 +30,7 @@ from app.drone_api import (
     _launchbox_platform_for_system,
     _load_overmind_config_for_settings,
     _collect_rom_metadata,
+    _hash_rom_metadata_batches,
     _poll_rom_metadata_cache,
     _rom_metadata_cache_path,
     _sync_rom_metadata_to_overmind,
@@ -853,8 +854,11 @@ class SettingsTests(unittest.TestCase):
             self.assertTrue(changed)
             self.assertEqual(stats["new_or_changed"], 1)
             self.assertEqual(stats["bios_new_or_changed"], 1)
-            first_md5 = snapshot["roms"][0]["rom_md5"]
+            self.assertNotIn("rom_md5", snapshot["roms"][0])
             first_bios_md5 = snapshot["bios"][0]["bios_md5"]
+            patches = list(_hash_rom_metadata_batches(settings, repo, batch_size=1))
+            self.assertEqual(len(patches), 1)
+            first_md5 = patches[0]["roms"][0]["rom_md5"]
             cache = _rom_metadata_cache_path(settings)
             cache_data = json.loads(cache.read_text(encoding="utf-8"))
             cache_data["dirty"] = False
@@ -896,6 +900,7 @@ class SettingsTests(unittest.TestCase):
                 settings = Settings.from_env()
             repo = RomRepository(settings.roms_root, settings.bios_root)
             _poll_rom_metadata_cache(settings, repo)
+            list(_hash_rom_metadata_batches(settings, repo, batch_size=1))
             cache_data = json.loads(_rom_metadata_cache_path(settings).read_text(encoding="utf-8"))
             cache_data["dirty"] = False
             _rom_metadata_cache_path(settings).write_text(json.dumps(cache_data), encoding="utf-8")
@@ -952,6 +957,7 @@ class SettingsTests(unittest.TestCase):
                 settings = Settings.from_env()
             repo = RomRepository(settings.roms_root, settings.bios_root)
             _poll_rom_metadata_cache(settings, repo)
+            list(_hash_rom_metadata_batches(settings, repo, batch_size=1))
             cache_data = json.loads(_rom_metadata_cache_path(settings).read_text(encoding="utf-8"))
             cache_data["dirty"] = False
             _rom_metadata_cache_path(settings).write_text(json.dumps(cache_data), encoding="utf-8")
@@ -987,6 +993,53 @@ class SettingsTests(unittest.TestCase):
             cache_after = json.loads(_rom_metadata_cache_path(settings).read_text(encoding="utf-8"))
             self.assertFalse(cache_after["dirty"])
             self.assertFalse(cache_after["last_successful_upload_at"])
+
+    def test_rom_metadata_sync_uploads_inventory_then_batched_md5_patches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            system = root / "roms" / "snes"
+            system.mkdir(parents=True)
+            (system / "Game One.zip").write_bytes(b"one")
+            (system / "Game Two.zip").write_bytes(b"two")
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "USERDATA_ROOT": str(root),
+                    "ROMS_ROOT": str(root / "roms"),
+                    "BIOS_ROOT": str(root / "bios"),
+                    "OVERMIND_DEVICE_ID": "drone-a",
+                },
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            repo = RomRepository(settings.roms_root, settings.bios_root)
+            uploads = []
+
+            def fake_post(url, payload, token=None, settings=None):
+                uploads.append(payload)
+                return 200, {
+                    "rom_count": len(payload.get("roms") or []),
+                    "bios_count": len(payload.get("bios") or []),
+                    "artwork_count": len(payload.get("artwork") or []),
+                }
+
+            with mock.patch("app.drone_api.ROM_METADATA_MD5_BATCH_SIZE", 1), mock.patch(
+                "app.drone_api._overmind_post_json_with_status", side_effect=fake_post
+            ):
+                result = _sync_rom_metadata_to_overmind(
+                    settings,
+                    repo,
+                    {"overmind_token": "drone-token"},
+                    "https://overmind.local",
+                    "drone-token",
+                )
+
+            self.assertEqual(result["hash_batches"], 2)
+            self.assertEqual(result["hashed_roms"], 2)
+            self.assertEqual([payload["update_mode"] for payload in uploads], ["inventory", "rom_hash_patch", "rom_hash_patch"])
+            self.assertEqual(len(uploads[0]["roms"]), 2)
+            self.assertTrue(all("rom_md5" not in row for row in uploads[0]["roms"]))
+            self.assertTrue(all(len(payload["roms"]) == 1 and payload["roms"][0].get("rom_md5") for payload in uploads[1:]))
 
     def test_sample_speed_uses_overmind_probe_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
