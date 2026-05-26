@@ -6484,6 +6484,12 @@ def _drone_client_ssl_context(settings: Settings, url: str, verify: bool = False
     if not url.startswith("https://"):
         return None
     context = ssl.create_default_context(cafile=str(cafile) if cafile else None) if verify else ssl._create_unverified_context()
+    configured_ca = settings.drone_mtls_ca_file
+    uses_configured_ca = bool(configured_ca and configured_ca.exists() and cafile and cafile.resolve() == configured_ca.resolve())
+    uses_peer_pin = bool(verify and cafile and not uses_configured_ca)
+    if uses_peer_pin:
+        # The pinned peer certificate came from Overmind; its routed NAT address need not appear in the SAN.
+        context.check_hostname = False
     if settings.drone_mtls_enabled and settings.drone_cert_file.exists() and settings.drone_key_file.exists():
         context.load_cert_chain(certfile=str(settings.drone_cert_file), keyfile=str(settings.drone_key_file))
     return context
@@ -6698,11 +6704,19 @@ def _peer_get_json(url: str, settings: Settings, peer_id: Optional[str] = None, 
 
 
 def _peer_address(peer: dict) -> Optional[str]:
+    public_reachable_url = str(peer.get("public_reachable_url") or "").strip().rstrip("/")
+    if public_reachable_url:
+        return public_reachable_url
+    scheme = str(peer.get("scheme") or peer.get("protocol") or "https").strip() or "https"
+    port = peer.get("api_port") or peer.get("port") or 8443
+    public_ip = str(peer.get("public_ip") or "").strip()
+    if public_ip:
+        if ":" in public_ip and not public_ip.startswith("["):
+            public_ip = f"[{public_ip}]"
+        return f"{scheme}://{public_ip}:{port}"
     reachable_url = str(peer.get("reachable_url") or "").strip().rstrip("/")
     if reachable_url:
         return reachable_url
-    scheme = str(peer.get("scheme") or peer.get("protocol") or "https").strip() or "https"
-    port = peer.get("api_port") or peer.get("port") or 8443
     resolved = peer.get("resolved_network") if isinstance(peer.get("resolved_network"), dict) else {}
     for value in resolved.get("ipv4") or []:
         host = str(value or "").strip()
@@ -6714,7 +6728,7 @@ def _peer_address(peer: dict) -> Optional[str]:
             if ":" in host and not host.startswith("["):
                 host = f"[{host}]"
             return f"{scheme}://{host}:{port}"
-    for key in ("local_ip", "private_ip", "public_ip"):
+    for key in ("local_ip", "private_ip"):
         value = peer.get(key)
         if isinstance(value, list):
             value = next((item for item in value if item), None)

@@ -2750,7 +2750,8 @@ async function renderOvermindIntegrationPage() {
         return `<div class="mt-2 p-2 rounded border" style="border-color:var(--admin-border)!important;background:rgba(31,42,68,.45)">
           <div class="d-flex justify-content-between gap-2"><span>${escapeHtml(drone.name || drone.hostname || drone.device_name || drone.drone_id || "Drone")}</span><span class="badge ${passed ? "text-bg-success" : "text-bg-danger"}">${latest.status ? (passed ? "RESOLVED" : "FAILED") : "unchecked"}</span></div>
           <div class="small text-muted mono">${escapeHtml(drone.drone_id || drone.device_id || "")}</div>
-          <div class="small text-muted">Address: ${escapeHtml(latest.target_address || drone.local_ip || drone.public_ip || "n/a")}</div>
+          <div class="small text-muted">Public IP: ${escapeHtml(drone.public_ip || "n/a")}</div>
+          <div class="small text-muted">Address: ${escapeHtml(latest.target_address || drone.public_reachable_url || drone.public_ip || drone.local_ip || "n/a")}</div>
           <div class="small text-muted">Checked: ${escapeHtml(latest.checked_at || "n/a")}</div>
           ${latest.failure_reason ? `<div class="small text-danger">${escapeHtml(latest.failure_reason)}</div>` : ""}
         </div>`;

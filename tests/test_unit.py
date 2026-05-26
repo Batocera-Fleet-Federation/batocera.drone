@@ -148,6 +148,25 @@ class SettingsTests(unittest.TestCase):
         }
         self.assertEqual(_peer_address(peer), "https://bff-drone-b:8443")
 
+    def test_peer_address_prefers_public_endpoint_for_remote_swarm_transfers(self) -> None:
+        peer = {
+            "public_reachable_url": "https://198.51.100.20:8443",
+            "public_ip": "198.51.100.20",
+            "reachable_url": "https://192.168.1.20:8443",
+            "resolved_network": {"ipv4": ["192.168.1.20"]},
+            "api_port": 8443,
+        }
+        self.assertEqual(_peer_address(peer), "https://198.51.100.20:8443")
+
+    def test_peer_address_builds_public_endpoint_from_public_ip(self) -> None:
+        peer = {
+            "public_ip": "198.51.100.21",
+            "reachable_url": "https://192.168.1.21:8443",
+            "scheme": "https",
+            "api_port": 8443,
+        }
+        self.assertEqual(_peer_address(peer), "https://198.51.100.21:8443")
+
     def test_log_source_collection_sends_only_new_log_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
