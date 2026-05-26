@@ -65,7 +65,7 @@ DOWNLOAD_PROGRESS_PUSH_SECONDS = float(os.environ.get("DOWNLOAD_PROGRESS_PUSH_SE
 PEER_CHECK_TIMEOUT_SECONDS = float(os.environ.get("DRONE_PEER_CHECK_TIMEOUT_SECONDS", "3"))
 PEER_CHECK_INTERVAL_SECONDS = int(os.environ.get("DRONE_PEER_CHECK_INTERVAL_SECONDS", "300"))
 OVERMIND_SPEED_SAMPLE_SECONDS = int(os.environ.get("OVERMIND_SPEED_SAMPLE_SECONDS", "300"))
-OVERMIND_HEARTBEAT_SECONDS = int(os.environ.get("OVERMIND_POLL_SECONDS", "60"))
+OVERMIND_HEARTBEAT_SECONDS = int(os.environ.get("OVERMIND_POLL_SECONDS", "30"))
 ROM_METADATA_CACHE_VERSION = 1
 ROM_METADATA_POLL_SECONDS = int(os.environ.get("ROM_METADATA_POLL_SECONDS", "30"))
 ROM_METADATA_PROGRESS_SECONDS = float(os.environ.get("ROM_METADATA_PROGRESS_SECONDS", "5"))
@@ -6049,9 +6049,47 @@ def _overmind_peer_results_path_for_settings(settings: Settings) -> Path:
     return (settings.userdata_root / "system" / "drone-app" / "peer_checks.json").resolve()
 
 
+def _overmind_log_cursor_path_for_settings(settings: Settings) -> Path:
+    return (settings.userdata_root / "system" / "drone-app" / "overmind_log_cursors.json").resolve()
+
+
+def _overmind_config_fingerprint_path_for_settings(settings: Settings) -> Path:
+    return (settings.userdata_root / "system" / "drone-app" / "overmind_config_fingerprints.json").resolve()
+
+
+def _load_uploaded_log_cursors(settings: Settings) -> dict:
+    state = _read_json_file(_overmind_log_cursor_path_for_settings(settings), {})
+    if not isinstance(state, dict) or state.get("schema_version") != 2:
+        return {}
+    cursors = state.get("cursors")
+    return cursors if isinstance(cursors, dict) else {}
+
+
+def _commit_log_cursors(settings: Settings, cursors: dict) -> None:
+    _write_json_file(
+        _overmind_log_cursor_path_for_settings(settings),
+        {"schema_version": 2, "cursors": dict(cursors or {})},
+    )
+
+
+def _load_uploaded_emulator_config_fingerprints(settings: Settings) -> dict:
+    state = _read_json_file(_overmind_config_fingerprint_path_for_settings(settings), {})
+    if not isinstance(state, dict) or state.get("schema_version") != 2:
+        return {}
+    fingerprints = state.get("fingerprints")
+    return fingerprints if isinstance(fingerprints, dict) else {}
+
+
+def _commit_emulator_config_fingerprints(settings: Settings, fingerprints: dict) -> None:
+    _write_json_file(
+        _overmind_config_fingerprint_path_for_settings(settings),
+        {"schema_version": 2, "fingerprints": dict(fingerprints or {})},
+    )
+
+
 def _write_json_file(path: Path, payload) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     tmp.replace(path)
 
@@ -6868,6 +6906,40 @@ def _read_text_file(path: Path, max_bytes: int = 262144) -> dict:
         return {"path": str(path), "error": str(error)}
 
 
+def _read_text_file_delta(path: Path, cursor: dict, max_bytes: int = 262144) -> Tuple[dict, dict]:
+    try:
+        stat = path.stat()
+        key = str(path.resolve())
+        previous = cursor.get(key) if isinstance(cursor.get(key), dict) else {}
+        previous_size = int(previous.get("size") or 0)
+        size = int(stat.st_size)
+        previous_mtime_ns = int(previous.get("mtime_ns") or 0)
+        mtime_ns = int(stat.st_mtime_ns)
+        if size > previous_size >= 0:
+            start = previous_size
+        elif size == previous_size and mtime_ns == previous_mtime_ns:
+            start = size
+        else:
+            start = max(0, size - max_bytes)
+        with path.open("rb") as handle:
+            handle.seek(start)
+            raw = handle.read(max_bytes + 1)
+        truncated = len(raw) > max_bytes
+        if truncated:
+            raw = raw[:max_bytes]
+        next_cursor = {"size": start + len(raw), "mtime_ns": mtime_ns}
+        return {
+            "path": str(path),
+            "size": size,
+            "offset": start,
+            "truncated": truncated,
+            "content": raw.decode("utf-8", errors="replace"),
+            "delta": True,
+        }, next_cursor
+    except Exception as error:
+        return {"path": str(path), "error": str(error), "delta": True}, {}
+
+
 def _resolve_userdata_path(settings: Settings, candidate: str) -> Path:
     if candidate == "/userdata":
         return settings.userdata_root.resolve()
@@ -7206,25 +7278,34 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
     return _build_rom_metadata_snapshot_from_cache(settings, cache), changed, stats
 
 
-def _collect_log_sources(settings: Settings) -> dict:
+def _collect_log_sources(settings: Settings, include_unchanged: bool = False) -> dict:
     candidates = {
         "es_launch_stdout": ["/userdata/system/logs/es_launch_stdout.log"],
         "es_launch_stderr": ["/userdata/system/logs/es_launch_stderr.log"],
         "drone_stdout": [str((settings.log_dir / settings.stdout_log_file).resolve())],
         "drone_stderr": [str((settings.log_dir / settings.stderr_log_file).resolve())],
     }
+    cursor = {} if include_unchanged else _load_uploaded_log_cursors(settings)
+    next_cursor = dict(cursor) if isinstance(cursor, dict) else {}
     logs = []
     for source, paths in candidates.items():
         entry = {"source": source, "files": []}
         for raw_path in paths:
             path = _resolve_userdata_path(settings, raw_path)
             if path.exists() and path.is_file():
-                entry["files"].append(_read_text_file(path, max_bytes=262144))
-        logs.append(entry)
+                file_info, file_cursor = _read_text_file_delta(path, cursor, max_bytes=262144)
+                if file_cursor:
+                    next_cursor[str(path.resolve())] = file_cursor
+                if str(file_info.get("content") or "") or file_info.get("error"):
+                    entry["files"].append(file_info)
+        if entry["files"]:
+            logs.append(entry)
     return {
         "type": "log_sources",
         "collected_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
         "logs": logs,
+        "append": True,
+        "_cursors": next_cursor,
     }
 
 
@@ -7287,9 +7368,63 @@ def _filesystem_events(settings: Settings, previous: Dict[str, dict], current: D
     return events[:100]
 
 
-def _collect_game_logs(settings: Settings) -> dict:
-    log_data = _collect_log_sources(settings)
+def _parse_launch_timestamp(line: str, fallback: str) -> str:
+    patterns = [
+        r"(?P<stamp>\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?)",
+        r"\[(?P<stamp>\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?)\]",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, line)
+        if not match:
+            continue
+        value = match.group("stamp").replace(",", ".")
+        try:
+            parsed = datetime.fromisoformat(value.replace(" ", "T"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc).replace(microsecond=0).isoformat()
+        except ValueError:
+            continue
+    return fallback
+
+
+def _resolve_launch_rom_path(settings: Settings, system_name: str, rom_value: str) -> Optional[Path]:
+    rom_text = str(rom_value or "").strip().strip('"')
+    if not rom_text:
+        return None
+    candidates = [Path(rom_text)]
+    if rom_text.startswith("/userdata/"):
+        candidates.append((settings.userdata_root / rom_text[len("/userdata/") :]).resolve())
+    if system_name:
+        candidates.append((settings.roms_root / system_name / rom_text).resolve())
+    candidates.append((settings.roms_root / rom_text).resolve())
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except Exception:
+            resolved = candidate
+        if resolved.exists() and resolved.is_file():
+            return resolved
+    return None
+
+
+def _system_from_launch_rom_path(settings: Settings, rom_path: Optional[Path], fallback: str) -> str:
+    fallback = str(fallback or "").strip()
+    if fallback:
+        return fallback
+    if not rom_path:
+        return ""
+    try:
+        relative = rom_path.resolve().relative_to(settings.roms_root.resolve())
+        return relative.parts[0] if relative.parts else ""
+    except Exception:
+        return ""
+
+
+def _collect_game_logs(settings: Settings, repository: Optional["RomRepository"] = None, log_data: Optional[dict] = None) -> dict:
+    log_data = log_data or _collect_log_sources(settings)
     sessions = []
+    collected_at = log_data["collected_at"]
     for source in log_data.get("logs", []):
         if source.get("source") != "es_launch_stdout":
             continue
@@ -7299,31 +7434,44 @@ def _collect_game_logs(settings: Settings) -> dict:
                 lowered = line.lower()
                 if "emulator=" in lowered:
                     current["raw_emulator_line"] = line
-                    match = re.search(r"emulator=([^\\s]+)", line, re.IGNORECASE)
+                    match = re.search(r"emulator=([^\s]+)", line, re.IGNORECASE)
                     if match:
                         current["system_name"] = match.group(1)
                 if "rom=" in lowered:
                     current["raw_rom_line"] = line
+                    current["played_at"] = _parse_launch_timestamp(line, current.get("played_at") or collected_at)
                     match = re.search(r"rom=(.+)$", line, re.IGNORECASE)
                     if match:
-                        current["game_name"] = match.group(1).strip()
-                    if current:
+                        rom_value = match.group(1).strip()
+                        rom_path = _resolve_launch_rom_path(settings, str(current.get("system_name") or ""), rom_value)
+                        system_name = _system_from_launch_rom_path(settings, rom_path, str(current.get("system_name") or ""))
+                        current["system_name"] = system_name
+                        current["rom_path"] = rom_path.as_posix() if rom_path else rom_value
+                        current["game_name"] = Path(rom_value).name
+                        if rom_path and repository:
+                            try:
+                                current["rom_md5"] = repository.build_md5(rom_path)
+                            except Exception as error:
+                                current["rom_md5_error"] = _format_overmind_error(error)
+                    if current.get("system_name") and current.get("game_name"):
                         sessions.append(dict(current))
                         current = {}
     return {
         "type": "game_logs",
-        "collected_at": log_data["collected_at"],
+        "collected_at": collected_at,
         "sessions": sessions,
         "logs": log_data.get("logs", []),
     }
 
 
-def _collect_emulator_configs(settings: Settings) -> dict:
+def _collect_emulator_configs(settings: Settings, include_unchanged: bool = False) -> dict:
     roots = [
         settings.userdata_root / "system" / "configs",
         settings.userdata_root / "system" / ".config",
     ]
     allowed_suffixes = {".cfg", ".conf", ".ini", ".json", ".toml", ".xml", ".yml", ".yaml", ".bml", ".reg"}
+    previous_fingerprints = _load_uploaded_emulator_config_fingerprints(settings)
+    next_fingerprints = {}
     configs = []
     for root in roots:
         if not root.exists() or not root.is_dir():
@@ -7333,17 +7481,27 @@ def _collect_emulator_configs(settings: Settings) -> dict:
                 break
             if not path.is_file() or path.suffix.lower() not in allowed_suffixes:
                 continue
+            if ".bak" in path.name.lower() or ".bak" in str(path.relative_to(root)).lower():
+                continue
             item = _read_text_file(path, max_bytes=131072)
             try:
                 item["relative_path"] = str(path.relative_to(root))
             except Exception:
                 item["relative_path"] = path.name
             item["root"] = str(root)
-            configs.append(item)
+            key = f"{item['root']}:{item['relative_path']}"
+            fingerprint = hashlib.sha256(str(item.get("content") or "").encode("utf-8", errors="replace")).hexdigest()
+            next_fingerprints[key] = fingerprint
+            if include_unchanged or previous_fingerprints.get(key) != fingerprint:
+                item["fingerprint"] = fingerprint
+                configs.append(item)
     return {
         "type": "emulator_configs",
         "collected_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
         "configs": configs,
+        "changed": bool(configs),
+        "incremental": not include_unchanged,
+        "_fingerprints": next_fingerprints,
     }
 
 
@@ -8327,15 +8485,17 @@ def _execute_overmind_action(settings: Settings, repository: "RomRepository", ac
         return "completed", f"Collected {_summarize_overmind_result(result)}.", result
 
     if action_name == "collect_game_logs":
-        result = _collect_game_logs(settings)
+        result = _collect_game_logs(settings, repository)
         return "completed", f"Collected {_summarize_overmind_result(result)}.", result
 
     if action_name == "collect_emulator_configs":
-        result = _collect_emulator_configs(settings)
+        result = _collect_emulator_configs(settings, include_unchanged=True)
+        result.pop("_fingerprints", None)
         return "completed", f"Collected {_summarize_overmind_result(result)}.", result
 
     if action_name == "collect_log_sources":
         result = _collect_log_sources(settings)
+        result.pop("_cursors", None)
         return "completed", f"Collected {_summarize_overmind_result(result)}.", result
 
     if action_name == "sync_bios":
@@ -8735,6 +8895,42 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                     print(f"Filesystem event: {event.get('metadata', {}).get('action')} {event.get('path')}", file=sys.stdout, flush=True)
                     _overmind_post_json(f"{base_url}/api/devices/{device_id}/events", event, token=token, settings=settings)
                 fs_snapshot = next_fs_snapshot
+
+                response_device = response.get("device") if isinstance(response.get("device"), dict) else {}
+                stored_logs = response_device.get("log_sources") if isinstance(response_device.get("log_sources"), dict) else {}
+                require_log_snapshot = not bool(stored_logs.get("logs"))
+                log_sources = _collect_log_sources(settings, include_unchanged=require_log_snapshot)
+                log_cursors = log_sources.pop("_cursors", {})
+                game_logs = _collect_game_logs(settings, repository, log_data=log_sources)
+                if game_logs.get("sessions"):
+                    game_logs.pop("logs", None)
+                    _overmind_post_json(f"{base_url}/api/devices/{device_id}/game-logs", game_logs, token=token, settings=settings)
+                    print(
+                        f"Sent {len(game_logs.get('sessions') or [])} game log session(s) to Overmind",
+                        file=sys.stdout,
+                        flush=True,
+                    )
+                if log_sources.get("logs"):
+                    _overmind_post_json(f"{base_url}/api/devices/{device_id}/log-sources", log_sources, token=token, settings=settings)
+                    _commit_log_cursors(settings, log_cursors)
+                    print(
+                        f"Sent {len(log_sources.get('logs') or [])} changed log source(s) to Overmind",
+                        file=sys.stdout,
+                        flush=True,
+                    )
+
+                stored_configs = response_device.get("emulator_configs") if isinstance(response_device.get("emulator_configs"), dict) else {}
+                require_config_snapshot = not bool(stored_configs.get("configs"))
+                emulator_configs = _collect_emulator_configs(settings, include_unchanged=require_config_snapshot)
+                emulator_config_fingerprints = emulator_configs.pop("_fingerprints", {})
+                if emulator_configs.get("configs"):
+                    _overmind_post_json(f"{base_url}/api/devices/{device_id}/emulator-configs", emulator_configs, token=token, settings=settings)
+                    _commit_emulator_config_fingerprints(settings, emulator_config_fingerprints)
+                    print(
+                        f"Sent {len(emulator_configs.get('configs') or [])} changed emulator config(s) to Overmind",
+                        file=sys.stdout,
+                        flush=True,
+                    )
 
                 actions = response.get("actions") if isinstance(response.get("actions"), list) else None
                 if actions is None:

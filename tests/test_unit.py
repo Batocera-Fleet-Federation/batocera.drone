@@ -44,6 +44,11 @@ from app.drone_api import (
     _execute_overmind_action,
     _register_or_claim_overmind_token,
     _reclaim_overmind_token_after_unauthorized,
+    _collect_emulator_configs,
+    _commit_emulator_config_fingerprints,
+    _collect_log_sources,
+    _commit_log_cursors,
+    _collect_game_logs,
 )
 from urllib.error import HTTPError, URLError
 
@@ -137,6 +142,109 @@ class SettingsTests(unittest.TestCase):
             "api_port": 8443,
         }
         self.assertEqual(_peer_address(peer), "https://bff-drone-b:8443")
+
+    def test_log_source_collection_sends_only_new_log_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            log_dir = Path(tmp) / "logs"
+            log_dir.mkdir(parents=True)
+            stdout_log = log_dir / "stdout.log"
+            stdout_log.write_text("first\nsecond\n", encoding="utf-8")
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "LOG_DIR": str(log_dir)},
+                clear=True,
+            ):
+                settings = Settings.from_env()
+
+            first = _collect_log_sources(settings)
+            stdout_entry = next(row for row in first["logs"] if row["source"] == "drone_stdout")
+            self.assertEqual(stdout_entry["files"][0]["content"], "first\nsecond\n")
+
+            unacknowledged = _collect_log_sources(settings)
+            stdout_entry = next(row for row in unacknowledged["logs"] if row["source"] == "drone_stdout")
+            self.assertEqual(stdout_entry["files"][0]["content"], "first\nsecond\n")
+
+            _commit_log_cursors(settings, first["_cursors"])
+            with stdout_log.open("a", encoding="utf-8") as handle:
+                handle.write("third\n")
+
+            second = _collect_log_sources(settings)
+            stdout_entry = next(row for row in second["logs"] if row["source"] == "drone_stdout")
+            self.assertEqual(stdout_entry["files"][0]["content"], "third\n")
+            _commit_log_cursors(settings, second["_cursors"])
+            self.assertEqual(_collect_log_sources(settings)["logs"], [])
+
+            stdout_log.write_text("rewritten\n", encoding="utf-8")
+            rewritten = _collect_log_sources(settings)
+            stdout_entry = next(row for row in rewritten["logs"] if row["source"] == "drone_stdout")
+            self.assertEqual(stdout_entry["files"][0]["content"], "rewritten\n")
+
+    def test_game_log_collection_detects_launch_with_md5(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            roms_root = root / "roms"
+            rom = roms_root / "snes" / "Game.sfc"
+            rom.parent.mkdir(parents=True)
+            rom.write_bytes(b"rom-data")
+            launch_log = root / "system" / "logs" / "es_launch_stdout.log"
+            launch_log.parent.mkdir(parents=True)
+            launch_log.write_text(
+                f"2026-05-26 10:15:00 emulator=snes\n2026-05-26 10:15:00 rom={rom}\n",
+                encoding="utf-8",
+            )
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(roms_root)},
+                clear=True,
+            ):
+                settings = Settings.from_env()
+
+            result = _collect_game_logs(settings, RomRepository(roms_root, root / "bios"))
+            self.assertEqual(len(result["sessions"]), 1)
+            session = result["sessions"][0]
+            self.assertEqual(session["system_name"], "snes")
+            self.assertEqual(session["game_name"], "Game.sfc")
+            self.assertEqual(session["rom_path"], rom.resolve().as_posix())
+            self.assertEqual(session["rom_md5"], RomRepository.build_md5(rom))
+            self.assertEqual(session["played_at"], "2026-05-26T10:15:00+00:00")
+
+    def test_emulator_config_collection_sends_changed_configs_and_skips_bak(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            configs_root = root / "system" / "configs" / "retroarch"
+            configs_root.mkdir(parents=True)
+            config = configs_root / "retroarch.cfg"
+            backup = configs_root / "retroarch.cfg.bak"
+            config.write_text("video_driver = gl", encoding="utf-8")
+            backup.write_text("old", encoding="utf-8")
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
+                settings = Settings.from_env()
+
+            first = _collect_emulator_configs(settings)
+            self.assertEqual([row["relative_path"] for row in first["configs"]], ["retroarch/retroarch.cfg"])
+
+            unacknowledged = _collect_emulator_configs(settings)
+            self.assertEqual([row["relative_path"] for row in unacknowledged["configs"]], ["retroarch/retroarch.cfg"])
+
+            _commit_emulator_config_fingerprints(settings, first["_fingerprints"])
+            second = _collect_emulator_configs(settings)
+            self.assertEqual(second["configs"], [])
+            self.assertFalse(second["changed"])
+            requested_snapshot = _collect_emulator_configs(settings, include_unchanged=True)
+            self.assertEqual([row["relative_path"] for row in requested_snapshot["configs"]], ["retroarch/retroarch.cfg"])
+            self.assertFalse(requested_snapshot["incremental"])
+
+            legacy_state = root / "system" / "drone-app" / "overmind_config_fingerprints.json"
+            legacy_state.write_text(json.dumps(first["_fingerprints"]), encoding="utf-8")
+            legacy_retry = _collect_emulator_configs(settings)
+            self.assertEqual([row["relative_path"] for row in legacy_retry["configs"]], ["retroarch/retroarch.cfg"])
+            _commit_emulator_config_fingerprints(settings, legacy_retry["_fingerprints"])
+
+            config.write_text("video_driver = vulkan", encoding="utf-8")
+            third = _collect_emulator_configs(settings)
+            self.assertEqual([row["relative_path"] for row in third["configs"]], ["retroarch/retroarch.cfg"])
+            self.assertIn("vulkan", third["configs"][0]["content"])
 
     def test_peer_trust_prefers_configured_ca_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

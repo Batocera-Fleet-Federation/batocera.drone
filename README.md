@@ -12,7 +12,7 @@ After it is installed, you open Drone from a browser on your computer, phone, or
 - Drone-to-Drone API calls can use mTLS. Drone creates its own local certificate on startup, so you do not need a public domain.
 - Drone reports live telemetry back to Overmind, including speed samples, filesystem changes, peer checks, gameplay, and ROM/library changes.
 - Containers are supported for local swarm testing. The Drone container creates a Batocera-like `/userdata` tree and copies a varied set of ROMs from `.github/data/roms/<system>/<files>`.
-- Drone checks in with Overmind every 60 seconds by default.
+- Drone checks in with Overmind every 30 seconds by default.
 - Overmind integration now uses an Overmind-generated authorization token instead of an integration password.
 - Drone caches approved peer certificates from Overmind before Drone-to-Drone mTLS calls.
 - The Drone admin header uses the shared project mascot at `content/batocera-swarm-mascot.jpg`, matching Overmind's landing and header branding without interfering with core workflows.
@@ -108,7 +108,7 @@ https://<your-batocera-name>.local:8443/v1/api/openapi.json
 
 Batocera Drone is the local Batocera agent. Overmind owns the Overlord UI, Drone authorization tokens, action queue, swarm list, peer status, and per-Drone auto-sync policy.
 
-Drone calls Overmind every 60 seconds by default. The alive payload includes the MAC-address `device_id`, discovered IPv4/IPv6 addresses, router/gateway IP when available, public IP when available, API port, protocol, local certificate metadata, ROM systems, and basic system information. Overmind validates `Authorization: Bearer <drone_token>` before accepting alive, action status, metadata, logs, telemetry events, peer checks, or speed samples.
+Drone calls Overmind every 30 seconds by default. The alive payload includes the MAC-address `device_id`, discovered IPv4/IPv6 addresses, router/gateway IP when available, public IP when available, API port, protocol, local certificate metadata, ROM systems, and basic system information. During this poll Drone checks emulator configs and log sources and uploads only new or changed content, retrying until Overmind accepts it. Overmind validates `Authorization: Bearer <drone_token>` before accepting alive, action status, metadata, logs, telemetry events, peer checks, or speed samples.
 
 Overmind responds with the current swarm list. Drone stores that list locally, skips itself, and checks each other Drone with a short API health request. The admin Overmind page shows whether the last peer check passed or failed, when it was checked, and the failure reason if there was one.
 
