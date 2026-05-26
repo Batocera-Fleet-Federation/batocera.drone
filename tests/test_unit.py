@@ -1041,6 +1041,52 @@ class SettingsTests(unittest.TestCase):
             self.assertTrue(all("rom_md5" not in row for row in uploads[0]["roms"]))
             self.assertTrue(all(len(payload["roms"]) == 1 and payload["roms"][0].get("rom_md5") for payload in uploads[1:]))
 
+    def test_rom_metadata_sync_persists_and_uploads_added_and_deleted_roms(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            system = root / "roms" / "snes"
+            system.mkdir(parents=True)
+            first = system / "First Game.zip"
+            second = system / "Second Game.zip"
+            first.write_bytes(b"one")
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "USERDATA_ROOT": str(root),
+                    "ROMS_ROOT": str(root / "roms"),
+                    "BIOS_ROOT": str(root / "bios"),
+                    "OVERMIND_DEVICE_ID": "drone-a",
+                },
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            repo = RomRepository(settings.roms_root, settings.bios_root)
+            uploads = []
+
+            def fake_post(url, payload, token=None, settings=None):
+                uploads.append(payload)
+                return 200, {
+                    "rom_count": len(payload.get("roms") or []),
+                    "bios_count": len(payload.get("bios") or []),
+                    "artwork_count": len(payload.get("artwork") or []),
+                }
+
+            with mock.patch("app.drone_api._overmind_post_json_with_status", side_effect=fake_post):
+                _sync_rom_metadata_to_overmind(settings, repo, {}, "https://overmind.local", "drone-token")
+                second.write_bytes(b"two")
+                added = _sync_rom_metadata_to_overmind(settings, repo, {}, "https://overmind.local", "drone-token")
+                first.unlink()
+                deleted = _sync_rom_metadata_to_overmind(settings, repo, {}, "https://overmind.local", "drone-token")
+
+            inventories = [payload for payload in uploads if payload.get("update_mode") == "inventory"]
+            self.assertEqual([len(payload["roms"]) for payload in inventories], [1, 2, 1])
+            self.assertEqual(added["stats"]["new_or_changed"], 1)
+            self.assertEqual(deleted["stats"]["deleted"], 1)
+            cache = json.loads(_rom_metadata_cache_path(settings).read_text(encoding="utf-8"))
+            self.assertEqual(len(cache["entries"]), 1)
+            self.assertEqual(next(iter(cache["entries"].values()))["file_path"], "Second Game.zip")
+            self.assertFalse(cache["dirty"])
+
     def test_sample_speed_uses_overmind_probe_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(Path(tmp) / "userdata")}, clear=True):
