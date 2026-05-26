@@ -13,7 +13,7 @@
 - Enhancing drone selection for downloads.  Fixing downloads/sync state so the UI shows closer to live data.
 - Fixing rom sync from drone to overmind
 - Added a Claim Ownership section to the Overmind Integration page. Added local admin route POST /admin/integrations/overmind/claim-ownership. Claim requires an https:// Overmind URL, email, and password. Drone sends credentials to Overmind over HTTPS, stores only the returned Drone bearer token, and does not log or persist the password.
-- Heartbeat no longer scans ROMs, sends ROM metadata, or hashes MD5s. Heartbeat now logs send start, endpoint, success/failure, status, and duration. Added independent ROM metadata poller with disk cache at /userdata/system/drone-app/rom_metadata_cache.json. Poller uses ROM_METADATA_POLL_SECONDS, detects new/changed/deleted ROMs, hashes only new/changed files, writes cache atomically, skips uploads when clean, and logs scan/hash/upload progress. Added tests for cache rebuild, deleted ROM handling, and MD5 reuse.
+- Heartbeat no longer scans ROMs, sends ROM metadata, or hashes MD5s. Heartbeat now logs send start, endpoint, success/failure, status, and duration. Added independent ROM metadata poller with disk cache at /userdata/system/drone-app/rom_metadata_cache.json. Poller uses ROM_METADATA_POLL_SECONDS, detects new/changed/deleted ROMs, hashes only new/changed files, writes cache atomically, continues collecting locally without an Overmind connection, skips uploads when clean, and logs scan/hash/upload progress. Added tests for cache rebuild, deleted ROM handling, offline collection, and MD5 reuse.
 
 ## [v0.0.15] - 2026-05-23
 

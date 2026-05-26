@@ -32,6 +32,7 @@ from app.drone_api import (
     _collect_rom_metadata,
     _hash_rom_metadata_batches,
     _poll_rom_metadata_cache,
+    _poll_rom_metadata_once,
     _rom_metadata_cache_path,
     _sync_rom_metadata_to_overmind,
     _sample_speed,
@@ -1162,6 +1163,65 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(len(cache["entries"]), 1)
             self.assertEqual(next(iter(cache["entries"].values()))["file_path"], "Second Game.zip")
             self.assertFalse(cache["dirty"])
+
+    def test_rom_metadata_poll_caches_and_hashes_without_overmind_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            rom = root / "roms" / "snes" / "Game.zip"
+            rom.parent.mkdir(parents=True)
+            rom.write_bytes(b"offline-rom")
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "USERDATA_ROOT": str(root),
+                    "ROMS_ROOT": str(root / "roms"),
+                    "BIOS_ROOT": str(root / "bios"),
+                    "OVERMIND_URL": "",
+                    "OVERMIND_DEVICE_ID": "drone-a",
+                },
+                clear=True,
+            ):
+                settings = Settings.from_env()
+
+            result = _poll_rom_metadata_once(settings, RomRepository(settings.roms_root, settings.bios_root))
+
+            self.assertEqual(result["status"], "cached")
+            self.assertEqual(result["reason"], "overmind_not_configured")
+            self.assertEqual(result["hashed_roms"], 1)
+            cache = json.loads(_rom_metadata_cache_path(settings).read_text(encoding="utf-8"))
+            self.assertTrue(cache["dirty"])
+            self.assertTrue(next(iter(cache["entries"].values()))["rom_md5"])
+
+    def test_rom_metadata_poll_finishes_local_cache_when_overmind_upload_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            rom = root / "roms" / "snes" / "Game.zip"
+            rom.parent.mkdir(parents=True)
+            rom.write_bytes(b"offline-rom")
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "USERDATA_ROOT": str(root),
+                    "ROMS_ROOT": str(root / "roms"),
+                    "BIOS_ROOT": str(root / "bios"),
+                    "OVERMIND_URL": "https://overmind.local",
+                    "OVERMIND_DRONE_TOKEN": "drone-token",
+                    "OVERMIND_DEVICE_ID": "drone-a",
+                },
+                clear=True,
+            ):
+                settings = Settings.from_env()
+
+            with mock.patch(
+                "app.drone_api._overmind_post_json_with_status",
+                side_effect=URLError("offline"),
+            ):
+                with self.assertRaises(URLError):
+                    _poll_rom_metadata_once(settings, RomRepository(settings.roms_root, settings.bios_root))
+
+            cache = json.loads(_rom_metadata_cache_path(settings).read_text(encoding="utf-8"))
+            self.assertTrue(cache["dirty"])
+            self.assertTrue(next(iter(cache["entries"].values()))["rom_md5"])
 
     def test_sample_speed_uses_overmind_probe_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

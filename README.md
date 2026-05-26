@@ -226,7 +226,7 @@ The poller stores its JSON cache at:
 /userdata/system/drone-app/rom_metadata_cache.json
 ```
 
-The cache includes a schema version, last scan/upload timestamps, systems, gamelist snapshots, and ROM entries keyed by system plus relative path. On each poll Drone scans file size and modified time first, hashes only new or changed ROM files, removes deleted ROMs from the cache, and uploads a full metadata snapshot to Overmind only when something changed or the cache had to be rebuilt. Cache writes are atomic; missing, corrupt, or incompatible cache files are rebuilt safely.
+The cache includes a schema version, last scan/upload timestamps, systems, gamelist snapshots, and ROM entries keyed by system plus relative path. On each poll Drone scans file size and modified time first, hashes only new or changed ROM files, and removes deleted ROMs from the cache. Local collection and caching continue even when Drone is not connected to Overmind or Overmind is temporarily unavailable; the cache remains pending for a later upload. When connected, Drone uploads a full metadata snapshot to Overmind only when something changed or the cache had to be rebuilt. Cache writes are atomic; missing, corrupt, or incompatible cache files are rebuilt safely.
 
 ROM metadata logs show cache load, scan, MD5 hashing, cache write, upload/skip, counts, and durations. MD5 progress is throttled by `ROM_METADATA_PROGRESS_FILES` and `ROM_METADATA_PROGRESS_SECONDS`, and individual ROM paths are not logged by default.
 

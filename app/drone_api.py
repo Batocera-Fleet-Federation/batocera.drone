@@ -8809,9 +8809,16 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
     thread.start()
 
 
-def _sync_rom_metadata_to_overmind(settings: Settings, repository: "RomRepository", config: dict, base_url: str, token: str) -> dict:
+def _sync_rom_metadata_to_overmind(
+    settings: Settings,
+    repository: "RomRepository",
+    config: dict,
+    base_url: str,
+    token: str,
+    prepared_poll: Optional[Tuple[dict, bool, dict]] = None,
+) -> dict:
     poll_started = time.monotonic()
-    snapshot, changed, stats = _poll_rom_metadata_cache(settings, repository)
+    snapshot, changed, stats = prepared_poll or _poll_rom_metadata_cache(settings, repository)
     rom_count = len(snapshot.get("roms") or [])
     bios_count = len(snapshot.get("bios") or [])
     artwork_count = len(snapshot.get("artwork") or [])
@@ -8900,6 +8907,43 @@ def _sync_rom_metadata_to_overmind(settings: Settings, repository: "RomRepositor
     }
 
 
+def _complete_local_rom_metadata_cache(settings: Settings, repository: "RomRepository", reason: str) -> dict:
+    hash_batches = 0
+    hashed_roms = 0
+    for patch in _hash_rom_metadata_batches(settings, repository, batch_size=ROM_METADATA_MD5_BATCH_SIZE):
+        hash_batches += 1
+        hashed_roms += len(patch.get("roms") or [])
+    print(
+        f"Asset metadata cached locally: upload_deferred={reason} hash_batches={hash_batches} hashed_roms={hashed_roms}",
+        file=sys.stdout,
+        flush=True,
+    )
+    return {
+        "status": "cached",
+        "reason": reason,
+        "hash_batches": hash_batches,
+        "hashed_roms": hashed_roms,
+    }
+
+
+def _poll_rom_metadata_once(settings: Settings, repository: "RomRepository") -> dict:
+    prepared_poll = _poll_rom_metadata_cache(settings, repository)
+    config = _load_overmind_config_for_settings(settings)
+    base_url = str(config.get("overmind_url") or "").strip().rstrip("/")
+    token = str(config.get("overmind_token") or "").strip()
+    if not base_url:
+        return _complete_local_rom_metadata_cache(settings, repository, "overmind_not_configured")
+    if not token:
+        token = _register_or_claim_overmind_token(settings, repository, config, base_url) or ""
+        if not token:
+            return _complete_local_rom_metadata_cache(settings, repository, "overmind_not_connected")
+    try:
+        return _sync_rom_metadata_to_overmind(settings, repository, config, base_url, token, prepared_poll=prepared_poll)
+    except Exception:
+        _complete_local_rom_metadata_cache(settings, repository, "overmind_upload_failed")
+        raise
+
+
 def _start_rom_metadata_poller(settings: Settings, repository: "RomRepository") -> None:
     poll_seconds = max(30, int(settings.rom_metadata_poll_seconds or ROM_METADATA_POLL_SECONDS))
 
@@ -8907,19 +8951,7 @@ def _start_rom_metadata_poller(settings: Settings, repository: "RomRepository") 
         while True:
             poll_started = time.monotonic()
             try:
-                config = _load_overmind_config_for_settings(settings)
-                base_url = str(config.get("overmind_url") or "").strip().rstrip("/")
-                token = str(config.get("overmind_token") or "").strip()
-                if not base_url:
-                    time.sleep(poll_seconds)
-                    continue
-                if not token:
-                    token = _register_or_claim_overmind_token(settings, repository, config, base_url) or ""
-                    if not token:
-                        time.sleep(poll_seconds)
-                        continue
-
-                _sync_rom_metadata_to_overmind(settings, repository, config, base_url, token)
+                _poll_rom_metadata_once(settings, repository)
             except (HTTPError, URLError) as error:
                 status_part = f" status={error.code}" if isinstance(error, HTTPError) else ""
                 print(
