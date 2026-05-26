@@ -39,6 +39,7 @@ from app.drone_api import (
     _peer_ssl_diagnostic,
     _peer_trust_cafile,
     _download_rom_from_peer,
+    _download_rom_folder_from_peer,
     _collision_safe_target,
     _rom_md5_exists,
     _best_peer_for_rom,
@@ -378,6 +379,61 @@ class SettingsTests(unittest.TestCase):
             self.assertFalse((root / "roms" / "snes" / "Cancel Me.zip.part").exists())
             self.assertEqual(repo.list_assets("snes", "roms")[1], [])
 
+    def test_download_folder_rom_from_peer_recreates_tree_without_md5(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
+                clear=True,
+            ):
+                settings = Settings.from_env()
+
+            manifest = {
+                "relative_path": "Game.ps3",
+                "entry_type": "folder",
+                "file_size": 10,
+                "directories": ["PS3_GAME", "PS3_GAME/USRDIR"],
+                "files": [
+                    {"relative_path": "PS3_GAME/PARAM.SFO", "file_size": 5},
+                    {"relative_path": "PS3_GAME/USRDIR/EBOOT.BIN", "file_size": 5},
+                ],
+            }
+
+            class FakeResponse:
+                def __init__(self, data):
+                    self._chunks = [data, b""]
+                    self.headers = {"Content-Length": str(len(data))}
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self, _size=-1):
+                    return self._chunks.pop(0)
+
+            def fake_urlopen(request, timeout=None, context=None):
+                url = request.full_url
+                if url.endswith("/PS3_GAME/PARAM.SFO"):
+                    return FakeResponse(b"param")
+                if url.endswith("/PS3_GAME/USRDIR/EBOOT.BIN"):
+                    return FakeResponse(b"eboot")
+                raise AssertionError(url)
+
+            peer = {"drone_id": "source-a", "reachable_url": "http://source-a:8080"}
+            with mock.patch("app.drone_api._peer_get_json", return_value=manifest), mock.patch(
+                "app.drone_api.urlopen", side_effect=fake_urlopen
+            ), mock.patch.object(RomRepository, "build_md5", side_effect=AssertionError("folder sync should not hash")):
+                result = _download_rom_folder_from_peer(settings, {}, peer, "ps3", "Game.ps3", expected_size=10)
+
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(result["entry_type"], "folder")
+            self.assertEqual(result["bytes_transferred"], 10)
+            self.assertEqual((root / "roms" / "ps3" / "Game.ps3" / "PS3_GAME" / "PARAM.SFO").read_bytes(), b"param")
+            self.assertEqual((root / "roms" / "ps3" / "Game.ps3" / "PS3_GAME" / "USRDIR" / "EBOOT.BIN").read_bytes(), b"eboot")
+
     def test_download_manager_tracks_queue_and_idempotent_cancel(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
@@ -546,6 +602,26 @@ class SettingsTests(unittest.TestCase):
             self.assertNotIn("md5", roms[0])
             self.assertNotIn("rom_md5", roms[0])
             self.assertEqual(roms[0]["rom_path"], "Loose Game (USA).zip")
+
+    def test_ps3_folder_rom_is_listed_without_md5(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            game = root / "roms" / "ps3" / "Demon Souls.ps3"
+            (game / "PS3_GAME" / "USRDIR").mkdir(parents=True)
+            (game / "PS3_GAME" / "USRDIR" / "EBOOT.BIN").write_bytes(b"boot")
+            (game / "PS3_DISC.SFB").write_bytes(b"disc")
+            repo = RomRepository(root / "roms", root / "bios")
+
+            with mock.patch.object(RomRepository, "build_md5", side_effect=AssertionError("folder ROM should not hash")):
+                _, roms = repo.list_assets("ps3", "roms")
+
+            self.assertEqual(len(roms), 1)
+            self.assertEqual(roms[0]["entry_type"], "folder")
+            self.assertFalse(roms[0]["is_downloadable"])
+            self.assertEqual(roms[0]["file_path"], "Demon Souls.ps3")
+            self.assertEqual(roms[0]["file_size"], 8)
+            self.assertNotIn("md5", roms[0])
+            self.assertNotIn("rom_md5", roms[0])
 
     def test_gamelist_metadata_enriches_matching_disk_rom_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

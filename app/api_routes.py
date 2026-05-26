@@ -45,6 +45,10 @@ class ApiRoutesMixin:
                 self._handle_peer_rom_download(parts[2], "/".join(parts[3:]))
                 return
 
+            if len(parts) >= 4 and parts[0] == "peer" and parts[1] == "rom-manifest":
+                self._handle_peer_rom_manifest(parts[2], "/".join(parts[3:]))
+                return
+
             if len(parts) >= 3 and parts[0] == "peer" and parts[1] == "bios":
                 self._handle_peer_bios_download("/".join(parts[2:]))
                 return

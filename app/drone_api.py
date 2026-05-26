@@ -1532,6 +1532,18 @@ class RomRepository:
         return digest.hexdigest()
 
     @staticmethod
+    def build_directory_stats(path: Path) -> Tuple[int, int]:
+        total_size = 0
+        latest_mtime = int(path.stat().st_mtime)
+        for child in path.rglob("*"):
+            if not child.is_file():
+                continue
+            stat = child.stat()
+            total_size += int(stat.st_size)
+            latest_mtime = max(latest_mtime, int(stat.st_mtime))
+        return total_size, latest_mtime
+
+    @staticmethod
     def should_ignore_rom_file(file_name: str, system: Optional[str] = None) -> bool:
         lower = str(file_name or "").strip().lower()
         if lower.startswith(".") or lower in {"_info.txt", "gamelist.xml", ".keep", ".gitkeep", "readme.md"}:
@@ -1596,17 +1608,28 @@ class RomRepository:
                 if system_lower == "ps3":
                     if not entry.name.lower().endswith(".ps3"):
                         continue
-                    stat = entry.stat()
+                    size, mtime = self.build_directory_stats(entry)
                     display_name = entry.name[:-4]
                     items.append(
                         {
                             "unique_id": self.build_unique_id(entry),
                             "name": display_name,
                             "rom_file": entry.name,
-                            "byte_count": stat.st_size,
+                            "filename": entry.name,
+                            "relative_path": entry.name,
+                            "absolute_path": str(entry.resolve()),
+                            "rom_path": entry.name,
+                            "file_path": entry.name,
+                            "byte_count": size,
+                            "size": size,
+                            "file_size": size,
+                            "modified_time": mtime,
+                            "mtime": mtime,
                             "entry_type": "folder",
                             "is_downloadable": False,
                             "source_folder": entry.name,
+                            "source": "disk",
+                            "metadata_source": None,
                             "image_stem": display_name,
                         }
                     )
@@ -1621,17 +1644,28 @@ class RomRepository:
                 if not ps4_name_file:
                     continue
 
-                stat = entry.stat()
+                size, mtime = self.build_directory_stats(entry)
                 display_name = ps4_name_file.stem
                 items.append(
                     {
-                            "unique_id": self.build_unique_id(entry),
-                            "name": display_name,
-                            "rom_file": entry.name,
-                        "byte_count": stat.st_size,
+                        "unique_id": self.build_unique_id(entry),
+                        "name": display_name,
+                        "rom_file": entry.name,
+                        "filename": entry.name,
+                        "relative_path": entry.name,
+                        "absolute_path": str(entry.resolve()),
+                        "rom_path": entry.name,
+                        "file_path": entry.name,
+                        "byte_count": size,
+                        "size": size,
+                        "file_size": size,
+                        "modified_time": mtime,
+                        "mtime": mtime,
                         "entry_type": "folder",
                         "is_downloadable": False,
                         "source_folder": entry.name,
+                        "source": "disk",
+                        "metadata_source": None,
                         "image_stem": display_name,
                     }
                 )
@@ -3455,6 +3489,51 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             return
         self.log_message("peer rom download system=%s rom=%s bytes=%s", system, rel, target.stat().st_size)
         self._stream_file(target, "application/octet-stream", as_attachment=True)
+
+    def _handle_peer_rom_manifest(self, system: str, relative_path: str) -> None:
+        if self.settings.drone_mtls_enabled:
+            cert = self.connection.getpeercert() if hasattr(self.connection, "getpeercert") else None
+            if not cert:
+                self._send_json(403, {"error": "client certificate required"})
+                return
+        system_dir = self.repository.get_system_dir(system).resolve()
+        rel = unquote(relative_path or "").replace("\\", "/").lstrip("/")
+        if not rel or ".." in Path(rel).parts:
+            self._send_json(400, {"error": "invalid rom path"})
+            return
+        target = (system_dir / rel).resolve()
+        if not target.exists() or not target.is_dir() or (target != system_dir and system_dir not in target.parents):
+            self.log_error("peer rom manifest failed system=%s rom=%s resolved=%s reason=not_found", system, rel, str(target))
+            self._send_json(404, {"error": "not found"})
+            return
+        files = []
+        directories = []
+        total_size = 0
+        latest_mtime = int(target.stat().st_mtime)
+        for child in sorted(target.rglob("*"), key=lambda p: p.relative_to(target).as_posix().lower()):
+            child_rel = child.relative_to(target).as_posix()
+            if child.is_dir():
+                directories.append(child_rel)
+                continue
+            if not child.is_file():
+                continue
+            stat = child.stat()
+            total_size += int(stat.st_size)
+            latest_mtime = max(latest_mtime, int(stat.st_mtime))
+            files.append({"relative_path": child_rel, "file_size": int(stat.st_size), "modified_time": int(stat.st_mtime)})
+        self._send_json(
+            200,
+            {
+                "system": system,
+                "relative_path": rel,
+                "entry_type": "folder",
+                "file_count": len(files),
+                "file_size": total_size,
+                "modified_time": latest_mtime,
+                "directories": directories,
+                "files": files,
+            },
+        )
 
     def _handle_peer_bios_download(self, relative_path: str) -> None:
         if self.settings.drone_mtls_enabled:
@@ -7020,7 +7099,8 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
         for rom in roms:
             file_path = str(rom.get("file_path") or rom.get("relative_path") or rom.get("rom_path") or rom.get("rom_file") or "").strip()
             absolute = Path(str(rom.get("absolute_path") or ""))
-            if not file_path or not absolute.exists() or not absolute.is_file():
+            entry_type = str(rom.get("entry_type") or "file").strip().lower()
+            if not file_path or not absolute.exists() or (entry_type == "file" and not absolute.is_file()) or (entry_type == "folder" and not absolute.is_dir()):
                 continue
             discovered += 1
             key = _rom_cache_entry_key(system_name, file_path)
@@ -7046,7 +7126,8 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
                     next_entries[key].update({"md5": previous.get("md5") or previous.get("rom_md5"), "rom_md5": previous.get("rom_md5")})
             else:
                 next_entries[key] = base_entry
-                new_or_changed.append((key, absolute, base_entry))
+                if entry_type != "folder":
+                    new_or_changed.append((key, absolute, base_entry))
         gamelist_path = settings.roms_root / system_name / "gamelist.xml"
         if gamelist_path.exists() and gamelist_path.is_file():
             gamelist = _read_text_file(gamelist_path, max_bytes=524288)
@@ -7238,7 +7319,7 @@ class DownloadManager:
         self._thread = Thread(target=self._worker, name="drone-download-worker", daemon=True)
         self._thread.start()
 
-    def enqueue_rom(self, config: dict, peer: dict, system: str, relative_path: str, expected_size=None, expected_md5=None, source_action_id: Optional[str] = None) -> dict:
+    def enqueue_rom(self, config: dict, peer: dict, system: str, relative_path: str, expected_size=None, expected_md5=None, source_action_id: Optional[str] = None, entry_type: str = "file") -> dict:
         job_id = str(uuid.uuid4())
         peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
         now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -7252,6 +7333,7 @@ class DownloadManager:
             "file_path": relative_path,
             "file_name": Path(relative_path).name,
             "file_type": "ROM",
+            "entry_type": entry_type,
             "system": system,
             "rom_name": relative_path,
             "relative_path": relative_path,
@@ -7274,6 +7356,7 @@ class DownloadManager:
             "_config": config,
             "_peer": peer,
             "_expected_md5": expected_md5,
+            "_entry_type": entry_type,
         }
         with self._lock:
             self._jobs[job_id] = job
@@ -7478,6 +7561,7 @@ class DownloadManager:
             artwork_type = str(job.get("artwork_type") or "")
             expected_size = job.get("file_size") or job.get("total_bytes")
             expected_md5 = job.get("_expected_md5")
+            entry_type = str(job.get("_entry_type") or job.get("entry_type") or "file").lower()
             cancel_event = self._cancel_events.get(job_id) or Event()
             asset_type = str(job.get("_asset_type") or "rom").lower()
         self._push_download_state(config, "started", force=True)
@@ -7528,17 +7612,29 @@ class DownloadManager:
                     cancellation_event=cancel_event,
                 )
             else:
-                activity = _download_rom_from_peer(
-                    self.settings,
-                    config,
-                    peer,
-                    system,
-                    rel,
-                    expected_size=expected_size,
-                    expected_md5=expected_md5,
-                    progress_callback=progress,
-                    cancellation_event=cancel_event,
-                )
+                if entry_type == "folder":
+                    activity = _download_rom_folder_from_peer(
+                        self.settings,
+                        config,
+                        peer,
+                        system,
+                        rel,
+                        expected_size=expected_size,
+                        progress_callback=progress,
+                        cancellation_event=cancel_event,
+                    )
+                else:
+                    activity = _download_rom_from_peer(
+                        self.settings,
+                        config,
+                        peer,
+                        system,
+                        rel,
+                        expected_size=expected_size,
+                        expected_md5=expected_md5,
+                        progress_callback=progress,
+                        cancellation_event=cancel_event,
+                    )
             refresh_started = time.monotonic()
             try:
                 refreshed = self.repository.list_artwork_metadata() if asset_type == "artwork" else (self.repository.list_bios_entries() if asset_type == "bios" else self.repository.list_assets(system, "roms")[1])
@@ -7688,6 +7784,132 @@ def _best_peer_for_bios(
     swarm = _read_json_file(_overmind_swarm_path_for_settings(settings), [])
     peer_checks = _read_json_file(_overmind_peer_results_path_for_settings(settings), [])
     return _select_best_peer(swarm, peer_checks, settings.overmind_device_id, source_device_ids=source_device_ids)
+
+
+def _download_rom_folder_from_peer(
+    settings: Settings,
+    config: dict,
+    peer: dict,
+    system: str,
+    relative_path: str,
+    expected_size=None,
+    progress_callback=None,
+    cancellation_event: Optional[Event] = None,
+) -> dict:
+    peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
+    address = _peer_address(peer)
+    if not address:
+        raise RuntimeError("selected peer has no address")
+    rel = _safe_rom_relative_path(relative_path)
+    manifest_url = f"{address}/v1/api/peer/rom-manifest/{quote(system, safe='')}/{quote(rel, safe='/')}"
+    system_dir = (settings.roms_root / system).resolve()
+    target_dir = (system_dir / rel).resolve()
+    if target_dir == system_dir or system_dir not in target_dir.parents:
+        raise ValueError("invalid target path")
+    if target_dir.exists() and not target_dir.is_dir():
+        raise ValueError("target path exists and is not a directory")
+    cafile = _peer_trust_cafile(settings, peer_id=peer_id, config=config)
+    if address.startswith("https://") and not cafile:
+        raise ssl.SSLError(f"no trusted certificate cached for peer {peer_id}")
+    manifest = _peer_get_json(manifest_url, settings, peer_id=peer_id, config=config)
+    files = manifest.get("files") if isinstance(manifest.get("files"), list) else []
+    directories = manifest.get("directories") if isinstance(manifest.get("directories"), list) else []
+    if not files and not directories:
+        raise RuntimeError("folder manifest is empty")
+
+    started_dt = datetime.now(timezone.utc).replace(microsecond=0)
+    started = started_dt.isoformat()
+    started_mono = time.monotonic()
+    bytes_written = 0
+    total_bytes = None
+    try:
+        total_bytes = int(manifest.get("file_size") or expected_size or 0) or None
+    except Exception:
+        total_bytes = None
+
+    def ensure_not_cancelled(partial: Optional[Path] = None) -> None:
+        if cancellation_event is not None and cancellation_event.is_set():
+            if partial and partial.exists():
+                partial.unlink()
+            raise DownloadCancelled("download cancelled")
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+    for directory in directories:
+        child_dir = (target_dir / _safe_rom_relative_path(str(directory or ""))).resolve()
+        if child_dir == target_dir or target_dir not in child_dir.parents:
+            raise ValueError("invalid manifest directory path")
+        child_dir.mkdir(parents=True, exist_ok=True)
+
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        child_rel = _safe_rom_relative_path(str(item.get("relative_path") or ""))
+        target = (target_dir / child_rel).resolve()
+        if target == target_dir or target_dir not in target.parents:
+            raise ValueError("invalid manifest file path")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        partial_target = target.with_name(f"{target.name}.part")
+        file_url = f"{address}/v1/api/peer/roms/{quote(system, safe='')}/{quote(rel + '/' + child_rel, safe='/')}"
+        request = Request(file_url, headers={"User-Agent": "batocera-drone-rom-folder-sync/1.0"})
+        context = _drone_client_ssl_context(settings, file_url, verify=bool(cafile), cafile=cafile)
+        expected_file_size = item.get("file_size")
+        file_bytes = 0
+        try:
+            with urlopen(request, timeout=max(10, PEER_CHECK_TIMEOUT_SECONDS * 4), context=context) as response, partial_target.open("wb") as handle:
+                while True:
+                    ensure_not_cancelled(partial_target)
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    handle.write(chunk)
+                    file_bytes += len(chunk)
+                    bytes_written += len(chunk)
+                    if progress_callback:
+                        progress_callback(bytes_written, total_bytes)
+        except DownloadCancelled:
+            if partial_target.exists():
+                partial_target.unlink()
+            raise
+        except Exception:
+            if partial_target.exists():
+                partial_target.unlink()
+            raise
+        if expected_file_size not in (None, ""):
+            try:
+                if int(expected_file_size) != file_bytes:
+                    if partial_target.exists():
+                        partial_target.unlink()
+                    raise RuntimeError(f"size mismatch for {child_rel} expected={expected_file_size} actual={file_bytes}")
+            except ValueError:
+                pass
+        partial_target.replace(target)
+    if expected_size not in (None, ""):
+        try:
+            if int(expected_size) != bytes_written:
+                raise RuntimeError(f"size mismatch expected={expected_size} actual={bytes_written}")
+        except ValueError:
+            pass
+    completed_dt = datetime.now(timezone.utc).replace(microsecond=0)
+    duration_ms = int((time.monotonic() - started_mono) * 1000)
+    return {
+        "entry_type": "folder",
+        "source_drone_id": peer_id,
+        "target_drone_id": settings.overmind_device_id,
+        "system": system,
+        "rom_name": rel,
+        "relative_path": target_dir.relative_to(system_dir).as_posix(),
+        "action": "download",
+        "status": "completed",
+        "bytes_transferred": bytes_written,
+        "file_size": expected_size or total_bytes or bytes_written,
+        "download_started_at": started,
+        "download_completed_at": completed_dt.isoformat(),
+        "started_at": started,
+        "completed_at": completed_dt.isoformat(),
+        "duration_ms": duration_ms,
+        "duration_seconds": round(duration_ms / 1000, 3),
+        "selected_peer_reason": "healthy peer with requested directory ROM and best sampled score",
+    }
 
 
 def _download_rom_from_peer(
@@ -8260,6 +8482,7 @@ def _execute_overmind_action(settings: Settings, repository: "RomRepository", ac
             system = str(item.get("system_name") or item.get("system") or payload.get("system_name") or "").strip()
             rel = str(item.get("file_path") or item.get("rom_name") or "").strip()
             expected_md5 = item.get("rom_md5") or item.get("md5")
+            entry_type = str(item.get("entry_type") or "file").strip().lower()
             source_device_ids = {
                 str(device.get("device_id") or device.get("drone_id") or "")
                 for device in item.get("devices", [])
@@ -8277,6 +8500,7 @@ def _execute_overmind_action(settings: Settings, repository: "RomRepository", ac
                     "system": system,
                     "rom_name": rel,
                     "relative_path": rel,
+                    "entry_type": entry_type,
                     "action": "download",
                     "status": "skipped",
                     "failure_reason": "ROM md5 already exists locally",
@@ -8295,6 +8519,7 @@ def _execute_overmind_action(settings: Settings, repository: "RomRepository", ac
                     "system": system,
                     "rom_name": rel,
                     "relative_path": rel,
+                    "entry_type": entry_type,
                     "action": "download",
                     "status": "failed",
                     "failure_reason": "No healthy source peer with requested ROM found",
@@ -8313,9 +8538,11 @@ def _execute_overmind_action(settings: Settings, repository: "RomRepository", ac
                     expected_size=item.get("file_size"),
                     expected_md5=expected_md5,
                     source_action_id=str(action.get("id") or ""),
+                    entry_type=entry_type,
                 )
                 activity["sync_id"] = activity.get("job_id") or sync_id
                 activity["rom_md5"] = activity.get("rom_md5") or expected_md5
+                activity["entry_type"] = activity.get("entry_type") or entry_type
                 activities.append(activity)
             except Exception as error:
                 failures += 1
@@ -8326,6 +8553,7 @@ def _execute_overmind_action(settings: Settings, repository: "RomRepository", ac
                     "system": system,
                     "rom_name": rel,
                     "relative_path": rel,
+                    "entry_type": entry_type,
                     "action": "download",
                     "status": "failed",
                     "failure_reason": str(error),
