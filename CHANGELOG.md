@@ -18,6 +18,7 @@
 - Asset transfers now reject Drones that Overmind has not verified as publicly resolvable, including when processing previously queued sync actions.
 - Added a Claim Ownership section to the Overmind Integration page. Added local admin route POST /admin/integrations/overmind/claim-ownership. Claim requires an https:// Overmind URL, email, and password. Drone sends credentials to Overmind over HTTPS, stores only the returned Drone bearer token, and does not log or persist the password.
 - Heartbeat no longer scans ROMs, sends ROM metadata, or hashes MD5s. Heartbeat now logs send start, endpoint, success/failure, status, and duration. Added independent ROM metadata poller with disk cache at /userdata/system/drone-app/rom_metadata_cache.json. Poller uses ROM_METADATA_POLL_SECONDS, detects new/changed/deleted ROMs, hashes only new/changed files, checkpoints long discovery/hash builds for restart recovery, writes cache atomically, continues collecting locally without an Overmind connection, skips uploads when clean, and logs scan/hash/upload progress. Added tests for cache rebuild, deleted ROM handling, offline collection, restart recovery, and MD5 reuse.
+- Log source uploads now fast-forward oversized post-outage backlogs to recent output with an explicit omission marker, keeping Overmind's Logs view current after reconnects.
 
 ## [v0.0.15] - 2026-05-23
 

@@ -204,6 +204,28 @@ class SettingsTests(unittest.TestCase):
             stdout_entry = next(row for row in rewritten["logs"] if row["source"] == "drone_stdout")
             self.assertEqual(stdout_entry["files"][0]["content"], "rewritten\n")
 
+    def test_log_source_collection_skips_old_bytes_when_backlog_is_large(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            log_dir = Path(tmp) / "logs"
+            log_dir.mkdir(parents=True)
+            stdout_log = log_dir / "stdout.log"
+            stdout_log.write_text("old-line\n" * 40000 + "latest-checkpoint\n", encoding="utf-8")
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "LOG_DIR": str(log_dir)},
+                clear=True,
+            ):
+                settings = Settings.from_env()
+
+            payload = _collect_log_sources(settings)
+            file_info = next(row for row in payload["logs"] if row["source"] == "drone_stdout")["files"][0]
+
+            self.assertGreater(file_info["skipped_bytes"], 0)
+            self.assertIn("older buffered bytes to show current output", file_info["content"])
+            self.assertIn("latest-checkpoint", file_info["content"])
+            self.assertEqual(payload["_cursors"][str(stdout_log.resolve())]["size"], stdout_log.stat().st_size)
+
     def test_game_log_collection_detects_launch_with_md5(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"

@@ -99,8 +99,12 @@ def _read_text_file_delta(path: Path, cursor: dict, max_bytes: int) -> Tuple[dic
         size = int(stat.st_size)
         previous_mtime_ns = int(previous.get("mtime_ns") or 0)
         mtime_ns = int(stat.st_mtime_ns)
+        skipped_bytes = 0
         if size > previous_size >= 0:
             start = previous_size
+            if size - start > max_bytes:
+                skipped_bytes = size - start - max_bytes
+                start = size - max_bytes
         elif size == previous_size and mtime_ns == previous_mtime_ns:
             start = size
         else:
@@ -111,13 +115,17 @@ def _read_text_file_delta(path: Path, cursor: dict, max_bytes: int) -> Tuple[dic
         truncated = len(raw) > max_bytes
         if truncated:
             raw = raw[:max_bytes]
+        content = raw.decode("utf-8", errors="replace")
+        if skipped_bytes:
+            content = f"[Log delivery skipped {skipped_bytes} older buffered bytes to show current output]\n{content}"
         next_cursor = {"size": start + len(raw), "mtime_ns": mtime_ns}
         return {
             "path": str(path),
             "size": size,
             "offset": start,
             "truncated": truncated,
-            "content": raw.decode("utf-8", errors="replace"),
+            "content": content,
+            "skipped_bytes": skipped_bytes,
             "delta": True,
         }, next_cursor
     except Exception as error:
