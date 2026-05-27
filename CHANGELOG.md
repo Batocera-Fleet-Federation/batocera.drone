@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.24] - 2026-05-27
+
+- Updating drone to only receive subset of information returned from overmind to reduce non-required information from going back and forth.
+
 ## [v0.0.23] - 2026-05-26
 
 - Updating drone fix bug with database updates.
