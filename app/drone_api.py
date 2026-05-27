@@ -9288,6 +9288,11 @@ def _start_rom_metadata_poller(settings: Settings, repository: "RomRepository") 
         0,
         int(os.environ.get("ROM_METADATA_INITIAL_DELAY_SECONDS", str(ROM_METADATA_INITIAL_DELAY_SECONDS))),
     )
+    print(
+        f"Asset metadata poller starting: poll_seconds={poll_seconds} initial_delay_seconds={initial_delay_seconds}",
+        file=sys.stdout,
+        flush=True,
+    )
 
     def loop() -> None:
         if initial_delay_seconds:
@@ -9321,6 +9326,7 @@ def _start_rom_metadata_poller(settings: Settings, repository: "RomRepository") 
 
     thread = Thread(target=loop, name="rom-metadata-poller", daemon=True)
     thread.start()
+    print("Asset metadata poller thread started", file=sys.stdout, flush=True)
 
 
 def create_server(settings: Settings) -> ThreadingHTTPServer:
@@ -9389,9 +9395,13 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
     if not _OVERMIND_POLLER_STARTED:
         _start_overmind_action_poller(settings, repository)
         _OVERMIND_POLLER_STARTED = True
-    if not _ROM_METADATA_POLLER_STARTED and settings.rom_metadata_poll_seconds != 0:
+    if settings.rom_metadata_poll_seconds == 0:
+        print("Asset metadata poller disabled: ROM_METADATA_POLL_SECONDS=0", file=sys.stdout, flush=True)
+    elif not _ROM_METADATA_POLLER_STARTED:
         _start_rom_metadata_poller(settings, repository)
         _ROM_METADATA_POLLER_STARTED = True
+    else:
+        print("Asset metadata poller already started", file=sys.stdout, flush=True)
 
     return server
 
