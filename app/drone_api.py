@@ -157,6 +157,7 @@ PEER_CHECK_INTERVAL_SECONDS = int(os.environ.get("DRONE_PEER_CHECK_INTERVAL_SECO
 OVERMIND_SPEED_SAMPLE_SECONDS = int(os.environ.get("OVERMIND_SPEED_SAMPLE_SECONDS", "600"))
 SPEED_TEST_DEFAULT_BASE_URL = "https://speed.cloudflare.com"
 OVERMIND_HEARTBEAT_SECONDS = int(os.environ.get("OVERMIND_POLL_SECONDS", "30"))
+OVERMIND_CONFIG_REPORT_SECONDS = int(os.environ.get("OVERMIND_CONFIG_REPORT_SECONDS", "900"))
 ROM_METADATA_POLL_SECONDS = int(os.environ.get("ROM_METADATA_POLL_SECONDS", "900"))
 ROM_METADATA_INITIAL_DELAY_SECONDS = int(os.environ.get("ROM_METADATA_INITIAL_DELAY_SECONDS", "60"))
 ROM_METADATA_PROGRESS_SECONDS = float(os.environ.get("ROM_METADATA_PROGRESS_SECONDS", "30"))
@@ -8919,15 +8920,17 @@ def _execute_overmind_action(
 def _start_overmind_action_poller(settings: Settings, repository: "RomRepository") -> None:
     poll_seconds = max(5, int(settings.overmind_poll_seconds or OVERMIND_HEARTBEAT_SECONDS))
     speed_sample_seconds = OVERMIND_SPEED_SAMPLE_SECONDS
+    config_report_seconds = max(0, int(OVERMIND_CONFIG_REPORT_SECONDS))
     system_info_refresh_seconds = max(300, int(os.environ.get("DRONE_SYSTEM_INFO_REFRESH_SECONDS", "3600")))
     last_speed_sample_at: Optional[float] = None
+    last_config_report_at = -float(config_report_seconds or 0)
     last_peer_check_at = -float(PEER_CHECK_INTERVAL_SECONDS)
     last_system_info_at = -float(system_info_refresh_seconds)
     system_info_payload: dict = {}
     fs_snapshot = _filesystem_snapshot(settings)
 
     def loop() -> None:
-        nonlocal last_speed_sample_at, last_peer_check_at, last_system_info_at, system_info_payload, fs_snapshot
+        nonlocal last_speed_sample_at, last_config_report_at, last_peer_check_at, last_system_info_at, system_info_payload, fs_snapshot
         while True:
             try:
                 config = _load_overmind_config_for_settings(settings)
@@ -9068,18 +9071,18 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                         flush=True,
                     )
 
-                stored_configs = response_device.get("emulator_configs") if isinstance(response_device.get("emulator_configs"), dict) else {}
-                require_config_snapshot = not bool(stored_configs.get("configs"))
-                emulator_configs = _collect_emulator_configs(settings, include_unchanged=require_config_snapshot)
-                emulator_config_fingerprints = emulator_configs.pop("_fingerprints", {})
-                if emulator_configs.get("configs"):
-                    _overmind_post_json(f"{base_url}/api/devices/{device_id}/emulator-configs", emulator_configs, token=token, settings=settings)
-                    _commit_emulator_config_fingerprints(settings, emulator_config_fingerprints)
-                    print(
-                        f"Sent {len(emulator_configs.get('configs') or [])} changed emulator config(s) to Overmind",
-                        file=sys.stdout,
-                        flush=True,
-                    )
+                if config_report_seconds > 0 and now - last_config_report_at >= config_report_seconds:
+                    emulator_configs = _collect_emulator_configs(settings)
+                    emulator_config_fingerprints = emulator_configs.pop("_fingerprints", {})
+                    if emulator_configs.get("configs"):
+                        _overmind_post_json(f"{base_url}/api/devices/{device_id}/emulator-configs", emulator_configs, token=token, settings=settings)
+                        _commit_emulator_config_fingerprints(settings, emulator_config_fingerprints)
+                        print(
+                            f"Sent {len(emulator_configs.get('configs') or [])} changed emulator config(s) to Overmind",
+                            file=sys.stdout,
+                            flush=True,
+                        )
+                    last_config_report_at = now
 
                 actions = response.get("actions") if isinstance(response.get("actions"), list) else None
                 if actions is None:
