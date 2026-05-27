@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,7 +15,88 @@ except ImportError:
 
 
 _STATE_SCHEMA_VERSION = 2
-_CONFIG_SUFFIXES = {".cfg", ".conf", ".ini", ".json", ".toml", ".xml", ".yml", ".yaml", ".bml", ".reg"}
+_CONFIG_COLLECTION_SPECS = (
+    (
+        "emulator_config",
+        "configs",
+        (
+            "cemu/**/*",
+            "dolphin-emu/*.ini",
+            "dosbox/*.conf",
+            "flycast/emu.cfg",
+            "flycast/mappings/**/*",
+            "mame/*.ini",
+            "mame/*.cfg",
+            "mupen64/**/*",
+            "openbor/config*.ini",
+            "PCSX2/**/*",
+            "Play Data Files/config.xml",
+            "play/Play Data Files/config.xml",
+            "play/Play Data Files/inputprofiles/**/*",
+            "ppsspp/PSP/SYSTEM/controls.ini",
+            "ppsspp/PSP/SYSTEM/ppsspp.ini",
+            "retroarch/**/*",
+            "rpcs3/config.yml",
+            "rpcs3/input_configs/**/*",
+            "rpcs3/evdev_positive_axis.yml",
+            "rpcs3/gem*.yml",
+            "rpcs3/LogitechG27.yml",
+            "rpcs3/usio.yml",
+            "rpcs3/patches/patch.yml",
+            "shadps4/user/config.toml",
+            "shadps4/user/input_config/**/*",
+            "vita3k/config.yml",
+            "xemu/xemu.toml",
+        ),
+    ),
+    (
+        "batocera_config",
+        "configs",
+        (
+            "emulationstation/es_input.cfg",
+            "emulationstation/es_last_input.cfg",
+            "emulationstation/es_settings.cfg",
+            "emulationstation/es_features_steam.cfg",
+            "emulationstation/es_systems_steam.cfg",
+            "encoder_keys.conf",
+            "multimedia_keys.conf",
+            "antimicrox/antimicrox_settings.ini",
+        ),
+    ),
+    (
+        "desktop_or_ui_config",
+        ".config",
+        (
+            "libfm/libfm.conf",
+            "pcmanfm/**/*",
+            "QtProject.conf",
+            "yad.conf",
+        ),
+    ),
+    (
+        "patch_metadata",
+        "configs",
+        (
+            "shadps4/user/patches/**/*",
+            "rpcs3/patches/patch.yml",
+        ),
+    ),
+)
+_CONFIG_EXCLUSIONS = (
+    "emulationstation/scrapers/**",
+    "rpcs3/dev_flash/**",
+    "rpcs3.broken.*",
+    "rpcs3.broken.*/**",
+    "rpcs3/players_history.yml",
+    "rpcs3/recording.yml",
+    "rpcs3/games.yml",
+    "dolphin-emu/TimePlayed.ini",
+    "dolphin-emu/Logger.ini",
+    "shadps4/user/game_data/**",
+    "shadps4/user/download/**",
+    "shadps4/user/imgui.ini",
+    "shadps4/user/qt_ui.ini",
+)
 
 
 def _state_path(settings: Any, filename: str) -> Path:
@@ -156,37 +238,56 @@ def collect_log_sources(settings: Any, include_unchanged: bool = False) -> dict:
     }
 
 
+def _is_excluded_config_path(relative_path: str) -> bool:
+    if ".bak" in relative_path.lower():
+        return True
+    return any(fnmatch.fnmatchcase(relative_path, pattern) for pattern in _CONFIG_EXCLUSIONS)
+
+
+def _iter_selected_config_files(settings: Any):
+    """Yield configured Batocera files only, deduplicating cross-category paths."""
+    roots = {
+        "configs": settings.userdata_root / "system" / "configs",
+        ".config": settings.userdata_root / "system" / ".config",
+    }
+    selected = {}
+    for _category, root_name, patterns in _CONFIG_COLLECTION_SPECS:
+        root = roots[root_name]
+        if not root.exists() or not root.is_dir():
+            continue
+        for pattern in patterns:
+            for path in root.glob(pattern):
+                if not path.is_file():
+                    continue
+                relative_path = path.relative_to(root).as_posix()
+                if _is_excluded_config_path(relative_path):
+                    continue
+                selected[str(path.resolve())] = (root, path, relative_path)
+    for _, selected_row in sorted(selected.items(), key=lambda row: row[0].lower()):
+        yield selected_row
+
+
 def collect_emulator_configs(settings: Any, include_unchanged: bool = False) -> dict:
     """Build changed emulator config payloads and deferred fingerprints."""
-    roots = [
-        settings.userdata_root / "system" / "configs",
-        settings.userdata_root / "system" / ".config",
-    ]
     previous_fingerprints = load_uploaded_emulator_config_fingerprints(settings)
     next_fingerprints = {}
     configs = []
-    for root in roots:
-        if not root.exists() or not root.is_dir():
-            continue
-        for path in sorted(root.rglob("*")):
-            if len(configs) >= 250:
-                break
-            if not path.is_file() or path.suffix.lower() not in _CONFIG_SUFFIXES:
-                continue
-            if ".bak" in path.name.lower() or ".bak" in str(path.relative_to(root)).lower():
-                continue
-            item = _read_text_file(path, max_bytes=131072)
-            try:
-                item["relative_path"] = str(path.relative_to(root))
-            except Exception:
-                item["relative_path"] = path.name
-            item["root"] = str(root)
-            key = f"{item['root']}:{item['relative_path']}"
-            fingerprint = hashlib.sha256(str(item.get("content") or "").encode("utf-8", errors="replace")).hexdigest()
+    for root, path, relative_path in _iter_selected_config_files(settings):
+        item = _read_text_file(path, max_bytes=131072)
+        item["relative_path"] = relative_path
+        item["root"] = str(root)
+        key = f"{item['root']}:{item['relative_path']}"
+        fingerprint = hashlib.sha256(str(item.get("content") or "").encode("utf-8", errors="replace")).hexdigest()
+        changed = include_unchanged or previous_fingerprints.get(key) != fingerprint
+        if changed and len(configs) < 250:
+            item["fingerprint"] = fingerprint
+            configs.append(item)
             next_fingerprints[key] = fingerprint
-            if include_unchanged or previous_fingerprints.get(key) != fingerprint:
-                item["fingerprint"] = fingerprint
-                configs.append(item)
+        elif changed:
+            if key in previous_fingerprints:
+                next_fingerprints[key] = previous_fingerprints[key]
+        else:
+            next_fingerprints[key] = fingerprint
     return {
         "type": "emulator_configs",
         "collected_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),

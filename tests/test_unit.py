@@ -310,6 +310,65 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual([row["relative_path"] for row in third["configs"]], ["retroarch/retroarch.cfg"])
             self.assertIn("vulkan", third["configs"][0]["content"])
 
+    def test_emulator_config_collection_uses_allowed_batocera_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            configs = root / "system" / "configs"
+            desktop = root / "system" / ".config"
+            paths = {
+                configs / "dolphin-emu" / "Dolphin.ini": "dolphin",
+                configs / "emulationstation" / "es_settings.cfg": "es",
+                configs / "rpcs3" / "patches" / "patch.yml": "patch",
+                configs / "shadps4" / "user" / "patches" / "enabled.yml": "patch",
+                desktop / "pcmanfm" / "default" / "pcmanfm.conf": "desktop",
+            }
+            excluded = [
+                configs / "dolphin-emu" / "TimePlayed.ini",
+                configs / "dolphin-emu" / "Logger.ini",
+                configs / "rpcs3" / "players_history.yml",
+                configs / "rpcs3" / "dev_flash" / "sys.yml",
+                configs / "emulationstation" / "scrapers" / "credentials.cfg",
+                configs / "shadps4" / "user" / "game_data" / "game.toml",
+                desktop / "unrelated" / "secret.ini",
+            ]
+            for path, content in paths.items():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+            for path in excluded:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("do not report", encoding="utf-8")
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
+                settings = Settings.from_env()
+
+            result = _collect_emulator_configs(settings)
+            rows = {row["relative_path"] for row in result["configs"]}
+
+            self.assertEqual(rows, {
+                "dolphin-emu/Dolphin.ini",
+                "emulationstation/es_settings.cfg",
+                "rpcs3/patches/patch.yml",
+                "shadps4/user/patches/enabled.yml",
+                "pcmanfm/default/pcmanfm.conf",
+            })
+            self.assertFalse(any(path.name in str(rows) for path in excluded))
+
+    def test_emulator_config_collection_retries_changed_rows_after_batch_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            configs = root / "system" / "configs" / "retroarch"
+            configs.mkdir(parents=True)
+            for index in range(251):
+                (configs / f"{index:03}.cfg").write_text(str(index), encoding="utf-8")
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
+                settings = Settings.from_env()
+
+            first = _collect_emulator_configs(settings)
+            self.assertEqual(len(first["configs"]), 250)
+            _commit_emulator_config_fingerprints(settings, first["_fingerprints"])
+            second = _collect_emulator_configs(settings)
+
+            self.assertEqual([row["relative_path"] for row in second["configs"]], ["retroarch/250.cfg"])
+
     def test_peer_trust_prefers_configured_ca_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ca_file = Path(tmp) / "ca.crt"
