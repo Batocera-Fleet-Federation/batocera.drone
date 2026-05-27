@@ -58,6 +58,7 @@ from app.drone_api import (
     _collect_log_sources,
     _commit_log_cursors,
     _collect_game_logs,
+    _collect_system_info_payload,
 )
 from urllib.error import HTTPError, URLError
 
@@ -97,6 +98,13 @@ class BasicAuthTests(unittest.TestCase):
 
 
 class SettingsTests(unittest.TestCase):
+    def _write_gamelist(self, system: Path, *roms: str) -> None:
+        games = "".join(
+            f"<game><path>./{rom}</path><name>{Path(rom).stem}</name></game>"
+            for rom in roms
+        )
+        (system / "gamelist.xml").write_text(f"<gameList>{games}</gameList>\n", encoding="utf-8")
+
     def test_overmind_error_format_includes_class_when_message_is_blank(self) -> None:
         self.assertEqual(_format_overmind_error(TimeoutError()), "TimeoutError()")
         self.assertIn("URLError reason=", _format_overmind_error(URLError(TimeoutError())))
@@ -892,6 +900,34 @@ class SettingsTests(unittest.TestCase):
                 stderr=subprocess.DEVNULL,
             )
 
+    def test_rebuild_asset_metadata_action_queues_without_blocking_heartbeat(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            repo = RomRepository(settings.roms_root, settings.bios_root)
+
+            with mock.patch("app.drone_api._sync_rom_metadata_to_overmind", side_effect=AssertionError("heartbeat thread must not rebuild inline")):
+                status, message, result = _execute_overmind_action(
+                    settings,
+                    repo,
+                    {"action": "rebuild_asset_metadata", "id": "rebuild-1"},
+                    {},
+                    "https://overmind.local",
+                    "drone-token",
+                )
+
+            cache, _ = _load_rom_metadata_cache(settings)
+            self.assertEqual(status, "completed")
+            self.assertIn("Queued asset metadata rebuild", message)
+            self.assertEqual(result["status"], "queued")
+            self.assertTrue(cache["dirty"])
+            self.assertTrue(cache["full_refresh_pending"])
+
     def test_reclaim_overmind_token_after_heartbeat_unauthorized_uses_bound_auth_token(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1002,6 +1038,19 @@ class SettingsTests(unittest.TestCase):
             info = _collect_gpu_info()
         self.assertIn("vendor", info)
         self.assertIn("pci_devices", info)
+
+    def test_system_info_includes_performance_metrics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
+                settings = Settings.from_env()
+
+            info = _collect_system_info_payload(settings)
+
+            self.assertIn("performance", info)
+            self.assertIn("cpu", info["performance"])
+            self.assertIn("memory", info["performance"])
+            self.assertIn("disk", info["performance"])
 
     def test_fake_overmind_config_is_ignored_when_fake_data_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1139,6 +1188,7 @@ class SettingsTests(unittest.TestCase):
             rom = root / "roms" / "snes" / "Game.zip"
             rom.parent.mkdir(parents=True)
             rom.write_bytes(b"first")
+            self._write_gamelist(rom.parent, "Game.zip")
             bios = root / "bios" / "dc" / "flash.bin"
             bios.parent.mkdir(parents=True)
             bios.write_bytes(b"bios-data")
@@ -1221,6 +1271,7 @@ class SettingsTests(unittest.TestCase):
             rom = root / "roms" / "snes" / "Game.zip"
             rom.parent.mkdir(parents=True)
             rom.write_bytes(b"first")
+            self._write_gamelist(rom.parent, "Game.zip")
             with mock.patch.dict(
                 "os.environ",
                 {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
@@ -1281,6 +1332,7 @@ class SettingsTests(unittest.TestCase):
             rom = root / "roms" / "snes" / "Game.zip"
             rom.parent.mkdir(parents=True)
             rom.write_bytes(b"rom")
+            self._write_gamelist(rom.parent, "Game.zip")
             with mock.patch.dict(
                 "os.environ",
                 {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
@@ -1297,12 +1349,14 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(len(snapshot["roms"]), 1)
             self.assertTrue(_rom_metadata_cache_path(settings).exists())
 
-    def test_rom_metadata_poll_uses_inventory_walk_for_system_counts(self) -> None:
+    def test_rom_metadata_poll_uses_gamelist_for_system_counts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
             rom = root / "roms" / "snes" / "Game.zip"
             rom.parent.mkdir(parents=True)
             rom.write_bytes(b"rom")
+            (rom.parent / "Loose.zip").write_bytes(b"loose")
+            self._write_gamelist(rom.parent, "Game.zip")
             with mock.patch.dict(
                 "os.environ",
                 {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
@@ -1311,10 +1365,13 @@ class SettingsTests(unittest.TestCase):
                 settings = Settings.from_env()
             repo = RomRepository(settings.roms_root, settings.bios_root)
 
-            with mock.patch.object(repo, "_count_rom_items", side_effect=AssertionError("poll must not pre-count ROMs")):
+            with mock.patch.object(repo, "_count_rom_items", side_effect=AssertionError("poll must not pre-count ROMs")), mock.patch.object(
+                repo, "_list_rom_items", side_effect=AssertionError("poll must use gamelist.xml")
+            ):
                 snapshot, _, _ = _poll_rom_metadata_cache(settings, repo)
 
             self.assertEqual(snapshot["systems"], [{"name": "snes", "rom_count": 1}])
+            self.assertEqual([row["file_path"] for row in snapshot["roms"]], ["Game.zip"])
 
     def test_background_metadata_hashes_use_storage_yield_setting(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1325,6 +1382,7 @@ class SettingsTests(unittest.TestCase):
             bios.parent.mkdir(parents=True)
             rom.write_bytes(b"rom")
             bios.write_bytes(b"bios")
+            self._write_gamelist(rom.parent, "Game.zip")
             with mock.patch.dict(
                 "os.environ",
                 {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
@@ -1376,6 +1434,7 @@ class SettingsTests(unittest.TestCase):
             system.mkdir(parents=True)
             (system / "First.zip").write_bytes(b"first")
             (system / "Second.zip").write_bytes(b"second")
+            self._write_gamelist(system, "First.zip", "Second.zip")
             with mock.patch.dict(
                 "os.environ",
                 {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
@@ -1456,6 +1515,7 @@ class SettingsTests(unittest.TestCase):
             system.mkdir(parents=True)
             (system / "A.zip").write_bytes(b"a")
             (system / "B.zip").write_bytes(b"b")
+            self._write_gamelist(system, "A.zip", "B.zip")
             with mock.patch.dict(
                 "os.environ",
                 {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
@@ -1500,6 +1560,7 @@ class SettingsTests(unittest.TestCase):
             rom = root / "roms" / "snes" / "Game.zip"
             rom.parent.mkdir(parents=True)
             rom.write_bytes(b"first")
+            self._write_gamelist(rom.parent, "Game.zip")
             with mock.patch.dict(
                 "os.environ",
                 {
@@ -1554,6 +1615,7 @@ class SettingsTests(unittest.TestCase):
             system = root / "roms" / "snes"
             system.mkdir(parents=True)
             (system / "Game.zip").write_bytes(b"rom")
+            self._write_gamelist(system, "Game.zip")
             with mock.patch.dict(
                 "os.environ",
                 {
@@ -1632,8 +1694,8 @@ class SettingsTests(unittest.TestCase):
                 result = _collect_rom_metadata(settings, repo)
 
             self.assertEqual(result["type"], "asset_metadata")
-            self.assertEqual(result["roms"][0]["rom_name"], "Game")
-            self.assertEqual(result["gamelists"], [])
+            self.assertEqual(result["roms"][0]["rom_name"], "Cached Title")
+            self.assertEqual(result["gamelists"][0]["rom_count"], 1)
 
     def test_rom_metadata_sync_uploads_inventory_then_batched_md5_patches(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1642,6 +1704,7 @@ class SettingsTests(unittest.TestCase):
             system.mkdir(parents=True)
             (system / "Game One.zip").write_bytes(b"one")
             (system / "Game Two.zip").write_bytes(b"two")
+            self._write_gamelist(system, "Game One.zip", "Game Two.zip")
             with mock.patch.dict(
                 "os.environ",
                 {
@@ -1690,6 +1753,7 @@ class SettingsTests(unittest.TestCase):
             first = system / "First Game.zip"
             second = system / "Second Game.zip"
             first.write_bytes(b"one")
+            self._write_gamelist(system, "First Game.zip")
             with mock.patch.dict(
                 "os.environ",
                 {
@@ -1715,8 +1779,10 @@ class SettingsTests(unittest.TestCase):
             with mock.patch("app.drone_api._overmind_post_json_with_status", side_effect=fake_post):
                 _sync_rom_metadata_to_overmind(settings, repo, {}, "https://overmind.local", "drone-token")
                 second.write_bytes(b"two")
+                self._write_gamelist(system, "First Game.zip", "Second Game.zip")
                 added = _sync_rom_metadata_to_overmind(settings, repo, {}, "https://overmind.local", "drone-token")
                 first.unlink()
+                self._write_gamelist(system, "Second Game.zip")
                 deleted = _sync_rom_metadata_to_overmind(settings, repo, {}, "https://overmind.local", "drone-token")
 
             inventories = [payload for payload in uploads if payload.get("update_mode") == "inventory_delta"]
@@ -1736,6 +1802,7 @@ class SettingsTests(unittest.TestCase):
             system.mkdir(parents=True)
             (system / "Game One.zip").write_bytes(b"one")
             (system / "Game Two.zip").write_bytes(b"two")
+            self._write_gamelist(system, "Game One.zip", "Game Two.zip")
             with mock.patch.dict(
                 "os.environ",
                 {
@@ -1796,6 +1863,7 @@ class SettingsTests(unittest.TestCase):
             rom = root / "roms" / "snes" / "Game.zip"
             rom.parent.mkdir(parents=True)
             rom.write_bytes(b"offline-rom")
+            self._write_gamelist(rom.parent, "Game.zip")
             with mock.patch.dict(
                 "os.environ",
                 {
@@ -1824,6 +1892,7 @@ class SettingsTests(unittest.TestCase):
             rom = root / "roms" / "snes" / "Game.zip"
             rom.parent.mkdir(parents=True)
             rom.write_bytes(b"offline-rom")
+            self._write_gamelist(rom.parent, "Game.zip")
             with mock.patch.dict(
                 "os.environ",
                 {

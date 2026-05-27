@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from threading import Lock, Thread
+from threading import Lock, RLock, Thread
 from threading import Event
 from typing import Dict, Iterable, List, Optional, Tuple
 from urllib.error import HTTPError, URLError
@@ -140,7 +140,9 @@ FAKE_OVERMIND_TOKEN = "demo-local-drone-token"
 _OVERMIND_POLLER_STARTED = False
 _ROM_METADATA_POLLER_STARTED = False
 _ROM_METADATA_ACTIVE = Event()
+_ROM_METADATA_LOCK = RLock()
 _DOWNLOAD_MANAGER = None
+_PERFORMANCE_METRICS_LAST_SAMPLE: Optional[dict] = None
 LAUNCHBOX_API_BASE = "https://api.gamesdb.launchbox-app.com/api"
 LAUNCHBOX_IMAGE_BASE = "https://images.launchbox-app.com"
 SCRAPER_USER_AGENT = (
@@ -1865,6 +1867,86 @@ class RomRepository:
             item["has_gamelist_entry"] = game is not None
             item["metadata_source"] = "gamelist.xml" if game is not None else item.get("metadata_source")
         return items
+
+    def list_gamelist_rom_metadata(self, system: str, system_dir: Optional[Path] = None) -> Tuple[dict, List[dict]]:
+        """Build ROM metadata from gamelist.xml, statting only referenced ROM paths."""
+        system = valid_segment(system)
+        system_dir = (system_dir or self.get_system_dir(system)).resolve()
+        gamelist_path = system_dir / "gamelist.xml"
+        tree, root = self._read_gamelist(system_dir)
+        del tree
+        gamelist_stat = gamelist_path.stat() if gamelist_path.exists() and gamelist_path.is_file() else None
+        items: List[dict] = []
+        seen_paths = set()
+        system_lower = system.lower()
+        for game in root.findall("game"):
+            relative_path = _normalize_gamelist_rom_path(_text_or_empty(game, "path"))
+            if not relative_path:
+                continue
+            normalized_key = relative_path.lower()
+            if normalized_key in seen_paths:
+                continue
+            seen_paths.add(normalized_key)
+            rom_path = (system_dir / relative_path).resolve()
+            try:
+                rom_path.relative_to(system_dir)
+            except ValueError:
+                continue
+            if not rom_path.exists():
+                continue
+            if rom_path.is_dir():
+                size, mtime = self.build_directory_stats(rom_path)
+                entry_type = "folder"
+                is_downloadable = False
+            elif rom_path.is_file():
+                stat = rom_path.stat()
+                size = int(stat.st_size)
+                mtime = int(stat.st_mtime)
+                entry_type = "file"
+                is_downloadable = system_lower != "steam"
+            else:
+                continue
+            display_name = Path(relative_path).stem
+            title = _text_or_empty(game, "name") or display_name
+            item = {
+                "unique_id": self.build_unique_id(rom_path),
+                "name": title,
+                "rom_name": title,
+                "title": title,
+                "rom_file": Path(relative_path).name,
+                "filename": Path(relative_path).name,
+                "relative_path": relative_path,
+                "absolute_path": str(rom_path),
+                "rom_path": relative_path,
+                "file_path": relative_path,
+                "byte_count": size,
+                "size": size,
+                "file_size": size,
+                "modified_time": mtime,
+                "mtime": mtime,
+                "source": "gamelist.xml",
+                "metadata_source": "gamelist.xml",
+                "entry_type": entry_type,
+                "is_downloadable": is_downloadable,
+                "image_stem": display_name,
+                "existing": {field: _text_or_empty(game, field) for field in ARTWORK_FIELDS},
+                "gamelist": _gamelist_details(game),
+                "has_gamelist_entry": True,
+            }
+            items.append(item)
+        items.sort(key=lambda item: str(item.get("relative_path") or "").lower())
+        gamelist = {
+            "system": system,
+            "system_name": system,
+            "path": str(gamelist_path),
+            "file_path": str(gamelist_path),
+            "exists": bool(gamelist_stat),
+            "rom_count": len(items),
+        }
+        if gamelist_stat:
+            gamelist["file_size"] = int(gamelist_stat.st_size)
+            gamelist["modified_time"] = int(gamelist_stat.st_mtime)
+        return gamelist, items
 
     def get_system_dir(self, system: str) -> Path:
         system = valid_segment(system)
@@ -6972,6 +7054,131 @@ def _collect_gpu_info() -> dict:
     return info
 
 
+def _collect_performance_metrics(root: Path) -> dict:
+    global _PERFORMANCE_METRICS_LAST_SAMPLE
+    now = time.monotonic()
+    previous = _PERFORMANCE_METRICS_LAST_SAMPLE
+    elapsed = max(0.001, now - float(previous.get("monotonic") or now)) if previous else None
+
+    process_seconds = float(os.times().user + os.times().system)
+    total_jiffies = None
+    idle_jiffies = None
+    try:
+        values = [int(part) for part in Path("/proc/stat").read_text(encoding="utf-8", errors="ignore").splitlines()[0].split()[1:]]
+        total_jiffies = sum(values)
+        idle_jiffies = values[3] + (values[4] if len(values) > 4 else 0)
+    except Exception:
+        pass
+
+    memory = {}
+    try:
+        parsed = {}
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8", errors="ignore").splitlines():
+            if ":" not in line:
+                continue
+            key, raw = line.split(":", 1)
+            parsed[key] = int(raw.strip().split()[0]) * 1024
+        total = int(parsed.get("MemTotal") or 0)
+        available = int(parsed.get("MemAvailable") or 0)
+        used = max(0, total - available) if total else 0
+        memory = {
+            "total_bytes": total,
+            "available_bytes": available,
+            "used_bytes": used,
+            "used_percent": round((used / total) * 100, 2) if total else None,
+        }
+    except Exception:
+        memory = {}
+
+    process_memory = {}
+    try:
+        values = {}
+        for line in Path("/proc/self/status").read_text(encoding="utf-8", errors="ignore").splitlines():
+            if line.startswith(("VmRSS:", "VmSize:")):
+                key, raw = line.split(":", 1)
+                values[key] = int(raw.strip().split()[0]) * 1024
+        process_memory = {"rss_bytes": values.get("VmRSS"), "vms_bytes": values.get("VmSize")}
+    except Exception:
+        process_memory = {}
+
+    diskstats = {}
+    try:
+        totals = {"read_bytes": 0, "write_bytes": 0, "weighted_io_ms": 0}
+        for line in Path("/proc/diskstats").read_text(encoding="utf-8", errors="ignore").splitlines():
+            parts = line.split()
+            if len(parts) < 14 or parts[2].startswith(("loop", "ram", "fd")):
+                continue
+            totals["read_bytes"] += int(parts[5]) * 512
+            totals["write_bytes"] += int(parts[9]) * 512
+            totals["weighted_io_ms"] += int(parts[13])
+        diskstats = totals
+    except Exception:
+        diskstats = {}
+
+    process_cpu_percent = None
+    host_cpu_percent = None
+    disk_rates = {}
+    if previous and elapsed:
+        process_delta = process_seconds - float(previous["cpu"].get("process_seconds") or 0)
+        process_cpu_percent = round(max(0.0, process_delta / elapsed * 100 / max(1, os.cpu_count() or 1)), 2)
+        if total_jiffies is not None and previous["cpu"].get("total_jiffies") is not None:
+            total_delta = int(total_jiffies) - int(previous["cpu"]["total_jiffies"])
+            idle_delta = int(idle_jiffies or 0) - int(previous["cpu"]["idle_jiffies"] or 0)
+            if total_delta > 0:
+                host_cpu_percent = round(max(0.0, min(100.0, (1 - idle_delta / total_delta) * 100)), 2)
+        if diskstats and previous.get("diskstats"):
+            prev_disk = previous["diskstats"]
+            read_delta = max(0, diskstats.get("read_bytes", 0) - prev_disk.get("read_bytes", 0))
+            write_delta = max(0, diskstats.get("write_bytes", 0) - prev_disk.get("write_bytes", 0))
+            weighted_delta = max(0, diskstats.get("weighted_io_ms", 0) - prev_disk.get("weighted_io_ms", 0))
+            disk_rates = {
+                "read_bytes_per_second": round(read_delta / elapsed, 2),
+                "write_bytes_per_second": round(write_delta / elapsed, 2),
+                "contention_percent": round(max(0.0, min(100.0, weighted_delta / (elapsed * 1000) * 100)), 2),
+            }
+
+    disk = {}
+    try:
+        usage = shutil.disk_usage(root)
+        disk = {
+            "path": str(root),
+            "total_bytes": usage.total,
+            "used_bytes": usage.used,
+            "free_bytes": usage.free,
+            "used_percent": round((usage.used / usage.total) * 100, 2) if usage.total else None,
+            **disk_rates,
+        }
+    except Exception:
+        disk = dict(disk_rates)
+
+    sample = {
+        "collected_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "cpu": {
+            "process_percent": process_cpu_percent,
+            "host_percent": host_cpu_percent,
+            "load_average": list(os.getloadavg()) if hasattr(os, "getloadavg") else None,
+            "cpu_count": os.cpu_count(),
+            "process_seconds": process_seconds,
+            "total_jiffies": total_jiffies,
+            "idle_jiffies": idle_jiffies,
+        },
+        "memory": memory,
+        "process": process_memory,
+        "disk": disk,
+        "diskstats": diskstats,
+        "monotonic": now,
+    }
+    _PERFORMANCE_METRICS_LAST_SAMPLE = sample
+    public_cpu = {key: value for key, value in sample["cpu"].items() if key not in {"process_seconds", "total_jiffies", "idle_jiffies"}}
+    return {
+        "collected_at": sample["collected_at"],
+        "cpu": public_cpu,
+        "memory": memory,
+        "process": process_memory,
+        "disk": disk,
+    }
+
+
 def _collect_system_info_payload(settings: Settings) -> dict:
     hostname = socket.gethostname()
     network = _get_local_ip_addresses()
@@ -7018,6 +7225,7 @@ def _collect_system_info_payload(settings: Settings) -> dict:
         "memory": memory,
         "disk": disk,
         "gpu": _collect_gpu_info(),
+        "performance": _collect_performance_metrics(settings.userdata_root),
         "network": network,
         "uptime_seconds": uptime,
         "container": Path("/.dockerenv").exists() or os.environ.get("RUNNING_IN_DOCKER") == "1",
@@ -7064,9 +7272,9 @@ def _collect_rom_metadata(settings: Settings, repository: "RomRepository") -> di
         return result
 
     try:
-        systems = repository.list_systems()
+        system_names = repository.list_system_names()
     except FileNotFoundError:
-        systems = []
+        system_names = []
     try:
         bios = repository.list_bios_entries()
     except FileNotFoundError:
@@ -7076,16 +7284,21 @@ def _collect_rom_metadata(settings: Settings, repository: "RomRepository") -> di
     except Exception:
         artwork = []
     roms = []
-    for system in systems:
-        system_name = str(system.get("name") or "").strip()
+    systems = []
+    gamelists = []
+    for system_name in system_names:
+        system_name = str(system_name or "").strip()
         if not system_name:
             continue
         try:
             system_dir = repository.get_system_dir(system_name)
-            system_roms = repository._list_rom_items(system_name, system_dir, include_md5=False)
+            gamelist, system_roms = repository.list_gamelist_rom_metadata(system_name, system_dir)
         except Exception as error:
             roms.append({"system": system_name, "error": str(error)})
             continue
+        gamelists.append(gamelist)
+        if system_roms:
+            systems.append({"name": system_name, "rom_count": len(system_roms)})
         for rom in system_roms:
             item = dict(rom)
             item["system"] = system_name
@@ -7100,7 +7313,7 @@ def _collect_rom_metadata(settings: Settings, repository: "RomRepository") -> di
         "roms": roms,
         "bios": bios,
         "artwork": artwork,
-        "gamelists": [],
+        "gamelists": gamelists,
     }
     print(
         f"Asset metadata scan root={settings.roms_root} systems={len(systems)} roms={len(roms)} bios={len(bios)} artwork={len(artwork)} source=database_or_filesystem",
@@ -7277,6 +7490,19 @@ def _mark_rom_metadata_upload_clean(settings: Settings) -> None:
     )
 
 
+def _begin_rom_metadata_activity(reason: str) -> bool:
+    if not _ROM_METADATA_LOCK.acquire(blocking=False):
+        print(f"Asset metadata {reason} skipped: metadata work already running", file=sys.stdout, flush=True)
+        return False
+    _ROM_METADATA_ACTIVE.set()
+    return True
+
+
+def _end_rom_metadata_activity() -> None:
+    _ROM_METADATA_ACTIVE.clear()
+    _ROM_METADATA_LOCK.release()
+
+
 def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") -> Tuple[dict, bool, dict]:
     started = time.monotonic()
     print("Asset metadata poll started: phase=cache_load", file=sys.stdout, flush=True)
@@ -7366,7 +7592,8 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
         systems_scanned += 1
         try:
             system_dir = repository.get_system_dir(system_name)
-            roms = repository._list_rom_items(system_name, system_dir, include_md5=False)
+            gamelist, roms = repository.list_gamelist_rom_metadata(system_name, system_dir)
+            gamelists.append(gamelist)
         except Exception as error:
             print(f"ROM metadata scan warning: system={system_name} error={_format_overmind_error(error)}", file=sys.stderr, flush=True)
             continue
@@ -7486,7 +7713,21 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
             flush=True,
         )
 
-    changed = rebuilt or bool(new_or_changed) or bool(deleted) or bool(bios_new_or_changed) or bool(bios_deleted) or artwork_changed or was_dirty
+    rom_metadata_changed = next_entries != existing_entries
+    gamelists_changed = gamelists != (cache.get("gamelists") if isinstance(cache.get("gamelists"), list) else [])
+    systems_changed = systems != (cache.get("systems") if isinstance(cache.get("systems"), list) else [])
+    changed = (
+        rebuilt
+        or bool(new_or_changed)
+        or bool(deleted)
+        or rom_metadata_changed
+        or systems_changed
+        or gamelists_changed
+        or bool(bios_new_or_changed)
+        or bool(bios_deleted)
+        or artwork_changed
+        or was_dirty
+    )
     cache["entries"] = next_entries
     cache["bios_entries"] = next_bios_entries
     cache["artwork_entries"] = next_artwork_entries
@@ -7587,7 +7828,7 @@ def _hash_rom_metadata_batches(settings: Settings, repository: "RomRepository", 
             cache["dirty"] = True
             _persist_rom_metadata_cache(settings, cache, rom_updates=pending_updates)
             pending_updates = {}
-            print(f"ROM metadata cache checkpoint: {processed}/{total} files", file=sys.stdout, flush=True)
+            print(f"ROM metadata MD5 checkpoint: {processed}/{total} files hashed", file=sys.stdout, flush=True)
             last_checkpoint = now
         if not patch or (len(patch) < batch_size and processed != total):
             continue
@@ -8669,28 +8910,15 @@ def _execute_overmind_action(
         return "completed", f"Collected {_summarize_overmind_result(result)}.", result
 
     if action_name == "rebuild_asset_metadata":
-        if not base_url or not token:
-            cache, _ = _load_rom_metadata_cache(settings)
-            cache["dirty"] = True
-            cache["full_refresh_pending"] = True
-            _persist_rom_metadata_cache(settings, cache)
-            return "completed", "Marked asset metadata dirty; upload will retry when Overmind is connected.", {
-                "type": "asset_metadata_rebuild",
-                "status": "queued",
-                "reason": "overmind_not_connected",
-            }
-        result = _sync_rom_metadata_to_overmind(
-            settings,
-            repository,
-            config or {},
-            base_url,
-            token,
-            force_upload=True,
-        )
-        return "completed", (
-            f"Rebuilt asset metadata and uploaded {result.get('rom_count', 0)} ROMs, "
-            f"{result.get('bios_count', 0)} BIOS files, and {result.get('artwork_count', 0)} artwork rows."
-        ), {"type": "asset_metadata_rebuild", **result, "uploads": len(result.get("uploads") or [])}
+        cache, _ = _load_rom_metadata_cache(settings)
+        cache["dirty"] = True
+        cache["full_refresh_pending"] = True
+        _persist_rom_metadata_cache(settings, cache)
+        return "completed", "Queued asset metadata rebuild; the metadata poller will upload it without blocking heartbeat.", {
+            "type": "asset_metadata_rebuild",
+            "status": "queued",
+            "reason": "queued_for_metadata_poller",
+        }
 
     if action_name == "collect_game_logs":
         result = _collect_game_logs(settings, repository)
@@ -9052,6 +9280,9 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                 if not system_info_payload or now - last_system_info_at >= system_info_refresh_seconds:
                     system_info_payload = _collect_system_info_payload(settings)
                     last_system_info_at = now
+                else:
+                    system_info_payload["performance"] = _collect_performance_metrics(settings.userdata_root)
+                    system_info_payload["updated_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
                 network_payload = _drone_network_payload(settings)
                 heartbeat_payload = {
                     "device_id": settings.overmind_device_id,
@@ -9247,6 +9478,43 @@ def _sync_rom_metadata_to_overmind(
     *,
     force_upload: bool = False,
 ) -> dict:
+    if not _begin_rom_metadata_activity("sync"):
+        cache, _ = _load_rom_metadata_cache(settings)
+        snapshot = _build_rom_metadata_snapshot_from_cache(settings, cache)
+        return {
+            "status": "skipped",
+            "reason": "metadata_already_running",
+            "changed": False,
+            "rom_count": len(snapshot.get("roms") or []),
+            "bios_count": len(snapshot.get("bios") or []),
+            "artwork_count": len(snapshot.get("artwork") or []),
+            "uploads": [],
+            "stats": {"metadata_already_running": True},
+        }
+    try:
+        return _sync_rom_metadata_to_overmind_locked(
+            settings,
+            repository,
+            config,
+            base_url,
+            token,
+            prepared_poll=prepared_poll,
+            force_upload=force_upload,
+        )
+    finally:
+        _end_rom_metadata_activity()
+
+
+def _sync_rom_metadata_to_overmind_locked(
+    settings: Settings,
+    repository: "RomRepository",
+    config: dict,
+    base_url: str,
+    token: str,
+    prepared_poll: Optional[Tuple[dict, bool, dict]] = None,
+    *,
+    force_upload: bool = False,
+) -> dict:
     poll_started = time.monotonic()
     snapshot, changed, stats = prepared_poll or _poll_rom_metadata_cache(settings, repository)
     rom_count = len(snapshot.get("roms") or [])
@@ -9419,21 +9687,26 @@ def _complete_local_rom_metadata_cache(settings: Settings, repository: "RomRepos
 
 
 def _poll_rom_metadata_once(settings: Settings, repository: "RomRepository") -> dict:
-    prepared_poll = _poll_rom_metadata_cache(settings, repository)
-    config = _load_overmind_config_for_settings(settings)
-    base_url = str(config.get("overmind_url") or "").strip().rstrip("/")
-    token = str(config.get("overmind_token") or "").strip()
-    if not base_url:
-        return _complete_local_rom_metadata_cache(settings, repository, "overmind_not_configured")
-    if not token:
-        token = _register_or_claim_overmind_token(settings, repository, config, base_url) or ""
-        if not token:
-            return _complete_local_rom_metadata_cache(settings, repository, "overmind_not_connected")
+    if not _begin_rom_metadata_activity("poll"):
+        return {"status": "skipped", "reason": "metadata_already_running", "changed": False}
     try:
-        return _sync_rom_metadata_to_overmind(settings, repository, config, base_url, token, prepared_poll=prepared_poll)
-    except Exception:
-        _complete_local_rom_metadata_cache(settings, repository, "overmind_upload_failed")
-        raise
+        prepared_poll = _poll_rom_metadata_cache(settings, repository)
+        config = _load_overmind_config_for_settings(settings)
+        base_url = str(config.get("overmind_url") or "").strip().rstrip("/")
+        token = str(config.get("overmind_token") or "").strip()
+        if not base_url:
+            return _complete_local_rom_metadata_cache(settings, repository, "overmind_not_configured")
+        if not token:
+            token = _register_or_claim_overmind_token(settings, repository, config, base_url) or ""
+            if not token:
+                return _complete_local_rom_metadata_cache(settings, repository, "overmind_not_connected")
+        try:
+            return _sync_rom_metadata_to_overmind_locked(settings, repository, config, base_url, token, prepared_poll=prepared_poll)
+        except Exception:
+            _complete_local_rom_metadata_cache(settings, repository, "overmind_upload_failed")
+            raise
+    finally:
+        _end_rom_metadata_activity()
 
 
 def _start_rom_metadata_poller(settings: Settings, repository: "RomRepository") -> None:
@@ -9458,7 +9731,6 @@ def _start_rom_metadata_poller(settings: Settings, repository: "RomRepository") 
             time.sleep(initial_delay_seconds)
         while True:
             poll_started = time.monotonic()
-            _ROM_METADATA_ACTIVE.set()
             try:
                 _poll_rom_metadata_once(settings, repository)
             except (HTTPError, URLError) as error:
@@ -9474,8 +9746,6 @@ def _start_rom_metadata_poller(settings: Settings, repository: "RomRepository") 
                     file=sys.stderr,
                     flush=True,
                 )
-            finally:
-                _ROM_METADATA_ACTIVE.clear()
             time.sleep(poll_seconds)
 
     thread = Thread(target=loop, name="rom-metadata-poller", daemon=True)
