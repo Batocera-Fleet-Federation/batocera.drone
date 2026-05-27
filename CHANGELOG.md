@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.23] - 2026-05-26
+
+- Updating drone fix bug with database updates.
+
 ## [v0.0.22] - 2026-05-26
 
 - Reduced default upload chunks from 1000 to 250. Reduced default MD5 patch batches from 1000 to 250. Drone metadata collection now prefers the local SQLite metadata cache/database when present. The metadata scan no longer reads/sends gamelist.xml payloads for ROM/system inventory; it uses cached DB data when available and filesystem rows when rebuilding. Added force_upload=True support so a clean Drone cache can still be resent to Overmind after an EC2/Overmind restart. Added Drone support for a new Overmind action: rebuild_asset_metadata.
