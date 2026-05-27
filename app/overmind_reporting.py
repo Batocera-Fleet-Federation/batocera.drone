@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import hashlib
-import json
-import os
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Tuple
+
+try:
+    from .state_store import database_path, load_payload, save_payload
+except ImportError:
+    from state_store import database_path, load_payload, save_payload  # type: ignore
 
 
 _STATE_SCHEMA_VERSION = 2
@@ -19,24 +21,13 @@ def _state_path(settings: Any, filename: str) -> Path:
     return (settings.userdata_root / "system" / "drone-app" / filename).resolve()
 
 
-def _read_json_file(path: Path, fallback: Any) -> Any:
-    try:
-        if path.exists() and path.is_file():
-            return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        pass
-    return fallback
-
-
-def _write_json_file(path: Path, payload: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
-    temporary_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    temporary_path.replace(path)
-
-
 def _read_delivery_state(settings: Any, filename: str, key: str) -> dict:
-    state = _read_json_file(_state_path(settings, filename), {})
+    state = load_payload(
+        database_path(settings.userdata_root),
+        filename,
+        {},
+        legacy_path=_state_path(settings, filename),
+    )
     if not isinstance(state, dict) or state.get("schema_version") != _STATE_SCHEMA_VERSION:
         return {}
     values = state.get(key)
@@ -44,8 +35,9 @@ def _read_delivery_state(settings: Any, filename: str, key: str) -> dict:
 
 
 def _commit_delivery_state(settings: Any, filename: str, key: str, values: dict) -> None:
-    _write_json_file(
-        _state_path(settings, filename),
+    save_payload(
+        database_path(settings.userdata_root),
+        filename,
         {"schema_version": _STATE_SCHEMA_VERSION, key: dict(values or {})},
     )
 

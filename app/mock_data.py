@@ -1,5 +1,10 @@
 from pathlib import Path
 
+try:
+    from .state_store import database_path, save_payload
+except ImportError:
+    from state_store import database_path, save_payload  # type: ignore
+
 
 def _write_text(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -13,7 +18,7 @@ def _write_bytes(path: Path, content: bytes) -> None:
 
 def seed_mock_userdata(userdata_root: Path) -> None:
     userdata_root.mkdir(parents=True, exist_ok=True)
-    _write_text(userdata_root / "system" / "drone-app" / "mock_userdata_seeded.json", '{"source":"batocera.drone mock_data"}\n')
+    save_payload(database_path(userdata_root), "mock_userdata_seeded", {"source": "batocera.drone mock_data"})
 
     # ROMs + artwork + video previews (systems, search, rom lists, image/video routes, downloads)
     roms_root = userdata_root / "roms"

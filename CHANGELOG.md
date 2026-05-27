@@ -4,6 +4,7 @@
 
 - Updating how logs are streamed to overmind so that overmind does not get delayed.
 - Replaced the monolithic ROM metadata JSON checkpoint rewrites with incremental SQLite row updates, including automatic migration of existing caches. Metadata hashing now yields disk time between chunks, starts after a startup delay, and suspends overlapping filesystem telemetry walks while active.
+- Consolidated Drone-owned persistent state into the local SQLite database, migrating credentials, Overmind connection/swarm/peer state, reporting cursors, ROM MD5 lookups, peer certificate metadata, mock-mode marker state, and processed action history from legacy files on first use.
 - Updating algorithm to only download from drones that are reachable via published IP (i.e. resolvable over internet).
 - Drone peer health checks and ROM/BIOS/artwork transfers now prefer the public endpoint over local/private addresses
 - Removing ability to Update remote machine for now.  Adding ability to toggle kiosk mode on or off remotely.

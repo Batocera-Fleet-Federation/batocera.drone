@@ -10,6 +10,7 @@ from unittest import mock
 from pathlib import Path
 
 from app.mock_data import seed_mock_userdata
+from app.state_store import database_path, database_path_for_legacy_file, load_payload, open_database, save_payload
 from app.drone_api import (
     FAKE_OVERMIND_EMAIL,
     FAKE_OVERMIND_TOKEN,
@@ -38,7 +39,6 @@ from app.drone_api import (
     _persist_rom_metadata_cache,
     _rom_metadata_cache_path,
     _sync_rom_metadata_to_overmind,
-    _write_json_file,
     _sample_speed,
     _real_data_roots,
     _peer_ssl_diagnostic,
@@ -81,9 +81,14 @@ class BasicAuthTests(unittest.TestCase):
 
             result = store.update("arcade-admin", "BetterPass123")
             self.assertTrue(result["stored"])
-            saved = (Path(tmp) / "credentials.json").read_text(encoding="utf-8")
+            saved = load_payload(
+                database_path_for_legacy_file(Path(tmp) / "credentials.json"),
+                "credentials",
+                {},
+            )
             self.assertIn("password_hash", saved)
-            self.assertNotIn("BetterPass123", saved)
+            self.assertNotIn("BetterPass123", json.dumps(saved))
+            self.assertFalse((Path(tmp) / "credentials.json").exists())
             self.assertFalse(auth.check(f"Basic {default_token}"))
             updated_token = base64.b64encode(b"arcade-admin:BetterPass123").decode("ascii")
             self.assertTrue(auth.check(f"Basic {updated_token}"))
@@ -284,9 +289,18 @@ class SettingsTests(unittest.TestCase):
             self.assertFalse(requested_snapshot["incremental"])
 
             legacy_state = root / "system" / "drone-app" / "overmind_config_fingerprints.json"
-            legacy_state.write_text(json.dumps(first["_fingerprints"]), encoding="utf-8")
+            legacy_state.write_text(
+                json.dumps({"schema_version": 2, "fingerprints": first["_fingerprints"]}),
+                encoding="utf-8",
+            )
+            with open_database(database_path(root)) as connection:
+                connection.execute(
+                    "DELETE FROM app_state WHERE namespace = ?",
+                    ("overmind_config_fingerprints.json",),
+                )
             legacy_retry = _collect_emulator_configs(settings)
-            self.assertEqual([row["relative_path"] for row in legacy_retry["configs"]], ["retroarch/retroarch.cfg"])
+            self.assertEqual(legacy_retry["configs"], [])
+            self.assertFalse(legacy_state.exists())
             _commit_emulator_config_fingerprints(settings, legacy_retry["_fingerprints"])
 
             config.write_text("video_driver = vulkan", encoding="utf-8")
@@ -898,7 +912,8 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(saved.get("integration_state"), "pending_failed")
             self.assertEqual(saved.get("swarm_connection_status"), "disconnected")
             self.assertIn("HTTPError status=401", saved.get("last_error") or "")
-            self.assertEqual(json.loads(swarm_path.read_text(encoding="utf-8")), [])
+            self.assertFalse(swarm_path.exists())
+            self.assertEqual(load_payload(database_path(root), "overmind_swarm.json", None), [])
 
     def test_gpu_info_tolerates_unavailable_detection(self) -> None:
         with mock.patch("app.drone_api.subprocess.run", side_effect=FileNotFoundError()):
@@ -1169,6 +1184,17 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(cache["entries"]["snes:Game.zip"]["rom_md5"], "abc")
             self.assertEqual(reloaded["entries"]["snes:Game.zip"]["file_path"], "Game.zip")
 
+    def test_metadata_initialization_preserves_other_shared_database_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
+                settings = Settings.from_env()
+            save_payload(database_path(root), "credentials", {"username": "kept"})
+
+            _poll_rom_metadata_cache(settings, RomRepository(root / "roms", root / "bios"))
+
+            self.assertEqual(load_payload(database_path(root), "credentials", {})["username"], "kept")
+
     def test_rom_metadata_poll_does_not_write_monolithic_json_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
@@ -1182,11 +1208,10 @@ class SettingsTests(unittest.TestCase):
             ):
                 settings = Settings.from_env()
 
-            with mock.patch("app.drone_api._write_json_file", side_effect=AssertionError("large JSON cache must not be rewritten")):
-                snapshot, changed, _ = _poll_rom_metadata_cache(
-                    settings,
-                    RomRepository(settings.roms_root, settings.bios_root),
-                )
+            snapshot, changed, _ = _poll_rom_metadata_cache(
+                settings,
+                RomRepository(settings.roms_root, settings.bios_root),
+            )
 
             self.assertTrue(changed)
             self.assertEqual(len(snapshot["roms"]), 1)

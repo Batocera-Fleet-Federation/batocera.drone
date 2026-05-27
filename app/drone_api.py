@@ -55,6 +55,15 @@ try:
     )
     from .peer_selection import select_best_peer as _select_best_peer
     from .route_config import API_PREFIX, api_url
+    from .state_store import (
+        append_event as _append_state_event,
+        database_path as _state_database_path,
+        database_path_for_legacy_file as _state_database_path_for_legacy_file,
+        load_events as _load_state_events,
+        load_payload as _load_state_payload,
+        open_database as _open_state_database,
+        save_payload as _save_state_payload,
+    )
     from .transfer_files import (
         bios_md5_exists as _bios_md5_exists,
         collision_safe_target as _collision_safe_target,
@@ -89,6 +98,15 @@ except ImportError:
     )
     from peer_selection import select_best_peer as _select_best_peer  # type: ignore
     from route_config import API_PREFIX, api_url  # type: ignore
+    from state_store import (  # type: ignore
+        append_event as _append_state_event,
+        database_path as _state_database_path,
+        database_path_for_legacy_file as _state_database_path_for_legacy_file,
+        load_events as _load_state_events,
+        load_payload as _load_state_payload,
+        open_database as _open_state_database,
+        save_payload as _save_state_payload,
+    )
     from transfer_files import (  # type: ignore
         bios_md5_exists as _bios_md5_exists,
         collision_safe_target as _collision_safe_target,
@@ -1195,11 +1213,19 @@ def _configure_rotating_logs(settings: Settings) -> None:
 class DroneCredentialStore:
     DEFAULT_USERNAME = "batocera"
     DEFAULT_PASSWORD = "linux"
+    STATE_NAMESPACE = "credentials"
 
-    def __init__(self, path: Path, env_username: Optional[str] = None, env_password: Optional[str] = None):
+    def __init__(
+        self,
+        path: Path,
+        env_username: Optional[str] = None,
+        env_password: Optional[str] = None,
+        state_database_file: Optional[Path] = None,
+    ):
         self.path = path
         self.env_username = env_username
         self.env_password = env_password
+        self.state_database_file = state_database_file or _state_database_path_for_legacy_file(path)
         self._lock = Lock()
 
     def _hash_password(self, password: str, salt: Optional[str] = None) -> str:
@@ -1218,13 +1244,14 @@ class DroneCredentialStore:
             return False
 
     def load(self) -> dict:
-        if self.path.exists():
-            try:
-                data = json.loads(self.path.read_text(encoding="utf-8"))
-                if data.get("username") and data.get("password_hash"):
-                    return data
-            except Exception:
-                pass
+        data = _load_state_payload(
+            self.state_database_file,
+            self.STATE_NAMESPACE,
+            {},
+            legacy_path=self.path,
+        )
+        if isinstance(data, dict) and data.get("username") and data.get("password_hash"):
+            return data
         username = self.env_username or self.DEFAULT_USERNAME
         password = self.env_password or self.DEFAULT_PASSWORD
         return {"username": username, "password_plain_fallback": password, "source": "default"}
@@ -1245,17 +1272,17 @@ class DroneCredentialStore:
         if len(password) < 8:
             raise ValueError("password must be at least 8 characters")
         with self._lock:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
             data = {
                 "username": username,
                 "password_hash": self._hash_password(password),
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }
-            temp_path = self.path.with_suffix(self.path.suffix + ".tmp")
-            temp_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-            os.chmod(temp_path, 0o600)
-            temp_path.replace(self.path)
-            os.chmod(self.path, 0o600)
+            _save_state_payload(
+                self.state_database_file,
+                self.STATE_NAMESPACE,
+                data,
+            )
+            self.path.unlink(missing_ok=True)
             return {"username": username, "updated_at": data["updated_at"], "stored": True}
 
 
@@ -3382,14 +3409,8 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         if auth_token:
             default["overmind_auth_token"] = auth_token
 
-        path = self._overmind_config_path()
-        if not path.exists() or not path.is_file():
-            return default
-        try:
-            loaded = json.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(loaded, dict):
-                return default
-        except Exception:
+        loaded = self._load_json_file(self._overmind_config_path(), {})
+        if not isinstance(loaded, dict) or not loaded:
             return default
 
         merged = dict(default)
@@ -3403,18 +3424,28 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         return merged
 
     def _save_overmind_config(self, payload: dict) -> None:
-        path = self._overmind_config_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        _save_state_payload(
+            _state_database_path(self.settings.userdata_root),
+            self._overmind_config_path().name,
+            payload,
+        )
+        self._overmind_config_path().unlink(missing_ok=True)
 
     def _load_json_file(self, path: Path, fallback):
-        try:
-            if path.exists() and path.is_file():
-                loaded = json.loads(path.read_text(encoding="utf-8"))
-                return loaded if loaded is not None else fallback
-        except Exception:
-            pass
-        return fallback
+        return _load_state_payload(
+            _state_database_path(self.settings.userdata_root),
+            path.name,
+            fallback,
+            legacy_path=path,
+        )
+
+    def _save_json_state(self, path: Path, payload) -> None:
+        _save_state_payload(
+            _state_database_path(self.settings.userdata_root),
+            path.name,
+            payload,
+        )
+        path.unlink(missing_ok=True)
 
     def _overmind_public_payload(self, config: dict) -> dict:
         password = str(config.get("overmind_password") or "")
@@ -3456,17 +3487,14 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         }
 
     def _load_processed_overmind_actions(self) -> List[dict]:
-        path = self._overmind_actions_path()
-        if not path.exists() or not path.is_file():
-            return []
-        try:
-            loaded = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-        except Exception:
-            return []
-        return loaded if isinstance(loaded, list) else []
+        return _load_state_events(
+            _state_database_path(self.settings.userdata_root),
+            "overmind_actions",
+            legacy_path=self._overmind_actions_path(),
+        )
 
     def _handle_admin_overmind_actions(self) -> None:
-        self._send_json(200, {"actions": list(reversed(self._load_processed_overmind_actions()))})
+        self._send_json(200, {"actions": self._load_processed_overmind_actions()})
 
     def _handle_admin_api_status(self) -> None:
         metadata = DroneCertificateManager(self.settings).ensure_certificate()
@@ -3508,7 +3536,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         if not md5_value:
             md5_value = self.repository.build_md5(target)
             cache = {key: md5_value}
-            _write_json_file(cache_path, cache)
+            self._save_json_state(cache_path, cache)
         self._send_json(200, {"system": system, "unique_id": unique_id, "md5": md5_value, "cached": bool(cache.get(key))})
 
     def _handle_peer_health(self) -> None:
@@ -5160,8 +5188,8 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             new_config["overmind_auth_token"] = auth_token_value
             new_config.pop("overmind_token", None)
             new_config["swarm_connection_status"] = "disconnected"
-            _write_json_file(self._overmind_swarm_path(), [])
-            _write_json_file(self._overmind_peer_results_path(), [])
+            self._save_json_state(self._overmind_swarm_path(), [])
+            self._save_json_state(self._overmind_peer_results_path(), [])
         if raw_token is not None:
             token_value = str(raw_token)
             if not token_value:
@@ -5397,7 +5425,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         config["swarm_connection_status"] = "disconnected"
         config["notes"] = "Drone disconnected from its Overmind swarm."
         self._save_overmind_config(config)
-        _write_json_file(self._overmind_swarm_path(), [])
+        self._save_json_state(self._overmind_swarm_path(), [])
         self._send_json(200, self._overmind_public_payload(config))
 
     def _handle_admin_api_certificate_rotate(self) -> None:
@@ -6244,13 +6272,6 @@ def _overmind_peer_results_path_for_settings(settings: Settings) -> Path:
     return (settings.userdata_root / "system" / "drone-app" / "peer_checks.json").resolve()
 
 
-def _write_json_file(path: Path, payload) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    tmp.replace(path)
-
-
 def _read_json_file(path: Path, fallback):
     try:
         if path.exists() and path.is_file():
@@ -6274,13 +6295,13 @@ def _load_overmind_config_for_settings(settings: Settings) -> dict:
         "integration_enabled": bool(settings.overmind_url and (settings.overmind_token or settings.overmind_auth_token or fake_token)),
     }
     path = _overmind_config_path_for_settings(settings)
-    if not path.exists() or not path.is_file():
-        return default
-    try:
-        loaded = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return default
-    if not isinstance(loaded, dict):
+    loaded = _load_state_payload(
+        _state_database_path(settings.userdata_root),
+        path.name,
+        {},
+        legacy_path=path,
+    )
+    if not isinstance(loaded, dict) or not loaded:
         return default
     merged = dict(default)
     merged.update(loaded)
@@ -6314,8 +6335,10 @@ def _mark_overmind_auth_failed(settings: Settings, config: dict, error: BaseExce
     config["last_error"] = _format_overmind_error(error)
     config["notes"] = "Overmind authorization token was rejected. Generate a new authorization token and try again."
     _save_overmind_runtime_config(settings, config)
-    _write_json_file(_overmind_swarm_path_for_settings(settings), [])
-    _write_json_file(_overmind_peer_results_path_for_settings(settings), [])
+    _save_state_payload(_state_database_path(settings.userdata_root), "overmind_swarm.json", [])
+    _save_state_payload(_state_database_path(settings.userdata_root), "peer_checks.json", [])
+    _overmind_swarm_path_for_settings(settings).unlink(missing_ok=True)
+    _overmind_peer_results_path_for_settings(settings).unlink(missing_ok=True)
 
 
 def _get_router_ip_address() -> Optional[str]:
@@ -6370,7 +6393,13 @@ def _looks_like_pure_mock_userdata(userdata_root: Path) -> bool:
                 has_known_fake = True
         except OSError:
             continue
-    if not (has_known_fake or _mock_userdata_marker(userdata_root).exists()):
+    seeded = _load_state_payload(
+        _state_database_path(userdata_root),
+        "mock_userdata_seeded",
+        None,
+        legacy_path=_mock_userdata_marker(userdata_root),
+    )
+    if not (has_known_fake or seeded):
         return False
 
     for path in roms_root.rglob("*"):
@@ -6405,8 +6434,6 @@ def _record_processed_overmind_action(
     message: str,
     result: Optional[dict] = None,
 ) -> None:
-    path = _overmind_actions_path_for_settings(settings)
-    path.parent.mkdir(parents=True, exist_ok=True)
     entry = {
             "id": action.get("id"),
             "device_id": settings.overmind_device_id,
@@ -6417,17 +6444,19 @@ def _record_processed_overmind_action(
             "processed_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
             "fake_data": settings.use_fake_data,
     }
+    legacy_path = _overmind_actions_path_for_settings(settings)
+    _load_state_events(
+        _state_database_path(settings.userdata_root),
+        "overmind_actions",
+        legacy_path=legacy_path,
+    )
     max_bytes = int(os.environ.get("OVERMIND_ACTION_LOG_MAX_BYTES", str(settings.log_max_bytes)))
-    if path.exists() and max_bytes > 0 and path.stat().st_size > max_bytes:
-        backup = path.with_name(f"{path.name}.1")
-        try:
-            if backup.exists():
-                backup.unlink()
-            path.replace(backup)
-        except OSError:
-            path.unlink(missing_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(entry, sort_keys=True) + "\n")
+    _append_state_event(
+        _state_database_path(settings.userdata_root),
+        "overmind_actions",
+        entry,
+        max_events=max(100, max_bytes // 512) if max_bytes > 0 else None,
+    )
 
 
 def _peer_cert_cache_dir(settings: Settings) -> Path:
@@ -6581,7 +6610,9 @@ def _format_overmind_error(error: BaseException) -> str:
 
 
 def _save_overmind_runtime_config(settings: Settings, config: dict) -> None:
-    _write_json_file(_overmind_config_path_for_settings(settings), config)
+    path = _overmind_config_path_for_settings(settings)
+    _save_state_payload(_state_database_path(settings.userdata_root), path.name, config)
+    path.unlink(missing_ok=True)
 
 
 def _register_or_claim_overmind_token(settings: Settings, repository: "RomRepository", config: dict, base_url: str) -> Optional[str]:
@@ -6682,7 +6713,13 @@ def _fetch_peer_certificate(settings: Settings, config: dict, peer_id: str) -> O
         meta["peer_drone_id"] = peer_id
         meta["fetched_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         meta["source_overmind_url"] = base_url
-        _peer_cert_meta_path(settings, peer_id).write_text(json.dumps(meta, indent=2, sort_keys=True), encoding="utf-8")
+        _save_state_payload(
+            _state_database_path(settings.userdata_root),
+            "peer_certificate_metadata",
+            meta,
+            state_key=peer_id,
+        )
+        _peer_cert_meta_path(settings, peer_id).unlink(missing_ok=True)
         print(f"Fetched peer certificate for {peer_id}", file=sys.stdout, flush=True)
         return cert_path
     except Exception as error:
@@ -7039,7 +7076,7 @@ def _collect_rom_metadata(settings: Settings, repository: "RomRepository") -> di
 
 
 def _rom_metadata_cache_path(settings: Settings) -> Path:
-    return (settings.userdata_root / "system" / "drone-app" / "rom_metadata_cache.sqlite3").resolve()
+    return _state_database_path(settings.userdata_root)
 
 
 def _legacy_rom_metadata_cache_path(settings: Settings) -> Path:
@@ -7061,11 +7098,7 @@ def _empty_rom_metadata_cache() -> dict:
 
 
 def _open_rom_metadata_cache(settings: Settings) -> sqlite3.Connection:
-    path = _rom_metadata_cache_path(settings)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(str(path), timeout=30)
-    connection.execute("PRAGMA journal_mode=WAL")
-    connection.execute("PRAGMA synchronous=NORMAL")
+    connection = _open_state_database(_rom_metadata_cache_path(settings))
     connection.execute(
         "CREATE TABLE IF NOT EXISTS cache_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
     )
@@ -7149,7 +7182,13 @@ def _load_rom_metadata_cache(settings: Settings) -> Tuple[dict, bool]:
     legacy_path = _legacy_rom_metadata_cache_path(settings)
     try:
         if path.exists():
-            return _read_sqlite_rom_metadata_cache(settings), False
+            try:
+                return _read_sqlite_rom_metadata_cache(settings), False
+            except ValueError:
+                # The shared state database may exist before metadata has been collected.
+                with _open_rom_metadata_cache(settings) as connection:
+                    connection.execute("DELETE FROM cache_state")
+                    connection.execute("DELETE FROM cache_entries")
         legacy = _read_json_file(legacy_path, None)
         if isinstance(legacy, dict) and isinstance(legacy.get("entries"), dict):
             legacy["schema_version"] = ROM_METADATA_CACHE_VERSION
@@ -8030,8 +8069,18 @@ def _best_peer_for_rom(
     relative_path: str,
     source_device_ids: Optional[set] = None,
 ) -> Optional[dict]:
-    swarm = _read_json_file(_overmind_swarm_path_for_settings(settings), [])
-    peer_checks = _read_json_file(_overmind_peer_results_path_for_settings(settings), [])
+    swarm = _load_state_payload(
+        _state_database_path(settings.userdata_root),
+        "overmind_swarm.json",
+        [],
+        legacy_path=_overmind_swarm_path_for_settings(settings),
+    )
+    peer_checks = _load_state_payload(
+        _state_database_path(settings.userdata_root),
+        "peer_checks.json",
+        [],
+        legacy_path=_overmind_peer_results_path_for_settings(settings),
+    )
     return _select_best_peer(
         swarm,
         peer_checks,
@@ -8047,8 +8096,18 @@ def _best_peer_for_bios(
     relative_path: str,
     source_device_ids: Optional[set] = None,
 ) -> Optional[dict]:
-    swarm = _read_json_file(_overmind_swarm_path_for_settings(settings), [])
-    peer_checks = _read_json_file(_overmind_peer_results_path_for_settings(settings), [])
+    swarm = _load_state_payload(
+        _state_database_path(settings.userdata_root),
+        "overmind_swarm.json",
+        [],
+        legacy_path=_overmind_swarm_path_for_settings(settings),
+    )
+    peer_checks = _load_state_payload(
+        _state_database_path(settings.userdata_root),
+        "peer_checks.json",
+        [],
+        legacy_path=_overmind_peer_results_path_for_settings(settings),
+    )
     return _select_best_peer(swarm, peer_checks, settings.overmind_device_id, source_device_ids=source_device_ids)
 
 
@@ -8964,7 +9023,8 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                     flush=True,
                 )
                 swarm = response.get("swarm") if isinstance(response.get("swarm"), list) else []
-                _write_json_file(_overmind_swarm_path_for_settings(settings), swarm)
+                _save_state_payload(_state_database_path(settings.userdata_root), "overmind_swarm.json", swarm)
+                _overmind_swarm_path_for_settings(settings).unlink(missing_ok=True)
 
                 if speed_sample_seconds > 0 and (
                     last_speed_sample_at is None or now - last_speed_sample_at >= speed_sample_seconds
@@ -8998,7 +9058,8 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                             continue
                         peer_results.append(_check_peer(settings, peer, config=config))
                     if peer_results:
-                        _write_json_file(_overmind_peer_results_path_for_settings(settings), peer_results)
+                        _save_state_payload(_state_database_path(settings.userdata_root), "peer_checks.json", peer_results)
+                        _overmind_peer_results_path_for_settings(settings).unlink(missing_ok=True)
                         _overmind_post_json(
                             f"{base_url}/api/devices/{device_id}/peer-checks",
                             {"results": peer_results},
@@ -9278,7 +9339,12 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
         bios_root,
         rom_search_cache_ttl_seconds=settings.rom_search_cache_ttl_seconds,
     )
-    credential_store = DroneCredentialStore(settings.credentials_file, settings.username, settings.password)
+    credential_store = DroneCredentialStore(
+        settings.credentials_file,
+        settings.username,
+        settings.password,
+        state_database_file=_state_database_path(settings.userdata_root),
+    )
     auth = BasicAuth(settings.username, settings.password, credential_store=credential_store)
     cert_state = DroneCertificateManager(settings).ensure_certificate()
     if cert_state.get("error"):

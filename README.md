@@ -118,7 +118,7 @@ Drone also reports live events to Overmind. These include filesystem create/upda
 
 System information is collected at startup and refreshed occasionally. It can include hostname, OS/platform, Batocera version when available, Drone app version, architecture, CPU count, memory, disk, network addresses, uptime, and whether Drone is running in Docker.
 
-Drone action processing state is not stored in a persistent database. Processed action history is written to a separate rotating log file, configurable with `OVERMIND_ACTION_LOG_FILE` and `OVERMIND_ACTION_LOG_MAX_BYTES`. Normal Drone logs also rotate with `LOG_MAX_BYTES` and `LOG_BACKUP_COUNT`, and log APIs default to a reasonable recent tail.
+Drone-owned durable state is stored in its local SQLite database: Overmind configuration, swarm and peer-check snapshots, upload cursors/fingerprints, credentials, small MD5 lookup results, peer certificate metadata, and processed action history. Existing JSON or action-log state files are imported on first access and removed after successful migration. `OVERMIND_ACTION_LOG_MAX_BYTES` is retained as a compatibility setting and bounds the number of completed-action records retained in SQLite. Normal Drone stdout/stderr logs remain rotating files controlled by `LOG_MAX_BYTES` and `LOG_BACKUP_COUNT`, because log collection tails those streams directly.
 
 Local fake mode is opt-in with `USE_FAKE_DATA=true`. Normal local Compose starts Drones unapproved so Overmind can show the pending Psionic connection.
 
@@ -222,13 +222,13 @@ ROM_METADATA_INITIAL_DELAY_SECONDS=60
 ROM_METADATA_HASH_IO_YIELD_SECONDS=0.05
 ```
 
-The poller stores its incremental SQLite cache at:
+The poller and other Drone-owned durable state share the local SQLite database at:
 
 ```text
 /userdata/system/drone-app/rom_metadata_cache.sqlite3
 ```
 
-The cache includes compact scan/upload state and separate keyed rows for ROM, BIOS, and artwork entries. Existing JSON caches are migrated on first use. On each poll Drone scans file size and modified time first, upserts only added or changed rows, deletes rows for removed assets, hashes only new or changed ROM files, and updates only the newly completed hash rows. Local collection and caching continue even when Drone is not connected to Overmind or Overmind is temporarily unavailable; the cache remains pending for a later upload. Discovery and MD5 work are checkpointed during progress so a restarted Drone resumes from completed hashes instead of starting the metadata build over. MD5 reads yield between chunks to avoid monopolizing slower storage, and heartbeat filesystem scanning pauses while metadata work is active.
+The database filename is retained for in-place compatibility with existing ROM caches; it now also contains keyed application state and completed action records. The metadata tables include compact scan/upload state and separate keyed rows for ROM, BIOS, and artwork entries. Existing JSON caches are migrated on first use. On each poll Drone scans file size and modified time first, upserts only added or changed rows, deletes rows for removed assets, hashes only new or changed ROM files, and updates only the newly completed hash rows. Local collection and caching continue even when Drone is not connected to Overmind or Overmind is temporarily unavailable; the cache remains pending for a later upload. Discovery and MD5 work are checkpointed during progress so a restarted Drone resumes from completed hashes instead of starting the metadata build over. MD5 reads yield between chunks to avoid monopolizing slower storage, and heartbeat filesystem scanning pauses while metadata work is active.
 
 ROM metadata logs show cache load, scan, checkpoint, MD5 hashing, cache update, upload/skip, counts, and durations. The checkpoint cadence defaults to 250 assets or 30 seconds and can be changed with `ROM_METADATA_PROGRESS_FILES` and `ROM_METADATA_PROGRESS_SECONDS`; `ROM_METADATA_HASH_IO_YIELD_SECONDS` controls the storage-friendly pause after each 1 MB hashing read. Individual ROM paths are not logged by default.
 
