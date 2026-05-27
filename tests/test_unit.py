@@ -569,12 +569,16 @@ class SettingsTests(unittest.TestCase):
                         {
                             "device_id": "source-without-rom",
                             "online": True,
+                            "public_resolvable": True,
+                            "public_reachable_url": "https://198.51.100.19:8443",
                             "rom_systems": ["snes"],
                             "last_speed_sample": {"upload_mbps": 500},
                         },
                         {
                             "device_id": "source-with-rom",
                             "online": True,
+                            "public_resolvable": True,
+                            "public_reachable_url": "https://198.51.100.20:8443",
                             "rom_systems": ["snes"],
                             "last_speed_sample": {"upload_mbps": 10},
                         },
@@ -592,6 +596,44 @@ class SettingsTests(unittest.TestCase):
             )
             self.assertIsNotNone(peer)
             self.assertEqual(peer["device_id"], "source-with-rom")
+
+    def test_best_peer_for_rom_rejects_unresolvable_source_device(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "USERDATA_ROOT": str(root),
+                    "ROMS_ROOT": str(root / "roms"),
+                    "BIOS_ROOT": str(root / "bios"),
+                    "OVERMIND_DEVICE_ID": "target-a",
+                },
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            swarm_path = root / "system" / "drone-app" / "overmind_swarm.json"
+            swarm_path.parent.mkdir(parents=True)
+            swarm_path.write_text(
+                json.dumps([{
+                    "device_id": "unreachable-source",
+                    "online": True,
+                    "public_resolvable": False,
+                    "rom_systems": ["snes"],
+                    "last_speed_sample": {"upload_mbps": 500},
+                }]),
+                encoding="utf-8",
+            )
+
+            peer = _best_peer_for_rom(
+                settings,
+                RomRepository(settings.roms_root, settings.bios_root),
+                {},
+                "snes",
+                "Game.zip",
+                source_device_ids={"unreachable-source"},
+            )
+
+            self.assertIsNone(peer)
 
     def test_disk_rom_without_gamelist_is_listed_with_md5(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

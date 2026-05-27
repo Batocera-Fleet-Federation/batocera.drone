@@ -163,7 +163,7 @@ The shared Compose swarm runs four lightweight Drones with unique hostnames, dev
 
 ## ROM Sync
 
-ROM sync is requested from Overmind, not by choosing a source Drone manually. The target Drone receives a `sync_rom` or `sync_system` action, checks its stored swarm list, picks a healthy peer with the requested ROM, downloads one file at a time through the peer API, and reports sync activity back to Overmind.
+ROM sync is requested from Overmind, not by choosing a source Drone manually. The target Drone receives a `sync_rom` or `sync_system` action, checks its stored swarm list, picks a healthy source that Overmind has verified as publicly resolvable and that has the requested ROM, downloads one file at a time through the peer API, and reports sync activity back to Overmind. Drones without a verified public peer endpoint are never selected as ROM, BIOS, or artwork download sources.
 
 Publish a multi-arch GHCR image:
 

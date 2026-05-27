@@ -21,6 +21,8 @@ def select_best_peer(
         peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
         if not peer_id or peer_id == local_device_id or not peer.get("online", True):
             continue
+        if not peer.get("public_resolvable") or not str(peer.get("public_reachable_url") or "").strip():
+            continue
         if allowed_sources and peer_id not in allowed_sources:
             continue
         if required_system:
