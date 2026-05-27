@@ -34,6 +34,8 @@ from app.drone_api import (
     _hash_rom_metadata_batches,
     _poll_rom_metadata_cache,
     _poll_rom_metadata_once,
+    _load_rom_metadata_cache,
+    _persist_rom_metadata_cache,
     _rom_metadata_cache_path,
     _sync_rom_metadata_to_overmind,
     _write_json_file,
@@ -1060,10 +1062,9 @@ class SettingsTests(unittest.TestCase):
             patches = list(_hash_rom_metadata_batches(settings, repo, batch_size=1))
             self.assertEqual(len(patches), 1)
             first_md5 = patches[0]["roms"][0]["rom_md5"]
-            cache = _rom_metadata_cache_path(settings)
-            cache_data = json.loads(cache.read_text(encoding="utf-8"))
+            cache_data, _ = _load_rom_metadata_cache(settings)
             cache_data["dirty"] = False
-            cache.write_text(json.dumps(cache_data), encoding="utf-8")
+            _persist_rom_metadata_cache(settings, cache_data)
 
             with mock.patch.object(RomRepository, "build_md5", side_effect=AssertionError("unchanged metadata should not hash")):
                 snapshot, changed, stats = _poll_rom_metadata_cache(settings, repo)
@@ -1102,9 +1103,9 @@ class SettingsTests(unittest.TestCase):
             repo = RomRepository(settings.roms_root, settings.bios_root)
             _poll_rom_metadata_cache(settings, repo)
             list(_hash_rom_metadata_batches(settings, repo, batch_size=1))
-            cache_data = json.loads(_rom_metadata_cache_path(settings).read_text(encoding="utf-8"))
+            cache_data, _ = _load_rom_metadata_cache(settings)
             cache_data["dirty"] = False
-            _rom_metadata_cache_path(settings).write_text(json.dumps(cache_data), encoding="utf-8")
+            _persist_rom_metadata_cache(settings, cache_data)
             gamelist.write_text(
                 "<gameList><game><path>./Game.zip</path><name>Game</name>"
                 "<image>./images/game.png</image><marquee>./images/game-marquee.png</marquee>"
@@ -1139,6 +1140,58 @@ class SettingsTests(unittest.TestCase):
             self.assertTrue(stats["rebuilt"])
             self.assertEqual(len(snapshot["roms"]), 1)
 
+    def test_legacy_json_rom_metadata_cache_migrates_to_incremental_store(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
+                settings = Settings.from_env()
+            legacy_path = root / "system" / "drone-app" / "rom_metadata_cache.json"
+            legacy_path.parent.mkdir(parents=True)
+            legacy_path.write_text(
+                json.dumps({
+                    "schema_version": 1,
+                    "entries": {"snes:Game.zip": {"system": "snes", "file_path": "Game.zip", "rom_md5": "abc"}},
+                    "bios_entries": {},
+                    "artwork_entries": {},
+                    "systems": [{"name": "snes"}],
+                    "gamelists": [],
+                    "dirty": False,
+                }),
+                encoding="utf-8",
+            )
+
+            cache, rebuilt = _load_rom_metadata_cache(settings)
+            reloaded, reloaded_rebuilt = _load_rom_metadata_cache(settings)
+
+            self.assertFalse(rebuilt)
+            self.assertFalse(reloaded_rebuilt)
+            self.assertTrue(_rom_metadata_cache_path(settings).exists())
+            self.assertEqual(cache["entries"]["snes:Game.zip"]["rom_md5"], "abc")
+            self.assertEqual(reloaded["entries"]["snes:Game.zip"]["file_path"], "Game.zip")
+
+    def test_rom_metadata_poll_does_not_write_monolithic_json_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            rom = root / "roms" / "snes" / "Game.zip"
+            rom.parent.mkdir(parents=True)
+            rom.write_bytes(b"rom")
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
+                clear=True,
+            ):
+                settings = Settings.from_env()
+
+            with mock.patch("app.drone_api._write_json_file", side_effect=AssertionError("large JSON cache must not be rewritten")):
+                snapshot, changed, _ = _poll_rom_metadata_cache(
+                    settings,
+                    RomRepository(settings.roms_root, settings.bios_root),
+                )
+
+            self.assertTrue(changed)
+            self.assertEqual(len(snapshot["roms"]), 1)
+            self.assertTrue(_rom_metadata_cache_path(settings).exists())
+
     def test_rom_metadata_scan_checkpoint_survives_interruption(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
@@ -1155,20 +1208,20 @@ class SettingsTests(unittest.TestCase):
             repo = RomRepository(settings.roms_root, settings.bios_root)
             interrupted = False
 
-            def interrupt_after_checkpoint(path, payload):
+            def interrupt_after_checkpoint(cache_settings, payload, **kwargs):
                 nonlocal interrupted
-                _write_json_file(path, payload)
+                _persist_rom_metadata_cache(cache_settings, payload, **kwargs)
                 if payload.get("scan_in_progress") and not interrupted:
                     interrupted = True
                     raise RuntimeError("simulated reset")
 
             with mock.patch("app.drone_api.ROM_METADATA_PROGRESS_FILES", 1), mock.patch(
-                "app.drone_api._write_json_file", side_effect=interrupt_after_checkpoint
+                "app.drone_api._persist_rom_metadata_cache", side_effect=interrupt_after_checkpoint
             ):
                 with self.assertRaisesRegex(RuntimeError, "simulated reset"):
                     _poll_rom_metadata_cache(settings, repo)
 
-            partial = json.loads(_rom_metadata_cache_path(settings).read_text(encoding="utf-8"))
+            partial, _ = _load_rom_metadata_cache(settings)
             self.assertTrue(partial["scan_in_progress"])
             self.assertEqual(len(partial["entries"]), 1)
 
@@ -1192,7 +1245,7 @@ class SettingsTests(unittest.TestCase):
             repo = RomRepository(settings.roms_root, settings.bios_root)
             original_md5 = RomRepository.build_md5
 
-            def interrupted_hash(path):
+            def interrupted_hash(path, **kwargs):
                 if path.name == "B.bin":
                     raise RuntimeError("simulated reset")
                 return original_md5(path)
@@ -1203,13 +1256,13 @@ class SettingsTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "simulated reset"):
                     _poll_rom_metadata_cache(settings, repo)
 
-            partial = json.loads(_rom_metadata_cache_path(settings).read_text(encoding="utf-8"))
+            partial, _ = _load_rom_metadata_cache(settings)
             self.assertTrue(partial["bios_entries"]["a.bin"]["bios_md5"])
             self.assertNotIn("bios_md5", partial["bios_entries"]["b.bin"])
 
             hashed_after_restart = []
 
-            def track_hash(path):
+            def track_hash(path, **kwargs):
                 hashed_after_restart.append(path.name)
                 return original_md5(path)
 
@@ -1236,7 +1289,7 @@ class SettingsTests(unittest.TestCase):
             _poll_rom_metadata_cache(settings, repo)
             original_md5 = RomRepository.build_md5
 
-            def interrupted_hash(path):
+            def interrupted_hash(path, **kwargs):
                 if path.name == "B.zip":
                     raise RuntimeError("simulated reset")
                 return original_md5(path)
@@ -1247,13 +1300,13 @@ class SettingsTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "simulated reset"):
                     list(_hash_rom_metadata_batches(settings, repo, batch_size=1000))
 
-            partial = json.loads(_rom_metadata_cache_path(settings).read_text(encoding="utf-8"))
+            partial, _ = _load_rom_metadata_cache(settings)
             self.assertTrue(partial["entries"]["snes:A.zip"]["rom_md5"])
             self.assertNotIn("rom_md5", partial["entries"]["snes:B.zip"])
 
             hashed_after_restart = []
 
-            def track_hash(path):
+            def track_hash(path, **kwargs):
                 hashed_after_restart.append(path.name)
                 return original_md5(path)
 
@@ -1284,9 +1337,9 @@ class SettingsTests(unittest.TestCase):
             repo = RomRepository(settings.roms_root, settings.bios_root)
             _poll_rom_metadata_cache(settings, repo)
             list(_hash_rom_metadata_batches(settings, repo, batch_size=1))
-            cache_data = json.loads(_rom_metadata_cache_path(settings).read_text(encoding="utf-8"))
+            cache_data, _ = _load_rom_metadata_cache(settings)
             cache_data["dirty"] = False
-            _rom_metadata_cache_path(settings).write_text(json.dumps(cache_data), encoding="utf-8")
+            _persist_rom_metadata_cache(settings, cache_data)
 
             uploads = []
 
@@ -1316,7 +1369,7 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(result["bios_count"], 0)
             self.assertEqual(result["artwork_count"], 0)
             self.assertEqual(len(uploads), 0)
-            cache_after = json.loads(_rom_metadata_cache_path(settings).read_text(encoding="utf-8"))
+            cache_after, _ = _load_rom_metadata_cache(settings)
             self.assertFalse(cache_after["dirty"])
             self.assertFalse(cache_after["last_successful_upload_at"])
 
@@ -1408,7 +1461,7 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual([len(payload["roms"]) for payload in inventories], [1, 2, 1])
             self.assertEqual(added["stats"]["new_or_changed"], 1)
             self.assertEqual(deleted["stats"]["deleted"], 1)
-            cache = json.loads(_rom_metadata_cache_path(settings).read_text(encoding="utf-8"))
+            cache, _ = _load_rom_metadata_cache(settings)
             self.assertEqual(len(cache["entries"]), 1)
             self.assertEqual(next(iter(cache["entries"].values()))["file_path"], "Second Game.zip")
             self.assertFalse(cache["dirty"])
@@ -1437,7 +1490,7 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(result["status"], "cached")
             self.assertEqual(result["reason"], "overmind_not_configured")
             self.assertEqual(result["hashed_roms"], 1)
-            cache = json.loads(_rom_metadata_cache_path(settings).read_text(encoding="utf-8"))
+            cache, _ = _load_rom_metadata_cache(settings)
             self.assertTrue(cache["dirty"])
             self.assertTrue(next(iter(cache["entries"].values()))["rom_md5"])
 
@@ -1468,7 +1521,7 @@ class SettingsTests(unittest.TestCase):
                 with self.assertRaises(URLError):
                     _poll_rom_metadata_once(settings, RomRepository(settings.roms_root, settings.bios_root))
 
-            cache = json.loads(_rom_metadata_cache_path(settings).read_text(encoding="utf-8"))
+            cache, _ = _load_rom_metadata_cache(settings)
             self.assertTrue(cache["dirty"])
             self.assertTrue(next(iter(cache["entries"].values()))["rom_md5"])
 

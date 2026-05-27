@@ -214,21 +214,23 @@ Drone heartbeats are intentionally lightweight. They report Drone identity, name
 
 Each heartbeat logs the send start, Overmind heartbeat endpoint, success or failure, response status when available, and duration.
 
-ROM inventory is handled by a separate poller. Configure the interval with:
+ROM inventory is handled by a separate low-priority poller. Its initial run waits 60 seconds after startup so Batocera services can settle, and subsequent polls default to every 15 minutes. Configure it with:
 
 ```bash
 ROM_METADATA_POLL_SECONDS=900
+ROM_METADATA_INITIAL_DELAY_SECONDS=60
+ROM_METADATA_HASH_IO_YIELD_SECONDS=0.05
 ```
 
-The poller stores its JSON cache at:
+The poller stores its incremental SQLite cache at:
 
 ```text
-/userdata/system/drone-app/rom_metadata_cache.json
+/userdata/system/drone-app/rom_metadata_cache.sqlite3
 ```
 
-The cache includes a schema version, last scan/upload timestamps, systems, gamelist snapshots, and ROM entries keyed by system plus relative path. On each poll Drone scans file size and modified time first, hashes only new or changed ROM files, and removes deleted ROMs from the cache. Local collection and caching continue even when Drone is not connected to Overmind or Overmind is temporarily unavailable; the cache remains pending for a later upload. Discovery and MD5 work are checkpointed during progress so a restarted Drone resumes from completed hashes instead of starting the metadata build over. When connected, Drone uploads a full metadata snapshot to Overmind only when something changed or the cache had to be rebuilt. Cache writes are atomic; missing, corrupt, or incompatible cache files are rebuilt safely.
+The cache includes compact scan/upload state and separate keyed rows for ROM, BIOS, and artwork entries. Existing JSON caches are migrated on first use. On each poll Drone scans file size and modified time first, upserts only added or changed rows, deletes rows for removed assets, hashes only new or changed ROM files, and updates only the newly completed hash rows. Local collection and caching continue even when Drone is not connected to Overmind or Overmind is temporarily unavailable; the cache remains pending for a later upload. Discovery and MD5 work are checkpointed during progress so a restarted Drone resumes from completed hashes instead of starting the metadata build over. MD5 reads yield between chunks to avoid monopolizing slower storage, and heartbeat filesystem scanning pauses while metadata work is active.
 
-ROM metadata logs show cache load, scan, checkpoint, MD5 hashing, cache write, upload/skip, counts, and durations. The checkpoint and progress cadence is controlled by `ROM_METADATA_PROGRESS_FILES` and `ROM_METADATA_PROGRESS_SECONDS`, and individual ROM paths are not logged by default.
+ROM metadata logs show cache load, scan, checkpoint, MD5 hashing, cache update, upload/skip, counts, and durations. The checkpoint cadence defaults to 250 assets or 30 seconds and can be changed with `ROM_METADATA_PROGRESS_FILES` and `ROM_METADATA_PROGRESS_SECONDS`; `ROM_METADATA_HASH_IO_YIELD_SECONDS` controls the storage-friendly pause after each 1 MB hashing read. Individual ROM paths are not logged by default.
 
 ### API Example
 

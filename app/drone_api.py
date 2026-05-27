@@ -8,6 +8,7 @@ import re
 import secrets
 import shutil
 import socket
+import sqlite3
 import ssl
 import subprocess
 import sys
@@ -103,6 +104,7 @@ FAKE_OVERMIND_PASSWORD = "DemoPass123"
 FAKE_OVERMIND_TOKEN = "demo-local-drone-token"
 _OVERMIND_POLLER_STARTED = False
 _ROM_METADATA_POLLER_STARTED = False
+_ROM_METADATA_ACTIVE = Event()
 _DOWNLOAD_MANAGER = None
 LAUNCHBOX_API_BASE = "https://api.gamesdb.launchbox-app.com/api"
 LAUNCHBOX_IMAGE_BASE = "https://images.launchbox-app.com"
@@ -126,11 +128,13 @@ PEER_CHECK_INTERVAL_SECONDS = int(os.environ.get("DRONE_PEER_CHECK_INTERVAL_SECO
 OVERMIND_SPEED_SAMPLE_SECONDS = int(os.environ.get("OVERMIND_SPEED_SAMPLE_SECONDS", "600"))
 SPEED_TEST_DEFAULT_BASE_URL = "https://speed.cloudflare.com"
 OVERMIND_HEARTBEAT_SECONDS = int(os.environ.get("OVERMIND_POLL_SECONDS", "30"))
-ROM_METADATA_CACHE_VERSION = 1
-ROM_METADATA_POLL_SECONDS = int(os.environ.get("ROM_METADATA_POLL_SECONDS", "30"))
-ROM_METADATA_PROGRESS_SECONDS = float(os.environ.get("ROM_METADATA_PROGRESS_SECONDS", "5"))
-ROM_METADATA_PROGRESS_FILES = int(os.environ.get("ROM_METADATA_PROGRESS_FILES", "25"))
+ROM_METADATA_CACHE_VERSION = 2
+ROM_METADATA_POLL_SECONDS = int(os.environ.get("ROM_METADATA_POLL_SECONDS", "900"))
+ROM_METADATA_INITIAL_DELAY_SECONDS = int(os.environ.get("ROM_METADATA_INITIAL_DELAY_SECONDS", "60"))
+ROM_METADATA_PROGRESS_SECONDS = float(os.environ.get("ROM_METADATA_PROGRESS_SECONDS", "30"))
+ROM_METADATA_PROGRESS_FILES = int(os.environ.get("ROM_METADATA_PROGRESS_FILES", "250"))
 ROM_METADATA_MD5_BATCH_SIZE = max(1, int(os.environ.get("ROM_METADATA_MD5_BATCH_SIZE", "1000")))
+ROM_METADATA_HASH_IO_YIELD_SECONDS = max(0.0, float(os.environ.get("ROM_METADATA_HASH_IO_YIELD_SECONDS", "0.05")))
 LAUNCHBOX_PLATFORM_ALIASES = {
     "3do": "3DO Interactive Multiplayer",
     "adam": "Coleco ADAM",
@@ -1571,7 +1575,7 @@ class RomRepository:
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
     @staticmethod
-    def build_md5(path: Path) -> str:
+    def build_md5(path: Path, io_yield_seconds: float = 0.0) -> str:
         digest = hashlib.md5()
         with path.open("rb") as handle:
             while True:
@@ -1579,6 +1583,8 @@ class RomRepository:
                 if not chunk:
                     break
                 digest.update(chunk)
+                if io_yield_seconds > 0:
+                    time.sleep(io_yield_seconds)
         return digest.hexdigest()
 
     @staticmethod
@@ -7033,6 +7039,10 @@ def _collect_rom_metadata(settings: Settings, repository: "RomRepository") -> di
 
 
 def _rom_metadata_cache_path(settings: Settings) -> Path:
+    return (settings.userdata_root / "system" / "drone-app" / "rom_metadata_cache.sqlite3").resolve()
+
+
+def _legacy_rom_metadata_cache_path(settings: Settings) -> Path:
     return (settings.userdata_root / "system" / "drone-app" / "rom_metadata_cache.json").resolve()
 
 
@@ -7050,29 +7060,121 @@ def _empty_rom_metadata_cache() -> dict:
     }
 
 
+def _open_rom_metadata_cache(settings: Settings) -> sqlite3.Connection:
+    path = _rom_metadata_cache_path(settings)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(str(path), timeout=30)
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("PRAGMA synchronous=NORMAL")
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS cache_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+    )
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS cache_entries (asset_type TEXT NOT NULL, entry_key TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY (asset_type, entry_key))"
+    )
+    return connection
+
+
+def _persist_rom_metadata_cache(
+    settings: Settings,
+    cache: dict,
+    *,
+    rom_updates: Optional[dict] = None,
+    bios_updates: Optional[dict] = None,
+    artwork_updates: Optional[dict] = None,
+    rom_deletes: Optional[Iterable[str]] = None,
+    bios_deletes: Optional[Iterable[str]] = None,
+    artwork_deletes: Optional[Iterable[str]] = None,
+) -> None:
+    """Persist only changed metadata rows plus compact scan state."""
+    state = {
+        key: value
+        for key, value in cache.items()
+        if key not in {"entries", "bios_entries", "artwork_entries"}
+    }
+    updates = (
+        ("rom", rom_updates or {}),
+        ("bios", bios_updates or {}),
+        ("artwork", artwork_updates or {}),
+    )
+    deletions = (
+        ("rom", rom_deletes or []),
+        ("bios", bios_deletes or []),
+        ("artwork", artwork_deletes or []),
+    )
+    with _open_rom_metadata_cache(settings) as connection:
+        connection.executemany(
+            "INSERT INTO cache_state (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [(key, json.dumps(value, sort_keys=True, default=str)) for key, value in state.items()],
+        )
+        for asset_type, rows in updates:
+            connection.executemany(
+                "INSERT INTO cache_entries (asset_type, entry_key, payload) VALUES (?, ?, ?) "
+                "ON CONFLICT(asset_type, entry_key) DO UPDATE SET payload=excluded.payload",
+                [
+                    (asset_type, key, json.dumps(value, sort_keys=True, default=str))
+                    for key, value in rows.items()
+                ],
+            )
+        for asset_type, keys in deletions:
+            connection.executemany(
+                "DELETE FROM cache_entries WHERE asset_type = ? AND entry_key = ?",
+                [(asset_type, key) for key in keys],
+            )
+
+
+def _read_sqlite_rom_metadata_cache(settings: Settings) -> dict:
+    with _open_rom_metadata_cache(settings) as connection:
+        state = {
+            key: json.loads(value)
+            for key, value in connection.execute("SELECT key, value FROM cache_state")
+        }
+        if state.get("schema_version") != ROM_METADATA_CACHE_VERSION:
+            raise ValueError("cache schema mismatch")
+        cache = {**_empty_rom_metadata_cache(), **state}
+        entries = {"rom": {}, "bios": {}, "artwork": {}}
+        for asset_type, key, payload in connection.execute(
+            "SELECT asset_type, entry_key, payload FROM cache_entries"
+        ):
+            if asset_type in entries:
+                entries[asset_type][key] = json.loads(payload)
+        cache["entries"] = entries["rom"]
+        cache["bios_entries"] = entries["bios"]
+        cache["artwork_entries"] = entries["artwork"]
+        return cache
+
+
 def _load_rom_metadata_cache(settings: Settings) -> Tuple[dict, bool]:
     path = _rom_metadata_cache_path(settings)
+    legacy_path = _legacy_rom_metadata_cache_path(settings)
     try:
-        cache = _read_json_file(path, None)
-        if not isinstance(cache, dict) or cache.get("schema_version") != ROM_METADATA_CACHE_VERSION:
-            raise ValueError("cache schema mismatch")
-        entries = cache.get("entries")
-        if not isinstance(entries, dict):
-            raise ValueError("cache entries missing")
-        bios_entries = cache.get("bios_entries")
-        if bios_entries is not None and not isinstance(bios_entries, dict):
-            raise ValueError("cache bios entries invalid")
-        artwork_entries = cache.get("artwork_entries")
-        if artwork_entries is not None and not isinstance(artwork_entries, dict):
-            raise ValueError("cache artwork entries invalid")
-        cache.setdefault("bios_entries", {})
-        cache.setdefault("artwork_entries", {})
-        cache.setdefault("systems", [])
-        cache.setdefault("gamelists", [])
-        cache.setdefault("dirty", False)
-        return cache, False
+        if path.exists():
+            return _read_sqlite_rom_metadata_cache(settings), False
+        legacy = _read_json_file(legacy_path, None)
+        if isinstance(legacy, dict) and isinstance(legacy.get("entries"), dict):
+            legacy["schema_version"] = ROM_METADATA_CACHE_VERSION
+            legacy.setdefault("bios_entries", {})
+            legacy.setdefault("artwork_entries", {})
+            legacy.setdefault("systems", [])
+            legacy.setdefault("gamelists", [])
+            legacy.setdefault("dirty", True)
+            _persist_rom_metadata_cache(
+                settings,
+                legacy,
+                rom_updates=legacy["entries"],
+                bios_updates=legacy["bios_entries"],
+                artwork_updates=legacy["artwork_entries"],
+            )
+            print(f"Asset metadata cache migrated to incremental store: {path}", file=sys.stdout, flush=True)
+            return legacy, False
+        return _empty_rom_metadata_cache(), True
     except Exception as error:
         print(f"Asset metadata cache rebuild required: {path} ({_format_overmind_error(error)})", file=sys.stderr, flush=True)
+        if path.exists():
+            try:
+                path.replace(path.with_name(f"{path.name}.corrupt-{uuid.uuid4().hex}"))
+            except Exception:
+                pass
         return _empty_rom_metadata_cache(), True
 
 
@@ -7141,6 +7243,8 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
     next_entries: Dict[str, dict] = {}
     next_bios_entries: Dict[str, dict] = {}
     next_artwork_entries: Dict[str, dict] = {}
+    persisted_entries = dict(existing_entries)
+    persisted_bios_entries = dict(existing_bios_entries)
     new_or_changed: List[Tuple[str, Path, dict]] = []
     bios_new_or_changed: List[Tuple[str, Path, dict]] = []
     systems_scanned = 0
@@ -7170,7 +7274,22 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
         cache["dirty"] = True
         cache["scan_in_progress"] = True
         cache["scan_checkpoint_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-        _write_json_file(_rom_metadata_cache_path(settings), cache)
+        rom_updates = {
+            key: value for key, value in next_entries.items()
+            if persisted_entries.get(key) != value
+        }
+        bios_updates = {
+            key: value for key, value in next_bios_entries.items()
+            if persisted_bios_entries.get(key) != value
+        }
+        _persist_rom_metadata_cache(
+            settings,
+            cache,
+            rom_updates=rom_updates,
+            bios_updates=bios_updates,
+        )
+        persisted_entries.update(rom_updates)
+        persisted_bios_entries.update(bios_updates)
         print(
             f"Asset metadata checkpoint saved: phase={phase} roms={len(next_entries)} bios={len(next_bios_entries)}",
             file=sys.stdout,
@@ -7297,7 +7416,7 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
         last_log = hash_started
         print(f"BIOS metadata poll phase=md5_hashing count={len(bios_new_or_changed)}", file=sys.stdout, flush=True)
         for bios_index, (key, absolute, entry) in enumerate(bios_new_or_changed, start=1):
-            md5_value = RomRepository.build_md5(absolute)
+            md5_value = RomRepository.build_md5(absolute, io_yield_seconds=ROM_METADATA_HASH_IO_YIELD_SECONDS)
             next_bios_entries[key] = {**entry, "md5": md5_value, "bios_md5": md5_value}
             now = time.monotonic()
             if bios_index == len(bios_new_or_changed) or bios_index % max(1, ROM_METADATA_PROGRESS_FILES) == 0 or now - last_log >= ROM_METADATA_PROGRESS_SECONDS:
@@ -7320,7 +7439,28 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
     cache["dirty"] = changed
     cache["scan_in_progress"] = False
     print("Asset metadata poll phase=cache_write", file=sys.stdout, flush=True)
-    _write_json_file(_rom_metadata_cache_path(settings), cache)
+    rom_updates = {
+        key: value for key, value in next_entries.items()
+        if persisted_entries.get(key) != value
+    }
+    bios_updates = {
+        key: value for key, value in next_bios_entries.items()
+        if persisted_bios_entries.get(key) != value
+    }
+    artwork_updates = {
+        key: value for key, value in next_artwork_entries.items()
+        if existing_artwork_entries.get(key) != value
+    }
+    _persist_rom_metadata_cache(
+        settings,
+        cache,
+        rom_updates=rom_updates,
+        bios_updates=bios_updates,
+        artwork_updates=artwork_updates,
+        rom_deletes=set(persisted_entries) - set(next_entries),
+        bios_deletes=set(persisted_bios_entries) - set(next_bios_entries),
+        artwork_deletes=artwork_deleted,
+    )
     print(
         f"Asset metadata cache write completed: entries={len(next_entries)} bios_entries={len(next_bios_entries)} artwork_entries={len(next_artwork_entries)} changed={changed} duration_ms={int((time.monotonic() - started) * 1000)}",
         file=sys.stdout,
@@ -7360,12 +7500,14 @@ def _hash_rom_metadata_batches(settings: Settings, repository: "RomRepository", 
     last_checkpoint = started
     print(f"ROM metadata phase=md5_hashing count={total} batch_size={batch_size}", file=sys.stdout, flush=True)
     patch = []
+    pending_updates = {}
     for processed, (key, entry) in enumerate(pending, start=1):
         absolute = Path(str(entry.get("absolute_path") or ""))
         if absolute.exists() and absolute.is_file():
-            md5_value = repository.build_md5(absolute)
+            md5_value = repository.build_md5(absolute, io_yield_seconds=ROM_METADATA_HASH_IO_YIELD_SECONDS)
             updated = {**entry, "md5": md5_value, "rom_md5": md5_value}
             entries[key] = updated
+            pending_updates[key] = updated
             patch.append({k: v for k, v in updated.items() if k != "absolute_path"})
         now = time.monotonic()
         checkpoint_due = (
@@ -7379,7 +7521,8 @@ def _hash_rom_metadata_batches(settings: Settings, repository: "RomRepository", 
         if checkpoint_due:
             cache["entries"] = entries
             cache["dirty"] = True
-            _write_json_file(_rom_metadata_cache_path(settings), cache)
+            _persist_rom_metadata_cache(settings, cache, rom_updates=pending_updates)
+            pending_updates = {}
             print(f"ROM metadata cache checkpoint: {processed}/{total} files", file=sys.stdout, flush=True)
             last_checkpoint = now
         if not patch or (len(patch) < batch_size and processed != total):
@@ -7387,7 +7530,8 @@ def _hash_rom_metadata_batches(settings: Settings, repository: "RomRepository", 
         if not checkpoint_due:
             cache["entries"] = entries
             cache["dirty"] = True
-            _write_json_file(_rom_metadata_cache_path(settings), cache)
+            _persist_rom_metadata_cache(settings, cache, rom_updates=pending_updates)
+            pending_updates = {}
         print(f"ROM metadata md5 progress: {processed}/{total} files", file=sys.stdout, flush=True)
         yield {
             "type": "asset_metadata",
@@ -8863,11 +9007,12 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                         )
                     last_peer_check_at = now
 
-                next_fs_snapshot = _filesystem_snapshot(settings)
-                for event in _filesystem_events(settings, fs_snapshot, next_fs_snapshot):
-                    print(f"Filesystem event: {event.get('metadata', {}).get('action')} {event.get('path')}", file=sys.stdout, flush=True)
-                    _overmind_post_json(f"{base_url}/api/devices/{device_id}/events", event, token=token, settings=settings)
-                fs_snapshot = next_fs_snapshot
+                if not _ROM_METADATA_ACTIVE.is_set():
+                    next_fs_snapshot = _filesystem_snapshot(settings)
+                    for event in _filesystem_events(settings, fs_snapshot, next_fs_snapshot):
+                        print(f"Filesystem event: {event.get('metadata', {}).get('action')} {event.get('path')}", file=sys.stdout, flush=True)
+                        _overmind_post_json(f"{base_url}/api/devices/{device_id}/events", event, token=token, settings=settings)
+                    fs_snapshot = next_fs_snapshot
 
                 response_device = response.get("device") if isinstance(response.get("device"), dict) else {}
                 stored_logs = response_device.get("log_sources") if isinstance(response_device.get("log_sources"), dict) else {}
@@ -8981,7 +9126,7 @@ def _sync_rom_metadata_to_overmind(
         cache, _ = _load_rom_metadata_cache(settings)
         cache["last_successful_upload_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         cache["dirty"] = False
-        _write_json_file(_rom_metadata_cache_path(settings), cache)
+        _persist_rom_metadata_cache(settings, cache)
         uploads.append({"phase": phase, "status_code": status_code, "response": response})
         return response
 
@@ -9086,10 +9231,22 @@ def _poll_rom_metadata_once(settings: Settings, repository: "RomRepository") -> 
 
 def _start_rom_metadata_poller(settings: Settings, repository: "RomRepository") -> None:
     poll_seconds = max(30, int(settings.rom_metadata_poll_seconds or ROM_METADATA_POLL_SECONDS))
+    initial_delay_seconds = max(
+        0,
+        int(os.environ.get("ROM_METADATA_INITIAL_DELAY_SECONDS", str(ROM_METADATA_INITIAL_DELAY_SECONDS))),
+    )
 
     def loop() -> None:
+        if initial_delay_seconds:
+            print(
+                f"Asset metadata poll delayed at startup: seconds={initial_delay_seconds}",
+                file=sys.stdout,
+                flush=True,
+            )
+            time.sleep(initial_delay_seconds)
         while True:
             poll_started = time.monotonic()
+            _ROM_METADATA_ACTIVE.set()
             try:
                 _poll_rom_metadata_once(settings, repository)
             except (HTTPError, URLError) as error:
@@ -9105,6 +9262,8 @@ def _start_rom_metadata_poller(settings: Settings, repository: "RomRepository") 
                     file=sys.stderr,
                     flush=True,
                 )
+            finally:
+                _ROM_METADATA_ACTIVE.clear()
             time.sleep(poll_seconds)
 
     thread = Thread(target=loop, name="rom-metadata-poller", daemon=True)
