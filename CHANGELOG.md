@@ -1,5 +1,10 @@
 # Changelog
 
+## [v0.0.26] - 2026-05-27
+
+- Added refresh_emulator_list in Overmind and Drone. Drone executes it through batocera-es-swissknife --restart, refreshing EmulationStation’s list. Added a Delete Actions button and API endpoint to clear pending/in-progress queued actions for a Drone.
+- Drone now keeps a durable SQLite change queue in rom_metadata_store.py (line 61). Added/updated/deleted ROM, BIOS, and artwork rows remain queued until Overmind accepts them. Failed uploads retry only pending changes, not the entire catalog.
+
 ## [v0.0.25] - 2026-05-27
 
 - Updated Drone’s emulator config reporting to use an explicit allowlist instead of recursively reading all config-like files under /userdata/system/configs and /userdata/system/.config: overmind_reporting.py (line 18). It now collects only the specified emulator, Batocera, desktop/UI, and patch metadata paths, while excluding scraper data, RPCS3 runtime/history content, shadPS4 game/download/UI data, backups, dolphin-emu/TimePlayed.ini, and dolphin-emu/Logger.ini. I treated Logger.ini as excluded because it is runtime logging configuration and was listed as questionable. I also fixed the existing 250-file report limit behavior: if more than 250 allowed configs change, unsent files remain pending and are reported on a subsequent pass instead of being incorrectly fingerprinted as already delivered.
