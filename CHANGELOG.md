@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.27] - 2026-05-27
+
+- Updating drone api to fix bug where heartbeat stops.
+
 ## [v0.0.26] - 2026-05-27
 
 - Added refresh_emulator_list in Overmind and Drone. Drone executes it through batocera-es-swissknife --restart, refreshing EmulationStation’s list. Added a Delete Actions button and API endpoint to clear pending/in-progress queued actions for a Drone.
