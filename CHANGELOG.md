@@ -1,5 +1,22 @@
 # Changelog
 
+## [v0.0.18] - 2026-05-26
+
+- Updating how logs are streamed to overmind so that overmind does not get delayed.
+- Updating algorithm to only download from drones that are reachable via published IP (i.e. resolvable over internet).
+- Drone peer health checks and ROM/BIOS/artwork transfers now prefer the public endpoint over local/private addresses
+- Removing ability to Update remote machine for now.  Adding ability to toggle kiosk mode on or off remotely.
+- Updating speed sampling to use cloudflare instead of overmind.
+- now checkpoints discovery and BIOS hash progress while a scan is in progress, preserving prior entries until a complete scan can safely confirm deletions.
+- Updating rom metadata poller to start even if overmind connection is not available.
+- PS3/PS4 folder ROMs are now inventoried as entry_type: folder with recursive size/mtime, but no MD5 hashing. Drone exposes a peer folder manifest endpoint and sync recreates the full directory tree file-by-file on the target. Overmind preserves entry_type through ROM metadata, master lists, sync actions, bulk sync, and sync activity. Folder ROM sync matches by system/path when there is no MD5.
+- Cleaning up navbar UI.
+- Refactor time!  Breaking more components out into modular pieces.
+- Adding more unit test for rom metadata caching behvaiors
+- Sends a full ROM inventory without calculating new ROM MD5 hashes first in drone_api.py (line 6967). Calculates missing ROM MD5 values afterward and sends incremental rom_hash_patch updates from drone_api.py (line 7144). Sends hash updates every 1000 processed ROMs by default, configurable through ROM_METADATA_MD5_BATCH_SIZE, defined in drone_api.py (line 116). Preserves existing cached hashes for unchanged ROMs, avoiding unnecessary recalculation.
+- Refactor time!  Breaking out logic into files for more structured codebase and easier readability
+- Updating code to push log data and emulator configs every 30 seconds instead of having to be asked by overmind to do so.
+
 ## [v0.0.17] - 2026-05-25
 
 - Fixing script to pull all proper newly created content folders down for js / css
