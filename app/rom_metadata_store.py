@@ -38,6 +38,7 @@ def _empty_rom_metadata_cache() -> dict:
         "systems": [],
         "gamelists": [],
         "dirty": True,
+        "full_refresh_pending": False,
     }
 
 
@@ -65,6 +66,9 @@ def _open_rom_metadata_cache(settings: Any):
     connection.execute(
         "CREATE TABLE IF NOT EXISTS cache_entries (asset_type TEXT NOT NULL, entry_key TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY (asset_type, entry_key))"
     )
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS cache_changes (asset_type TEXT NOT NULL, entry_key TEXT NOT NULL, operation TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY (asset_type, entry_key))"
+    )
     return connection
 
 
@@ -78,6 +82,10 @@ def _persist_rom_metadata_cache(
     rom_deletes: Optional[Iterable[str]] = None,
     bios_deletes: Optional[Iterable[str]] = None,
     artwork_deletes: Optional[Iterable[str]] = None,
+    rom_deleted_rows: Optional[dict] = None,
+    bios_deleted_rows: Optional[dict] = None,
+    artwork_deleted_rows: Optional[dict] = None,
+    queue_changes: bool = True,
 ) -> None:
     """Persist only changed metadata rows plus compact scan state."""
     state = {
@@ -91,9 +99,9 @@ def _persist_rom_metadata_cache(
         ("artwork", artwork_updates or {}),
     )
     deletions = (
-        ("rom", rom_deletes or []),
-        ("bios", bios_deletes or []),
-        ("artwork", artwork_deletes or []),
+        ("rom", rom_deletes or [], rom_deleted_rows or {}),
+        ("bios", bios_deletes or [], bios_deleted_rows or {}),
+        ("artwork", artwork_deletes or [], artwork_deleted_rows or {}),
     )
     with _open_rom_metadata_cache(settings) as connection:
         connection.executemany(
@@ -109,11 +117,57 @@ def _persist_rom_metadata_cache(
                     for key, value in rows.items()
                 ],
             )
-        for asset_type, keys in deletions:
+            if queue_changes:
+                connection.executemany(
+                    "INSERT INTO cache_changes (asset_type, entry_key, operation, payload) VALUES (?, ?, 'upsert', ?) "
+                    "ON CONFLICT(asset_type, entry_key) DO UPDATE SET operation='upsert', payload=excluded.payload",
+                    [
+                        (asset_type, key, json.dumps(value, sort_keys=True, default=str))
+                        for key, value in rows.items()
+                    ],
+                )
+        for asset_type, keys, deleted_rows in deletions:
             connection.executemany(
                 "DELETE FROM cache_entries WHERE asset_type = ? AND entry_key = ?",
                 [(asset_type, key) for key in keys],
             )
+            if queue_changes:
+                connection.executemany(
+                    "INSERT INTO cache_changes (asset_type, entry_key, operation, payload) VALUES (?, ?, 'delete', ?) "
+                    "ON CONFLICT(asset_type, entry_key) DO UPDATE SET operation='delete', payload=excluded.payload",
+                    [
+                        (asset_type, key, json.dumps(deleted_rows.get(key) or {"entry_key": key}, sort_keys=True, default=str))
+                        for key in keys
+                    ],
+                )
+
+
+def _read_pending_rom_metadata_changes(settings: Any) -> dict:
+    changes = {
+        "roms": [],
+        "bios": [],
+        "artwork": [],
+        "deleted": {"roms": [], "bios": [], "artwork": []},
+    }
+    labels = {"rom": "roms", "bios": "bios", "artwork": "artwork"}
+    with _open_rom_metadata_cache(settings) as connection:
+        for asset_type, _key, operation, payload in connection.execute(
+            "SELECT asset_type, entry_key, operation, payload FROM cache_changes ORDER BY asset_type, entry_key"
+        ):
+            label = labels.get(asset_type)
+            if not label:
+                continue
+            row = json.loads(payload)
+            if operation == "delete":
+                changes["deleted"][label].append(row)
+            else:
+                changes[label].append(row)
+    return changes
+
+
+def _clear_pending_rom_metadata_changes(settings: Any) -> None:
+    with _open_rom_metadata_cache(settings) as connection:
+        connection.execute("DELETE FROM cache_changes")
 
 
 def _update_rom_metadata_cache_state(settings: Any, **values: Any) -> None:

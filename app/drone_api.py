@@ -57,8 +57,10 @@ try:
     from .rom_metadata_store import (
         ROM_METADATA_CACHE_VERSION,
         _empty_rom_metadata_cache,
+        _clear_pending_rom_metadata_changes,
         _load_rom_metadata_cache,
         _persist_rom_metadata_cache,
+        _read_pending_rom_metadata_changes,
         _rom_metadata_cache_path,
         _update_rom_metadata_cache_state,
     )
@@ -107,8 +109,10 @@ except ImportError:
     from rom_metadata_store import (  # type: ignore
         ROM_METADATA_CACHE_VERSION,
         _empty_rom_metadata_cache,
+        _clear_pending_rom_metadata_changes,
         _load_rom_metadata_cache,
         _persist_rom_metadata_cache,
+        _read_pending_rom_metadata_changes,
         _rom_metadata_cache_path,
         _update_rom_metadata_cache_state,
     )
@@ -160,7 +164,7 @@ OVERMIND_SPEED_SAMPLE_SECONDS = int(os.environ.get("OVERMIND_SPEED_SAMPLE_SECOND
 SPEED_TEST_DEFAULT_BASE_URL = "https://speed.cloudflare.com"
 OVERMIND_HEARTBEAT_SECONDS = int(os.environ.get("OVERMIND_POLL_SECONDS", "30"))
 OVERMIND_CONFIG_REPORT_SECONDS = int(os.environ.get("OVERMIND_CONFIG_REPORT_SECONDS", "900"))
-ROM_METADATA_POLL_SECONDS = int(os.environ.get("ROM_METADATA_POLL_SECONDS", "900"))
+ROM_METADATA_POLL_SECONDS = int(os.environ.get("ROM_METADATA_POLL_SECONDS", "300"))
 ROM_METADATA_INITIAL_DELAY_SECONDS = int(os.environ.get("ROM_METADATA_INITIAL_DELAY_SECONDS", "60"))
 ROM_METADATA_PROGRESS_SECONDS = float(os.environ.get("ROM_METADATA_PROGRESS_SECONDS", "30"))
 ROM_METADATA_PROGRESS_FILES = int(os.environ.get("ROM_METADATA_PROGRESS_FILES", "250"))
@@ -7096,7 +7100,6 @@ def _collect_rom_metadata(settings: Settings, repository: "RomRepository") -> di
         "roms": roms,
         "bios": bios,
         "artwork": artwork,
-        "assets": {"roms": roms, "bios": bios, "artwork": artwork},
         "gamelists": [],
     }
     print(
@@ -7151,7 +7154,6 @@ def _build_rom_metadata_snapshot_from_cache(settings: Settings, cache: dict) -> 
         "roms": roms,
         "bios": bios,
         "artwork": artwork,
-        "assets": {"roms": roms, "bios": bios, "artwork": artwork},
         "gamelists": cache.get("gamelists") if isinstance(cache.get("gamelists"), list) else [],
         "cache": {"schema_version": ROM_METADATA_CACHE_VERSION},
     }
@@ -7166,11 +7168,17 @@ def _rom_metadata_inventory_id(settings: Settings, snapshot: dict) -> str:
     return f"{settings.overmind_device_id}:{snapshot.get('collected_at') or ''}:{counts[0]}:{counts[1]}:{counts[2]}"
 
 
-def _chunk_rom_metadata_inventory(settings: Settings, snapshot: dict, chunk_size: Optional[int] = None) -> List[dict]:
+def _chunk_rom_metadata_inventory(
+    settings: Settings,
+    snapshot: dict,
+    chunk_size: Optional[int] = None,
+    *,
+    replace_all: bool = False,
+) -> List[dict]:
     chunk_size = max(1, int(chunk_size or ROM_METADATA_UPLOAD_CHUNK_SIZE))
-    roms = snapshot.get("roms") if isinstance(snapshot.get("roms"), list) else []
-    bios = snapshot.get("bios") if isinstance(snapshot.get("bios"), list) else []
-    artwork = snapshot.get("artwork") if isinstance(snapshot.get("artwork"), list) else []
+    roms = _wire_asset_rows(snapshot.get("roms") if isinstance(snapshot.get("roms"), list) else [])
+    bios = _wire_asset_rows(snapshot.get("bios") if isinstance(snapshot.get("bios"), list) else [])
+    artwork = _wire_asset_rows(snapshot.get("artwork") if isinstance(snapshot.get("artwork"), list) else [])
     rows = [("roms", row) for row in roms] + [("bios", row) for row in bios] + [("artwork", row) for row in artwork]
     base = {
         "device_id": settings.overmind_device_id,
@@ -7181,9 +7189,10 @@ def _chunk_rom_metadata_inventory(settings: Settings, snapshot: dict, chunk_size
         "systems": snapshot.get("systems") if isinstance(snapshot.get("systems"), list) else [],
         "gamelists": snapshot.get("gamelists") if isinstance(snapshot.get("gamelists"), list) else [],
         "cache": snapshot.get("cache") if isinstance(snapshot.get("cache"), dict) else {},
+        "replace_all": bool(replace_all),
     }
     if len(rows) <= chunk_size:
-        return [{**base, "update_mode": "inventory", "roms": roms, "bios": bios, "artwork": artwork, "assets": {"roms": roms, "bios": bios, "artwork": artwork}}]
+        return [{**base, "update_mode": "inventory", "roms": roms, "bios": bios, "artwork": artwork}]
 
     chunks = []
     total = (len(rows) + chunk_size - 1) // chunk_size
@@ -7205,16 +7214,66 @@ def _chunk_rom_metadata_inventory(settings: Settings, snapshot: dict, chunk_size
         }
         for asset_type, row in chunk_rows:
             payload[asset_type].append(row)
-        payload["assets"] = {"roms": payload["roms"], "bios": payload["bios"], "artwork": payload["artwork"]}
         chunks.append(payload)
     return chunks
 
 
+def _wire_asset_rows(rows: list) -> list:
+    return [
+        {key: value for key, value in row.items() if key != "absolute_path"}
+        for row in rows
+        if isinstance(row, dict)
+    ]
+
+
+def _chunk_rom_metadata_delta(settings: Settings, snapshot: dict, changes: dict, chunk_size: Optional[int] = None) -> List[dict]:
+    chunk_size = max(1, int(chunk_size or ROM_METADATA_UPLOAD_CHUNK_SIZE))
+    deleted = changes.get("deleted") if isinstance(changes.get("deleted"), dict) else {}
+    rows = (
+        [("roms", "upsert", row) for row in _wire_asset_rows(changes.get("roms") or [])]
+        + [("bios", "upsert", row) for row in _wire_asset_rows(changes.get("bios") or [])]
+        + [("artwork", "upsert", row) for row in _wire_asset_rows(changes.get("artwork") or [])]
+        + [("roms", "delete", row) for row in _wire_asset_rows(deleted.get("roms") or [])]
+        + [("bios", "delete", row) for row in _wire_asset_rows(deleted.get("bios") or [])]
+        + [("artwork", "delete", row) for row in _wire_asset_rows(deleted.get("artwork") or [])]
+    )
+    if not rows:
+        return []
+    base = {
+        "device_id": settings.overmind_device_id,
+        "type": snapshot.get("type") or "asset_metadata",
+        "update_mode": "inventory_delta",
+        "collected_at": snapshot.get("collected_at"),
+        "systems": snapshot.get("systems") if isinstance(snapshot.get("systems"), list) else [],
+    }
+    payloads = []
+    total = (len(rows) + chunk_size - 1) // chunk_size
+    for index, start in enumerate(range(0, len(rows), chunk_size)):
+        payload = {
+            **base,
+            "delta_index": index,
+            "delta_total": total,
+            "roms": [],
+            "bios": [],
+            "artwork": [],
+            "deleted": {"roms": [], "bios": [], "artwork": []},
+        }
+        for asset_type, operation, row in rows[start:start + chunk_size]:
+            if operation == "delete":
+                payload["deleted"][asset_type].append(row)
+            else:
+                payload[asset_type].append(row)
+        payloads.append(payload)
+    return payloads
+
+
 def _mark_rom_metadata_upload_clean(settings: Settings) -> None:
+    _clear_pending_rom_metadata_changes(settings)
     _update_rom_metadata_cache_state(
         settings,
         last_successful_upload_at=datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
         dirty=False,
+        full_refresh_pending=False,
     )
 
 
@@ -7459,6 +7518,9 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
         rom_deletes=set(persisted_entries) - set(next_entries),
         bios_deletes=set(persisted_bios_entries) - set(next_bios_entries),
         artwork_deletes=artwork_deleted,
+        rom_deleted_rows={key: existing_entries[key] for key in deleted if key in existing_entries},
+        bios_deleted_rows={key: existing_bios_entries[key] for key in bios_deleted if key in existing_bios_entries},
+        artwork_deleted_rows={key: existing_artwork_entries[key] for key in artwork_deleted if key in existing_artwork_entries},
     )
     print(
         f"Asset metadata cache write completed: entries={len(next_entries)} bios_entries={len(next_bios_entries)} artwork_entries={len(next_artwork_entries)} changed={changed} write_duration_ms={int((time.monotonic() - cache_write_started) * 1000)} total_poll_duration_ms={int((time.monotonic() - started) * 1000)}",
@@ -7478,6 +7540,9 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
         "artwork_deleted": len(artwork_deleted),
         "artwork_changed": artwork_changed,
         "rebuilt": rebuilt,
+        "had_cached_assets": bool(existing_entries or existing_bios_entries or existing_artwork_entries),
+        "had_successful_upload": bool(cache.get("last_successful_upload_at")),
+        "full_refresh_pending": bool(cache.get("full_refresh_pending")),
     }
     return _build_rom_metadata_snapshot_from_cache(settings, cache), changed, stats
 
@@ -8607,6 +8672,7 @@ def _execute_overmind_action(
         if not base_url or not token:
             cache, _ = _load_rom_metadata_cache(settings)
             cache["dirty"] = True
+            cache["full_refresh_pending"] = True
             _persist_rom_metadata_cache(settings, cache)
             return "completed", "Marked asset metadata dirty; upload will retry when Overmind is connected.", {
                 "type": "asset_metadata_rebuild",
@@ -9229,11 +9295,14 @@ def _sync_rom_metadata_to_overmind(
         uploads.append({"phase": phase, "status_code": status_code, "response": response})
         return response
 
-    should_upload_inventory = changed or force_upload
+    pending_changes = _read_pending_rom_metadata_changes(settings)
+    full_refresh = bool(force_upload or stats.get("full_refresh_pending"))
+    payloads = _chunk_rom_metadata_inventory(settings, snapshot, replace_all=True) if full_refresh else _chunk_rom_metadata_delta(settings, snapshot, pending_changes)
+    should_upload_inventory = bool(payloads)
     if should_upload_inventory:
-        payloads = _chunk_rom_metadata_inventory(settings, snapshot)
+        upload_kind = "full refresh" if full_refresh else "delta"
         print(
-            f"Asset metadata inventory sync started: endpoint={upload_url} roms={rom_count} bios={bios_count} artwork={artwork_count} chunks={len(payloads)} timeout_seconds={OVERMIND_UPLOAD_TIMEOUT_SECONDS} force={force_upload}",
+            f"Asset metadata {upload_kind} sync started: endpoint={upload_url} roms={rom_count} bios={bios_count} artwork={artwork_count} chunks={len(payloads)} timeout_seconds={OVERMIND_UPLOAD_TIMEOUT_SECONDS} force={force_upload}",
             file=sys.stdout,
             flush=True,
         )
@@ -9257,7 +9326,7 @@ def _sync_rom_metadata_to_overmind(
             )
         _mark_rom_metadata_upload_clean(settings)
         print(
-            f"Asset metadata inventory sync succeeded: sent_roms={rom_count} sent_bios={bios_count} sent_artwork={artwork_count} accepted_roms={accepted_roms} accepted_bios={accepted_bios} accepted_artwork={accepted_artwork}",
+            f"Asset metadata {upload_kind} sync succeeded: accepted_roms={accepted_roms} accepted_bios={accepted_bios} accepted_artwork={accepted_artwork}",
             file=sys.stdout,
             flush=True,
         )
