@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.21] - 2026-05-26
+
+- Fixing issue where drone was overwhelming overmind when pushing asset metadata.
+
 ## [v0.0.20] - 2026-05-26
 
 - Drone now uploads large asset inventory in chunks instead of one huge POST. Metadata upload timeout is now configurable and defaults to 60s: OVERMIND_UPLOAD_TIMEOUT_SECONDS=60 Inventory chunk size is configurable and defaults to 1000 asset rows: ROM_METADATA_UPLOAD_CHUNK_SIZE=1000 Drone logs each inventory chunk start/success and logs upload failures with phase, mode, chunk, and error. Drone keeps the local metadata cache dirty=True until uploads are confirmed. If a chunk fails, the next poll retries instead of assuming Overmind has the data. If Drone restarts midway, the SQLite cache still has the metadata and dirty state, so the next poll resumes by re-sending the inventory. Overmind now understands update_mode: inventory_chunk and appends chunks without wiping earlier chunks.
