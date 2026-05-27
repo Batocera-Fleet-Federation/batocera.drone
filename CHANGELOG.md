@@ -1,5 +1,10 @@
 # Changelog
 
+## [v0.0.25] - 2026-05-27
+
+- Updated Drone’s emulator config reporting to use an explicit allowlist instead of recursively reading all config-like files under /userdata/system/configs and /userdata/system/.config: overmind_reporting.py (line 18). It now collects only the specified emulator, Batocera, desktop/UI, and patch metadata paths, while excluding scraper data, RPCS3 runtime/history content, shadPS4 game/download/UI data, backups, dolphin-emu/TimePlayed.ini, and dolphin-emu/Logger.ini. I treated Logger.ini as excluded because it is runtime logging configuration and was listed as questionable. I also fixed the existing 250-file report limit behavior: if more than 250 allowed configs change, unsent files remain pending and are reported on a subsequent pass instead of being incorrectly fingerprinted as already delivered.
+- Background ROM and BIOS MD5 reads now honor ROM_METADATA_HASH_IO_YIELD_SECONDS, defaulting to 0.05 seconds after each 1 MB read. Metadata polling now derives system counts from its required inventory pass instead of recursively walking ROM directories twice. Redundant per-ROM file checks during inventory assembly were removed. Emulator config collection is deferred while metadata processing is active. Cache logging now reports separate SQLite cache-load, SQLite cache-write, and total poll durations. In rom_metadata_store.py (line 119): Successful upload acknowledgement now updates only compact SQLite state fields (dirty and last_successful_upload_at) instead of loading and decoding all cached ROM, BIOS, and artwork rows. Documentation was updated in README.md (line 217), and regression coverage was added in test_unit.py (line 1222).
+
 ## [v0.0.24] - 2026-05-27
 
 - Updating drone to only receive subset of information returned from overmind to reduce non-required information from going back and forth.
