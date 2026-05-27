@@ -1399,6 +1399,92 @@ class SettingsTests(unittest.TestCase):
             self.assertFalse(cache_after["dirty"])
             self.assertFalse(cache_after["last_successful_upload_at"])
 
+    def test_rom_metadata_sync_force_uploads_clean_database_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            system = root / "roms" / "snes"
+            system.mkdir(parents=True)
+            (system / "Game.zip").write_bytes(b"rom")
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "USERDATA_ROOT": str(root),
+                    "ROMS_ROOT": str(root / "roms"),
+                    "BIOS_ROOT": str(root / "bios"),
+                    "OVERMIND_DEVICE_ID": "drone-a",
+                },
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            repo = RomRepository(settings.roms_root, settings.bios_root)
+            _poll_rom_metadata_cache(settings, repo)
+            list(_hash_rom_metadata_batches(settings, repo, batch_size=1))
+            cache_data, _ = _load_rom_metadata_cache(settings)
+            cache_data["dirty"] = False
+            _persist_rom_metadata_cache(settings, cache_data)
+            uploads = []
+
+            def fake_post(url, payload, token=None, settings=None, timeout_seconds=10):
+                uploads.append(payload)
+                return 200, {
+                    "rom_count": len(payload.get("roms") or []),
+                    "bios_count": len(payload.get("bios") or []),
+                    "artwork_count": len(payload.get("artwork") or []),
+                }
+
+            with mock.patch.object(RomRepository, "build_md5", side_effect=AssertionError("force inventory should not rehash clean ROM")), mock.patch(
+                "app.drone_api._overmind_post_json_with_status", side_effect=fake_post
+            ):
+                result = _sync_rom_metadata_to_overmind(
+                    settings,
+                    repo,
+                    {"overmind_token": "drone-token"},
+                    "https://overmind.local",
+                    "drone-token",
+                    force_upload=True,
+                )
+
+            self.assertEqual(result["status"], "uploaded")
+            self.assertTrue(result["forced"])
+            self.assertEqual(len(uploads), 1)
+            self.assertEqual(uploads[0]["update_mode"], "inventory")
+            self.assertEqual(len(uploads[0]["roms"]), 1)
+
+    def test_collect_rom_metadata_prefers_local_database_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            system = root / "roms" / "snes"
+            system.mkdir(parents=True)
+            (system / "Game.zip").write_bytes(b"rom")
+            (system / "gamelist.xml").write_text(
+                "<gameList><game><path>./Game.zip</path><name>Cached Title</name></game></gameList>\n",
+                encoding="utf-8",
+            )
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "USERDATA_ROOT": str(root),
+                    "ROMS_ROOT": str(root / "roms"),
+                    "BIOS_ROOT": str(root / "bios"),
+                    "OVERMIND_DEVICE_ID": "drone-a",
+                },
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            repo = RomRepository(settings.roms_root, settings.bios_root)
+            _poll_rom_metadata_cache(settings, repo)
+            (system / "gamelist.xml").write_text(
+                "<gameList><game><path>./Game.zip</path><name>Stale XML Title</name></game></gameList>\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(repo, "list_assets", side_effect=AssertionError("collect should use local database cache")):
+                result = _collect_rom_metadata(settings, repo)
+
+            self.assertEqual(result["type"], "asset_metadata")
+            self.assertEqual(result["roms"][0]["rom_name"], "Game")
+            self.assertEqual(result["gamelists"], [])
+
     def test_rom_metadata_sync_uploads_inventory_then_batched_md5_patches(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"

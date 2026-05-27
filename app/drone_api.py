@@ -161,8 +161,8 @@ ROM_METADATA_POLL_SECONDS = int(os.environ.get("ROM_METADATA_POLL_SECONDS", "900
 ROM_METADATA_INITIAL_DELAY_SECONDS = int(os.environ.get("ROM_METADATA_INITIAL_DELAY_SECONDS", "60"))
 ROM_METADATA_PROGRESS_SECONDS = float(os.environ.get("ROM_METADATA_PROGRESS_SECONDS", "30"))
 ROM_METADATA_PROGRESS_FILES = int(os.environ.get("ROM_METADATA_PROGRESS_FILES", "250"))
-ROM_METADATA_MD5_BATCH_SIZE = max(1, int(os.environ.get("ROM_METADATA_MD5_BATCH_SIZE", "1000")))
-ROM_METADATA_UPLOAD_CHUNK_SIZE = max(1, int(os.environ.get("ROM_METADATA_UPLOAD_CHUNK_SIZE", "1000")))
+ROM_METADATA_MD5_BATCH_SIZE = max(1, int(os.environ.get("ROM_METADATA_MD5_BATCH_SIZE", "250")))
+ROM_METADATA_UPLOAD_CHUNK_SIZE = max(1, int(os.environ.get("ROM_METADATA_UPLOAD_CHUNK_SIZE", "250")))
 OVERMIND_UPLOAD_TIMEOUT_SECONDS = max(10, int(os.environ.get("OVERMIND_UPLOAD_TIMEOUT_SECONDS", "60")))
 LAUNCHBOX_PLATFORM_ALIASES = {
     "3do": "3DO Interactive Multiplayer",
@@ -7040,6 +7040,19 @@ def _resolve_userdata_path(settings: Settings, candidate: str) -> Path:
 
 
 def _collect_rom_metadata(settings: Settings, repository: "RomRepository") -> dict:
+    cache, _ = _load_rom_metadata_cache(settings)
+    entries = cache.get("entries") if isinstance(cache.get("entries"), dict) else {}
+    bios_entries = cache.get("bios_entries") if isinstance(cache.get("bios_entries"), dict) else {}
+    artwork_entries = cache.get("artwork_entries") if isinstance(cache.get("artwork_entries"), dict) else {}
+    if entries or bios_entries or artwork_entries:
+        result = _build_rom_metadata_snapshot_from_cache(settings, cache)
+        print(
+            f"Asset metadata collected from local database: systems={len(result.get('systems') or [])} roms={len(result.get('roms') or [])} bios={len(result.get('bios') or [])} artwork={len(result.get('artwork') or [])}",
+            file=sys.stdout,
+            flush=True,
+        )
+        return result
+
     try:
         systems = repository.list_systems()
     except FileNotFoundError:
@@ -7053,25 +7066,21 @@ def _collect_rom_metadata(settings: Settings, repository: "RomRepository") -> di
     except Exception:
         artwork = []
     roms = []
-    gamelists = []
     for system in systems:
         system_name = str(system.get("name") or "").strip()
         if not system_name:
             continue
         try:
-            _, system_roms = repository.list_assets(system_name, "roms", include_md5=False)
+            system_dir = repository.get_system_dir(system_name)
+            system_roms = repository._list_rom_items(system_name, system_dir, include_md5=False)
         except Exception as error:
             roms.append({"system": system_name, "error": str(error)})
             continue
         for rom in system_roms:
             item = dict(rom)
             item["system"] = system_name
+            item["system_name"] = system_name
             roms.append(item)
-        gamelist_path = settings.roms_root / system_name / "gamelist.xml"
-        if gamelist_path.exists() and gamelist_path.is_file():
-            gamelist = _read_text_file(gamelist_path, max_bytes=524288)
-            gamelist["system"] = system_name
-            gamelists.append(gamelist)
     result = {
         "type": "asset_metadata",
         "collected_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
@@ -7082,10 +7091,10 @@ def _collect_rom_metadata(settings: Settings, repository: "RomRepository") -> di
         "bios": bios,
         "artwork": artwork,
         "assets": {"roms": roms, "bios": bios, "artwork": artwork},
-        "gamelists": gamelists,
+        "gamelists": [],
     }
     print(
-        f"Asset metadata scan root={settings.roms_root} systems={len(systems)} roms={len(roms)} bios={len(bios)} artwork={len(artwork)} gamelists={len(gamelists)}",
+        f"Asset metadata scan root={settings.roms_root} systems={len(systems)} roms={len(roms)} bios={len(bios)} artwork={len(artwork)} source=database_or_filesystem",
         file=sys.stdout,
         flush=True,
     )
@@ -7283,7 +7292,8 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
             continue
         systems_scanned += 1
         try:
-            _, roms = repository.list_assets(system_name, "roms", include_md5=False)
+            system_dir = repository.get_system_dir(system_name)
+            roms = repository._list_rom_items(system_name, system_dir, include_md5=False)
         except Exception as error:
             print(f"ROM metadata scan warning: system={system_name} error={_format_overmind_error(error)}", file=sys.stderr, flush=True)
             continue
@@ -7320,11 +7330,6 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
                 if entry_type != "folder":
                     new_or_changed.append((key, absolute, base_entry))
             checkpoint_scan("rom_scan")
-        gamelist_path = settings.roms_root / system_name / "gamelist.xml"
-        if gamelist_path.exists() and gamelist_path.is_file():
-            gamelist = _read_text_file(gamelist_path, max_bytes=524288)
-            gamelist["system"] = system_name
-            gamelists.append(gamelist)
 
     checkpoint_scan("rom_scan_complete", force=bool(discovered))
     deleted = previous_keys - set(next_entries.keys())
@@ -8564,12 +8569,42 @@ def _summarize_overmind_result(result: Optional[dict]) -> str:
     return "data returned"
 
 
-def _execute_overmind_action(settings: Settings, repository: "RomRepository", action: dict) -> Tuple[str, str, Optional[dict]]:
+def _execute_overmind_action(
+    settings: Settings,
+    repository: "RomRepository",
+    action: dict,
+    config: Optional[dict] = None,
+    base_url: Optional[str] = None,
+    token: Optional[str] = None,
+) -> Tuple[str, str, Optional[dict]]:
     action_name = str(action.get("action") or "").strip().lower()
 
     if action_name == "collect_rom_metadata":
         result = _collect_rom_metadata(settings, repository)
         return "completed", f"Collected {_summarize_overmind_result(result)}.", result
+
+    if action_name == "rebuild_asset_metadata":
+        if not base_url or not token:
+            cache, _ = _load_rom_metadata_cache(settings)
+            cache["dirty"] = True
+            _persist_rom_metadata_cache(settings, cache)
+            return "completed", "Marked asset metadata dirty; upload will retry when Overmind is connected.", {
+                "type": "asset_metadata_rebuild",
+                "status": "queued",
+                "reason": "overmind_not_connected",
+            }
+        result = _sync_rom_metadata_to_overmind(
+            settings,
+            repository,
+            config or {},
+            base_url,
+            token,
+            force_upload=True,
+        )
+        return "completed", (
+            f"Rebuilt asset metadata and uploaded {result.get('rom_count', 0)} ROMs, "
+            f"{result.get('bios_count', 0)} BIOS files, and {result.get('artwork_count', 0)} artwork rows."
+        ), {"type": "asset_metadata_rebuild", **result, "uploads": len(result.get("uploads") or [])}
 
     if action_name == "collect_game_logs":
         result = _collect_game_logs(settings, repository)
@@ -9057,7 +9092,7 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
 
                 print(f"Processing {len(actions)} Overmind action(s) for {settings.overmind_device_id}", file=sys.stdout, flush=True)
                 for action in actions:
-                    status_value, message, result = _execute_overmind_action(settings, repository, action)
+                    status_value, message, result = _execute_overmind_action(settings, repository, action, config, base_url, token)
                     _record_processed_overmind_action(settings, action, status_value, message, result)
                     print(
                         f"Processed Overmind action {action.get('action')} ({action.get('id')}): {status_value} - {message}",
@@ -9097,6 +9132,8 @@ def _sync_rom_metadata_to_overmind(
     base_url: str,
     token: str,
     prepared_poll: Optional[Tuple[dict, bool, dict]] = None,
+    *,
+    force_upload: bool = False,
 ) -> dict:
     poll_started = time.monotonic()
     snapshot, changed, stats = prepared_poll or _poll_rom_metadata_cache(settings, repository)
@@ -9163,10 +9200,11 @@ def _sync_rom_metadata_to_overmind(
         uploads.append({"phase": phase, "status_code": status_code, "response": response})
         return response
 
-    if changed:
+    should_upload_inventory = changed or force_upload
+    if should_upload_inventory:
         payloads = _chunk_rom_metadata_inventory(settings, snapshot)
         print(
-            f"Asset metadata inventory sync started: endpoint={upload_url} roms={rom_count} bios={bios_count} artwork={artwork_count} chunks={len(payloads)} timeout_seconds={OVERMIND_UPLOAD_TIMEOUT_SECONDS}",
+            f"Asset metadata inventory sync started: endpoint={upload_url} roms={rom_count} bios={bios_count} artwork={artwork_count} chunks={len(payloads)} timeout_seconds={OVERMIND_UPLOAD_TIMEOUT_SECONDS} force={force_upload}",
             file=sys.stdout,
             flush=True,
         )
@@ -9209,10 +9247,10 @@ def _sync_rom_metadata_to_overmind(
         upload(payload, "rom_hash_patch")
         hash_batches += 1
         hashed_roms += len(patch_roms)
-    if changed or hash_batches:
+    if should_upload_inventory or hash_batches:
         _mark_rom_metadata_upload_clean(settings)
 
-    if not changed and not hash_batches:
+    if not should_upload_inventory and not hash_batches:
         print(
             f"Asset metadata sync skipped: no changes detected systems={stats.get('systems_scanned')} roms={stats.get('roms_discovered')} bios={stats.get('bios_discovered')} artwork={stats.get('artwork_discovered')} duration_ms={int((time.monotonic() - poll_started) * 1000)}",
             file=sys.stdout,
@@ -9228,7 +9266,7 @@ def _sync_rom_metadata_to_overmind(
             "stats": stats,
         }
     print(
-        f"Asset metadata sync succeeded: inventory_uploaded={changed} hash_batches={hash_batches} hashed_roms={hashed_roms} duration_ms={int((time.monotonic() - poll_started) * 1000)}",
+        f"Asset metadata sync succeeded: inventory_uploaded={should_upload_inventory} hash_batches={hash_batches} hashed_roms={hashed_roms} duration_ms={int((time.monotonic() - poll_started) * 1000)}",
         file=sys.stdout,
         flush=True,
     )
@@ -9241,6 +9279,7 @@ def _sync_rom_metadata_to_overmind(
         "hash_batches": hash_batches,
         "hashed_roms": hashed_roms,
         "changed": changed,
+        "forced": force_upload,
         "stats": stats,
     }
 
