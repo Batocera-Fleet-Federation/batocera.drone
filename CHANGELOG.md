@@ -1,5 +1,11 @@
 # Changelog
 
+## [v0.0.19] - 2026-05-26
+
+- Refactoring out sqlite into its own python files.
+- Implemented the Drone-owned persistence migration to SQLite. The shared storage layer is in state_store.py (line 1), using the existing /userdata/system/drone-app/rom_metadata_cache.sqlite3 database so the large ROM cache is not copied or rebuilt just to rename the database. Updated drone_api.py (line 1213) and overmind_reporting.py (line 1) so SQLite now stores: Drone credential hashes Overmind integration configuration Swarm snapshots and peer-check results Log delivery cursors and emulator config fingerprints Small per-ROM MD5 lookup results Peer certificate metadata Processed Overmind action history Mock-mode marker state Incremental ROM/BIOS/artwork metadata cache Existing JSON and action-history files are imported on first access and removed after successful migration. Completed action history remains bounded in SQLite instead of growing indefinitely. I intentionally did not move these into SQLite: ROM, BIOS, artwork, videos, and gamelist.xml, because they are Batocera content Certificate and private key PEM files, because TLS APIs require file paths Drone stdout/stderr and Batocera logs, because they are tailed as streaming log files I also fixed an initialization edge case: if credentials or another state item creates the shared database before ROM metadata runs, the first metadata poll initializes its tables without discarding the other stored state. Documentation and changelog entries were updated
+- Updating logic so that it caches rom metadata in a much better way without taking machine down.
+
 ## [v0.0.18] - 2026-05-26
 
 - Updating how logs are streamed to overmind so that overmind does not get delayed.
