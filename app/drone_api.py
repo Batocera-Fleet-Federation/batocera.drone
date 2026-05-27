@@ -9048,9 +9048,12 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                         _overmind_post_json(f"{base_url}/api/devices/{device_id}/events", event, token=token, settings=settings)
                     fs_snapshot = next_fs_snapshot
 
-                response_device = response.get("device") if isinstance(response.get("device"), dict) else {}
-                stored_logs = response_device.get("log_sources") if isinstance(response_device.get("log_sources"), dict) else {}
-                require_log_snapshot = not bool(stored_logs.get("logs"))
+                if isinstance(response.get("log_sources_initialized"), bool):
+                    require_log_snapshot = not response["log_sources_initialized"]
+                else:
+                    response_device = response.get("device") if isinstance(response.get("device"), dict) else {}
+                    stored_logs = response_device.get("log_sources") if isinstance(response_device.get("log_sources"), dict) else {}
+                    require_log_snapshot = not bool(stored_logs.get("logs"))
                 log_sources = _collect_log_sources(settings, include_unchanged=require_log_snapshot)
                 log_cursors = log_sources.pop("_cursors", {})
                 game_logs = _collect_game_logs(settings, repository, log_data=log_sources)
