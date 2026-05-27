@@ -37,6 +37,7 @@ from app.drone_api import (
     _poll_rom_metadata_cache,
     _poll_rom_metadata_once,
     _load_rom_metadata_cache,
+    _mark_rom_metadata_upload_clean,
     _persist_rom_metadata_cache,
     _rom_metadata_cache_path,
     _sync_rom_metadata_to_overmind,
@@ -1217,6 +1218,78 @@ class SettingsTests(unittest.TestCase):
             self.assertTrue(changed)
             self.assertEqual(len(snapshot["roms"]), 1)
             self.assertTrue(_rom_metadata_cache_path(settings).exists())
+
+    def test_rom_metadata_poll_uses_inventory_walk_for_system_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            rom = root / "roms" / "snes" / "Game.zip"
+            rom.parent.mkdir(parents=True)
+            rom.write_bytes(b"rom")
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            repo = RomRepository(settings.roms_root, settings.bios_root)
+
+            with mock.patch.object(repo, "_count_rom_items", side_effect=AssertionError("poll must not pre-count ROMs")):
+                snapshot, _, _ = _poll_rom_metadata_cache(settings, repo)
+
+            self.assertEqual(snapshot["systems"], [{"name": "snes", "rom_count": 1}])
+
+    def test_background_metadata_hashes_use_storage_yield_setting(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            rom = root / "roms" / "snes" / "Game.zip"
+            bios = root / "bios" / "flash.bin"
+            rom.parent.mkdir(parents=True)
+            bios.parent.mkdir(parents=True)
+            rom.write_bytes(b"rom")
+            bios.write_bytes(b"bios")
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            repo = RomRepository(settings.roms_root, settings.bios_root)
+            observed_yields = []
+            original_md5 = RomRepository.build_md5
+
+            def tracked_md5(path, io_yield_seconds=0.0):
+                observed_yields.append(io_yield_seconds)
+                return original_md5(path)
+
+            with mock.patch("app.drone_api.ROM_METADATA_HASH_IO_YIELD_SECONDS", 0.125), mock.patch.object(
+                RomRepository, "build_md5", side_effect=tracked_md5
+            ):
+                _poll_rom_metadata_cache(settings, repo)
+                list(_hash_rom_metadata_batches(settings, repo, batch_size=1))
+
+            self.assertEqual(observed_yields, [0.125, 0.125])
+
+    def test_upload_clean_updates_sqlite_state_without_loading_asset_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
+                settings = Settings.from_env()
+            cache = {
+                "schema_version": 2,
+                "dirty": True,
+                "entries": {"snes:game.zip": {"file_path": "Game.zip"}},
+                "bios_entries": {},
+                "artwork_entries": {},
+            }
+            _persist_rom_metadata_cache(settings, cache, rom_updates=cache["entries"])
+
+            with mock.patch("app.drone_api._load_rom_metadata_cache", side_effect=AssertionError("must not decode all cache rows")):
+                _mark_rom_metadata_upload_clean(settings)
+
+            updated, _ = _load_rom_metadata_cache(settings)
+            self.assertFalse(updated["dirty"])
+            self.assertTrue(updated["last_successful_upload_at"])
+            self.assertIn("snes:game.zip", updated["entries"])
 
     def test_rom_metadata_scan_checkpoint_survives_interruption(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

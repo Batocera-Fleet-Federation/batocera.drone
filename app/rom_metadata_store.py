@@ -116,6 +116,17 @@ def _persist_rom_metadata_cache(
             )
 
 
+def _update_rom_metadata_cache_state(settings: Any, **values: Any) -> None:
+    """Update compact scan/upload state without reading all cached asset rows."""
+    if not values:
+        return
+    with _open_rom_metadata_cache(settings) as connection:
+        connection.executemany(
+            "INSERT INTO cache_state (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [(key, json.dumps(value, sort_keys=True, default=str)) for key, value in values.items()],
+        )
+
+
 def _read_sqlite_rom_metadata_cache(settings: Any) -> dict:
     with _open_rom_metadata_cache(settings) as connection:
         state = {

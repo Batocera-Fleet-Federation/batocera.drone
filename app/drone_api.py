@@ -60,6 +60,7 @@ try:
         _load_rom_metadata_cache,
         _persist_rom_metadata_cache,
         _rom_metadata_cache_path,
+        _update_rom_metadata_cache_state,
     )
     from .state_store import (
         append_event as _append_state_event,
@@ -109,6 +110,7 @@ except ImportError:
         _load_rom_metadata_cache,
         _persist_rom_metadata_cache,
         _rom_metadata_cache_path,
+        _update_rom_metadata_cache_state,
     )
     from state_store import (  # type: ignore
         append_event as _append_state_event,
@@ -164,6 +166,7 @@ ROM_METADATA_PROGRESS_SECONDS = float(os.environ.get("ROM_METADATA_PROGRESS_SECO
 ROM_METADATA_PROGRESS_FILES = int(os.environ.get("ROM_METADATA_PROGRESS_FILES", "250"))
 ROM_METADATA_MD5_BATCH_SIZE = max(1, int(os.environ.get("ROM_METADATA_MD5_BATCH_SIZE", "250")))
 ROM_METADATA_UPLOAD_CHUNK_SIZE = max(1, int(os.environ.get("ROM_METADATA_UPLOAD_CHUNK_SIZE", "250")))
+ROM_METADATA_HASH_IO_YIELD_SECONDS = max(0.0, float(os.environ.get("ROM_METADATA_HASH_IO_YIELD_SECONDS", "0.05")))
 OVERMIND_UPLOAD_TIMEOUT_SECONDS = max(10, int(os.environ.get("OVERMIND_UPLOAD_TIMEOUT_SECONDS", "60")))
 LAUNCHBOX_PLATFORM_ALIASES = {
     "3do": "3DO Interactive Multiplayer",
@@ -1876,26 +1879,28 @@ class RomRepository:
 
         return system_dir
 
-    def list_systems(self) -> List[dict]:
+    def list_system_names(self) -> List[str]:
+        """List usable ROM system directories without walking their content."""
         if not self.roms_root.exists():
             raise FileNotFoundError(str(self.roms_root))
-
-        systems = []
+        names = []
         for entry in sorted(self.roms_root.iterdir(), key=lambda p: p.name.lower()):
-            if not (entry.is_dir() or entry.is_symlink()):
+            if not (entry.is_dir() or entry.is_symlink()) or not self.should_include_system(entry.name):
                 continue
-            if not self.should_include_system(entry.name):
-                continue
-
             target_dir = entry.resolve()
-            if not target_dir.exists() or not target_dir.is_dir():
-                continue
+            if target_dir.exists() and target_dir.is_dir():
+                names.append(entry.name)
+        return names
 
-            rom_count = self._count_rom_items(entry.name, target_dir)
+    def list_systems(self) -> List[dict]:
+        systems = []
+        for system_name in self.list_system_names():
+            target_dir = self.get_system_dir(system_name)
+            rom_count = self._count_rom_items(system_name, target_dir)
             if rom_count < 1:
                 continue
 
-            systems.append({"name": entry.name, "rom_count": rom_count})
+            systems.append({"name": system_name, "rom_count": rom_count})
 
         return systems
 
@@ -7206,21 +7211,28 @@ def _chunk_rom_metadata_inventory(settings: Settings, snapshot: dict, chunk_size
 
 
 def _mark_rom_metadata_upload_clean(settings: Settings) -> None:
-    cache, _ = _load_rom_metadata_cache(settings)
-    cache["last_successful_upload_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-    cache["dirty"] = False
-    _persist_rom_metadata_cache(settings, cache)
+    _update_rom_metadata_cache_state(
+        settings,
+        last_successful_upload_at=datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        dirty=False,
+    )
 
 
 def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") -> Tuple[dict, bool, dict]:
     started = time.monotonic()
     print("Asset metadata poll started: phase=cache_load", file=sys.stdout, flush=True)
+    cache_load_started = time.monotonic()
     cache, rebuilt = _load_rom_metadata_cache(settings)
     was_dirty = bool(cache.get("dirty"))
     resuming_scan = bool(cache.get("scan_in_progress"))
     existing_entries = cache.get("entries") if isinstance(cache.get("entries"), dict) else {}
     existing_bios_entries = cache.get("bios_entries") if isinstance(cache.get("bios_entries"), dict) else {}
     existing_artwork_entries = cache.get("artwork_entries") if isinstance(cache.get("artwork_entries"), dict) else {}
+    print(
+        f"Asset metadata cache load completed: entries={len(existing_entries)} bios_entries={len(existing_bios_entries)} artwork_entries={len(existing_artwork_entries)} duration_ms={int((time.monotonic() - cache_load_started) * 1000)}",
+        file=sys.stdout,
+        flush=True,
+    )
     previous_keys = set(existing_entries.keys())
     previous_bios_keys = set(existing_bios_entries.keys())
     previous_artwork_keys = set(existing_artwork_entries.keys())
@@ -7283,12 +7295,13 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
 
     print("Asset metadata poll phase=scan", file=sys.stdout, flush=True)
     try:
-        systems = repository.list_systems()
+        system_names = repository.list_system_names()
     except FileNotFoundError:
-        systems = []
+        system_names = []
+    systems = []
     gamelists = []
-    for system in systems:
-        system_name = str(system.get("name") or "").strip()
+    for system_name in system_names:
+        system_name = str(system_name or "").strip()
         if not system_name:
             continue
         systems_scanned += 1
@@ -7298,13 +7311,16 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
         except Exception as error:
             print(f"ROM metadata scan warning: system={system_name} error={_format_overmind_error(error)}", file=sys.stderr, flush=True)
             continue
+        system_discovered = 0
         for rom in roms:
             file_path = str(rom.get("file_path") or rom.get("relative_path") or rom.get("rom_path") or rom.get("rom_file") or "").strip()
-            absolute = Path(str(rom.get("absolute_path") or ""))
-            entry_type = str(rom.get("entry_type") or "file").strip().lower()
-            if not file_path or not absolute.exists() or (entry_type == "file" and not absolute.is_file()) or (entry_type == "folder" and not absolute.is_dir()):
+            absolute_path = str(rom.get("absolute_path") or "").strip()
+            if not file_path or not absolute_path:
                 continue
+            absolute = Path(absolute_path)
+            entry_type = str(rom.get("entry_type") or "file").strip().lower()
             discovered += 1
+            system_discovered += 1
             key = _rom_cache_entry_key(system_name, file_path)
             stat_size = int(rom.get("file_size") or rom.get("byte_count") or absolute.stat().st_size)
             stat_mtime = int(rom.get("modified_time") or rom.get("mtime") or absolute.stat().st_mtime)
@@ -7331,6 +7347,8 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
                 if entry_type != "folder":
                     new_or_changed.append((key, absolute, base_entry))
             checkpoint_scan("rom_scan")
+        if system_discovered:
+            systems.append({"name": system_name, "rom_count": system_discovered})
 
     checkpoint_scan("rom_scan_complete", force=bool(discovered))
     deleted = previous_keys - set(next_entries.keys())
@@ -7396,7 +7414,7 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
         last_log = hash_started
         print(f"BIOS metadata poll phase=md5_hashing count={len(bios_new_or_changed)}", file=sys.stdout, flush=True)
         for bios_index, (key, absolute, entry) in enumerate(bios_new_or_changed, start=1):
-            md5_value = RomRepository.build_md5(absolute)
+            md5_value = RomRepository.build_md5(absolute, io_yield_seconds=ROM_METADATA_HASH_IO_YIELD_SECONDS)
             next_bios_entries[key] = {**entry, "md5": md5_value, "bios_md5": md5_value}
             now = time.monotonic()
             if bios_index == len(bios_new_or_changed) or bios_index % max(1, ROM_METADATA_PROGRESS_FILES) == 0 or now - last_log >= ROM_METADATA_PROGRESS_SECONDS:
@@ -7419,6 +7437,7 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
     cache["dirty"] = changed
     cache["scan_in_progress"] = False
     print("Asset metadata poll phase=cache_write", file=sys.stdout, flush=True)
+    cache_write_started = time.monotonic()
     rom_updates = {
         key: value for key, value in next_entries.items()
         if persisted_entries.get(key) != value
@@ -7442,7 +7461,7 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
         artwork_deletes=artwork_deleted,
     )
     print(
-        f"Asset metadata cache write completed: entries={len(next_entries)} bios_entries={len(next_bios_entries)} artwork_entries={len(next_artwork_entries)} changed={changed} duration_ms={int((time.monotonic() - started) * 1000)}",
+        f"Asset metadata cache write completed: entries={len(next_entries)} bios_entries={len(next_bios_entries)} artwork_entries={len(next_artwork_entries)} changed={changed} write_duration_ms={int((time.monotonic() - cache_write_started) * 1000)} total_poll_duration_ms={int((time.monotonic() - started) * 1000)}",
         file=sys.stdout,
         flush=True,
     )
@@ -7484,7 +7503,7 @@ def _hash_rom_metadata_batches(settings: Settings, repository: "RomRepository", 
     for processed, (key, entry) in enumerate(pending, start=1):
         absolute = Path(str(entry.get("absolute_path") or ""))
         if absolute.exists() and absolute.is_file():
-            md5_value = repository.build_md5(absolute)
+            md5_value = repository.build_md5(absolute, io_yield_seconds=ROM_METADATA_HASH_IO_YIELD_SECONDS)
             updated = {**entry, "md5": md5_value, "rom_md5": md5_value}
             entries[key] = updated
             pending_updates[key] = updated
@@ -9074,7 +9093,11 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                         flush=True,
                     )
 
-                if config_report_seconds > 0 and now - last_config_report_at >= config_report_seconds:
+                if (
+                    config_report_seconds > 0
+                    and now - last_config_report_at >= config_report_seconds
+                    and not _ROM_METADATA_ACTIVE.is_set()
+                ):
                     emulator_configs = _collect_emulator_configs(settings)
                     emulator_config_fingerprints = emulator_configs.pop("_fingerprints", {})
                     if emulator_configs.get("configs"):
