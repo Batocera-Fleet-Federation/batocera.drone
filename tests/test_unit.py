@@ -871,6 +871,27 @@ class SettingsTests(unittest.TestCase):
                 stderr=subprocess.DEVNULL,
             )
 
+    def test_refresh_emulator_list_restarts_emulationstation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
+                settings = Settings.from_env()
+            repo = RomRepository(root / "roms", root / "bios")
+            with mock.patch("app.drone_api.shutil.which", return_value="/usr/bin/batocera-es-swissknife"), mock.patch(
+                "app.drone_api.subprocess.Popen"
+            ) as popen:
+                status, message, result = _execute_overmind_action(settings, repo, {"action": "refresh_emulator_list"})
+
+            self.assertEqual(status, "completed")
+            self.assertIn("Emulator list refresh", message)
+            self.assertEqual(result["type"], "emulator_list_refresh")
+            self.assertTrue(result["emulationstation_restarted"])
+            popen.assert_called_once_with(
+                ["/usr/bin/batocera-es-swissknife", "--restart"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
     def test_reclaim_overmind_token_after_heartbeat_unauthorized_uses_bound_auth_token(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

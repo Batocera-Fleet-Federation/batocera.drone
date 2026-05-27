@@ -8974,6 +8974,23 @@ def _execute_overmind_action(
             return "completed", "Restart command issued.", None
         return "failed", "reboot/shutdown command was not found", None
 
+    if action_name == "refresh_emulator_list":
+        if settings.use_fake_data:
+            return "completed", "Simulated emulator list refresh because USE_FAKE_DATA is enabled.", {
+                "type": "emulator_list_refresh",
+                "emulationstation_restarted": False,
+                "simulated": True,
+            }
+        if not _restart_emulationstation():
+            return "failed", "Unable to refresh emulator list: batocera-es-swissknife was not found.", {
+                "type": "emulator_list_refresh",
+                "emulationstation_restarted": False,
+            }
+        return "completed", "Emulator list refresh issued through an EmulationStation restart.", {
+            "type": "emulator_list_refresh",
+            "emulationstation_restarted": True,
+        }
+
     if action_name in {"enable_kiosk", "disable_kiosk"}:
         enabled = action_name == "enable_kiosk"
         try:
