@@ -8,7 +8,6 @@ import re
 import secrets
 import shutil
 import socket
-import sqlite3
 import ssl
 import subprocess
 import sys
@@ -55,13 +54,19 @@ try:
     )
     from .peer_selection import select_best_peer as _select_best_peer
     from .route_config import API_PREFIX, api_url
+    from .rom_metadata_store import (
+        ROM_METADATA_CACHE_VERSION,
+        _empty_rom_metadata_cache,
+        _load_rom_metadata_cache,
+        _persist_rom_metadata_cache,
+        _rom_metadata_cache_path,
+    )
     from .state_store import (
         append_event as _append_state_event,
         database_path as _state_database_path,
         database_path_for_legacy_file as _state_database_path_for_legacy_file,
         load_events as _load_state_events,
         load_payload as _load_state_payload,
-        open_database as _open_state_database,
         save_payload as _save_state_payload,
     )
     from .transfer_files import (
@@ -98,13 +103,19 @@ except ImportError:
     )
     from peer_selection import select_best_peer as _select_best_peer  # type: ignore
     from route_config import API_PREFIX, api_url  # type: ignore
+    from rom_metadata_store import (  # type: ignore
+        ROM_METADATA_CACHE_VERSION,
+        _empty_rom_metadata_cache,
+        _load_rom_metadata_cache,
+        _persist_rom_metadata_cache,
+        _rom_metadata_cache_path,
+    )
     from state_store import (  # type: ignore
         append_event as _append_state_event,
         database_path as _state_database_path,
         database_path_for_legacy_file as _state_database_path_for_legacy_file,
         load_events as _load_state_events,
         load_payload as _load_state_payload,
-        open_database as _open_state_database,
         save_payload as _save_state_payload,
     )
     from transfer_files import (  # type: ignore
@@ -146,7 +157,6 @@ PEER_CHECK_INTERVAL_SECONDS = int(os.environ.get("DRONE_PEER_CHECK_INTERVAL_SECO
 OVERMIND_SPEED_SAMPLE_SECONDS = int(os.environ.get("OVERMIND_SPEED_SAMPLE_SECONDS", "600"))
 SPEED_TEST_DEFAULT_BASE_URL = "https://speed.cloudflare.com"
 OVERMIND_HEARTBEAT_SECONDS = int(os.environ.get("OVERMIND_POLL_SECONDS", "30"))
-ROM_METADATA_CACHE_VERSION = 2
 ROM_METADATA_POLL_SECONDS = int(os.environ.get("ROM_METADATA_POLL_SECONDS", "900"))
 ROM_METADATA_INITIAL_DELAY_SECONDS = int(os.environ.get("ROM_METADATA_INITIAL_DELAY_SECONDS", "60"))
 ROM_METADATA_PROGRESS_SECONDS = float(os.environ.get("ROM_METADATA_PROGRESS_SECONDS", "30"))
@@ -7073,148 +7083,6 @@ def _collect_rom_metadata(settings: Settings, repository: "RomRepository") -> di
         flush=True,
     )
     return result
-
-
-def _rom_metadata_cache_path(settings: Settings) -> Path:
-    return _state_database_path(settings.userdata_root)
-
-
-def _legacy_rom_metadata_cache_path(settings: Settings) -> Path:
-    return (settings.userdata_root / "system" / "drone-app" / "rom_metadata_cache.json").resolve()
-
-
-def _empty_rom_metadata_cache() -> dict:
-    return {
-        "schema_version": ROM_METADATA_CACHE_VERSION,
-        "last_full_scan_at": None,
-        "last_successful_upload_at": None,
-        "entries": {},
-        "bios_entries": {},
-        "artwork_entries": {},
-        "systems": [],
-        "gamelists": [],
-        "dirty": True,
-    }
-
-
-def _open_rom_metadata_cache(settings: Settings) -> sqlite3.Connection:
-    connection = _open_state_database(_rom_metadata_cache_path(settings))
-    connection.execute(
-        "CREATE TABLE IF NOT EXISTS cache_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
-    )
-    connection.execute(
-        "CREATE TABLE IF NOT EXISTS cache_entries (asset_type TEXT NOT NULL, entry_key TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY (asset_type, entry_key))"
-    )
-    return connection
-
-
-def _persist_rom_metadata_cache(
-    settings: Settings,
-    cache: dict,
-    *,
-    rom_updates: Optional[dict] = None,
-    bios_updates: Optional[dict] = None,
-    artwork_updates: Optional[dict] = None,
-    rom_deletes: Optional[Iterable[str]] = None,
-    bios_deletes: Optional[Iterable[str]] = None,
-    artwork_deletes: Optional[Iterable[str]] = None,
-) -> None:
-    """Persist only changed metadata rows plus compact scan state."""
-    state = {
-        key: value
-        for key, value in cache.items()
-        if key not in {"entries", "bios_entries", "artwork_entries"}
-    }
-    updates = (
-        ("rom", rom_updates or {}),
-        ("bios", bios_updates or {}),
-        ("artwork", artwork_updates or {}),
-    )
-    deletions = (
-        ("rom", rom_deletes or []),
-        ("bios", bios_deletes or []),
-        ("artwork", artwork_deletes or []),
-    )
-    with _open_rom_metadata_cache(settings) as connection:
-        connection.executemany(
-            "INSERT INTO cache_state (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            [(key, json.dumps(value, sort_keys=True, default=str)) for key, value in state.items()],
-        )
-        for asset_type, rows in updates:
-            connection.executemany(
-                "INSERT INTO cache_entries (asset_type, entry_key, payload) VALUES (?, ?, ?) "
-                "ON CONFLICT(asset_type, entry_key) DO UPDATE SET payload=excluded.payload",
-                [
-                    (asset_type, key, json.dumps(value, sort_keys=True, default=str))
-                    for key, value in rows.items()
-                ],
-            )
-        for asset_type, keys in deletions:
-            connection.executemany(
-                "DELETE FROM cache_entries WHERE asset_type = ? AND entry_key = ?",
-                [(asset_type, key) for key in keys],
-            )
-
-
-def _read_sqlite_rom_metadata_cache(settings: Settings) -> dict:
-    with _open_rom_metadata_cache(settings) as connection:
-        state = {
-            key: json.loads(value)
-            for key, value in connection.execute("SELECT key, value FROM cache_state")
-        }
-        if state.get("schema_version") != ROM_METADATA_CACHE_VERSION:
-            raise ValueError("cache schema mismatch")
-        cache = {**_empty_rom_metadata_cache(), **state}
-        entries = {"rom": {}, "bios": {}, "artwork": {}}
-        for asset_type, key, payload in connection.execute(
-            "SELECT asset_type, entry_key, payload FROM cache_entries"
-        ):
-            if asset_type in entries:
-                entries[asset_type][key] = json.loads(payload)
-        cache["entries"] = entries["rom"]
-        cache["bios_entries"] = entries["bios"]
-        cache["artwork_entries"] = entries["artwork"]
-        return cache
-
-
-def _load_rom_metadata_cache(settings: Settings) -> Tuple[dict, bool]:
-    path = _rom_metadata_cache_path(settings)
-    legacy_path = _legacy_rom_metadata_cache_path(settings)
-    try:
-        if path.exists():
-            try:
-                return _read_sqlite_rom_metadata_cache(settings), False
-            except ValueError:
-                # The shared state database may exist before metadata has been collected.
-                with _open_rom_metadata_cache(settings) as connection:
-                    connection.execute("DELETE FROM cache_state")
-                    connection.execute("DELETE FROM cache_entries")
-        legacy = _read_json_file(legacy_path, None)
-        if isinstance(legacy, dict) and isinstance(legacy.get("entries"), dict):
-            legacy["schema_version"] = ROM_METADATA_CACHE_VERSION
-            legacy.setdefault("bios_entries", {})
-            legacy.setdefault("artwork_entries", {})
-            legacy.setdefault("systems", [])
-            legacy.setdefault("gamelists", [])
-            legacy.setdefault("dirty", True)
-            _persist_rom_metadata_cache(
-                settings,
-                legacy,
-                rom_updates=legacy["entries"],
-                bios_updates=legacy["bios_entries"],
-                artwork_updates=legacy["artwork_entries"],
-            )
-            print(f"Asset metadata cache migrated to incremental store: {path}", file=sys.stdout, flush=True)
-            return legacy, False
-        return _empty_rom_metadata_cache(), True
-    except Exception as error:
-        print(f"Asset metadata cache rebuild required: {path} ({_format_overmind_error(error)})", file=sys.stderr, flush=True)
-        if path.exists():
-            try:
-                path.replace(path.with_name(f"{path.name}.corrupt-{uuid.uuid4().hex}"))
-            except Exception:
-                pass
-        return _empty_rom_metadata_cache(), True
 
 
 def _rom_cache_entry_key(system: str, relative_path: str) -> str:
