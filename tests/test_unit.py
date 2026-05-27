@@ -8,6 +8,7 @@ import unittest
 from threading import Event
 from unittest import mock
 from pathlib import Path
+from urllib.error import URLError
 
 from app.mock_data import seed_mock_userdata
 from app.state_store import database_path, database_path_for_legacy_file, load_payload, open_database, save_payload
@@ -1368,7 +1369,7 @@ class SettingsTests(unittest.TestCase):
 
             uploads = []
 
-            def fake_post(url, payload, token=None, settings=None):
+            def fake_post(url, payload, token=None, settings=None, timeout_seconds=10):
                 uploads.append((url, payload, token))
                 return 200, {
                     "rom_count": len(payload.get("roms") or []),
@@ -1419,7 +1420,7 @@ class SettingsTests(unittest.TestCase):
             repo = RomRepository(settings.roms_root, settings.bios_root)
             uploads = []
 
-            def fake_post(url, payload, token=None, settings=None):
+            def fake_post(url, payload, token=None, settings=None, timeout_seconds=10):
                 uploads.append(payload)
                 return 200, {
                     "rom_count": len(payload.get("roms") or []),
@@ -1467,7 +1468,7 @@ class SettingsTests(unittest.TestCase):
             repo = RomRepository(settings.roms_root, settings.bios_root)
             uploads = []
 
-            def fake_post(url, payload, token=None, settings=None):
+            def fake_post(url, payload, token=None, settings=None, timeout_seconds=10):
                 uploads.append(payload)
                 return 200, {
                     "rom_count": len(payload.get("roms") or []),
@@ -1490,6 +1491,67 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(len(cache["entries"]), 1)
             self.assertEqual(next(iter(cache["entries"].values()))["file_path"], "Second Game.zip")
             self.assertFalse(cache["dirty"])
+
+    def test_rom_metadata_inventory_upload_chunks_and_retries_until_confirmed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            system = root / "roms" / "snes"
+            system.mkdir(parents=True)
+            (system / "Game One.zip").write_bytes(b"one")
+            (system / "Game Two.zip").write_bytes(b"two")
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "USERDATA_ROOT": str(root),
+                    "ROMS_ROOT": str(root / "roms"),
+                    "BIOS_ROOT": str(root / "bios"),
+                    "OVERMIND_DEVICE_ID": "drone-a",
+                },
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            repo = RomRepository(settings.roms_root, settings.bios_root)
+            uploads = []
+
+            def failing_post(url, payload, token=None, settings=None, timeout_seconds=10):
+                uploads.append(payload)
+                if payload.get("update_mode") == "inventory_chunk" and payload.get("chunk_index") == 1:
+                    raise URLError("temporary outage")
+                return 200, {
+                    "rom_count": len(payload.get("roms") or []),
+                    "bios_count": len(payload.get("bios") or []),
+                    "artwork_count": len(payload.get("artwork") or []),
+                }
+
+            with mock.patch("app.drone_api.ROM_METADATA_UPLOAD_CHUNK_SIZE", 1), mock.patch(
+                "app.drone_api._overmind_post_json_with_status", side_effect=failing_post
+            ):
+                with self.assertRaises(URLError):
+                    _sync_rom_metadata_to_overmind(settings, repo, {}, "https://overmind.local", "drone-token")
+
+            cache, _ = _load_rom_metadata_cache(settings)
+            self.assertTrue(cache["dirty"])
+            self.assertEqual([payload.get("chunk_index") for payload in uploads if payload.get("update_mode") == "inventory_chunk"], [0, 1])
+
+            uploads.clear()
+
+            def successful_post(url, payload, token=None, settings=None, timeout_seconds=10):
+                uploads.append(payload)
+                return 200, {
+                    "rom_count": len(payload.get("roms") or []),
+                    "bios_count": len(payload.get("bios") or []),
+                    "artwork_count": len(payload.get("artwork") or []),
+                }
+
+            with mock.patch("app.drone_api.ROM_METADATA_UPLOAD_CHUNK_SIZE", 1), mock.patch(
+                "app.drone_api._overmind_post_json_with_status", side_effect=successful_post
+            ):
+                result = _sync_rom_metadata_to_overmind(settings, repo, {}, "https://overmind.local", "drone-token")
+
+            cache, _ = _load_rom_metadata_cache(settings)
+            self.assertFalse(cache["dirty"])
+            self.assertEqual(result["status"], "uploaded")
+            self.assertEqual([payload.get("chunk_index") for payload in uploads if payload.get("update_mode") == "inventory_chunk"], [0, 1])
 
     def test_rom_metadata_poll_caches_and_hashes_without_overmind_configuration(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

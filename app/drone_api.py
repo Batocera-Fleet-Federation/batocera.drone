@@ -162,7 +162,8 @@ ROM_METADATA_INITIAL_DELAY_SECONDS = int(os.environ.get("ROM_METADATA_INITIAL_DE
 ROM_METADATA_PROGRESS_SECONDS = float(os.environ.get("ROM_METADATA_PROGRESS_SECONDS", "30"))
 ROM_METADATA_PROGRESS_FILES = int(os.environ.get("ROM_METADATA_PROGRESS_FILES", "250"))
 ROM_METADATA_MD5_BATCH_SIZE = max(1, int(os.environ.get("ROM_METADATA_MD5_BATCH_SIZE", "1000")))
-ROM_METADATA_HASH_IO_YIELD_SECONDS = max(0.0, float(os.environ.get("ROM_METADATA_HASH_IO_YIELD_SECONDS", "0.05")))
+ROM_METADATA_UPLOAD_CHUNK_SIZE = max(1, int(os.environ.get("ROM_METADATA_UPLOAD_CHUNK_SIZE", "1000")))
+OVERMIND_UPLOAD_TIMEOUT_SECONDS = max(10, int(os.environ.get("OVERMIND_UPLOAD_TIMEOUT_SECONDS", "60")))
 LAUNCHBOX_PLATFORM_ALIASES = {
     "3do": "3DO Interactive Multiplayer",
     "adam": "Coleco ADAM",
@@ -6560,14 +6561,20 @@ def _overmind_post_json(url: str, payload: dict, token: Optional[str] = None, se
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _overmind_post_json_with_status(url: str, payload: dict, token: Optional[str] = None, settings: Optional[Settings] = None) -> Tuple[int, dict]:
+def _overmind_post_json_with_status(
+    url: str,
+    payload: dict,
+    token: Optional[str] = None,
+    settings: Optional[Settings] = None,
+    timeout_seconds: int = 10,
+) -> Tuple[int, dict]:
     body = json.dumps(payload).encode("utf-8")
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
     request = Request(url, data=body, headers=headers, method="POST")
     context = _drone_client_ssl_context(settings, url) if settings else (ssl._create_unverified_context() if url.startswith("https://") else None)
-    with urlopen(request, timeout=10, context=context) as response:
+    with urlopen(request, timeout=timeout_seconds, context=context) as response:
         status_code = int(getattr(response, "status", 200) or 200)
         raw = response.read()
     parsed = json.loads(raw.decode("utf-8")) if raw else {}
@@ -7135,6 +7142,66 @@ def _build_rom_metadata_snapshot_from_cache(settings: Settings, cache: dict) -> 
     }
 
 
+def _rom_metadata_inventory_id(settings: Settings, snapshot: dict) -> str:
+    counts = (
+        len(snapshot.get("roms") if isinstance(snapshot.get("roms"), list) else []),
+        len(snapshot.get("bios") if isinstance(snapshot.get("bios"), list) else []),
+        len(snapshot.get("artwork") if isinstance(snapshot.get("artwork"), list) else []),
+    )
+    return f"{settings.overmind_device_id}:{snapshot.get('collected_at') or ''}:{counts[0]}:{counts[1]}:{counts[2]}"
+
+
+def _chunk_rom_metadata_inventory(settings: Settings, snapshot: dict, chunk_size: Optional[int] = None) -> List[dict]:
+    chunk_size = max(1, int(chunk_size or ROM_METADATA_UPLOAD_CHUNK_SIZE))
+    roms = snapshot.get("roms") if isinstance(snapshot.get("roms"), list) else []
+    bios = snapshot.get("bios") if isinstance(snapshot.get("bios"), list) else []
+    artwork = snapshot.get("artwork") if isinstance(snapshot.get("artwork"), list) else []
+    rows = [("roms", row) for row in roms] + [("bios", row) for row in bios] + [("artwork", row) for row in artwork]
+    base = {
+        "device_id": settings.overmind_device_id,
+        "type": snapshot.get("type") or "asset_metadata",
+        "collected_at": snapshot.get("collected_at"),
+        "roms_root": snapshot.get("roms_root"),
+        "bios_root": snapshot.get("bios_root"),
+        "systems": snapshot.get("systems") if isinstance(snapshot.get("systems"), list) else [],
+        "gamelists": snapshot.get("gamelists") if isinstance(snapshot.get("gamelists"), list) else [],
+        "cache": snapshot.get("cache") if isinstance(snapshot.get("cache"), dict) else {},
+    }
+    if len(rows) <= chunk_size:
+        return [{**base, "update_mode": "inventory", "roms": roms, "bios": bios, "artwork": artwork, "assets": {"roms": roms, "bios": bios, "artwork": artwork}}]
+
+    chunks = []
+    total = (len(rows) + chunk_size - 1) // chunk_size
+    inventory_id = _rom_metadata_inventory_id(settings, snapshot)
+    counts = {"roms": len(roms), "bios": len(bios), "artwork": len(artwork)}
+    for index in range(total):
+        chunk_rows = rows[index * chunk_size:(index + 1) * chunk_size]
+        payload = {
+            **base,
+            "update_mode": "inventory_chunk",
+            "inventory_id": inventory_id,
+            "chunk_index": index,
+            "chunk_total": total,
+            "inventory_complete": index == total - 1,
+            "inventory_counts": counts,
+            "roms": [],
+            "bios": [],
+            "artwork": [],
+        }
+        for asset_type, row in chunk_rows:
+            payload[asset_type].append(row)
+        payload["assets"] = {"roms": payload["roms"], "bios": payload["bios"], "artwork": payload["artwork"]}
+        chunks.append(payload)
+    return chunks
+
+
+def _mark_rom_metadata_upload_clean(settings: Settings) -> None:
+    cache, _ = _load_rom_metadata_cache(settings)
+    cache["last_successful_upload_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    cache["dirty"] = False
+    _persist_rom_metadata_cache(settings, cache)
+
+
 def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") -> Tuple[dict, bool, dict]:
     started = time.monotonic()
     print("Asset metadata poll started: phase=cache_load", file=sys.stdout, flush=True)
@@ -7323,7 +7390,7 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
         last_log = hash_started
         print(f"BIOS metadata poll phase=md5_hashing count={len(bios_new_or_changed)}", file=sys.stdout, flush=True)
         for bios_index, (key, absolute, entry) in enumerate(bios_new_or_changed, start=1):
-            md5_value = RomRepository.build_md5(absolute, io_yield_seconds=ROM_METADATA_HASH_IO_YIELD_SECONDS)
+            md5_value = RomRepository.build_md5(absolute)
             next_bios_entries[key] = {**entry, "md5": md5_value, "bios_md5": md5_value}
             now = time.monotonic()
             if bios_index == len(bios_new_or_changed) or bios_index % max(1, ROM_METADATA_PROGRESS_FILES) == 0 or now - last_log >= ROM_METADATA_PROGRESS_SECONDS:
@@ -7411,7 +7478,7 @@ def _hash_rom_metadata_batches(settings: Settings, repository: "RomRepository", 
     for processed, (key, entry) in enumerate(pending, start=1):
         absolute = Path(str(entry.get("absolute_path") or ""))
         if absolute.exists() and absolute.is_file():
-            md5_value = repository.build_md5(absolute, io_yield_seconds=ROM_METADATA_HASH_IO_YIELD_SECONDS)
+            md5_value = repository.build_md5(absolute)
             updated = {**entry, "md5": md5_value, "rom_md5": md5_value}
             entries[key] = updated
             pending_updates[key] = updated
@@ -9042,33 +9109,88 @@ def _sync_rom_metadata_to_overmind(
 
     def upload(payload: dict, phase: str) -> dict:
         nonlocal token
+        update_mode = str(payload.get("update_mode") or phase)
+        chunk_label = ""
+        if update_mode == "inventory_chunk":
+            chunk_label = f" chunk={int(payload.get('chunk_index') or 0) + 1}/{payload.get('chunk_total')}"
         try:
-            status_code, response = _overmind_post_json_with_status(upload_url, payload, token=token, settings=settings)
+            status_code, response = _overmind_post_json_with_status(
+                upload_url,
+                payload,
+                token=token,
+                settings=settings,
+                timeout_seconds=OVERMIND_UPLOAD_TIMEOUT_SECONDS,
+            )
         except HTTPError as error:
             if error.code != 401:
+                print(
+                    f"Asset metadata upload failed: phase={phase} mode={update_mode}{chunk_label} error={_format_overmind_error(error)}",
+                    file=sys.stderr,
+                    flush=True,
+                )
                 raise
             replacement_token = _reclaim_overmind_token_after_unauthorized(settings, repository, config, base_url, error)
             if not replacement_token:
+                print(
+                    f"Asset metadata upload failed: phase={phase} mode={update_mode}{chunk_label} error={_format_overmind_error(error)}",
+                    file=sys.stderr,
+                    flush=True,
+                )
                 raise
             token = replacement_token
-            status_code, response = _overmind_post_json_with_status(upload_url, payload, token=token, settings=settings)
-        cache, _ = _load_rom_metadata_cache(settings)
-        cache["last_successful_upload_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-        cache["dirty"] = False
-        _persist_rom_metadata_cache(settings, cache)
+            try:
+                status_code, response = _overmind_post_json_with_status(
+                    upload_url,
+                    payload,
+                    token=token,
+                    settings=settings,
+                    timeout_seconds=OVERMIND_UPLOAD_TIMEOUT_SECONDS,
+                )
+            except Exception as retry_error:
+                print(
+                    f"Asset metadata upload failed after token refresh: phase={phase} mode={update_mode}{chunk_label} error={_format_overmind_error(retry_error)}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                raise
+        except Exception as error:
+            print(
+                f"Asset metadata upload failed: phase={phase} mode={update_mode}{chunk_label} error={_format_overmind_error(error)}",
+                file=sys.stderr,
+                flush=True,
+            )
+            raise
         uploads.append({"phase": phase, "status_code": status_code, "response": response})
         return response
 
     if changed:
-        payload = {"device_id": settings.overmind_device_id, **snapshot, "update_mode": "inventory"}
+        payloads = _chunk_rom_metadata_inventory(settings, snapshot)
         print(
-            f"Asset metadata inventory sync started: endpoint={upload_url} roms={rom_count} bios={bios_count} artwork={artwork_count}",
+            f"Asset metadata inventory sync started: endpoint={upload_url} roms={rom_count} bios={bios_count} artwork={artwork_count} chunks={len(payloads)} timeout_seconds={OVERMIND_UPLOAD_TIMEOUT_SECONDS}",
             file=sys.stdout,
             flush=True,
         )
-        response = upload(payload, "inventory")
+        accepted_roms = 0
+        accepted_bios = 0
+        accepted_artwork = 0
+        for index, payload in enumerate(payloads, start=1):
+            print(
+                f"Asset metadata inventory chunk upload started: chunk={index}/{len(payloads)} roms={len(payload.get('roms') or [])} bios={len(payload.get('bios') or [])} artwork={len(payload.get('artwork') or [])}",
+                file=sys.stdout,
+                flush=True,
+            )
+            response = upload(payload, "inventory")
+            accepted_roms += int(response.get("rom_count") or 0)
+            accepted_bios += int(response.get("bios_count") or 0)
+            accepted_artwork += int(response.get("artwork_count") or 0)
+            print(
+                f"Asset metadata inventory chunk upload succeeded: chunk={index}/{len(payloads)} accepted_roms={response.get('rom_count')} accepted_bios={response.get('bios_count')} accepted_artwork={response.get('artwork_count')}",
+                file=sys.stdout,
+                flush=True,
+            )
+        _mark_rom_metadata_upload_clean(settings)
         print(
-            f"Asset metadata inventory sync succeeded: sent_roms={rom_count} sent_bios={bios_count} sent_artwork={artwork_count} accepted_roms={response.get('rom_count')}",
+            f"Asset metadata inventory sync succeeded: sent_roms={rom_count} sent_bios={bios_count} sent_artwork={artwork_count} accepted_roms={accepted_roms} accepted_bios={accepted_bios} accepted_artwork={accepted_artwork}",
             file=sys.stdout,
             flush=True,
         )
@@ -9087,6 +9209,8 @@ def _sync_rom_metadata_to_overmind(
         upload(payload, "rom_hash_patch")
         hash_batches += 1
         hashed_roms += len(patch_roms)
+    if changed or hash_batches:
+        _mark_rom_metadata_upload_clean(settings)
 
     if not changed and not hash_batches:
         print(
