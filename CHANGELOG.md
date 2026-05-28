@@ -1,5 +1,10 @@
 # Changelog
 
+## [v0.0.28] - 2026-05-27
+
+- Fixing auth token connection between drone and overmind after database refactor.
+- Updating tests.
+
 ## [v0.0.27] - 2026-05-27
 
 - Updating drone api to fix bug where heartbeat stops.
