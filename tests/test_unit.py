@@ -959,6 +959,29 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(config["integration_state"], "credential_reclaim")
             register.assert_called_once()
 
+    def test_drone_overmind_client_uses_typed_overmind_endpoints(self) -> None:
+        source = Path(__file__).resolve().parents[1].joinpath("app/drone_api.py").read_text(encoding="utf-8")
+        reporting_source = Path(__file__).resolve().parents[1].joinpath("app/overmind_reporting.py").read_text(encoding="utf-8")
+        game_log_source = Path(__file__).resolve().parents[1].joinpath("app/overmind_game_logs.py").read_text(encoding="utf-8")
+
+        for endpoint in [
+            "/api/devices/{device_id}/heartbeat",
+            "/api/devices/{device_id}/rom-metadata",
+            "/api/devices/{device_id}/downloads",
+            "/api/devices/{device_id}/speed",
+            "/api/devices/{device_id}/events",
+            "/api/devices/{device_id}/peer-checks",
+            "/api/devices/{device_id}/game-logs",
+            "/api/devices/{device_id}/log-sources",
+            "/api/devices/{device_id}/emulator-configs",
+            "/api/devices/{device_id}/actions/{action_id}/complete",
+        ]:
+            self.assertIn(endpoint, source)
+        self.assertIn('"type": "asset_metadata"', source)
+        self.assertIn('"type": "game_logs"', game_log_source)
+        self.assertIn('"type": "log_sources"', reporting_source)
+        self.assertIn('"type": "emulator_configs"', reporting_source)
+
     def test_pending_overmind_approval_keeps_integration_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
