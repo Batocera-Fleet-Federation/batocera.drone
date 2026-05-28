@@ -2826,6 +2826,7 @@ async function renderOvermindIntegrationPage() {
     const state = payload.status?.integration_state || "";
     const isActive = payload.status?.integration_enabled && state !== "pending_failed";
     if (state === "pending_failed") {
+      console.error("Overmind authorization failed", payload.status?.last_error || "authorization token was rejected", payload.status?.last_onboarding_attempt || {});
       showToast(`Overmind authorization failed: ${escapeHtml(payload.status?.last_error || "authorization token was rejected")}`, "danger");
     } else {
       showToast(isActive ? "Overmind registered and polling is active." : "Overmind configuration saved. Check status for registration details.", isActive ? "success" : "warning");

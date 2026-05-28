@@ -3570,6 +3570,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             "requested_at": config.get("requested_at"),
             "last_started_at": config.get("last_started_at"),
             "last_error": config.get("last_error"),
+            "last_onboarding_attempt": config.get("last_onboarding_attempt") if isinstance(config.get("last_onboarding_attempt"), dict) else None,
             "notes": config.get("notes") or "Stub integration until batocera.overmind app is available.",
         }
         return {
@@ -6444,6 +6445,40 @@ def _mark_overmind_auth_failed(settings: Settings, config: dict, error: BaseExce
     _overmind_peer_results_path_for_settings(settings).unlink(missing_ok=True)
 
 
+def _safe_token_fingerprint(value: str) -> str:
+    clean = str(value or "").strip()
+    if not clean:
+        return "none"
+    return hashlib.sha256(clean.encode("utf-8")).hexdigest()[:12]
+
+
+def _overmind_onboarding_context(settings: Settings, config: dict, base_url: str, payload: Optional[dict] = None) -> dict:
+    email = str(config.get("overmind_email") or "").strip()
+    auth_token = str(config.get("overmind_auth_token") or "").strip()
+    drone_token = str(config.get("overmind_token") or "").strip()
+    request_payload = payload if isinstance(payload, dict) else {}
+    certificate = ((request_payload.get("batocera_info") or {}).get("certificate") or {}) if isinstance(request_payload.get("batocera_info"), dict) else {}
+    return {
+        "endpoint": f"{base_url.rstrip('/')}/api/devices/register" if base_url else "/api/devices/register",
+        "device_id": settings.overmind_device_id,
+        "drone_name": str(config.get("drone_name") or "").strip() or socket.gethostname(),
+        "email_hint_present": bool(email),
+        "email_hint_domain": email.split("@", 1)[1].lower() if "@" in email else "",
+        "auth_token_present": bool(auth_token),
+        "auth_token_fingerprint": _safe_token_fingerprint(auth_token),
+        "stored_drone_token_present": bool(drone_token),
+        "payload_authorization_token_present": bool(request_payload.get("authorization_token")),
+        "header_authorization_token_present": bool(auth_token),
+        "certificate_fingerprint_present": bool(certificate.get("fingerprint") or certificate.get("sha256_fingerprint")),
+    }
+
+
+def _log_overmind_onboarding(message: str, context: dict, *, error: Optional[BaseException] = None) -> None:
+    safe_context = json.dumps(context, sort_keys=True)
+    suffix = f" error={_format_overmind_error(error)}" if error else ""
+    print(f"{message}: {safe_context}{suffix}", file=sys.stderr if error else sys.stdout, flush=True)
+
+
 def _get_router_ip_address() -> Optional[str]:
     return _build_router_ip_address(run_command=subprocess.run)
 
@@ -6759,12 +6794,18 @@ def _register_or_claim_overmind_token(settings: Settings, repository: "RomReposi
         payload["email"] = email
     if auth_token:
         payload["authorization_token"] = auth_token
+    context = _overmind_onboarding_context(settings, config, base_url, payload)
+    config["last_onboarding_attempt"] = context
+    _log_overmind_onboarding("Overmind onboarding request prepared", context)
     try:
         response = _overmind_post_json(f"{base_url}/api/devices/register", payload, token=auth_token or None, settings=settings)
     except Exception as error:
         _mark_overmind_auth_failed(settings, config, error)
-        print(f"Overmind onboarding request failed for {settings.overmind_device_id}: {config['last_error']}", file=sys.stderr, flush=True)
+        config["last_onboarding_attempt"] = context
+        _save_overmind_runtime_config(settings, config)
+        _log_overmind_onboarding("Overmind onboarding request failed", context, error=error)
         return None
+    config["last_onboarding_attempt"] = context
     if response.get("drone_token"):
         config["overmind_token"] = str(response["drone_token"])
         config["integration_enabled"] = True
@@ -6781,6 +6822,7 @@ def _register_or_claim_overmind_token(settings: Settings, repository: "RomReposi
     config["notes"] = response.get("message") or "Psionic connection detected. Awaiting Overlord approval."
     config["last_error"] = None
     _save_overmind_runtime_config(settings, config)
+    _log_overmind_onboarding("Overmind onboarding request pending approval", context)
     return None
 
 

@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import io
 import json
 import socket
@@ -1053,6 +1054,12 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(saved.get("integration_state"), "pending_failed")
             self.assertEqual(saved.get("swarm_connection_status"), "disconnected")
             self.assertIn("HTTPError status=401", saved.get("last_error") or "")
+            attempt = saved.get("last_onboarding_attempt") or {}
+            self.assertEqual(attempt.get("endpoint"), "https://bff-overmind:8000/api/devices/register")
+            self.assertEqual(attempt.get("device_id"), "bff-drone-b")
+            self.assertTrue(attempt.get("auth_token_present"))
+            self.assertEqual(attempt.get("auth_token_fingerprint"), hashlib.sha256(b"shared-token").hexdigest()[:12])
+            self.assertTrue(attempt.get("payload_authorization_token_present"))
             self.assertFalse(swarm_path.exists())
             self.assertEqual(load_payload(database_path(root), "overmind_swarm.json", None), [])
 
