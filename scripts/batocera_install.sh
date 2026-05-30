@@ -5,7 +5,7 @@ DRONE_USER="drone-app"
 DRONE_GROUP="drone-app"
 DRONE_UID="999"
 DRONE_GID="999"
-WORK_DIR="/userdata/system/.drone-app"
+WORK_DIR="/userdata/system/drone-app"
 
 BATOCERA_VERSION=""
 if command -v batocera-version >/dev/null 2>&1; then
@@ -55,7 +55,7 @@ DRONE_USER="drone-app"
 DRONE_GROUP="drone-app"
 DRONE_UID="999"
 DRONE_GID="999"
-WORK_DIR="/userdata/system/.drone-app"
+WORK_DIR="/userdata/system/drone-app"
 ACTION="$1"
 PID_FILE="/tmp/drone-server.pid"
 
@@ -89,23 +89,21 @@ ensure_permissions() {
   echo "[drone-service] Applying filesystem permissions..."
 
   mkdir -p \
-    /userdata/system/.drone-app \
-    /userdata/system/certs \
+    /userdata/system/drone-app \
+    /userdata/system/drone-app/app \
+    /userdata/system/drone-app/content \
     /userdata/system/drone-app/certs \
+    /userdata/system/certs \
     /userdata/system/logs/drone-app
 
   chown -R root:"$DRONE_GROUP" \
-    /userdata/system/.drone-app \
-    /userdata/system/certs \
     /userdata/system/drone-app \
-    /userdata/system/drone-app/certs \
+    /userdata/system/certs \
     /userdata/system/logs/drone-app 2>/dev/null || true
 
   chmod -R 775 \
-    /userdata/system/.drone-app \
-    /userdata/system/certs \
     /userdata/system/drone-app \
-    /userdata/system/drone-app/certs \
+    /userdata/system/certs \
     /userdata/system/logs/drone-app 2>/dev/null || true
 
   chmod o+rx /userdata/system 2>/dev/null || true
@@ -236,7 +234,6 @@ echo "  /userdata/roms/*/images/"
 echo "  /userdata/roms/*/videos/"
 echo "  /userdata/roms/*/manuals/"
 echo "  /userdata/roms/*/gamelist.xml"
-echo "  /userdata/system/.drone-app/"
 echo "  /userdata/system/drone-app/"
 echo "  /userdata/system/drone-app/certs/"
 echo "  /userdata/system/certs/"

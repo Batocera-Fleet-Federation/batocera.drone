@@ -35,7 +35,7 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 1
 fi
 
-WORK_DIR="${DRONE_APP_WORK_DIR:-$HOME/.drone-app}"
+WORK_DIR="${DRONE_APP_WORK_DIR:-/userdata/system/drone-app}"
 mkdir -p "$WORK_DIR"
 APP_DIR="$WORK_DIR/app"
 APP_PATH="$APP_DIR/drone_api.py"
@@ -219,15 +219,11 @@ echo "Downloaded Drone App to $WORK_DIR"
 DRONE_CERT_FILE="${DRONE_CERT_FILE:-}"
 DRONE_CERT_DIR="${DRONE_CERT_FILE%/*}"
 if [ -z "$DRONE_CERT_DIR" ]; then
-  DRONE_CERT_DIR="/userdata/system/drone-app/certs"
+  DRONE_CERT_DIR="$WORK_DIR/certs"
 fi
 mkdir -p "$DRONE_CERT_DIR" 2>/dev/null || true
 
-cleanup() {
-  rm -rf "$WORK_DIR" 2>/dev/null || true
-}
-
-trap cleanup EXIT INT TERM
+# Do NOT clean up on exit — the app files must persist for use
 
 DRONE_APP_USERNAME="${DRONE_APP_USERNAME:-}"
 DRONE_APP_PASSWORD="${DRONE_APP_PASSWORD:-}"
