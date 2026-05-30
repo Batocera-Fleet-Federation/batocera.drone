@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.31] - 2026-05-30
+
+- Forgot chown -R for entire directory.
+
 ## [v0.0.30] - 2026-05-30
 
 - Another small issue fixed with run_now.sh
