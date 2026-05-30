@@ -94,14 +94,14 @@ ensure_permissions() {
     /userdata/system/drone-app/certs \
     /userdata/system/logs/drone-app
 
-  chown root:"$DRONE_GROUP" \
+  chown -R root:"$DRONE_GROUP" \
     /userdata/system/.drone-app \
     /userdata/system/certs \
     /userdata/system/drone-app \
     /userdata/system/drone-app/certs \
     /userdata/system/logs/drone-app 2>/dev/null || true
 
-  chmod 775 \
+  chmod -R 775 \
     /userdata/system/.drone-app \
     /userdata/system/certs \
     /userdata/system/drone-app \
