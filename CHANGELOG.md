@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.32] - 2026-05-30
+
+- Updating batocera_install.sh and run_now.sh to use drone-app and make sure all static assets are copied.
+
 ## [v0.0.31] - 2026-05-30
 
 - Forgot chown -R for entire directory.
