@@ -91,16 +91,21 @@ ensure_permissions() {
   mkdir -p \
     /userdata/system/.drone-app \
     /userdata/system/certs \
+    /userdata/system/drone-app/certs \
     /userdata/system/logs/drone-app
 
   chown root:"$DRONE_GROUP" \
     /userdata/system/.drone-app \
     /userdata/system/certs \
+    /userdata/system/drone-app \
+    /userdata/system/drone-app/certs \
     /userdata/system/logs/drone-app 2>/dev/null || true
 
   chmod 775 \
     /userdata/system/.drone-app \
     /userdata/system/certs \
+    /userdata/system/drone-app \
+    /userdata/system/drone-app/certs \
     /userdata/system/logs/drone-app 2>/dev/null || true
 
   chmod o+rx /userdata/system 2>/dev/null || true
@@ -232,6 +237,8 @@ echo "  /userdata/roms/*/videos/"
 echo "  /userdata/roms/*/manuals/"
 echo "  /userdata/roms/*/gamelist.xml"
 echo "  /userdata/system/.drone-app/"
+echo "  /userdata/system/drone-app/"
+echo "  /userdata/system/drone-app/certs/"
 echo "  /userdata/system/certs/"
 echo "  /userdata/system/logs/drone-app/"
 echo ""
