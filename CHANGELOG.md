@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.33] - 2026-05-30
+
+- - Update the batocera_install.sh to not need base_url :: curl -fsSL https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/run_now.sh | DRONE_APP_BASE_URL="https://raw.githubusercontent.com/Batocera-Fleet-Federation/batocera.drone/main" run_as_drone bash - Add Runtime Metrics to Drone like it exists on the overmind and put it on system info tab.  Clean up system info tab to be more compact in the ui.  I would like to also show the upload/download speed sample here as well. - Bug: System filters on drone for bios page does not work. - Bug: Drone has search bar when viewing system info but should not. - UI Bug: In overmind when viewing on mobile the github+Api Docs+Help icons overflow to the right of the page.  Perhaps when the screen is resized to smaller that these icons move below [Batocera Overmind].  Remove [Navigation] when screen gets smaller.  When screen is small move profile + notification icons on same line as github+Api Docs+Help icons. - It is possible that when the drone's network is configured to forward traffic to the machine that the port exposed to the internet might change, it may not be 8443.  I want overmind to attempt to resolve 8443, like it's doing now, but if it can't be resolved then I want the resolver to scan all ports to see which port was configured on the router to serve the app.  If a port is found then that port needs to be registered for the drone and that https://<drone_ip>:<drone_port> should be registered as the url that other drones need to call for peer-to-peer communciations. - On Drone when loading systems / ROMs I want to use rom asset cache logic to make the loading faster.  If cache is not complete then continue to load the way that it is now.
+
 ## [v0.0.32] - 2026-05-30
 
 - Updating batocera_install.sh and run_now.sh to use drone-app and make sure all static assets are copied.
