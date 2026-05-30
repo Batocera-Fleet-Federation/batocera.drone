@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.30] - 2026-05-30
+
+- Another small issue fixed with run_now.sh
+
 ## [v0.0.29] - 2026-05-30
 
 - Updating install scripts to fix a root vs drone-user issue on new machines.  Found when testing on pi5.
