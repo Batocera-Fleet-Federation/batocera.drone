@@ -1979,6 +1979,15 @@ class RomRepository:
         return names
 
     def list_systems(self) -> List[dict]:
+        cached = self._cached_asset_snapshot()
+        if cached:
+            counts: Dict[str, int] = {}
+            for row in cached.get("roms") or []:
+                system = str(row.get("system") or row.get("system_name") or "").strip()
+                if system:
+                    counts[system] = counts.get(system, 0) + 1
+            if counts:
+                return [{"name": name, "rom_count": counts[name]} for name in sorted(counts, key=str.lower)]
         systems = []
         for system_name in self.list_system_names():
             target_dir = self.get_system_dir(system_name)
@@ -1991,6 +2000,24 @@ class RomRepository:
         return systems
 
     def _build_search_index(self) -> List[dict]:
+        cached = self._cached_asset_snapshot()
+        if cached:
+            index = []
+            for rom in cached.get("roms") or []:
+                system_name = str(rom.get("system") or rom.get("system_name") or "").strip()
+                if not system_name or not self.should_include_system(system_name):
+                    continue
+                index.append(
+                    {
+                        "system": system_name,
+                        "name": rom.get("rom_name") or rom.get("name") or rom.get("file_path") or "",
+                        "unique_id": rom.get("unique_id", ""),
+                        "is_downloadable": rom.get("is_downloadable", True),
+                        "image_stem": rom.get("image_stem"),
+                        "md5": rom.get("md5") or rom.get("rom_md5"),
+                    }
+                )
+            return index
         if not self.roms_root.exists():
             return []
         index: List[dict] = []
@@ -2880,6 +2907,30 @@ class RomRepository:
             raise ValueError("invalid asset type")
 
         items = []
+        cached = self._cached_asset_snapshot()
+        if cached and asset_type == "roms":
+            system_key = str(system or "").strip().lower()
+            items = []
+            for rom in cached.get("roms") or []:
+                row_system = str(rom.get("system") or rom.get("system_name") or "").strip().lower()
+                if row_system != system_key:
+                    continue
+                relative_path = str(rom.get("file_path") or rom.get("rom_path") or rom.get("rom_name") or rom.get("name") or "")
+                row = {
+                    "unique_id": rom.get("unique_id") or hashlib.sha256(f"{system}:{relative_path}".encode("utf-8")).hexdigest()[:16],
+                    "name": rom.get("rom_name") or rom.get("name") or Path(str(rom.get("file_path") or "")).name,
+                    "file_path": relative_path,
+                    "byte_count": rom.get("file_size") or rom.get("byte_count"),
+                    "entry_type": rom.get("entry_type") or "file",
+                    "is_downloadable": rom.get("is_downloadable", True),
+                    "image_stem": rom.get("image_stem"),
+                }
+                if include_md5:
+                    row["md5"] = rom.get("md5") or rom.get("rom_md5")
+                    row["rom_md5"] = row["md5"]
+                items.append(row)
+            items.sort(key=lambda item: str(item.get("name") or "").lower())
+            return system_dir, items
         if asset_dir.exists() and asset_dir.is_dir():
             if asset_type == "roms":
                 items = self._list_rom_items(system, asset_dir, include_md5=include_md5)
@@ -2898,6 +2949,17 @@ class RomRepository:
                     )
 
         return asset_dir, items
+
+    def _cached_asset_snapshot(self) -> Optional[dict]:
+        try:
+            cache, rebuilt = _load_rom_metadata_cache(self.settings)
+        except Exception:
+            return None
+        if rebuilt or not cache.get("last_full_scan_at") or cache.get("scan_in_progress"):
+            return None
+        if not isinstance(cache.get("systems"), list):
+            return None
+        return _build_rom_metadata_snapshot_from_cache(self.settings, cache)
 
     def get_bios_root(self) -> Path:
         if not self.bios_root.exists() or not self.bios_root.is_dir():
@@ -4273,6 +4335,8 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         entries = self.repository.list_bios_entries()
         query_value = (query or "").strip().lower()
         selected_systems = set((s or "").strip().lower() for s in (system_filters or []) if (s or "").strip())
+        none_selected = "__none__" in selected_systems
+        selected_systems.discard("__none__")
 
         def _entry_system(item: dict) -> str:
             path = item.get("path") or item.get("name") or ""
@@ -4291,7 +4355,9 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                     or query_value in _entry_system(item)
                 )
             ]
-        if selected_systems:
+        if none_selected:
+            filtered = []
+        elif selected_systems:
             filtered = [item for item in filtered if _entry_system(item) in selected_systems]
 
         total = len(filtered)
@@ -5085,6 +5151,8 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
 
     def _handle_admin_system_info(self) -> None:
         router_ip_address = _get_router_ip_address() or "Unavailable"
+        runtime_metrics = _collect_performance_metrics(self.settings.userdata_root)
+        speed_sample = _sample_speed()
         if self.settings.use_fake_data:
             fake_router_ip_address = router_ip_address if router_ip_address != "Unavailable" else "192.168.1.1"
             entries = [
@@ -5133,6 +5201,8 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                     "lines": raw.splitlines(),
                     "entries": entries,
                     "fields": fields,
+                    "runtime_metrics": runtime_metrics,
+                    "speed_sample": speed_sample,
                 },
             )
             return
@@ -5223,6 +5293,8 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                     "lines": lines,
                     "entries": entries,
                     "fields": fields,
+                    "runtime_metrics": runtime_metrics,
+                    "speed_sample": speed_sample,
                 },
             )
         except Exception as error:
@@ -5245,6 +5317,8 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                         "overmind_integrated": overmind_integrated,
                         "router_ip_address": router_ip_address,
                     },
+                    "runtime_metrics": runtime_metrics,
+                    "speed_sample": speed_sample,
                     "warning": f"Failed to run batocera-info: {str(error)}",
                 },
             )

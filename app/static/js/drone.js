@@ -227,7 +227,7 @@ function wildcardToRegExp(pattern) {
 }
 function renderFilterDropdown(prefix, options, selected) {
   const selectedSet = new Set(selected || []);
-  const label = selectedSet.size ? `${selectedSet.size} selected` : "All systems";
+  const label = selectedSet.size ? `${selectedSet.size} selected` : (prefix === "bios" ? "No systems" : "All systems");
   return `
     <div class="dropdown app-checkbox-dropdown">
       <button class="btn btn-outline-primary dropdown-toggle w-100 text-start" type="button" id="${prefix}FilterToggle" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false">${label}</button>
@@ -309,6 +309,10 @@ function setupFilterDropdown(prefix, onSelectionChange) {
   document.querySelectorAll(`.${prefix}-system-filter`).forEach((node) => {
     node.addEventListener("change", () => {
       if (filterDropdownState[prefix]) filterDropdownState[prefix].dirty = true;
+      if (prefix === "bios") {
+        if (filterDropdownState[prefix]) filterDropdownState[prefix].dirty = false;
+        document.dispatchEvent(new CustomEvent(`filter-apply-${prefix}`));
+      }
     });
   });
   if (selectAllBtn) {
@@ -318,6 +322,10 @@ function setupFilterDropdown(prefix, onSelectionChange) {
         node.checked = true;
       });
       if (filterDropdownState[prefix]) filterDropdownState[prefix].dirty = true;
+      if (prefix === "bios") {
+        if (filterDropdownState[prefix]) filterDropdownState[prefix].dirty = false;
+        document.dispatchEvent(new CustomEvent(`filter-apply-${prefix}`));
+      }
     });
   }
   if (unselectAllBtn) {
@@ -327,6 +335,10 @@ function setupFilterDropdown(prefix, onSelectionChange) {
         node.checked = false;
       });
       if (filterDropdownState[prefix]) filterDropdownState[prefix].dirty = true;
+      if (prefix === "bios") {
+        if (filterDropdownState[prefix]) filterDropdownState[prefix].dirty = false;
+        document.dispatchEvent(new CustomEvent(`filter-apply-${prefix}`));
+      }
     });
   }
   document.removeEventListener(`filter-apply-${prefix}`, onSelectionChange);
@@ -1250,7 +1262,8 @@ async function renderBios() {
   setLoading(false);
 }
 async function loadBiosPage(offset = 0) {
-  const systemsParam = encodeURIComponent((biosFilterSelectedSystems || []).join(","));
+  const selected = biosFilterInitialized && !(biosFilterSelectedSystems || []).length ? ["__none__"] : (biosFilterSelectedSystems || []);
+  const systemsParam = encodeURIComponent(selected.join(","));
   const url = `/bios?limit=${BIOS_PAGE_SIZE}&offset=${Math.max(0, offset)}&q=${encodeURIComponent(biosFilterQuery || "")}&systems=${systemsParam}`;
   const data = await api(url);
   renderBiosList(data);
@@ -3183,37 +3196,65 @@ async function refreshCurrentConfig() {
   await loadConfig(currentConfigSource, activeSource);
 }
 async function renderAdminSystemInfoPage() {
+  setSearchMode("hidden");
   titleNode.textContent = "System Info";
-  subtitleNode.textContent = "Live information from batocera-info";
+  subtitleNode.textContent = "Runtime, network, and Batocera details";
   setLoading(true, "Loading system information...");
   try {
     const payload = await api("/admin/system-info");
     const entries = Array.isArray(payload.entries) ? payload.entries : [];
+    const fields = payload.fields || {};
+    const metrics = payload.runtime_metrics || {};
+    const cpu = metrics.cpu || {};
+    const memory = metrics.memory || {};
+    const disk = metrics.disk || {};
+    const process = metrics.process || {};
+    const speed = payload.speed_sample || {};
+    const row = (label, value) => `<div class="system-info-row"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value || "n/a")}</strong></div>`;
+    const pct = (value) => value === null || value === undefined || value === "" ? "n/a" : `${Number(value).toFixed(1)}%`;
     const renderedRows = entries.length
-      ? entries.map((entry) => `
-          <tr>
-            <th scope="row" style="width: 34%;">${escapeHtml(entry.key || "")}</th>
-            <td>${escapeHtml(entry.value || "")}</td>
-          </tr>
-        `).join("")
-      : `<tr><td colspan="2" class="text-muted">No system information available.</td></tr>`;
+      ? entries.slice(0, 18).map((entry) => row(entry.key || "", entry.value || "")).join("")
+      : `<div class="text-muted">No system information available.</div>`;
 
     content.innerHTML = `
       <div class="mb-3">
-        <button class="btn btn-outline-secondary" onclick="setHash('#admin')">← Back to Admin</button>
+        <button class="btn btn-outline-secondary" onclick="setHash('#admin')">Back to Admin</button>
       </div>
-      <div class="card log-card">
-        <div class="card-header d-flex justify-content-between align-items-center">
-          <span>batocera-info</span>
+      <div class="card log-card mb-3">
+        <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
+          <span>Runtime Metrics</span>
           <button class="btn btn-sm btn-outline-primary" onclick="setHash('#admin/system-info')">Refresh</button>
         </div>
-        <div class="card-body p-0">
-          <div class="table-responsive">
-            <table class="table table-dark table-striped mb-0">
-              <tbody>
-                ${renderedRows}
-              </tbody>
-            </table>
+        <div class="card-body">
+          <div class="system-info-grid">
+            ${row("CPU host", pct(cpu.host_percent))}
+            ${row("Drone CPU", pct(cpu.process_percent))}
+            ${row("Load", Array.isArray(cpu.load_average) ? cpu.load_average.map((v) => Number(v).toFixed(2)).join(" / ") : "n/a")}
+            ${row("Memory", `${formatBytes(memory.used_bytes)} / ${formatBytes(memory.total_bytes)} (${pct(memory.used_percent)})`)}
+            ${row("Process RSS", formatBytes(process.rss_bytes))}
+            ${row("Disk", `${formatBytes(disk.used_bytes)} / ${formatBytes(disk.total_bytes)} (${pct(disk.used_percent)})`)}
+            ${row("Disk read", disk.read_bytes_per_second ? `${formatBytes(disk.read_bytes_per_second)}/s` : "n/a")}
+            ${row("Disk write", disk.write_bytes_per_second ? `${formatBytes(disk.write_bytes_per_second)}/s` : "n/a")}
+            ${row("Download", speed.download_mbps !== undefined ? `${speed.download_mbps} Mbps` : "n/a")}
+            ${row("Upload", speed.upload_mbps !== undefined ? `${speed.upload_mbps} Mbps` : "n/a")}
+            ${row("Latency", speed.latency_ms !== undefined ? `${speed.latency_ms} ms` : "n/a")}
+            ${row("Speed source", speed.source || "n/a")}
+          </div>
+        </div>
+      </div>
+      <div class="card log-card">
+        <div class="card-header">System Details</div>
+        <div class="card-body">
+          <div class="system-info-grid">
+            ${row("Machine ID", fields.machine_id)}
+            ${row("Overmind", fields.overmind_integrated === "yes" ? "linked" : "disconnected")}
+            ${row("Batocera", fields.batocera_version || fields.system)}
+            ${row("Model", fields.model)}
+            ${row("Architecture", fields.architecture)}
+            ${row("CPU", fields.cpu_model || fields.cpu_topology)}
+            ${row("Network IP", fields.network_ip_address)}
+            ${row("Router IP", fields.router_ip_address)}
+            ${renderedRows}
           </div>
         </div>
       </div>

@@ -356,6 +356,31 @@
       white-space: nowrap;
       text-align: right;
     }
+    .system-info-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 0.5rem;
+    }
+    .system-info-row {
+      min-width: 0;
+      border: 1px solid var(--admin-border);
+      border-radius: 8px;
+      background: rgba(21, 31, 50, 0.72);
+      padding: 0.55rem 0.65rem;
+    }
+    .system-info-row span {
+      display: block;
+      color: var(--admin-muted);
+      font-size: 0.72rem;
+      font-weight: 800;
+      text-transform: uppercase;
+    }
+    .system-info-row strong {
+      display: block;
+      color: var(--admin-text);
+      font-size: 0.92rem;
+      overflow-wrap: anywhere;
+    }
     .log-card .list-group-item {
       background: rgba(21, 31, 50, 0.82);
       border-color: var(--admin-border);
