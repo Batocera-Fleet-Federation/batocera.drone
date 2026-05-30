@@ -216,6 +216,7 @@ fi
 echo "Downloaded Drone App to $WORK_DIR"
 
 # Ensure the Drone certificate directory exists so openssl can write to it
+DRONE_CERT_FILE="${DRONE_CERT_FILE:-}"
 DRONE_CERT_DIR="${DRONE_CERT_FILE%/*}"
 if [ -z "$DRONE_CERT_DIR" ]; then
   DRONE_CERT_DIR="/userdata/system/drone-app/certs"
