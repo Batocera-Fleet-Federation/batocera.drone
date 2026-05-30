@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.29] - 2026-05-30
+
+- Updating install scripts to fix a root vs drone-user issue on new machines.  Found when testing on pi5.
+
 ## [v0.0.28] - 2026-05-27
 
 - Fixing auth token connection between drone and overmind after database refactor.
