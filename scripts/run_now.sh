@@ -85,9 +85,9 @@ download_file() {
   local src="$1"
   local dst="$2"
   if [[ "$DOWNLOAD_TOOL" == "curl" ]]; then
-    curl -fsSL "$src" -o "$dst"
+    curl -fsSL --connect-timeout 10 --max-time 120 "$src" -o "$dst"
   else
-    wget -qO "$dst" "$src"
+    wget -T 120 -qO "$dst" "$src"
   fi
 }
 

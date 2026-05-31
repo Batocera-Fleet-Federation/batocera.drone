@@ -58,6 +58,7 @@ DRONE_GID="999"
 WORK_DIR="/userdata/system/drone-app"
 ACTION="$1"
 PID_FILE="/tmp/drone-server.pid"
+STARTUP_LOG="/userdata/system/logs/drone-app/startup.log"
 
 ensure_drone_user() {
   echo "[drone-service] Ensuring ${DRONE_USER} user/group exists..."
@@ -148,20 +149,45 @@ run_as_drone() {
   fi
 }
 
-start_app() {
-  (
-    ensure_permissions
-    ensure_drone_user
-    
-    while ! ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; do
-      sleep 5
-    done
+wait_for_network() {
+  max_attempts="${DRONE_NETWORK_WAIT_ATTEMPTS:-12}"
+  attempt=1
+  echo "[drone-service] Waiting for network connectivity..."
+  while [ "$attempt" -le "$max_attempts" ]; do
+    if curl -fsI --connect-timeout 5 --max-time 10 https://github.com >/dev/null 2>&1; then
+      echo "[drone-service] ✓ Network ready"
+      return 0
+    fi
+    if ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; then
+      echo "[drone-service] ✓ Network ready"
+      return 0
+    fi
+    echo "[drone-service] Network not ready (${attempt}/${max_attempts}); retrying..."
+    attempt=$((attempt + 1))
+    sleep 5
+  done
+  echo "[drone-service] Network check timed out; attempting startup anyway"
+  return 0
+}
 
-    curl -fsSL https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/run_now.sh | run_as_drone bash
-  ) &
+launch_drone() {
+  echo "[drone-service] Downloading and launching Drone app..."
+  curl -fsSL --connect-timeout 10 --max-time 120 https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/run_now.sh | run_as_drone bash
+}
+
+start_app() {
+  mkdir -p "$(dirname "$STARTUP_LOG")"
+  (
+    ensure_drone_user
+    ensure_permissions
+    wait_for_network
+
+    launch_drone
+  ) >> "$STARTUP_LOG" 2>&1 &
 
   echo $! > "$PID_FILE"
   echo "Web Server running on https://$(hostname).local:8443"
+  echo "Startup log: $STARTUP_LOG"
 }
 
 stop_app() {
@@ -209,11 +235,20 @@ else
 
 # Run Drone Web Server: https://raw.githubusercontent.com/Batocera-Fleet-Federation/batocera.drone
 (
-  while ! ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; do
+  max_attempts="${DRONE_NETWORK_WAIT_ATTEMPTS:-12}"
+  attempt=1
+  while [ "$attempt" -le "$max_attempts" ]; do
+    if curl -fsI --connect-timeout 5 --max-time 10 https://github.com >/dev/null 2>&1; then
+      break
+    fi
+    if ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; then
+      break
+    fi
+    attempt=$((attempt + 1))
     sleep 5
   done
 
-  curl -fsSL https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/run_now.sh | su -s /bin/sh -c "bash" drone-app
+  curl -fsSL --connect-timeout 10 --max-time 120 https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/run_now.sh | su -s /bin/sh -c "bash" drone-app
 ) &
 
 SERVICEBLOCK
