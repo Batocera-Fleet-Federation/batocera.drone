@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.40] - 2026-05-30
+
+- Bugs bruh
+
 ## [v0.0.39] - 2026-05-30
 
 - Fixing bugs with ping.
