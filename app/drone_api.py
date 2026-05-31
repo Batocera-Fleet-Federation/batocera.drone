@@ -165,6 +165,7 @@ PEER_CHECK_INTERVAL_SECONDS = int(os.environ.get("DRONE_PEER_CHECK_INTERVAL_SECO
 OVERMIND_SPEED_SAMPLE_SECONDS = int(os.environ.get("OVERMIND_SPEED_SAMPLE_SECONDS", "600"))
 SPEED_TEST_DEFAULT_BASE_URL = "https://speed.cloudflare.com"
 OVERMIND_HEARTBEAT_SECONDS = int(os.environ.get("OVERMIND_POLL_SECONDS", "30"))
+OVERMIND_HEARTBEAT_TIMEOUT_SECONDS = max(10, int(os.environ.get("OVERMIND_HEARTBEAT_TIMEOUT_SECONDS", "20")))
 OVERMIND_CONFIG_REPORT_SECONDS = int(os.environ.get("OVERMIND_CONFIG_REPORT_SECONDS", "900"))
 ROM_METADATA_POLL_SECONDS = int(os.environ.get("ROM_METADATA_POLL_SECONDS", "300"))
 ROM_METADATA_INITIAL_DELAY_SECONDS = int(os.environ.get("ROM_METADATA_INITIAL_DELAY_SECONDS", "60"))
@@ -349,6 +350,71 @@ def _gamelist_details(game: Optional[ET.Element]) -> dict:
         else:
             details[tag] = value
     return details
+
+
+def _gamelist_game_id(game: Optional[ET.Element], relative_path: str) -> str:
+    if game is None:
+        return relative_path
+    return str(game.get("id") or _text_or_empty(game, "id") or relative_path).strip() or relative_path
+
+
+def _find_gamelist_entry_by_game_id(root: ET.Element, game_id: str) -> Optional[ET.Element]:
+    wanted = str(game_id or "").strip()
+    if not wanted:
+        return None
+    wanted_path = _normalize_gamelist_rom_path(wanted).lower()
+    for game in root.findall("game"):
+        candidates = [
+            str(game.get("id") or "").strip(),
+            _text_or_empty(game, "id"),
+            _normalize_gamelist_rom_path(_text_or_empty(game, "path")),
+        ]
+        if any(candidate and candidate == wanted for candidate in candidates):
+            return game
+        if wanted_path and any(_normalize_gamelist_rom_path(candidate).lower() == wanted_path for candidate in candidates):
+            return game
+    return None
+
+
+def _gamelist_metadata_for_reference(gamelist_path: str, game_id: str) -> dict:
+    path = Path(str(gamelist_path or ""))
+    if not path.exists() or not path.is_file():
+        return {}
+    try:
+        root = ET.parse(path).getroot()
+    except Exception:
+        return {}
+    if root.tag != "gameList":
+        return {}
+    game = _find_gamelist_entry_by_game_id(root, game_id)
+    return _gamelist_details(game)
+
+
+def _database_rom_metadata_fields(rom: dict, system_name: str, file_path: str, absolute: Path, stat_size: int, stat_mtime: int) -> dict:
+    display_name = Path(file_path).stem
+    return {
+        **{k: v for k, v in rom.items() if k not in {"md5", "rom_md5", "gamelist", "existing", "name", "title", "rom_name"}},
+        "system": system_name,
+        "system_name": system_name,
+        "rom_name": display_name,
+        "name": display_name,
+        "title": display_name,
+        "rom_file": Path(file_path).name,
+        "filename": Path(file_path).name,
+        "file_path": file_path,
+        "relative_path": file_path,
+        "rom_path": file_path,
+        "file_size": stat_size,
+        "byte_count": stat_size,
+        "size": stat_size,
+        "modified_time": stat_mtime,
+        "mtime": stat_mtime,
+        "absolute_path": str(absolute),
+        "source": "gamelist.xml" if rom.get("gamelist_path") else "filesystem",
+        "metadata_source": "gamelist.xml" if rom.get("gamelist_path") else "filesystem",
+        "has_gamelist_entry": bool(rom.get("gamelist_path")),
+        "image_stem": display_name,
+    }
 
 
 def _set_child_text(parent: ET.Element, tag: str, value: str) -> None:
@@ -1931,6 +1997,8 @@ class RomRepository:
                 "image_stem": display_name,
                 "existing": {field: _text_or_empty(game, field) for field in ARTWORK_FIELDS},
                 "gamelist": _gamelist_details(game),
+                "gamelist_path": str(gamelist_path),
+                "gamelist_game_id": _gamelist_game_id(game, relative_path),
                 "has_gamelist_entry": True,
             }
             items.append(item)
@@ -7337,6 +7405,32 @@ def _collect_system_info_payload(settings: Settings) -> dict:
                 break
         except Exception:
             continue
+    asset_cache = {}
+    try:
+        cache_status = _rom_metadata_cache_status(settings)
+        counts = cache_status.get("counts") if isinstance(cache_status.get("counts"), dict) else {}
+        total_assets = int(counts.get("total") or 0)
+        complete = bool(cache_status.get("complete"))
+        uploaded = bool(cache_status.get("uploaded"))
+        pending_total = int((cache_status.get("pending_changes") or {}).get("total") or 0)
+        cached_percent = 100.0 if total_assets and complete else (0.0 if not total_assets else 50.0)
+        upload_percent = 100.0 if total_assets and uploaded and not pending_total else (0.0 if total_assets else None)
+        health = "green" if complete and (uploaded or not pending_total) else "yellow"
+        if cache_status.get("rebuilt") or cache_status.get("scan_in_progress"):
+            health = "yellow"
+        asset_cache = {
+            "health": health,
+            "cached_percent": cached_percent,
+            "uploaded_percent": upload_percent,
+            "counts": counts,
+            "pending_changes": cache_status.get("pending_changes") or {},
+            "last_full_scan_at": cache_status.get("last_full_scan_at"),
+            "last_successful_upload_at": cache_status.get("last_successful_upload_at"),
+            "scan_in_progress": bool(cache_status.get("scan_in_progress")),
+            "needs_upload": bool(cache_status.get("needs_upload")),
+        }
+    except Exception as error:
+        asset_cache = {"health": "red", "error": _format_overmind_error(error)}
     return {
         "hostname": hostname,
         "device_name": hostname,
@@ -7351,6 +7445,7 @@ def _collect_system_info_payload(settings: Settings) -> dict:
         "disk": disk,
         "gpu": _collect_gpu_info(),
         "performance": _collect_performance_metrics(settings.userdata_root),
+        "asset_cache": asset_cache,
         "network": network,
         "uptime_seconds": uptime,
         "container": Path("/.dockerenv").exists() or os.environ.get("RUNNING_IN_DOCKER") == "1",
@@ -7467,7 +7562,23 @@ def _build_rom_metadata_snapshot_from_cache(settings: Settings, cache: dict) -> 
     for entry in entries.values():
         if not isinstance(entry, dict):
             continue
-        roms.append({k: v for k, v in entry.items() if k != "absolute_path"})
+        row = {k: v for k, v in entry.items() if k != "absolute_path"}
+        gamelist = _gamelist_metadata_for_reference(str(row.get("gamelist_path") or ""), str(row.get("gamelist_game_id") or ""))
+        if gamelist:
+            row["gamelist"] = gamelist
+            row["existing"] = {field: gamelist.get(field) or "" for field in ARTWORK_FIELDS}
+            row["has_gamelist_entry"] = True
+            row["metadata_source"] = "gamelist.xml"
+            title = str(gamelist.get("name") or "").strip()
+            if title:
+                row["name"] = title
+                row["title"] = title
+                row["rom_name"] = title
+        else:
+            row["gamelist"] = {}
+            row["existing"] = {}
+            row["has_gamelist_entry"] = False
+        roms.append(row)
     roms.sort(key=lambda row: (str(row.get("system") or ""), str(row.get("file_path") or "")))
     bios_entries = cache.get("bios_entries") if isinstance(cache.get("bios_entries"), dict) else {}
     bios = []
@@ -7783,19 +7894,7 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
             stat_size = int(rom.get("file_size") or rom.get("byte_count") or absolute.stat().st_size)
             stat_mtime = int(rom.get("modified_time") or rom.get("mtime") or absolute.stat().st_mtime)
             previous = existing_entries.get(key) if isinstance(existing_entries.get(key), dict) else {}
-            base_entry = {
-                **{k: v for k, v in rom.items() if k not in {"md5", "rom_md5"}},
-                "system": system_name,
-                "system_name": system_name,
-                "rom_name": str(rom.get("rom_name") or rom.get("title") or rom.get("name") or Path(file_path).stem),
-                "file_path": file_path,
-                "relative_path": file_path,
-                "file_size": stat_size,
-                "byte_count": stat_size,
-                "modified_time": stat_mtime,
-                "mtime": stat_mtime,
-                "absolute_path": str(absolute),
-            }
+            base_entry = _database_rom_metadata_fields(rom, system_name, file_path, absolute, stat_size, stat_mtime)
             if previous and previous.get("file_size") == stat_size and previous.get("modified_time") == stat_mtime:
                 next_entries[key] = dict(base_entry)
                 if previous.get("rom_md5"):
@@ -9476,13 +9575,25 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                 )
                 try:
                     try:
-                        status_code, response = _overmind_post_json_with_status(heartbeat_url, heartbeat_payload, token=token, settings=settings)
+                        status_code, response = _overmind_post_json_with_status(
+                            heartbeat_url,
+                            heartbeat_payload,
+                            token=token,
+                            settings=settings,
+                            timeout_seconds=OVERMIND_HEARTBEAT_TIMEOUT_SECONDS,
+                        )
                     except HTTPError as error:
                         if error.code == 401:
                             replacement_token = _reclaim_overmind_token_after_unauthorized(settings, repository, config, base_url, error)
                             if replacement_token:
                                 token = replacement_token
-                                status_code, response = _overmind_post_json_with_status(heartbeat_url, heartbeat_payload, token=token, settings=settings)
+                                status_code, response = _overmind_post_json_with_status(
+                                    heartbeat_url,
+                                    heartbeat_payload,
+                                    token=token,
+                                    settings=settings,
+                                    timeout_seconds=OVERMIND_HEARTBEAT_TIMEOUT_SECONDS,
+                                )
                             else:
                                 raise
                         else:
