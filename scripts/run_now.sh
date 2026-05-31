@@ -222,9 +222,11 @@ fi
 
 echo "Downloaded Drone App to $WORK_DIR"
 
-# Prevent multiple instances — bail if port 8443 is already in use
-if lsof -i :8443 >/dev/null 2>&1; then
-  echo "Port 8443 is already in use — Drone App may already be running. Exiting."
+HTTPS_PORT="${HTTPS_PORT:-8443}"
+
+# Prevent multiple instances - bail if the configured port is already in use.
+if lsof -i :"$HTTPS_PORT" >/dev/null 2>&1; then
+  echo "Port ${HTTPS_PORT} is already in use - Drone App may already be running. Exiting."
   exit 0
 fi
 
@@ -245,7 +247,7 @@ env \
   PYTHONPATH="$WORK_DIR${PYTHONPATH:+:$PYTHONPATH}" \
   DRONE_APP_USERNAME="$DRONE_APP_USERNAME" \
   DRONE_APP_PASSWORD="$DRONE_APP_PASSWORD" \
-  HTTPS_PORT="${HTTPS_PORT:-8443}" \
+  HTTPS_PORT="$HTTPS_PORT" \
   ROMS_ROOT="${ROMS_ROOT:-/userdata/roms}" \
   BIOS_ROOT="${BIOS_ROOT:-/userdata/bios}" \
   TLS_SELF_SIGNED_DIR="${TLS_SELF_SIGNED_DIR:-/userdata/system/certs}" \

@@ -12,6 +12,7 @@ import ssl
 import subprocess
 import sys
 import time
+import traceback
 import uuid
 import xml.etree.ElementTree as ET
 from collections import OrderedDict
@@ -10049,6 +10050,11 @@ def _start_rom_metadata_poller(settings: Settings, repository: "RomRepository") 
     print("Asset metadata poller thread started", file=sys.stdout, flush=True)
 
 
+class DroneThreadingHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+
 def create_server(settings: Settings) -> ThreadingHTTPServer:
     global _OVERMIND_POLLER_STARTED, _ROM_METADATA_POLLER_STARTED, _DOWNLOAD_MANAGER
     roms_root, bios_root = _real_data_roots(settings)
@@ -10094,7 +10100,7 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
         json_cache=json_cache,
     )
 
-    server = ThreadingHTTPServer(("0.0.0.0", settings.https_port), handler_factory)
+    server = DroneThreadingHTTPServer(("0.0.0.0", settings.https_port), handler_factory)
     server.auth = auth  # type: ignore[attr-defined]
 
     if not settings.http_only:
@@ -10128,24 +10134,32 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
 
 def main() -> None:
     settings = Settings.from_env()
-    if settings.use_fake_data:
-        try:
-            from .mock_data import seed_mock_userdata
-        except ImportError:
-            from mock_data import seed_mock_userdata  # type: ignore
+    try:
+        if settings.use_fake_data:
+            try:
+                from .mock_data import seed_mock_userdata
+            except ImportError:
+                from mock_data import seed_mock_userdata  # type: ignore
 
-        seed_mock_userdata(settings.userdata_root)
-        print(f"USE_FAKE_DATA enabled: seeded fake dataset at {settings.userdata_root}")
-    _configure_rotating_logs(settings)
-    server = create_server(settings)
-    print(f"Log files: {settings.log_dir / settings.stdout_log_file}, {settings.log_dir / settings.stderr_log_file}")
-    server_auth = getattr(server, "auth", None)
-    credential_store = getattr(server_auth, "credential_store", None)
-    safe_username = credential_store.load().get("username") if credential_store else settings.username
-    print(f"Auth username: {safe_username}")
-    scheme = "http" if settings.http_only else "https"
-    print(f"Serving Drone App on {scheme}://0.0.0.0:{settings.https_port}")
-    server.serve_forever()
+            seed_mock_userdata(settings.userdata_root)
+            print(f"USE_FAKE_DATA enabled: seeded fake dataset at {settings.userdata_root}")
+        _configure_rotating_logs(settings)
+        server = create_server(settings)
+        print(f"Log files: {settings.log_dir / settings.stdout_log_file}, {settings.log_dir / settings.stderr_log_file}")
+        server_auth = getattr(server, "auth", None)
+        credential_store = getattr(server_auth, "credential_store", None)
+        safe_username = credential_store.load().get("username") if credential_store else settings.username
+        print(f"Auth username: {safe_username}")
+        scheme = "http" if settings.http_only else "https"
+        print(f"Serving Drone App on {scheme}://0.0.0.0:{settings.https_port}", flush=True)
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("Drone App shutdown requested", file=sys.stderr, flush=True)
+        raise
+    except BaseException:
+        print("Drone App fatal error:", file=sys.stderr, flush=True)
+        traceback.print_exc(file=sys.stderr)
+        raise
 
 
 if __name__ == "__main__":

@@ -1779,7 +1779,7 @@ class SettingsTests(unittest.TestCase):
             self.assertGreaterEqual(status["pending_changes"]["total"], 1)
             self.assertIn("rom_metadata_cache.sqlite3", status["path"])
 
-    def test_collect_rom_metadata_prefers_local_database_cache(self) -> None:
+    def test_collect_rom_metadata_uses_database_cache_with_current_gamelist_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
             system = root / "roms" / "snes"
@@ -1811,7 +1811,9 @@ class SettingsTests(unittest.TestCase):
                 result = _collect_rom_metadata(settings, repo)
 
             self.assertEqual(result["type"], "asset_metadata")
-            self.assertEqual(result["roms"][0]["rom_name"], "Cached Title")
+            self.assertEqual(result["roms"][0]["rom_name"], "Stale XML Title")
+            self.assertEqual(result["roms"][0]["gamelist_path"], str((system / "gamelist.xml").resolve()))
+            self.assertEqual(result["roms"][0]["gamelist_game_id"], "Game.zip")
             self.assertEqual(result["gamelists"][0]["rom_count"], 1)
 
     def test_rom_metadata_sync_uploads_inventory_then_batched_md5_patches(self) -> None:

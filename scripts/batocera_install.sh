@@ -171,8 +171,43 @@ wait_for_network() {
 }
 
 launch_drone() {
+  runner="/tmp/drone-run-now.$$"
   echo "[drone-service] Downloading and launching Drone app..."
-  curl -fsSL --connect-timeout 10 --max-time 120 https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/run_now.sh | run_as_drone bash
+  if ! curl -fsSL --connect-timeout 10 --max-time 120 -o "$runner" https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/run_now.sh; then
+    rm -f "$runner"
+    echo "[drone-service] Failed to download Drone launcher"
+    return 1
+  fi
+  chmod 755 "$runner" 2>/dev/null || true
+  run_as_drone bash "$runner"
+  exit_code="$?"
+  rm -f "$runner"
+  return "$exit_code"
+}
+
+supervise_drone() {
+  restart_delay="${DRONE_RESTART_DELAY_SECONDS:-10}"
+  restart_enabled="${DRONE_SERVICE_RESTART:-1}"
+
+  while true; do
+    launch_started="$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date)"
+    echo "[drone-service] Launch attempt started at ${launch_started}"
+    launch_drone
+    exit_code="$?"
+    launch_ended="$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date)"
+    echo "[drone-service] Drone app process exited at ${launch_ended} with code ${exit_code}"
+
+    if [ "$exit_code" -eq 0 ]; then
+      exit 0
+    fi
+
+    if [ "$restart_enabled" != "1" ]; then
+      exit "$exit_code"
+    fi
+
+    echo "[drone-service] Restarting Drone app in ${restart_delay}s..."
+    sleep "$restart_delay"
+  done
 }
 
 start_app() {
@@ -182,7 +217,7 @@ start_app() {
     ensure_permissions
     wait_for_network
 
-    launch_drone
+    supervise_drone
   ) >> "$STARTUP_LOG" 2>&1 &
 
   echo $! > "$PID_FILE"
@@ -191,6 +226,9 @@ start_app() {
 }
 
 stop_app() {
+  if [ -f "$PID_FILE" ]; then
+    kill "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null || true
+  fi
   kill -9 $(lsof -t -i:8443) 2>/dev/null || true
   rm -f "$PID_FILE"
 }
