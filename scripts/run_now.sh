@@ -93,7 +93,14 @@ download_file() {
 
 download_archive_dirs() {
   local archive_path="$WORK_DIR/source.tar.gz"
-  download_file "$DRONE_APP_ARCHIVE_URL" "$archive_path"
+  if ! download_file "$DRONE_APP_ARCHIVE_URL" "$archive_path"; then
+    echo "Failed to download archive from $DRONE_APP_ARCHIVE_URL"
+    return 1
+  fi
+  if [ ! -f "$archive_path" ]; then
+    echo "Archive download produced no file at $archive_path"
+    return 1
+  fi
   python3 - "$archive_path" "$WORK_DIR" <<'PY'
 import shutil
 import sys
@@ -214,6 +221,12 @@ if [[ ! -f "$APP_PATH" || ! -d "$STATIC_DIR" || ! -d "$CONTENT_DIR" ]]; then
 fi
 
 echo "Downloaded Drone App to $WORK_DIR"
+
+# Prevent multiple instances — bail if port 8443 is already in use
+if lsof -i :8443 >/dev/null 2>&1; then
+  echo "Port 8443 is already in use — Drone App may already be running. Exiting."
+  exit 0
+fi
 
 # Ensure the Drone certificate directory exists so openssl can write to it
 DRONE_CERT_FILE="${DRONE_CERT_FILE:-}"
