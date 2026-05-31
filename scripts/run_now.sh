@@ -10,7 +10,7 @@ DRONE_APP_CSS_URL="${DRONE_APP_CSS_URL:-}"
 DRONE_APP_JS_URL="${DRONE_APP_JS_URL:-}"
 DRONE_APP_CONTENT_URL="${DRONE_APP_CONTENT_URL:-}"
 DRONE_APP_ARCHIVE_URL="${DRONE_APP_ARCHIVE_URL:-}"
-DRONE_APP_BASE_URL="${DRONE_APP_BASE_URL:-${1:-}}"
+DRONE_APP_BASE_URL="${DRONE_APP_BASE_URL:-${1:-https://raw.githubusercontent.com/Batocera-Fleet-Federation/batocera.drone/main}}"
 
 if [[ -z "$DRONE_APP_URL" && -z "$DRONE_APP_BASE_URL" ]]; then
   echo "Usage:"
