@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.38] - 2026-05-30
+
+- Issue with drone startup Creates drone-app user before permission work. Replaces infinite ping wait with bounded network checks. Uses HTTPS check to GitHub first, ping fallback second. Continues after timeout instead of hanging forever. Writes startup details to /userdata/system/logs/drone-app/startup.log. Adds curl connect/max timeouts.
+
 ## [v0.0.37] - 2026-05-30
 
 - Fixing drone heatbeat issue
