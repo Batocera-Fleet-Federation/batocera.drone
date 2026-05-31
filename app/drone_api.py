@@ -9682,13 +9682,21 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                         flush=True,
                     )
                 if log_sources.get("logs"):
-                    _overmind_post_json(f"{base_url}/api/devices/{device_id}/log-sources", log_sources, token=token, settings=settings)
-                    _commit_log_cursors(settings, log_cursors)
-                    print(
-                        f"Sent {len(log_sources.get('logs') or [])} changed log source(s) to Overmind",
-                        file=sys.stdout,
-                        flush=True,
-                    )
+                    try:
+                        _overmind_post_json(f"{base_url}/api/devices/{device_id}/log-sources", log_sources, token=token, settings=settings)
+                    except (HTTPError, URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError) as error:
+                        print(
+                            f"Log source upload failed; heartbeat/action poll will continue: {_format_overmind_error(error)}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                    else:
+                        _commit_log_cursors(settings, log_cursors)
+                        print(
+                            f"Sent {len(log_sources.get('logs') or [])} changed log source(s) to Overmind",
+                            file=sys.stdout,
+                            flush=True,
+                        )
 
                 if (
                     config_report_seconds > 0
