@@ -149,6 +149,19 @@ run_as_drone() {
   fi
 }
 
+run_as_drone_shell() {
+  command="$1"
+  if command -v runuser >/dev/null 2>&1; then
+    runuser -u "$DRONE_USER" -- sh -c "$command"
+  elif command -v chpst >/dev/null 2>&1; then
+    chpst -u "$DRONE_USER" sh -c "$command"
+  elif command -v sudo >/dev/null 2>&1; then
+    sudo -u "$DRONE_USER" sh -c "$command"
+  else
+    su -s /bin/sh -c "$command" "$DRONE_USER"
+  fi
+}
+
 wait_for_network() {
   max_attempts="${DRONE_NETWORK_WAIT_ATTEMPTS:-12}"
   attempt=1
@@ -171,6 +184,12 @@ wait_for_network() {
 }
 
 launch_drone() {
+  if [ -f "$WORK_DIR/app/main.py" ] && [ -f "$WORK_DIR/app/drone_api.py" ]; then
+    echo "[drone-service] Launching local Drone app from ${WORK_DIR}..."
+    run_as_drone_shell "cd '$WORK_DIR' && env PYTHONPATH='$WORK_DIR' HTTPS_PORT='${HTTPS_PORT:-8443}' ROMS_ROOT='${ROMS_ROOT:-/userdata/roms}' BIOS_ROOT='${BIOS_ROOT:-/userdata/bios}' TLS_SELF_SIGNED_DIR='${TLS_SELF_SIGNED_DIR:-/userdata/system/certs}' LOG_DIR='${LOG_DIR:-/userdata/system/logs/drone-app}' LOG_MAX_BYTES='${LOG_MAX_BYTES:-5242880}' LOG_BACKUP_COUNT='${LOG_BACKUP_COUNT:-5}' ROM_METADATA_POLL_SECONDS='${ROM_METADATA_POLL_SECONDS:-900}' ROM_METADATA_INITIAL_DELAY_SECONDS='${ROM_METADATA_INITIAL_DELAY_SECONDS:-60}' ROM_METADATA_PROGRESS_SECONDS='${ROM_METADATA_PROGRESS_SECONDS:-30}' ROM_METADATA_PROGRESS_FILES='${ROM_METADATA_PROGRESS_FILES:-250}' ROM_METADATA_HASH_IO_YIELD_SECONDS='${ROM_METADATA_HASH_IO_YIELD_SECONDS:-0.05}' IMAGE_CACHE_TTL_SECONDS='${IMAGE_CACHE_TTL_SECONDS:-3600}' IMAGE_MISS_CACHE_TTL_SECONDS='${IMAGE_MISS_CACHE_TTL_SECONDS:-300}' IMAGE_CACHE_MAX_ITEMS='${IMAGE_CACHE_MAX_ITEMS:-1000}' IMAGE_CACHE_MAX_BYTES='${IMAGE_CACHE_MAX_BYTES:-134217728}' JSON_CACHE_TTL_SECONDS='${JSON_CACHE_TTL_SECONDS:-3600}' JSON_CACHE_MAX_ITEMS='${JSON_CACHE_MAX_ITEMS:-1000}' JSON_CACHE_MAX_BYTES='${JSON_CACHE_MAX_BYTES:-33554432}' OVERMIND_DRONE_TOKEN='${OVERMIND_DRONE_TOKEN:-}' OVERMIND_POLL_SECONDS='${OVERMIND_POLL_SECONDS:-60}' OVERMIND_SPEED_SAMPLE_SECONDS='${OVERMIND_SPEED_SAMPLE_SECONDS:-600}' python3 -m app.main"
+    return "$?"
+  fi
+
   runner="/tmp/drone-run-now.$$"
   echo "[drone-service] Downloading and launching Drone app..."
   if ! curl -fsSL --connect-timeout 10 --max-time 120 -o "$runner" https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/run_now.sh; then
