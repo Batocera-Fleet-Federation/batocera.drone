@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.35] - 2026-05-30
+
+- bug fix with startup
+
 ## [v0.0.34] - 2026-05-30
 
 - Updating github url to be default instead of having to set it in ENV VAR.
