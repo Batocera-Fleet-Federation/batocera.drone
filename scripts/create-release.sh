@@ -11,6 +11,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 RELEASE_ASSETS=(
   "scripts/batocera_install.sh"
   "scripts/run_now.sh"
+  "dist/drone-app.tar.gz"
 )
 
 RED='\033[0;31m'
@@ -60,6 +61,9 @@ fi
 
 for asset in "${RELEASE_ASSETS[@]}"; do
   if [[ ! -f "$asset" ]]; then
+    if [[ "$asset" == "dist/drone-app.tar.gz" ]]; then
+      continue
+    fi
     error "Release asset not found: $asset"
   fi
 done
@@ -153,6 +157,14 @@ update_changelog() {
 }
 
 update_changelog
+
+info "Building Drone app archive..."
+mkdir -p dist
+tar \
+  --exclude='*/__pycache__' \
+  --exclude='*.pyc' \
+  -czf dist/drone-app.tar.gz \
+  app content
 
 if ! git diff --quiet -- "$CHANGELOG" 2>/dev/null; then
   info "Committing changelog update..."

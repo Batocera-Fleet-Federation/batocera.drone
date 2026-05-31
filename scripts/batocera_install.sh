@@ -179,6 +179,7 @@ launch_drone() {
     return 1
   fi
   chmod 755 "$runner" 2>/dev/null || true
+  export DRONE_APP_ARCHIVE_URL="${DRONE_APP_ARCHIVE_URL:-https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/drone-app.tar.gz}"
   run_as_drone bash "$runner"
   exit_code="$?"
   rm -f "$runner"
@@ -212,6 +213,19 @@ supervise_drone() {
 
 start_app() {
   mkdir -p "$(dirname "$STARTUP_LOG")"
+  if [ -f "$PID_FILE" ]; then
+    existing_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+    if [ -n "$existing_pid" ] && kill -0 "$existing_pid" 2>/dev/null; then
+      echo "Drone service supervisor already running: pid=${existing_pid}"
+      echo "Startup log: $STARTUP_LOG"
+      exit 0
+    fi
+  fi
+  if lsof -i:8443 >/dev/null 2>&1; then
+    echo "Drone App already appears to be listening on port 8443"
+    echo "Startup log: $STARTUP_LOG"
+    exit 0
+  fi
   (
     ensure_drone_user
     ensure_permissions

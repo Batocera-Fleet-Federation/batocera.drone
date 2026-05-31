@@ -10,6 +10,7 @@ DRONE_APP_CSS_URL="${DRONE_APP_CSS_URL:-}"
 DRONE_APP_JS_URL="${DRONE_APP_JS_URL:-}"
 DRONE_APP_CONTENT_URL="${DRONE_APP_CONTENT_URL:-}"
 DRONE_APP_ARCHIVE_URL="${DRONE_APP_ARCHIVE_URL:-}"
+DRONE_APP_FALLBACK_ARCHIVE_URL="${DRONE_APP_FALLBACK_ARCHIVE_URL:-}"
 DRONE_APP_BASE_URL="${DRONE_APP_BASE_URL:-${1:-https://raw.githubusercontent.com/Batocera-Fleet-Federation/batocera.drone/main}}"
 
 if [[ -z "$DRONE_APP_URL" && -z "$DRONE_APP_BASE_URL" ]]; then
@@ -62,7 +63,11 @@ if [[ -n "$DRONE_APP_BASE_URL" ]]; then
   DRONE_APP_JS_URL="${DRONE_APP_JS_URL:-$DRONE_APP_BASE_URL/app/static/js/drone.js}"
   DRONE_APP_CONTENT_URL="${DRONE_APP_CONTENT_URL:-$DRONE_APP_BASE_URL/content}"
 
-  if [[ -z "$DRONE_APP_ARCHIVE_URL" && "$DRONE_APP_BASE_URL" == https://raw.githubusercontent.com/* ]]; then
+  if [[ -z "$DRONE_APP_ARCHIVE_URL" && "$DRONE_APP_BASE_URL" == https://raw.githubusercontent.com/Batocera-Fleet-Federation/batocera.drone/* ]]; then
+    DRONE_APP_ARCHIVE_URL="https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/drone-app.tar.gz"
+  fi
+
+  if [[ -z "$DRONE_APP_FALLBACK_ARCHIVE_URL" && "$DRONE_APP_BASE_URL" == https://raw.githubusercontent.com/* ]]; then
     raw_path="${DRONE_APP_BASE_URL#https://raw.githubusercontent.com/}"
     owner="${raw_path%%/*}"
     raw_path="${raw_path#*/}"
@@ -70,7 +75,7 @@ if [[ -n "$DRONE_APP_BASE_URL" ]]; then
     raw_path="${raw_path#*/}"
     ref="${raw_path%%/*}"
     if [[ -n "$owner" && -n "$repo" && -n "$ref" ]]; then
-      DRONE_APP_ARCHIVE_URL="https://codeload.github.com/$owner/$repo/tar.gz/$ref"
+      DRONE_APP_FALLBACK_ARCHIVE_URL="https://codeload.github.com/$owner/$repo/tar.gz/$ref"
     fi
   fi
 fi
@@ -92,9 +97,10 @@ download_file() {
 }
 
 download_archive_dirs() {
+  local archive_url="$1"
   local archive_path="$WORK_DIR/source.tar.gz"
-  if ! download_file "$DRONE_APP_ARCHIVE_URL" "$archive_path"; then
-    echo "Failed to download archive from $DRONE_APP_ARCHIVE_URL"
+  if ! download_file "$archive_url" "$archive_path"; then
+    echo "Failed to download archive from $archive_url"
     return 1
   fi
   if [ ! -f "$archive_path" ]; then
@@ -102,7 +108,6 @@ download_archive_dirs() {
     return 1
   fi
   python3 - "$archive_path" "$WORK_DIR" <<'PY'
-import shutil
 import sys
 import tarfile
 from pathlib import Path
@@ -113,10 +118,12 @@ wanted_roots = ("app/", "content/")
 
 with tarfile.open(archive_path, "r:gz") as archive:
     for member in archive.getmembers():
-        parts = member.name.split("/", 1)
-        if len(parts) != 2:
-            continue
-        relative = parts[1]
+        relative = member.name.lstrip("/")
+        if not relative.startswith(wanted_roots):
+            parts = relative.split("/", 1)
+            if len(parts) != 2:
+                continue
+            relative = parts[1]
         if not relative.startswith(wanted_roots):
             continue
         relative_path = Path(relative)
@@ -161,8 +168,18 @@ for name in ("app", "content"):
 PY
 }
 
+download_any_archive() {
+  if [[ -n "$DRONE_APP_ARCHIVE_URL" ]] && download_archive_dirs "$DRONE_APP_ARCHIVE_URL"; then
+    return 0
+  fi
+  if [[ -n "$DRONE_APP_FALLBACK_ARCHIVE_URL" ]] && download_archive_dirs "$DRONE_APP_FALLBACK_ARCHIVE_URL"; then
+    return 0
+  fi
+  return 1
+}
+
 if [[ -n "$DRONE_APP_BASE_URL" ]]; then
-  if [[ -n "$DRONE_APP_ARCHIVE_URL" ]] && download_archive_dirs; then
+  if download_any_archive; then
     :
   elif [[ "$DRONE_APP_BASE_URL" == file://* ]]; then
     copy_local_dirs
