@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.37] - 2026-05-30
+
+- Fixing drone heatbeat issue
+
 ## [v0.0.36] - 2026-05-30
 
 - Reworked drone ROM metadata cache into relational SQLite tables with typed row models in rom_metadata_store.py. Added migration script: migrate_rom_metadata_cache.py. Stopped storing gamelist metadata blobs in the DB; ROM rows store gamelist_path + gamelist_game_id, and snapshots rehydrate metadata from gamelist.xml. Added asset cache health/progress into drone system_info, and surfaced it in Overmind’s drone system info UI with green/yellow/red state. Changed Overmind notification digest polling default to 3 minutes. Made ROM hash patch uploads refresh last_seen, so active metadata uploads keep the drone online even if heartbeat requests timeout. Increased heartbeat timeout via OVERMIND_HEARTBEAT_TIMEOUT_SECONDS, defaulting to 20s.
