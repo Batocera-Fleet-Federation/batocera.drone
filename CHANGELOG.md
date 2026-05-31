@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.41] - 2026-05-30
+
+- Fix the drone bruh
+
 ## [v0.0.40] - 2026-05-30
 
 - Bugs bruh
