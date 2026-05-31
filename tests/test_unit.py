@@ -180,11 +180,21 @@ class SettingsTests(unittest.TestCase):
     def test_peer_address_builds_public_endpoint_from_public_ip(self) -> None:
         peer = {
             "public_ip": "198.51.100.21",
-            "reachable_url": "https://192.168.1.21:8443",
+            "public_resolvable": True,
             "scheme": "https",
             "api_port": 8443,
         }
         self.assertEqual(_peer_address(peer), "https://198.51.100.21:8443")
+
+    def test_peer_address_ignores_unverified_public_ip_when_reachable_url_exists(self) -> None:
+        peer = {
+            "public_ip": "198.51.100.21",
+            "public_resolvable": False,
+            "reachable_url": "https://bff-drone-b:8443",
+            "scheme": "https",
+            "api_port": 8443,
+        }
+        self.assertEqual(_peer_address(peer), "https://bff-drone-b:8443")
 
     def test_log_source_collection_sends_only_new_log_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -983,6 +993,17 @@ class SettingsTests(unittest.TestCase):
         self.assertIn('"type": "game_logs"', game_log_source)
         self.assertIn('"type": "log_sources"', reporting_source)
         self.assertIn('"type": "emulator_configs"', reporting_source)
+
+    def test_admin_ui_exposes_drone_self_update_action(self) -> None:
+        api_routes = Path(__file__).resolve().parents[1].joinpath("app/api_routes.py").read_text(encoding="utf-8")
+        js_source = Path(__file__).resolve().parents[1].joinpath("app/static/js/drone.js").read_text(encoding="utf-8")
+        drone_source = Path(__file__).resolve().parents[1].joinpath("app/drone_api.py").read_text(encoding="utf-8")
+
+        self.assertIn('parts[1] == "system" and parts[2] == "update-drone"', api_routes)
+        self.assertIn("async function updateDroneApp()", js_source)
+        self.assertIn('apiPost("/admin/system/update-drone"', js_source)
+        self.assertIn("DRONE_LATEST_ARCHIVE_URL", drone_source)
+        self.assertIn("os._exit(DRONE_SELF_UPDATE_EXIT_CODE)", drone_source)
 
     def test_pending_overmind_approval_keeps_integration_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

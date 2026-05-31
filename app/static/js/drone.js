@@ -1349,8 +1349,30 @@ async function renderAdminMenu() {
           </div>
         </div>
       </div>
+      <div class="col-md-4 mb-3">
+        <div class="card admin-tile h-100">
+          <div class="card-body d-flex flex-column">
+            <h5 class="card-title"><i class="bi bi-cloud-download me-2"></i>Drone Update</h5>
+            <p class="card-text">Download the latest Drone release and restart the app process without rebooting Batocera.</p>
+            <button class="btn btn-primary mt-auto" onclick="updateDroneApp()"><i class="bi bi-arrow-clockwise me-1"></i>Download & Restart</button>
+          </div>
+        </div>
+      </div>
     </div>
   `;
+}
+
+async function updateDroneApp() {
+  if (!window.confirm("Download the latest Drone release and restart the Drone app process? Batocera will keep running.")) return;
+  const toast = showToast('<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Downloading Drone update...', "info", null);
+  try {
+    const payload = await apiPost("/admin/system/update-drone", {});
+    dismissToast(toast);
+    showToast(`Drone update downloaded. Restarting app process... (${Math.round((payload.duration_ms || 0) / 1000)}s)`, "success", 10000);
+  } catch (error) {
+    dismissToast(toast);
+    showToast(`Drone update failed: ${escapeHtml(error.message || "unknown error")}`, "danger", 8000);
+  }
 }
 
 function formatBytes(value) {
