@@ -40,6 +40,7 @@ from app.drone_api import (
     _load_rom_metadata_cache,
     _mark_rom_metadata_upload_clean,
     _persist_rom_metadata_cache,
+    _rom_metadata_cache_status,
     _rom_metadata_cache_path,
     _sync_rom_metadata_to_overmind,
     _sample_speed,
@@ -1692,6 +1693,92 @@ class SettingsTests(unittest.TestCase):
             self.assertTrue(uploads[0]["replace_all"])
             self.assertEqual(len(uploads[0]["roms"]), 1)
 
+    def test_rom_metadata_sync_full_refreshes_clean_cache_without_successful_upload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            system = root / "roms" / "snes"
+            system.mkdir(parents=True)
+            (system / "Game.zip").write_bytes(b"rom")
+            self._write_gamelist(system, "Game.zip")
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "USERDATA_ROOT": str(root),
+                    "ROMS_ROOT": str(root / "roms"),
+                    "BIOS_ROOT": str(root / "bios"),
+                    "OVERMIND_DEVICE_ID": "drone-a",
+                },
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            repo = RomRepository(settings.roms_root, settings.bios_root)
+            _poll_rom_metadata_cache(settings, repo)
+            list(_hash_rom_metadata_batches(settings, repo, batch_size=1))
+            cache_data, _ = _load_rom_metadata_cache(settings)
+            cache_data["dirty"] = False
+            cache_data["last_successful_upload_at"] = None
+            _persist_rom_metadata_cache(settings, cache_data)
+            uploads = []
+
+            def fake_post(url, payload, token=None, settings=None, timeout_seconds=10):
+                uploads.append(payload)
+                return 200, {
+                    "rom_count": len(payload.get("roms") or []),
+                    "bios_count": len(payload.get("bios") or []),
+                    "artwork_count": len(payload.get("artwork") or []),
+                }
+
+            with mock.patch.object(RomRepository, "build_md5", side_effect=AssertionError("clean cache should not rehash")), mock.patch(
+                "app.drone_api._overmind_post_json_with_status", side_effect=fake_post
+            ):
+                result = _sync_rom_metadata_to_overmind(
+                    settings,
+                    repo,
+                    {"overmind_token": "drone-token"},
+                    "https://overmind.local",
+                    "drone-token",
+                )
+
+            self.assertEqual(result["status"], "uploaded")
+            self.assertFalse(result["forced"])
+            self.assertEqual(len(uploads), 1)
+            self.assertEqual(uploads[0]["update_mode"], "inventory")
+            self.assertTrue(uploads[0]["replace_all"])
+            self.assertEqual(len(uploads[0]["roms"]), 1)
+            cache_after, _ = _load_rom_metadata_cache(settings)
+            self.assertTrue(cache_after["last_successful_upload_at"])
+
+    def test_rom_metadata_cache_status_reports_progress_and_pending_upload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            system = root / "roms" / "snes"
+            system.mkdir(parents=True)
+            (system / "Game.zip").write_bytes(b"rom")
+            self._write_gamelist(system, "Game.zip")
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "USERDATA_ROOT": str(root),
+                    "ROMS_ROOT": str(root / "roms"),
+                    "BIOS_ROOT": str(root / "bios"),
+                    "OVERMIND_DEVICE_ID": "drone-a",
+                    "ROM_METADATA_POLL_SECONDS": "300",
+                },
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            _poll_rom_metadata_cache(settings, RomRepository(settings.roms_root, settings.bios_root))
+
+            status = _rom_metadata_cache_status(settings)
+
+            self.assertTrue(status["complete"])
+            self.assertFalse(status["uploaded"])
+            self.assertTrue(status["needs_upload"])
+            self.assertEqual(status["counts"]["roms"], 1)
+            self.assertEqual(status["counts"]["systems"], 1)
+            self.assertGreaterEqual(status["pending_changes"]["total"], 1)
+            self.assertIn("rom_metadata_cache.sqlite3", status["path"])
+
     def test_collect_rom_metadata_prefers_local_database_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
@@ -1770,8 +1857,9 @@ class SettingsTests(unittest.TestCase):
 
             self.assertEqual(result["hash_batches"], 2)
             self.assertEqual(result["hashed_roms"], 2)
-            self.assertEqual([payload["update_mode"] for payload in uploads], ["inventory_delta", "rom_hash_patch", "rom_hash_patch"])
+            self.assertEqual([payload["update_mode"] for payload in uploads], ["inventory", "rom_hash_patch", "rom_hash_patch"])
             self.assertEqual(len(uploads[0]["roms"]), 2)
+            self.assertTrue(uploads[0]["replace_all"])
             self.assertTrue(all("rom_md5" not in row for row in uploads[0]["roms"]))
             self.assertTrue(all(len(payload["roms"]) == 1 and payload["roms"][0].get("rom_md5") for payload in uploads[1:]))
 
@@ -1816,7 +1904,10 @@ class SettingsTests(unittest.TestCase):
                 deleted = _sync_rom_metadata_to_overmind(settings, repo, {}, "https://overmind.local", "drone-token")
 
             inventories = [payload for payload in uploads if payload.get("update_mode") == "inventory_delta"]
-            self.assertEqual([len(payload["roms"]) for payload in inventories], [1, 1, 0])
+            full_refreshes = [payload for payload in uploads if payload.get("update_mode") == "inventory"]
+            self.assertEqual(len(full_refreshes), 1)
+            self.assertTrue(full_refreshes[0]["replace_all"])
+            self.assertEqual([len(payload["roms"]) for payload in inventories], [1, 0])
             self.assertEqual(inventories[-1]["deleted"]["roms"][0]["file_path"], "First Game.zip")
             self.assertEqual(added["stats"]["new_or_changed"], 1)
             self.assertEqual(deleted["stats"]["deleted"], 1)
@@ -1845,6 +1936,10 @@ class SettingsTests(unittest.TestCase):
             ):
                 settings = Settings.from_env()
             repo = RomRepository(settings.roms_root, settings.bios_root)
+            _poll_rom_metadata_cache(settings, repo)
+            cache, _ = _load_rom_metadata_cache(settings)
+            cache["last_successful_upload_at"] = "2026-05-30T00:00:00+00:00"
+            _persist_rom_metadata_cache(settings, cache)
             uploads = []
 
             def failing_post(url, payload, token=None, settings=None, timeout_seconds=10):

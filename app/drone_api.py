@@ -3258,6 +3258,12 @@ OPENAPI_SPEC = {
                 },
             }
         },
+        "/admin/asset-cache": {
+            "get": {
+                "summary": "Get ROM, BIOS, and artwork asset cache progress",
+                "responses": {"200": {"description": "Asset cache status and pending upload counts"}},
+            }
+        },
         "/admin/api/status": {
             "get": {
                 "summary": "API access, Swagger, and mTLS certificate guidance",
@@ -3468,6 +3474,9 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             self._send_json(200, {"target_drone_id": self.settings.overmind_device_id, "downloads": [], "active": [], "queued": [], "recent": []})
             return
         self._send_json(200, manager.snapshot())
+
+    def _handle_admin_asset_cache(self) -> None:
+        self._send_json(200, _rom_metadata_cache_status(self.settings))
 
     def _handle_admin_download_cancel(self, job_id: str) -> None:
         manager = _get_download_manager()
@@ -7606,6 +7615,53 @@ def _mark_rom_metadata_upload_clean(settings: Settings) -> None:
     )
 
 
+def _rom_metadata_cache_status(settings: Settings) -> dict:
+    cache, rebuilt = _load_rom_metadata_cache(settings)
+    changes = _read_pending_rom_metadata_changes(settings)
+    roms = cache.get("entries") if isinstance(cache.get("entries"), dict) else {}
+    bios = cache.get("bios_entries") if isinstance(cache.get("bios_entries"), dict) else {}
+    artwork = cache.get("artwork_entries") if isinstance(cache.get("artwork_entries"), dict) else {}
+    deleted = changes.get("deleted") if isinstance(changes.get("deleted"), dict) else {}
+    pending = {
+        "roms": len(changes.get("roms") if isinstance(changes.get("roms"), list) else []),
+        "bios": len(changes.get("bios") if isinstance(changes.get("bios"), list) else []),
+        "artwork": len(changes.get("artwork") if isinstance(changes.get("artwork"), list) else []),
+        "deleted_roms": len(deleted.get("roms") if isinstance(deleted.get("roms"), list) else []),
+        "deleted_bios": len(deleted.get("bios") if isinstance(deleted.get("bios"), list) else []),
+        "deleted_artwork": len(deleted.get("artwork") if isinstance(deleted.get("artwork"), list) else []),
+    }
+    pending["total"] = sum(pending.values())
+    complete = bool(cache.get("last_full_scan_at")) and not bool(cache.get("scan_in_progress"))
+    uploaded = bool(cache.get("last_successful_upload_at"))
+    cached_assets = len(roms) + len(bios) + len(artwork)
+    return {
+        "path": str(_rom_metadata_cache_path(settings)),
+        "schema_version": cache.get("schema_version"),
+        "rebuilt": rebuilt,
+        "active": _ROM_METADATA_ACTIVE.is_set(),
+        "poller_enabled": settings.rom_metadata_poll_seconds != 0,
+        "poll_seconds": settings.rom_metadata_poll_seconds,
+        "initial_delay_seconds": ROM_METADATA_INITIAL_DELAY_SECONDS,
+        "complete": complete,
+        "uploaded": uploaded,
+        "needs_upload": bool(cached_assets and (cache.get("dirty") or cache.get("full_refresh_pending") or not uploaded or pending["total"])),
+        "dirty": bool(cache.get("dirty")),
+        "full_refresh_pending": bool(cache.get("full_refresh_pending")),
+        "scan_in_progress": bool(cache.get("scan_in_progress")),
+        "last_full_scan_at": cache.get("last_full_scan_at"),
+        "last_successful_upload_at": cache.get("last_successful_upload_at"),
+        "scan_checkpoint_at": cache.get("scan_checkpoint_at"),
+        "counts": {
+            "systems": len(cache.get("systems") if isinstance(cache.get("systems"), list) else []),
+            "roms": len(roms),
+            "bios": len(bios),
+            "artwork": len(artwork),
+            "total": cached_assets,
+        },
+        "pending_changes": pending,
+    }
+
+
 def _begin_rom_metadata_activity(reason: str) -> bool:
     if not _ROM_METADATA_LOCK.acquire(blocking=False):
         print(f"Asset metadata {reason} skipped: metadata work already running", file=sys.stdout, flush=True)
@@ -9697,7 +9753,12 @@ def _sync_rom_metadata_to_overmind_locked(
         return response
 
     pending_changes = _read_pending_rom_metadata_changes(settings)
-    full_refresh = bool(force_upload or stats.get("full_refresh_pending"))
+    has_cached_assets = bool(rom_count or bios_count or artwork_count)
+    full_refresh = bool(
+        force_upload
+        or stats.get("full_refresh_pending")
+        or (has_cached_assets and not stats.get("had_successful_upload"))
+    )
     payloads = _chunk_rom_metadata_inventory(settings, snapshot, replace_all=True) if full_refresh else _chunk_rom_metadata_delta(settings, snapshot, pending_changes)
     should_upload_inventory = bool(payloads)
     if should_upload_inventory:

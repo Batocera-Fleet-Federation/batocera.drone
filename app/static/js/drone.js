@@ -1326,6 +1326,14 @@ async function renderAdminMenu() {
         </div>
       </div>
       <div class="col-md-4 mb-3">
+        <div class="card admin-tile pointer h-100" onclick="setHash('#admin/asset-cache')">
+          <div class="card-body">
+            <h5 class="card-title"><i class="bi bi-database-check me-2"></i>Asset Cache</h5>
+            <p class="card-text">Track ROM, BIOS, artwork cache progress and Overmind upload state.</p>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-4 mb-3">
         <div class="card admin-tile pointer h-100" onclick="setHash('#admin/overmind')">
           <div class="card-body">
             <h5 class="card-title"><i class="bi bi-diagram-3 me-2"></i>Overmind Integration</h5>
@@ -1420,6 +1428,87 @@ async function cancelDroneDownload(jobId) {
   if (!jobId || !window.confirm("Cancel this download?")) return;
   await apiPost(`/admin/downloads/${encodeURIComponent(jobId)}/cancel`, {});
   await renderDownloadsPage();
+}
+async function renderAssetCachePage() {
+  currentSystemContext = null;
+  setSearchMode("hidden");
+  clearSystemTheme();
+  titleNode.textContent = "Asset Cache";
+  subtitleNode.textContent = "ROM, BIOS, artwork cache and Overmind upload state";
+  setLoading(true, "Loading asset cache...");
+  try {
+    const payload = await api("/admin/asset-cache");
+    const counts = payload.counts || {};
+    const pending = payload.pending_changes || {};
+    const boolText = (value) => value ? "yes" : "no";
+    const dateText = (value) => value ? new Date(value).toLocaleString() : "n/a";
+    const row = (label, value) => `<div class="system-info-row"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value === undefined || value === null || value === "" ? "n/a" : value)}</strong></div>`;
+    const pendingTotal = Number(pending.total || 0);
+    const statusClass = payload.active ? "text-bg-primary" : payload.needs_upload ? "text-bg-warning" : payload.uploaded ? "text-bg-success" : "text-bg-secondary";
+    const statusText = payload.active ? "Scanning" : payload.needs_upload ? "Needs Upload" : payload.uploaded ? "Uploaded" : "Waiting";
+    content.innerHTML = `
+      <div class="mb-3 d-flex flex-wrap gap-2">
+        <button class="btn btn-outline-secondary" onclick="setHash('#admin')">Back to Admin</button>
+        <button class="btn btn-outline-primary" onclick="setHash('#admin/asset-cache')">Refresh</button>
+      </div>
+      <div class="card log-card mb-3">
+        <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
+          <span>Cache Status</span>
+          <span class="badge ${statusClass}">${escapeHtml(statusText)}</span>
+        </div>
+        <div class="card-body">
+          <div class="system-info-grid">
+            ${row("Poller", payload.poller_enabled ? `enabled (${payload.poll_seconds}s)` : "disabled")}
+            ${row("Active", boolText(payload.active))}
+            ${row("Complete", boolText(payload.complete))}
+            ${row("Dirty", boolText(payload.dirty))}
+            ${row("Full refresh", boolText(payload.full_refresh_pending))}
+            ${row("Needs upload", boolText(payload.needs_upload))}
+            ${row("Last scan", dateText(payload.last_full_scan_at))}
+            ${row("Last upload", dateText(payload.last_successful_upload_at))}
+            ${row("Checkpoint", dateText(payload.scan_checkpoint_at))}
+            ${row("Cache path", payload.path)}
+          </div>
+        </div>
+      </div>
+      <div class="card log-card mb-3">
+        <div class="card-header">Cached Assets</div>
+        <div class="card-body">
+          <div class="system-info-grid">
+            ${row("Systems", Number(counts.systems || 0).toLocaleString())}
+            ${row("ROMs", Number(counts.roms || 0).toLocaleString())}
+            ${row("BIOS", Number(counts.bios || 0).toLocaleString())}
+            ${row("Artwork", Number(counts.artwork || 0).toLocaleString())}
+            ${row("Total", Number(counts.total || 0).toLocaleString())}
+            ${row("Pending changes", pendingTotal.toLocaleString())}
+          </div>
+        </div>
+      </div>
+      <div class="card log-card">
+        <div class="card-header">Pending Upload Details</div>
+        <div class="card-body">
+          <div class="system-info-grid">
+            ${row("ROM upserts", Number(pending.roms || 0).toLocaleString())}
+            ${row("BIOS upserts", Number(pending.bios || 0).toLocaleString())}
+            ${row("Artwork upserts", Number(pending.artwork || 0).toLocaleString())}
+            ${row("ROM deletes", Number(pending.deleted_roms || 0).toLocaleString())}
+            ${row("BIOS deletes", Number(pending.deleted_bios || 0).toLocaleString())}
+            ${row("Artwork deletes", Number(pending.deleted_artwork || 0).toLocaleString())}
+          </div>
+        </div>
+      </div>
+    `;
+  } catch (err) {
+    showToast(`Failed to load asset cache: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    content.innerHTML = `
+      <div class="mb-3">
+        <button class="btn btn-outline-secondary" onclick="setHash('#admin')">Back to Admin</button>
+      </div>
+      <div class="text-muted">Asset cache status could not be loaded.</div>
+    `;
+  } finally {
+    setLoading(false);
+  }
 }
 function renderArtworkCheckboxDropdown(kind, label, options, selected, allLabel = "Any", enableTools = false) {
   const selectedSet = new Set(selected || []);
@@ -3393,6 +3482,12 @@ async function router() {
         return;
       }
       await renderDownloadsPage();
+    } else if (hash === "#admin/asset-cache") {
+      if (!adminEnabled) {
+        setHash("");
+        return;
+      }
+      await renderAssetCachePage();
     } else if (hash === "#admin/overmind") {
       if (!adminEnabled) {
         setHash("");

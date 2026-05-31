@@ -198,6 +198,10 @@ class ApiRoutesMixin:
                 self._handle_admin_downloads()
                 return
 
+            if len(parts) == 2 and parts[0] == "admin" and parts[1] == "asset-cache":
+                self._handle_admin_asset_cache()
+                return
+
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "api" and parts[2] == "status":
                 self._handle_admin_api_status()
                 return
