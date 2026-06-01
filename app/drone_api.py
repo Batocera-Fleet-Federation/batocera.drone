@@ -5250,10 +5250,16 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         except Exception as e:
             self._send_json(500, {"error": f"Internal error: {str(e)}"})
 
-    def _handle_admin_system_info(self) -> None:
+    def _handle_admin_system_info(self, include_speed: bool = False) -> None:
         router_ip_address = _get_router_ip_address() or "Unavailable"
         runtime_metrics = _collect_performance_metrics(self.settings.userdata_root)
-        speed_sample = _sample_speed()
+        speed_sample = _sample_speed() if include_speed else {
+            "upload_mbps": None,
+            "download_mbps": None,
+            "latency_ms": None,
+            "source": "not_sampled",
+            "sampled_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        }
         if self.settings.use_fake_data:
             fake_router_ip_address = router_ip_address if router_ip_address != "Unavailable" else "192.168.1.1"
             entries = [

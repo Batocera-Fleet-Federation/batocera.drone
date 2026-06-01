@@ -3312,7 +3312,7 @@ async function renderAdminSystemInfoPage() {
   subtitleNode.textContent = "Runtime, network, and Batocera details";
   setLoading(true, "Loading system information...");
   try {
-    const payload = await api("/admin/system-info");
+    const payload = await api("/admin/system-info?speed=1");
     const entries = Array.isArray(payload.entries) ? payload.entries : [];
     const fields = payload.fields || {};
     const metrics = payload.runtime_metrics || {};
@@ -3558,12 +3558,10 @@ async function router() {
       setSearchMode("global");
       setLoading(true, "Loading systems...");
       clearSystemTheme();
-      const [data] = await Promise.all([
-        getSystemsData(),
-        refreshRandomThemeLogo(),
-      ]);
+      const data = await getSystemsData();
       renderSystems(data);
       setLoading(false);
+      refreshRandomThemeLogo().catch(() => {});
     }
   } catch (err) {
     setLoading(false);
@@ -3621,7 +3619,7 @@ async function bootstrap() {
     adminEnabled = !(msg.includes("admin disabled") || msg.includes("request failed: 403"));
   }
   applyAdminVisibility();
-  await loadSystemInfoBar();
+  loadSystemInfoBar();
   // Render immediately so UI/menu works even if theme discovery is slow.
   await router();
   try {

@@ -1032,6 +1032,21 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("Downloaded Drone App failed import validation", run_now)
         self.assertIn('"app.api_routes": "ApiRoutesMixin"', run_now)
 
+    def test_home_page_does_not_block_on_speed_test(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        js_source = root.joinpath("app/static/js/drone.js").read_text(encoding="utf-8")
+        api_routes = root.joinpath("app/api_routes.py").read_text(encoding="utf-8")
+        drone_source = root.joinpath("app/drone_api.py").read_text(encoding="utf-8")
+
+        self.assertIn("loadSystemInfoBar();", js_source)
+        self.assertNotIn("await loadSystemInfoBar();", js_source)
+        self.assertIn("const data = await getSystemsData();", js_source)
+        self.assertNotIn("getSystemsData(),\n        refreshRandomThemeLogo(),", js_source)
+        self.assertIn('api("/admin/system-info?speed=1")', js_source)
+        self.assertIn("include_speed = ", api_routes)
+        self.assertIn("def _handle_admin_system_info(self, include_speed: bool = False)", drone_source)
+        self.assertIn("_sample_speed() if include_speed else", drone_source)
+
     def test_pending_overmind_approval_keeps_integration_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -191,7 +191,8 @@ class ApiRoutesMixin:
                 return
 
             if len(parts) == 2 and parts[0] == "admin" and parts[1] == "system-info":
-                self._handle_admin_system_info()
+                include_speed = str(query_params.get("speed", ["0"])[0]).strip().lower() in ("1", "true", "yes", "on")
+                self._handle_admin_system_info(include_speed=include_speed)
                 return
 
             if len(parts) == 2 and parts[0] == "admin" and parts[1] == "downloads":
