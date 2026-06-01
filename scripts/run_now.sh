@@ -11,6 +11,7 @@ DRONE_APP_JS_URL="${DRONE_APP_JS_URL:-}"
 DRONE_APP_CONTENT_URL="${DRONE_APP_CONTENT_URL:-}"
 DRONE_APP_ARCHIVE_URL="${DRONE_APP_ARCHIVE_URL:-}"
 DRONE_APP_FALLBACK_ARCHIVE_URL="${DRONE_APP_FALLBACK_ARCHIVE_URL:-}"
+DRONE_APP_STAGE_ONLY="${DRONE_APP_STAGE_ONLY:-0}"
 DRONE_APP_BASE_URL="${DRONE_APP_BASE_URL:-${1:-https://raw.githubusercontent.com/Batocera-Fleet-Federation/batocera.drone/main}}"
 
 if [[ -z "$DRONE_APP_URL" && -z "$DRONE_APP_BASE_URL" ]]; then
@@ -110,6 +111,7 @@ download_archive_dirs() {
   python3 - "$archive_path" "$WORK_DIR" <<'PY'
 import sys
 import tarfile
+import shutil
 from pathlib import Path
 
 archive_path = Path(sys.argv[1])
@@ -270,6 +272,11 @@ then
 fi
 
 echo "Downloaded Drone App to $WORK_DIR"
+
+if [[ "$DRONE_APP_STAGE_ONLY" == "1" || "$DRONE_APP_STAGE_ONLY" == "true" || "$DRONE_APP_STAGE_ONLY" == "yes" ]]; then
+  echo "Drone App staged successfully; launch skipped because DRONE_APP_STAGE_ONLY=${DRONE_APP_STAGE_ONLY}."
+  exit 0
+fi
 
 HTTPS_PORT="${HTTPS_PORT:-8443}"
 

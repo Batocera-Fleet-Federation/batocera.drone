@@ -316,6 +316,40 @@ SERVICEBLOCK
   chmod +x "$SERVICE_FILE"
 
   echo "✓ Created service: $SERVICE_FILE"
+
+  echo ""
+  echo "Downloading latest Drone app bundle..."
+  RUNNER="/tmp/drone-run-now-install.$$"
+  if curl -fsSL --connect-timeout 10 --max-time 120 -o "$RUNNER" https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/run_now.sh; then
+    chmod 755 "$RUNNER" 2>/dev/null || true
+    APP_WAS_RUNNING=false
+    if [ -f /tmp/drone-server.pid ]; then
+      EXISTING_PID="$(cat /tmp/drone-server.pid 2>/dev/null || true)"
+      if [ -n "$EXISTING_PID" ] && kill -0 "$EXISTING_PID" 2>/dev/null; then
+        APP_WAS_RUNNING=true
+      fi
+    fi
+    if lsof -i:8443 >/dev/null 2>&1; then
+      APP_WAS_RUNNING=true
+    fi
+    "$SERVICE_FILE" stop >/dev/null 2>&1 || true
+    DRONE_APP_STAGE_ONLY=1 \
+      DRONE_APP_WORK_DIR="$WORK_DIR" \
+      DRONE_APP_ARCHIVE_URL="${DRONE_APP_ARCHIVE_URL:-https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/drone-app.tar.gz}" \
+      bash "$RUNNER"
+    rm -f "$RUNNER"
+    chown -R root:"$DRONE_GROUP" "$WORK_DIR" 2>/dev/null || true
+    chmod -R 775 "$WORK_DIR" 2>/dev/null || true
+    echo "✓ Updated Drone app bundle in $WORK_DIR"
+    if [ "$APP_WAS_RUNNING" = true ]; then
+      echo "Restarting Drone service with updated app bundle..."
+      "$SERVICE_FILE" start
+    fi
+  else
+    rm -f "$RUNNER"
+    echo "Could not download latest Drone app bundle now; service will download it on next startup if the local app is invalid."
+  fi
+
   echo "Start now with:"
   echo "  $SERVICE_FILE start"
 

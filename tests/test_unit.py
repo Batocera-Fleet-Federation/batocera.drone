@@ -1028,9 +1028,14 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("missing or empty ${required_file}", installer)
         self.assertIn("Local Drone app import check failed; downloading a fresh app bundle.", installer)
         self.assertIn('"app.ui_routes": "UiRoutesMixin"', installer)
+        self.assertIn("DRONE_APP_STAGE_ONLY=1", installer)
+        self.assertIn("✓ Updated Drone app bundle", installer)
+        self.assertIn("Restarting Drone service with updated app bundle", installer)
         self.assertIn("Missing or empty required file", run_now)
         self.assertIn("Downloaded Drone App failed import validation", run_now)
         self.assertIn('"app.api_routes": "ApiRoutesMixin"', run_now)
+        self.assertIn("import shutil", run_now)
+        self.assertIn("Drone App staged successfully", run_now)
 
     def test_home_page_does_not_block_on_speed_test(self) -> None:
         root = Path(__file__).resolve().parents[1]
