@@ -33,6 +33,7 @@ from urllib.parse import urlparse
 
 DRONE_LATEST_ARCHIVE_URL = "https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/drone-app.tar.gz"
 DRONE_SELF_UPDATE_EXIT_CODE = 75
+DRONE_REMOTE_REBOOT_EXIT_CODE = 76
 
 try:
     from .api_routes import ApiRoutesMixin
@@ -65,6 +66,7 @@ try:
         ROM_METADATA_CACHE_VERSION,
         _empty_rom_metadata_cache,
         _clear_pending_rom_metadata_changes,
+        _clear_sqlite_asset_metadata_cache,
         _load_rom_metadata_cache,
         _persist_rom_metadata_cache,
         _read_pending_rom_metadata_changes,
@@ -121,6 +123,7 @@ except ImportError:
         ROM_METADATA_CACHE_VERSION,
         _empty_rom_metadata_cache,
         _clear_pending_rom_metadata_changes,
+        _clear_sqlite_asset_metadata_cache,
         _load_rom_metadata_cache,
         _persist_rom_metadata_cache,
         _read_pending_rom_metadata_changes,
@@ -1531,39 +1534,25 @@ def _parse_es_theme_name(es_settings_path: Path) -> Optional[str]:
 
 
 def _set_kiosk_mode(settings: Settings, enabled: bool) -> Path:
-    path = _resolve_es_settings_file(settings) or settings.es_settings_file
-    text = path.read_text(encoding="utf-8", errors="ignore") if path.exists() else ""
-    wrapped = False
-    try:
-        root = ET.fromstring(text) if text.strip() else ET.Element("settings")
-        if root.tag in {"bool", "int", "string"}:
-            root = ET.fromstring(f"<settings>{text}</settings>")
-            wrapped = True
-    except ET.ParseError:
-        root = ET.fromstring(f"<settings>{text}</settings>")
-        wrapped = True
-
-    parent_by_child = {child: parent for parent in root.iter() for child in parent}
-    ui_mode_nodes = [
-        node for node in root.iter("string")
-        if str(node.attrib.get("name") or "").lower() == "uimode"
-    ]
-    if enabled:
-        if ui_mode_nodes:
-            ui_mode_nodes[0].set("value", "Kiosk")
-            for extra in ui_mode_nodes[1:]:
-                parent_by_child.get(extra, root).remove(extra)
-        else:
-            ET.SubElement(root, "string", {"name": "UIMode", "value": "Kiosk"})
-    else:
-        for node in ui_mode_nodes:
-            parent_by_child.get(node, root).remove(node)
-
-    if wrapped or not text.strip():
-        updated = "\n".join(ET.tostring(node, encoding="unicode") for node in list(root))
-        updated = f"{updated}\n" if updated else ""
-    else:
-        updated = ET.tostring(root, encoding="unicode") + "\n"
+    path = settings.batocera_conf_file
+    key = "kiosk.enabled"
+    value = "1" if enabled else "0"
+    lines = path.read_text(encoding="utf-8", errors="ignore").splitlines() if path.exists() else []
+    updated_lines = []
+    replaced = False
+    pattern = re.compile(rf"^(\s*{re.escape(key)}\s*=\s*).*$")
+    for line in lines:
+        if pattern.match(line):
+            if not replaced:
+                updated_lines.append(f"{key}={value}")
+                replaced = True
+            continue
+        updated_lines.append(line)
+    if not replaced:
+        if updated_lines and updated_lines[-1].strip():
+            updated_lines.append("")
+        updated_lines.append(f"{key}={value}")
+    updated = "\n".join(updated_lines) + "\n"
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     temp_path.write_text(updated, encoding="utf-8")
@@ -1571,11 +1560,21 @@ def _set_kiosk_mode(settings: Settings, enabled: bool) -> Path:
     return path
 
 
-def _restart_emulationstation() -> bool:
+def _emulationstation_restart_command() -> Optional[List[str]]:
+    init_script = Path("/etc/init.d/S31emulationstation")
+    if init_script.exists():
+        return [str(init_script), "restart"]
     restart_tool = shutil.which("batocera-es-swissknife")
-    if not restart_tool:
+    if restart_tool:
+        return [restart_tool, "--restart"]
+    return None
+
+
+def _restart_emulationstation() -> bool:
+    command = _emulationstation_restart_command()
+    if not command:
         return False
-    subprocess.Popen([restart_tool, "--restart"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return True
 
 
@@ -9334,14 +9333,16 @@ def _execute_overmind_action(
         return "completed", f"Collected {_summarize_overmind_result(result)}.", result
 
     if action_name == "rebuild_asset_metadata":
-        cache, _ = _load_rom_metadata_cache(settings)
+        _clear_sqlite_asset_metadata_cache(settings)
+        cache = _empty_rom_metadata_cache()
         cache["dirty"] = True
         cache["full_refresh_pending"] = True
+        cache["rebuild_requested_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         _persist_rom_metadata_cache(settings, cache)
-        return "completed", "Queued asset metadata rebuild; the metadata poller will upload it without blocking heartbeat.", {
+        return "completed", "Queued full asset metadata rebuild; local asset cache was cleared and the metadata poller will upload a fresh snapshot.", {
             "type": "asset_metadata_rebuild",
             "status": "queued",
-            "reason": "queued_for_metadata_poller",
+            "reason": "local_asset_cache_cleared",
         }
 
     if action_name == "collect_game_logs":
@@ -9622,13 +9623,11 @@ def _execute_overmind_action(
     if action_name == "restart":
         if settings.use_fake_data:
             return "completed", "Simulated restart action because USE_FAKE_DATA is enabled.", None
-        if shutil.which("reboot"):
-            subprocess.Popen(["reboot"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            return "completed", "Reboot command issued.", None
-        if shutil.which("shutdown"):
-            subprocess.Popen(["shutdown", "-r", "now"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            return "completed", "Restart command issued.", None
-        return "failed", "reboot/shutdown command was not found", None
+        return "completed", "Host reboot requested; Drone service supervisor will reboot after action completion is reported.", {
+            "type": "system_restart",
+            "reboot_requested": True,
+            "exit_code": DRONE_REMOTE_REBOOT_EXIT_CODE,
+        }
 
     if action_name == "refresh_emulator_list":
         if settings.use_fake_data:
@@ -9638,7 +9637,7 @@ def _execute_overmind_action(
                 "simulated": True,
             }
         if not _restart_emulationstation():
-            return "failed", "Unable to refresh emulator list: batocera-es-swissknife was not found.", {
+            return "failed", "Unable to refresh emulator list: EmulationStation restart command was not found.", {
                 "type": "emulator_list_refresh",
                 "emulationstation_restarted": False,
             }
@@ -9887,6 +9886,11 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                 print(f"Processing {len(actions)} Overmind action(s) for {settings.overmind_device_id}", file=sys.stdout, flush=True)
                 for action in actions:
                     status_value, message, result = _execute_overmind_action(settings, repository, action, config, base_url, token)
+                    reboot_requested = (
+                        str(action.get("action") or "").strip().lower() == "restart"
+                        and status_value == "completed"
+                        and not settings.use_fake_data
+                    )
                     _record_processed_overmind_action(settings, action, status_value, message, result)
                     print(
                         f"Processed Overmind action {action.get('action')} ({action.get('id')}): {status_value} - {message}",
@@ -9907,6 +9911,13 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                                 file=sys.stderr,
                                 flush=True,
                             )
+                    if reboot_requested:
+                        print(
+                            f"Remote restart action acknowledged; exiting with code {DRONE_REMOTE_REBOOT_EXIT_CODE} for service supervisor reboot.",
+                            file=sys.stdout,
+                            flush=True,
+                        )
+                        os._exit(DRONE_REMOTE_REBOOT_EXIT_CODE)
             except (HTTPError, URLError) as error:
                 print(f"Overmind action poll failed: {_format_overmind_error(error)}", file=sys.stderr, flush=True)
             except (TimeoutError, OSError, ValueError, json.JSONDecodeError) as error:

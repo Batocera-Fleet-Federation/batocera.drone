@@ -760,6 +760,34 @@ def _clear_pending_rom_metadata_changes(settings: Any) -> None:
         connection.execute("DELETE FROM deleted_artwork_cache_entries")
 
 
+def _clear_sqlite_asset_metadata_cache(settings: Any) -> None:
+    """Clear Drone asset metadata while preserving unrelated app state in the shared DB."""
+    tables = (
+        "rom_cache_entries",
+        "bios_cache_entries",
+        "artwork_cache_entries",
+        "deleted_rom_cache_entries",
+        "deleted_bios_cache_entries",
+        "deleted_artwork_cache_entries",
+        "cache_changes",
+        "asset_systems",
+        "asset_gamelists",
+    )
+    with _open_rom_metadata_cache(settings) as connection:
+        for table in tables:
+            connection.execute(f"DELETE FROM {table}")
+        connection.execute("DELETE FROM cache_state WHERE key <> 'schema_version'")
+        connection.execute(
+            "INSERT INTO cache_state (key, value) VALUES ('schema_version', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (json.dumps(ROM_METADATA_CACHE_VERSION),),
+        )
+    try:
+        _legacy_rom_metadata_cache_path(settings).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def _update_rom_metadata_cache_state(settings: Any, **values: Any) -> None:
     """Update compact scan/upload state without reading all cached asset rows."""
     if not values:

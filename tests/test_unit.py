@@ -38,6 +38,7 @@ from app.drone_api import (
     _normalize_overmind_link_state,
     _collect_rom_metadata,
     _hash_rom_metadata_batches,
+    _empty_rom_metadata_cache,
     _poll_rom_metadata_cache,
     _poll_rom_metadata_once,
     _load_rom_metadata_cache,
@@ -859,24 +860,24 @@ class SettingsTests(unittest.TestCase):
     def test_kiosk_actions_update_es_settings_and_restart_emulationstation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            es_settings = root / "system" / "configs" / "emulationstation" / "es_settings.cfg"
-            es_settings.parent.mkdir(parents=True)
-            es_settings.write_text('<string name="ThemeSet" value="carbon" />\n', encoding="utf-8")
+            batocera_conf = root / "system" / "batocera.conf"
+            batocera_conf.parent.mkdir(parents=True)
+            batocera_conf.write_text("global.retroachievements=1\nkiosk.enabled=0\n", encoding="utf-8")
             with mock.patch.dict(
                 "os.environ",
-                {"USERDATA_ROOT": str(root), "ES_SETTINGS_FILE": str(es_settings)},
+                {"USERDATA_ROOT": str(root), "BATOCERA_CONF_FILE": str(batocera_conf)},
                 clear=True,
             ):
                 settings = Settings.from_env()
             repo = RomRepository(root / "roms", root / "bios")
 
-            with mock.patch("app.drone_api.shutil.which", return_value="/usr/bin/batocera-es-swissknife"), mock.patch(
+            with mock.patch("app.drone_api._emulationstation_restart_command", return_value=["/etc/init.d/S31emulationstation", "restart"]), mock.patch(
                 "app.drone_api.subprocess.Popen"
             ) as popen:
                 enabled_status, enabled_message, enabled_result = _execute_overmind_action(
                     settings, repo, {"action": "enable_kiosk"}
                 )
-                self.assertIn('name="UIMode" value="Kiosk"', es_settings.read_text(encoding="utf-8"))
+                self.assertIn("kiosk.enabled=1", batocera_conf.read_text(encoding="utf-8"))
                 disabled_status, disabled_message, disabled_result = _execute_overmind_action(
                     settings, repo, {"action": "disable_kiosk"}
                 )
@@ -887,10 +888,11 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(disabled_status, "completed")
             self.assertIn("Kiosk mode disabled", disabled_message)
             self.assertFalse(disabled_result["enabled"])
-            self.assertNotIn('name="UIMode"', es_settings.read_text(encoding="utf-8"))
+            self.assertIn("global.retroachievements=1", batocera_conf.read_text(encoding="utf-8"))
+            self.assertIn("kiosk.enabled=0", batocera_conf.read_text(encoding="utf-8"))
             self.assertEqual(popen.call_count, 2)
             popen.assert_any_call(
-                ["/usr/bin/batocera-es-swissknife", "--restart"],
+                ["/etc/init.d/S31emulationstation", "restart"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
@@ -901,7 +903,7 @@ class SettingsTests(unittest.TestCase):
             with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
                 settings = Settings.from_env()
             repo = RomRepository(root / "roms", root / "bios")
-            with mock.patch("app.drone_api.shutil.which", return_value="/usr/bin/batocera-es-swissknife"), mock.patch(
+            with mock.patch("app.drone_api._emulationstation_restart_command", return_value=["/etc/init.d/S31emulationstation", "restart"]), mock.patch(
                 "app.drone_api.subprocess.Popen"
             ) as popen:
                 status, message, result = _execute_overmind_action(settings, repo, {"action": "refresh_emulator_list"})
@@ -911,10 +913,26 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(result["type"], "emulator_list_refresh")
             self.assertTrue(result["emulationstation_restarted"])
             popen.assert_called_once_with(
-                ["/usr/bin/batocera-es-swissknife", "--restart"],
+                ["/etc/init.d/S31emulationstation", "restart"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
+
+    def test_remote_restart_action_is_deferred_to_root_supervisor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
+                settings = Settings.from_env()
+            repo = RomRepository(root / "roms", root / "bios")
+            with mock.patch("app.drone_api.subprocess.Popen") as popen:
+                status, message, result = _execute_overmind_action(settings, repo, {"action": "restart"})
+
+            self.assertEqual(status, "completed")
+            self.assertIn("service supervisor", message)
+            self.assertEqual(result["type"], "system_restart")
+            self.assertTrue(result["reboot_requested"])
+            self.assertEqual(result["exit_code"], 76)
+            popen.assert_not_called()
 
     def test_rebuild_asset_metadata_action_queues_without_blocking_heartbeat(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -926,6 +944,33 @@ class SettingsTests(unittest.TestCase):
             ):
                 settings = Settings.from_env()
             repo = RomRepository(settings.roms_root, settings.bios_root)
+            _persist_rom_metadata_cache(
+                settings,
+                {
+                    **_empty_rom_metadata_cache(),
+                    "entries": {
+                        "snes/chrono.zip": {
+                            "system": "snes",
+                            "file_path": "chrono.zip",
+                            "rom_name": "Chrono",
+                            "file_size": 12,
+                        }
+                    },
+                    "systems": [{"name": "snes", "rom_count": 1}],
+                    "dirty": False,
+                    "full_refresh_pending": False,
+                },
+                rom_updates={
+                    "snes/chrono.zip": {
+                        "system": "snes",
+                        "file_path": "chrono.zip",
+                        "rom_name": "Chrono",
+                        "file_size": 12,
+                    }
+                },
+            )
+            state_db = database_path(settings.userdata_root)
+            save_payload(state_db, "overmind", {"overmind_token": "keep-me"})
 
             with mock.patch("app.drone_api._sync_rom_metadata_to_overmind", side_effect=AssertionError("heartbeat thread must not rebuild inline")):
                 status, message, result = _execute_overmind_action(
@@ -938,11 +983,15 @@ class SettingsTests(unittest.TestCase):
                 )
 
             cache, _ = _load_rom_metadata_cache(settings)
+            self.assertEqual(load_payload(state_db, "overmind", {}), {"overmind_token": "keep-me"})
             self.assertEqual(status, "completed")
-            self.assertIn("Queued asset metadata rebuild", message)
+            self.assertIn("local asset cache was cleared", message)
             self.assertEqual(result["status"], "queued")
+            self.assertEqual(result["reason"], "local_asset_cache_cleared")
             self.assertTrue(cache["dirty"])
             self.assertTrue(cache["full_refresh_pending"])
+            self.assertEqual(cache["entries"], {})
+            self.assertEqual(cache["systems"], [])
 
     def test_reclaim_overmind_token_after_heartbeat_unauthorized_uses_bound_auth_token(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1037,6 +1086,10 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("DRONE_APP_STAGE_ONLY=1", installer)
         self.assertIn("✓ Updated Drone app bundle", installer)
         self.assertIn("Restarting Drone service with updated app bundle", installer)
+        self.assertIn("DRONE_REMOTE_REBOOT_EXIT_CODE", installer)
+        self.assertIn("request_host_reboot()", installer)
+        self.assertIn('chown root:"$DRONE_GROUP" /userdata/system/batocera.conf', installer)
+        self.assertIn("chmod 664 /userdata/system/batocera.conf", installer)
         self.assertIn("Missing or empty required file", run_now)
         self.assertIn("Downloaded Drone App failed import validation", run_now)
         self.assertIn('"app.api_routes": "ApiRoutesMixin"', run_now)

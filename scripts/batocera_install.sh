@@ -131,8 +131,8 @@ ensure_permissions() {
     fi
   done
 
-  chown root:root /userdata/batocera.conf 2>/dev/null || true
-  chmod 644 /userdata/batocera.conf 2>/dev/null || true
+  chown root:"$DRONE_GROUP" /userdata/system/batocera.conf 2>/dev/null || true
+  chmod 664 /userdata/system/batocera.conf 2>/dev/null || true
 
   echo "[drone-service] ✓ Permissions applied"
 }
@@ -238,9 +238,31 @@ launch_drone() {
   return "$exit_code"
 }
 
+request_host_reboot() {
+  echo "[drone-service] Remote reboot requested by Drone app."
+  if [ -x /sbin/reboot ]; then
+    /sbin/reboot
+    return
+  fi
+  if [ -x /usr/sbin/reboot ]; then
+    /usr/sbin/reboot
+    return
+  fi
+  if command -v reboot >/dev/null 2>&1; then
+    reboot
+    return
+  fi
+  if command -v shutdown >/dev/null 2>&1; then
+    shutdown -r now
+    return
+  fi
+  echo "[drone-service] Unable to reboot: reboot/shutdown command was not found."
+}
+
 supervise_drone() {
   restart_delay="${DRONE_RESTART_DELAY_SECONDS:-10}"
   restart_enabled="${DRONE_SERVICE_RESTART:-1}"
+  remote_reboot_exit_code="${DRONE_REMOTE_REBOOT_EXIT_CODE:-76}"
 
   while true; do
     launch_started="$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date)"
@@ -252,6 +274,11 @@ supervise_drone() {
 
     if [ "$exit_code" -eq 0 ]; then
       exit 0
+    fi
+
+    if [ "$exit_code" -eq "$remote_reboot_exit_code" ]; then
+      request_host_reboot
+      exit "$exit_code"
     fi
 
     if [ "$restart_enabled" != "1" ]; then
