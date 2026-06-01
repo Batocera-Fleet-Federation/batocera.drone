@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.44] - 2026-05-31
+
+- Fixing batocera install script.
+
 ## [v0.0.43] - 2026-05-31
 
 - Introduced regression on last build.  Fixing issue. TODO: Need regression tests.
