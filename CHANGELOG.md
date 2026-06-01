@@ -1,5 +1,10 @@
 # Changelog
 
+## [v0.0.42] - 2026-05-31
+
+- Updating bug with overmind appvoals
+- Bugz
+
 ## [v0.0.41] - 2026-05-30
 
 - Fix the drone bruh
