@@ -1025,8 +1025,10 @@ class SettingsTests(unittest.TestCase):
         run_now = root.joinpath("scripts/run_now.sh").read_text(encoding="utf-8")
 
         self.assertIn("validate_local_app()", installer)
+        self.assertIn("missing or empty ${required_file}", installer)
         self.assertIn("Local Drone app import check failed; downloading a fresh app bundle.", installer)
         self.assertIn('"app.ui_routes": "UiRoutesMixin"', installer)
+        self.assertIn("Missing or empty required file", run_now)
         self.assertIn("Downloaded Drone App failed import validation", run_now)
         self.assertIn('"app.api_routes": "ApiRoutesMixin"', run_now)
 

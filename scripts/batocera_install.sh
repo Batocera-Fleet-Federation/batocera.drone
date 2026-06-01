@@ -184,6 +184,18 @@ wait_for_network() {
 }
 
 validate_local_app() {
+  for required_file in \
+    "$WORK_DIR/app/main.py" \
+    "$WORK_DIR/app/drone_api.py" \
+    "$WORK_DIR/app/api_routes.py" \
+    "$WORK_DIR/app/ui_routes.py" \
+    "$WORK_DIR/app/route_config.py"; do
+    if [ ! -s "$required_file" ]; then
+      echo "[drone-service] Local Drone app validation failed: missing or empty ${required_file}"
+      return 1
+    fi
+  done
+
   PYTHONPATH="$WORK_DIR" python3 - <<'PY'
 import importlib
 

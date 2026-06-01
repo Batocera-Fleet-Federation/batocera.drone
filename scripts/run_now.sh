@@ -237,6 +237,18 @@ if [[ ! -f "$APP_PATH" || ! -d "$STATIC_DIR" || ! -d "$CONTENT_DIR" ]]; then
   exit 1
 fi
 
+for required_file in \
+  "$MAIN_PATH" \
+  "$APP_PATH" \
+  "$API_ROUTES_PATH" \
+  "$UI_ROUTES_PATH" \
+  "$ROUTE_CONFIG_PATH"; do
+  if [[ ! -s "$required_file" ]]; then
+    echo "Downloaded Drone App is incomplete. Missing or empty required file: $required_file"
+    exit 1
+  fi
+done
+
 if ! PYTHONPATH="$WORK_DIR" python3 - <<'PY'
 import importlib
 
