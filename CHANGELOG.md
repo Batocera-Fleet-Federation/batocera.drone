@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.49] - 2026-06-01
+
+- Remote Restart now reports completion to Overmind, then exits Drone with code 76; the root service wrapper catches that and runs reboot.drone_api.py (line 9623) batocera_install.sh (line 241)
+
 ## [v0.0.48] - 2026-05-31
 
 - Updating code to intellgently upload emulator configs and logs.
