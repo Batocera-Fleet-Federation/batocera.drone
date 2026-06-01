@@ -268,7 +268,7 @@ def _iter_selected_config_files(settings: Any):
 
 
 def collect_emulator_configs(settings: Any, include_unchanged: bool = False) -> dict:
-    """Build changed emulator config payloads and deferred fingerprints."""
+    """Build changed emulator config payloads and deferred md5 fingerprints."""
     previous_fingerprints = load_uploaded_emulator_config_fingerprints(settings)
     next_fingerprints = {}
     configs = []
@@ -277,9 +277,13 @@ def collect_emulator_configs(settings: Any, include_unchanged: bool = False) -> 
         item["relative_path"] = relative_path
         item["root"] = str(root)
         key = f"{item['root']}:{item['relative_path']}"
-        fingerprint = hashlib.sha256(str(item.get("content") or "").encode("utf-8", errors="replace")).hexdigest()
+        try:
+            fingerprint = hashlib.md5(path.read_bytes()).hexdigest()
+        except Exception:
+            fingerprint = hashlib.md5(str(item.get("content") or "").encode("utf-8", errors="replace")).hexdigest()
         changed = include_unchanged or previous_fingerprints.get(key) != fingerprint
         if changed and len(configs) < 250:
+            item["md5"] = fingerprint
             item["fingerprint"] = fingerprint
             configs.append(item)
             next_fingerprints[key] = fingerprint
@@ -290,9 +294,7 @@ def collect_emulator_configs(settings: Any, include_unchanged: bool = False) -> 
             next_fingerprints[key] = fingerprint
     return {
         "type": "emulator_configs",
-        "collected_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
         "configs": configs,
-        "changed": bool(configs),
         "incremental": not include_unchanged,
         "_fingerprints": next_fingerprints,
     }

@@ -7,9 +7,93 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+try:
+    from .state_store import database_path, load_payload, save_payload
+except ImportError:
+    from state_store import database_path, load_payload, save_payload  # type: ignore
+
 
 LogCollector = Callable[[Any], dict]
 ErrorFormatter = Callable[[BaseException], str]
+_STATE_SCHEMA_VERSION = 1
+
+
+def _state_path(settings: Any, filename: str) -> Path:
+    return (settings.userdata_root / "system" / "drone-app" / filename).resolve()
+
+
+def load_game_log_cursors(settings: Any) -> dict:
+    state = load_payload(
+        database_path(settings.userdata_root),
+        "overmind_game_log_cursors.json",
+        {},
+        legacy_path=_state_path(settings, "overmind_game_log_cursors.json"),
+    )
+    if not isinstance(state, dict) or state.get("schema_version") != _STATE_SCHEMA_VERSION:
+        return {}
+    cursors = state.get("cursors")
+    return cursors if isinstance(cursors, dict) else {}
+
+
+def commit_game_log_cursors(settings: Any, cursors: dict) -> None:
+    save_payload(
+        database_path(settings.userdata_root),
+        "overmind_game_log_cursors.json",
+        {"schema_version": _STATE_SCHEMA_VERSION, "cursors": dict(cursors or {})},
+    )
+
+
+def _resolve_userdata_path(settings: Any, candidate: str) -> Path:
+    if candidate == "/userdata":
+        return settings.userdata_root.resolve()
+    if candidate.startswith("/userdata/"):
+        return (settings.userdata_root / candidate[len("/userdata/") :]).resolve()
+    return Path(candidate).resolve()
+
+
+def _read_launch_log_delta(settings: Any, max_bytes: int = 262144) -> dict:
+    path = _resolve_userdata_path(settings, "/userdata/system/logs/es_launch_stdout.log")
+    collected_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    cursor = load_game_log_cursors(settings)
+    next_cursor = dict(cursor)
+    if not path.exists() or not path.is_file():
+        return {"type": "log_sources", "collected_at": collected_at, "logs": [], "_cursors": next_cursor}
+    try:
+        stat = path.stat()
+        key = str(path.resolve())
+        previous = cursor.get(key) if isinstance(cursor.get(key), dict) else {}
+        previous_size = int(previous.get("size") or 0)
+        previous_mtime_ns = int(previous.get("mtime_ns") or 0)
+        size = int(stat.st_size)
+        mtime_ns = int(stat.st_mtime_ns)
+        if size > previous_size >= 0:
+            start = previous_size
+        elif size == previous_size and mtime_ns == previous_mtime_ns:
+            start = size
+        else:
+            start = 0
+        if size - start > max_bytes:
+            start = size - max_bytes
+        with path.open("rb") as handle:
+            handle.seek(start)
+            raw = handle.read(max_bytes)
+        next_cursor[key] = {"size": start + len(raw), "mtime_ns": mtime_ns}
+        content = raw.decode("utf-8", errors="replace")
+        if not content:
+            return {"type": "log_sources", "collected_at": collected_at, "logs": [], "_cursors": next_cursor}
+        return {
+            "type": "log_sources",
+            "collected_at": collected_at,
+            "logs": [{"source": "es_launch_stdout", "files": [{"path": str(path), "content": content, "offset": start}]}],
+            "_cursors": next_cursor,
+        }
+    except Exception as error:
+        return {
+            "type": "log_sources",
+            "collected_at": collected_at,
+            "logs": [{"source": "es_launch_stdout", "files": [{"path": str(path), "error": str(error)}]}],
+            "_cursors": next_cursor,
+        }
 
 
 def _parse_launch_timestamp(line: str, fallback: str) -> str:
@@ -75,9 +159,7 @@ def collect_game_logs(
 ) -> dict:
     """Build game sessions from EmulationStation launch output."""
     if not log_data:
-        if collect_log_sources is None:
-            raise ValueError("collect_log_sources is required when log_data is not provided")
-        log_data = collect_log_sources(settings)
+        log_data = _read_launch_log_delta(settings)
     formatter = format_error or (lambda error: str(error))
     sessions = []
     collected_at = log_data["collected_at"]
@@ -117,4 +199,5 @@ def collect_game_logs(
         "collected_at": collected_at,
         "sessions": sessions,
         "logs": log_data.get("logs", []),
+        "_cursors": log_data.get("_cursors", {}),
     }

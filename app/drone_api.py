@@ -51,6 +51,7 @@ try:
         filesystem_events as _build_filesystem_events,
         filesystem_snapshot as _filesystem_snapshot,
     )
+    from .overmind_game_logs import commit_game_log_cursors as _commit_game_log_cursors
     from .overmind_game_logs import collect_game_logs as _build_game_log_payload
     from .overmind_reporting import (
         collect_emulator_configs as _collect_emulator_configs,
@@ -106,6 +107,7 @@ except ImportError:
         filesystem_events as _build_filesystem_events,
         filesystem_snapshot as _filesystem_snapshot,
     )
+    from overmind_game_logs import commit_game_log_cursors as _commit_game_log_cursors  # type: ignore
     from overmind_game_logs import collect_game_logs as _build_game_log_payload  # type: ignore
     from overmind_reporting import (  # type: ignore
         collect_emulator_configs as _collect_emulator_configs,
@@ -176,7 +178,7 @@ OVERMIND_SPEED_SAMPLE_SECONDS = int(os.environ.get("OVERMIND_SPEED_SAMPLE_SECOND
 SPEED_TEST_DEFAULT_BASE_URL = "https://speed.cloudflare.com"
 OVERMIND_HEARTBEAT_SECONDS = int(os.environ.get("OVERMIND_POLL_SECONDS", "30"))
 OVERMIND_HEARTBEAT_TIMEOUT_SECONDS = max(10, int(os.environ.get("OVERMIND_HEARTBEAT_TIMEOUT_SECONDS", "20")))
-OVERMIND_CONFIG_REPORT_SECONDS = int(os.environ.get("OVERMIND_CONFIG_REPORT_SECONDS", "900"))
+OVERMIND_CONFIG_REPORT_SECONDS = int(os.environ.get("OVERMIND_CONFIG_REPORT_SECONDS", "300"))
 ROM_METADATA_POLL_SECONDS = int(os.environ.get("ROM_METADATA_POLL_SECONDS", "300"))
 ROM_METADATA_INITIAL_DELAY_SECONDS = int(os.environ.get("ROM_METADATA_INITIAL_DELAY_SECONDS", "60"))
 ROM_METADATA_PROGRESS_SECONDS = float(os.environ.get("ROM_METADATA_PROGRESS_SECONDS", "30"))
@@ -5787,7 +5789,11 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 "/userdata/system/configs/all/retroarch.cfg",
                 "/userdata/system/.emulationstation/es_settings.cfg",
             ],
-            "mame": ["/userdata/system/configs/mame/mame.ini"],
+            "mame": [
+                "/userdata/system/configs/mame/mame.ini",
+                "/userdata/system/configs/mame/default.cfg",
+                "/userdata/system/configs/mame",
+            ],
             "dolphin": ["/userdata/system/configs/dolphin-emu/Dolphin.ini"],
             "psx2": [
                 "/userdata/system/configs/PCSX2/inis/PCSX2_ui.ini",
@@ -9340,6 +9346,8 @@ def _execute_overmind_action(
 
     if action_name == "collect_game_logs":
         result = _collect_game_logs(settings, repository)
+        result.pop("_cursors", None)
+        result.pop("logs", None)
         return "completed", f"Collected {_summarize_overmind_result(result)}.", result
 
     if action_name == "collect_emulator_configs":
@@ -9348,9 +9356,11 @@ def _execute_overmind_action(
         return "completed", f"Collected {_summarize_overmind_result(result)}.", result
 
     if action_name == "collect_log_sources":
-        result = _collect_log_sources(settings)
-        result.pop("_cursors", None)
-        return "completed", f"Collected {_summarize_overmind_result(result)}.", result
+        return "skipped", "Raw log streaming is only active while the Overmind logs UI is open.", {
+            "type": "log_sources",
+            "logs": [],
+            "streaming_required": True,
+        }
 
     if action_name == "sync_bios":
         config = _load_overmind_config_for_settings(settings)
@@ -9813,39 +9823,40 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                         _overmind_post_json(f"{base_url}/api/devices/{device_id}/events", event, token=token, settings=settings)
                     fs_snapshot = next_fs_snapshot
 
-                if isinstance(response.get("log_sources_initialized"), bool):
-                    require_log_snapshot = not response["log_sources_initialized"]
-                else:
-                    response_device = response.get("device") if isinstance(response.get("device"), dict) else {}
-                    stored_logs = response_device.get("log_sources") if isinstance(response_device.get("log_sources"), dict) else {}
-                    require_log_snapshot = not bool(stored_logs.get("logs"))
-                log_sources = _collect_log_sources(settings, include_unchanged=require_log_snapshot)
-                log_cursors = log_sources.pop("_cursors", {})
-                game_logs = _collect_game_logs(settings, repository, log_data=log_sources)
+                game_logs = _collect_game_logs(settings, repository)
+                game_log_cursors = game_logs.pop("_cursors", {})
                 if game_logs.get("sessions"):
                     game_logs.pop("logs", None)
+                    game_logs.pop("collected_at", None)
                     _overmind_post_json(f"{base_url}/api/devices/{device_id}/game-logs", game_logs, token=token, settings=settings)
+                    _commit_game_log_cursors(settings, game_log_cursors)
                     print(
                         f"Sent {len(game_logs.get('sessions') or [])} game log session(s) to Overmind",
                         file=sys.stdout,
                         flush=True,
                     )
-                if log_sources.get("logs"):
-                    try:
-                        _overmind_post_json(f"{base_url}/api/devices/{device_id}/log-sources", log_sources, token=token, settings=settings)
-                    except (HTTPError, URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError) as error:
-                        print(
-                            f"Log source upload failed; heartbeat/action poll will continue: {_format_overmind_error(error)}",
-                            file=sys.stderr,
-                            flush=True,
-                        )
-                    else:
-                        _commit_log_cursors(settings, log_cursors)
-                        print(
-                            f"Sent {len(log_sources.get('logs') or [])} changed log source(s) to Overmind",
-                            file=sys.stdout,
-                            flush=True,
-                        )
+                elif game_log_cursors:
+                    _commit_game_log_cursors(settings, game_log_cursors)
+
+                if bool(response.get("log_stream_requested")):
+                    log_sources = _collect_log_sources(settings)
+                    log_cursors = log_sources.pop("_cursors", {})
+                    if log_sources.get("logs"):
+                        try:
+                            _overmind_post_json(f"{base_url}/api/devices/{device_id}/log-sources", log_sources, token=token, settings=settings)
+                        except (HTTPError, URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError) as error:
+                            print(
+                                f"Log stream upload failed; heartbeat/action poll will continue: {_format_overmind_error(error)}",
+                                file=sys.stderr,
+                                flush=True,
+                            )
+                        else:
+                            _commit_log_cursors(settings, log_cursors)
+                            print(
+                                f"Streamed {len(log_sources.get('logs') or [])} log source(s) to Overmind",
+                                file=sys.stdout,
+                                flush=True,
+                            )
 
                 if (
                     config_report_seconds > 0

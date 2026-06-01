@@ -309,10 +309,10 @@ class SettingsTests(unittest.TestCase):
             _commit_emulator_config_fingerprints(settings, first["_fingerprints"])
             second = _collect_emulator_configs(settings)
             self.assertEqual(second["configs"], [])
-            self.assertFalse(second["changed"])
             requested_snapshot = _collect_emulator_configs(settings, include_unchanged=True)
             self.assertEqual([row["relative_path"] for row in requested_snapshot["configs"]], ["retroarch/retroarch.cfg"])
             self.assertFalse(requested_snapshot["incremental"])
+            self.assertEqual(requested_snapshot["configs"][0]["md5"], hashlib.md5(b"video_driver = gl").hexdigest())
 
             legacy_state = root / "system" / "drone-app" / "overmind_config_fingerprints.json"
             legacy_state.write_text(
@@ -1008,6 +1008,12 @@ class SettingsTests(unittest.TestCase):
         self.assertIn('apiPost("/admin/system/update-drone"', js_source)
         self.assertIn("DRONE_LATEST_ARCHIVE_URL", drone_source)
         self.assertIn("os._exit(DRONE_SELF_UPDATE_EXIT_CODE)", drone_source)
+
+    def test_mame_config_source_accepts_batocera_cfg_directory(self) -> None:
+        drone_source = Path(__file__).resolve().parents[1].joinpath("app/drone_api.py").read_text(encoding="utf-8")
+
+        self.assertIn('"/userdata/system/configs/mame/default.cfg"', drone_source)
+        self.assertIn('"/userdata/system/configs/mame"', drone_source)
 
     def test_route_mixins_export_for_package_startup(self) -> None:
         api_routes = importlib.import_module("app.api_routes")
