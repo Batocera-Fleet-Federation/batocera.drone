@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.46] - 2026-05-31
+
+- Making update to more easily upgrade drone remotely.
+
 ## [v0.0.45] - 2026-05-31
 
 - Fixing UI latency issue where it was waiting on download/upload to finish before loading ui.
