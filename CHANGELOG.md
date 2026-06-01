@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.45] - 2026-05-31
+
+- Fixing UI latency issue where it was waiting on download/upload to finish before loading ui.
+
 ## [v0.0.44] - 2026-05-31
 
 - Fixing batocera install script.
