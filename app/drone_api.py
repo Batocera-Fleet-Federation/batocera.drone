@@ -3696,6 +3696,8 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         path.unlink(missing_ok=True)
 
     def _overmind_public_payload(self, config: dict) -> dict:
+        config = dict(config)
+        _normalize_overmind_link_state(config)
         password = str(config.get("overmind_password") or "")
         auth_token = str(config.get("overmind_auth_token") or "")
         token = str(config.get("overmind_token") or "")
@@ -5422,6 +5424,8 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
 
     def _handle_admin_overmind_status(self) -> None:
         config = self._load_overmind_config()
+        if _normalize_overmind_link_state(config):
+            self._save_overmind_config(config)
         self._send_json(200, self._overmind_public_payload(config))
 
     def _handle_admin_credentials_update(self, payload: dict) -> None:
@@ -6600,6 +6604,35 @@ def _strip_fake_overmind_values(config: dict) -> None:
     if config.get("integration_enabled") and not (config.get("overmind_token") or config.get("overmind_auth_token")):
         config["integration_enabled"] = False
         config["integration_state"] = "not_started"
+
+
+def _normalize_overmind_link_state(config: dict) -> bool:
+    """Reconcile stale onboarding status once an approved Drone token exists."""
+    token = str(config.get("overmind_token") or "").strip()
+    enabled = bool(config.get("integration_enabled"))
+    if not token or not enabled:
+        return False
+
+    state = str(config.get("integration_state") or "not_started")
+    if state in {"pending_failed", "not_started", "disconnected", "disconnect_failed"}:
+        return False
+
+    changed = False
+    if state in {"configured", "approval_requested", "pending_approval"}:
+        config["integration_state"] = "polling"
+        changed = True
+
+    swarm_status = str(config.get("swarm_connection_status") or "")
+    if swarm_status != "connected":
+        config["swarm_connection_status"] = "connected"
+        changed = True
+
+    notes = str(config.get("notes") or "")
+    if "Awaiting Overlord approval" in notes:
+        config["notes"] = "Drone approved by Overmind and polling is active."
+        changed = True
+
+    return changed
 
 
 def _mark_overmind_auth_failed(settings: Settings, config: dict, error: BaseException) -> None:

@@ -33,6 +33,7 @@ from app.drone_api import (
     _format_overmind_error,
     _launchbox_platform_for_system,
     _load_overmind_config_for_settings,
+    _normalize_overmind_link_state,
     _collect_rom_metadata,
     _hash_rom_metadata_batches,
     _poll_rom_metadata_cache,
@@ -1035,6 +1036,22 @@ class SettingsTests(unittest.TestCase):
             self.assertTrue(saved.get("integration_enabled"))
             self.assertEqual(saved.get("integration_state"), "pending_approval")
             self.assertEqual(saved.get("overmind_auth_token"), "onboarding-token")
+
+    def test_approved_overmind_token_clears_stale_pending_swarm_status(self) -> None:
+        config = {
+            "overmind_token": "approved-drone-token",
+            "integration_enabled": True,
+            "integration_state": "pending_approval",
+            "swarm_connection_status": "pending approval",
+            "notes": "Psionic connection detected. Awaiting Overlord approval.",
+        }
+
+        changed = _normalize_overmind_link_state(config)
+
+        self.assertTrue(changed)
+        self.assertEqual(config.get("integration_state"), "polling")
+        self.assertEqual(config.get("swarm_connection_status"), "connected")
+        self.assertEqual(config.get("notes"), "Drone approved by Overmind and polling is active.")
 
     def test_rejected_overmind_authorization_token_clears_connected_swarm_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
