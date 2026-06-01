@@ -87,6 +87,8 @@ try:
     )
     from .ui_routes import UiRoutesMixin
 except ImportError:
+    if __package__ not in (None, ""):
+        raise
     from api_routes import ApiRoutesMixin  # type: ignore
     from network_identity import (  # type: ignore
         drone_network_payload as _build_drone_network_payload,

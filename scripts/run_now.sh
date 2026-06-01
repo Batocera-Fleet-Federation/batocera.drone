@@ -237,6 +237,26 @@ if [[ ! -f "$APP_PATH" || ! -d "$STATIC_DIR" || ! -d "$CONTENT_DIR" ]]; then
   exit 1
 fi
 
+if ! PYTHONPATH="$WORK_DIR" python3 - <<'PY'
+import importlib
+
+required = {
+    "app.api_routes": "ApiRoutesMixin",
+    "app.ui_routes": "UiRoutesMixin",
+}
+
+for module_name, symbol in required.items():
+    module = importlib.import_module(module_name)
+    if not hasattr(module, symbol):
+        raise ImportError(f"{module_name} does not export {symbol}")
+
+importlib.import_module("app.drone_api")
+PY
+then
+  echo "Downloaded Drone App failed import validation. Refusing to launch incomplete app bundle."
+  exit 1
+fi
+
 echo "Downloaded Drone App to $WORK_DIR"
 
 HTTPS_PORT="${HTTPS_PORT:-8443}"

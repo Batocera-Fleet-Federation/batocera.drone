@@ -1,8 +1,10 @@
 import base64
 import hashlib
+import importlib
 import io
 import json
 import socket
+import sqlite3
 import subprocess
 import tempfile
 import unittest
@@ -43,6 +45,7 @@ from app.drone_api import (
     _persist_rom_metadata_cache,
     _rom_metadata_cache_status,
     _rom_metadata_cache_path,
+    _read_pending_rom_metadata_changes,
     _sync_rom_metadata_to_overmind,
     _sample_speed,
     _real_data_roots,
@@ -1006,6 +1009,27 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("DRONE_LATEST_ARCHIVE_URL", drone_source)
         self.assertIn("os._exit(DRONE_SELF_UPDATE_EXIT_CODE)", drone_source)
 
+    def test_route_mixins_export_for_package_startup(self) -> None:
+        api_routes = importlib.import_module("app.api_routes")
+        ui_routes = importlib.import_module("app.ui_routes")
+        drone_api = importlib.import_module("app.drone_api")
+
+        self.assertTrue(hasattr(api_routes, "ApiRoutesMixin"))
+        self.assertTrue(hasattr(ui_routes, "UiRoutesMixin"))
+        self.assertIs(drone_api.ApiRoutesMixin, api_routes.ApiRoutesMixin)
+        self.assertIs(drone_api.UiRoutesMixin, ui_routes.UiRoutesMixin)
+
+    def test_startup_scripts_validate_local_app_before_launch(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        installer = root.joinpath("scripts/batocera_install.sh").read_text(encoding="utf-8")
+        run_now = root.joinpath("scripts/run_now.sh").read_text(encoding="utf-8")
+
+        self.assertIn("validate_local_app()", installer)
+        self.assertIn("Local Drone app import check failed; downloading a fresh app bundle.", installer)
+        self.assertIn('"app.ui_routes": "UiRoutesMixin"', installer)
+        self.assertIn("Downloaded Drone App failed import validation", run_now)
+        self.assertIn('"app.api_routes": "ApiRoutesMixin"', run_now)
+
     def test_pending_overmind_approval_keeps_integration_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1383,6 +1407,92 @@ class SettingsTests(unittest.TestCase):
             self.assertTrue(_rom_metadata_cache_path(settings).exists())
             self.assertEqual(cache["entries"]["snes:Game.zip"]["rom_md5"], "abc")
             self.assertEqual(reloaded["entries"]["snes:Game.zip"]["file_path"], "Game.zip")
+
+    def test_metadata_change_queue_uses_relational_rows_not_payload_blobs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
+                settings = Settings.from_env()
+            cache = {
+                "schema_version": 4,
+                "dirty": True,
+                "entries": {
+                    "snes:Game.zip": {
+                        "system": "snes",
+                        "file_path": "Game.zip",
+                        "rom_md5": "abc",
+                        "file_size": 3,
+                        "modified_time": 10,
+                        "gamelist_path": "/userdata/roms/snes/gamelist.xml",
+                        "gamelist_game_id": "game-1",
+                    },
+                },
+                "bios_entries": {},
+                "artwork_entries": {},
+            }
+
+            _persist_rom_metadata_cache(settings, cache, rom_updates=cache["entries"])
+            _persist_rom_metadata_cache(
+                settings,
+                {**cache, "entries": {}},
+                rom_deletes=["snes:Game.zip"],
+                rom_deleted_rows=cache["entries"],
+            )
+            changes = _read_pending_rom_metadata_changes(settings)
+
+            with sqlite3.connect(_rom_metadata_cache_path(settings)) as connection:
+                columns = {row[1] for row in connection.execute("PRAGMA table_info(cache_changes)")}
+                tombstone = connection.execute(
+                    "SELECT md5, gamelist_path, gamelist_game_id FROM deleted_rom_cache_entries WHERE entry_key = ?",
+                    ("snes:Game.zip",),
+                ).fetchone()
+
+            self.assertNotIn("payload", columns)
+            self.assertEqual(tombstone, ("abc", "/userdata/roms/snes/gamelist.xml", "game-1"))
+            self.assertEqual(changes["deleted"]["roms"][0]["rom_md5"], "abc")
+            self.assertNotIn("gamelist", changes["deleted"]["roms"][0])
+
+    def test_legacy_payload_change_queue_migrates_to_relational_tombstones(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
+                settings = Settings.from_env()
+            db_path = _rom_metadata_cache_path(settings)
+            db_path.parent.mkdir(parents=True)
+            with sqlite3.connect(db_path) as connection:
+                connection.execute(
+                    "CREATE TABLE cache_changes (asset_type TEXT NOT NULL, entry_key TEXT NOT NULL, operation TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY (asset_type, entry_key))"
+                )
+                connection.execute(
+                    "INSERT INTO cache_changes (asset_type, entry_key, operation, payload) VALUES (?, ?, ?, ?)",
+                    (
+                        "rom",
+                        "snes:Removed.zip",
+                        "delete",
+                        json.dumps({
+                            "system": "snes",
+                            "file_path": "Removed.zip",
+                            "rom_md5": "kept-md5",
+                            "gamelist_path": "/userdata/roms/snes/gamelist.xml",
+                            "gamelist_game_id": "removed-game",
+                            "gamelist": {"name": "Should not persist"},
+                        }),
+                    ),
+                )
+
+            changes = _read_pending_rom_metadata_changes(settings)
+
+            with sqlite3.connect(db_path) as connection:
+                columns = {row[1] for row in connection.execute("PRAGMA table_info(cache_changes)")}
+                legacy_table = connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'cache_changes_payload_legacy'"
+                ).fetchone()
+
+            self.assertNotIn("payload", columns)
+            self.assertIsNone(legacy_table)
+            self.assertEqual(changes["deleted"]["roms"][0]["rom_md5"], "kept-md5")
+            self.assertEqual(changes["deleted"]["roms"][0]["gamelist_game_id"], "removed-game")
+            self.assertNotIn("gamelist", changes["deleted"]["roms"][0])
 
     def test_metadata_initialization_preserves_other_shared_database_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

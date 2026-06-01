@@ -18,7 +18,7 @@ except ImportError:
     from state_store import open_database as _open_state_database  # type: ignore
 
 
-ROM_METADATA_CACHE_VERSION = 3
+ROM_METADATA_CACHE_VERSION = 4
 _ROW_EXTRA_KEYS = {
     "system",
     "system_name",
@@ -96,7 +96,7 @@ class RomCacheRow:
             gamelist_game_id=gamelist_game_id,
             is_downloadable=bool(payload.get("is_downloadable", True)),
             image_stem=str(payload.get("image_stem") or Path(file_path).stem),
-            extra={key: value for key, value in payload.items() if key not in _ROW_EXTRA_KEYS},
+            extra={},
         )
 
     def to_payload(self) -> dict:
@@ -158,7 +158,7 @@ class BiosCacheRow:
             file_size=_int(payload.get("file_size") or payload.get("byte_count") or payload.get("size")),
             modified_time=_int(payload.get("modified_time") or payload.get("mtime")),
             md5=_clean_optional(payload.get("bios_md5") or payload.get("md5")),
-            extra={key: value for key, value in payload.items() if key not in _ROW_EXTRA_KEYS},
+            extra={},
         )
 
     def to_payload(self) -> dict:
@@ -180,6 +180,64 @@ class BiosCacheRow:
         if self.md5:
             payload["md5"] = self.md5
             payload["bios_md5"] = self.md5
+        return payload
+
+
+@dataclass(frozen=True)
+class ArtworkCacheRow:
+    entry_key: str
+    system: str
+    rom_path: str
+    artwork_types: Tuple[str, ...]
+    title: str
+    file_path: str
+    relative_path: str
+    file_size: int
+    modified_time: int
+    md5: Optional[str]
+    extra: dict
+
+    @classmethod
+    def from_payload(cls, entry_key: str, payload: dict) -> "ArtworkCacheRow":
+        artwork_types = payload.get("artwork_types")
+        if not isinstance(artwork_types, list):
+            single_type = str(payload.get("artwork_type") or payload.get("type") or "").strip()
+            artwork_types = [single_type] if single_type else []
+        return cls(
+            entry_key=entry_key,
+            system=str(payload.get("system") or payload.get("system_name") or ""),
+            rom_path=_normalize_path(payload.get("rom_path") or payload.get("file_path")),
+            artwork_types=tuple(str(value) for value in artwork_types if str(value or "").strip()),
+            title=str(payload.get("title") or payload.get("name") or ""),
+            file_path=_normalize_path(payload.get("file_path")),
+            relative_path=_normalize_path(payload.get("relative_path")),
+            file_size=_int(payload.get("file_size") or payload.get("byte_count") or payload.get("size")),
+            modified_time=_int(payload.get("modified_time") or payload.get("mtime")),
+            md5=_clean_optional(payload.get("md5")),
+            extra={},
+        )
+
+    def to_payload(self) -> dict:
+        payload = {
+            **self.extra,
+            "asset_type": "artwork",
+            "system": self.system,
+            "system_name": self.system,
+            "rom_path": self.rom_path,
+            "file_path": self.file_path,
+            "relative_path": self.relative_path,
+            "title": self.title,
+            "artwork_types": list(self.artwork_types),
+            "metadata_source": "gamelist.xml",
+            "file_size": self.file_size,
+            "byte_count": self.file_size,
+            "modified_time": self.modified_time,
+            "mtime": self.modified_time,
+        }
+        if self.artwork_types:
+            payload["artwork_type"] = self.artwork_types[0]
+        if self.md5:
+            payload["md5"] = self.md5
         return payload
 
 
@@ -272,22 +330,51 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
     )
     connection.execute(
         "CREATE TABLE IF NOT EXISTS artwork_cache_entries ("
-        "entry_key TEXT PRIMARY KEY, system TEXT NOT NULL, rom_path TEXT NOT NULL, artwork_type TEXT, title TEXT, "
+        "entry_key TEXT PRIMARY KEY, system TEXT NOT NULL, rom_path TEXT NOT NULL, artwork_type TEXT, artwork_types TEXT NOT NULL DEFAULT '[]', title TEXT, "
         "file_path TEXT, relative_path TEXT, file_size INTEGER, modified_time INTEGER, md5 TEXT, extra_json TEXT NOT NULL DEFAULT '{}')"
     )
+    _ensure_column(connection, "artwork_cache_entries", "artwork_types", "TEXT NOT NULL DEFAULT '[]'")
+    for create_sql in {
+        "deleted_rom_cache_entries": (
+            "CREATE TABLE IF NOT EXISTS deleted_rom_cache_entries ("
+            "entry_key TEXT PRIMARY KEY, system TEXT NOT NULL, file_path TEXT NOT NULL, rom_name TEXT NOT NULL, "
+            "unique_id TEXT, absolute_path TEXT, file_size INTEGER NOT NULL DEFAULT 0, modified_time INTEGER NOT NULL DEFAULT 0, "
+            "entry_type TEXT NOT NULL DEFAULT 'file', md5 TEXT, gamelist_path TEXT, gamelist_game_id TEXT, "
+            "is_downloadable INTEGER NOT NULL DEFAULT 1, image_stem TEXT, extra_json TEXT NOT NULL DEFAULT '{}')"
+        ),
+        "deleted_bios_cache_entries": (
+            "CREATE TABLE IF NOT EXISTS deleted_bios_cache_entries ("
+            "entry_key TEXT PRIMARY KEY, file_path TEXT NOT NULL UNIQUE, name TEXT NOT NULL, unique_id TEXT, absolute_path TEXT, "
+            "file_size INTEGER NOT NULL DEFAULT 0, modified_time INTEGER NOT NULL DEFAULT 0, md5 TEXT, "
+            "extra_json TEXT NOT NULL DEFAULT '{}')"
+        ),
+        "deleted_artwork_cache_entries": (
+            "CREATE TABLE IF NOT EXISTS deleted_artwork_cache_entries ("
+            "entry_key TEXT PRIMARY KEY, system TEXT NOT NULL, rom_path TEXT NOT NULL, artwork_type TEXT, artwork_types TEXT NOT NULL DEFAULT '[]', title TEXT, "
+            "file_path TEXT, relative_path TEXT, file_size INTEGER, modified_time INTEGER, md5 TEXT, extra_json TEXT NOT NULL DEFAULT '{}')"
+        ),
+    }.values():
+        connection.execute(create_sql)
     connection.execute(
         "CREATE TABLE IF NOT EXISTS cache_changes ("
-        "asset_type TEXT NOT NULL, entry_key TEXT NOT NULL, operation TEXT NOT NULL, payload TEXT NOT NULL, "
+        "asset_type TEXT NOT NULL, entry_key TEXT NOT NULL, operation TEXT NOT NULL, "
         "PRIMARY KEY (asset_type, entry_key))"
     )
     connection.execute("CREATE INDEX IF NOT EXISTS idx_rom_cache_system ON rom_cache_entries(system)")
     connection.execute("CREATE INDEX IF NOT EXISTS idx_artwork_cache_system ON artwork_cache_entries(system)")
     _migrate_blob_tables_if_needed(connection)
+    _migrate_payload_change_queue_if_needed(connection)
     connection.execute(
         "INSERT INTO cache_state (key, value) VALUES ('schema_version', ?) "
         "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         (json.dumps(ROM_METADATA_CACHE_VERSION),),
     )
+
+
+def _ensure_column(connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+    if column not in columns:
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
 def _migrate_blob_tables_if_needed(connection: sqlite3.Connection) -> None:
@@ -312,6 +399,41 @@ def _migrate_blob_tables_if_needed(connection: sqlite3.Connection) -> None:
         elif asset_type == "artwork":
             _upsert_artwork_row(connection, str(entry_key), data)
     connection.execute("DROP TABLE cache_entries")
+
+
+def _migrate_payload_change_queue_if_needed(connection: sqlite3.Connection) -> None:
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(cache_changes)")}
+    if "payload" not in columns:
+        return
+
+    legacy_rows = connection.execute(
+        "SELECT asset_type, entry_key, operation, payload FROM cache_changes"
+    ).fetchall()
+    connection.execute("ALTER TABLE cache_changes RENAME TO cache_changes_payload_legacy")
+    connection.execute(
+        "CREATE TABLE cache_changes ("
+        "asset_type TEXT NOT NULL, entry_key TEXT NOT NULL, operation TEXT NOT NULL, "
+        "PRIMARY KEY (asset_type, entry_key))"
+    )
+    for asset_type, entry_key, operation, payload in legacy_rows:
+        asset_type = str(asset_type or "")
+        entry_key = str(entry_key or "")
+        operation = str(operation or "")
+        if not asset_type or not entry_key or operation not in {"upsert", "delete"}:
+            continue
+        if operation == "delete":
+            try:
+                data = json.loads(payload)
+            except Exception:
+                data = {}
+            if isinstance(data, dict):
+                _upsert_deleted_row(connection, asset_type, entry_key, data)
+        connection.execute(
+            "INSERT INTO cache_changes (asset_type, entry_key, operation) VALUES (?, ?, ?) "
+            "ON CONFLICT(asset_type, entry_key) DO UPDATE SET operation=excluded.operation",
+            (asset_type, entry_key, operation),
+        )
+    connection.execute("DROP TABLE cache_changes_payload_legacy")
 
 
 def _persist_rom_metadata_cache(
@@ -406,19 +528,17 @@ def _persist_rows(
     for key, value in updates.items():
         if not isinstance(value, dict):
             continue
-        queued_payload = value
         if asset_type == "rom":
             row = RomCacheRow.from_payload(str(key), value)
             _upsert_rom_row(connection, row)
-            queued_payload = row.to_payload()
         elif asset_type == "bios":
             row = BiosCacheRow.from_payload(str(key), value)
             _upsert_bios_row(connection, row)
-            queued_payload = row.to_payload()
         elif asset_type == "artwork":
             _upsert_artwork_row(connection, str(key), value)
+        _delete_deleted_row(connection, asset_type, str(key))
         if queue_changes:
-            _queue_change(connection, asset_type, str(key), "upsert", queued_payload)
+            _queue_change(connection, asset_type, str(key), "upsert")
     for key in deletes:
         key_text = str(key)
         table = {
@@ -426,9 +546,13 @@ def _persist_rows(
             "bios": "bios_cache_entries",
             "artwork": "artwork_cache_entries",
         }[asset_type]
+        deleted_payload = deleted_rows.get(key_text)
+        if not isinstance(deleted_payload, dict):
+            deleted_payload = _read_live_row_payload(connection, asset_type, key_text) or {"entry_key": key_text}
+        _upsert_deleted_row(connection, asset_type, key_text, deleted_payload)
         connection.execute(f"DELETE FROM {table} WHERE entry_key = ?", (key_text,))
         if queue_changes:
-            _queue_change(connection, asset_type, key_text, "delete", deleted_rows.get(key_text) or {"entry_key": key_text})
+            _queue_change(connection, asset_type, key_text, "delete")
 
 
 def _upsert_rom_row(connection: sqlite3.Connection, row: RomCacheRow) -> None:
@@ -483,34 +607,120 @@ def _upsert_bios_row(connection: sqlite3.Connection, row: BiosCacheRow) -> None:
 
 
 def _upsert_artwork_row(connection: sqlite3.Connection, entry_key: str, payload: dict) -> None:
-    extra = {key: value for key, value in payload.items() if key not in _ROW_EXTRA_KEYS and key not in {"artwork_type"}}
+    row = ArtworkCacheRow.from_payload(entry_key, payload)
     connection.execute(
-        "INSERT INTO artwork_cache_entries (entry_key, system, rom_path, artwork_type, title, file_path, relative_path, file_size, modified_time, md5, extra_json) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "INSERT INTO artwork_cache_entries (entry_key, system, rom_path, artwork_type, artwork_types, title, file_path, relative_path, file_size, modified_time, md5, extra_json) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(entry_key) DO UPDATE SET system=excluded.system, rom_path=excluded.rom_path, artwork_type=excluded.artwork_type, "
-        "title=excluded.title, file_path=excluded.file_path, relative_path=excluded.relative_path, file_size=excluded.file_size, "
-        "modified_time=excluded.modified_time, md5=excluded.md5, extra_json=excluded.extra_json",
+        "artwork_types=excluded.artwork_types, title=excluded.title, file_path=excluded.file_path, relative_path=excluded.relative_path, "
+        "file_size=excluded.file_size, modified_time=excluded.modified_time, md5=excluded.md5, extra_json=excluded.extra_json",
         (
             entry_key,
-            str(payload.get("system") or payload.get("system_name") or ""),
-            _normalize_path(payload.get("rom_path") or payload.get("file_path")),
-            str(payload.get("artwork_type") or payload.get("type") or ""),
-            str(payload.get("title") or payload.get("name") or ""),
-            _normalize_path(payload.get("file_path")),
-            _normalize_path(payload.get("relative_path")),
-            _int(payload.get("file_size") or payload.get("byte_count") or payload.get("size")),
-            _int(payload.get("modified_time") or payload.get("mtime")),
-            _clean_optional(payload.get("md5")),
-            json.dumps(extra, sort_keys=True, default=str),
+            row.system,
+            row.rom_path,
+            row.artwork_types[0] if row.artwork_types else "",
+            json.dumps(list(row.artwork_types), sort_keys=True),
+            row.title,
+            row.file_path,
+            row.relative_path,
+            row.file_size,
+            row.modified_time,
+            row.md5,
+            json.dumps(row.extra, sort_keys=True, default=str),
         ),
     )
 
 
-def _queue_change(connection: sqlite3.Connection, asset_type: str, key: str, operation: str, payload: dict) -> None:
+def _upsert_deleted_row(connection: sqlite3.Connection, asset_type: str, entry_key: str, payload: dict) -> None:
+    if asset_type == "rom":
+        row = RomCacheRow.from_payload(entry_key, payload)
+        connection.execute(
+            "INSERT INTO deleted_rom_cache_entries (entry_key, system, file_path, rom_name, unique_id, absolute_path, file_size, "
+            "modified_time, entry_type, md5, gamelist_path, gamelist_game_id, is_downloadable, image_stem, extra_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(entry_key) DO UPDATE SET system=excluded.system, file_path=excluded.file_path, rom_name=excluded.rom_name, "
+            "unique_id=excluded.unique_id, absolute_path=excluded.absolute_path, file_size=excluded.file_size, "
+            "modified_time=excluded.modified_time, entry_type=excluded.entry_type, md5=excluded.md5, "
+            "gamelist_path=excluded.gamelist_path, gamelist_game_id=excluded.gamelist_game_id, "
+            "is_downloadable=excluded.is_downloadable, image_stem=excluded.image_stem, extra_json=excluded.extra_json",
+            (
+                row.entry_key,
+                row.system,
+                row.file_path,
+                row.rom_name,
+                row.unique_id,
+                row.absolute_path,
+                row.file_size,
+                row.modified_time,
+                row.entry_type,
+                row.md5,
+                row.gamelist_path,
+                row.gamelist_game_id,
+                1 if row.is_downloadable else 0,
+                row.image_stem,
+                json.dumps(row.extra, sort_keys=True, default=str),
+            ),
+        )
+    elif asset_type == "bios":
+        row = BiosCacheRow.from_payload(entry_key, payload)
+        connection.execute(
+            "INSERT INTO deleted_bios_cache_entries (entry_key, file_path, name, unique_id, absolute_path, file_size, modified_time, md5, extra_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(entry_key) DO UPDATE SET file_path=excluded.file_path, name=excluded.name, unique_id=excluded.unique_id, "
+            "absolute_path=excluded.absolute_path, file_size=excluded.file_size, modified_time=excluded.modified_time, "
+            "md5=excluded.md5, extra_json=excluded.extra_json",
+            (
+                row.entry_key,
+                row.file_path,
+                row.name,
+                row.unique_id,
+                row.absolute_path,
+                row.file_size,
+                row.modified_time,
+                row.md5,
+                json.dumps(row.extra, sort_keys=True, default=str),
+            ),
+        )
+    elif asset_type == "artwork":
+        row = ArtworkCacheRow.from_payload(entry_key, payload)
+        connection.execute(
+            "INSERT INTO deleted_artwork_cache_entries (entry_key, system, rom_path, artwork_type, artwork_types, title, file_path, relative_path, file_size, modified_time, md5, extra_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(entry_key) DO UPDATE SET system=excluded.system, rom_path=excluded.rom_path, artwork_type=excluded.artwork_type, "
+            "artwork_types=excluded.artwork_types, title=excluded.title, file_path=excluded.file_path, relative_path=excluded.relative_path, "
+            "file_size=excluded.file_size, modified_time=excluded.modified_time, md5=excluded.md5, extra_json=excluded.extra_json",
+            (
+                row.entry_key,
+                row.system,
+                row.rom_path,
+                row.artwork_types[0] if row.artwork_types else "",
+                json.dumps(list(row.artwork_types), sort_keys=True),
+                row.title,
+                row.file_path,
+                row.relative_path,
+                row.file_size,
+                row.modified_time,
+                row.md5,
+                json.dumps(row.extra, sort_keys=True, default=str),
+            ),
+        )
+
+
+def _delete_deleted_row(connection: sqlite3.Connection, asset_type: str, entry_key: str) -> None:
+    table = {
+        "rom": "deleted_rom_cache_entries",
+        "bios": "deleted_bios_cache_entries",
+        "artwork": "deleted_artwork_cache_entries",
+    }.get(asset_type)
+    if table:
+        connection.execute(f"DELETE FROM {table} WHERE entry_key = ?", (entry_key,))
+
+
+def _queue_change(connection: sqlite3.Connection, asset_type: str, key: str, operation: str) -> None:
     connection.execute(
-        "INSERT INTO cache_changes (asset_type, entry_key, operation, payload) VALUES (?, ?, ?, ?) "
-        "ON CONFLICT(asset_type, entry_key) DO UPDATE SET operation=excluded.operation, payload=excluded.payload",
-        (asset_type, key, operation, json.dumps(payload, sort_keys=True, default=str)),
+        "INSERT INTO cache_changes (asset_type, entry_key, operation) VALUES (?, ?, ?) "
+        "ON CONFLICT(asset_type, entry_key) DO UPDATE SET operation=excluded.operation",
+        (asset_type, key, operation),
     )
 
 
@@ -523,13 +733,18 @@ def _read_pending_rom_metadata_changes(settings: Any) -> dict:
     }
     labels = {"rom": "roms", "bios": "bios", "artwork": "artwork"}
     with _open_rom_metadata_cache(settings) as connection:
-        for asset_type, _key, operation, payload in connection.execute(
-            "SELECT asset_type, entry_key, operation, payload FROM cache_changes ORDER BY asset_type, entry_key"
+        for asset_type, entry_key, operation in connection.execute(
+            "SELECT asset_type, entry_key, operation FROM cache_changes ORDER BY asset_type, entry_key"
         ):
             label = labels.get(asset_type)
             if not label:
                 continue
-            row = json.loads(payload)
+            if operation == "delete":
+                row = _read_deleted_row_payload(connection, asset_type, str(entry_key)) or {"entry_key": str(entry_key)}
+            else:
+                row = _read_live_row_payload(connection, asset_type, str(entry_key))
+                if not row:
+                    continue
             if operation == "delete":
                 changes["deleted"][label].append(row)
             else:
@@ -540,6 +755,9 @@ def _read_pending_rom_metadata_changes(settings: Any) -> dict:
 def _clear_pending_rom_metadata_changes(settings: Any) -> None:
     with _open_rom_metadata_cache(settings) as connection:
         connection.execute("DELETE FROM cache_changes")
+        connection.execute("DELETE FROM deleted_rom_cache_entries")
+        connection.execute("DELETE FROM deleted_bios_cache_entries")
+        connection.execute("DELETE FROM deleted_artwork_cache_entries")
 
 
 def _update_rom_metadata_cache_state(settings: Any, **values: Any) -> None:
@@ -613,6 +831,95 @@ def _read_rom_rows(connection: sqlite3.Connection) -> dict:
     return rows
 
 
+def _read_live_row_payload(connection: sqlite3.Connection, asset_type: str, entry_key: str) -> Optional[dict]:
+    table = {
+        "rom": "rom_cache_entries",
+        "bios": "bios_cache_entries",
+        "artwork": "artwork_cache_entries",
+    }.get(asset_type)
+    return _read_row_payload_from_table(connection, asset_type, table, entry_key) if table else None
+
+
+def _read_deleted_row_payload(connection: sqlite3.Connection, asset_type: str, entry_key: str) -> Optional[dict]:
+    table = {
+        "rom": "deleted_rom_cache_entries",
+        "bios": "deleted_bios_cache_entries",
+        "artwork": "deleted_artwork_cache_entries",
+    }.get(asset_type)
+    return _read_row_payload_from_table(connection, asset_type, table, entry_key) if table else None
+
+
+def _read_row_payload_from_table(connection: sqlite3.Connection, asset_type: str, table: Optional[str], entry_key: str) -> Optional[dict]:
+    if not table:
+        return None
+    if asset_type == "rom":
+        values = connection.execute(
+            f"SELECT entry_key, system, file_path, rom_name, unique_id, absolute_path, file_size, modified_time, entry_type, "
+            f"md5, gamelist_path, gamelist_game_id, is_downloadable, image_stem, extra_json FROM {table} WHERE entry_key = ?",
+            (entry_key,),
+        ).fetchone()
+        if not values:
+            return None
+        return RomCacheRow(
+            entry_key=values[0],
+            system=values[1],
+            file_path=values[2],
+            rom_name=values[3],
+            unique_id=values[4] or "",
+            absolute_path=values[5] or "",
+            file_size=_int(values[6]),
+            modified_time=_int(values[7]),
+            entry_type=values[8] or "file",
+            md5=values[9],
+            gamelist_path=values[10] or "",
+            gamelist_game_id=values[11] or values[2],
+            is_downloadable=bool(values[12]),
+            image_stem=values[13] or Path(values[2]).stem,
+            extra=_loads_dict(values[14]),
+        ).to_payload()
+    if asset_type == "bios":
+        values = connection.execute(
+            f"SELECT entry_key, file_path, name, unique_id, absolute_path, file_size, modified_time, md5, extra_json FROM {table} WHERE entry_key = ?",
+            (entry_key,),
+        ).fetchone()
+        if not values:
+            return None
+        return BiosCacheRow(
+            entry_key=values[0],
+            file_path=values[1],
+            name=values[2],
+            unique_id=values[3] or "",
+            absolute_path=values[4] or "",
+            file_size=_int(values[5]),
+            modified_time=_int(values[6]),
+            md5=values[7],
+            extra=_loads_dict(values[8]),
+        ).to_payload()
+    if asset_type == "artwork":
+        values = connection.execute(
+            f"SELECT entry_key, system, rom_path, artwork_type, artwork_types, title, file_path, relative_path, file_size, modified_time, md5, extra_json "
+            f"FROM {table} WHERE entry_key = ?",
+            (entry_key,),
+        ).fetchone()
+        if not values:
+            return None
+        artwork_types = _loads_list(values[4]) or ([values[3]] if values[3] else [])
+        return ArtworkCacheRow(
+            entry_key=values[0],
+            system=values[1],
+            rom_path=values[2],
+            artwork_types=tuple(str(value) for value in artwork_types if str(value or "").strip()),
+            title=values[5] or "",
+            file_path=values[6] or "",
+            relative_path=values[7] or "",
+            file_size=_int(values[8]),
+            modified_time=_int(values[9]),
+            md5=values[10],
+            extra=_loads_dict(values[11]),
+        ).to_payload()
+    return None
+
+
 def _read_bios_rows(connection: sqlite3.Connection) -> dict:
     rows = {}
     for values in connection.execute(
@@ -636,28 +943,33 @@ def _read_bios_rows(connection: sqlite3.Connection) -> dict:
 def _read_artwork_rows(connection: sqlite3.Connection) -> dict:
     rows = {}
     for values in connection.execute(
-        "SELECT entry_key, system, rom_path, artwork_type, title, file_path, relative_path, file_size, modified_time, md5, extra_json "
+        "SELECT entry_key, system, rom_path, artwork_type, artwork_types, title, file_path, relative_path, file_size, modified_time, md5, extra_json "
         "FROM artwork_cache_entries"
     ):
-        payload = {
-            **_loads_dict(values[10]),
-            "asset_type": "artwork",
-            "system": values[1],
-            "system_name": values[1],
-            "rom_path": values[2],
-            "artwork_type": values[3],
-            "title": values[4],
-            "file_path": values[5],
-            "relative_path": values[6],
-            "file_size": values[7],
-            "byte_count": values[7],
-            "modified_time": values[8],
-            "mtime": values[8],
-        }
-        if values[9]:
-            payload["md5"] = values[9]
-        rows[values[0]] = payload
+        artwork_types = _loads_list(values[4]) or ([values[3]] if values[3] else [])
+        row = ArtworkCacheRow(
+            entry_key=values[0],
+            system=values[1],
+            rom_path=values[2],
+            artwork_types=tuple(str(value) for value in artwork_types if str(value or "").strip()),
+            title=values[5] or "",
+            file_path=values[6] or "",
+            relative_path=values[7] or "",
+            file_size=_int(values[8]),
+            modified_time=_int(values[9]),
+            md5=values[10],
+            extra=_loads_dict(values[11]),
+        )
+        rows[row.entry_key] = row.to_payload()
     return rows
+
+
+def _loads_list(value: Any) -> list:
+    try:
+        parsed = json.loads(value or "[]")
+        return parsed if isinstance(parsed, list) else []
+    except Exception:
+        return []
 
 
 def _loads_dict(value: Any) -> dict:
