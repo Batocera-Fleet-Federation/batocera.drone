@@ -67,6 +67,7 @@ try:
         _load_rom_metadata_cache,
         _persist_rom_metadata_cache,
         _read_pending_rom_metadata_changes,
+        _read_sqlite_asset_systems,
         _rom_metadata_cache_path,
         _update_rom_metadata_cache_state,
     )
@@ -121,6 +122,7 @@ except ImportError:
         _load_rom_metadata_cache,
         _persist_rom_metadata_cache,
         _read_pending_rom_metadata_changes,
+        _read_sqlite_asset_systems,
         _rom_metadata_cache_path,
         _update_rom_metadata_cache_state,
     )
@@ -2055,6 +2057,12 @@ class RomRepository:
         return names
 
     def list_systems(self) -> List[dict]:
+        cached_systems = _read_sqlite_asset_systems(self.roms_root.parent)
+        if cached_systems:
+            return [
+                row for row in cached_systems
+                if self.should_include_system(str(row.get("name") or ""))
+            ]
         cached = self._cached_asset_snapshot()
         if cached:
             counts: Dict[str, int] = {}
@@ -9680,7 +9688,9 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                     time.sleep(poll_seconds)
                     continue
                 if not token:
-                    token = _register_or_claim_overmind_token(settings, repository, config, base_url) or ""
+                    auth_token = str(config.get("overmind_auth_token") or "").strip()
+                    if auth_token:
+                        token = _register_or_claim_overmind_token(settings, repository, config, base_url) or ""
                     if not token:
                         time.sleep(poll_seconds)
                         continue
@@ -10132,7 +10142,9 @@ def _poll_rom_metadata_once(settings: Settings, repository: "RomRepository") -> 
         if not base_url:
             return _complete_local_rom_metadata_cache(settings, repository, "overmind_not_configured")
         if not token:
-            token = _register_or_claim_overmind_token(settings, repository, config, base_url) or ""
+            auth_token = str(config.get("overmind_auth_token") or "").strip()
+            if auth_token:
+                token = _register_or_claim_overmind_token(settings, repository, config, base_url) or ""
             if not token:
                 return _complete_local_rom_metadata_cache(settings, repository, "overmind_not_connected")
         try:

@@ -2183,6 +2183,44 @@ class SettingsTests(unittest.TestCase):
             self.assertTrue(cache["dirty"])
             self.assertTrue(next(iter(cache["entries"].values()))["rom_md5"])
 
+    def test_rom_metadata_poll_does_not_register_without_auth_token(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            rom = root / "roms" / "snes" / "Game.zip"
+            rom.parent.mkdir(parents=True)
+            rom.write_bytes(b"offline-rom")
+            self._write_gamelist(rom.parent, "Game.zip")
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "USERDATA_ROOT": str(root),
+                    "ROMS_ROOT": str(root / "roms"),
+                    "BIOS_ROOT": str(root / "bios"),
+                    "OVERMIND_URL": "https://overmind.local",
+                    "OVERMIND_DEVICE_ID": "drone-a",
+                },
+                clear=True,
+            ):
+                settings = Settings.from_env()
+
+            config = {
+                "overmind_url": "https://overmind.local",
+                "overmind_token": "",
+                "overmind_auth_token": "",
+                "integration_enabled": False,
+            }
+            with mock.patch("app.drone_api._load_overmind_config_for_settings", return_value=config):
+                with mock.patch(
+                    "app.drone_api._register_or_claim_overmind_token",
+                    side_effect=AssertionError("must not register without approved auth token"),
+                ):
+                    result = _poll_rom_metadata_once(settings, RomRepository(settings.roms_root, settings.bios_root))
+
+            self.assertEqual(result["status"], "cached")
+            self.assertEqual(result["reason"], "overmind_not_connected")
+            cache, _ = _load_rom_metadata_cache(settings)
+            self.assertTrue(cache["dirty"])
+
     def test_rom_metadata_poll_finishes_local_cache_when_overmind_upload_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
@@ -2282,6 +2320,30 @@ class RepositoryTests(unittest.TestCase):
             repo = RomRepository(root / "roms", root / "bios")
 
             with mock.patch.object(RomRepository, "build_md5", side_effect=AssertionError("should not hash")):
+                systems = repo.list_systems()
+
+            self.assertEqual(systems, [{"name": "snes", "rom_count": 1}])
+
+    def test_list_systems_uses_sqlite_system_counts_without_loading_rom_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            (root / "roms" / "snes").mkdir(parents=True)
+            (root / "bios").mkdir(parents=True)
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
+                settings = Settings.from_env()
+            cache = {
+                "schema_version": 4,
+                "last_full_scan_at": "2026-06-01T00:00:00+00:00",
+                "entries": {"snes:game.zip": {"system": "snes", "file_path": "game.zip", "rom_name": "Game"}},
+                "bios_entries": {},
+                "artwork_entries": {},
+                "systems": [{"name": "snes", "rom_count": 1}],
+                "gamelists": [],
+            }
+            _persist_rom_metadata_cache(settings, cache, rom_updates=cache["entries"])
+            repo = RomRepository(root / "roms", root / "bios")
+
+            with mock.patch("app.drone_api._load_rom_metadata_cache", side_effect=AssertionError("must not decode all cache rows")):
                 systems = repo.list_systems()
 
             self.assertEqual(systems, [{"name": "snes", "rom_count": 1}])

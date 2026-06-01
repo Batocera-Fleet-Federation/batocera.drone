@@ -803,6 +803,30 @@ def _read_sqlite_rom_metadata_cache(settings: Any) -> dict:
         return cache
 
 
+def _read_sqlite_asset_systems(userdata_root: Path) -> Optional[list[dict]]:
+    """Read cached system counts without materializing every cached ROM row."""
+    try:
+        db_path = _state_database_path(Path(userdata_root))
+        with _open_state_database(db_path) as connection:
+            _ensure_schema(connection)
+            state = {
+                key: json.loads(value)
+                for key, value in connection.execute(
+                    "SELECT key, value FROM cache_state WHERE key IN ('last_full_scan_at', 'scan_in_progress')"
+                )
+            }
+            if not state.get("last_full_scan_at") or state.get("scan_in_progress"):
+                return None
+            rows = [
+                {"name": name, "rom_count": _int(rom_count)}
+                for name, rom_count in connection.execute("SELECT name, rom_count FROM asset_systems ORDER BY name")
+                if str(name or "").strip() and _int(rom_count) > 0
+            ]
+            return rows or None
+    except Exception:
+        return None
+
+
 def _read_rom_rows(connection: sqlite3.Connection) -> dict:
     rows = {}
     for values in connection.execute(
