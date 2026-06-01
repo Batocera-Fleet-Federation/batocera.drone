@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.43] - 2026-05-31
+
+- Introduced regression on last build.  Fixing issue. TODO: Need regression tests.
+
 ## [v0.0.42] - 2026-05-31
 
 - Updating bug with overmind appvoals
