@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.48] - 2026-05-31
+
+- Updating code to intellgently upload emulator configs and logs.
+
 ## [v0.0.47] - 2026-05-31
 
 - Optimizing UI
