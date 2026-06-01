@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.47] - 2026-05-31
+
+- Optimizing UI
+
 ## [v0.0.46] - 2026-05-31
 
 - Making update to more easily upgrade drone remotely.
