@@ -2144,6 +2144,31 @@ class RomRepository:
                 "has_gamelist_entry": True,
             }
             items.append(item)
+        for disk_item in self._list_rom_items(system, system_dir, include_md5=False):
+            relative_path = _normalize_gamelist_rom_path(
+                disk_item.get("file_path") or disk_item.get("relative_path") or disk_item.get("rom_path") or ""
+            )
+            if not relative_path:
+                continue
+            normalized_key = relative_path.lower()
+            if normalized_key in seen_paths:
+                continue
+            seen_paths.add(normalized_key)
+            disk_item = dict(disk_item)
+            disk_item["name"] = disk_item.get("name") or Path(relative_path).stem
+            disk_item["rom_name"] = disk_item.get("rom_name") or disk_item.get("name") or Path(relative_path).stem
+            disk_item["title"] = disk_item.get("title") or disk_item.get("rom_name")
+            disk_item["relative_path"] = relative_path
+            disk_item["rom_path"] = relative_path
+            disk_item["file_path"] = relative_path
+            disk_item["source"] = "filesystem"
+            disk_item["metadata_source"] = "filesystem"
+            disk_item["gamelist"] = {}
+            disk_item["gamelist_path"] = ""
+            disk_item["gamelist_game_id"] = relative_path
+            disk_item["has_gamelist_entry"] = False
+            disk_item.setdefault("existing", {})
+            items.append(disk_item)
         items.sort(key=lambda item: str(item.get("relative_path") or "").lower())
         gamelist = {
             "system": system,
@@ -8484,6 +8509,30 @@ class DownloadCancelled(RuntimeError):
     pass
 
 
+def _kick_asset_metadata_sync_after_download(settings: Settings, repository: "RomRepository", config: dict, reason: str) -> None:
+    base_url = str(config.get("overmind_url") or "").strip().rstrip("/")
+    token = str(config.get("overmind_token") or "").strip()
+    if not base_url or not token:
+        return
+
+    def run() -> None:
+        try:
+            result = _sync_rom_metadata_to_overmind(settings, repository, config, base_url, token)
+            print(
+                f"Asset metadata follow-up sync completed: reason={reason} status={result.get('status')} changed={result.get('changed')}",
+                file=sys.stdout,
+                flush=True,
+            )
+        except Exception as error:
+            print(
+                f"Asset metadata follow-up sync failed: reason={reason} error={_format_overmind_error(error)}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+    Thread(target=run, name="asset-metadata-follow-up-sync", daemon=True).start()
+
+
 class DownloadManager:
     """Per-target Drone download queue with one active worker."""
 
@@ -8858,6 +8907,8 @@ class DownloadManager:
             self._push_download_state(config, "completed", force=True)
             if terminal_activity:
                 _post_rom_sync_activity(self.settings, config, terminal_activity)
+                if asset_type == "rom" and terminal_activity.get("status") == "completed":
+                    _kick_asset_metadata_sync_after_download(self.settings, self.repository, config, "rom_download_completed")
 
     def _push_download_state(self, config: dict, reason: str, force: bool = False) -> None:
         if not force:
@@ -8871,6 +8922,24 @@ class DownloadManager:
 
 def _get_download_manager() -> Optional[DownloadManager]:
     return _DOWNLOAD_MANAGER
+
+
+def _cached_rom_md5_exists(settings: Settings, expected_md5: Optional[str]) -> bool:
+    expected = str(expected_md5 or "").strip().lower()
+    if not expected:
+        return False
+    try:
+        cache, _ = _load_rom_metadata_cache(settings)
+    except Exception:
+        return False
+    entries = cache.get("entries") if isinstance(cache.get("entries"), dict) else {}
+    for entry in entries.values():
+        if not isinstance(entry, dict):
+            continue
+        md5_value = str(entry.get("rom_md5") or entry.get("md5") or "").strip().lower()
+        if md5_value == expected:
+            return True
+    return False
 
 
 def _post_download_state(settings: Settings, config: dict, snapshot: dict, reason: str = "progress") -> None:
@@ -9718,7 +9787,7 @@ def _execute_overmind_action(
             sync_id = str(uuid.uuid4())
             started_wall = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
             started_mono = time.monotonic()
-            if expected_md5 and _rom_md5_exists(repository, expected_md5):
+            if expected_md5 and _cached_rom_md5_exists(settings, expected_md5):
                 activities.append({
                     "sync_id": sync_id,
                     "target_drone_id": settings.overmind_device_id,

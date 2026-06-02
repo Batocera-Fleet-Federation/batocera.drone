@@ -124,6 +124,9 @@ ensure_permissions() {
   find /userdata/roms -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while read romdir; do
     system_name="$(basename "$romdir")"
 
+    chown root:"$DRONE_GROUP" "$romdir" 2>/dev/null || true
+    chmod 775 "$romdir" 2>/dev/null || true
+
     for subdir in images videos manuals; do
       target="${romdir}/${subdir}"
       mkdir -p "$target"

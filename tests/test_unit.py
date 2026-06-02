@@ -44,6 +44,7 @@ from app.drone_api import (
     _collect_rom_metadata,
     _hash_rom_metadata_batches,
     _empty_rom_metadata_cache,
+    _cached_rom_md5_exists,
     _poll_rom_metadata_cache,
     _poll_rom_metadata_once,
     _load_rom_metadata_cache,
@@ -868,6 +869,32 @@ class SettingsTests(unittest.TestCase):
             )
 
             self.assertIsNone(peer)
+
+    def test_cached_rom_md5_exists_uses_metadata_cache_without_scanning_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "USERDATA_ROOT": str(root),
+                    "ROMS_ROOT": str(root / "roms"),
+                    "BIOS_ROOT": str(root / "bios"),
+                },
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            cache = _empty_rom_metadata_cache()
+            cache["entries"] = {
+                "fbneo:game.zip": {
+                    "system": "fbneo",
+                    "file_path": "game.zip",
+                    "rom_md5": "abc123",
+                }
+            }
+            _persist_rom_metadata_cache(settings, cache, rom_updates=cache["entries"], queue_changes=False)
+
+            self.assertTrue(_cached_rom_md5_exists(settings, "ABC123"))
+            self.assertFalse(_cached_rom_md5_exists(settings, "missing"))
 
     def test_disk_rom_without_gamelist_is_listed_with_md5(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
