@@ -7814,21 +7814,10 @@ def _build_rom_metadata_snapshot_from_cache(settings: Settings, cache: dict) -> 
         if not isinstance(entry, dict):
             continue
         row = {k: v for k, v in entry.items() if k != "absolute_path"}
-        gamelist = _gamelist_metadata_for_reference(str(row.get("gamelist_path") or ""), str(row.get("gamelist_game_id") or ""))
-        if gamelist:
-            row["gamelist"] = gamelist
-            row["existing"] = {field: gamelist.get(field) or "" for field in ARTWORK_FIELDS}
-            row["has_gamelist_entry"] = True
-            row["metadata_source"] = "gamelist.xml"
-            title = str(gamelist.get("name") or "").strip()
-            if title:
-                row["name"] = title
-                row["title"] = title
-                row["rom_name"] = title
-        else:
-            row["gamelist"] = {}
-            row["existing"] = {}
-            row["has_gamelist_entry"] = False
+        row["gamelist"] = {}
+        row["existing"] = {}
+        row["has_gamelist_entry"] = bool(row.get("gamelist_path"))
+        row["metadata_source"] = "gamelist.xml" if row.get("gamelist_path") else row.get("metadata_source") or "filesystem"
         roms.append(row)
     roms.sort(key=lambda row: (str(row.get("system") or ""), str(row.get("file_path") or "")))
     bios_entries = cache.get("bios_entries") if isinstance(cache.get("bios_entries"), dict) else {}

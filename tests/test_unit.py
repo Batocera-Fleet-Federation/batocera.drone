@@ -1066,6 +1066,36 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(cache["entries"], {})
             self.assertEqual(cache["systems"], [])
 
+    def test_metadata_upload_snapshot_uses_cached_rows_without_gamelist_lookup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            cache = {
+                **_empty_rom_metadata_cache(),
+                "last_full_scan_at": "2026-01-01T00:00:00+00:00",
+                "entries": {
+                    "snes/chrono.zip": {
+                        "system": "snes",
+                        "file_path": "chrono.zip",
+                        "rom_name": "Chrono",
+                        "gamelist_path": str(root / "roms" / "snes" / "gamelist.xml"),
+                        "gamelist_game_id": "chrono.zip",
+                    }
+                },
+            }
+
+            with mock.patch("app.drone_api._gamelist_metadata_for_reference", side_effect=AssertionError("upload snapshot should not parse gamelists")):
+                snapshot = drone_api._build_rom_metadata_snapshot_from_cache(settings, cache)
+
+            self.assertEqual(snapshot["roms"][0]["rom_name"], "Chrono")
+            self.assertTrue(snapshot["roms"][0]["has_gamelist_entry"])
+            self.assertEqual(snapshot["roms"][0]["metadata_source"], "gamelist.xml")
+
     def test_reclaim_overmind_token_after_heartbeat_unauthorized_uses_bound_auth_token(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
