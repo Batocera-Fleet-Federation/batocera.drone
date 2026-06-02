@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.55] - 2026-06-02
+
+- Wake metadata poller for rebuild actions
+
 ## [v0.0.54] - 2026-06-02
 
 - Fix Drone update restart and permissions
