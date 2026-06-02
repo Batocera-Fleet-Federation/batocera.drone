@@ -132,6 +132,45 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.hostname_override, "bff-drone-a")
         self.assertEqual(_drone_reachable_url(settings, {"ipv4": ["192.168.1.50"]}), "https://bff-drone-a:8443")
 
+    def test_overmind_device_id_persists_after_first_physical_mac_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            device_id_file = root / "system" / "drone-app" / "device-id"
+            device_id_file.parent.mkdir(parents=True)
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True), mock.patch(
+                "app.drone_api._physical_mac_candidates",
+                return_value=["58:47:ca:7e:38:57"],
+            ), mock.patch("app.drone_api._runtime_machine_id", return_value="2c:cf:67:97:8c:8f"):
+                first = Settings.from_env()
+
+            self.assertEqual(first.overmind_device_id, "58:47:ca:7e:38:57")
+            self.assertEqual(device_id_file.read_text(encoding="utf-8").strip(), "58:47:ca:7e:38:57")
+
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True), mock.patch(
+                "app.drone_api._physical_mac_candidates",
+                return_value=["2c:cf:67:97:8c:8f"],
+            ), mock.patch("app.drone_api._runtime_machine_id", return_value="aa:bb:cc:dd:ee:ff"):
+                restarted = Settings.from_env()
+
+            self.assertEqual(restarted.overmind_device_id, "58:47:ca:7e:38:57")
+
+    def test_configured_overmind_device_id_wins_without_rewriting_persisted_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            device_id_file = root / "system" / "drone-app" / "device-id"
+            device_id_file.parent.mkdir(parents=True)
+            device_id_file.write_text("58:47:ca:7e:38:57\n", encoding="utf-8")
+
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "DRONE_DEVICE_ID": "bff-drone-a"},
+                clear=True,
+            ):
+                settings = Settings.from_env()
+
+            self.assertEqual(settings.overmind_device_id, "bff-drone-a")
+            self.assertEqual(device_id_file.read_text(encoding="utf-8").strip(), "58:47:ca:7e:38:57")
+
     def test_host_preference_order_is_override_ipv4_ipv6(self) -> None:
         with mock.patch.dict("os.environ", {"HOSTNAME_OVERRIDE": "bff-drone-a", "HTTPS_PORT": "8443"}, clear=True):
             settings = Settings.from_env()
