@@ -1,5 +1,11 @@
 # Changelog
 
+## [v0.0.50] - 2026-06-01
+
+- Adding landing page for drone and including Q&A + help.  Adding links to overmind.
+- Adding help page
+- Fixing action execution: Restart now works.
+
 ## [v0.0.49] - 2026-06-01
 
 - Remote Restart now reports completion to Overmind, then exits Drone with code 76; the root service wrapper catches that and runs reboot.drone_api.py (line 9623) batocera_install.sh (line 241)
