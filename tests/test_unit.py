@@ -1125,6 +1125,7 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("async function updateDroneApp()", js_source)
         self.assertIn('apiPost("/admin/system/update-drone"', js_source)
         self.assertIn("DRONE_LATEST_ARCHIVE_URL", drone_source)
+        self.assertIn("os.execv(sys.executable, [sys.executable, *sys.argv])", drone_source)
         self.assertIn("os._exit(DRONE_SELF_UPDATE_EXIT_CODE)", drone_source)
 
     def test_drone_update_overlays_release_files_without_deleting_app_tree(self) -> None:
@@ -1133,6 +1134,8 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("def _overlay_drone_release_tree", drone_source)
         self.assertIn('if "__pycache__" in relative.parts or item.name.endswith(".pyc"):', drone_source)
         self.assertNotIn("shutil.rmtree(target)", drone_source)
+        self.assertNotIn("shutil.copy2(item, destination)", drone_source)
+        self.assertIn("shutil.copyfile(item, destination)", drone_source)
         self.assertIn("copied_files", drone_source)
 
     def test_mame_config_source_accepts_batocera_cfg_directory(self) -> None:
@@ -1181,6 +1184,7 @@ class SettingsTests(unittest.TestCase):
         self.assertIn('"app.api_routes": "ApiRoutesMixin"', run_now)
         self.assertIn("import shutil", run_now)
         self.assertIn("Drone App staged successfully", run_now)
+        self.assertEqual(run_now.count("source = archive.extractfile(member)"), 1)
 
     def test_home_page_does_not_block_on_speed_test(self) -> None:
         root = Path(__file__).resolve().parents[1]

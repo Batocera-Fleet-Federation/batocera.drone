@@ -7063,7 +7063,11 @@ def _overlay_drone_release_tree(source: Path, target: Path) -> int:
             destination.mkdir(parents=True, exist_ok=True)
             continue
         destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(item, destination)
+        shutil.copyfile(item, destination)
+        try:
+            destination.chmod(0o664)
+        except OSError:
+            pass
         copied += 1
     return copied
 
@@ -7133,11 +7137,19 @@ def _restart_drone_process_soon(delay_seconds: float = 1.0) -> None:
     def restart() -> None:
         time.sleep(max(0.1, delay_seconds))
         print(
-            f"Drone self-update restart requested: exiting with code {DRONE_SELF_UPDATE_EXIT_CODE}",
+            "Drone self-update restart requested: re-executing app process",
             file=sys.stderr,
             flush=True,
         )
-        os._exit(DRONE_SELF_UPDATE_EXIT_CODE)
+        try:
+            os.execv(sys.executable, [sys.executable, *sys.argv])
+        except Exception as exc:
+            print(
+                f"Drone self-update re-exec failed: {exc!r}; exiting with code {DRONE_SELF_UPDATE_EXIT_CODE}",
+                file=sys.stderr,
+                flush=True,
+            )
+            os._exit(DRONE_SELF_UPDATE_EXIT_CODE)
 
     Thread(target=restart, name="drone-self-update-restart", daemon=True).start()
 
