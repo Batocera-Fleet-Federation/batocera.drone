@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.57] - 2026-06-02
+
+- Persist Drone Overmind device identity
+
 ## [v0.0.56] - 2026-06-02
 
 - Avoid gamelist parsing during metadata upload
