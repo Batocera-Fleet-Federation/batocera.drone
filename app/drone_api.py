@@ -7049,6 +7049,25 @@ def _drone_work_dir(settings: Settings) -> Path:
     return Path(os.environ.get("DRONE_APP_WORK_DIR", str(settings.userdata_root / "system" / "drone-app"))).resolve()
 
 
+def _overlay_drone_release_tree(source: Path, target: Path) -> int:
+    copied = 0
+    if not source.exists() or not source.is_dir():
+        raise ValueError(f"release source directory is missing: {source}")
+    target.mkdir(parents=True, exist_ok=True)
+    for item in source.rglob("*"):
+        relative = item.relative_to(source)
+        if "__pycache__" in relative.parts or item.name.endswith(".pyc"):
+            continue
+        destination = target / relative
+        if item.is_dir():
+            destination.mkdir(parents=True, exist_ok=True)
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(item, destination)
+        copied += 1
+    return copied
+
+
 def _download_latest_drone_app(settings: Settings) -> dict:
     archive_url = os.environ.get("DRONE_APP_ARCHIVE_URL", DRONE_LATEST_ARCHIVE_URL)
     work_dir = _drone_work_dir(settings)
@@ -7095,16 +7114,16 @@ def _download_latest_drone_app(settings: Settings) -> dict:
         missing = wanted_roots - extracted_roots
         if missing:
             raise ValueError(f"Drone archive is missing required directories: {', '.join(sorted(missing))}")
+        copied_files = 0
         for name in sorted(wanted_roots):
             source = stage_dir / name
             target = work_dir / name
-            if target.exists():
-                shutil.rmtree(target)
-            shutil.copytree(source, target, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+            copied_files += _overlay_drone_release_tree(source, target)
     return {
         "status": "downloaded",
         "archive_url": archive_url,
         "work_dir": str(work_dir),
+        "copied_files": copied_files,
         "duration_ms": int((time.monotonic() - started_at) * 1000),
         "restart_required": True,
     }

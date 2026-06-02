@@ -1127,6 +1127,14 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("DRONE_LATEST_ARCHIVE_URL", drone_source)
         self.assertIn("os._exit(DRONE_SELF_UPDATE_EXIT_CODE)", drone_source)
 
+    def test_drone_update_overlays_release_files_without_deleting_app_tree(self) -> None:
+        drone_source = Path(__file__).resolve().parents[1].joinpath("app/drone_api.py").read_text(encoding="utf-8")
+
+        self.assertIn("def _overlay_drone_release_tree", drone_source)
+        self.assertIn('if "__pycache__" in relative.parts or item.name.endswith(".pyc"):', drone_source)
+        self.assertNotIn("shutil.rmtree(target)", drone_source)
+        self.assertIn("copied_files", drone_source)
+
     def test_mame_config_source_accepts_batocera_cfg_directory(self) -> None:
         drone_source = Path(__file__).resolve().parents[1].joinpath("app/drone_api.py").read_text(encoding="utf-8")
 
