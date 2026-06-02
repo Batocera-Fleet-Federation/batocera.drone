@@ -5,6 +5,7 @@ const backBtn = document.getElementById("backBtn") || {
 };
 const systemsMenuBtn = document.getElementById("systemsMenuBtn");
 const biosBtn = document.getElementById("biosBtn");
+const helpBtn = document.getElementById("helpBtn");
 const emulatorsMenuBtn = document.getElementById("emulatorsMenuBtn");
 const themeMenuBtn = document.getElementById("themeMenuBtn");
 const systemInfoMenuBtn = document.getElementById("systemInfoMenuBtn");
@@ -1281,6 +1282,164 @@ async function renderThemeGalleryPage() {
   themeFilterInitialized = false;
   themeFilterSelectedSystems = [];
   await loadThemePage(0);
+  setLoading(false);
+}
+async function renderHelpPage() {
+  currentSystemContext = null;
+  setSearchMode("hidden");
+  clearSystemTheme();
+  await refreshRandomThemeLogo();
+  titleNode.textContent = "Help";
+  subtitleNode.textContent = "How Batocera Drone works";
+  content.innerHTML = `
+    <div class="help-page">
+      <div class="help-header mb-4">
+        <div>
+          <div class="help-kicker">Batocera Drone Guide</div>
+          <h2 class="h3 mb-2">Understand the app, the moving parts, and what each screen is for.</h2>
+          <p class="mb-0 text-muted">Drone is the local Batocera companion that indexes this machine, exposes ROM and BIOS files, manages artwork and metadata, and can report state back to Overmind when configured.</p>
+        </div>
+      </div>
+
+      <div class="row g-3 mb-4">
+        <div class="col-12 col-md-6 col-xl-3">
+          <div class="help-metric h-100">
+            <i class="bi bi-controller"></i>
+            <div>
+              <div class="help-metric-title">Systems</div>
+              <div class="text-muted small">Console and platform folders discovered from Batocera.</div>
+            </div>
+          </div>
+        </div>
+        <div class="col-12 col-md-6 col-xl-3">
+          <div class="help-metric h-100">
+            <i class="bi bi-collection-play"></i>
+            <div>
+              <div class="help-metric-title">ROMs</div>
+              <div class="text-muted small">Games, ports, folders, and launchable files inside each system.</div>
+            </div>
+          </div>
+        </div>
+        <div class="col-12 col-md-6 col-xl-3">
+          <div class="help-metric h-100">
+            <i class="bi bi-cpu"></i>
+            <div>
+              <div class="help-metric-title">BIOS</div>
+              <div class="text-muted small">Firmware files some emulators need before games can run correctly.</div>
+            </div>
+          </div>
+        </div>
+        <div class="col-12 col-md-6 col-xl-3">
+          <div class="help-metric h-100">
+            <i class="bi bi-diagram-3"></i>
+            <div>
+              <div class="help-metric-title">Overmind</div>
+              <div class="text-muted small">The optional swarm coordinator for shared inventory and actions.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="row g-4">
+        <div class="col-12 col-xl-7">
+          <div class="help-section">
+            <h3 class="h5 mb-3"><i class="bi bi-patch-question me-2"></i>Q&A</h3>
+            <div class="accordion help-accordion" id="helpAccordion">
+              ${[
+                {
+                  q: "What is Batocera Drone?",
+                  a: "Drone is the local web app running on this Batocera machine. It scans the Batocera filesystem, presents the ROM library by system, exposes BIOS files, and provides admin tools for logs, emulator configs, artwork, and integration status."
+                },
+                {
+                  q: "What is a system?",
+                  a: "A system is a Batocera platform folder such as nes, psx, arcade, or ports. The Systems view groups ROMs by those folders so users can browse one platform at a time."
+                },
+                {
+                  q: "What is a ROM?",
+                  a: "A ROM is the game or launchable file stored for a system. Some entries are downloadable files, while others are folders or compound games that Drone marks as folder ROMs instead of direct downloads."
+                },
+                {
+                  q: "Why does the BIOS page matter?",
+                  a: "Some emulators require firmware files before they can boot games correctly. The BIOS page lists detected BIOS assets and lets users find or download the files this Drone can expose."
+                },
+                {
+                  q: "What does the Theme page show?",
+                  a: "The Theme page surfaces artwork from the installed Batocera theme, including system images and logos. It helps users confirm what theme assets exist and which systems have visual coverage."
+                },
+                {
+                  q: "What are Artwork & Metadata tools for?",
+                  a: "They help maintain gamelist.xml data: titles, descriptions, release dates, ratings, artwork paths, marquee crops, and missing images. This is useful when library entries look incomplete in Batocera."
+                },
+                {
+                  q: "What does the Downloads page track?",
+                  a: "Downloads shows active, queued, and recent transfers targeting this Drone. It is meant for long file operations where users need progress, queue state, and cancellation controls."
+                },
+                {
+                  q: "What is the Asset Cache?",
+                  a: "The cache is Drone's snapshot of ROMs, BIOS files, artwork, and pending upload state. When Overmind is enabled, this snapshot is what helps the fleet understand what this machine has."
+                },
+                {
+                  q: "What is Overmind Integration?",
+                  a: "Overmind is the optional central coordinator for the fleet. Connecting Drone to Overmind can publish this machine's identity and inventory, process remote actions, and show swarm membership."
+                },
+                {
+                  q: "Why are there Logs and Emulator Config pages?",
+                  a: "Logs help diagnose launch, service, and emulator problems. Emulator Configs show configuration files mirrored from common emulator locations so users can inspect settings without digging through the filesystem."
+                },
+                {
+                  q: "What is API Access?",
+                  a: "API Access exposes Swagger/OpenAPI details and certificate information for integrations. Certificate-backed peer API access can identify trusted clients without sharing private keys."
+                },
+                {
+                  q: "Why do some features disappear?",
+                  a: "Admin-only navigation is hidden when admin routes are disabled or forbidden by server configuration. Public browsing can still work while operational tools stay unavailable."
+                }
+              ].map((item, index) => `
+                <div class="accordion-item">
+                  <h4 class="accordion-header" id="helpHeading${index}">
+                    <button class="accordion-button ${index === 0 ? "" : "collapsed"}" type="button" data-bs-toggle="collapse" data-bs-target="#helpAnswer${index}" aria-expanded="${index === 0 ? "true" : "false"}" aria-controls="helpAnswer${index}">
+                      ${escapeHtml(item.q)}
+                    </button>
+                  </h4>
+                  <div id="helpAnswer${index}" class="accordion-collapse collapse ${index === 0 ? "show" : ""}" aria-labelledby="helpHeading${index}" data-bs-parent="#helpAccordion">
+                    <div class="accordion-body">${escapeHtml(item.a)}</div>
+                  </div>
+                </div>
+              `).join("")}
+            </div>
+          </div>
+        </div>
+
+        <div class="col-12 col-xl-5">
+          <div class="help-section mb-4">
+            <h3 class="h5 mb-3"><i class="bi bi-signpost-split me-2"></i>Where To Go</h3>
+            <div class="help-link-list">
+              <button class="help-link-row" type="button" onclick="setHash('')"><i class="bi bi-grid"></i><span><strong>Systems</strong><small>Browse games by platform.</small></span></button>
+              <button class="help-link-row" type="button" onclick="setHash('#bios')"><i class="bi bi-cpu"></i><span><strong>BIOS</strong><small>Review firmware files and system filters.</small></span></button>
+              <button class="help-link-row" type="button" onclick="setHash('#theme')"><i class="bi bi-brush"></i><span><strong>Theme</strong><small>Inspect theme art and logos.</small></span></button>
+              <button class="help-link-row" type="button" onclick="setHash('#admin')"><i class="bi bi-shield-check"></i><span><strong>Admin</strong><small>Open maintenance and integration tools.</small></span></button>
+            </div>
+          </div>
+
+          <div class="help-section">
+            <h3 class="h5 mb-3"><i class="bi bi-lightbulb me-2"></i>Quick Explanations</h3>
+            <dl class="help-terms mb-0">
+              <dt>gamelist.xml</dt>
+              <dd>Batocera's metadata file for a system. Drone can help edit names, descriptions, dates, media paths, and flags stored there.</dd>
+              <dt>Marquee</dt>
+              <dd>A banner-style image often used by arcade or theme layouts. The artwork tools include upload and crop support for this field.</dd>
+              <dt>Machine ID</dt>
+              <dd>The local identity for this Batocera installation. It helps distinguish one Drone from another in a swarm.</dd>
+              <dt>Client certificate</dt>
+              <dd>A trust credential used by peer API clients. The public certificate can be shared; the private key stays on the machine.</dd>
+              <dt>Swarm</dt>
+              <dd>A group of Drones known to Overmind. Swarm state can include membership, health, inventory, and actions.</dd>
+            </dl>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
   setLoading(false);
 }
 async function renderAdminPage() {
@@ -3628,6 +3787,8 @@ async function router() {
       await renderBios();
     } else if (hash === "#theme") {
       await renderThemeGalleryPage();
+    } else if (hash === "#help") {
+      await renderHelpPage();
     } else if (hash === "#admin") {
       if (!adminEnabled) {
         setHash("");
@@ -3760,6 +3921,10 @@ systemsMenuBtn.addEventListener("click", (event) => {
 themeMenuBtn.addEventListener("click", (event) => {
   event.preventDefault();
   setHash("#theme");
+});
+helpBtn.addEventListener("click", (event) => {
+  event.preventDefault();
+  setHash("#help");
 });
 systemInfoMenuBtn.addEventListener("click", (event) => {
   event.preventDefault();

@@ -77,6 +77,9 @@
       text-decoration: none;
       transition: color .2s ease, background .2s ease, border-color .2s ease;
     }
+    .resource-links {
+      gap: 0.35rem;
+    }
     .resource-icon-link:hover,
     .resource-icon-link:focus {
       color: #fff;
@@ -363,6 +366,123 @@
       width: 1%;
       white-space: nowrap;
       text-align: right;
+    }
+    .help-page {
+      color: var(--admin-text);
+    }
+    .help-header,
+    .help-section,
+    .help-metric {
+      border: 1px solid var(--admin-border);
+      background: rgba(21, 31, 50, 0.66);
+      border-radius: 8px;
+      padding: 1rem;
+    }
+    .help-kicker {
+      color: var(--admin-sidebar-accent);
+      font-size: 0.75rem;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .help-metric {
+      display: flex;
+      align-items: flex-start;
+      gap: 0.75rem;
+    }
+    .help-metric i {
+      width: 2rem;
+      height: 2rem;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex: 0 0 auto;
+      color: #06111f;
+      background: var(--admin-sidebar-accent);
+      border-radius: 8px;
+      font-size: 1.05rem;
+    }
+    .help-metric-title {
+      color: var(--admin-text);
+      font-weight: 800;
+      line-height: 1.2;
+    }
+    .help-accordion .accordion-item {
+      color: var(--admin-text);
+      background: rgba(11, 16, 32, 0.38);
+      border-color: var(--admin-border);
+    }
+    .help-accordion .accordion-button {
+      color: var(--admin-text);
+      background: rgba(21, 31, 50, 0.78);
+      font-weight: 800;
+      box-shadow: none;
+      min-height: 3.1rem;
+    }
+    .help-accordion .accordion-button:not(.collapsed) {
+      color: #fff;
+      background: rgba(0, 194, 255, 0.14);
+      border-bottom: 1px solid var(--admin-border);
+    }
+    .help-accordion .accordion-button::after {
+      filter: invert(1) grayscale(1);
+      opacity: 0.8;
+    }
+    .help-accordion .accordion-body {
+      color: #d8e5f7;
+      line-height: 1.55;
+      background: rgba(11, 16, 32, 0.28);
+    }
+    .help-link-list {
+      display: grid;
+      gap: 0.55rem;
+    }
+    .help-link-row {
+      display: grid;
+      grid-template-columns: 2rem minmax(0, 1fr);
+      gap: 0.75rem;
+      align-items: center;
+      width: 100%;
+      min-height: 3.6rem;
+      padding: 0.65rem 0.75rem;
+      color: var(--admin-text);
+      background: rgba(11, 16, 32, 0.38);
+      border: 1px solid var(--admin-border);
+      border-radius: 8px;
+      text-align: left;
+    }
+    .help-link-row:hover,
+    .help-link-row:focus {
+      background: rgba(0, 194, 255, 0.12);
+      border-color: var(--admin-sidebar-accent);
+    }
+    .help-link-row i {
+      color: var(--admin-sidebar-accent);
+      font-size: 1.1rem;
+      text-align: center;
+    }
+    .help-link-row strong,
+    .help-link-row small {
+      display: block;
+      overflow-wrap: anywhere;
+    }
+    .help-link-row small,
+    .help-terms dd {
+      color: var(--admin-muted);
+    }
+    .help-terms dt {
+      color: var(--admin-text);
+      font-size: 0.78rem;
+      font-weight: 800;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .help-terms dd {
+      margin: 0 0 0.85rem;
+      line-height: 1.45;
+    }
+    .help-terms dd:last-child {
+      margin-bottom: 0;
     }
     .system-info-grid {
       display: grid;
