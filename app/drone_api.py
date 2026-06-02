@@ -162,6 +162,7 @@ FAKE_OVERMIND_TOKEN = "demo-local-drone-token"
 _OVERMIND_POLLER_STARTED = False
 _ROM_METADATA_POLLER_STARTED = False
 _ROM_METADATA_ACTIVE = Event()
+_ROM_METADATA_WAKE = Event()
 _ROM_METADATA_LOCK = RLock()
 _DOWNLOAD_MANAGER = None
 _PERFORMANCE_METRICS_LAST_SAMPLE: Optional[dict] = None
@@ -9437,10 +9438,12 @@ def _execute_overmind_action(
         cache["full_refresh_pending"] = True
         cache["rebuild_requested_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         _persist_rom_metadata_cache(settings, cache)
+        _ROM_METADATA_WAKE.set()
         return "completed", "Queued full asset metadata rebuild; local asset cache was cleared and the metadata poller will upload a fresh snapshot.", {
             "type": "asset_metadata_rebuild",
             "status": "queued",
             "reason": "local_asset_cache_cleared",
+            "poller_wake_requested": True,
         }
 
     if action_name == "collect_game_logs":
@@ -10314,7 +10317,8 @@ def _start_rom_metadata_poller(settings: Settings, repository: "RomRepository") 
                 file=sys.stdout,
                 flush=True,
             )
-            time.sleep(initial_delay_seconds)
+            if _ROM_METADATA_WAKE.wait(initial_delay_seconds):
+                _ROM_METADATA_WAKE.clear()
         while True:
             poll_started = time.monotonic()
             try:
@@ -10332,7 +10336,8 @@ def _start_rom_metadata_poller(settings: Settings, repository: "RomRepository") 
                     file=sys.stderr,
                     flush=True,
                 )
-            time.sleep(poll_seconds)
+            if _ROM_METADATA_WAKE.wait(poll_seconds):
+                _ROM_METADATA_WAKE.clear()
 
     thread = Thread(target=loop, name="rom-metadata-poller", daemon=True)
     thread.start()

@@ -13,6 +13,7 @@ from unittest import mock
 from pathlib import Path
 from urllib.error import URLError
 
+import app.drone_api as drone_api
 from app.mock_data import seed_mock_userdata
 from app.state_store import database_path, database_path_for_legacy_file, load_payload, open_database, save_payload
 from app.overmind_reporting import (
@@ -1040,6 +1041,7 @@ class SettingsTests(unittest.TestCase):
             )
             state_db = database_path(settings.userdata_root)
             save_payload(state_db, "overmind", {"overmind_token": "keep-me"})
+            drone_api._ROM_METADATA_WAKE.clear()
 
             with mock.patch("app.drone_api._sync_rom_metadata_to_overmind", side_effect=AssertionError("heartbeat thread must not rebuild inline")):
                 status, message, result = _execute_overmind_action(
@@ -1057,6 +1059,8 @@ class SettingsTests(unittest.TestCase):
             self.assertIn("local asset cache was cleared", message)
             self.assertEqual(result["status"], "queued")
             self.assertEqual(result["reason"], "local_asset_cache_cleared")
+            self.assertTrue(result["poller_wake_requested"])
+            self.assertTrue(drone_api._ROM_METADATA_WAKE.is_set())
             self.assertTrue(cache["dirty"])
             self.assertTrue(cache["full_refresh_pending"])
             self.assertEqual(cache["entries"], {})
