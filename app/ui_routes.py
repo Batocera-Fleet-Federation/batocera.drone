@@ -2,8 +2,10 @@ from pathlib import Path
 from urllib.parse import quote
 
 try:
+    from .app_version import drone_app_version
     from .route_config import API_PREFIX, api_url
 except ImportError:
+    from app_version import drone_app_version  # type: ignore
     from route_config import API_PREFIX, api_url  # type: ignore
 
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
@@ -15,6 +17,11 @@ def load_template(name: str) -> str:
 
 
 UI_HTML = load_template("index.html")
+
+
+def render_ui_html() -> str:
+    version = quote(drone_app_version(), safe="")
+    return UI_HTML.replace("{{DRONE_APP_VERSION}}", version)
 SWAGGER_HTML = f"""<!doctype html>
 <html lang="en">
 <head>
@@ -43,7 +50,7 @@ SWAGGER_HTML = f"""<!doctype html>
 
 class UiRoutesMixin:
     def _handle_root_html(self) -> None:
-        self._send_html(200, UI_HTML)
+        self._send_html(200, render_ui_html())
 
     def _handle_static_file(self, relative_path: str) -> None:
         rel = str(relative_path or "").replace("\\", "/").lstrip("/")

@@ -1547,10 +1547,14 @@ async function updateDroneApp() {
   try {
     const payload = await apiPost("/admin/system/update-drone", {});
     dismissToast(toast);
-    showToast(`Drone update downloaded. Restarting app process... (${Math.round((payload.duration_ms || 0) / 1000)}s)`, "success", 10000);
+    showToast(`Drone update downloaded. Restarting app process... (${Math.round((payload.duration_ms || 0) / 1000)}s). Reloading shortly.`, "success", 10000);
+    setTimeout(() => {
+      window.location.href = `${window.location.pathname}${window.location.search}#home`;
+      window.location.reload();
+    }, 8000);
   } catch (error) {
     dismissToast(toast);
-    showToast(`Drone update failed: ${escapeHtml(error.message || "unknown error")}`, "danger", 8000);
+    showToast(`Drone update request ended unexpectedly: ${escapeHtml(error.message || "unknown error")}. If the service restarted, reload this page in a few seconds.`, "warning", 12000);
   }
 }
 

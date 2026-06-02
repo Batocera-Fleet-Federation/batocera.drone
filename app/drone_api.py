@@ -37,6 +37,7 @@ DRONE_REMOTE_REBOOT_EXIT_CODE = 76
 APP_DIR = Path(__file__).resolve().parent
 
 try:
+    from .app_version import drone_app_version as _drone_app_version
     from .api_routes import ApiRoutesMixin
     from .network_identity import (
         drone_network_payload as _build_drone_network_payload,
@@ -96,6 +97,7 @@ try:
 except ImportError:
     if __package__ not in (None, ""):
         raise
+    from app_version import drone_app_version as _drone_app_version  # type: ignore
     from api_routes import ApiRoutesMixin  # type: ignore
     from network_identity import (  # type: ignore
         drone_network_payload as _build_drone_network_payload,
@@ -3152,22 +3154,6 @@ class RomRepository:
 
         raise FileNotFoundError()
 
-
-
-
-def _drone_app_version() -> str:
-    env_version = (os.environ.get("DRONE_APP_VERSION") or "").strip()
-    if env_version:
-        return env_version
-    try:
-        version = (APP_DIR / "VERSION").read_text(encoding="utf-8", errors="ignore").splitlines()[0].strip()
-        if version:
-            return version
-    except Exception:
-        pass
-    return "dev"
-
-
 OPENAPI_SPEC = {
     "openapi": "3.0.3",
     "info": {
@@ -5384,6 +5370,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                     "lines": raw.splitlines(),
                     "entries": entries,
                     "fields": fields,
+                    "drone_app_version": _drone_app_version(),
                     "runtime_metrics": runtime_metrics,
                     "speed_sample": speed_sample,
                 },
@@ -5477,6 +5464,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                     "lines": lines,
                     "entries": entries,
                     "fields": fields,
+                    "drone_app_version": _drone_app_version(),
                     "runtime_metrics": runtime_metrics,
                     "speed_sample": speed_sample,
                 },
@@ -5502,6 +5490,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                         "router_ip_address": router_ip_address,
                         "drone_app_version": _drone_app_version(),
                     },
+                    "drone_app_version": _drone_app_version(),
                     "runtime_metrics": runtime_metrics,
                     "speed_sample": speed_sample,
                     "warning": f"Failed to run batocera-info: {str(error)}",
@@ -7668,7 +7657,7 @@ def _collect_system_info_payload(settings: Settings) -> dict:
         "os": os.uname().sysname if hasattr(os, "uname") else sys.platform,
         "os_release": os.uname().release if hasattr(os, "uname") else "",
         "batocera_version": batocera_version,
-        "drone_app_version": OPENAPI_SPEC.get("info", {}).get("version"),
+        "drone_app_version": _drone_app_version(),
         "architecture": os.uname().machine if hasattr(os, "uname") else "",
         "cpu": {"model": os.environ.get("DRONE_CPU_MODEL", ""), "count": os.cpu_count()},
         "memory": memory,
