@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.52] - 2026-06-01
+
+- Fixing Drone Update
+
 ## [v0.0.51] - 2026-06-01
 
 - Adding version tag + showing in ui.
