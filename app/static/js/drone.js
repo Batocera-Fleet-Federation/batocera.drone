@@ -5,7 +5,7 @@ const backBtn = document.getElementById("backBtn") || {
 };
 const systemsMenuBtn = document.getElementById("systemsMenuBtn");
 const biosBtn = document.getElementById("biosBtn");
-const helpBtn = document.getElementById("helpBtn");
+const brandHomeBtn = document.getElementById("brandHomeBtn");
 const emulatorsMenuBtn = document.getElementById("emulatorsMenuBtn");
 const themeMenuBtn = document.getElementById("themeMenuBtn");
 const systemInfoMenuBtn = document.getElementById("systemInfoMenuBtn");
@@ -1284,20 +1284,31 @@ async function renderThemeGalleryPage() {
   await loadThemePage(0);
   setLoading(false);
 }
+async function renderSystemsPage() {
+  currentSystemContext = null;
+  setSearchMode("global");
+  setLoading(true, "Loading systems...");
+  clearSystemTheme();
+  const data = await getSystemsData();
+  renderSystems(data);
+  setLoading(false);
+  refreshRandomThemeLogo().catch(() => {});
+}
 async function renderHelpPage() {
   currentSystemContext = null;
   setSearchMode("hidden");
   clearSystemTheme();
   await refreshRandomThemeLogo();
-  titleNode.textContent = "Help";
-  subtitleNode.textContent = "How Batocera Drone works";
+  titleNode.textContent = "Batocera Drone";
+  subtitleNode.textContent = "How this Drone works";
   content.innerHTML = `
     <div class="help-page">
       <div class="help-header mb-4">
         <div>
           <div class="help-kicker">Batocera Drone Guide</div>
           <h2 class="h3 mb-2">Understand the app, the moving parts, and what each screen is for.</h2>
-          <p class="mb-0 text-muted">Drone is the local Batocera companion that indexes this machine, exposes ROM and BIOS files, manages artwork and metadata, and can report state back to Overmind when configured.</p>
+          <p class="mb-2 text-muted">Drone is the local Batocera companion that indexes this machine, exposes ROM and BIOS files, manages artwork and metadata, and helps keep this cabinet understandable from a browser.</p>
+          <p class="mb-0 text-muted">Overmind is the optional fleet coordinator at <a href="https://www.batocera-swarm.com" target="_blank" rel="noopener noreferrer">Batocera Swarm <i class="bi bi-box-arrow-up-right ms-1"></i></a>. When connected, it can track this Drone's inventory and health, show swarm membership, receive asset sync updates, and return processed actions so a fleet can be monitored and managed from one place.</p>
         </div>
       </div>
 
@@ -1380,7 +1391,9 @@ async function renderHelpPage() {
                 },
                 {
                   q: "What is Overmind Integration?",
-                  a: "Overmind is the optional central coordinator for the fleet. Connecting Drone to Overmind can publish this machine's identity and inventory, process remote actions, and show swarm membership."
+                  a: "Overmind is the optional central coordinator for the fleet. Connecting Drone to Overmind can publish this machine's identity and inventory, process remote actions, and show swarm membership.",
+                  url: "https://www.batocera-swarm.com",
+                  linkText: "Open Batocera Swarm"
                 },
                 {
                   q: "Why are there Logs and Emulator Config pages?",
@@ -1402,7 +1415,10 @@ async function renderHelpPage() {
                     </button>
                   </h4>
                   <div id="helpAnswer${index}" class="accordion-collapse collapse ${index === 0 ? "show" : ""}" aria-labelledby="helpHeading${index}" data-bs-parent="#helpAccordion">
-                    <div class="accordion-body">${escapeHtml(item.a)}</div>
+                    <div class="accordion-body">
+                      ${escapeHtml(item.a)}
+                      ${item.url ? `<div class="mt-2 small"><a href="${escapeHtml(item.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(item.linkText || item.url)} <i class="bi bi-box-arrow-up-right ms-1"></i></a></div>` : ""}
+                    </div>
                   </div>
                 </div>
               `).join("")}
@@ -1414,26 +1430,25 @@ async function renderHelpPage() {
           <div class="help-section mb-4">
             <h3 class="h5 mb-3"><i class="bi bi-signpost-split me-2"></i>Where To Go</h3>
             <div class="help-link-list">
-              <button class="help-link-row" type="button" onclick="setHash('')"><i class="bi bi-grid"></i><span><strong>Systems</strong><small>Browse games by platform.</small></span></button>
-              <button class="help-link-row" type="button" onclick="setHash('#bios')"><i class="bi bi-cpu"></i><span><strong>BIOS</strong><small>Review firmware files and system filters.</small></span></button>
-              <button class="help-link-row" type="button" onclick="setHash('#theme')"><i class="bi bi-brush"></i><span><strong>Theme</strong><small>Inspect theme art and logos.</small></span></button>
-              <button class="help-link-row" type="button" onclick="setHash('#admin')"><i class="bi bi-shield-check"></i><span><strong>Admin</strong><small>Open maintenance and integration tools.</small></span></button>
+              <button class="help-link-row" type="button" onclick="setHash('#admin/artwork')"><i class="bi bi-images"></i><span><strong>Artwork & Metadata</strong><small>Edit gamelist fields, upload media, and repair missing artwork.</small></span></button>
+              <button class="help-link-row" type="button" onclick="setHash('#admin/emulators')"><i class="bi bi-file-earmark-code"></i><span><strong>Emulators</strong><small>Inspect emulator configuration files mirrored by Drone.</small></span></button>
+              <button class="help-link-row" type="button" onclick="setHash('#admin/overmind')"><i class="bi bi-diagram-3"></i><span><strong>Overmind Integration</strong><small>Connect this Drone to the fleet and review processed actions.</small></span></button>
+              <button class="help-link-row" type="button" onclick="setHash('#systems')"><i class="bi bi-grid"></i><span><strong>Systems</strong><small>Browse ROMs and folders by Batocera platform.</small></span></button>
+            </div>
+            <div class="mt-2 small">
+              <a href="https://www.batocera-swarm.com" target="_blank" rel="noopener noreferrer">Open Batocera Swarm <i class="bi bi-box-arrow-up-right ms-1"></i></a>
             </div>
           </div>
 
           <div class="help-section">
             <h3 class="h5 mb-3"><i class="bi bi-lightbulb me-2"></i>Quick Explanations</h3>
             <dl class="help-terms mb-0">
-              <dt>gamelist.xml</dt>
-              <dd>Batocera's metadata file for a system. Drone can help edit names, descriptions, dates, media paths, and flags stored there.</dd>
-              <dt>Marquee</dt>
-              <dd>A banner-style image often used by arcade or theme layouts. The artwork tools include upload and crop support for this field.</dd>
-              <dt>Machine ID</dt>
-              <dd>The local identity for this Batocera installation. It helps distinguish one Drone from another in a swarm.</dd>
-              <dt>Client certificate</dt>
-              <dd>A trust credential used by peer API clients. The public certificate can be shared; the private key stays on the machine.</dd>
-              <dt>Swarm</dt>
-              <dd>A group of Drones known to Overmind. Swarm state can include membership, health, inventory, and actions.</dd>
+              <dt>Overmind</dt>
+              <dd>The optional coordinator that helps a fleet understand each Drone's identity, inventory, health, and completed actions.</dd>
+              <dt>Security</dt>
+              <dd>Drone keeps sensitive credentials local, uses authenticated routes for protected tools, and can use certificates so trusted peers can be identified without sharing private keys.</dd>
+              <dt>Asset Syncing</dt>
+              <dd>Drone scans ROMs, BIOS files, artwork, metadata, and cache state, then reports changes so Overmind can keep the fleet inventory current.</dd>
             </dl>
           </div>
         </div>
@@ -1447,9 +1462,9 @@ async function renderAdminPage() {
   setSearchMode("hidden");
   setLoading(true, "Loading admin panel...");
   clearSystemTheme();
-  await refreshRandomThemeLogo();
   renderAdminMenu();
   setLoading(false);
+  refreshRandomThemeLogo().catch(() => {});
 }
 async function renderAdminMenu() {
   titleNode.textContent = "Admin Panel";
@@ -2940,6 +2955,7 @@ async function renderOvermindIntegrationPage() {
             <div class="mb-3">
               <label class="form-label">Overmind URL <span class="text-danger">*</span> <span class="text-muted small">Required</span></label>
               <input id="overmindUrlInput" class="form-control" type="url" placeholder="https://www.batocera-swarm.com">
+              <div class="text-muted small mt-1"><a href="https://www.batocera-swarm.com" target="_blank" rel="noopener noreferrer">Open Batocera Swarm <i class="bi bi-box-arrow-up-right ms-1"></i></a></div>
             </div>
             <div class="mb-3">
               <label class="form-label">Authorization Token <span class="text-danger">*</span> <span class="text-muted small">Required</span></label>
@@ -3787,8 +3803,10 @@ async function router() {
       await renderBios();
     } else if (hash === "#theme") {
       await renderThemeGalleryPage();
-    } else if (hash === "#help") {
+    } else if (hash === "" || hash === "#" || hash === "#home" || hash === "#help") {
       await renderHelpPage();
+    } else if (hash === "#systems") {
+      await renderSystemsPage();
     } else if (hash === "#admin") {
       if (!adminEnabled) {
         setHash("");
@@ -3892,14 +3910,7 @@ async function router() {
       const parsed = parseSystemHash(hash);
       await renderSystem(parsed.system, parsed.page);
     } else {
-      currentSystemContext = null;
-      setSearchMode("global");
-      setLoading(true, "Loading systems...");
-      clearSystemTheme();
-      const data = await getSystemsData();
-      renderSystems(data);
-      setLoading(false);
-      refreshRandomThemeLogo().catch(() => {});
+      await renderHelpPage();
     }
   } catch (err) {
     setLoading(false);
@@ -3908,7 +3919,11 @@ async function router() {
 }
 backBtn.addEventListener("click", (event) => {
   event.preventDefault();
-  setHash("");
+  setHash("#systems");
+});
+brandHomeBtn.addEventListener("click", (event) => {
+  event.preventDefault();
+  setHash("#home");
 });
 biosBtn.addEventListener("click", (event) => {
   event.preventDefault();
@@ -3916,15 +3931,11 @@ biosBtn.addEventListener("click", (event) => {
 });
 systemsMenuBtn.addEventListener("click", (event) => {
   event.preventDefault();
-  setHash("");
+  setHash("#systems");
 });
 themeMenuBtn.addEventListener("click", (event) => {
   event.preventDefault();
   setHash("#theme");
-});
-helpBtn.addEventListener("click", (event) => {
-  event.preventDefault();
-  setHash("#help");
 });
 systemInfoMenuBtn.addEventListener("click", (event) => {
   event.preventDefault();
@@ -3949,7 +3960,7 @@ searchForm.addEventListener("submit", (event) => {
 clearSearchBtn.addEventListener("click", () => {
   searchInput.value = "";
   currentSystemContext = null;
-  setHash("");
+  setHash("#systems");
 });
 window.addEventListener("hashchange", router);
 async function bootstrap() {

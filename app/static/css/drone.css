@@ -57,6 +57,16 @@
       object-fit: cover;
       display: block;
     }
+    .brand-home-link {
+      display: inline-block;
+      text-decoration: none;
+      line-height: 1.2;
+    }
+    .brand-home-link:hover,
+    .brand-home-link:focus {
+      color: #fff !important;
+      text-decoration: none;
+    }
     .resource-links {
       display: inline-flex;
       align-items: center;
