@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.54] - 2026-06-02
+
+- Fix Drone update restart and permissions
+
 ## [v0.0.53] - 2026-06-01
 
 - Fix Drone self-update overlay install
