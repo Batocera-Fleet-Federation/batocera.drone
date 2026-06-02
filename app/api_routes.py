@@ -281,6 +281,23 @@ class ApiRoutesMixin:
                 self._handle_admin_overmind_actions()
                 return
 
+            if len(parts) == 2 and parts[0] == "admin" and parts[1] == "emulators":
+                self._handle_admin_emulators()
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "emulators" and parts[2] == "file":
+                max_bytes_raw = query_params.get("max_bytes", ["131072"])[0]
+                try:
+                    max_bytes = int(max_bytes_raw)
+                except Exception:
+                    max_bytes = 131072
+                self._handle_admin_emulator_file(
+                    query_params.get("root", [""])[0],
+                    query_params.get("relative_path", [""])[0],
+                    max_bytes,
+                )
+                return
+
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "configs":
                 if parts[2] == "sources":
                     self._handle_admin_config_sources()

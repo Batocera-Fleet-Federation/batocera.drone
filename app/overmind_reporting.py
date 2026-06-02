@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Tuple
@@ -97,6 +99,8 @@ _CONFIG_EXCLUSIONS = (
     "shadps4/user/imgui.ini",
     "shadps4/user/qt_ui.ini",
 )
+_CONFIG_FILE_LIST_CACHE_TTL_SECONDS = 30.0
+_CONFIG_FILE_LIST_CACHE: dict = {}
 
 
 def _state_path(settings: Any, filename: str) -> Path:
@@ -206,7 +210,7 @@ def _read_text_file_delta(path: Path, cursor: dict, max_bytes: int) -> Tuple[dic
         return {"path": str(path), "error": str(error), "delta": True}, {}
 
 
-def collect_log_sources(settings: Any, include_unchanged: bool = False) -> dict:
+def collect_log_sources(settings: Any, include_unchanged: bool = False, sources: Any = None) -> dict:
     """Build changed log source payloads and deferred delivery cursors."""
     candidates = {
         "es_launch_stdout": ["/userdata/system/logs/es_launch_stdout.log"],
@@ -214,6 +218,9 @@ def collect_log_sources(settings: Any, include_unchanged: bool = False) -> dict:
         "drone_stdout": [str((settings.log_dir / settings.stdout_log_file).resolve())],
         "drone_stderr": [str((settings.log_dir / settings.stderr_log_file).resolve())],
     }
+    if sources is not None:
+        selected = {str(source) for source in sources}
+        candidates = {source: paths for source, paths in candidates.items() if source in selected}
     cursor = {} if include_unchanged else load_uploaded_log_cursors(settings)
     next_cursor = dict(cursor)
     logs = []
@@ -239,12 +246,67 @@ def collect_log_sources(settings: Any, include_unchanged: bool = False) -> dict:
 
 
 def _is_excluded_config_path(relative_path: str) -> bool:
-    if ".bak" in relative_path.lower():
+    normalized = str(relative_path or "").replace("\\", "/").strip("/")
+    lowered = normalized.lower()
+    if ".bak" in lowered:
         return True
-    return any(fnmatch.fnmatchcase(relative_path, pattern) for pattern in _CONFIG_EXCLUSIONS)
+    if {"log", "logs"} & {part for part in lowered.split("/") if part}:
+        return True
+    return any(fnmatch.fnmatchcase(normalized, pattern) for pattern in _CONFIG_EXCLUSIONS)
 
 
-def _iter_selected_config_files(settings: Any):
+def _is_selected_config_relative(root_name: str, relative_path: str) -> bool:
+    normalized = str(relative_path or "").replace("\\", "/").strip("/")
+    if not normalized or _is_excluded_config_path(normalized):
+        return False
+
+    def matches(pattern: str) -> bool:
+        if "**" in pattern:
+            prefix, suffix = pattern.split("**", 1)
+            prefix = prefix.rstrip("/")
+            suffix = suffix.lstrip("/")
+            if prefix and not normalized.startswith(f"{prefix}/"):
+                return False
+            if suffix in {"", "*"}:
+                return True
+        return fnmatch.fnmatchcase(normalized, pattern)
+
+    return any(
+        spec_root == root_name and any(matches(pattern) for pattern in patterns)
+        for _category, spec_root, patterns in _CONFIG_COLLECTION_SPECS
+    )
+
+
+def _iter_pattern_files(root: Path, pattern: str):
+    if "**" not in pattern:
+        yield from root.glob(pattern)
+        return
+
+    prefix, suffix = pattern.split("**", 1)
+    prefix = prefix.rstrip("/")
+    suffix = suffix.lstrip("/")
+    start = root / prefix if prefix else root
+    if not start.exists() or not start.is_dir():
+        return
+    for dirpath, dirnames, filenames in os.walk(start):
+        dirnames[:] = [
+            name
+            for name in dirnames
+            if name.lower() not in {"log", "logs"}
+            and not _is_excluded_config_path((Path(dirpath) / name).relative_to(root).as_posix())
+        ]
+        base = Path(dirpath)
+        for filename in filenames:
+            path = base / filename
+            try:
+                relative_path = path.relative_to(root).as_posix()
+            except ValueError:
+                continue
+            if suffix in {"", "*"} or fnmatch.fnmatchcase(relative_path, pattern):
+                yield path
+
+
+def _iter_selected_config_file_rows(settings: Any):
     """Yield configured Batocera files only, deduplicating cross-category paths."""
     roots = {
         "configs": settings.userdata_root / "system" / "configs",
@@ -256,22 +318,107 @@ def _iter_selected_config_files(settings: Any):
         if not root.exists() or not root.is_dir():
             continue
         for pattern in patterns:
-            for path in root.glob(pattern):
+            for path in _iter_pattern_files(root, pattern):
                 if not path.is_file():
                     continue
                 relative_path = path.relative_to(root).as_posix()
                 if _is_excluded_config_path(relative_path):
                     continue
-                selected[str(path.resolve())] = (root, path, relative_path)
+                selected[str(path.resolve())] = {
+                    "root_name": root_name,
+                    "root": root,
+                    "path": path,
+                    "relative_path": relative_path,
+                }
     for _, selected_row in sorted(selected.items(), key=lambda row: row[0].lower()):
         yield selected_row
 
 
-def collect_emulator_configs(settings: Any, include_unchanged: bool = False) -> dict:
+def _selected_config_file_rows(settings: Any, use_cache: bool = True) -> list:
+    roots = {
+        "configs": settings.userdata_root / "system" / "configs",
+        ".config": settings.userdata_root / "system" / ".config",
+    }
+    cache_key = tuple((name, str(path), int(path.stat().st_mtime_ns) if path.exists() else 0) for name, path in sorted(roots.items()))
+    now = time.monotonic()
+    cached = _CONFIG_FILE_LIST_CACHE.get(cache_key)
+    if use_cache and cached and now - float(cached.get("created_at") or 0) <= _CONFIG_FILE_LIST_CACHE_TTL_SECONDS:
+        return [dict(row) for row in cached.get("rows", [])]
+    rows = list(_iter_selected_config_file_rows(settings))
+    if use_cache:
+        _CONFIG_FILE_LIST_CACHE.clear()
+        _CONFIG_FILE_LIST_CACHE[cache_key] = {"created_at": now, "rows": [dict(row) for row in rows]}
+    return rows
+
+
+def _iter_selected_config_files(settings: Any):
+    for row in _selected_config_file_rows(settings, use_cache=False):
+        yield row["root"], row["path"], row["relative_path"]
+
+
+def list_emulator_config_files(settings: Any) -> dict:
+    configs = []
+    for row in _selected_config_file_rows(settings, use_cache=True):
+        path = row["path"]
+        item = {
+            "root_name": row["root_name"],
+            "root": str(row["root"]),
+            "relative_path": row["relative_path"],
+            "path": str(path),
+        }
+        try:
+            stat = path.stat()
+            item["size"] = int(stat.st_size)
+            item["modified_at"] = datetime.fromtimestamp(stat.st_mtime, timezone.utc).replace(microsecond=0).isoformat()
+        except Exception as error:
+            item["error"] = str(error)
+        configs.append(item)
+    return {
+        "type": "emulator_configs",
+        "configs": configs,
+        "count": len(configs),
+        "incremental": False,
+    }
+
+
+def read_emulator_config_file(settings: Any, root_name: str, relative_path: str, max_bytes: int = 131072) -> dict:
+    requested_root = str(root_name or "").strip()
+    requested_relative = str(relative_path or "").replace("\\", "/").strip().lstrip("/")
+    safe_max_bytes = max(1024, min(int(max_bytes or 131072), 1048576))
+    roots = {
+        "configs": settings.userdata_root / "system" / "configs",
+        ".config": settings.userdata_root / "system" / ".config",
+    }
+    root = roots.get(requested_root)
+    if root is None or not _is_selected_config_relative(requested_root, requested_relative):
+        raise FileNotFoundError(f"Emulator config not found: {requested_root}:{requested_relative}")
+    path = (root / requested_relative).resolve()
+    try:
+        path.relative_to(root.resolve())
+    except ValueError:
+        raise FileNotFoundError(f"Emulator config not found: {requested_root}:{requested_relative}")
+    if not path.is_file():
+        raise FileNotFoundError(f"Emulator config not found: {requested_root}:{requested_relative}")
+    item = _read_text_file(path, max_bytes=safe_max_bytes)
+    item["root_name"] = requested_root
+    item["root"] = str(root)
+    item["relative_path"] = requested_relative
+    try:
+        fingerprint = hashlib.md5(path.read_bytes()).hexdigest()
+    except Exception:
+        fingerprint = hashlib.md5(str(item.get("content") or "").encode("utf-8", errors="replace")).hexdigest()
+    item["md5"] = fingerprint
+    item["fingerprint"] = fingerprint
+    return item
+    raise FileNotFoundError(f"Emulator config not found: {requested_root}:{requested_relative}")
+
+
+def collect_emulator_configs(settings: Any, include_unchanged: bool = False, max_configs: int = 250) -> dict:
     """Build changed emulator config payloads and deferred md5 fingerprints."""
     previous_fingerprints = load_uploaded_emulator_config_fingerprints(settings)
     next_fingerprints = {}
     configs = []
+    limit = max(0, int(max_configs or 0))
     for root, path, relative_path in _iter_selected_config_files(settings):
         item = _read_text_file(path, max_bytes=131072)
         item["relative_path"] = relative_path
@@ -282,7 +429,7 @@ def collect_emulator_configs(settings: Any, include_unchanged: bool = False) -> 
         except Exception:
             fingerprint = hashlib.md5(str(item.get("content") or "").encode("utf-8", errors="replace")).hexdigest()
         changed = include_unchanged or previous_fingerprints.get(key) != fingerprint
-        if changed and len(configs) < 250:
+        if changed and (limit == 0 or len(configs) < limit):
             item["md5"] = fingerprint
             item["fingerprint"] = fingerprint
             configs.append(item)

@@ -296,6 +296,15 @@ def _format_store_error(error: BaseException) -> str:
     return repr(error)
 
 
+def _is_transient_sqlite_open_error(error: BaseException) -> bool:
+    message = str(error).lower()
+    return isinstance(error, sqlite3.OperationalError) and (
+        "unable to open database file" in message
+        or "database is locked" in message
+        or "readonly database" in message
+    )
+
+
 def _open_rom_metadata_cache(settings: Any):
     connection = _open_state_database(_rom_metadata_cache_path(settings))
     _ensure_schema(connection)
@@ -1057,6 +1066,13 @@ def _load_rom_metadata_cache(settings: Any) -> Tuple[dict, bool]:
             return _read_sqlite_rom_metadata_cache(settings), False
         return _empty_rom_metadata_cache(), True
     except Exception as error:
+        if _is_transient_sqlite_open_error(error):
+            print(
+                f"Asset metadata cache temporarily unavailable; preserving existing database for next poll: {path}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return _empty_rom_metadata_cache(), False
         print(f"Asset metadata cache rebuild required: {path} ({_format_store_error(error)})", file=sys.stderr, flush=True)
         if path.exists():
             try:

@@ -59,6 +59,8 @@ try:
         collect_log_sources as _collect_log_sources,
         commit_emulator_config_fingerprints as _commit_emulator_config_fingerprints,
         commit_log_cursors as _commit_log_cursors,
+        list_emulator_config_files as _list_emulator_config_files,
+        read_emulator_config_file as _read_emulator_config_file,
     )
     from .peer_selection import select_best_peer as _select_best_peer
     from .route_config import API_PREFIX, api_url
@@ -116,6 +118,8 @@ except ImportError:
         collect_log_sources as _collect_log_sources,
         commit_emulator_config_fingerprints as _commit_emulator_config_fingerprints,
         commit_log_cursors as _commit_log_cursors,
+        list_emulator_config_files as _list_emulator_config_files,
+        read_emulator_config_file as _read_emulator_config_file,
     )
     from peer_selection import select_best_peer as _select_best_peer  # type: ignore
     from route_config import API_PREFIX, api_url  # type: ignore
@@ -174,6 +178,7 @@ OVERMIND_EVENT_TYPES = {
     "peer": "peer_health",
 }
 DOWNLOAD_TERMINAL_STATUSES = {"completed", "failed", "cancelled", "skipped"}
+PERSISTENT_OVERMIND_LOG_SOURCES = ("drone_stderr", "es_launch_stdout", "es_launch_stderr")
 DOWNLOAD_PROGRESS_PUSH_SECONDS = float(os.environ.get("DOWNLOAD_PROGRESS_PUSH_SECONDS", "5"))
 PEER_CHECK_TIMEOUT_SECONDS = float(os.environ.get("DRONE_PEER_CHECK_TIMEOUT_SECONDS", "3"))
 PEER_CHECK_INTERVAL_SECONDS = int(os.environ.get("DRONE_PEER_CHECK_INTERVAL_SECONDS", "300"))
@@ -1555,9 +1560,32 @@ def _set_kiosk_mode(settings: Settings, enabled: bool) -> Path:
     updated = "\n".join(updated_lines) + "\n"
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
-    temp_path.write_text(updated, encoding="utf-8")
-    temp_path.replace(path)
+    try:
+        temp_path.write_text(updated, encoding="utf-8")
+        temp_path.replace(path)
+    except PermissionError:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        path.write_text(updated, encoding="utf-8")
     return path
+
+
+def _request_service_control(command: str) -> bool:
+    if command not in {"restart-emulationstation"}:
+        return False
+    control_dir = Path(os.environ.get("DRONE_SERVICE_CONTROL_DIR", "/userdata/system/drone-app/control"))
+    request_path = control_dir / f"{command}.request"
+    try:
+        control_dir.mkdir(parents=True, exist_ok=True)
+        request_path.write_text(
+            datetime.now(timezone.utc).replace(microsecond=0).isoformat() + "\n",
+            encoding="utf-8",
+        )
+        return True
+    except OSError:
+        return False
 
 
 def _emulationstation_restart_command() -> Optional[List[str]]:
@@ -1571,6 +1599,8 @@ def _emulationstation_restart_command() -> Optional[List[str]]:
 
 
 def _restart_emulationstation() -> bool:
+    if _request_service_control("restart-emulationstation"):
+        return True
     command = _emulationstation_restart_command()
     if not command:
         return False
@@ -3404,6 +3434,28 @@ OPENAPI_SPEC = {
                 "summary": "List config source keys available on this host",
                 "responses": {
                     "200": {"description": "Detected config sources"},
+                },
+            }
+        },
+        "/admin/emulators": {
+            "get": {
+                "summary": "List emulator config files selected for Overmind reporting",
+                "responses": {
+                    "200": {"description": "Emulator config files and content"},
+                },
+            }
+        },
+        "/admin/emulators/file": {
+            "get": {
+                "summary": "Read one emulator config file selected for Overmind reporting",
+                "parameters": [
+                    {"name": "root", "in": "query", "required": True, "schema": {"type": "string"}},
+                    {"name": "relative_path", "in": "query", "required": True, "schema": {"type": "string"}},
+                    {"name": "max_bytes", "in": "query", "required": False, "schema": {"type": "integer", "default": 131072, "minimum": 1024, "maximum": 1048576}},
+                ],
+                "responses": {
+                    "200": {"description": "Emulator config file content"},
+                    "404": {"description": "Config file not found"},
                 },
             }
         },
@@ -6332,6 +6384,15 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 "scan_root": str(configs_root),
             },
         )
+
+    def _handle_admin_emulators(self) -> None:
+        self._send_json(200, _list_emulator_config_files(self.settings))
+
+    def _handle_admin_emulator_file(self, root_name: str, relative_path: str, max_bytes: int) -> None:
+        try:
+            self._send_json(200, _read_emulator_config_file(self.settings, root_name, relative_path, max_bytes=max_bytes))
+        except FileNotFoundError as error:
+            self._send_json(404, {"error": str(error)})
 
 
 def _build_handler(
@@ -9836,6 +9897,25 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                     )
                 elif game_log_cursors:
                     _commit_game_log_cursors(settings, game_log_cursors)
+
+                persistent_logs = _collect_log_sources(settings, sources=PERSISTENT_OVERMIND_LOG_SOURCES)
+                persistent_log_cursors = persistent_logs.pop("_cursors", {})
+                if persistent_logs.get("logs"):
+                    try:
+                        _overmind_post_json(f"{base_url}/api/devices/{device_id}/log-sources", persistent_logs, token=token, settings=settings)
+                    except (HTTPError, URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError) as error:
+                        print(
+                            f"Persistent log upload failed; heartbeat/action poll will continue: {_format_overmind_error(error)}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                    else:
+                        _commit_log_cursors(settings, persistent_log_cursors)
+                        print(
+                            f"Sent {len(persistent_logs.get('logs') or [])} persistent log source(s) to Overmind",
+                            file=sys.stdout,
+                            flush=True,
+                        )
 
                 if bool(response.get("log_stream_requested")):
                     log_sources = _collect_log_sources(settings)

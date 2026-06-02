@@ -58,6 +58,8 @@ DRONE_GID="999"
 WORK_DIR="/userdata/system/drone-app"
 ACTION="$1"
 PID_FILE="/tmp/drone-server.pid"
+CONTROL_PID_FILE="/tmp/drone-server-control.pid"
+CONTROL_DIR="/userdata/system/drone-app/control"
 STARTUP_LOG="/userdata/system/logs/drone-app/startup.log"
 
 ensure_drone_user() {
@@ -93,6 +95,7 @@ ensure_permissions() {
     /userdata/system/drone-app \
     /userdata/system/drone-app/app \
     /userdata/system/drone-app/content \
+    "$CONTROL_DIR" \
     /userdata/system/drone-app/certs \
     /userdata/system/certs \
     /userdata/system/logs/drone-app
@@ -104,8 +107,12 @@ ensure_permissions() {
 
   chmod -R 775 \
     /userdata/system/drone-app \
+    "$CONTROL_DIR" \
     /userdata/system/certs \
     /userdata/system/logs/drone-app 2>/dev/null || true
+
+  chown "$DRONE_USER":"$DRONE_GROUP" /userdata/system/drone-app/rom_metadata_cache.sqlite3* 2>/dev/null || true
+  chmod 600 /userdata/system/drone-app/rom_metadata_cache.sqlite3* 2>/dev/null || true
 
   chmod o+rx /userdata/system 2>/dev/null || true
   chmod o+rx /userdata/system/configs 2>/dev/null || true
@@ -135,6 +142,17 @@ ensure_permissions() {
   chmod 664 /userdata/system/batocera.conf 2>/dev/null || true
 
   echo "[drone-service] ✓ Permissions applied"
+}
+
+ensure_dns_fallback() {
+  if [ -w /etc/resolv.conf ]; then
+    if ! grep -q "^nameserver 1\\.1\\.1\\.1$" /etc/resolv.conf 2>/dev/null; then
+      echo "nameserver 1.1.1.1" >> /etc/resolv.conf
+    fi
+    if ! grep -q "^nameserver 8\\.8\\.8\\.8$" /etc/resolv.conf 2>/dev/null; then
+      echo "nameserver 8.8.8.8" >> /etc/resolv.conf
+    fi
+  fi
 }
 
 run_as_drone() {
@@ -225,6 +243,7 @@ launch_drone() {
 
   runner="/tmp/drone-run-now.$$"
   echo "[drone-service] Downloading and launching Drone app..."
+  wait_for_network
   if ! curl -fsSL --connect-timeout 10 --max-time 120 -o "$runner" https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/run_now.sh; then
     rm -f "$runner"
     echo "[drone-service] Failed to download Drone launcher"
@@ -257,6 +276,34 @@ request_host_reboot() {
     return
   fi
   echo "[drone-service] Unable to reboot: reboot/shutdown command was not found."
+}
+
+restart_emulationstation_as_root() {
+  if [ -x /etc/init.d/S31emulationstation ]; then
+    /etc/init.d/S31emulationstation restart
+    return
+  fi
+  if command -v batocera-es-swissknife >/dev/null 2>&1; then
+    batocera-es-swissknife --restart
+    return
+  fi
+  echo "[drone-service] Unable to restart EmulationStation: restart command was not found."
+}
+
+service_control_worker() {
+  while true; do
+    if [ -f "$CONTROL_DIR/restart-emulationstation.request" ]; then
+      rm -f "$CONTROL_DIR/restart-emulationstation.request"
+      echo "[drone-service] EmulationStation restart requested by Drone app."
+      restart_emulationstation_as_root
+    fi
+    sleep 1
+  done
+}
+
+start_control_worker() {
+  service_control_worker &
+  echo $! > "$CONTROL_PID_FILE"
 }
 
 supervise_drone() {
@@ -308,7 +355,8 @@ start_app() {
   (
     ensure_drone_user
     ensure_permissions
-    wait_for_network
+    ensure_dns_fallback
+    start_control_worker
 
     supervise_drone
   ) >> "$STARTUP_LOG" 2>&1 &
@@ -319,11 +367,15 @@ start_app() {
 }
 
 stop_app() {
+  if [ -f "$CONTROL_PID_FILE" ]; then
+    kill "$(cat "$CONTROL_PID_FILE" 2>/dev/null)" 2>/dev/null || true
+  fi
   if [ -f "$PID_FILE" ]; then
     kill "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null || true
   fi
   kill -9 $(lsof -t -i:8443) 2>/dev/null || true
   rm -f "$PID_FILE"
+  rm -f "$CONTROL_PID_FILE"
 }
 
 case "$ACTION" in
@@ -333,8 +385,12 @@ case "$ACTION" in
   stop)
     stop_app
     ;;
+  restart)
+    stop_app
+    start_app
+    ;;
   *)
-    echo "Usage: $0 {start|stop}"
+    echo "Usage: $0 {start|stop|restart}"
     exit 1
     ;;
 esac

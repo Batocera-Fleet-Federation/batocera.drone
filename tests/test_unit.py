@@ -15,6 +15,10 @@ from urllib.error import URLError
 
 from app.mock_data import seed_mock_userdata
 from app.state_store import database_path, database_path_for_legacy_file, load_payload, open_database, save_payload
+from app.overmind_reporting import (
+    list_emulator_config_files,
+    read_emulator_config_file,
+)
 from app.drone_api import (
     FAKE_OVERMIND_EMAIL,
     FAKE_OVERMIND_TOKEN,
@@ -238,6 +242,32 @@ class SettingsTests(unittest.TestCase):
             stdout_entry = next(row for row in rewritten["logs"] if row["source"] == "drone_stdout")
             self.assertEqual(stdout_entry["files"][0]["content"], "rewritten\n")
 
+    def test_log_source_collection_can_filter_persistent_overmind_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            log_dir = Path(tmp) / "logs"
+            log_dir.mkdir(parents=True)
+            (log_dir / "stderr.log").write_text("drone error\n", encoding="utf-8")
+            es_logs = root / "system" / "logs"
+            es_logs.mkdir(parents=True)
+            (es_logs / "es_launch_stdout.log").write_text("es stdout\n", encoding="utf-8")
+            (es_logs / "es_launch_stderr.log").write_text("es stderr\n", encoding="utf-8")
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "LOG_DIR": str(log_dir)},
+                clear=True,
+            ):
+                settings = Settings.from_env()
+
+            payload = _collect_log_sources(
+                settings,
+                sources=("drone_stderr", "es_launch_stdout", "es_launch_stderr"),
+            )
+            self.assertEqual(
+                {row["source"] for row in payload["logs"]},
+                {"drone_stderr", "es_launch_stdout", "es_launch_stderr"},
+            )
+
     def test_log_source_collection_skips_old_bytes_when_backlog_is_large(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
@@ -354,6 +384,8 @@ class SettingsTests(unittest.TestCase):
                 configs / "rpcs3" / "dev_flash" / "sys.yml",
                 configs / "emulationstation" / "scrapers" / "credentials.cfg",
                 configs / "shadps4" / "user" / "game_data" / "game.toml",
+                configs / "retroarch" / "log" / "runtime.cfg",
+                configs / "retroarch" / "logs" / "trace.cfg",
                 desktop / "unrelated" / "secret.ini",
             ]
             for path, content in paths.items():
@@ -393,6 +425,44 @@ class SettingsTests(unittest.TestCase):
             second = _collect_emulator_configs(settings)
 
             self.assertEqual([row["relative_path"] for row in second["configs"]], ["retroarch/250.cfg"])
+
+    def test_emulator_config_collection_can_return_full_snapshot_for_local_ui(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            configs = root / "system" / "configs" / "retroarch"
+            configs.mkdir(parents=True)
+            for index in range(251):
+                (configs / f"{index:03}.cfg").write_text(str(index), encoding="utf-8")
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
+                settings = Settings.from_env()
+
+            snapshot = _collect_emulator_configs(settings, include_unchanged=True, max_configs=0)
+
+            self.assertEqual(len(snapshot["configs"]), 251)
+            self.assertFalse(snapshot["incremental"])
+
+    def test_emulator_config_list_and_detail_use_same_selected_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            config = root / "system" / "configs" / "retroarch" / "retroarch.cfg"
+            config.parent.mkdir(parents=True)
+            config.write_text("Renderer = Vulkan", encoding="utf-8")
+            backup = root / "system" / "configs" / "retroarch" / "retroarch.cfg.bak"
+            backup.write_text("old", encoding="utf-8")
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
+                settings = Settings.from_env()
+
+            listing = list_emulator_config_files(settings)
+            rows = {row["relative_path"]: row for row in listing["configs"]}
+
+            self.assertEqual(list(rows), ["retroarch/retroarch.cfg"])
+            self.assertEqual(rows["retroarch/retroarch.cfg"]["root_name"], "configs")
+            self.assertNotIn("content", rows["retroarch/retroarch.cfg"])
+
+            detail = read_emulator_config_file(settings, "configs", "retroarch/retroarch.cfg")
+            self.assertEqual(detail["relative_path"], "retroarch/retroarch.cfg")
+            self.assertEqual(detail["content"], "Renderer = Vulkan")
+            self.assertEqual(detail["md5"], hashlib.md5(b"Renderer = Vulkan").hexdigest())
 
     def test_peer_trust_prefers_configured_ca_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -861,26 +931,29 @@ class SettingsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             batocera_conf = root / "system" / "batocera.conf"
+            control_dir = root / "system" / "drone-app" / "control"
             batocera_conf.parent.mkdir(parents=True)
             batocera_conf.write_text("global.retroachievements=1\nkiosk.enabled=0\n", encoding="utf-8")
             with mock.patch.dict(
                 "os.environ",
-                {"USERDATA_ROOT": str(root), "BATOCERA_CONF_FILE": str(batocera_conf)},
+                {
+                    "USERDATA_ROOT": str(root),
+                    "BATOCERA_CONF_FILE": str(batocera_conf),
+                    "DRONE_SERVICE_CONTROL_DIR": str(control_dir),
+                },
                 clear=True,
             ):
                 settings = Settings.from_env()
-            repo = RomRepository(root / "roms", root / "bios")
+                repo = RomRepository(root / "roms", root / "bios")
 
-            with mock.patch("app.drone_api._emulationstation_restart_command", return_value=["/etc/init.d/S31emulationstation", "restart"]), mock.patch(
-                "app.drone_api.subprocess.Popen"
-            ) as popen:
-                enabled_status, enabled_message, enabled_result = _execute_overmind_action(
-                    settings, repo, {"action": "enable_kiosk"}
-                )
-                self.assertIn("kiosk.enabled=1", batocera_conf.read_text(encoding="utf-8"))
-                disabled_status, disabled_message, disabled_result = _execute_overmind_action(
-                    settings, repo, {"action": "disable_kiosk"}
-                )
+                with mock.patch("app.drone_api.subprocess.Popen") as popen:
+                    enabled_status, enabled_message, enabled_result = _execute_overmind_action(
+                        settings, repo, {"action": "enable_kiosk"}
+                    )
+                    self.assertIn("kiosk.enabled=1", batocera_conf.read_text(encoding="utf-8"))
+                    disabled_status, disabled_message, disabled_result = _execute_overmind_action(
+                        settings, repo, {"action": "disable_kiosk"}
+                    )
 
             self.assertEqual(enabled_status, "completed")
             self.assertIn("Kiosk mode enabled", enabled_message)
@@ -890,33 +963,29 @@ class SettingsTests(unittest.TestCase):
             self.assertFalse(disabled_result["enabled"])
             self.assertIn("global.retroachievements=1", batocera_conf.read_text(encoding="utf-8"))
             self.assertIn("kiosk.enabled=0", batocera_conf.read_text(encoding="utf-8"))
-            self.assertEqual(popen.call_count, 2)
-            popen.assert_any_call(
-                ["/etc/init.d/S31emulationstation", "restart"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            self.assertTrue((control_dir / "restart-emulationstation.request").exists())
+            popen.assert_not_called()
 
     def test_refresh_emulator_list_restarts_emulationstation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
+            control_dir = root / "system" / "drone-app" / "control"
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "DRONE_SERVICE_CONTROL_DIR": str(control_dir)},
+                clear=True,
+            ):
                 settings = Settings.from_env()
-            repo = RomRepository(root / "roms", root / "bios")
-            with mock.patch("app.drone_api._emulationstation_restart_command", return_value=["/etc/init.d/S31emulationstation", "restart"]), mock.patch(
-                "app.drone_api.subprocess.Popen"
-            ) as popen:
-                status, message, result = _execute_overmind_action(settings, repo, {"action": "refresh_emulator_list"})
+                repo = RomRepository(root / "roms", root / "bios")
+                with mock.patch("app.drone_api.subprocess.Popen") as popen:
+                    status, message, result = _execute_overmind_action(settings, repo, {"action": "refresh_emulator_list"})
 
             self.assertEqual(status, "completed")
             self.assertIn("Emulator list refresh", message)
             self.assertEqual(result["type"], "emulator_list_refresh")
             self.assertTrue(result["emulationstation_restarted"])
-            popen.assert_called_once_with(
-                ["/etc/init.d/S31emulationstation", "restart"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            self.assertTrue((control_dir / "restart-emulationstation.request").exists())
+            popen.assert_not_called()
 
     def test_remote_restart_action_is_deferred_to_root_supervisor(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1078,6 +1147,7 @@ class SettingsTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         installer = root.joinpath("scripts/batocera_install.sh").read_text(encoding="utf-8")
         run_now = root.joinpath("scripts/run_now.sh").read_text(encoding="utf-8")
+        drone_source = root.joinpath("app/drone_api.py").read_text(encoding="utf-8")
 
         self.assertIn("validate_local_app()", installer)
         self.assertIn("missing or empty ${required_file}", installer)
@@ -1088,8 +1158,16 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("Restarting Drone service with updated app bundle", installer)
         self.assertIn("DRONE_REMOTE_REBOOT_EXIT_CODE", installer)
         self.assertIn("request_host_reboot()", installer)
+        self.assertIn("service_control_worker()", installer)
+        self.assertIn("/etc/init.d/S31emulationstation restart", installer)
+        self.assertIn("DRONE_SERVICE_CONTROL_DIR", drone_source)
+        self.assertIn("ensure_dns_fallback()", installer)
+        self.assertIn("nameserver 1.1.1.1", installer)
+        self.assertIn("/userdata/system/drone-app/rom_metadata_cache.sqlite3*", installer)
         self.assertIn('chown root:"$DRONE_GROUP" /userdata/system/batocera.conf', installer)
         self.assertIn("chmod 664 /userdata/system/batocera.conf", installer)
+        self.assertIn('echo "[drone-service] Downloading and launching Drone app..."\n  wait_for_network', installer)
+        self.assertNotIn("ensure_permissions\n    wait_for_network\n\n    supervise_drone", installer)
         self.assertIn("Missing or empty required file", run_now)
         self.assertIn("Downloaded Drone App failed import validation", run_now)
         self.assertIn('"app.api_routes": "ApiRoutesMixin"', run_now)
@@ -1459,6 +1537,27 @@ class SettingsTests(unittest.TestCase):
             self.assertTrue(changed)
             self.assertTrue(stats["rebuilt"])
             self.assertEqual(len(snapshot["roms"]), 1)
+
+    def test_transient_sqlite_open_error_preserves_metadata_database(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            db_path = _rom_metadata_cache_path(settings)
+            db_path.parent.mkdir(parents=True)
+            db_path.write_bytes(b"not touched")
+
+            with mock.patch("app.rom_metadata_store._read_sqlite_rom_metadata_cache", side_effect=sqlite3.OperationalError("unable to open database file")):
+                cache, missing = _load_rom_metadata_cache(settings)
+
+            self.assertFalse(missing)
+            self.assertTrue(db_path.exists())
+            self.assertEqual(db_path.read_bytes(), b"not touched")
+            self.assertEqual(cache["entries"], {})
 
     def test_legacy_json_rom_metadata_cache_migrates_to_incremental_store(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

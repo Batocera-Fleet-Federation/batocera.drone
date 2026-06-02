@@ -170,6 +170,14 @@
       background-color: rgba(0, 194, 255, 0.12);
       border-color: var(--admin-border) var(--admin-border) rgba(21, 31, 50, 0.92);
     }
+    .emulator-config-source-scroll {
+      max-height: 560px;
+      overflow-y: auto;
+    }
+    .emulator-config-filter-wrap {
+      border-bottom: 1px solid var(--admin-border);
+      background: rgba(11, 16, 32, 0.72);
+    }
     .input-group .form-control,
     .input-group .input-group-text {
       padding-top: 0.65rem;

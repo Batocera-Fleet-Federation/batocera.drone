@@ -5,6 +5,7 @@ const backBtn = document.getElementById("backBtn") || {
 };
 const systemsMenuBtn = document.getElementById("systemsMenuBtn");
 const biosBtn = document.getElementById("biosBtn");
+const emulatorsMenuBtn = document.getElementById("emulatorsMenuBtn");
 const themeMenuBtn = document.getElementById("themeMenuBtn");
 const systemInfoMenuBtn = document.getElementById("systemInfoMenuBtn");
 const adminMenuBtn = document.getElementById("adminMenuBtn");
@@ -41,6 +42,9 @@ let biosFilterInitialized = false;
 let themeFilterInitialized = false;
 let currentLogSource = null;
 let currentConfigSource = null;
+let emulatorConfigRows = [];
+let selectedEmulatorConfigIndex = 0;
+let selectedEmulatorConfigVersionIndex = 0;
 let artworkCurrentOffset = 0;
 let artworkIncludeFilesystem = false;
 let artworkSelectedFields = ["image", "marquee"];
@@ -139,7 +143,7 @@ function setSearchMode(mode, systemName = "") {
   }
 }
 function applyAdminVisibility() {
-  const adminLinks = [adminMenuBtn, systemInfoMenuBtn].filter(Boolean);
+  const adminLinks = [adminMenuBtn, systemInfoMenuBtn, emulatorsMenuBtn].filter(Boolean);
   if (adminEnabled) {
     adminLinks.forEach((link) => link.classList.remove("d-none"));
   } else {
@@ -1302,10 +1306,10 @@ async function renderAdminMenu() {
         </div>
       </div>
       <div class="col-md-4 mb-3">
-        <div class="card admin-tile pointer h-100" onclick="setHash('#admin/configs/batocera?max_bytes=131072')">
+        <div class="card admin-tile pointer h-100" onclick="setHash('#admin/emulators')">
           <div class="card-body">
             <h5 class="card-title"><i class="bi bi-file-earmark-code me-2"></i>Emulators</h5>
-            <p class="card-text">View emulator config files and detected versions</p>
+            <p class="card-text">View emulator config files mirrored to Overmind.</p>
           </div>
         </div>
       </div>
@@ -3176,6 +3180,173 @@ async function refreshCurrentLog() {
   const activeSource = document.querySelector('#logSources .list-group-item.active');
   await loadLog(currentLogSource, activeSource);
 }
+async function renderEmulatorsPage() {
+  setSearchMode("hidden");
+  titleNode.textContent = "Emulators";
+  subtitleNode.textContent = "Emulator config files mirrored to Overmind";
+  clearSystemTheme();
+  setLoading(true, "Loading emulator configs...");
+  try {
+    const payload = await api("/admin/emulators");
+    const configs = Array.isArray(payload.configs) ? payload.configs : [];
+    emulatorConfigRows = configs.map((item, index) => {
+      const label = item.relative_path || item.path || item.name || `config-${index + 1}`;
+      const content = item.content || item.text || JSON.stringify(item, null, 2);
+      const versions = Array.isArray(item.versions) && item.versions.length
+        ? item.versions
+        : [{ collected_at: item.collected_at || "", fingerprint: item.fingerprint || item.md5 || "", content }];
+      return {
+        label,
+        rootName: item.root_name || "configs",
+        root: item.root || "",
+        path: item.path || "",
+        content: item.content || "",
+        contentLoaded: Boolean(item.content || item.error),
+        fingerprint: item.fingerprint || item.md5 || "",
+        md5: item.md5 || "",
+        size: item.size,
+        truncated: Boolean(item.truncated),
+        error: item.error || "",
+        versions,
+      };
+    });
+    selectedEmulatorConfigIndex = Math.min(selectedEmulatorConfigIndex || 0, Math.max(0, emulatorConfigRows.length - 1));
+    content.innerHTML = `
+      <div class="row">
+        <div class="col-md-3 mb-3">
+          <div class="card log-card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+              <span>Emulators</span>
+              <span class="badge">${emulatorConfigRows.length}</span>
+            </div>
+            <div class="emulator-config-filter-wrap p-2">
+              <input id="emulatorConfigFilter" class="form-control form-control-sm" type="search" placeholder="Filter configs" autocomplete="off" oninput="filterEmulatorConfigs(this.value)">
+            </div>
+            <div class="list-group list-group-flush emulator-config-source-scroll" id="emulatorConfigSources">
+              ${emulatorConfigRows.map((row, index) => `
+                <button type="button" class="list-group-item list-group-item-action text-start" data-config-index="${index}" onclick="selectEmulatorConfig(${index})">
+                  <i class="bi bi-file-earmark-code me-2"></i>${escapeHtml(row.label)}
+                </button>
+              `).join("")}
+            </div>
+            <div id="emulatorConfigFilterEmpty" class="small text-muted px-3 py-2" style="display:none;">No configs match.</div>
+          </div>
+        </div>
+        <div class="col-md-9">
+          <div class="card log-card">
+            <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
+              <span id="emulatorConfigTitle">Select a config</span>
+              <div class="d-flex flex-wrap align-items-end gap-2">
+                <div>
+                  <label class="form-label small mb-1" for="emulatorConfigVersion">Version</label>
+                  <select id="emulatorConfigVersion" class="form-select form-select-sm" onchange="selectEmulatorConfigVersion(this.value)"></select>
+                </div>
+                <button class="btn btn-sm btn-outline-primary" onclick="renderEmulatorsPage()">Refresh</button>
+              </div>
+            </div>
+            <div class="card-body">
+              <div class="mb-2">
+                <div id="emulatorConfigPath" class="small text-muted"></div>
+                <div id="emulatorConfigFingerprint" class="small text-muted mono"></div>
+              </div>
+              <pre id="emulatorConfigContent" class="mono bg-dark text-light p-3" style="max-height: 640px; overflow-y: auto; white-space: pre-wrap;">Select a config from the left panel to view its contents.</pre>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+    if (!emulatorConfigRows.length) {
+      document.getElementById("emulatorConfigContent").textContent = "No emulator config files were found in the Overmind reporting set.";
+    } else {
+      setTimeout(() => selectEmulatorConfig(selectedEmulatorConfigIndex), 0);
+    }
+  } catch (err) {
+    content.innerHTML = `<div class="alert alert-danger">Failed to load emulator configs: ${escapeHtml(err.message || "unknown error")}</div>`;
+  } finally {
+    setLoading(false);
+  }
+}
+async function loadSelectedEmulatorConfigContent(row) {
+  if (!row || row.contentLoaded) return row;
+  const params = new URLSearchParams({
+    root: row.rootName || "configs",
+    relative_path: row.label,
+    max_bytes: "131072",
+  });
+  const data = await api(`/admin/emulators/file?${params.toString()}`);
+  row.root = data.root || row.root;
+  row.path = data.path || row.path;
+  row.content = data.content || "";
+  row.error = data.error || "";
+  row.fingerprint = data.fingerprint || data.md5 || row.fingerprint;
+  row.md5 = data.md5 || row.md5;
+  row.truncated = Boolean(data.truncated);
+  row.contentLoaded = true;
+  row.versions = [{ collected_at: data.collected_at || "", fingerprint: row.fingerprint, content: row.content }];
+  return row;
+}
+async function selectEmulatorConfig(index) {
+  const row = emulatorConfigRows[index];
+  if (!row) return;
+  selectedEmulatorConfigIndex = index;
+  selectedEmulatorConfigVersionIndex = 0;
+  document.querySelectorAll("#emulatorConfigSources .list-group-item").forEach((node) => {
+    node.classList.toggle("active", Number(node.dataset.configIndex) === index);
+  });
+  const title = document.getElementById("emulatorConfigTitle");
+  const path = document.getElementById("emulatorConfigPath");
+  const fingerprint = document.getElementById("emulatorConfigFingerprint");
+  const versionSelect = document.getElementById("emulatorConfigVersion");
+  const contentNode = document.getElementById("emulatorConfigContent");
+  if (title) title.textContent = row.label;
+  if (path) path.textContent = row.root || row.path || "";
+  if (contentNode && !row.contentLoaded) contentNode.textContent = "Loading config...";
+  try {
+    await loadSelectedEmulatorConfigContent(row);
+  } catch (err) {
+    row.error = err.message || "Failed to load config";
+    row.contentLoaded = true;
+  }
+  if (path) path.textContent = row.root || row.path || "";
+  if (versionSelect) {
+    versionSelect.innerHTML = (row.versions || []).map((version, versionIndex) => {
+      const stamp = version.collected_at ? new Date(version.collected_at).toLocaleString() : `Version ${versionIndex + 1}`;
+      const hash = version.fingerprint ? ` ${String(version.fingerprint).slice(0, 8)}` : "";
+      return `<option value="${versionIndex}">${escapeHtml(stamp + hash)}</option>`;
+    }).join("");
+    versionSelect.value = "0";
+  }
+  const version = (row.versions || [])[0] || row;
+  if (fingerprint) fingerprint.textContent = version.fingerprint || row.fingerprint ? `fingerprint: ${version.fingerprint || row.fingerprint}` : "";
+  if (contentNode) contentNode.textContent = row.error ? `[Config read error] ${row.error}` : (version.content || row.content || "");
+}
+function selectEmulatorConfigVersion(value) {
+  const row = emulatorConfigRows[selectedEmulatorConfigIndex || 0];
+  if (!row) return;
+  const versionIndex = Math.max(0, Math.min((row.versions || []).length - 1, Number(value) || 0));
+  selectedEmulatorConfigVersionIndex = versionIndex;
+  const version = (row.versions || [])[versionIndex] || row;
+  const fingerprint = document.getElementById("emulatorConfigFingerprint");
+  const contentNode = document.getElementById("emulatorConfigContent");
+  if (fingerprint) fingerprint.textContent = version.fingerprint || row.fingerprint ? `fingerprint: ${version.fingerprint || row.fingerprint}` : "";
+  if (contentNode) contentNode.textContent = row.error ? `[Config read error] ${row.error}` : (version.content || row.content || "");
+}
+function filterEmulatorConfigs(value) {
+  const query = String(value || "").trim().toLowerCase();
+  const buttons = Array.from(document.querySelectorAll("#emulatorConfigSources .list-group-item"));
+  const visible = [];
+  buttons.forEach((button) => {
+    const matched = !query || button.textContent.toLowerCase().includes(query);
+    button.style.display = matched ? "" : "none";
+    if (matched) visible.push(button);
+  });
+  const empty = document.getElementById("emulatorConfigFilterEmpty");
+  if (empty) empty.style.display = visible.length ? "none" : "block";
+  const selectedVisible = visible.some((button) => Number(button.dataset.configIndex) === selectedEmulatorConfigIndex);
+  if (!selectedVisible && visible.length) {
+    selectEmulatorConfig(Number(visible[0].dataset.configIndex));
+  }
+}
 async function renderConfigsPage(selectedSource = null, selectedMaxBytes = 131072) {
   setLoading(true, "Loading emulator config sources...");
   const configSourceCatalog = [
@@ -3463,6 +3634,12 @@ async function router() {
         return;
       }
       await renderAdminPage();
+    } else if (hash === "#admin/emulators") {
+      if (!adminEnabled) {
+        setHash("");
+        return;
+      }
+      await renderEmulatorsPage();
     } else if (hash.startsWith("#admin/logs/")) {
       if (!adminEnabled) {
         setHash("");

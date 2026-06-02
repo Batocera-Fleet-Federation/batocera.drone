@@ -113,9 +113,18 @@ class MockServerIntegrationTests(unittest.TestCase):
     def test_header_places_github_icon_beside_drone_brand(self) -> None:
         html = self._get_bytes("/").decode("utf-8")
         self.assertIn("Batocera Drone", html)
+        self.assertIn('id="emulatorsMenuBtn"', html)
         self.assertIn('class="resource-links"', html)
         self.assertIn('class="resource-icon-link" title="GitHub" aria-label="GitHub"', html)
         self.assertNotIn('<i class="bi bi-github me-2"></i>GitHub', html)
+
+    def test_emulators_page_ui_hooks_are_served(self) -> None:
+        js = self._get_bytes("/static/js/drone.js").decode("utf-8")
+        css = self._get_bytes("/static/css/drone.css").decode("utf-8")
+        self.assertIn("renderEmulatorsPage", js)
+        self.assertIn("filterEmulatorConfigs", js)
+        self.assertIn("/admin/emulators", js)
+        self.assertIn("emulator-config-source-scroll", css)
 
     def test_admin_logs_endpoint(self) -> None:
         payload = self._get_json("/v1/api/admin/logs/es_launch_stdout?lines=20")
@@ -127,6 +136,20 @@ class MockServerIntegrationTests(unittest.TestCase):
         self.assertEqual(payload["source"], "retroarch")
         self.assertEqual(payload["type"], "file")
         self.assertTrue(any("menu_driver" in line for line in payload["content"]))
+
+    def test_admin_emulators_endpoint_uses_overmind_config_set(self) -> None:
+        payload = self._get_json("/v1/api/admin/emulators")
+        self.assertEqual(payload["type"], "emulator_configs")
+        rows = {row["relative_path"]: row for row in payload["configs"]}
+        self.assertIn("retroarch/retroarchcustom.cfg", rows)
+        self.assertIn("duckstation/settings.ini", rows)
+        self.assertEqual(payload["count"], len(payload["configs"]))
+        self.assertEqual(rows["retroarch/retroarchcustom.cfg"]["root_name"], "configs")
+
+        detail = self._get_json("/v1/api/admin/emulators/file?root=configs&relative_path=retroarch/retroarchcustom.cfg")
+        self.assertEqual(detail["relative_path"], "retroarch/retroarchcustom.cfg")
+        self.assertIn("md5", detail)
+        self.assertIn("menu_driver", detail["content"])
 
     def test_admin_missing_artwork_endpoint(self) -> None:
         missing_rom = self._root / "roms" / "snes" / "Missing Game (USA).zip"
