@@ -13,6 +13,7 @@ const adminMenuBtn = document.getElementById("adminMenuBtn");
 const searchForm = document.getElementById("searchForm");
 const searchInput = document.getElementById("searchInput");
 const clearSearchBtn = document.getElementById("clearSearchBtn");
+const droneVersionBadge = document.getElementById("droneVersionBadge");
 const titleNode = document.querySelector(".h3.mb-1");
 const subtitleNode = document.getElementById("pageSubtitle");
 const API_BASE = "/v1/api";
@@ -3764,9 +3765,14 @@ async function loadSystemInfoBar() {
     const fields = payload.fields || {};
     const lines = payload.lines || [];
     const version = fields.batocera_version || fields.system || _extractInfoField(lines, ["version", "batocera version", "system"]);
+    const droneAppVersion = fields.drone_app_version || payload.drone_app_version || "";
     const machineId = fields.machine_id || "";
     const overmindIntegrated = fields.overmind_integrated || "no";
     const chips = [];
+    if (droneVersionBadge && droneAppVersion) {
+      droneVersionBadge.textContent = droneAppVersion;
+      droneVersionBadge.classList.remove("d-none");
+    }
     if (version) chips.push(`<span class="badge">Batocera: ${escapeHtml(version)}</span>`);
     if (machineId) chips.push(`<span class="badge">Machine ID: ${escapeHtml(machineId)}</span>`);
     if (overmindIntegrated === "yes") {

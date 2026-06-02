@@ -101,6 +101,24 @@ fi
 
 CHANGELOG="CHANGELOG.md"
 TODAY="$(date +%Y-%m-%d)"
+VERSION_FILE="app/VERSION"
+VERSION_FILE_EXISTED="0"
+VERSION_FILE_ORIGINAL=""
+
+if [[ -f "$VERSION_FILE" ]]; then
+  VERSION_FILE_EXISTED="1"
+  VERSION_FILE_ORIGINAL="$(cat "$VERSION_FILE")"
+fi
+
+restore_version_file() {
+  if [[ "$VERSION_FILE_EXISTED" == "1" ]]; then
+    printf '%s\n' "$VERSION_FILE_ORIGINAL" > "$VERSION_FILE"
+  else
+    rm -f "$VERSION_FILE"
+  fi
+}
+
+trap restore_version_file EXIT
 
 echo "══════════════════════════════════════════════════════════════"
 echo "  $PROJECT Release"
@@ -160,11 +178,14 @@ update_changelog
 
 info "Building Drone app archive..."
 mkdir -p dist
+printf '%s\n' "$VERSION" > "$VERSION_FILE"
 tar \
   --exclude='*/__pycache__' \
   --exclude='*.pyc' \
   -czf dist/drone-app.tar.gz \
   app content
+restore_version_file
+trap - EXIT
 
 if ! git diff --quiet -- "$CHANGELOG" 2>/dev/null; then
   info "Committing changelog update..."

@@ -34,6 +34,7 @@ from urllib.parse import urlparse
 DRONE_LATEST_ARCHIVE_URL = "https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/drone-app.tar.gz"
 DRONE_SELF_UPDATE_EXIT_CODE = 75
 DRONE_REMOTE_REBOOT_EXIT_CODE = 76
+APP_DIR = Path(__file__).resolve().parent
 
 try:
     from .api_routes import ApiRoutesMixin
@@ -3154,11 +3155,24 @@ class RomRepository:
 
 
 
+def _drone_app_version() -> str:
+    env_version = (os.environ.get("DRONE_APP_VERSION") or "").strip()
+    if env_version:
+        return env_version
+    try:
+        version = (APP_DIR / "VERSION").read_text(encoding="utf-8", errors="ignore").splitlines()[0].strip()
+        if version:
+            return version
+    except Exception:
+        pass
+    return "dev"
+
+
 OPENAPI_SPEC = {
     "openapi": "3.0.3",
     "info": {
         "title": "Drone App",
-        "version": "4.0",
+        "version": _drone_app_version(),
         "description": "Browse and download ROM, image, video, and BIOS assets. Peer API routes can require mTLS. For manual testing use a client certificate/key with curl, for example: curl --cert client.crt --key client.key -k https://drone-host:8443/v1/api/peer/health. The admin API page exposes certificate metadata and the public certificate only; private key material must stay on the Drone.",
     },
     "servers": [{"url": API_PREFIX}],
@@ -5360,6 +5374,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 "battery": "N/A",
                 "machine_id": self.settings.overmind_device_id,
                 "overmind_integrated": "yes" if self._load_overmind_config().get("integration_enabled") else "no",
+                "drone_app_version": _drone_app_version(),
             }
             raw = "\n".join(f"{item['key']}: {item['value']}" for item in entries)
             self._send_json(
@@ -5453,6 +5468,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 fields["router_ip_address"] = router_ip_address
             fields["machine_id"] = self.settings.overmind_device_id
             fields["overmind_integrated"] = overmind_integrated
+            fields["drone_app_version"] = _drone_app_version()
 
             self._send_json(
                 200,
@@ -5484,6 +5500,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                         "machine_id": self.settings.overmind_device_id,
                         "overmind_integrated": overmind_integrated,
                         "router_ip_address": router_ip_address,
+                        "drone_app_version": _drone_app_version(),
                     },
                     "runtime_metrics": runtime_metrics,
                     "speed_sample": speed_sample,

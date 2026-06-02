@@ -57,6 +57,12 @@
       object-fit: cover;
       display: block;
     }
+    .brand-title-wrap {
+      display: flex;
+      align-items: baseline;
+      gap: 0.45rem;
+      flex-wrap: wrap;
+    }
     .brand-home-link {
       display: inline-block;
       text-decoration: none;
@@ -66,6 +72,20 @@
     .brand-home-link:focus {
       color: #fff !important;
       text-decoration: none;
+    }
+    .drone-version-badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 1.25rem;
+      padding: 0.12rem 0.42rem;
+      color: #d7f4ff;
+      background: rgba(0, 194, 255, 0.12);
+      border: 1px solid rgba(0, 194, 255, 0.26);
+      border-radius: 0.4rem;
+      font-size: 0.72rem;
+      font-weight: 800;
+      line-height: 1;
+      white-space: nowrap;
     }
     .resource-links {
       display: inline-flex;
