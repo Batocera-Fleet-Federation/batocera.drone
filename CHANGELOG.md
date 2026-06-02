@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.51] - 2026-06-01
+
+- Adding version tag + showing in ui.
+
 ## [v0.0.50] - 2026-06-01
 
 - Adding landing page for drone and including Q&A + help.  Adding links to overmind.
