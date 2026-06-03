@@ -21,6 +21,8 @@ class ApiRoutesMixin:
             parts = [part for part in api_path.split("/") if part]
 
             public_parts = [part for part in raw_path.split("/") if part]
+            if self._rate_limit_unauthenticated_external_request():
+                return
             if len(public_parts) >= 2 and public_parts[0] == "static":
                 self._handle_static_file("/".join(public_parts[1:]))
                 return
@@ -332,6 +334,9 @@ class ApiRoutesMixin:
             else:
                 api_path = raw_path
             parts = [part for part in api_path.split("/") if part]
+
+            if self._rate_limit_unauthenticated_external_request():
+                return
 
             if not self.auth.check(self.headers.get("Authorization")):
                 self._send_unauthorized()

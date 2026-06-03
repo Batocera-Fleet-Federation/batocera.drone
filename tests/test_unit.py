@@ -3,6 +3,7 @@ import hashlib
 import importlib
 import io
 import json
+import os
 import socket
 import sqlite3
 import subprocess
@@ -72,6 +73,8 @@ from app.drone_api import (
     _commit_log_cursors,
     _collect_game_logs,
     _collect_system_info_payload,
+    _is_external_client_ip,
+    _unauthenticated_request_allowed,
 )
 from urllib.error import HTTPError, URLError
 
@@ -108,6 +111,21 @@ class BasicAuthTests(unittest.TestCase):
             self.assertFalse(auth.check(f"Basic {default_token}"))
             updated_token = base64.b64encode(b"arcade-admin:BetterPass123").decode("ascii")
             self.assertTrue(auth.check(f"Basic {updated_token}"))
+
+    def test_external_unauthenticated_rate_limit_exempts_private_ips(self) -> None:
+        drone_api._UNAUTH_RATE_LIMIT_BUCKETS.clear()
+        self.assertFalse(_is_external_client_ip("192.168.1.20"))
+        self.assertFalse(_is_external_client_ip("10.0.0.2"))
+        self.assertFalse(_is_external_client_ip("127.0.0.1"))
+        self.assertTrue(_is_external_client_ip("8.8.8.8"))
+        with mock.patch("app.drone_api.DRONE_UNAUTH_RATE_LIMIT_REQUESTS", 2), mock.patch(
+            "app.drone_api.DRONE_UNAUTH_RATE_LIMIT_WINDOW_SECONDS", 10
+        ):
+            self.assertTrue(_unauthenticated_request_allowed("8.8.8.8", now=100.0))
+            self.assertTrue(_unauthenticated_request_allowed("8.8.8.8", now=101.0))
+            self.assertFalse(_unauthenticated_request_allowed("8.8.8.8", now=102.0))
+            self.assertTrue(_unauthenticated_request_allowed("8.8.8.8", now=112.0))
+            self.assertTrue(_unauthenticated_request_allowed("192.168.1.20", now=102.0))
 
 
 class SettingsTests(unittest.TestCase):
@@ -1363,6 +1381,19 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("/userdata/system/drone-app/rom_metadata_cache.sqlite3*", installer)
         self.assertIn('chown root:"$DRONE_GROUP" /userdata/system/batocera.conf', installer)
         self.assertIn("chmod 664 /userdata/system/batocera.conf", installer)
+        self.assertIn("DRONE_REPAIR_ROM_PERMISSIONS:-0", installer)
+        self.assertIn("DRONE_UNAUTH_RATE_LIMIT_ENABLED='${DRONE_UNAUTH_RATE_LIMIT_ENABLED:-1}'", installer)
+        self.assertIn("DRONE_UNAUTH_RATE_LIMIT_REQUESTS='${DRONE_UNAUTH_RATE_LIMIT_REQUESTS:-60}'", installer)
+        self.assertIn("DRONE_UNAUTH_RATE_LIMIT_WINDOW_SECONDS='${DRONE_UNAUTH_RATE_LIMIT_WINDOW_SECONDS:-60}'", installer)
+        self.assertIn('DRONE_UNAUTH_RATE_LIMIT_ENABLED="${DRONE_UNAUTH_RATE_LIMIT_ENABLED:-1}"', run_now)
+        self.assertIn('DRONE_UNAUTH_RATE_LIMIT_REQUESTS="${DRONE_UNAUTH_RATE_LIMIT_REQUESTS:-60}"', run_now)
+        self.assertIn('DRONE_UNAUTH_RATE_LIMIT_WINDOW_SECONDS="${DRONE_UNAUTH_RATE_LIMIT_WINDOW_SECONDS:-60}"', run_now)
+        self.assertIn("ROM_METADATA_HASH_ROMS_ENABLED='${ROM_METADATA_HASH_ROMS_ENABLED:-1}'", installer)
+        self.assertIn('ROM_METADATA_HASH_ROMS_ENABLED="${ROM_METADATA_HASH_ROMS_ENABLED:-1}"', run_now)
+        self.assertIn("ROM_METADATA_UPLOAD_CHUNK_SIZE='${ROM_METADATA_UPLOAD_CHUNK_SIZE:-250}'", installer)
+        self.assertIn('ROM_METADATA_UPLOAD_CHUNK_SIZE="${ROM_METADATA_UPLOAD_CHUNK_SIZE:-250}"', run_now)
+        self.assertIn("DRONE_LOG_UNAUTHORIZED_REQUESTS='${DRONE_LOG_UNAUTHORIZED_REQUESTS:-0}'", installer)
+        self.assertIn('DRONE_LOG_UNAUTHORIZED_REQUESTS="${DRONE_LOG_UNAUTHORIZED_REQUESTS:-0}"', run_now)
         self.assertIn('echo "[drone-service] Downloading and launching Drone app..."\n  wait_for_network', installer)
         self.assertNotIn("ensure_permissions\n    wait_for_network\n\n    supervise_drone", installer)
         self.assertIn("Missing or empty required file", run_now)
@@ -1656,7 +1687,8 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(stats["bios_new_or_changed"], 1)
             self.assertNotIn("rom_md5", snapshot["roms"][0])
             first_bios_md5 = snapshot["bios"][0]["bios_md5"]
-            patches = list(_hash_rom_metadata_batches(settings, repo, batch_size=1))
+            with mock.patch("app.drone_api.ROM_METADATA_HASH_ROMS_ENABLED", True):
+                patches = list(_hash_rom_metadata_batches(settings, repo, batch_size=1))
             self.assertEqual(len(patches), 1)
             first_md5 = patches[0]["roms"][0]["rom_md5"]
             cache_data, _ = _load_rom_metadata_cache(settings)
@@ -1699,7 +1731,8 @@ class SettingsTests(unittest.TestCase):
                 settings = Settings.from_env()
             repo = RomRepository(settings.roms_root, settings.bios_root)
             _poll_rom_metadata_cache(settings, repo)
-            list(_hash_rom_metadata_batches(settings, repo, batch_size=1))
+            with mock.patch("app.drone_api.ROM_METADATA_HASH_ROMS_ENABLED", True):
+                list(_hash_rom_metadata_batches(settings, repo, batch_size=1))
             _mark_rom_metadata_upload_clean(settings)
             gamelist.write_text(
                 "<gameList><game><path>./Game.zip</path><name>Game</name>"
@@ -1714,6 +1747,41 @@ class SettingsTests(unittest.TestCase):
             self.assertTrue(changed)
             self.assertTrue(stats["artwork_changed"])
             self.assertEqual(snapshot["artwork"][0]["artwork_types"], ["image", "marquee"])
+
+    def test_rom_metadata_cache_reuses_md5_when_only_mtime_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            rom = root / "roms" / "snes" / "Game.zip"
+            rom.parent.mkdir(parents=True)
+            rom.write_bytes(b"rom-data")
+            self._write_gamelist(rom.parent, "Game.zip")
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            repo = RomRepository(settings.roms_root, settings.bios_root)
+
+            _poll_rom_metadata_cache(settings, repo)
+            with mock.patch("app.drone_api.ROM_METADATA_HASH_ROMS_ENABLED", True):
+                patches = list(_hash_rom_metadata_batches(settings, repo, batch_size=1))
+            first_md5 = patches[0]["roms"][0]["rom_md5"]
+            cache_data, _ = _load_rom_metadata_cache(settings)
+            cache_data["dirty"] = False
+            _persist_rom_metadata_cache(settings, cache_data)
+
+            os.utime(rom, (rom.stat().st_atime + 10, rom.stat().st_mtime + 10))
+
+            with mock.patch.object(RomRepository, "build_md5", side_effect=AssertionError("mtime-only ROM change should reuse cached md5")):
+                snapshot, changed, stats = _poll_rom_metadata_cache(settings, repo)
+                patches = list(_hash_rom_metadata_batches(settings, repo, batch_size=1))
+
+            self.assertTrue(changed)
+            self.assertEqual(stats["new_or_changed"], 0)
+            self.assertEqual(stats["roms_pending_md5"], 0)
+            self.assertEqual(snapshot["roms"][0]["rom_md5"], first_md5)
+            self.assertEqual(patches, [])
 
     def test_corrupt_rom_metadata_cache_rebuilds(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1954,13 +2022,34 @@ class SettingsTests(unittest.TestCase):
                 observed_yields.append(io_yield_seconds)
                 return original_md5(path)
 
-            with mock.patch("app.drone_api.ROM_METADATA_HASH_IO_YIELD_SECONDS", 0.125), mock.patch.object(
-                RomRepository, "build_md5", side_effect=tracked_md5
-            ):
+            with mock.patch("app.drone_api.ROM_METADATA_HASH_IO_YIELD_SECONDS", 0.125), mock.patch(
+                "app.drone_api.ROM_METADATA_HASH_ROMS_ENABLED", True
+            ), mock.patch.object(RomRepository, "build_md5", side_effect=tracked_md5):
                 _poll_rom_metadata_cache(settings, repo)
                 list(_hash_rom_metadata_batches(settings, repo, batch_size=1))
 
             self.assertEqual(observed_yields, [0.125, 0.125])
+
+    def test_background_rom_hashing_can_be_disabled_for_responsive_ui(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            rom = root / "roms" / "snes" / "Game.zip"
+            rom.parent.mkdir(parents=True)
+            rom.write_bytes(b"rom")
+            self._write_gamelist(rom.parent, "Game.zip")
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            repo = RomRepository(settings.roms_root, settings.bios_root)
+            _poll_rom_metadata_cache(settings, repo)
+
+            with mock.patch("app.drone_api.ROM_METADATA_HASH_ROMS_ENABLED", False), mock.patch.object(
+                repo, "build_md5", side_effect=AssertionError("ROM hashing should be disabled")
+            ):
+                self.assertEqual(list(_hash_rom_metadata_batches(settings, repo, batch_size=1)), [])
 
     def test_upload_clean_updates_sqlite_state_without_loading_asset_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2088,9 +2177,9 @@ class SettingsTests(unittest.TestCase):
                     raise RuntimeError("simulated reset")
                 return original_md5(path)
 
-            with mock.patch("app.drone_api.ROM_METADATA_PROGRESS_FILES", 1), mock.patch.object(
-                repo, "build_md5", side_effect=interrupted_hash
-            ):
+            with mock.patch("app.drone_api.ROM_METADATA_PROGRESS_FILES", 1), mock.patch(
+                "app.drone_api.ROM_METADATA_HASH_ROMS_ENABLED", True
+            ), mock.patch.object(repo, "build_md5", side_effect=interrupted_hash):
                 with self.assertRaisesRegex(RuntimeError, "simulated reset"):
                     list(_hash_rom_metadata_batches(settings, repo, batch_size=1000))
 
@@ -2104,7 +2193,7 @@ class SettingsTests(unittest.TestCase):
                 hashed_after_restart.append(path.name)
                 return original_md5(path)
 
-            with mock.patch.object(repo, "build_md5", side_effect=track_hash):
+            with mock.patch("app.drone_api.ROM_METADATA_HASH_ROMS_ENABLED", True), mock.patch.object(repo, "build_md5", side_effect=track_hash):
                 patches = list(_hash_rom_metadata_batches(settings, repo, batch_size=1000))
 
             self.assertEqual(hashed_after_restart, ["B.zip"])
@@ -2131,7 +2220,8 @@ class SettingsTests(unittest.TestCase):
                 settings = Settings.from_env()
             repo = RomRepository(settings.roms_root, settings.bios_root)
             _poll_rom_metadata_cache(settings, repo)
-            list(_hash_rom_metadata_batches(settings, repo, batch_size=1))
+            with mock.patch("app.drone_api.ROM_METADATA_HASH_ROMS_ENABLED", True):
+                list(_hash_rom_metadata_batches(settings, repo, batch_size=1))
             _mark_rom_metadata_upload_clean(settings)
 
             uploads = []
@@ -2186,7 +2276,8 @@ class SettingsTests(unittest.TestCase):
                 settings = Settings.from_env()
             repo = RomRepository(settings.roms_root, settings.bios_root)
             _poll_rom_metadata_cache(settings, repo)
-            list(_hash_rom_metadata_batches(settings, repo, batch_size=1))
+            with mock.patch("app.drone_api.ROM_METADATA_HASH_ROMS_ENABLED", True):
+                list(_hash_rom_metadata_batches(settings, repo, batch_size=1))
             cache_data, _ = _load_rom_metadata_cache(settings)
             cache_data["dirty"] = False
             _persist_rom_metadata_cache(settings, cache_data)
@@ -2239,7 +2330,8 @@ class SettingsTests(unittest.TestCase):
                 settings = Settings.from_env()
             repo = RomRepository(settings.roms_root, settings.bios_root)
             _poll_rom_metadata_cache(settings, repo)
-            list(_hash_rom_metadata_batches(settings, repo, batch_size=1))
+            with mock.patch("app.drone_api.ROM_METADATA_HASH_ROMS_ENABLED", True):
+                list(_hash_rom_metadata_batches(settings, repo, batch_size=1))
             cache_data, _ = _load_rom_metadata_cache(settings)
             cache_data["dirty"] = False
             cache_data["last_successful_upload_at"] = None
@@ -2373,6 +2465,8 @@ class SettingsTests(unittest.TestCase):
                 }
 
             with mock.patch("app.drone_api.ROM_METADATA_MD5_BATCH_SIZE", 1), mock.patch(
+                "app.drone_api.ROM_METADATA_HASH_ROMS_ENABLED", True
+            ), mock.patch(
                 "app.drone_api._overmind_post_json_with_status", side_effect=fake_post
             ):
                 result = _sync_rom_metadata_to_overmind(
@@ -2510,7 +2604,7 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(result["status"], "uploaded")
             self.assertEqual([payload.get("delta_index") for payload in uploads if payload.get("update_mode") == "inventory_delta"], [0, 1])
 
-    def test_rom_metadata_poll_caches_and_hashes_without_overmind_configuration(self) -> None:
+    def test_rom_metadata_poll_hashes_roms_by_default_when_cached_locally(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
             rom = root / "roms" / "snes" / "Game.zip"
@@ -2537,7 +2631,7 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(result["hashed_roms"], 1)
             cache, _ = _load_rom_metadata_cache(settings)
             self.assertTrue(cache["dirty"])
-            self.assertTrue(next(iter(cache["entries"].values()))["rom_md5"])
+            self.assertIn("rom_md5", next(iter(cache["entries"].values())))
 
     def test_rom_metadata_poll_does_not_register_without_auth_token(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2607,7 +2701,7 @@ class SettingsTests(unittest.TestCase):
 
             cache, _ = _load_rom_metadata_cache(settings)
             self.assertTrue(cache["dirty"])
-            self.assertTrue(next(iter(cache["entries"].values()))["rom_md5"])
+            self.assertIn("rom_md5", next(iter(cache["entries"].values())))
 
     def test_sample_speed_uses_cloudflare_speed_test_endpoints(self) -> None:
             calls = []

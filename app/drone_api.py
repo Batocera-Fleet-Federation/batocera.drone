@@ -2,6 +2,7 @@ import base64
 import hmac
 import html
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -17,7 +18,7 @@ import time
 import traceback
 import uuid
 import xml.etree.ElementTree as ET
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -198,6 +199,11 @@ ROM_METADATA_PROGRESS_FILES = int(os.environ.get("ROM_METADATA_PROGRESS_FILES", 
 ROM_METADATA_MD5_BATCH_SIZE = max(1, int(os.environ.get("ROM_METADATA_MD5_BATCH_SIZE", "250")))
 ROM_METADATA_UPLOAD_CHUNK_SIZE = max(1, int(os.environ.get("ROM_METADATA_UPLOAD_CHUNK_SIZE", "250")))
 ROM_METADATA_HASH_IO_YIELD_SECONDS = max(0.0, float(os.environ.get("ROM_METADATA_HASH_IO_YIELD_SECONDS", "0.05")))
+ROM_METADATA_HASH_ROMS_ENABLED = os.environ.get("ROM_METADATA_HASH_ROMS_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
+DRONE_LOG_UNAUTHORIZED_REQUESTS = os.environ.get("DRONE_LOG_UNAUTHORIZED_REQUESTS", "0").strip().lower() in {"1", "true", "yes", "on"}
+DRONE_UNAUTH_RATE_LIMIT_ENABLED = os.environ.get("DRONE_UNAUTH_RATE_LIMIT_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
+DRONE_UNAUTH_RATE_LIMIT_REQUESTS = max(1, int(os.environ.get("DRONE_UNAUTH_RATE_LIMIT_REQUESTS", "60")))
+DRONE_UNAUTH_RATE_LIMIT_WINDOW_SECONDS = max(1.0, float(os.environ.get("DRONE_UNAUTH_RATE_LIMIT_WINDOW_SECONDS", "60")))
 OVERMIND_UPLOAD_TIMEOUT_SECONDS = max(10, int(os.environ.get("OVERMIND_UPLOAD_TIMEOUT_SECONDS", "60")))
 LAUNCHBOX_PLATFORM_ALIASES = {
     "3do": "3DO Interactive Multiplayer",
@@ -1515,6 +1521,41 @@ class BasicAuth:
             return user == self.username and pw == self.password
         except Exception:
             return False
+
+
+_UNAUTH_RATE_LIMIT_BUCKETS: "defaultdict[str, deque]" = defaultdict(deque)
+_UNAUTH_RATE_LIMIT_LOCK = Lock()
+
+
+def _is_external_client_ip(value: str) -> bool:
+    try:
+        address = ipaddress.ip_address(str(value or "").split("%", 1)[0])
+    except ValueError:
+        return True
+    return not (
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_reserved
+        or address.is_unspecified
+    )
+
+
+def _unauthenticated_request_allowed(client_ip: str, now: Optional[float] = None) -> bool:
+    if not DRONE_UNAUTH_RATE_LIMIT_ENABLED:
+        return True
+    if not _is_external_client_ip(client_ip):
+        return True
+    timestamp = time.monotonic() if now is None else float(now)
+    cutoff = timestamp - DRONE_UNAUTH_RATE_LIMIT_WINDOW_SECONDS
+    with _UNAUTH_RATE_LIMIT_LOCK:
+        bucket = _UNAUTH_RATE_LIMIT_BUCKETS[str(client_ip or "-")]
+        while bucket and bucket[0] <= cutoff:
+            bucket.popleft()
+        if len(bucket) >= DRONE_UNAUTH_RATE_LIMIT_REQUESTS:
+            return False
+        bucket.append(timestamp)
+        return True
 
 
 class ExpiringLRUCache:
@@ -3652,17 +3693,43 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         return "application/octet-stream"
 
     def _send_unauthorized(self) -> None:
-        self.log_error(
-            '401 unauthorized "%s" auth_header_present=%s',
-            self.path.split("?", 1)[0],
-            "yes" if self.headers.get("Authorization") else "no",
-        )
+        has_auth_header = bool(self.headers.get("Authorization"))
+        if DRONE_LOG_UNAUTHORIZED_REQUESTS or has_auth_header:
+            self.log_error(
+                '401 unauthorized "%s" auth_header_present=%s',
+                self.path.split("?", 1)[0],
+                "yes" if has_auth_header else "no",
+            )
         self.send_response(401)
         self.send_header("WWW-Authenticate", 'Basic realm="Drone App"')
         self.send_header("Content-Type", "application/json")
         self._send_security_headers()
         self.end_headers()
         self.wfile.write(json_bytes({"error": "unauthorized"}))
+
+    def _send_rate_limited(self) -> None:
+        self.log_error('429 rate limited "%s"', self.path.split("?", 1)[0])
+        self.send_response(429)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Retry-After", str(int(DRONE_UNAUTH_RATE_LIMIT_WINDOW_SECONDS)))
+        self._send_security_headers()
+        self.end_headers()
+        self.wfile.write(json_bytes({"error": "rate_limited"}))
+
+    def _rate_limit_unauthenticated_external_request(self) -> bool:
+        if self.auth.check(self.headers.get("Authorization")):
+            return False
+        try:
+            cert = self.connection.getpeercert() if hasattr(self.connection, "getpeercert") else None
+        except Exception:
+            cert = None
+        if cert:
+            return False
+        client_ip = self.client_address[0] if self.client_address else "-"
+        if _unauthenticated_request_allowed(client_ip):
+            return False
+        self._send_rate_limited()
+        return True
 
     def _send_security_headers(self) -> None:
         image_sources = ["'self'", "data:", "https:"]
@@ -8141,6 +8208,7 @@ def _rom_metadata_cache_status(settings: Settings) -> dict:
         "active": _ROM_METADATA_ACTIVE.is_set(),
         "poller_enabled": settings.rom_metadata_poll_seconds != 0,
         "poll_seconds": settings.rom_metadata_poll_seconds,
+        "rom_hashing_enabled": ROM_METADATA_HASH_ROMS_ENABLED,
         "initial_delay_seconds": ROM_METADATA_INITIAL_DELAY_SECONDS,
         "complete": complete,
         "uploaded": uploaded,
@@ -8284,10 +8352,12 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
             stat_mtime = int(rom.get("modified_time") or rom.get("mtime") or absolute.stat().st_mtime)
             previous = existing_entries.get(key) if isinstance(existing_entries.get(key), dict) else {}
             base_entry = _database_rom_metadata_fields(rom, system_name, file_path, absolute, stat_size, stat_mtime)
-            if previous and previous.get("file_size") == stat_size and previous.get("modified_time") == stat_mtime:
+            previous_md5 = (previous.get("rom_md5") or previous.get("md5")) if previous else None
+            if previous and previous.get("file_size") == stat_size and previous_md5:
                 next_entries[key] = dict(base_entry)
-                if previous.get("rom_md5"):
-                    next_entries[key].update({"md5": previous.get("md5") or previous.get("rom_md5"), "rom_md5": previous.get("rom_md5")})
+                next_entries[key].update({"md5": previous_md5, "rom_md5": previous_md5})
+            elif previous and previous.get("file_size") == stat_size and previous.get("modified_time") == stat_mtime:
+                next_entries[key] = dict(base_entry)
             else:
                 next_entries[key] = base_entry
                 if entry_type != "folder":
@@ -8450,6 +8520,8 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
 
 def _hash_rom_metadata_batches(settings: Settings, repository: "RomRepository", batch_size: int = ROM_METADATA_MD5_BATCH_SIZE):
     """Yield bounded hash patches for ROM entries missing a current MD5 value."""
+    if not ROM_METADATA_HASH_ROMS_ENABLED:
+        return
     cache, _ = _load_rom_metadata_cache(settings)
     entries = cache.get("entries") if isinstance(cache.get("entries"), dict) else {}
     pending = [
