@@ -2646,6 +2646,7 @@ class SettingsTests(unittest.TestCase):
             self.assertFalse(cache["dirty"])
             self.assertEqual(result["status"], "uploaded")
             self.assertEqual([payload.get("delta_index") for payload in uploads if payload.get("update_mode") == "inventory_delta"], [0, 1])
+            self.assertTrue(all(item.get("payload_bytes", 0) > 0 for item in result["uploads"]))
 
     def test_rom_metadata_poll_hashes_roms_by_default_when_cached_locally(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2714,7 +2715,7 @@ class SettingsTests(unittest.TestCase):
             cache, _ = _load_rom_metadata_cache(settings)
             self.assertTrue(cache["dirty"])
 
-    def test_rom_metadata_poll_finishes_local_cache_when_overmind_upload_fails(self) -> None:
+    def test_rom_metadata_poll_defers_hashing_when_overmind_upload_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
             rom = root / "roms" / "snes" / "Game.zip"
@@ -2744,7 +2745,7 @@ class SettingsTests(unittest.TestCase):
 
             cache, _ = _load_rom_metadata_cache(settings)
             self.assertTrue(cache["dirty"])
-            self.assertIn("rom_md5", next(iter(cache["entries"].values())))
+            self.assertNotIn("rom_md5", next(iter(cache["entries"].values())))
 
     def test_sample_speed_uses_cloudflare_speed_test_endpoints(self) -> None:
             calls = []

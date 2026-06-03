@@ -8172,6 +8172,13 @@ def _chunk_rom_metadata_delta(settings: Settings, snapshot: dict, changes: dict,
     return payloads
 
 
+def _json_payload_size_bytes(payload: dict) -> int:
+    try:
+        return len(json.dumps(payload).encode("utf-8"))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _mark_rom_metadata_upload_clean(settings: Settings) -> None:
     _clear_pending_rom_metadata_changes(settings)
     _update_rom_metadata_cache_state(
@@ -10422,6 +10429,7 @@ def _sync_rom_metadata_to_overmind_locked(
     def upload(payload: dict, phase: str) -> dict:
         nonlocal token
         update_mode = str(payload.get("update_mode") or phase)
+        payload_bytes = _json_payload_size_bytes(payload)
         chunk_label = ""
         if update_mode == "inventory_chunk":
             chunk_label = f" chunk={int(payload.get('chunk_index') or 0) + 1}/{payload.get('chunk_total')}"
@@ -10436,7 +10444,7 @@ def _sync_rom_metadata_to_overmind_locked(
         except HTTPError as error:
             if error.code != 401:
                 print(
-                    f"Asset metadata upload failed: phase={phase} mode={update_mode}{chunk_label} error={_format_overmind_error(error)}",
+                    f"Asset metadata upload failed: phase={phase} mode={update_mode}{chunk_label} payload_bytes={payload_bytes} error={_format_overmind_error(error)}",
                     file=sys.stderr,
                     flush=True,
                 )
@@ -10444,7 +10452,7 @@ def _sync_rom_metadata_to_overmind_locked(
             replacement_token = _reclaim_overmind_token_after_unauthorized(settings, repository, config, base_url, error)
             if not replacement_token:
                 print(
-                    f"Asset metadata upload failed: phase={phase} mode={update_mode}{chunk_label} error={_format_overmind_error(error)}",
+                    f"Asset metadata upload failed: phase={phase} mode={update_mode}{chunk_label} payload_bytes={payload_bytes} error={_format_overmind_error(error)}",
                     file=sys.stderr,
                     flush=True,
                 )
@@ -10460,19 +10468,19 @@ def _sync_rom_metadata_to_overmind_locked(
                 )
             except Exception as retry_error:
                 print(
-                    f"Asset metadata upload failed after token refresh: phase={phase} mode={update_mode}{chunk_label} error={_format_overmind_error(retry_error)}",
+                    f"Asset metadata upload failed after token refresh: phase={phase} mode={update_mode}{chunk_label} payload_bytes={payload_bytes} error={_format_overmind_error(retry_error)}",
                     file=sys.stderr,
                     flush=True,
                 )
                 raise
         except Exception as error:
             print(
-                f"Asset metadata upload failed: phase={phase} mode={update_mode}{chunk_label} error={_format_overmind_error(error)}",
+                f"Asset metadata upload failed: phase={phase} mode={update_mode}{chunk_label} payload_bytes={payload_bytes} error={_format_overmind_error(error)}",
                 file=sys.stderr,
                 flush=True,
             )
             raise
-        uploads.append({"phase": phase, "status_code": status_code, "response": response})
+        uploads.append({"phase": phase, "status_code": status_code, "payload_bytes": payload_bytes, "response": response})
         return response
 
     pending_changes = _read_pending_rom_metadata_changes(settings)
@@ -10486,8 +10494,11 @@ def _sync_rom_metadata_to_overmind_locked(
     should_upload_inventory = bool(payloads)
     if should_upload_inventory:
         upload_kind = "full refresh" if full_refresh else "delta"
+        payload_sizes = [_json_payload_size_bytes(payload) for payload in payloads]
+        total_payload_bytes = sum(payload_sizes)
+        max_payload_bytes = max(payload_sizes) if payload_sizes else 0
         print(
-            f"Asset metadata {upload_kind} sync started: endpoint={upload_url} roms={rom_count} bios={bios_count} artwork={artwork_count} chunks={len(payloads)} timeout_seconds={OVERMIND_UPLOAD_TIMEOUT_SECONDS} force={force_upload}",
+            f"Asset metadata {upload_kind} sync started: endpoint={upload_url} roms={rom_count} bios={bios_count} artwork={artwork_count} chunks={len(payloads)} total_payload_bytes={total_payload_bytes} max_payload_bytes={max_payload_bytes} timeout_seconds={OVERMIND_UPLOAD_TIMEOUT_SECONDS} force={force_upload}",
             file=sys.stdout,
             flush=True,
         )
@@ -10495,8 +10506,9 @@ def _sync_rom_metadata_to_overmind_locked(
         accepted_bios = 0
         accepted_artwork = 0
         for index, payload in enumerate(payloads, start=1):
+            payload_bytes = _json_payload_size_bytes(payload)
             print(
-                f"Asset metadata inventory chunk upload started: chunk={index}/{len(payloads)} roms={len(payload.get('roms') or [])} bios={len(payload.get('bios') or [])} artwork={len(payload.get('artwork') or [])}",
+                f"Asset metadata inventory chunk upload started: chunk={index}/{len(payloads)} payload_bytes={payload_bytes} roms={len(payload.get('roms') or [])} bios={len(payload.get('bios') or [])} artwork={len(payload.get('artwork') or [])}",
                 file=sys.stdout,
                 flush=True,
             )
@@ -10505,7 +10517,7 @@ def _sync_rom_metadata_to_overmind_locked(
             accepted_bios += int(response.get("bios_count") or 0)
             accepted_artwork += int(response.get("artwork_count") or 0)
             print(
-                f"Asset metadata inventory chunk upload succeeded: chunk={index}/{len(payloads)} accepted_roms={response.get('rom_count')} accepted_bios={response.get('bios_count')} accepted_artwork={response.get('artwork_count')}",
+                f"Asset metadata inventory chunk upload succeeded: chunk={index}/{len(payloads)} payload_bytes={payload_bytes} accepted_roms={response.get('rom_count')} accepted_bios={response.get('bios_count')} accepted_artwork={response.get('artwork_count')}",
                 file=sys.stdout,
                 flush=True,
             )
@@ -10523,7 +10535,7 @@ def _sync_rom_metadata_to_overmind_locked(
         payload = {"device_id": settings.overmind_device_id, **patch}
         progress = patch.get("hash_progress") or {}
         print(
-            f"Asset metadata hash patch sync started: endpoint={upload_url} batch_roms={len(patch_roms)} processed={progress.get('processed')}/{progress.get('total')}",
+            f"Asset metadata hash patch sync started: endpoint={upload_url} payload_bytes={_json_payload_size_bytes(payload)} batch_roms={len(patch_roms)} processed={progress.get('processed')}/{progress.get('total')}",
             file=sys.stdout,
             flush=True,
         )
@@ -10586,6 +10598,22 @@ def _complete_local_rom_metadata_cache(settings: Settings, repository: "RomRepos
     }
 
 
+def _defer_rom_metadata_upload(settings: Settings, reason: str) -> dict:
+    cache, _ = _load_rom_metadata_cache(settings)
+    cache["dirty"] = True
+    _persist_rom_metadata_cache(settings, cache)
+    print(
+        f"Asset metadata upload deferred: reason={reason}",
+        file=sys.stderr,
+        flush=True,
+    )
+    return {
+        "status": "deferred",
+        "reason": reason,
+        "changed": False,
+    }
+
+
 def _poll_rom_metadata_once(settings: Settings, repository: "RomRepository") -> dict:
     if not _begin_rom_metadata_activity("poll"):
         return {"status": "skipped", "reason": "metadata_already_running", "changed": False}
@@ -10605,7 +10633,7 @@ def _poll_rom_metadata_once(settings: Settings, repository: "RomRepository") -> 
         try:
             return _sync_rom_metadata_to_overmind_locked(settings, repository, config, base_url, token, prepared_poll=prepared_poll)
         except Exception:
-            _complete_local_rom_metadata_cache(settings, repository, "overmind_upload_failed")
+            _defer_rom_metadata_upload(settings, "overmind_upload_failed")
             raise
     finally:
         _end_rom_metadata_activity()
