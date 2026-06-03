@@ -723,6 +723,37 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(len(snapshot["queued"]), 1)
             self.assertEqual(snapshot["recent"][0]["status"], "cancelled")
 
+    def test_download_manager_retries_failed_or_cancelled_job(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "USERDATA_ROOT": str(root),
+                    "ROMS_ROOT": str(root / "roms"),
+                    "BIOS_ROOT": str(root / "bios"),
+                    "OVERMIND_DEVICE_ID": "target-a",
+                },
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            repo = RomRepository(root / "roms", root / "bios")
+            with mock.patch("app.drone_api.Thread.start"):
+                manager = DownloadManager(settings, repo)
+
+            queued = manager.enqueue_rom({"overmind_url": "https://overmind.local"}, {"drone_id": "source-a"}, "fbneo", "1943.zip", expected_size=123)
+            manager.cancel(queued["job_id"])
+            retry = manager.retry(queued["job_id"])
+
+            self.assertEqual(retry["status"], "queued")
+            self.assertNotEqual(retry["job"]["job_id"], queued["job_id"])
+            self.assertEqual(retry["job"]["file_path"], "1943.zip")
+            self.assertEqual(retry["job"]["system"], "fbneo")
+            self.assertEqual(retry["job"]["retried_from_job_id"], queued["job_id"])
+            snapshot = manager.snapshot()
+            self.assertEqual(len(snapshot["queued"]), 1)
+            self.assertEqual(snapshot["queued"][0]["job_id"], retry["job"]["job_id"])
+
     def test_download_manager_pushes_terminal_sync_activity(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
@@ -911,6 +942,61 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(roms[0]["source"], "disk")
             self.assertFalse(roms[0]["has_gamelist_entry"])
             self.assertEqual(roms[0]["md5"], RomRepository.build_md5(rom))
+
+    def test_gamelist_rom_metadata_does_not_duplicate_disk_rows_when_gamelist_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            system = root / "roms" / "snes"
+            system.mkdir(parents=True)
+            (system / "Game.zip").write_bytes(b"rom")
+            (system / "gamelist.xml").write_text(
+                "<gameList><game><path>./Game.zip</path><name>Gamelist Game</name></game></gameList>\n",
+                encoding="utf-8",
+            )
+            repo = RomRepository(root / "roms", root / "bios")
+
+            _, roms = repo.list_gamelist_rom_metadata("snes")
+
+            self.assertEqual(len(roms), 1)
+            self.assertEqual(roms[0]["file_path"], "Game.zip")
+            self.assertTrue(roms[0]["has_gamelist_entry"])
+            self.assertEqual(roms[0]["metadata_source"], "gamelist.xml")
+
+    def test_gamelist_rom_metadata_includes_disk_rows_missing_from_stale_gamelist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            system = root / "roms" / "fbneo"
+            system.mkdir(parents=True)
+            (system / "Known.zip").write_bytes(b"rom")
+            (system / "1943.zip").write_bytes(b"new-rom")
+            (system / "gamelist.xml").write_text(
+                "<gameList><game><path>./Known.zip</path><name>Known Game</name></game></gameList>\n",
+                encoding="utf-8",
+            )
+            repo = RomRepository(root / "roms", root / "bios")
+
+            _, roms = repo.list_gamelist_rom_metadata("fbneo")
+
+            by_path = {row["file_path"]: row for row in roms}
+            self.assertEqual(set(by_path), {"Known.zip", "1943.zip"})
+            self.assertTrue(by_path["Known.zip"]["has_gamelist_entry"])
+            self.assertFalse(by_path["1943.zip"]["has_gamelist_entry"])
+            self.assertEqual(by_path["1943.zip"]["metadata_source"], "filesystem")
+
+    def test_gamelist_rom_metadata_uses_disk_rows_when_gamelist_is_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rom = root / "roms" / "fbneo" / "1942.zip"
+            rom.parent.mkdir(parents=True)
+            rom.write_bytes(b"rom")
+            repo = RomRepository(root / "roms", root / "bios")
+
+            _, roms = repo.list_gamelist_rom_metadata("fbneo")
+
+            self.assertEqual(len(roms), 1)
+            self.assertEqual(roms[0]["file_path"], "1942.zip")
+            self.assertFalse(roms[0]["has_gamelist_entry"])
+            self.assertEqual(roms[0]["metadata_source"], "filesystem")
 
     def test_rom_list_can_skip_md5_for_fast_ui_loads(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2765,6 +2851,24 @@ class RepositoryTests(unittest.TestCase):
             self.assertIn("Chrono Trigger Updated", text)
             self.assertIn("A time travel RPG.", text)
             self.assertNotIn("<genre>", text)
+
+    def test_update_gamelist_artwork_reference_creates_rom_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            system = root / "roms" / "fbneo"
+            (system / "images").mkdir(parents=True)
+            (system / "1942.zip").write_bytes(b"rom")
+            (system / "images" / "1942.png").write_bytes(b"image")
+            repo = RomRepository(root / "roms", root / "bios")
+
+            result = repo.update_gamelist_artwork_reference("fbneo", "1942.zip", "image", "images/1942.png")
+
+            self.assertEqual(result["rom_path"], "1942.zip")
+            self.assertEqual(result["artwork_path"], "images/1942.png")
+            text = (system / "gamelist.xml").read_text(encoding="utf-8")
+            self.assertIn("<path>./1942.zip</path>", text)
+            self.assertIn("<name>1942</name>", text)
+            self.assertIn("<image>./images/1942.png</image>", text)
 
 
 class LaunchBoxMappingTests(unittest.TestCase):

@@ -121,17 +121,21 @@ ensure_permissions() {
     chmod -R o+rX /userdata/system/configs/PCSX2 2>/dev/null || true
   fi
 
-  find /userdata/roms -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while read romdir; do
+  repair_rom_content_permissions() {
+    romdir="$1"
+    [ -d "$romdir" ] || return 0
     system_name="$(basename "$romdir")"
 
     chown root:"$DRONE_GROUP" "$romdir" 2>/dev/null || true
-    chmod 775 "$romdir" 2>/dev/null || true
+    chmod 2775 "$romdir" 2>/dev/null || true
 
-    for subdir in images videos manuals; do
+    for subdir in images videos manuals downloaded_images covers media; do
       target="${romdir}/${subdir}"
       mkdir -p "$target"
       chown root:"$DRONE_GROUP" "$target" 2>/dev/null || true
-      chmod 775 "$target" 2>/dev/null || true
+      chmod 2775 "$target" 2>/dev/null || true
+      find "$target" -type d -exec chown root:"$DRONE_GROUP" {} \; -exec chmod 2775 {} \; 2>/dev/null || true
+      find "$target" -type f -exec chown root:"$DRONE_GROUP" {} \; -exec chmod 664 {} \; 2>/dev/null || true
     done
 
     gamelist="${romdir}/gamelist.xml"
@@ -139,6 +143,19 @@ ensure_permissions() {
       chown root:"$DRONE_GROUP" "$gamelist" 2>/dev/null || true
       chmod 664 "$gamelist" 2>/dev/null || true
     fi
+
+    if [ -d "$romdir" ] && [ ! -f "$gamelist" ]; then
+      touch "$gamelist" 2>/dev/null || true
+      if [ -f "$gamelist" ] && [ ! -s "$gamelist" ]; then
+        printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' '<gameList />' > "$gamelist" 2>/dev/null || true
+      fi
+      chown root:"$DRONE_GROUP" "$gamelist" 2>/dev/null || true
+      chmod 664 "$gamelist" 2>/dev/null || true
+    fi
+  }
+
+  find /userdata/roms -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while read romdir; do
+    repair_rom_content_permissions "$romdir"
   done
 
   chown root:"$DRONE_GROUP" /userdata/system/batocera.conf 2>/dev/null || true
@@ -492,6 +509,7 @@ echo "drone-app can write to:"
 echo "  /userdata/roms/*/images/"
 echo "  /userdata/roms/*/videos/"
 echo "  /userdata/roms/*/manuals/"
+echo "  /userdata/roms/*/{downloaded_images,covers,media}/"
 echo "  /userdata/roms/*/gamelist.xml"
 echo "  /userdata/system/drone-app/"
 echo "  /userdata/system/drone-app/certs/"

@@ -1578,10 +1578,16 @@ function renderDownloadRows(rows, allowCancel = true) {
     <tbody>${rows.map(row => {
       const pct = Number(row.percentage || 0);
       const active = ["queued", "downloading"].includes(String(row.status || ""));
+      const retryable = ["failed", "cancelled"].includes(String(row.status || ""));
       const statusClass = row.status === "failed" ? "danger" : row.status === "completed" ? "success" : row.status === "cancelled" ? "secondary" : row.status === "downloading" ? "info" : "primary";
       const filePath = row.file_path || row.relative_path || row.rom_name || "";
       const fileType = row.file_type || "ROM";
       const errorText = row.error_message || row.failure_reason || "";
+      const jobId = escapeHtml(row.job_id || row.id || "");
+      const actions = [
+        allowCancel && active && jobId ? `<button class="btn btn-sm btn-outline-danger" title="Cancel download" aria-label="Cancel download" onclick="cancelDroneDownload('${jobId}')"><i class="bi bi-x-circle"></i></button>` : "",
+        retryable && jobId ? `<button class="btn btn-sm btn-outline-primary" title="Retry download" aria-label="Retry download" onclick="retryDroneDownload('${jobId}')"><i class="bi bi-arrow-clockwise"></i></button>` : "",
+      ].filter(Boolean).join(" ");
       return `<tr>
         <td><span class="badge text-bg-${statusClass}">${escapeHtml(row.status || "queued")}</span>${row.queue_position ? `<div class="download-meta">Queue #${row.queue_position}</div>` : ""}</td>
         <td class="small mono">${escapeHtml(row.source_drone_id || "n/a")}</td>
@@ -1593,7 +1599,7 @@ function renderDownloadRows(rows, allowCancel = true) {
         <td style="min-width:190px"><div class="progress"><div class="progress-bar" style="width:${Math.max(0, Math.min(100, pct))}%"></div></div><div class="download-meta">${formatBytes(row.downloaded_bytes || row.bytes_transferred)} / ${formatBytes(row.total_bytes || row.file_size)} · ${pct.toFixed(1)}%</div></td>
         <td class="small">${row.transfer_speed_bps ? `${formatBytes(row.transfer_speed_bps)}/s` : ""}</td>
         <td class="download-meta">${escapeHtml(row.started_at || row.download_started_at || row.created_at || "")}</td>
-        <td>${allowCancel && active ? `<button class="btn btn-sm btn-outline-danger" title="Cancel download" aria-label="Cancel download" onclick="cancelDroneDownload('${escapeHtml(row.job_id || row.id)}')"><i class="bi bi-x-circle"></i></button>` : ""}</td>
+        <td>${actions}</td>
       </tr>`;
     }).join("")}</tbody></table></div>`;
 }
@@ -1632,6 +1638,12 @@ async function renderDownloadsPage() {
 async function cancelDroneDownload(jobId) {
   if (!jobId || !window.confirm("Cancel this download?")) return;
   await apiPost(`/admin/downloads/${encodeURIComponent(jobId)}/cancel`, {});
+  await renderDownloadsPage();
+}
+
+async function retryDroneDownload(jobId) {
+  if (!jobId) return;
+  await apiPost(`/admin/downloads/${encodeURIComponent(jobId)}/retry`, {});
   await renderDownloadsPage();
 }
 async function renderAssetCachePage() {

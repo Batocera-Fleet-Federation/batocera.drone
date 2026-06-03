@@ -2144,7 +2144,12 @@ class RomRepository:
                 "has_gamelist_entry": True,
             }
             items.append(item)
-        for disk_item in self._list_rom_items(system, system_dir, include_md5=False):
+        try:
+            disk_items = self._list_rom_items(system, system_dir, include_md5=False)
+        except Exception as error:
+            print(f"ROM metadata disk supplement skipped: system={system} error={_format_overmind_error(error)}", file=sys.stderr, flush=True)
+            disk_items = []
+        for disk_item in disk_items:
             relative_path = _normalize_gamelist_rom_path(
                 disk_item.get("file_path") or disk_item.get("relative_path") or disk_item.get("rom_path") or ""
             )
@@ -3745,6 +3750,15 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             return
         result = manager.cancel(job_id, "cancelled from Drone admin")
         status_code = 404 if result.get("status") == "not_found" else 200
+        self._send_json(status_code, result)
+
+    def _handle_admin_download_retry(self, job_id: str) -> None:
+        manager = _get_download_manager()
+        if manager is None:
+            self._send_json(503, {"error": "download manager unavailable"})
+            return
+        result = manager.retry(job_id)
+        status_code = 404 if result.get("status") == "not_found" else 409 if result.get("status") == "not_retryable" else 200
         self._send_json(status_code, result)
 
     def _send_html(self, status_code: int, html: str) -> None:
@@ -7856,7 +7870,7 @@ def _collect_rom_metadata(settings: Settings, repository: "RomRepository") -> di
     bios_entries = cache.get("bios_entries") if isinstance(cache.get("bios_entries"), dict) else {}
     artwork_entries = cache.get("artwork_entries") if isinstance(cache.get("artwork_entries"), dict) else {}
     if entries or bios_entries or artwork_entries:
-        result = _build_rom_metadata_snapshot_from_cache(settings, cache)
+        result = _build_rom_metadata_snapshot_from_cache(settings, cache, rehydrate_gamelist=True)
         print(
             f"Asset metadata collected from local database: systems={len(result.get('systems') or [])} roms={len(result.get('roms') or [])} bios={len(result.get('bios') or [])} artwork={len(result.get('artwork') or [])}",
             file=sys.stdout,
@@ -7917,29 +7931,42 @@ def _collect_rom_metadata(settings: Settings, repository: "RomRepository") -> di
 
 
 def _rom_cache_entry_key(system: str, relative_path: str) -> str:
-    normalized_path = str(relative_path or "").replace("\\", "/").lstrip("./")
+    normalized_path = _normalize_gamelist_rom_path(str(relative_path or ""))
     return f"{system.strip().lower()}:{normalized_path}"
 
 
 def _bios_cache_entry_key(relative_path: str) -> str:
-    return str(relative_path or "").replace("\\", "/").lstrip("./").lower()
+    return _normalize_gamelist_rom_path(str(relative_path or "")).lower()
 
 
 def _artwork_cache_entry_key(system: str, rom_path: str) -> str:
-    return f"{str(system or '').strip().lower()}:{str(rom_path or '').replace(chr(92), '/').lstrip('./').lower()}"
+    return f"{str(system or '').strip().lower()}:{_normalize_gamelist_rom_path(str(rom_path or '')).lower()}"
 
 
-def _build_rom_metadata_snapshot_from_cache(settings: Settings, cache: dict) -> dict:
+def _build_rom_metadata_snapshot_from_cache(settings: Settings, cache: dict, rehydrate_gamelist: bool = False) -> dict:
     entries = cache.get("entries") if isinstance(cache.get("entries"), dict) else {}
     roms = []
     for entry in entries.values():
         if not isinstance(entry, dict):
             continue
         row = {k: v for k, v in entry.items() if k != "absolute_path"}
-        row["gamelist"] = {}
-        row["existing"] = {}
+        gamelist_details = (
+            _gamelist_metadata_for_reference(
+                str(row.get("gamelist_path") or ""),
+                str(row.get("gamelist_game_id") or row.get("file_path") or row.get("rom_path") or ""),
+            )
+            if rehydrate_gamelist
+            else {}
+        )
+        row["gamelist"] = gamelist_details
+        row["existing"] = {field: str(gamelist_details.get(field) or "") for field in ARTWORK_FIELDS}
         row["has_gamelist_entry"] = bool(row.get("gamelist_path"))
         row["metadata_source"] = "gamelist.xml" if row.get("gamelist_path") else row.get("metadata_source") or "filesystem"
+        title = str(gamelist_details.get("name") or "").strip()
+        if title:
+            row["name"] = title
+            row["rom_name"] = title
+            row["title"] = title
         roms.append(row)
     roms.sort(key=lambda row: (str(row.get("system") or ""), str(row.get("file_path") or "")))
     bios_entries = cache.get("bios_entries") if isinstance(cache.get("bios_entries"), dict) else {}
@@ -8714,6 +8741,45 @@ class DownloadManager:
             snapshot = self._public_job_locked(job)
         self._wake.set()
         return {"status": snapshot.get("status"), "job": snapshot}
+
+    def retry(self, job_id: str) -> dict:
+        with self._lock:
+            original = self._jobs.get(job_id)
+            if not original:
+                return {"status": "not_found", "job_id": job_id}
+            if original.get("status") not in {"failed", "cancelled"}:
+                return {"status": "not_retryable", "job_id": job_id, "job": self._public_job_locked(original)}
+            retry_job = {key: value for key, value in original.items() if key not in {"id", "job_id", "sync_id"}}
+            retry_id = str(uuid.uuid4())
+            now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+            retry_job.update({
+                "id": retry_id,
+                "job_id": retry_id,
+                "sync_id": retry_id,
+                "status": "queued",
+                "queue_position": None,
+                "downloaded_bytes": 0,
+                "bytes_transferred": 0,
+                "percentage": 0,
+                "transfer_speed_bps": 0,
+                "started_at": None,
+                "download_started_at": None,
+                "completed_at": None,
+                "download_completed_at": None,
+                "error_message": None,
+                "failure_reason": None,
+                "cancellation_requested": False,
+                "cancel_reason": None,
+                "retried_from_job_id": job_id,
+                "created_at": now,
+            })
+            retry_job.pop("_started_mono", None)
+            self._jobs[retry_id] = retry_job
+            self._cancel_events[retry_id] = Event()
+            self._update_queue_positions_locked()
+            snapshot = self._public_job_locked(retry_job)
+        self._wake.set()
+        return {"status": "queued", "job": snapshot, "retried_from_job_id": job_id}
 
     def snapshot(self) -> dict:
         with self._lock:
@@ -9526,7 +9592,18 @@ def _download_artwork_from_peer(
         raise RuntimeError("artwork download failed")
     actual_md5 = RomRepository.build_md5(partial_target)
     partial_target.replace(target)
-    repository.update_gamelist_artwork_reference(system, rom_rel, field, target.relative_to(system_dir).as_posix())
+    gamelist_update = None
+    gamelist_update_status = "succeeded"
+    try:
+        gamelist_update = repository.update_gamelist_artwork_reference(system, rom_rel, field, target.relative_to(system_dir).as_posix())
+    except Exception as error:
+        gamelist_update_status = "failed"
+        gamelist_update = {"error": str(error), "path": str(system_dir / "gamelist.xml")}
+        print(
+            f"Artwork download completed but gamelist update failed: system={system} rom={rom_rel} artwork_type={field} error={error}",
+            file=sys.stderr,
+            flush=True,
+        )
     completed_dt = datetime.now(timezone.utc).replace(microsecond=0)
     duration_ms = int((time.monotonic() - started_mono) * 1000)
     return {
@@ -9551,6 +9628,8 @@ def _download_artwork_from_peer(
         "duration_ms": duration_ms,
         "duration_seconds": round(duration_ms / 1000, 3),
         "selected_peer_reason": "healthy peer from Overmind artwork source list with best sampled score",
+        "gamelist_update_status": gamelist_update_status,
+        "gamelist_update": gamelist_update,
     }
 
 
