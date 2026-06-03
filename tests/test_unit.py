@@ -919,6 +919,49 @@ class SettingsTests(unittest.TestCase):
 
             self.assertIsNone(peer)
 
+    def test_sync_system_posts_failed_activity_with_payload_sync_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "USERDATA_ROOT": str(root),
+                    "ROMS_ROOT": str(root / "roms"),
+                    "BIOS_ROOT": str(root / "bios"),
+                    "OVERMIND_DEVICE_ID": "target-a",
+                },
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            repo = RomRepository(root / "roms", root / "bios")
+            action = {
+                "id": "action-1",
+                "action": "sync_system",
+                "payload": {
+                    "system_name": "fbneo",
+                    "roms": [{
+                        "sync_id": "sync-row-1",
+                        "system_name": "fbneo",
+                        "file_path": "1943.zip",
+                        "devices": [{"device_id": "missing-source"}],
+                    }],
+                },
+            }
+            config = {"overmind_url": "https://overmind.local", "overmind_token": "drone-token"}
+
+            with mock.patch("app.drone_api._get_download_manager") as manager, mock.patch(
+                "app.drone_api._best_peer_for_rom", return_value=None
+            ), mock.patch("app.drone_api._post_rom_sync_activity") as post_activity:
+                manager.return_value = object()
+                status, message, result = _execute_overmind_action(settings, repo, action, config, "https://overmind.local", "drone-token")
+
+            self.assertEqual(status, "failed")
+            self.assertIn("ROM sync failed", message)
+            pushed = post_activity.call_args.args[2]
+            self.assertEqual(pushed["sync_id"], "sync-row-1")
+            self.assertEqual(pushed["status"], "failed")
+            self.assertEqual(result["activity"][0]["sync_id"], "sync-row-1")
+
     def test_cached_rom_md5_exists_uses_metadata_cache_without_scanning_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"

@@ -8646,14 +8646,14 @@ class DownloadManager:
         self._thread = Thread(target=self._worker, name="drone-download-worker", daemon=True)
         self._thread.start()
 
-    def enqueue_rom(self, config: dict, peer: dict, system: str, relative_path: str, expected_size=None, expected_md5=None, source_action_id: Optional[str] = None, entry_type: str = "file") -> dict:
+    def enqueue_rom(self, config: dict, peer: dict, system: str, relative_path: str, expected_size=None, expected_md5=None, source_action_id: Optional[str] = None, entry_type: str = "file", sync_id: Optional[str] = None) -> dict:
         job_id = str(uuid.uuid4())
         peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
         now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         job = {
             "id": job_id,
             "job_id": job_id,
-            "sync_id": job_id,
+            "sync_id": sync_id or job_id,
             "source_action_id": source_action_id,
             "source_drone_id": peer_id,
             "target_drone_id": self.settings.overmind_device_id,
@@ -9928,6 +9928,7 @@ def _execute_overmind_action(
             rel = str(item.get("file_path") or item.get("rom_name") or "").strip()
             expected_md5 = item.get("rom_md5") or item.get("md5")
             entry_type = str(item.get("entry_type") or "file").strip().lower()
+            sync_id = str(item.get("sync_id") or payload.get("sync_id") or uuid.uuid4())
             source_device_ids = {
                 str(device.get("device_id") or device.get("drone_id") or "")
                 for device in item.get("devices", [])
@@ -9935,11 +9936,10 @@ def _execute_overmind_action(
             }
             if not system or not rel:
                 continue
-            sync_id = str(uuid.uuid4())
             started_wall = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
             started_mono = time.monotonic()
             if expected_md5 and _cached_rom_md5_exists(settings, expected_md5):
-                activities.append({
+                activity = {
                     "sync_id": sync_id,
                     "target_drone_id": settings.overmind_device_id,
                     "system": system,
@@ -9953,12 +9953,14 @@ def _execute_overmind_action(
                     "download_started_at": started_wall,
                     "download_completed_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
                     "duration_ms": int((time.monotonic() - started_mono) * 1000),
-                })
+                }
+                _post_rom_sync_activity(settings, config, activity)
+                activities.append(activity)
                 continue
             peer = _best_peer_for_rom(settings, repository, config, system, rel, source_device_ids=source_device_ids)
             if not peer:
                 failures += 1
-                activities.append({
+                activity = {
                     "sync_id": sync_id,
                     "target_drone_id": settings.overmind_device_id,
                     "system": system,
@@ -9972,7 +9974,9 @@ def _execute_overmind_action(
                     "download_started_at": started_wall,
                     "download_completed_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
                     "duration_ms": int((time.monotonic() - started_mono) * 1000),
-                })
+                }
+                _post_rom_sync_activity(settings, config, activity)
+                activities.append(activity)
                 continue
             try:
                 activity = manager.enqueue_rom(
@@ -9984,14 +9988,15 @@ def _execute_overmind_action(
                     expected_md5=expected_md5,
                     source_action_id=str(action.get("id") or ""),
                     entry_type=entry_type,
+                    sync_id=sync_id,
                 )
-                activity["sync_id"] = activity.get("job_id") or sync_id
+                activity["sync_id"] = sync_id
                 activity["rom_md5"] = activity.get("rom_md5") or expected_md5
                 activity["entry_type"] = activity.get("entry_type") or entry_type
                 activities.append(activity)
             except Exception as error:
                 failures += 1
-                activities.append({
+                activity = {
                     "sync_id": sync_id,
                     "source_drone_id": str(peer.get("drone_id") or peer.get("device_id") or ""),
                     "target_drone_id": settings.overmind_device_id,
@@ -10006,7 +10011,9 @@ def _execute_overmind_action(
                     "download_started_at": started_wall,
                     "download_completed_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
                     "duration_ms": int((time.monotonic() - started_mono) * 1000),
-                })
+                }
+                _post_rom_sync_activity(settings, config, activity)
+                activities.append(activity)
         result = {"type": "rom_sync", "activity": activities}
         if failures and failures == len(activities):
             return "failed", f"ROM sync failed for {failures} item(s).", result
