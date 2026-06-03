@@ -1,5 +1,13 @@
 # Changelog
 
+## [v0.0.58] - 2026-06-03
+
+- Fixing drone startup issue.
+- Removed the selected Drone metadata page’s broken Performance Metrics block in overmind.js. Added fresh selected-Drone detail merging so the metadata page uses the latest public reachability result instead of stale list data. Pinned public probe ports in tests as 8443, 443, 8080, 5000; the code already used that exact set. Fixed ROM/system/bulk sync activity IDs so pending rows can be updated by Drone results instead of leaving stale “pending” rows. Made Drone immediately post failed/skipped sync activity when it cannot start a download, including “no healthy source peer,” so sync activity reflects what happened.
+- Drone: improve ROM hashing performance, responsiveness, security, and log stability
+- Updating some UI components for retrying downloads.
+- Fixing sync issues.
+
 ## [v0.0.57] - 2026-06-02
 
 - Persist Drone Overmind device identity
