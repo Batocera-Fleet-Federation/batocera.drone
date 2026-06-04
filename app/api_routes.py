@@ -385,6 +385,10 @@ class ApiRoutesMixin:
                 self._handle_admin_drone_update()
                 return
 
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "asset-cache" and parts[2] == "purge":
+                self._handle_admin_asset_cache_purge()
+                return
+
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "downloads" and parts[3] == "cancel":
                 self._handle_admin_download_cancel(parts[2])
                 return

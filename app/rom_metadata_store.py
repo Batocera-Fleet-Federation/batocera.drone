@@ -797,6 +797,34 @@ def _clear_sqlite_asset_metadata_cache(settings: Any) -> None:
         pass
 
 
+def _purge_asset_cache_keep_md5(settings: Any, requested_at: Optional[str] = None) -> dict:
+    """Force a full re-scan and full Overmind re-upload while keeping cached md5.
+
+    Unlike :func:`_clear_sqlite_asset_metadata_cache`, which drops every cached
+    row and therefore forces every ROM to be re-hashed, this only flips the
+    scan/upload state and leaves the rom/bios/artwork rows (and their md5) in
+    place. The next metadata poll then:
+
+    * re-scans every system from disk, rebuilding the entry set so stale or
+      duplicate keys that no longer map to a file on disk are dropped, while
+      reusing md5 by (key, file_size) from the rows left in place (so nothing
+      is re-hashed); and
+    * uploads a full ``replace_all`` inventory, so Overmind rebuilds its master
+      ROM list from scratch and any duplicates it accumulated are cleared.
+    """
+    from datetime import datetime, timezone
+
+    requested = requested_at or datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    _update_rom_metadata_cache_state(
+        settings,
+        dirty=True,
+        full_refresh_pending=True,
+        scan_in_progress=False,
+        rebuild_requested_at=requested,
+    )
+    return {"status": "queued", "requested_at": requested}
+
+
 def _update_rom_metadata_cache_state(settings: Any, **values: Any) -> None:
     """Update compact scan/upload state without reading all cached asset rows."""
     if not values:

@@ -1399,6 +1399,60 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(cache["entries"], {})
             self.assertEqual(cache["systems"], [])
 
+    def test_purge_asset_cache_action_keeps_md5_and_queues_resync(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            repo = RomRepository(settings.roms_root, settings.bios_root)
+            seeded_entry = {
+                "system": "snes",
+                "file_path": "chrono.zip",
+                "rom_name": "Chrono",
+                "file_size": 12,
+                "md5": "abc123",
+                "rom_md5": "abc123",
+            }
+            _persist_rom_metadata_cache(
+                settings,
+                {
+                    **_empty_rom_metadata_cache(),
+                    "entries": {"snes:chrono.zip": seeded_entry},
+                    "systems": [{"name": "snes", "rom_count": 1}],
+                    "dirty": False,
+                    "full_refresh_pending": False,
+                },
+                rom_updates={"snes:chrono.zip": seeded_entry},
+            )
+            drone_api._ROM_METADATA_WAKE.clear()
+
+            with mock.patch("app.drone_api._sync_rom_metadata_to_overmind", side_effect=AssertionError("heartbeat thread must not resync inline")):
+                status, message, result = _execute_overmind_action(
+                    settings,
+                    repo,
+                    {"action": "purge_asset_cache", "id": "purge-1"},
+                    {},
+                    "https://overmind.local",
+                    "drone-token",
+                )
+
+            cache, _ = _load_rom_metadata_cache(settings)
+            self.assertEqual(status, "completed")
+            self.assertIn("md5 values were kept", message)
+            self.assertEqual(result["reason"], "full_refresh_kept_md5")
+            self.assertTrue(result["poller_wake_requested"])
+            self.assertTrue(drone_api._ROM_METADATA_WAKE.is_set())
+            # Resync is queued ...
+            self.assertTrue(cache["dirty"])
+            self.assertTrue(cache["full_refresh_pending"])
+            # ... but the cached entry and its md5 are preserved (no re-hash).
+            self.assertIn("snes:chrono.zip", cache["entries"])
+            self.assertEqual(cache["entries"]["snes:chrono.zip"].get("md5"), "abc123")
+
     def test_metadata_upload_snapshot_uses_cached_rows_without_gamelist_lookup(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"

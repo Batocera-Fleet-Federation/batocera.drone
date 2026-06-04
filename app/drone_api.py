@@ -72,6 +72,7 @@ try:
         _empty_rom_metadata_cache,
         _clear_pending_rom_metadata_changes,
         _clear_sqlite_asset_metadata_cache,
+        _purge_asset_cache_keep_md5,
         _load_rom_metadata_cache,
         _persist_rom_metadata_cache,
         _read_pending_rom_metadata_changes,
@@ -133,6 +134,7 @@ except ImportError:
         _empty_rom_metadata_cache,
         _clear_pending_rom_metadata_changes,
         _clear_sqlite_asset_metadata_cache,
+        _purge_asset_cache_keep_md5,
         _load_rom_metadata_cache,
         _persist_rom_metadata_cache,
         _read_pending_rom_metadata_changes,
@@ -3830,6 +3832,17 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
 
     def _handle_admin_asset_cache(self) -> None:
         self._send_json(200, _rom_metadata_cache_status(self.settings))
+
+    def _handle_admin_asset_cache_purge(self) -> None:
+        """Purge cached asset metadata while keeping md5, forcing a clean resync."""
+        result = _purge_asset_cache_keep_md5(self.settings)
+        _ROM_METADATA_WAKE.set()
+        self._send_json(200, {
+            "status": result.get("status", "queued"),
+            "kept_md5": True,
+            "requested_at": result.get("requested_at"),
+            "message": "Asset cache purge queued. Cached md5 values were kept; the poller will re-scan and upload a fresh full inventory.",
+        })
 
     def _handle_admin_download_cancel(self, job_id: str) -> None:
         manager = _get_download_manager()
@@ -9846,6 +9859,16 @@ def _execute_overmind_action(
             "type": "asset_metadata_rebuild",
             "status": "queued",
             "reason": "local_asset_cache_cleared",
+            "poller_wake_requested": True,
+        }
+
+    if action_name == "purge_asset_cache":
+        result = _purge_asset_cache_keep_md5(settings)
+        _ROM_METADATA_WAKE.set()
+        return "completed", "Queued asset cache purge; cached md5 values were kept, and the metadata poller will re-scan and upload a fresh full inventory.", {
+            "type": "asset_cache_purge",
+            "status": result.get("status", "queued"),
+            "reason": "full_refresh_kept_md5",
             "poller_wake_requested": True,
         }
 

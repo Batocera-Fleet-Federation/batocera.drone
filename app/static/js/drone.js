@@ -1646,6 +1646,23 @@ async function retryDroneDownload(jobId) {
   await apiPost(`/admin/downloads/${encodeURIComponent(jobId)}/retry`, {});
   await renderDownloadsPage();
 }
+async function purgeAssetCache() {
+  if (!window.confirm(
+    "Purge the asset cache and force a full re-scan and Overmind re-upload?\n\n" +
+    "Cached md5 values are kept, so ROMs are not re-hashed. This clears stale or " +
+    "duplicate entries and rebuilds Overmind's ROM list from a fresh full inventory."
+  )) {
+    return;
+  }
+  try {
+    const result = await apiPost("/admin/asset-cache/purge", {});
+    showToast(result.message || "Asset cache purge queued.", "success");
+    await renderAssetCachePage();
+  } catch (err) {
+    showToast(`Failed to purge asset cache: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  }
+}
+
 async function renderAssetCachePage() {
   currentSystemContext = null;
   setSearchMode("hidden");
@@ -1667,7 +1684,12 @@ async function renderAssetCachePage() {
       <div class="mb-3 d-flex flex-wrap gap-2">
         <button class="btn btn-outline-secondary" onclick="setHash('#admin')">Back to Admin</button>
         <button class="btn btn-outline-primary" onclick="setHash('#admin/asset-cache')">Refresh</button>
+        <button class="btn btn-outline-danger ms-auto" onclick="purgeAssetCache()">Purge Cache &amp; Resync</button>
       </div>
+      <p class="text-muted small mb-3">
+        Purge drops cached ROM, BIOS, and artwork metadata and forces a full re-scan and a full Overmind re-upload —
+        clearing stale or duplicate entries. Cached md5 values are kept, so ROMs are not re-hashed.
+      </p>
       <div class="card log-card mb-3">
         <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
           <span>Cache Status</span>
