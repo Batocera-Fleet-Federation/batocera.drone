@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.65] - 2026-06-04
+
+- Making bug fixes to resync functionality.
+
 ## [v0.0.64] - 2026-06-04
 
 - - Heartbeat fingerprint mismatch → purge_asset_cache → drone re-scans + full re-upload, keeping its md5 (no re-hash of ~20k ROMs), and Overmind's list is rebuilt clean. - Manual rebuild_asset_metadata action/button still exists unchanged for the rare case you do want a from-scratch re-hash. - The auto-path (db) just queues the action; only the manual endpoint clears Overmind assets immediately — preserving the exact pattern rebuild_asset_metadata already used.
