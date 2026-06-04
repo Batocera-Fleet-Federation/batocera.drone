@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.60] - 2026-06-03
+
+- Updating drone to ensure serving on port 443 and 8443 (backwards compatible).
+
 ## [v0.0.59] - 2026-06-03
 
 - Updating drone to host on port 443 for main port and 8443 for backwards compatibility.
