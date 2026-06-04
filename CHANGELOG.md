@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.61] - 2026-06-03
+
+- Adding peer to peer health checks against other drones in the swarm.
+
 ## [v0.0.60] - 2026-06-03
 
 - Updating drone to ensure serving on port 443 and 8443 (backwards compatible).
