@@ -1256,7 +1256,7 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
-        https_port_value = os.environ.get("HTTPS_PORT", os.environ.get("PORT", "8443"))
+        https_port_value = os.environ.get("HTTPS_PORT", os.environ.get("PORT", "443"))
         cert_value = os.environ.get("TLS_CERT_FILE")
         key_value = os.environ.get("TLS_KEY_FILE")
         use_fake_data = _env_bool(False, "USE_FAKE_DATA")
@@ -3328,7 +3328,7 @@ OPENAPI_SPEC = {
     "info": {
         "title": "Drone App",
         "version": _drone_app_version(),
-        "description": "Browse and download ROM, image, video, and BIOS assets. Peer API routes can require mTLS. For manual testing use a client certificate/key with curl, for example: curl --cert client.crt --key client.key -k https://drone-host:8443/v1/api/peer/health. The admin API page exposes certificate metadata and the public certificate only; private key material must stay on the Drone.",
+        "description": "Browse and download ROM, image, video, and BIOS assets. Peer API routes can require mTLS. For manual testing use a client certificate/key with curl, for example: curl --cert client.crt --key client.key -k https://drone-host/v1/api/peer/health. The admin API page exposes certificate metadata and the public certificate only; private key material must stay on the Drone.",
     },
     "servers": [{"url": API_PREFIX}],
     "components": {
@@ -4039,7 +4039,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 "mtls_enabled": self.settings.drone_mtls_enabled,
                 "certificate": metadata,
                 "guidance": {
-                    "curl": "curl --cert /path/to/client.crt --key /path/to/client.key -k https://drone-host:8443/v1/api/peer/health",
+                    "curl": "curl --cert /path/to/client.crt --key /path/to/client.key -k https://drone-host/v1/api/peer/health",
                     "warning": "Do not share Drone private key material. The download endpoint provides the public certificate only.",
                     "lifecycle": f"Drone creates or reuses a local certificate on startup. Default lifetime is {self.settings.drone_cert_days} days; expired certificates are recreated on restart.",
                 },
@@ -7507,7 +7507,7 @@ def _peer_address(peer: dict) -> Optional[str]:
     if public_reachable_url:
         return public_reachable_url
     scheme = str(peer.get("scheme") or peer.get("protocol") or "https").strip() or "https"
-    port = peer.get("api_port") or peer.get("port") or 8443
+    port = peer.get("api_port") or peer.get("port") or 443
     reachable_url = str(peer.get("reachable_url") or "").strip().rstrip("/")
     if reachable_url:
         return reachable_url
@@ -7515,7 +7515,12 @@ def _peer_address(peer: dict) -> Optional[str]:
     if public_ip and peer.get("public_resolvable") is True:
         if ":" in public_ip and not public_ip.startswith("["):
             public_ip = f"[{public_ip}]"
-        return f"{scheme}://{public_ip}:{port}"
+        try:
+            port_number = int(port)
+        except (TypeError, ValueError):
+            port_number = 443
+        port_suffix = "" if port_number == 443 and scheme == "https" else f":{port_number}"
+        return f"{scheme}://{public_ip}{port_suffix}"
     resolved = peer.get("resolved_network") if isinstance(peer.get("resolved_network"), dict) else {}
     for value in resolved.get("ipv4") or []:
         host = str(value or "").strip()

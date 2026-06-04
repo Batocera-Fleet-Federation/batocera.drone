@@ -143,13 +143,13 @@ class SettingsTests(unittest.TestCase):
     def test_hostname_override_builds_reported_drone_url(self) -> None:
         with mock.patch.dict(
             "os.environ",
-            {"HOSTNAME_OVERRIDE": "bff-drone-a", "HTTPS_PORT": "8443"},
+            {"HOSTNAME_OVERRIDE": "bff-drone-a", "HTTPS_PORT": "443"},
             clear=True,
         ):
             settings = Settings.from_env()
 
         self.assertEqual(settings.hostname_override, "bff-drone-a")
-        self.assertEqual(_drone_reachable_url(settings, {"ipv4": ["192.168.1.50"]}), "https://bff-drone-a:8443")
+        self.assertEqual(_drone_reachable_url(settings, {"ipv4": ["192.168.1.50"]}), "https://bff-drone-a")
 
     def test_overmind_device_id_persists_after_first_physical_mac_selection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -191,16 +191,16 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(device_id_file.read_text(encoding="utf-8").strip(), "58:47:ca:7e:38:57")
 
     def test_host_preference_order_is_override_ipv4_ipv6(self) -> None:
-        with mock.patch.dict("os.environ", {"HOSTNAME_OVERRIDE": "bff-drone-a", "HTTPS_PORT": "8443"}, clear=True):
+        with mock.patch.dict("os.environ", {"HOSTNAME_OVERRIDE": "bff-drone-a", "HTTPS_PORT": "443"}, clear=True):
             settings = Settings.from_env()
         network = {"ipv4": ["192.168.1.50"], "ipv6": ["fd00::50"]}
         self.assertEqual(_drone_report_host(settings, network), "bff-drone-a")
 
-        with mock.patch.dict("os.environ", {"HTTPS_PORT": "8443"}, clear=True):
+        with mock.patch.dict("os.environ", {"HTTPS_PORT": "443"}, clear=True):
             settings = Settings.from_env()
         self.assertEqual(_drone_report_host(settings, network), "192.168.1.50")
         self.assertEqual(_drone_report_host(settings, {"ipv6": ["fd00::50"]}), "fd00::50")
-        self.assertEqual(_drone_reachable_url(settings, {"ipv6": ["fd00::50"]}), "https://[fd00::50]:8443")
+        self.assertEqual(_drone_reachable_url(settings, {"ipv6": ["fd00::50"]}), "https://[fd00::50]")
 
     def test_ipv6_route_failure_is_quiet_without_debug(self) -> None:
         real_socket = socket.socket
@@ -229,40 +229,40 @@ class SettingsTests(unittest.TestCase):
 
     def test_peer_address_uses_reachable_url_before_ips(self) -> None:
         peer = {
-            "reachable_url": "https://bff-drone-b:8443",
+            "reachable_url": "https://bff-drone-b:443",
             "resolved_network": {"ipv4": ["172.20.0.4"], "ipv6": ["fd00::4"]},
-            "api_port": 8443,
+            "api_port": 443,
         }
-        self.assertEqual(_peer_address(peer), "https://bff-drone-b:8443")
+        self.assertEqual(_peer_address(peer), "https://bff-drone-b:443")
 
     def test_peer_address_prefers_public_endpoint_for_remote_swarm_transfers(self) -> None:
         peer = {
-            "public_reachable_url": "https://198.51.100.20:8443",
+            "public_reachable_url": "https://198.51.100.20:443",
             "public_ip": "198.51.100.20",
-            "reachable_url": "https://192.168.1.20:8443",
+            "reachable_url": "https://192.168.1.20:443",
             "resolved_network": {"ipv4": ["192.168.1.20"]},
-            "api_port": 8443,
+            "api_port": 443,
         }
-        self.assertEqual(_peer_address(peer), "https://198.51.100.20:8443")
+        self.assertEqual(_peer_address(peer), "https://198.51.100.20:443")
 
     def test_peer_address_builds_public_endpoint_from_public_ip(self) -> None:
         peer = {
             "public_ip": "198.51.100.21",
             "public_resolvable": True,
             "scheme": "https",
-            "api_port": 8443,
+            "api_port": 443,
         }
-        self.assertEqual(_peer_address(peer), "https://198.51.100.21:8443")
+        self.assertEqual(_peer_address(peer), "https://198.51.100.21")
 
     def test_peer_address_ignores_unverified_public_ip_when_reachable_url_exists(self) -> None:
         peer = {
             "public_ip": "198.51.100.21",
             "public_resolvable": False,
-            "reachable_url": "https://bff-drone-b:8443",
+            "reachable_url": "https://bff-drone-b:443",
             "scheme": "https",
-            "api_port": 8443,
+            "api_port": 443,
         }
-        self.assertEqual(_peer_address(peer), "https://bff-drone-b:8443")
+        self.assertEqual(_peer_address(peer), "https://bff-drone-b:443")
 
     def test_log_source_collection_sends_only_new_log_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -540,7 +540,7 @@ class SettingsTests(unittest.TestCase):
 
     def test_peer_ssl_diagnostic_identifies_hostname_mismatch(self) -> None:
         diagnostic = _peer_ssl_diagnostic(
-            "https://bff-drone-b:8443/v1/api/peer/health",
+            "https://bff-drone-b:443/v1/api/peer/health",
             Path("/tmp/local-ca.crt"),
             Exception("Hostname mismatch, certificate is not valid for 'bff-drone-b'"),
         )
@@ -591,7 +591,7 @@ class SettingsTests(unittest.TestCase):
 
             peer = {
                 "drone_id": "bff-drone-b",
-                "reachable_url": "https://bff-drone-b:8443",
+                "reachable_url": "https://bff-drone-b:443",
                 "resolved_network": {"ipv4": ["172.20.0.4"]},
             }
             with mock.patch("app.drone_api._drone_client_ssl_context", side_effect=fake_context), mock.patch(
@@ -600,7 +600,7 @@ class SettingsTests(unittest.TestCase):
                 result = _download_rom_from_peer(settings, {}, peer, "atari7800", "Asteroids (USA).zip", expected_size=7)
 
             self.assertEqual(result["source_drone_id"], "bff-drone-b")
-            self.assertEqual(requests[0][0], "https://bff-drone-b:8443/v1/api/peer/roms/atari7800/Asteroids%20%28USA%29.zip")
+            self.assertEqual(requests[0][0], "https://bff-drone-b:443/v1/api/peer/roms/atari7800/Asteroids%20%28USA%29.zip")
             self.assertEqual(contexts[0][1], True)
             self.assertEqual(contexts[0][2], ca_file)
             self.assertEqual((root / "roms" / "atari7800" / "Asteroids (USA).zip").read_bytes(), b"ROMDATA")
@@ -854,7 +854,7 @@ class SettingsTests(unittest.TestCase):
                             "device_id": "source-without-rom",
                             "online": True,
                             "public_resolvable": True,
-                            "public_reachable_url": "https://198.51.100.19:8443",
+                            "public_reachable_url": "https://198.51.100.19:443",
                             "rom_systems": ["snes"],
                             "last_speed_sample": {"upload_mbps": 500},
                         },
@@ -862,7 +862,7 @@ class SettingsTests(unittest.TestCase):
                             "device_id": "source-with-rom",
                             "online": True,
                             "public_resolvable": True,
-                            "public_reachable_url": "https://198.51.100.20:8443",
+                            "public_reachable_url": "https://198.51.100.20:443",
                             "rom_systems": ["snes"],
                             "last_speed_sample": {"upload_mbps": 10},
                         },

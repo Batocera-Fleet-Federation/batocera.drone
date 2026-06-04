@@ -6,7 +6,7 @@ ENV PYTHONUNBUFFERED=1 \
     BIOS_ROOT=/userdata/bios \
     THEMES_ROOT=/userdata/themes \
     LOG_DIR=/userdata/system/drone-app/logs \
-    HTTPS_PORT=8443
+    HTTPS_PORT=443
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates openssl curl \
@@ -17,6 +17,6 @@ COPY app ./app
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-EXPOSE 8443
+EXPOSE 443
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["python", "app/main.py"]

@@ -57,7 +57,10 @@ def drone_reachable_url(
     host = (report_host or drone_report_host)(settings, network)
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"
-    return f"{drone_scheme(settings)}://{host}:{settings.https_port}"
+    scheme = drone_scheme(settings)
+    port = int(settings.https_port)
+    port_suffix = "" if scheme == "https" and port == 443 else f":{port}"
+    return f"{scheme}://{host}{port_suffix}"
 
 
 def drone_network_payload(settings: Any, *, network_loader: Optional[Callable[[], dict]] = None) -> dict:

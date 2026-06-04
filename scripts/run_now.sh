@@ -278,7 +278,7 @@ if [[ "$DRONE_APP_STAGE_ONLY" == "1" || "$DRONE_APP_STAGE_ONLY" == "true" || "$D
   exit 0
 fi
 
-HTTPS_PORT="${HTTPS_PORT:-8443}"
+HTTPS_PORT="${HTTPS_PORT:-443}"
 
 # Prevent multiple instances - bail if the configured port is already in use.
 if lsof -i :"$HTTPS_PORT" >/dev/null 2>&1; then

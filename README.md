@@ -50,13 +50,13 @@ When it finishes, restart Batocera. If you do not want to restart yet, you can s
 Then open Drone in your browser:
 
 ```text
-https://<your-batocera-name>.local:8443
+https://<your-batocera-name>.local
 ```
 
 Example:
 
 ```text
-https://batocera.local:8443
+https://batocera.local
 ```
 
 Your browser may warn you about the certificate. That is expected because Drone creates a self-signed local certificate by default.
@@ -87,13 +87,13 @@ Drone also includes an API for advanced users and other tools.
 The API starts here:
 
 ```text
-https://<your-batocera-name>.local:8443/v1/api
+https://<your-batocera-name>.local/v1/api
 ```
 
 Interactive API documentation is here:
 
 ```text
-https://<your-batocera-name>.local:8443/v1/api/swagger
+https://<your-batocera-name>.local/v1/api/swagger
 ```
 
 The admin UI also has an **API Access** page. It links to Swagger, shows certificate metadata, and lets you download the public certificate. It does not download or display the private key.
@@ -101,7 +101,7 @@ The admin UI also has an **API Access** page. It links to Swagger, shows certifi
 The machine-readable OpenAPI file is here:
 
 ```text
-https://<your-batocera-name>.local:8443/v1/api/openapi.json
+https://<your-batocera-name>.local/v1/api/openapi.json
 ```
 
 ## Overmind Integration
@@ -144,7 +144,7 @@ For local peer trust, Drone fetches approved peer public certificates from Overm
 For API clients that need mTLS, use your client certificate and key from a trusted system:
 
 ```bash
-curl --cert client.crt --key client.key -k "https://<drone-host>:8443/v1/api/peer/health"
+curl --cert client.crt --key client.key -k "https://<drone-host>/v1/api/peer/health"
 ```
 
 Keep private keys private. If a key is exposed, recreate or rotate the certificate.
@@ -235,7 +235,7 @@ ROM metadata logs show cache load, scan, checkpoint, MD5 hashing, cache update, 
 ### API Example
 
 ```bash
-curl -k -u <username>:<password> "https://<your-batocera-name>.local:8443/v1/api/systems"
+curl -k -u <username>:<password> "https://<your-batocera-name>.local/v1/api/systems"
 ```
 
 Common API areas include systems, ROM lists, search, BIOS, themes, downloads, artwork/admin tools, logs, configs, and system information.
