@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.67] - 2026-06-04
+
+- Fixing small sync issues for roms.
+
 ## [v0.0.66] - 2026-06-04
 
 - Purge asset cache now clears SQLite ROM/BIOS/artwork rows (count -> 0) and the stored fingerprint, snapshotting md5 into preserved_* tables first so the rebuild reuses md5 by (key,size,mtime) without re-hashing.
