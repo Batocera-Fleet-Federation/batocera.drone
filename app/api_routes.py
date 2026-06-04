@@ -32,6 +32,9 @@ class ApiRoutesMixin:
             if raw_path == "/favicon.ico":
                 self._send_empty(204)
                 return
+            if raw_path == "/health":
+                self._handle_public_health()
+                return
             if len(public_parts) == 5 and public_parts[0] == "public" and public_parts[1] == "systems" and public_parts[3] == "images":
                 self._handle_public_image(public_parts[2], public_parts[4])
                 return

@@ -4071,6 +4071,16 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             raise FileNotFoundError()
         self._stream_file(cert_file, "application/x-pem-file", as_attachment=True)
 
+    def _handle_public_health(self) -> None:
+        self._send_json(
+            200,
+            {
+                "status": "ok",
+                "drone_id": self.settings.overmind_device_id,
+                "checked_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+            },
+        )
+
     def _handle_rom_md5(self, system: str, unique_id: str) -> None:
         system_dir = self.repository.get_system_dir(system)
         rom = self.repository.find_rom_by_unique_id(system, unique_id)

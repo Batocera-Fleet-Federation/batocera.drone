@@ -180,6 +180,24 @@ ensure_dns_fallback() {
   fi
 }
 
+ensure_low_port_binding() {
+  primary_port="${HTTPS_PORT:-443}"
+  compat_ports="${DRONE_COMPAT_HTTPS_PORTS:-8443}"
+  case " ${primary_port} ${compat_ports} " in
+    *" 443 "*)
+      if [ -w /proc/sys/net/ipv4/ip_unprivileged_port_start ]; then
+        current_start="$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start 2>/dev/null || echo 1024)"
+        if [ "${current_start:-1024}" -gt 0 ] 2>/dev/null; then
+          echo 0 > /proc/sys/net/ipv4/ip_unprivileged_port_start 2>/dev/null || true
+          echo "[drone-service] Enabled unprivileged binding for HTTPS port 443"
+        fi
+      else
+        echo "[drone-service] Cannot adjust unprivileged port binding; HTTPS port 443 may fail for ${DRONE_USER}"
+      fi
+      ;;
+  esac
+}
+
 run_as_drone() {
   if command -v runuser >/dev/null 2>&1; then
     runuser -u "$DRONE_USER" -- "$@"
@@ -382,6 +400,7 @@ start_app() {
     ensure_drone_user
     ensure_permissions
     ensure_dns_fallback
+    ensure_low_port_binding
     start_control_worker
 
     supervise_drone
