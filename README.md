@@ -59,6 +59,8 @@ Example:
 https://batocera.local
 ```
 
+Drone also listens on `https://<your-batocera-name>.local:8443` for backwards compatibility with older installs and bookmarks.
+
 Your browser may warn you about the certificate. That is expected because Drone creates a self-signed local certificate by default.
 
 ## Login

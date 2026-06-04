@@ -151,6 +151,21 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.hostname_override, "bff-drone-a")
         self.assertEqual(_drone_reachable_url(settings, {"ipv4": ["192.168.1.50"]}), "https://bff-drone-a")
 
+    def test_drone_defaults_to_8443_compatibility_listener(self) -> None:
+        with mock.patch.dict("os.environ", {"HTTPS_PORT": "443"}, clear=True):
+            settings = Settings.from_env()
+        self.assertEqual(settings.https_port, 443)
+        self.assertEqual(settings.compatibility_https_ports, (8443,))
+
+    def test_drone_compatibility_listener_can_be_overridden(self) -> None:
+        with mock.patch.dict(
+            "os.environ",
+            {"HTTPS_PORT": "443", "DRONE_COMPAT_HTTPS_PORTS": "8443, 9443, bad, 443"},
+            clear=True,
+        ):
+            settings = Settings.from_env()
+        self.assertEqual(settings.compatibility_https_ports, (8443, 9443))
+
     def test_overmind_device_id_persists_after_first_physical_mac_selection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"

@@ -330,6 +330,21 @@ def _env_bool(default: bool, *names: str) -> bool:
     return default
 
 
+def _parse_port_list(value: Optional[str]) -> Tuple[int, ...]:
+    ports = []
+    for raw in re.split(r"[,;\s]+", str(value or "")):
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            port = int(raw)
+        except ValueError:
+            continue
+        if 1 <= port <= 65535 and port not in ports:
+            ports.append(port)
+    return tuple(ports)
+
+
 _DEVICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]{3,128}$")
 _VIRTUAL_INTERFACE_PREFIXES = (
     "br-",
@@ -1208,6 +1223,7 @@ class Settings:
     password: Optional[str]
     credentials_file: Path
     https_port: int
+    compatibility_https_ports: Tuple[int, ...]
 
     image_cache_ttl_seconds: int
     image_miss_cache_ttl_seconds: int
@@ -1257,6 +1273,7 @@ class Settings:
     @classmethod
     def from_env(cls) -> "Settings":
         https_port_value = os.environ.get("HTTPS_PORT", os.environ.get("PORT", "443"))
+        compatibility_https_ports = _parse_port_list(os.environ.get("DRONE_COMPAT_HTTPS_PORTS", "8443"))
         cert_value = os.environ.get("TLS_CERT_FILE")
         key_value = os.environ.get("TLS_KEY_FILE")
         use_fake_data = _env_bool(False, "USE_FAKE_DATA")
@@ -1276,6 +1293,7 @@ class Settings:
             password=os.environ.get("DRONE_APP_PASSWORD") or None,
             credentials_file=Path(os.environ.get("DRONE_CREDENTIALS_FILE", str(userdata_root / "system" / "drone-app" / "credentials.json"))),
             https_port=int(https_port_value),
+            compatibility_https_ports=tuple(port for port in compatibility_https_ports if port != int(https_port_value)),
             image_cache_ttl_seconds=int(os.environ.get("IMAGE_CACHE_TTL_SECONDS", "3600")),
             image_miss_cache_ttl_seconds=int(os.environ.get("IMAGE_MISS_CACHE_TTL_SECONDS", "300")),
             image_cache_max_items=int(os.environ.get("IMAGE_CACHE_MAX_ITEMS", "1000")),
@@ -10695,6 +10713,24 @@ class DroneThreadingHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
 
 
+def _apply_server_tls(settings: Settings, server: ThreadingHTTPServer) -> None:
+    if settings.http_only:
+        return
+    if settings.drone_mtls_mode == "managed" and not (settings.drone_cert_file.exists() and settings.drone_key_file.exists()):
+        raise RuntimeError("managed Drone mTLS mode requires DRONE_CERT_FILE and DRONE_KEY_FILE")
+    if settings.drone_cert_file.exists() and settings.drone_key_file.exists():
+        cert_file, key_file = settings.drone_cert_file, settings.drone_key_file
+    else:
+        cert_file, key_file = _resolve_tls_material(settings)
+    ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ssl_context.load_cert_chain(certfile=str(cert_file), keyfile=str(key_file))
+    if settings.drone_mtls_enabled:
+        ssl_context.verify_mode = ssl.CERT_OPTIONAL
+        if settings.drone_mtls_ca_file and settings.drone_mtls_ca_file.exists():
+            ssl_context.load_verify_locations(cafile=str(settings.drone_mtls_ca_file))
+    server.socket = ssl_context.wrap_socket(server.socket, server_side=True)
+
+
 def create_server(settings: Settings) -> ThreadingHTTPServer:
     global _OVERMIND_POLLER_STARTED, _ROM_METADATA_POLLER_STARTED, _DOWNLOAD_MANAGER
     roms_root, bios_root = _real_data_roots(settings)
@@ -10742,21 +10778,32 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
 
     server = DroneThreadingHTTPServer(("0.0.0.0", settings.https_port), handler_factory)
     server.auth = auth  # type: ignore[attr-defined]
+    _apply_server_tls(settings, server)
 
-    if not settings.http_only:
-        if settings.drone_mtls_mode == "managed" and not (settings.drone_cert_file.exists() and settings.drone_key_file.exists()):
-            raise RuntimeError("managed Drone mTLS mode requires DRONE_CERT_FILE and DRONE_KEY_FILE")
-        if settings.drone_cert_file.exists() and settings.drone_key_file.exists():
-            cert_file, key_file = settings.drone_cert_file, settings.drone_key_file
-        else:
-            cert_file, key_file = _resolve_tls_material(settings)
-        ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        ssl_context.load_cert_chain(certfile=str(cert_file), keyfile=str(key_file))
-        if settings.drone_mtls_enabled:
-            ssl_context.verify_mode = ssl.CERT_OPTIONAL
-            if settings.drone_mtls_ca_file and settings.drone_mtls_ca_file.exists():
-                ssl_context.load_verify_locations(cafile=str(settings.drone_mtls_ca_file))
-        server.socket = ssl_context.wrap_socket(server.socket, server_side=True)
+    compatibility_servers = []
+    for compatibility_port in settings.compatibility_https_ports:
+        try:
+            compatibility_server = DroneThreadingHTTPServer(("0.0.0.0", compatibility_port), handler_factory)
+            compatibility_server.auth = auth  # type: ignore[attr-defined]
+            _apply_server_tls(settings, compatibility_server)
+        except OSError as error:
+            print(
+                f"Drone compatibility listener skipped on port {compatibility_port}: {error}",
+                file=sys.stderr,
+                flush=True,
+            )
+            continue
+        compatibility_thread = Thread(
+            target=compatibility_server.serve_forever,
+            name=f"drone-compat-listener-{compatibility_port}",
+            daemon=True,
+        )
+        compatibility_thread.start()
+        compatibility_server.thread = compatibility_thread  # type: ignore[attr-defined]
+        compatibility_servers.append(compatibility_server)
+        scheme = "http" if settings.http_only else "https"
+        print(f"Serving Drone compatibility listener on {scheme}://0.0.0.0:{compatibility_port}", flush=True)
+    server.compatibility_servers = compatibility_servers  # type: ignore[attr-defined]
 
     if not _OVERMIND_POLLER_STARTED:
         _start_overmind_action_poller(settings, repository)

@@ -17,6 +17,6 @@ COPY app ./app
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-EXPOSE 443
+EXPOSE 443 8443
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["python", "app/main.py"]
