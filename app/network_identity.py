@@ -85,13 +85,16 @@ def drone_reachable_url(
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"
     scheme = drone_scheme(settings)
-    port = int(settings.https_port)
+    port = int(getattr(settings, "advertised_api_port", None) or settings.https_port)
     port_suffix = "" if scheme == "https" and port == 443 else f":{port}"
     return f"{scheme}://{host}{port_suffix}"
 
 
 def drone_network_payload(settings: Any, *, network_loader: Optional[Callable[[], dict]] = None) -> dict:
     network = (network_loader or get_local_ip_addresses)()
+    public_ip_override = str(getattr(settings, "public_ip_override", None) or "").strip()
+    if public_ip_override:
+        network["public_ip"] = public_ip_override
     network["hostname_override"] = settings.hostname_override or None
     network["hostname_overrides"] = hostname_override_values(settings)
     network["reachable_url"] = drone_reachable_url(settings, network)

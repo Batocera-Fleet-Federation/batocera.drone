@@ -34,6 +34,7 @@ from app.drone_api import (
     _clean_rom_title,
     _drone_reachable_url,
     _drone_report_host,
+    _drone_network_payload,
     _peer_address,
     _get_local_ip_addresses,
     _get_router_ip_address,
@@ -154,6 +155,31 @@ class SettingsTests(unittest.TestCase):
 
         self.assertEqual(settings.hostname_override, "bff-drone-a")
         self.assertEqual(_drone_reachable_url(settings, {"ipv4": ["192.168.1.50"]}), "https://bff-drone-a")
+
+    def test_public_swarm_endpoint_can_be_faked_for_local_tests(self) -> None:
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "HOSTNAME_OVERRIDE": "bff-drone-b",
+                "DRONE_PUBLIC_IP_OVERRIDE": "bff-drone-b",
+                "DRONE_ADVERTISED_API_PORT": "8444",
+                "DRONE_COMPAT_HTTPS_PORTS": "8444",
+                "HTTPS_PORT": "8443",
+            },
+            clear=True,
+        ):
+            settings = Settings.from_env()
+
+        self.assertEqual(settings.https_port, 8443)
+        self.assertEqual(settings.advertised_api_port, 8444)
+        self.assertEqual(settings.compatibility_https_ports, (8444,))
+        self.assertEqual(_drone_reachable_url(settings, {"ipv4": ["172.20.0.10"]}), "https://bff-drone-b:8444")
+
+        with mock.patch("app.drone_api._get_local_ip_addresses", return_value={"ipv4": ["172.20.0.10"], "ipv6": []}):
+            network = _drone_network_payload(settings)
+
+        self.assertEqual(network["public_ip"], "bff-drone-b")
+        self.assertEqual(network["reachable_url"], "https://bff-drone-b:8444")
 
     def test_drone_defaults_to_8443_compatibility_listener(self) -> None:
         with mock.patch.dict("os.environ", {"HTTPS_PORT": "443"}, clear=True):

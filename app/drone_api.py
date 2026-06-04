@@ -1244,6 +1244,7 @@ class Settings:
     credentials_file: Path
     https_port: int
     compatibility_https_ports: Tuple[int, ...]
+    advertised_api_port: int
 
     image_cache_ttl_seconds: int
     image_miss_cache_ttl_seconds: int
@@ -1283,6 +1284,7 @@ class Settings:
     overmind_poll_seconds: int
     rom_metadata_poll_seconds: int
     hostname_override: Optional[str]
+    public_ip_override: Optional[str]
     drone_cert_file: Path
     drone_key_file: Path
     drone_cert_days: int
@@ -1293,6 +1295,11 @@ class Settings:
     @classmethod
     def from_env(cls) -> "Settings":
         https_port_value = os.environ.get("HTTPS_PORT", os.environ.get("PORT", "443"))
+        advertised_api_port_value = (
+            os.environ.get("DRONE_ADVERTISED_API_PORT")
+            or os.environ.get("DRONE_PUBLIC_API_PORT")
+            or https_port_value
+        )
         compatibility_https_ports = _parse_port_list(os.environ.get("DRONE_COMPAT_HTTPS_PORTS", "8443"))
         cert_value = os.environ.get("TLS_CERT_FILE")
         key_value = os.environ.get("TLS_KEY_FILE")
@@ -1314,6 +1321,7 @@ class Settings:
             credentials_file=Path(os.environ.get("DRONE_CREDENTIALS_FILE", str(userdata_root / "system" / "drone-app" / "credentials.json"))),
             https_port=int(https_port_value),
             compatibility_https_ports=tuple(port for port in compatibility_https_ports if port != int(https_port_value)),
+            advertised_api_port=int(advertised_api_port_value),
             image_cache_ttl_seconds=int(os.environ.get("IMAGE_CACHE_TTL_SECONDS", "3600")),
             image_miss_cache_ttl_seconds=int(os.environ.get("IMAGE_MISS_CACHE_TTL_SECONDS", "300")),
             image_cache_max_items=int(os.environ.get("IMAGE_CACHE_MAX_ITEMS", "1000")),
@@ -1354,6 +1362,7 @@ class Settings:
             overmind_poll_seconds=OVERMIND_HEARTBEAT_SECONDS,
             rom_metadata_poll_seconds=max(0, int(os.environ.get("ROM_METADATA_POLL_SECONDS", str(ROM_METADATA_POLL_SECONDS)))),
             hostname_override=(os.environ.get("HOSTNAME_OVERRIDE") or "").strip() or None,
+            public_ip_override=(os.environ.get("DRONE_PUBLIC_IP_OVERRIDE") or "").strip() or None,
             drone_cert_file=Path(os.environ.get("DRONE_CERT_FILE", os.environ.get("TLS_CERT_FILE", str(default_drone_cert)))),
             drone_key_file=Path(os.environ.get("DRONE_KEY_FILE", os.environ.get("TLS_KEY_FILE", str(default_drone_key)))),
             drone_cert_days=int(os.environ.get("DRONE_CERT_DAYS", "825")),
@@ -5854,7 +5863,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 "email": raw_email,
                 "password": claim_password,
                 "network": network_payload,
-                "api_port": self.settings.https_port,
+                "api_port": _drone_advertised_api_port(self.settings),
                 "scheme": _drone_scheme(self.settings),
                 "reachable_url": _drone_reachable_url(self.settings, network_payload),
                 "certificate": DroneCertificateManager(self.settings).metadata(),
@@ -5959,7 +5968,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             "email": email,
             "password": password,
             "network": network_payload,
-            "api_port": self.settings.https_port,
+            "api_port": _drone_advertised_api_port(self.settings),
             "scheme": _drone_scheme(self.settings),
             "reachable_url": _drone_reachable_url(self.settings, network_payload),
             "certificate": DroneCertificateManager(self.settings).metadata(),
@@ -7071,6 +7080,10 @@ def _drone_network_payload(settings: Settings) -> dict:
     return _build_drone_network_payload(settings, network_loader=_get_local_ip_addresses)
 
 
+def _drone_advertised_api_port(settings: Settings) -> int:
+    return int(settings.advertised_api_port or settings.https_port)
+
+
 def _mock_userdata_marker(userdata_root: Path) -> Path:
     return userdata_root / "system" / "drone-app" / "mock_userdata_seeded.json"
 
@@ -7439,7 +7452,7 @@ def _register_or_claim_overmind_token(settings: Settings, repository: "RomReposi
     payload = {
         "device_id": settings.overmind_device_id,
         "device_name": drone_name,
-        "api_port": settings.https_port,
+        "api_port": _drone_advertised_api_port(settings),
         "scheme": _drone_scheme(settings),
         "reachable_url": reachable_url,
         "batocera_info": {
@@ -7454,7 +7467,7 @@ def _register_or_claim_overmind_token(settings: Settings, repository: "RomReposi
             "memory_total": "unknown",
             "ip_address": _drone_report_host(settings, network),
             "network": network,
-            "api_port": settings.https_port,
+            "api_port": _drone_advertised_api_port(settings),
             "scheme": _drone_scheme(settings),
             "reachable_url": reachable_url,
             "system_info": _collect_system_info_payload(settings),
@@ -10295,7 +10308,7 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                     "device_id": settings.overmind_device_id,
                     "device_name": str(config.get("drone_name") or "").strip() or socket.gethostname(),
                     "network": network_payload,
-                    "api_port": settings.https_port,
+                    "api_port": _drone_advertised_api_port(settings),
                     "scheme": _drone_scheme(settings),
                     "reachable_url": _drone_reachable_url(settings, network_payload),
                     "certificate": DroneCertificateManager(settings).metadata(),
