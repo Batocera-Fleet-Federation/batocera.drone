@@ -7113,12 +7113,11 @@ def _record_processed_overmind_action(
         "overmind_actions",
         legacy_path=legacy_path,
     )
-    max_bytes = int(os.environ.get("OVERMIND_ACTION_LOG_MAX_BYTES", str(settings.log_max_bytes)))
     _append_state_event(
         _state_database_path(settings.userdata_root),
         "overmind_actions",
         entry,
-        max_events=max(100, max_bytes // 512) if max_bytes > 0 else None,
+        max_events=500,
     )
 
 

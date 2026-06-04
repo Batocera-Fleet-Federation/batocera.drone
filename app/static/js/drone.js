@@ -3029,6 +3029,57 @@ async function renderOvermindIntegrationPage() {
   const refreshBtn = document.getElementById("overmindRefreshBtn");
   const actionsRefreshBtn = document.getElementById("overmindActionsRefreshBtn");
   const actionsBody = document.getElementById("overmindActionsBody");
+  const ACTIONS_PER_PAGE = 10;
+  let allActions = [];
+  let actionsPage = 0;
+
+  function renderActionsPage() {
+    const total = allActions.length;
+    const totalPages = Math.max(1, Math.ceil(total / ACTIONS_PER_PAGE));
+    actionsPage = Math.max(0, Math.min(actionsPage, totalPages - 1));
+    const start = actionsPage * ACTIONS_PER_PAGE;
+    const pageItems = allActions.slice(start, start + ACTIONS_PER_PAGE);
+    const showPrev = actionsPage > 0;
+    const showNext = actionsPage < totalPages - 1;
+    const paginationHtml = totalPages > 1 ? `
+      <div class="d-flex align-items-center gap-2 mt-2 flex-wrap">
+        <button class="btn btn-sm btn-outline-secondary" onclick="overmindActionsPrev()" ${showPrev ? "" : "disabled"}>&#8249; Prev</button>
+        <span class="small text-muted">Page ${actionsPage + 1} of ${totalPages} &nbsp;(${total} total)</span>
+        <button class="btn btn-sm btn-outline-secondary" onclick="overmindActionsNext()" ${showNext ? "" : "disabled"}>Next &#8250;</button>
+      </div>` : "";
+    actionsBody.innerHTML = pageItems.length ? `
+      <div class="table-responsive">
+        <table class="table table-sm align-middle themed-table">
+          <thead>
+            <tr>
+              <th>Processed</th>
+              <th>Action</th>
+              <th>Status</th>
+              <th>Device</th>
+              <th>Message</th>
+              <th>Returned Data</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${pageItems.map(action => `
+              <tr>
+                <td>${escapeHtml(action.processed_at || "n/a")}</td>
+                <td>${escapeHtml(action.action || "n/a")}</td>
+                <td><span class="badge text-bg-secondary">${escapeHtml(action.status || "n/a")}</span></td>
+                <td class="mono small">${escapeHtml(action.device_id || "n/a")}</td>
+                <td>${escapeHtml(action.message || "")}${action.fake_data ? ' <span class="badge text-bg-info ms-1">fake data</span>' : ''}</td>
+                <td>${escapeHtml(action.result_summary || "")}</td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      </div>
+      ${paginationHtml}
+    ` : `<div class="themed-empty">No processed actions yet.</div>`;
+  }
+
+  window.overmindActionsPrev = function() { actionsPage--; renderActionsPage(); };
+  window.overmindActionsNext = function() { actionsPage++; renderActionsPage(); };
 
   function renderStatus(payload) {
     const status = payload.status || {};
@@ -3063,7 +3114,7 @@ async function renderOvermindIntegrationPage() {
       <div><strong>Certificate:</strong> ${escapeHtml(cert.status || "unknown")}${cert.fingerprint ? ` · ${escapeHtml(String(cert.fingerprint).slice(0, 16))}` : ""}</div>
       <div><strong>Swarm Drones:</strong> ${swarm.length}</div>
       <div class="mt-2"><strong>Notes:</strong> ${escapeHtml(status.notes || "")}</div>
-      ${swarm.length ? `<div class="mt-3"><strong>Last Swarm Snapshot (P2P Health via Public IP)</strong>${swarm.map((drone) => {
+      ${swarm.filter(d => String(d.drone_id || d.device_id || "") !== machineId).length ? `<div class="mt-3"><strong>Last Swarm Snapshot (P2P Health via Public IP)</strong>${swarm.filter(d => String(d.drone_id || d.device_id || "") !== machineId).map((drone) => {
         const dronePeerId = String(drone.drone_id || drone.device_id || "");
         const checks = peerChecks.filter((item) => String(item.target_drone_id || "") === dronePeerId);
         const latest = checks[0] || {};
@@ -3088,40 +3139,11 @@ async function renderOvermindIntegrationPage() {
     renderStatus(payload);
   }
 
-  function renderActions(actions) {
-    actionsBody.innerHTML = actions.length ? `
-      <div class="table-responsive">
-        <table class="table table-sm align-middle themed-table">
-          <thead>
-            <tr>
-              <th>Processed</th>
-              <th>Action</th>
-              <th>Status</th>
-              <th>Device</th>
-              <th>Message</th>
-              <th>Returned Data</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${actions.map(action => `
-              <tr>
-                <td>${escapeHtml(action.processed_at || "n/a")}</td>
-                <td>${escapeHtml(action.action || "n/a")}</td>
-                <td><span class="badge text-bg-secondary">${escapeHtml(action.status || "n/a")}</span></td>
-                <td class="mono small">${escapeHtml(action.device_id || "n/a")}</td>
-                <td>${escapeHtml(action.message || "")}${action.fake_data ? ' <span class="badge text-bg-info ms-1">fake data</span>' : ''}</td>
-                <td>${escapeHtml(action.result_summary || "")}</td>
-              </tr>
-            `).join("")}
-          </tbody>
-        </table>
-      </div>
-    ` : `<div class="themed-empty">No processed actions yet.</div>`;
-  }
-
   async function loadActions() {
     const payload = await api("/admin/integrations/overmind/actions");
-    renderActions(payload.actions || []);
+    allActions = payload.actions || [];
+    actionsPage = 0;
+    renderActionsPage();
   }
 
   async function saveConfig() {
