@@ -75,6 +75,7 @@ try:
         _load_rom_metadata_cache,
         _persist_rom_metadata_cache,
         _read_pending_rom_metadata_changes,
+        _read_rom_metadata_cache_state,
         _read_sqlite_asset_systems,
         _rom_metadata_cache_path,
         _update_rom_metadata_cache_state,
@@ -135,6 +136,7 @@ except ImportError:
         _load_rom_metadata_cache,
         _persist_rom_metadata_cache,
         _read_pending_rom_metadata_changes,
+        _read_rom_metadata_cache_state,
         _read_sqlite_asset_systems,
         _rom_metadata_cache_path,
         _update_rom_metadata_cache_state,
@@ -8043,6 +8045,50 @@ def _artwork_cache_entry_key(system: str, rom_path: str) -> str:
     return f"{str(system or '').strip().lower()}:{_normalize_gamelist_rom_path(str(rom_path or '')).lower()}"
 
 
+ROM_INVENTORY_FINGERPRINT_ALGORITHM = "rom-inventory-sha256-v1"
+
+
+def _normalize_rom_inventory_path(value: object) -> str:
+    return str(value or "").replace("\\", "/").strip().lstrip("./").lower()
+
+
+def _rom_inventory_fingerprint(roms: Iterable[dict]) -> str:
+    rows = []
+    for row in roms or []:
+        if not isinstance(row, dict):
+            continue
+        system = str(row.get("system") or row.get("system_name") or "").strip().lower()
+        path = _normalize_rom_inventory_path(
+            row.get("file_path")
+            or row.get("relative_path")
+            or row.get("rom_path")
+            or row.get("rom_file")
+            or row.get("rom_name")
+            or row.get("name")
+        )
+        if not system or not path:
+            continue
+        entry_type = str(row.get("entry_type") or "file").strip().lower()
+        md5_value = str(row.get("rom_md5") or row.get("md5") or row.get("hash") or "").strip().lower()
+        file_size = row.get("file_size") if row.get("file_size") is not None else row.get("byte_count")
+        size_value = str(int(file_size)) if isinstance(file_size, (int, float)) else str(file_size or "").strip()
+        rows.append("\t".join((system, path, entry_type, md5_value, size_value)))
+    digest = hashlib.sha256()
+    for value in sorted(rows):
+        digest.update(value.encode("utf-8"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def _rom_inventory_fingerprint_from_cache_state(settings: Settings) -> Optional[str]:
+    try:
+        state = _read_rom_metadata_cache_state(settings, "rom_inventory_fingerprint")
+    except Exception:
+        return None
+    value = str(state.get("rom_inventory_fingerprint") or "").strip()
+    return value or None
+
+
 def _build_rom_metadata_snapshot_from_cache(settings: Settings, cache: dict, rehydrate_gamelist: bool = False) -> dict:
     entries = cache.get("entries") if isinstance(cache.get("entries"), dict) else {}
     roms = []
@@ -8083,11 +8129,14 @@ def _build_rom_metadata_snapshot_from_cache(settings: Settings, cache: dict, reh
             continue
         artwork.append(dict(entry))
     artwork.sort(key=lambda row: (str(row.get("system") or ""), str(row.get("rom_path") or "")))
+    fingerprint = _rom_inventory_fingerprint(roms)
     return {
         "type": "asset_metadata",
         "collected_at": cache.get("last_full_scan_at") or datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
         "roms_root": str(settings.roms_root),
         "bios_root": str(settings.bios_root),
+        "rom_inventory_fingerprint": fingerprint,
+        "rom_inventory_fingerprint_algorithm": ROM_INVENTORY_FINGERPRINT_ALGORITHM,
         "systems": cache.get("systems") if isinstance(cache.get("systems"), list) else [],
         "roms": roms,
         "bios": bios,
@@ -8124,6 +8173,8 @@ def _chunk_rom_metadata_inventory(
         "collected_at": snapshot.get("collected_at"),
         "roms_root": snapshot.get("roms_root"),
         "bios_root": snapshot.get("bios_root"),
+        "rom_inventory_fingerprint": snapshot.get("rom_inventory_fingerprint") or _rom_inventory_fingerprint(roms),
+        "rom_inventory_fingerprint_algorithm": snapshot.get("rom_inventory_fingerprint_algorithm") or ROM_INVENTORY_FINGERPRINT_ALGORITHM,
         "systems": snapshot.get("systems") if isinstance(snapshot.get("systems"), list) else [],
         "gamelists": snapshot.get("gamelists") if isinstance(snapshot.get("gamelists"), list) else [],
         "cache": snapshot.get("cache") if isinstance(snapshot.get("cache"), dict) else {},
@@ -8182,6 +8233,8 @@ def _chunk_rom_metadata_delta(settings: Settings, snapshot: dict, changes: dict,
         "type": snapshot.get("type") or "asset_metadata",
         "update_mode": "inventory_delta",
         "collected_at": snapshot.get("collected_at"),
+        "rom_inventory_fingerprint": snapshot.get("rom_inventory_fingerprint") or _rom_inventory_fingerprint(snapshot.get("roms") if isinstance(snapshot.get("roms"), list) else []),
+        "rom_inventory_fingerprint_algorithm": snapshot.get("rom_inventory_fingerprint_algorithm") or ROM_INVENTORY_FINGERPRINT_ALGORITHM,
         "systems": snapshot.get("systems") if isinstance(snapshot.get("systems"), list) else [],
     }
     payloads = []
@@ -8191,6 +8244,7 @@ def _chunk_rom_metadata_delta(settings: Settings, snapshot: dict, changes: dict,
             **base,
             "delta_index": index,
             "delta_total": total,
+            "inventory_complete": index == total - 1,
             "roms": [],
             "bios": [],
             "artwork": [],
@@ -8212,14 +8266,17 @@ def _json_payload_size_bytes(payload: dict) -> int:
         return 0
 
 
-def _mark_rom_metadata_upload_clean(settings: Settings) -> None:
+def _mark_rom_metadata_upload_clean(settings: Settings, fingerprint: Optional[str] = None) -> None:
+    state = {
+        "last_successful_upload_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "dirty": False,
+        "full_refresh_pending": False,
+    }
+    if fingerprint:
+        state["rom_inventory_fingerprint"] = fingerprint
+        state["rom_inventory_fingerprint_algorithm"] = ROM_INVENTORY_FINGERPRINT_ALGORITHM
     _clear_pending_rom_metadata_changes(settings)
-    _update_rom_metadata_cache_state(
-        settings,
-        last_successful_upload_at=datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
-        dirty=False,
-        full_refresh_pending=False,
-    )
+    _update_rom_metadata_cache_state(settings, **state)
 
 
 def _rom_metadata_cache_status(settings: Settings) -> dict:
@@ -10177,6 +10234,10 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                     "system_info": system_info_payload,
                     "downloads": _get_download_manager().snapshot() if _get_download_manager() else {},
                 }
+                rom_fingerprint = _rom_inventory_fingerprint_from_cache_state(settings)
+                if rom_fingerprint:
+                    heartbeat_payload["rom_inventory_fingerprint"] = rom_fingerprint
+                    heartbeat_payload["rom_inventory_fingerprint_algorithm"] = ROM_INVENTORY_FINGERPRINT_ALGORITHM
                 heartbeat_url = f"{base_url}/api/devices/{device_id}/heartbeat"
                 heartbeat_started = time.monotonic()
                 print(
@@ -10649,7 +10710,7 @@ def _sync_rom_metadata_to_overmind_locked(
                 file=sys.stdout,
                 flush=True,
             )
-        _mark_rom_metadata_upload_clean(settings)
+        _mark_rom_metadata_upload_clean(settings, snapshot.get("rom_inventory_fingerprint"))
         print(
             f"Asset metadata {upload_kind} sync succeeded: accepted_roms={accepted_roms} accepted_bios={accepted_bios} accepted_artwork={accepted_artwork}",
             file=sys.stdout,
@@ -10671,7 +10732,10 @@ def _sync_rom_metadata_to_overmind_locked(
         hash_batches += 1
         hashed_roms += len(patch_roms)
     if should_upload_inventory or hash_batches:
-        _mark_rom_metadata_upload_clean(settings)
+        if hash_batches:
+            cache, _ = _load_rom_metadata_cache(settings)
+            snapshot = _build_rom_metadata_snapshot_from_cache(settings, cache)
+        _mark_rom_metadata_upload_clean(settings, snapshot.get("rom_inventory_fingerprint"))
 
     if not should_upload_inventory and not hash_batches:
         print(

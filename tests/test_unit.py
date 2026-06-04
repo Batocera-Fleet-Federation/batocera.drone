@@ -43,13 +43,17 @@ from app.drone_api import (
     _load_overmind_config_for_settings,
     _normalize_overmind_link_state,
     _collect_rom_metadata,
+    _chunk_rom_metadata_delta,
+    _chunk_rom_metadata_inventory,
     _hash_rom_metadata_batches,
+    _rom_inventory_fingerprint,
     _empty_rom_metadata_cache,
     _cached_rom_md5_exists,
     _poll_rom_metadata_cache,
     _poll_rom_metadata_once,
     _load_rom_metadata_cache,
     _mark_rom_metadata_upload_clean,
+    ROM_INVENTORY_FINGERPRINT_ALGORITHM,
     _persist_rom_metadata_cache,
     _rom_metadata_cache_status,
     _rom_metadata_cache_path,
@@ -216,6 +220,14 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(_drone_report_host(settings, network), "192.168.1.50")
         self.assertEqual(_drone_report_host(settings, {"ipv6": ["fd00::50"]}), "fd00::50")
         self.assertEqual(_drone_reachable_url(settings, {"ipv6": ["fd00::50"]}), "https://[fd00::50]")
+
+    def test_reachable_url_ignores_loopback_hostname_alias(self) -> None:
+        with mock.patch.dict("os.environ", {"HTTPS_PORT": "443"}, clear=True):
+            settings = Settings.from_env()
+        network = {"ipv4": ["127.0.1.1", "192.168.0.206", "127.0.0.1"], "ipv6": []}
+
+        self.assertEqual(_drone_report_host(settings, network), "192.168.0.206")
+        self.assertEqual(_drone_reachable_url(settings, network), "https://192.168.0.206")
 
     def test_ipv6_route_failure_is_quiet_without_debug(self) -> None:
         real_socket = socket.socket
@@ -1002,6 +1014,99 @@ class SettingsTests(unittest.TestCase):
 
             self.assertTrue(_cached_rom_md5_exists(settings, "ABC123"))
             self.assertFalse(_cached_rom_md5_exists(settings, "missing"))
+
+    def test_rom_inventory_fingerprint_is_stable_for_equivalent_rom_sets(self) -> None:
+        left = _rom_inventory_fingerprint([
+            {"system": "SNES", "file_path": "./A\\Game.zip", "rom_md5": "ABC", "file_size": 12},
+            {"system_name": "nes", "rom_path": "B.zip", "md5": "def", "file_size": 4},
+        ])
+        right = _rom_inventory_fingerprint([
+            {"system": "nes", "file_path": "b.zip", "rom_md5": "DEF", "file_size": 4, "modified_time": 999},
+            {"system": "snes", "relative_path": "a/game.zip", "md5": "abc", "file_size": 12},
+        ])
+
+        self.assertEqual(left, right)
+
+    def test_rom_metadata_inventory_payloads_include_final_fingerprint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "USERDATA_ROOT": str(root),
+                    "ROMS_ROOT": str(root / "roms"),
+                    "BIOS_ROOT": str(root / "bios"),
+                    "OVERMIND_DEVICE_ID": "drone-a",
+                },
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            snapshot = {
+                "type": "asset_metadata",
+                "collected_at": "2026-06-04T12:00:00+00:00",
+                "systems": [{"name": "snes", "rom_count": 2}],
+                "roms": [
+                    {"system": "snes", "file_path": "A.zip", "rom_md5": "aaa", "file_size": 1},
+                    {"system": "snes", "file_path": "B.zip", "rom_md5": "bbb", "file_size": 2},
+                ],
+            }
+            expected = _rom_inventory_fingerprint(snapshot["roms"])
+
+            payloads = _chunk_rom_metadata_inventory(settings, snapshot, chunk_size=1, replace_all=True)
+
+            self.assertEqual(len(payloads), 2)
+            self.assertFalse(payloads[0]["inventory_complete"])
+            self.assertTrue(payloads[-1]["inventory_complete"])
+            self.assertEqual(payloads[-1]["rom_inventory_fingerprint"], expected)
+            self.assertEqual(payloads[-1]["rom_inventory_fingerprint_algorithm"], ROM_INVENTORY_FINGERPRINT_ALGORITHM)
+
+    def test_rom_metadata_delta_payloads_include_fingerprint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "USERDATA_ROOT": str(root),
+                    "ROMS_ROOT": str(root / "roms"),
+                    "BIOS_ROOT": str(root / "bios"),
+                    "OVERMIND_DEVICE_ID": "drone-a",
+                },
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            snapshot = {
+                "type": "asset_metadata",
+                "collected_at": "2026-06-04T12:00:00+00:00",
+                "systems": [{"name": "snes", "rom_count": 1}],
+                "roms": [{"system": "snes", "file_path": "A.zip", "rom_md5": "aaa", "file_size": 1}],
+            }
+            changes = {"roms": snapshot["roms"], "deleted": {"roms": []}}
+
+            payloads = _chunk_rom_metadata_delta(settings, snapshot, changes, chunk_size=10)
+
+            self.assertEqual(len(payloads), 1)
+            self.assertTrue(payloads[0]["inventory_complete"])
+            self.assertEqual(payloads[0]["rom_inventory_fingerprint"], _rom_inventory_fingerprint(snapshot["roms"]))
+
+    def test_mark_rom_metadata_upload_clean_persists_fingerprint_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "USERDATA_ROOT": str(root),
+                    "ROMS_ROOT": str(root / "roms"),
+                    "BIOS_ROOT": str(root / "bios"),
+                },
+                clear=True,
+            ):
+                settings = Settings.from_env()
+
+            _mark_rom_metadata_upload_clean(settings, "abc123")
+            cache, _ = _load_rom_metadata_cache(settings)
+
+            self.assertEqual(cache["rom_inventory_fingerprint"], "abc123")
+            self.assertEqual(cache["rom_inventory_fingerprint_algorithm"], ROM_INVENTORY_FINGERPRINT_ALGORITHM)
 
     def test_disk_rom_without_gamelist_is_listed_with_md5(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

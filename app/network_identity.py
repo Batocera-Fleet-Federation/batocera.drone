@@ -29,6 +29,27 @@ def is_ip_literal(value: str) -> bool:
         return False
 
 
+def is_advertisable_ip(value: str) -> bool:
+    try:
+        address = ipaddress.ip_address(str(value or "").strip("[]"))
+    except ValueError:
+        return False
+    return not (
+        address.is_loopback
+        or address.is_link_local
+        or address.is_unspecified
+        or address.is_multicast
+    )
+
+
+def first_advertisable(values: list) -> Optional[str]:
+    for value in values:
+        text = str(value or "").split("%", 1)[0].strip()
+        if text and is_advertisable_ip(text):
+            return text
+    return None
+
+
 def drone_report_host(
     settings: Any,
     network: Optional[dict] = None,
@@ -41,6 +62,12 @@ def drone_report_host(
     network = network if isinstance(network, dict) else (network_loader or get_local_ip_addresses)()
     ipv4 = network.get("ipv4") if isinstance(network.get("ipv4"), list) else []
     ipv6 = network.get("ipv6") if isinstance(network.get("ipv6"), list) else []
+    ipv4_host = first_advertisable(ipv4)
+    if ipv4_host:
+        return ipv4_host
+    ipv6_host = first_advertisable(ipv6)
+    if ipv6_host:
+        return ipv6_host
     if ipv4:
         return str(ipv4[0])
     if ipv6:

@@ -808,6 +808,26 @@ def _update_rom_metadata_cache_state(settings: Any, **values: Any) -> None:
         )
 
 
+def _read_rom_metadata_cache_state(settings: Any, *keys: str) -> dict:
+    """Read compact scan/upload state without materializing cached asset rows."""
+    with _open_rom_metadata_cache(settings) as connection:
+        if keys:
+            placeholders = ",".join("?" for _ in keys)
+            rows = connection.execute(
+                f"SELECT key, value FROM cache_state WHERE key IN ({placeholders})",
+                tuple(keys),
+            )
+        else:
+            rows = connection.execute("SELECT key, value FROM cache_state")
+        state = {}
+        for key, value in rows:
+            try:
+                state[key] = json.loads(value)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                state[key] = value
+        return state
+
+
 def _read_sqlite_rom_metadata_cache(settings: Any) -> dict:
     with _open_rom_metadata_cache(settings) as connection:
         state = {
