@@ -1698,6 +1698,7 @@ async function renderAssetCachePage() {
         <div class="card-body">
           <div class="system-info-grid">
             ${row("Poller", payload.poller_enabled ? `enabled (${payload.poll_seconds}s)` : "disabled")}
+            ${row("Real-time watch", payload.watch_enabled ? (payload.watch_active ? "active" : "enabled (inactive)") : "disabled")}
             ${row("Active", boolText(payload.active))}
             ${row("Complete", boolText(payload.complete))}
             ${row("Dirty", boolText(payload.dirty))}

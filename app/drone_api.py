@@ -81,6 +81,7 @@ try:
         _rom_metadata_cache_path,
         _update_rom_metadata_cache_state,
     )
+    from .rom_fs_watcher import RomFilesystemWatcher
     from .state_store import (
         append_event as _append_state_event,
         database_path as _state_database_path,
@@ -143,6 +144,7 @@ except ImportError:
         _rom_metadata_cache_path,
         _update_rom_metadata_cache_state,
     )
+    from rom_fs_watcher import RomFilesystemWatcher  # type: ignore
     from state_store import (  # type: ignore
         append_event as _append_state_event,
         database_path as _state_database_path,
@@ -166,6 +168,8 @@ FAKE_OVERMIND_PASSWORD = "DemoPass123"
 FAKE_OVERMIND_TOKEN = "demo-local-drone-token"
 _OVERMIND_POLLER_STARTED = False
 _ROM_METADATA_POLLER_STARTED = False
+_ROM_METADATA_WATCHER_STARTED = False
+_ROM_METADATA_WATCHER = None
 _PEER_HEALTH_CHECK_THREAD_STARTED = False
 _ROM_METADATA_ACTIVE = Event()
 _ROM_METADATA_WAKE = Event()
@@ -205,6 +209,15 @@ ROM_METADATA_MD5_BATCH_SIZE = max(1, int(os.environ.get("ROM_METADATA_MD5_BATCH_
 ROM_METADATA_UPLOAD_CHUNK_SIZE = max(1, int(os.environ.get("ROM_METADATA_UPLOAD_CHUNK_SIZE", "250")))
 ROM_METADATA_HASH_IO_YIELD_SECONDS = max(0.0, float(os.environ.get("ROM_METADATA_HASH_IO_YIELD_SECONDS", "0.05")))
 ROM_METADATA_HASH_ROMS_ENABLED = os.environ.get("ROM_METADATA_HASH_ROMS_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
+# Real-time inotify watcher that wakes the metadata poller when ROM files change.
+ROM_METADATA_WATCH_ENABLED = os.environ.get("ROM_METADATA_WATCH_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
+# Coalesce a burst of filesystem events: wait for this much quiet before waking
+# the poller, but never delay longer than the max even during a long bulk copy.
+ROM_METADATA_WATCH_DEBOUNCE_SECONDS = max(0.5, float(os.environ.get("ROM_METADATA_WATCH_DEBOUNCE_SECONDS", "10")))
+ROM_METADATA_WATCH_MAX_DELAY_SECONDS = max(
+    ROM_METADATA_WATCH_DEBOUNCE_SECONDS,
+    float(os.environ.get("ROM_METADATA_WATCH_MAX_DELAY_SECONDS", "60")),
+)
 DRONE_LOG_UNAUTHORIZED_REQUESTS = os.environ.get("DRONE_LOG_UNAUTHORIZED_REQUESTS", "0").strip().lower() in {"1", "true", "yes", "on"}
 DRONE_UNAUTH_RATE_LIMIT_ENABLED = os.environ.get("DRONE_UNAUTH_RATE_LIMIT_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
 DRONE_UNAUTH_RATE_LIMIT_REQUESTS = max(1, int(os.environ.get("DRONE_UNAUTH_RATE_LIMIT_REQUESTS", "60")))
@@ -8318,6 +8331,8 @@ def _rom_metadata_cache_status(settings: Settings) -> dict:
         "active": _ROM_METADATA_ACTIVE.is_set(),
         "poller_enabled": settings.rom_metadata_poll_seconds != 0,
         "poll_seconds": settings.rom_metadata_poll_seconds,
+        "watch_enabled": ROM_METADATA_WATCH_ENABLED,
+        "watch_active": _ROM_METADATA_WATCHER is not None,
         "rom_hashing_enabled": ROM_METADATA_HASH_ROMS_ENABLED,
         "initial_delay_seconds": ROM_METADATA_INITIAL_DELAY_SECONDS,
         "complete": complete,
@@ -10900,6 +10915,23 @@ def _start_rom_metadata_poller(settings: Settings, repository: "RomRepository") 
     print("Asset metadata poller thread started", file=sys.stdout, flush=True)
 
 
+def _start_rom_metadata_watcher(settings: Settings) -> None:
+    """Wake the metadata poller in near real time when ROM files change.
+
+    Best-effort: if inotify is unavailable the periodic poll still covers
+    changes, so a failure here is logged and otherwise ignored.
+    """
+    global _ROM_METADATA_WATCHER
+    watcher = RomFilesystemWatcher(
+        settings.roms_root,
+        _ROM_METADATA_WAKE.set,
+        debounce_seconds=ROM_METADATA_WATCH_DEBOUNCE_SECONDS,
+        max_delay_seconds=ROM_METADATA_WATCH_MAX_DELAY_SECONDS,
+    )
+    if watcher.start():
+        _ROM_METADATA_WATCHER = watcher
+
+
 class DroneThreadingHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
     daemon_threads = True
@@ -10924,7 +10956,7 @@ def _apply_server_tls(settings: Settings, server: ThreadingHTTPServer) -> None:
 
 
 def create_server(settings: Settings) -> ThreadingHTTPServer:
-    global _OVERMIND_POLLER_STARTED, _ROM_METADATA_POLLER_STARTED, _PEER_HEALTH_CHECK_THREAD_STARTED, _DOWNLOAD_MANAGER
+    global _OVERMIND_POLLER_STARTED, _ROM_METADATA_POLLER_STARTED, _ROM_METADATA_WATCHER_STARTED, _PEER_HEALTH_CHECK_THREAD_STARTED, _DOWNLOAD_MANAGER
     roms_root, bios_root = _real_data_roots(settings)
     repository = RomRepository(
         roms_root,
@@ -11010,6 +11042,15 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
         _ROM_METADATA_POLLER_STARTED = True
     else:
         print("Asset metadata poller already started", file=sys.stdout, flush=True)
+
+    # Near-real-time ROM change detection wakes the poller above; only useful
+    # when the poller is running.
+    if settings.rom_metadata_poll_seconds == 0 or not ROM_METADATA_WATCH_ENABLED:
+        if not ROM_METADATA_WATCH_ENABLED:
+            print("ROM filesystem watcher disabled: ROM_METADATA_WATCH_ENABLED=0", file=sys.stdout, flush=True)
+    elif not _ROM_METADATA_WATCHER_STARTED:
+        _start_rom_metadata_watcher(settings)
+        _ROM_METADATA_WATCHER_STARTED = True
 
     return server
 
