@@ -73,6 +73,7 @@ try:
         _clear_pending_rom_metadata_changes,
         _clear_sqlite_asset_metadata_cache,
         _purge_asset_cache_keep_md5,
+        _read_preserved_asset_md5,
         _load_rom_metadata_cache,
         _persist_rom_metadata_cache,
         _read_pending_rom_metadata_changes,
@@ -136,6 +137,7 @@ except ImportError:
         _clear_pending_rom_metadata_changes,
         _clear_sqlite_asset_metadata_cache,
         _purge_asset_cache_keep_md5,
+        _read_preserved_asset_md5,
         _load_rom_metadata_cache,
         _persist_rom_metadata_cache,
         _read_pending_rom_metadata_changes,
@@ -3850,11 +3852,19 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         """Purge cached asset metadata while keeping md5, forcing a clean resync."""
         result = _purge_asset_cache_keep_md5(self.settings)
         _ROM_METADATA_WAKE.set()
+        cleared = result.get("cleared") or {}
+        roms = int(cleared.get("roms") or 0)
+        kept = int(cleared.get("preserved_md5") or 0)
         self._send_json(200, {
             "status": result.get("status", "queued"),
             "kept_md5": True,
+            "cleared": cleared,
             "requested_at": result.get("requested_at"),
-            "message": "Asset cache purge queued. Cached md5 values were kept; the poller will re-scan and upload a fresh full inventory.",
+            "message": (
+                f"Asset cache cleared ({roms} ROMs, {int(cleared.get('bios') or 0)} BIOS, "
+                f"{int(cleared.get('artwork') or 0)} artwork). Kept {kept} md5 hashes — "
+                "rebuilding now without re-hashing, then uploading a full inventory."
+            ),
         })
 
     def _handle_admin_download_cancel(self, job_id: str) -> None:
@@ -8378,6 +8388,10 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
     existing_entries = cache.get("entries") if isinstance(cache.get("entries"), dict) else {}
     existing_bios_entries = cache.get("bios_entries") if isinstance(cache.get("bios_entries"), dict) else {}
     existing_artwork_entries = cache.get("artwork_entries") if isinstance(cache.get("artwork_entries"), dict) else {}
+    # md5 snapshot kept by a cache purge so a clean rebuild does not re-hash files.
+    preserved_md5 = _read_preserved_asset_md5(settings)
+    preserved_rom_md5 = preserved_md5.get("rom") or {}
+    preserved_bios_md5 = preserved_md5.get("bios") or {}
     print(
         f"Asset metadata cache load completed: entries={len(existing_entries)} bios_entries={len(existing_bios_entries)} artwork_entries={len(existing_artwork_entries)} duration_ms={int((time.monotonic() - cache_load_started) * 1000)}",
         file=sys.stdout,
@@ -8478,9 +8492,18 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
             previous = existing_entries.get(key) if isinstance(existing_entries.get(key), dict) else {}
             base_entry = _database_rom_metadata_fields(rom, system_name, file_path, absolute, stat_size, stat_mtime)
             previous_md5 = (previous.get("rom_md5") or previous.get("md5")) if previous else None
+            reuse_md5 = None
             if previous and previous.get("file_size") == stat_size and previous_md5:
+                reuse_md5 = previous_md5
+            else:
+                # After a purge the entry rows are gone; reuse md5 from the
+                # snapshot for files whose size and mtime are unchanged.
+                kept = preserved_rom_md5.get(key)
+                if kept and kept.get("md5") and kept.get("file_size") == stat_size and kept.get("modified_time") == stat_mtime:
+                    reuse_md5 = kept["md5"]
+            if reuse_md5:
                 next_entries[key] = dict(base_entry)
-                next_entries[key].update({"md5": previous_md5, "rom_md5": previous_md5})
+                next_entries[key].update({"md5": reuse_md5, "rom_md5": reuse_md5})
             elif previous and previous.get("file_size") == stat_size and previous.get("modified_time") == stat_mtime:
                 next_entries[key] = dict(base_entry)
             else:
@@ -8519,8 +8542,15 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
                 "mtime": stat_mtime,
                 "absolute_path": str(bios_path),
             }
+            reuse_bios_md5 = None
             if previous and previous.get("file_size") == stat_size and previous.get("modified_time") == stat_mtime and previous.get("md5"):
-                next_bios_entries[key] = {**base_entry, "md5": previous.get("md5"), "bios_md5": previous.get("bios_md5") or previous.get("md5")}
+                reuse_bios_md5 = previous.get("md5")
+            else:
+                kept = preserved_bios_md5.get(key)
+                if kept and kept.get("md5") and kept.get("file_size") == stat_size and kept.get("modified_time") == stat_mtime:
+                    reuse_bios_md5 = kept["md5"]
+            if reuse_bios_md5:
+                next_bios_entries[key] = {**base_entry, "md5": reuse_bios_md5, "bios_md5": (previous.get("bios_md5") if previous else None) or reuse_bios_md5}
             else:
                 next_bios_entries[key] = base_entry
                 bios_new_or_changed.append((key, bios_path, base_entry))

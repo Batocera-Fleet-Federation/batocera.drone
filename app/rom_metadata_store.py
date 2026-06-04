@@ -797,32 +797,106 @@ def _clear_sqlite_asset_metadata_cache(settings: Any) -> None:
         pass
 
 
+def _ensure_preserved_md5_tables(connection: sqlite3.Connection) -> None:
+    """Create the md5-preservation tables used to survive a cache purge."""
+    for table in ("preserved_rom_md5", "preserved_bios_md5"):
+        connection.execute(
+            f"CREATE TABLE IF NOT EXISTS {table} ("
+            "entry_key TEXT PRIMARY KEY, file_size INTEGER, modified_time INTEGER, md5 TEXT)"
+        )
+
+
+def _read_preserved_asset_md5(settings: Any) -> dict:
+    """Return md5 snapshots saved by the last purge, keyed by entry_key.
+
+    Shape: ``{"rom": {entry_key: {file_size, modified_time, md5}}, "bios": {...}}``.
+    Empty when nothing was preserved; safe to call on caches that never purged.
+    """
+    result: dict = {"rom": {}, "bios": {}}
+    with _open_rom_metadata_cache(settings) as connection:
+        _ensure_preserved_md5_tables(connection)
+        for table, bucket in (("preserved_rom_md5", "rom"), ("preserved_bios_md5", "bios")):
+            for entry_key, file_size, modified_time, md5 in connection.execute(
+                f"SELECT entry_key, file_size, modified_time, md5 FROM {table}"
+            ):
+                if not entry_key or not md5:
+                    continue
+                result[bucket][entry_key] = {
+                    "file_size": file_size,
+                    "modified_time": modified_time,
+                    "md5": md5,
+                }
+    return result
+
+
 def _purge_asset_cache_keep_md5(settings: Any, requested_at: Optional[str] = None) -> dict:
-    """Force a full re-scan and full Overmind re-upload while keeping cached md5.
+    """Clear cached asset metadata and queue a full rebuild, preserving md5.
 
-    Unlike :func:`_clear_sqlite_asset_metadata_cache`, which drops every cached
-    row and therefore forces every ROM to be re-hashed, this only flips the
-    scan/upload state and leaves the rom/bios/artwork rows (and their md5) in
-    place. The next metadata poll then:
-
-    * re-scans every system from disk, rebuilding the entry set so stale or
-      duplicate keys that no longer map to a file on disk are dropped, while
-      reusing md5 by (key, file_size) from the rows left in place (so nothing
-      is re-hashed); and
-    * uploads a full ``replace_all`` inventory, so Overmind rebuilds its master
-      ROM list from scratch and any duplicates it accumulated are cleared.
+    This empties the rom/bios/artwork entry tables (so the cached counts drop to
+    zero and a clean rebuild runs) and clears the stored ROM-inventory
+    fingerprint. Before clearing, it snapshots every known md5 keyed by
+    ``(entry_key, file_size, modified_time)`` into ``preserved_*`` tables. The
+    next metadata poll rebuilds the entry set from disk and reuses those md5
+    values for unchanged files (see ``_read_preserved_asset_md5``), so ROMs are
+    not re-hashed, then uploads a full ``replace_all`` inventory to Overmind.
     """
     from datetime import datetime, timezone
 
     requested = requested_at or datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-    _update_rom_metadata_cache_state(
-        settings,
-        dirty=True,
-        full_refresh_pending=True,
-        scan_in_progress=False,
-        rebuild_requested_at=requested,
-    )
-    return {"status": "queued", "requested_at": requested}
+    cleared = {"roms": 0, "bios": 0, "artwork": 0, "preserved_md5": 0}
+    with _open_rom_metadata_cache(settings) as connection:
+        _ensure_preserved_md5_tables(connection)
+        # Snapshot md5 before clearing so the rebuild does not re-hash unchanged files.
+        connection.execute("DELETE FROM preserved_rom_md5")
+        preserved = connection.execute(
+            "INSERT INTO preserved_rom_md5 (entry_key, file_size, modified_time, md5) "
+            "SELECT entry_key, file_size, modified_time, md5 FROM rom_cache_entries "
+            "WHERE md5 IS NOT NULL AND md5 <> ''"
+        ).rowcount
+        connection.execute("DELETE FROM preserved_bios_md5")
+        connection.execute(
+            "INSERT INTO preserved_bios_md5 (entry_key, file_size, modified_time, md5) "
+            "SELECT entry_key, file_size, modified_time, md5 FROM bios_cache_entries "
+            "WHERE md5 IS NOT NULL AND md5 <> ''"
+        )
+        cleared["roms"] = connection.execute("SELECT count(*) FROM rom_cache_entries").fetchone()[0]
+        cleared["bios"] = connection.execute("SELECT count(*) FROM bios_cache_entries").fetchone()[0]
+        cleared["artwork"] = connection.execute("SELECT count(*) FROM artwork_cache_entries").fetchone()[0]
+        cleared["preserved_md5"] = max(0, int(preserved or 0))
+        # Empty the asset entry + derived tables (cached counts drop to zero).
+        for table in (
+            "rom_cache_entries",
+            "bios_cache_entries",
+            "artwork_cache_entries",
+            "deleted_rom_cache_entries",
+            "deleted_bios_cache_entries",
+            "deleted_artwork_cache_entries",
+            "cache_changes",
+            "asset_systems",
+            "asset_gamelists",
+        ):
+            connection.execute(f"DELETE FROM {table}")
+        # Drop fingerprint + upload/scan markers so a full rebuild and upload run.
+        for key in (
+            "rom_inventory_fingerprint",
+            "rom_inventory_fingerprint_algorithm",
+            "last_full_scan_at",
+            "last_successful_upload_at",
+            "scan_checkpoint_at",
+        ):
+            connection.execute("DELETE FROM cache_state WHERE key = ?", (key,))
+        for key, value in (
+            ("dirty", True),
+            ("full_refresh_pending", True),
+            ("scan_in_progress", False),
+            ("rebuild_requested_at", requested),
+        ):
+            connection.execute(
+                "INSERT INTO cache_state (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, json.dumps(value, sort_keys=True, default=str)),
+            )
+    return {"status": "queued", "requested_at": requested, "cleared": cleared}
 
 
 def _update_rom_metadata_cache_state(settings: Any, **values: Any) -> None:

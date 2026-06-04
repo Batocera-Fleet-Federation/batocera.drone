@@ -1399,7 +1399,7 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(cache["entries"], {})
             self.assertEqual(cache["systems"], [])
 
-    def test_purge_asset_cache_action_keeps_md5_and_queues_resync(self) -> None:
+    def test_purge_asset_cache_action_clears_entries_but_preserves_md5(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
             with mock.patch.dict(
@@ -1449,9 +1449,12 @@ class SettingsTests(unittest.TestCase):
             # Resync is queued ...
             self.assertTrue(cache["dirty"])
             self.assertTrue(cache["full_refresh_pending"])
-            # ... but the cached entry and its md5 are preserved (no re-hash).
-            self.assertIn("snes:chrono.zip", cache["entries"])
-            self.assertEqual(cache["entries"]["snes:chrono.zip"].get("md5"), "abc123")
+            # ... the cached ROM entries are actually cleared (count -> 0) ...
+            self.assertEqual(cache["entries"], {})
+            # ... but the md5 is preserved so the rebuild does not re-hash.
+            preserved = drone_api._read_preserved_asset_md5(settings)
+            self.assertIn("snes:chrono.zip", preserved["rom"])
+            self.assertEqual(preserved["rom"]["snes:chrono.zip"]["md5"], "abc123")
 
     def test_metadata_upload_snapshot_uses_cached_rows_without_gamelist_lookup(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
