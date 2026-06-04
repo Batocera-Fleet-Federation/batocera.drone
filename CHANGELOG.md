@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.62] - 2026-06-03
+
+- Updating drone to page actions in overmind admin.
+
 ## [v0.0.61] - 2026-06-03
 
 - Adding peer to peer health checks against other drones in the swarm.
