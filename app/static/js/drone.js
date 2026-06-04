@@ -3063,16 +3063,17 @@ async function renderOvermindIntegrationPage() {
       <div><strong>Certificate:</strong> ${escapeHtml(cert.status || "unknown")}${cert.fingerprint ? ` · ${escapeHtml(String(cert.fingerprint).slice(0, 16))}` : ""}</div>
       <div><strong>Swarm Drones:</strong> ${swarm.length}</div>
       <div class="mt-2"><strong>Notes:</strong> ${escapeHtml(status.notes || "")}</div>
-      ${swarm.length ? `<div class="mt-3"><strong>Last Swarm Snapshot</strong>${swarm.map((drone) => {
-        const checks = peerChecks.filter((item) => String(item.target_drone_id || "") === String(drone.drone_id || drone.device_id || ""));
+      ${swarm.length ? `<div class="mt-3"><strong>Last Swarm Snapshot (P2P Health via Public IP)</strong>${swarm.map((drone) => {
+        const dronePeerId = String(drone.drone_id || drone.device_id || "");
+        const checks = peerChecks.filter((item) => String(item.target_drone_id || "") === dronePeerId);
         const latest = checks[0] || {};
         const passed = latest.status === "pass";
+        const hasPublicIp = !!(drone.public_ip || "").trim();
         return `<div class="mt-2 p-2 rounded border" style="border-color:var(--admin-border)!important;background:rgba(31,42,68,.45)">
-          <div class="d-flex justify-content-between gap-2"><span>${escapeHtml(drone.name || drone.hostname || drone.device_name || drone.drone_id || "Drone")}</span><span class="badge ${passed ? "text-bg-success" : "text-bg-danger"}">${latest.status ? (passed ? "RESOLVED" : "FAILED") : "unchecked"}</span></div>
-          <div class="small text-muted mono">${escapeHtml(drone.drone_id || drone.device_id || "")}</div>
+          <div class="d-flex justify-content-between gap-2"><span>${escapeHtml(drone.name || drone.hostname || drone.device_name || dronePeerId || "Drone")}</span><span class="badge ${!hasPublicIp ? "text-bg-secondary" : (passed ? "text-bg-success" : (latest.status ? "text-bg-danger" : "text-bg-warning"))}">${!hasPublicIp ? "no public IP" : (latest.status ? (passed ? "RESOLVED" : "FAILED") : "pending")}</span></div>
+          <div class="small text-muted mono">${escapeHtml(dronePeerId)}</div>
           <div class="small text-muted">Public IP: ${escapeHtml(drone.public_ip || "n/a")}</div>
-          <div class="small text-muted">Address: ${escapeHtml(latest.target_address || drone.public_reachable_url || drone.public_ip || drone.local_ip || "n/a")}</div>
-          <div class="small text-muted">Checked: ${escapeHtml(latest.checked_at || "n/a")}</div>
+          <div class="small text-muted">Checked: ${escapeHtml(latest.checked_at || "n/a")}${latest.latency_ms != null ? ` · ${latest.latency_ms} ms` : ""}</div>
           ${latest.failure_reason ? `<div class="small text-danger">${escapeHtml(latest.failure_reason)}</div>` : ""}
         </div>`;
       }).join("")}</div>` : ""}

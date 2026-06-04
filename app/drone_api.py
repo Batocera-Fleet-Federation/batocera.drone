@@ -162,6 +162,7 @@ FAKE_OVERMIND_PASSWORD = "DemoPass123"
 FAKE_OVERMIND_TOKEN = "demo-local-drone-token"
 _OVERMIND_POLLER_STARTED = False
 _ROM_METADATA_POLLER_STARTED = False
+_PEER_HEALTH_CHECK_THREAD_STARTED = False
 _ROM_METADATA_ACTIVE = Event()
 _ROM_METADATA_WAKE = Event()
 _ROM_METADATA_LOCK = RLock()
@@ -10135,13 +10136,12 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
     system_info_refresh_seconds = max(300, int(os.environ.get("DRONE_SYSTEM_INFO_REFRESH_SECONDS", "3600")))
     last_speed_sample_at: Optional[float] = None
     last_config_report_at = -float(config_report_seconds or 0)
-    last_peer_check_at = -float(PEER_CHECK_INTERVAL_SECONDS)
     last_system_info_at = -float(system_info_refresh_seconds)
     system_info_payload: dict = {}
     fs_snapshot = _filesystem_snapshot(settings)
 
     def loop() -> None:
-        nonlocal last_speed_sample_at, last_config_report_at, last_peer_check_at, last_system_info_at, system_info_payload, fs_snapshot
+        nonlocal last_speed_sample_at, last_config_report_at, last_system_info_at, system_info_payload, fs_snapshot
         while True:
             try:
                 config = _load_overmind_config_for_settings(settings)
@@ -10250,24 +10250,6 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                         settings=settings,
                     )
                     last_speed_sample_at = now
-
-                if swarm and now - last_peer_check_at >= PEER_CHECK_INTERVAL_SECONDS:
-                    peer_results = []
-                    for peer in swarm:
-                        peer_id = str(peer.get("drone_id") or peer.get("device_id") or peer.get("id") or "")
-                        if not peer_id or peer_id == settings.overmind_device_id:
-                            continue
-                        peer_results.append(_check_peer(settings, peer, config=config))
-                    if peer_results:
-                        _save_state_payload(_state_database_path(settings.userdata_root), "peer_checks.json", peer_results)
-                        _overmind_peer_results_path_for_settings(settings).unlink(missing_ok=True)
-                        _overmind_post_json(
-                            f"{base_url}/api/devices/{device_id}/peer-checks",
-                            {"results": peer_results},
-                            token=token,
-                            settings=settings,
-                        )
-                    last_peer_check_at = now
 
                 if not _ROM_METADATA_ACTIVE.is_set():
                     next_fs_snapshot = _filesystem_snapshot(settings)
@@ -10400,6 +10382,120 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
             time.sleep(poll_seconds)
 
     thread = Thread(target=loop, name="overmind-action-poller", daemon=True)
+    thread.start()
+
+
+def _probe_peer_public_ip(settings: Settings, peer: dict, config: Optional[dict] = None) -> dict:
+    """Health-check a peer using its public IP only via mTLS https://<public_ip>/health."""
+    peer_id = str(peer.get("drone_id") or peer.get("device_id") or peer.get("id") or "")
+    public_ip = str(peer.get("public_ip") or "").strip()
+    checked_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    result: dict = {
+        "source_drone_id": settings.overmind_device_id,
+        "target_drone_id": peer_id,
+        "target_address": None,
+        "status": "fail",
+        "latency_ms": None,
+        "failure_reason": None,
+        "checked_at": checked_at,
+    }
+    if not public_ip:
+        result["failure_reason"] = "no public IP available"
+        return result
+    host = public_ip
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    address = f"https://{host}"
+    result["target_address"] = address
+    started = time.monotonic()
+    try:
+        _peer_get_json(f"{address}/v1/api/peer/health", settings, peer_id=peer_id, config=config)
+        result["status"] = "pass"
+        result["latency_ms"] = int((time.monotonic() - started) * 1000)
+    except ssl.SSLError as error:
+        message = str(error)
+        if config and any(term in message.lower() for term in ("unknown ca", "certificate", "cert")):
+            try:
+                _peer_get_json(f"{address}/v1/api/peer/health", settings, peer_id=peer_id, config=config, refresh_cert=True)
+                result["status"] = "pass"
+                result["latency_ms"] = int((time.monotonic() - started) * 1000)
+                return result
+            except Exception as retry_error:
+                result["failure_reason"] = f"{message}; retry after cert refresh: {retry_error}"
+                return result
+        result["failure_reason"] = message
+    except Exception as error:
+        result["failure_reason"] = str(error)
+    return result
+
+
+def _start_peer_health_check_thread(settings: Settings) -> None:
+    """Start a background thread that periodically health-checks swarm peers via their public IP."""
+    interval = max(30, PEER_CHECK_INTERVAL_SECONDS)
+
+    def loop() -> None:
+        while True:
+            time.sleep(interval)
+            try:
+                config = _load_overmind_config_for_settings(settings)
+                base_url = str(config.get("overmind_url") or "").strip().rstrip("/")
+                token = str(config.get("overmind_token") or "").strip()
+                if not base_url or not token:
+                    continue
+                swarm = _load_state_payload(
+                    _state_database_path(settings.userdata_root),
+                    "overmind_swarm.json",
+                    [],
+                    legacy_path=_overmind_swarm_path_for_settings(settings),
+                )
+                if not swarm:
+                    continue
+                peer_results = []
+                for peer in swarm:
+                    peer_id = str(peer.get("drone_id") or peer.get("device_id") or peer.get("id") or "")
+                    if not peer_id or peer_id == settings.overmind_device_id:
+                        continue
+                    if not str(peer.get("public_ip") or "").strip():
+                        continue
+                    result = _probe_peer_public_ip(settings, peer, config=config)
+                    peer_results.append(result)
+                    print(
+                        f"Peer health check: source={settings.overmind_device_id} target={peer_id} "
+                        f"status={result['status']} address={result.get('target_address')} "
+                        f"latency={result.get('latency_ms')}ms",
+                        file=sys.stdout,
+                        flush=True,
+                    )
+                if peer_results:
+                    _save_state_payload(
+                        _state_database_path(settings.userdata_root),
+                        "peer_checks.json",
+                        peer_results,
+                    )
+                    _overmind_peer_results_path_for_settings(settings).unlink(missing_ok=True)
+                    device_id = quote(settings.overmind_device_id, safe="")
+                    try:
+                        _overmind_post_json(
+                            f"{base_url}/api/devices/{device_id}/peer-checks",
+                            {"results": peer_results},
+                            token=token,
+                            settings=settings,
+                        )
+                        print(
+                            f"Peer health checks reported to Overmind: {len(peer_results)} result(s)",
+                            file=sys.stdout,
+                            flush=True,
+                        )
+                    except Exception as report_error:
+                        print(
+                            f"Failed to report peer health checks to Overmind: {_format_overmind_error(report_error)}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+            except Exception as error:
+                print(f"Peer health check thread error: {_format_overmind_error(error)}", file=sys.stderr, flush=True)
+
+    thread = Thread(target=loop, name="peer-health-checker", daemon=True)
     thread.start()
 
 
@@ -10742,7 +10838,7 @@ def _apply_server_tls(settings: Settings, server: ThreadingHTTPServer) -> None:
 
 
 def create_server(settings: Settings) -> ThreadingHTTPServer:
-    global _OVERMIND_POLLER_STARTED, _ROM_METADATA_POLLER_STARTED, _DOWNLOAD_MANAGER
+    global _OVERMIND_POLLER_STARTED, _ROM_METADATA_POLLER_STARTED, _PEER_HEALTH_CHECK_THREAD_STARTED, _DOWNLOAD_MANAGER
     roms_root, bios_root = _real_data_roots(settings)
     repository = RomRepository(
         roms_root,
@@ -10818,6 +10914,9 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
     if not _OVERMIND_POLLER_STARTED:
         _start_overmind_action_poller(settings, repository)
         _OVERMIND_POLLER_STARTED = True
+    if not _PEER_HEALTH_CHECK_THREAD_STARTED:
+        _start_peer_health_check_thread(settings)
+        _PEER_HEALTH_CHECK_THREAD_STARTED = True
     if settings.rom_metadata_poll_seconds == 0:
         print("Asset metadata poller disabled: ROM_METADATA_POLL_SECONDS=0", file=sys.stdout, flush=True)
     elif not _ROM_METADATA_POLLER_STARTED:
