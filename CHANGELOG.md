@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.64] - 2026-06-04
+
+- - Heartbeat fingerprint mismatch → purge_asset_cache → drone re-scans + full re-upload, keeping its md5 (no re-hash of ~20k ROMs), and Overmind's list is rebuilt clean. - Manual rebuild_asset_metadata action/button still exists unchanged for the rare case you do want a from-scratch re-hash. - The auto-path (db) just queues the action; only the manual endpoint clears Overmind assets immediately — preserving the exact pattern rebuild_asset_metadata already used.
+
 ## [v0.0.63] - 2026-06-04
 
 - Drone now computes a stable rom-inventory-sha256-v1 fingerprint from ROM system/path/type/md5/size. Drone includes the fingerprint in ROM metadata uploads and in heartbeat after a successful upload. Final inventory/delta chunks are marked complete so Overmind computes its fingerprint only after the committed ROM set is complete. Overmind stores both: Drone-reported ROM fingerprint Overmind-computed ROM fingerprint Overmind heartbeat now compares fingerprints and queues one rebuild_asset_metadata action when they differ or Overmind has no stored fingerprint. Overmind recomputes the fingerprint after final ROM hash patch completion too, avoiding a false rebuild right after MD5 hashing. Added yoyo migration columns on drones.
