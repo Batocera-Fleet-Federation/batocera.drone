@@ -146,7 +146,7 @@ For local peer trust, Drone fetches approved peer public certificates from Overm
 For API clients that need mTLS, use your client certificate and key from a trusted system:
 
 ```bash
-curl --cert client.crt --key client.key -k "https://<drone-host>/v1/api/peer/health"
+curl --cert client.crt --key client.key -k "https://<drone-host>/health"
 ```
 
 Keep private keys private. If a key is exposed, recreate or rotate the certificate.

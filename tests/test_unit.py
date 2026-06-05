@@ -36,6 +36,8 @@ from app.drone_api import (
     _drone_report_host,
     _drone_network_payload,
     _peer_address,
+    _peer_health_url,
+    _probe_peer_public_ip,
     _get_local_ip_addresses,
     _get_router_ip_address,
     _collect_gpu_info,
@@ -317,6 +319,33 @@ class SettingsTests(unittest.TestCase):
         }
         self.assertEqual(_peer_address(peer), "https://bff-drone-b:443")
 
+    def test_peer_health_url_uses_public_health_endpoint(self) -> None:
+        self.assertEqual(_peer_health_url("https://198.51.100.21"), "https://198.51.100.21/health")
+        self.assertEqual(_peer_health_url("https://bff-drone-b:443/"), "https://bff-drone-b:443/health")
+
+    def test_public_ip_peer_probe_checks_health_endpoint_through_peer_client(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(Path(tmp) / "userdata")}, clear=True):
+                settings = Settings.from_env()
+
+            calls = []
+
+            def fake_peer_get_json(url, settings_arg, peer_id=None, config=None, refresh_cert=False):
+                calls.append((url, settings_arg, peer_id, config, refresh_cert))
+                return {"status": "ok"}
+
+            peer = {"drone_id": "bff-drone-b", "public_ip": "198.51.100.21"}
+            config = {"overmind_url": "https://overmind.example", "overmind_token": "token"}
+            with mock.patch("app.drone_api._peer_get_json", side_effect=fake_peer_get_json):
+                result = _probe_peer_public_ip(settings, peer, config=config)
+
+            self.assertEqual(result["status"], "pass")
+            self.assertEqual(result["target_address"], "https://198.51.100.21")
+            self.assertEqual(calls[0][0], "https://198.51.100.21/health")
+            self.assertEqual(calls[0][2], "bff-drone-b")
+            self.assertIs(calls[0][3], config)
+            self.assertFalse(calls[0][4])
+
     def test_log_source_collection_sends_only_new_log_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
@@ -591,9 +620,46 @@ class SettingsTests(unittest.TestCase):
                 self.assertEqual(_peer_trust_cafile(settings, peer_id="bff-drone-b", config={}), ca_file)
                 fetch.assert_not_called()
 
+    def test_drone_client_ssl_context_loads_client_cert_for_mtls_peer_checks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            cert_file = Path(tmp) / "drone.crt"
+            key_file = Path(tmp) / "drone.key"
+            ca_file = Path(tmp) / "peer.crt"
+            cert_file.write_text("client-cert", encoding="utf-8")
+            key_file.write_text("client-key", encoding="utf-8")
+            ca_file.write_text("peer-cert", encoding="utf-8")
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "USERDATA_ROOT": str(root),
+                    "DRONE_MTLS_ENABLED": "true",
+                    "DRONE_CERT_FILE": str(cert_file),
+                    "DRONE_KEY_FILE": str(key_file),
+                },
+                clear=True,
+            ):
+                settings = Settings.from_env()
+
+            class FakeContext:
+                def __init__(self):
+                    self.loaded_chain = None
+                    self.check_hostname = True
+
+                def load_cert_chain(self, certfile=None, keyfile=None):
+                    self.loaded_chain = (certfile, keyfile)
+
+            fake_context = FakeContext()
+            with mock.patch("app.drone_api.ssl.create_default_context", return_value=fake_context):
+                context = drone_api._drone_client_ssl_context(settings, "https://198.51.100.21/health", verify=True, cafile=ca_file)
+
+            self.assertIs(context, fake_context)
+            self.assertEqual(fake_context.loaded_chain, (str(cert_file), str(key_file)))
+            self.assertFalse(fake_context.check_hostname)
+
     def test_peer_ssl_diagnostic_identifies_hostname_mismatch(self) -> None:
         diagnostic = _peer_ssl_diagnostic(
-            "https://bff-drone-b:443/v1/api/peer/health",
+            "https://bff-drone-b:443/health",
             Path("/tmp/local-ca.crt"),
             Exception("Hostname mismatch, certificate is not valid for 'bff-drone-b'"),
         )

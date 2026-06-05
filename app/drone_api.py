@@ -3375,7 +3375,7 @@ OPENAPI_SPEC = {
     "info": {
         "title": "Drone App",
         "version": _drone_app_version(),
-        "description": "Browse and download ROM, image, video, and BIOS assets. Peer API routes can require mTLS. For manual testing use a client certificate/key with curl, for example: curl --cert client.crt --key client.key -k https://drone-host/v1/api/peer/health. The admin API page exposes certificate metadata and the public certificate only; private key material must stay on the Drone.",
+        "description": "Browse and download ROM, image, video, and BIOS assets. Peer API routes can require mTLS. For manual health testing use a client certificate/key with curl, for example: curl --cert client.crt --key client.key -k https://drone-host/health. The admin API page exposes certificate metadata and the public certificate only; private key material must stay on the Drone.",
     },
     "servers": [{"url": API_PREFIX}],
     "components": {
@@ -4105,7 +4105,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 "mtls_enabled": self.settings.drone_mtls_enabled,
                 "certificate": metadata,
                 "guidance": {
-                    "curl": "curl --cert /path/to/client.crt --key /path/to/client.key -k https://drone-host/v1/api/peer/health",
+                    "curl": "curl --cert /path/to/client.crt --key /path/to/client.key -k https://drone-host/health",
                     "warning": "Do not share Drone private key material. The download endpoint provides the public certificate only.",
                     "lifecycle": f"Drone creates or reuses a local certificate on startup. Default lifetime is {self.settings.drone_cert_days} days; expired certificates are recreated on restart.",
                 },
@@ -7581,6 +7581,10 @@ def _peer_get_json(url: str, settings: Settings, peer_id: Optional[str] = None, 
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _peer_health_url(address: str) -> str:
+    return f"{str(address or '').strip().rstrip('/')}/health"
+
+
 def _peer_address(peer: dict) -> Optional[str]:
     public_reachable_url = str(peer.get("public_reachable_url") or "").strip().rstrip("/")
     if public_reachable_url:
@@ -7642,14 +7646,14 @@ def _check_peer(settings: Settings, peer: dict, config: Optional[dict] = None) -
         return result
     started = time.monotonic()
     try:
-        _peer_get_json(f"{address}/v1/api/peer/health", settings, peer_id=peer_id, config=config)
+        _peer_get_json(_peer_health_url(address), settings, peer_id=peer_id, config=config)
         result["status"] = "pass"
         result["latency_ms"] = int((time.monotonic() - started) * 1000)
     except ssl.SSLError as error:
         message = str(error)
         if config and any(term in message.lower() for term in ("unknown ca", "certificate", "cert")):
             try:
-                _peer_get_json(f"{address}/v1/api/peer/health", settings, peer_id=peer_id, config=config, refresh_cert=True)
+                _peer_get_json(_peer_health_url(address), settings, peer_id=peer_id, config=config, refresh_cert=True)
                 result["status"] = "pass"
                 result["latency_ms"] = int((time.monotonic() - started) * 1000)
                 return result
@@ -10550,14 +10554,14 @@ def _probe_peer_public_ip(settings: Settings, peer: dict, config: Optional[dict]
     result["target_address"] = address
     started = time.monotonic()
     try:
-        _peer_get_json(f"{address}/v1/api/peer/health", settings, peer_id=peer_id, config=config)
+        _peer_get_json(_peer_health_url(address), settings, peer_id=peer_id, config=config)
         result["status"] = "pass"
         result["latency_ms"] = int((time.monotonic() - started) * 1000)
     except ssl.SSLError as error:
         message = str(error)
         if config and any(term in message.lower() for term in ("unknown ca", "certificate", "cert")):
             try:
-                _peer_get_json(f"{address}/v1/api/peer/health", settings, peer_id=peer_id, config=config, refresh_cert=True)
+                _peer_get_json(_peer_health_url(address), settings, peer_id=peer_id, config=config, refresh_cert=True)
                 result["status"] = "pass"
                 result["latency_ms"] = int((time.monotonic() - started) * 1000)
                 return result
