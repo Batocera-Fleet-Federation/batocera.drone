@@ -7585,12 +7585,19 @@ def _peer_health_url(address: str) -> str:
     return f"{str(address or '').strip().rstrip('/')}/health"
 
 
+def _peer_api_port(peer: dict) -> int:
+    try:
+        return int(peer.get("api_port") or peer.get("port") or 443)
+    except (TypeError, ValueError):
+        return 443
+
+
 def _peer_address(peer: dict) -> Optional[str]:
     public_reachable_url = str(peer.get("public_reachable_url") or "").strip().rstrip("/")
     if public_reachable_url:
         return public_reachable_url
     scheme = str(peer.get("scheme") or peer.get("protocol") or "https").strip() or "https"
-    port = peer.get("api_port") or peer.get("port") or 443
+    port = _peer_api_port(peer)
     reachable_url = str(peer.get("reachable_url") or "").strip().rstrip("/")
     if reachable_url:
         return reachable_url
@@ -7598,11 +7605,7 @@ def _peer_address(peer: dict) -> Optional[str]:
     if public_ip and peer.get("public_resolvable") is True:
         if ":" in public_ip and not public_ip.startswith("["):
             public_ip = f"[{public_ip}]"
-        try:
-            port_number = int(port)
-        except (TypeError, ValueError):
-            port_number = 443
-        port_suffix = "" if port_number == 443 and scheme == "https" else f":{port_number}"
+        port_suffix = "" if port == 443 and scheme == "https" else f":{port}"
         return f"{scheme}://{public_ip}{port_suffix}"
     resolved = peer.get("resolved_network") if isinstance(peer.get("resolved_network"), dict) else {}
     for value in resolved.get("ipv4") or []:
@@ -10531,14 +10534,17 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
 
 
 def _probe_peer_public_ip(settings: Settings, peer: dict, config: Optional[dict] = None) -> dict:
-    """Health-check a peer using its public IP only via mTLS https://<public_ip>/health."""
+    """Health-check a peer using its public endpoint via mTLS https://<public_ip>[:port]/health."""
     peer_id = str(peer.get("drone_id") or peer.get("device_id") or peer.get("id") or "")
     public_ip = str(peer.get("public_ip") or "").strip()
+    api_port = _peer_api_port(peer)
     checked_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     result: dict = {
         "source_drone_id": settings.overmind_device_id,
         "target_drone_id": peer_id,
         "target_address": None,
+        "public_ip": public_ip or None,
+        "api_port": api_port,
         "status": "fail",
         "latency_ms": None,
         "failure_reason": None,
@@ -10550,7 +10556,8 @@ def _probe_peer_public_ip(settings: Settings, peer: dict, config: Optional[dict]
     host = public_ip
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"
-    address = f"https://{host}"
+    port_suffix = "" if api_port == 443 else f":{api_port}"
+    address = f"https://{host}{port_suffix}"
     result["target_address"] = address
     started = time.monotonic()
     try:

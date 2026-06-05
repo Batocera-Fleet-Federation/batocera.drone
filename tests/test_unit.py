@@ -36,6 +36,7 @@ from app.drone_api import (
     _drone_report_host,
     _drone_network_payload,
     _peer_address,
+    _peer_api_port,
     _peer_health_url,
     _probe_peer_public_ip,
     _get_local_ip_addresses,
@@ -309,6 +310,16 @@ class SettingsTests(unittest.TestCase):
         }
         self.assertEqual(_peer_address(peer), "https://198.51.100.21")
 
+    def test_peer_address_builds_public_endpoint_with_advertised_port(self) -> None:
+        peer = {
+            "public_ip": "bff-drone-b",
+            "public_resolvable": True,
+            "scheme": "https",
+            "api_port": 8444,
+        }
+        self.assertEqual(_peer_api_port(peer), 8444)
+        self.assertEqual(_peer_address(peer), "https://bff-drone-b:8444")
+
     def test_peer_address_ignores_unverified_public_ip_when_reachable_url_exists(self) -> None:
         peer = {
             "public_ip": "198.51.100.21",
@@ -334,14 +345,16 @@ class SettingsTests(unittest.TestCase):
                 calls.append((url, settings_arg, peer_id, config, refresh_cert))
                 return {"status": "ok"}
 
-            peer = {"drone_id": "bff-drone-b", "public_ip": "198.51.100.21"}
+            peer = {"drone_id": "bff-drone-b", "public_ip": "bff-drone-b", "api_port": 8444}
             config = {"overmind_url": "https://overmind.example", "overmind_token": "token"}
             with mock.patch("app.drone_api._peer_get_json", side_effect=fake_peer_get_json):
                 result = _probe_peer_public_ip(settings, peer, config=config)
 
             self.assertEqual(result["status"], "pass")
-            self.assertEqual(result["target_address"], "https://198.51.100.21")
-            self.assertEqual(calls[0][0], "https://198.51.100.21/health")
+            self.assertEqual(result["target_address"], "https://bff-drone-b:8444")
+            self.assertEqual(result["public_ip"], "bff-drone-b")
+            self.assertEqual(result["api_port"], 8444)
+            self.assertEqual(calls[0][0], "https://bff-drone-b:8444/health")
             self.assertEqual(calls[0][2], "bff-drone-b")
             self.assertIs(calls[0][3], config)
             self.assertFalse(calls[0][4])
