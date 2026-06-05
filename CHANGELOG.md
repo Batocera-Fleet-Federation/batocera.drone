@@ -1,5 +1,10 @@
 # Changelog
 
+## [v0.0.68] - 2026-06-04
+
+- Updating drone to use port number in the public ip for peer-to-peer health checks and downloads.
+- Updating /health endpoint that each drone checks to target proper /health endpoint.
+
 ## [v0.0.67] - 2026-06-04
 
 - Fixing small sync issues for roms.
