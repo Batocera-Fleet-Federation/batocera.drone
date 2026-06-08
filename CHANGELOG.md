@@ -1,5 +1,10 @@
 # Changelog
 
+## [v0.0.69] - 2026-06-08
+
+- Making big optimizations to database and how information is queried to ensure drone runs fast even on rpi5.
+- UI update.
+
 ## [v0.0.68] - 2026-06-04
 
 - Updating drone to use port number in the public ip for peer-to-peer health checks and downloads.
