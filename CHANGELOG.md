@@ -1,5 +1,10 @@
 # Changelog
 
+## [v0.0.72] - 2026-06-08
+
+- Big update to UI to make things flow better and fixing some small bugs with the dropdowns.
+- Adding uninstall script so users can easily uninstall as easy as they installed.
+
 ## [v0.0.71] - 2026-06-08
 
 - Drone (overmind_reporting.py): added the main config that lived outside the collected roots — /userdata/system/batocera.conf (new system root) — plus es_systems(+overlays) and several standalone-emulator config patterns (duckstation, citra, scummvm, melonds, amiberry, redream, etc.). These now upload + version like the rest.
