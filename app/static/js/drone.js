@@ -681,7 +681,7 @@ function renderSystems(data) {
             >
             <div class="card-body">
               <h2 class="h5 card-title mb-2"><i class="bi bi-controller me-2"></i>${escapeHtml(system.name)}</h2>
-              <div class="text-muted"><i class="bi bi-collection-play me-1"></i>ROMs: ${system.rom_count}</div>
+              <div class="text-muted"><i class="bi bi-collection-play me-1"></i>ROM Files: ${system.rom_count}</div>
             </div>
           </div>
         </div>
@@ -1933,7 +1933,7 @@ function updateArtworkPageFromPayload(payload) {
   const summary = document.getElementById("artworkSummary");
   if (summary) {
     summary.innerHTML = `
-      <span class="badge text-bg-secondary">ROMs: ${total}</span>
+      <span class="badge text-bg-secondary">ROM Files: ${total}</span>
       <span class="badge text-bg-light border">Showing: ${firstItem}-${lastItem}</span>
       <span class="badge text-bg-light border">Page: ${page}/${totalPages}</span>
       <span class="badge text-bg-light border">Mode: ${escapeHtml(payload.mode || "gamelist")}</span>
@@ -2025,7 +2025,7 @@ async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh 
         <button id="removeMissingGamelistBtn" class="btn btn-outline-danger" type="button">Remove Missing ROM Entries</button>
       </div>
       <div id="artworkSummary" class="mb-3 d-flex flex-wrap gap-2">
-        <span class="badge text-bg-secondary">ROMs: ${total}</span>
+        <span class="badge text-bg-secondary">ROM Files: ${total}</span>
         <span class="badge text-bg-light border">Showing: ${firstItem}-${lastItem}</span>
         <span class="badge text-bg-light border">Page: ${page}/${totalPages}</span>
         <span class="badge text-bg-light border">Mode: ${escapeHtml(payload.mode || "gamelist")}</span>
