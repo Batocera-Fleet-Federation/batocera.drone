@@ -705,7 +705,8 @@
       line-height: 1.2;
     }
     .log-content {
-      min-height: 420px;
+      height: min(68vh, 720px);
+      min-height: 520px;
       max-height: 68vh;
       overflow-y: auto;
       white-space: pre-wrap;
@@ -727,6 +728,10 @@
       .asset-flow { grid-template-columns: 1fr; }
       .asset-detail { grid-template-columns: 1fr; gap: 0.15rem; }
       .log-source-list { max-height: 180px; overflow-y: auto; }
+      .log-content {
+        height: 58vh;
+        min-height: 360px;
+      }
     }
     #systemInfoBar {
       font-size: 0.85rem;

@@ -1942,8 +1942,11 @@ class SettingsTests(unittest.TestCase):
     def test_system_info_includes_performance_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
-            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
+            batocera_conf = root / "system" / "batocera.conf"
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root), "BATOCERA_CONF_FILE": str(batocera_conf)}, clear=True):
                 settings = Settings.from_env()
+            settings.batocera_conf_file.parent.mkdir(parents=True, exist_ok=True)
+            settings.batocera_conf_file.write_text("kiosk.enabled=1\n", encoding="utf-8")
 
             info = _collect_system_info_payload(settings)
 
@@ -1951,6 +1954,7 @@ class SettingsTests(unittest.TestCase):
             self.assertIn("cpu", info["performance"])
             self.assertIn("memory", info["performance"])
             self.assertIn("disk", info["performance"])
+            self.assertIs(info["kiosk_enabled"], True)
 
     def test_fake_overmind_config_is_ignored_when_fake_data_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

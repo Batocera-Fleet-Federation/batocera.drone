@@ -1773,6 +1773,24 @@ def _set_kiosk_mode(settings: Settings, enabled: bool) -> Path:
     return path
 
 
+def _get_kiosk_mode(settings: Settings) -> Optional[bool]:
+    path = settings.batocera_conf_file
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return None
+    pattern = re.compile(r"^\s*kiosk\.enabled\s*=\s*(.*?)\s*$", flags=re.IGNORECASE | re.MULTILINE)
+    match = pattern.search(text)
+    if not match:
+        return None
+    value = match.group(1).strip().strip('"').strip("'").lower()
+    if value in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    if value in {"0", "false", "no", "off", "disabled"}:
+        return False
+    return None
+
+
 def _request_service_control(command: str) -> bool:
     if command not in {"restart-emulationstation"}:
         return False
@@ -8034,6 +8052,7 @@ def _collect_system_info_payload(settings: Settings) -> dict:
         "gpu": _collect_gpu_info(),
         "performance": _collect_performance_metrics(settings.userdata_root),
         "asset_cache": asset_cache,
+        "kiosk_enabled": _get_kiosk_mode(settings),
         "network": network,
         "uptime_seconds": uptime,
         "container": Path("/.dockerenv").exists() or os.environ.get("RUNNING_IN_DOCKER") == "1",
