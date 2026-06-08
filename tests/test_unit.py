@@ -1832,6 +1832,10 @@ class SettingsTests(unittest.TestCase):
         self.assertIn('class="table table-hover align-middle themed-table bios-table"', js_source)
         self.assertIn('const selected = themeFilterInitialized && !(themeFilterSelectedSystems || []).length ? ["__none__"]', js_source)
         self.assertIn('class="system-health-row"', js_source)
+        self.assertIn("emulatorConfigSelectionRequestId", js_source)
+        self.assertIn("document.activeElement !== versionSelect", js_source)
+        self.assertIn('apiPost("/admin/asset-cache/clear-pending"', js_source)
+        self.assertIn("What this means:", js_source)
 
     def test_pending_overmind_approval_keeps_integration_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2811,6 +2815,14 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(status["counts"]["systems"], 1)
             self.assertGreaterEqual(status["pending_changes"]["total"], 1)
             self.assertIn("rom_metadata_cache.sqlite3", status["path"])
+
+            drone_api._clear_pending_rom_metadata_changes(settings)
+            drone_api._update_rom_metadata_cache_state(settings, dirty=False, full_refresh_pending=False)
+            cleared_status = _rom_metadata_cache_status(settings)
+
+            self.assertEqual(cleared_status["pending_changes"]["total"], 0)
+            self.assertFalse(cleared_status["needs_upload"])
+            self.assertEqual(cleared_status["counts"]["roms"], 1)
 
     def test_collect_rom_metadata_uses_database_cache_with_current_gamelist_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

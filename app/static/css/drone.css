@@ -514,6 +514,21 @@
     .asset-detail:last-child { border-bottom: 0; }
     .asset-detail span { color: var(--admin-muted); }
     .asset-detail strong { overflow-wrap: anywhere; }
+    .asset-cache-status-line {
+      display: inline-flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 0.55rem;
+    }
+    .asset-cache-help {
+      padding: 0.75rem;
+      color: #d8e5f7;
+      background: rgba(255, 191, 63, 0.08);
+      border: 1px solid rgba(255, 191, 63, 0.28);
+      border-radius: 8px;
+      font-size: 0.88rem;
+      line-height: 1.45;
+    }
     .system-health-row {
       margin-bottom: 0.9rem;
     }

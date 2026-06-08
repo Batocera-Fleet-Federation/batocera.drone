@@ -49,6 +49,7 @@ let currentConfigSource = null;
 let emulatorConfigRows = [];
 let selectedEmulatorConfigIndex = 0;
 let selectedEmulatorConfigVersionIndex = 0;
+let emulatorConfigSelectionRequestId = 0;
 let artworkCurrentOffset = 0;
 let artworkIncludeFilesystem = false;
 let artworkSelectedFields = ["image", "marquee"];
@@ -1703,6 +1704,27 @@ async function purgeAssetCache() {
   }
 }
 
+async function clearPendingAssetChanges() {
+  if (!window.confirm(
+    "Clear all pending asset changes waiting to upload to Overmind?\n\n" +
+    "This keeps the local asset cache and files, but discards the unsent upload queue. " +
+    "Discarded changes will not reach Overmind unless a later scan detects them again."
+  )) {
+    return;
+  }
+  try {
+    const result = await apiPost("/admin/asset-cache/clear-pending", {});
+    showToast(result.message || "Pending asset changes cleared.", "success");
+    if (window.location.hash === "#admin/overmind" && typeof window.refreshOvermindAssetCache === "function") {
+      await window.refreshOvermindAssetCache();
+    } else {
+      await renderAssetCachePage();
+    }
+  } catch (err) {
+    showToast(`Failed to clear pending asset changes: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  }
+}
+
 function renderAssetCachePanel(payload, includeActions = true) {
   const counts = payload.counts || {};
   const pending = payload.pending_changes || {};
@@ -1716,12 +1738,17 @@ function renderAssetCachePanel(payload, includeActions = true) {
   const step = (number, label, text) => `<div class="asset-flow-step ${stage === number ? "active" : stage > number ? "complete" : ""}"><span>${stage > number ? '<i class="bi bi-check-lg"></i>' : number}</span><div><strong>${label}</strong><small>${text}</small></div></div>`;
   return `
     <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
-      <div><span class="badge ${statusClass}">${escapeHtml(statusText)}</span><span class="small text-muted ms-2">${pendingTotal.toLocaleString()} pending change${pendingTotal === 1 ? "" : "s"}</span></div>
+      <div class="asset-cache-status-line">
+        <span class="badge ${statusClass}">${escapeHtml(statusText)}</span>
+        <span class="small text-muted">${pendingTotal.toLocaleString()} pending change${pendingTotal === 1 ? "" : "s"} waiting for Overmind upload</span>
+      </div>
       ${includeActions ? `<div class="d-flex flex-wrap gap-2">
         <button class="btn btn-sm btn-outline-primary" onclick="renderAssetCachePage()"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
+        <button class="btn btn-sm btn-outline-warning" onclick="clearPendingAssetChanges()" ${pendingTotal ? "" : "disabled"}><i class="bi bi-x-circle me-1"></i>Clear Pending</button>
         <button class="btn btn-sm btn-outline-danger" onclick="purgeAssetCache()">Purge Cache &amp; Resync</button>
       </div>` : ""}
     </div>
+    ${pendingTotal ? `<div class="asset-cache-help mb-3"><strong>What this means:</strong> Drone has local asset changes queued for Overmind. If Overmind is connected, refresh after the next upload cycle. If these are stale or duplicated queue entries, use <strong>Clear Pending</strong> to discard the unsent queue without deleting local cache data.</div>` : ""}
     <div class="asset-flow mb-3">
       ${step(1, "Scan", payload.active ? "Reading local assets now" : `Last scan: ${dateText(payload.last_full_scan_at)}`)}
       ${step(2, "Queue", pendingTotal ? `${pendingTotal.toLocaleString()} changes waiting` : "No changes waiting")}
@@ -3078,6 +3105,7 @@ async function renderOvermindIntegrationPage() {
         <span><i class="bi bi-database-check me-2"></i>Asset Cache</span>
         <div class="d-flex gap-2">
           <button id="overmindAssetCacheRefreshBtn" class="btn btn-sm btn-outline-primary" type="button"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
+          <button class="btn btn-sm btn-outline-warning" type="button" onclick="clearPendingAssetChanges()"><i class="bi bi-x-circle me-1"></i>Clear Pending</button>
           <button class="btn btn-sm btn-outline-danger" type="button" onclick="purgeAssetCache()">Purge &amp; Resync</button>
         </div>
       </div>
@@ -3637,6 +3665,7 @@ async function loadSelectedEmulatorConfigContent(row) {
 async function selectEmulatorConfig(index) {
   const row = emulatorConfigRows[index];
   if (!row) return;
+  const requestId = ++emulatorConfigSelectionRequestId;
   selectedEmulatorConfigIndex = index;
   selectedEmulatorConfigVersionIndex = 0;
   document.querySelectorAll("#emulatorConfigSources .list-group-item").forEach((node) => {
@@ -3650,20 +3679,26 @@ async function selectEmulatorConfig(index) {
   if (title) title.textContent = row.label;
   if (path) path.textContent = row.root || row.path || "";
   if (contentNode && !row.contentLoaded) contentNode.textContent = "Loading config...";
+  if (versionSelect) versionSelect.disabled = !row.contentLoaded;
   try {
     await loadSelectedEmulatorConfigContent(row);
   } catch (err) {
     row.error = err.message || "Failed to load config";
     row.contentLoaded = true;
   }
+  if (requestId !== emulatorConfigSelectionRequestId || selectedEmulatorConfigIndex !== index) return;
   if (path) path.textContent = row.root || row.path || "";
   if (versionSelect) {
-    versionSelect.innerHTML = (row.versions || []).map((version, versionIndex) => {
+    const optionsHtml = (row.versions || []).map((version, versionIndex) => {
       const stamp = version.collected_at ? new Date(version.collected_at).toLocaleString() : `Version ${versionIndex + 1}`;
       const hash = version.fingerprint ? ` ${String(version.fingerprint).slice(0, 8)}` : "";
       return `<option value="${versionIndex}">${escapeHtml(stamp + hash)}</option>`;
     }).join("");
-    versionSelect.value = "0";
+    if (document.activeElement !== versionSelect && versionSelect.innerHTML !== optionsHtml) {
+      versionSelect.innerHTML = optionsHtml;
+      versionSelect.value = String(selectedEmulatorConfigVersionIndex);
+    }
+    versionSelect.disabled = false;
   }
   const version = (row.versions || [])[0] || row;
   if (fingerprint) fingerprint.textContent = version.fingerprint || row.fingerprint ? `fingerprint: ${version.fingerprint || row.fingerprint}` : "";

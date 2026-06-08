@@ -151,6 +151,12 @@ class MockServerIntegrationTests(unittest.TestCase):
         self.assertIn("md5", detail)
         self.assertIn("menu_driver", detail["content"])
 
+    def test_admin_asset_cache_clear_pending_endpoint(self) -> None:
+        payload = self._post_json("/v1/api/admin/asset-cache/clear-pending", {})
+        self.assertEqual(payload["status"], "cleared")
+        self.assertEqual(payload["pending_changes"]["total"], 0)
+        self.assertIn("Cleared", payload["message"])
+
     def test_admin_missing_artwork_endpoint(self) -> None:
         missing_rom = self._root / "roms" / "snes" / "Missing Game (USA).zip"
         gamelist = self._root / "roms" / "snes" / "gamelist.xml"

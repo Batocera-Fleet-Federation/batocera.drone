@@ -3903,6 +3903,20 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             ),
         })
 
+    def _handle_admin_asset_cache_clear_pending(self) -> None:
+        """Discard pending asset metadata upload changes without clearing cached assets."""
+        before = _rom_metadata_cache_status(self.settings).get("pending_changes") or {}
+        cleared_total = int(before.get("total") or 0)
+        _clear_pending_rom_metadata_changes(self.settings)
+        _update_rom_metadata_cache_state(self.settings, dirty=False, full_refresh_pending=False)
+        after = _rom_metadata_cache_status(self.settings)
+        self._send_json(200, {
+            "status": "cleared",
+            "cleared": before,
+            "pending_changes": after.get("pending_changes") or {},
+            "message": f"Cleared {cleared_total:,} pending asset change{'s' if cleared_total != 1 else ''}.",
+        })
+
     def _handle_admin_download_cancel(self, job_id: str) -> None:
         manager = _get_download_manager()
         if manager is None:
@@ -8396,7 +8410,7 @@ def _rom_metadata_cache_status(settings: Settings) -> dict:
         "initial_delay_seconds": ROM_METADATA_INITIAL_DELAY_SECONDS,
         "complete": complete,
         "uploaded": uploaded,
-        "needs_upload": bool(cached_assets and (cache.get("dirty") or cache.get("full_refresh_pending") or not uploaded or pending["total"])),
+        "needs_upload": bool(cached_assets and (cache.get("dirty") or cache.get("full_refresh_pending") or pending["total"])),
         "dirty": bool(cache.get("dirty")),
         "full_refresh_pending": bool(cache.get("full_refresh_pending")),
         "scan_in_progress": bool(cache.get("scan_in_progress")),
