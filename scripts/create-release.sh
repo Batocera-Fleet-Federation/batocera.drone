@@ -10,6 +10,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 RELEASE_ASSETS=(
   "scripts/batocera_install.sh"
+  "scripts/batocera_uninstall.sh"
   "scripts/run_now.sh"
   "dist/drone-app.tar.gz"
 )
@@ -280,3 +281,6 @@ info "Release complete: $VERSION"
 echo ""
 echo "Installer:"
 echo "curl -fsSL https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/batocera_install.sh | bash"
+echo ""
+echo "Uninstaller:"
+echo "wget -qO- https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/batocera_uninstall.sh | bash"

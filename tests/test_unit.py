@@ -1750,6 +1750,7 @@ class SettingsTests(unittest.TestCase):
     def test_startup_scripts_validate_local_app_before_launch(self) -> None:
         root = Path(__file__).resolve().parents[1]
         installer = root.joinpath("scripts/batocera_install.sh").read_text(encoding="utf-8")
+        uninstaller = root.joinpath("scripts/batocera_uninstall.sh").read_text(encoding="utf-8")
         run_now = root.joinpath("scripts/run_now.sh").read_text(encoding="utf-8")
         drone_source = root.joinpath("app/drone_api.py").read_text(encoding="utf-8")
 
@@ -1791,6 +1792,11 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("import shutil", run_now)
         self.assertIn("Drone App staged successfully", run_now)
         self.assertEqual(run_now.count("source = archive.extractfile(member)"), 1)
+        self.assertIn("/userdata/system/services/DRONE_SERVER", uninstaller)
+        self.assertIn("/userdata/system/services/DRONE_APP", uninstaller)
+        self.assertIn("/userdata/system/custom.sh", uninstaller)
+        self.assertIn("remove_legacy_custom_sh_block()", uninstaller)
+        self.assertIn("ROM files, artwork folders, gamelist.xml files", uninstaller)
 
     def test_home_page_does_not_block_on_speed_test(self) -> None:
         root = Path(__file__).resolve().parents[1]

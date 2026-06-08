@@ -264,11 +264,15 @@ Default mock login:
 admin / changeme
 ```
 
-### Uninstall
+## Uninstall
 
 ```bash
-userdel drone-app 2>/dev/null || true
-rm -f /userdata/system/services/DRONE_SERVER
+wget -qO- https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/batocera_uninstall.sh | bash
 ```
 
-If the installer changed ownership on `/userdata/roms/*/{images,videos,manuals}/` or `gamelist.xml`, those ownership changes remain until you manually change them back.
+The uninstaller automatically detects and removes either installation style:
+
+- Batocera v43+ service installs in `/userdata/system/services/DRONE_SERVER` or `/userdata/system/services/DRONE_APP`.
+- Legacy Batocera installs that start Drone from `/userdata/system/custom.sh`.
+
+It stops Drone, removes its startup configuration, app files, logs, game-event hook, and `drone-app` account. It does not delete ROMs, artwork, videos, manuals, or `gamelist.xml` files. Any permissions previously applied to those Batocera content files remain unchanged.
