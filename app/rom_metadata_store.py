@@ -371,12 +371,78 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
     )
     connection.execute("CREATE INDEX IF NOT EXISTS idx_rom_cache_system ON rom_cache_entries(system)")
     connection.execute("CREATE INDEX IF NOT EXISTS idx_artwork_cache_system ON artwork_cache_entries(system)")
+    # Btree indexes that back ORDER BY and the LIKE fallback when FTS5 is unavailable.
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_rom_cache_name ON rom_cache_entries(rom_name)")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_rom_cache_system_name ON rom_cache_entries(system, rom_name)")
+    _ensure_rom_search_index(connection)
     _migrate_blob_tables_if_needed(connection)
     _migrate_payload_change_queue_if_needed(connection)
     connection.execute(
         "INSERT INTO cache_state (key, value) VALUES ('schema_version', ?) "
         "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         (json.dumps(ROM_METADATA_CACHE_VERSION),),
+    )
+
+
+ROM_FTS_MIN_QUERY_LENGTH = 3  # trigram tokenizer requires >= 3 chars to MATCH
+
+
+def _fts5_trigram_supported(connection: sqlite3.Connection) -> bool:
+    """Return True if this SQLite build has FTS5 with the trigram tokenizer."""
+    try:
+        connection.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS temp._fts5_probe USING fts5(x, tokenize='trigram')"
+        )
+        connection.execute("DROP TABLE IF EXISTS temp._fts5_probe")
+        return True
+    except sqlite3.Error:
+        return False
+
+
+def _ensure_rom_search_index(connection: sqlite3.Connection) -> None:
+    """Create the FTS5 (trigram) index over rom_cache_entries plus its sync triggers.
+
+    Uses an external-content FTS table so no column data is duplicated, and keeps it
+    in sync with triggers (covers every upsert/delete path automatically). Degrades
+    gracefully to the btree LIKE fallback when FTS5/trigram is unavailable on the host
+    SQLite build (e.g. an older Batocera image).
+    """
+    already_exists = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'rom_fts'"
+    ).fetchone()
+    if not _fts5_trigram_supported(connection):
+        return
+    try:
+        connection.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS rom_fts USING fts5("
+            "rom_name, content='rom_cache_entries', content_rowid='rowid', tokenize='trigram')"
+        )
+        connection.execute(
+            "CREATE TRIGGER IF NOT EXISTS rom_fts_ai AFTER INSERT ON rom_cache_entries BEGIN "
+            "INSERT INTO rom_fts(rowid, rom_name) VALUES (new.rowid, new.rom_name); END"
+        )
+        connection.execute(
+            "CREATE TRIGGER IF NOT EXISTS rom_fts_ad AFTER DELETE ON rom_cache_entries BEGIN "
+            "INSERT INTO rom_fts(rom_fts, rowid, rom_name) VALUES ('delete', old.rowid, old.rom_name); END"
+        )
+        connection.execute(
+            "CREATE TRIGGER IF NOT EXISTS rom_fts_au AFTER UPDATE ON rom_cache_entries BEGIN "
+            "INSERT INTO rom_fts(rom_fts, rowid, rom_name) VALUES ('delete', old.rowid, old.rom_name); "
+            "INSERT INTO rom_fts(rowid, rom_name) VALUES (new.rowid, new.rom_name); END"
+        )
+        if not already_exists:
+            # Backfill the index from existing rows (first-time creation only).
+            connection.execute("INSERT INTO rom_fts(rom_fts) VALUES ('rebuild')")
+    except sqlite3.Error as error:
+        # Never let an index problem break cache open; fall back to LIKE scans.
+        print(f"ROM search index unavailable, using LIKE fallback: {_format_store_error(error)}", file=sys.stderr, flush=True)
+
+
+def _rom_search_index_present(connection: sqlite3.Connection) -> bool:
+    return bool(
+        connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'rom_fts'"
+        ).fetchone()
     )
 
 
@@ -1161,6 +1227,135 @@ def _loads_dict(value: Any) -> dict:
         return parsed if isinstance(parsed, dict) else {}
     except Exception:
         return {}
+
+
+def _escape_like(value: str) -> str:
+    """Escape LIKE wildcards so user input is treated as a literal substring."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def search_rom_entries(
+    settings: Any,
+    query: str,
+    *,
+    system_filter: Optional[str] = None,
+    limit: Optional[int] = None,
+    offset: int = 0,
+) -> List[dict]:
+    """Search ROM names directly in SQLite (FTS5 trigram, or LIKE fallback).
+
+    Returns lightweight result rows ``{system, name, unique_id, is_downloadable,
+    image_stem, md5}`` straight from the relational columns — no full-cache
+    materialization, no per-row JSON parsing, filtering/ordering/pagination all run
+    in SQLite. This is the fast path that replaces the in-memory linear scan.
+    """
+    normalized = (query or "").strip()
+    if not normalized:
+        return []
+    params: list = []
+    select = (
+        "SELECT system, rom_name, unique_id, is_downloadable, image_stem, md5 "
+        "FROM rom_cache_entries "
+    )
+    try:
+        with _open_rom_metadata_cache(settings) as connection:
+            use_fts = len(normalized) >= ROM_FTS_MIN_QUERY_LENGTH and _rom_search_index_present(connection)
+            if use_fts:
+                where = "WHERE rowid IN (SELECT rowid FROM rom_fts WHERE rom_fts MATCH ?) "
+                params.append('"' + normalized.replace('"', '""') + '"')
+            else:
+                where = "WHERE rom_name LIKE ? ESCAPE '\\' "
+                params.append(f"%{_escape_like(normalized)}%")
+            if system_filter:
+                where += "AND system = ? COLLATE NOCASE "
+                params.append(system_filter)
+            order = "ORDER BY system COLLATE NOCASE, rom_name COLLATE NOCASE "
+            limit_clause = ""
+            if limit is not None and int(limit) > 0:
+                limit_clause = "LIMIT ? OFFSET ?"
+                params.extend([int(limit), max(0, int(offset))])
+            rows = connection.execute(select + where + order + limit_clause, params).fetchall()
+    except sqlite3.Error as error:
+        print(f"ROM search query failed: {_format_store_error(error)}", file=sys.stderr, flush=True)
+        return []
+    return [
+        {
+            "system": row[0],
+            "name": row[1],
+            "unique_id": row[2] or "",
+            "is_downloadable": bool(row[3]),
+            "image_stem": row[4],
+            "md5": row[5],
+        }
+        for row in rows
+    ]
+
+
+def rom_cache_has_entries(settings: Any) -> bool:
+    """Return True if the relational ROM cache holds any rows (cheap existence check)."""
+    try:
+        with _open_rom_metadata_cache(settings) as connection:
+            return connection.execute("SELECT 1 FROM rom_cache_entries LIMIT 1").fetchone() is not None
+    except Exception:
+        return False
+
+
+def rom_cache_ready(settings: Any) -> bool:
+    """Return True once a full scan has completed and none is in progress.
+
+    Mirrors the readiness gate of the legacy in-memory snapshot so cache-backed
+    listings only serve results when the relational cache is authoritative; during
+    the initial/active scan callers fall back to scanning the live filesystem.
+    Reads only two ``cache_state`` keys — no row materialization.
+    """
+    try:
+        with _open_rom_metadata_cache(settings) as connection:
+            state = dict(
+                connection.execute(
+                    "SELECT key, value FROM cache_state WHERE key IN ('last_full_scan_at', 'scan_in_progress')"
+                ).fetchall()
+            )
+            last_full_scan = json.loads(state.get("last_full_scan_at") or "null")
+            scan_in_progress = json.loads(state.get("scan_in_progress") or "false")
+            return bool(last_full_scan) and not bool(scan_in_progress)
+    except Exception:
+        return False
+
+
+def list_rom_rows_by_system(settings: Any, system: str, *, include_md5: bool = True) -> Optional[List[dict]]:
+    """Return ROM rows for a single system straight from SQLite, ordered by name.
+
+    Uses the ``idx_rom_cache_system`` index so listing one system never loads the
+    whole library into memory — the key win for large libraries on small hardware.
+    Returns ``None`` only on a SQL error so the caller can fall back to the filesystem.
+    """
+    columns = "system, file_path, rom_name, unique_id, file_size, entry_type, is_downloadable, image_stem, md5"
+    try:
+        with _open_rom_metadata_cache(settings) as connection:
+            rows = connection.execute(
+                f"SELECT {columns} FROM rom_cache_entries WHERE system = ? COLLATE NOCASE "
+                "ORDER BY rom_name COLLATE NOCASE",
+                (system,),
+            ).fetchall()
+    except sqlite3.Error as error:
+        print(f"ROM system listing failed: {_format_store_error(error)}", file=sys.stderr, flush=True)
+        return None
+    result: List[dict] = []
+    for row in rows:
+        item = {
+            "system": row[0],
+            "file_path": row[1],
+            "rom_name": row[2],
+            "unique_id": row[3] or "",
+            "file_size": _int(row[4]),
+            "entry_type": row[5] or "file",
+            "is_downloadable": bool(row[6]),
+            "image_stem": row[7],
+        }
+        if include_md5:
+            item["md5"] = row[8]
+        result.append(item)
+    return result
 
 
 def _load_rom_metadata_cache(settings: Any) -> Tuple[dict, bool]:

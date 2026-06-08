@@ -728,7 +728,7 @@ function renderRomGrid(system, items, page = 1, total = items.length) {
   return `
     <div class="mb-4">
       <div class="d-flex flex-wrap gap-2 justify-content-between align-items-center mb-3">
-        <h3 class="h5 mb-0">ROMs <span class="text-muted">(${total})</span></h3>
+        <h3 class="h5 mb-0">ROM Files <span class="text-muted">(${total})</span></h3>
         <div class="text-muted small">Showing ${total ? ((page - 1) * SYSTEM_ROM_PAGE_SIZE) + 1 : 0}-${Math.min(total, page * SYSTEM_ROM_PAGE_SIZE)} of ${total}</div>
       </div>
       <div class="row g-3">
@@ -1327,7 +1327,7 @@ async function renderHelpPage() {
           <div class="help-metric h-100">
             <i class="bi bi-collection-play"></i>
             <div>
-              <div class="help-metric-title">ROMs</div>
+              <div class="help-metric-title">ROM Files</div>
               <div class="text-muted small">Games, ports, folders, and launchable files inside each system.</div>
             </div>
           </div>

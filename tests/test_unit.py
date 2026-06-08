@@ -3132,6 +3132,86 @@ class RepositoryTests(unittest.TestCase):
             results = repo.search_roms("mario")
             self.assertTrue(any(item["name"].lower().startswith("mario") for item in results))
 
+    def test_search_roms_uses_relational_cache(self) -> None:
+        # With settings + a populated SQLite cache (and an empty filesystem), search must
+        # come from the relational cache via the FTS/LIKE SQL path, not a filesystem scan.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            entries = {
+                "snes:smw.zip": {"system": "snes", "file_path": "smw.zip", "rom_name": "Super Mario World", "unique_id": "u1"},
+                "gba:metroid.zip": {"system": "gba", "file_path": "metroid.zip", "rom_name": "Metroid Fusion", "unique_id": "u2"},
+            }
+            _persist_rom_metadata_cache(
+                settings,
+                {
+                    **_empty_rom_metadata_cache(),
+                    "entries": entries,
+                    "systems": [{"name": "snes", "rom_count": 1}, {"name": "gba", "rom_count": 1}],
+                    "dirty": False,
+                    "full_refresh_pending": False,
+                },
+                rom_updates=entries,
+            )
+            repo = RomRepository(settings.roms_root, settings.bios_root, settings=settings)
+
+            # Mid-word substring match (the filesystem is empty, so a result proves the cache path).
+            names = {item["name"] for item in repo.search_roms("etroid")}
+            self.assertIn("Metroid Fusion", names)
+            # System filter is applied in SQL.
+            snes = repo.search_roms("mario", system_filter="snes")
+            self.assertTrue(snes)
+            self.assertTrue(all(item["system"] == "snes" for item in snes))
+            self.assertTrue(any(item["name"] == "Super Mario World" for item in snes))
+            # Empty query returns nothing.
+            self.assertEqual(repo.search_roms(""), [])
+
+    def test_list_assets_roms_uses_relational_cache_by_system(self) -> None:
+        # list_assets(roms) must query just the requested system from SQLite, not load
+        # the whole library. Empty filesystem + populated/ready cache proves the SQL path.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            entries = {
+                "snes:b.zip": {"system": "snes", "file_path": "b.zip", "rom_name": "Beta", "unique_id": "u-b"},
+                "snes:a.zip": {"system": "snes", "file_path": "a.zip", "rom_name": "Alpha", "unique_id": "u-a"},
+                "gba:m.zip": {"system": "gba", "file_path": "m.zip", "rom_name": "Metroid", "unique_id": "u-m"},
+            }
+            _persist_rom_metadata_cache(
+                settings,
+                {
+                    **_empty_rom_metadata_cache(),
+                    "entries": entries,
+                    "systems": [{"name": "snes", "rom_count": 2}, {"name": "gba", "rom_count": 1}],
+                    "dirty": False,
+                    "full_refresh_pending": False,
+                    "last_full_scan_at": "2026-06-08T00:00:00Z",
+                    "scan_in_progress": False,
+                },
+                rom_updates=entries,
+            )
+            # System dirs exist (as in production) but hold no rom files, so any result
+            # must come from the cache, not a filesystem listing.
+            (root / "roms" / "snes").mkdir(parents=True)
+            (root / "roms" / "gba").mkdir(parents=True)
+            repo = RomRepository(settings.roms_root, settings.bios_root, settings=settings)
+
+            _, roms = repo.list_assets("snes", "roms", include_md5=False)
+            names = [item["name"] for item in roms]
+            self.assertEqual(names, ["Alpha", "Beta"])  # ordered, only snes
+            self.assertTrue(all(item["unique_id"] for item in roms))
+            self.assertEqual(len(repo.list_assets("gba", "roms")[1]), 1)
+
     def test_list_missing_artwork_from_gamelist(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"

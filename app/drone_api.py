@@ -69,6 +69,10 @@ try:
     from .route_config import API_PREFIX, api_url
     from .rom_metadata_store import (
         ROM_METADATA_CACHE_VERSION,
+        search_rom_entries,
+        rom_cache_has_entries,
+        rom_cache_ready,
+        list_rom_rows_by_system,
         _empty_rom_metadata_cache,
         _clear_pending_rom_metadata_changes,
         _clear_sqlite_asset_metadata_cache,
@@ -133,6 +137,10 @@ except ImportError:
     from route_config import API_PREFIX, api_url  # type: ignore
     from rom_metadata_store import (  # type: ignore
         ROM_METADATA_CACHE_VERSION,
+        search_rom_entries,
+        rom_cache_has_entries,
+        rom_cache_ready,
+        list_rom_rows_by_system,
         _empty_rom_metadata_cache,
         _clear_pending_rom_metadata_changes,
         _clear_sqlite_asset_metadata_cache,
@@ -1897,9 +1905,13 @@ def _resolve_theme_dir(settings: Settings) -> Optional[Path]:
 
 
 class RomRepository:
-    def __init__(self, roms_root: Path, bios_root: Path, rom_search_cache_ttl_seconds: int = 300):
+    def __init__(self, roms_root: Path, bios_root: Path, rom_search_cache_ttl_seconds: int = 300, settings=None):
         self.roms_root = roms_root
         self.bios_root = bios_root
+        # Settings are required to read the relational SQLite cache. When absent
+        # (e.g. unit tests constructing a bare repository) the cache-backed paths
+        # transparently fall back to scanning the filesystem.
+        self.settings = settings
         self.rom_search_cache_ttl_seconds = rom_search_cache_ttl_seconds
         self._search_cache_lock = Lock()
         self._search_index: List[dict] = []
@@ -2379,11 +2391,23 @@ class RomRepository:
         return index
 
     def search_roms(self, query: str, limit: Optional[int] = None, system_filter: Optional[str] = None) -> List[dict]:
-        normalized = query.strip().lower()
+        normalized = query.strip()
         if not normalized:
             return []
-        normalized_system_filter = system_filter.strip().lower() if system_filter else None
 
+        # Fast path: search SQLite directly (FTS5 trigram, or indexed LIKE fallback).
+        # No full-cache materialization or per-query linear scan. Used whenever the
+        # relational cache is populated; otherwise we fall back to the legacy index.
+        if self.settings is not None and rom_cache_has_entries(self.settings):
+            rows = search_rom_entries(self.settings, normalized, system_filter=system_filter)
+            results = [item for item in rows if self.should_include_system(item["system"])]
+            if limit is not None and limit > 0:
+                return results[:limit]
+            return results
+
+        # Legacy fallback: in-memory index built from the snapshot/filesystem.
+        normalized_lower = normalized.lower()
+        normalized_system_filter = system_filter.strip().lower() if system_filter else None
         with self._search_cache_lock:
             now = time.time()
             if now >= self._search_index_expires_at:
@@ -2393,7 +2417,7 @@ class RomRepository:
 
         results = []
         for item in source:
-            if normalized not in item["name"].lower():
+            if normalized_lower not in item["name"].lower():
                 continue
             if normalized_system_filter and item["system"].lower() != normalized_system_filter:
                 continue
@@ -3241,30 +3265,29 @@ class RomRepository:
             raise ValueError("invalid asset type")
 
         items = []
-        cached = self._cached_asset_snapshot()
-        if cached and asset_type == "roms":
-            system_key = str(system or "").strip().lower()
-            items = []
-            for rom in cached.get("roms") or []:
-                row_system = str(rom.get("system") or rom.get("system_name") or "").strip().lower()
-                if row_system != system_key:
-                    continue
-                relative_path = str(rom.get("file_path") or rom.get("rom_path") or rom.get("rom_name") or rom.get("name") or "")
-                row = {
-                    "unique_id": rom.get("unique_id") or hashlib.sha256(f"{system}:{relative_path}".encode("utf-8")).hexdigest()[:16],
-                    "name": rom.get("rom_name") or rom.get("name") or Path(str(rom.get("file_path") or "")).name,
-                    "file_path": relative_path,
-                    "byte_count": rom.get("file_size") or rom.get("byte_count"),
-                    "entry_type": rom.get("entry_type") or "file",
-                    "is_downloadable": rom.get("is_downloadable", True),
-                    "image_stem": rom.get("image_stem"),
-                }
-                if include_md5:
-                    row["md5"] = rom.get("md5") or rom.get("rom_md5")
-                    row["rom_md5"] = row["md5"]
-                items.append(row)
-            items.sort(key=lambda item: str(item.get("name") or "").lower())
-            return system_dir, items
+        # Fast path: query just this system's rows from SQLite (indexed by system),
+        # instead of materializing the entire library snapshot in memory. Only used
+        # once the cache is authoritative; otherwise we fall through to the filesystem.
+        if asset_type == "roms" and self.settings is not None and rom_cache_ready(self.settings):
+            rows = list_rom_rows_by_system(self.settings, system, include_md5=include_md5)
+            if rows is not None:
+                items = []
+                for rom in rows:
+                    relative_path = str(rom.get("file_path") or rom.get("rom_name") or "")
+                    row = {
+                        "unique_id": rom.get("unique_id") or hashlib.sha256(f"{system}:{relative_path}".encode("utf-8")).hexdigest()[:16],
+                        "name": rom.get("rom_name") or Path(relative_path).name,
+                        "file_path": relative_path,
+                        "byte_count": rom.get("file_size"),
+                        "entry_type": rom.get("entry_type") or "file",
+                        "is_downloadable": rom.get("is_downloadable", True),
+                        "image_stem": rom.get("image_stem"),
+                    }
+                    if include_md5:
+                        row["md5"] = rom.get("md5")
+                        row["rom_md5"] = row["md5"]
+                    items.append(row)
+                return system_dir, items
         if asset_dir.exists() and asset_dir.is_dir():
             if asset_type == "roms":
                 items = self._list_rom_items(system, asset_dir, include_md5=include_md5)
@@ -11016,6 +11039,7 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
         roms_root,
         bios_root,
         rom_search_cache_ttl_seconds=settings.rom_search_cache_ttl_seconds,
+        settings=settings,
     )
     credential_store = DroneCredentialStore(
         settings.credentials_file,
