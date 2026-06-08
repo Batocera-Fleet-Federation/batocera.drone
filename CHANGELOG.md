@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.70] - 2026-06-08
+
+- Fixing "Game Logging" so that script now detects ES game start and uploads to overmind properly.
+
 ## [v0.0.69] - 2026-06-08
 
 - Making big optimizations to database and how information is queried to ensure drone runs fast even on rpi5.
