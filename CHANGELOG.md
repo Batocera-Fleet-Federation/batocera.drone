@@ -1,5 +1,10 @@
 # Changelog
 
+## [v0.0.74] - 2026-06-08
+
+- Trying to fix issue with gameplay logs.  Adding UI elements to show this.
+- Drone log viewer textarea now opens at a more usable height, with a mobile-specific height too. Drone now reports kiosk_enabled from batocera.conf in system metadata. Overmind removed the per-drone Actions tab from the UI. Moved actions where users would expect them: Remote Restart: Metadata Kiosk Mode: Metadata as a switch toggle Refresh Emulator List: Configs Rebuild Asset Metadata: Systems Old /actions device routes now normalize to Metadata instead of dead-ending. Updated focused tests for the new UI contract.
+
 ## [v0.0.73] - 2026-06-08
 
 - Implemented the emulator dropdown fix and the asset cache clear action. The emulator page now guards against stale async config loads and avoids rebuilding the version dropdown while it is focused, which should stop the random close behavior: drone.js (line 3665). Asset Cache now explains what pending changes mean and includes a Clear Pending button that discards only the unsent Overmind queue, not local cached assets/files: drone.js (line 1707). The backend endpoint is wired at api_routes.py (line 392) and handled in drone_api.py (line 3906). I also adjusted the status calculation so after clearing stale pending changes it no longer keeps showing Upload Pending just because the cache has not uploaded before.
