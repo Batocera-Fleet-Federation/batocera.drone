@@ -19,13 +19,30 @@ except ImportError:
 _STATE_SCHEMA_VERSION = 2
 _CONFIG_COLLECTION_SPECS = (
     (
+        "main_config",
+        "system",
+        (
+            "batocera.conf",
+        ),
+    ),
+    (
         "emulator_config",
         "configs",
         (
+            "amiberry/*.conf",
+            "azahar/*.ini",
             "cemu/**/*",
+            "citra-emu/*.ini",
             "dolphin-emu/*.ini",
             "dosbox/*.conf",
+            "duckstation/*.ini",
             "flycast/emu.cfg",
+            "mednafen/*.cfg",
+            "melonds/*.ini",
+            "model2emu/*.ini",
+            "redream/*.cfg",
+            "scummvm/*.ini",
+            "supermodel/*.ini",
             "flycast/mappings/**/*",
             "mame/*.ini",
             "mame/*.cfg",
@@ -58,6 +75,8 @@ _CONFIG_COLLECTION_SPECS = (
             "emulationstation/es_input.cfg",
             "emulationstation/es_last_input.cfg",
             "emulationstation/es_settings.cfg",
+            "emulationstation/es_systems.cfg",
+            "emulationstation/es_systems_*.cfg",
             "emulationstation/es_features_steam.cfg",
             "emulationstation/es_systems_steam.cfg",
             "encoder_keys.conf",
@@ -311,6 +330,7 @@ def _iter_selected_config_file_rows(settings: Any):
     roots = {
         "configs": settings.userdata_root / "system" / "configs",
         ".config": settings.userdata_root / "system" / ".config",
+        "system": settings.userdata_root / "system",
     }
     selected = {}
     for _category, root_name, patterns in _CONFIG_COLLECTION_SPECS:
@@ -338,6 +358,7 @@ def _selected_config_file_rows(settings: Any, use_cache: bool = True) -> list:
     roots = {
         "configs": settings.userdata_root / "system" / "configs",
         ".config": settings.userdata_root / "system" / ".config",
+        "system": settings.userdata_root / "system",
     }
     cache_key = tuple((name, str(path), int(path.stat().st_mtime_ns) if path.exists() else 0) for name, path in sorted(roots.items()))
     now = time.monotonic()
@@ -388,6 +409,7 @@ def read_emulator_config_file(settings: Any, root_name: str, relative_path: str,
     roots = {
         "configs": settings.userdata_root / "system" / "configs",
         ".config": settings.userdata_root / "system" / ".config",
+        "system": settings.userdata_root / "system",
     }
     root = roots.get(requested_root)
     if root is None or not _is_selected_config_relative(requested_root, requested_relative):

@@ -473,6 +473,28 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(session["rom_md5"], RomRepository.build_md5(rom))
             self.assertEqual(session["played_at"], "2026-05-26T10:15:00+00:00")
 
+    def test_collect_emulator_configs_includes_batocera_conf(self) -> None:
+        from app.overmind_reporting import collect_emulator_configs
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            (root / "system").mkdir(parents=True)
+            (root / "system" / "batocera.conf").write_text("system.power.switch=PIN\n", encoding="utf-8")
+            retroarch = root / "system" / "configs" / "retroarch"
+            retroarch.mkdir(parents=True)
+            (retroarch / "retroarchcustom.cfg").write_text("video_driver = vulkan\n", encoding="utf-8")
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
+                clear=True,
+            ):
+                settings = Settings.from_env()
+
+            payload = collect_emulator_configs(settings, include_unchanged=True)
+            rel_paths = {config["relative_path"] for config in payload["configs"]}
+            self.assertIn("batocera.conf", rel_paths)
+            self.assertIn("retroarch/retroarchcustom.cfg", rel_paths)
+
     def test_game_event_spool_produces_session_with_duration(self) -> None:
         from app.overmind_game_logs import collect_game_event_sessions, delete_game_event_spool
 
