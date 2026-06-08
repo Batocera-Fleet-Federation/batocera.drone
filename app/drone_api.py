@@ -5652,6 +5652,39 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         except Exception as e:
             self._send_json(500, {"error": f"Internal error: {str(e)}"})
 
+    def _handle_admin_gameplay_logs(self) -> None:
+        try:
+            log_data = _collect_log_sources(
+                self.settings,
+                include_unchanged=True,
+                sources=("es_launch_stdout",),
+            )
+            payload = _collect_game_logs(self.settings, self.repository, log_data=log_data)
+            event_sessions, spool_files = _collect_game_event_sessions(self.settings, self.repository)
+            sessions = []
+            seen = set()
+            for session in list(payload.get("sessions") or []) + list(event_sessions or []):
+                if not isinstance(session, dict):
+                    continue
+                key = json.dumps(session, sort_keys=True, default=str)
+                if key in seen:
+                    continue
+                seen.add(key)
+                sessions.append(session)
+            sessions.sort(key=lambda row: str(row.get("played_at") or ""), reverse=True)
+            self._send_json(
+                200,
+                {
+                    "type": "game_logs",
+                    "collected_at": payload.get("collected_at"),
+                    "sessions": sessions,
+                    "logs": payload.get("logs") or [],
+                    "pending_spool_events": len(spool_files or []),
+                },
+            )
+        except Exception as error:
+            self._send_json(500, {"error": _format_overmind_error(error)})
+
     def _handle_admin_system_info(self, include_speed: bool = False) -> None:
         router_ip_address = _get_router_ip_address() or "Unavailable"
         runtime_metrics = _collect_performance_metrics(self.settings.userdata_root)
@@ -11057,6 +11090,40 @@ def _start_rom_metadata_watcher(settings: Settings) -> None:
         _ROM_METADATA_WATCHER = watcher
 
 
+def _ensure_game_event_hook(settings: Settings) -> None:
+    """Best-effort install of the EmulationStation gameplay event hook."""
+    target = (settings.userdata_root / "system" / "scripts" / "drone-game-event.sh").resolve()
+    spool = (settings.userdata_root / "system" / "drone-app" / "game-events").resolve()
+    source_candidates = [
+        Path(__file__).resolve().parent.parent / "scripts" / "drone-game-event.sh",
+        settings.userdata_root / "system" / "drone-app" / "scripts" / "drone-game-event.sh",
+        settings.userdata_root / "system" / "apps" / "roms-api" / "scripts" / "drone-game-event.sh",
+    ]
+    source = next((path for path in source_candidates if path.exists() and path.is_file()), None)
+    if source is None:
+        return
+    try:
+        spool.mkdir(parents=True, exist_ok=True)
+        try:
+            spool.chmod(0o2775)
+        except OSError:
+            pass
+        target.parent.mkdir(parents=True, exist_ok=True)
+        should_copy = True
+        if target.exists():
+            try:
+                should_copy = target.read_bytes() != source.read_bytes()
+            except OSError:
+                should_copy = True
+        if should_copy:
+            shutil.copyfile(source, target)
+        target.chmod(0o755)
+        if should_copy:
+            print(f"Gameplay event hook installed: {target}", file=sys.stdout, flush=True)
+    except OSError as error:
+        print(f"Gameplay event hook install skipped: {_format_overmind_error(error)}", file=sys.stderr, flush=True)
+
+
 class DroneThreadingHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
     daemon_threads = True
@@ -11116,6 +11183,7 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
     )
     if _DOWNLOAD_MANAGER is None:
         _DOWNLOAD_MANAGER = DownloadManager(settings, repository)
+    _ensure_game_event_hook(settings)
 
     handler_factory = _build_handler(
         settings=settings,

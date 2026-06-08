@@ -1496,9 +1496,17 @@ async function renderAdminMenu() {
   content.innerHTML = `
     <div class="row">
       <div class="col-md-4 mb-3">
+        <div class="card admin-tile pointer h-100" onclick="setHash('#admin/gameplay-logs')">
+          <div class="card-body">
+            <h5 class="card-title"><i class="bi bi-clock-history me-2"></i>Gameplay Logs</h5>
+            <p class="card-text">View detected game launches and recent gameplay sessions.</p>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-4 mb-3">
         <div class="card admin-tile pointer h-100" onclick="setHash('#admin/logs/es_launch_stdout?lines=200')">
           <div class="card-body">
-            <h5 class="card-title"><i class="bi bi-journal-text me-2"></i>Logs</h5>
+            <h5 class="card-title"><i class="bi bi-journal-text me-2"></i>System Logs</h5>
             <p class="card-text">View system and emulator logs</p>
           </div>
         </div>
@@ -3515,6 +3523,74 @@ async function renderLogsPage(selectedSource = null, selectedLines = 200) {
   }
   startLogAutoRefresh();
 }
+async function renderGameplayLogsPage() {
+  stopLogAutoRefresh();
+  currentLogSource = null;
+  titleNode.textContent = "Gameplay Logs";
+  subtitleNode.textContent = "Detected game launches from EmulationStation";
+  setLoading(true, "Loading gameplay logs...");
+  try {
+    const payload = await api("/admin/gameplay-logs");
+    const sessions = Array.isArray(payload.sessions) ? payload.sessions : [];
+    const logs = Array.isArray(payload.logs) ? payload.logs : [];
+    const launchSource = logs.find((entry) => entry && entry.source === "es_launch_stdout") || null;
+    const launchText = launchSource && Array.isArray(launchSource.files)
+      ? launchSource.files.map((file) => file.content || file.error || "").filter(Boolean).join("\n")
+      : "";
+    const rows = sessions.map((session) => {
+      const duration = session.duration_seconds !== undefined && session.duration_seconds !== null
+        ? `${Math.round(Number(session.duration_seconds) || 0)}s`
+        : "n/a";
+      return `
+        <tr>
+          <td class="text-nowrap">${escapeHtml(session.played_at || "n/a")}</td>
+          <td>${escapeHtml(session.system_name || "n/a")}</td>
+          <td>
+            <div class="fw-semibold">${escapeHtml(session.game_name || session.name || "Unknown game")}</div>
+            <div class="text-muted small mono">${escapeHtml(session.rom_path || "")}</div>
+          </td>
+          <td class="text-nowrap">${escapeHtml(duration)}</td>
+        </tr>
+      `;
+    }).join("");
+    content.innerHTML = `
+      <div class="mb-3 d-flex flex-wrap justify-content-between gap-2">
+        <button class="btn btn-outline-secondary" onclick="renderAdminPage()">Back to Admin</button>
+        <button class="btn btn-outline-primary" onclick="renderGameplayLogsPage()"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
+      </div>
+      <div class="card log-card mb-3">
+        <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
+          <span>Gameplay Sessions</span>
+          <span class="badge text-bg-secondary">${sessions.length} session${sessions.length === 1 ? "" : "s"}${payload.pending_spool_events ? ` · ${payload.pending_spool_events} pending event${payload.pending_spool_events === 1 ? "" : "s"}` : ""}</span>
+        </div>
+        <div class="card-body">
+          <div class="table-responsive">
+            <table class="table table-sm align-middle">
+              <thead><tr><th>Played</th><th>System</th><th>Game</th><th>Duration</th></tr></thead>
+              <tbody>${rows || '<tr><td colspan="4" class="text-muted">No gameplay sessions detected yet.</td></tr>'}</tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <div class="card log-card">
+        <div class="card-header">Launch Log Source</div>
+        <div class="card-body">
+          <pre class="mono bg-dark text-light p-3" style="max-height:520px;overflow:auto;white-space:pre-wrap;">${escapeHtml(launchText || "No EmulationStation launch log content found.")}</pre>
+        </div>
+      </div>
+    `;
+  } catch (err) {
+    showToast(`Failed to load gameplay logs: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    content.innerHTML = `
+      <div class="mb-3">
+        <button class="btn btn-outline-secondary" onclick="renderAdminPage()">Back to Admin</button>
+      </div>
+      <div class="text-muted">Gameplay logs could not be loaded.</div>
+    `;
+  } finally {
+    setLoading(false);
+  }
+}
 async function loadLog(source, triggerEl = null, updateHash = true, silent = false) {
   currentLogSource = source;
   const lines = clampLogLines(document.getElementById("linesInput")?.value || "200");
@@ -4067,6 +4143,12 @@ async function router() {
         return;
       }
       await renderLogsPage(parsed.source, parsed.lines);
+    } else if (hash === "#admin/gameplay-logs") {
+      if (!adminEnabled) {
+        setHash("");
+        return;
+      }
+      await renderGameplayLogsPage();
     } else if (hash.startsWith("#admin/configs/")) {
       if (!adminEnabled) {
         setHash("");

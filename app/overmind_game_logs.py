@@ -16,7 +16,7 @@ except ImportError:
 
 LogCollector = Callable[[Any], dict]
 ErrorFormatter = Callable[[BaseException], str]
-_STATE_SCHEMA_VERSION = 1
+_STATE_SCHEMA_VERSION = 2
 
 
 def _state_path(settings: Any, filename: str) -> Path:
@@ -261,7 +261,23 @@ def collect_game_logs(
         log_data = _read_launch_log_delta(settings)
     formatter = format_error or (lambda error: str(error))
     sessions = []
+    seen_sessions = set()
     collected_at = log_data["collected_at"]
+
+    def append_session(session: dict) -> None:
+        if not session.get("system_name") or not session.get("game_name"):
+            return
+        key = (
+            str(session.get("played_at") or ""),
+            str(session.get("system_name") or ""),
+            str(session.get("game_name") or ""),
+            str(session.get("rom_path") or ""),
+        )
+        if key in seen_sessions:
+            return
+        seen_sessions.add(key)
+        sessions.append(dict(session))
+
     for source in log_data.get("logs", []):
         if source.get("source") != "es_launch_stdout":
             continue
@@ -269,6 +285,39 @@ def collect_game_logs(
             current = {}
             for line in str(file_info.get("content") or "").splitlines():
                 lowered = line.lower()
+                if "start_rom running system:" in lowered:
+                    current["played_at"] = _parse_launch_timestamp(line, current.get("played_at") or collected_at)
+                    match = re.search(r"running system:\s*([^\s]+)", line, re.IGNORECASE)
+                    if match:
+                        current["system_name"] = match.group(1).strip()
+                if "game settings name:" in lowered:
+                    current["played_at"] = _parse_launch_timestamp(line, current.get("played_at") or collected_at)
+                    match = re.search(r"game settings name:\s*(.+)$", line, re.IGNORECASE)
+                    if match:
+                        current["game_name"] = Path(match.group(1).strip()).name
+                if "callexternalscripts" in lowered and "gamestart" in lowered and "/userdata/roms/" in line:
+                    current["played_at"] = _parse_launch_timestamp(line, current.get("played_at") or collected_at)
+                    system_match = re.search(r"['\"]gameStart['\"]\s*,\s*['\"]([^'\"]+)['\"]", line)
+                    rom_match = re.search(r"PosixPath\('([^']*/userdata/roms/[^']+)'\)", line)
+                    if not rom_match:
+                        rom_match = re.search(r"['\"](/userdata/roms/[^'\"]+)['\"]", line)
+                    if system_match:
+                        current["system_name"] = system_match.group(1).strip()
+                    if rom_match:
+                        rom_value = rom_match.group(1).strip()
+                        rom_path = _resolve_launch_rom_path(settings, str(current.get("system_name") or ""), rom_value)
+                        system_name = _system_from_launch_rom_path(settings, rom_path, str(current.get("system_name") or ""))
+                        current["system_name"] = system_name
+                        current["rom_path"] = rom_path.as_posix() if rom_path else rom_value
+                        current["game_name"] = Path(rom_value).name
+                        if rom_path and repository:
+                            try:
+                                current["rom_md5"] = repository.build_md5(rom_path)
+                            except Exception as error:
+                                current["rom_md5_error"] = formatter(error)
+                        append_session(current)
+                        current = {}
+                        continue
                 if "emulator=" in lowered:
                     current["raw_emulator_line"] = line
                     match = re.search(r"emulator=([^\s]+)", line, re.IGNORECASE)
@@ -291,8 +340,10 @@ def collect_game_logs(
                             except Exception as error:
                                 current["rom_md5_error"] = formatter(error)
                     if current.get("system_name") and current.get("game_name"):
-                        sessions.append(dict(current))
+                        append_session(current)
                         current = {}
+            if current.get("system_name") and current.get("game_name"):
+                append_session(current)
     return {
         "type": "game_logs",
         "collected_at": collected_at,

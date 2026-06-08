@@ -195,6 +195,10 @@ class ApiRoutesMixin:
                 self._handle_admin_logs(parts[2], lines)
                 return
 
+            if len(parts) == 2 and parts[0] == "admin" and parts[1] == "gameplay-logs":
+                self._handle_admin_gameplay_logs()
+                return
+
             if len(parts) == 2 and parts[0] == "admin" and parts[1] == "system-info":
                 include_speed = str(query_params.get("speed", ["0"])[0]).strip().lower() in ("1", "true", "yes", "on")
                 self._handle_admin_system_info(include_speed=include_speed)

@@ -473,6 +473,39 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(session["rom_md5"], RomRepository.build_md5(rom))
             self.assertEqual(session["played_at"], "2026-05-26T10:15:00+00:00")
 
+    def test_game_log_collection_detects_batocera_v43_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            roms_root = root / "roms"
+            rom = roms_root / "steam" / "243780_PixelJunk_Monsters_Ultimate.sh"
+            rom.parent.mkdir(parents=True)
+            rom.write_text("#!/bin/sh\n", encoding="utf-8")
+            launch_log = root / "system" / "logs" / "es_launch_stdout.log"
+            launch_log.parent.mkdir(parents=True)
+            launch_log.write_text(
+                "\n".join([
+                    "2026-06-08 23:25:36,163 DEBUG (emulatorlauncher.py:83):start_rom Running system: steam",
+                    "2026-06-08 23:25:36,169 INFO (Emulator.py:128):__post_init__ game settings name: 243780_PixelJunk_Monsters_Ultimate.sh",
+                    "2026-06-08 23:25:36,747 DEBUG (emulatorlauncher.py:408):callExternalScripts calling external script: [PosixPath('/usr/share/batocera/configgen/scripts/nvidia-workaround.sh'), 'gameStart', 'steam', 'sh', 'sh', PosixPath('/userdata/roms/steam/243780_PixelJunk_Monsters_Ultimate.sh')]",
+                    "2026-06-08 23:25:36,769 DEBUG (emulatorlauncher.py:408):callExternalScripts calling external script: [PosixPath('/usr/share/batocera/configgen/scripts/powermode_launch_hooks.sh'), 'gameStart', 'steam', 'sh', 'sh', PosixPath('/userdata/roms/steam/243780_PixelJunk_Monsters_Ultimate.sh')]",
+                ]),
+                encoding="utf-8",
+            )
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(roms_root)},
+                clear=True,
+            ):
+                settings = Settings.from_env()
+
+            result = _collect_game_logs(settings, RomRepository(roms_root, root / "bios"))
+            self.assertEqual(len(result["sessions"]), 1)
+            session = result["sessions"][0]
+            self.assertEqual(session["system_name"], "steam")
+            self.assertEqual(session["game_name"], "243780_PixelJunk_Monsters_Ultimate.sh")
+            self.assertEqual(session["rom_path"], rom.resolve().as_posix())
+            self.assertEqual(session["played_at"], "2026-06-08T23:25:36+00:00")
+
     def test_collect_emulator_configs_includes_batocera_conf(self) -> None:
         from app.overmind_reporting import collect_emulator_configs
 
