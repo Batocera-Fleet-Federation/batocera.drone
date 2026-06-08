@@ -377,9 +377,12 @@ def _iter_selected_config_files(settings: Any):
         yield row["root"], row["path"], row["relative_path"]
 
 
-def list_emulator_config_files(settings: Any) -> dict:
+def list_emulator_config_files(settings: Any, max_configs: int = 250) -> dict:
     configs = []
+    limit = max(0, int(max_configs or 0))
     for row in _selected_config_file_rows(settings, use_cache=True):
+        if limit and len(configs) >= limit:
+            break
         path = row["path"]
         item = {
             "root_name": row["root_name"],
@@ -398,6 +401,7 @@ def list_emulator_config_files(settings: Any) -> dict:
         "type": "emulator_configs",
         "configs": configs,
         "count": len(configs),
+        "max_configs": limit,
         "incremental": False,
     }
 

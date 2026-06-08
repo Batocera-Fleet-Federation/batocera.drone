@@ -682,6 +682,21 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(detail["content"], "Renderer = Vulkan")
             self.assertEqual(detail["md5"], hashlib.md5(b"Renderer = Vulkan").hexdigest())
 
+    def test_emulator_config_list_matches_overmind_default_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            configs = root / "system" / "configs" / "retroarch"
+            configs.mkdir(parents=True)
+            for index in range(251):
+                (configs / f"{index:03}.cfg").write_text(str(index), encoding="utf-8")
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
+                settings = Settings.from_env()
+
+            listing = list_emulator_config_files(settings)
+
+            self.assertEqual(listing["count"], 250)
+            self.assertEqual(listing["max_configs"], 250)
+
     def test_peer_trust_prefers_configured_ca_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ca_file = Path(tmp) / "ca.crt"
@@ -1812,6 +1827,11 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("include_speed = ", api_routes)
         self.assertIn("def _handle_admin_system_info(self, include_speed: bool = False)", drone_source)
         self.assertIn("_sample_speed() if include_speed else", drone_source)
+        self.assertNotIn('id="${prefix}FilterToggle" data-bs-toggle="dropdown"', js_source)
+        self.assertIn('event.stopPropagation();', js_source)
+        self.assertIn('class="table table-hover align-middle themed-table bios-table"', js_source)
+        self.assertIn('const selected = themeFilterInitialized && !(themeFilterSelectedSystems || []).length ? ["__none__"]', js_source)
+        self.assertIn('class="system-health-row"', js_source)
 
     def test_pending_overmind_approval_keeps_integration_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

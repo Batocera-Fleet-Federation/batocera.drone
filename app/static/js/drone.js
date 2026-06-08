@@ -43,6 +43,8 @@ let filterDropdownState = {};
 let biosFilterInitialized = false;
 let themeFilterInitialized = false;
 let currentLogSource = null;
+let logRefreshTimer = null;
+let logRefreshInFlight = false;
 let currentConfigSource = null;
 let emulatorConfigRows = [];
 let selectedEmulatorConfigIndex = 0;
@@ -233,10 +235,10 @@ function wildcardToRegExp(pattern) {
 }
 function renderFilterDropdown(prefix, options, selected) {
   const selectedSet = new Set(selected || []);
-  const label = selectedSet.size ? `${selectedSet.size} selected` : (prefix === "bios" ? "No systems" : "All systems");
+  const label = selectedSet.size ? `${selectedSet.size} selected` : "No systems";
   return `
     <div class="dropdown app-checkbox-dropdown">
-      <button class="btn btn-outline-primary dropdown-toggle w-100 text-start" type="button" id="${prefix}FilterToggle" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false">${label}</button>
+      <button class="btn btn-outline-primary dropdown-toggle w-100 text-start" type="button" id="${prefix}FilterToggle" aria-expanded="false">${label}</button>
       <div class="dropdown-menu filter-dropdown-menu app-checkbox-menu" data-prefix="${prefix}" aria-labelledby="${prefix}FilterToggle">
         <input id="${prefix}FilterSearch" type="search" class="form-control form-control-sm mb-2" placeholder="Filter systems...">
         <div class="d-flex gap-2 mb-2">
@@ -263,6 +265,7 @@ function setupFilterDropdown(prefix, onSelectionChange) {
   if (toggle && menu) {
     toggle.addEventListener("click", (event) => {
       event.preventDefault();
+      event.stopPropagation();
       const isOpen = menu.classList.contains("show");
       document.querySelectorAll(".filter-dropdown-menu.show").forEach((node) => node.classList.remove("show"));
       document.querySelectorAll("[id$='FilterToggle'][aria-expanded='true']").forEach((node) => node.setAttribute("aria-expanded", "false"));
@@ -511,6 +514,26 @@ function clearSystemTheme() {
 }
 function setHash(hash) {
   window.location.hash = hash;
+}
+function stopLogAutoRefresh() {
+  if (logRefreshTimer) {
+    clearInterval(logRefreshTimer);
+    logRefreshTimer = null;
+  }
+  logRefreshInFlight = false;
+}
+function startLogAutoRefresh() {
+  stopLogAutoRefresh();
+  logRefreshTimer = setInterval(async () => {
+    if (!window.location.hash.startsWith("#admin/logs/") || !currentLogSource || logRefreshInFlight) return;
+    logRefreshInFlight = true;
+    try {
+      const activeSource = document.querySelector("#logSources .list-group-item.active");
+      await loadLog(currentLogSource, activeSource, false, true);
+    } finally {
+      logRefreshInFlight = false;
+    }
+  }, 5000);
 }
 function clampLogLines(value) {
   const parsed = Number.parseInt(String(value || "200"), 10);
@@ -976,29 +999,28 @@ function renderBiosList(data) {
     </div>
     ${
       systems.length
-        ? systems.map((system) => `
-          <section class="mb-4">
-            <h3 class="h5 mb-2"><i class="bi bi-folder2-open me-2"></i>${escapeHtml(system === "_root" ? "root" : system)} <span class="text-muted">(${grouped[system].length})</span></h3>
-            <div class="row g-3">
-              ${grouped[system].map((item) => `
-                <div class="col-12 col-md-6 col-xl-3">
-                  <div class="card shadow-sm tile h-100">
-                    <div class="card-body">
-                      <div class="fw-semibold mb-2">${escapeHtml(item.name)}</div>
-                      ${item.byte_count !== undefined ? `<div class="text-muted small mono mb-3">${formatBytesToMb(item.byte_count)}</div>` : ""}
-                      ${item.md5 ? `<div class="text-muted small mono mb-3">MD5: ${escapeHtml(item.md5)}</div>` : ""}
-                      ${
-                        item.is_downloadable === false
-                          ? `<button class="btn btn-secondary btn-sm" type="button" disabled><i class="bi bi-slash-circle me-1"></i>Download Disabled</button>`
-                          : `<a class="btn btn-primary btn-sm" href="${biosDownloadUrl(item.unique_id)}"><i class="bi bi-download me-1"></i>Download BIOS</a>`
-                      }
-                    </div>
-                  </div>
-                </div>
-              `).join("")}
-            </div>
-          </section>
-        `).join("")
+        ? `<div class="card log-card">
+          <div class="table-responsive">
+            <table class="table table-hover align-middle themed-table bios-table">
+              <thead><tr><th>System</th><th>BIOS File</th><th>Size</th><th>MD5</th><th></th></tr></thead>
+              <tbody>
+                ${systems.map((system) => grouped[system].map((item) => `
+                  <tr>
+                    <td><span class="badge text-bg-secondary">${escapeHtml(system === "_root" ? "root" : system)}</span></td>
+                    <td><div class="fw-semibold">${escapeHtml(item.name)}</div><div class="small text-muted mono">${escapeHtml(item.path || item.name || "")}</div></td>
+                    <td class="text-nowrap">${item.byte_count !== undefined ? formatBytes(item.byte_count) : "n/a"}</td>
+                    <td class="small mono bios-md5">${escapeHtml(item.md5 || "n/a")}</td>
+                    <td class="text-end">${
+                      item.is_downloadable === false
+                        ? `<button class="btn btn-secondary btn-sm" type="button" disabled><i class="bi bi-slash-circle me-1"></i>Disabled</button>`
+                        : `<a class="btn btn-primary btn-sm" href="${biosDownloadUrl(item.unique_id)}"><i class="bi bi-download me-1"></i>Download</a>`
+                    }</td>
+                  </tr>
+                `).join("")).join("")}
+              </tbody>
+            </table>
+          </div>
+        </div>`
         : `<div class="text-muted">No BIOS files found.</div>`
     }
     <div class="mt-3 d-flex gap-2">
@@ -1497,26 +1519,10 @@ async function renderAdminMenu() {
         </div>
       </div>
       <div class="col-md-4 mb-3">
-        <div class="card admin-tile pointer h-100" onclick="setHash('#admin/downloads')">
-          <div class="card-body">
-            <h5 class="card-title"><i class="bi bi-cloud-arrow-down me-2"></i>Downloads</h5>
-            <p class="card-text">Monitor active and queued ROM/file transfers for this Drone.</p>
-          </div>
-        </div>
-      </div>
-      <div class="col-md-4 mb-3">
-        <div class="card admin-tile pointer h-100" onclick="setHash('#admin/asset-cache')">
-          <div class="card-body">
-            <h5 class="card-title"><i class="bi bi-database-check me-2"></i>Asset Cache</h5>
-            <p class="card-text">Track ROM, BIOS, artwork cache progress and Overmind upload state.</p>
-          </div>
-        </div>
-      </div>
-      <div class="col-md-4 mb-3">
         <div class="card admin-tile pointer h-100" onclick="setHash('#admin/overmind')">
           <div class="card-body">
             <h5 class="card-title"><i class="bi bi-diagram-3 me-2"></i>Overmind Integration</h5>
-            <p class="card-text">Configure batocera.overmind and review processed actions.</p>
+            <p class="card-text">Configure Overmind, monitor downloads, review asset cache status, and inspect processed actions.</p>
           </div>
         </div>
       </div>
@@ -1604,6 +1610,38 @@ function renderDownloadRows(rows, allowCancel = true) {
     }).join("")}</tbody></table></div>`;
 }
 
+function renderDownloadsPanel(payload, includeHeader = true) {
+  const active = payload.active || [];
+  const queued = payload.queued || [];
+  const recent = payload.recent || [];
+  const summary = [
+    ["Active", active.length, "bi-cloud-arrow-down", "info"],
+    ["Queued", queued.length, "bi-hourglass-split", "warning"],
+    ["Recent", recent.length, "bi-clock-history", "success"],
+  ];
+  return `
+    ${includeHeader ? `<div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+      <div><strong>${escapeHtml(payload.target_drone_id || "This Drone")}</strong><div class="small text-muted">Transfers run one at a time on this Drone.</div></div>
+      <button class="btn btn-sm btn-outline-primary" title="Refresh downloads" aria-label="Refresh downloads" onclick="renderDownloadsPage()"><i class="bi bi-arrow-repeat"></i></button>
+    </div>` : ""}
+    <div class="download-summary-grid mb-3">
+      ${summary.map(([label, count, icon, tone]) => `<div class="download-summary-card tone-${tone}"><i class="bi ${icon}"></i><div><strong>${count}</strong><span>${label}</span></div></div>`).join("")}
+    </div>
+    <div class="download-section">
+      <div class="download-section-title"><span><i class="bi bi-lightning-charge me-2"></i>Active</span><span class="badge text-bg-info">${active.length}</span></div>
+      ${renderDownloadRows(active)}
+    </div>
+    <div class="download-section">
+      <div class="download-section-title"><span><i class="bi bi-hourglass-split me-2"></i>Queued</span><span class="badge text-bg-warning">${queued.length}</span></div>
+      ${renderDownloadRows(queued)}
+    </div>
+    <div class="download-section mb-0">
+      <div class="download-section-title"><span><i class="bi bi-clock-history me-2"></i>Recent</span><span class="badge text-bg-secondary">${recent.length}</span></div>
+      ${renderDownloadRows(recent, false)}
+    </div>
+  `;
+}
+
 async function renderDownloadsPage() {
   currentSystemContext = null;
   setSearchMode("hidden");
@@ -1613,20 +1651,10 @@ async function renderDownloadsPage() {
   subtitleNode.textContent = "One active transfer at a time on this Drone";
   try {
     const payload = await api("/admin/downloads");
-    const active = payload.active || [];
-    const queued = payload.queued || [];
-    const recent = payload.recent || [];
     content.innerHTML = `
-      <div class="mb-3"><button class="btn btn-outline-secondary" onclick="setHash('#admin')">Back to Admin</button></div>
+      <div class="mb-3"><button class="btn btn-outline-secondary" onclick="setHash('#admin/overmind')">Back to Overmind Integration</button></div>
       <div class="card log-card mb-3"><div class="card-body py-3">
-        <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
-          <div><strong>${escapeHtml(payload.target_drone_id || "This Drone")}</strong><div class="small text-muted">Concurrency limit: one active download per target Drone</div></div>
-          <button class="btn btn-sm btn-outline-primary" title="Refresh downloads" aria-label="Refresh downloads" onclick="renderDownloadsPage()"><i class="bi bi-arrow-repeat"></i></button>
-        </div>
-        <h6>Active</h6>${renderDownloadRows(active)}
-        <h6 class="mt-3">Queued</h6>${renderDownloadRows(queued)}
-        <h6 class="mt-3">Recent</h6>${renderDownloadRows(recent, false)}
-        ${active.length || queued.length || recent.length ? "" : '<div class="empty-state">No active or queued downloads.</div>'}
+        ${renderDownloadsPanel(payload)}
       </div></div>`;
   } catch (error) {
     content.innerHTML = '<div class="empty-state">Unable to load downloads.</div>';
@@ -1638,13 +1666,21 @@ async function renderDownloadsPage() {
 async function cancelDroneDownload(jobId) {
   if (!jobId || !window.confirm("Cancel this download?")) return;
   await apiPost(`/admin/downloads/${encodeURIComponent(jobId)}/cancel`, {});
-  await renderDownloadsPage();
+  if (window.location.hash === "#admin/overmind" && typeof window.refreshOvermindDownloads === "function") {
+    await window.refreshOvermindDownloads();
+  } else {
+    await renderDownloadsPage();
+  }
 }
 
 async function retryDroneDownload(jobId) {
   if (!jobId) return;
   await apiPost(`/admin/downloads/${encodeURIComponent(jobId)}/retry`, {});
-  await renderDownloadsPage();
+  if (window.location.hash === "#admin/overmind" && typeof window.refreshOvermindDownloads === "function") {
+    await window.refreshOvermindDownloads();
+  } else {
+    await renderDownloadsPage();
+  }
 }
 async function purgeAssetCache() {
   if (!window.confirm(
@@ -1657,10 +1693,70 @@ async function purgeAssetCache() {
   try {
     const result = await apiPost("/admin/asset-cache/purge", {});
     showToast(result.message || "Asset cache purge queued.", "success");
-    await renderAssetCachePage();
+    if (window.location.hash === "#admin/overmind" && typeof window.refreshOvermindAssetCache === "function") {
+      await window.refreshOvermindAssetCache();
+    } else {
+      await renderAssetCachePage();
+    }
   } catch (err) {
     showToast(`Failed to purge asset cache: ${escapeHtml(err.message || "unknown error")}`, "danger");
   }
+}
+
+function renderAssetCachePanel(payload, includeActions = true) {
+  const counts = payload.counts || {};
+  const pending = payload.pending_changes || {};
+  const dateText = (value) => value ? new Date(value).toLocaleString() : "Not yet";
+  const pendingTotal = Number(pending.total || 0);
+  const statusClass = payload.active ? "text-bg-primary" : payload.needs_upload ? "text-bg-warning" : payload.uploaded ? "text-bg-success" : "text-bg-secondary";
+  const statusText = payload.active ? "Scanning" : payload.needs_upload ? "Upload Pending" : payload.uploaded ? "Synced" : "Waiting";
+  const stage = payload.active ? 1 : payload.needs_upload ? 2 : payload.uploaded ? 3 : 0;
+  const metric = (label, value, icon, tone = "") => `<div class="asset-metric ${tone}"><i class="bi ${icon}"></i><div><strong>${Number(value || 0).toLocaleString()}</strong><span>${escapeHtml(label)}</span></div></div>`;
+  const detail = (label, value) => `<div class="asset-detail"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value || "n/a")}</strong></div>`;
+  const step = (number, label, text) => `<div class="asset-flow-step ${stage === number ? "active" : stage > number ? "complete" : ""}"><span>${stage > number ? '<i class="bi bi-check-lg"></i>' : number}</span><div><strong>${label}</strong><small>${text}</small></div></div>`;
+  return `
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+      <div><span class="badge ${statusClass}">${escapeHtml(statusText)}</span><span class="small text-muted ms-2">${pendingTotal.toLocaleString()} pending change${pendingTotal === 1 ? "" : "s"}</span></div>
+      ${includeActions ? `<div class="d-flex flex-wrap gap-2">
+        <button class="btn btn-sm btn-outline-primary" onclick="renderAssetCachePage()"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
+        <button class="btn btn-sm btn-outline-danger" onclick="purgeAssetCache()">Purge Cache &amp; Resync</button>
+      </div>` : ""}
+    </div>
+    <div class="asset-flow mb-3">
+      ${step(1, "Scan", payload.active ? "Reading local assets now" : `Last scan: ${dateText(payload.last_full_scan_at)}`)}
+      ${step(2, "Queue", pendingTotal ? `${pendingTotal.toLocaleString()} changes waiting` : "No changes waiting")}
+      ${step(3, "Sync", payload.uploaded && !payload.needs_upload ? "Overmind is current" : `Last upload: ${dateText(payload.last_successful_upload_at)}`)}
+    </div>
+    <div class="asset-metric-grid mb-3">
+      ${metric("Systems", counts.systems, "bi-grid")}
+      ${metric("ROMs", counts.roms, "bi-controller", "accent")}
+      ${metric("BIOS", counts.bios, "bi-cpu")}
+      ${metric("Artwork", counts.artwork, "bi-images")}
+      ${metric("Pending", pendingTotal, "bi-cloud-arrow-up", pendingTotal ? "warning" : "")}
+    </div>
+    <div class="row g-3">
+      <div class="col-12 col-xl-6">
+        <div class="asset-detail-panel h-100">
+          <h6>Cache Health</h6>
+          ${detail("Poller", payload.poller_enabled ? `Every ${payload.poll_seconds}s` : "Disabled")}
+          ${detail("Real-time watch", payload.watch_enabled ? (payload.watch_active ? "Active" : "Enabled, inactive") : "Disabled")}
+          ${detail("Cache state", payload.complete ? (payload.dirty ? "Complete, changes pending" : "Complete") : "Building")}
+          ${detail("Full refresh", payload.full_refresh_pending ? "Pending" : "Not required")}
+          ${detail("Cache path", payload.path)}
+        </div>
+      </div>
+      <div class="col-12 col-xl-6">
+        <div class="asset-detail-panel h-100">
+          <h6>Pending Upload Details</h6>
+          ${detail("ROM changes", `${Number(pending.roms || 0).toLocaleString()} upserts · ${Number(pending.deleted_roms || 0).toLocaleString()} deletes`)}
+          ${detail("BIOS changes", `${Number(pending.bios || 0).toLocaleString()} upserts · ${Number(pending.deleted_bios || 0).toLocaleString()} deletes`)}
+          ${detail("Artwork changes", `${Number(pending.artwork || 0).toLocaleString()} upserts · ${Number(pending.deleted_artwork || 0).toLocaleString()} deletes`)}
+          ${detail("Checkpoint", dateText(payload.scan_checkpoint_at))}
+          ${detail("Last successful upload", dateText(payload.last_successful_upload_at))}
+        </div>
+      </div>
+    </div>
+  `;
 }
 
 async function renderAssetCachePage() {
@@ -1672,71 +1768,11 @@ async function renderAssetCachePage() {
   setLoading(true, "Loading asset cache...");
   try {
     const payload = await api("/admin/asset-cache");
-    const counts = payload.counts || {};
-    const pending = payload.pending_changes || {};
-    const boolText = (value) => value ? "yes" : "no";
-    const dateText = (value) => value ? new Date(value).toLocaleString() : "n/a";
-    const row = (label, value) => `<div class="system-info-row"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value === undefined || value === null || value === "" ? "n/a" : value)}</strong></div>`;
-    const pendingTotal = Number(pending.total || 0);
-    const statusClass = payload.active ? "text-bg-primary" : payload.needs_upload ? "text-bg-warning" : payload.uploaded ? "text-bg-success" : "text-bg-secondary";
-    const statusText = payload.active ? "Scanning" : payload.needs_upload ? "Needs Upload" : payload.uploaded ? "Uploaded" : "Waiting";
     content.innerHTML = `
       <div class="mb-3 d-flex flex-wrap gap-2">
-        <button class="btn btn-outline-secondary" onclick="setHash('#admin')">Back to Admin</button>
-        <button class="btn btn-outline-primary" onclick="setHash('#admin/asset-cache')">Refresh</button>
-        <button class="btn btn-outline-danger ms-auto" onclick="purgeAssetCache()">Purge Cache &amp; Resync</button>
+        <button class="btn btn-outline-secondary" onclick="setHash('#admin/overmind')">Back to Overmind Integration</button>
       </div>
-      <p class="text-muted small mb-3">
-        Purge drops cached ROM, BIOS, and artwork metadata and forces a full re-scan and a full Overmind re-upload —
-        clearing stale or duplicate entries. Cached md5 values are kept, so ROMs are not re-hashed.
-      </p>
-      <div class="card log-card mb-3">
-        <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
-          <span>Cache Status</span>
-          <span class="badge ${statusClass}">${escapeHtml(statusText)}</span>
-        </div>
-        <div class="card-body">
-          <div class="system-info-grid">
-            ${row("Poller", payload.poller_enabled ? `enabled (${payload.poll_seconds}s)` : "disabled")}
-            ${row("Real-time watch", payload.watch_enabled ? (payload.watch_active ? "active" : "enabled (inactive)") : "disabled")}
-            ${row("Active", boolText(payload.active))}
-            ${row("Complete", boolText(payload.complete))}
-            ${row("Dirty", boolText(payload.dirty))}
-            ${row("Full refresh", boolText(payload.full_refresh_pending))}
-            ${row("Needs upload", boolText(payload.needs_upload))}
-            ${row("Last scan", dateText(payload.last_full_scan_at))}
-            ${row("Last upload", dateText(payload.last_successful_upload_at))}
-            ${row("Checkpoint", dateText(payload.scan_checkpoint_at))}
-            ${row("Cache path", payload.path)}
-          </div>
-        </div>
-      </div>
-      <div class="card log-card mb-3">
-        <div class="card-header">Cached Assets</div>
-        <div class="card-body">
-          <div class="system-info-grid">
-            ${row("Systems", Number(counts.systems || 0).toLocaleString())}
-            ${row("ROMs", Number(counts.roms || 0).toLocaleString())}
-            ${row("BIOS", Number(counts.bios || 0).toLocaleString())}
-            ${row("Artwork", Number(counts.artwork || 0).toLocaleString())}
-            ${row("Total", Number(counts.total || 0).toLocaleString())}
-            ${row("Pending changes", pendingTotal.toLocaleString())}
-          </div>
-        </div>
-      </div>
-      <div class="card log-card">
-        <div class="card-header">Pending Upload Details</div>
-        <div class="card-body">
-          <div class="system-info-grid">
-            ${row("ROM upserts", Number(pending.roms || 0).toLocaleString())}
-            ${row("BIOS upserts", Number(pending.bios || 0).toLocaleString())}
-            ${row("Artwork upserts", Number(pending.artwork || 0).toLocaleString())}
-            ${row("ROM deletes", Number(pending.deleted_roms || 0).toLocaleString())}
-            ${row("BIOS deletes", Number(pending.deleted_bios || 0).toLocaleString())}
-            ${row("Artwork deletes", Number(pending.deleted_artwork || 0).toLocaleString())}
-          </div>
-        </div>
-      </div>
+      <div class="card log-card"><div class="card-body">${renderAssetCachePanel(payload)}</div></div>
     `;
   } catch (err) {
     showToast(`Failed to load asset cache: ${escapeHtml(err.message || "unknown error")}`, "danger");
@@ -3032,6 +3068,23 @@ async function renderOvermindIntegrationPage() {
     </div>
     <div class="card log-card mt-3">
       <div class="card-header d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-cloud-arrow-down me-2"></i>Downloads</span>
+        <button id="overmindDownloadsRefreshBtn" class="btn btn-sm btn-outline-primary" type="button"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
+      </div>
+      <div class="card-body" id="overmindDownloadsBody"><div class="text-muted">Loading downloads...</div></div>
+    </div>
+    <div class="card log-card mt-3">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-database-check me-2"></i>Asset Cache</span>
+        <div class="d-flex gap-2">
+          <button id="overmindAssetCacheRefreshBtn" class="btn btn-sm btn-outline-primary" type="button"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
+          <button class="btn btn-sm btn-outline-danger" type="button" onclick="purgeAssetCache()">Purge &amp; Resync</button>
+        </div>
+      </div>
+      <div class="card-body" id="overmindAssetCacheBody"><div class="text-muted">Loading asset cache...</div></div>
+    </div>
+    <div class="card log-card mt-3">
+      <div class="card-header d-flex justify-content-between align-items-center">
         <span>Processed Overmind Actions</span>
         <button id="overmindActionsRefreshBtn" class="btn btn-sm btn-outline-primary" type="button">Refresh</button>
       </div>
@@ -3052,6 +3105,10 @@ async function renderOvermindIntegrationPage() {
   const refreshBtn = document.getElementById("overmindRefreshBtn");
   const actionsRefreshBtn = document.getElementById("overmindActionsRefreshBtn");
   const actionsBody = document.getElementById("overmindActionsBody");
+  const downloadsRefreshBtn = document.getElementById("overmindDownloadsRefreshBtn");
+  const downloadsBody = document.getElementById("overmindDownloadsBody");
+  const assetCacheRefreshBtn = document.getElementById("overmindAssetCacheRefreshBtn");
+  const assetCacheBody = document.getElementById("overmindAssetCacheBody");
   const ACTIONS_PER_PAGE = 10;
   let allActions = [];
   let actionsPage = 0;
@@ -3169,6 +3226,19 @@ async function renderOvermindIntegrationPage() {
     renderActionsPage();
   }
 
+  async function loadDownloads() {
+    const payload = await api("/admin/downloads");
+    downloadsBody.innerHTML = renderDownloadsPanel(payload, false);
+  }
+
+  async function loadAssetCache() {
+    const payload = await api("/admin/asset-cache");
+    assetCacheBody.innerHTML = renderAssetCachePanel(payload, false);
+  }
+
+  window.refreshOvermindDownloads = loadDownloads;
+  window.refreshOvermindAssetCache = loadAssetCache;
+
   async function saveConfig() {
     const overmindUrl = (urlInput.value || "").trim();
     const droneName = (droneNameInput.value || "").trim();
@@ -3244,13 +3314,36 @@ async function renderOvermindIntegrationPage() {
       setLoading(false);
     }
   });
+  downloadsRefreshBtn.addEventListener("click", async () => {
+    try {
+      await loadDownloads();
+    } catch (err) {
+      showToast(escapeHtml(err.message || "Failed to load downloads"), "danger");
+    }
+  });
+  assetCacheRefreshBtn.addEventListener("click", async () => {
+    try {
+      await loadAssetCache();
+    } catch (err) {
+      showToast(escapeHtml(err.message || "Failed to load asset cache"), "danger");
+    }
+  });
 
   setLoading(true, "Loading Overmind status...");
   try {
-    await loadStatus();
-    await loadActions();
-  } catch (err) {
-    showToast(escapeHtml(err.message || "Failed to load Overmind integration"), "danger");
+    const loaders = [
+      ["status", loadStatus],
+      ["actions", loadActions],
+      ["downloads", loadDownloads],
+      ["asset cache", loadAssetCache],
+    ];
+    const results = await Promise.allSettled(loaders.map(([, loader]) => loader()));
+    results.forEach((result, index) => {
+      if (result.status === "rejected") {
+        const label = loaders[index][0];
+        showToast(`Failed to load Overmind ${label}: ${escapeHtml(result.reason?.message || "unknown error")}`, "danger");
+      }
+    });
   } finally {
     setLoading(false);
   }
@@ -3329,6 +3422,7 @@ async function renderApiAdminPage() {
   }
 }
 async function renderLogsPage(selectedSource = null, selectedLines = 200) {
+  stopLogAutoRefresh();
   const logSources = [
     ["drone_stdout", "Drone Stdout", "bi-file-text"],
     ["drone_stderr", "Drone Stderr", "bi-bug"],
@@ -3346,10 +3440,10 @@ async function renderLogsPage(selectedSource = null, selectedLines = 200) {
       <button class="btn btn-outline-secondary" onclick="renderAdminPage()">← Back to Admin</button>
     </div>
     <div class="row">
-      <div class="col-md-3">
+      <div class="col-md-3 col-xl-2">
         <div class="card log-card">
           <div class="card-header">Log Sources</div>
-          <div class="list-group list-group-flush" id="logSources">
+          <div class="list-group list-group-flush log-source-list" id="logSources">
             ${logSources.map(([source, label, icon]) => `
               <button type="button" class="list-group-item list-group-item-action text-start" data-log-source="${source}" onclick="loadLog('${source}', this)">
                 <i class="bi ${icon} me-2"></i>${label}
@@ -3358,11 +3452,11 @@ async function renderLogsPage(selectedSource = null, selectedLines = 200) {
           </div>
         </div>
       </div>
-      <div class="col-md-9">
+      <div class="col-md-9 col-xl-10">
         <div class="card log-card">
-          <div class="card-header d-flex justify-content-between align-items-center">
-            <span id="logTitle">Select a log source</span>
-            <div>
+          <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
+            <div><span id="logTitle">Select a log source</span><span class="badge text-bg-success ms-2"><i class="bi bi-broadcast-pin me-1"></i>Live · 5s</span></div>
+            <div class="d-flex align-items-center flex-wrap gap-2">
               <label for="linesInput" class="form-label me-2">Lines:</label>
               <select id="linesInput" class="form-select log-lines-select">
                 <option value="100">100</option>
@@ -3372,11 +3466,12 @@ async function renderLogsPage(selectedSource = null, selectedLines = 200) {
                 <option value="2000">2000</option>
                 <option value="5000">5000</option>
               </select>
-              <button class="btn btn-sm btn-outline-primary ms-2" onclick="refreshCurrentLog()">Refresh</button>
+              <button class="btn btn-sm btn-outline-primary" onclick="refreshCurrentLog()">Refresh</button>
             </div>
           </div>
           <div class="card-body">
-            <pre id="logContent" class="mono bg-dark text-light p-3" style="max-height: 600px; overflow-y: auto; white-space: pre-wrap;">Select a log source from the left panel to view its contents.</pre>
+            <div class="small text-muted mb-2">Newest lines are shown first. Automatic updates preserve your reading position.</div>
+            <textarea id="logContent" class="mono log-content bg-dark text-light p-3 form-control" readonly spellcheck="false">Select a log source from the left panel to view its contents.</textarea>
           </div>
         </div>
       </div>
@@ -3390,8 +3485,9 @@ async function renderLogsPage(selectedSource = null, selectedLines = 200) {
     const sourceBtn = document.querySelector(`#logSources .list-group-item[data-log-source="${effectiveSource}"]`);
     await loadLog(effectiveSource, sourceBtn, false);
   }
+  startLogAutoRefresh();
 }
-async function loadLog(source, triggerEl = null, updateHash = true) {
+async function loadLog(source, triggerEl = null, updateHash = true, silent = false) {
   currentLogSource = source;
   const lines = clampLogLines(document.getElementById("linesInput")?.value || "200");
   const targetHash = `#admin/logs/${encodeURIComponent(source)}?lines=${encodeURIComponent(lines)}`;
@@ -3399,19 +3495,33 @@ async function loadLog(source, triggerEl = null, updateHash = true) {
     setHash(targetHash);
     return;
   }
-  setLoading(true, `Loading ${source} logs...`);
+  if (!silent) setLoading(true, `Loading ${source} logs...`);
   try {
     const data = await api(`/admin/logs/${source}?lines=${lines}`);
-    document.getElementById('logTitle').textContent = `${data.source} Log (${data.path})`;
-    document.getElementById('logContent').textContent = data.content.join('\n');
+    const logTitle = document.getElementById("logTitle");
+    const logContent = document.getElementById("logContent");
+    if (!logTitle || !logContent) throw new Error("Log viewer is not available");
+    const previousHeight = logContent.scrollHeight;
+    const previousTop = logContent.scrollTop;
+    const wasAtTop = previousTop <= 2;
+    logTitle.textContent = `${data.source} Log (${data.path})`;
+    logContent.value = [...data.content].reverse().join("\n");
+    if (!wasAtTop) {
+      logContent.scrollTop = previousTop + Math.max(0, logContent.scrollHeight - previousHeight);
+    } else {
+      logContent.scrollTop = previousTop;
+    }
     document.querySelectorAll('#logSources .list-group-item').forEach(el => el.classList.remove('active'));
     const activeEl = triggerEl || document.querySelector(`#logSources .list-group-item[data-log-source="${source}"]`);
     if (activeEl) activeEl.classList.add('active');
   } catch (err) {
-    showToast(`Error loading log: ${escapeHtml(err.message || "unknown error")}`, "danger");
-    document.getElementById('logContent').textContent = "";
+    if (!silent) {
+      showToast(`Error loading log: ${escapeHtml(err.message || "unknown error")}`, "danger");
+      const logContent = document.getElementById("logContent");
+      if (logContent) logContent.value = "";
+    }
   }
-  setLoading(false);
+  if (!silent) setLoading(false);
 }
 async function refreshCurrentLog() {
   if (!currentLogSource) return;
@@ -3454,7 +3564,7 @@ async function renderEmulatorsPage() {
         <div class="col-md-3 mb-3">
           <div class="card log-card">
             <div class="card-header d-flex justify-content-between align-items-center">
-              <span>Emulators</span>
+              <span>Overmind Config Set</span>
               <span class="badge">${emulatorConfigRows.length}</span>
             </div>
             <div class="emulator-config-filter-wrap p-2">
@@ -3468,6 +3578,7 @@ async function renderEmulatorsPage() {
               `).join("")}
             </div>
             <div id="emulatorConfigFilterEmpty" class="small text-muted px-3 py-2" style="display:none;">No configs match.</div>
+            <div class="small text-muted px-3 py-2 border-top" style="border-color:var(--admin-border)!important;">Only configuration files selected for Overmind synchronization are shown${payload.max_configs ? `, up to ${payload.max_configs}` : ""}.</div>
           </div>
         </div>
         <div class="col-md-9">
@@ -3730,51 +3841,69 @@ async function renderAdminSystemInfoPage() {
     const disk = metrics.disk || {};
     const process = metrics.process || {};
     const speed = payload.speed_sample || {};
-    const row = (label, value) => `<div class="system-info-row"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value || "n/a")}</strong></div>`;
+    const detail = (label, value) => `<div class="asset-detail"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value || "n/a")}</strong></div>`;
     const pct = (value) => value === null || value === undefined || value === "" ? "n/a" : `${Number(value).toFixed(1)}%`;
+    const numericPct = (value) => Math.max(0, Math.min(100, Number(value || 0)));
+    const health = (label, value, display, tone = "info") => `<div class="system-health-row">
+      <div class="d-flex justify-content-between gap-2"><span>${escapeHtml(label)}</span><strong>${escapeHtml(display)}</strong></div>
+      <div class="progress"><div class="progress-bar bg-${tone}" style="width:${numericPct(value)}%"></div></div>
+    </div>`;
     const renderedRows = entries.length
-      ? entries.slice(0, 18).map((entry) => row(entry.key || "", entry.value || "")).join("")
+      ? entries.slice(0, 18).map((entry) => detail(entry.key || "", entry.value || "")).join("")
       : `<div class="text-muted">No system information available.</div>`;
 
     content.innerHTML = `
-      <div class="mb-3">
+      <div class="mb-3 d-flex flex-wrap justify-content-between gap-2">
         <button class="btn btn-outline-secondary" onclick="setHash('#admin')">Back to Admin</button>
+        <button class="btn btn-outline-primary" onclick="setHash('#admin/system-info')"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
       </div>
       <div class="card log-card mb-3">
-        <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
-          <span>Runtime Metrics</span>
-          <button class="btn btn-sm btn-outline-primary" onclick="setHash('#admin/system-info')">Refresh</button>
-        </div>
+        <div class="card-header">System Health</div>
         <div class="card-body">
-          <div class="system-info-grid">
-            ${row("CPU host", pct(cpu.host_percent))}
-            ${row("Drone CPU", pct(cpu.process_percent))}
-            ${row("Load", Array.isArray(cpu.load_average) ? cpu.load_average.map((v) => Number(v).toFixed(2)).join(" / ") : "n/a")}
-            ${row("Memory", `${formatBytes(memory.used_bytes)} / ${formatBytes(memory.total_bytes)} (${pct(memory.used_percent)})`)}
-            ${row("Process RSS", formatBytes(process.rss_bytes))}
-            ${row("Disk", `${formatBytes(disk.used_bytes)} / ${formatBytes(disk.total_bytes)} (${pct(disk.used_percent)})`)}
-            ${row("Disk read", disk.read_bytes_per_second ? `${formatBytes(disk.read_bytes_per_second)}/s` : "n/a")}
-            ${row("Disk write", disk.write_bytes_per_second ? `${formatBytes(disk.write_bytes_per_second)}/s` : "n/a")}
-            ${row("Download", speed.download_mbps !== undefined ? `${speed.download_mbps} Mbps` : "n/a")}
-            ${row("Upload", speed.upload_mbps !== undefined ? `${speed.upload_mbps} Mbps` : "n/a")}
-            ${row("Latency", speed.latency_ms !== undefined ? `${speed.latency_ms} ms` : "n/a")}
-            ${row("Speed source", speed.source || "n/a")}
+          <div class="row g-3">
+            <div class="col-12 col-lg-7">
+              ${health("Host CPU", cpu.host_percent, pct(cpu.host_percent), numericPct(cpu.host_percent) >= 85 ? "danger" : "info")}
+              ${health("Drone CPU", cpu.process_percent, pct(cpu.process_percent), numericPct(cpu.process_percent) >= 85 ? "danger" : "success")}
+              ${health("Memory", memory.used_percent, `${formatBytes(memory.used_bytes)} / ${formatBytes(memory.total_bytes)} (${pct(memory.used_percent)})`, numericPct(memory.used_percent) >= 90 ? "danger" : "warning")}
+              ${health("Disk", disk.used_percent, `${formatBytes(disk.used_bytes)} / ${formatBytes(disk.total_bytes)} (${pct(disk.used_percent)})`, numericPct(disk.used_percent) >= 90 ? "danger" : "primary")}
+            </div>
+            <div class="col-12 col-lg-5">
+              <div class="asset-detail-panel h-100">
+                <h6>Runtime &amp; Network</h6>
+                ${detail("Load average", Array.isArray(cpu.load_average) ? cpu.load_average.map((v) => Number(v).toFixed(2)).join(" / ") : "n/a")}
+                ${detail("Process RSS", formatBytes(process.rss_bytes))}
+                ${detail("Disk I/O", `${disk.read_bytes_per_second ? `${formatBytes(disk.read_bytes_per_second)}/s read` : "n/a"} · ${disk.write_bytes_per_second ? `${formatBytes(disk.write_bytes_per_second)}/s write` : "n/a"}`)}
+                ${detail("Internet", `${speed.download_mbps ?? "n/a"} Mbps down · ${speed.upload_mbps ?? "n/a"} Mbps up`)}
+                ${detail("Latency", speed.latency_ms !== undefined ? `${speed.latency_ms} ms` : "n/a")}
+                ${detail("Speed source", speed.source || "n/a")}
+              </div>
+            </div>
           </div>
         </div>
       </div>
       <div class="card log-card">
         <div class="card-header">System Details</div>
         <div class="card-body">
-          <div class="system-info-grid">
-            ${row("Machine ID", fields.machine_id)}
-            ${row("Overmind", fields.overmind_integrated === "yes" ? "linked" : "disconnected")}
-            ${row("Batocera", fields.batocera_version || fields.system)}
-            ${row("Model", fields.model)}
-            ${row("Architecture", fields.architecture)}
-            ${row("CPU", fields.cpu_model || fields.cpu_topology)}
-            ${row("Network IP", fields.network_ip_address)}
-            ${row("Router IP", fields.router_ip_address)}
-            ${renderedRows}
+          <div class="row g-3">
+            <div class="col-12 col-lg-6">
+              <div class="asset-detail-panel h-100">
+                <h6>Identity &amp; Network</h6>
+                ${detail("Machine ID", fields.machine_id)}
+                ${detail("Overmind", fields.overmind_integrated === "yes" ? "Linked" : "Disconnected")}
+                ${detail("Network IP", fields.network_ip_address)}
+                ${detail("Router IP", fields.router_ip_address)}
+                ${detail("Batocera", fields.batocera_version || fields.system)}
+              </div>
+            </div>
+            <div class="col-12 col-lg-6">
+              <div class="asset-detail-panel h-100">
+                <h6>Hardware</h6>
+                ${detail("Model", fields.model)}
+                ${detail("Architecture", fields.architecture)}
+                ${detail("CPU", fields.cpu_model || fields.cpu_topology)}
+                ${renderedRows}
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -3792,7 +3921,8 @@ async function renderAdminSystemInfoPage() {
   }
 }
 async function loadThemePage(offset = 0) {
-  const systemsParam = encodeURIComponent((themeFilterSelectedSystems || []).join(","));
+  const selected = themeFilterInitialized && !(themeFilterSelectedSystems || []).length ? ["__none__"] : (themeFilterSelectedSystems || []);
+  const systemsParam = encodeURIComponent(selected.join(","));
   const url = `/theme/images?limit=${THEME_GALLERY_PAGE_SIZE}&offset=${Math.max(0, offset)}&q=${encodeURIComponent(themeFilterQuery || "")}&systems=${systemsParam}`;
   const data = await api(url);
   renderThemeGallery(data);
@@ -3866,6 +3996,10 @@ async function router() {
   clearError();
   try {
     const hash = window.location.hash || "";
+    if (!hash.startsWith("#admin/logs/")) {
+      stopLogAutoRefresh();
+      currentLogSource = null;
+    }
     document.body.classList.toggle("artwork-page", hash.startsWith("#admin/artwork"));
     if (hash === "#bios") {
       await renderBios();

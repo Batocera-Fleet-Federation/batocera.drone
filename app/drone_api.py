@@ -4695,7 +4695,9 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         elif system_filter:
             selected_systems = [system_filter.strip().lower()]
 
-        if selected_systems:
+        if "__none__" in selected_systems:
+            images_all = []
+        elif selected_systems:
             selected_set = set(selected_systems)
             images_all = [
                 item
@@ -6699,7 +6701,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         )
 
     def _handle_admin_emulators(self) -> None:
-        self._send_json(200, _list_emulator_config_files(self.settings))
+        self._send_json(200, _list_emulator_config_files(self.settings, max_configs=250))
 
     def _handle_admin_emulator_file(self, root_name: str, relative_path: str, max_bytes: int) -> None:
         try:
