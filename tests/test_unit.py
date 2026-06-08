@@ -473,6 +473,48 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(session["rom_md5"], RomRepository.build_md5(rom))
             self.assertEqual(session["played_at"], "2026-05-26T10:15:00+00:00")
 
+    def test_game_event_spool_produces_session_with_duration(self) -> None:
+        from app.overmind_game_logs import collect_game_event_sessions, delete_game_event_spool
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            roms_root = root / "roms"
+            rom = roms_root / "snes" / "Game.sfc"
+            rom.parent.mkdir(parents=True)
+            rom.write_bytes(b"rom-data")
+            spool = root / "system" / "drone-app" / "game-events"
+            spool.mkdir(parents=True)
+            (spool / "1-1-start.json").write_text(
+                json.dumps({"event": "start", "played_at": "2026-06-08T10:00:00+00:00", "rom_path": str(rom)}),
+                encoding="utf-8",
+            )
+            (spool / "2-1-end.json").write_text(
+                json.dumps({"event": "end", "played_at": "2026-06-08T10:05:00+00:00", "rom_path": str(rom)}),
+                encoding="utf-8",
+            )
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(roms_root)},
+                clear=True,
+            ):
+                settings = Settings.from_env()
+
+            sessions, processed = collect_game_event_sessions(settings, RomRepository(roms_root, root / "bios"))
+            self.assertEqual(len(sessions), 1)
+            session = sessions[0]
+            self.assertEqual(session["system_name"], "snes")
+            self.assertEqual(session["game_name"], "Game.sfc")
+            self.assertEqual(session["rom_path"], rom.resolve().as_posix())
+            self.assertEqual(session["rom_md5"], RomRepository.build_md5(rom))
+            self.assertEqual(session["played_at"], "2026-06-08T10:00:00+00:00")
+            self.assertEqual(session["duration_seconds"], 300)
+            self.assertEqual(len(processed), 2)
+
+            # Processed files are removed so they are never re-sent.
+            delete_game_event_spool(processed)
+            self.assertEqual(list(spool.iterdir()), [])
+            self.assertEqual(collect_game_event_sessions(settings, None), ([], []))
+
     def test_emulator_config_collection_sends_changed_configs_and_skips_bak(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"

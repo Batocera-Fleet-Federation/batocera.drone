@@ -57,6 +57,8 @@ try:
     )
     from .overmind_game_logs import commit_game_log_cursors as _commit_game_log_cursors
     from .overmind_game_logs import collect_game_logs as _build_game_log_payload
+    from .overmind_game_logs import collect_game_event_sessions as _collect_game_event_sessions
+    from .overmind_game_logs import delete_game_event_spool as _delete_game_event_spool
     from .overmind_reporting import (
         collect_emulator_configs as _collect_emulator_configs,
         collect_log_sources as _collect_log_sources,
@@ -125,6 +127,8 @@ except ImportError:
     )
     from overmind_game_logs import commit_game_log_cursors as _commit_game_log_cursors  # type: ignore
     from overmind_game_logs import collect_game_logs as _build_game_log_payload  # type: ignore
+    from overmind_game_logs import collect_game_event_sessions as _collect_game_event_sessions  # type: ignore
+    from overmind_game_logs import delete_game_event_spool as _delete_game_event_spool  # type: ignore
     from overmind_reporting import (  # type: ignore
         collect_emulator_configs as _collect_emulator_configs,
         collect_log_sources as _collect_log_sources,
@@ -10431,18 +10435,27 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
 
                 game_logs = _collect_game_logs(settings, repository)
                 game_log_cursors = game_logs.pop("_cursors", {})
+                # Game launches detected in real time by the EmulationStation hook
+                # (drone-game-event.sh) arrive via the spool directory; merge them in.
+                event_sessions, spool_files = _collect_game_event_sessions(settings, repository)
+                if event_sessions:
+                    game_logs.setdefault("sessions", []).extend(event_sessions)
                 if game_logs.get("sessions"):
                     game_logs.pop("logs", None)
                     game_logs.pop("collected_at", None)
                     _overmind_post_json(f"{base_url}/api/devices/{device_id}/game-logs", game_logs, token=token, settings=settings)
                     _commit_game_log_cursors(settings, game_log_cursors)
+                    _delete_game_event_spool(spool_files)
                     print(
                         f"Sent {len(game_logs.get('sessions') or [])} game log session(s) to Overmind",
                         file=sys.stdout,
                         flush=True,
                     )
-                elif game_log_cursors:
-                    _commit_game_log_cursors(settings, game_log_cursors)
+                else:
+                    if game_log_cursors:
+                        _commit_game_log_cursors(settings, game_log_cursors)
+                    # Consumed but produced no sessions (e.g. game-end only); clear them.
+                    _delete_game_event_spool(spool_files)
 
                 persistent_logs = _collect_log_sources(settings, sources=PERSISTENT_OVERMIND_LOG_SOURCES)
                 persistent_log_cursors = persistent_logs.pop("_cursors", {})

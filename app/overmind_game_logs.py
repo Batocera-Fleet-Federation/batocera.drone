@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, List, Optional, Tuple
 
 try:
     from .state_store import database_path, load_payload, save_payload
@@ -147,6 +148,104 @@ def _system_from_launch_rom_path(settings: Any, rom_path: Optional[Path], fallba
         return relative.parts[0] if relative.parts else ""
     except Exception:
         return ""
+
+
+GAME_EVENT_SPOOL_DIRNAME = "game-events"
+
+
+def _game_event_spool_dir(settings: Any) -> Path:
+    return (settings.userdata_root / "system" / "drone-app" / GAME_EVENT_SPOOL_DIRNAME).resolve()
+
+
+def _event_duration_seconds(start_iso: str, end_iso: str) -> Optional[int]:
+    try:
+        start = datetime.fromisoformat(start_iso)
+        end = datetime.fromisoformat(end_iso)
+    except (TypeError, ValueError):
+        return None
+    delta = int((end - start).total_seconds())
+    return delta if delta >= 0 else None
+
+
+def collect_game_event_sessions(
+    settings: Any,
+    repository: Optional[Any] = None,
+    *,
+    format_error: Optional[ErrorFormatter] = None,
+) -> Tuple[List[dict], List[Path]]:
+    """Drain the EmulationStation game-event spool into Overmind game sessions.
+
+    Each file in the spool is one launch/stop event written by the ES hook
+    (``drone-game-event.sh``). Returns the sessions to report plus the list of
+    spool files consumed, so the caller can delete them only after a successful
+    upload. ``game-start`` yields a session immediately; a matching ``game-end``
+    in the same batch fills in ``duration_seconds``.
+    """
+    formatter = format_error or (lambda error: str(error))
+    spool = _game_event_spool_dir(settings)
+    if not spool.exists() or not spool.is_dir():
+        return [], []
+    try:
+        files = sorted(path for path in spool.iterdir() if path.is_file() and path.suffix == ".json")
+    except OSError:
+        return [], []
+
+    collected_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    sessions: List[dict] = []
+    processed: List[Path] = []
+    starts: dict = {}  # resolved rom path -> (session index, started_at) for in-batch duration
+    for path in files:
+        processed.append(path)
+        try:
+            event = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(event, dict):
+            continue
+        rom_value = str(event.get("rom_path") or "").strip()
+        if not rom_value:
+            continue
+        kind = str(event.get("event") or "start").strip().lower()
+        played_at = _parse_launch_timestamp(str(event.get("played_at") or ""), collected_at)
+        rom_path = _resolve_launch_rom_path(settings, "", rom_value)
+        resolved_rom = rom_path.as_posix() if rom_path else rom_value
+
+        if kind == "end":
+            pending = starts.get(resolved_rom)
+            if pending is not None:
+                index, started_at = pending
+                duration = _event_duration_seconds(started_at, played_at)
+                if duration is not None:
+                    sessions[index]["duration_seconds"] = duration
+            continue
+
+        system_name = _system_from_launch_rom_path(settings, rom_path, "")
+        game_name = Path(rom_value).name
+        if not system_name or not game_name:
+            continue
+        session = {
+            "played_at": played_at,
+            "system_name": system_name,
+            "game_name": game_name,
+            "rom_path": resolved_rom,
+        }
+        if rom_path and repository:
+            try:
+                session["rom_md5"] = repository.build_md5(rom_path)
+            except Exception as error:  # noqa: BLE001 - md5 is best-effort
+                session["rom_md5_error"] = formatter(error)
+        sessions.append(session)
+        starts[resolved_rom] = (len(sessions) - 1, played_at)
+    return sessions, processed
+
+
+def delete_game_event_spool(files: Optional[List[Path]]) -> None:
+    """Remove spool files that have been successfully reported to Overmind."""
+    for path in files or []:
+        try:
+            Path(path).unlink()
+        except OSError:
+            pass
 
 
 def collect_game_logs(
