@@ -10915,6 +10915,7 @@ def _sync_rom_metadata_to_overmind_locked(
 
     hash_batches = 0
     hashed_roms = 0
+    hash_patch_failed = False
     for patch in _hash_rom_metadata_batches(settings, repository, batch_size=ROM_METADATA_MD5_BATCH_SIZE):
         patch_roms = patch.get("roms") if isinstance(patch.get("roms"), list) else []
         payload = {"device_id": settings.overmind_device_id, **patch}
@@ -10924,16 +10925,44 @@ def _sync_rom_metadata_to_overmind_locked(
             file=sys.stdout,
             flush=True,
         )
-        upload(payload, "rom_hash_patch")
+        try:
+            upload(payload, "rom_hash_patch")
+        except Exception:
+            # md5 is already persisted to the local cache before the patch is sent,
+            # so without this the next poll sees nothing pending to hash and never
+            # resends — leaving Overmind with md5-less rows forever. Flag a full
+            # refresh so the next poll re-uploads the inventory (now carrying md5)
+            # and Overmind converges.
+            hash_patch_failed = True
+            _update_rom_metadata_cache_state(settings, dirty=True, full_refresh_pending=True)
+            print(
+                "Asset metadata hash patch upload failed; flagged full refresh so md5 values resync on the next poll",
+                file=sys.stderr,
+                flush=True,
+            )
+            break
         hash_batches += 1
         hashed_roms += len(patch_roms)
-    if should_upload_inventory or hash_batches:
+    if not hash_patch_failed and (should_upload_inventory or hash_batches):
         if hash_batches:
             cache, _ = _load_rom_metadata_cache(settings)
             snapshot = _build_rom_metadata_snapshot_from_cache(settings, cache)
         _mark_rom_metadata_upload_clean(settings, snapshot.get("rom_inventory_fingerprint"))
 
     if not should_upload_inventory and not hash_batches:
+        # Advertise the fingerprint of what the drone *actually* holds (md5
+        # included), even when there is nothing to upload. If a past hash patch
+        # never reached Overmind, its stored fingerprint still reflects the
+        # md5-less inventory; reporting the true data fingerprint in the next
+        # heartbeat lets Overmind detect the drift and queue a resync on its own,
+        # so already-stuck drones recover without a manual force.
+        current_fingerprint = snapshot.get("rom_inventory_fingerprint")
+        if current_fingerprint and current_fingerprint != _rom_inventory_fingerprint_from_cache_state(settings):
+            _update_rom_metadata_cache_state(
+                settings,
+                rom_inventory_fingerprint=current_fingerprint,
+                rom_inventory_fingerprint_algorithm=ROM_INVENTORY_FINGERPRINT_ALGORITHM,
+            )
         print(
             f"Asset metadata sync skipped: no changes detected systems={stats.get('systems_scanned')} roms={stats.get('roms_discovered')} bios={stats.get('bios_discovered')} artwork={stats.get('artwork_discovered')} duration_ms={int((time.monotonic() - poll_started) * 1000)}",
             file=sys.stdout,

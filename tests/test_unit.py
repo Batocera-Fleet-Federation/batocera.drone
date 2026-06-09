@@ -2949,6 +2949,109 @@ class SettingsTests(unittest.TestCase):
             self.assertTrue(all("rom_md5" not in row for row in uploads[0]["roms"]))
             self.assertTrue(all(len(payload["roms"]) == 1 and payload["roms"][0].get("rom_md5") for payload in uploads[1:]))
 
+    def test_rom_metadata_sync_flags_full_refresh_when_hash_patch_upload_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            system = root / "roms" / "snes"
+            system.mkdir(parents=True)
+            (system / "Game One.zip").write_bytes(b"one")
+            self._write_gamelist(system, "Game One.zip")
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "USERDATA_ROOT": str(root),
+                    "ROMS_ROOT": str(root / "roms"),
+                    "BIOS_ROOT": str(root / "bios"),
+                    "OVERMIND_DEVICE_ID": "drone-a",
+                },
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            repo = RomRepository(settings.roms_root, settings.bios_root)
+
+            def fake_post(url, payload, token=None, settings=None, timeout_seconds=10):
+                if payload.get("update_mode") == "rom_hash_patch":
+                    raise RuntimeError("overmind unavailable")
+                return 200, {
+                    "rom_count": len(payload.get("roms") or []),
+                    "bios_count": len(payload.get("bios") or []),
+                    "artwork_count": len(payload.get("artwork") or []),
+                }
+
+            with mock.patch("app.drone_api.ROM_METADATA_MD5_BATCH_SIZE", 1), mock.patch(
+                "app.drone_api.ROM_METADATA_HASH_ROMS_ENABLED", True
+            ), mock.patch(
+                "app.drone_api._overmind_post_json_with_status", side_effect=fake_post
+            ):
+                # The failed hash patch must not abort the poll; it should flag a
+                # full refresh so the next poll resends md5 instead of losing it.
+                _sync_rom_metadata_to_overmind(
+                    settings,
+                    repo,
+                    {"overmind_token": "drone-token"},
+                    "https://overmind.local",
+                    "drone-token",
+                )
+
+            state = drone_api._read_rom_metadata_cache_state(
+                settings, "full_refresh_pending", "dirty"
+            )
+            self.assertTrue(state.get("full_refresh_pending"))
+            self.assertTrue(state.get("dirty"))
+
+    def test_rom_metadata_sync_readvertises_true_fingerprint_when_state_is_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            system = root / "roms" / "snes"
+            system.mkdir(parents=True)
+            (system / "Game One.zip").write_bytes(b"one")
+            self._write_gamelist(system, "Game One.zip")
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "USERDATA_ROOT": str(root),
+                    "ROMS_ROOT": str(root / "roms"),
+                    "BIOS_ROOT": str(root / "bios"),
+                    "OVERMIND_DEVICE_ID": "drone-a",
+                },
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            repo = RomRepository(settings.roms_root, settings.bios_root)
+
+            def fake_post(url, payload, token=None, settings=None, timeout_seconds=10):
+                return 200, {
+                    "rom_count": len(payload.get("roms") or []),
+                    "bios_count": len(payload.get("bios") or []),
+                    "artwork_count": len(payload.get("artwork") or []),
+                }
+
+            with mock.patch("app.drone_api.ROM_METADATA_HASH_ROMS_ENABLED", True), mock.patch(
+                "app.drone_api._overmind_post_json_with_status", side_effect=fake_post
+            ):
+                # First sync hashes md5 and records the true fingerprint.
+                _sync_rom_metadata_to_overmind(
+                    settings, repo, {}, "https://overmind.local", "drone-token"
+                )
+                # Simulate a drone whose md5 never reached Overmind: its stored
+                # fingerprint still reflects the md5-less inventory.
+                drone_api._update_rom_metadata_cache_state(
+                    settings, rom_inventory_fingerprint="stale-md5-less"
+                )
+                # Nothing changed on disk -> the poll takes the no-changes path,
+                # which must re-advertise the real (md5-bearing) fingerprint so
+                # Overmind detects the drift and resyncs on its own.
+                result = _sync_rom_metadata_to_overmind(
+                    settings, repo, {}, "https://overmind.local", "drone-token"
+                )
+
+            self.assertEqual(result["status"], "skipped")
+            fingerprint = drone_api._read_rom_metadata_cache_state(
+                settings, "rom_inventory_fingerprint"
+            ).get("rom_inventory_fingerprint")
+            self.assertTrue(fingerprint)
+            self.assertNotEqual(fingerprint, "stale-md5-less")
+
     def test_rom_metadata_sync_persists_and_uploads_added_and_deleted_roms(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
