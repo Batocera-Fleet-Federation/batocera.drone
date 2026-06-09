@@ -18,7 +18,7 @@ except ImportError:
     from state_store import open_database as _open_state_database  # type: ignore
 
 
-ROM_METADATA_CACHE_VERSION = 4
+ROM_METADATA_CACHE_VERSION = 5
 _ROW_EXTRA_KEYS = {
     "system",
     "system_name",
@@ -36,8 +36,9 @@ _ROW_EXTRA_KEYS = {
     "file_size",
     "modified_time",
     "mtime",
+    "fingerprint",
+    "rom_fingerprint",
     "md5",
-    "rom_md5",
     "bios_md5",
     "source",
     "metadata_source",
@@ -65,7 +66,7 @@ class RomCacheRow:
     file_size: int
     modified_time: int
     entry_type: str
-    md5: Optional[str]
+    fingerprint: Optional[str]
     gamelist_path: str
     gamelist_game_id: str
     is_downloadable: bool
@@ -91,7 +92,7 @@ class RomCacheRow:
             file_size=_int(payload.get("file_size") or payload.get("byte_count") or payload.get("size")),
             modified_time=_int(payload.get("modified_time") or payload.get("mtime")),
             entry_type=str(payload.get("entry_type") or "file"),
-            md5=_clean_optional(payload.get("rom_md5") or payload.get("md5")),
+            fingerprint=_clean_optional(payload.get("rom_fingerprint") or payload.get("fingerprint")),
             gamelist_path=gamelist_path,
             gamelist_game_id=gamelist_game_id,
             is_downloadable=bool(payload.get("is_downloadable", True)),
@@ -128,9 +129,9 @@ class RomCacheRow:
             "gamelist_game_id": self.gamelist_game_id,
             "has_gamelist_entry": bool(self.gamelist_path and self.gamelist_game_id),
         }
-        if self.md5:
-            payload["md5"] = self.md5
-            payload["rom_md5"] = self.md5
+        if self.fingerprint:
+            payload["fingerprint"] = self.fingerprint
+            payload["rom_fingerprint"] = self.fingerprint
         return payload
 
 
@@ -194,7 +195,7 @@ class ArtworkCacheRow:
     relative_path: str
     file_size: int
     modified_time: int
-    md5: Optional[str]
+    fingerprint: Optional[str]
     extra: dict
 
     @classmethod
@@ -213,7 +214,7 @@ class ArtworkCacheRow:
             relative_path=_normalize_path(payload.get("relative_path")),
             file_size=_int(payload.get("file_size") or payload.get("byte_count") or payload.get("size")),
             modified_time=_int(payload.get("modified_time") or payload.get("mtime")),
-            md5=_clean_optional(payload.get("md5")),
+            fingerprint=_clean_optional(payload.get("fingerprint")),
             extra={},
         )
 
@@ -236,8 +237,8 @@ class ArtworkCacheRow:
         }
         if self.artwork_types:
             payload["artwork_type"] = self.artwork_types[0]
-        if self.md5:
-            payload["md5"] = self.md5
+        if self.fingerprint:
+            payload["fingerprint"] = self.fingerprint
         return payload
 
 
@@ -327,7 +328,7 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
         "CREATE TABLE IF NOT EXISTS rom_cache_entries ("
         "entry_key TEXT PRIMARY KEY, system TEXT NOT NULL, file_path TEXT NOT NULL, rom_name TEXT NOT NULL, "
         "unique_id TEXT, absolute_path TEXT, file_size INTEGER NOT NULL DEFAULT 0, modified_time INTEGER NOT NULL DEFAULT 0, "
-        "entry_type TEXT NOT NULL DEFAULT 'file', md5 TEXT, gamelist_path TEXT, gamelist_game_id TEXT, "
+        "entry_type TEXT NOT NULL DEFAULT 'file', fingerprint TEXT, gamelist_path TEXT, gamelist_game_id TEXT, "
         "is_downloadable INTEGER NOT NULL DEFAULT 1, image_stem TEXT, extra_json TEXT NOT NULL DEFAULT '{}', "
         "UNIQUE(system, file_path))"
     )
@@ -340,7 +341,7 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
     connection.execute(
         "CREATE TABLE IF NOT EXISTS artwork_cache_entries ("
         "entry_key TEXT PRIMARY KEY, system TEXT NOT NULL, rom_path TEXT NOT NULL, artwork_type TEXT, artwork_types TEXT NOT NULL DEFAULT '[]', title TEXT, "
-        "file_path TEXT, relative_path TEXT, file_size INTEGER, modified_time INTEGER, md5 TEXT, extra_json TEXT NOT NULL DEFAULT '{}')"
+        "file_path TEXT, relative_path TEXT, file_size INTEGER, modified_time INTEGER, fingerprint TEXT, extra_json TEXT NOT NULL DEFAULT '{}')"
     )
     _ensure_column(connection, "artwork_cache_entries", "artwork_types", "TEXT NOT NULL DEFAULT '[]'")
     for create_sql in {
@@ -348,7 +349,7 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
             "CREATE TABLE IF NOT EXISTS deleted_rom_cache_entries ("
             "entry_key TEXT PRIMARY KEY, system TEXT NOT NULL, file_path TEXT NOT NULL, rom_name TEXT NOT NULL, "
             "unique_id TEXT, absolute_path TEXT, file_size INTEGER NOT NULL DEFAULT 0, modified_time INTEGER NOT NULL DEFAULT 0, "
-            "entry_type TEXT NOT NULL DEFAULT 'file', md5 TEXT, gamelist_path TEXT, gamelist_game_id TEXT, "
+            "entry_type TEXT NOT NULL DEFAULT 'file', fingerprint TEXT, gamelist_path TEXT, gamelist_game_id TEXT, "
             "is_downloadable INTEGER NOT NULL DEFAULT 1, image_stem TEXT, extra_json TEXT NOT NULL DEFAULT '{}')"
         ),
         "deleted_bios_cache_entries": (
@@ -360,10 +361,11 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
         "deleted_artwork_cache_entries": (
             "CREATE TABLE IF NOT EXISTS deleted_artwork_cache_entries ("
             "entry_key TEXT PRIMARY KEY, system TEXT NOT NULL, rom_path TEXT NOT NULL, artwork_type TEXT, artwork_types TEXT NOT NULL DEFAULT '[]', title TEXT, "
-            "file_path TEXT, relative_path TEXT, file_size INTEGER, modified_time INTEGER, md5 TEXT, extra_json TEXT NOT NULL DEFAULT '{}')"
+            "file_path TEXT, relative_path TEXT, file_size INTEGER, modified_time INTEGER, fingerprint TEXT, extra_json TEXT NOT NULL DEFAULT '{}')"
         ),
     }.values():
         connection.execute(create_sql)
+    _migrate_md5_column_to_fingerprint(connection)
     connection.execute(
         "CREATE TABLE IF NOT EXISTS cache_changes ("
         "asset_type TEXT NOT NULL, entry_key TEXT NOT NULL, operation TEXT NOT NULL, "
@@ -450,6 +452,33 @@ def _ensure_column(connection: sqlite3.Connection, table: str, column: str, defi
     columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
     if column not in columns:
         connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def _migrate_md5_column_to_fingerprint(connection: sqlite3.Connection) -> None:
+    """Rename the legacy ``md5`` column to ``fingerprint`` on pre-v5 ROM/artwork caches.
+
+    The old ROM column held full-file md5 / gamelist md5 values; the ROM fingerprint is
+    now a sampled hash (``sample-fp-v1``), a different algorithm, so the rows are renamed
+    and their values cleared to force a clean re-fingerprint on the next scan. BIOS tables
+    are intentionally excluded — BIOS keeps a full-file ``md5`` column (exact emulator
+    identity), so there is nothing to rename there.
+    """
+    tables = (
+        "rom_cache_entries", "artwork_cache_entries",
+        "deleted_rom_cache_entries", "deleted_artwork_cache_entries",
+        "preserved_rom_fingerprint",
+    )
+    for table in tables:
+        exists = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+        ).fetchone()
+        if not exists:
+            continue
+        columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+        if "md5" in columns and "fingerprint" not in columns:
+            connection.execute(f"ALTER TABLE {table} RENAME COLUMN md5 TO fingerprint")
+            # Discard stale (wrong-algorithm) values so the next scan recomputes them.
+            connection.execute(f"UPDATE {table} SET fingerprint = NULL")
 
 
 def _migrate_blob_tables_if_needed(connection: sqlite3.Connection) -> None:
@@ -633,11 +662,11 @@ def _persist_rows(
 def _upsert_rom_row(connection: sqlite3.Connection, row: RomCacheRow) -> None:
     connection.execute(
         "INSERT INTO rom_cache_entries (entry_key, system, file_path, rom_name, unique_id, absolute_path, file_size, "
-        "modified_time, entry_type, md5, gamelist_path, gamelist_game_id, is_downloadable, image_stem, extra_json) "
+        "modified_time, entry_type, fingerprint, gamelist_path, gamelist_game_id, is_downloadable, image_stem, extra_json) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(entry_key) DO UPDATE SET system=excluded.system, file_path=excluded.file_path, rom_name=excluded.rom_name, "
         "unique_id=excluded.unique_id, absolute_path=excluded.absolute_path, file_size=excluded.file_size, "
-        "modified_time=excluded.modified_time, entry_type=excluded.entry_type, md5=excluded.md5, "
+        "modified_time=excluded.modified_time, entry_type=excluded.entry_type, fingerprint=excluded.fingerprint, "
         "gamelist_path=excluded.gamelist_path, gamelist_game_id=excluded.gamelist_game_id, "
         "is_downloadable=excluded.is_downloadable, image_stem=excluded.image_stem, extra_json=excluded.extra_json",
         (
@@ -650,7 +679,7 @@ def _upsert_rom_row(connection: sqlite3.Connection, row: RomCacheRow) -> None:
             row.file_size,
             row.modified_time,
             row.entry_type,
-            row.md5,
+            row.fingerprint,
             row.gamelist_path,
             row.gamelist_game_id,
             1 if row.is_downloadable else 0,
@@ -684,11 +713,11 @@ def _upsert_bios_row(connection: sqlite3.Connection, row: BiosCacheRow) -> None:
 def _upsert_artwork_row(connection: sqlite3.Connection, entry_key: str, payload: dict) -> None:
     row = ArtworkCacheRow.from_payload(entry_key, payload)
     connection.execute(
-        "INSERT INTO artwork_cache_entries (entry_key, system, rom_path, artwork_type, artwork_types, title, file_path, relative_path, file_size, modified_time, md5, extra_json) "
+        "INSERT INTO artwork_cache_entries (entry_key, system, rom_path, artwork_type, artwork_types, title, file_path, relative_path, file_size, modified_time, fingerprint, extra_json) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(entry_key) DO UPDATE SET system=excluded.system, rom_path=excluded.rom_path, artwork_type=excluded.artwork_type, "
         "artwork_types=excluded.artwork_types, title=excluded.title, file_path=excluded.file_path, relative_path=excluded.relative_path, "
-        "file_size=excluded.file_size, modified_time=excluded.modified_time, md5=excluded.md5, extra_json=excluded.extra_json",
+        "file_size=excluded.file_size, modified_time=excluded.modified_time, fingerprint=excluded.fingerprint, extra_json=excluded.extra_json",
         (
             entry_key,
             row.system,
@@ -700,7 +729,7 @@ def _upsert_artwork_row(connection: sqlite3.Connection, entry_key: str, payload:
             row.relative_path,
             row.file_size,
             row.modified_time,
-            row.md5,
+            row.fingerprint,
             json.dumps(row.extra, sort_keys=True, default=str),
         ),
     )
@@ -711,11 +740,11 @@ def _upsert_deleted_row(connection: sqlite3.Connection, asset_type: str, entry_k
         row = RomCacheRow.from_payload(entry_key, payload)
         connection.execute(
             "INSERT INTO deleted_rom_cache_entries (entry_key, system, file_path, rom_name, unique_id, absolute_path, file_size, "
-            "modified_time, entry_type, md5, gamelist_path, gamelist_game_id, is_downloadable, image_stem, extra_json) "
+            "modified_time, entry_type, fingerprint, gamelist_path, gamelist_game_id, is_downloadable, image_stem, extra_json) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(entry_key) DO UPDATE SET system=excluded.system, file_path=excluded.file_path, rom_name=excluded.rom_name, "
             "unique_id=excluded.unique_id, absolute_path=excluded.absolute_path, file_size=excluded.file_size, "
-            "modified_time=excluded.modified_time, entry_type=excluded.entry_type, md5=excluded.md5, "
+            "modified_time=excluded.modified_time, entry_type=excluded.entry_type, fingerprint=excluded.fingerprint, "
             "gamelist_path=excluded.gamelist_path, gamelist_game_id=excluded.gamelist_game_id, "
             "is_downloadable=excluded.is_downloadable, image_stem=excluded.image_stem, extra_json=excluded.extra_json",
             (
@@ -728,7 +757,7 @@ def _upsert_deleted_row(connection: sqlite3.Connection, asset_type: str, entry_k
                 row.file_size,
                 row.modified_time,
                 row.entry_type,
-                row.md5,
+                row.fingerprint,
                 row.gamelist_path,
                 row.gamelist_game_id,
                 1 if row.is_downloadable else 0,
@@ -759,11 +788,11 @@ def _upsert_deleted_row(connection: sqlite3.Connection, asset_type: str, entry_k
     elif asset_type == "artwork":
         row = ArtworkCacheRow.from_payload(entry_key, payload)
         connection.execute(
-            "INSERT INTO deleted_artwork_cache_entries (entry_key, system, rom_path, artwork_type, artwork_types, title, file_path, relative_path, file_size, modified_time, md5, extra_json) "
+            "INSERT INTO deleted_artwork_cache_entries (entry_key, system, rom_path, artwork_type, artwork_types, title, file_path, relative_path, file_size, modified_time, fingerprint, extra_json) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(entry_key) DO UPDATE SET system=excluded.system, rom_path=excluded.rom_path, artwork_type=excluded.artwork_type, "
             "artwork_types=excluded.artwork_types, title=excluded.title, file_path=excluded.file_path, relative_path=excluded.relative_path, "
-            "file_size=excluded.file_size, modified_time=excluded.modified_time, md5=excluded.md5, extra_json=excluded.extra_json",
+            "file_size=excluded.file_size, modified_time=excluded.modified_time, fingerprint=excluded.fingerprint, extra_json=excluded.extra_json",
             (
                 row.entry_key,
                 row.system,
@@ -775,7 +804,7 @@ def _upsert_deleted_row(connection: sqlite3.Connection, asset_type: str, entry_k
                 row.relative_path,
                 row.file_size,
                 row.modified_time,
-                row.md5,
+                row.fingerprint,
                 json.dumps(row.extra, sort_keys=True, default=str),
             ),
         )
@@ -863,61 +892,74 @@ def _clear_sqlite_asset_metadata_cache(settings: Any) -> None:
         pass
 
 
-def _ensure_preserved_md5_tables(connection: sqlite3.Connection) -> None:
-    """Create the md5-preservation tables used to survive a cache purge."""
-    for table in ("preserved_rom_md5", "preserved_bios_md5"):
-        connection.execute(
-            f"CREATE TABLE IF NOT EXISTS {table} ("
-            "entry_key TEXT PRIMARY KEY, file_size INTEGER, modified_time INTEGER, md5 TEXT)"
-        )
+def _ensure_preserved_fingerprint_tables(connection: sqlite3.Connection) -> None:
+    """Create the identity-preservation tables used to survive a cache purge.
+
+    ROMs use a sampled ``fingerprint``; BIOS use a full-file ``md5`` (exact emulator
+    identity), so the preservation columns mirror that split.
+    """
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS preserved_rom_fingerprint ("
+        "entry_key TEXT PRIMARY KEY, file_size INTEGER, modified_time INTEGER, fingerprint TEXT)"
+    )
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS preserved_bios_md5 ("
+        "entry_key TEXT PRIMARY KEY, file_size INTEGER, modified_time INTEGER, md5 TEXT)"
+    )
+    # Pre-v5 ROM caches may still carry a legacy ``md5`` column on the ROM tables.
+    _migrate_md5_column_to_fingerprint(connection)
 
 
-def _read_preserved_asset_md5(settings: Any) -> dict:
-    """Return md5 snapshots saved by the last purge, keyed by entry_key.
+def _read_preserved_asset_fingerprint(settings: Any) -> dict:
+    """Return identity snapshots saved by the last purge, keyed by entry_key.
 
-    Shape: ``{"rom": {entry_key: {file_size, modified_time, md5}}, "bios": {...}}``.
+    Shape: ``{"rom": {entry_key: {file_size, modified_time, fingerprint}},
+              "bios": {entry_key: {file_size, modified_time, md5}}}``.
     Empty when nothing was preserved; safe to call on caches that never purged.
     """
     result: dict = {"rom": {}, "bios": {}}
     with _open_rom_metadata_cache(settings) as connection:
-        _ensure_preserved_md5_tables(connection)
-        for table, bucket in (("preserved_rom_md5", "rom"), ("preserved_bios_md5", "bios")):
-            for entry_key, file_size, modified_time, md5 in connection.execute(
-                f"SELECT entry_key, file_size, modified_time, md5 FROM {table}"
+        _ensure_preserved_fingerprint_tables(connection)
+        for table, bucket, column in (
+            ("preserved_rom_fingerprint", "rom", "fingerprint"),
+            ("preserved_bios_md5", "bios", "md5"),
+        ):
+            for entry_key, file_size, modified_time, value in connection.execute(
+                f"SELECT entry_key, file_size, modified_time, {column} FROM {table}"
             ):
-                if not entry_key or not md5:
+                if not entry_key or not value:
                     continue
                 result[bucket][entry_key] = {
                     "file_size": file_size,
                     "modified_time": modified_time,
-                    "md5": md5,
+                    column: value,
                 }
     return result
 
 
-def _purge_asset_cache_keep_md5(settings: Any, requested_at: Optional[str] = None) -> dict:
-    """Clear cached asset metadata and queue a full rebuild, preserving md5.
+def _purge_asset_cache_keep_fingerprint(settings: Any, requested_at: Optional[str] = None) -> dict:
+    """Clear cached asset metadata and queue a full rebuild, preserving fingerprint.
 
     This empties the rom/bios/artwork entry tables (so the cached counts drop to
     zero and a clean rebuild runs) and clears the stored ROM-inventory
-    fingerprint. Before clearing, it snapshots every known md5 keyed by
+    fingerprint. Before clearing, it snapshots every known fingerprint keyed by
     ``(entry_key, file_size, modified_time)`` into ``preserved_*`` tables. The
-    next metadata poll rebuilds the entry set from disk and reuses those md5
-    values for unchanged files (see ``_read_preserved_asset_md5``), so ROMs are
+    next metadata poll rebuilds the entry set from disk and reuses those fingerprint
+    values for unchanged files (see ``_read_preserved_asset_fingerprint``), so ROMs are
     not re-hashed, then uploads a full ``replace_all`` inventory to Overmind.
     """
     from datetime import datetime, timezone
 
     requested = requested_at or datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-    cleared = {"roms": 0, "bios": 0, "artwork": 0, "preserved_md5": 0}
+    cleared = {"roms": 0, "bios": 0, "artwork": 0, "preserved_fingerprint": 0}
     with _open_rom_metadata_cache(settings) as connection:
-        _ensure_preserved_md5_tables(connection)
-        # Snapshot md5 before clearing so the rebuild does not re-hash unchanged files.
-        connection.execute("DELETE FROM preserved_rom_md5")
+        _ensure_preserved_fingerprint_tables(connection)
+        # Snapshot fingerprint before clearing so the rebuild does not re-hash unchanged files.
+        connection.execute("DELETE FROM preserved_rom_fingerprint")
         preserved = connection.execute(
-            "INSERT INTO preserved_rom_md5 (entry_key, file_size, modified_time, md5) "
-            "SELECT entry_key, file_size, modified_time, md5 FROM rom_cache_entries "
-            "WHERE md5 IS NOT NULL AND md5 <> ''"
+            "INSERT INTO preserved_rom_fingerprint (entry_key, file_size, modified_time, fingerprint) "
+            "SELECT entry_key, file_size, modified_time, fingerprint FROM rom_cache_entries "
+            "WHERE fingerprint IS NOT NULL AND fingerprint <> ''"
         ).rowcount
         connection.execute("DELETE FROM preserved_bios_md5")
         connection.execute(
@@ -928,7 +970,7 @@ def _purge_asset_cache_keep_md5(settings: Any, requested_at: Optional[str] = Non
         cleared["roms"] = connection.execute("SELECT count(*) FROM rom_cache_entries").fetchone()[0]
         cleared["bios"] = connection.execute("SELECT count(*) FROM bios_cache_entries").fetchone()[0]
         cleared["artwork"] = connection.execute("SELECT count(*) FROM artwork_cache_entries").fetchone()[0]
-        cleared["preserved_md5"] = max(0, int(preserved or 0))
+        cleared["preserved_fingerprint"] = max(0, int(preserved or 0))
         # Empty the asset entry + derived tables (cached counts drop to zero).
         for table in (
             "rom_cache_entries",
@@ -1056,7 +1098,7 @@ def _read_rom_rows(connection: sqlite3.Connection) -> dict:
     rows = {}
     for values in connection.execute(
         "SELECT entry_key, system, file_path, rom_name, unique_id, absolute_path, file_size, modified_time, entry_type, "
-        "md5, gamelist_path, gamelist_game_id, is_downloadable, image_stem, extra_json FROM rom_cache_entries"
+        "fingerprint, gamelist_path, gamelist_game_id, is_downloadable, image_stem, extra_json FROM rom_cache_entries"
     ):
         extra = _loads_dict(values[14])
         row = RomCacheRow(
@@ -1069,7 +1111,7 @@ def _read_rom_rows(connection: sqlite3.Connection) -> dict:
             file_size=_int(values[6]),
             modified_time=_int(values[7]),
             entry_type=values[8] or "file",
-            md5=values[9],
+            fingerprint=values[9],
             gamelist_path=values[10] or "",
             gamelist_game_id=values[11] or values[2],
             is_downloadable=bool(values[12]),
@@ -1104,7 +1146,7 @@ def _read_row_payload_from_table(connection: sqlite3.Connection, asset_type: str
     if asset_type == "rom":
         values = connection.execute(
             f"SELECT entry_key, system, file_path, rom_name, unique_id, absolute_path, file_size, modified_time, entry_type, "
-            f"md5, gamelist_path, gamelist_game_id, is_downloadable, image_stem, extra_json FROM {table} WHERE entry_key = ?",
+            f"fingerprint, gamelist_path, gamelist_game_id, is_downloadable, image_stem, extra_json FROM {table} WHERE entry_key = ?",
             (entry_key,),
         ).fetchone()
         if not values:
@@ -1119,7 +1161,7 @@ def _read_row_payload_from_table(connection: sqlite3.Connection, asset_type: str
             file_size=_int(values[6]),
             modified_time=_int(values[7]),
             entry_type=values[8] or "file",
-            md5=values[9],
+            fingerprint=values[9],
             gamelist_path=values[10] or "",
             gamelist_game_id=values[11] or values[2],
             is_downloadable=bool(values[12]),
@@ -1128,7 +1170,7 @@ def _read_row_payload_from_table(connection: sqlite3.Connection, asset_type: str
         ).to_payload()
     if asset_type == "bios":
         values = connection.execute(
-            f"SELECT entry_key, file_path, name, unique_id, absolute_path, file_size, modified_time, md5, extra_json FROM {table} WHERE entry_key = ?",
+            f"SELECT entry_key, file_path, name, unique_id, absolute_path, file_size, modified_time, fingerprint, extra_json FROM {table} WHERE entry_key = ?",
             (entry_key,),
         ).fetchone()
         if not values:
@@ -1141,12 +1183,12 @@ def _read_row_payload_from_table(connection: sqlite3.Connection, asset_type: str
             absolute_path=values[4] or "",
             file_size=_int(values[5]),
             modified_time=_int(values[6]),
-            md5=values[7],
+            fingerprint=values[7],
             extra=_loads_dict(values[8]),
         ).to_payload()
     if asset_type == "artwork":
         values = connection.execute(
-            f"SELECT entry_key, system, rom_path, artwork_type, artwork_types, title, file_path, relative_path, file_size, modified_time, md5, extra_json "
+            f"SELECT entry_key, system, rom_path, artwork_type, artwork_types, title, file_path, relative_path, file_size, modified_time, fingerprint, extra_json "
             f"FROM {table} WHERE entry_key = ?",
             (entry_key,),
         ).fetchone()
@@ -1163,7 +1205,7 @@ def _read_row_payload_from_table(connection: sqlite3.Connection, asset_type: str
             relative_path=values[7] or "",
             file_size=_int(values[8]),
             modified_time=_int(values[9]),
-            md5=values[10],
+            fingerprint=values[10],
             extra=_loads_dict(values[11]),
         ).to_payload()
     return None
@@ -1192,7 +1234,7 @@ def _read_bios_rows(connection: sqlite3.Connection) -> dict:
 def _read_artwork_rows(connection: sqlite3.Connection) -> dict:
     rows = {}
     for values in connection.execute(
-        "SELECT entry_key, system, rom_path, artwork_type, artwork_types, title, file_path, relative_path, file_size, modified_time, md5, extra_json "
+        "SELECT entry_key, system, rom_path, artwork_type, artwork_types, title, file_path, relative_path, file_size, modified_time, fingerprint, extra_json "
         "FROM artwork_cache_entries"
     ):
         artwork_types = _loads_list(values[4]) or ([values[3]] if values[3] else [])
@@ -1206,7 +1248,7 @@ def _read_artwork_rows(connection: sqlite3.Connection) -> dict:
             relative_path=values[7] or "",
             file_size=_int(values[8]),
             modified_time=_int(values[9]),
-            md5=values[10],
+            fingerprint=values[10],
             extra=_loads_dict(values[11]),
         )
         rows[row.entry_key] = row.to_payload()
@@ -1245,7 +1287,7 @@ def search_rom_entries(
     """Search ROM names directly in SQLite (FTS5 trigram, or LIKE fallback).
 
     Returns lightweight result rows ``{system, name, unique_id, is_downloadable,
-    image_stem, md5}`` straight from the relational columns — no full-cache
+    image_stem, fingerprint}`` straight from the relational columns — no full-cache
     materialization, no per-row JSON parsing, filtering/ordering/pagination all run
     in SQLite. This is the fast path that replaces the in-memory linear scan.
     """
@@ -1254,7 +1296,7 @@ def search_rom_entries(
         return []
     params: list = []
     select = (
-        "SELECT system, rom_name, unique_id, is_downloadable, image_stem, md5 "
+        "SELECT system, rom_name, unique_id, is_downloadable, image_stem, fingerprint "
         "FROM rom_cache_entries "
     )
     try:
@@ -1285,7 +1327,7 @@ def search_rom_entries(
             "unique_id": row[2] or "",
             "is_downloadable": bool(row[3]),
             "image_stem": row[4],
-            "md5": row[5],
+            "fingerprint": row[5],
         }
         for row in rows
     ]
@@ -1322,14 +1364,14 @@ def rom_cache_ready(settings: Any) -> bool:
         return False
 
 
-def list_rom_rows_by_system(settings: Any, system: str, *, include_md5: bool = True) -> Optional[List[dict]]:
+def list_rom_rows_by_system(settings: Any, system: str, *, include_fingerprint: bool = True) -> Optional[List[dict]]:
     """Return ROM rows for a single system straight from SQLite, ordered by name.
 
     Uses the ``idx_rom_cache_system`` index so listing one system never loads the
     whole library into memory — the key win for large libraries on small hardware.
     Returns ``None`` only on a SQL error so the caller can fall back to the filesystem.
     """
-    columns = "system, file_path, rom_name, unique_id, file_size, entry_type, is_downloadable, image_stem, md5"
+    columns = "system, file_path, rom_name, unique_id, file_size, entry_type, is_downloadable, image_stem, fingerprint"
     try:
         with _open_rom_metadata_cache(settings) as connection:
             rows = connection.execute(
@@ -1352,8 +1394,8 @@ def list_rom_rows_by_system(settings: Any, system: str, *, include_md5: bool = T
             "is_downloadable": bool(row[6]),
             "image_stem": row[7],
         }
-        if include_md5:
-            item["md5"] = row[8]
+        if include_fingerprint:
+            item["fingerprint"] = row[8]
         result.append(item)
     return result
 

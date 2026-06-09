@@ -1,7 +1,7 @@
 """End-to-end coverage for the asset-cache purge -> resync flow.
 
 Verifies that after a purge the metadata poller uploads a *full* (replace_all)
-inventory to Overmind while reusing cached md5 (no re-hash), so the resync
+inventory to Overmind while reusing cached fingerprint (no re-fingerprint), so the resync
 actually clears Overmind's list rather than sending a delta.
 """
 
@@ -19,7 +19,7 @@ from app.drone_api import (
     _persist_rom_metadata_cache,
     _poll_rom_metadata_cache,
 )
-from app.rom_metadata_store import _purge_asset_cache_keep_md5
+from app.rom_metadata_store import _purge_asset_cache_keep_fingerprint
 
 
 class PurgeResyncTest(unittest.TestCase):
@@ -55,8 +55,8 @@ class PurgeResyncTest(unittest.TestCase):
             cache["last_successful_upload_at"] = "2026-06-04T00:00:00+00:00"
             _persist_rom_metadata_cache(settings, cache)
 
-            # The button's action: purge keeping md5.
-            _purge_asset_cache_keep_md5(settings)
+            # The button's action: purge keeping fingerprint.
+            _purge_asset_cache_keep_fingerprint(settings)
 
             posted = []
 
@@ -68,7 +68,7 @@ class PurgeResyncTest(unittest.TestCase):
                 "app.drone_api._load_overmind_config_for_settings",
                 return_value={"overmind_url": "https://ov.local", "overmind_token": "tok"},
             ), mock.patch.object(
-                RomRepository, "build_md5", side_effect=AssertionError("purge must not re-hash; md5 is reused")
+                RomRepository, "build_fingerprint", side_effect=AssertionError("purge must not re-fingerprint; fingerprint is reused")
             ):
                 result = drone_api._poll_rom_metadata_once(settings, repo)
 

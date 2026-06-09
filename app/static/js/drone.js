@@ -885,7 +885,7 @@ async function renderRomMediaPage(system, uniqueId) {
                 <div>
                   <h2 class="h4 mb-1">${escapeHtml(rom.title || rom.name || "")}</h2>
                   <div class="text-muted small mono">${escapeHtml(rom.rom_file || rom.name || "")}</div>
-                  <div id="romMd5Hash" class="text-muted small mono mt-1">MD5: loading...</div>
+                  <div id="romFingerprint" class="text-muted small mono mt-1">Fingerprint: loading...</div>
                 </div>
                 <span class="badge ${rom.has_gamelist_entry ? "text-bg-success" : "text-bg-warning"}">${rom.has_gamelist_entry ? "gamelist.xml entry" : "no gamelist.xml entry"}</span>
               </div>
@@ -933,14 +933,14 @@ async function renderRomMediaPage(system, uniqueId) {
     window.missingArtworkRoms = [rom];
     window.selectedArtworkRomIndex = 0;
     bindArtworkEditButtons(rom, 0);
-    api(`/systems/${encodeURIComponent(system)}/roms/${encodeURIComponent(rom.unique_id)}/md5`)
+    api(`/systems/${encodeURIComponent(system)}/roms/${encodeURIComponent(rom.unique_id)}/fingerprint`)
       .then((data) => {
-        const node = document.getElementById("romMd5Hash");
-        if (node) node.textContent = `MD5: ${data.md5 || "unavailable"}`;
+        const node = document.getElementById("romFingerprint");
+        if (node) node.textContent = `Fingerprint: ${data.fingerprint || "unavailable"}`;
       })
       .catch(() => {
-        const node = document.getElementById("romMd5Hash");
-        if (node) node.textContent = "MD5: unavailable";
+        const node = document.getElementById("romFingerprint");
+        if (node) node.textContent = "Fingerprint: unavailable";
       });
   } catch (err) {
     showToast(`Failed to load ROM media: ${escapeHtml(err.message || "unknown error")}`, "danger");
@@ -1003,14 +1003,14 @@ function renderBiosList(data) {
         ? `<div class="card log-card">
           <div class="table-responsive">
             <table class="table table-hover align-middle themed-table bios-table">
-              <thead><tr><th>System</th><th>BIOS File</th><th>Size</th><th>MD5</th><th></th></tr></thead>
+              <thead><tr><th>System</th><th>BIOS File</th><th>Size</th><th>Fingerprint</th><th></th></tr></thead>
               <tbody>
                 ${systems.map((system) => grouped[system].map((item) => `
                   <tr>
                     <td><span class="badge text-bg-secondary">${escapeHtml(system === "_root" ? "root" : system)}</span></td>
                     <td><div class="fw-semibold">${escapeHtml(item.name)}</div><div class="small text-muted mono">${escapeHtml(item.path || item.name || "")}</div></td>
                     <td class="text-nowrap">${item.byte_count !== undefined ? formatBytes(item.byte_count) : "n/a"}</td>
-                    <td class="small mono bios-md5">${escapeHtml(item.md5 || "n/a")}</td>
+                    <td class="small mono bios-fingerprint">${escapeHtml(item.fingerprint || "n/a")}</td>
                     <td class="text-end">${
                       item.is_downloadable === false
                         ? `<button class="btn btn-secondary btn-sm" type="button" disabled><i class="bi bi-slash-circle me-1"></i>Disabled</button>`
@@ -1608,7 +1608,7 @@ function renderDownloadRows(rows, allowCancel = true) {
         <td class="small mono">${escapeHtml(row.source_drone_id || "n/a")}</td>
         <td>
           <div class="download-file">${escapeHtml(filePath)}</div>
-          <div class="download-meta">${escapeHtml(fileType)}${row.system ? ` · ${escapeHtml(row.system)}` : ""}${row.rom_md5 ? ` · md5 ${escapeHtml(row.rom_md5)}` : ""}</div>
+          <div class="download-meta">${escapeHtml(fileType)}${row.system ? ` · ${escapeHtml(row.system)}` : ""}${row.rom_fingerprint ? ` · fingerprint ${escapeHtml(row.rom_fingerprint)}` : ""}</div>
           ${errorText ? `<div class="text-danger small">${escapeHtml(errorText)}</div>` : ""}
         </td>
         <td style="min-width:190px"><div class="progress"><div class="progress-bar" style="width:${Math.max(0, Math.min(100, pct))}%"></div></div><div class="download-meta">${formatBytes(row.downloaded_bytes || row.bytes_transferred)} / ${formatBytes(row.total_bytes || row.file_size)} · ${pct.toFixed(1)}%</div></td>
@@ -1694,7 +1694,7 @@ async function retryDroneDownload(jobId) {
 async function purgeAssetCache() {
   if (!window.confirm(
     "Purge the asset cache and force a full re-scan and Overmind re-upload?\n\n" +
-    "Cached md5 values are kept, so ROMs are not re-hashed. This clears stale or " +
+    "Cached fingerprint values are kept, so ROMs are not re-fingerprinted. This clears stale or " +
     "duplicate entries and rebuilds Overmind's ROM list from a fresh full inventory."
   )) {
     return;

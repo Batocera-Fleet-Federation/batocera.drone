@@ -165,8 +165,8 @@ class ApiRoutesMixin:
                 self._handle_download(parts[1], "roms", parts[3])
                 return
 
-            if len(parts) == 5 and parts[0] == "systems" and parts[2] == "roms" and parts[4] == "md5":
-                self._handle_rom_md5(parts[1], parts[3])
+            if len(parts) == 5 and parts[0] == "systems" and parts[2] == "roms" and parts[4] == "fingerprint":
+                self._handle_rom_fingerprint(parts[1], parts[3])
                 return
 
             if len(parts) == 4 and parts[0] == "systems" and parts[2] == "images":

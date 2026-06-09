@@ -78,8 +78,8 @@ try:
         _empty_rom_metadata_cache,
         _clear_pending_rom_metadata_changes,
         _clear_sqlite_asset_metadata_cache,
-        _purge_asset_cache_keep_md5,
-        _read_preserved_asset_md5,
+        _purge_asset_cache_keep_fingerprint,
+        _read_preserved_asset_fingerprint,
         _load_rom_metadata_cache,
         _persist_rom_metadata_cache,
         _read_pending_rom_metadata_changes,
@@ -101,7 +101,7 @@ try:
         bios_md5_exists as _bios_md5_exists,
         collision_safe_target as _collision_safe_target,
         rom_exists as _rom_exists,
-        rom_md5_exists as _rom_md5_exists,
+        rom_fingerprint_exists as _rom_fingerprint_exists,
         safe_rom_relative_path as _safe_rom_relative_path,
     )
     from .ui_routes import UiRoutesMixin
@@ -148,8 +148,8 @@ except ImportError:
         _empty_rom_metadata_cache,
         _clear_pending_rom_metadata_changes,
         _clear_sqlite_asset_metadata_cache,
-        _purge_asset_cache_keep_md5,
-        _read_preserved_asset_md5,
+        _purge_asset_cache_keep_fingerprint,
+        _read_preserved_asset_fingerprint,
         _load_rom_metadata_cache,
         _persist_rom_metadata_cache,
         _read_pending_rom_metadata_changes,
@@ -171,7 +171,7 @@ except ImportError:
         bios_md5_exists as _bios_md5_exists,
         collision_safe_target as _collision_safe_target,
         rom_exists as _rom_exists,
-        rom_md5_exists as _rom_md5_exists,
+        rom_fingerprint_exists as _rom_fingerprint_exists,
         safe_rom_relative_path as _safe_rom_relative_path,
     )
     from ui_routes import UiRoutesMixin  # type: ignore
@@ -219,15 +219,18 @@ ROM_METADATA_POLL_SECONDS = int(os.environ.get("ROM_METADATA_POLL_SECONDS", "300
 ROM_METADATA_INITIAL_DELAY_SECONDS = int(os.environ.get("ROM_METADATA_INITIAL_DELAY_SECONDS", "60"))
 ROM_METADATA_PROGRESS_SECONDS = float(os.environ.get("ROM_METADATA_PROGRESS_SECONDS", "30"))
 ROM_METADATA_PROGRESS_FILES = int(os.environ.get("ROM_METADATA_PROGRESS_FILES", "250"))
-ROM_METADATA_MD5_BATCH_SIZE = max(1, int(os.environ.get("ROM_METADATA_MD5_BATCH_SIZE", "250")))
+ROM_METADATA_FINGERPRINT_BATCH_SIZE = max(1, int(os.environ.get("ROM_METADATA_FINGERPRINT_BATCH_SIZE", "250")))
 ROM_METADATA_UPLOAD_CHUNK_SIZE = max(1, int(os.environ.get("ROM_METADATA_UPLOAD_CHUNK_SIZE", "250")))
-ROM_METADATA_HASH_IO_YIELD_SECONDS = max(0.0, float(os.environ.get("ROM_METADATA_HASH_IO_YIELD_SECONDS", "0.05")))
-# Throttle every Nth read block instead of every block, so the per-MB yield does
-# not multiply into minutes of pure sleep on multi-GB disc images.
-ROM_METADATA_HASH_READ_BYTES = max(1024 * 1024, int(os.environ.get("ROM_METADATA_HASH_READ_BYTES", str(8 * 1024 * 1024))))
-# Wall-clock budget for full-file hashing within a single poll. Hashing is resumable
-# (md5 persists per checkpoint), so a bounded slice each poll keeps progress steady
-# without monopolizing disk I/O. 0 disables the budget.
+# Cross-drone file fingerprint (sample-fp-v1). A sampled hash (size + fixed
+# head/middle/tail windows) replaces full-file fingerprint so disc images are not read end
+# to end. Constant cost per file; see RomRepository.build_fingerprint.
+FINGERPRINT_ALGORITHM = "sample-fp-v1"
+FINGERPRINT_SAMPLE_BYTES = max(4096, int(os.environ.get("ROM_METADATA_FINGERPRINT_SAMPLE_BYTES", str(64 * 1024))))
+# Files at or below this size are fingerprinted whole (exact); larger files use the
+# three sample windows. Keep >= 3x the sample size so the windows never overlap.
+FINGERPRINT_SMALL_FILE_BYTES = max(3 * FINGERPRINT_SAMPLE_BYTES, int(os.environ.get("ROM_METADATA_FINGERPRINT_SMALL_FILE_BYTES", str(3 * FINGERPRINT_SAMPLE_BYTES))))
+# Wall-clock budget for fingerprinting within a single poll. Fingerprinting is cheap
+# (constant I/O per file) and resumable, so this is a safety guard that rarely trips.
 ROM_METADATA_HASH_BUDGET_SECONDS = max(0.0, float(os.environ.get("ROM_METADATA_HASH_BUDGET_SECONDS", "120")))
 ROM_METADATA_HASH_ROMS_ENABLED = os.environ.get("ROM_METADATA_HASH_ROMS_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
 # Real-time inotify watcher that wakes the metadata poller when ROM files change.
@@ -529,38 +532,6 @@ def _gamelist_details(game: Optional[ET.Element]) -> dict:
     return details
 
 
-def _normalize_md5(value: object) -> Optional[str]:
-    """Return a lowercase 32-hex md5 string, or None if the value is not a valid md5.
-
-    Gamelist detail values may be a plain string or a ``{"text": ..., "attributes": {...}}``
-    mapping (when the source element carried attributes), so unwrap both shapes.
-    """
-    if isinstance(value, dict):
-        value = value.get("text")
-    candidate = str(value or "").strip().lower()
-    if len(candidate) == 32 and all(c in "0123456789abcdef" for c in candidate):
-        return candidate
-    return None
-
-
-def _extract_gamelist_md5(rom: dict) -> Optional[str]:
-    """Pull a validated md5 from a ROM's gamelist details.
-
-    Batocera's EmulationStation writes a ``<md5>`` of the ROM file into gamelist.xml
-    for the great majority of titles (only large disc images tend to lack it). Reusing
-    it lets the Drone skip a full-file hash for ~95% of ROMs.
-    """
-    if not isinstance(rom, dict):
-        return None
-    direct = _normalize_md5(rom.get("md5") or rom.get("rom_md5"))
-    if direct:
-        return direct
-    gamelist = rom.get("gamelist")
-    if isinstance(gamelist, dict):
-        return _normalize_md5(gamelist.get("md5"))
-    return None
-
-
 def _gamelist_game_id(game: Optional[ET.Element], relative_path: str) -> str:
     if game is None:
         return relative_path
@@ -602,7 +573,7 @@ def _gamelist_metadata_for_reference(gamelist_path: str, game_id: str) -> dict:
 def _database_rom_metadata_fields(rom: dict, system_name: str, file_path: str, absolute: Path, stat_size: int, stat_mtime: int) -> dict:
     display_name = Path(file_path).stem
     return {
-        **{k: v for k, v in rom.items() if k not in {"md5", "rom_md5", "gamelist", "existing", "name", "title", "rom_name"}},
+        **{k: v for k, v in rom.items() if k not in {"fingerprint", "rom_fingerprint", "gamelist", "existing", "name", "title", "rom_name"}},
         "system": system_name,
         "system_name": system_name,
         "rom_name": display_name,
@@ -1992,19 +1963,42 @@ class RomRepository:
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
     @staticmethod
-    def build_md5(path: Path, io_yield_seconds: float = 0.0, read_bytes: int = ROM_METADATA_HASH_READ_BYTES) -> str:
+    def build_fingerprint(path: Path) -> str:
+        """Content fingerprint for cross-drone file identity (``sample-fp-v1``).
+
+        Hashes the file size plus up to three fixed 64 KB windows (head, middle,
+        tail). Files at or below the small-file threshold are hashed whole, so
+        small files are exact. Cost is constant regardless of file size, which is
+        what lets us fingerprint multi-GB disc images without reading them end to
+        end. Folding the size into the digest means two files of different size can
+        never collide. This is the imohash approach used by file-sync tools: it is
+        not a cryptographic hash, but for "is this the same file on another drone?"
+        the collision probability is negligible. Deterministic across drones."""
+        size = int(path.stat().st_size)
         digest = hashlib.md5()
-        block = max(1024 * 1024, int(read_bytes))
+        digest.update(size.to_bytes(8, "little"))
         with path.open("rb") as handle:
-            while True:
-                chunk = handle.read(block)
-                if not chunk:
-                    break
+            if size <= FINGERPRINT_SMALL_FILE_BYTES:
+                digest.update(handle.read())
+            else:
+                digest.update(handle.read(FINGERPRINT_SAMPLE_BYTES))
+                handle.seek(max(0, size // 2 - FINGERPRINT_SAMPLE_BYTES // 2))
+                digest.update(handle.read(FINGERPRINT_SAMPLE_BYTES))
+                handle.seek(size - FINGERPRINT_SAMPLE_BYTES)
+                digest.update(handle.read(FINGERPRINT_SAMPLE_BYTES))
+        return digest.hexdigest()
+
+    @staticmethod
+    def build_md5(path: Path) -> str:
+        """Full-file MD5 — used for BIOS identity.
+
+        BIOS files must be matched exactly against known-good dumps (No-Intro / MAME
+        BIOS sets), so unlike ROMs they use a true content MD5 rather than the sampled
+        fingerprint. BIOS files are small, so reading them whole is cheap."""
+        digest = hashlib.md5()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                 digest.update(chunk)
-                # Yield once per (large) block so the cumulative throttle on a
-                # multi-GB file stays in the seconds range, not minutes.
-                if io_yield_seconds > 0:
-                    time.sleep(io_yield_seconds)
         return digest.hexdigest()
 
     @staticmethod
@@ -2050,7 +2044,7 @@ class RomRepository:
             return []
         return [entry for entry in sorted(path.iterdir(), key=lambda p: p.name.lower()) if entry.is_file()]
 
-    def _list_rom_items(self, system: str, asset_dir: Path, include_md5: bool = True) -> List[dict]:
+    def _list_rom_items(self, system: str, asset_dir: Path, include_fingerprint: bool = True) -> List[dict]:
         items: List[dict] = []
         system_lower = system.lower()
 
@@ -2175,10 +2169,10 @@ class RomRepository:
                 "is_downloadable": (system_lower != "steam"),
                 "image_stem": display_name,
             }
-            if include_md5:
-                md5_value = self.build_md5(entry)
-                item["md5"] = md5_value
-                item["rom_md5"] = md5_value
+            if include_fingerprint:
+                fingerprint_value = self.build_fingerprint(entry)
+                item["fingerprint"] = fingerprint_value
+                item["rom_fingerprint"] = fingerprint_value
             items.append(item)
         return items
 
@@ -2309,7 +2303,7 @@ class RomRepository:
             }
             items.append(item)
         try:
-            disk_items = self._list_rom_items(system, system_dir, include_md5=False)
+            disk_items = self._list_rom_items(system, system_dir, include_fingerprint=False)
         except Exception as error:
             print(f"ROM metadata disk supplement skipped: system={system} error={_format_overmind_error(error)}", file=sys.stderr, flush=True)
             disk_items = []
@@ -2424,7 +2418,7 @@ class RomRepository:
                         "unique_id": rom.get("unique_id", ""),
                         "is_downloadable": rom.get("is_downloadable", True),
                         "image_stem": rom.get("image_stem"),
-                        "md5": rom.get("md5") or rom.get("rom_md5"),
+                        "fingerprint": rom.get("fingerprint") or rom.get("rom_fingerprint"),
                     }
                 )
             return index
@@ -2449,7 +2443,7 @@ class RomRepository:
                         "unique_id": rom.get("unique_id", ""),
                         "is_downloadable": rom.get("is_downloadable", True),
                         "image_stem": rom.get("image_stem"),
-                        "md5": rom.get("md5") or rom.get("rom_md5"),
+                        "fingerprint": rom.get("fingerprint") or rom.get("rom_fingerprint"),
                     }
                 )
         return index
@@ -3316,7 +3310,7 @@ class RomRepository:
             "has_gamelist_entry": True,
         }
 
-    def list_assets(self, system: str, asset_type: str, include_md5: bool = True) -> Tuple[Path, List[dict]]:
+    def list_assets(self, system: str, asset_type: str, include_fingerprint: bool = True) -> Tuple[Path, List[dict]]:
         system_dir = self.get_system_dir(system)
 
         if asset_type == "roms":
@@ -3333,7 +3327,7 @@ class RomRepository:
         # instead of materializing the entire library snapshot in memory. Only used
         # once the cache is authoritative; otherwise we fall through to the filesystem.
         if asset_type == "roms" and self.settings is not None and rom_cache_ready(self.settings):
-            rows = list_rom_rows_by_system(self.settings, system, include_md5=include_md5)
+            rows = list_rom_rows_by_system(self.settings, system, include_fingerprint=include_fingerprint)
             if rows is not None:
                 items = []
                 for rom in rows:
@@ -3347,14 +3341,14 @@ class RomRepository:
                         "is_downloadable": rom.get("is_downloadable", True),
                         "image_stem": rom.get("image_stem"),
                     }
-                    if include_md5:
-                        row["md5"] = rom.get("md5")
-                        row["rom_md5"] = row["md5"]
+                    if include_fingerprint:
+                        row["fingerprint"] = rom.get("fingerprint")
+                        row["rom_fingerprint"] = row["fingerprint"]
                     items.append(row)
                 return system_dir, items
         if asset_dir.exists() and asset_dir.is_dir():
             if asset_type == "roms":
-                items = self._list_rom_items(system, asset_dir, include_md5=include_md5)
+                items = self._list_rom_items(system, asset_dir, include_fingerprint=include_fingerprint)
                 items = self._attach_gamelist_to_rom_items(system_dir, items)
             else:
                 for entry in self.iter_files(asset_dir):
@@ -3429,6 +3423,8 @@ class RomRepository:
 
         for file_path, size in sorted(files, key=lambda item: str(item[0].relative_to(bios_root)).lower()):
             relative_path = file_path.relative_to(bios_root).as_posix()
+            # BIOS uses a full-file MD5 (exact emulator identity), not the sampled fingerprint.
+            bios_md5 = self.build_md5(file_path)
             entries.append(
                 {
                     "entry_type": "file",
@@ -3436,7 +3432,8 @@ class RomRepository:
                     "path": relative_path,
                     "unique_id": self.build_unique_id(file_path),
                     "byte_count": size,
-                    "md5": self.build_md5(file_path),
+                    "md5": bios_md5,
+                    "bios_md5": bios_md5,
                 }
             )
 
@@ -3945,20 +3942,20 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         self._send_json(200, _rom_metadata_cache_status(self.settings))
 
     def _handle_admin_asset_cache_purge(self) -> None:
-        """Purge cached asset metadata while keeping md5, forcing a clean resync."""
-        result = _purge_asset_cache_keep_md5(self.settings)
+        """Purge cached asset metadata while keeping fingerprint, forcing a clean resync."""
+        result = _purge_asset_cache_keep_fingerprint(self.settings)
         _ROM_METADATA_WAKE.set()
         cleared = result.get("cleared") or {}
         roms = int(cleared.get("roms") or 0)
-        kept = int(cleared.get("preserved_md5") or 0)
+        kept = int(cleared.get("preserved_fingerprint") or 0)
         self._send_json(200, {
             "status": result.get("status", "queued"),
-            "kept_md5": True,
+            "kept_fingerprint": True,
             "cleared": cleared,
             "requested_at": result.get("requested_at"),
             "message": (
                 f"Asset cache cleared ({roms} ROMs, {int(cleared.get('bios') or 0)} BIOS, "
-                f"{int(cleared.get('artwork') or 0)} artwork). Kept {kept} md5 hashes — "
+                f"{int(cleared.get('artwork') or 0)} artwork). Kept {kept} fingerprint hashes — "
                 "rebuilding now without re-hashing, then uploading a full inventory."
             ),
         })
@@ -4057,8 +4054,8 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
     def _overmind_peer_results_path(self) -> Path:
         return (self.settings.userdata_root / "system" / "drone-app" / "peer_checks.json").resolve()
 
-    def _rom_md5_cache_path(self) -> Path:
-        return (self.settings.userdata_root / "system" / "drone-app" / "rom_md5_cache.json").resolve()
+    def _rom_fingerprint_cache_path(self) -> Path:
+        return (self.settings.userdata_root / "system" / "drone-app" / "rom_fingerprint_cache.json").resolve()
 
     def _mask_secret(self, value: str) -> str:
         if not value:
@@ -4230,7 +4227,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             },
         )
 
-    def _handle_rom_md5(self, system: str, unique_id: str) -> None:
+    def _handle_rom_fingerprint(self, system: str, unique_id: str) -> None:
         system_dir = self.repository.get_system_dir(system)
         rom = self.repository.find_rom_by_unique_id(system, unique_id)
         rom_path = str(rom.get("relative_path") or rom.get("rom_path") or rom.get("rom_file") or rom.get("name") or "")
@@ -4238,15 +4235,15 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         if not target.exists() or not target.is_file() or (target != system_dir and system_dir not in target.parents):
             raise FileNotFoundError()
         stat = target.stat()
-        cache_path = self._rom_md5_cache_path()
+        cache_path = self._rom_fingerprint_cache_path()
         cache = self._load_json_file(cache_path, {})
         key = f"{system}:{unique_id}:{stat.st_size}:{int(stat.st_mtime)}"
-        md5_value = cache.get(key) if isinstance(cache, dict) else None
-        if not md5_value:
-            md5_value = self.repository.build_md5(target)
-            cache = {key: md5_value}
+        fingerprint_value = cache.get(key) if isinstance(cache, dict) else None
+        if not fingerprint_value:
+            fingerprint_value = self.repository.build_fingerprint(target)
+            cache = {key: fingerprint_value}
             self._save_json_state(cache_path, cache)
-        self._send_json(200, {"system": system, "unique_id": unique_id, "md5": md5_value, "cached": bool(cache.get(key))})
+        self._send_json(200, {"system": system, "unique_id": unique_id, "fingerprint": fingerprint_value, "cached": bool(cache.get(key))})
 
     def _handle_peer_health(self) -> None:
         if self.settings.drone_mtls_enabled:
@@ -4848,11 +4845,11 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         self._send_json(200, {"systems": systems}, cache_key="json:/systems")
 
     def _handle_rom_list(self, system: str) -> None:
-        _, roms = self.repository.list_assets(system, "roms", include_md5=False)
+        _, roms = self.repository.list_assets(system, "roms", include_fingerprint=False)
         if not self.settings.downloads_enabled:
             for item in roms:
                 item["is_downloadable"] = False
-        self._send_json(200, {"system": system, "roms": roms}, cache_key=f"json:/systems/{system}?md5=0")
+        self._send_json(200, {"system": system, "roms": roms}, cache_key=f"json:/systems/{system}?fingerprint=0")
 
     def _handle_images_list(self, system: str) -> None:
         _, images = self.repository.list_assets(system, "images")
@@ -4896,7 +4893,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 if (
                     query_value in (item.get("path") or "").lower()
                     or query_value in (item.get("name") or "").lower()
-                    or query_value in (item.get("md5") or "").lower()
+                    or query_value in (item.get("fingerprint") or "").lower()
                     or query_value in _entry_system(item)
                 )
             ]
@@ -8262,10 +8259,10 @@ def _rom_inventory_fingerprint(roms: Iterable[dict]) -> str:
         if not system or not path:
             continue
         entry_type = str(row.get("entry_type") or "file").strip().lower()
-        md5_value = str(row.get("rom_md5") or row.get("md5") or row.get("hash") or "").strip().lower()
+        fingerprint_value = str(row.get("rom_fingerprint") or row.get("fingerprint") or row.get("hash") or "").strip().lower()
         file_size = row.get("file_size") if row.get("file_size") is not None else row.get("byte_count")
         size_value = str(int(file_size)) if isinstance(file_size, (int, float)) else str(file_size or "").strip()
-        rows.append("\t".join((system, path, entry_type, md5_value, size_value)))
+        rows.append("\t".join((system, path, entry_type, fingerprint_value, size_value)))
     digest = hashlib.sha256()
     for value in sorted(rows):
         digest.update(value.encode("utf-8"))
@@ -8545,10 +8542,10 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
     existing_entries = cache.get("entries") if isinstance(cache.get("entries"), dict) else {}
     existing_bios_entries = cache.get("bios_entries") if isinstance(cache.get("bios_entries"), dict) else {}
     existing_artwork_entries = cache.get("artwork_entries") if isinstance(cache.get("artwork_entries"), dict) else {}
-    # md5 snapshot kept by a cache purge so a clean rebuild does not re-hash files.
-    preserved_md5 = _read_preserved_asset_md5(settings)
-    preserved_rom_md5 = preserved_md5.get("rom") or {}
-    preserved_bios_md5 = preserved_md5.get("bios") or {}
+    # fingerprint snapshot kept by a cache purge so a clean rebuild does not re-hash files.
+    preserved_fingerprint = _read_preserved_asset_fingerprint(settings)
+    preserved_rom_fingerprint = preserved_fingerprint.get("rom") or {}
+    preserved_bios_md5 = preserved_fingerprint.get("bios") or {}
     print(
         f"Asset metadata cache load completed: entries={len(existing_entries)} bios_entries={len(existing_bios_entries)} artwork_entries={len(existing_artwork_entries)} duration_ms={int((time.monotonic() - cache_load_started) * 1000)}",
         file=sys.stdout,
@@ -8648,25 +8645,19 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
             stat_mtime = int(rom.get("modified_time") or rom.get("mtime") or absolute.stat().st_mtime)
             previous = existing_entries.get(key) if isinstance(existing_entries.get(key), dict) else {}
             base_entry = _database_rom_metadata_fields(rom, system_name, file_path, absolute, stat_size, stat_mtime)
-            previous_md5 = (previous.get("rom_md5") or previous.get("md5")) if previous else None
-            gamelist_md5 = _extract_gamelist_md5(rom) if entry_type != "folder" else None
-            reuse_md5 = None
-            if previous and previous.get("file_size") == stat_size and previous_md5:
-                reuse_md5 = previous_md5
-            elif gamelist_md5:
-                # EmulationStation already recorded this file's md5 in gamelist.xml;
-                # trust it instead of re-hashing (and refresh it on any file change,
-                # since ES re-scrapes changed ROMs). Avoids hashing multi-GB files.
-                reuse_md5 = gamelist_md5
+            previous_fingerprint = (previous.get("rom_fingerprint") or previous.get("fingerprint")) if previous else None
+            reuse_fingerprint = None
+            if previous and previous.get("file_size") == stat_size and previous_fingerprint:
+                reuse_fingerprint = previous_fingerprint
             else:
-                # After a purge the entry rows are gone; reuse md5 from the
+                # After a purge the entry rows are gone; reuse fingerprint from the
                 # snapshot for files whose size and mtime are unchanged.
-                kept = preserved_rom_md5.get(key)
-                if kept and kept.get("md5") and kept.get("file_size") == stat_size and kept.get("modified_time") == stat_mtime:
-                    reuse_md5 = kept["md5"]
-            if reuse_md5:
+                kept = preserved_rom_fingerprint.get(key)
+                if kept and kept.get("fingerprint") and kept.get("file_size") == stat_size and kept.get("modified_time") == stat_mtime:
+                    reuse_fingerprint = kept["fingerprint"]
+            if reuse_fingerprint:
                 next_entries[key] = dict(base_entry)
-                next_entries[key].update({"md5": reuse_md5, "rom_md5": reuse_md5})
+                next_entries[key].update({"fingerprint": reuse_fingerprint, "rom_fingerprint": reuse_fingerprint})
             elif previous and previous.get("file_size") == stat_size and previous.get("modified_time") == stat_mtime:
                 next_entries[key] = dict(base_entry)
             else:
@@ -8748,7 +8739,8 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
         last_log = hash_started
         print(f"BIOS metadata poll phase=md5_hashing count={len(bios_new_or_changed)}", file=sys.stdout, flush=True)
         for bios_index, (key, absolute, entry) in enumerate(bios_new_or_changed, start=1):
-            md5_value = RomRepository.build_md5(absolute, io_yield_seconds=ROM_METADATA_HASH_IO_YIELD_SECONDS)
+            # BIOS uses a full-file MD5 (exact emulator identity), not the sampled ROM fingerprint.
+            md5_value = RomRepository.build_md5(absolute)
             next_bios_entries[key] = {**entry, "md5": md5_value, "bios_md5": md5_value}
             now = time.monotonic()
             if bios_index == len(bios_new_or_changed) or bios_index % max(1, ROM_METADATA_PROGRESS_FILES) == 0 or now - last_log >= ROM_METADATA_PROGRESS_SECONDS:
@@ -8822,7 +8814,7 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
         "bios_discovered": bios_discovered,
         "artwork_discovered": artwork_discovered,
         "new_or_changed": len(new_or_changed),
-        "roms_pending_md5": len(new_or_changed),
+        "roms_pending_fingerprint": len(new_or_changed),
         "bios_new_or_changed": len(bios_new_or_changed),
         "deleted": len(deleted),
         "bios_deleted": len(bios_deleted),
@@ -8836,8 +8828,8 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
     return _build_rom_metadata_snapshot_from_cache(settings, cache), changed, stats
 
 
-def _hash_rom_metadata_batches(settings: Settings, repository: "RomRepository", batch_size: int = ROM_METADATA_MD5_BATCH_SIZE):
-    """Yield bounded hash patches for ROM entries missing a current MD5 value."""
+def _hash_rom_metadata_batches(settings: Settings, repository: "RomRepository", batch_size: int = ROM_METADATA_FINGERPRINT_BATCH_SIZE):
+    """Yield bounded hash patches for ROM entries missing a current fingerprint."""
     if not ROM_METADATA_HASH_ROMS_ENABLED:
         return
     cache, _ = _load_rom_metadata_cache(settings)
@@ -8845,7 +8837,7 @@ def _hash_rom_metadata_batches(settings: Settings, repository: "RomRepository", 
     pending = [
         (key, entry)
         for key, entry in entries.items()
-        if isinstance(entry, dict) and not entry.get("rom_md5") and entry.get("absolute_path")
+        if isinstance(entry, dict) and not entry.get("rom_fingerprint") and entry.get("absolute_path")
     ]
     total = len(pending)
     if not total:
@@ -8854,7 +8846,7 @@ def _hash_rom_metadata_batches(settings: Settings, repository: "RomRepository", 
     started = time.monotonic()
     last_checkpoint = started
     budget_seconds = ROM_METADATA_HASH_BUDGET_SECONDS
-    print(f"ROM metadata phase=md5_hashing count={total} batch_size={batch_size} budget_seconds={budget_seconds}", file=sys.stdout, flush=True)
+    print(f"ROM metadata phase=fingerprint_hashing count={total} batch_size={batch_size} budget_seconds={budget_seconds}", file=sys.stdout, flush=True)
     patch = []
     pending_updates = {}
     budget_exhausted = False
@@ -8867,8 +8859,8 @@ def _hash_rom_metadata_batches(settings: Settings, repository: "RomRepository", 
             break
         absolute = Path(str(entry.get("absolute_path") or ""))
         if absolute.exists() and absolute.is_file():
-            md5_value = repository.build_md5(absolute, io_yield_seconds=ROM_METADATA_HASH_IO_YIELD_SECONDS)
-            updated = {**entry, "md5": md5_value, "rom_md5": md5_value}
+            fingerprint_value = repository.build_fingerprint(absolute)
+            updated = {**entry, "fingerprint": fingerprint_value, "rom_fingerprint": fingerprint_value}
             entries[key] = updated
             pending_updates[key] = updated
             patch.append({k: v for k, v in updated.items() if k != "absolute_path"})
@@ -8887,7 +8879,7 @@ def _hash_rom_metadata_batches(settings: Settings, repository: "RomRepository", 
             cache["dirty"] = True
             _persist_rom_metadata_cache(settings, cache, rom_updates=pending_updates)
             pending_updates = {}
-            print(f"ROM metadata MD5 checkpoint: {processed}/{total} files hashed", file=sys.stdout, flush=True)
+            print(f"ROM metadata fingerprint checkpoint: {processed}/{total} files hashed", file=sys.stdout, flush=True)
             last_checkpoint = now
         if not patch or (len(patch) < batch_size and processed != total):
             continue
@@ -8896,7 +8888,7 @@ def _hash_rom_metadata_batches(settings: Settings, repository: "RomRepository", 
             cache["dirty"] = True
             _persist_rom_metadata_cache(settings, cache, rom_updates=pending_updates)
             pending_updates = {}
-        print(f"ROM metadata md5 progress: {processed}/{total} files", file=sys.stdout, flush=True)
+        print(f"ROM metadata fingerprint progress: {processed}/{total} files", file=sys.stdout, flush=True)
         yield {
             "type": "asset_metadata",
             "update_mode": "rom_hash_patch",
@@ -8925,7 +8917,7 @@ def _hash_rom_metadata_batches(settings: Settings, repository: "RomRepository", 
         patch = []
     if budget_exhausted:
         print(
-            f"ROM metadata md5 hashing paused (budget {budget_seconds}s reached): "
+            f"ROM metadata fingerprint hashing paused (budget {budget_seconds}s reached): "
             f"hashed={hashed} remaining≈{total - hashed}/{total} resume on next poll "
             f"duration_ms={int((time.monotonic() - started) * 1000)}",
             file=sys.stdout,
@@ -8933,7 +8925,7 @@ def _hash_rom_metadata_batches(settings: Settings, repository: "RomRepository", 
         )
     else:
         print(
-            f"ROM metadata md5 hashing completed: count={total} duration_ms={int((time.monotonic() - started) * 1000)}",
+            f"ROM metadata fingerprint hashing completed: count={total} duration_ms={int((time.monotonic() - started) * 1000)}",
             file=sys.stdout,
             flush=True,
         )
@@ -9000,7 +8992,7 @@ class DownloadManager:
         self._thread = Thread(target=self._worker, name="drone-download-worker", daemon=True)
         self._thread.start()
 
-    def enqueue_rom(self, config: dict, peer: dict, system: str, relative_path: str, expected_size=None, expected_md5=None, source_action_id: Optional[str] = None, entry_type: str = "file", sync_id: Optional[str] = None) -> dict:
+    def enqueue_rom(self, config: dict, peer: dict, system: str, relative_path: str, expected_size=None, expected_fingerprint=None, source_action_id: Optional[str] = None, entry_type: str = "file", sync_id: Optional[str] = None) -> dict:
         job_id = str(uuid.uuid4())
         peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
         now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -9036,7 +9028,7 @@ class DownloadManager:
             "created_at": now,
             "_config": config,
             "_peer": peer,
-            "_expected_md5": expected_md5,
+            "_expected_fingerprint": expected_fingerprint,
             "_entry_type": entry_type,
         }
         with self._lock:
@@ -9086,7 +9078,7 @@ class DownloadManager:
             "_asset_type": "bios",
             "_config": config,
             "_peer": peer,
-            "_expected_md5": expected_md5,
+            "_expected_fingerprint": expected_md5,
         }
         with self._lock:
             self._jobs[job_id] = job
@@ -9280,7 +9272,7 @@ class DownloadManager:
             rom_path = str(job.get("rom_path") or job.get("rom_name") or rel)
             artwork_type = str(job.get("artwork_type") or "")
             expected_size = job.get("file_size") or job.get("total_bytes")
-            expected_md5 = job.get("_expected_md5")
+            expected_fingerprint = job.get("_expected_fingerprint")
             entry_type = str(job.get("_entry_type") or job.get("entry_type") or "file").lower()
             cancel_event = self._cancel_events.get(job_id) or Event()
             asset_type = str(job.get("_asset_type") or "rom").lower()
@@ -9327,7 +9319,7 @@ class DownloadManager:
                     peer,
                     rel,
                     expected_size=expected_size,
-                    expected_md5=expected_md5,
+                    expected_md5=expected_fingerprint,
                     progress_callback=progress,
                     cancellation_event=cancel_event,
                 )
@@ -9351,7 +9343,7 @@ class DownloadManager:
                         system,
                         rel,
                         expected_size=expected_size,
-                        expected_md5=expected_md5,
+                        expected_fingerprint=expected_fingerprint,
                         progress_callback=progress,
                         cancellation_event=cancel_event,
                     )
@@ -9416,8 +9408,8 @@ def _get_download_manager() -> Optional[DownloadManager]:
     return _DOWNLOAD_MANAGER
 
 
-def _cached_rom_md5_exists(settings: Settings, expected_md5: Optional[str]) -> bool:
-    expected = str(expected_md5 or "").strip().lower()
+def _cached_rom_fingerprint_exists(settings: Settings, expected_fingerprint: Optional[str]) -> bool:
+    expected = str(expected_fingerprint or "").strip().lower()
     if not expected:
         return False
     try:
@@ -9428,8 +9420,8 @@ def _cached_rom_md5_exists(settings: Settings, expected_md5: Optional[str]) -> b
     for entry in entries.values():
         if not isinstance(entry, dict):
             continue
-        md5_value = str(entry.get("rom_md5") or entry.get("md5") or "").strip().lower()
-        if md5_value == expected:
+        fingerprint_value = str(entry.get("rom_fingerprint") or entry.get("fingerprint") or "").strip().lower()
+        if fingerprint_value == expected:
             return True
     return False
 
@@ -9679,7 +9671,7 @@ def _download_rom_from_peer(
     system: str,
     relative_path: str,
     expected_size=None,
-    expected_md5=None,
+    expected_fingerprint=None,
     progress_callback=None,
     cancellation_event: Optional[Event] = None,
 ) -> dict:
@@ -9777,12 +9769,12 @@ def _download_rom_from_peer(
                 raise RuntimeError(f"size mismatch expected={expected_size} actual={bytes_written}")
         except ValueError:
             pass
-    actual_md5 = RomRepository.build_md5(partial_target)
-    expected_md5_clean = str(expected_md5 or "").strip().lower()
-    if expected_md5_clean and actual_md5.lower() != expected_md5_clean:
+    actual_fingerprint = RomRepository.build_fingerprint(partial_target)
+    expected_fingerprint_clean = str(expected_fingerprint or "").strip().lower()
+    if expected_fingerprint_clean and actual_fingerprint.lower() != expected_fingerprint_clean:
         if partial_target.exists():
             partial_target.unlink()
-        raise RuntimeError(f"md5 mismatch expected={expected_md5_clean} actual={actual_md5}")
+        raise RuntimeError(f"fingerprint mismatch expected={expected_fingerprint_clean} actual={actual_fingerprint}")
     partial_target.replace(target)
     completed_dt = datetime.now(timezone.utc).replace(microsecond=0)
     duration_ms = int((time.monotonic() - started_mono) * 1000)
@@ -9796,8 +9788,8 @@ def _download_rom_from_peer(
         "status": "completed",
         "bytes_transferred": bytes_written,
         "file_size": expected_size or bytes_written,
-        "md5": actual_md5,
-        "rom_md5": expected_md5_clean or actual_md5,
+        "fingerprint": actual_fingerprint,
+        "rom_fingerprint": expected_fingerprint_clean or actual_fingerprint,
         "download_started_at": started,
         "download_completed_at": completed_dt.isoformat(),
         "started_at": started,
@@ -9913,6 +9905,7 @@ def _download_bios_from_peer(
                 raise RuntimeError(f"size mismatch expected={expected_size} actual={bytes_written}")
         except ValueError:
             pass
+    # BIOS verifies against a full-file MD5 (exact emulator identity), not the sampled fingerprint.
     actual_md5 = RomRepository.build_md5(partial_target)
     expected_md5_clean = str(expected_md5 or "").strip().lower()
     if expected_md5_clean and actual_md5.lower() != expected_md5_clean:
@@ -10016,7 +10009,7 @@ def _download_artwork_from_peer(
         raise
     if not partial_target or not target:
         raise RuntimeError("artwork download failed")
-    actual_md5 = RomRepository.build_md5(partial_target)
+    actual_fingerprint = RomRepository.build_fingerprint(partial_target)
     partial_target.replace(target)
     gamelist_update = None
     gamelist_update_status = "succeeded"
@@ -10046,7 +10039,7 @@ def _download_artwork_from_peer(
         "status": "completed",
         "bytes_transferred": bytes_written,
         "file_size": bytes_written,
-        "md5": actual_md5,
+        "fingerprint": actual_fingerprint,
         "download_started_at": started,
         "download_completed_at": completed_dt.isoformat(),
         "started_at": started,
@@ -10107,12 +10100,12 @@ def _execute_overmind_action(
         }
 
     if action_name == "purge_asset_cache":
-        result = _purge_asset_cache_keep_md5(settings)
+        result = _purge_asset_cache_keep_fingerprint(settings)
         _ROM_METADATA_WAKE.set()
-        return "completed", "Queued asset cache purge; cached md5 values were kept, and the metadata poller will re-scan and upload a fresh full inventory.", {
+        return "completed", "Queued asset cache purge; cached fingerprint values were kept, and the metadata poller will re-scan and upload a fresh full inventory.", {
             "type": "asset_cache_purge",
             "status": result.get("status", "queued"),
-            "reason": "full_refresh_kept_md5",
+            "reason": "full_refresh_kept_fingerprint",
             "poller_wake_requested": True,
         }
 
@@ -10141,7 +10134,7 @@ def _execute_overmind_action(
             return "failed", "Download manager is not available.", None
         payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
         rel = str(payload.get("file_path") or payload.get("relative_path") or payload.get("bios_name") or payload.get("name") or "").strip()
-        expected_md5 = payload.get("bios_md5") or payload.get("md5")
+        expected_md5 = payload.get("bios_md5") or payload.get("fingerprint")
         source_device_ids = {
             str(device.get("device_id") or device.get("drone_id") or "")
             for device in payload.get("devices", [])
@@ -10164,7 +10157,7 @@ def _execute_overmind_action(
                     "relative_path": rel,
                     "action": "download",
                     "status": "skipped",
-                    "failure_reason": "BIOS md5 already exists locally",
+                    "failure_reason": "BIOS fingerprint already exists locally",
                     "bios_md5": expected_md5,
                     "download_started_at": started_wall,
                     "download_completed_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
@@ -10290,7 +10283,7 @@ def _execute_overmind_action(
         for item in requested:
             system = str(item.get("system_name") or item.get("system") or payload.get("system_name") or "").strip()
             rel = str(item.get("file_path") or item.get("rom_name") or "").strip()
-            expected_md5 = item.get("rom_md5") or item.get("md5")
+            expected_fingerprint = item.get("rom_fingerprint") or item.get("fingerprint")
             entry_type = str(item.get("entry_type") or "file").strip().lower()
             sync_id = str(item.get("sync_id") or payload.get("sync_id") or uuid.uuid4())
             source_device_ids = {
@@ -10302,7 +10295,7 @@ def _execute_overmind_action(
                 continue
             started_wall = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
             started_mono = time.monotonic()
-            if expected_md5 and _cached_rom_md5_exists(settings, expected_md5):
+            if expected_fingerprint and _cached_rom_fingerprint_exists(settings, expected_fingerprint):
                 activity = {
                     "sync_id": sync_id,
                     "target_drone_id": settings.overmind_device_id,
@@ -10312,8 +10305,8 @@ def _execute_overmind_action(
                     "entry_type": entry_type,
                     "action": "download",
                     "status": "skipped",
-                    "failure_reason": "ROM md5 already exists locally",
-                    "rom_md5": expected_md5,
+                    "failure_reason": "ROM fingerprint already exists locally",
+                    "rom_fingerprint": expected_fingerprint,
                     "download_started_at": started_wall,
                     "download_completed_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
                     "duration_ms": int((time.monotonic() - started_mono) * 1000),
@@ -10334,7 +10327,7 @@ def _execute_overmind_action(
                     "action": "download",
                     "status": "failed",
                     "failure_reason": "No healthy source peer with requested ROM found",
-                    "rom_md5": expected_md5,
+                    "rom_fingerprint": expected_fingerprint,
                     "download_started_at": started_wall,
                     "download_completed_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
                     "duration_ms": int((time.monotonic() - started_mono) * 1000),
@@ -10349,13 +10342,13 @@ def _execute_overmind_action(
                     system,
                     rel,
                     expected_size=item.get("file_size"),
-                    expected_md5=expected_md5,
+                    expected_fingerprint=expected_fingerprint,
                     source_action_id=str(action.get("id") or ""),
                     entry_type=entry_type,
                     sync_id=sync_id,
                 )
                 activity["sync_id"] = sync_id
-                activity["rom_md5"] = activity.get("rom_md5") or expected_md5
+                activity["rom_fingerprint"] = activity.get("rom_fingerprint") or expected_fingerprint
                 activity["entry_type"] = activity.get("entry_type") or entry_type
                 activities.append(activity)
             except Exception as error:
@@ -10371,7 +10364,7 @@ def _execute_overmind_action(
                     "action": "download",
                     "status": "failed",
                     "failure_reason": str(error),
-                    "rom_md5": expected_md5,
+                    "rom_fingerprint": expected_fingerprint,
                     "download_started_at": started_wall,
                     "download_completed_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
                     "duration_ms": int((time.monotonic() - started_mono) * 1000),
@@ -11000,7 +10993,7 @@ def _sync_rom_metadata_to_overmind_locked(
     hash_batches = 0
     hashed_roms = 0
     hash_patch_failed = False
-    for patch in _hash_rom_metadata_batches(settings, repository, batch_size=ROM_METADATA_MD5_BATCH_SIZE):
+    for patch in _hash_rom_metadata_batches(settings, repository, batch_size=ROM_METADATA_FINGERPRINT_BATCH_SIZE):
         patch_roms = patch.get("roms") if isinstance(patch.get("roms"), list) else []
         payload = {"device_id": settings.overmind_device_id, **patch}
         progress = patch.get("hash_progress") or {}
@@ -11012,15 +11005,15 @@ def _sync_rom_metadata_to_overmind_locked(
         try:
             upload(payload, "rom_hash_patch")
         except Exception:
-            # md5 is already persisted to the local cache before the patch is sent,
+            # fingerprint is already persisted to the local cache before the patch is sent,
             # so without this the next poll sees nothing pending to hash and never
-            # resends — leaving Overmind with md5-less rows forever. Flag a full
-            # refresh so the next poll re-uploads the inventory (now carrying md5)
+            # resends — leaving Overmind with fingerprint-less rows forever. Flag a full
+            # refresh so the next poll re-uploads the inventory (now carrying fingerprint)
             # and Overmind converges.
             hash_patch_failed = True
             _update_rom_metadata_cache_state(settings, dirty=True, full_refresh_pending=True)
             print(
-                "Asset metadata hash patch upload failed; flagged full refresh so md5 values resync on the next poll",
+                "Asset metadata hash patch upload failed; flagged full refresh so fingerprint values resync on the next poll",
                 file=sys.stderr,
                 flush=True,
             )
@@ -11034,10 +11027,10 @@ def _sync_rom_metadata_to_overmind_locked(
         _mark_rom_metadata_upload_clean(settings, snapshot.get("rom_inventory_fingerprint"))
 
     if not should_upload_inventory and not hash_batches:
-        # Advertise the fingerprint of what the drone *actually* holds (md5
+        # Advertise the fingerprint of what the drone *actually* holds (fingerprint
         # included), even when there is nothing to upload. If a past hash patch
         # never reached Overmind, its stored fingerprint still reflects the
-        # md5-less inventory; reporting the true data fingerprint in the next
+        # fingerprint-less inventory; reporting the true data fingerprint in the next
         # heartbeat lets Overmind detect the drift and queue a resync on its own,
         # so already-stuck drones recover without a manual force.
         current_fingerprint = snapshot.get("rom_inventory_fingerprint")
@@ -11083,7 +11076,7 @@ def _sync_rom_metadata_to_overmind_locked(
 def _complete_local_rom_metadata_cache(settings: Settings, repository: "RomRepository", reason: str) -> dict:
     hash_batches = 0
     hashed_roms = 0
-    for patch in _hash_rom_metadata_batches(settings, repository, batch_size=ROM_METADATA_MD5_BATCH_SIZE):
+    for patch in _hash_rom_metadata_batches(settings, repository, batch_size=ROM_METADATA_FINGERPRINT_BATCH_SIZE):
         hash_batches += 1
         hashed_roms += len(patch.get("roms") or [])
     print(

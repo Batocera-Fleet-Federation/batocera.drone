@@ -231,9 +231,9 @@ def collect_game_event_sessions(
         }
         if rom_path and repository:
             try:
-                session["rom_md5"] = repository.build_md5(rom_path)
-            except Exception as error:  # noqa: BLE001 - md5 is best-effort
-                session["rom_md5_error"] = formatter(error)
+                session["rom_fingerprint"] = repository.build_fingerprint(rom_path)
+            except Exception as error:  # noqa: BLE001 - fingerprint is best-effort
+                session["rom_fingerprint_error"] = formatter(error)
         sessions.append(session)
         starts[resolved_rom] = (len(sessions) - 1, played_at)
     return sessions, processed
@@ -312,9 +312,9 @@ def collect_game_logs(
                         current["game_name"] = Path(rom_value).name
                         if rom_path and repository:
                             try:
-                                current["rom_md5"] = repository.build_md5(rom_path)
+                                current["rom_fingerprint"] = repository.build_fingerprint(rom_path)
                             except Exception as error:
-                                current["rom_md5_error"] = formatter(error)
+                                current["rom_fingerprint_error"] = formatter(error)
                         append_session(current)
                         current = {}
                         continue
@@ -336,9 +336,9 @@ def collect_game_logs(
                         current["game_name"] = Path(rom_value).name
                         if rom_path and repository:
                             try:
-                                current["rom_md5"] = repository.build_md5(rom_path)
+                                current["rom_fingerprint"] = repository.build_fingerprint(rom_path)
                             except Exception as error:
-                                current["rom_md5_error"] = formatter(error)
+                                current["rom_fingerprint_error"] = formatter(error)
                     if current.get("system_name") and current.get("game_name"):
                         append_session(current)
                         current = {}

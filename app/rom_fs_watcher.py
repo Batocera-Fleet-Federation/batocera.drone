@@ -14,7 +14,7 @@ It is best-effort and self-contained:
   limit is exhausted, ``start()`` returns ``False`` and the caller simply keeps
   relying on the periodic poll. It never raises into the caller.
 * It only *wakes* the poller; the poller remains the single source of truth that
-  scans the disk, reconciles new/changed/deleted ROMs, and reuses cached md5.
+  scans the disk, reconciles new/changed/deleted ROMs, and reuses cached fingerprints.
 """
 
 from __future__ import annotations

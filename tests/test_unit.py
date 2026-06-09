@@ -52,7 +52,7 @@ from app.drone_api import (
     _hash_rom_metadata_batches,
     _rom_inventory_fingerprint,
     _empty_rom_metadata_cache,
-    _cached_rom_md5_exists,
+    _cached_rom_fingerprint_exists,
     _poll_rom_metadata_cache,
     _poll_rom_metadata_once,
     _load_rom_metadata_cache,
@@ -70,7 +70,7 @@ from app.drone_api import (
     _download_rom_from_peer,
     _download_rom_folder_from_peer,
     _collision_safe_target,
-    _rom_md5_exists,
+    _rom_fingerprint_exists,
     _best_peer_for_rom,
     _execute_overmind_action,
     _register_or_claim_overmind_token,
@@ -444,7 +444,7 @@ class SettingsTests(unittest.TestCase):
             self.assertIn("latest-checkpoint", file_info["content"])
             self.assertEqual(payload["_cursors"][str(stdout_log.resolve())]["size"], stdout_log.stat().st_size)
 
-    def test_game_log_collection_detects_launch_with_md5(self) -> None:
+    def test_game_log_collection_detects_launch_with_fingerprint(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
             roms_root = root / "roms"
@@ -470,7 +470,7 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(session["system_name"], "snes")
             self.assertEqual(session["game_name"], "Game.sfc")
             self.assertEqual(session["rom_path"], rom.resolve().as_posix())
-            self.assertEqual(session["rom_md5"], RomRepository.build_md5(rom))
+            self.assertEqual(session["rom_fingerprint"], RomRepository.build_fingerprint(rom))
             self.assertEqual(session["played_at"], "2026-05-26T10:15:00+00:00")
 
     def test_game_log_collection_detects_batocera_v43_launch(self) -> None:
@@ -560,7 +560,7 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(session["system_name"], "snes")
             self.assertEqual(session["game_name"], "Game.sfc")
             self.assertEqual(session["rom_path"], rom.resolve().as_posix())
-            self.assertEqual(session["rom_md5"], RomRepository.build_md5(rom))
+            self.assertEqual(session["rom_fingerprint"], RomRepository.build_fingerprint(rom))
             self.assertEqual(session["played_at"], "2026-06-08T10:00:00+00:00")
             self.assertEqual(session["duration_seconds"], 300)
             self.assertEqual(len(processed), 2)
@@ -898,7 +898,7 @@ class SettingsTests(unittest.TestCase):
             self.assertFalse((root / "roms" / "snes" / "Cancel Me.zip.part").exists())
             self.assertEqual(repo.list_assets("snes", "roms")[1], [])
 
-    def test_download_folder_rom_from_peer_recreates_tree_without_md5(self) -> None:
+    def test_download_folder_rom_from_peer_recreates_tree_without_fingerprint(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
             with mock.patch.dict(
@@ -944,7 +944,7 @@ class SettingsTests(unittest.TestCase):
             peer = {"drone_id": "source-a", "reachable_url": "http://source-a:8080"}
             with mock.patch("app.drone_api._peer_get_json", return_value=manifest), mock.patch(
                 "app.drone_api.urlopen", side_effect=fake_urlopen
-            ), mock.patch.object(RomRepository, "build_md5", side_effect=AssertionError("folder sync should not hash")):
+            ), mock.patch.object(RomRepository, "build_fingerprint", side_effect=AssertionError("folder sync should not hash")):
                 result = _download_rom_folder_from_peer(settings, {}, peer, "ps3", "Game.ps3", expected_size=10)
 
             self.assertEqual(result["status"], "completed")
@@ -1035,7 +1035,7 @@ class SettingsTests(unittest.TestCase):
                 manager = DownloadManager(settings, repo)
 
             config = {"overmind_url": "https://overmind.local", "overmind_token": "drone-token"}
-            queued = manager.enqueue_rom(config, {"drone_id": "source-a"}, "snes", "Game.zip", expected_size=8, expected_md5="abc")
+            queued = manager.enqueue_rom(config, {"drone_id": "source-a"}, "snes", "Game.zip", expected_size=8, expected_fingerprint="abc")
             completed = {
                 "source_drone_id": "source-a",
                 "target_drone_id": "target-a",
@@ -1046,7 +1046,7 @@ class SettingsTests(unittest.TestCase):
                 "status": "completed",
                 "bytes_transferred": 8,
                 "file_size": 8,
-                "rom_md5": "abc",
+                "rom_fingerprint": "abc",
                 "download_started_at": "2026-01-01T00:00:00+00:00",
                 "download_completed_at": "2026-01-01T00:00:01+00:00",
                 "duration_ms": 1000,
@@ -1073,7 +1073,7 @@ class SettingsTests(unittest.TestCase):
             pushed = post_activity.call_args.args[2]
             self.assertEqual(pushed["status"], "completed")
             self.assertEqual(pushed["sync_id"], queued["job_id"])
-            self.assertEqual(pushed["rom_md5"], "abc")
+            self.assertEqual(pushed["rom_fingerprint"], "abc")
 
     def test_best_peer_for_rom_respects_source_device_inventory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1206,7 +1206,7 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(pushed["status"], "failed")
             self.assertEqual(result["activity"][0]["sync_id"], "sync-row-1")
 
-    def test_cached_rom_md5_exists_uses_metadata_cache_without_scanning_files(self) -> None:
+    def test_cached_rom_fingerprint_exists_uses_metadata_cache_without_scanning_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
             with mock.patch.dict(
@@ -1224,22 +1224,22 @@ class SettingsTests(unittest.TestCase):
                 "fbneo:game.zip": {
                     "system": "fbneo",
                     "file_path": "game.zip",
-                    "rom_md5": "abc123",
+                    "rom_fingerprint": "abc123",
                 }
             }
             _persist_rom_metadata_cache(settings, cache, rom_updates=cache["entries"], queue_changes=False)
 
-            self.assertTrue(_cached_rom_md5_exists(settings, "ABC123"))
-            self.assertFalse(_cached_rom_md5_exists(settings, "missing"))
+            self.assertTrue(_cached_rom_fingerprint_exists(settings, "ABC123"))
+            self.assertFalse(_cached_rom_fingerprint_exists(settings, "missing"))
 
     def test_rom_inventory_fingerprint_is_stable_for_equivalent_rom_sets(self) -> None:
         left = _rom_inventory_fingerprint([
-            {"system": "SNES", "file_path": "./A\\Game.zip", "rom_md5": "ABC", "file_size": 12},
-            {"system_name": "nes", "rom_path": "B.zip", "md5": "def", "file_size": 4},
+            {"system": "SNES", "file_path": "./A\\Game.zip", "rom_fingerprint": "ABC", "file_size": 12},
+            {"system_name": "nes", "rom_path": "B.zip", "fingerprint": "def", "file_size": 4},
         ])
         right = _rom_inventory_fingerprint([
-            {"system": "nes", "file_path": "b.zip", "rom_md5": "DEF", "file_size": 4, "modified_time": 999},
-            {"system": "snes", "relative_path": "a/game.zip", "md5": "abc", "file_size": 12},
+            {"system": "nes", "file_path": "b.zip", "rom_fingerprint": "DEF", "file_size": 4, "modified_time": 999},
+            {"system": "snes", "relative_path": "a/game.zip", "fingerprint": "abc", "file_size": 12},
         ])
 
         self.assertEqual(left, right)
@@ -1263,8 +1263,8 @@ class SettingsTests(unittest.TestCase):
                 "collected_at": "2026-06-04T12:00:00+00:00",
                 "systems": [{"name": "snes", "rom_count": 2}],
                 "roms": [
-                    {"system": "snes", "file_path": "A.zip", "rom_md5": "aaa", "file_size": 1},
-                    {"system": "snes", "file_path": "B.zip", "rom_md5": "bbb", "file_size": 2},
+                    {"system": "snes", "file_path": "A.zip", "rom_fingerprint": "aaa", "file_size": 1},
+                    {"system": "snes", "file_path": "B.zip", "rom_fingerprint": "bbb", "file_size": 2},
                 ],
             }
             expected = _rom_inventory_fingerprint(snapshot["roms"])
@@ -1295,7 +1295,7 @@ class SettingsTests(unittest.TestCase):
                 "type": "asset_metadata",
                 "collected_at": "2026-06-04T12:00:00+00:00",
                 "systems": [{"name": "snes", "rom_count": 1}],
-                "roms": [{"system": "snes", "file_path": "A.zip", "rom_md5": "aaa", "file_size": 1}],
+                "roms": [{"system": "snes", "file_path": "A.zip", "rom_fingerprint": "aaa", "file_size": 1}],
             }
             changes = {"roms": snapshot["roms"], "deleted": {"roms": []}}
 
@@ -1325,7 +1325,7 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(cache["rom_inventory_fingerprint"], "abc123")
             self.assertEqual(cache["rom_inventory_fingerprint_algorithm"], ROM_INVENTORY_FINGERPRINT_ALGORITHM)
 
-    def test_disk_rom_without_gamelist_is_listed_with_md5(self) -> None:
+    def test_disk_rom_without_gamelist_is_listed_with_fingerprint(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             rom = root / "roms" / "snes" / "Loose Game (USA).zip"
@@ -1339,7 +1339,7 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(roms[0]["rom_path"], "Loose Game (USA).zip")
             self.assertEqual(roms[0]["source"], "disk")
             self.assertFalse(roms[0]["has_gamelist_entry"])
-            self.assertEqual(roms[0]["md5"], RomRepository.build_md5(rom))
+            self.assertEqual(roms[0]["fingerprint"], RomRepository.build_fingerprint(rom))
 
     def test_gamelist_rom_metadata_does_not_duplicate_disk_rows_when_gamelist_exists(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1396,7 +1396,7 @@ class SettingsTests(unittest.TestCase):
             self.assertFalse(roms[0]["has_gamelist_entry"])
             self.assertEqual(roms[0]["metadata_source"], "filesystem")
 
-    def test_rom_list_can_skip_md5_for_fast_ui_loads(self) -> None:
+    def test_rom_list_can_skip_fingerprint_for_fast_ui_loads(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             rom = root / "roms" / "snes" / "Loose Game (USA).zip"
@@ -1404,15 +1404,15 @@ class SettingsTests(unittest.TestCase):
             rom.write_bytes(b"loose-rom")
             repo = RomRepository(root / "roms", root / "bios")
 
-            with mock.patch.object(RomRepository, "build_md5", side_effect=AssertionError("should not hash")):
-                _, roms = repo.list_assets("snes", "roms", include_md5=False)
+            with mock.patch.object(RomRepository, "build_fingerprint", side_effect=AssertionError("should not hash")):
+                _, roms = repo.list_assets("snes", "roms", include_fingerprint=False)
 
             self.assertEqual(len(roms), 1)
-            self.assertNotIn("md5", roms[0])
-            self.assertNotIn("rom_md5", roms[0])
+            self.assertNotIn("fingerprint", roms[0])
+            self.assertNotIn("rom_fingerprint", roms[0])
             self.assertEqual(roms[0]["rom_path"], "Loose Game (USA).zip")
 
-    def test_ps3_folder_rom_is_listed_without_md5(self) -> None:
+    def test_ps3_folder_rom_is_listed_without_fingerprint(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             game = root / "roms" / "ps3" / "Demon Souls.ps3"
@@ -1421,7 +1421,7 @@ class SettingsTests(unittest.TestCase):
             (game / "PS3_DISC.SFB").write_bytes(b"disc")
             repo = RomRepository(root / "roms", root / "bios")
 
-            with mock.patch.object(RomRepository, "build_md5", side_effect=AssertionError("folder ROM should not hash")):
+            with mock.patch.object(RomRepository, "build_fingerprint", side_effect=AssertionError("folder ROM should not hash")):
                 _, roms = repo.list_assets("ps3", "roms")
 
             self.assertEqual(len(roms), 1)
@@ -1429,8 +1429,8 @@ class SettingsTests(unittest.TestCase):
             self.assertFalse(roms[0]["is_downloadable"])
             self.assertEqual(roms[0]["file_path"], "Demon Souls.ps3")
             self.assertEqual(roms[0]["file_size"], 8)
-            self.assertNotIn("md5", roms[0])
-            self.assertNotIn("rom_md5", roms[0])
+            self.assertNotIn("fingerprint", roms[0])
+            self.assertNotIn("rom_fingerprint", roms[0])
 
     def test_gamelist_metadata_enriches_matching_disk_rom_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1452,7 +1452,7 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual([rom["title"] for rom in roms], ["Chrono Trigger Deluxe"])
             self.assertEqual(roms[0]["metadata_source"], "gamelist.xml")
 
-    def test_md5_identity_and_collision_target(self) -> None:
+    def test_fingerprint_identity_and_collision_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             system = root / "roms" / "snes"
@@ -1462,8 +1462,42 @@ class SettingsTests(unittest.TestCase):
             (system / "Renamed Asteroids.zip").write_bytes(b"one")
             repo = RomRepository(root / "roms", root / "bios")
 
-            self.assertTrue(_rom_md5_exists(repo, RomRepository.build_md5(existing)))
+            self.assertTrue(_rom_fingerprint_exists(repo, RomRepository.build_fingerprint(existing)))
             self.assertEqual(_collision_safe_target(system, "Asteroids (USA).zip").name, "Asteroids (USA) (2).zip")
+
+    def test_build_fingerprint_is_sampled_deterministic_and_size_sensitive(self) -> None:
+        import app.drone_api as da
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            a = root / "a.bin"
+            b = root / "b.bin"
+            # Identical content -> identical fingerprint, and it is stable across calls.
+            a.write_bytes(b"identical-content")
+            b.write_bytes(b"identical-content")
+            self.assertEqual(RomRepository.build_fingerprint(a), RomRepository.build_fingerprint(b))
+            self.assertEqual(RomRepository.build_fingerprint(a), RomRepository.build_fingerprint(a))
+            # A small content change flips the fingerprint (small files are hashed whole).
+            b.write_bytes(b"identical-contenX")
+            self.assertNotEqual(RomRepository.build_fingerprint(a), RomRepository.build_fingerprint(b))
+
+            # Large files: only the sample windows are read, but size is folded in so two
+            # files of different size never collide even if their samples coincide.
+            sample = da.FINGERPRINT_SAMPLE_BYTES
+            big = root / "big.bin"
+            bigger = root / "bigger.bin"
+            body = b"\x00" * (sample * 4)
+            big.write_bytes(body)
+            bigger.write_bytes(body + b"\x00")  # same head/mid/tail samples, different size
+            self.assertNotEqual(RomRepository.build_fingerprint(big), RomRepository.build_fingerprint(bigger))
+
+            # A change confined to the unsampled middle of a large file is intentionally
+            # NOT detected (documents the sampled-hash trade-off).
+            mid_changed = root / "mid.bin"
+            altered = bytearray(body)
+            altered[sample] = 0xFF  # well outside head/mid/tail windows of a 4*sample file
+            mid_changed.write_bytes(bytes(altered))
+            # (size identical, samples identical) -> same fingerprint by design.
+            self.assertEqual(RomRepository.build_fingerprint(big), RomRepository.build_fingerprint(mid_changed))
 
     def test_legacy_shutdown_action_is_rejected_without_execution(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1616,7 +1650,7 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(cache["entries"], {})
             self.assertEqual(cache["systems"], [])
 
-    def test_purge_asset_cache_action_clears_entries_but_preserves_md5(self) -> None:
+    def test_purge_asset_cache_action_clears_entries_but_preserves_fingerprint(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
             with mock.patch.dict(
@@ -1631,8 +1665,8 @@ class SettingsTests(unittest.TestCase):
                 "file_path": "chrono.zip",
                 "rom_name": "Chrono",
                 "file_size": 12,
-                "md5": "abc123",
-                "rom_md5": "abc123",
+                "fingerprint": "abc123",
+                "rom_fingerprint": "abc123",
             }
             _persist_rom_metadata_cache(
                 settings,
@@ -1659,8 +1693,8 @@ class SettingsTests(unittest.TestCase):
 
             cache, _ = _load_rom_metadata_cache(settings)
             self.assertEqual(status, "completed")
-            self.assertIn("md5 values were kept", message)
-            self.assertEqual(result["reason"], "full_refresh_kept_md5")
+            self.assertIn("fingerprint values were kept", message)
+            self.assertEqual(result["reason"], "full_refresh_kept_fingerprint")
             self.assertTrue(result["poller_wake_requested"])
             self.assertTrue(drone_api._ROM_METADATA_WAKE.is_set())
             # Resync is queued ...
@@ -1668,10 +1702,10 @@ class SettingsTests(unittest.TestCase):
             self.assertTrue(cache["full_refresh_pending"])
             # ... the cached ROM entries are actually cleared (count -> 0) ...
             self.assertEqual(cache["entries"], {})
-            # ... but the md5 is preserved so the rebuild does not re-hash.
-            preserved = drone_api._read_preserved_asset_md5(settings)
+            # ... but the fingerprint is preserved so the rebuild does not re-fingerprint.
+            preserved = drone_api._read_preserved_asset_fingerprint(settings)
             self.assertIn("snes:chrono.zip", preserved["rom"])
-            self.assertEqual(preserved["rom"]["snes:chrono.zip"]["md5"], "abc123")
+            self.assertEqual(preserved["rom"]["snes:chrono.zip"]["fingerprint"], "abc123")
 
     def test_metadata_upload_snapshot_uses_cached_rows_without_gamelist_lookup(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2089,7 +2123,7 @@ class SettingsTests(unittest.TestCase):
             result = _collect_rom_metadata(settings, RomRepository(settings.roms_root, settings.bios_root))
             self.assertEqual(len(result["bios"]), 1)
             self.assertEqual(result["bios"][0]["path"], "dc/flash.bin")
-            self.assertTrue(result["bios"][0]["md5"])
+            self.assertTrue(result["bios"][0]["bios_md5"])
 
     def test_collect_asset_metadata_includes_artwork_types_from_gamelist(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2119,7 +2153,7 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(result["artwork"][0]["artwork_types"], ["image", "marquee"])
             self.assertNotIn("artwork_paths", result["artwork"][0])
 
-    def test_rom_metadata_cache_reuses_md5_and_detects_deletes(self) -> None:
+    def test_rom_metadata_cache_reuses_fingerprint_and_detects_deletes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
             rom = root / "roms" / "snes" / "Game.zip"
@@ -2141,20 +2175,21 @@ class SettingsTests(unittest.TestCase):
             self.assertTrue(changed)
             self.assertEqual(stats["new_or_changed"], 1)
             self.assertEqual(stats["bios_new_or_changed"], 1)
-            self.assertNotIn("rom_md5", snapshot["roms"][0])
+            self.assertNotIn("rom_fingerprint", snapshot["roms"][0])
             first_bios_md5 = snapshot["bios"][0]["bios_md5"]
             with mock.patch("app.drone_api.ROM_METADATA_HASH_ROMS_ENABLED", True):
                 patches = list(_hash_rom_metadata_batches(settings, repo, batch_size=1))
             self.assertEqual(len(patches), 1)
-            first_md5 = patches[0]["roms"][0]["rom_md5"]
+            first_fingerprint = patches[0]["roms"][0]["rom_fingerprint"]
             cache_data, _ = _load_rom_metadata_cache(settings)
             cache_data["dirty"] = False
             _persist_rom_metadata_cache(settings, cache_data)
 
-            with mock.patch.object(RomRepository, "build_md5", side_effect=AssertionError("unchanged metadata should not hash")):
+            with mock.patch.object(RomRepository, "build_fingerprint", side_effect=AssertionError("unchanged ROM should not re-fingerprint")), \
+                 mock.patch.object(RomRepository, "build_md5", side_effect=AssertionError("unchanged BIOS should not re-hash")):
                 snapshot, changed, stats = _poll_rom_metadata_cache(settings, repo)
             self.assertFalse(changed)
-            self.assertEqual(snapshot["roms"][0]["rom_md5"], first_md5)
+            self.assertEqual(snapshot["roms"][0]["rom_fingerprint"], first_fingerprint)
             self.assertEqual(snapshot["bios"][0]["bios_md5"], first_bios_md5)
 
             rom.unlink()
@@ -2197,14 +2232,14 @@ class SettingsTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with mock.patch.object(RomRepository, "build_md5", side_effect=AssertionError("unchanged ROM should not hash")):
+            with mock.patch.object(RomRepository, "build_fingerprint", side_effect=AssertionError("unchanged ROM should not hash")):
                 snapshot, changed, stats = _poll_rom_metadata_cache(settings, repo)
 
             self.assertTrue(changed)
             self.assertTrue(stats["artwork_changed"])
             self.assertEqual(snapshot["artwork"][0]["artwork_types"], ["image", "marquee"])
 
-    def test_rom_metadata_cache_reuses_md5_when_only_mtime_changes(self) -> None:
+    def test_rom_metadata_cache_reuses_fingerprint_when_only_mtime_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
             rom = root / "roms" / "snes" / "Game.zip"
@@ -2222,21 +2257,21 @@ class SettingsTests(unittest.TestCase):
             _poll_rom_metadata_cache(settings, repo)
             with mock.patch("app.drone_api.ROM_METADATA_HASH_ROMS_ENABLED", True):
                 patches = list(_hash_rom_metadata_batches(settings, repo, batch_size=1))
-            first_md5 = patches[0]["roms"][0]["rom_md5"]
+            first_fingerprint = patches[0]["roms"][0]["rom_fingerprint"]
             cache_data, _ = _load_rom_metadata_cache(settings)
             cache_data["dirty"] = False
             _persist_rom_metadata_cache(settings, cache_data)
 
             os.utime(rom, (rom.stat().st_atime + 10, rom.stat().st_mtime + 10))
 
-            with mock.patch.object(RomRepository, "build_md5", side_effect=AssertionError("mtime-only ROM change should reuse cached md5")):
+            with mock.patch.object(RomRepository, "build_fingerprint", side_effect=AssertionError("mtime-only ROM change should reuse cached fingerprint")):
                 snapshot, changed, stats = _poll_rom_metadata_cache(settings, repo)
                 patches = list(_hash_rom_metadata_batches(settings, repo, batch_size=1))
 
             self.assertTrue(changed)
             self.assertEqual(stats["new_or_changed"], 0)
-            self.assertEqual(stats["roms_pending_md5"], 0)
-            self.assertEqual(snapshot["roms"][0]["rom_md5"], first_md5)
+            self.assertEqual(stats["roms_pending_fingerprint"], 0)
+            self.assertEqual(snapshot["roms"][0]["rom_fingerprint"], first_fingerprint)
             self.assertEqual(patches, [])
 
     def test_corrupt_rom_metadata_cache_rebuilds(self) -> None:
@@ -2291,7 +2326,7 @@ class SettingsTests(unittest.TestCase):
             legacy_path.write_text(
                 json.dumps({
                     "schema_version": 1,
-                    "entries": {"snes:Game.zip": {"system": "snes", "file_path": "Game.zip", "rom_md5": "abc"}},
+                    "entries": {"snes:Game.zip": {"system": "snes", "file_path": "Game.zip", "rom_fingerprint": "abc"}},
                     "bios_entries": {},
                     "artwork_entries": {},
                     "systems": [{"name": "snes"}],
@@ -2307,7 +2342,7 @@ class SettingsTests(unittest.TestCase):
             self.assertFalse(rebuilt)
             self.assertFalse(reloaded_rebuilt)
             self.assertTrue(_rom_metadata_cache_path(settings).exists())
-            self.assertEqual(cache["entries"]["snes:Game.zip"]["rom_md5"], "abc")
+            self.assertEqual(cache["entries"]["snes:Game.zip"]["rom_fingerprint"], "abc")
             self.assertEqual(reloaded["entries"]["snes:Game.zip"]["file_path"], "Game.zip")
 
     def test_metadata_change_queue_uses_relational_rows_not_payload_blobs(self) -> None:
@@ -2322,7 +2357,7 @@ class SettingsTests(unittest.TestCase):
                     "snes:Game.zip": {
                         "system": "snes",
                         "file_path": "Game.zip",
-                        "rom_md5": "abc",
+                        "rom_fingerprint": "abc",
                         "file_size": 3,
                         "modified_time": 10,
                         "gamelist_path": "/userdata/roms/snes/gamelist.xml",
@@ -2345,13 +2380,13 @@ class SettingsTests(unittest.TestCase):
             with sqlite3.connect(_rom_metadata_cache_path(settings)) as connection:
                 columns = {row[1] for row in connection.execute("PRAGMA table_info(cache_changes)")}
                 tombstone = connection.execute(
-                    "SELECT md5, gamelist_path, gamelist_game_id FROM deleted_rom_cache_entries WHERE entry_key = ?",
+                    "SELECT fingerprint, gamelist_path, gamelist_game_id FROM deleted_rom_cache_entries WHERE entry_key = ?",
                     ("snes:Game.zip",),
                 ).fetchone()
 
             self.assertNotIn("payload", columns)
             self.assertEqual(tombstone, ("abc", "/userdata/roms/snes/gamelist.xml", "game-1"))
-            self.assertEqual(changes["deleted"]["roms"][0]["rom_md5"], "abc")
+            self.assertEqual(changes["deleted"]["roms"][0]["rom_fingerprint"], "abc")
             self.assertNotIn("gamelist", changes["deleted"]["roms"][0])
 
     def test_legacy_payload_change_queue_migrates_to_relational_tombstones(self) -> None:
@@ -2374,7 +2409,7 @@ class SettingsTests(unittest.TestCase):
                         json.dumps({
                             "system": "snes",
                             "file_path": "Removed.zip",
-                            "rom_md5": "kept-md5",
+                            "rom_fingerprint": "kept-md5",
                             "gamelist_path": "/userdata/roms/snes/gamelist.xml",
                             "gamelist_game_id": "removed-game",
                             "gamelist": {"name": "Should not persist"},
@@ -2392,7 +2427,7 @@ class SettingsTests(unittest.TestCase):
 
             self.assertNotIn("payload", columns)
             self.assertIsNone(legacy_table)
-            self.assertEqual(changes["deleted"]["roms"][0]["rom_md5"], "kept-md5")
+            self.assertEqual(changes["deleted"]["roms"][0]["rom_fingerprint"], "kept-md5")
             self.assertEqual(changes["deleted"]["roms"][0]["gamelist_game_id"], "removed-game")
             self.assertNotIn("gamelist", changes["deleted"]["roms"][0])
 
@@ -2454,38 +2489,6 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(snapshot["systems"], [{"name": "snes", "rom_count": 1}])
             self.assertEqual([row["file_path"] for row in snapshot["roms"]], ["Game.zip"])
 
-    def test_background_metadata_hashes_use_storage_yield_setting(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "userdata"
-            rom = root / "roms" / "snes" / "Game.zip"
-            bios = root / "bios" / "flash.bin"
-            rom.parent.mkdir(parents=True)
-            bios.parent.mkdir(parents=True)
-            rom.write_bytes(b"rom")
-            bios.write_bytes(b"bios")
-            self._write_gamelist(rom.parent, "Game.zip")
-            with mock.patch.dict(
-                "os.environ",
-                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
-                clear=True,
-            ):
-                settings = Settings.from_env()
-            repo = RomRepository(settings.roms_root, settings.bios_root)
-            observed_yields = []
-            original_md5 = RomRepository.build_md5
-
-            def tracked_md5(path, io_yield_seconds=0.0):
-                observed_yields.append(io_yield_seconds)
-                return original_md5(path)
-
-            with mock.patch("app.drone_api.ROM_METADATA_HASH_IO_YIELD_SECONDS", 0.125), mock.patch(
-                "app.drone_api.ROM_METADATA_HASH_ROMS_ENABLED", True
-            ), mock.patch.object(RomRepository, "build_md5", side_effect=tracked_md5):
-                _poll_rom_metadata_cache(settings, repo)
-                list(_hash_rom_metadata_batches(settings, repo, batch_size=1))
-
-            self.assertEqual(observed_yields, [0.125, 0.125])
-
     def test_background_rom_hashing_can_be_disabled_for_responsive_ui(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
@@ -2503,7 +2506,7 @@ class SettingsTests(unittest.TestCase):
             _poll_rom_metadata_cache(settings, repo)
 
             with mock.patch("app.drone_api.ROM_METADATA_HASH_ROMS_ENABLED", False), mock.patch.object(
-                repo, "build_md5", side_effect=AssertionError("ROM hashing should be disabled")
+                repo, "build_fingerprint", side_effect=AssertionError("ROM hashing should be disabled")
             ):
                 self.assertEqual(list(_hash_rom_metadata_batches(settings, repo, batch_size=1)), [])
 
@@ -2581,7 +2584,7 @@ class SettingsTests(unittest.TestCase):
             ):
                 settings = Settings.from_env()
             repo = RomRepository(settings.roms_root, settings.bios_root)
-            original_md5 = RomRepository.build_md5
+            original_md5 = RomRepository.build_md5  # BIOS uses a full-file MD5, not the sampled fingerprint
 
             def interrupted_hash(path, **kwargs):
                 if path.name == "B.bin":
@@ -2626,30 +2629,30 @@ class SettingsTests(unittest.TestCase):
                 settings = Settings.from_env()
             repo = RomRepository(settings.roms_root, settings.bios_root)
             _poll_rom_metadata_cache(settings, repo)
-            original_md5 = RomRepository.build_md5
+            original_fingerprint = RomRepository.build_fingerprint
 
             def interrupted_hash(path, **kwargs):
                 if path.name == "B.zip":
                     raise RuntimeError("simulated reset")
-                return original_md5(path)
+                return original_fingerprint(path)
 
             with mock.patch("app.drone_api.ROM_METADATA_PROGRESS_FILES", 1), mock.patch(
                 "app.drone_api.ROM_METADATA_HASH_ROMS_ENABLED", True
-            ), mock.patch.object(repo, "build_md5", side_effect=interrupted_hash):
+            ), mock.patch.object(repo, "build_fingerprint", side_effect=interrupted_hash):
                 with self.assertRaisesRegex(RuntimeError, "simulated reset"):
                     list(_hash_rom_metadata_batches(settings, repo, batch_size=1000))
 
             partial, _ = _load_rom_metadata_cache(settings)
-            self.assertTrue(partial["entries"]["snes:A.zip"]["rom_md5"])
-            self.assertNotIn("rom_md5", partial["entries"]["snes:B.zip"])
+            self.assertTrue(partial["entries"]["snes:A.zip"]["rom_fingerprint"])
+            self.assertNotIn("rom_fingerprint", partial["entries"]["snes:B.zip"])
 
             hashed_after_restart = []
 
             def track_hash(path, **kwargs):
                 hashed_after_restart.append(path.name)
-                return original_md5(path)
+                return original_fingerprint(path)
 
-            with mock.patch("app.drone_api.ROM_METADATA_HASH_ROMS_ENABLED", True), mock.patch.object(repo, "build_md5", side_effect=track_hash):
+            with mock.patch("app.drone_api.ROM_METADATA_HASH_ROMS_ENABLED", True), mock.patch.object(repo, "build_fingerprint", side_effect=track_hash):
                 patches = list(_hash_rom_metadata_batches(settings, repo, batch_size=1000))
 
             self.assertEqual(hashed_after_restart, ["B.zip"])
@@ -2690,7 +2693,7 @@ class SettingsTests(unittest.TestCase):
                     "artwork_count": len(payload.get("artwork") or []),
                 }
 
-            with mock.patch.object(RomRepository, "build_md5", side_effect=AssertionError("unchanged ROM should not hash")), mock.patch(
+            with mock.patch.object(RomRepository, "build_fingerprint", side_effect=AssertionError("unchanged ROM should not hash")), mock.patch(
                 "app.drone_api._overmind_post_json_with_status", side_effect=fake_post
             ):
                 result = _sync_rom_metadata_to_overmind(
@@ -2747,7 +2750,7 @@ class SettingsTests(unittest.TestCase):
                     "artwork_count": len(payload.get("artwork") or []),
                 }
 
-            with mock.patch.object(RomRepository, "build_md5", side_effect=AssertionError("force inventory should not rehash clean ROM")), mock.patch(
+            with mock.patch.object(RomRepository, "build_fingerprint", side_effect=AssertionError("force inventory should not rehash clean ROM")), mock.patch(
                 "app.drone_api._overmind_post_json_with_status", side_effect=fake_post
             ):
                 result = _sync_rom_metadata_to_overmind(
@@ -2802,7 +2805,7 @@ class SettingsTests(unittest.TestCase):
                     "artwork_count": len(payload.get("artwork") or []),
                 }
 
-            with mock.patch.object(RomRepository, "build_md5", side_effect=AssertionError("clean cache should not rehash")), mock.patch(
+            with mock.patch.object(RomRepository, "build_fingerprint", side_effect=AssertionError("clean cache should not rehash")), mock.patch(
                 "app.drone_api._overmind_post_json_with_status", side_effect=fake_post
             ):
                 result = _sync_rom_metadata_to_overmind(
@@ -2898,7 +2901,7 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(result["roms"][0]["gamelist_game_id"], "Game.zip")
             self.assertEqual(result["gamelists"][0]["rom_count"], 1)
 
-    def test_rom_metadata_sync_uploads_inventory_then_batched_md5_patches(self) -> None:
+    def test_rom_metadata_sync_uploads_inventory_then_batched_fingerprint_patches(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
             system = root / "roms" / "snes"
@@ -2928,7 +2931,7 @@ class SettingsTests(unittest.TestCase):
                     "artwork_count": len(payload.get("artwork") or []),
                 }
 
-            with mock.patch("app.drone_api.ROM_METADATA_MD5_BATCH_SIZE", 1), mock.patch(
+            with mock.patch("app.drone_api.ROM_METADATA_FINGERPRINT_BATCH_SIZE", 1), mock.patch(
                 "app.drone_api.ROM_METADATA_HASH_ROMS_ENABLED", True
             ), mock.patch(
                 "app.drone_api._overmind_post_json_with_status", side_effect=fake_post
@@ -2946,8 +2949,8 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual([payload["update_mode"] for payload in uploads], ["inventory", "rom_hash_patch", "rom_hash_patch"])
             self.assertEqual(len(uploads[0]["roms"]), 2)
             self.assertTrue(uploads[0]["replace_all"])
-            self.assertTrue(all("rom_md5" not in row for row in uploads[0]["roms"]))
-            self.assertTrue(all(len(payload["roms"]) == 1 and payload["roms"][0].get("rom_md5") for payload in uploads[1:]))
+            self.assertTrue(all("rom_fingerprint" not in row for row in uploads[0]["roms"]))
+            self.assertTrue(all(len(payload["roms"]) == 1 and payload["roms"][0].get("rom_fingerprint") for payload in uploads[1:]))
 
     def test_rom_metadata_sync_flags_full_refresh_when_hash_patch_upload_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2978,7 +2981,7 @@ class SettingsTests(unittest.TestCase):
                     "artwork_count": len(payload.get("artwork") or []),
                 }
 
-            with mock.patch("app.drone_api.ROM_METADATA_MD5_BATCH_SIZE", 1), mock.patch(
+            with mock.patch("app.drone_api.ROM_METADATA_FINGERPRINT_BATCH_SIZE", 1), mock.patch(
                 "app.drone_api.ROM_METADATA_HASH_ROMS_ENABLED", True
             ), mock.patch(
                 "app.drone_api._overmind_post_json_with_status", side_effect=fake_post
@@ -3199,7 +3202,7 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(result["hashed_roms"], 1)
             cache, _ = _load_rom_metadata_cache(settings)
             self.assertTrue(cache["dirty"])
-            self.assertIn("rom_md5", next(iter(cache["entries"].values())))
+            self.assertIn("rom_fingerprint", next(iter(cache["entries"].values())))
 
     def test_rom_metadata_poll_does_not_register_without_auth_token(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3269,57 +3272,7 @@ class SettingsTests(unittest.TestCase):
 
             cache, _ = _load_rom_metadata_cache(settings)
             self.assertTrue(cache["dirty"])
-            self.assertNotIn("rom_md5", next(iter(cache["entries"].values())))
-
-    def test_extract_gamelist_md5_validates_and_unwraps(self) -> None:
-        valid = "a" * 32
-        # Plain string form.
-        self.assertEqual(drone_api._extract_gamelist_md5({"gamelist": {"md5": valid.upper()}}), valid)
-        # Attribute-bearing element form ({"text": ..., "attributes": {...}}).
-        self.assertEqual(
-            drone_api._extract_gamelist_md5({"gamelist": {"md5": {"text": valid, "attributes": {}}}}),
-            valid,
-        )
-        # Direct md5 on the rom takes precedence and is validated.
-        self.assertEqual(drone_api._extract_gamelist_md5({"rom_md5": valid}), valid)
-        # Non-md5 junk is rejected.
-        self.assertIsNone(drone_api._extract_gamelist_md5({"gamelist": {"md5": "not-a-hash"}}))
-        self.assertIsNone(drone_api._extract_gamelist_md5({"gamelist": {}}))
-        self.assertIsNone(drone_api._extract_gamelist_md5({}))
-
-    def test_rom_metadata_scan_sources_md5_from_gamelist_without_hashing(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "userdata"
-            rom = root / "roms" / "snes" / "Game.zip"
-            rom.parent.mkdir(parents=True)
-            rom.write_bytes(b"some-rom-bytes")
-            gamelist_md5 = "0123456789abcdef0123456789abcdef"
-            (rom.parent / "gamelist.xml").write_text(
-                f"<gameList><game><path>./Game.zip</path><name>Game</name>"
-                f"<md5>{gamelist_md5}</md5></game></gameList>\n",
-                encoding="utf-8",
-            )
-            with mock.patch.dict(
-                "os.environ",
-                {
-                    "USERDATA_ROOT": str(root),
-                    "ROMS_ROOT": str(root / "roms"),
-                    "BIOS_ROOT": str(root / "bios"),
-                    "OVERMIND_DEVICE_ID": "drone-a",
-                },
-                clear=True,
-            ):
-                settings = Settings.from_env()
-
-            # The gamelist already carries md5, so the scan must NOT fall back to
-            # full-file hashing — assert build_md5 is never invoked.
-            with mock.patch.object(RomRepository, "build_md5", side_effect=AssertionError("should not hash")):
-                _poll_rom_metadata_cache(settings, RomRepository(settings.roms_root, settings.bios_root))
-
-            cache, _ = _load_rom_metadata_cache(settings)
-            entry = next(iter(cache["entries"].values()))
-            self.assertEqual(entry.get("rom_md5"), gamelist_md5)
-            self.assertEqual(entry.get("md5"), gamelist_md5)
+            self.assertNotIn("rom_fingerprint", next(iter(cache["entries"].values())))
 
     def test_sample_speed_uses_cloudflare_speed_test_endpoints(self) -> None:
             calls = []
@@ -3387,7 +3340,7 @@ class RepositoryTests(unittest.TestCase):
             rom.write_bytes(b"rom")
             repo = RomRepository(root / "roms", root / "bios")
 
-            with mock.patch.object(RomRepository, "build_md5", side_effect=AssertionError("should not hash")):
+            with mock.patch.object(RomRepository, "build_fingerprint", side_effect=AssertionError("should not hash")):
                 systems = repo.list_systems()
 
             self.assertEqual(systems, [{"name": "snes", "rom_count": 1}])
@@ -3498,7 +3451,7 @@ class RepositoryTests(unittest.TestCase):
             (root / "roms" / "gba").mkdir(parents=True)
             repo = RomRepository(settings.roms_root, settings.bios_root, settings=settings)
 
-            _, roms = repo.list_assets("snes", "roms", include_md5=False)
+            _, roms = repo.list_assets("snes", "roms", include_fingerprint=False)
             names = [item["name"] for item in roms]
             self.assertEqual(names, ["Alpha", "Beta"])  # ordered, only snes
             self.assertTrue(all(item["unique_id"] for item in roms))

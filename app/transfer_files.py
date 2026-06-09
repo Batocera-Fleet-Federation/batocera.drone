@@ -22,8 +22,8 @@ def rom_exists(repository: Any, system: str, relative_path: str) -> bool:
         return False
 
 
-def rom_md5_exists(repository: Any, expected_md5: Optional[str]) -> bool:
-    expected = str(expected_md5 or "").strip().lower()
+def rom_fingerprint_exists(repository: Any, expected_fingerprint: Optional[str]) -> bool:
+    expected = str(expected_fingerprint or "").strip().lower()
     if not expected:
         return False
     try:
@@ -33,7 +33,7 @@ def rom_md5_exists(repository: Any, expected_md5: Optional[str]) -> bool:
                 continue
             _, roms = repository.list_assets(system_name, "roms")
             for rom in roms:
-                if str(rom.get("md5") or rom.get("rom_md5") or "").strip().lower() == expected:
+                if str(rom.get("fingerprint") or rom.get("rom_fingerprint") or "").strip().lower() == expected:
                     return True
     except Exception:
         return False
