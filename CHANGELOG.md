@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.78] - 2026-06-09
+
+- Fixing small refactor bug done before with fingerprints.
+
 ## [v0.0.77] - 2026-06-09
 
 - Changing ROMs from using full md5 to partial md5 (fingerprint) everywhere to increase performance and reduce time taken to hash large rom sets.
