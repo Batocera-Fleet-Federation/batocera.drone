@@ -187,6 +187,9 @@ _ROM_METADATA_WATCHER = None
 _PEER_HEALTH_CHECK_THREAD_STARTED = False
 _ROM_METADATA_ACTIVE = Event()
 _ROM_METADATA_WAKE = Event()
+# Set when an Overmind heartbeat reports asset thumbprints that differ from what the
+# Drone holds locally, so the next metadata poll pushes a full inventory to resync.
+_ASSET_PUSH_REQUESTED = Event()
 _ROM_METADATA_LOCK = RLock()
 _DOWNLOAD_MANAGER = None
 _PERFORMANCE_METRICS_LAST_SAMPLE: Optional[dict] = None
@@ -8279,6 +8282,100 @@ def _rom_inventory_fingerprint_from_cache_state(settings: Settings) -> Optional[
     return value or None
 
 
+# Wholistic per-asset-class "thumbprints" round-tripped with Overmind so the Drone
+# (not Overmind) decides when a re-sync is needed: Overmind echoes the thumbprints it
+# last stored, the Drone compares them against what it currently holds on disk, and only
+# pushes when they differ. The romset thumbprint reuses the ROM inventory fingerprint;
+# BIOS gets its own so the two asset classes can drift independently.
+BIOS_INVENTORY_FINGERPRINT_ALGORITHM = "bios-inventory-sha256-v1"
+
+
+def _bios_inventory_fingerprint(bios: Iterable[dict]) -> str:
+    rows = []
+    for row in bios or []:
+        if not isinstance(row, dict):
+            continue
+        path = _normalize_rom_inventory_path(
+            row.get("relative_path")
+            or row.get("file_path")
+            or row.get("path")
+            or row.get("name")
+            or row.get("bios_name")
+        )
+        if not path:
+            continue
+        md5_value = str(row.get("bios_md5") or row.get("md5") or row.get("fingerprint") or "").strip().lower()
+        file_size = row.get("file_size") if row.get("file_size") is not None else row.get("byte_count")
+        size_value = str(int(file_size)) if isinstance(file_size, (int, float)) else str(file_size or "").strip()
+        rows.append("\t".join((path, md5_value, size_value)))
+    digest = hashlib.sha256()
+    for value in sorted(rows):
+        digest.update(value.encode("utf-8"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def _local_asset_thumbprints(settings: Settings) -> Tuple[str, str]:
+    """Return the (romset, bios) thumbprints the Drone last persisted for its on-disk assets."""
+    try:
+        state = _read_rom_metadata_cache_state(
+            settings,
+            "romset_files_thumbprint",
+            "bios_files_thumbprint",
+            "rom_inventory_fingerprint",
+        )
+    except Exception:
+        return "", ""
+    romset = str(state.get("romset_files_thumbprint") or state.get("rom_inventory_fingerprint") or "").strip()
+    bios = str(state.get("bios_files_thumbprint") or "").strip()
+    return romset, bios
+
+
+def _snapshot_asset_thumbprints(snapshot: dict) -> Tuple[str, str]:
+    romset = str(snapshot.get("romset_files_thumbprint") or snapshot.get("rom_inventory_fingerprint") or "").strip()
+    bios = str(snapshot.get("bios_files_thumbprint") or "").strip()
+    return romset, bios
+
+
+def _maybe_request_asset_push_from_heartbeat(settings: Settings, response: dict) -> None:
+    """Compare Overmind-echoed asset thumbprints with the Drone's local thumbprints.
+
+    When Overmind reports a thumbprint that differs from what the Drone last synced,
+    Overmind's stored asset set has drifted (or it never received ours). Flag a push so
+    the next metadata poll uploads a full inventory and resyncs, and wake the poller so it
+    happens promptly instead of waiting out the full poll interval. Only fires when the
+    Drone actually has local assets, so a fresh Drone's initial upload still flows through
+    the normal poller path.
+    """
+    if not isinstance(response, dict):
+        return
+    overmind_romset = str(response.get("romset_files_thumbprint") or "").strip()
+    overmind_bios = str(response.get("bios_files_thumbprint") or "").strip()
+    if not overmind_romset and not overmind_bios:
+        return
+    local_romset, local_bios = _local_asset_thumbprints(settings)
+    if not local_romset:
+        return
+    romset_mismatch = overmind_romset != local_romset
+    # Only treat BIOS as drifted when Overmind actually reported a BIOS thumbprint;
+    # an older Overmind that never sends one should not trigger endless pushes.
+    bios_mismatch = bool(overmind_bios) and overmind_bios != local_bios
+    if not romset_mismatch and not bios_mismatch:
+        return
+    if _ASSET_PUSH_REQUESTED.is_set():
+        return
+    _ASSET_PUSH_REQUESTED.set()
+    _ROM_METADATA_WAKE.set()
+    print(
+        "Asset thumbprint mismatch from heartbeat; queued resync push: "
+        f"romset_mismatch={romset_mismatch} bios_mismatch={bios_mismatch} "
+        f"overmind_romset={overmind_romset[:12]} local_romset={local_romset[:12]} "
+        f"overmind_bios={overmind_bios[:12]} local_bios={local_bios[:12]}",
+        file=sys.stdout,
+        flush=True,
+    )
+
+
 def _build_rom_metadata_snapshot_from_cache(settings: Settings, cache: dict, rehydrate_gamelist: bool = False) -> dict:
     entries = cache.get("entries") if isinstance(cache.get("entries"), dict) else {}
     roms = []
@@ -8320,6 +8417,7 @@ def _build_rom_metadata_snapshot_from_cache(settings: Settings, cache: dict, reh
         artwork.append(dict(entry))
     artwork.sort(key=lambda row: (str(row.get("system") or ""), str(row.get("rom_path") or "")))
     fingerprint = _rom_inventory_fingerprint(roms)
+    bios_thumbprint = _bios_inventory_fingerprint(bios)
     return {
         "type": "asset_metadata",
         "collected_at": cache.get("last_full_scan_at") or datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
@@ -8327,6 +8425,9 @@ def _build_rom_metadata_snapshot_from_cache(settings: Settings, cache: dict, reh
         "bios_root": str(settings.bios_root),
         "rom_inventory_fingerprint": fingerprint,
         "rom_inventory_fingerprint_algorithm": ROM_INVENTORY_FINGERPRINT_ALGORITHM,
+        "romset_files_thumbprint": fingerprint,
+        "bios_files_thumbprint": bios_thumbprint,
+        "bios_inventory_fingerprint_algorithm": BIOS_INVENTORY_FINGERPRINT_ALGORITHM,
         "systems": cache.get("systems") if isinstance(cache.get("systems"), list) else [],
         "roms": roms,
         "bios": bios,
@@ -8365,6 +8466,8 @@ def _chunk_rom_metadata_inventory(
         "bios_root": snapshot.get("bios_root"),
         "rom_inventory_fingerprint": snapshot.get("rom_inventory_fingerprint") or _rom_inventory_fingerprint(roms),
         "rom_inventory_fingerprint_algorithm": snapshot.get("rom_inventory_fingerprint_algorithm") or ROM_INVENTORY_FINGERPRINT_ALGORITHM,
+        "romset_files_thumbprint": snapshot.get("romset_files_thumbprint") or snapshot.get("rom_inventory_fingerprint") or _rom_inventory_fingerprint(roms),
+        "bios_files_thumbprint": snapshot.get("bios_files_thumbprint") or _bios_inventory_fingerprint(bios),
         "systems": snapshot.get("systems") if isinstance(snapshot.get("systems"), list) else [],
         "gamelists": snapshot.get("gamelists") if isinstance(snapshot.get("gamelists"), list) else [],
         "cache": snapshot.get("cache") if isinstance(snapshot.get("cache"), dict) else {},
@@ -8425,6 +8528,8 @@ def _chunk_rom_metadata_delta(settings: Settings, snapshot: dict, changes: dict,
         "collected_at": snapshot.get("collected_at"),
         "rom_inventory_fingerprint": snapshot.get("rom_inventory_fingerprint") or _rom_inventory_fingerprint(snapshot.get("roms") if isinstance(snapshot.get("roms"), list) else []),
         "rom_inventory_fingerprint_algorithm": snapshot.get("rom_inventory_fingerprint_algorithm") or ROM_INVENTORY_FINGERPRINT_ALGORITHM,
+        "romset_files_thumbprint": snapshot.get("romset_files_thumbprint") or snapshot.get("rom_inventory_fingerprint") or _rom_inventory_fingerprint(snapshot.get("roms") if isinstance(snapshot.get("roms"), list) else []),
+        "bios_files_thumbprint": snapshot.get("bios_files_thumbprint") or _bios_inventory_fingerprint(snapshot.get("bios") if isinstance(snapshot.get("bios"), list) else []),
         "systems": snapshot.get("systems") if isinstance(snapshot.get("systems"), list) else [],
     }
     payloads = []
@@ -8456,7 +8561,11 @@ def _json_payload_size_bytes(payload: dict) -> int:
         return 0
 
 
-def _mark_rom_metadata_upload_clean(settings: Settings, fingerprint: Optional[str] = None) -> None:
+def _mark_rom_metadata_upload_clean(
+    settings: Settings,
+    fingerprint: Optional[str] = None,
+    bios_thumbprint: Optional[str] = None,
+) -> None:
     state = {
         "last_successful_upload_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
         "dirty": False,
@@ -8465,8 +8574,15 @@ def _mark_rom_metadata_upload_clean(settings: Settings, fingerprint: Optional[st
     if fingerprint:
         state["rom_inventory_fingerprint"] = fingerprint
         state["rom_inventory_fingerprint_algorithm"] = ROM_INVENTORY_FINGERPRINT_ALGORITHM
+        state["romset_files_thumbprint"] = fingerprint
+    if bios_thumbprint is not None:
+        state["bios_files_thumbprint"] = bios_thumbprint
+        state["bios_inventory_fingerprint_algorithm"] = BIOS_INVENTORY_FINGERPRINT_ALGORITHM
     _clear_pending_rom_metadata_changes(settings)
     _update_rom_metadata_cache_state(settings, **state)
+    # The Drone has now told Overmind its current thumbprints; any pending
+    # heartbeat-driven resync request is satisfied.
+    _ASSET_PUSH_REQUESTED.clear()
 
 
 def _rom_metadata_cache_status(settings: Settings) -> dict:
@@ -10499,6 +10615,11 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                 if rom_fingerprint:
                     heartbeat_payload["rom_inventory_fingerprint"] = rom_fingerprint
                     heartbeat_payload["rom_inventory_fingerprint_algorithm"] = ROM_INVENTORY_FINGERPRINT_ALGORITHM
+                local_romset_thumbprint, local_bios_thumbprint = _local_asset_thumbprints(settings)
+                if local_romset_thumbprint:
+                    heartbeat_payload["romset_files_thumbprint"] = local_romset_thumbprint
+                if local_bios_thumbprint:
+                    heartbeat_payload["bios_files_thumbprint"] = local_bios_thumbprint
                 heartbeat_url = f"{base_url}/api/devices/{device_id}/heartbeat"
                 heartbeat_started = time.monotonic()
                 print(
@@ -10547,6 +10668,12 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                 swarm = response.get("swarm") if isinstance(response.get("swarm"), list) else []
                 _save_state_payload(_state_database_path(settings.userdata_root), "overmind_swarm.json", swarm)
                 _overmind_swarm_path_for_settings(settings).unlink(missing_ok=True)
+
+                # Overmind echoes the asset thumbprints it last stored for this Drone.
+                # If they differ from what the Drone currently holds, Overmind's copy has
+                # drifted (or is missing) — wake the metadata poller to push a fresh
+                # inventory and resync. The Drone, not Overmind, decides to resend.
+                _maybe_request_asset_push_from_heartbeat(settings, response)
 
                 if speed_sample_seconds > 0 and (
                     last_speed_sample_at is None or now - last_speed_sample_at >= speed_sample_seconds
@@ -10948,8 +11075,12 @@ def _sync_rom_metadata_to_overmind_locked(
 
     pending_changes = _read_pending_rom_metadata_changes(settings)
     has_cached_assets = bool(rom_count or bios_count or artwork_count)
+    # A heartbeat that reported a thumbprint differing from ours means Overmind's
+    # stored asset set drifted from the Drone's; resync by pushing a full inventory.
+    push_requested = _ASSET_PUSH_REQUESTED.is_set()
     full_refresh = bool(
         force_upload
+        or push_requested
         or stats.get("full_refresh_pending")
         or (has_cached_assets and not stats.get("had_successful_upload"))
     )
@@ -10984,7 +11115,11 @@ def _sync_rom_metadata_to_overmind_locked(
                 file=sys.stdout,
                 flush=True,
             )
-        _mark_rom_metadata_upload_clean(settings, snapshot.get("rom_inventory_fingerprint"))
+        _mark_rom_metadata_upload_clean(
+            settings,
+            snapshot.get("romset_files_thumbprint") or snapshot.get("rom_inventory_fingerprint"),
+            snapshot.get("bios_files_thumbprint"),
+        )
         print(
             f"Asset metadata {upload_kind} sync succeeded: accepted_roms={accepted_roms} accepted_bios={accepted_bios} accepted_artwork={accepted_artwork}",
             file=sys.stdout,
@@ -11025,7 +11160,11 @@ def _sync_rom_metadata_to_overmind_locked(
         if hash_batches:
             cache, _ = _load_rom_metadata_cache(settings)
             snapshot = _build_rom_metadata_snapshot_from_cache(settings, cache)
-        _mark_rom_metadata_upload_clean(settings, snapshot.get("rom_inventory_fingerprint"))
+        _mark_rom_metadata_upload_clean(
+            settings,
+            snapshot.get("romset_files_thumbprint") or snapshot.get("rom_inventory_fingerprint"),
+            snapshot.get("bios_files_thumbprint"),
+        )
 
     if not should_upload_inventory and not hash_batches:
         # Advertise the fingerprint of what the drone *actually* holds (fingerprint
@@ -11035,11 +11174,21 @@ def _sync_rom_metadata_to_overmind_locked(
         # heartbeat lets Overmind detect the drift and queue a resync on its own,
         # so already-stuck drones recover without a manual force.
         current_fingerprint = snapshot.get("rom_inventory_fingerprint")
-        if current_fingerprint and current_fingerprint != _rom_inventory_fingerprint_from_cache_state(settings):
+        current_bios_thumbprint = str(snapshot.get("bios_files_thumbprint") or "")
+        stored_romset, stored_bios = _local_asset_thumbprints(settings)
+        stored_legacy = _rom_inventory_fingerprint_from_cache_state(settings) or ""
+        if current_fingerprint and (
+            current_fingerprint != stored_romset
+            or current_fingerprint != stored_legacy
+            or current_bios_thumbprint != stored_bios
+        ):
             _update_rom_metadata_cache_state(
                 settings,
                 rom_inventory_fingerprint=current_fingerprint,
                 rom_inventory_fingerprint_algorithm=ROM_INVENTORY_FINGERPRINT_ALGORITHM,
+                romset_files_thumbprint=current_fingerprint,
+                bios_files_thumbprint=current_bios_thumbprint,
+                bios_inventory_fingerprint_algorithm=BIOS_INVENTORY_FINGERPRINT_ALGORITHM,
             )
         print(
             f"Asset metadata sync skipped: no changes detected systems={stats.get('systems_scanned')} roms={stats.get('roms_discovered')} bios={stats.get('bios_discovered')} artwork={stats.get('artwork_discovered')} duration_ms={int((time.monotonic() - poll_started) * 1000)}",

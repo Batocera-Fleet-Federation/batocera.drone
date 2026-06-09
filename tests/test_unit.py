@@ -1325,6 +1325,103 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(cache["rom_inventory_fingerprint"], "abc123")
             self.assertEqual(cache["rom_inventory_fingerprint_algorithm"], ROM_INVENTORY_FINGERPRINT_ALGORITHM)
 
+    def test_bios_inventory_fingerprint_is_stable_and_order_independent(self) -> None:
+        left = drone_api._bios_inventory_fingerprint([
+            {"relative_path": "./SNES\\bios.bin", "bios_md5": "ABC", "file_size": 12},
+            {"file_path": "nes/disksys.rom", "md5": "def", "byte_count": 4},
+        ])
+        right = drone_api._bios_inventory_fingerprint([
+            {"path": "nes/disksys.rom", "bios_md5": "DEF", "file_size": 4},
+            {"relative_path": "snes/bios.bin", "fingerprint": "abc", "file_size": 12},
+        ])
+        self.assertEqual(left, right)
+        # A different BIOS set produces a different thumbprint.
+        self.assertNotEqual(left, drone_api._bios_inventory_fingerprint([
+            {"relative_path": "snes/bios.bin", "bios_md5": "abc", "file_size": 99},
+        ]))
+
+    def test_inventory_payloads_include_romset_and_bios_thumbprints(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "USERDATA_ROOT": str(root),
+                    "ROMS_ROOT": str(root / "roms"),
+                    "BIOS_ROOT": str(root / "bios"),
+                    "OVERMIND_DEVICE_ID": "drone-a",
+                },
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            snapshot = {
+                "type": "asset_metadata",
+                "collected_at": "2026-06-04T12:00:00+00:00",
+                "systems": [{"name": "snes", "rom_count": 1}],
+                "roms": [{"system": "snes", "file_path": "A.zip", "rom_fingerprint": "aaa", "file_size": 1}],
+                "bios": [{"relative_path": "snes/bios.bin", "bios_md5": "deadbeef", "file_size": 2}],
+            }
+            payloads = _chunk_rom_metadata_inventory(settings, snapshot, replace_all=True)
+            self.assertEqual(payloads[-1]["romset_files_thumbprint"], _rom_inventory_fingerprint(snapshot["roms"]))
+            self.assertEqual(payloads[-1]["bios_files_thumbprint"], drone_api._bios_inventory_fingerprint(snapshot["bios"]))
+
+    def test_mark_rom_metadata_upload_clean_persists_bios_thumbprint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            drone_api._ASSET_PUSH_REQUESTED.set()
+            _mark_rom_metadata_upload_clean(settings, "romset-xyz", "bios-xyz")
+            romset, bios = drone_api._local_asset_thumbprints(settings)
+            self.assertEqual(romset, "romset-xyz")
+            self.assertEqual(bios, "bios-xyz")
+            # Marking clean satisfies any pending heartbeat-driven push request.
+            self.assertFalse(drone_api._ASSET_PUSH_REQUESTED.is_set())
+
+    def test_heartbeat_thumbprint_mismatch_requests_push(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            # Establish the Drone's local synced thumbprints.
+            _mark_rom_metadata_upload_clean(settings, "local-romset", "local-bios")
+            drone_api._ASSET_PUSH_REQUESTED.clear()
+
+            # Matching thumbprints: no push.
+            drone_api._maybe_request_asset_push_from_heartbeat(
+                settings,
+                {"romset_files_thumbprint": "local-romset", "bios_files_thumbprint": "local-bios"},
+            )
+            self.assertFalse(drone_api._ASSET_PUSH_REQUESTED.is_set())
+
+            # A differing romset thumbprint (Overmind drifted) requests a push.
+            drone_api._maybe_request_asset_push_from_heartbeat(
+                settings,
+                {"romset_files_thumbprint": "overmind-stale", "bios_files_thumbprint": "local-bios"},
+            )
+            self.assertTrue(drone_api._ASSET_PUSH_REQUESTED.is_set())
+            drone_api._ASSET_PUSH_REQUESTED.clear()
+
+            # A differing BIOS thumbprint alone also requests a push.
+            drone_api._maybe_request_asset_push_from_heartbeat(
+                settings,
+                {"romset_files_thumbprint": "local-romset", "bios_files_thumbprint": "overmind-stale-bios"},
+            )
+            self.assertTrue(drone_api._ASSET_PUSH_REQUESTED.is_set())
+            drone_api._ASSET_PUSH_REQUESTED.clear()
+
+            # An Overmind that reports no thumbprints (older build) never triggers a push.
+            drone_api._maybe_request_asset_push_from_heartbeat(settings, {})
+            self.assertFalse(drone_api._ASSET_PUSH_REQUESTED.is_set())
+
     def test_disk_rom_without_gamelist_is_listed_with_fingerprint(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

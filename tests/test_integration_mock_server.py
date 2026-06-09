@@ -37,6 +37,11 @@ class MockServerIntegrationTests(unittest.TestCase):
         os.environ["HTTP_ONLY"] = "1"
         os.environ["LOG_DIR"] = str(Path(self._tmp.name) / "logs")
         os.environ["ALLOW_CONTENT_DOWNLOAD"] = "true"
+        # Disable the background ROM metadata poller for these HTTP-endpoint tests. Left
+        # enabled, create_server() spawns a daemon poller thread that outlives the test and
+        # races to clear the shared _ROM_METADATA_WAKE event, intermittently failing
+        # unrelated unit tests that assert on it later in the same suite run.
+        os.environ["ROM_METADATA_POLL_SECONDS"] = "0"
 
         self.settings = Settings.from_env()
         try:
