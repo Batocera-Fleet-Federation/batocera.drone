@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.76] - 2026-06-08
+
+- per-poll hash budget (ROM_METADATA_HASH_BUDGET_SECONDS, default 120s) that only full-hashes the rare files without gamelist md5.
+
 ## [v0.0.75] - 2026-06-08
 
 - Adding better self-healing for md5 hashing and roms.
