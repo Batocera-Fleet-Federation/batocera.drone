@@ -1,5 +1,10 @@
 # Changelog
 
+## [v0.0.79] - 2026-06-09
+
+- Updating drone to create bios and romset fingerprints and use them to determine if resync needs to happen against overmind.
+- Adding claude skills.
+
 ## [v0.0.78] - 2026-06-09
 
 - Fixing small refactor bug done before with fingerprints.
