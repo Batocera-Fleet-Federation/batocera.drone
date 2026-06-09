@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.75] - 2026-06-08
+
+- Adding better self-healing for md5 hashing and roms.
+
 ## [v0.0.74] - 2026-06-08
 
 - Trying to fix issue with gameplay logs.  Adding UI elements to show this.
