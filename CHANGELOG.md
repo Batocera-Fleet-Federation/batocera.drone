@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.77] - 2026-06-09
+
+- Changing ROMs from using full md5 to partial md5 (fingerprint) everywhere to increase performance and reduce time taken to hash large rom sets.
+
 ## [v0.0.76] - 2026-06-08
 
 - per-poll hash budget (ROM_METADATA_HASH_BUDGET_SECONDS, default 120s) that only full-hashes the rare files without gamelist md5.
