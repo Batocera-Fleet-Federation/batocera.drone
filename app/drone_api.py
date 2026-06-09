@@ -222,6 +222,13 @@ ROM_METADATA_PROGRESS_FILES = int(os.environ.get("ROM_METADATA_PROGRESS_FILES", 
 ROM_METADATA_MD5_BATCH_SIZE = max(1, int(os.environ.get("ROM_METADATA_MD5_BATCH_SIZE", "250")))
 ROM_METADATA_UPLOAD_CHUNK_SIZE = max(1, int(os.environ.get("ROM_METADATA_UPLOAD_CHUNK_SIZE", "250")))
 ROM_METADATA_HASH_IO_YIELD_SECONDS = max(0.0, float(os.environ.get("ROM_METADATA_HASH_IO_YIELD_SECONDS", "0.05")))
+# Throttle every Nth read block instead of every block, so the per-MB yield does
+# not multiply into minutes of pure sleep on multi-GB disc images.
+ROM_METADATA_HASH_READ_BYTES = max(1024 * 1024, int(os.environ.get("ROM_METADATA_HASH_READ_BYTES", str(8 * 1024 * 1024))))
+# Wall-clock budget for full-file hashing within a single poll. Hashing is resumable
+# (md5 persists per checkpoint), so a bounded slice each poll keeps progress steady
+# without monopolizing disk I/O. 0 disables the budget.
+ROM_METADATA_HASH_BUDGET_SECONDS = max(0.0, float(os.environ.get("ROM_METADATA_HASH_BUDGET_SECONDS", "120")))
 ROM_METADATA_HASH_ROMS_ENABLED = os.environ.get("ROM_METADATA_HASH_ROMS_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
 # Real-time inotify watcher that wakes the metadata poller when ROM files change.
 ROM_METADATA_WATCH_ENABLED = os.environ.get("ROM_METADATA_WATCH_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
@@ -520,6 +527,38 @@ def _gamelist_details(game: Optional[ET.Element]) -> dict:
         else:
             details[tag] = value
     return details
+
+
+def _normalize_md5(value: object) -> Optional[str]:
+    """Return a lowercase 32-hex md5 string, or None if the value is not a valid md5.
+
+    Gamelist detail values may be a plain string or a ``{"text": ..., "attributes": {...}}``
+    mapping (when the source element carried attributes), so unwrap both shapes.
+    """
+    if isinstance(value, dict):
+        value = value.get("text")
+    candidate = str(value or "").strip().lower()
+    if len(candidate) == 32 and all(c in "0123456789abcdef" for c in candidate):
+        return candidate
+    return None
+
+
+def _extract_gamelist_md5(rom: dict) -> Optional[str]:
+    """Pull a validated md5 from a ROM's gamelist details.
+
+    Batocera's EmulationStation writes a ``<md5>`` of the ROM file into gamelist.xml
+    for the great majority of titles (only large disc images tend to lack it). Reusing
+    it lets the Drone skip a full-file hash for ~95% of ROMs.
+    """
+    if not isinstance(rom, dict):
+        return None
+    direct = _normalize_md5(rom.get("md5") or rom.get("rom_md5"))
+    if direct:
+        return direct
+    gamelist = rom.get("gamelist")
+    if isinstance(gamelist, dict):
+        return _normalize_md5(gamelist.get("md5"))
+    return None
 
 
 def _gamelist_game_id(game: Optional[ET.Element], relative_path: str) -> str:
@@ -1953,14 +1992,17 @@ class RomRepository:
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
     @staticmethod
-    def build_md5(path: Path, io_yield_seconds: float = 0.0) -> str:
+    def build_md5(path: Path, io_yield_seconds: float = 0.0, read_bytes: int = ROM_METADATA_HASH_READ_BYTES) -> str:
         digest = hashlib.md5()
+        block = max(1024 * 1024, int(read_bytes))
         with path.open("rb") as handle:
             while True:
-                chunk = handle.read(1024 * 1024)
+                chunk = handle.read(block)
                 if not chunk:
                     break
                 digest.update(chunk)
+                # Yield once per (large) block so the cumulative throttle on a
+                # multi-GB file stays in the seconds range, not minutes.
                 if io_yield_seconds > 0:
                     time.sleep(io_yield_seconds)
         return digest.hexdigest()
@@ -8607,9 +8649,15 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
             previous = existing_entries.get(key) if isinstance(existing_entries.get(key), dict) else {}
             base_entry = _database_rom_metadata_fields(rom, system_name, file_path, absolute, stat_size, stat_mtime)
             previous_md5 = (previous.get("rom_md5") or previous.get("md5")) if previous else None
+            gamelist_md5 = _extract_gamelist_md5(rom) if entry_type != "folder" else None
             reuse_md5 = None
             if previous and previous.get("file_size") == stat_size and previous_md5:
                 reuse_md5 = previous_md5
+            elif gamelist_md5:
+                # EmulationStation already recorded this file's md5 in gamelist.xml;
+                # trust it instead of re-hashing (and refresh it on any file change,
+                # since ES re-scrapes changed ROMs). Avoids hashing multi-GB files.
+                reuse_md5 = gamelist_md5
             else:
                 # After a purge the entry rows are gone; reuse md5 from the
                 # snapshot for files whose size and mtime are unchanged.
@@ -8805,10 +8853,18 @@ def _hash_rom_metadata_batches(settings: Settings, repository: "RomRepository", 
     batch_size = max(1, int(batch_size))
     started = time.monotonic()
     last_checkpoint = started
-    print(f"ROM metadata phase=md5_hashing count={total} batch_size={batch_size}", file=sys.stdout, flush=True)
+    budget_seconds = ROM_METADATA_HASH_BUDGET_SECONDS
+    print(f"ROM metadata phase=md5_hashing count={total} batch_size={batch_size} budget_seconds={budget_seconds}", file=sys.stdout, flush=True)
     patch = []
     pending_updates = {}
+    budget_exhausted = False
+    hashed = 0
     for processed, (key, entry) in enumerate(pending, start=1):
+        if budget_seconds and (time.monotonic() - started) >= budget_seconds:
+            # Stop starting new files once the per-poll budget is spent; flush any
+            # accumulated patch/updates below, then resume on the next poll.
+            budget_exhausted = True
+            break
         absolute = Path(str(entry.get("absolute_path") or ""))
         if absolute.exists() and absolute.is_file():
             md5_value = repository.build_md5(absolute, io_yield_seconds=ROM_METADATA_HASH_IO_YIELD_SECONDS)
@@ -8816,6 +8872,7 @@ def _hash_rom_metadata_batches(settings: Settings, repository: "RomRepository", 
             entries[key] = updated
             pending_updates[key] = updated
             patch.append({k: v for k, v in updated.items() if k != "absolute_path"})
+            hashed += 1
         now = time.monotonic()
         checkpoint_due = (
             bool(patch)
@@ -8848,11 +8905,38 @@ def _hash_rom_metadata_batches(settings: Settings, repository: "RomRepository", 
             "hash_progress": {"processed": processed, "total": total, "complete": processed == total},
         }
         patch = []
-    print(
-        f"ROM metadata md5 hashing completed: count={total} duration_ms={int((time.monotonic() - started) * 1000)}",
-        file=sys.stdout,
-        flush=True,
-    )
+    # Flush any work accumulated before an early budget break (the in-loop yield only
+    # fires on a full batch or on the final file, neither of which is reached on break).
+    if pending_updates:
+        cache["entries"] = entries
+        cache["dirty"] = True
+        _persist_rom_metadata_cache(settings, cache, rom_updates=pending_updates)
+        pending_updates = {}
+    if patch:
+        yield {
+            "type": "asset_metadata",
+            "update_mode": "rom_hash_patch",
+            "collected_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+            "roms": patch,
+            # complete only when we exhausted the pending list, not on a budget break,
+            # so Overmind does not mark the inventory fingerprint clean prematurely.
+            "hash_progress": {"processed": hashed, "total": total, "complete": not budget_exhausted},
+        }
+        patch = []
+    if budget_exhausted:
+        print(
+            f"ROM metadata md5 hashing paused (budget {budget_seconds}s reached): "
+            f"hashed={hashed} remaining≈{total - hashed}/{total} resume on next poll "
+            f"duration_ms={int((time.monotonic() - started) * 1000)}",
+            file=sys.stdout,
+            flush=True,
+        )
+    else:
+        print(
+            f"ROM metadata md5 hashing completed: count={total} duration_ms={int((time.monotonic() - started) * 1000)}",
+            file=sys.stdout,
+            flush=True,
+        )
 
 
 def _filesystem_events(settings: Settings, previous: Dict[str, dict], current: Dict[str, dict]) -> List[dict]:

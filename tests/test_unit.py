@@ -3271,6 +3271,56 @@ class SettingsTests(unittest.TestCase):
             self.assertTrue(cache["dirty"])
             self.assertNotIn("rom_md5", next(iter(cache["entries"].values())))
 
+    def test_extract_gamelist_md5_validates_and_unwraps(self) -> None:
+        valid = "a" * 32
+        # Plain string form.
+        self.assertEqual(drone_api._extract_gamelist_md5({"gamelist": {"md5": valid.upper()}}), valid)
+        # Attribute-bearing element form ({"text": ..., "attributes": {...}}).
+        self.assertEqual(
+            drone_api._extract_gamelist_md5({"gamelist": {"md5": {"text": valid, "attributes": {}}}}),
+            valid,
+        )
+        # Direct md5 on the rom takes precedence and is validated.
+        self.assertEqual(drone_api._extract_gamelist_md5({"rom_md5": valid}), valid)
+        # Non-md5 junk is rejected.
+        self.assertIsNone(drone_api._extract_gamelist_md5({"gamelist": {"md5": "not-a-hash"}}))
+        self.assertIsNone(drone_api._extract_gamelist_md5({"gamelist": {}}))
+        self.assertIsNone(drone_api._extract_gamelist_md5({}))
+
+    def test_rom_metadata_scan_sources_md5_from_gamelist_without_hashing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            rom = root / "roms" / "snes" / "Game.zip"
+            rom.parent.mkdir(parents=True)
+            rom.write_bytes(b"some-rom-bytes")
+            gamelist_md5 = "0123456789abcdef0123456789abcdef"
+            (rom.parent / "gamelist.xml").write_text(
+                f"<gameList><game><path>./Game.zip</path><name>Game</name>"
+                f"<md5>{gamelist_md5}</md5></game></gameList>\n",
+                encoding="utf-8",
+            )
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "USERDATA_ROOT": str(root),
+                    "ROMS_ROOT": str(root / "roms"),
+                    "BIOS_ROOT": str(root / "bios"),
+                    "OVERMIND_DEVICE_ID": "drone-a",
+                },
+                clear=True,
+            ):
+                settings = Settings.from_env()
+
+            # The gamelist already carries md5, so the scan must NOT fall back to
+            # full-file hashing — assert build_md5 is never invoked.
+            with mock.patch.object(RomRepository, "build_md5", side_effect=AssertionError("should not hash")):
+                _poll_rom_metadata_cache(settings, RomRepository(settings.roms_root, settings.bios_root))
+
+            cache, _ = _load_rom_metadata_cache(settings)
+            entry = next(iter(cache["entries"].values()))
+            self.assertEqual(entry.get("rom_md5"), gamelist_md5)
+            self.assertEqual(entry.get("md5"), gamelist_md5)
+
     def test_sample_speed_uses_cloudflare_speed_test_endpoints(self) -> None:
             calls = []
 
