@@ -1170,7 +1170,7 @@ def _read_row_payload_from_table(connection: sqlite3.Connection, asset_type: str
         ).to_payload()
     if asset_type == "bios":
         values = connection.execute(
-            f"SELECT entry_key, file_path, name, unique_id, absolute_path, file_size, modified_time, fingerprint, extra_json FROM {table} WHERE entry_key = ?",
+            f"SELECT entry_key, file_path, name, unique_id, absolute_path, file_size, modified_time, md5, extra_json FROM {table} WHERE entry_key = ?",
             (entry_key,),
         ).fetchone()
         if not values:
@@ -1183,7 +1183,7 @@ def _read_row_payload_from_table(connection: sqlite3.Connection, asset_type: str
             absolute_path=values[4] or "",
             file_size=_int(values[5]),
             modified_time=_int(values[6]),
-            fingerprint=values[7],
+            md5=values[7],
             extra=_loads_dict(values[8]),
         ).to_payload()
     if asset_type == "artwork":

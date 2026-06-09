@@ -8658,9 +8658,10 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
             if reuse_fingerprint:
                 next_entries[key] = dict(base_entry)
                 next_entries[key].update({"fingerprint": reuse_fingerprint, "rom_fingerprint": reuse_fingerprint})
-            elif previous and previous.get("file_size") == stat_size and previous.get("modified_time") == stat_mtime:
-                next_entries[key] = dict(base_entry)
             else:
+                # No reusable fingerprint (new/changed file, or a value cleared by the
+                # md5->fingerprint migration) -> queue it for hashing. Folders are never
+                # hashed, so they just carry forward without a fingerprint.
                 next_entries[key] = base_entry
                 if entry_type != "folder":
                     new_or_changed.append((key, absolute, base_entry))
