@@ -236,6 +236,7 @@ def collect_log_sources(settings: Any, include_unchanged: bool = False, sources:
         "es_launch_stderr": ["/userdata/system/logs/es_launch_stderr.log"],
         "drone_stdout": [str((settings.log_dir / settings.stdout_log_file).resolve())],
         "drone_stderr": [str((settings.log_dir / settings.stderr_log_file).resolve())],
+        "drone_overmind": [str((settings.log_dir / settings.overmind_log_file).resolve())],
     }
     if sources is not None:
         selected = {str(source) for source in sources}

@@ -189,6 +189,8 @@ _ROM_METADATA_POLLER_STARTED = False
 _ROM_METADATA_WATCHER_STARTED = False
 _ROM_METADATA_WATCHER = None
 _SAVES_METADATA_WATCHER = None
+# File-only rotating stream for Overmind-related logs; configured in _configure_rotating_logs.
+_OVERMIND_LOG_STREAM = None
 _PEER_HEALTH_CHECK_THREAD_STARTED = False
 _ROM_METADATA_ACTIVE = Event()
 _ROM_METADATA_WAKE = Event()
@@ -1303,6 +1305,7 @@ class Settings:
     log_dir: Path
     stdout_log_file: str
     stderr_log_file: str
+    overmind_log_file: str
     log_max_bytes: int
     log_backup_count: int
     rom_search_cache_ttl_seconds: int
@@ -1378,6 +1381,7 @@ class Settings:
             log_dir=Path(os.environ.get("LOG_DIR", "./logs")),
             stdout_log_file=os.environ.get("STDOUT_LOG_FILE", "stdout.log"),
             stderr_log_file=os.environ.get("STDERR_LOG_FILE", "stderr.log"),
+            overmind_log_file=os.environ.get("OVERMIND_LOG_FILE", "overmind.log"),
             log_max_bytes=int(os.environ.get("LOG_MAX_BYTES", str(5 * 1024 * 1024))),
             log_backup_count=int(os.environ.get("LOG_BACKUP_COUNT", "5")),
             rom_search_cache_ttl_seconds=int(os.environ.get("ROM_SEARCH_CACHE_TTL_SECONDS", "300")),
@@ -1482,16 +1486,20 @@ class _TeeRotatingStream:
                     self._file.write(ts_line)
                     self._file.flush()
                 self._rollover_if_needed()
-            self._original_stream.write(data)
+            # original_stream is None for file-only streams (e.g. the Overmind log),
+            # which must NOT also echo to the console/stdout.
+            if self._original_stream is not None:
+                self._original_stream.write(data)
             return len(data)
 
     def flush(self) -> None:
         with self._lock:
-            self._original_stream.flush()
+            if self._original_stream is not None:
+                self._original_stream.flush()
             self._file.flush()
 
     def isatty(self) -> bool:
-        return self._original_stream.isatty()
+        return self._original_stream.isatty() if self._original_stream is not None else False
 
 
 def _configure_rotating_logs(settings: Settings) -> None:
@@ -1511,6 +1519,36 @@ def _configure_rotating_logs(settings: Settings) -> None:
         max_bytes=settings.log_max_bytes,
         backup_count=settings.log_backup_count,
     )
+    # Dedicated, file-only stream for Overmind-related chatter (heartbeat, asset/saves
+    # sync details, speed samples, peer checks, token reclaim). Keeps stdout to high-level
+    # lifecycle events. Surfaced in Log Sources as "drone_overmind".
+    global _OVERMIND_LOG_STREAM
+    _OVERMIND_LOG_STREAM = _TeeRotatingStream(
+        original_stream=None,
+        log_path=settings.log_dir / settings.overmind_log_file,
+        max_bytes=settings.log_max_bytes,
+        backup_count=settings.log_backup_count,
+    )
+
+
+def _overmind_log(message: str, *, also_stdout: bool = False) -> None:
+    """Record an Overmind-related event to the dedicated overmind.log.
+
+    Detailed events (heartbeat, per-chunk uploads, sync triggers, speed/peer telemetry)
+    go to overmind.log only. High-level lifecycle events pass ``also_stdout=True`` so a
+    concise summary still appears in stdout.log. If the dedicated stream is not configured
+    yet (e.g. unit tests, early startup), fall back to stdout so nothing is lost.
+    """
+    line = message if message.endswith("\n") else message + "\n"
+    stream = _OVERMIND_LOG_STREAM
+    if stream is None:
+        sys.stdout.write(line)
+        sys.stdout.flush()
+        return
+    stream.write(line)
+    if also_stdout:
+        sys.stdout.write(line)
+        sys.stdout.flush()
 
 
 class DroneCredentialStore:
@@ -5727,6 +5765,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             "es_launch_stderr": ["/userdata/system/logs/es_launch_stderr.log"],
             "drone_stdout": [str((self.settings.log_dir / self.settings.stdout_log_file).resolve())],
             "drone_stderr": [str((self.settings.log_dir / self.settings.stderr_log_file).resolve())],
+            "drone_overmind": [str((self.settings.log_dir / self.settings.overmind_log_file).resolve())],
         }
 
         def _resolve_userdata_path(candidate: str) -> str:
@@ -7786,10 +7825,8 @@ def _reclaim_overmind_token_after_unauthorized(settings: Settings, repository: "
     config["last_error"] = _format_overmind_error(error)
     config["notes"] = "Stored Drone bearer token was rejected; reclaiming with bound authorization token."
     _save_overmind_runtime_config(settings, config)
-    print(
-        f"Overmind bearer token rejected for {settings.overmind_device_id}; reclaiming with bound authorization token.",
-        file=sys.stderr,
-        flush=True,
+    _overmind_log(
+        f"Overmind bearer token rejected for {settings.overmind_device_id}; reclaiming with bound authorization token."
     )
     return _register_or_claim_overmind_token(settings, repository, config, base_url)
 
@@ -8801,7 +8838,7 @@ def _rom_metadata_cache_status(settings: Settings) -> dict:
 
 def _begin_rom_metadata_activity(reason: str) -> bool:
     if not _ROM_METADATA_LOCK.acquire(blocking=False):
-        print(f"Asset metadata {reason} skipped: metadata work already running", file=sys.stdout, flush=True)
+        _overmind_log(f"Asset metadata {reason} skipped: metadata work already running")
         return False
     _ROM_METADATA_ACTIVE.set()
     return True
@@ -8814,7 +8851,7 @@ def _end_rom_metadata_activity() -> None:
 
 def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") -> Tuple[dict, bool, dict]:
     started = time.monotonic()
-    print("Asset metadata poll started: phase=cache_load", file=sys.stdout, flush=True)
+    _overmind_log("Asset metadata poll started: phase=cache_load")
     cache_load_started = time.monotonic()
     cache, rebuilt = _load_rom_metadata_cache(settings)
     was_dirty = bool(cache.get("dirty"))
@@ -8891,7 +8928,7 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
         )
         last_checkpoint = now
 
-    print("Asset metadata poll phase=scan", file=sys.stdout, flush=True)
+    _overmind_log("Asset metadata poll phase=scan")
     try:
         system_names = repository.list_system_names()
     except FileNotFoundError:
@@ -9060,7 +9097,7 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
     cache["last_full_scan_at"] = now_iso
     cache["dirty"] = changed
     cache["scan_in_progress"] = False
-    print("Asset metadata poll phase=cache_write", file=sys.stdout, flush=True)
+    _overmind_log("Asset metadata poll phase=cache_write")
     cache_write_started = time.monotonic()
     rom_updates = {
         key: value for key, value in next_entries.items()
@@ -9247,16 +9284,12 @@ def _kick_asset_metadata_sync_after_download(settings: Settings, repository: "Ro
     def run() -> None:
         try:
             result = _sync_rom_metadata_to_overmind(settings, repository, config, base_url, token)
-            print(
-                f"Asset metadata follow-up sync completed: reason={reason} status={result.get('status')} changed={result.get('changed')}",
-                file=sys.stdout,
-                flush=True,
+            _overmind_log(
+                f"Asset metadata follow-up sync completed: reason={reason} status={result.get('status')} changed={result.get('changed')}"
             )
         except Exception as error:
-            print(
-                f"Asset metadata follow-up sync failed: reason={reason} error={_format_overmind_error(error)}",
-                file=sys.stderr,
-                flush=True,
+            _overmind_log(
+                f"Asset metadata follow-up sync failed: reason={reason} error={_format_overmind_error(error)}"
             )
 
     Thread(target=run, name="asset-metadata-follow-up-sync", daemon=True).start()
@@ -10878,10 +10911,8 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                     heartbeat_payload["saves_files_thumbprint"] = local_saves_thumbprint
                 heartbeat_url = f"{base_url}/api/devices/{device_id}/heartbeat"
                 heartbeat_started = time.monotonic()
-                print(
-                    f"Heartbeat send started: endpoint={heartbeat_url} device_id={settings.overmind_device_id}",
-                    file=sys.stdout,
-                    flush=True,
+                _overmind_log(
+                    f"Heartbeat send started: endpoint={heartbeat_url} device_id={settings.overmind_device_id}"
                 )
                 try:
                     try:
@@ -10910,16 +10941,12 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                             raise
                 except Exception as error:
                     status_part = f" status={error.code}" if isinstance(error, HTTPError) else ""
-                    print(
-                        f"Heartbeat send failed: endpoint={heartbeat_url}{status_part} error={_format_overmind_error(error)} duration_ms={int((time.monotonic() - heartbeat_started) * 1000)}",
-                        file=sys.stderr,
-                        flush=True,
+                    _overmind_log(
+                        f"Heartbeat send failed: endpoint={heartbeat_url}{status_part} error={_format_overmind_error(error)} duration_ms={int((time.monotonic() - heartbeat_started) * 1000)}"
                     )
                     raise
-                print(
-                    f"Heartbeat send succeeded: endpoint={heartbeat_url} status={status_code} duration_ms={int((time.monotonic() - heartbeat_started) * 1000)}",
-                    file=sys.stdout,
-                    flush=True,
+                _overmind_log(
+                    f"Heartbeat send succeeded: endpoint={heartbeat_url} status={status_code} duration_ms={int((time.monotonic() - heartbeat_started) * 1000)}"
                 )
                 swarm = response.get("swarm") if isinstance(response.get("swarm"), list) else []
                 _save_state_payload(_state_database_path(settings.userdata_root), "overmind_swarm.json", swarm)
@@ -10953,10 +10980,10 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                             token=token,
                             settings=settings,
                         )
-                        print(f"Speed sample sent to Overmind for {settings.overmind_device_id}", file=sys.stdout, flush=True)
+                        _overmind_log(f"Speed sample sent to Overmind for {settings.overmind_device_id}")
                         last_speed_sample_at = now
                     except Exception as error:
-                        print(f"Speed sample failed for {settings.overmind_device_id}; continuing: {_format_overmind_error(error)}", file=sys.stderr, flush=True)
+                        _overmind_log(f"Speed sample failed for {settings.overmind_device_id}; continuing: {_format_overmind_error(error)}")
 
                 if not _ROM_METADATA_ACTIVE.is_set():
                     try:
@@ -10984,10 +11011,8 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                         _overmind_post_json(f"{base_url}/api/devices/{device_id}/game-logs", game_logs, token=token, settings=settings)
                         _commit_game_log_cursors(settings, game_log_cursors)
                         _delete_game_event_spool(spool_files)
-                        print(
-                            f"Sent {len(game_logs.get('sessions') or [])} game log session(s) to Overmind",
-                            file=sys.stdout,
-                            flush=True,
+                        _overmind_log(
+                            f"Sent {len(game_logs.get('sessions') or [])} game log session(s) to Overmind"
                         )
                     else:
                         if game_log_cursors:
@@ -10997,7 +11022,7 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                 except Exception as error:
                     # Leave cursors uncommitted and spool files in place so the next
                     # heartbeat retries the same sessions instead of losing them.
-                    print(f"Game log upload failed; will retry next heartbeat: {_format_overmind_error(error)}", file=sys.stderr, flush=True)
+                    _overmind_log(f"Game log upload failed; will retry next heartbeat: {_format_overmind_error(error)}")
 
                 persistent_logs = _collect_log_sources(settings, sources=PERSISTENT_OVERMIND_LOG_SOURCES)
                 persistent_log_cursors = persistent_logs.pop("_cursors", {})
@@ -11005,17 +11030,13 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                     try:
                         _overmind_post_json(f"{base_url}/api/devices/{device_id}/log-sources", persistent_logs, token=token, settings=settings)
                     except (HTTPError, URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError) as error:
-                        print(
-                            f"Persistent log upload failed; heartbeat/action poll will continue: {_format_overmind_error(error)}",
-                            file=sys.stderr,
-                            flush=True,
+                        _overmind_log(
+                            f"Persistent log upload failed; heartbeat/action poll will continue: {_format_overmind_error(error)}"
                         )
                     else:
                         _commit_log_cursors(settings, persistent_log_cursors)
-                        print(
-                            f"Sent {len(persistent_logs.get('logs') or [])} persistent log source(s) to Overmind",
-                            file=sys.stdout,
-                            flush=True,
+                        _overmind_log(
+                            f"Sent {len(persistent_logs.get('logs') or [])} persistent log source(s) to Overmind"
                         )
 
                 if bool(response.get("log_stream_requested")):
@@ -11025,17 +11046,13 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                         try:
                             _overmind_post_json(f"{base_url}/api/devices/{device_id}/log-sources", log_sources, token=token, settings=settings)
                         except (HTTPError, URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError) as error:
-                            print(
-                                f"Log stream upload failed; heartbeat/action poll will continue: {_format_overmind_error(error)}",
-                                file=sys.stderr,
-                                flush=True,
+                            _overmind_log(
+                                f"Log stream upload failed; heartbeat/action poll will continue: {_format_overmind_error(error)}"
                             )
                         else:
                             _commit_log_cursors(settings, log_cursors)
-                            print(
-                                f"Streamed {len(log_sources.get('logs') or [])} log source(s) to Overmind",
-                                file=sys.stdout,
-                                flush=True,
+                            _overmind_log(
+                                f"Streamed {len(log_sources.get('logs') or [])} log source(s) to Overmind"
                             )
 
                 if (
@@ -11048,10 +11065,8 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                     if emulator_configs.get("configs"):
                         _overmind_post_json(f"{base_url}/api/devices/{device_id}/emulator-configs", emulator_configs, token=token, settings=settings)
                         _commit_emulator_config_fingerprints(settings, emulator_config_fingerprints)
-                        print(
-                            f"Sent {len(emulator_configs.get('configs') or [])} changed emulator config(s) to Overmind",
-                            file=sys.stdout,
-                            flush=True,
+                        _overmind_log(
+                            f"Sent {len(emulator_configs.get('configs') or [])} changed emulator config(s) to Overmind"
                         )
                     last_config_report_at = now
 
@@ -11189,12 +11204,10 @@ def _start_peer_health_check_thread(settings: Settings) -> None:
                         continue
                     result = _probe_peer_public_ip(settings, peer, config=config)
                     peer_results.append(result)
-                    print(
+                    _overmind_log(
                         f"Peer health check: source={settings.overmind_device_id} target={peer_id} "
                         f"status={result['status']} address={result.get('target_address')} "
-                        f"latency={result.get('latency_ms')}ms",
-                        file=sys.stdout,
-                        flush=True,
+                        f"latency={result.get('latency_ms')}ms"
                     )
                 if peer_results:
                     _save_state_payload(
@@ -11211,19 +11224,15 @@ def _start_peer_health_check_thread(settings: Settings) -> None:
                             token=token,
                             settings=settings,
                         )
-                        print(
-                            f"Peer health checks reported to Overmind: {len(peer_results)} result(s)",
-                            file=sys.stdout,
-                            flush=True,
+                        _overmind_log(
+                            f"Peer health checks reported to Overmind: {len(peer_results)} result(s)"
                         )
                     except Exception as report_error:
-                        print(
-                            f"Failed to report peer health checks to Overmind: {_format_overmind_error(report_error)}",
-                            file=sys.stderr,
-                            flush=True,
+                        _overmind_log(
+                            f"Failed to report peer health checks to Overmind: {_format_overmind_error(report_error)}"
                         )
             except Exception as error:
-                print(f"Peer health check thread error: {_format_overmind_error(error)}", file=sys.stderr, flush=True)
+                _overmind_log(f"Peer health check thread error: {_format_overmind_error(error)}")
 
     thread = Thread(target=loop, name="peer-health-checker", daemon=True)
     thread.start()
@@ -11387,14 +11396,12 @@ def _sync_rom_metadata_to_overmind_locked(
     if not should_upload_inventory:
         sync_reasons.append("no_changes")
     decision = "full_refresh" if full_refresh else ("delta" if should_upload_inventory else "skip")
-    print(
+    _overmind_log(
         f"Asset metadata sync trigger: decision={decision} will_upload={should_upload_inventory} "
         f"reasons={','.join(sync_reasons) or 'none'} pending_roms={pending_roms} pending_bios={pending_bios} "
         f"pending_artwork={pending_artwork} pending_deletes={pending_deleted} chunks={len(payloads)} "
         f"force_upload={force_upload} push_requested={push_requested} "
-        f"full_refresh_pending={bool(stats.get('full_refresh_pending'))} first_upload={first_upload_after_cache}",
-        file=sys.stdout,
-        flush=True,
+        f"full_refresh_pending={bool(stats.get('full_refresh_pending'))} first_upload={first_upload_after_cache}"
     )
 
     if should_upload_inventory:
@@ -11402,39 +11409,37 @@ def _sync_rom_metadata_to_overmind_locked(
         payload_sizes = [_json_payload_size_bytes(payload) for payload in payloads]
         total_payload_bytes = sum(payload_sizes)
         max_payload_bytes = max(payload_sizes) if payload_sizes else 0
-        print(
-            f"Asset metadata {upload_kind} sync started: endpoint={upload_url} roms={rom_count} bios={bios_count} artwork={artwork_count} chunks={len(payloads)} total_payload_bytes={total_payload_bytes} max_payload_bytes={max_payload_bytes} timeout_seconds={OVERMIND_UPLOAD_TIMEOUT_SECONDS} force={force_upload}",
-            file=sys.stdout,
-            flush=True,
+        # High-level lifecycle event -> stdout (also recorded in overmind.log).
+        _overmind_log(
+            f"Asset metadata {upload_kind} sync started: roms={rom_count} bios={bios_count} artwork={artwork_count} chunks={len(payloads)} total_payload_bytes={total_payload_bytes}",
+            also_stdout=True,
+        )
+        # Per-chunk detail -> overmind.log only.
+        _overmind_log(
+            f"Asset metadata {upload_kind} sync detail: endpoint={upload_url} max_payload_bytes={max_payload_bytes} timeout_seconds={OVERMIND_UPLOAD_TIMEOUT_SECONDS} force={force_upload}"
         )
         accepted_roms = 0
         accepted_bios = 0
         accepted_artwork = 0
         for index, payload in enumerate(payloads, start=1):
             payload_bytes = _json_payload_size_bytes(payload)
-            print(
-                f"Asset metadata inventory chunk upload started: chunk={index}/{len(payloads)} payload_bytes={payload_bytes} roms={len(payload.get('roms') or [])} bios={len(payload.get('bios') or [])} artwork={len(payload.get('artwork') or [])}",
-                file=sys.stdout,
-                flush=True,
+            _overmind_log(
+                f"Asset metadata inventory chunk upload started: chunk={index}/{len(payloads)} payload_bytes={payload_bytes} roms={len(payload.get('roms') or [])} bios={len(payload.get('bios') or [])} artwork={len(payload.get('artwork') or [])}"
             )
             response = upload(payload, "inventory")
             accepted_roms += int(response.get("rom_count") or 0)
             accepted_bios += int(response.get("bios_count") or 0)
             accepted_artwork += int(response.get("artwork_count") or 0)
-            print(
-                f"Asset metadata inventory chunk upload succeeded: chunk={index}/{len(payloads)} payload_bytes={payload_bytes} accepted_roms={response.get('rom_count')} accepted_bios={response.get('bios_count')} accepted_artwork={response.get('artwork_count')}",
-                file=sys.stdout,
-                flush=True,
+            _overmind_log(
+                f"Asset metadata inventory chunk upload succeeded: chunk={index}/{len(payloads)} payload_bytes={payload_bytes} accepted_roms={response.get('rom_count')} accepted_bios={response.get('bios_count')} accepted_artwork={response.get('artwork_count')}"
             )
         _mark_rom_metadata_upload_clean(
             settings,
             snapshot.get("romset_files_thumbprint") or snapshot.get("rom_inventory_fingerprint"),
             snapshot.get("bios_files_thumbprint"),
         )
-        print(
-            f"Asset metadata {upload_kind} sync succeeded: accepted_roms={accepted_roms} accepted_bios={accepted_bios} accepted_artwork={accepted_artwork}",
-            file=sys.stdout,
-            flush=True,
+        _overmind_log(
+            f"Asset metadata {upload_kind} sync succeeded: accepted_roms={accepted_roms} accepted_bios={accepted_bios} accepted_artwork={accepted_artwork}"
         )
 
     hash_batches = 0
@@ -11444,10 +11449,8 @@ def _sync_rom_metadata_to_overmind_locked(
         patch_roms = patch.get("roms") if isinstance(patch.get("roms"), list) else []
         payload = {"device_id": settings.overmind_device_id, **patch}
         progress = patch.get("hash_progress") or {}
-        print(
-            f"Asset metadata hash patch sync started: endpoint={upload_url} payload_bytes={_json_payload_size_bytes(payload)} batch_roms={len(patch_roms)} processed={progress.get('processed')}/{progress.get('total')}",
-            file=sys.stdout,
-            flush=True,
+        _overmind_log(
+            f"Asset metadata hash patch sync started: endpoint={upload_url} payload_bytes={_json_payload_size_bytes(payload)} batch_roms={len(patch_roms)} processed={progress.get('processed')}/{progress.get('total')}"
         )
         try:
             upload(payload, "rom_hash_patch")
@@ -11459,10 +11462,8 @@ def _sync_rom_metadata_to_overmind_locked(
             # and Overmind converges.
             hash_patch_failed = True
             _update_rom_metadata_cache_state(settings, dirty=True, full_refresh_pending=True)
-            print(
-                "Asset metadata hash patch upload failed; flagged full refresh so fingerprint values resync on the next poll",
-                file=sys.stderr,
-                flush=True,
+            _overmind_log(
+                "Asset metadata hash patch upload failed; flagged full refresh so fingerprint values resync on the next poll"
             )
             break
         hash_batches += 1
@@ -11501,10 +11502,8 @@ def _sync_rom_metadata_to_overmind_locked(
                 bios_files_thumbprint=current_bios_thumbprint,
                 bios_inventory_fingerprint_algorithm=BIOS_INVENTORY_FINGERPRINT_ALGORITHM,
             )
-        print(
-            f"Asset metadata sync skipped: no changes detected systems={stats.get('systems_scanned')} roms={stats.get('roms_discovered')} bios={stats.get('bios_discovered')} artwork={stats.get('artwork_discovered')} duration_ms={int((time.monotonic() - poll_started) * 1000)}",
-            file=sys.stdout,
-            flush=True,
+        _overmind_log(
+            f"Asset metadata sync skipped: no changes detected systems={stats.get('systems_scanned')} roms={stats.get('roms_discovered')} bios={stats.get('bios_discovered')} artwork={stats.get('artwork_discovered')} duration_ms={int((time.monotonic() - poll_started) * 1000)}"
         )
         return {
             "status": "skipped",
@@ -11515,10 +11514,9 @@ def _sync_rom_metadata_to_overmind_locked(
             "changed": changed,
             "stats": stats,
         }
-    print(
-        f"Asset metadata sync succeeded: inventory_uploaded={should_upload_inventory} hash_batches={hash_batches} hashed_roms={hashed_roms} duration_ms={int((time.monotonic() - poll_started) * 1000)}",
-        file=sys.stdout,
-        flush=True,
+    _overmind_log(
+        f"Asset metadata sync finished: inventory_uploaded={should_upload_inventory} hash_batches={hash_batches} hashed_roms={hashed_roms} duration_ms={int((time.monotonic() - poll_started) * 1000)}",
+        also_stdout=bool(should_upload_inventory or hash_batches),
     )
     return {
         "status": "uploaded",
@@ -11582,7 +11580,7 @@ def _sync_saves_to_overmind(settings: Settings, base_url: str, token: str) -> di
     try:
         summary = _saves_store.sync_saves_cache(settings.saves_root)
     except Exception as error:
-        print(f"Saves scan failed: error={_format_overmind_error(error)}", file=sys.stderr, flush=True)
+        _overmind_log(f"Saves scan failed: error={_format_overmind_error(error)}")
         return {"status": "scan_failed"}
     current = str(summary.get("thumbprint") or "").strip()
     _update_rom_metadata_cache_state(settings, saves_files_thumbprint=current)
@@ -11605,12 +11603,10 @@ def _sync_saves_to_overmind(settings: Settings, base_url: str, token: str) -> di
     if not has_changes and not push_requested and current != last_uploaded:
         saves_reasons.append("thumbprint_changed_since_upload")
     will_upload = bool(has_changes or push_requested or current != last_uploaded)
-    print(
+    _overmind_log(
         f"Saves sync trigger: will_upload={will_upload} reasons={','.join(saves_reasons) or 'none'} "
         f"thumbprint={current[:12]} last_uploaded={last_uploaded[:12]} "
-        f"has_changes={has_changes} push_requested={push_requested}",
-        file=sys.stdout,
-        flush=True,
+        f"has_changes={has_changes} push_requested={push_requested}"
     )
     if not has_changes and not push_requested and current == last_uploaded:
         return {"status": "unchanged", "thumbprint": current}
@@ -11642,16 +11638,16 @@ def _sync_saves_to_overmind(settings: Settings, base_url: str, token: str) -> di
             timeout_seconds=OVERMIND_UPLOAD_TIMEOUT_SECONDS,
         )
     except Exception as error:
-        print(f"Saves upload failed: error={_format_overmind_error(error)}", file=sys.stderr, flush=True)
+        _overmind_log(f"Saves upload failed: error={_format_overmind_error(error)}")
         return {"status": "upload_failed"}
     _saves_store.clear_pending_changes(settings.saves_root)
     _update_rom_metadata_cache_state(settings, saves_files_thumbprint_uploaded=current)
     _SAVES_PUSH_REQUESTED.clear()
-    print(
+    # High-level lifecycle event -> stdout (also recorded in overmind.log).
+    _overmind_log(
         f"Saves sync uploaded: upserts={len(upsert_rows)} deletes={len(deleted_rows)} "
         f"thumbprint={current[:12]} status={status_code}",
-        file=sys.stdout,
-        flush=True,
+        also_stdout=True,
     )
     return {"status": "ok", "upserts": len(upsert_rows), "deletes": len(deleted_rows), "thumbprint": current}
 
@@ -11681,7 +11677,7 @@ def _poll_rom_metadata_once(settings: Settings, repository: "RomRepository") -> 
         try:
             _sync_saves_to_overmind(settings, base_url, token)
         except Exception as error:
-            print(f"Saves sync failed: error={_format_overmind_error(error)}", file=sys.stderr, flush=True)
+            _overmind_log(f"Saves sync failed: error={_format_overmind_error(error)}")
         return result
     finally:
         _end_rom_metadata_activity()
