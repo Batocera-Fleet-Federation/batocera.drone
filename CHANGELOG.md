@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.85] - 2026-06-10
+
+- Adding UI to show new logs.
+
 ## [v0.0.84] - 2026-06-10
 
 - Breaking out overmind logging into new file so stdout is not polluted with overmind logs.  Overmind logs will now show up as separate log file.
