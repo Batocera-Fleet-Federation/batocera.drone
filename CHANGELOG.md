@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.81] - 2026-06-09
+
+- Fixing bug with saves thumbprint which was causing bug with offline/online for drone.  Fix bug with game logs not making it to overmind.
+
 ## [v0.0.80] - 2026-06-09
 
 - Updating notification issue where emails / channels were not being notified and aggregating notifications instead of sending one at a time.  Bug fix where resolvable / online-offline was firing when it should not have been.  Updating gameplay logs screen to view in table rather than logs text area.  Adding syncing of saved game data and UI.
