@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.80] - 2026-06-09
+
+- Updating notification issue where emails / channels were not being notified and aggregating notifications instead of sending one at a time.  Bug fix where resolvable / online-offline was firing when it should not have been.  Updating gameplay logs screen to view in table rather than logs text area.  Adding syncing of saved game data and UI.
+
 ## [v0.0.79] - 2026-06-09
 
 - Updating drone to create bios and romset fingerprints and use them to determine if resync needs to happen against overmind.
