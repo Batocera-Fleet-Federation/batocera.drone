@@ -89,6 +89,7 @@ try:
         _update_rom_metadata_cache_state,
     )
     from .rom_fs_watcher import RomFilesystemWatcher
+    from . import saves_store as _saves_store
     from .state_store import (
         append_event as _append_state_event,
         database_path as _state_database_path,
@@ -159,6 +160,7 @@ except ImportError:
         _update_rom_metadata_cache_state,
     )
     from rom_fs_watcher import RomFilesystemWatcher  # type: ignore
+    import saves_store as _saves_store  # type: ignore
     from state_store import (  # type: ignore
         append_event as _append_state_event,
         database_path as _state_database_path,
@@ -184,12 +186,16 @@ _OVERMIND_POLLER_STARTED = False
 _ROM_METADATA_POLLER_STARTED = False
 _ROM_METADATA_WATCHER_STARTED = False
 _ROM_METADATA_WATCHER = None
+_SAVES_METADATA_WATCHER = None
 _PEER_HEALTH_CHECK_THREAD_STARTED = False
 _ROM_METADATA_ACTIVE = Event()
 _ROM_METADATA_WAKE = Event()
 # Set when an Overmind heartbeat reports asset thumbprints that differ from what the
 # Drone holds locally, so the next metadata poll pushes a full inventory to resync.
 _ASSET_PUSH_REQUESTED = Event()
+# Same idea for game saves, tracked independently so a saves drift does not force a
+# (much larger) ROM/BIOS inventory push and vice versa.
+_SAVES_PUSH_REQUESTED = Event()
 _ROM_METADATA_LOCK = RLock()
 _DOWNLOAD_MANAGER = None
 _PERFORMANCE_METRICS_LAST_SAMPLE: Optional[dict] = None
@@ -1264,6 +1270,7 @@ class Settings:
     userdata_root: Path
     roms_root: Path
     bios_root: Path
+    saves_root: Path
     username: Optional[str]
     password: Optional[str]
     credentials_file: Path
@@ -1341,6 +1348,7 @@ class Settings:
             userdata_root=userdata_root,
             roms_root=Path(os.environ.get("ROMS_ROOT", "/userdata/roms")),
             bios_root=Path(os.environ.get("BIOS_ROOT", "/userdata/bios")),
+            saves_root=Path(os.environ.get("SAVES_ROOT", "/userdata/saves")),
             username=os.environ.get("DRONE_APP_USERNAME") or None,
             password=os.environ.get("DRONE_APP_PASSWORD") or None,
             credentials_file=Path(os.environ.get("DRONE_CREDENTIALS_FILE", str(userdata_root / "system" / "drone-app" / "credentials.json"))),
@@ -4349,6 +4357,27 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             self._send_json(404, {"error": "not found"})
             return
         self.log_message("peer bios download bios=%s bytes=%s", rel, target.stat().st_size)
+        self._stream_file(target, "application/octet-stream", as_attachment=True)
+
+    def _handle_peer_save_download(self, system: str, relative_path: str) -> None:
+        """Serve a single game-save file to an authenticated peer (mTLS when enabled)."""
+        if self.settings.drone_mtls_enabled:
+            cert = self.connection.getpeercert() if hasattr(self.connection, "getpeercert") else None
+            if not cert:
+                self._send_json(403, {"error": "client certificate required"})
+                return
+        saves_root = Path(self.settings.saves_root).resolve()
+        system_clean = unquote(system or "").replace("\\", "/").strip("/")
+        rel = unquote(relative_path or "").replace("\\", "/").lstrip("/")
+        if not system_clean or ".." in Path(system_clean).parts or not rel or ".." in Path(rel).parts:
+            self._send_json(400, {"error": "invalid save path"})
+            return
+        target = (saves_root / system_clean / rel).resolve()
+        if not target.exists() or not target.is_file() or saves_root not in target.parents:
+            self.log_error("peer save download failed system=%s save=%s resolved=%s reason=not_found", system_clean, rel, str(target))
+            self._send_json(404, {"error": "not found"})
+            return
+        self.log_message("peer save download system=%s save=%s bytes=%s", system_clean, rel, target.stat().st_size)
         self._stream_file(target, "application/octet-stream", as_attachment=True)
 
     def _handle_peer_artwork_download(self, system: str, artwork_type: str, rom_path: str) -> None:
@@ -8376,6 +8405,37 @@ def _maybe_request_asset_push_from_heartbeat(settings: Settings, response: dict)
     )
 
 
+def _local_saves_thumbprint(settings: Settings) -> str:
+    """Return the saves thumbprint the Drone last persisted for its on-disk saves."""
+    try:
+        state = _read_rom_metadata_cache_state(settings, "saves_files_thumbprint")
+    except Exception:
+        return ""
+    return str(state.get("saves_files_thumbprint") or "").strip()
+
+
+def _maybe_request_saves_push_from_heartbeat(settings: Settings, response: dict) -> None:
+    """Queue a saves resync when Overmind's echoed saves thumbprint drifts from ours."""
+    if not isinstance(response, dict):
+        return
+    overmind_saves = str(response.get("saves_files_thumbprint") or "").strip()
+    local_saves = _local_saves_thumbprint(settings)
+    # Only act once the Drone has actually scanned and stored a saves thumbprint, so a
+    # fresh Drone's first upload still flows through the normal poller path.
+    if not local_saves or overmind_saves == local_saves:
+        return
+    if _SAVES_PUSH_REQUESTED.is_set():
+        return
+    _SAVES_PUSH_REQUESTED.set()
+    _ROM_METADATA_WAKE.set()
+    print(
+        "Saves thumbprint mismatch from heartbeat; queued resync push: "
+        f"overmind_saves={overmind_saves[:12]} local_saves={local_saves[:12]}",
+        file=sys.stdout,
+        flush=True,
+    )
+
+
 def _build_rom_metadata_snapshot_from_cache(settings: Settings, cache: dict, rehydrate_gamelist: bool = False) -> dict:
     entries = cache.get("entries") if isinstance(cache.get("entries"), dict) else {}
     roms = []
@@ -10057,6 +10117,92 @@ def _download_bios_from_peer(
     }
 
 
+def _download_save_from_peer(
+    settings: Settings,
+    config: dict,
+    peer: dict,
+    system: str,
+    relative_path: str,
+    expected_size=None,
+    expected_fingerprint=None,
+    cancellation_event: Optional[Event] = None,
+) -> dict:
+    """Fetch a single game-save file from a peer and write it under saves_root.
+
+    Unlike ROMs/BIOS (which never overwrite an existing file), saves resolve
+    newest-modified-wins, so the fetched copy replaces the local one at the exact
+    path. The sampled fingerprint is verified when the caller supplies the expected
+    value. ``relative_path`` is the path WITHIN the system directory.
+    """
+    peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
+    address = _peer_address(peer)
+    if not address:
+        raise RuntimeError("selected peer has no address")
+    system_clean = _safe_rom_relative_path(system).strip("/")
+    rel = _safe_rom_relative_path(relative_path)
+    url = f"{address}/v1/api/peer/saves/{quote(system_clean, safe='/')}/{quote(rel, safe='/')}"
+    saves_root = Path(settings.saves_root).resolve()
+    target = (saves_root / system_clean / rel).resolve()
+    if saves_root not in target.parents:
+        raise ValueError("invalid save target path")
+    partial_target = target.with_name(f"{target.name}.part")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    cafile = _peer_trust_cafile(settings, peer_id=peer_id, config=config)
+    if address.startswith("https://") and not cafile:
+        raise ssl.SSLError(f"no trusted certificate cached for peer {peer_id}")
+    context = _drone_client_ssl_context(settings, url, verify=bool(cafile), cafile=cafile)
+    started_mono = time.monotonic()
+    bytes_written = 0
+    request = Request(url, headers={"User-Agent": "batocera-drone-saves-sync/1.0"})
+
+    def ensure_not_cancelled() -> None:
+        if cancellation_event is not None and cancellation_event.is_set():
+            if partial_target.exists():
+                partial_target.unlink()
+            raise DownloadCancelled("download cancelled")
+
+    try:
+        with urlopen(request, timeout=max(10, PEER_CHECK_TIMEOUT_SECONDS * 4), context=context) as response, partial_target.open("wb") as handle:
+            while True:
+                ensure_not_cancelled()
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                handle.write(chunk)
+                bytes_written += len(chunk)
+    except DownloadCancelled:
+        raise
+    except Exception:
+        if partial_target.exists():
+            partial_target.unlink()
+        raise
+    expected_fp = str(expected_fingerprint or "").strip().lower()
+    if expected_fp:
+        actual_fp = RomRepository.build_fingerprint(partial_target).lower()
+        if actual_fp != expected_fp:
+            if partial_target.exists():
+                partial_target.unlink()
+            raise RuntimeError(f"fingerprint mismatch expected={expected_fp} actual={actual_fp}")
+    partial_target.replace(target)  # newest-wins: overwrite any existing local save
+    duration_ms = int((time.monotonic() - started_mono) * 1000)
+    return {
+        "asset_type": "saves",
+        "file_type": "Save",
+        "source_drone_id": peer_id,
+        "target_drone_id": settings.overmind_device_id,
+        "system": system_clean,
+        "save_name": rel,
+        "relative_path": f"{system_clean}/{rel}",
+        "action": "download",
+        "status": "completed",
+        "bytes_transferred": bytes_written,
+        "file_size": expected_size or bytes_written,
+        "fingerprint": expected_fp or RomRepository.build_fingerprint(target),
+        "duration_ms": duration_ms,
+        "duration_seconds": round(duration_ms / 1000, 3),
+    }
+
+
 def _download_artwork_from_peer(
     settings: Settings,
     repository: "RomRepository",
@@ -10620,6 +10766,9 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                     heartbeat_payload["romset_files_thumbprint"] = local_romset_thumbprint
                 if local_bios_thumbprint:
                     heartbeat_payload["bios_files_thumbprint"] = local_bios_thumbprint
+                local_saves_thumbprint = _local_saves_thumbprint(settings)
+                if local_saves_thumbprint:
+                    heartbeat_payload["saves_files_thumbprint"] = local_saves_thumbprint
                 heartbeat_url = f"{base_url}/api/devices/{device_id}/heartbeat"
                 heartbeat_started = time.monotonic()
                 print(
@@ -10674,6 +10823,7 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                 # drifted (or is missing) — wake the metadata poller to push a fresh
                 # inventory and resync. The Drone, not Overmind, decides to resend.
                 _maybe_request_asset_push_from_heartbeat(settings, response)
+                _maybe_request_saves_push_from_heartbeat(settings, response)
 
                 if speed_sample_seconds > 0 and (
                     last_speed_sample_at is None or now - last_speed_sample_at >= speed_sample_seconds
@@ -11258,6 +11408,75 @@ def _defer_rom_metadata_upload(settings: Settings, reason: str) -> dict:
     }
 
 
+def _sync_saves_to_overmind(settings: Settings, base_url: str, token: str) -> dict:
+    """Scan game saves and push created/updated/deleted entries to Overmind.
+
+    Runs on the ROM-metadata poll cadence but with its own small payload so a saves
+    change never forces a (much larger) ROM/BIOS re-upload. Uses a single-shot
+    ``inventory_delta`` so it upserts changed saves and removes deleted ones WITHOUT
+    touching ROM/BIOS rows (``replace_all`` would clear those). The on-disk saves
+    thumbprint is persisted every scan so heartbeats can report and compare it; the
+    upload only fires when something actually changed or a heartbeat flagged drift.
+    """
+    try:
+        summary = _saves_store.sync_saves_cache(settings.saves_root)
+    except Exception as error:
+        print(f"Saves scan failed: error={_format_overmind_error(error)}", file=sys.stderr, flush=True)
+        return {"status": "scan_failed"}
+    current = str(summary.get("thumbprint") or "").strip()
+    _update_rom_metadata_cache_state(settings, saves_files_thumbprint=current)
+    pending = _saves_store.read_pending_changes(settings.saves_root)
+    has_changes = bool(pending.get("saves") or pending.get("deleted"))
+    push_requested = _SAVES_PUSH_REQUESTED.is_set()
+    try:
+        uploaded_state = _read_rom_metadata_cache_state(settings, "saves_files_thumbprint_uploaded")
+    except Exception:
+        uploaded_state = {}
+    last_uploaded = str(uploaded_state.get("saves_files_thumbprint_uploaded") or "").strip()
+    if not has_changes and not push_requested and current == last_uploaded:
+        return {"status": "unchanged", "thumbprint": current}
+    if has_changes:
+        upsert_rows = pending.get("saves") or []
+        deleted_rows = pending.get("deleted") or []
+    else:
+        # Drift resync / first push with an empty change queue: re-assert the full set.
+        upsert_rows = _saves_store.list_saves(settings.saves_root)
+        deleted_rows = []
+    payload = {
+        "device_id": settings.overmind_device_id,
+        "type": "asset_metadata",
+        "update_mode": "inventory_delta",
+        "saves": upsert_rows,
+        "deleted": {"saves": deleted_rows},
+        "saves_files_thumbprint": current,
+        "saves_root": str(settings.saves_root),
+        "inventory_complete": True,
+    }
+    device_id = quote(settings.overmind_device_id, safe="")
+    upload_url = f"{base_url}/api/devices/{device_id}/rom-metadata"
+    try:
+        status_code, _ = _overmind_post_json_with_status(
+            upload_url,
+            payload,
+            token=token,
+            settings=settings,
+            timeout_seconds=OVERMIND_UPLOAD_TIMEOUT_SECONDS,
+        )
+    except Exception as error:
+        print(f"Saves upload failed: error={_format_overmind_error(error)}", file=sys.stderr, flush=True)
+        return {"status": "upload_failed"}
+    _saves_store.clear_pending_changes(settings.saves_root)
+    _update_rom_metadata_cache_state(settings, saves_files_thumbprint_uploaded=current)
+    _SAVES_PUSH_REQUESTED.clear()
+    print(
+        f"Saves sync uploaded: upserts={len(upsert_rows)} deletes={len(deleted_rows)} "
+        f"thumbprint={current[:12]} status={status_code}",
+        file=sys.stdout,
+        flush=True,
+    )
+    return {"status": "ok", "upserts": len(upsert_rows), "deletes": len(deleted_rows), "thumbprint": current}
+
+
 def _poll_rom_metadata_once(settings: Settings, repository: "RomRepository") -> dict:
     if not _begin_rom_metadata_activity("poll"):
         return {"status": "skipped", "reason": "metadata_already_running", "changed": False}
@@ -11275,10 +11494,16 @@ def _poll_rom_metadata_once(settings: Settings, repository: "RomRepository") -> 
             if not token:
                 return _complete_local_rom_metadata_cache(settings, repository, "overmind_not_connected")
         try:
-            return _sync_rom_metadata_to_overmind_locked(settings, repository, config, base_url, token, prepared_poll=prepared_poll)
+            result = _sync_rom_metadata_to_overmind_locked(settings, repository, config, base_url, token, prepared_poll=prepared_poll)
         except Exception:
             _defer_rom_metadata_upload(settings, "overmind_upload_failed")
             raise
+        # Best-effort: a saves sync failure must not affect ROM metadata results.
+        try:
+            _sync_saves_to_overmind(settings, base_url, token)
+        except Exception as error:
+            print(f"Saves sync failed: error={_format_overmind_error(error)}", file=sys.stderr, flush=True)
+        return result
     finally:
         _end_rom_metadata_activity()
 
@@ -11335,7 +11560,7 @@ def _start_rom_metadata_watcher(settings: Settings) -> None:
     Best-effort: if inotify is unavailable the periodic poll still covers
     changes, so a failure here is logged and otherwise ignored.
     """
-    global _ROM_METADATA_WATCHER
+    global _ROM_METADATA_WATCHER, _SAVES_METADATA_WATCHER
     watcher = RomFilesystemWatcher(
         settings.roms_root,
         _ROM_METADATA_WAKE.set,
@@ -11344,6 +11569,16 @@ def _start_rom_metadata_watcher(settings: Settings) -> None:
     )
     if watcher.start():
         _ROM_METADATA_WATCHER = watcher
+    # Watch the saves tree too so a created/updated/deleted save wakes the poller in
+    # near real time; the periodic poll still covers it if inotify is unavailable.
+    saves_watcher = RomFilesystemWatcher(
+        settings.saves_root,
+        _ROM_METADATA_WAKE.set,
+        debounce_seconds=ROM_METADATA_WATCH_DEBOUNCE_SECONDS,
+        max_delay_seconds=ROM_METADATA_WATCH_MAX_DELAY_SECONDS,
+    )
+    if saves_watcher.start():
+        _SAVES_METADATA_WATCHER = saves_watcher
 
 
 def _ensure_game_event_hook(settings: Settings) -> None:

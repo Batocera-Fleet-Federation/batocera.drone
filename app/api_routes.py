@@ -58,6 +58,10 @@ class ApiRoutesMixin:
                 self._handle_peer_bios_download("/".join(parts[2:]))
                 return
 
+            if len(parts) >= 4 and parts[0] == "peer" and parts[1] == "saves":
+                self._handle_peer_save_download(parts[2], "/".join(parts[3:]))
+                return
+
             if len(parts) >= 5 and parts[0] == "peer" and parts[1] == "artwork":
                 self._handle_peer_artwork_download(parts[2], parts[3], "/".join(parts[4:]))
                 return
