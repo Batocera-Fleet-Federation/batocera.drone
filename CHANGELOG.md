@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.84] - 2026-06-10
+
+- Breaking out overmind logging into new file so stdout is not polluted with overmind logs.  Overmind logs will now show up as separate log file.
+
 ## [v0.0.83] - 2026-06-10
 
 - Adding logging for when a resync happens to better understand why resync is occuring.
