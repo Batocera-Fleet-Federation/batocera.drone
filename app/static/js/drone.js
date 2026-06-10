@@ -3462,6 +3462,7 @@ async function renderLogsPage(selectedSource = null, selectedLines = 200) {
   const logSources = [
     ["drone_stdout", "Drone Stdout", "bi-file-text"],
     ["drone_stderr", "Drone Stderr", "bi-bug"],
+    ["drone_overmind", "Overmind", "bi-broadcast"],
     ["es_launch_stdout", "ES Launch Stdout", "bi-terminal"],
     ["es_launch_stderr", "ES Launch Stderr", "bi-exclamation-triangle"],
   ];
