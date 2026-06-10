@@ -10,6 +10,8 @@ except ImportError:
 class ApiRoutesMixin:
     def do_GET(self) -> None:
         try:
+            if self._reject_if_ip_blocked():
+                return
             raw_path, _, raw_query = self.path.partition("?")
             query_params = parse_qs(raw_query, keep_blank_values=True)
             if raw_path == API_PREFIX:
@@ -337,6 +339,8 @@ class ApiRoutesMixin:
 
     def do_POST(self) -> None:
         try:
+            if self._reject_if_ip_blocked():
+                return
             raw_path, _, _ = self.path.partition("?")
             if raw_path == API_PREFIX:
                 api_path = "/"

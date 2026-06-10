@@ -3532,11 +3532,6 @@ async function renderGameplayLogsPage() {
   try {
     const payload = await api("/admin/gameplay-logs");
     const sessions = Array.isArray(payload.sessions) ? payload.sessions : [];
-    const logs = Array.isArray(payload.logs) ? payload.logs : [];
-    const launchSource = logs.find((entry) => entry && entry.source === "es_launch_stdout") || null;
-    const launchText = launchSource && Array.isArray(launchSource.files)
-      ? launchSource.files.map((file) => file.content || file.error || "").filter(Boolean).join("\n")
-      : "";
     const rows = sessions.map((session) => {
       const duration = session.duration_seconds !== undefined && session.duration_seconds !== null
         ? `${Math.round(Number(session.duration_seconds) || 0)}s`
@@ -3570,12 +3565,6 @@ async function renderGameplayLogsPage() {
               <tbody>${rows || '<tr><td colspan="4" class="text-muted">No gameplay sessions detected yet.</td></tr>'}</tbody>
             </table>
           </div>
-        </div>
-      </div>
-      <div class="card log-card">
-        <div class="card-header">Launch Log Source</div>
-        <div class="card-body">
-          <pre class="mono bg-dark text-light p-3" style="max-height:520px;overflow:auto;white-space:pre-wrap;">${escapeHtml(launchText || "No EmulationStation launch log content found.")}</pre>
         </div>
       </div>
     `;

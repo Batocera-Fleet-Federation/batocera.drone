@@ -255,6 +255,13 @@ DRONE_LOG_UNAUTHORIZED_REQUESTS = os.environ.get("DRONE_LOG_UNAUTHORIZED_REQUEST
 DRONE_UNAUTH_RATE_LIMIT_ENABLED = os.environ.get("DRONE_UNAUTH_RATE_LIMIT_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
 DRONE_UNAUTH_RATE_LIMIT_REQUESTS = max(1, int(os.environ.get("DRONE_UNAUTH_RATE_LIMIT_REQUESTS", "60")))
 DRONE_UNAUTH_RATE_LIMIT_WINDOW_SECONDS = max(1.0, float(os.environ.get("DRONE_UNAUTH_RATE_LIMIT_WINDOW_SECONDS", "60")))
+
+# Brute-force protection: temporarily block an IP that produces too many 401
+# (unauthorized) responses in a short window. Defaults: 5 failures / 60s -> 5 min block.
+DRONE_AUTH_BLOCK_ENABLED = os.environ.get("DRONE_AUTH_BLOCK_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
+DRONE_AUTH_BLOCK_THRESHOLD = max(1, int(os.environ.get("DRONE_AUTH_BLOCK_THRESHOLD", "5")))
+DRONE_AUTH_BLOCK_WINDOW_SECONDS = max(1.0, float(os.environ.get("DRONE_AUTH_BLOCK_WINDOW_SECONDS", "60")))
+DRONE_AUTH_BLOCK_DURATION_SECONDS = max(1.0, float(os.environ.get("DRONE_AUTH_BLOCK_DURATION_SECONDS", "300")))
 OVERMIND_UPLOAD_TIMEOUT_SECONDS = max(10, int(os.environ.get("OVERMIND_UPLOAD_TIMEOUT_SECONDS", "60")))
 LAUNCHBOX_PLATFORM_ALIASES = {
     "3do": "3DO Interactive Multiplayer",
@@ -1605,6 +1612,76 @@ class BasicAuth:
 
 _UNAUTH_RATE_LIMIT_BUCKETS: "defaultdict[str, deque]" = defaultdict(deque)
 _UNAUTH_RATE_LIMIT_LOCK = Lock()
+
+# Brute-force auth blocker state. ``_AUTH_401_BUCKETS`` holds recent 401 timestamps
+# per client IP (monotonic clock); ``_AUTH_BLOCKED_IPS`` maps a blocked IP to the
+# monotonic time it should be unblocked. Both guarded by ``_AUTH_BLOCK_LOCK``.
+_AUTH_401_BUCKETS: "defaultdict[str, deque]" = defaultdict(deque)
+_AUTH_BLOCKED_IPS: "dict[str, float]" = {}
+_AUTH_BLOCK_LOCK = Lock()
+
+
+def _auth_block_exempt_ip(client_ip: str) -> bool:
+    """Never block loopback so the local UI / on-device tooling can't lock itself out."""
+    try:
+        address = ipaddress.ip_address(str(client_ip or "").split("%", 1)[0])
+    except ValueError:
+        return False
+    return address.is_loopback or address.is_unspecified
+
+
+def record_unauthorized_response(client_ip: str, now: Optional[float] = None) -> bool:
+    """Record a 401 for ``client_ip``; block the IP if it crosses the threshold.
+
+    Returns True when this 401 triggered a new block. Blocking is logged to stdout
+    (visible in the Drone container/service logs). Self-traffic (loopback) is exempt.
+    """
+    if not DRONE_AUTH_BLOCK_ENABLED:
+        return False
+    ip = str(client_ip or "-")
+    if ip == "-" or _auth_block_exempt_ip(ip):
+        return False
+    timestamp = time.monotonic() if now is None else float(now)
+    cutoff = timestamp - DRONE_AUTH_BLOCK_WINDOW_SECONDS
+    with _AUTH_BLOCK_LOCK:
+        if ip in _AUTH_BLOCKED_IPS:
+            return False  # already blocked; nothing more to count
+        bucket = _AUTH_401_BUCKETS[ip]
+        while bucket and bucket[0] <= cutoff:
+            bucket.popleft()
+        bucket.append(timestamp)
+        if len(bucket) < DRONE_AUTH_BLOCK_THRESHOLD:
+            return False
+        _AUTH_BLOCKED_IPS[ip] = timestamp + DRONE_AUTH_BLOCK_DURATION_SECONDS
+        _AUTH_401_BUCKETS.pop(ip, None)
+    print(
+        f"Auth block: ip={ip} blocked after {DRONE_AUTH_BLOCK_THRESHOLD} unauthorized "
+        f"requests within {int(DRONE_AUTH_BLOCK_WINDOW_SECONDS)}s; "
+        f"blocked for {int(DRONE_AUTH_BLOCK_DURATION_SECONDS)}s",
+        file=sys.stdout,
+        flush=True,
+    )
+    return True
+
+
+def is_ip_blocked(client_ip: str, now: Optional[float] = None) -> bool:
+    """Return True if ``client_ip`` is currently blocked, expiring stale blocks lazily."""
+    if not DRONE_AUTH_BLOCK_ENABLED:
+        return False
+    ip = str(client_ip or "-")
+    if ip == "-" or _auth_block_exempt_ip(ip):
+        return False
+    timestamp = time.monotonic() if now is None else float(now)
+    with _AUTH_BLOCK_LOCK:
+        blocked_until = _AUTH_BLOCKED_IPS.get(ip)
+        if blocked_until is None:
+            return False
+        if timestamp >= blocked_until:
+            # 5-minute (configurable) block elapsed: unblock and start fresh.
+            _AUTH_BLOCKED_IPS.pop(ip, None)
+            _AUTH_401_BUCKETS.pop(ip, None)
+            return False
+        return True
 
 
 def _is_external_client_ip(value: str) -> bool:
@@ -3848,6 +3925,29 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         self._send_security_headers()
         self.end_headers()
         self.wfile.write(json_bytes({"error": "unauthorized"}))
+        client_ip = self.client_address[0] if self.client_address else "-"
+        record_unauthorized_response(client_ip)
+
+    def _reject_if_ip_blocked(self) -> bool:
+        """Reject (403) and log every request from an IP blocked for 401 brute force."""
+        client_ip = self.client_address[0] if self.client_address else "-"
+        if not is_ip_blocked(client_ip):
+            return False
+        print(
+            f"Blocked request: ip={client_ip} {self.command} {self.path.split('?', 1)[0]}",
+            file=sys.stdout,
+            flush=True,
+        )
+        try:
+            self.send_response(403)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Retry-After", str(int(DRONE_AUTH_BLOCK_DURATION_SECONDS)))
+            self._send_security_headers()
+            self.end_headers()
+            self.wfile.write(json_bytes({"error": "blocked"}))
+        except Exception:
+            pass
+        return True
 
     def _send_rate_limited(self) -> None:
         self.log_error('429 rate limited "%s"', self.path.split("?", 1)[0])
@@ -10825,60 +10925,72 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                 _maybe_request_asset_push_from_heartbeat(settings, response)
                 _maybe_request_saves_push_from_heartbeat(settings, response)
 
+                # Telemetry steps below are best-effort and independent: a failure in
+                # one (e.g. a flaky speed test) must not abort the heartbeat iteration
+                # before later steps such as the game-log upload get a chance to run.
                 if speed_sample_seconds > 0 and (
                     last_speed_sample_at is None or now - last_speed_sample_at >= speed_sample_seconds
                 ):
                     speed_url = f"{base_url}/api/devices/{device_id}/speed"
-                    speed_sample = _sample_speed()
                     try:
+                        speed_sample = _sample_speed()
                         _overmind_post_json(speed_url, speed_sample, token=token, settings=settings)
+                        _overmind_post_json(
+                            f"{base_url}/api/devices/{device_id}/events",
+                            {
+                                "drone_id": settings.overmind_device_id,
+                                "event_type": OVERMIND_EVENT_TYPES["speed"],
+                                "timestamp": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                                "metadata": {"speed_result": speed_sample},
+                            },
+                            token=token,
+                            settings=settings,
+                        )
                         print(f"Speed sample sent to Overmind for {settings.overmind_device_id}", file=sys.stdout, flush=True)
+                        last_speed_sample_at = now
                     except Exception as error:
-                        print(f"Speed sample failed for {settings.overmind_device_id}: {_format_overmind_error(error)}", file=sys.stderr, flush=True)
-                        raise
-                    _overmind_post_json(
-                        f"{base_url}/api/devices/{device_id}/events",
-                        {
-                            "drone_id": settings.overmind_device_id,
-                            "event_type": OVERMIND_EVENT_TYPES["speed"],
-                            "timestamp": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
-                            "metadata": {"speed_result": speed_sample},
-                        },
-                        token=token,
-                        settings=settings,
-                    )
-                    last_speed_sample_at = now
+                        print(f"Speed sample failed for {settings.overmind_device_id}; continuing: {_format_overmind_error(error)}", file=sys.stderr, flush=True)
 
                 if not _ROM_METADATA_ACTIVE.is_set():
-                    next_fs_snapshot = _filesystem_snapshot(settings)
-                    for event in _filesystem_events(settings, fs_snapshot, next_fs_snapshot):
-                        print(f"Filesystem event: {event.get('metadata', {}).get('action')} {event.get('path')}", file=sys.stdout, flush=True)
-                        _overmind_post_json(f"{base_url}/api/devices/{device_id}/events", event, token=token, settings=settings)
-                    fs_snapshot = next_fs_snapshot
+                    try:
+                        next_fs_snapshot = _filesystem_snapshot(settings)
+                        for event in _filesystem_events(settings, fs_snapshot, next_fs_snapshot):
+                            print(f"Filesystem event: {event.get('metadata', {}).get('action')} {event.get('path')}", file=sys.stdout, flush=True)
+                            _overmind_post_json(f"{base_url}/api/devices/{device_id}/events", event, token=token, settings=settings)
+                        fs_snapshot = next_fs_snapshot
+                    except Exception as error:
+                        print(f"Filesystem event upload failed; continuing: {_format_overmind_error(error)}", file=sys.stderr, flush=True)
 
-                game_logs = _collect_game_logs(settings, repository)
-                game_log_cursors = game_logs.pop("_cursors", {})
                 # Game launches detected in real time by the EmulationStation hook
-                # (drone-game-event.sh) arrive via the spool directory; merge them in.
-                event_sessions, spool_files = _collect_game_event_sessions(settings, repository)
-                if event_sessions:
-                    game_logs.setdefault("sessions", []).extend(event_sessions)
-                if game_logs.get("sessions"):
-                    game_logs.pop("logs", None)
-                    game_logs.pop("collected_at", None)
-                    _overmind_post_json(f"{base_url}/api/devices/{device_id}/game-logs", game_logs, token=token, settings=settings)
-                    _commit_game_log_cursors(settings, game_log_cursors)
-                    _delete_game_event_spool(spool_files)
-                    print(
-                        f"Sent {len(game_logs.get('sessions') or [])} game log session(s) to Overmind",
-                        file=sys.stdout,
-                        flush=True,
-                    )
-                else:
-                    if game_log_cursors:
+                # (drone-game-event.sh) arrive via the spool directory; the launch-log
+                # delta is a secondary source. Best-effort so a transient failure does not
+                # drop the sessions — cursors/spool are only cleared after a successful POST.
+                try:
+                    game_logs = _collect_game_logs(settings, repository)
+                    game_log_cursors = game_logs.pop("_cursors", {})
+                    event_sessions, spool_files = _collect_game_event_sessions(settings, repository)
+                    if event_sessions:
+                        game_logs.setdefault("sessions", []).extend(event_sessions)
+                    if game_logs.get("sessions"):
+                        game_logs.pop("logs", None)
+                        game_logs.pop("collected_at", None)
+                        _overmind_post_json(f"{base_url}/api/devices/{device_id}/game-logs", game_logs, token=token, settings=settings)
                         _commit_game_log_cursors(settings, game_log_cursors)
-                    # Consumed but produced no sessions (e.g. game-end only); clear them.
-                    _delete_game_event_spool(spool_files)
+                        _delete_game_event_spool(spool_files)
+                        print(
+                            f"Sent {len(game_logs.get('sessions') or [])} game log session(s) to Overmind",
+                            file=sys.stdout,
+                            flush=True,
+                        )
+                    else:
+                        if game_log_cursors:
+                            _commit_game_log_cursors(settings, game_log_cursors)
+                        # Consumed but produced no sessions (e.g. game-end only); clear them.
+                        _delete_game_event_spool(spool_files)
+                except Exception as error:
+                    # Leave cursors uncommitted and spool files in place so the next
+                    # heartbeat retries the same sessions instead of losing them.
+                    print(f"Game log upload failed; will retry next heartbeat: {_format_overmind_error(error)}", file=sys.stderr, flush=True)
 
                 persistent_logs = _collect_log_sources(settings, sources=PERSISTENT_OVERMIND_LOG_SOURCES)
                 persistent_log_cursors = persistent_logs.pop("_cursors", {})
