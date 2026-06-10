@@ -1,3 +1,5 @@
+import contextlib
+import io
 import os
 import tempfile
 import unittest
@@ -95,6 +97,26 @@ class SavesSyncTest(unittest.TestCase):
         local = drone_api._local_saves_thumbprint(self.settings)
         drone_api._maybe_request_saves_push_from_heartbeat(self.settings, {"saves_files_thumbprint": local})
         self.assertFalse(drone_api._SAVES_PUSH_REQUESTED.is_set())
+
+    def test_sync_logs_trigger_reason(self):
+        # The trigger log must explain WHY a saves sync fired (or was skipped).
+        self._write_save("snes/A.srm")
+        with mock.patch.object(drone_api, "_overmind_post_json_with_status", lambda *a, **k: (200, {})):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                drone_api._sync_saves_to_overmind(self.settings, "https://o", "tok")
+            first = buf.getvalue()
+            self.assertIn("Saves sync trigger:", first)
+            self.assertIn("will_upload=True", first)
+            self.assertIn("changed_saves=", first)  # first scan has pending saves
+
+            # Second run with nothing changed -> skip, reasons=none.
+            drone_api._SAVES_PUSH_REQUESTED.clear()
+            buf2 = io.StringIO()
+            with contextlib.redirect_stdout(buf2):
+                result = drone_api._sync_saves_to_overmind(self.settings, "https://o", "tok")
+            self.assertEqual(result["status"], "unchanged")
+            self.assertIn("Saves sync trigger: will_upload=False reasons=none", buf2.getvalue())
 
     def test_empty_overmind_thumbprint_does_not_queue_push(self):
         # An Overmind that doesn't echo a saves thumbprint must NOT be treated as drift,

@@ -11355,6 +11355,48 @@ def _sync_rom_metadata_to_overmind_locked(
     )
     payloads = _chunk_rom_metadata_inventory(settings, snapshot, replace_all=True) if full_refresh else _chunk_rom_metadata_delta(settings, snapshot, pending_changes)
     should_upload_inventory = bool(payloads)
+
+    # Explain exactly why this sync did or did not fire. The reasons map 1:1 to the
+    # full_refresh / delta decision inputs above, so "syncing when nothing changed" can be
+    # traced to its trigger (e.g. heartbeat_thumbprint_mismatch sets _ASSET_PUSH_REQUESTED,
+    # or a non-empty pending change queue from the scan).
+    _pending_deleted = pending_changes.get("deleted") if isinstance(pending_changes.get("deleted"), dict) else {}
+    pending_roms = len(pending_changes.get("roms") or [])
+    pending_bios = len(pending_changes.get("bios") or [])
+    pending_artwork = len(pending_changes.get("artwork") or [])
+    pending_deleted = len(_pending_deleted.get("roms") or []) + len(_pending_deleted.get("bios") or []) + len(_pending_deleted.get("artwork") or [])
+    first_upload_after_cache = bool(has_cached_assets and not stats.get("had_successful_upload"))
+    sync_reasons = []
+    if force_upload:
+        sync_reasons.append("force_upload")
+    if push_requested:
+        sync_reasons.append("heartbeat_thumbprint_mismatch")
+    if stats.get("full_refresh_pending"):
+        sync_reasons.append("full_refresh_pending")
+    if first_upload_after_cache:
+        sync_reasons.append("first_upload_after_cache_load")
+    if not full_refresh and should_upload_inventory:
+        if pending_roms:
+            sync_reasons.append(f"delta_roms={pending_roms}")
+        if pending_bios:
+            sync_reasons.append(f"delta_bios={pending_bios}")
+        if pending_artwork:
+            sync_reasons.append(f"delta_artwork={pending_artwork}")
+        if pending_deleted:
+            sync_reasons.append(f"delta_deletes={pending_deleted}")
+    if not should_upload_inventory:
+        sync_reasons.append("no_changes")
+    decision = "full_refresh" if full_refresh else ("delta" if should_upload_inventory else "skip")
+    print(
+        f"Asset metadata sync trigger: decision={decision} will_upload={should_upload_inventory} "
+        f"reasons={','.join(sync_reasons) or 'none'} pending_roms={pending_roms} pending_bios={pending_bios} "
+        f"pending_artwork={pending_artwork} pending_deletes={pending_deleted} chunks={len(payloads)} "
+        f"force_upload={force_upload} push_requested={push_requested} "
+        f"full_refresh_pending={bool(stats.get('full_refresh_pending'))} first_upload={first_upload_after_cache}",
+        file=sys.stdout,
+        flush=True,
+    )
+
     if should_upload_inventory:
         upload_kind = "full refresh" if full_refresh else "delta"
         payload_sizes = [_json_payload_size_bytes(payload) for payload in payloads]
@@ -11552,6 +11594,24 @@ def _sync_saves_to_overmind(settings: Settings, base_url: str, token: str) -> di
     except Exception:
         uploaded_state = {}
     last_uploaded = str(uploaded_state.get("saves_files_thumbprint_uploaded") or "").strip()
+    # Explain why a saves sync did or did not fire (mirrors the asset sync trigger log).
+    saves_reasons = []
+    if has_changes:
+        saves_reasons.append(f"changed_saves={len(pending.get('saves') or [])}")
+        if pending.get("deleted"):
+            saves_reasons.append(f"deleted_saves={len(pending.get('deleted') or [])}")
+    if push_requested:
+        saves_reasons.append("heartbeat_thumbprint_mismatch")
+    if not has_changes and not push_requested and current != last_uploaded:
+        saves_reasons.append("thumbprint_changed_since_upload")
+    will_upload = bool(has_changes or push_requested or current != last_uploaded)
+    print(
+        f"Saves sync trigger: will_upload={will_upload} reasons={','.join(saves_reasons) or 'none'} "
+        f"thumbprint={current[:12]} last_uploaded={last_uploaded[:12]} "
+        f"has_changes={has_changes} push_requested={push_requested}",
+        file=sys.stdout,
+        flush=True,
+    )
     if not has_changes and not push_requested and current == last_uploaded:
         return {"status": "unchanged", "thumbprint": current}
     if has_changes:

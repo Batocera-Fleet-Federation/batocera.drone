@@ -5,6 +5,8 @@ inventory to Overmind while reusing cached fingerprint (no re-fingerprint), so t
 actually clears Overmind's list rather than sending a delta.
 """
 
+import contextlib
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -19,7 +21,10 @@ from app.drone_api import (
     _persist_rom_metadata_cache,
     _poll_rom_metadata_cache,
 )
-from app.rom_metadata_store import _purge_asset_cache_keep_fingerprint
+from app.rom_metadata_store import (
+    _clear_pending_rom_metadata_changes,
+    _purge_asset_cache_keep_fingerprint,
+)
 
 
 class PurgeResyncTest(unittest.TestCase):
@@ -80,6 +85,42 @@ class PurgeResyncTest(unittest.TestCase):
                 f"expected a full inventory upload, got {posted}",
             )
             self.assertTrue(any(p.get("replace_all") for p in posted), f"replace_all not set: {posted}")
+
+    def test_steady_state_logs_skip_trigger_and_uploads_nothing(self):
+        # With nothing changed, the sync must log decision=skip / reasons=no_changes and
+        # post nothing — the observability behind "why did a sync fire?".
+        tmp, settings, repo = self._settings_with_rom()
+        with tmp:
+            drone_api._ASSET_PUSH_REQUESTED.clear()
+            _poll_rom_metadata_cache(settings, repo)
+            with mock.patch("app.drone_api.ROM_METADATA_HASH_ROMS_ENABLED", True):
+                list(_hash_rom_metadata_batches(settings, repo, batch_size=10))
+            cache, _ = _load_rom_metadata_cache(settings)
+            cache["dirty"] = False
+            cache["full_refresh_pending"] = False
+            cache["last_successful_upload_at"] = "2026-06-04T00:00:00+00:00"
+            _persist_rom_metadata_cache(settings, cache)
+            _clear_pending_rom_metadata_changes(settings)
+
+            posted = []
+
+            def fake_post(url, payload, token=None, settings=None, timeout_seconds=10):
+                posted.append(payload.get("update_mode"))
+                return 200, {"rom_count": 0, "bios_count": 0, "artwork_count": 0}
+
+            with mock.patch("app.drone_api._overmind_post_json_with_status", side_effect=fake_post), mock.patch(
+                "app.drone_api._load_overmind_config_for_settings",
+                return_value={"overmind_url": "https://ov.local", "overmind_token": "tok"},
+            ):
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    drone_api._poll_rom_metadata_once(settings, repo)
+                out = buf.getvalue()
+
+            self.assertIn("Asset metadata sync trigger:", out)
+            self.assertIn("decision=skip", out)
+            self.assertIn("reasons=no_changes", out)
+            self.assertEqual(posted, [], f"steady state must not upload anything, posted={posted}")
 
 
 if __name__ == "__main__":
