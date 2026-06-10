@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.83] - 2026-06-10
+
+- Adding logging for when a resync happens to better understand why resync is occuring.
+
 ## [v0.0.82] - 2026-06-10
 
 - Fixing sync loop bug.
