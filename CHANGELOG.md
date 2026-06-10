@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.82] - 2026-06-10
+
+- Fixing sync loop bug.
+
 ## [v0.0.81] - 2026-06-09
 
 - Fixing bug with saves thumbprint which was causing bug with offline/online for drone.  Fix bug with game logs not making it to overmind.
