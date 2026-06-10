@@ -96,6 +96,17 @@ class SavesSyncTest(unittest.TestCase):
         drone_api._maybe_request_saves_push_from_heartbeat(self.settings, {"saves_files_thumbprint": local})
         self.assertFalse(drone_api._SAVES_PUSH_REQUESTED.is_set())
 
+    def test_empty_overmind_thumbprint_does_not_queue_push(self):
+        # An Overmind that doesn't echo a saves thumbprint must NOT be treated as drift,
+        # or the drone re-pushes the full saves set on every heartbeat (the resync loop).
+        self._write_save("snes/A.srm")
+        with mock.patch.object(drone_api, "_overmind_post_json_with_status", lambda *a, **k: (200, {})):
+            drone_api._sync_saves_to_overmind(self.settings, "https://o", "tok")
+        drone_api._SAVES_PUSH_REQUESTED.clear()
+        for response in ({}, {"saves_files_thumbprint": ""}, {"saves_files_thumbprint": None}):
+            drone_api._maybe_request_saves_push_from_heartbeat(self.settings, response)
+            self.assertFalse(drone_api._SAVES_PUSH_REQUESTED.is_set(), f"empty echo should not queue: {response}")
+
 
 if __name__ == "__main__":
     unittest.main()

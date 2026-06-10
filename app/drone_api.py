@@ -71,6 +71,7 @@ try:
     from .route_config import API_PREFIX, api_url
     from .rom_metadata_store import (
         ROM_METADATA_CACHE_VERSION,
+        ArtworkCacheRow,
         search_rom_entries,
         rom_cache_has_entries,
         rom_cache_ready,
@@ -142,6 +143,7 @@ except ImportError:
     from route_config import API_PREFIX, api_url  # type: ignore
     from rom_metadata_store import (  # type: ignore
         ROM_METADATA_CACHE_VERSION,
+        ArtworkCacheRow,
         search_rom_entries,
         rom_cache_has_entries,
         rom_cache_ready,
@@ -8520,9 +8522,11 @@ def _maybe_request_saves_push_from_heartbeat(settings: Settings, response: dict)
         return
     overmind_saves = str(response.get("saves_files_thumbprint") or "").strip()
     local_saves = _local_saves_thumbprint(settings)
-    # Only act once the Drone has actually scanned and stored a saves thumbprint, so a
-    # fresh Drone's first upload still flows through the normal poller path.
-    if not local_saves or overmind_saves == local_saves:
+    # Only act once the Drone has stored a saves thumbprint AND Overmind actually echoed one
+    # that differs. Treating an empty/absent Overmind thumbprint as drift (an Overmind that
+    # doesn't yet report saves) would re-push the full saves set on every heartbeat — mirror
+    # the bios guard (bool(overmind_bios) and ...) in _maybe_request_asset_push_from_heartbeat.
+    if not local_saves or not overmind_saves or overmind_saves == local_saves:
         return
     if _SAVES_PUSH_REQUESTED.is_set():
         return
@@ -8998,8 +9002,11 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
             if not key.split(":", 1)[-1]:
                 continue
             artwork_discovered += 1
-            clean = dict(artwork)
-            clean["asset_type"] = "artwork"
+            # Normalize the scanned artwork into the same canonical payload shape the cache
+            # round-trips (ArtworkCacheRow.to_payload). Without this, the raw scan dict never
+            # equals the cached entry, so every artwork is re-queued as "changed" on every
+            # poll and the whole artwork set is re-uploaded forever (a CPU-pinning resync loop).
+            clean = ArtworkCacheRow.from_payload(key, {**artwork, "asset_type": "artwork"}).to_payload()
             next_artwork_entries[key] = clean
     except Exception as error:
         print(f"Artwork metadata scan warning: error={_format_overmind_error(error)}", file=sys.stderr, flush=True)
