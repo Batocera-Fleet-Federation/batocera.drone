@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.88] - 2026-06-10
+
+- BIOS UI now displays an MD5 column using hashes from the metadata database, with filesystem fallback. Gameplay detection now polls /proc for emulatorlauncher processes instead of scanning logs. Start/stop events persist across heartbeats and retry if spool writes or Overmind delivery fail. Removed the legacy EmulationStation gameplay hook and updated installer/docs. Added focused coverage for MD5 UI and process monitoring.
+
 ## [v0.0.87] - 2026-06-10
 
 - Fixing regression bug with artwork on systems > system > rom.
