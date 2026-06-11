@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.86] - 2026-06-10
+
+- System sync notifications are aggregated per system: “syncing X ROM(s) for Y”. ROM/system sync explicitly queues no artwork actions. Disconnected and pending-approval drones continue lightweight heartbeats for superadmin recovery. Swarm master systems/drones now use checkbox dropdowns. Drone BIOS paging now matches numbered systems paging. Kiosk actions now update es_settings.cfg UIMode, stop EmulationStation, save overlay, and restart it.
+
 ## [v0.0.85] - 2026-06-10
 
 - Adding UI to show new logs.
