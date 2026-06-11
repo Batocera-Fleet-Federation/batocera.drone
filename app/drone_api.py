@@ -1878,55 +1878,32 @@ def _parse_es_theme_name(es_settings_path: Path) -> Optional[str]:
 
 
 def _set_kiosk_mode(settings: Settings, enabled: bool) -> Path:
-    path = settings.batocera_conf_file
-    key = "kiosk.enabled"
-    value = "1" if enabled else "0"
-    lines = path.read_text(encoding="utf-8", errors="ignore").splitlines() if path.exists() else []
-    updated_lines = []
-    replaced = False
-    pattern = re.compile(rf"^(\s*{re.escape(key)}\s*=\s*).*$")
-    for line in lines:
-        if pattern.match(line):
-            if not replaced:
-                updated_lines.append(f"{key}={value}")
-                replaced = True
-            continue
-        updated_lines.append(line)
-    if not replaced:
-        if updated_lines and updated_lines[-1].strip():
-            updated_lines.append("")
-        updated_lines.append(f"{key}={value}")
-    updated = "\n".join(updated_lines) + "\n"
+    path = settings.es_settings_file
+    target = "Kiosk" if enabled else "Full"
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     try:
-        temp_path.write_text(updated, encoding="utf-8")
-        temp_path.replace(path)
-    except PermissionError:
-        try:
-            temp_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        path.write_text(updated, encoding="utf-8")
+        tree = ET.parse(path) if path.exists() else ET.ElementTree(ET.Element("map"))
+    except ET.ParseError:
+        tree = ET.ElementTree(ET.Element("map"))
+    root = tree.getroot()
+    node = root.find(".//string[@name='UIMode']")
+    if node is None:
+        node = ET.SubElement(root, "string")
+        node.set("name", "UIMode")
+    node.set("value", target)
+    tree.write(path, encoding="utf-8", xml_declaration=True)
     return path
 
 
 def _get_kiosk_mode(settings: Settings) -> Optional[bool]:
-    path = settings.batocera_conf_file
     try:
-        text = path.read_text(encoding="utf-8", errors="ignore")
+        root = ET.parse(settings.es_settings_file).getroot()
     except Exception:
         return None
-    pattern = re.compile(r"^\s*kiosk\.enabled\s*=\s*(.*?)\s*$", flags=re.IGNORECASE | re.MULTILINE)
-    match = pattern.search(text)
-    if not match:
+    node = root.find(".//string[@name='UIMode']")
+    if node is None:
         return None
-    value = match.group(1).strip().strip('"').strip("'").lower()
-    if value in {"1", "true", "yes", "on", "enabled"}:
-        return True
-    if value in {"0", "false", "no", "off", "disabled"}:
-        return False
-    return None
+    return str(node.get("value") or "").strip().lower() == "kiosk"
 
 
 def _request_service_control(command: str) -> bool:
@@ -1963,6 +1940,28 @@ def _restart_emulationstation() -> bool:
         return False
     subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return True
+
+
+def _apply_kiosk_mode(settings: Settings, enabled: bool) -> tuple[Path, bool]:
+    if settings.use_fake_data:
+        return _set_kiosk_mode(settings, enabled), False
+    init_script = Path("/etc/init.d/S31emulationstation")
+    if not init_script.exists():
+        path = _set_kiosk_mode(settings, enabled)
+        return path, _restart_emulationstation()
+    subprocess.run([str(init_script), "stop"], check=True)
+    time.sleep(2)
+    path = _set_kiosk_mode(settings, enabled)
+    overlay_tool = shutil.which("batocera-save-overlay")
+    if overlay_tool:
+        subprocess.run([overlay_tool], check=True)
+    subprocess.Popen(
+        [str(init_script), "start"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    return path, True
 
 
 def _resolve_es_settings_file(settings: Settings) -> Optional[Path]:
@@ -6359,11 +6358,10 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 self._save_overmind_config(config)
                 self._send_json(502, self._overmind_public_payload(config))
                 return
-        config.pop("overmind_token", None)
         config["integration_enabled"] = False
         config["integration_state"] = "disconnected"
         config["swarm_connection_status"] = "disconnected"
-        config["notes"] = "Drone disconnected from its Overmind swarm."
+        config["notes"] = "Drone disconnected from its Overmind swarm. Its retained recovery credential is used only for lightweight heartbeats."
         self._save_overmind_config(config)
         self._save_json_state(self._overmind_swarm_path(), [])
         self._send_json(200, self._overmind_public_payload(config))
@@ -10823,10 +10821,9 @@ def _execute_overmind_action(
     if action_name in {"enable_kiosk", "disable_kiosk"}:
         enabled = action_name == "enable_kiosk"
         try:
-            settings_path = _set_kiosk_mode(settings, enabled)
-        except (OSError, ET.ParseError, ValueError) as error:
+            settings_path, restarted = _apply_kiosk_mode(settings, enabled)
+        except (OSError, subprocess.SubprocessError, ET.ParseError, ValueError) as error:
             return "failed", f"Unable to update Kiosk mode settings: {error}", None
-        restarted = False if settings.use_fake_data else _restart_emulationstation()
         state = "enabled" if enabled else "disabled"
         suffix = " EmulationStation restart issued." if restarted else " Applies on the next EmulationStation restart."
         return "completed", f"Kiosk mode {state}.{suffix}", {
@@ -10866,13 +10863,18 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                 config = _load_overmind_config_for_settings(settings)
                 base_url = str(config.get("overmind_url") or "").strip().rstrip("/")
                 token = str(config.get("overmind_token") or "").strip()
+                integration_enabled = bool(config.get("integration_enabled"))
                 if not base_url:
                     time.sleep(poll_seconds)
                     continue
                 if not token:
                     auth_token = str(config.get("overmind_auth_token") or "").strip()
-                    if auth_token:
+                    if auth_token and integration_enabled:
                         token = _register_or_claim_overmind_token(settings, repository, config, base_url) or ""
+                        if not token:
+                            # Pending onboarding still emits a lightweight heartbeat. Overmind
+                            # records it as an installed, recoverable Drone until approval.
+                            token = auth_token
                     if not token:
                         time.sleep(poll_seconds)
                         continue
@@ -10924,7 +10926,7 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                             timeout_seconds=OVERMIND_HEARTBEAT_TIMEOUT_SECONDS,
                         )
                     except HTTPError as error:
-                        if error.code == 401:
+                        if error.code == 401 and integration_enabled:
                             replacement_token = _reclaim_overmind_token_after_unauthorized(settings, repository, config, base_url, error)
                             if replacement_token:
                                 token = replacement_token
@@ -10948,6 +10950,9 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                 _overmind_log(
                     f"Heartbeat send succeeded: endpoint={heartbeat_url} status={status_code} duration_ms={int((time.monotonic() - heartbeat_started) * 1000)}"
                 )
+                if not integration_enabled:
+                    time.sleep(poll_seconds)
+                    continue
                 swarm = response.get("swarm") if isinstance(response.get("swarm"), list) else []
                 _save_state_payload(_state_database_path(settings.userdata_root), "overmind_swarm.json", swarm)
                 _overmind_swarm_path_for_settings(settings).unlink(missing_ok=True)

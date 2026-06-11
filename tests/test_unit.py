@@ -1612,15 +1612,15 @@ class SettingsTests(unittest.TestCase):
     def test_kiosk_actions_update_es_settings_and_restart_emulationstation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            batocera_conf = root / "system" / "batocera.conf"
+            es_settings = root / "system" / "configs" / "emulationstation" / "es_settings.cfg"
             control_dir = root / "system" / "drone-app" / "control"
-            batocera_conf.parent.mkdir(parents=True)
-            batocera_conf.write_text("global.retroachievements=1\nkiosk.enabled=0\n", encoding="utf-8")
+            es_settings.parent.mkdir(parents=True)
+            es_settings.write_text('<?xml version="1.0"?><map><string name="ThemeSet" value="carbon"/></map>', encoding="utf-8")
             with mock.patch.dict(
                 "os.environ",
                 {
                     "USERDATA_ROOT": str(root),
-                    "BATOCERA_CONF_FILE": str(batocera_conf),
+                    "ES_SETTINGS_FILE": str(es_settings),
                     "DRONE_SERVICE_CONTROL_DIR": str(control_dir),
                 },
                 clear=True,
@@ -1632,7 +1632,7 @@ class SettingsTests(unittest.TestCase):
                     enabled_status, enabled_message, enabled_result = _execute_overmind_action(
                         settings, repo, {"action": "enable_kiosk"}
                     )
-                    self.assertIn("kiosk.enabled=1", batocera_conf.read_text(encoding="utf-8"))
+                    self.assertIn('name="UIMode" value="Kiosk"', es_settings.read_text(encoding="utf-8"))
                     disabled_status, disabled_message, disabled_result = _execute_overmind_action(
                         settings, repo, {"action": "disable_kiosk"}
                     )
@@ -1643,8 +1643,8 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(disabled_status, "completed")
             self.assertIn("Kiosk mode disabled", disabled_message)
             self.assertFalse(disabled_result["enabled"])
-            self.assertIn("global.retroachievements=1", batocera_conf.read_text(encoding="utf-8"))
-            self.assertIn("kiosk.enabled=0", batocera_conf.read_text(encoding="utf-8"))
+            self.assertIn('name="ThemeSet" value="carbon"', es_settings.read_text(encoding="utf-8"))
+            self.assertIn('name="UIMode" value="Full"', es_settings.read_text(encoding="utf-8"))
             self.assertTrue((control_dir / "restart-emulationstation.request").exists())
             popen.assert_not_called()
 
@@ -2106,11 +2106,11 @@ class SettingsTests(unittest.TestCase):
     def test_system_info_includes_performance_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
-            batocera_conf = root / "system" / "batocera.conf"
-            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root), "BATOCERA_CONF_FILE": str(batocera_conf)}, clear=True):
+            es_settings = root / "system" / "configs" / "emulationstation" / "es_settings.cfg"
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root), "ES_SETTINGS_FILE": str(es_settings)}, clear=True):
                 settings = Settings.from_env()
-            settings.batocera_conf_file.parent.mkdir(parents=True, exist_ok=True)
-            settings.batocera_conf_file.write_text("kiosk.enabled=1\n", encoding="utf-8")
+            settings.es_settings_file.parent.mkdir(parents=True, exist_ok=True)
+            settings.es_settings_file.write_text('<map><string name="UIMode" value="Kiosk"/></map>', encoding="utf-8")
 
             info = _collect_system_info_payload(settings)
 
