@@ -22,6 +22,7 @@ except ImportError:
 LogCollector = Callable[[Any], dict]
 ErrorFormatter = Callable[[BaseException], str]
 _STATE_SCHEMA_VERSION = 2
+GAMEPLAY_HISTORY_NAMESPACE = "gameplay_history"
 
 
 def _state_path(settings: Any, filename: str) -> Path:
@@ -287,6 +288,45 @@ def _event_duration_seconds(start_iso: str, end_iso: str) -> Optional[int]:
     return delta if delta >= 0 else None
 
 
+def _game_session_key(session: dict) -> tuple:
+    return (
+        str(session.get("played_at") or session.get("started_at") or ""),
+        str(session.get("system_name") or session.get("system") or "").strip().lower(),
+        str(session.get("game_name") or session.get("rom_name") or session.get("rom_path") or "").strip().lower(),
+        str(session.get("rom_path") or "").strip().lower(),
+    )
+
+
+def load_gameplay_history(settings: Any) -> List[dict]:
+    """Load the Drone's durable, deduplicated completed gameplay history."""
+    history = load_payload(database_path(settings.userdata_root), GAMEPLAY_HISTORY_NAMESPACE, [])
+    if not isinstance(history, list):
+        return []
+    return [row for row in history if isinstance(row, dict)]
+
+
+def _store_gameplay_history(settings: Any, sessions: List[dict]) -> None:
+    history = load_gameplay_history(settings)
+    by_key = {_game_session_key(row): index for index, row in enumerate(history)}
+    for session in sessions:
+        key = _game_session_key(session)
+        existing_index = by_key.get(key)
+        if existing_index is None:
+            by_key[key] = len(history)
+            history.append(dict(session))
+        else:
+            history[existing_index] = {**history[existing_index], **session}
+    save_payload(database_path(settings.userdata_root), GAMEPLAY_HISTORY_NAMESPACE, history)
+
+
+def pending_game_event_count(settings: Any) -> int:
+    spool = _game_event_spool_dir(settings)
+    try:
+        return sum(1 for path in spool.iterdir() if path.is_file() and path.suffix == ".json")
+    except OSError:
+        return 0
+
+
 def collect_game_event_sessions(
     settings: Any,
     repository: Optional[Any] = None,
@@ -367,6 +407,8 @@ def collect_game_event_sessions(
                 session["rom_fingerprint_error"] = formatter(error)
         active_sessions[resolved_rom] = session
     save_payload(database_path(settings.userdata_root), "active_game_process_sessions", active_sessions)
+    if sessions:
+        _store_gameplay_history(settings, sessions)
     return sessions, processed
 
 

@@ -60,6 +60,8 @@ try:
     from .overmind_game_logs import collect_game_event_sessions as _collect_game_event_sessions
     from .overmind_game_logs import delete_game_event_spool as _delete_game_event_spool
     from .overmind_game_logs import GameProcessMonitor
+    from .overmind_game_logs import load_gameplay_history as _load_gameplay_history
+    from .overmind_game_logs import pending_game_event_count as _pending_game_event_count
     from .overmind_reporting import (
         collect_emulator_configs as _collect_emulator_configs,
         collect_log_sources as _collect_log_sources,
@@ -133,6 +135,8 @@ except ImportError:
     from overmind_game_logs import collect_game_event_sessions as _collect_game_event_sessions  # type: ignore
     from overmind_game_logs import delete_game_event_spool as _delete_game_event_spool  # type: ignore
     from overmind_game_logs import GameProcessMonitor  # type: ignore
+    from overmind_game_logs import load_gameplay_history as _load_gameplay_history  # type: ignore
+    from overmind_game_logs import pending_game_event_count as _pending_game_event_count  # type: ignore
     from overmind_reporting import (  # type: ignore
         collect_emulator_configs as _collect_emulator_configs,
         collect_log_sources as _collect_log_sources,
@@ -5923,8 +5927,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
 
     def _handle_admin_gameplay_logs(self) -> None:
         try:
-            event_sessions, spool_files = _collect_game_event_sessions(self.settings, self.repository)
-            sessions = list(event_sessions or [])
+            sessions = _load_gameplay_history(self.settings)
             sessions.sort(key=lambda row: str(row.get("played_at") or ""), reverse=True)
             self._send_json(
                 200,
@@ -5933,7 +5936,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                     "collected_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
                     "sessions": sessions,
                     "logs": [],
-                    "pending_spool_events": len(spool_files or []),
+                    "pending_spool_events": _pending_game_event_count(self.settings),
                 },
             )
         except Exception as error:
@@ -10554,7 +10557,7 @@ def _execute_overmind_action(
         }
 
     if action_name == "collect_game_logs":
-        sessions, _ = _collect_game_event_sessions(settings, repository)
+        sessions = _load_gameplay_history(settings)
         result = {"type": "game_logs", "sessions": sessions}
         return "completed", f"Collected {_summarize_overmind_result(result)}.", result
 

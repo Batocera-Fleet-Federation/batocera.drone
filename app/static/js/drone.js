@@ -3561,7 +3561,7 @@ async function renderGameplayLogsPage() {
         </div>
         <div class="card-body">
           <div class="table-responsive">
-            <table class="table table-sm align-middle">
+            <table class="table table-sm table-hover align-middle themed-table">
               <thead><tr><th>Played</th><th>System</th><th>Game</th><th>Duration</th></tr></thead>
               <tbody>${rows || '<tr><td colspan="4" class="text-muted">No gameplay sessions detected yet.</td></tr>'}</tbody>
             </table>

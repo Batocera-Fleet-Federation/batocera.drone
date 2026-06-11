@@ -529,7 +529,7 @@ class SettingsTests(unittest.TestCase):
             self.assertIn("retroarch/retroarchcustom.cfg", rel_paths)
 
     def test_game_event_spool_produces_session_with_duration(self) -> None:
-        from app.overmind_game_logs import collect_game_event_sessions, delete_game_event_spool
+        from app.overmind_game_logs import collect_game_event_sessions, delete_game_event_spool, load_gameplay_history
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
@@ -569,6 +569,7 @@ class SettingsTests(unittest.TestCase):
             delete_game_event_spool(processed)
             self.assertEqual(list(spool.iterdir()), [])
             self.assertEqual(collect_game_event_sessions(settings, None), ([], []))
+            self.assertEqual(load_gameplay_history(settings), [session])
 
     def test_game_process_monitor_emits_start_and_stop_events(self) -> None:
         from app.overmind_game_logs import GameProcessMonitor, collect_game_event_sessions, find_running_emulatorlauncher
