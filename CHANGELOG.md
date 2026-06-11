@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.90] - 2026-06-11
+
+- Fixing kiosk error due to permissions.
+
 ## [v0.0.89] - 2026-06-11
 
 - Drone now stores completed gameplay sessions permanently in its SQLite database, independently from pending upload events. Drone gameplay page reads stored history instead of consuming the upload queue. Overmind gameplay API now reads the complete PostgreSQL gameplay history instead of the bounded device snapshot. Added Gameplay History to Log Sources. Selecting Gameplay History replaces the text viewer with the themed gameplay table. Text-only line controls are hidden while viewing gameplay history. Duplicate retries remain deduplicated while enriching duration/fingerprint data.
