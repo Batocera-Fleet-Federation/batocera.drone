@@ -1915,7 +1915,7 @@ def _get_kiosk_mode(settings: Settings) -> Optional[bool]:
 
 
 def _request_service_control(command: str) -> bool:
-    if command not in {"restart-emulationstation"}:
+    if command not in {"restart-emulationstation", "set-kiosk-on", "set-kiosk-off"}:
         return False
     control_dir = Path(os.environ.get("DRONE_SERVICE_CONTROL_DIR", "/userdata/system/drone-app/control"))
     request_path = control_dir / f"{command}.request"
@@ -1928,6 +1928,36 @@ def _request_service_control(command: str) -> bool:
         return True
     except OSError:
         return False
+
+
+def _request_kiosk_service_control(enabled: bool) -> bool:
+    command = "set-kiosk-on" if enabled else "set-kiosk-off"
+    control_dir = Path(os.environ.get("DRONE_SERVICE_CONTROL_DIR", "/userdata/system/drone-app/control"))
+    request_path = control_dir / f"{command}.request"
+    result_path = control_dir / f"{command}.result"
+    try:
+        result_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+    if not _request_service_control(command):
+        return False
+    deadline = time.monotonic() + max(3.0, float(os.environ.get("DRONE_SERVICE_CONTROL_TIMEOUT_SECONDS", "60")))
+    while time.monotonic() < deadline:
+        try:
+            if result_path.exists():
+                result = result_path.read_text(encoding="utf-8", errors="ignore").strip()
+                result_path.unlink(missing_ok=True)
+                if result == "ok":
+                    return True
+                raise OSError(result or "Privileged Kiosk mode operation failed")
+        except OSError:
+            raise
+        time.sleep(0.25)
+    try:
+        request_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+    raise OSError("Timed out waiting for the privileged Kiosk mode service operation")
 
 
 def _emulationstation_restart_command() -> Optional[List[str]]:
@@ -1953,23 +1983,28 @@ def _restart_emulationstation() -> bool:
 def _apply_kiosk_mode(settings: Settings, enabled: bool) -> tuple[Path, bool]:
     if settings.use_fake_data:
         return _set_kiosk_mode(settings, enabled), False
-    init_script = Path("/etc/init.d/S31emulationstation")
-    if not init_script.exists():
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        init_script = Path("/etc/init.d/S31emulationstation")
+        if init_script.exists():
+            subprocess.run([str(init_script), "stop"], check=True)
+            time.sleep(2)
         path = _set_kiosk_mode(settings, enabled)
+        overlay_tool = shutil.which("batocera-save-overlay")
+        if overlay_tool:
+            subprocess.run([overlay_tool], check=True)
+        if init_script.exists():
+            subprocess.Popen(
+                [str(init_script), "start"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            return path, True
         return path, _restart_emulationstation()
-    subprocess.run([str(init_script), "stop"], check=True)
-    time.sleep(2)
+    if _request_kiosk_service_control(enabled):
+        return settings.es_settings_file, True
     path = _set_kiosk_mode(settings, enabled)
-    overlay_tool = shutil.which("batocera-save-overlay")
-    if overlay_tool:
-        subprocess.run([overlay_tool], check=True)
-    subprocess.Popen(
-        [str(init_script), "start"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-    return path, True
+    return path, _restart_emulationstation()
 
 
 def _resolve_es_settings_file(settings: Settings) -> Optional[Path]:
@@ -8223,19 +8258,9 @@ def _collect_performance_metrics(root: Path) -> dict:
                 "contention_percent": round(max(0.0, min(100.0, weighted_delta / (elapsed * 1000) * 100)), 2),
             }
 
-    disk = {}
-    try:
-        usage = shutil.disk_usage(root)
-        disk = {
-            "path": str(root),
-            "total_bytes": usage.total,
-            "used_bytes": usage.used,
-            "free_bytes": usage.free,
-            "used_percent": round((usage.used / usage.total) * 100, 2) if usage.total else None,
-            **disk_rates,
-        }
-    except Exception:
-        disk = dict(disk_rates)
+    disks = _collect_mounted_disk_metrics(root)
+    disk = dict(disks[0]) if disks else {}
+    disk.update(disk_rates)
 
     sample = {
         "collected_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
@@ -8251,6 +8276,7 @@ def _collect_performance_metrics(root: Path) -> dict:
         "memory": memory,
         "process": process_memory,
         "disk": disk,
+        "disks": disks,
         "diskstats": diskstats,
         "monotonic": now,
     }
@@ -8262,7 +8288,75 @@ def _collect_performance_metrics(root: Path) -> dict:
         "memory": memory,
         "process": process_memory,
         "disk": disk,
+        "disks": disks,
     }
+
+
+def _decode_mountinfo_path(value: str) -> str:
+    return re.sub(r"\\([0-7]{3})", lambda match: chr(int(match.group(1), 8)), value)
+
+
+def _collect_mounted_disk_metrics(root: Path, mountinfo_path: Path = Path("/proc/self/mountinfo")) -> List[dict]:
+    """Collect capacity metrics for the main data filesystem and mounted physical drives."""
+    root = root.resolve()
+    try:
+        main_device = root.stat().st_dev
+    except OSError:
+        main_device = None
+
+    candidates = []
+    try:
+        for line in mountinfo_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            before, after = line.split(" - ", 1)
+            fields = before.split()
+            trailing = after.split()
+            if len(fields) < 5 or len(trailing) < 2:
+                continue
+            mount_path = Path(_decode_mountinfo_path(fields[4]))
+            source = _decode_mountinfo_path(trailing[1])
+            if not source.startswith("/dev/"):
+                continue
+            candidates.append((mount_path, trailing[0], source))
+    except (OSError, ValueError):
+        candidates = []
+
+    # Always include the configured userdata filesystem even when procfs is unavailable
+    # or Batocera exposes it through a non-/dev mount source.
+    candidates.insert(0, (root, "", ""))
+    rows = []
+    by_device = {}
+    for mount_path, filesystem, source in candidates:
+        try:
+            stat = mount_path.stat()
+            usage = shutil.disk_usage(mount_path)
+        except OSError:
+            continue
+        device_id = stat.st_dev
+        existing_index = by_device.get(device_id)
+        if existing_index is not None:
+            existing = rows[existing_index]
+            if source and not existing.get("source"):
+                existing["source"] = source
+            if filesystem and not existing.get("filesystem"):
+                existing["filesystem"] = filesystem
+            continue
+        by_device[device_id] = len(rows)
+        is_main = main_device is not None and device_id == main_device
+        label = "Main drive" if is_main else (mount_path.name or source or str(mount_path))
+        rows.append({
+            "label": label,
+            "path": str(mount_path),
+            "source": source or None,
+            "filesystem": filesystem or None,
+            "is_main": is_main,
+            "is_external": not is_main,
+            "total_bytes": usage.total,
+            "used_bytes": usage.used,
+            "free_bytes": usage.free,
+            "used_percent": round((usage.used / usage.total) * 100, 2) if usage.total else None,
+        })
+    rows.sort(key=lambda row: (not row["is_main"], str(row["label"]).lower(), str(row["path"]).lower()))
+    return rows
 
 
 def _collect_system_info_payload(settings: Settings) -> dict:

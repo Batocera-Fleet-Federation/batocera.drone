@@ -117,6 +117,17 @@ ensure_permissions() {
   chmod o+rx /userdata/system 2>/dev/null || true
   chmod o+rx /userdata/system/configs 2>/dev/null || true
 
+  # Drone manages EmulationStation settings for remote Kiosk mode actions.
+  # Keep root ownership while allowing the dedicated Drone group to update the
+  # existing file or create it when Batocera has not generated it yet.
+  mkdir -p /userdata/system/configs/emulationstation 2>/dev/null || true
+  chown root:"$DRONE_GROUP" /userdata/system/configs/emulationstation 2>/dev/null || true
+  chmod 2775 /userdata/system/configs/emulationstation 2>/dev/null || true
+  if [ -f /userdata/system/configs/emulationstation/es_settings.cfg ]; then
+    chown root:"$DRONE_GROUP" /userdata/system/configs/emulationstation/es_settings.cfg 2>/dev/null || true
+    chmod 664 /userdata/system/configs/emulationstation/es_settings.cfg 2>/dev/null || true
+  fi
+
   if [ -d /userdata/system/configs/PCSX2 ]; then
     chmod -R o+rX /userdata/system/configs/PCSX2 2>/dev/null || true
   fi
@@ -343,6 +354,16 @@ restart_emulationstation_as_root() {
   echo "[drone-service] Unable to restart EmulationStation: restart command was not found."
 }
 
+set_kiosk_mode_as_root() {
+  mode="$1"
+  helper="$WORK_DIR/app/toggle_kiosk.py"
+  if [ ! -f "$helper" ]; then
+    echo "[drone-service] Unable to set Kiosk mode: helper was not found."
+    return 1
+  fi
+  python3 "$helper" "$mode"
+}
+
 service_control_worker() {
   while true; do
     if [ -f "$CONTROL_DIR/restart-emulationstation.request" ]; then
@@ -350,6 +371,21 @@ service_control_worker() {
       echo "[drone-service] EmulationStation restart requested by Drone app."
       restart_emulationstation_as_root
     fi
+    for mode in on off; do
+      request="$CONTROL_DIR/set-kiosk-${mode}.request"
+      result="$CONTROL_DIR/set-kiosk-${mode}.result"
+      if [ -f "$request" ]; then
+        rm -f "$request" "$result"
+        echo "[drone-service] Kiosk mode ${mode} requested by Drone app."
+        if set_kiosk_mode_as_root "$mode"; then
+          printf '%s\n' "ok" > "$result"
+        else
+          printf '%s\n' "Privileged Kiosk mode ${mode} operation failed" > "$result"
+        fi
+        chown root:"$DRONE_GROUP" "$result" 2>/dev/null || true
+        chmod 664 "$result" 2>/dev/null || true
+      fi
+    done
     sleep 1
   done
 }

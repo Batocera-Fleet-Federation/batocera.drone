@@ -3940,6 +3940,7 @@ async function renderAdminSystemInfoPage() {
     const cpu = metrics.cpu || {};
     const memory = metrics.memory || {};
     const disk = metrics.disk || {};
+    const disks = Array.isArray(metrics.disks) && metrics.disks.length ? metrics.disks : [disk];
     const process = metrics.process || {};
     const speed = payload.speed_sample || {};
     const detail = (label, value) => `<div class="asset-detail"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value || "n/a")}</strong></div>`;
@@ -3952,6 +3953,16 @@ async function renderAdminSystemInfoPage() {
     const renderedRows = entries.length
       ? entries.slice(0, 18).map((entry) => detail(entry.key || "", entry.value || "")).join("")
       : `<div class="text-muted">No system information available.</div>`;
+    const renderedDisks = disks.map((drive, index) => {
+      const label = drive.label || (drive.is_main ? "Main drive" : `Drive ${index + 1}`);
+      const tone = numericPct(drive.used_percent) >= 90 ? "danger" : (drive.is_external ? "info" : "primary");
+      return health(label, drive.used_percent, `${formatBytes(drive.used_bytes)} / ${formatBytes(drive.total_bytes)} (${pct(drive.used_percent)})`, tone);
+    }).join("");
+    const diskDetails = disks.map((drive, index) => {
+      const label = drive.label || (drive.is_main ? "Main drive" : `Drive ${index + 1}`);
+      const location = [drive.path, drive.source, drive.filesystem].filter(Boolean).join(" · ");
+      return detail(label, location || "n/a");
+    }).join("");
 
     content.innerHTML = `
       <div class="mb-3 d-flex flex-wrap justify-content-between gap-2">
@@ -3966,7 +3977,7 @@ async function renderAdminSystemInfoPage() {
               ${health("Host CPU", cpu.host_percent, pct(cpu.host_percent), numericPct(cpu.host_percent) >= 85 ? "danger" : "info")}
               ${health("Drone CPU", cpu.process_percent, pct(cpu.process_percent), numericPct(cpu.process_percent) >= 85 ? "danger" : "success")}
               ${health("Memory", memory.used_percent, `${formatBytes(memory.used_bytes)} / ${formatBytes(memory.total_bytes)} (${pct(memory.used_percent)})`, numericPct(memory.used_percent) >= 90 ? "danger" : "warning")}
-              ${health("Disk", disk.used_percent, `${formatBytes(disk.used_bytes)} / ${formatBytes(disk.total_bytes)} (${pct(disk.used_percent)})`, numericPct(disk.used_percent) >= 90 ? "danger" : "primary")}
+              ${renderedDisks}
             </div>
             <div class="col-12 col-lg-5">
               <div class="asset-detail-panel h-100">
@@ -3974,6 +3985,8 @@ async function renderAdminSystemInfoPage() {
                 ${detail("Load average", Array.isArray(cpu.load_average) ? cpu.load_average.map((v) => Number(v).toFixed(2)).join(" / ") : "n/a")}
                 ${detail("Process RSS", formatBytes(process.rss_bytes))}
                 ${detail("Disk I/O", `${disk.read_bytes_per_second ? `${formatBytes(disk.read_bytes_per_second)}/s read` : "n/a"} · ${disk.write_bytes_per_second ? `${formatBytes(disk.write_bytes_per_second)}/s write` : "n/a"}`)}
+                <h6 class="mt-3">Mounted Drives</h6>
+                ${diskDetails}
                 ${detail("Internet", `${speed.download_mbps ?? "n/a"} Mbps down · ${speed.upload_mbps ?? "n/a"} Mbps up`)}
                 ${detail("Latency", speed.latency_ms !== undefined ? `${speed.latency_ms} ms` : "n/a")}
                 ${detail("Speed source", speed.source || "n/a")}

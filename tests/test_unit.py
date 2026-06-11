@@ -80,6 +80,7 @@ from app.drone_api import (
     _collect_log_sources,
     _commit_log_cursors,
     _collect_game_logs,
+    _collect_mounted_disk_metrics,
     _collect_system_info_payload,
     _is_external_client_ip,
     _unauthenticated_request_allowed,
@@ -1687,14 +1688,15 @@ class SettingsTests(unittest.TestCase):
                 settings = Settings.from_env()
                 repo = RomRepository(root / "roms", root / "bios")
 
-                with mock.patch("app.drone_api.subprocess.Popen") as popen:
-                    enabled_status, enabled_message, enabled_result = _execute_overmind_action(
-                        settings, repo, {"action": "enable_kiosk"}
-                    )
-                    self.assertIn('name="UIMode" value="Kiosk"', es_settings.read_text(encoding="utf-8"))
-                    disabled_status, disabled_message, disabled_result = _execute_overmind_action(
-                        settings, repo, {"action": "disable_kiosk"}
-                    )
+                with mock.patch("app.drone_api.os.geteuid", return_value=999):
+                    with mock.patch("app.drone_api._request_kiosk_service_control", return_value=True) as kiosk_control:
+                        with mock.patch("app.drone_api.subprocess.Popen") as popen:
+                            enabled_status, enabled_message, enabled_result = _execute_overmind_action(
+                                settings, repo, {"action": "enable_kiosk"}
+                            )
+                            disabled_status, disabled_message, disabled_result = _execute_overmind_action(
+                                settings, repo, {"action": "disable_kiosk"}
+                            )
 
             self.assertEqual(enabled_status, "completed")
             self.assertIn("Kiosk mode enabled", enabled_message)
@@ -1703,9 +1705,25 @@ class SettingsTests(unittest.TestCase):
             self.assertIn("Kiosk mode disabled", disabled_message)
             self.assertFalse(disabled_result["enabled"])
             self.assertIn('name="ThemeSet" value="carbon"', es_settings.read_text(encoding="utf-8"))
-            self.assertIn('name="UIMode" value="Full"', es_settings.read_text(encoding="utf-8"))
-            self.assertTrue((control_dir / "restart-emulationstation.request").exists())
+            kiosk_control.assert_has_calls([mock.call(True), mock.call(False)])
             popen.assert_not_called()
+
+    def test_privileged_kiosk_helper_updates_xml_and_saves_overlay(self) -> None:
+        from app import toggle_kiosk
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "es_settings.cfg"
+            config.write_text('<?xml version="1.0"?><map><string name="ThemeSet" value="carbon"/></map>', encoding="utf-8")
+            with mock.patch.object(toggle_kiosk, "CONFIG", config):
+                with mock.patch.object(toggle_kiosk, "EMULATIONSTATION_SERVICE", Path(tmp) / "missing-service"):
+                    with mock.patch("app.toggle_kiosk.subprocess.run") as run:
+                        toggle_kiosk.set_kiosk_mode(True)
+                        self.assertIn('name="UIMode" value="Kiosk"', config.read_text(encoding="utf-8"))
+                        toggle_kiosk.set_kiosk_mode(False)
+
+            self.assertIn('name="ThemeSet" value="carbon"', config.read_text(encoding="utf-8"))
+            self.assertIn('name="UIMode" value="Full"', config.read_text(encoding="utf-8"))
+            self.assertEqual(run.call_count, 2)
 
     def test_refresh_emulator_list_restarts_emulationstation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2008,12 +2026,19 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("request_host_reboot()", installer)
         self.assertIn("service_control_worker()", installer)
         self.assertIn("/etc/init.d/S31emulationstation restart", installer)
+        self.assertIn("set_kiosk_mode_as_root()", installer)
+        self.assertIn('python3 "$helper" "$mode"', installer)
+        self.assertIn("set-kiosk-${mode}.request", installer)
         self.assertIn("DRONE_SERVICE_CONTROL_DIR", drone_source)
         self.assertIn("ensure_dns_fallback()", installer)
         self.assertIn("nameserver 1.1.1.1", installer)
         self.assertIn("/userdata/system/drone-app/rom_metadata_cache.sqlite3*", installer)
         self.assertIn('chown root:"$DRONE_GROUP" /userdata/system/batocera.conf', installer)
         self.assertIn("chmod 664 /userdata/system/batocera.conf", installer)
+        self.assertIn('chown root:"$DRONE_GROUP" /userdata/system/configs/emulationstation', installer)
+        self.assertIn("chmod 2775 /userdata/system/configs/emulationstation", installer)
+        self.assertIn('chown root:"$DRONE_GROUP" /userdata/system/configs/emulationstation/es_settings.cfg', installer)
+        self.assertIn("chmod 664 /userdata/system/configs/emulationstation/es_settings.cfg", installer)
         self.assertIn("DRONE_REPAIR_ROM_PERMISSIONS:-0", installer)
         self.assertIn("DRONE_UNAUTH_RATE_LIMIT_ENABLED='${DRONE_UNAUTH_RATE_LIMIT_ENABLED:-1}'", installer)
         self.assertIn("DRONE_UNAUTH_RATE_LIMIT_REQUESTS='${DRONE_UNAUTH_RATE_LIMIT_REQUESTS:-60}'", installer)
@@ -2182,7 +2207,42 @@ class SettingsTests(unittest.TestCase):
             self.assertIn("cpu", info["performance"])
             self.assertIn("memory", info["performance"])
             self.assertIn("disk", info["performance"])
+            self.assertIn("disks", info["performance"])
             self.assertIs(info["kiosk_enabled"], True)
+
+    def test_mounted_disk_metrics_include_external_drives_without_bind_duplicates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            external = Path(tmp) / "media" / "games"
+            duplicate = Path(tmp) / "mnt" / "games-bind"
+            for path in (root, external, duplicate):
+                path.mkdir(parents=True)
+            mountinfo = Path(tmp) / "mountinfo"
+            mountinfo.write_text(
+                "\n".join([
+                    f"29 1 8:1 / {root} rw - ext4 /dev/sda1 rw",
+                    f"30 1 8:2 / {external} rw - ext4 /dev/sdb1 rw",
+                    f"31 1 8:2 / {duplicate} rw - ext4 /dev/sdb1 rw",
+                ]),
+                encoding="utf-8",
+            )
+            original_stat = Path.stat
+
+            def fake_stat(path, *args, **kwargs):
+                if path.name == "userdata":
+                    return mock.Mock(st_dev=101)
+                if path.name in {"games", "games-bind"}:
+                    return mock.Mock(st_dev=202)
+                return original_stat(path, *args, **kwargs)
+
+            with mock.patch("pathlib.Path.stat", autospec=True, side_effect=fake_stat):
+                rows = _collect_mounted_disk_metrics(root, mountinfo)
+
+            self.assertEqual(len(rows), 2)
+            self.assertTrue(rows[0]["is_main"])
+            self.assertEqual(rows[0]["source"], "/dev/sda1")
+            self.assertTrue(rows[1]["is_external"])
+            self.assertEqual(rows[1]["source"], "/dev/sdb1")
 
     def test_fake_overmind_config_is_ignored_when_fake_data_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
