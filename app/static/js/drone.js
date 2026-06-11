@@ -1003,14 +1003,14 @@ function renderBiosList(data) {
         ? `<div class="card log-card">
           <div class="table-responsive">
             <table class="table table-hover align-middle themed-table bios-table">
-              <thead><tr><th>System</th><th>BIOS File</th><th>Size</th><th>Fingerprint</th><th></th></tr></thead>
+              <thead><tr><th>System</th><th>BIOS File</th><th>Size</th><th>MD5</th><th></th></tr></thead>
               <tbody>
                 ${systems.map((system) => grouped[system].map((item) => `
                   <tr>
                     <td><span class="badge text-bg-secondary">${escapeHtml(system === "_root" ? "root" : system)}</span></td>
                     <td><div class="fw-semibold">${escapeHtml(item.name)}</div><div class="small text-muted mono">${escapeHtml(item.path || item.name || "")}</div></td>
                     <td class="text-nowrap">${item.byte_count !== undefined ? formatBytes(item.byte_count) : "n/a"}</td>
-                    <td class="small mono bios-fingerprint">${escapeHtml(item.fingerprint || "n/a")}</td>
+                    <td class="small mono bios-fingerprint">${escapeHtml(item.bios_md5 || item.md5 || item.fingerprint || "n/a")}</td>
                     <td class="text-end">${
                       item.is_downloadable === false
                         ? `<button class="btn btn-secondary btn-sm" type="button" disabled><i class="bi bi-slash-circle me-1"></i>Disabled</button>`

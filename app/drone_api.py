@@ -59,6 +59,7 @@ try:
     from .overmind_game_logs import collect_game_logs as _build_game_log_payload
     from .overmind_game_logs import collect_game_event_sessions as _collect_game_event_sessions
     from .overmind_game_logs import delete_game_event_spool as _delete_game_event_spool
+    from .overmind_game_logs import GameProcessMonitor
     from .overmind_reporting import (
         collect_emulator_configs as _collect_emulator_configs,
         collect_log_sources as _collect_log_sources,
@@ -131,6 +132,7 @@ except ImportError:
     from overmind_game_logs import collect_game_logs as _build_game_log_payload  # type: ignore
     from overmind_game_logs import collect_game_event_sessions as _collect_game_event_sessions  # type: ignore
     from overmind_game_logs import delete_game_event_spool as _delete_game_event_spool  # type: ignore
+    from overmind_game_logs import GameProcessMonitor  # type: ignore
     from overmind_reporting import (  # type: ignore
         collect_emulator_configs as _collect_emulator_configs,
         collect_log_sources as _collect_log_sources,
@@ -192,6 +194,8 @@ _SAVES_METADATA_WATCHER = None
 # File-only rotating stream for Overmind-related logs; configured in _configure_rotating_logs.
 _OVERMIND_LOG_STREAM = None
 _PEER_HEALTH_CHECK_THREAD_STARTED = False
+_GAME_PROCESS_MONITOR_STARTED = False
+_GAME_PROCESS_MONITOR = None
 _ROM_METADATA_ACTIVE = Event()
 _ROM_METADATA_WAKE = Event()
 # Set when an Overmind heartbeat reports asset thumbprints that differ from what the
@@ -5079,7 +5083,27 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         query: Optional[str] = None,
         system_filters: Optional[List[str]] = None,
     ) -> None:
-        entries = self.repository.list_bios_entries()
+        cache, _ = _load_rom_metadata_cache(self.settings)
+        cached_bios = cache.get("bios_entries") if isinstance(cache.get("bios_entries"), dict) else {}
+        entries = []
+        for row in cached_bios.values():
+            if not isinstance(row, dict):
+                continue
+            path = str(row.get("file_path") or row.get("relative_path") or row.get("path") or "").strip()
+            if not path:
+                continue
+            md5_value = str(row.get("bios_md5") or row.get("md5") or "").strip()
+            entries.append({
+                **row,
+                "name": row.get("name") or Path(path).name,
+                "path": path,
+                "byte_count": row.get("byte_count") if row.get("byte_count") is not None else row.get("file_size"),
+                "fingerprint": md5_value,
+                "md5": md5_value,
+                "bios_md5": md5_value,
+            })
+        if not entries:
+            entries = self.repository.list_bios_entries()
         query_value = (query or "").strip().lower()
         selected_systems = set((s or "").strip().lower() for s in (system_filters or []) if (s or "").strip())
         none_selected = "__none__" in selected_systems
@@ -5899,31 +5923,16 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
 
     def _handle_admin_gameplay_logs(self) -> None:
         try:
-            log_data = _collect_log_sources(
-                self.settings,
-                include_unchanged=True,
-                sources=("es_launch_stdout",),
-            )
-            payload = _collect_game_logs(self.settings, self.repository, log_data=log_data)
             event_sessions, spool_files = _collect_game_event_sessions(self.settings, self.repository)
-            sessions = []
-            seen = set()
-            for session in list(payload.get("sessions") or []) + list(event_sessions or []):
-                if not isinstance(session, dict):
-                    continue
-                key = json.dumps(session, sort_keys=True, default=str)
-                if key in seen:
-                    continue
-                seen.add(key)
-                sessions.append(session)
+            sessions = list(event_sessions or [])
             sessions.sort(key=lambda row: str(row.get("played_at") or ""), reverse=True)
             self._send_json(
                 200,
                 {
                     "type": "game_logs",
-                    "collected_at": payload.get("collected_at"),
+                    "collected_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
                     "sessions": sessions,
-                    "logs": payload.get("logs") or [],
+                    "logs": [],
                     "pending_spool_events": len(spool_files or []),
                 },
             )
@@ -10545,9 +10554,8 @@ def _execute_overmind_action(
         }
 
     if action_name == "collect_game_logs":
-        result = _collect_game_logs(settings, repository)
-        result.pop("_cursors", None)
-        result.pop("logs", None)
+        sessions, _ = _collect_game_event_sessions(settings, repository)
+        result = {"type": "game_logs", "sessions": sessions}
         return "completed", f"Collected {_summarize_overmind_result(result)}.", result
 
     if action_name == "collect_emulator_configs":
@@ -11034,33 +11042,21 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                     except Exception as error:
                         print(f"Filesystem event upload failed; continuing: {_format_overmind_error(error)}", file=sys.stderr, flush=True)
 
-                # Game launches detected in real time by the EmulationStation hook
-                # (drone-game-event.sh) arrive via the spool directory; the launch-log
-                # delta is a secondary source. Best-effort so a transient failure does not
-                # drop the sessions — cursors/spool are only cleared after a successful POST.
+                # The procfs game monitor writes durable start/stop events to the spool.
+                # Best-effort so transient failures leave those events queued for retry.
                 try:
-                    game_logs = _collect_game_logs(settings, repository)
-                    game_log_cursors = game_logs.pop("_cursors", {})
                     event_sessions, spool_files = _collect_game_event_sessions(settings, repository)
                     if event_sessions:
-                        game_logs.setdefault("sessions", []).extend(event_sessions)
-                    if game_logs.get("sessions"):
-                        game_logs.pop("logs", None)
-                        game_logs.pop("collected_at", None)
+                        game_logs = {"type": "game_logs", "sessions": event_sessions}
                         _overmind_post_json(f"{base_url}/api/devices/{device_id}/game-logs", game_logs, token=token, settings=settings)
-                        _commit_game_log_cursors(settings, game_log_cursors)
                         _delete_game_event_spool(spool_files)
                         _overmind_log(
                             f"Sent {len(game_logs.get('sessions') or [])} game log session(s) to Overmind"
                         )
                     else:
-                        if game_log_cursors:
-                            _commit_game_log_cursors(settings, game_log_cursors)
-                        # Consumed but produced no sessions (e.g. game-end only); clear them.
                         _delete_game_event_spool(spool_files)
                 except Exception as error:
-                    # Leave cursors uncommitted and spool files in place so the next
-                    # heartbeat retries the same sessions instead of losing them.
+                    # Leave spool files in place so the next heartbeat retries them.
                     _overmind_log(f"Game log upload failed; will retry next heartbeat: {_format_overmind_error(error)}")
 
                 persistent_logs = _collect_log_sources(settings, sources=PERSISTENT_OVERMIND_LOG_SOURCES)
@@ -11795,38 +11791,21 @@ def _start_rom_metadata_watcher(settings: Settings) -> None:
         _SAVES_METADATA_WATCHER = saves_watcher
 
 
-def _ensure_game_event_hook(settings: Settings) -> None:
-    """Best-effort install of the EmulationStation gameplay event hook."""
+def _ensure_game_event_spool(settings: Settings) -> None:
+    """Prepare the durable process-monitor event spool and remove the legacy hook."""
     target = (settings.userdata_root / "system" / "scripts" / "drone-game-event.sh").resolve()
     spool = (settings.userdata_root / "system" / "drone-app" / "game-events").resolve()
-    source_candidates = [
-        Path(__file__).resolve().parent.parent / "scripts" / "drone-game-event.sh",
-        settings.userdata_root / "system" / "drone-app" / "scripts" / "drone-game-event.sh",
-        settings.userdata_root / "system" / "apps" / "roms-api" / "scripts" / "drone-game-event.sh",
-    ]
-    source = next((path for path in source_candidates if path.exists() and path.is_file()), None)
-    if source is None:
-        return
     try:
         spool.mkdir(parents=True, exist_ok=True)
         try:
             spool.chmod(0o2775)
         except OSError:
             pass
-        target.parent.mkdir(parents=True, exist_ok=True)
-        should_copy = True
         if target.exists():
-            try:
-                should_copy = target.read_bytes() != source.read_bytes()
-            except OSError:
-                should_copy = True
-        if should_copy:
-            shutil.copyfile(source, target)
-        target.chmod(0o755)
-        if should_copy:
-            print(f"Gameplay event hook installed: {target}", file=sys.stdout, flush=True)
+            target.unlink()
+            print(f"Legacy gameplay event hook removed: {target}", file=sys.stdout, flush=True)
     except OSError as error:
-        print(f"Gameplay event hook install skipped: {_format_overmind_error(error)}", file=sys.stderr, flush=True)
+        print(f"Gameplay event spool setup skipped: {_format_overmind_error(error)}", file=sys.stderr, flush=True)
 
 
 class DroneThreadingHTTPServer(ThreadingHTTPServer):
@@ -11853,7 +11832,7 @@ def _apply_server_tls(settings: Settings, server: ThreadingHTTPServer) -> None:
 
 
 def create_server(settings: Settings) -> ThreadingHTTPServer:
-    global _OVERMIND_POLLER_STARTED, _ROM_METADATA_POLLER_STARTED, _ROM_METADATA_WATCHER_STARTED, _PEER_HEALTH_CHECK_THREAD_STARTED, _DOWNLOAD_MANAGER
+    global _OVERMIND_POLLER_STARTED, _ROM_METADATA_POLLER_STARTED, _ROM_METADATA_WATCHER_STARTED, _PEER_HEALTH_CHECK_THREAD_STARTED, _GAME_PROCESS_MONITOR_STARTED, _GAME_PROCESS_MONITOR, _DOWNLOAD_MANAGER
     roms_root, bios_root = _real_data_roots(settings)
     repository = RomRepository(
         roms_root,
@@ -11888,7 +11867,12 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
     )
     if _DOWNLOAD_MANAGER is None:
         _DOWNLOAD_MANAGER = DownloadManager(settings, repository)
-    _ensure_game_event_hook(settings)
+    _ensure_game_event_spool(settings)
+    if not _GAME_PROCESS_MONITOR_STARTED:
+        poll_seconds = max(0.25, float(os.environ.get("GAME_PROCESS_POLL_SECONDS", "2")))
+        _GAME_PROCESS_MONITOR = GameProcessMonitor(settings, poll_seconds=poll_seconds)
+        _GAME_PROCESS_MONITOR.start()
+        _GAME_PROCESS_MONITOR_STARTED = True
 
     handler_factory = _build_handler(
         settings=settings,

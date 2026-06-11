@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import shlex
+import threading
+import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, List, Optional, Tuple
@@ -157,6 +162,121 @@ def _game_event_spool_dir(settings: Any) -> Path:
     return (settings.userdata_root / "system" / "drone-app" / GAME_EVENT_SPOOL_DIRNAME).resolve()
 
 
+def _parse_emulatorlauncher_args(parts: List[str], cmdline: str) -> Optional[dict]:
+    if not any("emulatorlauncher" in part.lower() for part in parts):
+        return None
+    system_name = ""
+    rom_path = ""
+    for index, part in enumerate(parts):
+        if part == "-system" and index + 1 < len(parts):
+            system_name = parts[index + 1]
+        elif part == "-rom" and index + 1 < len(parts):
+            rom_path = parts[index + 1]
+    if not rom_path:
+        return None
+    return {"system_name": system_name, "rom_path": rom_path, "cmdline": str(cmdline or "")}
+
+
+def parse_emulatorlauncher_command(cmdline: str) -> Optional[dict]:
+    """Extract the active Batocera system and ROM from a printable command line."""
+    try:
+        parts = shlex.split(str(cmdline or ""))
+    except ValueError:
+        parts = str(cmdline or "").split()
+    return _parse_emulatorlauncher_args(parts, str(cmdline or ""))
+
+
+def find_running_emulatorlauncher(proc_root: Path = Path("/proc")) -> Optional[dict]:
+    """Return the first active emulatorlauncher invocation from Linux procfs."""
+    try:
+        pids = sorted((path for path in proc_root.iterdir() if path.name.isdigit()), key=lambda path: int(path.name))
+    except OSError:
+        return None
+    for pid_path in pids:
+        try:
+            raw = (pid_path / "cmdline").read_bytes()
+        except OSError:
+            continue
+        parts = [part.decode("utf-8", errors="ignore") for part in raw.split(b"\x00") if part]
+        cmdline = " ".join(shlex.quote(part) for part in parts)
+        parsed = _parse_emulatorlauncher_args(parts, cmdline)
+        if parsed:
+            parsed["pid"] = int(pid_path.name)
+            return parsed
+    return None
+
+
+def write_game_process_event(settings: Any, kind: str, game: dict) -> Optional[Path]:
+    """Atomically append a process-detected game start/stop event to the durable spool."""
+    spool = _game_event_spool_dir(settings)
+    try:
+        spool.mkdir(parents=True, exist_ok=True)
+        event_id = f"{time.time_ns()}-{os.getpid()}-{uuid.uuid4().hex[:8]}-{kind}"
+        temp_path = spool / f".{event_id}.tmp"
+        final_path = spool / f"{event_id}.json"
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        payload = {
+            "event": kind,
+            "played_at": str(game.get("started_at") or now) if kind == "start" else now,
+            "started_at": str(game.get("started_at") or ""),
+            "system_name": str(game.get("system_name") or ""),
+            "rom_path": str(game.get("rom_path") or ""),
+            "source": "emulatorlauncher_process",
+        }
+        temp_path.write_text(json.dumps(payload, separators=(",", ":")) + "\n", encoding="utf-8")
+        temp_path.replace(final_path)
+        return final_path
+    except OSError:
+        return None
+
+
+class GameProcessMonitor:
+    """Poll procfs and emit durable events when emulatorlauncher starts or stops."""
+
+    def __init__(self, settings: Any, poll_seconds: float = 2.0, proc_root: Path = Path("/proc")) -> None:
+        self.settings = settings
+        self.poll_seconds = max(0.25, float(poll_seconds))
+        self.proc_root = proc_root
+        self.active_game: Optional[dict] = None
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def poll_once(self) -> Optional[dict]:
+        current = find_running_emulatorlauncher(self.proc_root)
+        active_key = (
+            str((self.active_game or {}).get("system_name") or ""),
+            str((self.active_game or {}).get("rom_path") or ""),
+        )
+        current_key = (
+            str((current or {}).get("system_name") or ""),
+            str((current or {}).get("rom_path") or ""),
+        )
+        if self.active_game and active_key != current_key:
+            if write_game_process_event(self.settings, "end", self.active_game) is None:
+                return current
+            self.active_game = None
+        if current and active_key != current_key:
+            current["started_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+            if write_game_process_event(self.settings, "start", current) is None:
+                return current
+            self.active_game = current
+        return current
+
+    def start(self) -> bool:
+        if self._thread and self._thread.is_alive():
+            return False
+        self._thread = threading.Thread(target=self._run, name="game-process-monitor", daemon=True)
+        self._thread.start()
+        return True
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.poll_seconds):
+            try:
+                self.poll_once()
+            except Exception:
+                continue
+
+
 def _event_duration_seconds(start_iso: str, end_iso: str) -> Optional[int]:
     try:
         start = datetime.fromisoformat(start_iso)
@@ -173,14 +293,7 @@ def collect_game_event_sessions(
     *,
     format_error: Optional[ErrorFormatter] = None,
 ) -> Tuple[List[dict], List[Path]]:
-    """Drain the EmulationStation game-event spool into Overmind game sessions.
-
-    Each file in the spool is one launch/stop event written by the ES hook
-    (``drone-game-event.sh``). Returns the sessions to report plus the list of
-    spool files consumed, so the caller can delete them only after a successful
-    upload. ``game-start`` yields a session immediately; a matching ``game-end``
-    in the same batch fills in ``duration_seconds``.
-    """
+    """Drain process-monitor start/stop events into completed gameplay sessions."""
     formatter = format_error or (lambda error: str(error))
     spool = _game_event_spool_dir(settings)
     if not spool.exists() or not spool.is_dir():
@@ -191,9 +304,15 @@ def collect_game_event_sessions(
         return [], []
 
     collected_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    active_sessions = load_payload(
+        database_path(settings.userdata_root),
+        "active_game_process_sessions",
+        {},
+    )
+    if not isinstance(active_sessions, dict):
+        active_sessions = {}
     sessions: List[dict] = []
     processed: List[Path] = []
-    starts: dict = {}  # resolved rom path -> (session index, started_at) for in-batch duration
     for path in files:
         processed.append(path)
         try:
@@ -211,15 +330,27 @@ def collect_game_event_sessions(
         resolved_rom = rom_path.as_posix() if rom_path else rom_value
 
         if kind == "end":
-            pending = starts.get(resolved_rom)
-            if pending is not None:
-                index, started_at = pending
-                duration = _event_duration_seconds(started_at, played_at)
+            session = active_sessions.pop(resolved_rom, None)
+            if not isinstance(session, dict):
+                started_at = str(event.get("started_at") or "").strip()
+                event_system = str(event.get("system_name") or "").strip()
+                if started_at and event_system:
+                    session = {
+                        "played_at": started_at,
+                        "system_name": event_system,
+                        "game_name": Path(rom_value).name,
+                        "rom_path": resolved_rom,
+                    }
+            if isinstance(session, dict):
+                duration = _event_duration_seconds(str(session.get("played_at") or ""), played_at)
                 if duration is not None:
-                    sessions[index]["duration_seconds"] = duration
+                    session["duration_seconds"] = duration
+                session["ended_at"] = played_at
+                sessions.append(session)
             continue
 
-        system_name = _system_from_launch_rom_path(settings, rom_path, "")
+        event_system = str(event.get("system_name") or "").strip()
+        system_name = _system_from_launch_rom_path(settings, rom_path, event_system)
         game_name = Path(rom_value).name
         if not system_name or not game_name:
             continue
@@ -234,8 +365,8 @@ def collect_game_event_sessions(
                 session["rom_fingerprint"] = repository.build_fingerprint(rom_path)
             except Exception as error:  # noqa: BLE001 - fingerprint is best-effort
                 session["rom_fingerprint_error"] = formatter(error)
-        sessions.append(session)
-        starts[resolved_rom] = (len(sessions) - 1, played_at)
+        active_sessions[resolved_rom] = session
+    save_payload(database_path(settings.userdata_root), "active_game_process_sessions", active_sessions)
     return sessions, processed
 
 
@@ -256,7 +387,7 @@ def collect_game_logs(
     collect_log_sources: Optional[LogCollector] = None,
     format_error: Optional[ErrorFormatter] = None,
 ) -> dict:
-    """Build game sessions from EmulationStation launch output."""
+    """Legacy parser for previously captured EmulationStation launch output."""
     if not log_data:
         log_data = _read_launch_log_delta(settings)
     formatter = format_error or (lambda error: str(error))

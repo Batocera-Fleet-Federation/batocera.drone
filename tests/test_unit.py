@@ -570,6 +570,64 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(list(spool.iterdir()), [])
             self.assertEqual(collect_game_event_sessions(settings, None), ([], []))
 
+    def test_game_process_monitor_emits_start_and_stop_events(self) -> None:
+        from app.overmind_game_logs import GameProcessMonitor, collect_game_event_sessions, find_running_emulatorlauncher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            roms_root = root / "roms"
+            rom = roms_root / "snes" / "Game With Spaces.sfc"
+            rom.parent.mkdir(parents=True)
+            rom.write_bytes(b"rom-data")
+            proc_root = Path(tmp) / "proc"
+            process_dir = proc_root / "123"
+            process_dir.mkdir(parents=True)
+            (process_dir / "cmdline").write_bytes(
+                f"/usr/bin/python3\x00/usr/bin/emulatorlauncher\x00-system\x00snes\x00-rom\x00{rom}\x00".encode()
+            )
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(roms_root)},
+                clear=True,
+            ):
+                settings = Settings.from_env()
+
+            running = find_running_emulatorlauncher(proc_root)
+            self.assertEqual(running["system_name"], "snes")
+            self.assertEqual(running["rom_path"], str(rom))
+
+            monitor = GameProcessMonitor(settings, proc_root=proc_root)
+            monitor.poll_once()
+            sessions, start_events = collect_game_event_sessions(settings, RomRepository(roms_root, root / "bios"))
+            self.assertEqual(sessions, [])
+            self.assertEqual(len(start_events), 1)
+            for event in start_events:
+                event.unlink()
+
+            (process_dir / "cmdline").unlink()
+            monitor.poll_once()
+
+            sessions, processed = collect_game_event_sessions(settings, RomRepository(roms_root, root / "bios"))
+            self.assertEqual(len(processed), 1)
+            self.assertEqual(len(sessions), 1)
+            self.assertEqual(sessions[0]["system_name"], "snes")
+            self.assertEqual(sessions[0]["rom_path"], rom.resolve().as_posix())
+            self.assertIn("duration_seconds", sessions[0])
+
+    def test_game_process_monitor_retries_failed_spool_write(self) -> None:
+        from app.overmind_game_logs import GameProcessMonitor
+
+        monitor = GameProcessMonitor(mock.Mock())
+        running = {"system_name": "snes", "rom_path": "/userdata/roms/snes/Game.sfc"}
+        with mock.patch("app.overmind_game_logs.find_running_emulatorlauncher", return_value=running):
+            with mock.patch("app.overmind_game_logs.write_game_process_event", side_effect=[None, Path("/tmp/start.json")]) as write_event:
+                monitor.poll_once()
+                self.assertIsNone(monitor.active_game)
+                monitor.poll_once()
+
+        self.assertEqual(write_event.call_count, 2)
+        self.assertEqual(monitor.active_game["rom_path"], running["rom_path"])
+
     def test_emulator_config_collection_sends_changed_configs_and_skips_bak(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
@@ -1887,6 +1945,11 @@ class SettingsTests(unittest.TestCase):
         self.assertIn('"type": "game_logs"', game_log_source)
         self.assertIn('"type": "log_sources"', reporting_source)
         self.assertIn('"type": "emulator_configs"', reporting_source)
+
+    def test_bios_ui_displays_cached_md5_column(self) -> None:
+        source = Path(__file__).resolve().parents[1].joinpath("app/static/js/drone.js").read_text(encoding="utf-8")
+        self.assertIn("<th>MD5</th>", source)
+        self.assertIn("item.bios_md5 || item.md5 || item.fingerprint", source)
 
     def test_admin_ui_exposes_drone_self_update_action(self) -> None:
         api_routes = Path(__file__).resolve().parents[1].joinpath("app/api_routes.py").read_text(encoding="utf-8")

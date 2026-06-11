@@ -121,27 +121,15 @@ ensure_permissions() {
     chmod -R o+rX /userdata/system/configs/PCSX2 2>/dev/null || true
   fi
 
-  # EmulationStation game-event spool. The ES hook runs as root and writes one
-  # file per launch here; the drone-app user drains and deletes them. setgid +
-  # group-writable lets both cooperate without an ownership conflict.
+  # Gameplay event spool. Drone's procfs monitor writes one file per game
+  # start/stop here and drains it after successful Overmind delivery.
   mkdir -p /userdata/system/drone-app/game-events 2>/dev/null || true
   chown root:"$DRONE_GROUP" /userdata/system/drone-app/game-events 2>/dev/null || true
   chmod 2775 /userdata/system/drone-app/game-events 2>/dev/null || true
 
-  # Install (or refresh) the EmulationStation game start/stop hook so launches are
-  # detected in real time and reported to Overmind on the next heartbeat. The app
-  # may be deployed under different roots, so search the known locations.
-  for hook_src in \
-    /userdata/system/drone-app/scripts/drone-game-event.sh \
-    /userdata/system/apps/roms-api/scripts/drone-game-event.sh; do
-    if [ -f "$hook_src" ]; then
-      mkdir -p /userdata/system/scripts 2>/dev/null || true
-      cp -f "$hook_src" /userdata/system/scripts/drone-game-event.sh 2>/dev/null || true
-      chmod 755 /userdata/system/scripts/drone-game-event.sh 2>/dev/null || true
-      echo "[drone-service] ✓ EmulationStation game-event hook installed from $hook_src"
-      break
-    fi
-  done
+  # Remove the legacy EmulationStation hook. Gameplay detection now watches
+  # emulatorlauncher directly through /proc from the Drone process.
+  rm -f /userdata/system/scripts/drone-game-event.sh 2>/dev/null || true
 
   repair_rom_content_permissions() {
     romdir="$1"
