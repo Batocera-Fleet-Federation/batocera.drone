@@ -3554,6 +3554,60 @@ class RepositoryTests(unittest.TestCase):
             self.assertTrue(all(item["unique_id"] for item in roms))
             self.assertEqual(len(repo.list_assets("gba", "roms")[1]), 1)
 
+    def test_list_assets_roms_cache_fast_path_includes_gamelist_artwork(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            system = root / "roms" / "snes"
+            system.mkdir(parents=True)
+            (system / "gamelist.xml").write_text(
+                """<gameList>
+  <game>
+    <path>./Game.zip</path>
+    <name>Gamelist Game</name>
+    <image>./images/Game-image.png</image>
+    <marquee>./images/Game-marquee.png</marquee>
+  </game>
+</gameList>
+""",
+                encoding="utf-8",
+            )
+            entries = {
+                "snes:Game.zip": {
+                    "system": "snes",
+                    "file_path": "Game.zip",
+                    "rom_name": "Game",
+                    "unique_id": "u-game",
+                },
+            }
+            _persist_rom_metadata_cache(
+                settings,
+                {
+                    **_empty_rom_metadata_cache(),
+                    "entries": entries,
+                    "systems": [{"name": "snes", "rom_count": 1}],
+                    "dirty": False,
+                    "full_refresh_pending": False,
+                    "last_full_scan_at": "2026-06-08T00:00:00Z",
+                    "scan_in_progress": False,
+                },
+                rom_updates=entries,
+            )
+            repo = RomRepository(settings.roms_root, settings.bios_root, settings=settings)
+
+            _, roms = repo.list_assets("snes", "roms", include_fingerprint=False)
+
+            self.assertEqual(len(roms), 1)
+            self.assertEqual(roms[0]["title"], "Gamelist Game")
+            self.assertTrue(roms[0]["has_gamelist_entry"])
+            self.assertEqual(roms[0]["existing"]["image"], "./images/Game-image.png")
+            self.assertEqual(roms[0]["existing"]["marquee"], "./images/Game-marquee.png")
+
     def test_list_missing_artwork_from_gamelist(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"

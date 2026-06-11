@@ -2348,11 +2348,41 @@ class RomRepository:
             _, root = self._read_gamelist(system_dir)
         except Exception:
             root = ET.Element("gameList")
+        exact_paths = {}
+        path_names = {}
+        path_stems = {}
+        display_names = {}
+        for index, game in enumerate(root.findall("game")):
+            path_value = _normalize_gamelist_rom_path(_text_or_empty(game, "path")).lower()
+            if path_value:
+                exact_paths.setdefault(path_value, game)
+                path_name = Path(path_value).name.lower()
+                path_names.setdefault(path_name, (index, game))
+                path_stems.setdefault(Path(path_name).stem.lower(), (index, game))
+            display_name = _text_or_empty(game, "name").lower()
+            if display_name:
+                display_names.setdefault(display_name, (index, game))
         for item in items:
             rom_file = str(item.get("rom_file") or item.get("name") or "")
             display_name = str(item.get("image_stem") or item.get("name") or "")
             relative_path = str(item.get("relative_path") or item.get("rom_path") or rom_file)
-            game = self._find_gamelist_entry_by_path(root, relative_path) or self._find_gamelist_entry(root, rom_file, display_name)
+            normalized_path = _normalize_gamelist_rom_path(relative_path).lower()
+            game = exact_paths.get(normalized_path)
+            if game is None:
+                normalized_file = rom_file.lower()
+                normalized_file_stem = Path(rom_file).stem.lower()
+                normalized_display = display_name.lower()
+                candidates = [
+                    path_names.get(normalized_file),
+                    path_stems.get(normalized_file_stem),
+                    path_stems.get(normalized_display),
+                    display_names.get(normalized_display),
+                    display_names.get(normalized_file),
+                    display_names.get(normalized_file_stem),
+                ]
+                matches = [candidate for candidate in candidates if candidate is not None]
+                if matches:
+                    game = min(matches, key=lambda candidate: candidate[0])[1]
             item["rom_path"] = relative_path
             item["title"] = _text_or_empty(game, "name") if game is not None else str(item.get("name") or display_name)
             item["existing"] = {field: _text_or_empty(game, field) if game is not None else "" for field in ARTWORK_FIELDS}
@@ -3462,17 +3492,21 @@ class RomRepository:
                     row = {
                         "unique_id": rom.get("unique_id") or hashlib.sha256(f"{system}:{relative_path}".encode("utf-8")).hexdigest()[:16],
                         "name": rom.get("rom_name") or Path(relative_path).name,
+                        "rom_file": Path(relative_path).name,
+                        "filename": Path(relative_path).name,
+                        "relative_path": relative_path,
+                        "rom_path": relative_path,
                         "file_path": relative_path,
                         "byte_count": rom.get("file_size"),
                         "entry_type": rom.get("entry_type") or "file",
                         "is_downloadable": rom.get("is_downloadable", True),
-                        "image_stem": rom.get("image_stem"),
+                        "image_stem": rom.get("image_stem") or Path(relative_path).stem,
                     }
                     if include_fingerprint:
                         row["fingerprint"] = rom.get("fingerprint")
                         row["rom_fingerprint"] = row["fingerprint"]
                     items.append(row)
-                return system_dir, items
+                return system_dir, self._attach_gamelist_to_rom_items(system_dir, items)
         if asset_dir.exists() and asset_dir.is_dir():
             if asset_type == "roms":
                 items = self._list_rom_items(system, asset_dir, include_fingerprint=include_fingerprint)
