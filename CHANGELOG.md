@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.1.0] - 2026-06-13
+
+- Updating install script to display url that users can navigate to for the drone.  Updating verbiage on landing page.
+
 ## [v0.0.97] - 2026-06-13
 
 - Updating landing page to be more meaningful
