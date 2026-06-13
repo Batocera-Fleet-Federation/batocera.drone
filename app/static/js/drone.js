@@ -1366,10 +1366,10 @@ async function renderHelpPage() {
         </div>
         <div class="col-12 col-md-6 col-xl-3">
           <div class="help-metric h-100">
-            <i class="bi bi-activity"></i>
+            <i class="bi bi-shield-lock"></i>
             <div>
-              <div class="help-metric-title">Keep it healthy</div>
-              <div class="text-muted small">Live system info, gameplay history, logs, and artwork repair at a glance.</div>
+              <div class="help-metric-title">Secure by design</div>
+              <div class="text-muted small">Encrypted everywhere, certificate-verified peers, and credentials that never leave the machine.</div>
             </div>
           </div>
         </div>
@@ -1473,11 +1473,30 @@ async function renderHelpPage() {
               <dd>A single Drone is a handy dashboard. A few of them with Overmind become a fleet you keep in sync and manage from one screen.</dd>
               <dt>Peer-to-peer sync</dt>
               <dd>Cabinets copy content directly from each other over encrypted links, so you don't re-download the same files on every machine.</dd>
-              <dt>Private by default</dt>
-              <dd>Credentials stay on the machine, protected tools require authentication, and trusted cabinets are verified by certificate.</dd>
+              <dt>Serious about security</dt>
+              <dd>Security was built in from the start, not bolted on. Every connection is encrypted over HTTPS, machine-to-machine transfers use mutually-authenticated TLS with pinned certificates so only trusted cabinets can connect, sensitive credentials never leave this machine, admin tools sit behind authentication, and unauthenticated requests are rate-limited and brute-force protected.</dd>
             </dl>
           </div>
         </div>
+      </div>
+
+      <div class="help-section mt-4">
+        <h3 class="h5 mb-3"><i class="bi bi-wifi me-2"></i>Open this Drone from another device</h3>
+        <p class="text-muted mb-3">When the installer finishes it prints this machine's exact address in a green banner &mdash; it looks like <code>https://batocera.local</code>. Open that from any device on your network. To find it again:</p>
+        <ol class="mb-4">
+          <li>On a phone, laptop, or computer on the same network, open <code>https://BATOCERA-HOSTNAME.local</code>.</li>
+          <li>The default hostname is usually <code>batocera</code>, so try <code>https://batocera.local</code> first.</li>
+          <li>Not sure of the name? Check Batocera under <strong>Network Settings</strong> &gt; <strong>Hostname</strong> and use that in place of <code>BATOCERA-HOSTNAME</code>.</li>
+          <li>Older bookmarks and router rules can still use <code>https://BATOCERA-HOSTNAME.local:8443</code>.</li>
+        </ol>
+        <h3 class="h5 mb-3"><i class="bi bi-router me-2"></i>Enable content syncing (port forwarding)</h3>
+        <p class="text-muted">Only needed so Overmind and other Drones can pull games, saves, BIOS, artwork, and configs from this machine. The Drone still connects to Overmind for monitoring and remote actions without it.</p>
+        <ol class="mb-0">
+          <li>Find your router address in <strong>System Info</strong> &gt; <strong>Router IP Address</strong>, then open that IP in a browser to sign in to your router.</li>
+          <li>In the router, look for <strong>NAT</strong>, <strong>Port Forwarding</strong>, or <strong>Connected Devices</strong>.</li>
+          <li>Forward port <code>443</code> to this machine's IP address (find it under <strong>Network Settings</strong> &gt; <strong>IP Address</strong>).</li>
+          <li>Need help? Open <a href="https://www.youtube.com/results?search_query=How+to+enable+Home+Router+NAT+Port+Forwarding" target="_blank" rel="noopener noreferrer">NAT Port Forwarding Help <i class="bi bi-box-arrow-up-right ms-1"></i></a>.</li>
+        </ol>
       </div>
     </div>
   `;

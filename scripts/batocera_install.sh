@@ -179,7 +179,6 @@ fi
 
 echo ""
 echo "Installation complete!"
-echo "Web Server URL: https://$(hostname)"
 echo ""
 echo "drone-app can read:"
 echo "  /userdata/system/configs/PCSX2/**"
@@ -196,3 +195,22 @@ echo "  /userdata/system/certs/"
 echo "  /userdata/system/logs/drone-app/"
 echo ""
 echo "ROM files and Batocera system config remain read-only to drone-app."
+
+# Show the exact local URL the Drone resolves at, front and center, so the user
+# knows precisely where to open it from any device on their network.
+DRONE_LOCAL_URL="https://$(hostname | tr 'A-Z' 'a-z').local"
+echo ""
+printf '\033[1;32m'
+echo "======================================================================"
+echo ""
+echo "   >>>  OPEN YOUR DRONE IN A BROWSER AT:  <<<"
+echo ""
+echo "        ${DRONE_LOCAL_URL}"
+echo ""
+echo "   Works from any phone or computer on the same network."
+echo "   Sign in with username 'batocera' and password 'linux'."
+echo "   (If it does not load yet, start the DRONE_SERVER service or reboot.)"
+echo ""
+echo "======================================================================"
+printf '\033[0m'
+echo ""
