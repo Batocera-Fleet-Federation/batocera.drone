@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.92] - 2026-06-13
+
+- Fixing volume action processing.
+
 ## [v0.0.91] - 2026-06-13
 
 - Bugs #1 & #2 — Kiosk ON black screen / OFF failure (Drone)
