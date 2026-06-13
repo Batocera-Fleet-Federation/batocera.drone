@@ -364,6 +364,16 @@ set_kiosk_mode_as_root() {
   python3 "$helper" "$mode"
 }
 
+set_volume_as_root() {
+  level="$1"
+  helper="$WORK_DIR/app/set_volume.py"
+  if [ ! -f "$helper" ]; then
+    echo "[drone-service] Unable to set volume: helper was not found."
+    return 1
+  fi
+  python3 "$helper" "$level"
+}
+
 service_control_worker() {
   while true; do
     if [ -f "$CONTROL_DIR/restart-emulationstation.request" ]; then
@@ -386,6 +396,20 @@ service_control_worker() {
         chmod 664 "$result" 2>/dev/null || true
       fi
     done
+    volume_request="$CONTROL_DIR/set-volume.request"
+    volume_result="$CONTROL_DIR/set-volume.result"
+    if [ -f "$volume_request" ]; then
+      level="$(head -n 1 "$volume_request" 2>/dev/null | tr -cd '0-9')"
+      rm -f "$volume_request" "$volume_result"
+      echo "[drone-service] Volume change to ${level:-?} requested by Drone app."
+      if [ -n "$level" ] && set_volume_as_root "$level"; then
+        printf '%s\n' "ok" > "$volume_result"
+      else
+        printf '%s\n' "Privileged volume operation failed" > "$volume_result"
+      fi
+      chown root:"$DRONE_GROUP" "$volume_result" 2>/dev/null || true
+      chmod 664 "$volume_result" 2>/dev/null || true
+    fi
     sleep 1
   done
 }

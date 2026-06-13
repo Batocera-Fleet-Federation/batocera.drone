@@ -1708,22 +1708,132 @@ class SettingsTests(unittest.TestCase):
             kiosk_control.assert_has_calls([mock.call(True), mock.call(False)])
             popen.assert_not_called()
 
-    def test_privileged_kiosk_helper_updates_xml_and_saves_overlay(self) -> None:
+    def test_privileged_kiosk_helper_updates_xml_and_restarts_emulationstation(self) -> None:
         from app import toggle_kiosk
 
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "es_settings.cfg"
             config.write_text('<?xml version="1.0"?><map><string name="ThemeSet" value="carbon"/></map>', encoding="utf-8")
             with mock.patch.object(toggle_kiosk, "CONFIG", config):
-                with mock.patch.object(toggle_kiosk, "EMULATIONSTATION_SERVICE", Path(tmp) / "missing-service"):
-                    with mock.patch("app.toggle_kiosk.subprocess.run") as run:
+                with mock.patch("app.toggle_kiosk.subprocess.run") as run:
+                    with mock.patch("app.toggle_kiosk.subprocess.Popen") as popen:
                         toggle_kiosk.set_kiosk_mode(True)
                         self.assertIn('name="UIMode" value="Kiosk"', config.read_text(encoding="utf-8"))
                         toggle_kiosk.set_kiosk_mode(False)
 
             self.assertIn('name="ThemeSet" value="carbon"', config.read_text(encoding="utf-8"))
             self.assertIn('name="UIMode" value="Full"', config.read_text(encoding="utf-8"))
-            self.assertEqual(run.call_count, 2)
+            # Each invocation runs the proven sequence: stop ES + save overlay (2 run calls)
+            # then relaunches ES detached (1 Popen call).
+            self.assertEqual(run.call_count, 4)
+            self.assertEqual(popen.call_count, 2)
+            run_commands = [call.args[0] for call in run.call_args_list]
+            self.assertIn([toggle_kiosk.EMULATIONSTATION_SERVICE, "stop"], run_commands)
+            self.assertIn(["batocera-save-overlay"], run_commands)
+            popen_commands = [call.args[0] for call in popen.call_args_list]
+            self.assertIn([toggle_kiosk.EMULATIONSTATION_SERVICE, "start"], popen_commands)
+
+    def test_kiosk_action_reports_failure_when_worker_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
+                settings = Settings.from_env()
+            repo = RomRepository(root / "roms", root / "bios")
+            with mock.patch("app.drone_api.os.geteuid", return_value=999):
+                # Worker cannot be dispatched at all (control dir not writable).
+                with mock.patch("app.drone_api._request_kiosk_service_control", return_value=False):
+                    status, message, result = _execute_overmind_action(settings, repo, {"action": "enable_kiosk"})
+            self.assertEqual(status, "failed")
+            self.assertIn("Unable to update Kiosk mode settings", message)
+            self.assertIsNone(result)
+
+    def test_kiosk_action_reports_failure_when_worker_times_out(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
+                settings = Settings.from_env()
+            repo = RomRepository(root / "roms", root / "bios")
+            with mock.patch("app.drone_api.os.geteuid", return_value=999):
+                with mock.patch(
+                    "app.drone_api._request_kiosk_service_control",
+                    side_effect=OSError("Timed out waiting for the privileged Kiosk mode service operation"),
+                ):
+                    status, message, result = _execute_overmind_action(settings, repo, {"action": "disable_kiosk"})
+            self.assertEqual(status, "failed")
+            self.assertIn("Timed out", message)
+            self.assertIsNone(result)
+
+    def test_set_volume_action_dispatches_to_privileged_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
+                settings = Settings.from_env()
+            repo = RomRepository(root / "roms", root / "bios")
+            with mock.patch("app.drone_api.os.geteuid", return_value=999):
+                with mock.patch("app.drone_api._request_volume_service_control", return_value=True) as volume_control:
+                    status, message, result = _execute_overmind_action(
+                        settings, repo, {"action": "set_volume", "payload": {"level": 60}}
+                    )
+            self.assertEqual(status, "completed")
+            self.assertIn("Volume set to 60%", message)
+            self.assertEqual(result["type"], "audio_volume")
+            self.assertEqual(result["level"], 60)
+            self.assertFalse(result["muted"])
+            volume_control.assert_called_once_with(60)
+
+    def test_set_volume_action_clamps_and_mutes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
+                settings = Settings.from_env()
+            repo = RomRepository(root / "roms", root / "bios")
+            with mock.patch("app.drone_api.os.geteuid", return_value=999):
+                with mock.patch("app.drone_api._request_volume_service_control", return_value=True) as volume_control:
+                    high_status, high_message, high_result = _execute_overmind_action(
+                        settings, repo, {"action": "set_volume", "payload": {"level": 150}}
+                    )
+                    mute_status, mute_message, mute_result = _execute_overmind_action(
+                        settings, repo, {"action": "set_volume", "payload": {"level": 0}}
+                    )
+            self.assertEqual(high_status, "completed")
+            self.assertEqual(high_result["level"], 100)
+            self.assertEqual(mute_status, "completed")
+            self.assertIn("muted", mute_message)
+            self.assertTrue(mute_result["muted"])
+            volume_control.assert_has_calls([mock.call(100), mock.call(0)])
+
+    def test_set_volume_action_rejects_missing_level(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
+                settings = Settings.from_env()
+            repo = RomRepository(root / "roms", root / "bios")
+            status, message, result = _execute_overmind_action(settings, repo, {"action": "set_volume", "payload": {}})
+            self.assertEqual(status, "failed")
+            self.assertIn("numeric volume level", message)
+            self.assertIsNone(result)
+
+    def test_privileged_volume_helper_runs_settings_and_amixer(self) -> None:
+        from app import set_volume
+
+        def fake_which(name):
+            return f"/usr/bin/{name}" if name in {"batocera-settings-set", "amixer"} else None
+
+        with mock.patch("app.set_volume.shutil.which", side_effect=fake_which):
+            with mock.patch("app.set_volume.subprocess.run") as run:
+                set_volume.set_audio_volume(40)
+                set_volume.set_audio_volume(0)
+        commands = [call.args[0] for call in run.call_args_list]
+        self.assertIn(["/usr/bin/batocera-settings-set", "audio.volume", "40"], commands)
+        self.assertIn(["/usr/bin/amixer", "-q", "sset", "Master", "40%", "unmute"], commands)
+        self.assertIn(["/usr/bin/amixer", "-q", "sset", "Master", "mute"], commands)
+
+    def test_privileged_volume_helper_requires_a_tool(self) -> None:
+        from app import set_volume
+
+        with mock.patch("app.set_volume.shutil.which", return_value=None):
+            with self.assertRaises(OSError):
+                set_volume.set_audio_volume(50)
 
     def test_refresh_emulator_list_restarts_emulationstation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2029,6 +2139,8 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("set_kiosk_mode_as_root()", installer)
         self.assertIn('python3 "$helper" "$mode"', installer)
         self.assertIn("set-kiosk-${mode}.request", installer)
+        self.assertIn("set_volume_as_root()", installer)
+        self.assertIn("set-volume.request", installer)
         self.assertIn("DRONE_SERVICE_CONTROL_DIR", drone_source)
         self.assertIn("ensure_dns_fallback()", installer)
         self.assertIn("nameserver 1.1.1.1", installer)
@@ -2201,7 +2313,8 @@ class SettingsTests(unittest.TestCase):
             settings.es_settings_file.parent.mkdir(parents=True, exist_ok=True)
             settings.es_settings_file.write_text('<map><string name="UIMode" value="Kiosk"/></map>', encoding="utf-8")
 
-            info = _collect_system_info_payload(settings)
+            with mock.patch("app.drone_api._get_audio_volume", return_value=55):
+                info = _collect_system_info_payload(settings)
 
             self.assertIn("performance", info)
             self.assertIn("cpu", info["performance"])
@@ -2209,6 +2322,7 @@ class SettingsTests(unittest.TestCase):
             self.assertIn("disk", info["performance"])
             self.assertIn("disks", info["performance"])
             self.assertIs(info["kiosk_enabled"], True)
+            self.assertEqual(info["audio_volume"], 55)
 
     def test_mounted_disk_metrics_include_external_drives_without_bind_duplicates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

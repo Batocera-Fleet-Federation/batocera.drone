@@ -40,6 +40,8 @@ APP_DIR = Path(__file__).resolve().parent
 try:
     from .app_version import drone_app_version as _drone_app_version
     from .api_routes import ApiRoutesMixin
+    from .toggle_kiosk import set_kiosk_mode as _toggle_set_kiosk_mode
+    from .set_volume import set_audio_volume as _set_audio_volume_helper
     from .network_identity import (
         drone_network_payload as _build_drone_network_payload,
         drone_reachable_url as _build_drone_reachable_url,
@@ -115,6 +117,8 @@ except ImportError:
         raise
     from app_version import drone_app_version as _drone_app_version  # type: ignore
     from api_routes import ApiRoutesMixin  # type: ignore
+    from toggle_kiosk import set_kiosk_mode as _toggle_set_kiosk_mode  # type: ignore
+    from set_volume import set_audio_volume as _set_audio_volume_helper  # type: ignore
     from network_identity import (  # type: ignore
         drone_network_payload as _build_drone_network_payload,
         drone_reachable_url as _build_drone_reachable_url,
@@ -1914,6 +1918,33 @@ def _get_kiosk_mode(settings: Settings) -> Optional[bool]:
     return str(node.get("value") or "").strip().lower() == "kiosk"
 
 
+def _get_audio_volume(settings: Settings) -> Optional[int]:
+    """Best-effort read of the current output volume (0-100). Read-only, no root."""
+    getter = shutil.which("batocera-settings-get")
+    if getter:
+        try:
+            result = subprocess.run(
+                [getter, "audio.volume"], capture_output=True, text=True, timeout=5
+            )
+            value = (result.stdout or "").strip()
+            if value.isdigit():
+                return max(0, min(100, int(value)))
+        except (OSError, subprocess.SubprocessError):
+            pass
+    amixer = shutil.which("amixer")
+    if amixer:
+        try:
+            result = subprocess.run(
+                [amixer, "sget", "Master"], capture_output=True, text=True, timeout=5
+            )
+            match = re.search(r"\[(\d{1,3})%\]", result.stdout or "")
+            if match:
+                return max(0, min(100, int(match.group(1))))
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return None
+
+
 def _request_service_control(command: str) -> bool:
     if command not in {"restart-emulationstation", "set-kiosk-on", "set-kiosk-off"}:
         return False
@@ -1941,7 +1972,7 @@ def _request_kiosk_service_control(enabled: bool) -> bool:
         pass
     if not _request_service_control(command):
         return False
-    deadline = time.monotonic() + max(3.0, float(os.environ.get("DRONE_SERVICE_CONTROL_TIMEOUT_SECONDS", "60")))
+    deadline = time.monotonic() + max(3.0, float(os.environ.get("DRONE_SERVICE_CONTROL_TIMEOUT_SECONDS", "120")))
     while time.monotonic() < deadline:
         try:
             if result_path.exists():
@@ -1958,6 +1989,55 @@ def _request_kiosk_service_control(enabled: bool) -> bool:
     except OSError:
         pass
     raise OSError("Timed out waiting for the privileged Kiosk mode service operation")
+
+
+def _request_volume_service_control(level: int) -> bool:
+    level = max(0, min(100, int(level)))
+    control_dir = Path(os.environ.get("DRONE_SERVICE_CONTROL_DIR", "/userdata/system/drone-app/control"))
+    request_path = control_dir / "set-volume.request"
+    result_path = control_dir / "set-volume.result"
+    try:
+        result_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+    try:
+        control_dir.mkdir(parents=True, exist_ok=True)
+        request_path.write_text(f"{level}\n", encoding="utf-8")
+    except OSError:
+        return False
+    deadline = time.monotonic() + max(3.0, float(os.environ.get("DRONE_SERVICE_CONTROL_TIMEOUT_SECONDS", "120")))
+    while time.monotonic() < deadline:
+        try:
+            if result_path.exists():
+                result = result_path.read_text(encoding="utf-8", errors="ignore").strip()
+                result_path.unlink(missing_ok=True)
+                if result == "ok":
+                    return True
+                raise OSError(result or "Privileged volume operation failed")
+        except OSError:
+            raise
+        time.sleep(0.25)
+    try:
+        request_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+    raise OSError("Timed out waiting for the privileged volume service operation")
+
+
+def _apply_audio_volume(settings: Settings, level: int) -> int:
+    """Apply the output volume (0-100), returning the clamped level that was set."""
+    level = max(0, min(100, int(level)))
+    if settings.use_fake_data:
+        return level
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        _set_audio_volume_helper(level)
+        return level
+    if not _request_volume_service_control(level):
+        raise OSError(
+            "Unable to dispatch the privileged volume request; the Drone service "
+            "control worker may not be running."
+        )
+    return level
 
 
 def _emulationstation_restart_command() -> Optional[List[str]]:
@@ -1983,28 +2063,21 @@ def _restart_emulationstation() -> bool:
 def _apply_kiosk_mode(settings: Settings, enabled: bool) -> tuple[Path, bool]:
     if settings.use_fake_data:
         return _set_kiosk_mode(settings, enabled), False
+    # When the Drone app already runs as root, apply the change directly using the
+    # proven stop -> write -> overlay -> start sequence shared with toggle_kiosk.py.
     if hasattr(os, "geteuid") and os.geteuid() == 0:
-        init_script = Path("/etc/init.d/S31emulationstation")
-        if init_script.exists():
-            subprocess.run([str(init_script), "stop"], check=True)
-            time.sleep(2)
-        path = _set_kiosk_mode(settings, enabled)
-        overlay_tool = shutil.which("batocera-save-overlay")
-        if overlay_tool:
-            subprocess.run([overlay_tool], check=True)
-        if init_script.exists():
-            subprocess.Popen(
-                [str(init_script), "start"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-            return path, True
-        return path, _restart_emulationstation()
-    if _request_kiosk_service_control(enabled):
+        _toggle_set_kiosk_mode(enabled, config=settings.es_settings_file)
         return settings.es_settings_file, True
-    path = _set_kiosk_mode(settings, enabled)
-    return path, _restart_emulationstation()
+    # Non-root (production): the privileged service worker runs toggle_kiosk.py for us.
+    # _request_kiosk_service_control returns True only after the worker reports "ok"
+    # and raises on failure/timeout, so the result we report back to Overmind reflects
+    # what actually happened instead of falsely claiming an EmulationStation restart.
+    if not _request_kiosk_service_control(enabled):
+        raise OSError(
+            "Unable to dispatch the privileged Kiosk mode request; the Drone service "
+            "control worker may not be running."
+        )
+    return settings.es_settings_file, True
 
 
 def _resolve_es_settings_file(settings: Settings) -> Optional[Path]:
@@ -8434,6 +8507,7 @@ def _collect_system_info_payload(settings: Settings) -> dict:
         "performance": _collect_performance_metrics(settings.userdata_root),
         "asset_cache": asset_cache,
         "kiosk_enabled": _get_kiosk_mode(settings),
+        "audio_volume": _get_audio_volume(settings),
         "network": network,
         "uptime_seconds": uptime,
         "container": Path("/.dockerenv").exists() or os.environ.get("RUNNING_IN_DOCKER") == "1",
@@ -10970,6 +11044,26 @@ def _execute_overmind_action(
             "enabled": enabled,
             "settings_file": str(settings_path),
             "emulationstation_restarted": restarted,
+        }
+
+    if action_name == "set_volume":
+        payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
+        raw_level = payload.get("level")
+        if raw_level is None:
+            raw_level = payload.get("volume")
+        try:
+            level = int(raw_level)
+        except (TypeError, ValueError):
+            return "failed", "A numeric volume level (0-100) is required.", None
+        try:
+            applied = _apply_audio_volume(settings, level)
+        except (OSError, subprocess.SubprocessError, ValueError) as error:
+            return "failed", f"Unable to set volume: {error}", None
+        label = "muted" if applied <= 0 else f"set to {applied}%"
+        return "completed", f"Volume {label}.", {
+            "type": "audio_volume",
+            "level": applied,
+            "muted": applied <= 0,
         }
 
     if action_name == "update":
