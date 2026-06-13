@@ -1329,47 +1329,47 @@ async function renderHelpPage() {
     <div class="help-page">
       <div class="help-header mb-4">
         <div>
-          <div class="help-kicker">Batocera Drone Guide</div>
-          <h2 class="h3 mb-2">Understand the app, the moving parts, and what each screen is for.</h2>
-          <p class="mb-2 text-muted">Drone is the local Batocera companion that indexes this machine, exposes ROM and BIOS files, manages artwork and metadata, and helps keep this cabinet understandable from a browser.</p>
-          <p class="mb-0 text-muted">Overmind is the optional fleet coordinator at <a href="https://www.batocera-swarm.com" target="_blank" rel="noopener noreferrer">Batocera Swarm <i class="bi bi-box-arrow-up-right ms-1"></i></a>. When connected, it can track this Drone's inventory and health, show swarm membership, receive asset sync updates, and return processed actions so a fleet can be monitored and managed from one place.</p>
+          <div class="help-kicker">Batocera Drone</div>
+          <h2 class="h3 mb-2">Run your whole collection like a fleet — not one machine at a time.</h2>
+          <p class="mb-2 text-muted">Drone runs quietly on this Batocera machine and gives you a browser dashboard for everything on it — your library, saves, BIOS, artwork, and live health — from any phone, tablet, or computer on your network. No controller or TV required.</p>
+          <p class="mb-0 text-muted">Pair it with Overmind, the optional fleet coordinator at <a href="https://www.batocera-swarm.com" target="_blank" rel="noopener noreferrer">Batocera Swarm <i class="bi bi-box-arrow-up-right ms-1"></i></a>, and you can manage every cabinet from one place: copy content between machines, send remote actions, and watch the health of the whole swarm.</p>
         </div>
       </div>
 
       <div class="row g-3 mb-4">
         <div class="col-12 col-md-6 col-xl-3">
           <div class="help-metric h-100">
-            <i class="bi bi-controller"></i>
+            <i class="bi bi-phone"></i>
             <div>
-              <div class="help-metric-title">Systems</div>
-              <div class="text-muted small">Console and platform folders discovered from Batocera.</div>
+              <div class="help-metric-title">Browse from anywhere</div>
+              <div class="text-muted small">View and search your entire collection from any browser on your network.</div>
             </div>
           </div>
         </div>
         <div class="col-12 col-md-6 col-xl-3">
           <div class="help-metric h-100">
-            <i class="bi bi-collection-play"></i>
+            <i class="bi bi-arrow-left-right"></i>
             <div>
-              <div class="help-metric-title">ROM Files</div>
-              <div class="text-muted small">Games, ports, folders, and launchable files inside each system.</div>
+              <div class="help-metric-title">Sync between machines</div>
+              <div class="text-muted small">Copy games, saves, BIOS, and artwork cabinet-to-cabinet — no re-downloading.</div>
             </div>
           </div>
         </div>
         <div class="col-12 col-md-6 col-xl-3">
           <div class="help-metric h-100">
-            <i class="bi bi-cpu"></i>
+            <i class="bi bi-sliders"></i>
             <div>
-              <div class="help-metric-title">BIOS</div>
-              <div class="text-muted small">Firmware files some emulators need before games can run correctly.</div>
+              <div class="help-metric-title">Manage remotely</div>
+              <div class="text-muted small">Kiosk mode, volume, restarts, and cache refreshes — straight from Overmind.</div>
             </div>
           </div>
         </div>
         <div class="col-12 col-md-6 col-xl-3">
           <div class="help-metric h-100">
-            <i class="bi bi-diagram-3"></i>
+            <i class="bi bi-activity"></i>
             <div>
-              <div class="help-metric-title">Overmind</div>
-              <div class="text-muted small">The optional swarm coordinator for shared inventory and actions.</div>
+              <div class="help-metric-title">Keep it healthy</div>
+              <div class="text-muted small">Live system info, gameplay history, logs, and artwork repair at a glance.</div>
             </div>
           </div>
         </div>
@@ -1382,54 +1382,56 @@ async function renderHelpPage() {
             <div class="accordion help-accordion" id="helpAccordion">
               ${[
                 {
-                  q: "What is Batocera Drone?",
-                  a: "Drone is the local web app running on this Batocera machine. It scans the Batocera filesystem, presents the ROM library by system, exposes BIOS files, and provides admin tools for logs, emulator configs, artwork, and integration status."
+                  q: "Why would I use Batocera Drone?",
+                  a: "Drone turns this machine into something you can see and control from a browser. Check what's installed, fix missing artwork, watch gameplay history, read logs, and — through Overmind — manage it alongside every other cabinet you own. It's most powerful once you have more than one machine to keep in sync."
                 },
                 {
-                  q: "What is a system?",
-                  a: "A system is a Batocera platform folder such as nes, psx, arcade, or ports. The Systems view groups ROMs by those folders so users can browse one platform at a time."
+                  q: "Can I copy content between machines?",
+                  a: "Yes. When connected to Overmind, cabinets copy games, saves, BIOS, and artwork directly from each other over an encrypted peer-to-peer link. Set something up on one machine and let the others pull it — without re-downloading from the internet.",
+                  url: "https://www.batocera-swarm.com",
+                  linkText: "Open Batocera Swarm"
                 },
                 {
-                  q: "What is a ROM?",
-                  a: "A ROM is the game or launchable file stored for a system. Some entries are downloadable files, while others are folders or compound games that Drone marks as folder ROMs instead of direct downloads."
+                  q: "Can I manage the machine remotely?",
+                  a: "Yes. From Overmind you can turn Kiosk mode on or off, set the volume, restart the machine or EmulationStation, and rebuild the asset cache — then watch each action's status as it completes."
                 },
                 {
-                  q: "Why does the BIOS page matter?",
-                  a: "Some emulators require firmware files before they can boot games correctly. The BIOS page lists detected BIOS assets and lets users find or download the files this Drone can expose."
+                  q: "Will my saves stay in sync?",
+                  a: "Drone tracks your save files and reports changes, so Overmind can keep them aligned across the fleet. Pick up a game on one cabinet and continue on another."
                 },
                 {
-                  q: "What does the Theme page show?",
-                  a: "The Theme page surfaces artwork from the installed Batocera theme, including system images and logos. It helps users confirm what theme assets exist and which systems have visual coverage."
+                  q: "What does the BIOS page do?",
+                  a: "Some emulators need firmware before games boot correctly. The BIOS page shows what this machine already has and what's missing, so you can spot gaps before they cause problems."
                 },
                 {
-                  q: "What are Artwork & Metadata tools for?",
-                  a: "They help maintain gamelist.xml data: titles, descriptions, release dates, ratings, artwork paths, marquee crops, and missing images. This is useful when library entries look incomplete in Batocera."
+                  q: "What can Artwork & Metadata fix?",
+                  a: "It repairs gamelist data — titles, descriptions, release dates, ratings, box art, marquees, and missing images — so your library looks complete and polished in Batocera."
                 },
                 {
                   q: "What does the Downloads page track?",
-                  a: "Downloads shows active, queued, and recent transfers targeting this Drone. It is meant for long file operations where users need progress, queue state, and cancellation controls."
+                  a: "Active, queued, and recent transfers heading to this machine, with progress, queue position, and cancellation controls for long file operations."
                 },
                 {
                   q: "What is the Asset Cache?",
-                  a: "The cache is Drone's snapshot of ROMs, BIOS files, artwork, and pending upload state. When Overmind is enabled, this snapshot is what helps the fleet understand what this machine has."
+                  a: "Drone's fast snapshot of what this machine holds and what still needs uploading. It's how Overmind understands the cabinet's contents at a glance without rescanning every time."
                 },
                 {
-                  q: "What is Overmind Integration?",
-                  a: "Overmind is the optional central coordinator for the fleet. Connecting Drone to Overmind can publish this machine's identity and inventory, process remote actions, and show swarm membership.",
+                  q: "What is Overmind?",
+                  a: "The optional central coordinator for your fleet. Connect Drone to it to publish this machine's identity and inventory, run remote actions, and see swarm membership and health from one dashboard.",
                   url: "https://www.batocera-swarm.com",
                   linkText: "Open Batocera Swarm"
                 },
                 {
                   q: "Why are there Logs and Emulator Config pages?",
-                  a: "Logs help diagnose launch, service, and emulator problems. Emulator Configs show configuration files mirrored from common emulator locations so users can inspect settings without digging through the filesystem."
+                  a: "Logs help you diagnose launch, service, and emulator problems quickly. Emulator Configs surface configuration files from common emulator locations so you can inspect settings without digging through the filesystem."
                 },
                 {
-                  q: "What is API Access?",
-                  a: "API Access exposes Swagger/OpenAPI details and certificate information for integrations. Certificate-backed peer API access can identify trusted clients without sharing private keys."
+                  q: "Is it secure?",
+                  a: "Drone keeps sensitive credentials local, gates protected tools behind authenticated routes, and uses certificates so trusted cabinets can identify each other without ever sharing private keys."
                 },
                 {
                   q: "Why do some features disappear?",
-                  a: "Admin-only navigation is hidden when admin routes are disabled or forbidden by server configuration. Public browsing can still work while operational tools stay unavailable."
+                  a: "Admin-only tools are hidden when admin routes are disabled or restricted by configuration. Everyday browsing still works while operational tools stay locked down."
                 }
               ].map((item, index) => `
                 <div class="accordion-item">
@@ -1452,27 +1454,27 @@ async function renderHelpPage() {
 
         <div class="col-12 col-xl-5">
           <div class="help-section mb-4">
-            <h3 class="h5 mb-3"><i class="bi bi-signpost-split me-2"></i>Where To Go</h3>
+            <h3 class="h5 mb-3"><i class="bi bi-stars me-2"></i>What Drone does for you</h3>
             <div class="help-link-list">
-              <button class="help-link-row" type="button" onclick="setHash('#admin/artwork')"><i class="bi bi-images"></i><span><strong>Artwork & Metadata</strong><small>Edit gamelist fields, upload media, and repair missing artwork.</small></span></button>
-              <button class="help-link-row" type="button" onclick="setHash('#admin/emulators')"><i class="bi bi-file-earmark-code"></i><span><strong>Emulators</strong><small>Inspect emulator configuration files mirrored by Drone.</small></span></button>
-              <button class="help-link-row" type="button" onclick="setHash('#admin/overmind')"><i class="bi bi-diagram-3"></i><span><strong>Overmind Integration</strong><small>Connect this Drone to the fleet and review processed actions.</small></span></button>
-              <button class="help-link-row" type="button" onclick="setHash('#systems')"><i class="bi bi-grid"></i><span><strong>Systems</strong><small>Browse ROMs and folders by Batocera platform.</small></span></button>
+              <button class="help-link-row" type="button" onclick="setHash('#admin/overmind')"><i class="bi bi-arrow-left-right"></i><span><strong>Share across cabinets</strong><small>Copy games, saves, BIOS, and artwork peer-to-peer instead of downloading them everywhere.</small></span></button>
+              <button class="help-link-row" type="button" onclick="setHash('#admin/artwork')"><i class="bi bi-images"></i><span><strong>Polish your library</strong><small>Fix titles, descriptions, box art, and marquees so everything looks complete.</small></span></button>
+              <button class="help-link-row" type="button" onclick="setHash('#admin/gameplay-logs')"><i class="bi bi-clock-history"></i><span><strong>See what's been played</strong><small>Review detected game launches and recent play sessions.</small></span></button>
+              <button class="help-link-row" type="button" onclick="setHash('#admin/system-info')"><i class="bi bi-pc-display"></i><span><strong>Check machine health</strong><small>CPU, memory, storage, network, and connection speed at a glance.</small></span></button>
             </div>
             <div class="mt-2 small">
-              <a href="https://www.batocera-swarm.com" target="_blank" rel="noopener noreferrer">Open Batocera Swarm <i class="bi bi-box-arrow-up-right ms-1"></i></a>
+              <a href="https://www.batocera-swarm.com" target="_blank" rel="noopener noreferrer">Manage your whole fleet with Overmind <i class="bi bi-box-arrow-up-right ms-1"></i></a>
             </div>
           </div>
 
           <div class="help-section">
-            <h3 class="h5 mb-3"><i class="bi bi-lightbulb me-2"></i>Quick Explanations</h3>
+            <h3 class="h5 mb-3"><i class="bi bi-lightbulb me-2"></i>Good to know</h3>
             <dl class="help-terms mb-0">
-              <dt>Overmind</dt>
-              <dd>The optional coordinator that helps a fleet understand each Drone's identity, inventory, health, and completed actions.</dd>
-              <dt>Security</dt>
-              <dd>Drone keeps sensitive credentials local, uses authenticated routes for protected tools, and can use certificates so trusted peers can be identified without sharing private keys.</dd>
-              <dt>Asset Syncing</dt>
-              <dd>Drone scans ROMs, BIOS files, artwork, metadata, and cache state, then reports changes so Overmind can keep the fleet inventory current.</dd>
+              <dt>Better with more machines</dt>
+              <dd>A single Drone is a handy dashboard. A few of them with Overmind become a fleet you keep in sync and manage from one screen.</dd>
+              <dt>Peer-to-peer sync</dt>
+              <dd>Cabinets copy content directly from each other over encrypted links, so you don't re-download the same files on every machine.</dd>
+              <dt>Private by default</dt>
+              <dd>Credentials stay on the machine, protected tools require authentication, and trusted cabinets are verified by certificate.</dd>
             </dl>
           </div>
         </div>
