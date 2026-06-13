@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.94] - 2026-06-13
+
+- Fixing small bug with kiosk mode turning es back on.
+
 ## [v0.0.93] - 2026-06-13
 
 - Updating DRONE_SERVER so it bootstraps code each time and doesn't require a second manuall install.
