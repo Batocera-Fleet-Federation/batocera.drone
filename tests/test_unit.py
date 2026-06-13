@@ -1670,7 +1670,7 @@ class SettingsTests(unittest.TestCase):
             self.assertIsNone(result)
             popen.assert_not_called()
 
-    def test_kiosk_actions_update_es_settings_and_restart_emulationstation(self) -> None:
+    def test_screen_mode_action_updates_es_settings_and_restarts_emulationstation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             es_settings = root / "system" / "configs" / "emulationstation" / "es_settings.cfg"
@@ -1690,52 +1690,59 @@ class SettingsTests(unittest.TestCase):
                 repo = RomRepository(root / "roms", root / "bios")
 
                 with mock.patch("app.drone_api.os.geteuid", return_value=999):
-                    with mock.patch("app.drone_api._request_kiosk_service_control", return_value=True) as kiosk_control:
+                    with mock.patch("app.drone_api._request_screen_mode_service_control", return_value=True) as screen_control:
                         with mock.patch("app.drone_api.subprocess.Popen") as popen:
-                            enabled_status, enabled_message, enabled_result = _execute_overmind_action(
-                                settings, repo, {"action": "enable_kiosk"}
+                            kiosk_status, kiosk_message, kiosk_result = _execute_overmind_action(
+                                settings, repo, {"action": "set_screen_mode", "payload": {"mode": "kiosk"}}
                             )
-                            disabled_status, disabled_message, disabled_result = _execute_overmind_action(
-                                settings, repo, {"action": "disable_kiosk"}
+                            full_status, full_message, full_result = _execute_overmind_action(
+                                settings, repo, {"action": "set_screen_mode", "payload": {"mode": "full"}}
+                            )
+                            kid_status, kid_message, kid_result = _execute_overmind_action(
+                                settings, repo, {"action": "set_screen_mode", "payload": {"mode": "kid"}}
                             )
 
-            self.assertEqual(enabled_status, "completed")
-            self.assertIn("Kiosk mode enabled", enabled_message)
-            self.assertTrue(enabled_result["enabled"])
-            self.assertEqual(disabled_status, "completed")
-            self.assertIn("Kiosk mode disabled", disabled_message)
-            self.assertFalse(disabled_result["enabled"])
+            self.assertEqual(kiosk_status, "completed")
+            self.assertIn("Screen mode set to kiosk", kiosk_message)
+            self.assertEqual(kiosk_result["mode"], "kiosk")
+            self.assertEqual(full_status, "completed")
+            self.assertIn("Screen mode set to full", full_message)
+            self.assertEqual(full_result["mode"], "full")
+            self.assertEqual(kid_status, "completed")
+            self.assertIn("Screen mode set to kid", kid_message)
+            self.assertEqual(kid_result["mode"], "kid")
             self.assertIn('name="ThemeSet" value="carbon"', es_settings.read_text(encoding="utf-8"))
-            kiosk_control.assert_has_calls([mock.call(True), mock.call(False)])
+            screen_control.assert_has_calls([mock.call("kiosk"), mock.call("full"), mock.call("kid")])
             popen.assert_not_called()
 
-    def test_privileged_kiosk_helper_updates_xml_and_restarts_emulationstation(self) -> None:
-        from app import toggle_kiosk
+    def test_privileged_screen_mode_helper_updates_xml_and_restarts_emulationstation(self) -> None:
+        from app import set_screen_mode
 
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "es_settings.cfg"
             config.write_text('<?xml version="1.0"?><map><string name="ThemeSet" value="carbon"/></map>', encoding="utf-8")
-            with mock.patch.object(toggle_kiosk, "CONFIG", config):
-                with mock.patch("app.toggle_kiosk.subprocess.run", return_value=mock.Mock(returncode=0, stdout="")) as run:
-                    with mock.patch("app.toggle_kiosk.subprocess.Popen") as popen:
-                        toggle_kiosk.set_kiosk_mode(True)
+            with mock.patch.object(set_screen_mode, "CONFIG", config):
+                with mock.patch("app.set_screen_mode.subprocess.run", return_value=mock.Mock(returncode=0, stdout="")) as run:
+                    with mock.patch("app.set_screen_mode.subprocess.Popen") as popen:
+                        set_screen_mode.set_screen_mode("kiosk")
                         self.assertIn('name="UIMode" value="Kiosk"', config.read_text(encoding="utf-8"))
-                        toggle_kiosk.set_kiosk_mode(False)
+                        set_screen_mode.set_screen_mode("full")
+                        set_screen_mode.set_screen_mode("kid")
 
             self.assertIn('name="ThemeSet" value="carbon"', config.read_text(encoding="utf-8"))
-            self.assertIn('name="UIMode" value="Full"', config.read_text(encoding="utf-8"))
+            self.assertIn('name="UIMode" value="Kid"', config.read_text(encoding="utf-8"))
             # Each invocation runs stop ES + save overlay (2 run calls) then relaunches
             # ES detached (1 Popen call).
-            self.assertEqual(run.call_count, 4)
-            self.assertEqual(popen.call_count, 2)
+            self.assertEqual(run.call_count, 6)
+            self.assertEqual(popen.call_count, 3)
             run_commands = [call.args[0] for call in run.call_args_list]
-            self.assertIn([toggle_kiosk.EMULATIONSTATION_SERVICE, "stop"], run_commands)
+            self.assertIn([set_screen_mode.EMULATIONSTATION_SERVICE, "stop"], run_commands)
             self.assertIn(["batocera-save-overlay"], run_commands)
             popen_commands = [call.args[0] for call in popen.call_args_list]
-            self.assertIn([toggle_kiosk.EMULATIONSTATION_SERVICE, "start"], popen_commands)
+            self.assertIn([set_screen_mode.EMULATIONSTATION_SERVICE, "start"], popen_commands)
 
-    def test_kiosk_helper_restarts_emulationstation_even_when_overlay_fails(self) -> None:
-        from app import toggle_kiosk
+    def test_screen_mode_helper_restarts_emulationstation_even_when_overlay_fails(self) -> None:
+        from app import set_screen_mode
 
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "es_settings.cfg"
@@ -1745,18 +1752,18 @@ class SettingsTests(unittest.TestCase):
                 rc = 1 if command and command[0] == "batocera-save-overlay" else 0
                 return mock.Mock(returncode=rc, stdout="overlay failure" if rc else "")
 
-            with mock.patch.object(toggle_kiosk, "CONFIG", config):
-                with mock.patch("app.toggle_kiosk.subprocess.run", side_effect=fake_run):
-                    with mock.patch("app.toggle_kiosk.subprocess.Popen") as popen:
-                        toggle_kiosk.set_kiosk_mode(True)
+            with mock.patch.object(set_screen_mode, "CONFIG", config):
+                with mock.patch("app.set_screen_mode.subprocess.run", side_effect=fake_run):
+                    with mock.patch("app.set_screen_mode.subprocess.Popen") as popen:
+                        set_screen_mode.set_screen_mode("kiosk")
 
             # The overlay step failed, but EmulationStation must still be restarted and the
             # new UIMode must still be written (so the screen comes back in Kiosk mode).
             self.assertIn('name="UIMode" value="Kiosk"', config.read_text(encoding="utf-8"))
             popen_commands = [call.args[0] for call in popen.call_args_list]
-            self.assertIn([toggle_kiosk.EMULATIONSTATION_SERVICE, "start"], popen_commands)
+            self.assertIn([set_screen_mode.EMULATIONSTATION_SERVICE, "start"], popen_commands)
 
-    def test_kiosk_action_reports_failure_when_worker_unavailable(self) -> None:
+    def test_screen_mode_action_reports_failure_when_worker_unavailable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
@@ -1764,13 +1771,15 @@ class SettingsTests(unittest.TestCase):
             repo = RomRepository(root / "roms", root / "bios")
             with mock.patch("app.drone_api.os.geteuid", return_value=999):
                 # Worker cannot be dispatched at all (control dir not writable).
-                with mock.patch("app.drone_api._request_kiosk_service_control", return_value=False):
-                    status, message, result = _execute_overmind_action(settings, repo, {"action": "enable_kiosk"})
+                with mock.patch("app.drone_api._request_screen_mode_service_control", return_value=False):
+                    status, message, result = _execute_overmind_action(
+                        settings, repo, {"action": "set_screen_mode", "payload": {"mode": "kiosk"}}
+                    )
             self.assertEqual(status, "failed")
-            self.assertIn("Unable to update Kiosk mode settings", message)
+            self.assertIn("Unable to update screen mode settings", message)
             self.assertIsNone(result)
 
-    def test_kiosk_action_reports_failure_when_worker_times_out(self) -> None:
+    def test_screen_mode_action_reports_failure_when_worker_times_out(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
@@ -1778,12 +1787,27 @@ class SettingsTests(unittest.TestCase):
             repo = RomRepository(root / "roms", root / "bios")
             with mock.patch("app.drone_api.os.geteuid", return_value=999):
                 with mock.patch(
-                    "app.drone_api._request_kiosk_service_control",
-                    side_effect=OSError("Timed out waiting for the privileged Kiosk mode service operation"),
+                    "app.drone_api._request_screen_mode_service_control",
+                    side_effect=OSError("Timed out waiting for the privileged screen mode service operation"),
                 ):
-                    status, message, result = _execute_overmind_action(settings, repo, {"action": "disable_kiosk"})
+                    status, message, result = _execute_overmind_action(
+                        settings, repo, {"action": "set_screen_mode", "payload": {"mode": "full"}}
+                    )
             self.assertEqual(status, "failed")
             self.assertIn("Timed out", message)
+            self.assertIsNone(result)
+
+    def test_screen_mode_action_rejects_invalid_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
+                settings = Settings.from_env()
+            repo = RomRepository(root / "roms", root / "bios")
+            status, message, result = _execute_overmind_action(
+                settings, repo, {"action": "set_screen_mode", "payload": {"mode": "arcade"}}
+            )
+            self.assertEqual(status, "failed")
+            self.assertIn("full, kiosk, or kid", message)
             self.assertIsNone(result)
 
     def test_set_volume_action_dispatches_to_privileged_worker(self) -> None:
@@ -1894,8 +1918,8 @@ class SettingsTests(unittest.TestCase):
             ) as reclaim:
                 new_token = _report_overmind_action_completion(
                     mock.Mock(), mock.Mock(), {"integration_enabled": True}, "https://overmind.local",
-                    "old-token", "dev", {"id": "a1", "action": "enable_kiosk"}, "completed", "ok",
-                    {"type": "kiosk_mode"}, True,
+                    "old-token", "dev", {"id": "a1", "action": "set_screen_mode"}, "completed", "ok",
+                    {"type": "screen_mode"}, True,
                 )
         # Reclaimed once and retried the completion with the fresh token.
         self.assertEqual(new_token, "new-token")
@@ -2233,12 +2257,15 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("request_host_reboot()", bootstrap)
         self.assertIn("service_control_worker()", bootstrap)
         self.assertIn("/etc/init.d/S31emulationstation restart", bootstrap)
-        self.assertIn("set_kiosk_mode_as_root()", bootstrap)
+        self.assertIn("set_screen_mode_as_root()", bootstrap)
         self.assertIn('python3 "$helper" "$mode"', bootstrap)
-        self.assertIn("set-kiosk-${mode}.request", bootstrap)
+        self.assertIn("set-screen-mode-${mode}.request", bootstrap)
+        self.assertIn("for mode in full kiosk kid", bootstrap)
         self.assertIn("set_volume_as_root()", bootstrap)
         self.assertIn("set-volume.request", bootstrap)
         self.assertIn("DRONE_SERVICE_CONTROL_DIR", drone_source)
+        self.assertIn('system_info_payload["screen_mode"] = _get_screen_mode(settings)', drone_source)
+        self.assertIn('system_info_payload["audio_volume"] = _get_audio_volume(settings)', drone_source)
         self.assertIn("ensure_dns_fallback()", bootstrap)
         self.assertIn("nameserver 1.1.1.1", bootstrap)
         self.assertIn("ensure_drone_user", bootstrap)
@@ -2419,7 +2446,7 @@ class SettingsTests(unittest.TestCase):
             self.assertIn("memory", info["performance"])
             self.assertIn("disk", info["performance"])
             self.assertIn("disks", info["performance"])
-            self.assertIs(info["kiosk_enabled"], True)
+            self.assertEqual(info["screen_mode"], "kiosk")
             self.assertEqual(info["audio_volume"], 55)
 
     def test_mounted_disk_metrics_include_external_drives_without_bind_duplicates(self) -> None:

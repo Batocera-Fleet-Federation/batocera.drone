@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Apply Batocera's EmulationStation kiosk setting as the privileged service worker.
+"""Apply Batocera's EmulationStation screen mode as the privileged service worker.
 
-This is the single, canonical implementation of "flip Kiosk mode and restart
+This is the single, canonical implementation of "set screen mode and restart
 EmulationStation". The privileged (root) Drone service worker invokes it as
-``python3 app/toggle_kiosk.py [on|off]`` and the Drone app itself reuses
-``set_kiosk_mode`` when it happens to run as root, so the stop -> write -> overlay
+``python3 app/set_screen_mode.py [full|kiosk|kid]`` and the Drone app itself reuses
+``set_screen_mode`` when it happens to run as root, so the stop -> write -> overlay
 -> start sequence below can never drift between the two entry points.
 
 The restart is failure-tolerant on purpose: the ``stop`` and ``batocera-save-overlay``
@@ -51,47 +51,50 @@ def _run_step(command: list, *, timeout: int = 120) -> bool:
             command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=timeout
         )
         output = (proc.stdout or "").strip()
-        print(f"[toggle_kiosk] {label} -> rc={proc.returncode} {output}".rstrip())
+        print(f"[set_screen_mode] {label} -> rc={proc.returncode} {output}".rstrip())
         return proc.returncode == 0
     except (OSError, subprocess.SubprocessError) as error:
-        print(f"[toggle_kiosk] {label} -> error: {error}")
+        print(f"[set_screen_mode] {label} -> error: {error}")
         return False
 
 
-def set_kiosk_mode(enabled: bool, config: Optional[Path] = None) -> None:
-    """Flip UIMode and (re)start EmulationStation.
+def set_screen_mode(mode: str, config: Optional[Path] = None) -> None:
+    """Set UIMode and (re)start EmulationStation.
 
     Stop and overlay-save are best-effort; EmulationStation is always restarted so
     the screen comes back even when an earlier step fails in the headless service
     context. The UIMode is written to es_settings.cfg before the restart, so the new
     mode takes effect as soon as EmulationStation relaunches.
     """
+    normalized_mode = str(mode or "").strip().lower()
+    if normalized_mode not in {"full", "kiosk", "kid"}:
+        raise ValueError("Screen mode must be one of: full, kiosk, kid")
     if config is None:
         config = CONFIG
-    target = "Kiosk" if enabled else "Full"
-    print(f"[toggle_kiosk] applying UIMode={target}")
+    target = normalized_mode.title()
+    print(f"[set_screen_mode] applying UIMode={target}")
     _run_step([EMULATIONSTATION_SERVICE, "stop"], timeout=60)
     time.sleep(2)
     _write_ui_mode(config, target)
-    print(f"[toggle_kiosk] wrote UIMode={target} to {config}")
+    print(f"[set_screen_mode] wrote UIMode={target} to {config}")
     # Persist to the overlay so the change survives a reboot, but never let a slow or
     # failing overlay save block the EmulationStation restart below.
     _run_step(["batocera-save-overlay"], timeout=120)
-    print("[toggle_kiosk] starting EmulationStation")
+    print("[set_screen_mode] starting EmulationStation")
     subprocess.Popen(
         [EMULATIONSTATION_SERVICE, "start"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
-    print("[toggle_kiosk] EmulationStation start issued")
+    print("[set_screen_mode] EmulationStation start issued")
 
 
 def main() -> int:
-    if len(sys.argv) != 2 or sys.argv[1].lower() not in {"on", "off"}:
-        print("Usage: toggle_kiosk.py [on|off]", file=sys.stderr)
+    if len(sys.argv) != 2 or sys.argv[1].lower() not in {"full", "kiosk", "kid"}:
+        print("Usage: set_screen_mode.py [full|kiosk|kid]", file=sys.stderr)
         return 2
-    set_kiosk_mode(sys.argv[1].lower() == "on")
+    set_screen_mode(sys.argv[1].lower())
     return 0
 
 

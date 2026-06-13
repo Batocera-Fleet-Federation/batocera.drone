@@ -312,11 +312,11 @@ restart_emulationstation_as_root() {
   echo "[drone-service] Unable to restart EmulationStation: restart command was not found."
 }
 
-set_kiosk_mode_as_root() {
+set_screen_mode_as_root() {
   mode="$1"
-  helper="$WORK_DIR/app/toggle_kiosk.py"
+  helper="$WORK_DIR/app/set_screen_mode.py"
   if [ ! -f "$helper" ]; then
-    echo "[drone-service] Unable to set Kiosk mode: helper was not found."
+    echo "[drone-service] Unable to set screen mode: helper was not found."
     return 1
   fi
   python3 "$helper" "$mode"
@@ -339,21 +339,21 @@ service_control_worker() {
       echo "[drone-service] EmulationStation restart requested by Drone app."
       restart_emulationstation_as_root
     fi
-    for mode in on off; do
-      request="$CONTROL_DIR/set-kiosk-${mode}.request"
-      result="$CONTROL_DIR/set-kiosk-${mode}.result"
+    for mode in full kiosk kid; do
+      request="$CONTROL_DIR/set-screen-mode-${mode}.request"
+      result="$CONTROL_DIR/set-screen-mode-${mode}.result"
       if [ -f "$request" ]; then
         rm -f "$request" "$result"
-        echo "[drone-service] Kiosk mode ${mode} requested by Drone app."
+        echo "[drone-service] Screen mode ${mode} requested by Drone app."
         # Capture the helper's combined output so a failure reports the real reason
         # back to the Drone app (and on to the Overmind action result) instead of a
         # generic message.
-        if helper_output="$(set_kiosk_mode_as_root "$mode" 2>&1)"; then
+        if helper_output="$(set_screen_mode_as_root "$mode" 2>&1)"; then
           printf '%s\n' "ok" > "$result"
         else
-          printf 'Privileged Kiosk mode %s operation failed: %s\n' "$mode" "$(printf '%s' "$helper_output" | tr '\n' ' ' | cut -c1-300)" > "$result"
+          printf 'Privileged screen mode %s operation failed: %s\n' "$mode" "$(printf '%s' "$helper_output" | tr '\n' ' ' | cut -c1-300)" > "$result"
         fi
-        echo "[drone-service] Kiosk mode ${mode} result: ${helper_output}"
+        echo "[drone-service] Screen mode ${mode} result: ${helper_output}"
         chown root:"$DRONE_GROUP" "$result" 2>/dev/null || true
         chmod 664 "$result" 2>/dev/null || true
       fi

@@ -40,7 +40,7 @@ APP_DIR = Path(__file__).resolve().parent
 try:
     from .app_version import drone_app_version as _drone_app_version
     from .api_routes import ApiRoutesMixin
-    from .toggle_kiosk import set_kiosk_mode as _toggle_set_kiosk_mode
+    from .set_screen_mode import set_screen_mode as _set_screen_mode_helper
     from .set_volume import set_audio_volume as _set_audio_volume_helper
     from .network_identity import (
         drone_network_payload as _build_drone_network_payload,
@@ -117,7 +117,7 @@ except ImportError:
         raise
     from app_version import drone_app_version as _drone_app_version  # type: ignore
     from api_routes import ApiRoutesMixin  # type: ignore
-    from toggle_kiosk import set_kiosk_mode as _toggle_set_kiosk_mode  # type: ignore
+    from set_screen_mode import set_screen_mode as _set_screen_mode_helper  # type: ignore
     from set_volume import set_audio_volume as _set_audio_volume_helper  # type: ignore
     from network_identity import (  # type: ignore
         drone_network_payload as _build_drone_network_payload,
@@ -1889,9 +1889,12 @@ def _parse_es_theme_name(es_settings_path: Path) -> Optional[str]:
     return theme or None
 
 
-def _set_kiosk_mode(settings: Settings, enabled: bool) -> Path:
+def _set_screen_mode(settings: Settings, mode: str) -> Path:
+    normalized_mode = str(mode or "").strip().lower()
+    if normalized_mode not in {"full", "kiosk", "kid"}:
+        raise ValueError("Screen mode must be one of: full, kiosk, kid")
     path = settings.es_settings_file
-    target = "Kiosk" if enabled else "Full"
+    target = normalized_mode.title()
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         tree = ET.parse(path) if path.exists() else ET.ElementTree(ET.Element("map"))
@@ -1907,7 +1910,7 @@ def _set_kiosk_mode(settings: Settings, enabled: bool) -> Path:
     return path
 
 
-def _get_kiosk_mode(settings: Settings) -> Optional[bool]:
+def _get_screen_mode(settings: Settings) -> Optional[str]:
     try:
         root = ET.parse(settings.es_settings_file).getroot()
     except Exception:
@@ -1915,22 +1918,12 @@ def _get_kiosk_mode(settings: Settings) -> Optional[bool]:
     node = root.find(".//string[@name='UIMode']")
     if node is None:
         return None
-    return str(node.get("value") or "").strip().lower() == "kiosk"
+    mode = str(node.get("value") or "").strip().lower()
+    return mode if mode in {"full", "kiosk", "kid"} else None
 
 
 def _get_audio_volume(settings: Settings) -> Optional[int]:
     """Best-effort read of the current output volume (0-100). Read-only, no root."""
-    audio = shutil.which("batocera-audio")
-    if audio:
-        try:
-            result = subprocess.run(
-                [audio, "getSystemVolume"], capture_output=True, text=True, timeout=5
-            )
-            match = re.search(r"\d{1,3}", result.stdout or "")
-            if match:
-                return max(0, min(100, int(match.group())))
-        except (OSError, subprocess.SubprocessError):
-            pass
     getter = shutil.which("batocera-settings-get")
     if getter:
         try:
@@ -1940,6 +1933,17 @@ def _get_audio_volume(settings: Settings) -> Optional[int]:
             value = (result.stdout or "").strip()
             if value.isdigit():
                 return max(0, min(100, int(value)))
+        except (OSError, subprocess.SubprocessError):
+            pass
+    audio = shutil.which("batocera-audio")
+    if audio:
+        try:
+            result = subprocess.run(
+                [audio, "getSystemVolume"], capture_output=True, text=True, timeout=5
+            )
+            match = re.search(r"\d{1,3}", result.stdout or "")
+            if match:
+                return max(0, min(100, int(match.group())))
         except (OSError, subprocess.SubprocessError):
             pass
     amixer = shutil.which("amixer")
@@ -1957,7 +1961,12 @@ def _get_audio_volume(settings: Settings) -> Optional[int]:
 
 
 def _request_service_control(command: str) -> bool:
-    if command not in {"restart-emulationstation", "set-kiosk-on", "set-kiosk-off"}:
+    if command not in {
+        "restart-emulationstation",
+        "set-screen-mode-full",
+        "set-screen-mode-kiosk",
+        "set-screen-mode-kid",
+    }:
         return False
     control_dir = Path(os.environ.get("DRONE_SERVICE_CONTROL_DIR", "/userdata/system/drone-app/control"))
     request_path = control_dir / f"{command}.request"
@@ -1972,8 +1981,11 @@ def _request_service_control(command: str) -> bool:
         return False
 
 
-def _request_kiosk_service_control(enabled: bool) -> bool:
-    command = "set-kiosk-on" if enabled else "set-kiosk-off"
+def _request_screen_mode_service_control(mode: str) -> bool:
+    normalized_mode = str(mode or "").strip().lower()
+    if normalized_mode not in {"full", "kiosk", "kid"}:
+        raise ValueError("Screen mode must be one of: full, kiosk, kid")
+    command = f"set-screen-mode-{normalized_mode}"
     control_dir = Path(os.environ.get("DRONE_SERVICE_CONTROL_DIR", "/userdata/system/drone-app/control"))
     request_path = control_dir / f"{command}.request"
     result_path = control_dir / f"{command}.result"
@@ -1991,7 +2003,7 @@ def _request_kiosk_service_control(enabled: bool) -> bool:
                 result_path.unlink(missing_ok=True)
                 if result == "ok":
                     return True
-                raise OSError(result or "Privileged Kiosk mode operation failed")
+                raise OSError(result or "Privileged screen mode operation failed")
         except OSError:
             raise
         time.sleep(0.25)
@@ -1999,7 +2011,7 @@ def _request_kiosk_service_control(enabled: bool) -> bool:
         request_path.unlink(missing_ok=True)
     except OSError:
         pass
-    raise OSError("Timed out waiting for the privileged Kiosk mode service operation")
+    raise OSError("Timed out waiting for the privileged screen mode service operation")
 
 
 def _request_volume_service_control(level: int) -> bool:
@@ -2071,21 +2083,21 @@ def _restart_emulationstation() -> bool:
     return True
 
 
-def _apply_kiosk_mode(settings: Settings, enabled: bool) -> tuple[Path, bool]:
+def _apply_screen_mode(settings: Settings, mode: str) -> tuple[Path, bool]:
     if settings.use_fake_data:
-        return _set_kiosk_mode(settings, enabled), False
+        return _set_screen_mode(settings, mode), False
     # When the Drone app already runs as root, apply the change directly using the
-    # proven stop -> write -> overlay -> start sequence shared with toggle_kiosk.py.
+    # proven stop -> write -> overlay -> start sequence shared with set_screen_mode.py.
     if hasattr(os, "geteuid") and os.geteuid() == 0:
-        _toggle_set_kiosk_mode(enabled, config=settings.es_settings_file)
+        _set_screen_mode_helper(mode, config=settings.es_settings_file)
         return settings.es_settings_file, True
-    # Non-root (production): the privileged service worker runs toggle_kiosk.py for us.
-    # _request_kiosk_service_control returns True only after the worker reports "ok"
+    # Non-root (production): the privileged service worker runs set_screen_mode.py for us.
+    # _request_screen_mode_service_control returns True only after the worker reports "ok"
     # and raises on failure/timeout, so the result we report back to Overmind reflects
     # what actually happened instead of falsely claiming an EmulationStation restart.
-    if not _request_kiosk_service_control(enabled):
+    if not _request_screen_mode_service_control(mode):
         raise OSError(
-            "Unable to dispatch the privileged Kiosk mode request; the Drone service "
+            "Unable to dispatch the privileged screen mode request; the Drone service "
             "control worker may not be running."
         )
     return settings.es_settings_file, True
@@ -8569,7 +8581,7 @@ def _collect_system_info_payload(settings: Settings) -> dict:
         "gpu": _collect_gpu_info(),
         "performance": _collect_performance_metrics(settings.userdata_root),
         "asset_cache": asset_cache,
-        "kiosk_enabled": _get_kiosk_mode(settings),
+        "screen_mode": _get_screen_mode(settings),
         "audio_volume": _get_audio_volume(settings),
         "network": network,
         "uptime_seconds": uptime,
@@ -11094,17 +11106,19 @@ def _execute_overmind_action(
             "emulationstation_restarted": True,
         }
 
-    if action_name in {"enable_kiosk", "disable_kiosk"}:
-        enabled = action_name == "enable_kiosk"
+    if action_name == "set_screen_mode":
+        payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
+        mode = str(payload.get("mode") or "").strip().lower()
+        if mode not in {"full", "kiosk", "kid"}:
+            return "failed", "A screen mode of full, kiosk, or kid is required.", None
         try:
-            settings_path, restarted = _apply_kiosk_mode(settings, enabled)
+            settings_path, restarted = _apply_screen_mode(settings, mode)
         except (OSError, subprocess.SubprocessError, ET.ParseError, ValueError) as error:
-            return "failed", f"Unable to update Kiosk mode settings: {error}", None
-        state = "enabled" if enabled else "disabled"
+            return "failed", f"Unable to update screen mode settings: {error}", None
         suffix = " EmulationStation restart issued." if restarted else " Applies on the next EmulationStation restart."
-        return "completed", f"Kiosk mode {state}.{suffix}", {
-            "type": "kiosk_mode",
-            "enabled": enabled,
+        return "completed", f"Screen mode set to {mode}.{suffix}", {
+            "type": "screen_mode",
+            "mode": mode,
             "settings_file": str(settings_path),
             "emulationstation_restarted": restarted,
         }
@@ -11183,6 +11197,8 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                 else:
                     system_info_payload["performance"] = _collect_performance_metrics(settings.userdata_root)
                     system_info_payload["updated_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+                    system_info_payload["screen_mode"] = _get_screen_mode(settings)
+                    system_info_payload["audio_volume"] = _get_audio_volume(settings)
                 network_payload = _drone_network_payload(settings)
                 heartbeat_payload = {
                     "device_id": settings.overmind_device_id,
