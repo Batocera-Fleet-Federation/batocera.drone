@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.97] - 2026-06-13
+
+- Updating landing page to be more meaningful
+
 ## [v0.0.96] - 2026-06-13
 
 - Replaced kiosk on/off actions with validated set_screen_mode supporting full, kiosk, and kid. Drone now refreshes screen_mode and audio_volume every heartbeat and uses the privileged [screen-mode helper (line 61)](/Users/Jerrod/Documents/github/batocera-fleet-federation/batocera.drone/app/set_screen_mode.py:61). Added PostgreSQL persistence via [migration 0011 (line 1)](/Users/Jerrod/Documents/github/batocera-fleet-federation/batocera.overmind/src/overmind/migrations/0011.drone_screen_mode_volume.sql:1). Updated Overmind admin controls and converted recent actions to the themed responsive table in [overmind.js (line 3066)](/Users/Jerrod/Documents/github/batocera-fleet-federation/batocera.overmind/src/overmind/static/js/overmind.js:3066).
