@@ -23,6 +23,15 @@ def _clamp(level: int) -> int:
     return max(0, min(100, int(level)))
 
 
+def _run(command: list) -> str:
+    """Run a command, returning its combined output; raise OSError with that output on failure."""
+    proc = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    output = (proc.stdout or "").strip()
+    if proc.returncode != 0:
+        raise OSError(f"{' '.join(command)} exited {proc.returncode}: {output or '(no output)'}")
+    return output
+
+
 def set_audio_volume(level: int) -> None:
     """Apply the output volume (0-100, 0 = mute). Raises on failure.
 
@@ -35,15 +44,16 @@ def set_audio_volume(level: int) -> None:
 
     audio = shutil.which("batocera-audio")
     if audio:
-        subprocess.run([audio, "setSystemVolume", str(level)], check=True)
+        output = _run([audio, "setSystemVolume", str(level)])
+        print(f"batocera-audio setSystemVolume {level}: {output or 'ok'}")
         return
 
     amixer = shutil.which("amixer")
     if amixer:
         if level <= 0:
-            subprocess.run([amixer, "-q", "sset", MIXER_CONTROL, "mute"], check=True)
+            _run([amixer, "-q", "sset", MIXER_CONTROL, "mute"])
         else:
-            subprocess.run([amixer, "-q", "sset", MIXER_CONTROL, f"{level}%", "unmute"], check=True)
+            _run([amixer, "-q", "sset", MIXER_CONTROL, f"{level}%", "unmute"])
         return
 
     raise OSError("No volume tool found (batocera-audio / amixer)")

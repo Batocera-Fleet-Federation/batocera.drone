@@ -1820,7 +1820,7 @@ class SettingsTests(unittest.TestCase):
             return f"/usr/bin/{name}" if name == "batocera-audio" else None
 
         with mock.patch("app.set_volume.shutil.which", side_effect=fake_which):
-            with mock.patch("app.set_volume.subprocess.run") as run:
+            with mock.patch("app.set_volume.subprocess.run", return_value=mock.Mock(returncode=0, stdout="")) as run:
                 set_volume.set_audio_volume(40)
                 set_volume.set_audio_volume(0)
         commands = [call.args[0] for call in run.call_args_list]
@@ -1834,12 +1834,27 @@ class SettingsTests(unittest.TestCase):
             return f"/usr/bin/{name}" if name == "amixer" else None
 
         with mock.patch("app.set_volume.shutil.which", side_effect=fake_which):
-            with mock.patch("app.set_volume.subprocess.run") as run:
+            with mock.patch("app.set_volume.subprocess.run", return_value=mock.Mock(returncode=0, stdout="")) as run:
                 set_volume.set_audio_volume(40)
                 set_volume.set_audio_volume(0)
         commands = [call.args[0] for call in run.call_args_list]
         self.assertIn(["/usr/bin/amixer", "-q", "sset", "Master", "40%", "unmute"], commands)
         self.assertIn(["/usr/bin/amixer", "-q", "sset", "Master", "mute"], commands)
+
+    def test_privileged_volume_helper_raises_with_command_output_on_failure(self) -> None:
+        from app import set_volume
+
+        def fake_which(name):
+            return f"/usr/bin/{name}" if name == "batocera-audio" else None
+
+        with mock.patch("app.set_volume.shutil.which", side_effect=fake_which):
+            with mock.patch(
+                "app.set_volume.subprocess.run",
+                return_value=mock.Mock(returncode=1, stdout="no default sink"),
+            ):
+                with self.assertRaises(OSError) as ctx:
+                    set_volume.set_audio_volume(40)
+        self.assertIn("no default sink", str(ctx.exception))
 
     def test_privileged_volume_helper_requires_a_tool(self) -> None:
         from app import set_volume

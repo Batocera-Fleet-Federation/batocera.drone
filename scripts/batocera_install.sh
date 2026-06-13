@@ -387,11 +387,15 @@ service_control_worker() {
       if [ -f "$request" ]; then
         rm -f "$request" "$result"
         echo "[drone-service] Kiosk mode ${mode} requested by Drone app."
-        if set_kiosk_mode_as_root "$mode"; then
+        # Capture the helper's combined output so a failure reports the real reason
+        # back to the Drone app (and on to the Overmind action result) instead of a
+        # generic message.
+        if helper_output="$(set_kiosk_mode_as_root "$mode" 2>&1)"; then
           printf '%s\n' "ok" > "$result"
         else
-          printf '%s\n' "Privileged Kiosk mode ${mode} operation failed" > "$result"
+          printf 'Privileged Kiosk mode %s operation failed: %s\n' "$mode" "$(printf '%s' "$helper_output" | tr '\n' ' ' | cut -c1-300)" > "$result"
         fi
+        echo "[drone-service] Kiosk mode ${mode} result: ${helper_output}"
         chown root:"$DRONE_GROUP" "$result" 2>/dev/null || true
         chmod 664 "$result" 2>/dev/null || true
       fi
@@ -402,11 +406,12 @@ service_control_worker() {
       level="$(head -n 1 "$volume_request" 2>/dev/null | tr -cd '0-9')"
       rm -f "$volume_request" "$volume_result"
       echo "[drone-service] Volume change to ${level:-?} requested by Drone app."
-      if [ -n "$level" ] && set_volume_as_root "$level"; then
+      if [ -n "$level" ] && volume_output="$(set_volume_as_root "$level" 2>&1)"; then
         printf '%s\n' "ok" > "$volume_result"
       else
-        printf '%s\n' "Privileged volume operation failed" > "$volume_result"
+        printf 'Privileged volume operation failed: %s\n' "$(printf '%s' "${volume_output:-no level provided}" | tr '\n' ' ' | cut -c1-300)" > "$volume_result"
       fi
+      echo "[drone-service] Volume change result: ${volume_output:-no level provided}"
       chown root:"$DRONE_GROUP" "$volume_result" 2>/dev/null || true
       chmod 664 "$volume_result" 2>/dev/null || true
     fi

@@ -11316,8 +11316,19 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                     time.sleep(poll_seconds)
                     continue
 
-                print(f"Processing {len(actions)} Overmind action(s) for {settings.overmind_device_id}", file=sys.stdout, flush=True)
+                claimed_names = ", ".join(str(action.get("action") or "?") for action in actions)
+                _overmind_log(
+                    f"Claimed {len(actions)} Overmind action(s) for {settings.overmind_device_id}: {claimed_names}",
+                    also_stdout=True,
+                )
                 for action in actions:
+                    action_name_log = str(action.get("action") or "?")
+                    action_id_log = str(action.get("id") or "?")
+                    payload_log = action.get("payload") if isinstance(action.get("payload"), dict) else {}
+                    _overmind_log(
+                        f"Executing Overmind action {action_name_log} ({action_id_log}) payload={payload_log}",
+                        also_stdout=True,
+                    )
                     status_value, message, result = _execute_overmind_action(settings, repository, action, config, base_url, token)
                     reboot_requested = (
                         str(action.get("action") or "").strip().lower() == "restart"
@@ -11325,10 +11336,9 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                         and not settings.use_fake_data
                     )
                     _record_processed_overmind_action(settings, action, status_value, message, result)
-                    print(
-                        f"Processed Overmind action {action.get('action')} ({action.get('id')}): {status_value} - {message}",
-                        file=sys.stdout,
-                        flush=True,
+                    _overmind_log(
+                        f"Processed Overmind action {action_name_log} ({action_id_log}): {status_value} - {message}",
+                        also_stdout=True,
                     )
                     action_id = quote(str(action.get("id") or ""), safe="")
                     if action_id:
@@ -11338,11 +11348,13 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                             completion_payload["result"] = result
                         try:
                             _overmind_post_json(complete_url, completion_payload, token=token, settings=settings)
+                            _overmind_log(
+                                f"Reported Overmind action completion {action_name_log} ({action_id_log}): {status_value}"
+                            )
                         except Exception as error:
-                            print(
-                                f"Failed to report Overmind action completion {action.get('id')}: {_format_overmind_error(error)}",
-                                file=sys.stderr,
-                                flush=True,
+                            _overmind_log(
+                                f"Failed to report Overmind action completion {action_id_log}: {_format_overmind_error(error)}",
+                                also_stdout=True,
                             )
                     if reboot_requested:
                         print(
