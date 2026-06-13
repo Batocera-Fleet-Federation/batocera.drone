@@ -1,5 +1,10 @@
 # Changelog
 
+## [v0.0.93] - 2026-06-13
+
+- Updating DRONE_SERVER so it bootstraps code each time and doesn't require a second manuall install.
+- Fixing bug with volume control.
+
 ## [v0.0.92] - 2026-06-13
 
 - Fixing volume action processing.
