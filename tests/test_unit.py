@@ -1715,7 +1715,7 @@ class SettingsTests(unittest.TestCase):
             config = Path(tmp) / "es_settings.cfg"
             config.write_text('<?xml version="1.0"?><map><string name="ThemeSet" value="carbon"/></map>', encoding="utf-8")
             with mock.patch.object(toggle_kiosk, "CONFIG", config):
-                with mock.patch("app.toggle_kiosk.subprocess.run") as run:
+                with mock.patch("app.toggle_kiosk.subprocess.run", return_value=mock.Mock(returncode=0, stdout="")) as run:
                     with mock.patch("app.toggle_kiosk.subprocess.Popen") as popen:
                         toggle_kiosk.set_kiosk_mode(True)
                         self.assertIn('name="UIMode" value="Kiosk"', config.read_text(encoding="utf-8"))
@@ -1723,13 +1723,35 @@ class SettingsTests(unittest.TestCase):
 
             self.assertIn('name="ThemeSet" value="carbon"', config.read_text(encoding="utf-8"))
             self.assertIn('name="UIMode" value="Full"', config.read_text(encoding="utf-8"))
-            # Each invocation runs the proven sequence: stop ES + save overlay (2 run calls)
-            # then relaunches ES detached (1 Popen call).
+            # Each invocation runs stop ES + save overlay (2 run calls) then relaunches
+            # ES detached (1 Popen call).
             self.assertEqual(run.call_count, 4)
             self.assertEqual(popen.call_count, 2)
             run_commands = [call.args[0] for call in run.call_args_list]
             self.assertIn([toggle_kiosk.EMULATIONSTATION_SERVICE, "stop"], run_commands)
             self.assertIn(["batocera-save-overlay"], run_commands)
+            popen_commands = [call.args[0] for call in popen.call_args_list]
+            self.assertIn([toggle_kiosk.EMULATIONSTATION_SERVICE, "start"], popen_commands)
+
+    def test_kiosk_helper_restarts_emulationstation_even_when_overlay_fails(self) -> None:
+        from app import toggle_kiosk
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "es_settings.cfg"
+
+            def fake_run(command, **kwargs):
+                # Simulate batocera-save-overlay failing/hanging in the headless context.
+                rc = 1 if command and command[0] == "batocera-save-overlay" else 0
+                return mock.Mock(returncode=rc, stdout="overlay failure" if rc else "")
+
+            with mock.patch.object(toggle_kiosk, "CONFIG", config):
+                with mock.patch("app.toggle_kiosk.subprocess.run", side_effect=fake_run):
+                    with mock.patch("app.toggle_kiosk.subprocess.Popen") as popen:
+                        toggle_kiosk.set_kiosk_mode(True)
+
+            # The overlay step failed, but EmulationStation must still be restarted and the
+            # new UIMode must still be written (so the screen comes back in Kiosk mode).
+            self.assertIn('name="UIMode" value="Kiosk"', config.read_text(encoding="utf-8"))
             popen_commands = [call.args[0] for call in popen.call_args_list]
             self.assertIn([toggle_kiosk.EMULATIONSTATION_SERVICE, "start"], popen_commands)
 
