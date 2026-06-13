@@ -1813,18 +1813,31 @@ class SettingsTests(unittest.TestCase):
             self.assertIn("numeric volume level", message)
             self.assertIsNone(result)
 
-    def test_privileged_volume_helper_runs_settings_and_amixer(self) -> None:
+    def test_privileged_volume_helper_uses_batocera_audio(self) -> None:
         from app import set_volume
 
         def fake_which(name):
-            return f"/usr/bin/{name}" if name in {"batocera-settings-set", "amixer"} else None
+            return f"/usr/bin/{name}" if name == "batocera-audio" else None
 
         with mock.patch("app.set_volume.shutil.which", side_effect=fake_which):
             with mock.patch("app.set_volume.subprocess.run") as run:
                 set_volume.set_audio_volume(40)
                 set_volume.set_audio_volume(0)
         commands = [call.args[0] for call in run.call_args_list]
-        self.assertIn(["/usr/bin/batocera-settings-set", "audio.volume", "40"], commands)
+        self.assertIn(["/usr/bin/batocera-audio", "setSystemVolume", "40"], commands)
+        self.assertIn(["/usr/bin/batocera-audio", "setSystemVolume", "0"], commands)
+
+    def test_privileged_volume_helper_falls_back_to_amixer(self) -> None:
+        from app import set_volume
+
+        def fake_which(name):
+            return f"/usr/bin/{name}" if name == "amixer" else None
+
+        with mock.patch("app.set_volume.shutil.which", side_effect=fake_which):
+            with mock.patch("app.set_volume.subprocess.run") as run:
+                set_volume.set_audio_volume(40)
+                set_volume.set_audio_volume(0)
+        commands = [call.args[0] for call in run.call_args_list]
         self.assertIn(["/usr/bin/amixer", "-q", "sset", "Master", "40%", "unmute"], commands)
         self.assertIn(["/usr/bin/amixer", "-q", "sset", "Master", "mute"], commands)
 

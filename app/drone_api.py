@@ -1920,6 +1920,17 @@ def _get_kiosk_mode(settings: Settings) -> Optional[bool]:
 
 def _get_audio_volume(settings: Settings) -> Optional[int]:
     """Best-effort read of the current output volume (0-100). Read-only, no root."""
+    audio = shutil.which("batocera-audio")
+    if audio:
+        try:
+            result = subprocess.run(
+                [audio, "getSystemVolume"], capture_output=True, text=True, timeout=5
+            )
+            match = re.search(r"\d{1,3}", result.stdout or "")
+            if match:
+                return max(0, min(100, int(match.group())))
+        except (OSError, subprocess.SubprocessError):
+            pass
     getter = shutil.which("batocera-settings-get")
     if getter:
         try:

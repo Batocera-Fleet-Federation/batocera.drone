@@ -4,8 +4,9 @@
 Canonical implementation of "change the machine volume", invoked by the
 privileged (root) Drone service worker as ``python3 app/set_volume.py <0-100>``
 and reused in-process by the Drone app when it happens to run as root. ``0``
-means mute. Persists the level via ``batocera-settings-set audio.volume`` and
-applies it live with ALSA so it takes effect without a reboot.
+means mute. Uses ``batocera-audio setSystemVolume <level>`` (the supported
+Batocera command, which both applies the level live and persists it); falls
+back to ALSA ``amixer`` only on non-Batocera/dev hosts.
 """
 
 from __future__ import annotations
@@ -23,19 +24,19 @@ def _clamp(level: int) -> int:
 
 
 def set_audio_volume(level: int) -> None:
-    """Persist and apply the output volume. Raises on failure.
+    """Apply the output volume (0-100, 0 = mute). Raises on failure.
 
-    Runs whichever tools are available: ``batocera-settings-set`` persists the
-    value across reboots and ``amixer`` applies it immediately. At least one of
-    them must be present, otherwise there is no way to honour the request.
+    Prefers ``batocera-audio setSystemVolume <level>`` which sets the absolute
+    system volume live and persists it. Falls back to ALSA ``amixer`` only when
+    batocera-audio is unavailable (dev/container hosts); at least one tool must
+    be present, otherwise there is no way to honour the request.
     """
     level = _clamp(level)
-    applied = False
 
-    settings_set = shutil.which("batocera-settings-set")
-    if settings_set:
-        subprocess.run([settings_set, "audio.volume", str(level)], check=True)
-        applied = True
+    audio = shutil.which("batocera-audio")
+    if audio:
+        subprocess.run([audio, "setSystemVolume", str(level)], check=True)
+        return
 
     amixer = shutil.which("amixer")
     if amixer:
@@ -43,10 +44,9 @@ def set_audio_volume(level: int) -> None:
             subprocess.run([amixer, "-q", "sset", MIXER_CONTROL, "mute"], check=True)
         else:
             subprocess.run([amixer, "-q", "sset", MIXER_CONTROL, f"{level}%", "unmute"], check=True)
-        applied = True
+        return
 
-    if not applied:
-        raise OSError("No volume tool found (batocera-settings-set / amixer)")
+    raise OSError("No volume tool found (batocera-audio / amixer)")
 
 
 def main() -> int:
