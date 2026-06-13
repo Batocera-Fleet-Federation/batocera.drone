@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.95] - 2026-06-13
+
+- Another bug found with action handling and drone tokens that caused issue with processing kiosk action.
+
 ## [v0.0.94] - 2026-06-13
 
 - Fixing small bug with kiosk mode turning es back on.
