@@ -7994,6 +7994,58 @@ def _reclaim_overmind_token_after_unauthorized(settings: Settings, repository: "
     return _register_or_claim_overmind_token(settings, repository, config, base_url)
 
 
+def _report_overmind_action_completion(
+    settings: "Settings",
+    repository: "RomRepository",
+    config: dict,
+    base_url: str,
+    token: str,
+    device_id: str,
+    action: dict,
+    status_value: str,
+    message: str,
+    result: Optional[dict],
+    integration_enabled: bool,
+) -> str:
+    """Report an action's completion to Overmind, returning the (possibly reclaimed) token.
+
+    If the stored bearer token was rotated out from under us, the completion POST gets a
+    401. Without recovery the action would stay 'in_progress' in Overmind forever (the
+    Drone already executed and dropped it). So on 401 we reclaim the token with the bound
+    authorization token and retry the completion once, mirroring the heartbeat path.
+    """
+    action_id = quote(str(action.get("id") or ""), safe="")
+    action_label = str(action.get("action") or "?")
+    action_id_log = str(action.get("id") or "?")
+    if not action_id:
+        return token
+    complete_url = f"{base_url}/api/devices/{device_id}/actions/{action_id}/complete"
+    completion_payload: dict = {"status": status_value, "message": message}
+    if result is not None:
+        completion_payload["result"] = result
+    try:
+        try:
+            _overmind_post_json(complete_url, completion_payload, token=token, settings=settings)
+        except HTTPError as error:
+            if error.code == 401 and integration_enabled:
+                replacement_token = _reclaim_overmind_token_after_unauthorized(settings, repository, config, base_url, error)
+                if not replacement_token:
+                    raise
+                token = replacement_token
+                _overmind_post_json(complete_url, completion_payload, token=token, settings=settings)
+            else:
+                raise
+        _overmind_log(
+            f"Reported Overmind action completion {action_label} ({action_id_log}): {status_value}"
+        )
+    except Exception as error:
+        _overmind_log(
+            f"Failed to report Overmind action completion {action_id_log}: {_format_overmind_error(error)}",
+            also_stdout=True,
+        )
+    return token
+
+
 def _fetch_peer_certificate(settings: Settings, config: dict, peer_id: str) -> Optional[Path]:
     base_url = str(config.get("overmind_url") or "").strip().rstrip("/")
     token = str(config.get("overmind_token") or "").strip()
@@ -11340,22 +11392,19 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                         f"Processed Overmind action {action_name_log} ({action_id_log}): {status_value} - {message}",
                         also_stdout=True,
                     )
-                    action_id = quote(str(action.get("id") or ""), safe="")
-                    if action_id:
-                        complete_url = f"{base_url}/api/devices/{device_id}/actions/{action_id}/complete"
-                        completion_payload = {"status": status_value, "message": message}
-                        if result is not None:
-                            completion_payload["result"] = result
-                        try:
-                            _overmind_post_json(complete_url, completion_payload, token=token, settings=settings)
-                            _overmind_log(
-                                f"Reported Overmind action completion {action_name_log} ({action_id_log}): {status_value}"
-                            )
-                        except Exception as error:
-                            _overmind_log(
-                                f"Failed to report Overmind action completion {action_id_log}: {_format_overmind_error(error)}",
-                                also_stdout=True,
-                            )
+                    token = _report_overmind_action_completion(
+                        settings,
+                        repository,
+                        config,
+                        base_url,
+                        token,
+                        device_id,
+                        action,
+                        status_value,
+                        message,
+                        result,
+                        integration_enabled,
+                    )
                     if reboot_requested:
                         print(
                             f"Remote restart action acknowledged; exiting with code {DRONE_REMOTE_REBOOT_EXIT_CODE} for service supervisor reboot.",

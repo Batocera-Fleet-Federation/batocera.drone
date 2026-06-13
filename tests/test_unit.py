@@ -73,6 +73,7 @@ from app.drone_api import (
     _rom_fingerprint_exists,
     _best_peer_for_rom,
     _execute_overmind_action,
+    _report_overmind_action_completion,
     _register_or_claim_overmind_token,
     _reclaim_overmind_token_after_unauthorized,
     _collect_emulator_configs,
@@ -1877,6 +1878,43 @@ class SettingsTests(unittest.TestCase):
                 with self.assertRaises(OSError) as ctx:
                     set_volume.set_audio_volume(40)
         self.assertIn("no default sink", str(ctx.exception))
+
+    def test_action_completion_reclaims_token_and_retries_on_401(self) -> None:
+        used_tokens = []
+
+        def fake_post(url, payload, token=None, settings=None):
+            used_tokens.append(token)
+            if len(used_tokens) == 1:
+                raise HTTPError(url, 401, "Unauthorized", {}, io.BytesIO(b'{"detail":"Invalid Drone token"}'))
+            return {}
+
+        with mock.patch("app.drone_api._overmind_post_json", side_effect=fake_post):
+            with mock.patch(
+                "app.drone_api._reclaim_overmind_token_after_unauthorized", return_value="new-token"
+            ) as reclaim:
+                new_token = _report_overmind_action_completion(
+                    mock.Mock(), mock.Mock(), {"integration_enabled": True}, "https://overmind.local",
+                    "old-token", "dev", {"id": "a1", "action": "enable_kiosk"}, "completed", "ok",
+                    {"type": "kiosk_mode"}, True,
+                )
+        # Reclaimed once and retried the completion with the fresh token.
+        self.assertEqual(new_token, "new-token")
+        self.assertEqual(reclaim.call_count, 1)
+        self.assertEqual(used_tokens, ["old-token", "new-token"])
+
+    def test_action_completion_does_not_reclaim_on_non_401(self) -> None:
+        def fake_post(url, payload, token=None, settings=None):
+            raise HTTPError(url, 500, "Server Error", {}, io.BytesIO(b"boom"))
+
+        with mock.patch("app.drone_api._overmind_post_json", side_effect=fake_post):
+            with mock.patch("app.drone_api._reclaim_overmind_token_after_unauthorized") as reclaim:
+                new_token = _report_overmind_action_completion(
+                    mock.Mock(), mock.Mock(), {"integration_enabled": True}, "https://overmind.local",
+                    "old-token", "dev", {"id": "a1", "action": "restart"}, "completed", "ok", None, True,
+                )
+        # A non-auth failure is logged but does not trigger a token reclaim; token unchanged.
+        self.assertEqual(new_token, "old-token")
+        reclaim.assert_not_called()
 
     def test_privileged_volume_helper_requires_a_tool(self) -> None:
         from app import set_volume
