@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.91] - 2026-06-13
+
+- Bugs #1 & #2 — Kiosk ON black screen / OFF failure (Drone)
+
 ## [v0.0.90] - 2026-06-11
 
 - Fixing kiosk error due to permissions.
