@@ -28,6 +28,7 @@ from app.drone_api import (
     DownloadCancelled,
     DownloadManager,
     DroneCredentialStore,
+    DroneThreadingHTTPServer,
     LaunchBoxClient,
     RomRepository,
     Settings,
@@ -4153,3 +4154,23 @@ class LaunchBoxMappingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DroneServerErrorHandlingTests(unittest.TestCase):
+    def test_handle_error_logs_concise_line_for_tls_probe(self) -> None:
+        import contextlib
+        import ssl as _ssl
+        from unittest import mock as _mock
+
+        captured = io.StringIO()
+        try:
+            raise _ssl.SSLError("UNEXPECTED_RECORD")
+        except _ssl.SSLError:
+            with contextlib.redirect_stderr(captured):
+                # Bound-method call with a stand-in self; the SSLError branch returns
+                # before any super() call, so a Mock self is sufficient.
+                DroneThreadingHTTPServer.handle_error(_mock.Mock(), object(), ("66.228.34.203", 4444))
+        output = captured.getvalue()
+        self.assertIn("Dropped malformed/insecure connection from 66.228.34.203", output)
+        self.assertIn("SSLError", output)
+        self.assertNotIn("Traceback", output)

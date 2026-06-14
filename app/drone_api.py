@@ -12091,6 +12091,23 @@ class DroneThreadingHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
     daemon_threads = True
 
+    def handle_error(self, request, client_address):
+        # The public HTTPS port is constantly probed by internet scanners sending
+        # non-TLS or malformed payloads, which surface as SSL/connection errors during
+        # request handling. socketserver's default dumps a full traceback for each,
+        # spamming stderr. Log a single concise line for these benign cases instead;
+        # fall back to the noisy traceback only for genuinely unexpected errors.
+        error = sys.exc_info()[1]
+        if isinstance(error, (ssl.SSLError, ConnectionError, BrokenPipeError, TimeoutError, OSError)):
+            ip = client_address[0] if isinstance(client_address, (tuple, list)) and client_address else client_address
+            print(
+                f"Dropped malformed/insecure connection from {ip}: {error.__class__.__name__}: {error}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return
+        super().handle_error(request, client_address)
+
 
 def _apply_server_tls(settings: Settings, server: ThreadingHTTPServer) -> None:
     if settings.http_only:
