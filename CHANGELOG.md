@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.1.2] - 2026-06-13
+
+- Clear pending asset-change queue after a successful inventory upload
+
 ## [v0.1.1] - 2026-06-13
 
 - Quiet internet-scanner TLS probes in the Drone HTTP server
