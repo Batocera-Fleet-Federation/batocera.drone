@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.1.3] - 2026-06-14
+
+- Fix HTTP server wedging when a client stalls the TLS handshake
+
 ## [v0.1.2] - 2026-06-13
 
 - Clear pending asset-change queue after a successful inventory upload
