@@ -3413,6 +3413,53 @@ class SettingsTests(unittest.TestCase):
             self.assertTrue(all("rom_fingerprint" not in row for row in uploads[0]["roms"]))
             self.assertTrue(all(len(payload["roms"]) == 1 and payload["roms"][0].get("rom_fingerprint") for payload in uploads[1:]))
 
+    def test_rom_metadata_delta_upload_clears_pending_so_next_poll_skips(self) -> None:
+        from app.rom_metadata_store import _read_pending_rom_metadata_changes
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            system = root / "roms" / "snes"
+            system.mkdir(parents=True)
+            (system / "Game One.zip").write_bytes(b"one")
+            self._write_gamelist(system, "Game One.zip")
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "USERDATA_ROOT": str(root),
+                    "ROMS_ROOT": str(root / "roms"),
+                    "BIOS_ROOT": str(root / "bios"),
+                    "OVERMIND_DEVICE_ID": "drone-a",
+                },
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            repo = RomRepository(settings.roms_root, settings.bios_root)
+
+            def fake_post(url, payload, token=None, settings=None, timeout_seconds=10):
+                return 200, {
+                    "rom_count": len(payload.get("roms") or []),
+                    "bios_count": len(payload.get("bios") or []),
+                    "artwork_count": len(payload.get("artwork") or []),
+                }
+
+            with mock.patch("app.drone_api.ROM_METADATA_HASH_ROMS_ENABLED", False), mock.patch(
+                "app.drone_api._overmind_post_json_with_status", side_effect=fake_post
+            ):
+                # First sync establishes a clean, uploaded cache (full refresh).
+                _sync_rom_metadata_to_overmind(settings, repo, {"overmind_token": "t"}, "https://overmind.local", "t")
+                # A new ROM appears -> the next sync is a delta carrying it.
+                (system / "Game Two.zip").write_bytes(b"two")
+                self._write_gamelist(system, "Game One.zip", "Game Two.zip")
+                delta = _sync_rom_metadata_to_overmind(settings, repo, {"overmind_token": "t"}, "https://overmind.local", "t")
+                # The pending-change queue must be empty after a successful delta upload...
+                pending = _read_pending_rom_metadata_changes(settings)
+                self.assertEqual(pending.get("roms"), [])
+                self.assertEqual(delta["status"], "uploaded")
+                # ...so a follow-up poll with no filesystem change uploads nothing
+                # (regression: it used to re-upload the same delta every poll forever).
+                again = _sync_rom_metadata_to_overmind(settings, repo, {"overmind_token": "t"}, "https://overmind.local", "t")
+                self.assertEqual(again["status"], "skipped")
+
     def test_rom_metadata_sync_flags_full_refresh_when_hash_patch_upload_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"

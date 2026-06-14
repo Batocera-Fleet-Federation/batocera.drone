@@ -11755,6 +11755,10 @@ def _sync_rom_metadata_to_overmind_locked(
         _overmind_log(
             f"Asset metadata {upload_kind} sync succeeded: accepted_roms={accepted_roms} accepted_bios={accepted_bios} accepted_artwork={accepted_artwork}"
         )
+        # Flush the pending-change queue now that this snapshot's inventory was accepted.
+        # Without this the same pending rows re-upload on every poll forever (observed as
+        # a steady "decision=delta delta_roms=N" loop in overmind.log).
+        _clear_pending_rom_metadata_changes(settings)
 
     hash_batches = 0
     hashed_roms = 0
