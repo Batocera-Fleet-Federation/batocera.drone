@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.1.1] - 2026-06-13
+
+- Quiet internet-scanner TLS probes in the Drone HTTP server
+
 ## [v0.1.0] - 2026-06-13
 
 - Updating install script to display url that users can navigate to for the drone.  Updating verbiage on landing page.
