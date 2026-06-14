@@ -4065,6 +4065,13 @@ OPENAPI_SPEC = {
 class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
     server_version = "DroneApp/4.0"
     openapi_spec = OPENAPI_SPEC
+    # Per-connection idle timeout (applied to the socket in BaseHTTPRequestHandler.setup).
+    # The TLS handshake is now deferred to this worker thread (do_handshake_on_connect=False),
+    # so this bounds both the handshake and per-request reads/writes: a stalled or silent
+    # client is dropped instead of holding a thread forever. It is a per-operation idle
+    # timeout, not a total-transfer cap, so large peer ROM transfers with flowing data are
+    # unaffected. Overridable via env for slow networks.
+    timeout = max(15, int(os.environ.get("DRONE_REQUEST_TIMEOUT_SECONDS", "120")))
 
     def __init__(
         self,
@@ -12128,7 +12135,13 @@ def _apply_server_tls(settings: Settings, server: ThreadingHTTPServer) -> None:
         ssl_context.verify_mode = ssl.CERT_OPTIONAL
         if settings.drone_mtls_ca_file and settings.drone_mtls_ca_file.exists():
             ssl_context.load_verify_locations(cafile=str(settings.drone_mtls_ca_file))
-    server.socket = ssl_context.wrap_socket(server.socket, server_side=True)
+    # do_handshake_on_connect=False is critical: wrapping the LISTENING socket otherwise
+    # makes accept() perform the TLS handshake on the single serve_forever thread, so one
+    # silent client (e.g. an internet scanner that opens 443 and never speaks) blocks
+    # accept() forever and wedges the whole server. Deferring the handshake lets accept()
+    # return immediately; the handshake then runs in the per-request worker thread under
+    # RomRequestHandler.timeout, where a stall costs only that one thread.
+    server.socket = ssl_context.wrap_socket(server.socket, server_side=True, do_handshake_on_connect=False)
 
 
 def create_server(settings: Settings) -> ThreadingHTTPServer:

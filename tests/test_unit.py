@@ -4221,3 +4221,39 @@ class DroneServerErrorHandlingTests(unittest.TestCase):
         self.assertIn("Dropped malformed/insecure connection from 66.228.34.203", output)
         self.assertIn("SSLError", output)
         self.assertNotIn("Traceback", output)
+
+
+class DroneTlsHandshakeTests(unittest.TestCase):
+    def test_request_handler_has_idle_timeout(self) -> None:
+        from app.drone_api import RomRequestHandler
+        # Per-connection timeout must be set so a stalled/silent client cannot hold a
+        # worker thread (or, before this fix, wedge accept()) forever.
+        self.assertIsNotNone(RomRequestHandler.timeout)
+        self.assertGreaterEqual(RomRequestHandler.timeout, 15)
+
+    def test_apply_server_tls_defers_handshake_off_accept_loop(self) -> None:
+        from unittest import mock as _mock
+        import app.drone_api as da
+
+        settings = _mock.Mock()
+        settings.http_only = False
+        settings.drone_mtls_mode = "self-signed"
+        settings.drone_mtls_enabled = False
+        cert = _mock.Mock(); cert.exists.return_value = True
+        key = _mock.Mock(); key.exists.return_value = True
+        settings.drone_cert_file = cert
+        settings.drone_key_file = key
+
+        ctx = _mock.Mock()
+        ctx.wrap_socket.return_value = "wrapped"
+        server = _mock.Mock()
+        server.socket = "raw"
+        with _mock.patch("app.drone_api.ssl.SSLContext", return_value=ctx):
+            da._apply_server_tls(settings, server)
+
+        # The listening socket must be wrapped with do_handshake_on_connect=False so the
+        # TLS handshake never runs on the single accept thread.
+        _, kwargs = ctx.wrap_socket.call_args
+        self.assertFalse(kwargs.get("do_handshake_on_connect"))
+        self.assertTrue(kwargs.get("server_side"))
+        self.assertEqual(server.socket, "wrapped")
