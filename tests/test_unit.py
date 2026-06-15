@@ -1135,6 +1135,33 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(len(snapshot["queued"]), 1)
             self.assertEqual(snapshot["queued"][0]["job_id"], retry["job"]["job_id"])
 
+    def test_download_manager_estimates_entire_queue_completion(self) -> None:
+        estimate = DownloadManager._queue_estimate(
+            active=[{"total_bytes": 1000, "downloaded_bytes": 400, "transfer_speed_bps": 100}],
+            queued=[{"total_bytes": 2000}, {"total_bytes": None}],
+            recent=[],
+            paused=False,
+        )
+
+        self.assertEqual(estimate["queue_known_remaining_bytes"], 2600)
+        self.assertEqual(estimate["queue_estimated_unknown_bytes"], 1500)
+        self.assertEqual(estimate["queue_remaining_bytes"], 4100)
+        self.assertEqual(estimate["queue_eta_seconds"], 41)
+        self.assertEqual(estimate["queue_unknown_size_count"], 1)
+        self.assertEqual(estimate["queue_estimate_speed_source"], "active")
+        self.assertEqual(estimate["queue_eta_state"], "ready")
+
+        paused = DownloadManager._queue_estimate([], [{"total_bytes": 500}], [{"status": "completed", "transfer_speed_bps": 50}], True)
+        self.assertEqual(paused["queue_eta_seconds"], 10)
+        self.assertEqual(paused["queue_estimate_speed_source"], "recent")
+        self.assertEqual(paused["queue_eta_state"], "paused")
+
+        calculating = DownloadManager._queue_estimate([], [{"total_bytes": None}], [], False)
+        self.assertIsNone(calculating["queue_remaining_bytes"])
+        self.assertFalse(calculating["queue_size_estimate_available"])
+        self.assertIsNone(calculating["queue_eta_seconds"])
+        self.assertEqual(calculating["queue_eta_state"], "calculating")
+
     def test_download_manager_pushes_terminal_sync_activity(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"

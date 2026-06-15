@@ -1649,6 +1649,36 @@ function formatCompactLocalDate(value) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
+function formatDuration(seconds) {
+  const total = Math.max(0, Math.round(Number(seconds) || 0));
+  if (total < 60) return `${total}s`;
+  const minutes = Math.floor(total / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  if (hours < 24) return `${hours}h ${remainingMinutes}m`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ${hours % 24}h`;
+}
+
+function renderQueueEta(payload) {
+  const pendingCount = (payload.active || []).length + (payload.queued || []).length;
+  if (!pendingCount) return "";
+  const etaSeconds = payload.queue_eta_seconds == null ? Number.NaN : Number(payload.queue_eta_seconds);
+  const remaining = payload.queue_size_estimate_available === false ? "Remaining size is still being discovered" : `${formatBytes(payload.queue_remaining_bytes)} remains`;
+  const unknownCount = Number(payload.queue_unknown_size_count) || 0;
+  const speed = Number(payload.queue_estimate_speed_bps) || 0;
+  const unknownNote = unknownCount ? ` Includes estimated sizes for ${unknownCount} file${unknownCount === 1 ? "" : "s"}.` : "";
+  if (payload.queue_eta_state === "paused") {
+    return `<div class="alert alert-warning py-2 mb-3"><strong>Queue paused.</strong> ${remaining}.${unknownNote}</div>`;
+  }
+  if (!Number.isFinite(etaSeconds) || etaSeconds < 0 || !speed) {
+    return `<div class="alert alert-info py-2 mb-3"><strong>Queue ETA:</strong> Calculating after transfer speed and file sizes are available. ${remaining}.${unknownNote}</div>`;
+  }
+  const completion = formatCompactLocalDate(new Date(Date.now() + etaSeconds * 1000).toISOString());
+  return `<div class="alert alert-info py-2 mb-3"><strong>Queue ETA:</strong> ${formatDuration(etaSeconds)} remaining, approximately ${escapeHtml(completion)} at ${formatBytes(speed)}/s. ${remaining}.${unknownNote}</div>`;
+}
+
 function renderDownloadRows(rows, allowCancel = true) {
   if (!rows.length) return '<div class="themed-empty">No downloads in this group.</div>';
   return `<div class="table-responsive"><table class="table table-sm table-hover align-middle themed-table download-table">
@@ -1701,6 +1731,7 @@ function renderDownloadsPanel(payload, includeHeader = true) {
     <div class="download-summary-grid mb-3">
       ${summary.map(([label, count, icon, tone]) => `<div class="download-summary-card tone-${tone}"><i class="bi ${icon}"></i><div><strong>${count}</strong><span>${label}</span></div></div>`).join("")}
     </div>
+    ${renderQueueEta(payload)}
     <div class="download-section">
       <div class="download-section-title"><span><i class="bi bi-lightning-charge me-2"></i>Active</span><span class="badge text-bg-info">${active.length}</span></div>
       ${renderDownloadRows(active)}
@@ -1753,7 +1784,7 @@ function renderLocalTransfersPanel(payload) {
   const active = localTransferPayload.active || [];
   const queued = localTransferPayload.queued || [];
   const recent = localTransferPayload.recent || [];
-  return `<div class="download-section">
+  return `${renderQueueEta(localTransferPayload)}<div class="download-section">
       <div class="download-section-title"><span><i class="bi bi-lightning-charge me-2"></i>Active</span><span class="badge text-bg-info">${active.length}</span></div>
       ${renderDownloadRows(active)}
     </div>

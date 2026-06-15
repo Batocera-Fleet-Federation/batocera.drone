@@ -179,6 +179,8 @@ class MockServerIntegrationTests(unittest.TestCase):
         self.assertIn(b"renderLocalNetworkPage", js)
         self.assertIn(b"local-asset-system-check", js)
         self.assertIn(b"setLocalTransferSearch", js)
+        self.assertIn(b"Queue ETA:", js)
+        self.assertIn(b"renderQueueEta", js)
         self.assertNotIn(b"networkModeSelect", js)
 
     def test_peer_inventory_does_not_expose_absolute_paths(self) -> None:

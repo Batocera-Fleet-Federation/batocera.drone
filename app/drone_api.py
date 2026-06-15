@@ -10762,17 +10762,75 @@ class DownloadManager:
     def snapshot(self) -> dict:
         with self._lock:
             jobs = [self._public_job_locked(job) for job in self._jobs.values()]
+            paused = self._paused
         active = [job for job in jobs if job.get("status") == "downloading"]
         queued = [job for job in jobs if job.get("status") == "queued"]
         recent = [job for job in jobs if job.get("status") in DOWNLOAD_TERMINAL_STATUSES][-25:]
+        estimate = self._queue_estimate(active, queued, recent, paused)
         return {
             "target_drone_id": self.settings.overmind_device_id,
             "concurrency": {"scope": "target_drone", "active_limit": 1},
-            "paused": self._paused,
+            "paused": paused,
             "active": active,
             "queued": queued,
             "recent": list(reversed(recent)),
             "downloads": active + queued + list(reversed(recent)),
+            **estimate,
+        }
+
+    @staticmethod
+    def _queue_estimate(active: List[dict], queued: List[dict], recent: List[dict], paused: bool) -> dict:
+        def safe_int(value: object) -> int:
+            try:
+                return int(value or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        pending = active + queued
+        known_remaining = 0
+        unknown_size_count = 0
+        known_sizes = []
+        for job in pending:
+            total = safe_int(job.get("total_bytes") or job.get("file_size"))
+            downloaded = safe_int(job.get("downloaded_bytes") or job.get("bytes_transferred"))
+            if total > 0:
+                known_sizes.append(total)
+                known_remaining += max(0, total - downloaded)
+            else:
+                unknown_size_count += 1
+
+        if not known_sizes:
+            known_sizes = [
+                safe_int(job.get("total_bytes") or job.get("file_size"))
+                for job in recent
+                if safe_int(job.get("total_bytes") or job.get("file_size")) > 0
+            ]
+        average_size = int(sum(known_sizes) / len(known_sizes)) if known_sizes else 0
+        estimated_unknown_bytes = average_size * unknown_size_count
+        size_estimate_available = unknown_size_count == 0 or average_size > 0
+        remaining_bytes = known_remaining + estimated_unknown_bytes if size_estimate_available else None
+
+        speeds = [safe_int(job.get("transfer_speed_bps")) for job in active if safe_int(job.get("transfer_speed_bps")) > 0]
+        speed_source = "active"
+        if not speeds:
+            speeds = [
+                safe_int(job.get("transfer_speed_bps"))
+                for job in recent
+                if job.get("status") == "completed" and safe_int(job.get("transfer_speed_bps")) > 0
+            ]
+            speed_source = "recent"
+        speed_bps = int(sum(speeds) / len(speeds)) if speeds else 0
+        eta_seconds = int(remaining_bytes / speed_bps) if remaining_bytes is not None and remaining_bytes > 0 and speed_bps > 0 else None
+        return {
+            "queue_eta_seconds": eta_seconds,
+            "queue_remaining_bytes": remaining_bytes,
+            "queue_known_remaining_bytes": known_remaining,
+            "queue_estimated_unknown_bytes": estimated_unknown_bytes,
+            "queue_unknown_size_count": unknown_size_count,
+            "queue_size_estimate_available": size_estimate_available,
+            "queue_estimate_speed_bps": speed_bps,
+            "queue_estimate_speed_source": speed_source if speed_bps else None,
+            "queue_eta_state": "paused" if paused and pending else ("calculating" if pending and eta_seconds is None else "ready"),
         }
 
     def pause(self) -> dict:
