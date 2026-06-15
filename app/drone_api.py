@@ -4738,9 +4738,20 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             )
             return
         if normalized == "roms":
-            if not system:
-                raise ValueError("system is required for ROM inventory")
-            _, rows = self.repository.list_assets(system, "roms")
+            if system:
+                _, rows = self.repository.list_assets(system, "roms")
+            else:
+                # No system filter: return ROMs across every system so the
+                # requester can browse/copy the whole library at once. Rows
+                # already carry their own "system" field; paging/filtering
+                # below operates on the combined list.
+                rows = []
+                for system_name in self.repository.list_system_names():
+                    try:
+                        _, system_rows = self.repository.list_assets(system_name, "roms")
+                    except Exception:
+                        continue
+                    rows.extend(system_rows)
         elif normalized == "bios":
             rows = self.repository.list_bios_entries()
         elif normalized == "artwork":
