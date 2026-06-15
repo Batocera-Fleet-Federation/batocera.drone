@@ -1779,12 +1779,22 @@ function renderLocalTransferGroup(kind, label, icon, tone, rows, allowCancel) {
   </div>`;
 }
 
+function renderLocalTransferControls(payload, active, queued) {
+  return `<div class="d-flex flex-wrap align-items-center gap-2 mb-3">
+    ${payload.paused
+      ? `<span class="badge text-bg-warning"><i class="bi bi-pause-circle me-1"></i>Queue paused</span><button class="btn btn-sm btn-success" type="button" onclick="resumeDroneDownloads()"><i class="bi bi-play-fill me-1"></i>Resume</button>`
+      : `<button class="btn btn-sm btn-outline-warning" type="button" ${(active.length || queued.length) ? "" : "disabled"} onclick="pauseDroneDownloads()"><i class="bi bi-pause-fill me-1"></i>Pause</button>`}
+    <button class="btn btn-sm btn-outline-danger" type="button" ${queued.length ? "" : "disabled"} onclick="clearDroneDownloads()"><i class="bi bi-x-circle me-1"></i>Clear Queue</button>
+    <span class="small text-muted ms-auto">${Number((payload.concurrency && payload.concurrency.active_limit) || 1) > 1 ? `Up to ${Number(payload.concurrency.active_limit)} at a time` : "One at a time"}</span>
+  </div>`;
+}
+
 function renderLocalTransfersPanel(payload) {
   localTransferPayload = payload || {};
   const active = localTransferPayload.active || [];
   const queued = localTransferPayload.queued || [];
   const recent = localTransferPayload.recent || [];
-  return `${renderQueueEta(localTransferPayload)}<div class="download-section">
+  return `${renderQueueEta(localTransferPayload)}${renderLocalTransferControls(localTransferPayload, active, queued)}<div class="download-section">
       <div class="download-section-title"><span><i class="bi bi-lightning-charge me-2"></i>Active</span><span class="badge text-bg-info">${active.length}</span></div>
       ${renderDownloadRows(active)}
     </div>
