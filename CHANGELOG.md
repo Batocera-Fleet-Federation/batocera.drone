@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.1.7] - 2026-06-15
+
+- Adding rom paging when pulling from drone to drone.  Adding ability to download all that are returned.  Ensuring gamelist.xml can be updated with artwork when copied over.
+
 ## [v0.1.6] - 2026-06-14
 
 - Updates to local network admin page
