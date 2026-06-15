@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.1.10] - 2026-06-15
+
+- Updating drone to support both integrations at the same time (overmind & local network).  Fixing UIs to page instead of show all downloaded files.
+
 ## [v0.1.9] - 2026-06-15
 
 - More bug fixes for artwork not sticking when downloading from drones.
