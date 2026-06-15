@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.1.8] - 2026-06-15
+
+- Making updates to drone to allow for both local and overmind integrations at the same time.  Updating UI to refresh better.  Bug fix to enable file permissions for gamelist.xml / artwork.
+
 ## [v0.1.7] - 2026-06-15
 
 - Adding rom paging when pulling from drone to drone.  Adding ability to download all that are returned.  Ensuring gamelist.xml can be updated with artwork when copied over.
