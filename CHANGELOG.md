@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.1.14] - 2026-06-15
+
+- Cleaning up local network page so it flows better.  Fixing multi sustem view bug.
+
 ## [v0.1.13] - 2026-06-15
 
 - Updating drone to have better resume/pause management for downloading.
