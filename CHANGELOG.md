@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.1.13] - 2026-06-15
+
+- Updating drone to have better resume/pause management for downloading.
+
 ## [v0.1.12] - 2026-06-15
 
 - Bug fix for rom downloading
