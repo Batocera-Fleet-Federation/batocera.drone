@@ -419,6 +419,11 @@ class ApiRoutesMixin:
                 self._handle_admin_local_sync(payload)
                 return
 
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "local-network" and parts[2] == "sync-bulk":
+                payload = self._read_json_body()
+                self._handle_admin_local_sync_bulk(payload)
+                return
+
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "integrations" and parts[2] == "overmind" and parts[3] == "start":
                 payload = self._read_json_body()
                 self._handle_admin_overmind_start(payload)

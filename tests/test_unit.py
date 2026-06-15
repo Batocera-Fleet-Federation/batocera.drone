@@ -4309,3 +4309,120 @@ class DroneTlsHandshakeTests(unittest.TestCase):
         self.assertFalse(kwargs.get("do_handshake_on_connect"))
         self.assertTrue(kwargs.get("server_side"))
         self.assertEqual(server.socket, "wrapped")
+
+
+class LocalNetworkAssetCopyTests(unittest.TestCase):
+    """Local Network 'Request Assets' panel: system-optional browse, paging,
+    and copying ROMs together with their gamelist-referenced artwork."""
+
+    def _settings(self, root):
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "USERDATA_ROOT": str(root),
+                "ROMS_ROOT": str(root / "roms"),
+                "BIOS_ROOT": str(root / "bios"),
+                "OVERMIND_DEVICE_ID": "target-a",
+            },
+            clear=True,
+        ):
+            return drone_api.Settings.from_env()
+
+    def _seed_two_systems(self, root):
+        roms = root / "roms"
+        (roms / "snes").mkdir(parents=True)
+        (roms / "gba").mkdir(parents=True)
+        (roms / "snes" / "Super Mario World.zip").write_bytes(b"smw-rom-bytes")
+        (roms / "gba" / "Metroid.zip").write_bytes(b"metroid-rom-bytes")
+        images = roms / "snes" / "images"
+        images.mkdir()
+        (images / "Super Mario World.png").write_bytes(b"box-art")
+        (roms / "snes" / "gamelist.xml").write_text(
+            '<?xml version="1.0" encoding="UTF-8"?>\n<gameList>\n'
+            "  <game>\n"
+            "    <path>./Super Mario World.zip</path>\n"
+            "    <name>Super Mario World</name>\n"
+            "    <image>./images/Super Mario World.png</image>\n"
+            "    <marquee>./images/Super Mario World.png</marquee>\n"
+            "  </game>\n"
+            "</gameList>\n",
+            encoding="utf-8",
+        )
+
+    def _handler(self, settings, repo):
+        handler = object.__new__(drone_api.RomRequestHandler)
+        handler.settings = settings
+        handler.repository = repo
+        return handler
+
+    def test_collect_peer_inventory_roms_without_system_spans_all_systems(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            self._seed_two_systems(root)
+            settings = self._settings(root)
+            repo = drone_api.RomRepository(root / "roms", root / "bios")
+            handler = self._handler(settings, repo)
+
+            payload = handler._collect_peer_inventory("roms", {})
+            self.assertEqual(payload["total"], 2)
+            systems = {item.get("system") for item in payload["items"]}
+            self.assertEqual(systems, {"snes", "gba"})
+
+            # Paging across the combined library.
+            page = handler._collect_peer_inventory("roms", {"limit": ["1"], "offset": ["0"]})
+            self.assertEqual(page["total"], 2)
+            self.assertEqual(len(page["items"]), 1)
+            page2 = handler._collect_peer_inventory("roms", {"limit": ["1"], "offset": ["1"]})
+            self.assertEqual(len(page2["items"]), 1)
+            self.assertNotEqual(page["items"][0]["system"], page2["items"][0]["system"])
+
+    def test_collect_peer_inventory_roms_with_system_filters(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            self._seed_two_systems(root)
+            settings = self._settings(root)
+            repo = drone_api.RomRepository(root / "roms", root / "bios")
+            handler = self._handler(settings, repo)
+
+            payload = handler._collect_peer_inventory("roms", {"system": ["gba"]})
+            self.assertEqual(payload["total"], 1)
+            self.assertEqual(payload["items"][0]["system"], "gba")
+
+    def test_enqueue_local_asset_rom_includes_gamelist_artwork(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            self._seed_two_systems(root)
+            settings = self._settings(root)
+            repo = drone_api.RomRepository(root / "roms", root / "bios")
+            handler = self._handler(settings, repo)
+            with mock.patch("app.drone_api.Thread.start"):
+                manager = drone_api.DownloadManager(settings, repo)
+
+            inventory = handler._collect_peer_inventory("roms", {"system": ["snes"]})
+            rom_item = inventory["items"][0]
+            peer = {"drone_id": "source-a", "reachable_url": "http://source-a:8080"}
+
+            jobs = handler._enqueue_local_asset(
+                manager, {}, peer, "roms", rom_item, default_system="snes", include_artwork=True
+            )
+            self.assertEqual(jobs[0]["file_type"], "ROM")
+            artwork_types = sorted(j["artwork_type"] for j in jobs if j.get("file_type") == "ARTWORK")
+            self.assertEqual(artwork_types, ["image", "marquee"])
+
+    def test_enqueue_local_asset_rom_without_artwork(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            self._seed_two_systems(root)
+            settings = self._settings(root)
+            repo = drone_api.RomRepository(root / "roms", root / "bios")
+            handler = self._handler(settings, repo)
+            with mock.patch("app.drone_api.Thread.start"):
+                manager = drone_api.DownloadManager(settings, repo)
+
+            inventory = handler._collect_peer_inventory("roms", {"system": ["snes"]})
+            jobs = handler._enqueue_local_asset(
+                manager, {}, {"drone_id": "source-a"}, "roms", inventory["items"][0],
+                default_system="snes", include_artwork=False,
+            )
+            self.assertEqual(len(jobs), 1)
+            self.assertEqual(jobs[0]["file_type"], "ROM")

@@ -1963,24 +1963,35 @@ def _get_audio_volume(settings: Settings) -> Optional[int]:
     return None
 
 
-def _request_service_control(command: str) -> bool:
+def _request_service_control(command: str, body: Optional[str] = None) -> bool:
     if command not in {
         "restart-emulationstation",
         "set-screen-mode-full",
         "set-screen-mode-kiosk",
         "set-screen-mode-kid",
+        "repair-rom-permissions",
     }:
         return False
     control_dir = Path(os.environ.get("DRONE_SERVICE_CONTROL_DIR", "/userdata/system/drone-app/control"))
     request_path = control_dir / f"{command}.request"
     try:
         control_dir.mkdir(parents=True, exist_ok=True)
-        request_path.write_text(
-            datetime.now(timezone.utc).replace(microsecond=0).isoformat() + "\n",
-            encoding="utf-8",
-        )
+        # The privileged worker reads the first line: for parametrized commands
+        # that is the argument (e.g. a system name); otherwise a timestamp marker.
+        content = body if body is not None else datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        request_path.write_text(content + "\n", encoding="utf-8")
         return True
     except OSError:
+        return False
+
+
+def _request_rom_permission_repair(system: str = "") -> bool:
+    """Best-effort: ask the privileged service worker to make a ROM system's
+    images/ dir and gamelist.xml group-writable so the unprivileged Drone can
+    place artwork and update the gamelist. No-op outside the on-device service."""
+    try:
+        return _request_service_control("repair-rom-permissions", body=str(system or "").strip())
+    except Exception:
         return False
 
 
@@ -4716,6 +4727,9 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
     def _handle_peer_inventory(self, asset_type: str, query_params: dict, require_authorization: bool = True) -> None:
         if require_authorization and not self._peer_request_authorized():
             return
+        self._send_json(200, self._collect_peer_inventory(asset_type, query_params))
+
+    def _collect_peer_inventory(self, asset_type: str, query_params: dict) -> dict:
         normalized = str(asset_type or "").strip().lower()
         try:
             limit = max(1, min(int((query_params.get("limit") or ["500"])[0]), 2000))
@@ -4726,31 +4740,36 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         system = str((query_params.get("system") or [""])[0]).strip()
         if normalized == "summary":
             cache_status = _rom_metadata_cache_status(self.settings)
-            self._send_json(
-                200,
-                {
-                    "drone_id": self.settings.overmind_device_id,
-                    "name": socket.gethostname(),
-                    "systems": self.repository.list_system_names(),
-                    "counts": cache_status.get("counts") or {},
-                    "updated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
-                },
-            )
-            return
+            return {
+                "drone_id": self.settings.overmind_device_id,
+                "name": socket.gethostname(),
+                "systems": self.repository.list_system_names(),
+                "counts": cache_status.get("counts") or {},
+                "updated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+            }
         if normalized == "roms":
             if system:
                 _, rows = self.repository.list_assets(system, "roms")
+                # Stamp the system on every row so the requester (and the bulk
+                # copy path) always knows where each ROM belongs, even when the
+                # SQLite fast path omits it.
+                for row in rows:
+                    if isinstance(row, dict):
+                        row.setdefault("system", system)
             else:
                 # No system filter: return ROMs across every system so the
-                # requester can browse/copy the whole library at once. Rows
-                # already carry their own "system" field; paging/filtering
-                # below operates on the combined list.
+                # requester can browse/copy the whole library at once. Each row
+                # is stamped with its system; paging/filtering below operates on
+                # the combined list.
                 rows = []
                 for system_name in self.repository.list_system_names():
                     try:
                         _, system_rows = self.repository.list_assets(system_name, "roms")
                     except Exception:
                         continue
+                    for row in system_rows:
+                        if isinstance(row, dict):
+                            row["system"] = system_name
                     rows.extend(system_rows)
         elif normalized == "bios":
             rows = self.repository.list_bios_entries()
@@ -4794,18 +4813,15 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             rows = [row for row in rows if query in json.dumps(row, sort_keys=True).lower()]
         total = len(rows)
         page = rows[offset:offset + limit]
-        self._send_json(
-            200,
-            {
-                "drone_id": self.settings.overmind_device_id,
-                "asset_type": normalized,
-                "system": system or None,
-                "total": total,
-                "limit": limit,
-                "offset": offset,
-                "items": page,
-            },
-        )
+        return {
+            "drone_id": self.settings.overmind_device_id,
+            "asset_type": normalized,
+            "system": system or None,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "items": page,
+        }
 
     def _handle_peer_rom_download(self, system: str, relative_path: str) -> None:
         if not self._peer_request_authorized():
@@ -6639,6 +6655,89 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         )
         self._send_json(200, result)
 
+    def _enqueue_local_asset(
+        self,
+        manager: "DownloadManager",
+        config: dict,
+        peer: dict,
+        asset_type: str,
+        item: dict,
+        default_system: str = "",
+        include_artwork: bool = True,
+    ) -> List[dict]:
+        """Enqueue a single peer asset (and, for ROMs, its artwork when present).
+
+        Returns the list of jobs created (the asset itself first). Shared by the
+        single-item sync and the bulk "copy all" handlers."""
+        jobs: List[dict] = []
+        if asset_type == "roms":
+            system = str(item.get("system") or default_system or "").strip()
+            relative_path = str(item.get("relative_path") or item.get("rom_path") or item.get("file_path") or "").strip()
+            if not relative_path:
+                return jobs
+            jobs.append(manager.enqueue_rom(
+                config,
+                peer,
+                system,
+                relative_path,
+                expected_size=item.get("byte_count") or item.get("file_size"),
+                expected_fingerprint=item.get("rom_fingerprint") or item.get("fingerprint"),
+                entry_type=str(item.get("entry_type") or "file"),
+            ))
+            if include_artwork:
+                gamelist = item.get("gamelist") if isinstance(item.get("gamelist"), dict) else {}
+                fields = [field for field in ARTWORK_FIELDS if gamelist.get(field)]
+                if fields:
+                    # Make the target system's images/ dir and gamelist.xml writable
+                    # for the unprivileged Drone before the artwork jobs run.
+                    _request_rom_permission_repair(system)
+                for field in fields:
+                    try:
+                        jobs.append(manager.enqueue_artwork(config, peer, system, relative_path, field))
+                    except Exception:
+                        continue
+        elif asset_type == "bios":
+            relative_path = str(item.get("path") or item.get("relative_path") or item.get("file_path") or "").strip()
+            if not relative_path:
+                return jobs
+            jobs.append(manager.enqueue_bios(
+                config,
+                peer,
+                relative_path,
+                expected_size=item.get("byte_count") or item.get("file_size"),
+                expected_md5=item.get("bios_md5") or item.get("md5"),
+            ))
+        elif asset_type == "artwork":
+            artwork_types = item.get("artwork_types")
+            if isinstance(artwork_types, list):
+                default_artwork_type = str(artwork_types[0] if artwork_types else "image")
+            else:
+                default_artwork_type = str(artwork_types or "image")
+            system = str(item.get("system") or default_system or "")
+            _request_rom_permission_repair(system)
+            jobs.append(manager.enqueue_artwork(
+                config,
+                peer,
+                system,
+                str(item.get("rom_path") or item.get("file_path") or ""),
+                str(item.get("artwork_type") or default_artwork_type),
+            ))
+        elif asset_type == "saves":
+            relative_path = str(item.get("file_path") or item.get("relative_path") or "").strip()
+            if not relative_path:
+                return jobs
+            jobs.append(manager.enqueue_save(
+                config,
+                peer,
+                str(item.get("system") or default_system or ""),
+                relative_path,
+                expected_size=item.get("file_size"),
+                expected_fingerprint=item.get("saves_fingerprint") or item.get("fingerprint"),
+            ))
+        else:
+            raise ValueError("asset_type must be roms, bios, artwork, or saves")
+        return jobs
+
     def _handle_admin_local_sync(self, payload: dict) -> None:
         if not _local_network.is_local_mode(self.settings):
             self._send_json(409, {"error": "Enable Local Network mode before syncing assets"})
@@ -6646,6 +6745,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         peer_id = str(payload.get("peer_id") or "").strip()
         asset_type = str(payload.get("asset_type") or "").strip().lower()
         item = payload.get("item") if isinstance(payload.get("item"), dict) else payload
+        include_artwork = bool(payload.get("include_artwork", True))
         peer = _local_network.get_paired_peer(self.settings, peer_id)
         manager = _get_download_manager()
         if not peer:
@@ -6655,52 +6755,110 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             self._send_json(503, {"error": "download manager unavailable"})
             return
         config = {"network_mode": "local_network"}
-        if asset_type == "roms":
-            system = str(payload.get("system") or item.get("system") or "").strip()
-            relative_path = str(item.get("relative_path") or item.get("rom_path") or item.get("file_path") or "").strip()
-            job = manager.enqueue_rom(
-                config,
-                peer,
-                system,
-                relative_path,
-                expected_size=item.get("byte_count") or item.get("file_size"),
-                expected_fingerprint=item.get("rom_fingerprint") or item.get("fingerprint"),
-                entry_type=str(item.get("entry_type") or "file"),
-            )
-        elif asset_type == "bios":
-            relative_path = str(item.get("path") or item.get("relative_path") or item.get("file_path") or "").strip()
-            job = manager.enqueue_bios(
-                config,
-                peer,
-                relative_path,
-                expected_size=item.get("byte_count") or item.get("file_size"),
-                expected_md5=item.get("bios_md5") or item.get("md5"),
-            )
-        elif asset_type == "artwork":
-            artwork_types = item.get("artwork_types")
-            if isinstance(artwork_types, list):
-                default_artwork_type = str(artwork_types[0] if artwork_types else "image")
-            else:
-                default_artwork_type = str(artwork_types or "image")
-            job = manager.enqueue_artwork(
-                config,
-                peer,
-                str(item.get("system") or payload.get("system") or ""),
-                str(item.get("rom_path") or item.get("file_path") or ""),
-                str(item.get("artwork_type") or default_artwork_type),
-            )
-        elif asset_type == "saves":
-            job = manager.enqueue_save(
-                config,
-                peer,
-                str(item.get("system") or payload.get("system") or ""),
-                str(item.get("file_path") or item.get("relative_path") or ""),
-                expected_size=item.get("file_size"),
-                expected_fingerprint=item.get("saves_fingerprint") or item.get("fingerprint"),
-            )
-        else:
-            raise ValueError("asset_type must be roms, bios, artwork, or saves")
-        self._send_json(202, {"status": "queued", "job": job})
+        jobs = self._enqueue_local_asset(
+            manager,
+            config,
+            peer,
+            asset_type,
+            item,
+            default_system=str(payload.get("system") or ""),
+            include_artwork=include_artwork,
+        )
+        self._send_json(202, {"status": "queued", "job": jobs[0] if jobs else None, "jobs": jobs})
+
+    def _handle_admin_local_sync_bulk(self, payload: dict) -> None:
+        """Copy every item of an asset type from a paired peer.
+
+        Pages through the peer's inventory server-side (so it works regardless of
+        the UI's current page) and enqueues each transferable item. Optionally
+        scoped to a single system and/or a search query. For ROMs, artwork is
+        enqueued alongside each ROM when include_artwork is set."""
+        if not _local_network.is_local_mode(self.settings):
+            self._send_json(409, {"error": "Enable Local Network mode before syncing assets"})
+            return
+        peer_id = str(payload.get("peer_id") or "").strip()
+        asset_type = str(payload.get("asset_type") or "").strip().lower()
+        if asset_type not in {"roms", "bios", "artwork", "saves"}:
+            self._send_json(400, {"error": "Bulk copy supports roms, bios, artwork, or saves"})
+            return
+        system = str(payload.get("system") or "").strip()
+        query = str(payload.get("q") or "").strip()
+        include_artwork = bool(payload.get("include_artwork", True))
+        peer = _local_network.get_paired_peer(self.settings, peer_id)
+        manager = _get_download_manager()
+        if not peer:
+            self._send_json(404, {"error": "paired peer not found"})
+            return
+        if manager is None:
+            self._send_json(503, {"error": "download manager unavailable"})
+            return
+        config = {"network_mode": "local_network"}
+        page_size = 500
+        offset = 0
+        queued_assets = 0
+        queued_artwork = 0
+        total = None
+        while True:
+            params = [f"limit={page_size}", f"offset={offset}"]
+            if system:
+                params.append(f"system={quote(system, safe='')}")
+            if query:
+                params.append(f"q={quote(query, safe='')}")
+            inventory = self._fetch_peer_inventory(peer, peer_id, asset_type, params)
+            items = inventory.get("items") or []
+            if total is None:
+                total = inventory.get("total")
+            if not items:
+                break
+            for entry in items:
+                if not isinstance(entry, dict):
+                    continue
+                jobs = self._enqueue_local_asset(
+                    manager,
+                    config,
+                    peer,
+                    asset_type,
+                    entry,
+                    default_system=system,
+                    include_artwork=include_artwork,
+                )
+                if jobs:
+                    queued_assets += 1
+                    queued_artwork += max(0, len(jobs) - 1)
+            offset += len(items)
+            if total is not None and offset >= int(total):
+                break
+            if len(items) < page_size:
+                break
+        self._send_json(202, {
+            "status": "queued",
+            "asset_type": asset_type,
+            "system": system or None,
+            "queued_assets": queued_assets,
+            "queued_artwork": queued_artwork,
+            "total_available": total,
+        })
+
+    def _fetch_peer_inventory(self, peer: dict, peer_id: str, asset_type: str, params: List[str]) -> dict:
+        """Fetch a page of a peer's inventory, transparently handling the
+        fake-data local peer (used in tests/dev) the same way browsing does."""
+        if self.settings.use_fake_data and peer.get("fake_data"):
+            query_params: dict = {}
+            for raw in params:
+                if "=" in raw:
+                    key, value = raw.split("=", 1)
+                    query_params[unquote(key)] = [unquote(value)]
+            return self._collect_peer_inventory(asset_type, query_params)
+        address = _peer_address(peer)
+        if not address:
+            raise ValueError("paired peer has no reachable address")
+        suffix = f"?{'&'.join(params)}" if params else ""
+        return _peer_get_json(
+            f"{address}/v1/api/peer/inventory/{quote(asset_type, safe='')}{suffix}",
+            self.settings,
+            peer_id=peer_id,
+            config={"network_mode": "local_network"},
+        )
 
     def _handle_admin_credentials_update(self, payload: dict) -> None:
         username = str(payload.get("username") or "").strip()

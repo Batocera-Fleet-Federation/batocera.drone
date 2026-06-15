@@ -20,6 +20,42 @@ CONTROL_PID_FILE="/tmp/drone-server-control.pid"
 CONTROL_DIR="/userdata/system/drone-app/control"
 STARTUP_LOG="/userdata/system/logs/drone-app/startup.log"
 
+# Make a single ROM system's images/ dir and gamelist.xml writable by the
+# unprivileged Drone (group ${DRONE_GROUP}) so it can place peer-copied artwork
+# and update gamelist.xml. Cheap (no recursive file walk) -- safe to run for
+# every system on each boot and on demand from the privileged control worker.
+ensure_rom_write_access() {
+  romdir="$1"
+  [ -d "$romdir" ] || return 0
+
+  chown root:"$DRONE_GROUP" "$romdir" 2>/dev/null || true
+  chmod 2775 "$romdir" 2>/dev/null || true
+
+  images="${romdir}/images"
+  mkdir -p "$images" 2>/dev/null || true
+  chown root:"$DRONE_GROUP" "$images" 2>/dev/null || true
+  chmod 2775 "$images" 2>/dev/null || true
+
+  gamelist="${romdir}/gamelist.xml"
+  if [ -f "$gamelist" ]; then
+    chown root:"$DRONE_GROUP" "$gamelist" 2>/dev/null || true
+    chmod 664 "$gamelist" 2>/dev/null || true
+  fi
+}
+
+# Apply ensure_rom_write_access to one system (by name) or, when no name is
+# given, every ROM system directory.
+ensure_rom_write_access_all() {
+  target_system="$1"
+  if [ -n "$target_system" ]; then
+    ensure_rom_write_access "/userdata/roms/${target_system}"
+    return 0
+  fi
+  find /userdata/roms -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while read romdir; do
+    ensure_rom_write_access "$romdir"
+  done
+}
+
 ensure_drone_user() {
   echo "[drone-service] Ensuring ${DRONE_USER} user/group exists..."
 
@@ -138,8 +174,12 @@ ensure_permissions() {
       repair_rom_content_permissions "$romdir"
     done
   else
-    find /userdata/roms -mindepth 1 -maxdepth 1 -type d -exec chown root:"$DRONE_GROUP" {} \; -exec chmod 2775 {} \; 2>/dev/null || true
-    echo "[drone-service] Skipped recursive ROM permission repair; set DRONE_REPAIR_ROM_PERMISSIONS=1 to run it."
+    # Cheap, ungated per-system write access: top-level dir + images/ + an
+    # existing gamelist.xml become group-writable so the Drone can copy peer
+    # artwork and link it in gamelist.xml. The full recursive repair (every
+    # asset file) stays behind DRONE_REPAIR_ROM_PERMISSIONS=1.
+    ensure_rom_write_access_all
+    echo "[drone-service] Applied lightweight ROM write access (images/ + gamelist.xml); set DRONE_REPAIR_ROM_PERMISSIONS=1 for full recursive repair."
   fi
 
   chown root:"$DRONE_GROUP" /userdata/system/batocera.conf 2>/dev/null || true
@@ -358,6 +398,21 @@ service_control_worker() {
         chmod 664 "$result" 2>/dev/null || true
       fi
     done
+    perm_request="$CONTROL_DIR/repair-rom-permissions.request"
+    perm_result="$CONTROL_DIR/repair-rom-permissions.result"
+    if [ -f "$perm_request" ]; then
+      # First line (optional) names a single system; empty means all systems.
+      perm_system="$(head -n 1 "$perm_request" 2>/dev/null | tr -d '\r\n' | tr -cd 'A-Za-z0-9._-')"
+      rm -f "$perm_request" "$perm_result"
+      echo "[drone-service] ROM write-access repair requested by Drone app (system='${perm_system:-all}')."
+      if perm_output="$(ensure_rom_write_access_all "$perm_system" 2>&1)"; then
+        printf '%s\n' "ok" > "$perm_result"
+      else
+        printf 'ROM permission repair failed: %s\n' "$(printf '%s' "$perm_output" | tr '\n' ' ' | cut -c1-300)" > "$perm_result"
+      fi
+      chown root:"$DRONE_GROUP" "$perm_result" 2>/dev/null || true
+      chmod 664 "$perm_result" 2>/dev/null || true
+    fi
     volume_request="$CONTROL_DIR/set-volume.request"
     volume_result="$CONTROL_DIR/set-volume.result"
     if [ -f "$volume_request" ]; then
