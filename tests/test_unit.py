@@ -15,6 +15,7 @@ from pathlib import Path
 from urllib.error import URLError
 
 import app.drone_api as drone_api
+from app import local_network
 from app.mock_data import seed_mock_userdata
 from app.state_store import database_path, database_path_for_legacy_file, load_payload, open_database, save_payload
 from app.overmind_reporting import (
@@ -150,6 +151,40 @@ class SettingsTests(unittest.TestCase):
     def test_overmind_error_format_includes_class_when_message_is_blank(self) -> None:
         self.assertEqual(_format_overmind_error(TimeoutError()), "TimeoutError()")
         self.assertIn("URLError reason=", _format_overmind_error(URLError(TimeoutError())))
+
+    def test_network_mode_defaults_to_overmind_and_persists_local_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root), "DRONE_DEVICE_ID": "local-a"}, clear=True):
+                settings = Settings.from_env()
+                self.assertEqual(local_network.get_mode(settings), local_network.MODE_OVERMIND)
+                local_network.set_mode(settings, local_network.MODE_LOCAL_NETWORK)
+                self.assertEqual(local_network.get_mode(settings), local_network.MODE_LOCAL_NETWORK)
+                with mock.patch("app.drone_api.urlopen") as opened:
+                    with self.assertRaisesRegex(RuntimeError, "disabled in Local Network mode"):
+                        drone_api._overmind_post_json("https://overmind.example/api/test", {}, settings=settings)
+                    opened.assert_not_called()
+
+    def test_discovery_requires_local_mode_and_pairing_is_explicit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root), "DRONE_DEVICE_ID": "local-a"}, clear=True):
+                settings = Settings.from_env()
+                announcement = {
+                    "service": local_network.DISCOVERY_SERVICE,
+                    "drone_id": "local-b",
+                    "name": "Cabinet B",
+                    "scheme": "https",
+                    "api_port": 443,
+                }
+                self.assertIsNone(local_network.record_discovered_peer(settings, announcement, "192.168.1.22"))
+                local_network.set_mode(settings, local_network.MODE_LOCAL_NETWORK)
+                discovered = local_network.record_discovered_peer(settings, announcement, "192.168.1.22")
+                self.assertEqual(discovered["drone_id"], "local-b")
+                self.assertFalse(discovered["paired"])
+                paired = local_network.save_paired_peer(settings, {**discovered, "certificate_fingerprint": "abc"})
+                self.assertTrue(paired["paired"])
+                self.assertEqual(local_network.get_paired_peer(settings, "local-b")["certificate_fingerprint"], "abc")
 
     def test_hostname_override_builds_reported_drone_url(self) -> None:
         with mock.patch.dict(
@@ -806,6 +841,23 @@ class SettingsTests(unittest.TestCase):
             with mock.patch("app.drone_api._fetch_peer_certificate") as fetch:
                 self.assertEqual(_peer_trust_cafile(settings, peer_id="bff-drone-b", config={}), ca_file)
                 fetch.assert_not_called()
+
+    def test_local_peer_trust_uses_separate_pinned_certificate_store(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root), "DRONE_DEVICE_ID": "local-a"}, clear=True):
+                settings = Settings.from_env()
+            local_network.set_mode(settings, local_network.MODE_LOCAL_NETWORK)
+            local_cert = drone_api._local_peer_cert_cache_path(settings, "local-b")
+            local_cert.parent.mkdir(parents=True)
+            local_cert.write_text("local-peer-cert", encoding="utf-8")
+            overmind_cert = drone_api._peer_cert_cache_path(settings, "local-b")
+            overmind_cert.parent.mkdir(parents=True)
+            overmind_cert.write_text("overmind-peer-cert", encoding="utf-8")
+
+            self.assertEqual(_peer_trust_cafile(settings, peer_id="local-b", config={}), local_cert)
+            local_network.set_mode(settings, local_network.MODE_OVERMIND)
+            self.assertEqual(_peer_trust_cafile(settings, peer_id="local-b", config={}), overmind_cert)
 
     def test_drone_client_ssl_context_loads_client_cert_for_mtls_peer_checks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

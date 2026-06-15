@@ -1456,7 +1456,7 @@ async function renderHelpPage() {
           <div class="help-section mb-4">
             <h3 class="h5 mb-3"><i class="bi bi-stars me-2"></i>What Drone does for you</h3>
             <div class="help-link-list">
-              <button class="help-link-row" type="button" onclick="setHash('#admin/overmind')"><i class="bi bi-arrow-left-right"></i><span><strong>Share across cabinets</strong><small>Copy games, saves, BIOS, and artwork peer-to-peer instead of downloading them everywhere.</small></span></button>
+              <button class="help-link-row" type="button" onclick="setHash('#admin/integration')"><i class="bi bi-arrow-left-right"></i><span><strong>Share across cabinets</strong><small>Copy games, saves, BIOS, and artwork peer-to-peer instead of downloading them everywhere.</small></span></button>
               <button class="help-link-row" type="button" onclick="setHash('#admin/artwork')"><i class="bi bi-images"></i><span><strong>Polish your library</strong><small>Fix titles, descriptions, box art, and marquees so everything looks complete.</small></span></button>
               <button class="help-link-row" type="button" onclick="setHash('#admin/gameplay-logs')"><i class="bi bi-clock-history"></i><span><strong>See what's been played</strong><small>Review detected game launches and recent play sessions.</small></span></button>
               <button class="help-link-row" type="button" onclick="setHash('#admin/system-info')"><i class="bi bi-pc-display"></i><span><strong>Check machine health</strong><small>CPU, memory, storage, network, and connection speed at a glance.</small></span></button>
@@ -1549,10 +1549,10 @@ async function renderAdminMenu() {
         </div>
       </div>
       <div class="col-md-4 mb-3">
-        <div class="card admin-tile pointer h-100" onclick="setHash('#admin/overmind')">
+        <div class="card admin-tile pointer h-100" onclick="setHash('#admin/integration')">
           <div class="card-body">
-            <h5 class="card-title"><i class="bi bi-diagram-3 me-2"></i>Overmind Integration</h5>
-            <p class="card-text">Configure Overmind, monitor downloads, review asset cache status, and inspect processed actions.</p>
+            <h5 class="card-title"><i class="bi bi-diagram-3 me-2"></i>Integration</h5>
+            <p class="card-text">Choose Overmind or Local Network mode, then manage the active integration from one page.</p>
           </div>
         </div>
       </div>
@@ -1682,7 +1682,7 @@ async function renderDownloadsPage() {
   try {
     const payload = await api("/admin/downloads");
     content.innerHTML = `
-      <div class="mb-3"><button class="btn btn-outline-secondary" onclick="setHash('#admin/overmind')">Back to Overmind Integration</button></div>
+      <div class="mb-3"><button class="btn btn-outline-secondary" onclick="setHash('#admin/integration')">Back to Integration</button></div>
       <div class="card log-card mb-3"><div class="card-body py-3">
         ${renderDownloadsPanel(payload)}
       </div></div>`;
@@ -1696,8 +1696,10 @@ async function renderDownloadsPage() {
 async function cancelDroneDownload(jobId) {
   if (!jobId || !window.confirm("Cancel this download?")) return;
   await apiPost(`/admin/downloads/${encodeURIComponent(jobId)}/cancel`, {});
-  if (window.location.hash === "#admin/overmind" && typeof window.refreshOvermindDownloads === "function") {
-    await window.refreshOvermindDownloads();
+  if (["#admin/integration", "#admin/overmind", "#admin/local-network"].includes(window.location.hash)) {
+    const refresh = window.refreshLocalNetwork || window.refreshOvermindDownloads;
+    if (typeof refresh === "function") await refresh();
+    else await renderIntegrationPage();
   } else {
     await renderDownloadsPage();
   }
@@ -1706,8 +1708,10 @@ async function cancelDroneDownload(jobId) {
 async function retryDroneDownload(jobId) {
   if (!jobId) return;
   await apiPost(`/admin/downloads/${encodeURIComponent(jobId)}/retry`, {});
-  if (window.location.hash === "#admin/overmind" && typeof window.refreshOvermindDownloads === "function") {
-    await window.refreshOvermindDownloads();
+  if (["#admin/integration", "#admin/overmind", "#admin/local-network"].includes(window.location.hash)) {
+    const refresh = window.refreshLocalNetwork || window.refreshOvermindDownloads;
+    if (typeof refresh === "function") await refresh();
+    else await renderIntegrationPage();
   } else {
     await renderDownloadsPage();
   }
@@ -1723,7 +1727,7 @@ async function purgeAssetCache() {
   try {
     const result = await apiPost("/admin/asset-cache/purge", {});
     showToast(result.message || "Asset cache purge queued.", "success");
-    if (window.location.hash === "#admin/overmind" && typeof window.refreshOvermindAssetCache === "function") {
+    if (["#admin/integration", "#admin/overmind"].includes(window.location.hash) && typeof window.refreshOvermindAssetCache === "function") {
       await window.refreshOvermindAssetCache();
     } else {
       await renderAssetCachePage();
@@ -1744,7 +1748,7 @@ async function clearPendingAssetChanges() {
   try {
     const result = await apiPost("/admin/asset-cache/clear-pending", {});
     showToast(result.message || "Pending asset changes cleared.", "success");
-    if (window.location.hash === "#admin/overmind" && typeof window.refreshOvermindAssetCache === "function") {
+    if (["#admin/integration", "#admin/overmind"].includes(window.location.hash) && typeof window.refreshOvermindAssetCache === "function") {
       await window.refreshOvermindAssetCache();
     } else {
       await renderAssetCachePage();
@@ -1826,7 +1830,7 @@ async function renderAssetCachePage() {
     const payload = await api("/admin/asset-cache");
     content.innerHTML = `
       <div class="mb-3 d-flex flex-wrap gap-2">
-        <button class="btn btn-outline-secondary" onclick="setHash('#admin/overmind')">Back to Overmind Integration</button>
+        <button class="btn btn-outline-secondary" onclick="setHash('#admin/integration')">Back to Integration</button>
       </div>
       <div class="card log-card"><div class="card-body">${renderAssetCachePanel(payload)}</div></div>
     `;
@@ -3069,13 +3073,198 @@ async function removeMissingGamelistEntriesForCurrentFilters() {
     setLoading(false);
   }
 }
-async function renderOvermindIntegrationPage() {
-  titleNode.textContent = "Overmind Integration";
-  subtitleNode.textContent = "Configure Overmind action polling and review returned action data";
-  content.innerHTML = `
-    <div class="mb-3">
-      <button class="btn btn-outline-secondary" onclick="setHash('#admin')">← Back to Admin</button>
-    </div>
+let localPeerAssetContext = { peerId: "", peerName: "", assetType: "summary", system: "", items: [] };
+
+function localPeerStatusBadge(peer) {
+  if (!peer.paired) return '<span class="badge text-bg-warning">Discovered</span>';
+  const health = peer.health || {};
+  if (health.status === "pass") return '<span class="badge text-bg-success">Paired · Online</span>';
+  if (health.status === "fail") return '<span class="badge text-bg-danger">Paired · Offline</span>';
+  return '<span class="badge text-bg-info">Paired</span>';
+}
+
+function renderLocalPeerRows(peers) {
+  if (!peers.length) return '<div class="themed-empty">No nearby Drones discovered yet.</div>';
+  return `<div class="table-responsive"><table class="table table-sm table-hover align-middle themed-table">
+    <thead><tr><th>Drone</th><th>Status</th><th>Address</th><th>Last Seen</th><th>Certificate</th><th></th></tr></thead>
+    <tbody>${peers.map(peer => {
+      const rawPeerId = String(peer.drone_id || "");
+      const peerId = escapeHtml(rawPeerId);
+      const peerToken = encodeURIComponent(rawPeerId).replace(/'/g, "%27");
+      return `<tr>
+        <td><strong>${escapeHtml(peer.name || peer.hostname || peerId)}</strong><div class="small text-muted mono">${peerId}</div></td>
+        <td>${localPeerStatusBadge(peer)}${peer.health?.failure_reason ? `<div class="small text-danger">${escapeHtml(peer.health.failure_reason)}</div>` : ""}</td>
+        <td class="small mono">${escapeHtml(peer.reachable_url || peer.source_ip || "n/a")}</td>
+        <td class="small">${escapeHtml(peer.last_seen || "n/a")}</td>
+        <td class="small mono">${escapeHtml(String(peer.certificate_fingerprint || "").slice(0, 16) || "pending")}</td>
+        <td class="text-nowrap">${peer.paired
+          ? `<button class="btn btn-sm btn-primary me-1" onclick="browseLocalPeer(decodeURIComponent('${peerToken}'))">Browse</button><button class="btn btn-sm btn-outline-danger" onclick="forgetLocalPeer(decodeURIComponent('${peerToken}'))">Forget</button>`
+          : `<button class="btn btn-sm btn-outline-primary" onclick="pairLocalPeer(decodeURIComponent('${peerToken}'))">Pair</button>`}</td>
+      </tr>`;
+    }).join("")}</tbody></table></div>`;
+}
+
+function localAssetPath(item) {
+  return item.relative_path || item.rom_path || item.file_path || item.path || item.name || "";
+}
+
+function renderLocalAssetRows(payload) {
+  localPeerAssetContext.items = payload.items || [];
+  if (!localPeerAssetContext.items.length) return '<div class="themed-empty">No assets match this view.</div>';
+  return `<div class="table-responsive"><table class="table table-sm table-hover align-middle themed-table">
+    <thead><tr><th>Name</th><th>System</th><th>Type</th><th>Size</th><th>Fingerprint</th><th></th></tr></thead>
+    <tbody>${localPeerAssetContext.items.map((item, index) => `<tr>
+      <td><strong>${escapeHtml(item.name || item.rom_name || item.save_name || localAssetPath(item))}</strong><div class="small text-muted mono">${escapeHtml(localAssetPath(item))}</div></td>
+      <td>${escapeHtml(item.system || localPeerAssetContext.system || "")}</td>
+      <td>${escapeHtml(item.artwork_type || item.entry_type || localPeerAssetContext.assetType)}</td>
+      <td>${formatBytes(item.byte_count || item.file_size || item.size)}</td>
+      <td class="small mono">${escapeHtml(String(item.rom_fingerprint || item.bios_md5 || item.saves_fingerprint || item.fingerprint || item.md5 || "").slice(0, 16))}</td>
+      <td><button class="btn btn-sm btn-primary" onclick="copyLocalPeerAsset(${index})"><i class="bi bi-cloud-arrow-down me-1"></i>Copy Here</button></td>
+    </tr>`).join("")}</tbody></table></div>`;
+}
+
+async function renderIntegrationPage() {
+  currentSystemContext = null;
+  setSearchMode("hidden");
+  clearSystemTheme();
+  titleNode.textContent = "Integration";
+  subtitleNode.textContent = "Manage this Drone through Overmind or directly on the local network";
+  setLoading(true, "Loading integration...");
+  try {
+    const modeStatus = await api("/admin/network-mode");
+    const mode = modeStatus.mode === "local_network" ? "local_network" : "overmind";
+    const overmindActive = mode === "overmind";
+    content.innerHTML = `
+      <div class="mb-3"><button class="btn btn-outline-secondary" onclick="setHash('#admin')">← Back to Admin</button></div>
+      <div class="card log-card mb-3">
+        <div class="card-header">Integration Mode</div>
+        <div class="card-body">
+          <div class="d-flex flex-wrap align-items-center justify-content-between gap-3">
+            <div>
+              <div class="fw-semibold">${overmindActive ? "Overmind Integration" : "Local Network Integration"} is active</div>
+              <div class="small text-muted">Only one integration runs at a time. Switching modes retains its configuration while suspending the other integration.</div>
+            </div>
+            <div class="btn-group" role="group" aria-label="Integration mode">
+              <button id="integrationModeOvermindBtn" class="btn ${overmindActive ? "btn-primary" : "btn-outline-primary"}" type="button" ${overmindActive ? "disabled" : ""}><i class="bi bi-diagram-3 me-1"></i>Overmind</button>
+              <button id="integrationModeLocalBtn" class="btn ${overmindActive ? "btn-outline-primary" : "btn-primary"}" type="button" ${overmindActive ? "" : "disabled"}><i class="bi bi-hdd-network me-1"></i>Local Network</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div id="integrationModePanel"></div>`;
+
+    document.getElementById("integrationModeOvermindBtn").addEventListener("click", () => switchIntegrationMode("overmind"));
+    document.getElementById("integrationModeLocalBtn").addEventListener("click", () => switchIntegrationMode("local_network"));
+    window.refreshLocalNetwork = null;
+    window.refreshOvermindDownloads = null;
+    window.refreshOvermindAssetCache = null;
+    const panel = document.getElementById("integrationModePanel");
+    if (overmindActive) {
+      await renderOvermindIntegrationPanel(panel);
+    } else {
+      await renderLocalNetworkIntegrationPanel(panel);
+    }
+  } catch (err) {
+    showToast(`Failed to load integration: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    content.innerHTML = '<div class="themed-empty">Integration status could not be loaded.</div>';
+  } finally {
+    setLoading(false);
+  }
+}
+
+async function switchIntegrationMode(mode) {
+  const label = mode === "local_network" ? "Local Network" : "Overmind";
+  if (!window.confirm(`Switch this Drone to ${label} integration mode? The current integration will be suspended.`)) return;
+  setLoading(true, `Switching to ${label}...`);
+  try {
+    await apiPost("/admin/network-mode", { mode });
+    showToast(`${label} integration is now active.`, "success");
+    await renderIntegrationPage();
+  } catch (err) {
+    showToast(`Failed to switch integration mode: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  } finally {
+    setLoading(false);
+  }
+}
+
+async function renderLocalNetworkIntegrationPanel(target) {
+  target.innerHTML = `
+    <div class="card log-card mb-3"><div class="card-header d-flex justify-content-between align-items-center"><span>Pairing</span><button class="btn btn-sm btn-outline-primary" id="localPairCodeRotateBtn">Rotate Code</button></div>
+      <div class="card-body" id="localPairingBody"></div></div>
+    <div class="card log-card mb-3"><div class="card-header d-flex justify-content-between align-items-center"><span>Nearby Drones</span><div class="d-flex gap-2"><button class="btn btn-sm btn-outline-primary" id="localDiscoverBtn"><i class="bi bi-radar me-1"></i>Discover</button><button class="btn btn-sm btn-outline-secondary" id="localRefreshBtn"><i class="bi bi-arrow-repeat"></i></button></div></div>
+      <div class="card-body" id="localPeersBody"><div class="text-muted">Loading peers...</div></div></div>
+    <div class="card log-card mb-3 d-none" id="localAssetsCard"><div class="card-header d-flex justify-content-between align-items-center"><span id="localAssetsTitle">Peer Assets</span><button class="btn btn-sm btn-outline-secondary" onclick="document.getElementById('localAssetsCard').classList.add('d-none')">Close</button></div>
+      <div class="card-body"><div class="row g-2 mb-3"><div class="col-12 col-md-3"><select id="localAssetType" class="form-select"><option value="roms">ROMs</option><option value="bios">BIOS</option><option value="artwork">Artwork</option><option value="saves">Saves</option></select></div><div class="col-12 col-md-3"><input id="localAssetSystem" class="form-control" placeholder="System (required for ROMs)"></div><div class="col-12 col-md-4"><input id="localAssetQuery" class="form-control" placeholder="Filter assets"></div><div class="col-12 col-md-2"><button class="btn btn-primary w-100" id="localAssetLoadBtn">Load</button></div></div><div id="localAssetsBody"></div></div></div>
+    <div class="card log-card mb-3"><div class="card-header">Local Transfers</div><div class="card-body" id="localDownloadsBody"></div></div>
+    <div class="card log-card"><div class="card-header">Local Transfer History</div><div class="card-body" id="localActivityBody"></div></div>`;
+
+  async function refresh() {
+    const status = await api("/admin/local-network/status");
+    document.getElementById("localPairingBody").innerHTML = status.active
+      ? `<div class="d-flex flex-wrap align-items-center gap-3"><div><div class="small text-muted">Pairing code</div><div class="display-6 mono">${escapeHtml(status.pairing?.code || "")}</div></div><div class="small text-muted">Expires ${escapeHtml(status.pairing?.expires_at || "")}. Enter this code on the other Drone to approve it.</div></div>`
+      : '<div class="themed-empty">Enable Local Network mode to discover and pair nearby Drones.</div>';
+    document.getElementById("localPeersBody").innerHTML = renderLocalPeerRows(status.peers || []);
+    document.getElementById("localDownloadsBody").innerHTML = renderDownloadsPanel(status.downloads || {}, false);
+    document.getElementById("localActivityBody").innerHTML = renderDownloadRows(status.activity || [], false);
+    document.getElementById("localDiscoverBtn").disabled = !status.active;
+    document.getElementById("localPairCodeRotateBtn").disabled = !status.active;
+  }
+  window.refreshLocalNetwork = refresh;
+  document.getElementById("localDiscoverBtn").addEventListener("click", async () => { await apiPost("/admin/local-network/discover", {}); await refresh(); });
+  document.getElementById("localRefreshBtn").addEventListener("click", refresh);
+  document.getElementById("localPairCodeRotateBtn").addEventListener("click", async () => { await apiPost("/admin/local-network/pairing-code/rotate", {}); await refresh(); });
+  document.getElementById("localAssetLoadBtn").addEventListener("click", loadLocalPeerAssets);
+  await refresh();
+}
+
+async function pairLocalPeer(peerId) {
+  const code = window.prompt("Enter the 8-digit pairing code shown on the other Drone:");
+  if (!code) return;
+  await apiPost(`/admin/local-network/peers/${encodeURIComponent(peerId)}/pair`, { pairing_code: code.trim() });
+  showToast("Drone paired.", "success");
+  await window.refreshLocalNetwork();
+}
+
+async function forgetLocalPeer(peerId) {
+  if (!window.confirm("Forget this paired Drone? It will need to be paired again before browsing or syncing.")) return;
+  await apiPost(`/admin/local-network/peers/${encodeURIComponent(peerId)}/forget`, {});
+  await window.refreshLocalNetwork();
+}
+
+async function browseLocalPeer(peerId) {
+  localPeerAssetContext = { peerId, peerName: peerId, assetType: "roms", system: "", items: [] };
+  document.getElementById("localAssetsCard").classList.remove("d-none");
+  document.getElementById("localAssetsTitle").textContent = `Assets on ${peerId}`;
+  document.getElementById("localAssetsBody").innerHTML = '<div class="themed-empty">Choose an asset type and system, then load assets.</div>';
+  document.getElementById("localAssetsCard").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+async function loadLocalPeerAssets() {
+  const type = document.getElementById("localAssetType").value;
+  const system = document.getElementById("localAssetSystem").value.trim();
+  const q = document.getElementById("localAssetQuery").value.trim();
+  if (type === "roms" && !system) { showToast("A system is required to browse ROMs.", "warning"); return; }
+  localPeerAssetContext.assetType = type;
+  localPeerAssetContext.system = system;
+  const params = new URLSearchParams({ type, limit: "500" });
+  if (system) params.set("system", system);
+  if (q) params.set("q", q);
+  const body = document.getElementById("localAssetsBody");
+  body.innerHTML = '<div class="text-muted">Loading peer assets...</div>';
+  const payload = await api(`/admin/local-network/peers/${encodeURIComponent(localPeerAssetContext.peerId)}/assets?${params.toString()}`);
+  body.innerHTML = renderLocalAssetRows(payload);
+}
+
+async function copyLocalPeerAsset(index) {
+  const item = localPeerAssetContext.items[index];
+  if (!item) return;
+  await apiPost("/admin/local-network/sync", { peer_id: localPeerAssetContext.peerId, asset_type: localPeerAssetContext.assetType, system: localPeerAssetContext.system, item });
+  showToast("Asset queued for local transfer.", "success");
+  await window.refreshLocalNetwork();
+}
+
+async function renderOvermindIntegrationPanel(target) {
+  target.innerHTML = `
     <div class="card log-card">
       <div class="card-header d-flex justify-content-between align-items-center">
         <span>Configuration</span>
@@ -3233,8 +3422,10 @@ async function renderOvermindIntegrationPage() {
     const cert = payload.certificate || {};
     const swarm = payload.swarm || [];
     const peerChecks = payload.peer_checks || [];
+    const networkMode = payload.network_mode || "overmind";
     statusEl.innerHTML = `
       <div class="d-flex flex-wrap gap-2 mb-2">
+        <span class="badge ${networkMode === "overmind" ? "text-bg-success" : "text-bg-warning"}">Mode: ${escapeHtml(networkMode === "overmind" ? "Overmind" : "Local Network")}</span>
         <span class="badge ${status.configured ? "text-bg-success" : "text-bg-secondary"}">Overmind: ${status.configured ? "linked" : "disconnected"}</span>
         <span class="badge ${swarmStatus === "connected" ? "text-bg-success" : swarmStatus.includes("pending") || swarmStatus.includes("requested") ? "text-bg-warning" : "text-bg-secondary"}">Connected to Swarm: ${escapeHtml(swarmStatus)}</span>
       </div>
@@ -3265,6 +3456,7 @@ async function renderOvermindIntegrationPage() {
           ${latest.failure_reason ? `<div class="small text-danger">${escapeHtml(latest.failure_reason)}</div>` : ""}
         </div>`;
       }).join("")}</div>` : ""}
+      ${networkMode !== "overmind" ? '<div class="alert alert-warning mt-3 mb-0">Overmind communication is suspended. Use the integration mode toggle above to resume it.</div>' : ""}
     `;
     urlInput.value = payload.overmind_url || "https://www.batocera-swarm.com";
     droneNameInput.value = payload.drone_name || "";
@@ -4209,18 +4401,12 @@ async function router() {
         return;
       }
       await renderAssetCachePage();
-    } else if (hash === "#admin/overmind") {
+    } else if (["#admin/integration", "#admin/overmind", "#admin/local-network", "#admin/overmind/actions"].includes(hash)) {
       if (!adminEnabled) {
         setHash("");
         return;
       }
-      await renderOvermindIntegrationPage();
-    } else if (hash === "#admin/overmind/actions") {
-      if (!adminEnabled) {
-        setHash("");
-        return;
-      }
-      await renderOvermindIntegrationPage();
+      await renderIntegrationPage();
     } else if (hash === "#admin/api") {
       if (!adminEnabled) {
         setHash("");

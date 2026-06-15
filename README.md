@@ -124,6 +124,19 @@ Drone-owned durable state is stored in its local SQLite database: Overmind confi
 
 Local fake mode is opt-in with `USE_FAKE_DATA=true`. Normal local Compose starts Drones unapproved so Overmind can show the pending Psionic connection.
 
+## Local Network Mode
+
+Each Drone runs in exactly one control-plane mode:
+
+- **Overmind Integration** keeps the existing heartbeat, action, telemetry, inventory upload, and Overmind-managed swarm behavior.
+- **Local Network** suspends all Overmind communication and discovers nearby Drones with a local multicast announcement. Local asset caches and filesystem watchers continue running.
+
+Choose the mode with the toggle on **Admin > Integration**. The page shows only the controls for the active integration. In Local Network mode, a discovered Drone is not trusted automatically. Open the same page on the other Drone, enter its short-lived eight-digit pairing code, and confirm the pairing. Pairing exchanges and pins each Drone's public certificate; private keys never leave their Drone.
+
+After pairing, the page shows peer health and lets an administrator browse and copy ROMs, BIOS, artwork, and saves directly from the other Drone. Transfers use the existing recipient-pull queue, run one at a time, verify the advertised fingerprint or MD5 when available, and appear in the normal Downloads panel.
+
+Local mode state, discovered peers, paired peers, pairing codes, and health snapshots are stored in Drone's existing SQLite state database. The saved Overmind configuration is retained while suspended, so switching back to Overmind mode resumes the existing integration without reconfiguration.
+
 ## Drone-to-Drone Security
 
 Drone can protect peer API routes with mTLS. In plain language, one Drone must show its local certificate before another Drone answers peer API calls.
@@ -141,7 +154,7 @@ DRONE_CERT_DAYS=825
 
 If you use your own certificate authority, set `DRONE_MTLS_CA_FILE` so Drone can ask the TLS layer to verify peer certificates.
 
-For local peer trust, Drone fetches approved peer public certificates from Overmind and caches them in `/userdata/system/drone-app/peer-certs/`. If a peer call fails with an unknown CA or certificate mismatch, Drone refreshes that peer certificate and retries once.
+In Overmind mode, Drone fetches approved peer public certificates from Overmind and caches them in `/userdata/system/drone-app/peer-certs/`. In Local Network mode, an administrator-approved pairing exchanges and pins peer certificates separately in `/userdata/system/drone-app/local-peer-certs/`. Local pairing trust is inactive in Overmind mode unless Overmind independently approved the same certificate. Discovery alone never grants access to peer health, inventory, or files.
 
 For API clients that need mTLS, use your client certificate and key from a trusted system:
 

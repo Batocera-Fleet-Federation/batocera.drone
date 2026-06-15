@@ -53,6 +53,7 @@ try:
         hostname_override_values as _hostname_override_values,
         is_ip_literal as _is_ip_literal,
     )
+    from . import local_network as _local_network
     from .overmind_filesystem import (
         filesystem_events as _build_filesystem_events,
         filesystem_snapshot as _filesystem_snapshot,
@@ -130,6 +131,7 @@ except ImportError:
         hostname_override_values as _hostname_override_values,
         is_ip_literal as _is_ip_literal,
     )
+    import local_network as _local_network  # type: ignore
     from overmind_filesystem import (  # type: ignore
         filesystem_events as _build_filesystem_events,
         filesystem_snapshot as _filesystem_snapshot,
@@ -202,6 +204,7 @@ _SAVES_METADATA_WATCHER = None
 # File-only rotating stream for Overmind-related logs; configured in _configure_rotating_logs.
 _OVERMIND_LOG_STREAM = None
 _PEER_HEALTH_CHECK_THREAD_STARTED = False
+_LOCAL_NETWORK_WORKERS_STARTED = False
 _GAME_PROCESS_MONITOR_STARTED = False
 _GAME_PROCESS_MONITOR = None
 _ROM_METADATA_ACTIVE = Event()
@@ -4572,31 +4575,207 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         if not fingerprint_value:
             fingerprint_value = self.repository.build_fingerprint(target)
             cache = {key: fingerprint_value}
-            self._save_json_state(cache_path, cache)
+        self._save_json_state(cache_path, cache)
         self._send_json(200, {"system": system, "unique_id": unique_id, "fingerprint": fingerprint_value, "cached": bool(cache.get(key))})
 
-    def _handle_peer_health(self) -> None:
+    def _peer_request_authorized(self) -> bool:
+        if _local_network.is_local_mode(self.settings):
+            if self.settings.http_only:
+                if _env_bool(False, "DRONE_LOCAL_ALLOW_INSECURE_HTTP"):
+                    return True
+                self._send_json(403, {"error": "local-network peer API requires HTTPS and a paired client certificate"})
+                return False
+            try:
+                der = self.connection.getpeercert(binary_form=True) if hasattr(self.connection, "getpeercert") else None
+            except Exception:
+                der = None
+            fingerprint = hashlib.sha256(der).hexdigest() if der else ""
+            trusted = {
+                str(peer.get("certificate_fingerprint") or "").strip().lower()
+                for peer in _local_network.paired_peers(self.settings)
+            }
+            if not fingerprint or fingerprint.lower() not in trusted:
+                self._send_json(403, {"error": "paired client certificate required"})
+                return False
+            return True
         if self.settings.drone_mtls_enabled:
             cert = self.connection.getpeercert() if hasattr(self.connection, "getpeercert") else None
             if not cert:
                 self._send_json(403, {"error": "client certificate required"})
-                return
+                return False
+            try:
+                der = self.connection.getpeercert(binary_form=True)
+            except Exception:
+                der = None
+            fingerprint = hashlib.sha256(der).hexdigest().lower() if der else ""
+            local_match = next(
+                (
+                    peer
+                    for peer in _local_network.paired_peers(self.settings)
+                    if str(peer.get("certificate_fingerprint") or "").strip().lower() == fingerprint
+                ),
+                None,
+            )
+            if local_match:
+                peer_id = str(local_match.get("drone_id") or "")
+                approved_path = _peer_cert_cache_path(self.settings, peer_id)
+                try:
+                    independently_approved = (
+                        approved_path.exists()
+                        and _certificate_pem_fingerprint(approved_path.read_text(encoding="utf-8", errors="ignore")).lower() == fingerprint
+                    )
+                except Exception:
+                    independently_approved = False
+                if not independently_approved:
+                    self._send_json(403, {"error": "Local Network pairing trust is inactive in Overmind mode"})
+                    return False
+        return True
+
+    def _handle_peer_pair(self, payload: dict) -> None:
+        if not _local_network.is_local_mode(self.settings):
+            self._send_json(409, {"error": "Drone is not in local network mode"})
+            return
+        if not _local_network.validate_pairing_code(self.settings, str(payload.get("pairing_code") or "")):
+            client_ip = self.client_address[0] if self.client_address else "-"
+            record_unauthorized_response(client_ip)
+            self._send_json(403, {"error": "invalid or expired pairing code"})
+            return
+        peer_id = str(payload.get("drone_id") or "").strip()
+        certificate_pem = str(payload.get("certificate_pem") or "")
+        if not peer_id or peer_id == self.settings.overmind_device_id:
+            raise ValueError("invalid peer id")
+        cert_path, fingerprint = _save_local_peer_certificate(self.settings, peer_id, certificate_pem)
+        expected = str(payload.get("certificate_fingerprint") or "").strip().lower()
+        if expected and expected != fingerprint.lower():
+            cert_path.unlink(missing_ok=True)
+            raise ValueError("peer certificate fingerprint mismatch")
+        source_ip = self.client_address[0] if self.client_address else ""
+        scheme = str(payload.get("scheme") or ("http" if self.settings.http_only else "https"))
+        port = int(payload.get("api_port") or 443)
+        advertised_reachable_url = str(payload.get("reachable_url") or "").strip()
+        reachable_url = advertised_reachable_url
+        if source_ip:
+            suffix = "" if scheme == "https" and port == 443 else f":{port}"
+            reachable_url = f"{scheme}://{source_ip}{suffix}"
+        peer = _local_network.save_paired_peer(
+            self.settings,
+            {
+                "drone_id": peer_id,
+                "name": str(payload.get("name") or peer_id),
+                "hostname": str(payload.get("hostname") or ""),
+                "reachable_url": reachable_url,
+                "advertised_reachable_url": advertised_reachable_url,
+                "scheme": scheme,
+                "api_port": port,
+                "certificate_fingerprint": fingerprint,
+                "certificate_path": str(cert_path),
+                "source_ip": source_ip,
+            },
+        )
+        ssl_context = getattr(self.server, "ssl_context", None)
+        if ssl_context is not None:
+            try:
+                ssl_context.load_verify_locations(cafile=str(cert_path))
+            except ssl.SSLError:
+                pass
+        _local_network.pairing_code(self.settings, rotate=True)
+        own_certificate = DroneCertificateManager(self.settings).ensure_certificate()
+        own_discovery = _local_network.discovery_payload(
+            self.settings,
+            str(own_certificate.get("fingerprint") or ""),
+        )
+        self._send_json(
+            200,
+            {
+                "status": "paired",
+                "peer": _public_local_peer(peer),
+                "drone_id": self.settings.overmind_device_id,
+                "name": socket.gethostname(),
+                "scheme": _drone_scheme(self.settings),
+                "api_port": _drone_advertised_api_port(self.settings),
+                "reachable_url": own_discovery.get("reachable_url"),
+                "certificate_pem": str(own_certificate.get("public_certificate") or ""),
+                "certificate_fingerprint": str(own_certificate.get("fingerprint") or ""),
+            },
+        )
+
+    def _handle_peer_health(self) -> None:
+        if not self._peer_request_authorized():
+            return
         self._send_json(
             200,
             {
                 "status": "ok",
                 "drone_id": self.settings.overmind_device_id,
                 "checked_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
-                "mtls": bool(self.settings.drone_mtls_enabled),
+                "mtls": bool(self.settings.drone_mtls_enabled or _local_network.is_local_mode(self.settings)),
+                "network_mode": _network_mode(self.settings),
+            },
+        )
+
+    def _handle_peer_inventory(self, asset_type: str, query_params: dict) -> None:
+        if not self._peer_request_authorized():
+            return
+        normalized = str(asset_type or "").strip().lower()
+        try:
+            limit = max(1, min(int((query_params.get("limit") or ["500"])[0]), 2000))
+            offset = max(0, int((query_params.get("offset") or ["0"])[0]))
+        except (TypeError, ValueError):
+            raise ValueError("limit and offset must be integers")
+        query = str((query_params.get("q") or [""])[0]).strip().lower()
+        system = str((query_params.get("system") or [""])[0]).strip()
+        if normalized == "summary":
+            cache_status = _rom_metadata_cache_status(self.settings)
+            self._send_json(
+                200,
+                {
+                    "drone_id": self.settings.overmind_device_id,
+                    "name": socket.gethostname(),
+                    "systems": self.repository.list_system_names(),
+                    "counts": cache_status.get("counts") or {},
+                    "updated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                },
+            )
+            return
+        if normalized == "roms":
+            if not system:
+                raise ValueError("system is required for ROM inventory")
+            _, rows = self.repository.list_assets(system, "roms")
+        elif normalized == "bios":
+            rows = self.repository.list_bios_entries()
+        elif normalized == "artwork":
+            rows = self.repository.list_artwork_metadata()
+            if system:
+                rows = [row for row in rows if str(row.get("system") or "").lower() == system.lower()]
+        elif normalized == "saves":
+            rows = _saves_store.list_saves(self.settings.saves_root, system=system or None)
+        else:
+            raise ValueError("asset type must be summary, roms, bios, artwork, or saves")
+        rows = [
+            {key: value for key, value in row.items() if key not in {"absolute_path"}}
+            for row in rows
+            if isinstance(row, dict)
+        ]
+        if query:
+            rows = [row for row in rows if query in json.dumps(row, sort_keys=True).lower()]
+        total = len(rows)
+        page = rows[offset:offset + limit]
+        self._send_json(
+            200,
+            {
+                "drone_id": self.settings.overmind_device_id,
+                "asset_type": normalized,
+                "system": system or None,
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+                "items": page,
             },
         )
 
     def _handle_peer_rom_download(self, system: str, relative_path: str) -> None:
-        if self.settings.drone_mtls_enabled:
-            cert = self.connection.getpeercert() if hasattr(self.connection, "getpeercert") else None
-            if not cert:
-                self._send_json(403, {"error": "client certificate required"})
-                return
+        if not self._peer_request_authorized():
+            return
         system_dir = self.repository.get_system_dir(system).resolve()
         rel = unquote(relative_path or "").replace("\\", "/").lstrip("/")
         if not rel or ".." in Path(rel).parts:
@@ -4611,11 +4790,8 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         self._stream_file(target, "application/octet-stream", as_attachment=True)
 
     def _handle_peer_rom_manifest(self, system: str, relative_path: str) -> None:
-        if self.settings.drone_mtls_enabled:
-            cert = self.connection.getpeercert() if hasattr(self.connection, "getpeercert") else None
-            if not cert:
-                self._send_json(403, {"error": "client certificate required"})
-                return
+        if not self._peer_request_authorized():
+            return
         system_dir = self.repository.get_system_dir(system).resolve()
         rel = unquote(relative_path or "").replace("\\", "/").lstrip("/")
         if not rel or ".." in Path(rel).parts:
@@ -4656,11 +4832,8 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         )
 
     def _handle_peer_bios_download(self, relative_path: str) -> None:
-        if self.settings.drone_mtls_enabled:
-            cert = self.connection.getpeercert() if hasattr(self.connection, "getpeercert") else None
-            if not cert:
-                self._send_json(403, {"error": "client certificate required"})
-                return
+        if not self._peer_request_authorized():
+            return
         try:
             bios_root = self.repository.get_bios_root().resolve()
         except FileNotFoundError:
@@ -4680,11 +4853,8 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
 
     def _handle_peer_save_download(self, system: str, relative_path: str) -> None:
         """Serve a single game-save file to an authenticated peer (mTLS when enabled)."""
-        if self.settings.drone_mtls_enabled:
-            cert = self.connection.getpeercert() if hasattr(self.connection, "getpeercert") else None
-            if not cert:
-                self._send_json(403, {"error": "client certificate required"})
-                return
+        if not self._peer_request_authorized():
+            return
         saves_root = Path(self.settings.saves_root).resolve()
         system_clean = unquote(system or "").replace("\\", "/").strip("/")
         rel = unquote(relative_path or "").replace("\\", "/").lstrip("/")
@@ -4700,11 +4870,8 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         self._stream_file(target, "application/octet-stream", as_attachment=True)
 
     def _handle_peer_artwork_download(self, system: str, artwork_type: str, rom_path: str) -> None:
-        if self.settings.drone_mtls_enabled:
-            cert = self.connection.getpeercert() if hasattr(self.connection, "getpeercert") else None
-            if not cert:
-                self._send_json(403, {"error": "client certificate required"})
-                return
+        if not self._peer_request_authorized():
+            return
         try:
             target, relative_path, gamelist_ref = self.repository.resolve_artwork_file(system, unquote(rom_path or ""), unquote(artwork_type or ""))
         except ValueError as error:
@@ -6270,7 +6437,222 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         config = self._load_overmind_config()
         if _normalize_overmind_link_state(config):
             self._save_overmind_config(config)
-        self._send_json(200, self._overmind_public_payload(config))
+        payload = self._overmind_public_payload(config)
+        payload["network_mode"] = _network_mode(self.settings)
+        payload["overmind_active"] = _local_network.is_overmind_mode(self.settings)
+        if not payload["overmind_active"]:
+            payload["status"]["integration_enabled"] = False
+            payload["status"]["integration_state"] = "suspended_local_network"
+            payload["status"]["swarm_connection_status"] = "disconnected"
+        self._send_json(200, payload)
+
+    def _require_overmind_mode(self) -> bool:
+        if _local_network.is_overmind_mode(self.settings):
+            return True
+        self._send_json(409, {"error": "Overmind integration is disabled while Local Network mode is active"})
+        return False
+
+    def _handle_admin_network_mode(self) -> None:
+        mode = _network_mode(self.settings)
+        self._send_json(
+            200,
+            {
+                "mode": mode,
+                "overmind_active": mode == _local_network.MODE_OVERMIND,
+                "local_network_active": mode == _local_network.MODE_LOCAL_NETWORK,
+                "modes": [_local_network.MODE_OVERMIND, _local_network.MODE_LOCAL_NETWORK],
+            },
+        )
+
+    def _handle_admin_network_mode_update(self, payload: dict) -> None:
+        result = _local_network.set_mode(self.settings, str(payload.get("mode") or ""))
+        if result["mode"] == _local_network.MODE_LOCAL_NETWORK:
+            config = self._load_overmind_config()
+            config["suspended_by_network_mode"] = True
+            config["notes"] = "Overmind communication is suspended while Local Network mode is active."
+            self._save_overmind_config(config)
+            ssl_context = getattr(self.server, "ssl_context", None)
+            if ssl_context is not None:
+                ssl_context.verify_mode = ssl.CERT_OPTIONAL
+                for peer in _local_network.paired_peers(self.settings):
+                    cert_path = Path(str(peer.get("certificate_path") or ""))
+                    if cert_path.exists():
+                        try:
+                            ssl_context.load_verify_locations(cafile=str(cert_path))
+                        except ssl.SSLError:
+                            continue
+            _local_network.announce(self.settings, str(DroneCertificateManager(self.settings).metadata().get("fingerprint") or ""))
+        else:
+            config = self._load_overmind_config()
+            config.pop("suspended_by_network_mode", None)
+            self._save_overmind_config(config)
+        self._handle_admin_network_mode()
+
+    def _local_network_status_payload(self) -> dict:
+        paired = {str(peer.get("drone_id") or ""): peer for peer in _local_network.paired_peers(self.settings)}
+        checks = {
+            str(check.get("target_drone_id") or ""): check
+            for check in _local_network.load_peer_checks(self.settings)
+            if isinstance(check, dict)
+        }
+        discovered = []
+        seen = set()
+        for peer in _local_network.discovered_peers(self.settings, include_stale=True):
+            peer_id = str(peer.get("drone_id") or "")
+            discovered.append(_public_local_peer({**peer, **paired.get(peer_id, {}), "health": checks.get(peer_id)}))
+            seen.add(peer_id)
+        for peer_id, peer in paired.items():
+            if peer_id not in seen:
+                discovered.append(_public_local_peer({**peer, "health": checks.get(peer_id)}))
+        return {
+            "mode": _network_mode(self.settings),
+            "active": _local_network.is_local_mode(self.settings),
+            "pairing": _local_network.pairing_code(self.settings),
+            "peers": discovered,
+            "paired_count": len(paired),
+            "discovered_count": len(discovered),
+            "downloads": _get_download_manager().snapshot() if _get_download_manager() else {},
+            "activity": _local_network.load_activity(self.settings),
+        }
+
+    def _handle_admin_local_network_status(self) -> None:
+        self._send_json(200, self._local_network_status_payload())
+
+    def _handle_admin_local_network_discover(self) -> None:
+        if not _local_network.is_local_mode(self.settings):
+            self._send_json(409, {"error": "Enable Local Network mode before discovering peers"})
+            return
+        sent = _local_network.announce(
+            self.settings,
+            str(DroneCertificateManager(self.settings).metadata().get("fingerprint") or ""),
+        )
+        payload = self._local_network_status_payload()
+        payload["announcement_sent"] = sent
+        self._send_json(200, payload)
+
+    def _handle_admin_local_pairing_code_rotate(self) -> None:
+        if not _local_network.is_local_mode(self.settings):
+            self._send_json(409, {"error": "Enable Local Network mode before pairing"})
+            return
+        self._send_json(200, {"pairing": _local_network.pairing_code(self.settings, rotate=True)})
+
+    def _handle_admin_local_peer_pair(self, peer_id: str, payload: dict) -> None:
+        peer_id = unquote(peer_id)
+        if not _local_network.is_local_mode(self.settings):
+            self._send_json(409, {"error": "Enable Local Network mode before pairing"})
+            return
+        peer = next(
+            (row for row in _local_network.discovered_peers(self.settings, include_stale=True) if str(row.get("drone_id") or "") == peer_id),
+            None,
+        )
+        if not peer:
+            self._send_json(404, {"error": "discovered peer not found"})
+            return
+        paired = _local_pair_peer(self.settings, peer, str(payload.get("pairing_code") or ""))
+        ssl_context = getattr(self.server, "ssl_context", None)
+        cert_path = Path(str(paired.get("certificate_path") or ""))
+        if ssl_context is not None and cert_path.exists():
+            try:
+                ssl_context.load_verify_locations(cafile=str(cert_path))
+            except ssl.SSLError:
+                pass
+        self._send_json(200, {"status": "paired", "peer": _public_local_peer(paired)})
+
+    def _handle_admin_local_peer_forget(self, peer_id: str) -> None:
+        peer_id = unquote(peer_id)
+        removed = _local_network.forget_peer(self.settings, peer_id)
+        _local_peer_cert_cache_path(self.settings, peer_id).unlink(missing_ok=True)
+        self._send_json(200, {"status": "forgotten" if removed else "not_found", "peer_id": peer_id})
+
+    def _handle_admin_local_peer_assets(self, peer_id: str, query_params: dict) -> None:
+        peer_id = unquote(peer_id)
+        if not _local_network.is_local_mode(self.settings):
+            self._send_json(409, {"error": "Enable Local Network mode before browsing peers"})
+            return
+        peer = _local_network.get_paired_peer(self.settings, peer_id)
+        if not peer:
+            self._send_json(404, {"error": "paired peer not found"})
+            return
+        asset_type = str((query_params.get("type") or ["summary"])[0]).strip().lower()
+        params = []
+        for key in ("system", "q", "limit", "offset"):
+            value = str((query_params.get(key) or [""])[0]).strip()
+            if value:
+                params.append(f"{quote(key, safe='')}={quote(value, safe='')}")
+        address = _peer_address(peer)
+        if not address:
+            raise ValueError("paired peer has no reachable address")
+        suffix = f"?{'&'.join(params)}" if params else ""
+        result = _peer_get_json(
+            f"{address}/v1/api/peer/inventory/{quote(asset_type, safe='')}{suffix}",
+            self.settings,
+            peer_id=peer_id,
+            config={"network_mode": "local_network"},
+        )
+        self._send_json(200, result)
+
+    def _handle_admin_local_sync(self, payload: dict) -> None:
+        if not _local_network.is_local_mode(self.settings):
+            self._send_json(409, {"error": "Enable Local Network mode before syncing assets"})
+            return
+        peer_id = str(payload.get("peer_id") or "").strip()
+        asset_type = str(payload.get("asset_type") or "").strip().lower()
+        item = payload.get("item") if isinstance(payload.get("item"), dict) else payload
+        peer = _local_network.get_paired_peer(self.settings, peer_id)
+        manager = _get_download_manager()
+        if not peer:
+            self._send_json(404, {"error": "paired peer not found"})
+            return
+        if manager is None:
+            self._send_json(503, {"error": "download manager unavailable"})
+            return
+        config = {"network_mode": "local_network"}
+        if asset_type == "roms":
+            system = str(payload.get("system") or item.get("system") or "").strip()
+            relative_path = str(item.get("relative_path") or item.get("rom_path") or item.get("file_path") or "").strip()
+            job = manager.enqueue_rom(
+                config,
+                peer,
+                system,
+                relative_path,
+                expected_size=item.get("byte_count") or item.get("file_size"),
+                expected_fingerprint=item.get("rom_fingerprint") or item.get("fingerprint"),
+                entry_type=str(item.get("entry_type") or "file"),
+            )
+        elif asset_type == "bios":
+            relative_path = str(item.get("path") or item.get("relative_path") or item.get("file_path") or "").strip()
+            job = manager.enqueue_bios(
+                config,
+                peer,
+                relative_path,
+                expected_size=item.get("byte_count") or item.get("file_size"),
+                expected_md5=item.get("bios_md5") or item.get("md5"),
+            )
+        elif asset_type == "artwork":
+            artwork_types = item.get("artwork_types")
+            if isinstance(artwork_types, list):
+                default_artwork_type = str(artwork_types[0] if artwork_types else "image")
+            else:
+                default_artwork_type = str(artwork_types or "image")
+            job = manager.enqueue_artwork(
+                config,
+                peer,
+                str(item.get("system") or payload.get("system") or ""),
+                str(item.get("rom_path") or item.get("file_path") or ""),
+                str(item.get("artwork_type") or default_artwork_type),
+            )
+        elif asset_type == "saves":
+            job = manager.enqueue_save(
+                config,
+                peer,
+                str(item.get("system") or payload.get("system") or ""),
+                str(item.get("file_path") or item.get("relative_path") or ""),
+                expected_size=item.get("file_size"),
+                expected_fingerprint=item.get("saves_fingerprint") or item.get("fingerprint"),
+            )
+        else:
+            raise ValueError("asset_type must be roms, bios, artwork, or saves")
+        self._send_json(202, {"status": "queued", "job": job})
 
     def _handle_admin_credentials_update(self, payload: dict) -> None:
         username = str(payload.get("username") or "").strip()
@@ -6281,6 +6663,8 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         self._send_json(200, {"credentials": result, "message": "Drone credentials updated."})
 
     def _handle_admin_overmind_config(self, payload: dict) -> None:
+        if not self._require_overmind_mode():
+            return
         raw_url = str(payload.get("overmind_url") or "").strip()
         raw_email = str(payload.get("overmind_email") or "").strip()
         raw_drone_name = str(payload.get("drone_name") or "").strip()
@@ -6396,6 +6780,8 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         self._send_json(200, self._overmind_public_payload(new_config))
 
     def _handle_admin_overmind_start(self, payload: dict) -> None:
+        if not self._require_overmind_mode():
+            return
         config = self._load_overmind_config()
         password = str(config.get("overmind_password") or "")
         auth_token = str(config.get("overmind_auth_token") or "")
@@ -6435,6 +6821,8 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         self._send_json(200, self._overmind_public_payload(config))
 
     def _handle_admin_overmind_claim_ownership(self, payload: dict) -> None:
+        if not self._require_overmind_mode():
+            return
         raw_url = str(payload.get("overmind_url") or "").strip()
         email = str(payload.get("email") or "").strip()
         password = str(payload.get("password") or "")
@@ -6514,6 +6902,8 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         self._send_json(200, self._overmind_public_payload(config))
 
     def _handle_admin_overmind_swarm_connect(self) -> None:
+        if not self._require_overmind_mode():
+            return
         config = self._load_overmind_config()
         base_url = str(config.get("overmind_url") or "").strip().rstrip("/")
         if not base_url:
@@ -6529,6 +6919,8 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         self._send_json(200, self._overmind_public_payload(refreshed if token or refreshed else config))
 
     def _handle_admin_overmind_swarm_disconnect(self) -> None:
+        if not self._require_overmind_mode():
+            return
         config = self._load_overmind_config()
         base_url = str(config.get("overmind_url") or "").strip().rstrip("/")
         token = str(config.get("overmind_token") or "").strip()
@@ -7660,8 +8052,40 @@ def _record_processed_overmind_action(
     )
 
 
+def _network_mode(settings: Settings) -> str:
+    return _local_network.get_mode(settings)
+
+
+def _certificate_pem_fingerprint(pem: str) -> str:
+    der = ssl.PEM_cert_to_DER_cert(str(pem or ""))
+    return hashlib.sha256(der).hexdigest()
+
+
+def _public_local_peer(peer: dict) -> dict:
+    return {key: value for key, value in dict(peer or {}).items() if key not in {"certificate_path"}}
+
+
+def _save_local_peer_certificate(settings: Settings, peer_id: str, certificate_pem: str) -> Tuple[Path, str]:
+    if "BEGIN CERTIFICATE" not in str(certificate_pem or ""):
+        raise ValueError("peer certificate is required")
+    fingerprint = _certificate_pem_fingerprint(certificate_pem)
+    cert_path = _local_peer_cert_cache_path(settings, peer_id)
+    cert_path.parent.mkdir(parents=True, exist_ok=True)
+    cert_path.write_text(certificate_pem, encoding="utf-8")
+    try:
+        cert_path.chmod(0o600)
+    except OSError:
+        pass
+    return cert_path, fingerprint
+
+
 def _peer_cert_cache_dir(settings: Settings) -> Path:
     return (settings.userdata_root / "system" / "drone-app" / "peer-certs").resolve()
+
+
+def _local_peer_cert_cache_path(settings: Settings, peer_id: str) -> Path:
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", peer_id)
+    return (settings.userdata_root / "system" / "drone-app" / "local-peer-certs" / f"{safe}.crt").resolve()
 
 
 def _peer_cert_cache_path(settings: Settings, peer_id: str) -> Path:
@@ -7680,6 +8104,11 @@ def _peer_trust_cafile(
     config: Optional[dict] = None,
     refresh_cert: bool = False,
 ) -> Optional[Path]:
+    if _local_network.is_local_mode(settings):
+        if not peer_id:
+            return None
+        local_cached = _local_peer_cert_cache_path(settings, peer_id)
+        return local_cached if local_cached.exists() else None
     if settings.drone_mtls_ca_file and settings.drone_mtls_ca_file.exists():
         if peer_id and refresh_cert and config:
             _fetch_peer_certificate(settings, config, peer_id)
@@ -7726,12 +8155,14 @@ def _drone_client_ssl_context(settings: Settings, url: str, verify: bool = False
     if uses_peer_pin:
         # The pinned peer certificate came from Overmind; its routed NAT address need not appear in the SAN.
         context.check_hostname = False
-    if settings.drone_mtls_enabled and settings.drone_cert_file.exists() and settings.drone_key_file.exists():
+    if (settings.drone_mtls_enabled or _local_network.is_local_mode(settings)) and settings.drone_cert_file.exists() and settings.drone_key_file.exists():
         context.load_cert_chain(certfile=str(settings.drone_cert_file), keyfile=str(settings.drone_key_file))
     return context
 
 
 def _overmind_post_json(url: str, payload: dict, token: Optional[str] = None, settings: Optional[Settings] = None) -> dict:
+    if settings is not None and not _local_network.is_overmind_mode(settings):
+        raise RuntimeError("Overmind communication is disabled in Local Network mode")
     body = json.dumps(payload).encode("utf-8")
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     if token:
@@ -7758,6 +8189,8 @@ def _overmind_post_json_with_status(
     settings: Optional[Settings] = None,
     timeout_seconds: int = 10,
 ) -> Tuple[int, dict]:
+    if settings is not None and not _local_network.is_overmind_mode(settings):
+        raise RuntimeError("Overmind communication is disabled in Local Network mode")
     body = json.dumps(payload).encode("utf-8")
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     if token:
@@ -7772,6 +8205,8 @@ def _overmind_post_json_with_status(
 
 
 def _overmind_get_json(url: str, token: Optional[str] = None, settings: Optional[Settings] = None) -> dict:
+    if settings is not None and not _local_network.is_overmind_mode(settings):
+        raise RuntimeError("Overmind communication is disabled in Local Network mode")
     headers = {"Accept": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -7784,6 +8219,8 @@ def _overmind_get_json(url: str, token: Optional[str] = None, settings: Optional
 
 
 def _overmind_delete_json(url: str, token: Optional[str] = None, settings: Optional[Settings] = None) -> dict:
+    if settings is not None and not _local_network.is_overmind_mode(settings):
+        raise RuntimeError("Overmind communication is disabled in Local Network mode")
     headers = {"Accept": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -8033,6 +8470,8 @@ def _report_overmind_action_completion(
     Drone already executed and dropped it). So on 401 we reclaim the token with the bound
     authorization token and retry the completion once, mirroring the heartbeat path.
     """
+    if not _local_network.is_overmind_mode(settings):
+        return token
     action_id = quote(str(action.get("id") or ""), safe="")
     action_label = str(action.get("action") or "?")
     action_id_log = str(action.get("id") or "?")
@@ -8117,6 +8556,67 @@ def _peer_get_json(url: str, settings: Settings, peer_id: Optional[str] = None, 
         raise
     parsed = json.loads(raw.decode("utf-8")) if raw else {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _local_pair_peer(settings: Settings, peer: dict, pairing_code: str) -> dict:
+    if not _local_network.is_local_mode(settings):
+        raise ValueError("Drone is not in local network mode")
+    peer_id = str(peer.get("drone_id") or peer.get("device_id") or "").strip()
+    address = _peer_address(peer)
+    if not peer_id or not address:
+        raise ValueError("discovered peer has no reachable address")
+    certificate = DroneCertificateManager(settings).ensure_certificate()
+    certificate_pem = str(certificate.get("public_certificate") or "")
+    if not certificate_pem:
+        raise RuntimeError("local Drone certificate is unavailable")
+    own_discovery = _local_network.discovery_payload(settings, str(certificate.get("fingerprint") or ""))
+    payload = {
+        "pairing_code": str(pairing_code or "").strip(),
+        "drone_id": settings.overmind_device_id,
+        "name": socket.gethostname(),
+        "hostname": socket.gethostname(),
+        "scheme": _drone_scheme(settings),
+        "api_port": _drone_advertised_api_port(settings),
+        "reachable_url": own_discovery.get("reachable_url"),
+        "certificate_pem": certificate_pem,
+        "certificate_fingerprint": str(certificate.get("fingerprint") or ""),
+    }
+    request = Request(
+        f"{address.rstrip('/')}/v1/api/peer/pair",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Accept": "application/json", "User-Agent": "batocera-drone-local-pair/1.0"},
+        method="POST",
+    )
+    context = ssl._create_unverified_context() if address.startswith("https://") else None
+    with urlopen(request, timeout=10, context=context) as response:
+        raw = response.read()
+    result = json.loads(raw.decode("utf-8")) if raw else {}
+    if not isinstance(result, dict) or str(result.get("status") or "") != "paired":
+        raise RuntimeError("peer did not accept pairing request")
+    remote_id = str(result.get("drone_id") or "").strip()
+    if remote_id != peer_id:
+        raise RuntimeError("paired peer identity did not match discovered peer")
+    remote_pem = str(result.get("certificate_pem") or "")
+    cert_path, fingerprint = _save_local_peer_certificate(settings, peer_id, remote_pem)
+    expected = str(peer.get("certificate_fingerprint") or "").strip().lower()
+    returned = str(result.get("certificate_fingerprint") or "").strip().lower()
+    if (expected and expected != fingerprint.lower()) or (returned and returned != fingerprint.lower()):
+        cert_path.unlink(missing_ok=True)
+        raise RuntimeError("paired peer certificate fingerprint did not match discovery")
+    stored = _local_network.save_paired_peer(
+        settings,
+        {
+            **peer,
+            "name": str(result.get("name") or peer.get("name") or peer_id),
+            "reachable_url": address,
+            "advertised_reachable_url": str(result.get("reachable_url") or peer.get("advertised_reachable_url") or ""),
+            "scheme": str(result.get("scheme") or peer.get("scheme") or "https"),
+            "api_port": int(result.get("api_port") or peer.get("api_port") or 443),
+            "certificate_fingerprint": fingerprint,
+            "certificate_path": str(cert_path),
+        },
+    )
+    return stored
 
 
 def _peer_health_url(address: str) -> str:
@@ -9570,6 +10070,9 @@ class DownloadCancelled(RuntimeError):
 
 
 def _kick_asset_metadata_sync_after_download(settings: Settings, repository: "RomRepository", config: dict, reason: str) -> None:
+    if not _local_network.is_overmind_mode(settings):
+        _ROM_METADATA_WAKE.set()
+        return
     base_url = str(config.get("overmind_url") or "").strip().rstrip("/")
     token = str(config.get("overmind_token") or "").strip()
     if not base_url or not token:
@@ -9739,6 +10242,51 @@ class DownloadManager:
             "_asset_type": "artwork",
             "_config": config,
             "_peer": peer,
+        }
+        with self._lock:
+            self._jobs[job_id] = job
+            self._cancel_events[job_id] = Event()
+            self._update_queue_positions_locked()
+            snapshot = self._public_job_locked(job)
+        self._wake.set()
+        return snapshot
+
+    def enqueue_save(self, config: dict, peer: dict, system: str, relative_path: str, expected_size=None, expected_fingerprint=None) -> dict:
+        job_id = str(uuid.uuid4())
+        peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        job = {
+            "id": job_id,
+            "job_id": job_id,
+            "sync_id": job_id,
+            "source_drone_id": peer_id,
+            "target_drone_id": self.settings.overmind_device_id,
+            "asset_type": "saves",
+            "file_path": relative_path,
+            "file_name": Path(relative_path).name,
+            "file_type": "Save",
+            "system": system,
+            "relative_path": relative_path,
+            "total_bytes": expected_size,
+            "file_size": expected_size,
+            "downloaded_bytes": 0,
+            "bytes_transferred": 0,
+            "percentage": 0,
+            "transfer_speed_bps": 0,
+            "status": "queued",
+            "queue_position": None,
+            "started_at": None,
+            "download_started_at": None,
+            "completed_at": None,
+            "download_completed_at": None,
+            "error_message": None,
+            "failure_reason": None,
+            "cancellation_requested": False,
+            "created_at": now,
+            "_asset_type": "saves",
+            "_config": config,
+            "_peer": peer,
+            "_expected_fingerprint": expected_fingerprint,
         }
         with self._lock:
             self._jobs[job_id] = job
@@ -9923,6 +10471,17 @@ class DownloadManager:
                     progress_callback=progress,
                     cancellation_event=cancel_event,
                 )
+            elif asset_type == "saves":
+                activity = _download_save_from_peer(
+                    self.settings,
+                    config,
+                    peer,
+                    system,
+                    rel,
+                    expected_size=expected_size,
+                    expected_fingerprint=expected_fingerprint,
+                    cancellation_event=cancel_event,
+                )
             elif asset_type == "bios":
                 activity = _download_bios_from_peer(
                     self.settings,
@@ -9960,7 +10519,15 @@ class DownloadManager:
                     )
             refresh_started = time.monotonic()
             try:
-                refreshed = self.repository.list_artwork_metadata() if asset_type == "artwork" else (self.repository.list_bios_entries() if asset_type == "bios" else self.repository.list_assets(system, "roms")[1])
+                refreshed = (
+                    self.repository.list_artwork_metadata()
+                    if asset_type == "artwork"
+                    else (
+                        self.repository.list_bios_entries()
+                        if asset_type == "bios"
+                        else (_saves_store.list_saves(self.settings.saves_root, system=system or None) if asset_type == "saves" else self.repository.list_assets(system, "roms")[1])
+                    )
+                )
                 activity["inventory_refresh_status"] = "succeeded"
                 activity["inventory_refresh_count"] = len(refreshed)
             except Exception as refresh_error:
@@ -10001,6 +10568,8 @@ class DownloadManager:
                 self._update_queue_positions_locked()
             self._push_download_state(config, "completed", force=True)
             if terminal_activity:
+                if _local_network.is_local_mode(self.settings):
+                    _local_network.record_activity(self.settings, terminal_activity)
                 _post_rom_sync_activity(self.settings, config, terminal_activity)
                 if asset_type == "rom" and terminal_activity.get("status") == "completed":
                     _kick_asset_metadata_sync_after_download(self.settings, self.repository, config, "rom_download_completed")
@@ -10038,6 +10607,8 @@ def _cached_rom_fingerprint_exists(settings: Settings, expected_fingerprint: Opt
 
 
 def _post_download_state(settings: Settings, config: dict, snapshot: dict, reason: str = "progress") -> None:
+    if not _local_network.is_overmind_mode(settings):
+        return
     base_url = str(config.get("overmind_url") or "").strip().rstrip("/")
     token = str(config.get("overmind_token") or "").strip()
     if not base_url or not token:
@@ -10068,6 +10639,8 @@ def _post_download_state(settings: Settings, config: dict, snapshot: dict, reaso
 
 
 def _post_rom_sync_activity(settings: Settings, config: dict, activity: dict) -> None:
+    if not _local_network.is_overmind_mode(settings):
+        return
     base_url = str(config.get("overmind_url") or "").strip().rstrip("/")
     token = str(config.get("overmind_token") or "").strip()
     if not base_url or not token:
@@ -11176,6 +11749,9 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
     def loop() -> None:
         nonlocal last_speed_sample_at, last_config_report_at, last_system_info_at, system_info_payload, fs_snapshot
         while True:
+            if not _local_network.is_overmind_mode(settings):
+                time.sleep(poll_seconds)
+                continue
             try:
                 config = _load_overmind_config_for_settings(settings)
                 base_url = str(config.get("overmind_url") or "").strip().rstrip("/")
@@ -11502,6 +12078,8 @@ def _start_peer_health_check_thread(settings: Settings) -> None:
     def loop() -> None:
         while True:
             time.sleep(interval)
+            if not _local_network.is_overmind_mode(settings):
+                continue
             try:
                 config = _load_overmind_config_for_settings(settings)
                 base_url = str(config.get("overmind_url") or "").strip().rstrip("/")
@@ -11559,6 +12137,54 @@ def _start_peer_health_check_thread(settings: Settings) -> None:
     thread.start()
 
 
+def _start_local_network_workers(settings: Settings) -> None:
+    def fingerprint() -> str:
+        return str(DroneCertificateManager(settings).metadata().get("fingerprint") or "")
+
+    _local_network.start_discovery_worker(settings, fingerprint)
+    interval = max(10, int(os.environ.get("DRONE_LOCAL_HEALTH_INTERVAL_SECONDS", "30")))
+
+    def health_loop() -> None:
+        while True:
+            time.sleep(interval)
+            if not _local_network.is_local_mode(settings):
+                continue
+            checks = []
+            for peer in _local_network.paired_peers(settings):
+                peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
+                address = _peer_address(peer)
+                checked_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+                result = {
+                    "source_drone_id": settings.overmind_device_id,
+                    "target_drone_id": peer_id,
+                    "target_address": address,
+                    "status": "fail",
+                    "latency_ms": None,
+                    "failure_reason": None,
+                    "checked_at": checked_at,
+                }
+                if not address:
+                    result["failure_reason"] = "no peer address available"
+                    checks.append(result)
+                    continue
+                started = time.monotonic()
+                try:
+                    _peer_get_json(
+                        f"{address.rstrip('/')}/v1/api/peer/health",
+                        settings,
+                        peer_id=peer_id,
+                        config={"network_mode": "local_network"},
+                    )
+                    result["status"] = "pass"
+                    result["latency_ms"] = int((time.monotonic() - started) * 1000)
+                except Exception as error:
+                    result["failure_reason"] = str(error)
+                checks.append(result)
+            _local_network.save_peer_checks(settings, checks)
+
+    Thread(target=health_loop, name="drone-local-peer-health", daemon=True).start()
+
+
 def _sync_rom_metadata_to_overmind(
     settings: Settings,
     repository: "RomRepository",
@@ -11569,6 +12195,8 @@ def _sync_rom_metadata_to_overmind(
     *,
     force_upload: bool = False,
 ) -> dict:
+    if not _local_network.is_overmind_mode(settings):
+        return {"status": "skipped", "reason": "local_network_mode", "changed": False, "uploads": []}
     if not _begin_rom_metadata_activity("sync"):
         cache, _ = _load_rom_metadata_cache(settings)
         snapshot = _build_rom_metadata_snapshot_from_cache(settings, cache)
@@ -11902,6 +12530,8 @@ def _sync_saves_to_overmind(settings: Settings, base_url: str, token: str) -> di
     thumbprint is persisted every scan so heartbeats can report and compare it; the
     upload only fires when something actually changed or a heartbeat flagged drift.
     """
+    if not _local_network.is_overmind_mode(settings):
+        return {"status": "skipped", "reason": "local_network_mode"}
     try:
         summary = _saves_store.sync_saves_cache(settings.saves_root)
     except Exception as error:
@@ -11982,6 +12612,12 @@ def _poll_rom_metadata_once(settings: Settings, repository: "RomRepository") -> 
         return {"status": "skipped", "reason": "metadata_already_running", "changed": False}
     try:
         prepared_poll = _poll_rom_metadata_cache(settings, repository)
+        if _local_network.is_local_mode(settings):
+            try:
+                _saves_store.sync_saves_cache(settings.saves_root)
+            except Exception as error:
+                print(f"Local saves cache scan failed: {_format_overmind_error(error)}", file=sys.stderr, flush=True)
+            return _complete_local_rom_metadata_cache(settings, repository, "local_network_mode")
         config = _load_overmind_config_for_settings(settings)
         base_url = str(config.get("overmind_url") or "").strip().rstrip("/")
         token = str(config.get("overmind_token") or "").strip()
@@ -12131,10 +12767,18 @@ def _apply_server_tls(settings: Settings, server: ThreadingHTTPServer) -> None:
         cert_file, key_file = _resolve_tls_material(settings)
     ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ssl_context.load_cert_chain(certfile=str(cert_file), keyfile=str(key_file))
-    if settings.drone_mtls_enabled:
+    if settings.drone_mtls_enabled or _local_network.is_local_mode(settings):
         ssl_context.verify_mode = ssl.CERT_OPTIONAL
         if settings.drone_mtls_ca_file and settings.drone_mtls_ca_file.exists():
             ssl_context.load_verify_locations(cafile=str(settings.drone_mtls_ca_file))
+        for peer in _local_network.paired_peers(settings):
+            cert_path = Path(str(peer.get("certificate_path") or ""))
+            if cert_path.exists():
+                try:
+                    ssl_context.load_verify_locations(cafile=str(cert_path))
+                except ssl.SSLError:
+                    continue
+    server.ssl_context = ssl_context  # type: ignore[attr-defined]
     # do_handshake_on_connect=False is critical: wrapping the LISTENING socket otherwise
     # makes accept() perform the TLS handshake on the single serve_forever thread, so one
     # silent client (e.g. an internet scanner that opens 443 and never speaks) blocks
@@ -12145,7 +12789,7 @@ def _apply_server_tls(settings: Settings, server: ThreadingHTTPServer) -> None:
 
 
 def create_server(settings: Settings) -> ThreadingHTTPServer:
-    global _OVERMIND_POLLER_STARTED, _ROM_METADATA_POLLER_STARTED, _ROM_METADATA_WATCHER_STARTED, _PEER_HEALTH_CHECK_THREAD_STARTED, _GAME_PROCESS_MONITOR_STARTED, _GAME_PROCESS_MONITOR, _DOWNLOAD_MANAGER
+    global _OVERMIND_POLLER_STARTED, _ROM_METADATA_POLLER_STARTED, _ROM_METADATA_WATCHER_STARTED, _PEER_HEALTH_CHECK_THREAD_STARTED, _LOCAL_NETWORK_WORKERS_STARTED, _GAME_PROCESS_MONITOR_STARTED, _GAME_PROCESS_MONITOR, _DOWNLOAD_MANAGER
     roms_root, bios_root = _real_data_roots(settings)
     repository = RomRepository(
         roms_root,
@@ -12231,6 +12875,9 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
     if not _PEER_HEALTH_CHECK_THREAD_STARTED:
         _start_peer_health_check_thread(settings)
         _PEER_HEALTH_CHECK_THREAD_STARTED = True
+    if not _LOCAL_NETWORK_WORKERS_STARTED:
+        _start_local_network_workers(settings)
+        _LOCAL_NETWORK_WORKERS_STARTED = True
     if settings.rom_metadata_poll_seconds == 0:
         print("Asset metadata poller disabled: ROM_METADATA_POLL_SECONDS=0", file=sys.stdout, flush=True)
     elif not _ROM_METADATA_POLLER_STARTED:

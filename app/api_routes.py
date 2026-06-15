@@ -48,6 +48,10 @@ class ApiRoutesMixin:
                 self._handle_peer_health()
                 return
 
+            if len(parts) == 3 and parts[0] == "peer" and parts[1] == "inventory":
+                self._handle_peer_inventory(parts[2], query_params)
+                return
+
             if len(parts) >= 4 and parts[0] == "peer" and parts[1] == "roms":
                 self._handle_peer_rom_download(parts[2], "/".join(parts[3:]))
                 return
@@ -296,6 +300,18 @@ class ApiRoutesMixin:
                 self._handle_admin_overmind_actions()
                 return
 
+            if len(parts) == 2 and parts[0] == "admin" and parts[1] == "network-mode":
+                self._handle_admin_network_mode()
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "local-network" and parts[2] == "status":
+                self._handle_admin_local_network_status()
+                return
+
+            if len(parts) == 5 and parts[0] == "admin" and parts[1] == "local-network" and parts[2] == "peers" and parts[4] == "assets":
+                self._handle_admin_local_peer_assets(parts[3], query_params)
+                return
+
             if len(parts) == 2 and parts[0] == "admin" and parts[1] == "emulators":
                 self._handle_admin_emulators()
                 return
@@ -353,6 +369,11 @@ class ApiRoutesMixin:
             if self._rate_limit_unauthenticated_external_request():
                 return
 
+            if len(parts) == 2 and parts[0] == "peer" and parts[1] == "pair":
+                payload = self._read_json_body()
+                self._handle_peer_pair(payload)
+                return
+
             if not self.auth.check(self.headers.get("Authorization")):
                 self._send_unauthorized()
                 return
@@ -369,6 +390,33 @@ class ApiRoutesMixin:
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "integrations" and parts[2] == "overmind" and parts[3] == "config":
                 payload = self._read_json_body()
                 self._handle_admin_overmind_config(payload)
+                return
+
+            if len(parts) == 2 and parts[0] == "admin" and parts[1] == "network-mode":
+                payload = self._read_json_body()
+                self._handle_admin_network_mode_update(payload)
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "local-network" and parts[2] == "discover":
+                self._handle_admin_local_network_discover()
+                return
+
+            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "local-network" and parts[2] == "pairing-code" and parts[3] == "rotate":
+                self._handle_admin_local_pairing_code_rotate()
+                return
+
+            if len(parts) == 5 and parts[0] == "admin" and parts[1] == "local-network" and parts[2] == "peers" and parts[4] == "pair":
+                payload = self._read_json_body()
+                self._handle_admin_local_peer_pair(parts[3], payload)
+                return
+
+            if len(parts) == 5 and parts[0] == "admin" and parts[1] == "local-network" and parts[2] == "peers" and parts[4] == "forget":
+                self._handle_admin_local_peer_forget(parts[3])
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "local-network" and parts[2] == "sync":
+                payload = self._read_json_body()
+                self._handle_admin_local_sync(payload)
                 return
 
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "integrations" and parts[2] == "overmind" and parts[3] == "start":

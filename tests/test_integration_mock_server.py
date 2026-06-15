@@ -111,6 +111,32 @@ class MockServerIntegrationTests(unittest.TestCase):
         self.assertIn(b"Claim Ownership", js)
         self.assertNotIn(b"Integration Password", js)
 
+    def test_network_mode_and_local_network_admin_endpoints(self) -> None:
+        initial = self._get_json("/v1/api/admin/network-mode")
+        self.assertEqual(initial["mode"], "overmind")
+
+        updated = self._post_json("/v1/api/admin/network-mode", {"mode": "local_network"})
+        self.assertEqual(updated["mode"], "local_network")
+        self.assertTrue(updated["local_network_active"])
+
+        status = self._get_json("/v1/api/admin/local-network/status")
+        self.assertTrue(status["active"])
+        self.assertEqual(len(status["pairing"]["code"]), 8)
+        self.assertIn("peers", status)
+
+        js = self._get_bytes("/static/js/drone.js")
+        self.assertIn(b"renderIntegrationPage", js)
+        self.assertIn(b"Integration Mode", js)
+        self.assertIn(b"integrationModeOvermindBtn", js)
+        self.assertIn(b"integrationModeLocalBtn", js)
+        self.assertNotIn(b"networkModeSelect", js)
+
+    def test_peer_inventory_does_not_expose_absolute_paths(self) -> None:
+        payload = self._get_json("/v1/api/peer/inventory/roms?system=snes&limit=1")
+        self.assertEqual(payload["asset_type"], "roms")
+        self.assertEqual(len(payload["items"]), 1)
+        self.assertNotIn("absolute_path", payload["items"][0])
+
     def test_content_mascot_is_served(self) -> None:
         image = self._get_bytes("/content/batocera-swarm-mascot.jpg")
         self.assertTrue(image.startswith(b"\xff\xd8\xff"))
