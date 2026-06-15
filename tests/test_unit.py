@@ -4471,6 +4471,26 @@ class LocalNetworkAssetCopyTests(unittest.TestCase):
             both = handler._collect_peer_inventory("roms", {"systems": ["snes,gba"]})
             self.assertEqual({item["system"] for item in both["items"]}, {"snes", "gba"})
 
+    def test_collect_peer_inventory_roms_interleaves_multiple_systems(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            self._seed_two_systems(root)
+            # Several ROMs per system so ordering is observable.
+            for index in range(5):
+                (root / "roms" / "snes" / f"snes-game-{index}.zip").write_bytes(b"s")
+                (root / "roms" / "gba" / f"gba-game-{index}.zip").write_bytes(b"g")
+            settings = self._settings(root)
+            repo = drone_api.RomRepository(root / "roms", root / "bios")
+            handler = self._handler(settings, repo)
+
+            payload = handler._collect_peer_inventory("roms", {"systems": ["snes,gba"]})
+            order = [item["system"] for item in payload["items"]]
+            self.assertEqual(set(order), {"snes", "gba"})
+            # Interleaved, not grouped: both systems appear within the first few
+            # items (a grouped result would be all of one system first, which is
+            # what made multi-system requests look like only one system).
+            self.assertEqual(set(order[:4]), {"snes", "gba"})
+
     def _peer_only_rom_item(self):
         # A ROM that is NOT on the local machine (fingerprint not in the seeded
         # snes library), carrying gamelist artwork fields.

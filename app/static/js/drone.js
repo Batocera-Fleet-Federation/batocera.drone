@@ -533,23 +533,21 @@ function stopLocalTransfersAutoRefresh() {
   localTransfersInFlight = false;
 }
 function startLocalTransfersAutoRefresh() {
-  // Live-update only the Local Transfers / Transfer History data while a copy is
-  // in progress -- never re-render the whole panel, so the user's asset request
-  // form, paging, and selections are left untouched.
+  // Live-update only the Local Transfers data while a copy is in progress --
+  // never re-render the whole panel, so the user's asset request form, paging,
+  // and selections are left untouched.
   stopLocalTransfersAutoRefresh();
   localTransfersTimer = setInterval(async () => {
     if (document.hidden || localTransfersInFlight) return;
     if (!["#admin/integration", "#admin/local-network"].includes(window.location.hash)) return;
     const downloadsBody = document.getElementById("localDownloadsBody");
-    const activityBody = document.getElementById("localActivityBody");
-    if (!downloadsBody || !activityBody) return;
+    if (!downloadsBody) return;
     localTransfersInFlight = true;
     try {
       const status = await api("/admin/local-network/status");
       if (!downloadsBody.contains(document.activeElement)) {
         downloadsBody.innerHTML = renderLocalTransfersPanel(status.downloads || {});
       }
-      activityBody.innerHTML = renderDownloadRows(status.activity || [], false);
     } catch (err) {
       // Transient poll failure: leave the last good data in place silently.
     } finally {
@@ -1794,9 +1792,14 @@ function renderLocalTransfersPanel(payload) {
   const active = localTransferPayload.active || [];
   const queued = localTransferPayload.queued || [];
   const recent = localTransferPayload.recent || [];
+  // Reserve a fixed height for the Active section based on the max number of
+  // concurrent downloads, so it doesn't grow/shrink (and shove the rest of the
+  // page around) as transfers start and finish on each refresh.
+  const activeLimit = Math.max(1, Number(localTransferPayload.concurrency && localTransferPayload.concurrency.active_limit) || 1);
+  const activeMinHeight = 44 + activeLimit * 46;
   return `${renderQueueEta(localTransferPayload)}${renderLocalTransferControls(localTransferPayload, active, queued)}<div class="download-section">
       <div class="download-section-title"><span><i class="bi bi-lightning-charge me-2"></i>Active</span><span class="badge text-bg-info">${active.length}</span></div>
-      ${renderDownloadRows(active)}
+      <div style="min-height:${activeMinHeight}px">${renderDownloadRows(active)}</div>
     </div>
     ${renderLocalTransferGroup("queued", "Queued", "bi-hourglass-split", "warning", queued, true)}
     ${renderLocalTransferGroup("recent", "Recent", "bi-clock-history", "secondary", recent, false)}`;
@@ -3348,9 +3351,10 @@ function renderLocalAssetRows(payload) {
             ? '<span class="badge text-bg-success ms-2" title="This ROM is already on this machine (matched by thumbprint)">On this machine</span>'
             : '<span class="badge text-bg-info ms-2">New</span>')
         : "";
-      // An existing ROM is not re-downloaded; the button still copies artwork
-      // (when Include artwork is checked) and links it in the gamelist.
-      const romBtnLabel = exists ? "Get Artwork" : downloadLabel;
+      // ROM rows use a compact icon-only button to keep the table tight; an
+      // existing ROM is not re-downloaded but the button still copies its artwork.
+      const romBtn = `<button class="btn btn-sm ${exists ? "btn-outline-primary" : "btn-primary"}" title="${exists ? "On this machine — copy its artwork" : "Download"}" aria-label="${exists ? "Copy artwork" : "Download"}" onclick="copyLocalPeerAsset(${index})"><i class="bi ${exists ? "bi-images" : "bi-cloud-arrow-down"}"></i></button>`;
+      const otherBtn = `<button class="btn btn-sm btn-primary" onclick="copyLocalPeerAsset(${index})"><i class="bi bi-cloud-arrow-down me-1"></i>${downloadLabel}</button>`;
       return `<tr>
       <td><strong>${escapeHtml(localAssetDisplayName(item))}</strong>${statusBadge}</td>
       <td class="small mono">${escapeHtml(localAssetPath(item))}</td>
@@ -3358,7 +3362,7 @@ function renderLocalAssetRows(payload) {
       <td>${formatBytes(item.byte_count || item.file_size || item.size)}</td>
       <td class="small">${escapeHtml(localAssetDetail(item) || String(item.rom_fingerprint || item.bios_md5 || item.saves_fingerprint || item.fingerprint || item.md5 || "").slice(0, 16))}</td>
       <td>${transferable
-        ? `<button class="btn btn-sm ${exists ? "btn-outline-primary" : "btn-primary"}" onclick="copyLocalPeerAsset(${index})"><i class="bi bi-cloud-arrow-down me-1"></i>${isRoms ? romBtnLabel : downloadLabel}</button>`
+        ? (isRoms ? romBtn : otherBtn)
         : `<details><summary class="btn btn-sm btn-outline-primary">View Details</summary><pre class="mono small mt-2 mb-0 text-wrap">${escapeHtml(JSON.stringify(item, null, 2))}</pre></details>`}</td>
     </tr>`;
     }).join("")}</tbody></table></div>`;
@@ -3546,8 +3550,7 @@ async function renderLocalNetworkIntegrationPanel(target) {
         <div id="localAssetsBody"><div class="themed-empty">Pair a nearby Drone, then request its assets here.</div></div>
         <div id="localAssetsPagination" class="mt-2"></div>
       </div></div>
-    <div class="card log-card mb-3"><div class="card-header">Local Transfers</div><div class="card-body" id="localDownloadsBody"></div></div>
-    <div class="card log-card"><div class="card-header">Local Transfer History</div><div class="card-body" id="localActivityBody"></div></div>`;
+    <div class="card log-card"><div class="card-header">Local Transfers</div><div class="card-body" id="localDownloadsBody"></div></div>`;
 
   async function refresh() {
     const status = await api("/admin/local-network/status");
@@ -3556,7 +3559,6 @@ async function renderLocalNetworkIntegrationPanel(target) {
       : '<div class="themed-empty">Enable Local Network integration to discover and pair nearby Drones.</div>';
     document.getElementById("localPeersBody").innerHTML = renderLocalPeerRows(status.peers || []);
     document.getElementById("localDownloadsBody").innerHTML = renderLocalTransfersPanel(status.downloads || {});
-    document.getElementById("localActivityBody").innerHTML = renderDownloadRows(status.activity || [], false);
     document.getElementById("localDiscoverBtn").disabled = !status.active;
     document.getElementById("localPairCodeRotateBtn").disabled = !status.active;
     const pairedPeers = (status.peers || []).filter(peer => peer.paired);

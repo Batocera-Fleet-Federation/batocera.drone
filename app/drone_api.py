@@ -4822,7 +4822,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 target_systems = [name for name in self.repository.list_system_names() if name.strip().lower() in systems]
             else:
                 target_systems = list(self.repository.list_system_names())
-            rows = []
+            per_system_rows = []
             for system_name in target_systems:
                 try:
                     _, system_rows = self.repository.list_assets(system_name, "roms")
@@ -4834,7 +4834,20 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 for row in system_rows:
                     if isinstance(row, dict):
                         row["system"] = system_name
-                rows.extend(system_rows)
+                per_system_rows.append(system_rows)
+            if len(per_system_rows) <= 1:
+                rows = per_system_rows[0] if per_system_rows else []
+            else:
+                # Round-robin interleave so every requested system is visible from
+                # the first page (and downloads in a balanced order) instead of all
+                # of one system before the next -- which made multi-system requests
+                # look like only one system was returned.
+                rows = []
+                longest = max(len(system_rows) for system_rows in per_system_rows)
+                for index in range(longest):
+                    for system_rows in per_system_rows:
+                        if index < len(system_rows):
+                            rows.append(system_rows[index])
         elif normalized == "bios":
             rows = self.repository.list_bios_entries()
         elif normalized == "artwork":
