@@ -225,6 +225,12 @@ SCRAPER_USER_AGENT = (
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 ARTWORK_FIELDS = ("image", "thumbnail", "marquee", "fanart", "boxart", "video", "wheel", "manual")
+
+# Serializes gamelist.xml read-modify-write so concurrent artwork downloads (the
+# download pool runs several at once) can't clobber each other's <image>/<video>
+# entries on the same system. Writes are sub-millisecond, so a single global lock
+# costs nothing relative to the transfers themselves.
+_GAMELIST_WRITE_LOCK = Lock()
 ARTWORK_DUPLICATE_FILTER = "duplicate_artwork"
 OVERMIND_EVENT_TYPES = {
     "gameplay": "gameplay_activity",
@@ -2948,21 +2954,24 @@ class RomRepository:
         normalized_artwork_path = _normalize_gamelist_rom_path(artwork_relative_path)
         if not normalized_rom_path or not normalized_artwork_path:
             raise ValueError("rom_path and artwork path are required")
-        tree, root = self._read_gamelist(system_dir)
-        game = self._find_gamelist_entry_by_path(root, normalized_rom_path)
-        if game is None:
-            game = ET.SubElement(root, "game")
-            _set_child_text(game, "path", f"./{normalized_rom_path}")
-            _set_child_text(game, "name", Path(normalized_rom_path).stem)
-        _set_child_text(game, field, f"./{normalized_artwork_path}")
         gamelist_path = system_dir / "gamelist.xml"
-        try:
-            ET.indent(tree, space="  ")
-        except Exception:
-            pass
-        tree.write(gamelist_path, encoding="utf-8", xml_declaration=True)
-        with gamelist_path.open("a", encoding="utf-8") as handle:
-            handle.write("\n")
+        # Hold the lock across the whole read-modify-write so parallel artwork
+        # downloads for this system serialize instead of overwriting each other.
+        with _GAMELIST_WRITE_LOCK:
+            tree, root = self._read_gamelist(system_dir)
+            game = self._find_gamelist_entry_by_path(root, normalized_rom_path)
+            if game is None:
+                game = ET.SubElement(root, "game")
+                _set_child_text(game, "path", f"./{normalized_rom_path}")
+                _set_child_text(game, "name", Path(normalized_rom_path).stem)
+            _set_child_text(game, field, f"./{normalized_artwork_path}")
+            try:
+                ET.indent(tree, space="  ")
+            except Exception:
+                pass
+            tree.write(gamelist_path, encoding="utf-8", xml_declaration=True)
+            with gamelist_path.open("a", encoding="utf-8") as handle:
+                handle.write("\n")
         return {"system": system, "rom_path": normalized_rom_path, "artwork_type": field, "artwork_path": normalized_artwork_path}
 
     def _rom_path_exists(self, system: str, rom_path: str) -> bool:
@@ -10491,7 +10500,12 @@ def _kick_asset_metadata_sync_after_download(settings: Settings, repository: "Ro
 
 
 class DownloadManager:
-    """Per-target Drone download queue with one active worker."""
+    """Per-target Drone download queue with a small pool of worker threads.
+
+    Running a few transfers concurrently markedly improves aggregate throughput
+    over Wi-Fi (where a single TCP stream rarely fills the link) and hides the
+    per-file TLS-handshake latency when copying many small files (artwork). The
+    pool size is ``DRONE_DOWNLOAD_CONCURRENCY`` (default 3, clamped 1-8)."""
 
     def __init__(self, settings: Settings, repository: "RomRepository") -> None:
         self.settings = settings
@@ -10502,8 +10516,23 @@ class DownloadManager:
         self._wake = Event()
         self._paused = False
         self._last_download_state_push_at = 0.0
-        self._thread = Thread(target=self._worker, name="drone-download-worker", daemon=True)
-        self._thread.start()
+        self._concurrency = self._resolve_concurrency()
+        # Job selection + the queued->downloading transition happen atomically under
+        # self._lock, so multiple workers never claim the same job. Per-job state is
+        # likewise mutated under the lock, so running _run_job concurrently is safe.
+        self._threads = []
+        for index in range(self._concurrency):
+            thread = Thread(target=self._worker, name=f"drone-download-worker-{index + 1}", daemon=True)
+            thread.start()
+            self._threads.append(thread)
+
+    @staticmethod
+    def _resolve_concurrency() -> int:
+        try:
+            value = int(os.environ.get("DRONE_DOWNLOAD_CONCURRENCY", "3"))
+        except (TypeError, ValueError):
+            value = 3
+        return max(1, min(value, 8))
 
     def enqueue_rom(self, config: dict, peer: dict, system: str, relative_path: str, expected_size=None, expected_fingerprint=None, source_action_id: Optional[str] = None, entry_type: str = "file", sync_id: Optional[str] = None) -> dict:
         job_id = str(uuid.uuid4())
@@ -10766,10 +10795,10 @@ class DownloadManager:
         active = [job for job in jobs if job.get("status") == "downloading"]
         queued = [job for job in jobs if job.get("status") == "queued"]
         recent = [job for job in jobs if job.get("status") in DOWNLOAD_TERMINAL_STATUSES][-25:]
-        estimate = self._queue_estimate(active, queued, recent, paused)
+        estimate = self._queue_estimate(active, queued, recent, paused, self._concurrency)
         return {
             "target_drone_id": self.settings.overmind_device_id,
-            "concurrency": {"scope": "target_drone", "active_limit": 1},
+            "concurrency": {"scope": "target_drone", "active_limit": self._concurrency},
             "paused": paused,
             "active": active,
             "queued": queued,
@@ -10779,7 +10808,7 @@ class DownloadManager:
         }
 
     @staticmethod
-    def _queue_estimate(active: List[dict], queued: List[dict], recent: List[dict], paused: bool) -> dict:
+    def _queue_estimate(active: List[dict], queued: List[dict], recent: List[dict], paused: bool, concurrency: int = 1) -> dict:
         def safe_int(value: object) -> int:
             try:
                 return int(value or 0)
@@ -10810,16 +10839,24 @@ class DownloadManager:
         size_estimate_available = unknown_size_count == 0 or average_size > 0
         remaining_bytes = known_remaining + estimated_unknown_bytes if size_estimate_available else None
 
+        parallel = max(1, int(concurrency or 1))
         speeds = [safe_int(job.get("transfer_speed_bps")) for job in active if safe_int(job.get("transfer_speed_bps")) > 0]
         speed_source = "active"
-        if not speeds:
-            speeds = [
+        if speeds:
+            # Aggregate throughput across the concurrently-running streams is what
+            # actually drains the queue.
+            speed_bps = sum(speeds)
+        else:
+            recent_speeds = [
                 safe_int(job.get("transfer_speed_bps"))
                 for job in recent
                 if job.get("status") == "completed" and safe_int(job.get("transfer_speed_bps")) > 0
             ]
             speed_source = "recent"
-        speed_bps = int(sum(speeds) / len(speeds)) if speeds else 0
+            # Project a single stream's typical speed across however many transfers
+            # will run in parallel (bounded by the pool size and the work pending).
+            per_stream = int(sum(recent_speeds) / len(recent_speeds)) if recent_speeds else 0
+            speed_bps = per_stream * (min(parallel, len(pending)) if pending else 1)
         eta_seconds = int(remaining_bytes / speed_bps) if remaining_bytes is not None and remaining_bytes > 0 and speed_bps > 0 else None
         return {
             "queue_eta_seconds": eta_seconds,
@@ -11820,8 +11857,15 @@ def _download_artwork_from_peer(
     partial_target.replace(target)
     gamelist_update = None
     gamelist_update_status = "succeeded"
+    artwork_rel = target.relative_to(system_dir).as_posix()
     try:
-        gamelist_update = repository.update_gamelist_artwork_reference(system, local_rom_rel, field, target.relative_to(system_dir).as_posix())
+        try:
+            gamelist_update = repository.update_gamelist_artwork_reference(system, local_rom_rel, field, artwork_rel)
+        except PermissionError:
+            # gamelist.xml is root-owned / not yet writable by the Drone; fix perms
+            # via the privileged worker and retry once before reporting failure.
+            _ensure_rom_write_access(settings, system)
+            gamelist_update = repository.update_gamelist_artwork_reference(system, local_rom_rel, field, artwork_rel)
     except Exception as error:
         gamelist_update_status = "failed"
         gamelist_update = {"error": str(error), "path": str(system_dir / "gamelist.xml")}

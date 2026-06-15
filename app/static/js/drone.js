@@ -1719,7 +1719,7 @@ function renderDownloadsPanel(payload, includeHeader = true) {
   ];
   return `
     ${includeHeader ? `<div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
-      <div><strong>${escapeHtml(payload.target_drone_id || "This Drone")}</strong><div class="small text-muted">Transfers run one at a time on this Drone.</div></div>
+      <div><strong>${escapeHtml(payload.target_drone_id || "This Drone")}</strong><div class="small text-muted">${(() => { const n = Number(payload.concurrency && payload.concurrency.active_limit) || 1; return n > 1 ? `Up to ${n} transfers run at a time on this Drone.` : "Transfers run one at a time on this Drone."; })()}</div></div>
       <button class="btn btn-sm btn-outline-primary" title="Refresh downloads" aria-label="Refresh downloads" onclick="renderDownloadsPage()"><i class="bi bi-arrow-repeat"></i></button>
     </div>` : ""}
     <div class="d-flex flex-wrap align-items-center gap-2 mb-3">

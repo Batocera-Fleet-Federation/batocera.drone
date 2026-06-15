@@ -1162,6 +1162,40 @@ class SettingsTests(unittest.TestCase):
         self.assertIsNone(calculating["queue_eta_seconds"])
         self.assertEqual(calculating["queue_eta_state"], "calculating")
 
+    def test_download_manager_concurrency_pool(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios"), "OVERMIND_DEVICE_ID": "target-a"},
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            repo = RomRepository(root / "roms", root / "bios")
+
+            with mock.patch.dict("os.environ", {"DRONE_DOWNLOAD_CONCURRENCY": "4"}, clear=False), \
+                 mock.patch("app.drone_api.Thread.start"):
+                manager = DownloadManager(settings, repo)
+            self.assertEqual(manager._concurrency, 4)
+            self.assertEqual(len(manager._threads), 4)
+            self.assertEqual(manager.snapshot()["concurrency"]["active_limit"], 4)
+
+            # Clamp out-of-range / non-numeric values; default to 3 when unset.
+            for raw, expected in (("0", 1), ("99", 8), ("abc", 3)):
+                with mock.patch.dict("os.environ", {"DRONE_DOWNLOAD_CONCURRENCY": raw}, clear=False), \
+                     mock.patch("app.drone_api.Thread.start"):
+                    self.assertEqual(DownloadManager(settings, repo)._concurrency, expected, raw)
+            with mock.patch("app.drone_api.Thread.start"):
+                os.environ.pop("DRONE_DOWNLOAD_CONCURRENCY", None)
+                self.assertEqual(DownloadManager(settings, repo)._concurrency, 3)
+
+    def test_queue_estimate_uses_aggregate_throughput(self) -> None:
+        # Three streams at 4 MB/s each drain 90 MB at 12 MB/s (~7s), not 22s.
+        active = [{"total_bytes": 30_000_000, "downloaded_bytes": 0, "transfer_speed_bps": 4_000_000} for _ in range(3)]
+        est = DownloadManager._queue_estimate(active, [], [], False, concurrency=3)
+        self.assertEqual(est["queue_estimate_speed_bps"], 12_000_000)
+        self.assertEqual(est["queue_eta_seconds"], 7)
+
     def test_download_manager_pushes_terminal_sync_activity(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
@@ -4553,6 +4587,83 @@ class LocalNetworkAssetCopyTests(unittest.TestCase):
             self.assertEqual(target.read_bytes(), b"NEWER!")
             self.assertFalse((root / "roms" / "snes" / "images" / "Super Mario World-image-1.png").exists())
 
+    def test_ensure_rom_write_access_returns_true_on_ok_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            control = Path(tmp) / "control"
+            control.mkdir()
+            settings = self._settings(Path(tmp) / "userdata")
+
+            def fake_request(system=""):
+                # Simulate the privileged worker confirming the repair.
+                (control / "repair-rom-permissions.result").write_text("ok", encoding="utf-8")
+                return True
+
+            with mock.patch.dict("os.environ", {"DRONE_SERVICE_CONTROL_DIR": str(control)}), \
+                 mock.patch("app.drone_api._request_rom_permission_repair", side_effect=fake_request):
+                self.assertTrue(drone_api._ensure_rom_write_access(settings, "snes", timeout_seconds=2))
+
+    def test_ensure_rom_write_access_times_out_without_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            control = Path(tmp) / "control"
+            control.mkdir()
+            settings = self._settings(Path(tmp) / "userdata")
+            with mock.patch.dict("os.environ", {"DRONE_SERVICE_CONTROL_DIR": str(control)}), \
+                 mock.patch("app.drone_api._request_rom_permission_repair", return_value=True):
+                self.assertFalse(drone_api._ensure_rom_write_access(settings, "snes", timeout_seconds=0.6))
+            # And when the request itself can't be queued, it fails fast.
+            with mock.patch("app.drone_api._request_rom_permission_repair", return_value=False):
+                self.assertFalse(drone_api._ensure_rom_write_access(settings, "snes", timeout_seconds=2))
+
+    def test_artwork_gamelist_eacces_triggers_repair_and_retry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            self._seed_two_systems(root)
+            settings = self._settings(root)
+            repo = drone_api.RomRepository(root / "roms", root / "bios")
+            peer = {"drone_id": "src", "reachable_url": "http://src:8080"}
+
+            class FakeResponse:
+                def __init__(self, data, name="images/Super Mario World-image.png"):
+                    self._chunks = [data, b""]
+                    self.headers = {"X-Asset-Relative-Path": name, "Content-Length": str(len(data))}
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self, _size=-1):
+                    return self._chunks.pop(0)
+
+                def geturl(self):
+                    return "http://src:8080/v1/api/peer/artwork/snes/image/Super%20Mario%20World.zip"
+
+            real_update = repo.update_gamelist_artwork_reference
+            calls = {"n": 0}
+
+            def flaky_update(*args, **kwargs):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise PermissionError("Operation not permitted")
+                return real_update(*args, **kwargs)
+
+            ensure = mock.Mock(return_value=True)
+            with mock.patch("app.drone_api.urlopen", return_value=FakeResponse(b"ART")), \
+                 mock.patch.object(repo, "update_gamelist_artwork_reference", side_effect=flaky_update), \
+                 mock.patch("app.drone_api._ensure_rom_write_access", ensure):
+                result = drone_api._download_artwork_from_peer(
+                    settings, repo, {}, peer, "snes", "Super Mario World.zip", "image",
+                    overwrite=True, local_rom_path="Super Mario World.zip",
+                )
+
+            # First PermissionError -> request a privileged perm repair, then retry.
+            self.assertTrue(ensure.called)
+            self.assertEqual(calls["n"], 2)
+            self.assertEqual(result["gamelist_update_status"], "succeeded")
+            gamelist = (root / "roms" / "snes" / "gamelist.xml").read_text(encoding="utf-8")
+            self.assertIn("images/Super Mario World-image.png", gamelist)
+
     def test_artwork_video_lands_in_videos_subdir(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
@@ -4589,6 +4700,41 @@ class LocalNetworkAssetCopyTests(unittest.TestCase):
             self.assertTrue(target.exists())
             gamelist = (root / "roms" / "snes" / "gamelist.xml").read_text(encoding="utf-8")
             self.assertIn("videos/Super Mario World-video.mp4", gamelist)
+
+    def test_concurrent_gamelist_artwork_writes_do_not_clobber(self):
+        import threading
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            self._seed_two_systems(root)
+            repo = drone_api.RomRepository(root / "roms", root / "bios")
+            roms = root / "roms" / "snes"
+            names = [f"Game{i}.zip" for i in range(8)]
+            for name in names:
+                (roms / name).write_bytes(b"x")
+
+            errors = []
+
+            def worker(name, field):
+                try:
+                    repo.update_gamelist_artwork_reference("snes", name, field, f"images/{Path(name).stem}-{field}.png")
+                except Exception as exc:  # pragma: no cover - failure path
+                    errors.append(exc)
+
+            threads = [threading.Thread(target=worker, args=(name, field))
+                       for name in names for field in ("image", "marquee")]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+            # The serialized read-modify-write must preserve every reference; without
+            # the lock the concurrent writers would drop most of them.
+            self.assertEqual(errors, [])
+            text = (roms / "gamelist.xml").read_text(encoding="utf-8")
+            for name in names:
+                stem = Path(name).stem
+                self.assertIn(f"images/{stem}-image.png", text)
+                self.assertIn(f"images/{stem}-marquee.png", text)
 
     def test_download_manager_pause_resume_clear(self):
         with tempfile.TemporaryDirectory() as tmp:
