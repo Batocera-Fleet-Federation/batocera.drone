@@ -7,6 +7,7 @@ import unittest
 import urllib.request
 from pathlib import Path
 
+from app import local_network
 from app.mock_data import seed_mock_userdata
 from app.drone_api import Settings, create_server
 
@@ -26,6 +27,7 @@ class MockServerIntegrationTests(unittest.TestCase):
         os.environ["USERDATA_ROOT"] = str(self._root)
         os.environ["ROMS_ROOT"] = str(self._root / "roms")
         os.environ["BIOS_ROOT"] = str(self._root / "bios")
+        os.environ["SAVES_ROOT"] = str(self._root / "saves")
         os.environ["THEMES_ROOT"] = str(self._root / "themes")
         os.environ["BATOCERA_CONF_FILE"] = str(self._root / "system" / "batocera.conf")
         os.environ["ES_SETTINGS_FILE"] = str(
@@ -119,10 +121,41 @@ class MockServerIntegrationTests(unittest.TestCase):
         self.assertEqual(updated["mode"], "local_network")
         self.assertTrue(updated["local_network_active"])
 
+        object.__setattr__(self.settings, "use_fake_data", True)
+        local_network.record_discovered_peer(
+            self.settings,
+            {
+                "service": local_network.DISCOVERY_SERVICE,
+                "drone_id": "nearby-fake-drone",
+                "name": "Nearby Test Cabinet",
+                "scheme": "https",
+                "api_port": 8444,
+            },
+            "192.168.1.44",
+        )
         status = self._get_json("/v1/api/admin/local-network/status")
         self.assertTrue(status["active"])
         self.assertEqual(len(status["pairing"]["code"]), 8)
         self.assertIn("peers", status)
+        fake_peer = next(peer for peer in status["peers"] if peer["drone_id"] == "nearby-fake-drone")
+        self.assertTrue(fake_peer["paired"])
+        self.assertEqual(status["paired_count"], 1)
+
+        peer_roms = self._get_json(
+            "/v1/api/admin/local-network/peers/nearby-fake-drone/assets?type=roms&system=snes&limit=5"
+        )
+        self.assertEqual(peer_roms["asset_type"], "roms")
+        self.assertTrue(peer_roms["items"])
+        peer_saves = self._get_json(
+            "/v1/api/admin/local-network/peers/nearby-fake-drone/assets?type=saves&limit=5"
+        )
+        self.assertEqual(peer_saves["asset_type"], "saves")
+        self.assertTrue(peer_saves["items"])
+        peer_gameplay = self._get_json(
+            "/v1/api/admin/local-network/peers/nearby-fake-drone/assets?type=gameplay&limit=5"
+        )
+        self.assertEqual(peer_gameplay["asset_type"], "gameplay")
+        self.assertTrue(peer_gameplay["items"])
 
         js = self._get_bytes("/static/js/drone.js")
         self.assertIn(b"renderIntegrationPage", js)
@@ -136,6 +169,23 @@ class MockServerIntegrationTests(unittest.TestCase):
         self.assertEqual(payload["asset_type"], "roms")
         self.assertEqual(len(payload["items"]), 1)
         self.assertNotIn("absolute_path", payload["items"][0])
+
+    def test_peer_inventory_exposes_read_only_config_and_gameplay_records(self) -> None:
+        configs = self._get_json("/v1/api/peer/inventory/emulator_configs?limit=5")
+        self.assertEqual(configs["asset_type"], "emulator_configs")
+        self.assertTrue(configs["items"])
+        self.assertNotIn("path", configs["items"][0])
+        self.assertNotIn("root", configs["items"][0])
+        self.assertFalse(configs["items"][0]["is_downloadable"])
+
+        gameplay = self._get_json("/v1/api/peer/inventory/gameplay?limit=5")
+        self.assertEqual(gameplay["asset_type"], "gameplay")
+        self.assertTrue(all(not row["is_downloadable"] for row in gameplay["items"]))
+
+        js = self._get_bytes("/static/js/drone.js")
+        self.assertIn(b"Request Assets from Connected Drone", js)
+        self.assertIn(b"emulator_configs", js)
+        self.assertIn(b"Gameplay History", js)
 
     def test_content_mascot_is_served(self) -> None:
         image = self._get_bytes("/content/batocera-swarm-mascot.jpg")

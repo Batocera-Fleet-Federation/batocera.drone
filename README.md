@@ -122,7 +122,7 @@ System information is collected at startup and refreshed occasionally. It can in
 
 Drone-owned durable state is stored in its local SQLite database: Overmind configuration, swarm and peer-check snapshots, upload cursors/fingerprints, credentials, small MD5 lookup results, peer certificate metadata, and processed action history. Existing JSON or action-log state files are imported on first access and removed after successful migration. `OVERMIND_ACTION_LOG_MAX_BYTES` is retained as a compatibility setting and bounds the number of completed-action records retained in SQLite. Normal Drone stdout/stderr logs remain rotating files controlled by `LOG_MAX_BYTES` and `LOG_BACKUP_COUNT`, because log collection tails those streams directly.
 
-Local fake mode is opt-in with `USE_FAKE_DATA=true`. Normal local Compose starts Drones unapproved so Overmind can show the pending Psionic connection.
+Local fake mode is opt-in with `USE_FAKE_DATA=true`. In Local Network mode, one visible nearby Drone is automatically shown as paired so asset requests can be exercised without completing the pairing flow; the remaining nearby Drones stay unpaired for pairing UI testing. A paired **Demo Arcade Cabinet** is used as a fallback when no nearby Drone has been discovered. Normal local Compose starts Drones unapproved so Overmind can show the pending Psionic connection.
 
 ## Local Network Mode
 
@@ -133,7 +133,7 @@ Each Drone runs in exactly one control-plane mode:
 
 Choose the mode with the toggle on **Admin > Integration**. The page shows only the controls for the active integration. In Local Network mode, a discovered Drone is not trusted automatically. Open the same page on the other Drone, enter its short-lived eight-digit pairing code, and confirm the pairing. Pairing exchanges and pins each Drone's public certificate; private keys never leave their Drone.
 
-After pairing, the page shows peer health and lets an administrator browse and copy ROMs, BIOS, artwork, and saves directly from the other Drone. Transfers use the existing recipient-pull queue, run one at a time, verify the advertised fingerprint or MD5 when available, and appear in the normal Downloads panel.
+After pairing, the page shows peer health and provides an asset-request workspace for connected Drones. Administrators can browse and copy ROMs, BIOS, artwork, and saves directly from another Drone, or request emulator-config metadata and gameplay history for inspection. Transfers use the existing recipient-pull queue, run one at a time, verify the advertised fingerprint or MD5 when available, and appear in the normal Downloads panel.
 
 Local mode state, discovered peers, paired peers, pairing codes, and health snapshots are stored in Drone's existing SQLite state database. The saved Overmind configuration is retained while suspended, so switching back to Overmind mode resumes the existing integration without reconfiguration.
 

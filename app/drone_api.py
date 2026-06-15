@@ -4713,8 +4713,8 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             },
         )
 
-    def _handle_peer_inventory(self, asset_type: str, query_params: dict) -> None:
-        if not self._peer_request_authorized():
+    def _handle_peer_inventory(self, asset_type: str, query_params: dict, require_authorization: bool = True) -> None:
+        if require_authorization and not self._peer_request_authorized():
             return
         normalized = str(asset_type or "").strip().lower()
         try:
@@ -4748,9 +4748,32 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             if system:
                 rows = [row for row in rows if str(row.get("system") or "").lower() == system.lower()]
         elif normalized == "saves":
+            if self.settings.use_fake_data:
+                _saves_store.sync_saves_cache(self.settings.saves_root)
             rows = _saves_store.list_saves(self.settings.saves_root, system=system or None)
+        elif normalized == "emulator_configs":
+            configs = _list_emulator_config_files(self.settings, max_configs=2000)
+            rows = [
+                {
+                    "name": Path(str(row.get("relative_path") or "")).name,
+                    "root_name": row.get("root_name"),
+                    "relative_path": row.get("relative_path"),
+                    "size": row.get("size"),
+                    "modified_at": row.get("modified_at"),
+                    "error": row.get("error"),
+                    "is_downloadable": False,
+                }
+                for row in configs.get("configs") or []
+                if isinstance(row, dict)
+            ]
+        elif normalized == "gameplay":
+            rows = sorted(
+                [dict(row, is_downloadable=False) for row in _load_gameplay_history(self.settings)],
+                key=lambda row: str(row.get("played_at") or row.get("started_at") or ""),
+                reverse=True,
+            )
         else:
-            raise ValueError("asset type must be summary, roms, bios, artwork, or saves")
+            raise ValueError("asset type must be summary, roms, bios, artwork, saves, emulator_configs, or gameplay")
         rows = [
             {key: value for key, value in row.items() if key not in {"absolute_path"}}
             for row in rows
@@ -6489,6 +6512,15 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         self._handle_admin_network_mode()
 
     def _local_network_status_payload(self) -> dict:
+        hide_seeded_demo = False
+        if self.settings.use_fake_data and _local_network.is_local_mode(self.settings):
+            discovered_peers = _local_network.discovered_peers(self.settings, include_stale=True)
+            visible_peer = next((peer for peer in discovered_peers if not peer.get("fake_data")), None)
+            paired_peers = _local_network.paired_peers(self.settings)
+            if visible_peer and not any(not peer.get("fake_data") for peer in paired_peers):
+                _local_network.forget_peer(self.settings, "fake-local-peer-01")
+                _local_network.save_paired_peer(self.settings, {**visible_peer, "fake_data": True})
+            hide_seeded_demo = visible_peer is not None
         paired = {str(peer.get("drone_id") or ""): peer for peer in _local_network.paired_peers(self.settings)}
         checks = {
             str(check.get("target_drone_id") or ""): check
@@ -6499,6 +6531,8 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         seen = set()
         for peer in _local_network.discovered_peers(self.settings, include_stale=True):
             peer_id = str(peer.get("drone_id") or "")
+            if hide_seeded_demo and peer_id == "fake-local-peer-01":
+                continue
             discovered.append(_public_local_peer({**peer, **paired.get(peer_id, {}), "health": checks.get(peer_id)}))
             seen.add(peer_id)
         for peer_id, peer in paired.items():
@@ -6574,6 +6608,9 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             self._send_json(404, {"error": "paired peer not found"})
             return
         asset_type = str((query_params.get("type") or ["summary"])[0]).strip().lower()
+        if self.settings.use_fake_data and peer.get("fake_data"):
+            self._handle_peer_inventory(asset_type, query_params, require_authorization=False)
+            return
         params = []
         for key in ("system", "q", "limit", "offset"):
             value = str((query_params.get(key) or [""])[0]).strip()

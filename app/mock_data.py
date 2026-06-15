@@ -18,7 +18,40 @@ def _write_bytes(path: Path, content: bytes) -> None:
 
 def seed_mock_userdata(userdata_root: Path) -> None:
     userdata_root.mkdir(parents=True, exist_ok=True)
-    save_payload(database_path(userdata_root), "mock_userdata_seeded", {"source": "batocera.drone mock_data"})
+    state_db = database_path(userdata_root)
+    save_payload(state_db, "mock_userdata_seeded", {"source": "batocera.drone mock_data"})
+    fake_peer = {
+        "drone_id": "fake-local-peer-01",
+        "device_id": "fake-local-peer-01",
+        "name": "Demo Arcade Cabinet",
+        "hostname": "demo-arcade",
+        "reachable_url": "fake://demo-arcade.local",
+        "advertised_reachable_url": "fake://demo-arcade.local",
+        "scheme": "fake",
+        "api_port": 443,
+        "certificate_fingerprint": "f" * 64,
+        "source_ip": "192.168.1.42",
+        "last_seen": "2026-01-01T00:00:00+00:00",
+        "paired_at": "2026-01-01T00:00:00+00:00",
+        "paired": True,
+        "fake_data": True,
+    }
+    save_payload(state_db, "local_discovered_peers", {fake_peer["drone_id"]: fake_peer})
+    save_payload(state_db, "local_paired_peers", {fake_peer["drone_id"]: fake_peer})
+    save_payload(
+        state_db,
+        "gameplay_history",
+        [
+            {
+                "system": "snes",
+                "game_name": "Chrono Trigger",
+                "rom_path": "Chrono Trigger (USA).zip",
+                "emulator": "libretro",
+                "played_at": "2026-01-01T19:30:00+00:00",
+                "duration_seconds": 2700,
+            }
+        ],
+    )
 
     # ROMs + artwork + video previews (systems, search, rom lists, image/video routes, downloads)
     roms_root = userdata_root / "roms"
@@ -54,6 +87,10 @@ def seed_mock_userdata(userdata_root: Path) -> None:
     _write_bytes(bios_root / "gba_bios.bin", b"BIOS-DATA-GBA")
     _write_bytes(bios_root / "dc" / "dc_boot.bin", b"BIOS-DATA-DC")
     _write_bytes(bios_root / "dc" / "dc_flash.bin", b"BIOS-DATA-DC-FLASH")
+
+    # Saves exposed by the fake paired Drone in Local Network mode.
+    _write_bytes(userdata_root / "saves" / "snes" / "Chrono Trigger.srm", b"FAKE-SNES-SAVE")
+    _write_bytes(userdata_root / "saves" / "gba" / "Metroid Fusion.sav", b"FAKE-GBA-SAVE")
 
     # Logs used by admin logs endpoint
     logs_root = userdata_root / "system" / "logs"
