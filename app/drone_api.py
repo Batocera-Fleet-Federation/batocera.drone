@@ -4811,29 +4811,30 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 "updated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
             }
         if normalized == "roms":
+            # Scan only the requested systems. Scanning the WHOLE library and then
+            # filtering (the old plural-`systems` path) is dramatically slower on a
+            # large library and could blow past the requester's peer-fetch timeout,
+            # surfacing as a silent "Failed to fetch". An empty target list means
+            # "no filter" -> the whole library.
             if system:
-                _, rows = self.repository.list_assets(system, "roms")
-                # Stamp the system on every row so the requester (and the bulk
-                # copy path) always knows where each ROM belongs, even when the
-                # SQLite fast path omits it.
-                for row in rows:
-                    if isinstance(row, dict):
-                        row.setdefault("system", system)
+                target_systems = [system]
+            elif systems:
+                target_systems = [name for name in self.repository.list_system_names() if name.strip().lower() in systems]
             else:
-                # No system filter: return ROMs across every system so the
-                # requester can browse/copy the whole library at once. Each row
-                # is stamped with its system; paging/filtering below operates on
-                # the combined list.
-                rows = []
-                for system_name in self.repository.list_system_names():
-                    try:
-                        _, system_rows = self.repository.list_assets(system_name, "roms")
-                    except Exception:
-                        continue
-                    for row in system_rows:
-                        if isinstance(row, dict):
-                            row["system"] = system_name
-                    rows.extend(system_rows)
+                target_systems = list(self.repository.list_system_names())
+            rows = []
+            for system_name in target_systems:
+                try:
+                    _, system_rows = self.repository.list_assets(system_name, "roms")
+                except Exception:
+                    continue
+                # Stamp the system on every row so the requester (and the bulk copy
+                # path) always knows where each ROM belongs, even when the SQLite
+                # fast path omits it.
+                for row in system_rows:
+                    if isinstance(row, dict):
+                        row["system"] = system_name
+                rows.extend(system_rows)
         elif normalized == "bios":
             rows = self.repository.list_bios_entries()
         elif normalized == "artwork":

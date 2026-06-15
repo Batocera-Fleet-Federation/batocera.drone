@@ -3602,14 +3602,37 @@ function renderLocalAssetSystems() {
   if (!menu || !toggle) return;
   const systems = localPeerAssetContext.availableSystems || [];
   const selected = new Set(localPeerAssetContext.systems || []);
-  menu.innerHTML = systems.length
-    ? systems.map(system => `<label class="dropdown-item d-flex gap-2 align-items-center"><input class="form-check-input local-asset-system-check" type="checkbox" value="${escapeHtml(system)}" ${selected.has(system) ? "checked" : ""}>${escapeHtml(system)}</label>`).join("")
-    : '<div class="small text-muted px-2 py-1">No systems reported.</div>';
+  if (!systems.length) {
+    menu.innerHTML = '<div class="small text-muted px-2 py-1">No systems reported.</div>';
+    toggle.textContent = "All systems";
+    return;
+  }
+  // The system list can be very long (250+), so give it a search filter and a
+  // scrollable, height-capped list.
+  menu.innerHTML = `
+    <input type="search" id="localAssetSystemsSearch" class="form-control form-control-sm mb-2" placeholder="Filter systems..." autocomplete="off">
+    <div id="localAssetSystemsList" style="max-height: 260px; overflow-y: auto;">
+      ${systems.map(system => {
+        const safe = escapeHtml(system);
+        return `<label class="dropdown-item d-flex gap-2 align-items-center" data-system="${safe.toLowerCase()}"><input class="form-check-input local-asset-system-check" type="checkbox" value="${safe}" ${selected.has(system) ? "checked" : ""}>${safe}</label>`;
+      }).join("")}
+    </div>`;
   toggle.textContent = selected.size ? `${selected.size} selected` : "All systems";
   menu.querySelectorAll(".local-asset-system-check").forEach(input => input.addEventListener("change", () => {
     localPeerAssetContext.systems = selectedLocalAssetSystems();
     toggle.textContent = localPeerAssetContext.systems.length ? `${localPeerAssetContext.systems.length} selected` : "All systems";
   }));
+  const search = document.getElementById("localAssetSystemsSearch");
+  if (search) {
+    search.addEventListener("click", (event) => event.stopPropagation());
+    search.addEventListener("input", () => {
+      const query = search.value.trim().toLowerCase();
+      menu.querySelectorAll("#localAssetSystemsList label").forEach(label => {
+        const name = label.getAttribute("data-system") || "";
+        label.classList.toggle("d-none", Boolean(query) && !name.includes(query));
+      });
+    });
+  }
 }
 
 async function loadLocalPeerSystems() {

@@ -4454,6 +4454,23 @@ class LocalNetworkAssetCopyTests(unittest.TestCase):
             self.assertEqual(payload["total"], 1)
             self.assertEqual(payload["items"][0]["system"], "gba")
 
+    def test_collect_peer_inventory_roms_with_systems_plural_filter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            self._seed_two_systems(root)
+            settings = self._settings(root)
+            repo = drone_api.RomRepository(root / "roms", root / "bios")
+            handler = self._handler(settings, repo)
+
+            # The Local Network UI sends ?systems=<csv>; only those systems' ROMs
+            # come back (and we don't scan the whole library to do it).
+            single = handler._collect_peer_inventory("roms", {"systems": ["gba"]})
+            self.assertEqual({item["system"] for item in single["items"]}, {"gba"})
+            self.assertEqual(single["total"], 1)
+
+            both = handler._collect_peer_inventory("roms", {"systems": ["snes,gba"]})
+            self.assertEqual({item["system"] for item in both["items"]}, {"snes", "gba"})
+
     def _peer_only_rom_item(self):
         # A ROM that is NOT on the local machine (fingerprint not in the seeded
         # snes library), carrying gamelist artwork fields.

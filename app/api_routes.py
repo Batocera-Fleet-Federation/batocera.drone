@@ -347,11 +347,19 @@ class ApiRoutesMixin:
             self._send_json(400, {"error": str(error)})
         except FileNotFoundError:
             self._send_json(404, {"error": "not found"})
-        except (BrokenPipeError, ConnectionResetError, ssl.SSLError, OSError):
+        except (BrokenPipeError, ConnectionResetError):
+            # The client went away mid-response; nothing we can or need to send.
             pass
         except Exception as error:
-            self.log_error('500 internal error "%s": %s', self.path.split("?", 1)[0], str(error))
-            self._send_json(500, {"error": "internal server error"})
+            # Everything else (including a failed upstream peer fetch, which raises
+            # URLError/OSError/SSLError) must be logged AND reported, not silently
+            # swallowed -- otherwise the browser just sees "Failed to fetch" with no
+            # server-side trace. Guard the reply in case the client is already gone.
+            self.log_error('500 internal error "%s": %s: %s', self.path.split("?", 1)[0], error.__class__.__name__, str(error))
+            try:
+                self._send_json(500, {"error": str(error) or "internal server error"})
+            except (BrokenPipeError, ConnectionResetError, ssl.SSLError, OSError):
+                pass
 
     def do_POST(self) -> None:
         try:
@@ -515,6 +523,11 @@ class ApiRoutesMixin:
             self._send_json(404, {"error": "not found"})
         except ValueError as error:
             self._send_json(400, {"error": str(error)})
+        except (BrokenPipeError, ConnectionResetError):
+            pass
         except Exception as error:
-            self.log_error('500 internal error "%s": %s', self.path.split("?", 1)[0], str(error))
-            self._send_json(500, {"error": "internal server error"})
+            self.log_error('500 internal error "%s": %s: %s', self.path.split("?", 1)[0], error.__class__.__name__, str(error))
+            try:
+                self._send_json(500, {"error": str(error) or "internal server error"})
+            except (BrokenPipeError, ConnectionResetError, ssl.SSLError, OSError):
+                pass
