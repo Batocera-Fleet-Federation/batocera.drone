@@ -546,7 +546,9 @@ function startLocalTransfersAutoRefresh() {
     localTransfersInFlight = true;
     try {
       const status = await api("/admin/local-network/status");
-      downloadsBody.innerHTML = renderDownloadsPanel(status.downloads || {}, false);
+      if (!downloadsBody.contains(document.activeElement)) {
+        downloadsBody.innerHTML = renderLocalTransfersPanel(status.downloads || {});
+      }
       activityBody.innerHTML = renderDownloadRows(status.activity || [], false);
     } catch (err) {
       // Transient poll failure: leave the last good data in place silently.
@@ -1584,7 +1586,7 @@ async function renderAdminMenu() {
         <div class="card admin-tile pointer h-100" onclick="setHash('#admin/integration')">
           <div class="card-body">
             <h5 class="card-title"><i class="bi bi-diagram-3 me-2"></i>Integration</h5>
-            <p class="card-text">Choose Overmind or Local Network mode, then manage the active integration from one page.</p>
+            <p class="card-text">Enable and configure Overmind and Local Network integrations independently.</p>
           </div>
         </div>
       </div>
@@ -1639,17 +1641,24 @@ function formatBytes(value) {
   return `${size.toFixed(unit ? 1 : 0)} ${units[unit]}`;
 }
 
+function formatCompactLocalDate(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  const pad = number => String(number).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
 function renderDownloadRows(rows, allowCancel = true) {
   if (!rows.length) return '<div class="themed-empty">No downloads in this group.</div>';
   return `<div class="table-responsive"><table class="table table-sm table-hover align-middle themed-table download-table">
-    <thead><tr><th>Status</th><th>Source</th><th>File</th><th>Progress</th><th>Speed</th><th>Started</th><th></th></tr></thead>
+    <thead><tr><th>Status</th><th>Source</th><th>File</th><th>System</th><th>Progress</th><th>Speed</th><th>Started</th><th></th></tr></thead>
     <tbody>${rows.map(row => {
       const pct = Number(row.percentage || 0);
       const active = ["queued", "downloading"].includes(String(row.status || ""));
       const retryable = ["failed", "cancelled"].includes(String(row.status || ""));
       const statusClass = row.status === "failed" ? "danger" : row.status === "completed" ? "success" : row.status === "cancelled" ? "secondary" : row.status === "downloading" ? "info" : "primary";
       const filePath = row.file_path || row.relative_path || row.rom_name || "";
-      const fileType = row.file_type || "ROM";
       const errorText = row.error_message || row.failure_reason || "";
       const jobId = escapeHtml(row.job_id || row.id || "");
       const actions = [
@@ -1657,16 +1666,13 @@ function renderDownloadRows(rows, allowCancel = true) {
         retryable && jobId ? `<button class="btn btn-sm btn-outline-primary" title="Retry download" aria-label="Retry download" onclick="retryDroneDownload('${jobId}')"><i class="bi bi-arrow-clockwise"></i></button>` : "",
       ].filter(Boolean).join(" ");
       return `<tr>
-        <td><span class="badge text-bg-${statusClass}">${escapeHtml(row.status || "queued")}</span>${row.queue_position ? `<div class="download-meta">Queue #${row.queue_position}</div>` : ""}</td>
+        <td><span class="badge text-bg-${statusClass}" title="${escapeHtml(errorText)}">${escapeHtml(row.status || "queued")}${row.queue_position ? ` #${row.queue_position}` : ""}</span></td>
         <td class="small mono">${escapeHtml(row.source_drone_id || "n/a")}</td>
-        <td>
-          <div class="download-file">${escapeHtml(filePath)}</div>
-          <div class="download-meta">${escapeHtml(fileType)}${row.system ? ` · ${escapeHtml(row.system)}` : ""}${row.rom_fingerprint ? ` · fingerprint ${escapeHtml(row.rom_fingerprint)}` : ""}</div>
-          ${errorText ? `<div class="text-danger small">${escapeHtml(errorText)}</div>` : ""}
-        </td>
-        <td style="min-width:190px"><div class="progress"><div class="progress-bar" style="width:${Math.max(0, Math.min(100, pct))}%"></div></div><div class="download-meta">${formatBytes(row.downloaded_bytes || row.bytes_transferred)} / ${formatBytes(row.total_bytes || row.file_size)} · ${pct.toFixed(1)}%</div></td>
+        <td class="small mono" title="${escapeHtml(errorText || row.rom_fingerprint || "")}">${escapeHtml(filePath)}</td>
+        <td class="small">${escapeHtml(row.system || "")}</td>
+        <td class="small text-nowrap">${pct.toFixed(1)}% (${formatBytes(row.downloaded_bytes || row.bytes_transferred)} / ${formatBytes(row.total_bytes || row.file_size)})</td>
         <td class="small">${row.transfer_speed_bps ? `${formatBytes(row.transfer_speed_bps)}/s` : ""}</td>
-        <td class="download-meta">${escapeHtml(row.started_at || row.download_started_at || row.created_at || "")}</td>
+        <td class="small text-nowrap">${escapeHtml(formatCompactLocalDate(row.started_at || row.download_started_at || row.created_at))}</td>
         <td>${actions}</td>
       </tr>`;
     }).join("")}</tbody></table></div>`;
@@ -1709,6 +1715,59 @@ function renderDownloadsPanel(payload, includeHeader = true) {
     </div>
   `;
 }
+
+let localTransferPayload = {};
+const localTransferViews = {
+  queued: { query: "", limit: 10, page: 1 },
+  recent: { query: "", limit: 10, page: 1 },
+};
+
+function localTransferPage(kind, rows) {
+  const view = localTransferViews[kind];
+  const query = view.query.trim().toLowerCase();
+  const filtered = query ? rows.filter(row => JSON.stringify(row).toLowerCase().includes(query)) : rows;
+  const pages = Math.max(1, Math.ceil(filtered.length / view.limit));
+  view.page = Math.max(1, Math.min(view.page, pages));
+  const start = (view.page - 1) * view.limit;
+  return { rows: filtered.slice(start, start + view.limit), total: filtered.length, pages };
+}
+
+function renderLocalTransferGroup(kind, label, icon, tone, rows, allowCancel) {
+  const page = localTransferPage(kind, rows);
+  const view = localTransferViews[kind];
+  return `<div class="download-section">
+    <div class="download-section-title"><span><i class="bi ${icon} me-2"></i>${label}</span><span class="badge text-bg-${tone}">${page.total}</span></div>
+    <div class="d-flex flex-wrap gap-2 mb-2">
+      <input class="form-control form-control-sm" style="max-width:260px" placeholder="Search ${label.toLowerCase()}" value="${escapeHtml(view.query)}" onchange="setLocalTransferSearch('${kind}', this.value)" onkeydown="if(event.key==='Enter'){event.preventDefault();setLocalTransferSearch('${kind}',this.value)}">
+      <select class="form-select form-select-sm" style="width:auto" onchange="setLocalTransferLimit('${kind}', this.value)">${[10, 50, 100, 200].map(size => `<option value="${size}" ${view.limit === size ? "selected" : ""}>${size}</option>`).join("")}</select>
+      <button class="btn btn-sm btn-outline-secondary" ${view.page <= 1 ? "disabled" : ""} onclick="setLocalTransferPage('${kind}', ${view.page - 1})">Previous</button>
+      <span class="small text-muted align-self-center">Page ${view.page} of ${page.pages}</span>
+      <button class="btn btn-sm btn-outline-secondary" ${view.page >= page.pages ? "disabled" : ""} onclick="setLocalTransferPage('${kind}', ${view.page + 1})">Next</button>
+    </div>
+    ${renderDownloadRows(page.rows, allowCancel)}
+  </div>`;
+}
+
+function renderLocalTransfersPanel(payload) {
+  localTransferPayload = payload || {};
+  const active = localTransferPayload.active || [];
+  const queued = localTransferPayload.queued || [];
+  const recent = localTransferPayload.recent || [];
+  return `<div class="download-section">
+      <div class="download-section-title"><span><i class="bi bi-lightning-charge me-2"></i>Active</span><span class="badge text-bg-info">${active.length}</span></div>
+      ${renderDownloadRows(active)}
+    </div>
+    ${renderLocalTransferGroup("queued", "Queued", "bi-hourglass-split", "warning", queued, true)}
+    ${renderLocalTransferGroup("recent", "Recent", "bi-clock-history", "secondary", recent, false)}`;
+}
+
+function refreshLocalTransfersPanel() {
+  const node = document.getElementById("localDownloadsBody");
+  if (node) node.innerHTML = renderLocalTransfersPanel(localTransferPayload);
+}
+function setLocalTransferSearch(kind, value) { localTransferViews[kind].query = value; localTransferViews[kind].page = 1; refreshLocalTransfersPanel(); }
+function setLocalTransferLimit(kind, value) { localTransferViews[kind].limit = Number(value) || 10; localTransferViews[kind].page = 1; refreshLocalTransfersPanel(); }
+function setLocalTransferPage(kind, value) { localTransferViews[kind].page = Number(value) || 1; refreshLocalTransfersPanel(); }
 
 async function renderDownloadsPage() {
   currentSystemContext = null;
@@ -3153,7 +3212,7 @@ async function removeMissingGamelistEntriesForCurrentFilters() {
     setLoading(false);
   }
 }
-let localPeerAssetContext = { peerId: "", peerName: "", assetType: "summary", system: "", items: [], query: "", limit: 50, offset: 0, total: 0 };
+let localPeerAssetContext = { peerId: "", peerName: "", assetType: "summary", systems: [], availableSystems: [], items: [], query: "", limit: 50, offset: 0, total: 0 };
 
 function localPeerStatusBadge(peer) {
   if (!peer.paired) return '<span class="badge text-bg-warning">Discovered</span>';
@@ -3166,7 +3225,7 @@ function localPeerStatusBadge(peer) {
 function renderLocalPeerRows(peers) {
   if (!peers.length) return '<div class="themed-empty">No nearby Drones discovered yet.</div>';
   return `<div class="table-responsive"><table class="table table-sm table-hover align-middle themed-table">
-    <thead><tr><th>Drone</th><th>Status</th><th>Address</th><th>Last Seen</th><th>Certificate</th><th></th></tr></thead>
+    <thead><tr><th>Drone</th><th>Drone ID</th><th>Status</th><th>Error</th><th>Address</th><th>Last Seen</th><th>Certificate</th><th></th></tr></thead>
     <tbody>${peers.map(peer => {
       const rawPeerId = String(peer.drone_id || "");
       const peerId = escapeHtml(rawPeerId);
@@ -3184,10 +3243,12 @@ function renderLocalPeerRows(peers) {
         actionCell = `<button class="btn btn-sm btn-outline-primary" onclick="pairLocalPeer(decodeURIComponent('${peerToken}'))">Pair</button>`;
       }
       return `<tr>
-        <td><strong>${escapeHtml(peer.name || peer.hostname || peerId)}</strong>${insecure ? '<span class="badge text-bg-danger ms-2" title="Not running HTTPS — cannot pair">Not secure</span>' : ""}<div class="small text-muted mono">${peerId}</div></td>
-        <td>${localPeerStatusBadge(peer)}${peer.health?.failure_reason ? `<div class="small text-danger">${escapeHtml(peer.health.failure_reason)}</div>` : ""}</td>
+        <td><strong>${escapeHtml(peer.name || peer.hostname || peerId)}</strong>${insecure ? '<span class="badge text-bg-danger ms-2" title="Not running HTTPS — cannot pair">Not secure</span>' : ""}</td>
+        <td class="small mono">${peerId}</td>
+        <td>${localPeerStatusBadge(peer)}</td>
+        <td class="small text-danger">${escapeHtml(peer.health?.failure_reason || "")}</td>
         <td class="small mono">${escapeHtml(peer.reachable_url || peer.source_ip || "n/a")}</td>
-        <td class="small">${escapeHtml(peer.last_seen || "n/a")}</td>
+        <td class="small text-nowrap">${escapeHtml(formatCompactLocalDate(peer.last_seen) || "n/a")}</td>
         <td class="small mono">${escapeHtml(String(peer.certificate_fingerprint || "").slice(0, 16) || "pending")}</td>
         <td class="text-nowrap">${actionCell}</td>
       </tr>`;
@@ -3203,7 +3264,8 @@ function localAssetDisplayName(item) {
 }
 
 function localAssetDetail(item) {
-  return item.played_at || item.started_at || item.modified_at || item.duration || item.emulator || "";
+  const date = item.played_at || item.started_at || item.modified_at;
+  return date ? formatCompactLocalDate(date) : (item.duration || item.emulator || "");
 }
 
 const LOCAL_TRANSFERABLE_TYPES = new Set(["roms", "bios", "artwork", "saves"]);
@@ -3237,7 +3299,7 @@ function renderLocalAssetRows(payload) {
     }
   }
   return systemBar + `<div class="table-responsive"><table class="table table-sm table-hover align-middle themed-table">
-    <thead><tr><th>Name</th><th>System / Source</th><th>Type</th><th>Size</th><th>Details</th><th></th></tr></thead>
+    <thead><tr><th>Name</th><th>Path</th><th>System / Source</th><th>Size</th><th>Details</th><th></th></tr></thead>
     <tbody>${localPeerAssetContext.items.map((item, index) => {
       const exists = isRoms && item.exists_locally === true;
       const statusBadge = isRoms
@@ -3249,9 +3311,9 @@ function renderLocalAssetRows(payload) {
       // (when Include artwork is checked) and links it in the gamelist.
       const romBtnLabel = exists ? "Get Artwork" : downloadLabel;
       return `<tr>
-      <td><strong>${escapeHtml(localAssetDisplayName(item))}</strong>${statusBadge}<div class="small text-muted mono">${escapeHtml(localAssetPath(item))}</div></td>
-      <td>${escapeHtml(item.system || item.root_name || localPeerAssetContext.system || "")}</td>
-      <td>${escapeHtml(item.artwork_type || item.entry_type || localPeerAssetContext.assetType)}</td>
+      <td><strong>${escapeHtml(localAssetDisplayName(item))}</strong>${statusBadge}</td>
+      <td class="small mono">${escapeHtml(localAssetPath(item))}</td>
+      <td>${escapeHtml(item.system || item.root_name || localPeerAssetContext.systems.join(", "))}</td>
       <td>${formatBytes(item.byte_count || item.file_size || item.size)}</td>
       <td class="small">${escapeHtml(localAssetDetail(item) || String(item.rom_fingerprint || item.bios_md5 || item.saves_fingerprint || item.fingerprint || item.md5 || "").slice(0, 16))}</td>
       <td>${transferable
@@ -3297,39 +3359,37 @@ async function renderIntegrationPage() {
   setLoading(true, "Loading integration...");
   try {
     const modeStatus = await api("/admin/network-mode");
-    const mode = modeStatus.mode === "local_network" ? "local_network" : "overmind";
-    const overmindActive = mode === "overmind";
+    const overmindActive = !!modeStatus.overmind_enabled;
+    const localActive = !!modeStatus.local_network_enabled;
     content.innerHTML = `
       <div class="mb-3"><button class="btn btn-outline-secondary" onclick="setHash('#admin')">← Back to Admin</button></div>
       <div class="card log-card mb-3">
-        <div class="card-header">Integration Mode</div>
+        <div class="card-header">Integration Enablement</div>
         <div class="card-body">
-          <div class="d-flex flex-wrap align-items-center justify-content-between gap-3">
-            <div>
-              <div class="fw-semibold">${overmindActive ? "Overmind Integration" : "Local Network Integration"} is active</div>
-              <div class="small text-muted">Only one integration runs at a time. Switching modes retains its configuration while suspending the other integration.</div>
-            </div>
-            <div class="btn-group" role="group" aria-label="Integration mode">
-              <button id="integrationModeOvermindBtn" class="btn ${overmindActive ? "btn-primary" : "btn-outline-primary"}" type="button" ${overmindActive ? "disabled" : ""}><i class="bi bi-diagram-3 me-1"></i>Overmind</button>
-              <button id="integrationModeLocalBtn" class="btn ${overmindActive ? "btn-outline-primary" : "btn-primary"}" type="button" ${overmindActive ? "" : "disabled"}><i class="bi bi-hdd-network me-1"></i>Local Network</button>
-            </div>
+          <div class="small text-muted mb-3">Enable either integration independently, or run both at the same time.</div>
+          <div class="row g-3">
+            <div class="col-12 col-lg-6"><div class="p-3 rounded border h-100" style="border-color:var(--admin-border)!important">
+              <div class="form-check form-switch"><input id="integrationOvermindToggle" class="form-check-input" type="checkbox" ${overmindActive ? "checked" : ""}><label class="form-check-label fw-semibold" for="integrationOvermindToggle">Overmind Integration</label></div>
+              <div class="small text-muted mt-2">Heartbeats, actions, fleet reporting, and Overmind-managed syncing.</div>
+              <button class="btn btn-sm btn-outline-primary mt-3" type="button" onclick="setHash('#admin/overmind')">Open Overmind Integration</button>
+            </div></div>
+            <div class="col-12 col-lg-6"><div class="p-3 rounded border h-100" style="border-color:var(--admin-border)!important">
+              <div class="form-check form-switch"><input id="integrationLocalToggle" class="form-check-input" type="checkbox" ${localActive ? "checked" : ""}><label class="form-check-label fw-semibold" for="integrationLocalToggle">Local Network</label></div>
+              <div class="small text-muted mt-2">Discover, pair, browse, and sync directly with nearby Drones.</div>
+              <button class="btn btn-sm btn-outline-primary mt-3" type="button" onclick="setHash('#admin/local-network')">Open Local Network</button>
+            </div></div>
           </div>
         </div>
       </div>
-      <div id="integrationModePanel"></div>`;
+      <div id="integrationOvermindConfiguration"></div>`;
 
-    document.getElementById("integrationModeOvermindBtn").addEventListener("click", () => switchIntegrationMode("overmind"));
-    document.getElementById("integrationModeLocalBtn").addEventListener("click", () => switchIntegrationMode("local_network"));
+    document.getElementById("integrationOvermindToggle").addEventListener("change", (event) => setIntegrationEnabled("overmind", event.target.checked));
+    document.getElementById("integrationLocalToggle").addEventListener("change", (event) => setIntegrationEnabled("local_network", event.target.checked));
+    await renderIntegrationOvermindConfiguration(document.getElementById("integrationOvermindConfiguration"));
     window.refreshLocalNetwork = null;
     window.refreshOvermindDownloads = null;
     window.refreshOvermindAssetCache = null;
     stopLocalTransfersAutoRefresh();
-    const panel = document.getElementById("integrationModePanel");
-    if (overmindActive) {
-      await renderOvermindIntegrationPanel(panel);
-    } else {
-      await renderLocalNetworkIntegrationPanel(panel);
-    }
   } catch (err) {
     showToast(`Failed to load integration: ${escapeHtml(err.message || "unknown error")}`, "danger");
     content.innerHTML = '<div class="themed-empty">Integration status could not be loaded.</div>';
@@ -3338,19 +3398,87 @@ async function renderIntegrationPage() {
   }
 }
 
-async function switchIntegrationMode(mode) {
-  const label = mode === "local_network" ? "Local Network" : "Overmind";
-  if (!window.confirm(`Switch this Drone to ${label} integration mode? The current integration will be suspended.`)) return;
-  setLoading(true, `Switching to ${label}...`);
+async function renderIntegrationOvermindConfiguration(target) {
+  target.innerHTML = `<div class="card log-card mb-3"><div class="card-header">Overmind Configuration</div><div class="card-body">
+    <div class="row g-2">
+      <div class="col-12 col-lg-4"><label class="form-label small">Overmind URL</label><input id="integrationOvermindUrl" class="form-control" type="url"></div>
+      <div class="col-12 col-lg-4"><label class="form-label small">Authorization Token</label><input id="integrationOvermindToken" class="form-control" type="password" placeholder="Leave blank to keep current token"></div>
+      <div class="col-12 col-lg-4"><label class="form-label small">Drone Name</label><input id="integrationOvermindName" class="form-control"></div>
+      <div class="col-12 col-lg-6"><label class="form-label small">Claim Email <span class="text-muted">(optional)</span></label><input id="integrationOvermindEmail" class="form-control" type="email"></div>
+      <div class="col-12 col-lg-6"><label class="form-label small">Claim Password <span class="text-muted">(optional)</span></label><input id="integrationOvermindPassword" class="form-control" type="password"></div>
+    </div>
+    <button id="integrationOvermindSave" class="btn btn-primary mt-3" type="button">Save Overmind Configuration</button>
+    <span id="integrationOvermindConfigStatus" class="small text-muted ms-2"></span>
+  </div></div>`;
+  const payload = await api("/admin/integrations/overmind/status");
+  document.getElementById("integrationOvermindUrl").value = payload.overmind_url || "https://www.batocera-swarm.com";
+  document.getElementById("integrationOvermindName").value = payload.drone_name || "";
+  document.getElementById("integrationOvermindEmail").value = payload.overmind_email || "";
+  document.getElementById("integrationOvermindConfigStatus").textContent = `Status: ${(payload.status || {}).integration_state || "not configured"}`;
+  document.getElementById("integrationOvermindSave").addEventListener("click", async () => {
+    const body = {
+      overmind_url: document.getElementById("integrationOvermindUrl").value.trim(),
+      drone_name: document.getElementById("integrationOvermindName").value.trim(),
+    };
+    const token = document.getElementById("integrationOvermindToken").value;
+    const email = document.getElementById("integrationOvermindEmail").value.trim();
+    const password = document.getElementById("integrationOvermindPassword").value;
+    if (token) body.overmind_auth_token = token;
+    if (email) body.overmind_email = email;
+    if (password) body.overmind_password = password;
+    try {
+      await apiPost("/admin/integrations/overmind/config", body);
+      document.getElementById("integrationOvermindToken").value = "";
+      document.getElementById("integrationOvermindPassword").value = "";
+      showToast("Overmind configuration saved.", "success");
+    } catch (err) {
+      showToast(`Failed to save Overmind configuration: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    }
+  });
+}
+
+async function setIntegrationEnabled(integration, enabled) {
+  const label = integration === "local_network" ? "Local Network" : "Overmind";
+  setLoading(true, `${enabled ? "Enabling" : "Disabling"} ${label}...`);
   try {
-    await apiPost("/admin/network-mode", { mode });
-    showToast(`${label} integration is now active.`, "success");
+    const current = await api("/admin/network-mode");
+    await apiPost("/admin/network-mode", {
+      overmind_enabled: integration === "overmind" ? enabled : !!current.overmind_enabled,
+      local_network_enabled: integration === "local_network" ? enabled : !!current.local_network_enabled,
+    });
+    showToast(`${label} integration ${enabled ? "enabled" : "disabled"}.`, "success");
     await renderIntegrationPage();
   } catch (err) {
-    showToast(`Failed to switch integration mode: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    showToast(`Failed to update ${label}: ${escapeHtml(err.message || "unknown error")}`, "danger");
   } finally {
     setLoading(false);
   }
+}
+
+async function renderLocalNetworkPage() {
+  currentSystemContext = null;
+  setSearchMode("hidden");
+  clearSystemTheme();
+  titleNode.textContent = "Local Network";
+  subtitleNode.textContent = "Pair nearby Drones and manage direct asset transfers";
+  window.refreshOvermindDownloads = null;
+  window.refreshOvermindAssetCache = null;
+  content.innerHTML = `<div class="mb-3"><button class="btn btn-outline-secondary" onclick="setHash('#admin/integration')">← Back to Integration</button></div><div id="localNetworkPagePanel"></div>`;
+  await renderLocalNetworkIntegrationPanel(document.getElementById("localNetworkPagePanel"));
+}
+
+async function renderOvermindIntegrationPage() {
+  currentSystemContext = null;
+  setSearchMode("hidden");
+  clearSystemTheme();
+  titleNode.textContent = "Overmind Integration";
+  subtitleNode.textContent = "Monitor Overmind activity, downloads, cache, and actions";
+  window.refreshLocalNetwork = null;
+  content.innerHTML = `<div class="mb-3"><button class="btn btn-outline-secondary" onclick="setHash('#admin/integration')">← Back to Integration</button></div><div id="overmindPagePanel"></div>`;
+  const panel = document.getElementById("overmindPagePanel");
+  await renderOvermindIntegrationPanel(panel);
+  const configurationCard = panel.querySelector(".card.log-card");
+  if (configurationCard) configurationCard.remove();
 }
 
 async function renderLocalNetworkIntegrationPanel(target) {
@@ -3361,11 +3489,11 @@ async function renderLocalNetworkIntegrationPanel(target) {
       <div class="card-body" id="localPeersBody"><div class="text-muted">Loading peers...</div></div></div>
     <div class="card log-card mb-3" id="localAssetsCard"><div class="card-header"><span id="localAssetsTitle">Request Assets from Connected Drone</span></div>
       <div class="card-body">
-        <div class="small text-muted mb-3">Request inventories from a paired Drone, then download what you need. ROMs, BIOS, artwork, and saves can be copied here; emulator configs and gameplay history are available for inspection. Leave <strong>System</strong> blank to browse every system at once.</div>
+        <div class="small text-muted mb-3">Request inventories from a paired Drone, then download what you need. ROMs, BIOS, artwork, and saves can be copied here; emulator configs and gameplay history are available for inspection.</div>
         <div class="row g-2 mb-2">
           <div class="col-12 col-lg-3"><label class="form-label small" for="localAssetPeer">Connected Drone</label><select id="localAssetPeer" class="form-select"></select></div>
           <div class="col-6 col-lg-2"><label class="form-label small" for="localAssetType">Asset Type</label><select id="localAssetType" class="form-select"><option value="roms">ROMs</option><option value="bios">BIOS</option><option value="saves">Saves</option><option value="emulator_configs">Emulator Configs</option><option value="gameplay">Gameplay History</option><option value="artwork">Artwork</option></select></div>
-          <div class="col-6 col-lg-2"><label class="form-label small" for="localAssetSystem">System <span class="text-muted">(optional)</span></label><input id="localAssetSystem" class="form-control" placeholder="All systems"></div>
+          <div class="col-6 col-lg-2"><label class="form-label small">Systems</label><div class="dropdown"><button id="localAssetSystemsToggle" class="btn btn-outline-secondary dropdown-toggle w-100 text-start" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside">All systems</button><div id="localAssetSystemsMenu" class="dropdown-menu p-2 w-100"><div class="small text-muted">Select a connected Drone to load systems.</div></div></div></div>
           <div class="col-8 col-lg-3"><label class="form-label small" for="localAssetQuery">Search</label><input id="localAssetQuery" class="form-control" placeholder="Search assets"></div>
           <div class="col-4 col-lg-2"><label class="form-label small" for="localAssetPageSize">Per Page</label><select id="localAssetPageSize" class="form-select"><option value="50">50</option><option value="100">100</option><option value="200">200</option></select></div>
         </div>
@@ -3384,9 +3512,9 @@ async function renderLocalNetworkIntegrationPanel(target) {
     const status = await api("/admin/local-network/status");
     document.getElementById("localPairingBody").innerHTML = status.active
       ? `<div class="d-flex flex-wrap align-items-center gap-3"><div><div class="small text-muted">Pairing code</div><div class="display-6 mono">${escapeHtml(status.pairing?.code || "")}</div></div><div class="small text-muted">Expires ${escapeHtml(status.pairing?.expires_at || "")}. Enter this code on the other Drone to approve it.</div></div>`
-      : '<div class="themed-empty">Enable Local Network mode to discover and pair nearby Drones.</div>';
+      : '<div class="themed-empty">Enable Local Network integration to discover and pair nearby Drones.</div>';
     document.getElementById("localPeersBody").innerHTML = renderLocalPeerRows(status.peers || []);
-    document.getElementById("localDownloadsBody").innerHTML = renderDownloadsPanel(status.downloads || {}, false);
+    document.getElementById("localDownloadsBody").innerHTML = renderLocalTransfersPanel(status.downloads || {});
     document.getElementById("localActivityBody").innerHTML = renderDownloadRows(status.activity || [], false);
     document.getElementById("localDiscoverBtn").disabled = !status.active;
     document.getElementById("localPairCodeRotateBtn").disabled = !status.active;
@@ -3397,6 +3525,10 @@ async function renderLocalNetworkIntegrationPanel(target) {
       ? pairedPeers.map(peer => `<option value="${escapeHtml(peer.drone_id || "")}">${escapeHtml(peer.name || peer.hostname || peer.drone_id || "Drone")}</option>`).join("")
       : '<option value="">No paired Drones</option>';
     if (pairedPeers.some(peer => String(peer.drone_id || "") === selectedPeerId)) peerSelect.value = selectedPeerId;
+    if (peerSelect.value && peerSelect.value !== localPeerAssetContext.peerId) {
+      localPeerAssetContext.peerId = peerSelect.value;
+      await loadLocalPeerSystems();
+    }
     document.getElementById("localAssetLoadBtn").disabled = !pairedPeers.length;
     document.getElementById("localAssetCopyAllBtn").disabled = !pairedPeers.length;
   }
@@ -3407,9 +3539,9 @@ async function renderLocalNetworkIntegrationPanel(target) {
   document.getElementById("localAssetLoadBtn").addEventListener("click", () => loadLocalPeerAssets());
   document.getElementById("localAssetCopyAllBtn").addEventListener("click", copyAllLocalAssets);
   document.getElementById("localAssetType").addEventListener("change", updateLocalAssetTypeUi);
+  document.getElementById("localAssetPeer").addEventListener("change", loadLocalPeerSystems);
   document.getElementById("localAssetPageSize").addEventListener("change", () => loadLocalPeerAssets());
   document.getElementById("localAssetQuery").addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); loadLocalPeerAssets(); } });
-  document.getElementById("localAssetSystem").addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); loadLocalPeerAssets(); } });
   updateLocalAssetTypeUi();
   await refresh();
   startLocalTransfersAutoRefresh();
@@ -3427,6 +3559,44 @@ function updateLocalAssetTypeUi() {
   if (wrap) wrap.classList.toggle("d-none", type !== "roms");
 }
 
+function selectedLocalAssetSystems() {
+  return Array.from(document.querySelectorAll(".local-asset-system-check:checked"))
+    .map(input => input.value)
+    .sort((a, b) => a.localeCompare(b));
+}
+
+function renderLocalAssetSystems() {
+  const menu = document.getElementById("localAssetSystemsMenu");
+  const toggle = document.getElementById("localAssetSystemsToggle");
+  if (!menu || !toggle) return;
+  const systems = localPeerAssetContext.availableSystems || [];
+  const selected = new Set(localPeerAssetContext.systems || []);
+  menu.innerHTML = systems.length
+    ? systems.map(system => `<label class="dropdown-item d-flex gap-2 align-items-center"><input class="form-check-input local-asset-system-check" type="checkbox" value="${escapeHtml(system)}" ${selected.has(system) ? "checked" : ""}>${escapeHtml(system)}</label>`).join("")
+    : '<div class="small text-muted px-2 py-1">No systems reported.</div>';
+  toggle.textContent = selected.size ? `${selected.size} selected` : "All systems";
+  menu.querySelectorAll(".local-asset-system-check").forEach(input => input.addEventListener("change", () => {
+    localPeerAssetContext.systems = selectedLocalAssetSystems();
+    toggle.textContent = localPeerAssetContext.systems.length ? `${localPeerAssetContext.systems.length} selected` : "All systems";
+  }));
+}
+
+async function loadLocalPeerSystems() {
+  const peerId = (document.getElementById("localAssetPeer") || {}).value || localPeerAssetContext.peerId;
+  localPeerAssetContext.peerId = peerId;
+  localPeerAssetContext.systems = [];
+  localPeerAssetContext.availableSystems = [];
+  renderLocalAssetSystems();
+  if (!peerId) return;
+  try {
+    const summary = await api(`/admin/local-network/peers/${encodeURIComponent(peerId)}/assets?type=summary`);
+    localPeerAssetContext.availableSystems = Array.from(new Set(summary.systems || [])).sort((a, b) => String(a).localeCompare(String(b)));
+  } catch (_) {
+    localPeerAssetContext.availableSystems = [];
+  }
+  renderLocalAssetSystems();
+}
+
 async function pairLocalPeer(peerId) {
   const code = window.prompt("Enter the 8-digit pairing code shown on the other Drone:");
   if (!code) return;
@@ -3442,13 +3612,13 @@ async function forgetLocalPeer(peerId) {
 }
 
 async function browseLocalPeer(peerId) {
-  localPeerAssetContext = { peerId, peerName: peerId, assetType: "roms", system: "", items: [], query: "", limit: 50, offset: 0, total: 0 };
+  localPeerAssetContext = { peerId, peerName: peerId, assetType: "roms", systems: [], availableSystems: [], items: [], query: "", limit: 50, offset: 0, total: 0 };
   document.getElementById("localAssetPeer").value = peerId;
   document.getElementById("localAssetType").value = "roms";
-  document.getElementById("localAssetSystem").value = "";
   document.getElementById("localAssetQuery").value = "";
+  await loadLocalPeerSystems();
   updateLocalAssetTypeUi();
-  document.getElementById("localAssetsBody").innerHTML = '<div class="themed-empty">Choose an asset type and request assets from this Drone. Leave System blank to browse every system.</div>';
+  document.getElementById("localAssetsBody").innerHTML = '<div class="themed-empty">Choose an asset type and request assets from this Drone.</div>';
   document.getElementById("localAssetsPagination").innerHTML = "";
   document.getElementById("localAssetsCard").scrollIntoView({ behavior: "smooth", block: "start" });
 }
@@ -3456,20 +3626,20 @@ async function browseLocalPeer(peerId) {
 async function loadLocalPeerAssets(resetPage = true) {
   const peerId = document.getElementById("localAssetPeer").value;
   const type = document.getElementById("localAssetType").value;
-  const system = document.getElementById("localAssetSystem").value.trim();
+  const systems = selectedLocalAssetSystems();
   const q = document.getElementById("localAssetQuery").value.trim();
   const limit = Math.max(1, Number(document.getElementById("localAssetPageSize").value) || 50);
   if (!peerId) { showToast("Pair a Drone before requesting assets.", "warning"); return; }
-  if (resetPage || type !== localPeerAssetContext.assetType || system !== localPeerAssetContext.system || q !== localPeerAssetContext.query || limit !== localPeerAssetContext.limit) {
+  if (resetPage || type !== localPeerAssetContext.assetType || systems.join(",") !== localPeerAssetContext.systems.join(",") || q !== localPeerAssetContext.query || limit !== localPeerAssetContext.limit) {
     localPeerAssetContext.offset = 0;
   }
   localPeerAssetContext.peerId = peerId;
   localPeerAssetContext.assetType = type;
-  localPeerAssetContext.system = system;
+  localPeerAssetContext.systems = systems;
   localPeerAssetContext.query = q;
   localPeerAssetContext.limit = limit;
   const params = new URLSearchParams({ type, limit: String(limit), offset: String(localPeerAssetContext.offset) });
-  if (system) params.set("system", system);
+  if (systems.length) params.set("systems", systems.join(","));
   if (q) params.set("q", q);
   const body = document.getElementById("localAssetsBody");
   body.innerHTML = '<div class="text-muted">Requesting peer assets...</div>';
@@ -3498,7 +3668,7 @@ async function copyLocalPeerAsset(index) {
   const result = await apiPost("/admin/local-network/sync", {
     peer_id: localPeerAssetContext.peerId,
     asset_type: localPeerAssetContext.assetType,
-    system: localPeerAssetContext.system,
+    system: item.system || item.root_name || "",
     include_artwork: localAssetIncludeArtwork(),
     item,
   });
@@ -3516,13 +3686,13 @@ async function copyLocalPeerAsset(index) {
 async function copyAllLocalAssets() {
   const peerId = document.getElementById("localAssetPeer").value;
   const type = document.getElementById("localAssetType").value;
-  const system = document.getElementById("localAssetSystem").value.trim();
+  const systems = selectedLocalAssetSystems();
   const q = document.getElementById("localAssetQuery").value.trim();
   if (!peerId) { showToast("Pair a Drone before copying assets.", "warning"); return; }
   if (!LOCAL_TRANSFERABLE_TYPES.has(type)) { showToast("Bulk download supports ROMs, BIOS, saves, and artwork.", "warning"); return; }
-  const scope = system ? `all ${type} for ${system}` : (q ? `all ${type} matching “${q}”` : `every ${type} asset`);
+  const scope = systems.length ? `all ${type} for ${systems.join(", ")}` : (q ? `all ${type} matching “${q}”` : `every ${type} asset`);
   if (!window.confirm(`Queue ${scope} from this Drone for download?`)) return;
-  await queueLocalBulkCopy({ peer_id: peerId, asset_type: type, system, q, include_artwork: localAssetIncludeArtwork() });
+  await queueLocalBulkCopy({ peer_id: peerId, asset_type: type, systems, q, include_artwork: localAssetIncludeArtwork() });
 }
 
 async function copyAllRomsForSystem(encodedSystem) {
@@ -3677,7 +3847,7 @@ async function renderOvermindIntegrationPanel(target) {
           <tbody>
             ${pageItems.map(action => `
               <tr>
-                <td>${escapeHtml(action.processed_at || "n/a")}</td>
+                <td class="text-nowrap">${escapeHtml(formatCompactLocalDate(action.processed_at) || "n/a")}</td>
                 <td>${escapeHtml(action.action || "n/a")}</td>
                 <td><span class="badge text-bg-secondary">${escapeHtml(action.status || "n/a")}</span></td>
                 <td class="mono small">${escapeHtml(action.device_id || "n/a")}</td>
@@ -3710,10 +3880,10 @@ async function renderOvermindIntegrationPanel(target) {
     const cert = payload.certificate || {};
     const swarm = payload.swarm || [];
     const peerChecks = payload.peer_checks || [];
-    const networkMode = payload.network_mode || "overmind";
+    const overmindActive = payload.overmind_active !== false;
     statusEl.innerHTML = `
       <div class="d-flex flex-wrap gap-2 mb-2">
-        <span class="badge ${networkMode === "overmind" ? "text-bg-success" : "text-bg-warning"}">Mode: ${escapeHtml(networkMode === "overmind" ? "Overmind" : "Local Network")}</span>
+        <span class="badge ${overmindActive ? "text-bg-success" : "text-bg-secondary"}">Overmind: ${overmindActive ? "enabled" : "disabled"}</span>
         <span class="badge ${status.configured ? "text-bg-success" : "text-bg-secondary"}">Overmind: ${status.configured ? "linked" : "disconnected"}</span>
         <span class="badge ${swarmStatus === "connected" ? "text-bg-success" : swarmStatus.includes("pending") || swarmStatus.includes("requested") ? "text-bg-warning" : "text-bg-secondary"}">Connected to Swarm: ${escapeHtml(swarmStatus)}</span>
       </div>
@@ -3744,7 +3914,7 @@ async function renderOvermindIntegrationPanel(target) {
           ${latest.failure_reason ? `<div class="small text-danger">${escapeHtml(latest.failure_reason)}</div>` : ""}
         </div>`;
       }).join("")}</div>` : ""}
-      ${networkMode !== "overmind" ? '<div class="alert alert-warning mt-3 mb-0">Overmind communication is suspended. Use the integration mode toggle above to resume it.</div>' : ""}
+      ${!overmindActive ? '<div class="alert alert-warning mt-3 mb-0">Overmind communication is disabled. Enable it on the Integration page to resume it.</div>' : ""}
     `;
     urlInput.value = payload.overmind_url || "https://www.batocera-swarm.com";
     droneNameInput.value = payload.drone_name || "";
@@ -4692,12 +4862,24 @@ async function router() {
         return;
       }
       await renderAssetCachePage();
-    } else if (["#admin/integration", "#admin/overmind", "#admin/local-network", "#admin/overmind/actions"].includes(hash)) {
+    } else if (hash === "#admin/integration") {
       if (!adminEnabled) {
         setHash("");
         return;
       }
       await renderIntegrationPage();
+    } else if (["#admin/overmind", "#admin/overmind/actions"].includes(hash)) {
+      if (!adminEnabled) {
+        setHash("");
+        return;
+      }
+      await renderOvermindIntegrationPage();
+    } else if (hash === "#admin/local-network") {
+      if (!adminEnabled) {
+        setHash("");
+        return;
+      }
+      await renderLocalNetworkPage();
     } else if (hash === "#admin/api") {
       if (!adminEnabled) {
         setHash("");

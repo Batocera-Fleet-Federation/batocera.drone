@@ -4653,10 +4653,11 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 str(peer.get("certificate_fingerprint") or "").strip().lower()
                 for peer in _local_network.paired_peers(self.settings)
             }
-            if not fingerprint or fingerprint.lower() not in trusted:
+            if fingerprint and fingerprint.lower() in trusted:
+                return True
+            if not _local_network.is_overmind_mode(self.settings):
                 self._send_json(403, {"error": "paired client certificate required"})
                 return False
-            return True
         if self.settings.drone_mtls_enabled:
             cert = self.connection.getpeercert() if hasattr(self.connection, "getpeercert") else None
             if not cert:
@@ -4786,6 +4787,11 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             raise ValueError("limit and offset must be integers")
         query = str((query_params.get("q") or [""])[0]).strip().lower()
         system = str((query_params.get("system") or [""])[0]).strip()
+        systems = {
+            value.strip().lower()
+            for value in str((query_params.get("systems") or [""])[0]).split(",")
+            if value.strip()
+        }
         if normalized == "summary":
             cache_status = _rom_metadata_cache_status(self.settings)
             return {
@@ -4857,6 +4863,11 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             for row in rows
             if isinstance(row, dict)
         ]
+        if systems:
+            rows = [
+                row for row in rows
+                if str(row.get("system") or row.get("root_name") or "").strip().lower() in systems
+            ]
         if query:
             rows = [row for row in rows if query in json.dumps(row, sort_keys=True).lower()]
         total = len(rows)
@@ -4865,6 +4876,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             "drone_id": self.settings.overmind_device_id,
             "asset_type": normalized,
             "system": system or None,
+            "systems": sorted(systems),
             "total": total,
             "limit": limit,
             "offset": offset,
@@ -6540,35 +6552,47 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         payload["overmind_active"] = _local_network.is_overmind_mode(self.settings)
         if not payload["overmind_active"]:
             payload["status"]["integration_enabled"] = False
-            payload["status"]["integration_state"] = "suspended_local_network"
+            payload["status"]["integration_state"] = "disabled"
             payload["status"]["swarm_connection_status"] = "disconnected"
         self._send_json(200, payload)
 
     def _require_overmind_mode(self) -> bool:
         if _local_network.is_overmind_mode(self.settings):
             return True
-        self._send_json(409, {"error": "Overmind integration is disabled while Local Network mode is active"})
+        self._send_json(409, {"error": "Overmind integration is disabled"})
         return False
 
     def _handle_admin_network_mode(self) -> None:
         mode = _network_mode(self.settings)
+        integrations = _local_network.get_integrations(self.settings)
         self._send_json(
             200,
             {
                 "mode": mode,
-                "overmind_active": mode == _local_network.MODE_OVERMIND,
-                "local_network_active": mode == _local_network.MODE_LOCAL_NETWORK,
-                "modes": [_local_network.MODE_OVERMIND, _local_network.MODE_LOCAL_NETWORK],
+                "overmind_active": integrations["overmind_enabled"],
+                "local_network_active": integrations["local_network_enabled"],
+                "overmind_enabled": integrations["overmind_enabled"],
+                "local_network_enabled": integrations["local_network_enabled"],
+                "modes": [
+                    _local_network.MODE_OVERMIND,
+                    _local_network.MODE_LOCAL_NETWORK,
+                    _local_network.MODE_BOTH,
+                    _local_network.MODE_DISABLED,
+                ],
             },
         )
 
     def _handle_admin_network_mode_update(self, payload: dict) -> None:
-        result = _local_network.set_mode(self.settings, str(payload.get("mode") or ""))
-        if result["mode"] == _local_network.MODE_LOCAL_NETWORK:
-            config = self._load_overmind_config()
-            config["suspended_by_network_mode"] = True
-            config["notes"] = "Overmind communication is suspended while Local Network mode is active."
-            self._save_overmind_config(config)
+        current = _local_network.get_integrations(self.settings)
+        if "overmind_enabled" in payload or "local_network_enabled" in payload:
+            result = _local_network.set_integrations(
+                self.settings,
+                overmind_enabled=bool(payload.get("overmind_enabled", current["overmind_enabled"])),
+                local_network_enabled=bool(payload.get("local_network_enabled", current["local_network_enabled"])),
+            )
+        else:
+            result = _local_network.set_mode(self.settings, str(payload.get("mode") or ""))
+        if result["local_network_enabled"]:
             ssl_context = getattr(self.server, "ssl_context", None)
             if ssl_context is not None:
                 ssl_context.verify_mode = ssl.CERT_OPTIONAL
@@ -6580,10 +6604,6 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                         except ssl.SSLError:
                             continue
             _local_network.announce(self.settings, str(DroneCertificateManager(self.settings).metadata().get("fingerprint") or ""))
-        else:
-            config = self._load_overmind_config()
-            config.pop("suspended_by_network_mode", None)
-            self._save_overmind_config(config)
         self._handle_admin_network_mode()
 
     def _local_network_status_payload(self) -> dict:
@@ -6687,7 +6707,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             result = self._collect_peer_inventory(asset_type, query_params)
         else:
             params = []
-            for key in ("system", "q", "limit", "offset"):
+            for key in ("system", "systems", "q", "limit", "offset"):
                 value = str((query_params.get(key) or [""])[0]).strip()
                 if value:
                     params.append(f"{quote(key, safe='')}={quote(value, safe='')}")
@@ -6929,6 +6949,11 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             self._send_json(400, {"error": "Bulk copy supports roms, bios, artwork, or saves"})
             return
         system = str(payload.get("system") or "").strip()
+        systems = [
+            str(value).strip()
+            for value in (payload.get("systems") or [])
+            if str(value).strip()
+        ]
         query = str(payload.get("q") or "").strip()
         include_artwork = bool(payload.get("include_artwork", True))
         peer = _local_network.get_paired_peer(self.settings, peer_id)
@@ -6951,6 +6976,8 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             params = [f"limit={page_size}", f"offset={offset}"]
             if system:
                 params.append(f"system={quote(system, safe='')}")
+            if systems:
+                params.append(f"systems={quote(','.join(systems), safe='')}")
             if query:
                 params.append(f"q={quote(query, safe='')}")
             inventory = self._fetch_peer_inventory(peer, peer_id, asset_type, params)
@@ -6986,6 +7013,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             "status": "queued",
             "asset_type": asset_type,
             "system": system or None,
+            "systems": systems,
             "queued_assets": queued_assets,
             "queued_artwork": queued_artwork,
             "skipped_existing": skipped_existing,
@@ -7022,8 +7050,6 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         self._send_json(200, {"credentials": result, "message": "Drone credentials updated."})
 
     def _handle_admin_overmind_config(self, payload: dict) -> None:
-        if not self._require_overmind_mode():
-            return
         raw_url = str(payload.get("overmind_url") or "").strip()
         raw_email = str(payload.get("overmind_email") or "").strip()
         raw_drone_name = str(payload.get("drone_name") or "").strip()
@@ -7067,7 +7093,8 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         new_config["integration_state"] = "configured"
         new_config["last_error"] = None
         new_config["notes"] = "Configuration saved. Drone will report heartbeat and collect Overmind actions on its polling interval."
-        if new_config.get("overmind_auth_token"):
+        overmind_active = _local_network.is_overmind_mode(self.settings)
+        if new_config.get("overmind_auth_token") and overmind_active:
             base_url = str(new_config.get("overmind_url") or "").strip().rstrip("/")
             new_config["integration_enabled"] = True
             token = _register_or_claim_overmind_token(self.settings, self.repository, new_config, base_url)
@@ -7080,7 +7107,13 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                     new_config["integration_enabled"] = True
                 else:
                     new_config["integration_enabled"] = False
+        elif new_config.get("overmind_auth_token"):
+            new_config["integration_enabled"] = False
+            new_config["integration_state"] = "disabled"
+            new_config["notes"] = "Configuration saved. Enable Overmind integration to connect this Drone."
         if raw_password is not None:
+            if not overmind_active:
+                raise ValueError("enable Overmind integration before claiming ownership")
             if parsed.scheme != "https":
                 raise ValueError("claim ownership requires an https Overmind URL")
             if not raw_email:
@@ -8463,7 +8496,13 @@ def _peer_trust_cafile(
     config: Optional[dict] = None,
     refresh_cert: bool = False,
 ) -> Optional[Path]:
-    if _local_network.is_local_mode(settings):
+    if (
+        _local_network.is_local_mode(settings)
+        and (
+            str((config or {}).get("network_mode") or "") == "local_network"
+            or not _local_network.is_overmind_mode(settings)
+        )
+    ):
         if not peer_id:
             return None
         local_cached = _local_peer_cert_cache_path(settings, peer_id)
@@ -8521,7 +8560,7 @@ def _drone_client_ssl_context(settings: Settings, url: str, verify: bool = False
 
 def _overmind_post_json(url: str, payload: dict, token: Optional[str] = None, settings: Optional[Settings] = None) -> dict:
     if settings is not None and not _local_network.is_overmind_mode(settings):
-        raise RuntimeError("Overmind communication is disabled in Local Network mode")
+        raise RuntimeError("Overmind integration is disabled")
     body = json.dumps(payload).encode("utf-8")
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     if token:
@@ -8549,7 +8588,7 @@ def _overmind_post_json_with_status(
     timeout_seconds: int = 10,
 ) -> Tuple[int, dict]:
     if settings is not None and not _local_network.is_overmind_mode(settings):
-        raise RuntimeError("Overmind communication is disabled in Local Network mode")
+        raise RuntimeError("Overmind integration is disabled")
     body = json.dumps(payload).encode("utf-8")
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     if token:
@@ -8565,7 +8604,7 @@ def _overmind_post_json_with_status(
 
 def _overmind_get_json(url: str, token: Optional[str] = None, settings: Optional[Settings] = None) -> dict:
     if settings is not None and not _local_network.is_overmind_mode(settings):
-        raise RuntimeError("Overmind communication is disabled in Local Network mode")
+        raise RuntimeError("Overmind integration is disabled")
     headers = {"Accept": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -8579,7 +8618,7 @@ def _overmind_get_json(url: str, token: Optional[str] = None, settings: Optional
 
 def _overmind_delete_json(url: str, token: Optional[str] = None, settings: Optional[Settings] = None) -> dict:
     if settings is not None and not _local_network.is_overmind_mode(settings):
-        raise RuntimeError("Overmind communication is disabled in Local Network mode")
+        raise RuntimeError("Overmind integration is disabled")
     headers = {"Accept": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -13052,12 +13091,12 @@ def _poll_rom_metadata_once(settings: Settings, repository: "RomRepository") -> 
         return {"status": "skipped", "reason": "metadata_already_running", "changed": False}
     try:
         prepared_poll = _poll_rom_metadata_cache(settings, repository)
-        if _local_network.is_local_mode(settings):
+        if _local_network.is_local_mode(settings) and not _local_network.is_overmind_mode(settings):
             try:
                 _saves_store.sync_saves_cache(settings.saves_root)
             except Exception as error:
                 print(f"Local saves cache scan failed: {_format_overmind_error(error)}", file=sys.stderr, flush=True)
-            return _complete_local_rom_metadata_cache(settings, repository, "local_network_mode")
+            return _complete_local_rom_metadata_cache(settings, repository, "overmind_disabled")
         config = _load_overmind_config_for_settings(settings)
         base_url = str(config.get("overmind_url") or "").strip().rstrip("/")
         token = str(config.get("overmind_token") or "").strip()

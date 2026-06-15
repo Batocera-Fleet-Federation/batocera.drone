@@ -160,8 +160,13 @@ class SettingsTests(unittest.TestCase):
                 self.assertEqual(local_network.get_mode(settings), local_network.MODE_OVERMIND)
                 local_network.set_mode(settings, local_network.MODE_LOCAL_NETWORK)
                 self.assertEqual(local_network.get_mode(settings), local_network.MODE_LOCAL_NETWORK)
+                local_network.set_integrations(settings, overmind_enabled=True, local_network_enabled=True)
+                self.assertEqual(local_network.get_mode(settings), local_network.MODE_BOTH)
+                self.assertTrue(local_network.is_overmind_mode(settings))
+                self.assertTrue(local_network.is_local_mode(settings))
+                local_network.set_mode(settings, local_network.MODE_LOCAL_NETWORK)
                 with mock.patch("app.drone_api.urlopen") as opened:
-                    with self.assertRaisesRegex(RuntimeError, "disabled in Local Network mode"):
+                    with self.assertRaisesRegex(RuntimeError, "Overmind integration is disabled"):
                         drone_api._overmind_post_json("https://overmind.example/api/test", {}, settings=settings)
                     opened.assert_not_called()
 

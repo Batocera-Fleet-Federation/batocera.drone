@@ -21,7 +21,9 @@ except ImportError:
 
 MODE_OVERMIND = "overmind"
 MODE_LOCAL_NETWORK = "local_network"
-VALID_MODES = {MODE_OVERMIND, MODE_LOCAL_NETWORK}
+MODE_BOTH = "both"
+MODE_DISABLED = "disabled"
+VALID_MODES = {MODE_OVERMIND, MODE_LOCAL_NETWORK, MODE_BOTH, MODE_DISABLED}
 
 DISCOVERY_SERVICE = "batocera-drone-local-v1"
 DISCOVERY_GROUP = os.environ.get("DRONE_LOCAL_DISCOVERY_GROUP", "239.255.42.99")
@@ -43,36 +45,73 @@ def _db(settings: Any) -> Path:
     return database_path(Path(settings.userdata_root))
 
 
-def get_mode(settings: Any) -> str:
+def get_integrations(settings: Any) -> dict:
     configured = str(os.environ.get("DRONE_NETWORK_MODE") or "").strip().lower()
     if configured in VALID_MODES:
-        return configured
+        return {
+            "overmind_enabled": configured in {MODE_OVERMIND, MODE_BOTH},
+            "local_network_enabled": configured in {MODE_LOCAL_NETWORK, MODE_BOTH},
+        }
     try:
         db_path = _db(settings)
         if not db_path.exists():
-            return MODE_OVERMIND
+            return {"overmind_enabled": True, "local_network_enabled": False}
+        integrations = load_payload(db_path, "integration_enablement", {})
+        if isinstance(integrations, dict) and (
+            "overmind_enabled" in integrations or "local_network_enabled" in integrations
+        ):
+            return {
+                "overmind_enabled": bool(integrations.get("overmind_enabled")),
+                "local_network_enabled": bool(integrations.get("local_network_enabled")),
+            }
         payload = load_payload(db_path, "network_mode", {"mode": MODE_OVERMIND})
     except (AttributeError, TypeError, ValueError, OSError):
-        return MODE_OVERMIND
+        return {"overmind_enabled": True, "local_network_enabled": False}
     mode = str(payload.get("mode") if isinstance(payload, dict) else payload or "").strip().lower()
-    return mode if mode in VALID_MODES else MODE_OVERMIND
+    return {
+        "overmind_enabled": mode in {MODE_OVERMIND, MODE_BOTH},
+        "local_network_enabled": mode in {MODE_LOCAL_NETWORK, MODE_BOTH},
+    }
+
+
+def get_mode(settings: Any) -> str:
+    integrations = get_integrations(settings)
+    if integrations["overmind_enabled"] and integrations["local_network_enabled"]:
+        return MODE_BOTH
+    if integrations["local_network_enabled"]:
+        return MODE_LOCAL_NETWORK
+    if integrations["overmind_enabled"]:
+        return MODE_OVERMIND
+    return MODE_DISABLED
+
+
+def set_integrations(settings: Any, *, overmind_enabled: bool, local_network_enabled: bool) -> dict:
+    payload = {
+        "overmind_enabled": bool(overmind_enabled),
+        "local_network_enabled": bool(local_network_enabled),
+        "updated_at": _now_iso(),
+    }
+    save_payload(_db(settings), "integration_enablement", payload)
+    return {**payload, "mode": get_mode(settings)}
 
 
 def set_mode(settings: Any, mode: str) -> dict:
     normalized = str(mode or "").strip().lower()
     if normalized not in VALID_MODES:
-        raise ValueError("mode must be overmind or local_network")
-    payload = {"mode": normalized, "updated_at": _now_iso()}
-    save_payload(_db(settings), "network_mode", payload)
-    return payload
+        raise ValueError("mode must be overmind, local_network, both, or disabled")
+    return set_integrations(
+        settings,
+        overmind_enabled=normalized in {MODE_OVERMIND, MODE_BOTH},
+        local_network_enabled=normalized in {MODE_LOCAL_NETWORK, MODE_BOTH},
+    )
 
 
 def is_local_mode(settings: Any) -> bool:
-    return get_mode(settings) == MODE_LOCAL_NETWORK
+    return get_integrations(settings)["local_network_enabled"]
 
 
 def is_overmind_mode(settings: Any) -> bool:
-    return get_mode(settings) == MODE_OVERMIND
+    return get_integrations(settings)["overmind_enabled"]
 
 
 def _load_peer_map(settings: Any, namespace: str) -> dict[str, dict]:

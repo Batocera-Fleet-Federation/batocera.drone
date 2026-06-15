@@ -120,6 +120,13 @@ class MockServerIntegrationTests(unittest.TestCase):
         updated = self._post_json("/v1/api/admin/network-mode", {"mode": "local_network"})
         self.assertEqual(updated["mode"], "local_network")
         self.assertTrue(updated["local_network_active"])
+        both = self._post_json(
+            "/v1/api/admin/network-mode",
+            {"overmind_enabled": True, "local_network_enabled": True},
+        )
+        self.assertEqual(both["mode"], "both")
+        self.assertTrue(both["overmind_active"])
+        self.assertTrue(both["local_network_active"])
 
         object.__setattr__(self.settings, "use_fake_data", True)
         local_network.record_discovered_peer(
@@ -146,6 +153,12 @@ class MockServerIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(peer_roms["asset_type"], "roms")
         self.assertTrue(peer_roms["items"])
+        peer_multi_system_roms = self._get_json(
+            "/v1/api/admin/local-network/peers/nearby-fake-drone/assets?type=roms&systems=snes&limit=5"
+        )
+        self.assertTrue(peer_multi_system_roms["items"])
+        self.assertEqual(peer_multi_system_roms["systems"], ["snes"])
+        self.assertTrue(all(item["system"] == "snes" for item in peer_multi_system_roms["items"]))
         peer_saves = self._get_json(
             "/v1/api/admin/local-network/peers/nearby-fake-drone/assets?type=saves&limit=5"
         )
@@ -159,9 +172,13 @@ class MockServerIntegrationTests(unittest.TestCase):
 
         js = self._get_bytes("/static/js/drone.js")
         self.assertIn(b"renderIntegrationPage", js)
-        self.assertIn(b"Integration Mode", js)
-        self.assertIn(b"integrationModeOvermindBtn", js)
-        self.assertIn(b"integrationModeLocalBtn", js)
+        self.assertIn(b"Integration Enablement", js)
+        self.assertIn(b"integrationOvermindToggle", js)
+        self.assertIn(b"integrationLocalToggle", js)
+        self.assertIn(b"renderOvermindIntegrationPage", js)
+        self.assertIn(b"renderLocalNetworkPage", js)
+        self.assertIn(b"local-asset-system-check", js)
+        self.assertIn(b"setLocalTransferSearch", js)
         self.assertNotIn(b"networkModeSelect", js)
 
     def test_peer_inventory_does_not_expose_absolute_paths(self) -> None:
