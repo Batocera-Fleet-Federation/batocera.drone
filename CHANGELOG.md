@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.1.6] - 2026-06-14
+
+- Updates to local network admin page
+
 ## [v0.1.5] - 2026-06-14
 
 - Updating drone to fix small bug and fake data for local network.
