@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.1.12] - 2026-06-15
+
+- Bug fix for rom downloading
+
 ## [v0.1.11] - 2026-06-15
 
 - Making update to speed up downloads from drone to drone
