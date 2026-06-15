@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.1.5] - 2026-06-14
+
+- Updating drone to fix small bug and fake data for local network.
+
 ## [v0.1.4] - 2026-06-14
 
 - Update drone to support network discovery and peer-to-peer (no overmind) vs. overmind integration.
