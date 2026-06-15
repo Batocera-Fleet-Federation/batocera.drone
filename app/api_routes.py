@@ -466,6 +466,18 @@ class ApiRoutesMixin:
                 self._handle_admin_download_retry(parts[2])
                 return
 
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "downloads" and parts[2] == "pause":
+                self._handle_admin_downloads_pause()
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "downloads" and parts[2] == "resume":
+                self._handle_admin_downloads_resume()
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "downloads" and parts[2] == "clear":
+                self._handle_admin_downloads_clear()
+                return
+
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "artwork" and parts[2] == "launchbox" and parts[3] == "apply":
                 payload = self._read_json_body()
                 self._handle_admin_launchbox_apply(payload)

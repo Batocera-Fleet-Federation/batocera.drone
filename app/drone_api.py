@@ -4336,6 +4336,27 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         status_code = 404 if result.get("status") == "not_found" else 409 if result.get("status") == "not_retryable" else 200
         self._send_json(status_code, result)
 
+    def _handle_admin_downloads_pause(self) -> None:
+        manager = _get_download_manager()
+        if manager is None:
+            self._send_json(503, {"error": "download manager unavailable"})
+            return
+        self._send_json(200, manager.pause())
+
+    def _handle_admin_downloads_resume(self) -> None:
+        manager = _get_download_manager()
+        if manager is None:
+            self._send_json(503, {"error": "download manager unavailable"})
+            return
+        self._send_json(200, manager.resume())
+
+    def _handle_admin_downloads_clear(self) -> None:
+        manager = _get_download_manager()
+        if manager is None:
+            self._send_json(503, {"error": "download manager unavailable"})
+            return
+        self._send_json(200, manager.clear_queue())
+
     def _send_html(self, status_code: int, html: str) -> None:
         body = html_bytes(html)
         self.send_response(status_code)
@@ -6636,24 +6657,79 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             return
         asset_type = str((query_params.get("type") or ["summary"])[0]).strip().lower()
         if self.settings.use_fake_data and peer.get("fake_data"):
-            self._handle_peer_inventory(asset_type, query_params, require_authorization=False)
-            return
-        params = []
-        for key in ("system", "q", "limit", "offset"):
-            value = str((query_params.get(key) or [""])[0]).strip()
-            if value:
-                params.append(f"{quote(key, safe='')}={quote(value, safe='')}")
-        address = _peer_address(peer)
-        if not address:
-            raise ValueError("paired peer has no reachable address")
-        suffix = f"?{'&'.join(params)}" if params else ""
-        result = _peer_get_json(
-            f"{address}/v1/api/peer/inventory/{quote(asset_type, safe='')}{suffix}",
-            self.settings,
-            peer_id=peer_id,
-            config={"network_mode": "local_network"},
-        )
+            result = self._collect_peer_inventory(asset_type, query_params)
+        else:
+            params = []
+            for key in ("system", "q", "limit", "offset"):
+                value = str((query_params.get(key) or [""])[0]).strip()
+                if value:
+                    params.append(f"{quote(key, safe='')}={quote(value, safe='')}")
+            address = _peer_address(peer)
+            if not address:
+                raise ValueError("paired peer has no reachable address")
+            suffix = f"?{'&'.join(params)}" if params else ""
+            result = _peer_get_json(
+                f"{address}/v1/api/peer/inventory/{quote(asset_type, safe='')}{suffix}",
+                self.settings,
+                peer_id=peer_id,
+                config={"network_mode": "local_network"},
+            )
+        if asset_type == "roms" and isinstance(result, dict):
+            self._annotate_roms_exist_locally(result.get("items") or [])
         self._send_json(200, result)
+
+    def _annotate_roms_exist_locally(self, items: List[dict]) -> None:
+        """Flag each peer ROM row with whether it already exists on this machine
+        (by content thumbprint) so the UI can show it and skip re-downloading."""
+        cache: dict = {}
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            system = str(item.get("system") or "").strip()
+            if not system:
+                item["exists_locally"] = False
+                continue
+            index = self._local_rom_index(system, cache=cache)
+            item["exists_locally"] = self._match_local_rom(index, item) is not None
+
+    def _local_rom_index(self, system: str, cache: Optional[dict] = None) -> dict:
+        """Build a lookup of this machine's ROMs for a system: content
+        fingerprint -> relative path, and normalized path -> relative path. Used
+        to decide whether a peer ROM already exists locally. Optionally memoized
+        in `cache` (system -> index) for bulk operations."""
+        if cache is not None and system in cache:
+            return cache[system]
+        fingerprints: Dict[str, str] = {}
+        paths: Dict[str, str] = {}
+        try:
+            _, rows = self.repository.list_assets(system, "roms")
+        except Exception:
+            rows = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            rel = str(row.get("relative_path") or row.get("rom_path") or row.get("file_path") or "")
+            rel_norm = rel.replace("\\", "/").lstrip("./").lower()
+            fp = str(row.get("fingerprint") or row.get("rom_fingerprint") or "").strip().lower()
+            if rel_norm:
+                paths.setdefault(rel_norm, rel)
+            if fp:
+                fingerprints.setdefault(fp, rel)
+        index = {"fingerprints": fingerprints, "paths": paths}
+        if cache is not None:
+            cache[system] = index
+        return index
+
+    def _match_local_rom(self, index: dict, item: dict) -> Optional[str]:
+        """Return the local relative path of a ROM matching this peer item, or
+        None. Prefers a content-fingerprint (thumbprint) match; falls back to a
+        path match only when no fingerprint is available to compare."""
+        peer_fp = str(item.get("rom_fingerprint") or item.get("fingerprint") or "").strip().lower()
+        if peer_fp:
+            return index.get("fingerprints", {}).get(peer_fp)
+        rel = str(item.get("relative_path") or item.get("rom_path") or item.get("file_path") or "")
+        rel_norm = rel.replace("\\", "/").lstrip("./").lower()
+        return index.get("paths", {}).get(rel_norm)
 
     def _enqueue_local_asset(
         self,
@@ -6664,26 +6740,40 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         item: dict,
         default_system: str = "",
         include_artwork: bool = True,
+        local_index_cache: Optional[dict] = None,
     ) -> List[dict]:
         """Enqueue a single peer asset (and, for ROMs, its artwork when present).
 
-        Returns the list of jobs created (the asset itself first). Shared by the
-        single-item sync and the bulk "copy all" handlers."""
+        ROMs already present on this machine (matched by content fingerprint, or
+        path when no fingerprint is available) are NOT re-downloaded; their artwork
+        is still copied (overwriting any same-named file) and linked into the local
+        gamelist. Returns the list of jobs created. Shared by the single-item sync
+        and the bulk "copy all" handlers. `local_index_cache` (system -> index) lets
+        the bulk path reuse the local ROM lookup across many items."""
         jobs: List[dict] = []
         if asset_type == "roms":
             system = str(item.get("system") or default_system or "").strip()
             relative_path = str(item.get("relative_path") or item.get("rom_path") or item.get("file_path") or "").strip()
             if not relative_path:
                 return jobs
-            jobs.append(manager.enqueue_rom(
-                config,
-                peer,
-                system,
-                relative_path,
-                expected_size=item.get("byte_count") or item.get("file_size"),
-                expected_fingerprint=item.get("rom_fingerprint") or item.get("fingerprint"),
-                entry_type=str(item.get("entry_type") or "file"),
-            ))
+            index = self._local_rom_index(system, cache=local_index_cache)
+            local_match = self._match_local_rom(index, item)
+            if local_match is None:
+                # Not on this machine yet -> download it.
+                jobs.append(manager.enqueue_rom(
+                    config,
+                    peer,
+                    system,
+                    relative_path,
+                    expected_size=item.get("byte_count") or item.get("file_size"),
+                    expected_fingerprint=item.get("rom_fingerprint") or item.get("fingerprint"),
+                    entry_type=str(item.get("entry_type") or "file"),
+                ))
+                art_local_path = relative_path
+            else:
+                # Already present (thumbprint match) -> skip the ROM, attach artwork
+                # to the existing local ROM so it shows after a gamelist refresh.
+                art_local_path = local_match
             if include_artwork:
                 gamelist = item.get("gamelist") if isinstance(item.get("gamelist"), dict) else {}
                 fields = [field for field in ARTWORK_FIELDS if gamelist.get(field)]
@@ -6693,7 +6783,10 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                     _request_rom_permission_repair(system)
                 for field in fields:
                     try:
-                        jobs.append(manager.enqueue_artwork(config, peer, system, relative_path, field))
+                        jobs.append(manager.enqueue_artwork(
+                            config, peer, system, relative_path, field,
+                            overwrite=True, local_rom_path=art_local_path,
+                        ))
                     except Exception:
                         continue
         elif asset_type == "bios":
@@ -6721,6 +6814,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 system,
                 str(item.get("rom_path") or item.get("file_path") or ""),
                 str(item.get("artwork_type") or default_artwork_type),
+                overwrite=True,
             ))
         elif asset_type == "saves":
             relative_path = str(item.get("file_path") or item.get("relative_path") or "").strip()
@@ -6764,7 +6858,13 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             default_system=str(payload.get("system") or ""),
             include_artwork=include_artwork,
         )
-        self._send_json(202, {"status": "queued", "job": jobs[0] if jobs else None, "jobs": jobs})
+        rom_skipped = asset_type == "roms" and not any(job.get("file_type") == "ROM" for job in jobs)
+        self._send_json(202, {
+            "status": "queued",
+            "job": jobs[0] if jobs else None,
+            "jobs": jobs,
+            "rom_skipped": rom_skipped,
+        })
 
     def _handle_admin_local_sync_bulk(self, payload: dict) -> None:
         """Copy every item of an asset type from a paired peer.
@@ -6797,7 +6897,9 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         offset = 0
         queued_assets = 0
         queued_artwork = 0
+        skipped_existing = 0
         total = None
+        local_index_cache: dict = {}
         while True:
             params = [f"limit={page_size}", f"offset={offset}"]
             if system:
@@ -6821,10 +6923,13 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                     entry,
                     default_system=system,
                     include_artwork=include_artwork,
+                    local_index_cache=local_index_cache,
                 )
-                if jobs:
-                    queued_assets += 1
-                    queued_artwork += max(0, len(jobs) - 1)
+                asset_jobs = [job for job in jobs if job.get("file_type") != "ARTWORK"]
+                queued_assets += len(asset_jobs)
+                queued_artwork += len(jobs) - len(asset_jobs)
+                if asset_type == "roms" and not asset_jobs:
+                    skipped_existing += 1
             offset += len(items)
             if total is not None and offset >= int(total):
                 break
@@ -6836,6 +6941,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             "system": system or None,
             "queued_assets": queued_assets,
             "queued_artwork": queued_artwork,
+            "skipped_existing": skipped_existing,
             "total_available": total,
         })
 
@@ -10308,6 +10414,7 @@ class DownloadManager:
         self._jobs: OrderedDict[str, dict] = OrderedDict()
         self._cancel_events: Dict[str, Event] = {}
         self._wake = Event()
+        self._paused = False
         self._last_download_state_push_at = 0.0
         self._thread = Thread(target=self._worker, name="drone-download-worker", daemon=True)
         self._thread.start()
@@ -10408,7 +10515,7 @@ class DownloadManager:
         self._wake.set()
         return snapshot
 
-    def enqueue_artwork(self, config: dict, peer: dict, system: str, rom_path: str, artwork_type: str, source_action_id: Optional[str] = None) -> dict:
+    def enqueue_artwork(self, config: dict, peer: dict, system: str, rom_path: str, artwork_type: str, source_action_id: Optional[str] = None, overwrite: bool = False, local_rom_path: Optional[str] = None) -> dict:
         job_id = str(uuid.uuid4())
         peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
         now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -10448,6 +10555,8 @@ class DownloadManager:
             "_asset_type": "artwork",
             "_config": config,
             "_peer": peer,
+            "_overwrite": bool(overwrite),
+            "_local_rom_path": local_rom_path,
         }
         with self._lock:
             self._jobs[job_id] = job
@@ -10573,11 +10682,49 @@ class DownloadManager:
         return {
             "target_drone_id": self.settings.overmind_device_id,
             "concurrency": {"scope": "target_drone", "active_limit": 1},
+            "paused": self._paused,
             "active": active,
             "queued": queued,
             "recent": list(reversed(recent)),
             "downloads": active + queued + list(reversed(recent)),
         }
+
+    def pause(self) -> dict:
+        """Stop the worker from starting any further queued downloads. A job that
+        is already downloading runs to completion (cancel it individually to stop
+        it sooner)."""
+        with self._lock:
+            self._paused = True
+        return self.snapshot()
+
+    def resume(self) -> dict:
+        with self._lock:
+            self._paused = False
+        self._wake.set()
+        return self.snapshot()
+
+    def clear_queue(self) -> dict:
+        """Cancel every still-queued job so nothing further downloads. The active
+        job (if any) is left running."""
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        cleared = 0
+        with self._lock:
+            for job in self._jobs.values():
+                if job.get("status") == "queued":
+                    job["status"] = "cancelled"
+                    job["failure_reason"] = "queue cleared by user"
+                    job["error_message"] = job["failure_reason"]
+                    job["cancellation_requested"] = True
+                    job["completed_at"] = now
+                    job["download_completed_at"] = now
+                    event = self._cancel_events.get(job.get("job_id"))
+                    if event:
+                        event.set()
+                    cleared += 1
+            self._update_queue_positions_locked()
+        result = self.snapshot()
+        result["cleared"] = cleared
+        return result
 
     def _public_job_locked(self, job: dict) -> dict:
         public = {key: value for key, value in job.items() if not key.startswith("_")}
@@ -10607,10 +10754,11 @@ class DownloadManager:
         while True:
             job_id = None
             with self._lock:
-                for candidate_id, candidate in self._jobs.items():
-                    if candidate.get("status") == "queued":
-                        job_id = candidate_id
-                        break
+                if not self._paused:
+                    for candidate_id, candidate in self._jobs.items():
+                        if candidate.get("status") == "queued":
+                            job_id = candidate_id
+                            break
                 if job_id:
                     job = self._jobs[job_id]
                     now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -10636,6 +10784,8 @@ class DownloadManager:
             rel = str(job.get("relative_path") or job.get("file_path") or "")
             rom_path = str(job.get("rom_path") or job.get("rom_name") or rel)
             artwork_type = str(job.get("artwork_type") or "")
+            artwork_overwrite = bool(job.get("_overwrite"))
+            artwork_local_rom_path = job.get("_local_rom_path")
             expected_size = job.get("file_size") or job.get("total_bytes")
             expected_fingerprint = job.get("_expected_fingerprint")
             entry_type = str(job.get("_entry_type") or job.get("entry_type") or "file").lower()
@@ -10676,6 +10826,8 @@ class DownloadManager:
                     artwork_type,
                     progress_callback=progress,
                     cancellation_event=cancel_event,
+                    overwrite=artwork_overwrite,
+                    local_rom_path=artwork_local_rom_path,
                 )
             elif asset_type == "saves":
                 activity = _download_save_from_peer(
@@ -11426,6 +11578,8 @@ def _download_artwork_from_peer(
     artwork_type: str,
     progress_callback=None,
     cancellation_event: Optional[Event] = None,
+    overwrite: bool = False,
+    local_rom_path: Optional[str] = None,
 ) -> dict:
     peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
     address = _peer_address(peer)
@@ -11435,7 +11589,12 @@ def _download_artwork_from_peer(
     field = str(artwork_type or "").strip()
     if field not in ARTWORK_FIELDS:
         raise ValueError("invalid artwork type")
+    # The peer resolves its artwork from its own gamelist using the *peer's* ROM
+    # path; the file is written locally and linked in the local gamelist against
+    # the *local* ROM path (which differs only when the same ROM is present under
+    # a different filename).
     rom_rel = _safe_rom_relative_path(rom_path)
+    local_rom_rel = _safe_rom_relative_path(local_rom_path) if local_rom_path else rom_rel
     url = f"{address}/v1/api/peer/artwork/{quote(system, safe='')}/{quote(field, safe='')}/{quote(rom_rel, safe='/')}"
     system_dir = (settings.roms_root / system).resolve()
     cafile = _peer_trust_cafile(settings, peer_id=peer_id, config=config)
@@ -11457,8 +11616,24 @@ def _download_artwork_from_peer(
     artwork_relative_path = ""
     try:
         with urlopen(request, timeout=max(10, PEER_CHECK_TIMEOUT_SECONDS * 4), context=context) as response:
-            artwork_relative_path = _safe_rom_relative_path(response.headers.get("X-Asset-Relative-Path") or f"images/{Path(rom_rel).stem}-{field}{Path(urlparse(response.geturl()).path).suffix or '.bin'}")
-            target = _collision_safe_target(system_dir, artwork_relative_path)
+            header_name = response.headers.get("X-Asset-Relative-Path") or ""
+            ext = Path(header_name).suffix or Path(urlparse(response.geturl()).path).suffix or ".bin"
+            if overwrite:
+                # Deterministic name keyed to the *local* ROM so a re-copy overwrites
+                # the same file instead of accumulating "-1" duplicates. Keep the
+                # peer's media subdir (videos/ for video, manuals/ for manual, etc.)
+                # so the file lands where EmulationStation expects it; default to
+                # images/ when the peer did not provide one.
+                media_subdir = Path(header_name).parent.as_posix() if header_name else ""
+                if not media_subdir or media_subdir in (".", "/"):
+                    media_subdir = "images"
+                artwork_relative_path = _safe_rom_relative_path(f"{media_subdir}/{Path(local_rom_rel).stem}-{field}{ext}")
+                target = (system_dir / artwork_relative_path).resolve()
+                if target != system_dir and system_dir not in target.parents:
+                    raise ValueError("unsafe artwork target path")
+            else:
+                artwork_relative_path = _safe_rom_relative_path(header_name or f"images/{Path(local_rom_rel).stem}-{field}{ext}")
+                target = _collision_safe_target(system_dir, artwork_relative_path)
             partial_target = target.with_name(f"{target.name}.part")
             target.parent.mkdir(parents=True, exist_ok=True)
             try:
@@ -11490,12 +11665,12 @@ def _download_artwork_from_peer(
     gamelist_update = None
     gamelist_update_status = "succeeded"
     try:
-        gamelist_update = repository.update_gamelist_artwork_reference(system, rom_rel, field, target.relative_to(system_dir).as_posix())
+        gamelist_update = repository.update_gamelist_artwork_reference(system, local_rom_rel, field, target.relative_to(system_dir).as_posix())
     except Exception as error:
         gamelist_update_status = "failed"
         gamelist_update = {"error": str(error), "path": str(system_dir / "gamelist.xml")}
         print(
-            f"Artwork download completed but gamelist update failed: system={system} rom={rom_rel} artwork_type={field} error={error}",
+            f"Artwork download completed but gamelist update failed: system={system} rom={local_rom_rel} artwork_type={field} error={error}",
             file=sys.stderr,
             flush=True,
         )
@@ -11507,8 +11682,8 @@ def _download_artwork_from_peer(
         "source_drone_id": peer_id,
         "target_drone_id": settings.overmind_device_id,
         "system": system,
-        "rom_name": rom_rel,
-        "rom_path": rom_rel,
+        "rom_name": local_rom_rel,
+        "rom_path": local_rom_rel,
         "artwork_type": field,
         "relative_path": target.relative_to(system_dir).as_posix(),
         "action": "download",
@@ -12944,6 +13119,12 @@ class DroneThreadingHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
     daemon_threads = True
 
+    # Per-IP throttle so a chatty unpaired peer (or scanner) can't flood the log
+    # with one identical line per connection attempt.
+    _drop_log_lock = Lock()
+    _drop_log_last: Dict[str, float] = {}
+    _DROP_LOG_INTERVAL_SECONDS = 60.0
+
     def handle_error(self, request, client_address):
         # The public HTTPS port is constantly probed by internet scanners sending
         # non-TLS or malformed payloads, which surface as SSL/connection errors during
@@ -12953,8 +13134,21 @@ class DroneThreadingHTTPServer(ThreadingHTTPServer):
         error = sys.exc_info()[1]
         if isinstance(error, (ssl.SSLError, ConnectionError, BrokenPipeError, TimeoutError, OSError)):
             ip = client_address[0] if isinstance(client_address, (tuple, list)) and client_address else client_address
+            now = time.monotonic()
+            cls = DroneThreadingHTTPServer
+            with cls._drop_log_lock:
+                last = cls._drop_log_last.get(str(ip))
+                if last is not None and now - last < cls._DROP_LOG_INTERVAL_SECONDS:
+                    return
+                cls._drop_log_last[str(ip)] = now
+            hint = ""
+            reason = str(error).lower()
+            if "certificate" in reason and not _is_external_client_ip(str(ip)):
+                # On a LAN this is almost always another Drone that this one has not
+                # paired with (or that is not running HTTPS) trying to transfer.
+                hint = " — this looks like a Drone on your network that is not paired with this one (or is not running HTTPS). Pair it under Admin > Integration > Local Network. (repeats from this IP are suppressed for 60s)"
             print(
-                f"Dropped malformed/insecure connection from {ip}: {error.__class__.__name__}: {error}",
+                f"Dropped untrusted/insecure connection from {ip}: {error.__class__.__name__}: {error}{hint}",
                 file=sys.stderr,
                 flush=True,
             )
@@ -12982,6 +13176,18 @@ def _apply_server_tls(settings: Settings, server: ThreadingHTTPServer) -> None:
             if cert_path.exists():
                 try:
                     ssl_context.load_verify_locations(cafile=str(cert_path))
+                except ssl.SSLError:
+                    continue
+        # Belt-and-suspenders: also trust every cert in the local-peer-certs store
+        # so a paired peer stays trusted across restarts even if its record's
+        # certificate_path drifts or is missing. Pairing also injects new certs
+        # into this live context (see _handle_peer_pair), so post-startup pairings
+        # work without a restart too.
+        local_certs_dir = _local_peer_cert_cache_path(settings, "x").parent
+        if local_certs_dir.exists():
+            for cert_file_path in sorted(local_certs_dir.glob("*.crt")):
+                try:
+                    ssl_context.load_verify_locations(cafile=str(cert_file_path))
                 except ssl.SSLError:
                     continue
     server.ssl_context = ssl_context  # type: ignore[attr-defined]

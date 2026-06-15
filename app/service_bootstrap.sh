@@ -20,10 +20,17 @@ CONTROL_PID_FILE="/tmp/drone-server-control.pid"
 CONTROL_DIR="/userdata/system/drone-app/control"
 STARTUP_LOG="/userdata/system/logs/drone-app/startup.log"
 
-# Make a single ROM system's images/ dir and gamelist.xml writable by the
-# unprivileged Drone (group ${DRONE_GROUP}) so it can place peer-copied artwork
-# and update gamelist.xml. Cheap (no recursive file walk) -- safe to run for
-# every system on each boot and on demand from the privileged control worker.
+# Media subdirectories where scraped/peer-copied artwork lands. Artwork fields map
+# to these: images (image/thumbnail/marquee/boxart/wheel/fanart), videos (video),
+# manuals (manual). The others are included so existing scraper layouts also work.
+DRONE_ROM_MEDIA_DIRS="images videos manuals downloaded_images covers media"
+
+# Make a single ROM system writable enough for the unprivileged Drone (group
+# ${DRONE_GROUP}) to place peer-copied artwork (in any media subdir) and update
+# gamelist.xml. Cheap (creates/chmods the media dirs themselves + gamelist, no
+# recursive per-file walk) -- safe to run for every system on each boot and on
+# demand from the privileged control worker. setgid (2775) makes new files the
+# Drone creates inherit the group so EmulationStation can still read them.
 ensure_rom_write_access() {
   romdir="$1"
   [ -d "$romdir" ] || return 0
@@ -31,10 +38,12 @@ ensure_rom_write_access() {
   chown root:"$DRONE_GROUP" "$romdir" 2>/dev/null || true
   chmod 2775 "$romdir" 2>/dev/null || true
 
-  images="${romdir}/images"
-  mkdir -p "$images" 2>/dev/null || true
-  chown root:"$DRONE_GROUP" "$images" 2>/dev/null || true
-  chmod 2775 "$images" 2>/dev/null || true
+  for subdir in $DRONE_ROM_MEDIA_DIRS; do
+    target="${romdir}/${subdir}"
+    mkdir -p "$target" 2>/dev/null || true
+    chown root:"$DRONE_GROUP" "$target" 2>/dev/null || true
+    chmod 2775 "$target" 2>/dev/null || true
+  done
 
   gamelist="${romdir}/gamelist.xml"
   if [ -f "$gamelist" ]; then
@@ -51,7 +60,9 @@ ensure_rom_write_access_all() {
     ensure_rom_write_access "/userdata/roms/${target_system}"
     return 0
   fi
-  find /userdata/roms -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while read romdir; do
+  # -L follows symlinks so systems whose folder is a symlink to an external
+  # drive (e.g. snes -> /media/roms_retro/...) are repaired too.
+  find -L /userdata/roms -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while read romdir; do
     ensure_rom_write_access "$romdir"
   done
 }

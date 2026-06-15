@@ -45,6 +45,8 @@ let themeFilterInitialized = false;
 let currentLogSource = null;
 let logRefreshTimer = null;
 let logRefreshInFlight = false;
+let localTransfersTimer = null;
+let localTransfersInFlight = false;
 let currentConfigSource = null;
 let emulatorConfigRows = [];
 let selectedEmulatorConfigIndex = 0;
@@ -522,6 +524,36 @@ function stopLogAutoRefresh() {
     logRefreshTimer = null;
   }
   logRefreshInFlight = false;
+}
+function stopLocalTransfersAutoRefresh() {
+  if (localTransfersTimer) {
+    clearInterval(localTransfersTimer);
+    localTransfersTimer = null;
+  }
+  localTransfersInFlight = false;
+}
+function startLocalTransfersAutoRefresh() {
+  // Live-update only the Local Transfers / Transfer History data while a copy is
+  // in progress -- never re-render the whole panel, so the user's asset request
+  // form, paging, and selections are left untouched.
+  stopLocalTransfersAutoRefresh();
+  localTransfersTimer = setInterval(async () => {
+    if (document.hidden || localTransfersInFlight) return;
+    if (!["#admin/integration", "#admin/local-network"].includes(window.location.hash)) return;
+    const downloadsBody = document.getElementById("localDownloadsBody");
+    const activityBody = document.getElementById("localActivityBody");
+    if (!downloadsBody || !activityBody) return;
+    localTransfersInFlight = true;
+    try {
+      const status = await api("/admin/local-network/status");
+      downloadsBody.innerHTML = renderDownloadsPanel(status.downloads || {}, false);
+      activityBody.innerHTML = renderDownloadRows(status.activity || [], false);
+    } catch (err) {
+      // Transient poll failure: leave the last good data in place silently.
+    } finally {
+      localTransfersInFlight = false;
+    }
+  }, 3000);
 }
 function startLogAutoRefresh() {
   stopLogAutoRefresh();
@@ -1654,6 +1686,12 @@ function renderDownloadsPanel(payload, includeHeader = true) {
       <div><strong>${escapeHtml(payload.target_drone_id || "This Drone")}</strong><div class="small text-muted">Transfers run one at a time on this Drone.</div></div>
       <button class="btn btn-sm btn-outline-primary" title="Refresh downloads" aria-label="Refresh downloads" onclick="renderDownloadsPage()"><i class="bi bi-arrow-repeat"></i></button>
     </div>` : ""}
+    <div class="d-flex flex-wrap align-items-center gap-2 mb-3">
+      ${payload.paused
+        ? `<span class="badge text-bg-warning"><i class="bi bi-pause-circle me-1"></i>Queue paused</span><button class="btn btn-sm btn-success" type="button" onclick="resumeDroneDownloads()"><i class="bi bi-play-fill me-1"></i>Resume</button>`
+        : `<button class="btn btn-sm btn-outline-warning" type="button" ${(active.length || queued.length) ? "" : "disabled"} onclick="pauseDroneDownloads()"><i class="bi bi-pause-fill me-1"></i>Pause</button>`}
+      <button class="btn btn-sm btn-outline-danger" type="button" ${queued.length ? "" : "disabled"} onclick="clearDroneDownloads()"><i class="bi bi-x-circle me-1"></i>Clear Queue</button>
+    </div>
     <div class="download-summary-grid mb-3">
       ${summary.map(([label, count, icon, tone]) => `<div class="download-summary-card tone-${tone}"><i class="bi ${icon}"></i><div><strong>${count}</strong><span>${label}</span></div></div>`).join("")}
     </div>
@@ -1716,6 +1754,48 @@ async function retryDroneDownload(jobId) {
     await renderDownloadsPage();
   }
 }
+
+async function refreshDownloadsView() {
+  if (["#admin/integration", "#admin/overmind", "#admin/local-network"].includes(window.location.hash)) {
+    const refresh = window.refreshLocalNetwork || window.refreshOvermindDownloads;
+    if (typeof refresh === "function") await refresh();
+    else await renderIntegrationPage();
+  } else {
+    await renderDownloadsPage();
+  }
+}
+
+async function pauseDroneDownloads() {
+  try {
+    await apiPost("/admin/downloads/pause", {});
+    showToast("Downloads paused. The active transfer finishes; nothing new starts until you resume.", "info");
+    await refreshDownloadsView();
+  } catch (err) {
+    showToast(`Failed to pause downloads: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  }
+}
+
+async function resumeDroneDownloads() {
+  try {
+    await apiPost("/admin/downloads/resume", {});
+    showToast("Downloads resumed.", "success");
+    await refreshDownloadsView();
+  } catch (err) {
+    showToast(`Failed to resume downloads: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  }
+}
+
+async function clearDroneDownloads() {
+  if (!window.confirm("Clear the download queue? Queued items are cancelled so nothing else downloads. Any active transfer keeps running.")) return;
+  try {
+    const result = await apiPost("/admin/downloads/clear", {});
+    showToast(`Cleared ${Number(result.cleared) || 0} queued download${(Number(result.cleared) || 0) === 1 ? "" : "s"}.`, "success");
+    await refreshDownloadsView();
+  } catch (err) {
+    showToast(`Failed to clear queue: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  }
+}
+
 async function purgeAssetCache() {
   if (!window.confirm(
     "Purge the asset cache and force a full re-scan and Overmind re-upload?\n\n" +
@@ -3091,15 +3171,25 @@ function renderLocalPeerRows(peers) {
       const rawPeerId = String(peer.drone_id || "");
       const peerId = escapeHtml(rawPeerId);
       const peerToken = encodeURIComponent(rawPeerId).replace(/'/g, "%27");
+      // A peer advertising a non-HTTPS URL (or no certificate) can't do the
+      // certificate-verified mTLS transfer; flag it instead of offering Pair.
+      const url = String(peer.reachable_url || "");
+      const insecure = !peer.paired && url !== "" && !/^https:/i.test(url);
+      let actionCell;
+      if (peer.paired) {
+        actionCell = `<button class="btn btn-sm btn-primary me-1" onclick="browseLocalPeer(decodeURIComponent('${peerToken}'))">Request Assets</button><button class="btn btn-sm btn-outline-danger" onclick="forgetLocalPeer(decodeURIComponent('${peerToken}'))">Forget</button>`;
+      } else if (insecure) {
+        actionCell = `<button class="btn btn-sm btn-outline-secondary" disabled title="This Drone is advertising ${escapeHtml(url)} (not HTTPS), so it can't be paired for secure transfers. Update/repair the Drone on that machine.">Not secure</button>`;
+      } else {
+        actionCell = `<button class="btn btn-sm btn-outline-primary" onclick="pairLocalPeer(decodeURIComponent('${peerToken}'))">Pair</button>`;
+      }
       return `<tr>
-        <td><strong>${escapeHtml(peer.name || peer.hostname || peerId)}</strong><div class="small text-muted mono">${peerId}</div></td>
+        <td><strong>${escapeHtml(peer.name || peer.hostname || peerId)}</strong>${insecure ? '<span class="badge text-bg-danger ms-2" title="Not running HTTPS — cannot pair">Not secure</span>' : ""}<div class="small text-muted mono">${peerId}</div></td>
         <td>${localPeerStatusBadge(peer)}${peer.health?.failure_reason ? `<div class="small text-danger">${escapeHtml(peer.health.failure_reason)}</div>` : ""}</td>
         <td class="small mono">${escapeHtml(peer.reachable_url || peer.source_ip || "n/a")}</td>
         <td class="small">${escapeHtml(peer.last_seen || "n/a")}</td>
         <td class="small mono">${escapeHtml(String(peer.certificate_fingerprint || "").slice(0, 16) || "pending")}</td>
-        <td class="text-nowrap">${peer.paired
-          ? `<button class="btn btn-sm btn-primary me-1" onclick="browseLocalPeer(decodeURIComponent('${peerToken}'))">Request Assets</button><button class="btn btn-sm btn-outline-danger" onclick="forgetLocalPeer(decodeURIComponent('${peerToken}'))">Forget</button>`
-          : `<button class="btn btn-sm btn-outline-primary" onclick="pairLocalPeer(decodeURIComponent('${peerToken}'))">Pair</button>`}</td>
+        <td class="text-nowrap">${actionCell}</td>
       </tr>`;
     }).join("")}</tbody></table></div>`;
 }
@@ -3148,16 +3238,27 @@ function renderLocalAssetRows(payload) {
   }
   return systemBar + `<div class="table-responsive"><table class="table table-sm table-hover align-middle themed-table">
     <thead><tr><th>Name</th><th>System / Source</th><th>Type</th><th>Size</th><th>Details</th><th></th></tr></thead>
-    <tbody>${localPeerAssetContext.items.map((item, index) => `<tr>
-      <td><strong>${escapeHtml(localAssetDisplayName(item))}</strong><div class="small text-muted mono">${escapeHtml(localAssetPath(item))}</div></td>
+    <tbody>${localPeerAssetContext.items.map((item, index) => {
+      const exists = isRoms && item.exists_locally === true;
+      const statusBadge = isRoms
+        ? (exists
+            ? '<span class="badge text-bg-success ms-2" title="This ROM is already on this machine (matched by thumbprint)">On this machine</span>'
+            : '<span class="badge text-bg-info ms-2">New</span>')
+        : "";
+      // An existing ROM is not re-downloaded; the button still copies artwork
+      // (when Include artwork is checked) and links it in the gamelist.
+      const romBtnLabel = exists ? "Get Artwork" : downloadLabel;
+      return `<tr>
+      <td><strong>${escapeHtml(localAssetDisplayName(item))}</strong>${statusBadge}<div class="small text-muted mono">${escapeHtml(localAssetPath(item))}</div></td>
       <td>${escapeHtml(item.system || item.root_name || localPeerAssetContext.system || "")}</td>
       <td>${escapeHtml(item.artwork_type || item.entry_type || localPeerAssetContext.assetType)}</td>
       <td>${formatBytes(item.byte_count || item.file_size || item.size)}</td>
       <td class="small">${escapeHtml(localAssetDetail(item) || String(item.rom_fingerprint || item.bios_md5 || item.saves_fingerprint || item.fingerprint || item.md5 || "").slice(0, 16))}</td>
       <td>${transferable
-        ? `<button class="btn btn-sm btn-primary" onclick="copyLocalPeerAsset(${index})"><i class="bi bi-cloud-arrow-down me-1"></i>${downloadLabel}</button>`
+        ? `<button class="btn btn-sm ${exists ? "btn-outline-primary" : "btn-primary"}" onclick="copyLocalPeerAsset(${index})"><i class="bi bi-cloud-arrow-down me-1"></i>${isRoms ? romBtnLabel : downloadLabel}</button>`
         : `<details><summary class="btn btn-sm btn-outline-primary">View Details</summary><pre class="mono small mt-2 mb-0 text-wrap">${escapeHtml(JSON.stringify(item, null, 2))}</pre></details>`}</td>
-    </tr>`).join("")}</tbody></table></div>`;
+    </tr>`;
+    }).join("")}</tbody></table></div>`;
 }
 
 function renderLocalAssetsPagination() {
@@ -3222,6 +3323,7 @@ async function renderIntegrationPage() {
     window.refreshLocalNetwork = null;
     window.refreshOvermindDownloads = null;
     window.refreshOvermindAssetCache = null;
+    stopLocalTransfersAutoRefresh();
     const panel = document.getElementById("integrationModePanel");
     if (overmindActive) {
       await renderOvermindIntegrationPanel(panel);
@@ -3310,6 +3412,7 @@ async function renderLocalNetworkIntegrationPanel(target) {
   document.getElementById("localAssetSystem").addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); loadLocalPeerAssets(); } });
   updateLocalAssetTypeUi();
   await refresh();
+  startLocalTransfersAutoRefresh();
 }
 
 function localAssetIncludeArtwork() {
@@ -3392,14 +3495,21 @@ function setLocalAssetPage(page) {
 async function copyLocalPeerAsset(index) {
   const item = localPeerAssetContext.items[index];
   if (!item) return;
-  await apiPost("/admin/local-network/sync", {
+  const result = await apiPost("/admin/local-network/sync", {
     peer_id: localPeerAssetContext.peerId,
     asset_type: localPeerAssetContext.assetType,
     system: localPeerAssetContext.system,
     include_artwork: localAssetIncludeArtwork(),
     item,
   });
-  showToast("Asset queued for local transfer.", "success");
+  if (result && result.rom_skipped) {
+    const artworkJobs = Array.isArray(result.jobs) ? result.jobs.length : 0;
+    showToast(artworkJobs
+      ? "ROM already on this machine — copying its artwork only."
+      : "ROM already on this machine — nothing to download.", "info");
+  } else {
+    showToast("Asset queued for local transfer.", "success");
+  }
   await window.refreshLocalNetwork();
 }
 
@@ -3428,10 +3538,12 @@ async function queueLocalBulkCopy(body) {
     const result = await apiPost("/admin/local-network/sync-bulk", body);
     const assets = Number(result.queued_assets) || 0;
     const artwork = Number(result.queued_artwork) || 0;
-    if (!assets) {
-      showToast("Nothing matched to download.", "warning");
+    const skipped = Number(result.skipped_existing) || 0;
+    const skippedNote = skipped ? ` ${skipped} already on this machine were skipped.` : "";
+    if (!assets && !artwork) {
+      showToast(skipped ? `All ${skipped} already on this machine — nothing to download.` : "Nothing matched to download.", skipped ? "info" : "warning");
     } else {
-      showToast(`Queued ${assets} ${body.asset_type} for local transfer${artwork ? ` (+${artwork} artwork files)` : ""}.`, "success");
+      showToast(`Queued ${assets} ${body.asset_type}${artwork ? ` (+${artwork} artwork files)` : ""} for local transfer.${skippedNote}`, "success");
     }
     await window.refreshLocalNetwork();
   } catch (err) {
@@ -4502,6 +4614,9 @@ async function router() {
     if (!hash.startsWith("#admin/logs/")) {
       stopLogAutoRefresh();
       currentLogSource = null;
+    }
+    if (!["#admin/integration", "#admin/local-network", "#admin/overmind"].includes(hash)) {
+      stopLocalTransfersAutoRefresh();
     }
     document.body.classList.toggle("artwork-page", hash.startsWith("#admin/artwork"));
     if (hash === "#bios") {
