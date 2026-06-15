@@ -1,5 +1,10 @@
 # Changelog
 
+## [v0.1.11] - 2026-06-15
+
+- Making update to speed up downloads from drone to drone
+- Estimated duration and local completion time Total remaining bytes Current/ recent transfer speed used Calculating state while speed or sizes are unavailable Paused queue state Notice when unknown file sizes are estimated
+
 ## [v0.1.10] - 2026-06-15
 
 - Updating drone to support both integrations at the same time (overmind & local network).  Fixing UIs to page instead of show all downloaded files.
