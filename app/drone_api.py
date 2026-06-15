@@ -1995,6 +1995,33 @@ def _request_rom_permission_repair(system: str = "") -> bool:
         return False
 
 
+def _ensure_rom_write_access(settings: Settings, system: str = "", timeout_seconds: float = 5.0) -> bool:
+    """Synchronously ask the privileged service worker to make a ROM system's media
+    dirs + gamelist.xml writable by the Drone, waiting briefly for confirmation so a
+    following write actually succeeds. Best-effort: returns True only on a confirmed
+    "ok"; returns False on failure/timeout and never raises (e.g. off-device, or when
+    the privileged worker is unavailable)."""
+    control_dir = Path(os.environ.get("DRONE_SERVICE_CONTROL_DIR", "/userdata/system/drone-app/control"))
+    result_path = control_dir / "repair-rom-permissions.result"
+    try:
+        result_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+    if not _request_rom_permission_repair(system):
+        return False
+    deadline = time.monotonic() + max(0.5, float(timeout_seconds))
+    while time.monotonic() < deadline:
+        try:
+            if result_path.exists():
+                result = result_path.read_text(encoding="utf-8", errors="ignore").strip()
+                result_path.unlink(missing_ok=True)
+                return result == "ok"
+        except OSError:
+            return False
+        time.sleep(0.2)
+    return False
+
+
 def _request_screen_mode_service_control(mode: str) -> bool:
     normalized_mode = str(mode or "").strip().lower()
     if normalized_mode not in {"full", "kiosk", "kid"}:
@@ -6720,6 +6747,24 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             cache[system] = index
         return index
 
+    def _ensure_system_writable_once(self, system: str) -> None:
+        """Ensure this ROM system's media dirs + gamelist are writable by the Drone,
+        at most once per request (a bulk copy touches one system many times)."""
+        system = str(system or "").strip()
+        if not system:
+            return
+        done = getattr(self, "_perm_repaired_systems", None)
+        if done is None:
+            done = set()
+            self._perm_repaired_systems = done
+        if system in done:
+            return
+        done.add(system)
+        try:
+            _ensure_rom_write_access(self.settings, system)
+        except Exception:
+            pass
+
     def _match_local_rom(self, index: dict, item: dict) -> Optional[str]:
         """Return the local relative path of a ROM matching this peer item, or
         None. Prefers a content-fingerprint (thumbprint) match; falls back to a
@@ -6778,9 +6823,11 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 gamelist = item.get("gamelist") if isinstance(item.get("gamelist"), dict) else {}
                 fields = [field for field in ARTWORK_FIELDS if gamelist.get(field)]
                 if fields:
-                    # Make the target system's images/ dir and gamelist.xml writable
-                    # for the unprivileged Drone before the artwork jobs run.
-                    _request_rom_permission_repair(system)
+                    # Make the target system's media dirs + gamelist.xml writable
+                    # for the unprivileged Drone before the artwork jobs run. Done
+                    # once per system, synchronously, so the download worker doesn't
+                    # race ahead of the privileged permission repair.
+                    self._ensure_system_writable_once(system)
                 for field in fields:
                     try:
                         jobs.append(manager.enqueue_artwork(
@@ -6807,7 +6854,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             else:
                 default_artwork_type = str(artwork_types or "image")
             system = str(item.get("system") or default_system or "")
-            _request_rom_permission_repair(system)
+            self._ensure_system_writable_once(system)
             jobs.append(manager.enqueue_artwork(
                 config,
                 peer,
@@ -11635,12 +11682,24 @@ def _download_artwork_from_peer(
                 artwork_relative_path = _safe_rom_relative_path(header_name or f"images/{Path(local_rom_rel).stem}-{field}{ext}")
                 target = _collision_safe_target(system_dir, artwork_relative_path)
             partial_target = target.with_name(f"{target.name}.part")
-            target.parent.mkdir(parents=True, exist_ok=True)
+
+            def _open_partial():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                return partial_target.open("wb")
+
+            try:
+                handle = _open_partial()
+            except PermissionError:
+                # The media dir isn't yet writable by the unprivileged Drone (a
+                # freshly-scraped, root-owned images/ or videos/). Ask the privileged
+                # worker to fix perms, then retry once before giving up.
+                _ensure_rom_write_access(settings, system)
+                handle = _open_partial()
             try:
                 total_bytes = int(response.headers.get("Content-Length") or 0) or None
             except Exception:
                 total_bytes = None
-            with partial_target.open("wb") as handle:
+            with handle:
                 while True:
                     ensure_not_cancelled()
                     chunk = response.read(1024 * 1024)

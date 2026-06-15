@@ -383,8 +383,28 @@ set_volume_as_root() {
   python3 "$helper" "$level"
 }
 
+# Signature of the on-disk bootstrap script. The Drone app self-updates by
+# re-exec'ing its own (unprivileged) process in place, which leaves this root-side
+# service layer running the OLD code (old ensure_permissions + control worker) until
+# the next full service restart. We use this signature so the privileged control
+# worker can detect a shipped service-layer update and adopt it on its own.
+_script_signature() {
+  stat -c '%Y %s' "$WORK_DIR/app/service_bootstrap.sh" 2>/dev/null \
+    || md5sum "$WORK_DIR/app/service_bootstrap.sh" 2>/dev/null | awk '{print $1}' \
+    || echo "unknown"
+}
+
 service_control_worker() {
+  worker_script_sig="$(_script_signature)"
   while true; do
+    # If the bundle's service_bootstrap.sh changed under us (an app self-update
+    # shipped a new service layer), re-exec into it so new root-side logic --
+    # permission repair, new control commands -- takes effect without waiting for
+    # a full DRONE_SERVER restart.
+    if [ "$(_script_signature)" != "$worker_script_sig" ]; then
+      echo "[drone-service] Service bundle changed; re-execing control worker to adopt the update."
+      exec sh "$WORK_DIR/app/service_bootstrap.sh" control-worker
+    fi
     if [ -f "$CONTROL_DIR/restart-emulationstation.request" ]; then
       rm -f "$CONTROL_DIR/restart-emulationstation.request"
       echo "[drone-service] EmulationStation restart requested by Drone app."
@@ -537,6 +557,14 @@ case "$ACTION" in
   restart)
     stop_app
     start_app
+    ;;
+  control-worker)
+    # Re-entry point used by the control worker's own self-re-exec after a bundle
+    # update. Reapply ROM write access with the new code, then resume processing
+    # privileged control requests. Runs in the foreground (it has replaced the
+    # previous worker process via exec, so CONTROL_PID_FILE still points at it).
+    ensure_rom_write_access_all
+    service_control_worker
     ;;
   *)
     echo "Usage: $0 {start|stop|restart}"
