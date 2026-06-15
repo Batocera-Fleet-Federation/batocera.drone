@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.1.9] - 2026-06-15
+
+- More bug fixes for artwork not sticking when downloading from drones.
+
 ## [v0.1.8] - 2026-06-15
 
 - Making updates to drone to allow for both local and overmind integrations at the same time.  Updating UI to refresh better.  Bug fix to enable file permissions for gamelist.xml / artwork.
