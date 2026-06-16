@@ -1689,12 +1689,20 @@ function renderDownloadRows(rows, allowCancel = true) {
       const filePath = row.file_path || row.relative_path || row.rom_name || "";
       const errorText = row.error_message || row.failure_reason || "";
       const jobId = escapeHtml(row.job_id || row.id || "");
+      // The artwork file can copy successfully while linking it into gamelist.xml
+      // fails (e.g. a root-owned, non-writable gamelist). Surface that instead of
+      // letting it look like a clean success.
+      const gamelistFailed = row.gamelist_update_status === "failed";
+      const gamelistError = (row.gamelist_update && row.gamelist_update.error) ? String(row.gamelist_update.error) : "gamelist.xml was not updated";
+      const gamelistWarning = gamelistFailed
+        ? ` <span class="badge text-bg-warning" title="${escapeHtml(`Artwork copied but not linked: ${gamelistError}`)}"><i class="bi bi-exclamation-triangle me-1"></i>gamelist not linked</span>`
+        : "";
       const actions = [
         allowCancel && active && jobId ? `<button class="btn btn-sm btn-outline-danger" title="Cancel download" aria-label="Cancel download" onclick="cancelDroneDownload('${jobId}')"><i class="bi bi-x-circle"></i></button>` : "",
         retryable && jobId ? `<button class="btn btn-sm btn-outline-primary" title="Retry download" aria-label="Retry download" onclick="retryDroneDownload('${jobId}')"><i class="bi bi-arrow-clockwise"></i></button>` : "",
       ].filter(Boolean).join(" ");
       return `<tr>
-        <td><span class="badge text-bg-${statusClass}" title="${escapeHtml(errorText)}">${escapeHtml(row.status || "queued")}${row.queue_position ? ` #${row.queue_position}` : ""}</span></td>
+        <td><span class="badge text-bg-${statusClass}" title="${escapeHtml(errorText)}">${escapeHtml(row.status || "queued")}${row.queue_position ? ` #${row.queue_position}` : ""}</span>${gamelistWarning}</td>
         <td class="small mono">${escapeHtml(row.source_drone_id || "n/a")}</td>
         <td class="small mono" title="${escapeHtml(errorText || row.rom_fingerprint || "")}">${escapeHtml(filePath)}</td>
         <td class="small">${escapeHtml(row.system || "")}</td>

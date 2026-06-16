@@ -3125,19 +3125,22 @@ class RomRepository:
         normalized_rom_path = _normalize_gamelist_rom_path(rom_path)
         if not normalized_rom_path:
             raise ValueError("rom_path is required")
-        tree, root = self._read_gamelist(system_dir)
-        game = self._find_gamelist_entry_by_path(root, normalized_rom_path)
-        if game is None:
-            raise FileNotFoundError()
-        root.remove(game)
-        gamelist_path = system_dir / "gamelist.xml"
-        try:
-            ET.indent(tree, space="  ")
-        except Exception:
-            pass
-        tree.write(gamelist_path, encoding="utf-8", xml_declaration=True)
-        with gamelist_path.open("a", encoding="utf-8") as handle:
-            handle.write("\n")
+        # Serialize the whole read-modify-write against other gamelist writers
+        # (notably the concurrent artwork-download worker) so updates aren't lost.
+        with _GAMELIST_WRITE_LOCK:
+            tree, root = self._read_gamelist(system_dir)
+            game = self._find_gamelist_entry_by_path(root, normalized_rom_path)
+            if game is None:
+                raise FileNotFoundError()
+            root.remove(game)
+            gamelist_path = system_dir / "gamelist.xml"
+            try:
+                ET.indent(tree, space="  ")
+            except Exception:
+                pass
+            tree.write(gamelist_path, encoding="utf-8", xml_declaration=True)
+            with gamelist_path.open("a", encoding="utf-8") as handle:
+                handle.write("\n")
         with self._missing_artwork_cache_lock:
             self._missing_artwork_cache.clear()
         return {"system": system, "rom_path": normalized_rom_path, "removed": True}
@@ -3155,37 +3158,40 @@ class RomRepository:
         not_found = []
         failed = []
         for system, paths in grouped.items():
-            try:
-                system_dir = self.get_system_dir(system)
-                tree, root = self._read_gamelist(system_dir)
-            except Exception as error:
-                for rom_path in paths:
-                    failed.append({"system": system, "rom_path": rom_path, "error": str(error)})
-                continue
-            changed = False
-            pending_removed = []
-            for rom_path in paths:
-                game = self._find_gamelist_entry_by_path(root, rom_path)
-                if game is None:
-                    not_found.append({"system": system, "rom_path": rom_path})
-                    continue
-                root.remove(game)
-                pending_removed.append({"system": system, "rom_path": rom_path})
-                changed = True
-            if changed:
-                gamelist_path = system_dir / "gamelist.xml"
+            # Hold the gamelist lock across each system's read-modify-write so a
+            # concurrent writer (e.g. the artwork-download worker) can't clobber it.
+            with _GAMELIST_WRITE_LOCK:
                 try:
-                    ET.indent(tree, space="  ")
-                except Exception:
-                    pass
-                try:
-                    tree.write(gamelist_path, encoding="utf-8", xml_declaration=True)
-                    with gamelist_path.open("a", encoding="utf-8") as handle:
-                        handle.write("\n")
-                    removed.extend(pending_removed)
+                    system_dir = self.get_system_dir(system)
+                    tree, root = self._read_gamelist(system_dir)
                 except Exception as error:
-                    for item in pending_removed:
-                        failed.append({**item, "path": str(gamelist_path), "error": str(error)})
+                    for rom_path in paths:
+                        failed.append({"system": system, "rom_path": rom_path, "error": str(error)})
+                    continue
+                changed = False
+                pending_removed = []
+                for rom_path in paths:
+                    game = self._find_gamelist_entry_by_path(root, rom_path)
+                    if game is None:
+                        not_found.append({"system": system, "rom_path": rom_path})
+                        continue
+                    root.remove(game)
+                    pending_removed.append({"system": system, "rom_path": rom_path})
+                    changed = True
+                if changed:
+                    gamelist_path = system_dir / "gamelist.xml"
+                    try:
+                        ET.indent(tree, space="  ")
+                    except Exception:
+                        pass
+                    try:
+                        tree.write(gamelist_path, encoding="utf-8", xml_declaration=True)
+                        with gamelist_path.open("a", encoding="utf-8") as handle:
+                            handle.write("\n")
+                        removed.extend(pending_removed)
+                    except Exception as error:
+                        for item in pending_removed:
+                            failed.append({**item, "path": str(gamelist_path), "error": str(error)})
 
         if removed:
             with self._missing_artwork_cache_lock:
@@ -3199,38 +3205,41 @@ class RomRepository:
             raise ValueError("rom_path is required")
         if not isinstance(fields, dict):
             raise ValueError("fields must be an object")
-        tree, root = self._read_gamelist(system_dir)
-        game = self._find_gamelist_entry_by_path(root, normalized_rom_path)
-        created = False
-        if game is None:
-            game = ET.SubElement(root, "game")
-            _set_child_text(game, "path", f"./{normalized_rom_path}")
-            created = True
+        # Serialize the read-modify-write against the artwork-download worker and
+        # other gamelist writers so concurrent edits aren't lost.
+        with _GAMELIST_WRITE_LOCK:
+            tree, root = self._read_gamelist(system_dir)
+            game = self._find_gamelist_entry_by_path(root, normalized_rom_path)
+            created = False
+            if game is None:
+                game = ET.SubElement(root, "game")
+                _set_child_text(game, "path", f"./{normalized_rom_path}")
+                created = True
 
-        updated = {}
-        removed = []
-        for raw_tag, raw_value in fields.items():
-            tag = str(raw_tag or "").strip()
-            if not tag or tag == "path":
-                continue
-            if not re.match(r"^[A-Za-z0-9_.-]+$", tag):
-                raise ValueError(f"invalid gamelist field: {tag}")
-            value = str(raw_value if raw_value is not None else "").strip()
-            if value:
-                _set_child_text(game, tag, value)
-                updated[tag] = value
-            else:
-                _remove_child(game, tag)
-                removed.append(tag)
+            updated = {}
+            removed = []
+            for raw_tag, raw_value in fields.items():
+                tag = str(raw_tag or "").strip()
+                if not tag or tag == "path":
+                    continue
+                if not re.match(r"^[A-Za-z0-9_.-]+$", tag):
+                    raise ValueError(f"invalid gamelist field: {tag}")
+                value = str(raw_value if raw_value is not None else "").strip()
+                if value:
+                    _set_child_text(game, tag, value)
+                    updated[tag] = value
+                else:
+                    _remove_child(game, tag)
+                    removed.append(tag)
 
-        gamelist_path = system_dir / "gamelist.xml"
-        try:
-            ET.indent(tree, space="  ")
-        except Exception:
-            pass
-        tree.write(gamelist_path, encoding="utf-8", xml_declaration=True)
-        with gamelist_path.open("a", encoding="utf-8") as handle:
-            handle.write("\n")
+            gamelist_path = system_dir / "gamelist.xml"
+            try:
+                ET.indent(tree, space="  ")
+            except Exception:
+                pass
+            tree.write(gamelist_path, encoding="utf-8", xml_declaration=True)
+            with gamelist_path.open("a", encoding="utf-8") as handle:
+                handle.write("\n")
         with self._missing_artwork_cache_lock:
             self._missing_artwork_cache.clear()
 
@@ -3291,41 +3300,44 @@ class RomRepository:
             raise ValueError("invalid artwork field")
         system_dir = self.get_system_dir(system)
         rom = self.find_rom_by_path(system, rom_path) if rom_path else self.find_rom_by_unique_id(system, unique_id)
-        tree, root = self._read_gamelist(system_dir)
-        rom_name = str(rom.get("rom_file") or rom.get("rom_name") or rom.get("name") or "")
-        normalized_rom_path = str(rom.get("rom_path") or rom_path or rom_name)
-        display_name = str(rom.get("image_stem") or rom.get("name") or Path(normalized_rom_path).stem)
-        game = self._find_gamelist_entry_by_path(root, normalized_rom_path) or self._find_gamelist_entry(root, rom_name, display_name)
-        if game is None:
-            game = ET.SubElement(root, "game")
-            _set_child_text(game, "path", f"./{normalized_rom_path}")
-            _set_child_text(game, "name", _clean_rom_title(display_name))
+        # Serialize the gamelist read-modify-write (and the image write keyed off it)
+        # against the artwork-download worker and other gamelist writers.
+        with _GAMELIST_WRITE_LOCK:
+            tree, root = self._read_gamelist(system_dir)
+            rom_name = str(rom.get("rom_file") or rom.get("rom_name") or rom.get("name") or "")
+            normalized_rom_path = str(rom.get("rom_path") or rom_path or rom_name)
+            display_name = str(rom.get("image_stem") or rom.get("name") or Path(normalized_rom_path).stem)
+            game = self._find_gamelist_entry_by_path(root, normalized_rom_path) or self._find_gamelist_entry(root, rom_name, display_name)
+            if game is None:
+                game = ET.SubElement(root, "game")
+                _set_child_text(game, "path", f"./{normalized_rom_path}")
+                _set_child_text(game, "name", _clean_rom_title(display_name))
 
-        parsed_suffix = Path(urlparse(source_url).path).suffix.lower()
-        if parsed_suffix not in (".png", ".jpg", ".jpeg", ".webp", ".gif"):
-            parsed_suffix = {
-                "image/png": ".png",
-                "image/jpeg": ".jpg",
-                "image/webp": ".webp",
-                "image/gif": ".gif",
-            }.get(content_type, ".jpg")
-        images_dir = system_dir / "images"
-        images_dir.mkdir(parents=True, exist_ok=True)
-        safe_stem = re.sub(r"[^a-zA-Z0-9._-]+", "-", Path(display_name).stem).strip("-") or "rom"
-        safe_label = re.sub(r"[^a-zA-Z0-9._-]+", "-", source_label).strip("-") or "remote"
-        target_path = images_dir / f"{safe_stem}-{safe_label}-{field}{parsed_suffix}"
-        target_path.write_bytes(image_data)
-        relative_path = _relative_artwork_path(system_dir, target_path)
-        _set_child_text(game, field, relative_path)
+            parsed_suffix = Path(urlparse(source_url).path).suffix.lower()
+            if parsed_suffix not in (".png", ".jpg", ".jpeg", ".webp", ".gif"):
+                parsed_suffix = {
+                    "image/png": ".png",
+                    "image/jpeg": ".jpg",
+                    "image/webp": ".webp",
+                    "image/gif": ".gif",
+                }.get(content_type, ".jpg")
+            images_dir = system_dir / "images"
+            images_dir.mkdir(parents=True, exist_ok=True)
+            safe_stem = re.sub(r"[^a-zA-Z0-9._-]+", "-", Path(display_name).stem).strip("-") or "rom"
+            safe_label = re.sub(r"[^a-zA-Z0-9._-]+", "-", source_label).strip("-") or "remote"
+            target_path = images_dir / f"{safe_stem}-{safe_label}-{field}{parsed_suffix}"
+            target_path.write_bytes(image_data)
+            relative_path = _relative_artwork_path(system_dir, target_path)
+            _set_child_text(game, field, relative_path)
 
-        gamelist_path = system_dir / "gamelist.xml"
-        try:
-            ET.indent(tree, space="  ")
-        except Exception:
-            pass
-        tree.write(gamelist_path, encoding="utf-8", xml_declaration=True)
-        with gamelist_path.open("a", encoding="utf-8") as handle:
-            handle.write("\n")
+            gamelist_path = system_dir / "gamelist.xml"
+            try:
+                ET.indent(tree, space="  ")
+            except Exception:
+                pass
+            tree.write(gamelist_path, encoding="utf-8", xml_declaration=True)
+            with gamelist_path.open("a", encoding="utf-8") as handle:
+                handle.write("\n")
         with self._missing_artwork_cache_lock:
             self._missing_artwork_cache.clear()
 
@@ -3438,14 +3450,29 @@ class RomRepository:
             )
 
         if updated:
-            gamelist_path = system_dir / "gamelist.xml"
-            try:
-                ET.indent(tree, space="  ")
-            except Exception:
-                pass
-            tree.write(gamelist_path, encoding="utf-8", xml_declaration=True)
-            with gamelist_path.open("a", encoding="utf-8") as handle:
-                handle.write("\n")
+            # Persist under the gamelist lock with a fresh read-merge-write: the
+            # image fetches above ran without the lock (network I/O), so re-read the
+            # current gamelist and re-apply just the fields we changed, rather than
+            # writing a stale tree that could clobber a concurrent writer.
+            with _GAMELIST_WRITE_LOCK:
+                tree, root = self._read_gamelist(system_dir)
+                game = self._find_gamelist_entry_by_path(root, normalized_rom_path) or self._find_gamelist_entry(root, rom_name, display_name)
+                if game is None:
+                    game = ET.SubElement(root, "game")
+                    _set_child_text(game, "path", f"./{normalized_rom_path}")
+                    _set_child_text(game, "name", _clean_rom_title(display_name))
+                for item in updated:
+                    value = item.get("path") or item.get("value")
+                    if item.get("field") and value:
+                        _set_child_text(game, str(item["field"]), str(value))
+                gamelist_path = system_dir / "gamelist.xml"
+                try:
+                    ET.indent(tree, space="  ")
+                except Exception:
+                    pass
+                tree.write(gamelist_path, encoding="utf-8", xml_declaration=True)
+                with gamelist_path.open("a", encoding="utf-8") as handle:
+                    handle.write("\n")
 
         return {
             "system": system,
@@ -3547,14 +3574,28 @@ class RomRepository:
             )
 
         if updated:
-            gamelist_path = system_dir / "gamelist.xml"
-            try:
-                ET.indent(tree, space="  ")
-            except Exception:
-                pass
-            tree.write(gamelist_path, encoding="utf-8", xml_declaration=True)
-            with gamelist_path.open("a", encoding="utf-8") as handle:
-                handle.write("\n")
+            # Re-read-merge-write under the gamelist lock: image fetches above ran
+            # without the lock, so persist against the current on-disk gamelist
+            # instead of a stale tree that could clobber a concurrent writer.
+            with _GAMELIST_WRITE_LOCK:
+                tree, root = self._read_gamelist(system_dir)
+                game = self._find_gamelist_entry_by_path(root, normalized_rom_path) or self._find_gamelist_entry(root, rom_name, display_name)
+                if game is None:
+                    game = ET.SubElement(root, "game")
+                    _set_child_text(game, "path", f"./{normalized_rom_path}")
+                    _set_child_text(game, "name", _clean_rom_title(display_name))
+                for item in updated:
+                    value = item.get("path") or item.get("value")
+                    if item.get("field") and value:
+                        _set_child_text(game, str(item["field"]), str(value))
+                gamelist_path = system_dir / "gamelist.xml"
+                try:
+                    ET.indent(tree, space="  ")
+                except Exception:
+                    pass
+                tree.write(gamelist_path, encoding="utf-8", xml_declaration=True)
+                with gamelist_path.open("a", encoding="utf-8") as handle:
+                    handle.write("\n")
             with self._missing_artwork_cache_lock:
                 self._missing_artwork_cache.clear()
 
@@ -3655,14 +3696,28 @@ class RomRepository:
             )
 
         if updated:
-            gamelist_path = system_dir / "gamelist.xml"
-            try:
-                ET.indent(tree, space="  ")
-            except Exception:
-                pass
-            tree.write(gamelist_path, encoding="utf-8", xml_declaration=True)
-            with gamelist_path.open("a", encoding="utf-8") as handle:
-                handle.write("\n")
+            # Re-read-merge-write under the gamelist lock: image fetches above ran
+            # without the lock, so persist against the current on-disk gamelist
+            # instead of a stale tree that could clobber a concurrent writer.
+            with _GAMELIST_WRITE_LOCK:
+                tree, root = self._read_gamelist(system_dir)
+                game = self._find_gamelist_entry_by_path(root, normalized_rom_path) or self._find_gamelist_entry(root, rom_name, display_name)
+                if game is None:
+                    game = ET.SubElement(root, "game")
+                    _set_child_text(game, "path", f"./{normalized_rom_path}")
+                    _set_child_text(game, "name", _clean_rom_title(display_name))
+                for item in updated:
+                    value = item.get("path") or item.get("value")
+                    if item.get("field") and value:
+                        _set_child_text(game, str(item["field"]), str(value))
+                gamelist_path = system_dir / "gamelist.xml"
+                try:
+                    ET.indent(tree, space="  ")
+                except Exception:
+                    pass
+                tree.write(gamelist_path, encoding="utf-8", xml_declaration=True)
+                with gamelist_path.open("a", encoding="utf-8") as handle:
+                    handle.write("\n")
             with self._missing_artwork_cache_lock:
                 self._missing_artwork_cache.clear()
 
@@ -6022,33 +6077,35 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         existing = {field: "" for field in ARTWORK_FIELDS}
         missing = list(ARTWORK_FIELDS)
         has_gamelist_entry = False
-        # Update gamelist if possible
+        # Update gamelist if possible. Serialize the read-modify-write against the
+        # artwork-download worker and other gamelist writers.
         try:
-            tree, root = self.repository._read_gamelist(system_dir)
-            game = self.repository._find_gamelist_entry_by_path(root, normalized_rom_path)
-            if game is None:
-                rom_name = str(rom.get("rom_file") or Path(normalized_rom_path or rom_id).name)
-                display_name = str(rom.get("image_stem") or rom.get("name") or Path(rom_name).stem)
-                game = self.repository._find_gamelist_entry(root, rom_name, display_name)
-            if game is None and normalized_rom_path:
-                display_name = str(rom.get("image_stem") or rom.get("name") or Path(normalized_rom_path).stem)
-                game = ET.SubElement(root, "game")
-                _set_child_text(game, "path", f"./{normalized_rom_path}")
-                _set_child_text(game, "name", _clean_rom_title(display_name))
-            if game is not None:
-                _set_child_text(game, field_name, relative_path)
-                gamelist_path = system_dir / "gamelist.xml"
-                try:
-                    ET.indent(tree, space="  ")
-                except Exception:
-                    pass
-                tree.write(gamelist_path, encoding="utf-8", xml_declaration=True)
-                with gamelist_path.open("a", encoding="utf-8") as handle:
-                    handle.write("\n")
-                gamelist_details = _gamelist_details(game)
-                existing = {field: _text_or_empty(game, field) for field in ARTWORK_FIELDS}
-                missing = self.repository._entry_missing_artwork(game)
-                has_gamelist_entry = True
+            with _GAMELIST_WRITE_LOCK:
+                tree, root = self.repository._read_gamelist(system_dir)
+                game = self.repository._find_gamelist_entry_by_path(root, normalized_rom_path)
+                if game is None:
+                    rom_name = str(rom.get("rom_file") or Path(normalized_rom_path or rom_id).name)
+                    display_name = str(rom.get("image_stem") or rom.get("name") or Path(rom_name).stem)
+                    game = self.repository._find_gamelist_entry(root, rom_name, display_name)
+                if game is None and normalized_rom_path:
+                    display_name = str(rom.get("image_stem") or rom.get("name") or Path(normalized_rom_path).stem)
+                    game = ET.SubElement(root, "game")
+                    _set_child_text(game, "path", f"./{normalized_rom_path}")
+                    _set_child_text(game, "name", _clean_rom_title(display_name))
+                if game is not None:
+                    _set_child_text(game, field_name, relative_path)
+                    gamelist_path = system_dir / "gamelist.xml"
+                    try:
+                        ET.indent(tree, space="  ")
+                    except Exception:
+                        pass
+                    tree.write(gamelist_path, encoding="utf-8", xml_declaration=True)
+                    with gamelist_path.open("a", encoding="utf-8") as handle:
+                        handle.write("\n")
+                    gamelist_details = _gamelist_details(game)
+                    existing = {field: _text_or_empty(game, field) for field in ARTWORK_FIELDS}
+                    missing = self.repository._entry_missing_artwork(game)
+                    has_gamelist_entry = True
         except Exception:
             pass  # Gamelist write is best-effort for manual uploads
         # Invalidate caches
@@ -12084,9 +12141,11 @@ def _download_artwork_from_peer(
     try:
         try:
             gamelist_update = repository.update_gamelist_artwork_reference(system, local_rom_rel, field, artwork_rel)
-        except PermissionError:
-            # gamelist.xml is root-owned / not yet writable by the Drone; fix perms
-            # via the privileged worker and retry once before reporting failure.
+        except Exception:
+            # gamelist.xml is typically root-owned / not yet writable by the Drone
+            # (a freshly-scraped, root:644 file), surfacing as PermissionError; other
+            # transient errors are possible too. Ask the privileged worker to make it
+            # group-writable, then retry once before reporting failure.
             _ensure_rom_write_access(settings, system)
             gamelist_update = repository.update_gamelist_artwork_reference(system, local_rom_rel, field, artwork_rel)
     except Exception as error:
