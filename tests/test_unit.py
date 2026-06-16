@@ -969,6 +969,61 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual((root / "roms" / "atari7800" / "Asteroids (USA).zip").read_bytes(), b"ROMDATA")
             fetch.assert_not_called()
 
+    def test_download_rom_from_peer_skips_existing_target_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            target = root / "roms" / "nes" / "Game.nes"
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b"already here")
+
+            with mock.patch("app.drone_api.urlopen", side_effect=AssertionError("duplicate download attempted")):
+                result = _download_rom_from_peer(
+                    settings,
+                    {},
+                    {"drone_id": "source-a", "reachable_url": "http://source-a:8080"},
+                    "nes",
+                    "Game.nes",
+                )
+
+            self.assertEqual(result["status"], "skipped")
+            self.assertEqual(result["skip_reason"], "target path already exists")
+            self.assertFalse((root / "roms" / "nes" / "Game (2).nes").exists())
+
+    def test_download_rom_from_peer_skips_matching_local_fingerprint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            existing = root / "roms" / "nes" / "Existing Name.nes"
+            existing.parent.mkdir(parents=True)
+            existing.write_bytes(b"same rom bytes")
+            fingerprint = RomRepository.build_fingerprint(existing)
+
+            with mock.patch("app.drone_api.urlopen", side_effect=AssertionError("duplicate download attempted")):
+                result = _download_rom_from_peer(
+                    settings,
+                    {},
+                    {"drone_id": "source-a", "reachable_url": "http://source-a:8080"},
+                    "nes",
+                    "Peer Name.nes",
+                    expected_fingerprint=fingerprint,
+                )
+
+            self.assertEqual(result["status"], "skipped")
+            self.assertEqual(result["skip_reason"], "matching ROM already exists")
+            self.assertEqual(result["relative_path"], "Existing Name.nes")
+            self.assertFalse((root / "roms" / "nes" / "Peer Name.nes").exists())
+
     def test_cancelled_download_uses_part_file_and_is_not_inventoried(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
@@ -4560,6 +4615,79 @@ class LocalNetworkAssetCopyTests(unittest.TestCase):
             self.assertFalse(any(j.get("file_type") == "ROM" for j in jobs))
             artwork = [j for j in jobs if j.get("file_type") == "ARTWORK"]
             self.assertEqual(sorted(j["artwork_type"] for j in artwork), ["image", "marquee"])
+
+    def test_existing_rom_on_disk_is_skipped_even_when_metadata_is_stale(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            self._seed_two_systems(root)
+            settings = self._settings(root)
+            repo = drone_api.RomRepository(root / "roms", root / "bios")
+            handler = self._handler(settings, repo)
+            with mock.patch("app.drone_api.Thread.start"):
+                manager = drone_api.DownloadManager(settings, repo)
+            item = {
+                "system": "snes",
+                "relative_path": "Super Mario World.zip",
+                "file_size": (root / "roms" / "snes" / "Super Mario World.zip").stat().st_size,
+            }
+
+            with mock.patch.object(repo, "list_assets", return_value=(root / "roms" / "snes", [])):
+                jobs = handler._enqueue_local_asset(
+                    manager, {}, {"drone_id": "source-a"}, "roms", item,
+                    default_system="snes", include_artwork=False,
+                )
+
+            self.assertEqual(jobs, [])
+            self.assertEqual(manager.snapshot()["queued"], [])
+
+    def test_existing_rom_fingerprint_is_skipped_even_when_peer_name_differs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            self._seed_two_systems(root)
+            settings = self._settings(root)
+            repo = drone_api.RomRepository(root / "roms", root / "bios")
+            handler = self._handler(settings, repo)
+            local_rom = root / "roms" / "snes" / "Super Mario World.zip"
+            item = {
+                "system": "snes",
+                "relative_path": "Super Mario World (USA).zip",
+                "file_size": local_rom.stat().st_size,
+                "rom_fingerprint": repo.build_fingerprint(local_rom),
+            }
+            with mock.patch("app.drone_api.Thread.start"):
+                manager = drone_api.DownloadManager(settings, repo)
+
+            jobs = handler._enqueue_local_asset(
+                manager, {}, {"drone_id": "source-a"}, "roms", item,
+                default_system="snes", include_artwork=False,
+            )
+
+            self.assertEqual(jobs, [])
+            self.assertEqual(manager.snapshot()["queued"], [])
+
+    def test_duplicate_rom_queue_request_is_not_enqueued_twice(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            self._seed_two_systems(root)
+            settings = self._settings(root)
+            repo = drone_api.RomRepository(root / "roms", root / "bios")
+            handler = self._handler(settings, repo)
+            with mock.patch("app.drone_api.Thread.start"):
+                manager = drone_api.DownloadManager(settings, repo)
+            peer = {"drone_id": "source-a", "reachable_url": "http://source-a:8080"}
+
+            first = handler._enqueue_local_asset(
+                manager, {}, peer, "roms", self._peer_only_rom_item(),
+                default_system="snes", include_artwork=False,
+            )
+            second = handler._enqueue_local_asset(
+                manager, {}, peer, "roms", self._peer_only_rom_item(),
+                default_system="snes", include_artwork=False,
+            )
+
+            self.assertEqual(len([job for job in first if job.get("file_type") == "ROM"]), 1)
+            self.assertEqual(second, [])
+            self.assertEqual(len(manager.snapshot()["queued"]), 1)
 
     def test_annotate_roms_exist_locally(self):
         with tempfile.TemporaryDirectory() as tmp:

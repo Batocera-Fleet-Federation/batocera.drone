@@ -6771,6 +6771,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             return cache[system]
         fingerprints: Dict[str, str] = {}
         paths: Dict[str, str] = {}
+        names_by_size: Dict[tuple, str] = {}
         try:
             _, rows = self.repository.list_assets(system, "roms")
         except Exception:
@@ -6783,9 +6784,34 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             fp = str(row.get("fingerprint") or row.get("rom_fingerprint") or "").strip().lower()
             if rel_norm:
                 paths.setdefault(rel_norm, rel)
+                size = row.get("byte_count") or row.get("file_size") or row.get("size")
+                try:
+                    size_int = int(size)
+                except (TypeError, ValueError):
+                    size_int = -1
+                names_by_size.setdefault((Path(rel_norm).name, size_int), rel)
             if fp:
                 fingerprints.setdefault(fp, rel)
-        index = {"fingerprints": fingerprints, "paths": paths}
+        system_dir = (self.settings.roms_root if getattr(self, "settings", None) else self.repository.roms_root) / system
+        if system_dir.exists() and system_dir.is_dir():
+            for entry in sorted(system_dir.rglob("*"), key=lambda path: path.relative_to(system_dir).as_posix().lower()):
+                if not entry.is_file():
+                    continue
+                rel = entry.relative_to(system_dir).as_posix()
+                if self.repository.should_ignore_rom_path(Path(rel)):
+                    continue
+                rel_norm = rel.replace("\\", "/").lstrip("./").lower()
+                try:
+                    size_int = int(entry.stat().st_size)
+                except OSError:
+                    continue
+                paths.setdefault(rel_norm, rel)
+                names_by_size.setdefault((Path(rel_norm).name, size_int), rel)
+                try:
+                    fingerprints.setdefault(self.repository.build_fingerprint(entry).lower(), rel)
+                except Exception:
+                    continue
+        index = {"fingerprints": fingerprints, "paths": paths, "names_by_size": names_by_size}
         if cache is not None:
             cache[system] = index
         return index
@@ -6814,10 +6840,22 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         path match only when no fingerprint is available to compare."""
         peer_fp = str(item.get("rom_fingerprint") or item.get("fingerprint") or "").strip().lower()
         if peer_fp:
-            return index.get("fingerprints", {}).get(peer_fp)
+            match = index.get("fingerprints", {}).get(peer_fp)
+            if match:
+                return match
         rel = str(item.get("relative_path") or item.get("rom_path") or item.get("file_path") or "")
         rel_norm = rel.replace("\\", "/").lstrip("./").lower()
-        return index.get("paths", {}).get(rel_norm)
+        match = index.get("paths", {}).get(rel_norm)
+        if match:
+            return match
+        size = item.get("byte_count") or item.get("file_size") or item.get("size")
+        try:
+            size_int = int(size)
+        except (TypeError, ValueError):
+            size_int = -1
+        if size_int >= 0 and rel_norm:
+            return index.get("names_by_size", {}).get((Path(rel_norm).name, size_int))
+        return None
 
     def _enqueue_local_asset(
         self,
@@ -6847,6 +6885,14 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             index = self._local_rom_index(system, cache=local_index_cache)
             local_match = self._match_local_rom(index, item)
             if local_match is None:
+                pending_match = (
+                    manager.find_pending_rom(system, relative_path, item.get("rom_fingerprint") or item.get("fingerprint"))
+                    if hasattr(manager, "find_pending_rom")
+                    else None
+                )
+            else:
+                pending_match = None
+            if local_match is None and pending_match is None:
                 # Not on this machine yet -> download it.
                 jobs.append(manager.enqueue_rom(
                     config,
@@ -6861,7 +6907,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             else:
                 # Already present (thumbprint match) -> skip the ROM, attach artwork
                 # to the existing local ROM so it shows after a gamelist refresh.
-                art_local_path = local_match
+                art_local_path = local_match or relative_path
             if include_artwork:
                 gamelist = item.get("gamelist") if isinstance(item.get("gamelist"), dict) else {}
                 fields = [field for field in ARTWORK_FIELDS if gamelist.get(field)]
@@ -10802,6 +10848,27 @@ class DownloadManager:
         self._wake.set()
         return {"status": "queued", "job": snapshot, "retried_from_job_id": job_id}
 
+    def find_pending_rom(self, system: str, relative_path: str, expected_fingerprint: Optional[str] = None) -> Optional[dict]:
+        """Return an active/queued ROM job for the same local target or fingerprint."""
+        system_norm = str(system or "").strip().lower()
+        path_norm = str(relative_path or "").replace("\\", "/").strip().lstrip("./").lower()
+        fp_norm = str(expected_fingerprint or "").strip().lower()
+        with self._lock:
+            for job in self._jobs.values():
+                if job.get("status") not in {"queued", "downloading"}:
+                    continue
+                if str(job.get("file_type") or "").upper() != "ROM":
+                    continue
+                if str(job.get("system") or "").strip().lower() != system_norm:
+                    continue
+                job_path = str(job.get("relative_path") or job.get("file_path") or "").replace("\\", "/").strip().lstrip("./").lower()
+                job_fp = str(job.get("_expected_fingerprint") or "").strip().lower()
+                if path_norm and job_path == path_norm:
+                    return self._public_job_locked(job)
+                if fp_norm and job_fp == fp_norm:
+                    return self._public_job_locked(job)
+        return None
+
     def snapshot(self) -> dict:
         with self._lock:
             jobs = [self._public_job_locked(job) for job in self._jobs.values()]
@@ -11419,16 +11486,72 @@ def _download_rom_from_peer(
     rel = _safe_rom_relative_path(relative_path)
     url = f"{address}/v1/api/peer/roms/{quote(system, safe='')}/{quote(rel, safe='/')}"
     system_dir = (settings.roms_root / system).resolve()
-    target = _collision_safe_target(system_dir, rel)
+    target = (system_dir / rel).resolve()
+    if target == system_dir or system_dir not in target.parents:
+        raise ValueError("invalid target path")
     partial_target = target.with_name(f"{target.name}.part")
+    started_dt = datetime.now(timezone.utc).replace(microsecond=0)
+    started = started_dt.isoformat()
+    started_mono = time.monotonic()
+    expected_fingerprint_clean = str(expected_fingerprint or "").strip().lower()
+
+    def skipped_activity(existing: Path, reason: str) -> dict:
+        completed_dt = datetime.now(timezone.utc).replace(microsecond=0)
+        duration_ms = int((time.monotonic() - started_mono) * 1000)
+        try:
+            size = int(existing.stat().st_size)
+        except OSError:
+            try:
+                size = int(expected_size or 0) if expected_size not in (None, "") else 0
+            except (TypeError, ValueError):
+                size = 0
+        try:
+            fingerprint = RomRepository.build_fingerprint(existing) if existing.is_file() else expected_fingerprint_clean
+        except Exception:
+            fingerprint = expected_fingerprint_clean
+        return {
+            "source_drone_id": peer_id,
+            "target_drone_id": settings.overmind_device_id,
+            "system": system,
+            "rom_name": rel,
+            "relative_path": existing.relative_to(system_dir).as_posix(),
+            "action": "download",
+            "status": "skipped",
+            "skip_reason": reason,
+            "failure_reason": reason,
+            "bytes_transferred": 0,
+            "file_size": size or expected_size,
+            "fingerprint": fingerprint,
+            "rom_fingerprint": expected_fingerprint_clean or fingerprint,
+            "download_started_at": started,
+            "download_completed_at": completed_dt.isoformat(),
+            "started_at": started,
+            "completed_at": completed_dt.isoformat(),
+            "duration_ms": duration_ms,
+            "duration_seconds": round(duration_ms / 1000, 3),
+            "selected_peer_reason": "local ROM already exists",
+        }
+
+    if target.exists():
+        return skipped_activity(target, "target path already exists")
+    if expected_fingerprint_clean and system_dir.exists() and system_dir.is_dir():
+        for candidate in sorted(system_dir.rglob("*"), key=lambda path: path.relative_to(system_dir).as_posix().lower()):
+            if not candidate.is_file():
+                continue
+            rel_candidate = candidate.relative_to(system_dir).as_posix()
+            if RomRepository.should_ignore_rom_path(Path(rel_candidate)):
+                continue
+            try:
+                if RomRepository.build_fingerprint(candidate).lower() == expected_fingerprint_clean:
+                    return skipped_activity(candidate, "matching ROM already exists")
+            except Exception:
+                continue
+
     target.parent.mkdir(parents=True, exist_ok=True)
     cafile = _peer_trust_cafile(settings, peer_id=peer_id, config=config)
     if address.startswith("https://") and not cafile:
         raise ssl.SSLError(f"no trusted certificate cached for peer {peer_id}")
     context = _drone_client_ssl_context(settings, url, verify=bool(cafile), cafile=cafile)
-    started_dt = datetime.now(timezone.utc).replace(microsecond=0)
-    started = started_dt.isoformat()
-    started_mono = time.monotonic()
     bytes_written = 0
     request = Request(url, headers={"User-Agent": "batocera-drone-rom-sync/1.0"})
     def ensure_not_cancelled() -> None:
@@ -11507,7 +11630,6 @@ def _download_rom_from_peer(
         except ValueError:
             pass
     actual_fingerprint = RomRepository.build_fingerprint(partial_target)
-    expected_fingerprint_clean = str(expected_fingerprint or "").strip().lower()
     if expected_fingerprint_clean and actual_fingerprint.lower() != expected_fingerprint_clean:
         if partial_target.exists():
             partial_target.unlink()
