@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.1.19] - 2026-06-15
+
+- fixing bug when bulk downloading roms and artwork.
+
 ## [v0.1.18] - 2026-06-15
 
 - New capability: "Artwork only" sync in the Local Network panel
