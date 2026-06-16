@@ -3263,6 +3263,7 @@ let localPeerAssetContext = {
   systems: [],
   availableSystems: [],
   systemCounts: {},
+  systemsLoadedPeerId: "",
   items: [],
   query: "",
   limit: 50,
@@ -3623,6 +3624,7 @@ async function renderLocalNetworkIntegrationPanel(target) {
           <button class="btn btn-primary" id="localAssetLoadBtn"><i class="bi bi-search me-1"></i>Request</button>
           <button class="btn btn-success" id="localAssetCopyAllBtn" disabled><i class="bi bi-cloud-arrow-down me-1"></i>Download All</button>
           <div class="form-check ms-lg-2 d-none" id="localAssetArtworkWrap"><input class="form-check-input" type="checkbox" id="localAssetIncludeArtwork" checked><label class="form-check-label small" for="localAssetIncludeArtwork">Include artwork (places art &amp; updates gamelist.xml)</label></div>
+          <div class="form-check d-none" id="localAssetOverwriteArtworkWrap"><input class="form-check-input" type="checkbox" id="localAssetOverwriteArtwork"><label class="form-check-label small" for="localAssetOverwriteArtwork">Overwrite existing artwork (otherwise only artwork missing here is downloaded)</label></div>
         </div>
         <div id="localAssetsBody"><div class="themed-empty">Pair a nearby Drone, then request its assets here.</div></div>
         <div id="localAssetsPagination" class="mt-2"></div>
@@ -3645,9 +3647,15 @@ async function renderLocalNetworkIntegrationPanel(target) {
       ? pairedPeers.map(peer => `<option value="${escapeHtml(peer.drone_id || "")}">${escapeHtml(peer.name || peer.hostname || peer.drone_id || "Drone")}</option>`).join("")
       : '<option value="">No paired Drones</option>';
     if (pairedPeers.some(peer => String(peer.drone_id || "") === selectedPeerId)) peerSelect.value = selectedPeerId;
-    if (peerSelect.value && peerSelect.value !== localPeerAssetContext.peerId) {
+    if (peerSelect.value && localPeerAssetContext.systemsLoadedPeerId !== peerSelect.value) {
+      // Peer changed (or systems were never loaded for it) -- load from the peer.
       localPeerAssetContext.peerId = peerSelect.value;
       await loadLocalPeerSystems();
+    } else if (peerSelect.value) {
+      // Same peer, systems already loaded: the menu DOM was reset to its
+      // placeholder by this panel re-render, so repaint it from cache instead of
+      // letting the loaded systems silently vanish.
+      renderLocalAssetSystems();
     }
     if (peerSelect.value && localPeerAssetContext.autoLoadedPeerId !== peerSelect.value) {
       localPeerAssetContext.autoLoadedPeerId = peerSelect.value;
@@ -3663,6 +3671,7 @@ async function renderLocalNetworkIntegrationPanel(target) {
   document.getElementById("localAssetLoadBtn").addEventListener("click", () => loadLocalPeerAssets());
   document.getElementById("localAssetCopyAllBtn").addEventListener("click", copyAllLocalAssets);
   document.getElementById("localAssetType").addEventListener("change", updateLocalAssetTypeUi);
+  document.getElementById("localAssetIncludeArtwork").addEventListener("change", updateLocalAssetTypeUi);
   document.getElementById("localAssetPeer").addEventListener("change", async () => {
     localPeerAssetContext.autoLoadedPeerId = "";
     await loadLocalPeerSystems();
@@ -3680,11 +3689,19 @@ function localAssetIncludeArtwork() {
   return checkbox ? !!checkbox.checked : false;
 }
 
+function localAssetOverwriteArtwork() {
+  const checkbox = document.getElementById("localAssetOverwriteArtwork");
+  return checkbox ? !!checkbox.checked : false;
+}
+
 function updateLocalAssetTypeUi() {
   const type = (document.getElementById("localAssetType") || {}).value || "roms";
-  // The "Include artwork" option only applies when copying ROMs.
+  // The artwork options only apply when copying ROMs.
   const wrap = document.getElementById("localAssetArtworkWrap");
   if (wrap) wrap.classList.toggle("d-none", type !== "roms");
+  // "Overwrite existing artwork" is only meaningful when artwork is being included.
+  const overwriteWrap = document.getElementById("localAssetOverwriteArtworkWrap");
+  if (overwriteWrap) overwriteWrap.classList.toggle("d-none", type !== "roms" || !localAssetIncludeArtwork());
 }
 
 function selectedLocalAssetSystems() {
@@ -3741,12 +3758,18 @@ async function loadLocalPeerSystems() {
   localPeerAssetContext.systems = [];
   localPeerAssetContext.availableSystems = [];
   localPeerAssetContext.systemCounts = {};
+  localPeerAssetContext.systemsLoadedPeerId = "";
   renderLocalAssetSystems();
   if (!peerId) return;
   try {
     const summary = await api(`/admin/local-network/peers/${encodeURIComponent(peerId)}/assets?type=summary`);
-    localPeerAssetContext.availableSystems = Array.from(new Set(summary.systems || [])).sort((a, b) => String(a).localeCompare(String(b)));
-    localPeerAssetContext.systemCounts = summary.system_counts || {};
+    const counts = summary.system_counts || {};
+    localPeerAssetContext.systemCounts = counts;
+    // Hide systems with no items -- an empty system is just noise in the filter.
+    localPeerAssetContext.availableSystems = Array.from(new Set(summary.systems || []))
+      .filter((name) => Number(counts[name] || 0) > 0)
+      .sort((a, b) => String(a).localeCompare(String(b)));
+    localPeerAssetContext.systemsLoadedPeerId = peerId;
   } catch (_) {
     localPeerAssetContext.availableSystems = [];
     localPeerAssetContext.systemCounts = {};
@@ -3769,7 +3792,7 @@ async function forgetLocalPeer(peerId) {
 }
 
 async function browseLocalPeer(peerId) {
-  localPeerAssetContext = { peerId, peerName: peerId, assetType: "roms", systems: [], availableSystems: [], systemCounts: {}, items: [], query: "", limit: 50, offset: 0, total: 0, autoLoadedPeerId: "" };
+  localPeerAssetContext = { peerId, peerName: peerId, assetType: "roms", systems: [], availableSystems: [], systemCounts: {}, systemsLoadedPeerId: "", items: [], query: "", limit: 50, offset: 0, total: 0, autoLoadedPeerId: "" };
   document.getElementById("localAssetPeer").value = peerId;
   document.getElementById("localAssetType").value = "roms";
   document.getElementById("localAssetQuery").value = "";
@@ -3827,6 +3850,7 @@ async function copyLocalPeerAsset(index) {
     asset_type: localPeerAssetContext.assetType,
     system: item.system || item.root_name || "",
     include_artwork: localAssetIncludeArtwork(),
+    overwrite_artwork: localAssetOverwriteArtwork(),
     item,
   });
   if (result && result.rom_skipped) {
@@ -3849,7 +3873,7 @@ async function copyAllLocalAssets() {
   if (!LOCAL_TRANSFERABLE_TYPES.has(type)) { showToast("Bulk download supports ROMs, BIOS, and saves.", "warning"); return; }
   const scope = systems.length ? `all ${type} for ${systems.join(", ")}` : (q ? `all ${type} matching “${q}”` : `every ${type} asset`);
   if (!window.confirm(`Queue ${scope} from this Drone for download?`)) return;
-  await queueLocalBulkCopy({ peer_id: peerId, asset_type: type, systems, q, include_artwork: localAssetIncludeArtwork() });
+  await queueLocalBulkCopy({ peer_id: peerId, asset_type: type, systems, q, include_artwork: localAssetIncludeArtwork(), overwrite_artwork: localAssetOverwriteArtwork() });
 }
 
 async function copyAllRomsForSystem(encodedSystem) {
@@ -3857,7 +3881,7 @@ async function copyAllRomsForSystem(encodedSystem) {
   const peerId = document.getElementById("localAssetPeer").value || localPeerAssetContext.peerId;
   if (!peerId) { showToast("Pair a Drone before copying assets.", "warning"); return; }
   if (!window.confirm(`Queue all ROMs for ${system} from this Drone for download?`)) return;
-  await queueLocalBulkCopy({ peer_id: peerId, asset_type: "roms", system, include_artwork: localAssetIncludeArtwork() });
+  await queueLocalBulkCopy({ peer_id: peerId, asset_type: "roms", system, include_artwork: localAssetIncludeArtwork(), overwrite_artwork: localAssetOverwriteArtwork() });
 }
 
 async function queueLocalBulkCopy(body) {

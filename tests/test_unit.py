@@ -4616,6 +4616,60 @@ class LocalNetworkAssetCopyTests(unittest.TestCase):
             artwork = [j for j in jobs if j.get("file_type") == "ARTWORK"]
             self.assertEqual(sorted(j["artwork_type"] for j in artwork), ["image", "marquee"])
 
+    def test_existing_artwork_is_skipped_when_not_overwriting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            self._seed_two_systems(root)
+            settings = self._settings(root)
+            repo = drone_api.RomRepository(root / "roms", root / "bios")
+            handler = self._handler(settings, repo)
+            with mock.patch("app.drone_api.Thread.start"):
+                manager = drone_api.DownloadManager(settings, repo)
+
+            inventory = handler._collect_peer_inventory("roms", {"system": ["snes"]})
+            local_item = inventory["items"][0]
+
+            # ROM already present AND both artwork files already on disk: with
+            # overwrite disabled, nothing is queued.
+            jobs = handler._enqueue_local_asset(
+                manager, {}, {"drone_id": "source-a"}, "roms", local_item,
+                default_system="snes", include_artwork=True, overwrite_artwork=False,
+            )
+            self.assertEqual(jobs, [])
+
+    def test_only_missing_artwork_is_fetched_when_not_overwriting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            self._seed_two_systems(root)
+            # image -> existing file (present); marquee -> a file not on disk (missing).
+            (root / "roms" / "snes" / "gamelist.xml").write_text(
+                '<?xml version="1.0" encoding="UTF-8"?>\n<gameList>\n'
+                "  <game>\n"
+                "    <path>./Super Mario World.zip</path>\n"
+                "    <name>Super Mario World</name>\n"
+                "    <image>./images/Super Mario World.png</image>\n"
+                "    <marquee>./images/Super Mario World Marquee.png</marquee>\n"
+                "  </game>\n"
+                "</gameList>\n",
+                encoding="utf-8",
+            )
+            settings = self._settings(root)
+            repo = drone_api.RomRepository(root / "roms", root / "bios")
+            handler = self._handler(settings, repo)
+            with mock.patch("app.drone_api.Thread.start"):
+                manager = drone_api.DownloadManager(settings, repo)
+
+            inventory = handler._collect_peer_inventory("roms", {"system": ["snes"]})
+            local_item = inventory["items"][0]
+
+            jobs = handler._enqueue_local_asset(
+                manager, {}, {"drone_id": "source-a"}, "roms", local_item,
+                default_system="snes", include_artwork=True, overwrite_artwork=False,
+            )
+            # Only the missing marquee is fetched; the already-present image is left alone.
+            artwork = [j for j in jobs if j.get("file_type") == "ARTWORK"]
+            self.assertEqual(sorted(j["artwork_type"] for j in artwork), ["marquee"])
+
     def test_existing_rom_on_disk_is_skipped_even_when_metadata_is_stale(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"

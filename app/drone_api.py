@@ -2945,6 +2945,33 @@ class RomRepository:
             raise FileNotFoundError()
         return target, target.relative_to(system_dir).as_posix(), artwork_ref
 
+    def list_present_artwork(self, system: str) -> Dict[str, set]:
+        """Map normalized ROM path -> set of artwork fields that are both referenced
+        in this system's gamelist.xml and present on disk. Lets the local-network
+        sync skip re-downloading artwork that already exists, parsing the gamelist
+        once per system instead of once per ROM."""
+        system_dir = self.get_system_dir(system).resolve()
+        try:
+            _, root = self._read_gamelist(system_dir)
+        except Exception:
+            return {}
+        present: Dict[str, set] = {}
+        for game in root.findall("game"):
+            rom_norm = _normalize_gamelist_rom_path(_text_or_empty(game, "path")).lower()
+            if not rom_norm:
+                continue
+            fields = set()
+            for field in ARTWORK_FIELDS:
+                ref = _normalize_gamelist_rom_path(_text_or_empty(game, field))
+                if not ref:
+                    continue
+                target = (system_dir / ref).resolve()
+                if target.is_file() and (target == system_dir or system_dir in target.parents):
+                    fields.add(field)
+            if fields:
+                present[rom_norm] = fields
+        return present
+
     def update_gamelist_artwork_reference(self, system: str, rom_path: str, artwork_type: str, artwork_relative_path: str) -> dict:
         system_dir = self.get_system_dir(system).resolve()
         field = str(artwork_type or "").strip()
@@ -6844,6 +6871,20 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             cache[system] = index
         return index
 
+    def _local_artwork_index(self, system: str, cache: Optional[dict] = None) -> dict:
+        """Normalized ROM path -> set of artwork fields already present locally for a
+        system. Memoized in `cache` (system -> index) for bulk operations so the
+        gamelist is parsed once per system."""
+        if cache is not None and system in cache:
+            return cache[system]
+        try:
+            index = self.repository.list_present_artwork(system)
+        except Exception:
+            index = {}
+        if cache is not None:
+            cache[system] = index
+        return index
+
     def _ensure_system_writable_once(self, system: str) -> None:
         """Ensure this ROM system's media dirs + gamelist are writable by the Drone,
         at most once per request (a bulk copy touches one system many times)."""
@@ -6894,16 +6935,21 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         item: dict,
         default_system: str = "",
         include_artwork: bool = True,
+        overwrite_artwork: bool = True,
         local_index_cache: Optional[dict] = None,
+        local_artwork_cache: Optional[dict] = None,
     ) -> List[dict]:
         """Enqueue a single peer asset (and, for ROMs, its artwork when present).
 
         ROMs already present on this machine (matched by content fingerprint, or
         path when no fingerprint is available) are NOT re-downloaded; their artwork
-        is still copied (overwriting any same-named file) and linked into the local
-        gamelist. Returns the list of jobs created. Shared by the single-item sync
-        and the bulk "copy all" handlers. `local_index_cache` (system -> index) lets
-        the bulk path reuse the local ROM lookup across many items."""
+        is still copied and linked into the local gamelist. When `overwrite_artwork`
+        is False, artwork fields the local ROM already has (referenced in gamelist.xml
+        and present on disk) are left untouched -- only missing artwork is fetched.
+        Returns the list of jobs created. Shared by the single-item sync and the bulk
+        "copy all" handlers. `local_index_cache`/`local_artwork_cache` (system ->
+        index) let the bulk path reuse the local ROM and artwork lookups across many
+        items."""
         jobs: List[dict] = []
         if asset_type == "roms":
             system = str(item.get("system") or default_system or "").strip()
@@ -6939,6 +6985,13 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             if include_artwork:
                 gamelist = item.get("gamelist") if isinstance(item.get("gamelist"), dict) else {}
                 fields = [field for field in ARTWORK_FIELDS if gamelist.get(field)]
+                if not overwrite_artwork and fields:
+                    # Skip artwork the local ROM already has -- only fetch what's
+                    # missing so user-curated/scraped art isn't clobbered.
+                    present = self._local_artwork_index(system, cache=local_artwork_cache).get(
+                        _normalize_gamelist_rom_path(art_local_path).lower(), set()
+                    )
+                    fields = [field for field in fields if field not in present]
                 if fields:
                     # Make the target system's media dirs + gamelist.xml writable
                     # for the unprivileged Drone before the artwork jobs run. Done
@@ -7004,6 +7057,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         asset_type = str(payload.get("asset_type") or "").strip().lower()
         item = payload.get("item") if isinstance(payload.get("item"), dict) else payload
         include_artwork = bool(payload.get("include_artwork", True))
+        overwrite_artwork = bool(payload.get("overwrite_artwork", True))
         peer = _local_network.get_paired_peer(self.settings, peer_id)
         manager = _get_download_manager()
         if not peer:
@@ -7021,6 +7075,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             item,
             default_system=str(payload.get("system") or ""),
             include_artwork=include_artwork,
+            overwrite_artwork=overwrite_artwork,
         )
         rom_skipped = asset_type == "roms" and not any(job.get("file_type") == "ROM" for job in jobs)
         self._send_json(202, {
@@ -7053,6 +7108,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         ]
         query = str(payload.get("q") or "").strip()
         include_artwork = bool(payload.get("include_artwork", True))
+        overwrite_artwork = bool(payload.get("overwrite_artwork", True))
         peer = _local_network.get_paired_peer(self.settings, peer_id)
         manager = _get_download_manager()
         if not peer:
@@ -7069,6 +7125,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         skipped_existing = 0
         total = None
         local_index_cache: dict = {}
+        local_artwork_cache: dict = {}
         while True:
             params = [f"limit={page_size}", f"offset={offset}"]
             if system:
@@ -7094,7 +7151,9 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                     entry,
                     default_system=system,
                     include_artwork=include_artwork,
+                    overwrite_artwork=overwrite_artwork,
                     local_index_cache=local_index_cache,
+                    local_artwork_cache=local_artwork_cache,
                 )
                 asset_jobs = [job for job in jobs if job.get("file_type") != "ARTWORK"]
                 queued_assets += len(asset_jobs)
