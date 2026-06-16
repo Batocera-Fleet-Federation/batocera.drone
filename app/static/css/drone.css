@@ -366,6 +366,50 @@
       border-color: var(--admin-border);
       color: var(--admin-text);
     }
+    .local-assets-table,
+    #localPeersBody .themed-table {
+      font-size: 0.82rem;
+      line-height: 1.22;
+    }
+    .local-assets-table thead th,
+    .local-assets-table tbody td,
+    #localPeersBody .themed-table thead th,
+    #localPeersBody .themed-table tbody td {
+      padding: 0.32rem 0.45rem;
+    }
+    .local-assets-table .btn-sm,
+    #localPeersBody .btn-sm {
+      --bs-btn-padding-y: 0.18rem;
+      --bs-btn-padding-x: 0.4rem;
+      --bs-btn-font-size: 0.76rem;
+    }
+    .local-asset-details-modal {
+      color: var(--admin-text);
+      background: rgba(15, 23, 42, 0.98);
+      border: 1px solid var(--admin-border);
+    }
+    .local-asset-details-modal .modal-header {
+      background: rgba(31, 42, 68, 0.94);
+      border-color: var(--admin-border);
+    }
+    .local-asset-details-modal .modal-body {
+      background: rgba(11, 16, 32, 0.92);
+    }
+    .local-asset-native-content {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      color: var(--admin-text);
+      background: rgba(21, 31, 50, 0.74);
+      border: 1px solid var(--admin-border);
+      border-radius: 8px;
+      padding: 0.85rem;
+      margin: 0;
+    }
+    .local-asset-details-table th {
+      width: 14rem;
+      color: var(--admin-muted);
+      font-weight: 600;
+    }
     .themed-empty {
       color: var(--admin-muted);
       background: rgba(21, 31, 50, 0.58);

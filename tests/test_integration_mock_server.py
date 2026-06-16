@@ -164,6 +164,11 @@ class MockServerIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(peer_saves["asset_type"], "saves")
         self.assertTrue(peer_saves["items"])
+        peer_summary = self._get_json(
+            "/v1/api/admin/local-network/peers/nearby-fake-drone/assets?type=summary"
+        )
+        self.assertIn("system_counts", peer_summary)
+        self.assertIsInstance(peer_summary["system_counts"], dict)
         peer_gameplay = self._get_json(
             "/v1/api/admin/local-network/peers/nearby-fake-drone/assets?type=gameplay&limit=5"
         )
@@ -181,6 +186,7 @@ class MockServerIntegrationTests(unittest.TestCase):
         self.assertIn(b"setLocalTransferSearch", js)
         self.assertIn(b"Queue ETA:", js)
         self.assertIn(b"renderQueueEta", js)
+        self.assertNotIn(b'<option value="artwork">Artwork</option>', js)
         self.assertNotIn(b"networkModeSelect", js)
 
     def test_peer_inventory_does_not_expose_absolute_paths(self) -> None:

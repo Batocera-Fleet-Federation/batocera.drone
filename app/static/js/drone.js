@@ -3256,7 +3256,20 @@ async function removeMissingGamelistEntriesForCurrentFilters() {
     setLoading(false);
   }
 }
-let localPeerAssetContext = { peerId: "", peerName: "", assetType: "summary", systems: [], availableSystems: [], items: [], query: "", limit: 50, offset: 0, total: 0 };
+let localPeerAssetContext = {
+  peerId: "",
+  peerName: "",
+  assetType: "roms",
+  systems: [],
+  availableSystems: [],
+  systemCounts: {},
+  items: [],
+  query: "",
+  limit: 50,
+  offset: 0,
+  total: 0,
+  autoLoadedPeerId: "",
+};
 
 function localPeerStatusBadge(peer) {
   if (!peer.paired) return '<span class="badge text-bg-warning">Discovered</span>';
@@ -3280,7 +3293,7 @@ function renderLocalPeerRows(peers) {
       const insecure = !peer.paired && url !== "" && !/^https:/i.test(url);
       let actionCell;
       if (peer.paired) {
-        actionCell = `<button class="btn btn-sm btn-primary me-1" onclick="browseLocalPeer(decodeURIComponent('${peerToken}'))">Request Assets</button><button class="btn btn-sm btn-outline-danger" onclick="forgetLocalPeer(decodeURIComponent('${peerToken}'))">Forget</button>`;
+        actionCell = `<button class="btn btn-sm btn-outline-danger" onclick="forgetLocalPeer(decodeURIComponent('${peerToken}'))">Forget</button>`;
       } else if (insecure) {
         actionCell = `<button class="btn btn-sm btn-outline-secondary" disabled title="This Drone is advertising ${escapeHtml(url)} (not HTTPS), so it can't be paired for secure transfers. Update/repair the Drone on that machine.">Not secure</button>`;
       } else {
@@ -3312,7 +3325,71 @@ function localAssetDetail(item) {
   return date ? formatCompactLocalDate(date) : (item.duration || item.emulator || "");
 }
 
-const LOCAL_TRANSFERABLE_TYPES = new Set(["roms", "bios", "artwork", "saves"]);
+const LOCAL_TRANSFERABLE_TYPES = new Set(["roms", "bios", "saves"]);
+
+function localAssetNativeLabel(key) {
+  return String(key || "")
+    .replace(/^is_/, "")
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, char => char.toUpperCase());
+}
+
+function localAssetNativeValue(key, value) {
+  if (value === null || value === undefined || value === "") return "";
+  if (String(key || "").endsWith("_at")) return formatCompactLocalDate(value);
+  if (String(key || "").includes("duration") && !Number.isNaN(Number(value))) return formatDuration(value);
+  if (String(key || "").includes("size") || String(key || "").includes("byte_count")) return formatBytes(value);
+  if (Array.isArray(value)) return value.join(", ");
+  if (typeof value === "object") return Object.entries(value)
+    .map(([entryKey, entryValue]) => `${localAssetNativeLabel(entryKey)}: ${localAssetNativeValue(entryKey, entryValue)}`)
+    .join("\n");
+  return String(value);
+}
+
+function localAssetDetailRows(item) {
+  const hidden = new Set(["absolute_path", "content", "content_truncated", "is_downloadable"]);
+  return Object.entries(item || {})
+    .filter(([key, value]) => !hidden.has(key) && value !== null && value !== undefined && value !== "")
+    .map(([key, value]) => `<tr><th class="text-nowrap">${escapeHtml(localAssetNativeLabel(key))}</th><td class="mono text-wrap">${escapeHtml(localAssetNativeValue(key, value))}</td></tr>`)
+    .join("");
+}
+
+function showLocalAssetDetails(index) {
+  const item = localPeerAssetContext.items[index];
+  if (!item) return;
+  const modalId = "localAssetDetailsModal";
+  let modal = document.getElementById(modalId);
+  if (!modal) {
+    modal = document.createElement("div");
+    modal.id = modalId;
+    modal.className = "modal fade";
+    modal.tabIndex = -1;
+    modal.setAttribute("aria-hidden", "true");
+    document.body.appendChild(modal);
+  }
+  const content = item.content
+    ? `<pre class="local-asset-native-content">${escapeHtml(item.content)}</pre>${item.content_truncated ? '<div class="small text-warning mt-2">Content was truncated by the target Drone.</div>' : ""}`
+    : `<div class="table-responsive"><table class="table table-sm themed-table local-asset-details-table mb-0"><tbody>${localAssetDetailRows(item) || '<tr><td>No details reported by target Drone.</td></tr>'}</tbody></table></div>`;
+  modal.innerHTML = `
+    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+      <div class="modal-content local-asset-details-modal">
+        <div class="modal-header">
+          <div>
+            <h5 class="modal-title mb-0">${escapeHtml(localAssetDisplayName(item))}</h5>
+            <div class="small text-muted">${escapeHtml(localAssetPath(item) || item.relative_path || item.root_name || "")}</div>
+          </div>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">${content}</div>
+      </div>
+    </div>`;
+  if (window.bootstrap?.Modal) {
+    window.bootstrap.Modal.getOrCreateInstance(modal).show();
+  } else {
+    modal.classList.add("show");
+    modal.style.display = "block";
+  }
+}
 
 function localAssetSystemEntries() {
   // Distinct systems present in the currently loaded page (for per-system bulk copy).
@@ -3330,7 +3407,6 @@ function renderLocalAssetRows(payload) {
   if (!localPeerAssetContext.items.length) return '<div class="themed-empty">No assets match this view.</div>';
   const isRoms = localPeerAssetContext.assetType === "roms";
   const transferable = LOCAL_TRANSFERABLE_TYPES.has(localPeerAssetContext.assetType);
-  const downloadLabel = isRoms ? "Download" : "Copy Here";
   // When browsing ROMs across multiple systems, expose a quick per-system "download all".
   let systemBar = "";
   if (isRoms) {
@@ -3342,7 +3418,7 @@ function renderLocalAssetRows(payload) {
       </div>`;
     }
   }
-  return systemBar + `<div class="table-responsive"><table class="table table-sm table-hover align-middle themed-table">
+  return systemBar + `<div class="table-responsive"><table class="table table-sm table-hover align-middle themed-table local-assets-table">
     <thead><tr><th>Name</th><th>Path</th><th>System / Source</th><th>Size</th><th>Details</th><th></th></tr></thead>
     <tbody>${localPeerAssetContext.items.map((item, index) => {
       const exists = isRoms && item.exists_locally === true;
@@ -3354,7 +3430,8 @@ function renderLocalAssetRows(payload) {
       // ROM rows use a compact icon-only button to keep the table tight; an
       // existing ROM is not re-downloaded but the button still copies its artwork.
       const romBtn = `<button class="btn btn-sm ${exists ? "btn-outline-primary" : "btn-primary"}" title="${exists ? "On this machine — copy its artwork" : "Download"}" aria-label="${exists ? "Copy artwork" : "Download"}" onclick="copyLocalPeerAsset(${index})"><i class="bi ${exists ? "bi-images" : "bi-cloud-arrow-down"}"></i></button>`;
-      const otherBtn = `<button class="btn btn-sm btn-primary" onclick="copyLocalPeerAsset(${index})"><i class="bi bi-cloud-arrow-down me-1"></i>${downloadLabel}</button>`;
+      const otherBtn = `<button class="btn btn-sm btn-primary" title="Copy here" aria-label="Copy here" onclick="copyLocalPeerAsset(${index})"><i class="bi bi-cloud-arrow-down"></i></button>`;
+      const detailsBtn = `<button class="btn btn-sm btn-outline-primary" title="View details" aria-label="View details" onclick="showLocalAssetDetails(${index})"><i class="bi bi-eye"></i></button>`;
       return `<tr>
       <td><strong>${escapeHtml(localAssetDisplayName(item))}</strong>${statusBadge}</td>
       <td class="small mono">${escapeHtml(localAssetPath(item))}</td>
@@ -3363,7 +3440,7 @@ function renderLocalAssetRows(payload) {
       <td class="small">${escapeHtml(localAssetDetail(item) || String(item.rom_fingerprint || item.bios_md5 || item.saves_fingerprint || item.fingerprint || item.md5 || "").slice(0, 16))}</td>
       <td>${transferable
         ? (isRoms ? romBtn : otherBtn)
-        : `<details><summary class="btn btn-sm btn-outline-primary">View Details</summary><pre class="mono small mt-2 mb-0 text-wrap">${escapeHtml(JSON.stringify(item, null, 2))}</pre></details>`}</td>
+        : detailsBtn}</td>
     </tr>`;
     }).join("")}</tbody></table></div>`;
 }
@@ -3534,10 +3611,10 @@ async function renderLocalNetworkIntegrationPanel(target) {
       <div class="card-body" id="localPeersBody"><div class="text-muted">Loading peers...</div></div></div>
     <div class="card log-card mb-3" id="localAssetsCard"><div class="card-header"><span id="localAssetsTitle">Request Assets from Connected Drone</span></div>
       <div class="card-body">
-        <div class="small text-muted mb-3">Request inventories from a paired Drone, then download what you need. ROMs, BIOS, artwork, and saves can be copied here; emulator configs and gameplay history are available for inspection.</div>
+        <div class="small text-muted mb-3">Request inventories from a paired Drone, then download what you need. ROMs, BIOS, and saves can be copied here; emulator configs and gameplay history are available for inspection.</div>
         <div class="row g-2 mb-2">
           <div class="col-12 col-lg-3"><label class="form-label small" for="localAssetPeer">Connected Drone</label><select id="localAssetPeer" class="form-select"></select></div>
-          <div class="col-6 col-lg-2"><label class="form-label small" for="localAssetType">Asset Type</label><select id="localAssetType" class="form-select"><option value="roms">ROMs</option><option value="bios">BIOS</option><option value="saves">Saves</option><option value="emulator_configs">Emulator Configs</option><option value="gameplay">Gameplay History</option><option value="artwork">Artwork</option></select></div>
+          <div class="col-6 col-lg-2"><label class="form-label small" for="localAssetType">Asset Type</label><select id="localAssetType" class="form-select"><option value="roms">ROMs</option><option value="bios">BIOS</option><option value="saves">Saves</option><option value="emulator_configs">Emulator Configs</option><option value="gameplay">Gameplay History</option></select></div>
           <div class="col-6 col-lg-2"><label class="form-label small">Systems</label><div class="dropdown"><button id="localAssetSystemsToggle" class="btn btn-outline-secondary dropdown-toggle w-100 text-start" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside">All systems</button><div id="localAssetSystemsMenu" class="dropdown-menu p-2 w-100"><div class="small text-muted">Select a connected Drone to load systems.</div></div></div></div>
           <div class="col-8 col-lg-3"><label class="form-label small" for="localAssetQuery">Search</label><input id="localAssetQuery" class="form-control" placeholder="Search assets"></div>
           <div class="col-4 col-lg-2"><label class="form-label small" for="localAssetPageSize">Per Page</label><select id="localAssetPageSize" class="form-select"><option value="50">50</option><option value="100">100</option><option value="200">200</option></select></div>
@@ -3572,6 +3649,10 @@ async function renderLocalNetworkIntegrationPanel(target) {
       localPeerAssetContext.peerId = peerSelect.value;
       await loadLocalPeerSystems();
     }
+    if (peerSelect.value && localPeerAssetContext.autoLoadedPeerId !== peerSelect.value) {
+      localPeerAssetContext.autoLoadedPeerId = peerSelect.value;
+      await loadLocalPeerAssets();
+    }
     document.getElementById("localAssetLoadBtn").disabled = !pairedPeers.length;
     document.getElementById("localAssetCopyAllBtn").disabled = !pairedPeers.length;
   }
@@ -3582,7 +3663,11 @@ async function renderLocalNetworkIntegrationPanel(target) {
   document.getElementById("localAssetLoadBtn").addEventListener("click", () => loadLocalPeerAssets());
   document.getElementById("localAssetCopyAllBtn").addEventListener("click", copyAllLocalAssets);
   document.getElementById("localAssetType").addEventListener("change", updateLocalAssetTypeUi);
-  document.getElementById("localAssetPeer").addEventListener("change", loadLocalPeerSystems);
+  document.getElementById("localAssetPeer").addEventListener("change", async () => {
+    localPeerAssetContext.autoLoadedPeerId = "";
+    await loadLocalPeerSystems();
+    await loadLocalPeerAssets();
+  });
   document.getElementById("localAssetPageSize").addEventListener("change", () => loadLocalPeerAssets());
   document.getElementById("localAssetQuery").addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); loadLocalPeerAssets(); } });
   updateLocalAssetTypeUi();
@@ -3613,6 +3698,7 @@ function renderLocalAssetSystems() {
   const toggle = document.getElementById("localAssetSystemsToggle");
   if (!menu || !toggle) return;
   const systems = localPeerAssetContext.availableSystems || [];
+  const counts = localPeerAssetContext.systemCounts || {};
   const selected = new Set(localPeerAssetContext.systems || []);
   if (!systems.length) {
     menu.innerHTML = '<div class="small text-muted px-2 py-1">No systems reported.</div>';
@@ -3626,7 +3712,9 @@ function renderLocalAssetSystems() {
     <div id="localAssetSystemsList" style="max-height: 260px; overflow-y: auto;">
       ${systems.map(system => {
         const safe = escapeHtml(system);
-        return `<label class="dropdown-item d-flex gap-2 align-items-center" data-system="${safe.toLowerCase()}"><input class="form-check-input local-asset-system-check" type="checkbox" value="${safe}" ${selected.has(system) ? "checked" : ""}>${safe}</label>`;
+        const count = Number(counts[system] || 0);
+        const countBadge = `<span class="badge text-bg-secondary ms-auto">${count}</span>`;
+        return `<label class="dropdown-item d-flex gap-2 align-items-center" data-system="${safe.toLowerCase()}"><input class="form-check-input local-asset-system-check" type="checkbox" value="${safe}" ${selected.has(system) ? "checked" : ""}><span>${safe}</span>${countBadge}</label>`;
       }).join("")}
     </div>`;
   toggle.textContent = selected.size ? `${selected.size} selected` : "All systems";
@@ -3652,13 +3740,16 @@ async function loadLocalPeerSystems() {
   localPeerAssetContext.peerId = peerId;
   localPeerAssetContext.systems = [];
   localPeerAssetContext.availableSystems = [];
+  localPeerAssetContext.systemCounts = {};
   renderLocalAssetSystems();
   if (!peerId) return;
   try {
     const summary = await api(`/admin/local-network/peers/${encodeURIComponent(peerId)}/assets?type=summary`);
     localPeerAssetContext.availableSystems = Array.from(new Set(summary.systems || [])).sort((a, b) => String(a).localeCompare(String(b)));
+    localPeerAssetContext.systemCounts = summary.system_counts || {};
   } catch (_) {
     localPeerAssetContext.availableSystems = [];
+    localPeerAssetContext.systemCounts = {};
   }
   renderLocalAssetSystems();
 }
@@ -3678,14 +3769,13 @@ async function forgetLocalPeer(peerId) {
 }
 
 async function browseLocalPeer(peerId) {
-  localPeerAssetContext = { peerId, peerName: peerId, assetType: "roms", systems: [], availableSystems: [], items: [], query: "", limit: 50, offset: 0, total: 0 };
+  localPeerAssetContext = { peerId, peerName: peerId, assetType: "roms", systems: [], availableSystems: [], systemCounts: {}, items: [], query: "", limit: 50, offset: 0, total: 0, autoLoadedPeerId: "" };
   document.getElementById("localAssetPeer").value = peerId;
   document.getElementById("localAssetType").value = "roms";
   document.getElementById("localAssetQuery").value = "";
   await loadLocalPeerSystems();
   updateLocalAssetTypeUi();
-  document.getElementById("localAssetsBody").innerHTML = '<div class="themed-empty">Choose an asset type and request assets from this Drone.</div>';
-  document.getElementById("localAssetsPagination").innerHTML = "";
+  await loadLocalPeerAssets();
   document.getElementById("localAssetsCard").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
@@ -3722,10 +3812,11 @@ async function loadLocalPeerAssets(resetPage = true) {
   }
 }
 
-function setLocalAssetPage(page) {
+async function setLocalAssetPage(page) {
   const limit = Math.max(1, Number(localPeerAssetContext.limit) || 50);
   localPeerAssetContext.offset = Math.max(0, (Math.max(1, Number(page) || 1) - 1) * limit);
-  loadLocalPeerAssets(false);
+  await loadLocalPeerAssets(false);
+  document.getElementById("localAssetsCard")?.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 async function copyLocalPeerAsset(index) {
@@ -3755,7 +3846,7 @@ async function copyAllLocalAssets() {
   const systems = selectedLocalAssetSystems();
   const q = document.getElementById("localAssetQuery").value.trim();
   if (!peerId) { showToast("Pair a Drone before copying assets.", "warning"); return; }
-  if (!LOCAL_TRANSFERABLE_TYPES.has(type)) { showToast("Bulk download supports ROMs, BIOS, saves, and artwork.", "warning"); return; }
+  if (!LOCAL_TRANSFERABLE_TYPES.has(type)) { showToast("Bulk download supports ROMs, BIOS, and saves.", "warning"); return; }
   const scope = systems.length ? `all ${type} for ${systems.join(", ")}` : (q ? `all ${type} matching “${q}”` : `every ${type} asset`);
   if (!window.confirm(`Queue ${scope} from this Drone for download?`)) return;
   await queueLocalBulkCopy({ peer_id: peerId, asset_type: type, systems, q, include_artwork: localAssetIncludeArtwork() });

@@ -4803,10 +4803,18 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         }
         if normalized == "summary":
             cache_status = _rom_metadata_cache_status(self.settings)
+            system_rows = self.repository.list_systems()
+            system_counts = {
+                str(row.get("name") or ""): int(row.get("rom_count") or 0)
+                for row in system_rows
+                if str(row.get("name") or "")
+            }
+            system_names = sorted(set(self.repository.list_system_names()) | set(system_counts.keys()), key=str.lower)
             return {
                 "drone_id": self.settings.overmind_device_id,
                 "name": socket.gethostname(),
-                "systems": self.repository.list_system_names(),
+                "systems": system_names,
+                "system_counts": system_counts,
                 "counts": cache_status.get("counts") or {},
                 "updated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
             }
@@ -4895,6 +4903,26 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             rows = [row for row in rows if query in json.dumps(row, sort_keys=True).lower()]
         total = len(rows)
         page = rows[offset:offset + limit]
+        if normalized == "emulator_configs":
+            enriched_page = []
+            for row in page:
+                enriched = dict(row)
+                try:
+                    detail = _read_emulator_config_file(
+                        self.settings,
+                        str(row.get("root_name") or ""),
+                        str(row.get("relative_path") or ""),
+                        max_bytes=65536,
+                    )
+                    if detail.get("content") is not None:
+                        enriched["content"] = detail.get("content")
+                        enriched["content_truncated"] = bool(detail.get("truncated"))
+                    if detail.get("fingerprint"):
+                        enriched["fingerprint"] = detail.get("fingerprint")
+                except Exception as error:
+                    enriched.setdefault("error", str(error))
+                enriched_page.append(enriched)
+            page = enriched_page
         return {
             "drone_id": self.settings.overmind_device_id,
             "asset_type": normalized,
