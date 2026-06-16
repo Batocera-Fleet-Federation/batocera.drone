@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.1.18] - 2026-06-15
+
+- New capability: "Artwork only" sync in the Local Network panel
+
 ## [v0.1.17] - 2026-06-15
 
 - Peer-copied artwork files landed on disk but never linked into gamelist.xml because of two layers: the drone runs unprivileged (drone-app) and the gamelist was root:644 (group read-only), so every gamelist write failed with [Errno 13] Permission denied — and the privileged control worker that's supposed to repair perms was stale, never having adopted the redeployed bundle, so repair requests piled up unconsumed.
