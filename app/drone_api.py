@@ -243,6 +243,10 @@ DOWNLOAD_TERMINAL_STATUSES = {"completed", "failed", "cancelled", "skipped"}
 PERSISTENT_OVERMIND_LOG_SOURCES = ("drone_stderr", "es_launch_stdout", "es_launch_stderr")
 DOWNLOAD_PROGRESS_PUSH_SECONDS = float(os.environ.get("DOWNLOAD_PROGRESS_PUSH_SECONDS", "5"))
 PEER_CHECK_TIMEOUT_SECONDS = float(os.environ.get("DRONE_PEER_CHECK_TIMEOUT_SECONDS", "3"))
+# Browsing/copying a peer's inventory can scan a large library to build a page,
+# which far exceeds the quick health-check timeout. Give inventory reads a much
+# longer budget so big libraries don't surface as "read operation timed out".
+PEER_INVENTORY_TIMEOUT_SECONDS = float(os.environ.get("DRONE_PEER_INVENTORY_TIMEOUT_SECONDS", "120"))
 PEER_CHECK_INTERVAL_SECONDS = int(os.environ.get("DRONE_PEER_CHECK_INTERVAL_SECONDS", "300"))
 OVERMIND_SPEED_SAMPLE_SECONDS = int(os.environ.get("OVERMIND_SPEED_SAMPLE_SECONDS", "600"))
 SPEED_TEST_DEFAULT_BASE_URL = "https://speed.cloudflare.com"
@@ -6855,6 +6859,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 self.settings,
                 peer_id=peer_id,
                 config={"network_mode": "local_network"},
+                timeout=PEER_INVENTORY_TIMEOUT_SECONDS,
             )
         if asset_type == "roms" and isinstance(result, dict):
             self._annotate_roms_exist_locally(result.get("items") or [])
@@ -7192,53 +7197,80 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             return
         config = {"network_mode": "local_network"}
         page_size = 500
-        offset = 0
         queued_assets = 0
         queued_artwork = 0
         skipped_existing = 0
-        total = None
+        total = 0
         local_index_cache: dict = {}
         local_artwork_cache: dict = {}
-        while True:
-            params = [f"limit={page_size}", f"offset={offset}"]
-            if system:
-                params.append(f"system={quote(system, safe='')}")
-            if systems:
-                params.append(f"systems={quote(','.join(systems), safe='')}")
-            if query:
-                params.append(f"q={quote(query, safe='')}")
-            inventory = self._fetch_peer_inventory(peer, peer_id, asset_type, params)
-            items = inventory.get("items") or []
-            if total is None:
-                total = inventory.get("total")
-            if not items:
-                break
-            for entry in items:
-                if not isinstance(entry, dict):
-                    continue
-                jobs = self._enqueue_local_asset(
-                    manager,
-                    config,
-                    peer,
-                    asset_type,
-                    entry,
-                    default_system=system,
-                    include_artwork=include_artwork,
-                    overwrite_artwork=overwrite_artwork,
-                    artwork_only=artwork_only,
-                    local_index_cache=local_index_cache,
-                    local_artwork_cache=local_artwork_cache,
-                )
-                asset_jobs = [job for job in jobs if job.get("file_type") != "ARTWORK"]
-                queued_assets += len(asset_jobs)
-                queued_artwork += len(jobs) - len(asset_jobs)
-                if asset_type == "roms" and not artwork_only and not asset_jobs:
-                    skipped_existing += 1
-            offset += len(items)
-            if total is not None and offset >= int(total):
-                break
-            if len(items) < page_size:
-                break
+
+        def walk_scope(scope_system: str) -> None:
+            """Page through one scope (a single system, or the whole library when
+            scope_system is empty) and enqueue each item."""
+            nonlocal queued_assets, queued_artwork, skipped_existing, total
+            offset = 0
+            scope_total = None
+            while True:
+                params = [f"limit={page_size}", f"offset={offset}"]
+                if scope_system:
+                    params.append(f"system={quote(scope_system, safe='')}")
+                if query:
+                    params.append(f"q={quote(query, safe='')}")
+                inventory = self._fetch_peer_inventory(peer, peer_id, asset_type, params)
+                items = inventory.get("items") or []
+                if scope_total is None:
+                    scope_total = inventory.get("total")
+                    if isinstance(scope_total, int):
+                        total += scope_total
+                if not items:
+                    break
+                for entry in items:
+                    if not isinstance(entry, dict):
+                        continue
+                    jobs = self._enqueue_local_asset(
+                        manager,
+                        config,
+                        peer,
+                        asset_type,
+                        entry,
+                        default_system=scope_system or system,
+                        include_artwork=include_artwork,
+                        overwrite_artwork=overwrite_artwork,
+                        artwork_only=artwork_only,
+                        local_index_cache=local_index_cache,
+                        local_artwork_cache=local_artwork_cache,
+                    )
+                    asset_jobs = [job for job in jobs if job.get("file_type") != "ARTWORK"]
+                    queued_assets += len(asset_jobs)
+                    queued_artwork += len(jobs) - len(asset_jobs)
+                    if asset_type == "roms" and not artwork_only and not asset_jobs:
+                        skipped_existing += 1
+                offset += len(items)
+                if scope_total is not None and offset >= int(scope_total):
+                    break
+                if len(items) < page_size:
+                    break
+
+        # For ROMs, walk one system at a time so each peer inventory fetch stays
+        # small (the peer scans only that system) instead of rescanning its whole
+        # library for every page -- which is slow and times out on large libraries.
+        # An "all systems" request is expanded via the cheap summary endpoint.
+        if asset_type == "roms":
+            scope_systems = systems or ([system] if system else [])
+            if not scope_systems:
+                try:
+                    summary = self._fetch_peer_inventory(peer, peer_id, "summary", [])
+                    scope_systems = [str(name) for name in (summary.get("systems") or []) if str(name).strip()]
+                except Exception:
+                    scope_systems = []
+            if scope_systems:
+                for scope_system in scope_systems:
+                    walk_scope(scope_system)
+            else:
+                walk_scope("")
+        else:
+            # bios/saves/artwork inventories aren't per-system scanned the same way.
+            walk_scope(system)
         self._send_json(202, {
             "status": "queued",
             "asset_type": asset_type,
@@ -7269,6 +7301,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             self.settings,
             peer_id=peer_id,
             config={"network_mode": "local_network"},
+            timeout=PEER_INVENTORY_TIMEOUT_SECONDS,
         )
 
     def _handle_admin_credentials_update(self, payload: dict) -> None:
@@ -9167,13 +9200,13 @@ def _fetch_peer_certificate(settings: Settings, config: dict, peer_id: str) -> O
         return None
 
 
-def _peer_get_json(url: str, settings: Settings, peer_id: Optional[str] = None, config: Optional[dict] = None, refresh_cert: bool = False) -> dict:
+def _peer_get_json(url: str, settings: Settings, peer_id: Optional[str] = None, config: Optional[dict] = None, refresh_cert: bool = False, timeout: float = PEER_CHECK_TIMEOUT_SECONDS) -> dict:
     cafile = _peer_trust_cafile(settings, peer_id=peer_id, config=config, refresh_cert=refresh_cert)
     if url.startswith("https://") and peer_id and not cafile:
         raise ssl.SSLError(f"no trusted certificate cached for peer {peer_id}")
     request = Request(url, headers={"Accept": "application/json", "User-Agent": "batocera-drone-peer/1.0"})
     try:
-        with urlopen(request, timeout=PEER_CHECK_TIMEOUT_SECONDS, context=_drone_client_ssl_context(settings, url, verify=bool(cafile), cafile=cafile)) as response:
+        with urlopen(request, timeout=timeout, context=_drone_client_ssl_context(settings, url, verify=bool(cafile), cafile=cafile)) as response:
             raw = response.read()
     except ssl.SSLError as error:
         raise ssl.SSLError(_peer_ssl_diagnostic(url, cafile, error)) from error
