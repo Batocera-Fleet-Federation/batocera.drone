@@ -6993,6 +6993,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         default_system: str = "",
         include_artwork: bool = True,
         overwrite_artwork: bool = True,
+        artwork_only: bool = False,
         local_index_cache: Optional[dict] = None,
         local_artwork_cache: Optional[dict] = None,
     ) -> List[dict]:
@@ -7003,10 +7004,12 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         is still copied and linked into the local gamelist. When `overwrite_artwork`
         is False, artwork fields the local ROM already has (referenced in gamelist.xml
         and present on disk) are left untouched -- only missing artwork is fetched.
-        Returns the list of jobs created. Shared by the single-item sync and the bulk
-        "copy all" handlers. `local_index_cache`/`local_artwork_cache` (system ->
-        index) let the bulk path reuse the local ROM and artwork lookups across many
-        items."""
+        When `artwork_only` is True, ROM files are never downloaded and artwork is
+        attached only to ROMs that already exist on this machine (peer ROMs missing
+        here are skipped entirely). Returns the list of jobs created. Shared by the
+        single-item sync and the bulk "copy all" handlers.
+        `local_index_cache`/`local_artwork_cache` (system -> index) let the bulk path
+        reuse the local ROM and artwork lookups across many items."""
         jobs: List[dict] = []
         if asset_type == "roms":
             system = str(item.get("system") or default_system or "").strip()
@@ -7015,31 +7018,38 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 return jobs
             index = self._local_rom_index(system, cache=local_index_cache)
             local_match = self._match_local_rom(index, item)
-            if local_match is None:
-                pending_match = (
-                    manager.find_pending_rom(system, relative_path, item.get("rom_fingerprint") or item.get("fingerprint"))
-                    if hasattr(manager, "find_pending_rom")
-                    else None
-                )
+            if artwork_only:
+                # Artwork-only sync: never copy the ROM file. Attach artwork only to
+                # ROMs that already exist on this machine; skip peer ROMs we don't have.
+                if local_match is None:
+                    return jobs
+                art_local_path = local_match
             else:
-                pending_match = None
-            if local_match is None and pending_match is None:
-                # Not on this machine yet -> download it.
-                jobs.append(manager.enqueue_rom(
-                    config,
-                    peer,
-                    system,
-                    relative_path,
-                    expected_size=item.get("byte_count") or item.get("file_size"),
-                    expected_fingerprint=item.get("rom_fingerprint") or item.get("fingerprint"),
-                    entry_type=str(item.get("entry_type") or "file"),
-                ))
-                art_local_path = relative_path
-            else:
-                # Already present (thumbprint match) -> skip the ROM, attach artwork
-                # to the existing local ROM so it shows after a gamelist refresh.
-                art_local_path = local_match or relative_path
-            if include_artwork:
+                if local_match is None:
+                    pending_match = (
+                        manager.find_pending_rom(system, relative_path, item.get("rom_fingerprint") or item.get("fingerprint"))
+                        if hasattr(manager, "find_pending_rom")
+                        else None
+                    )
+                else:
+                    pending_match = None
+                if local_match is None and pending_match is None:
+                    # Not on this machine yet -> download it.
+                    jobs.append(manager.enqueue_rom(
+                        config,
+                        peer,
+                        system,
+                        relative_path,
+                        expected_size=item.get("byte_count") or item.get("file_size"),
+                        expected_fingerprint=item.get("rom_fingerprint") or item.get("fingerprint"),
+                        entry_type=str(item.get("entry_type") or "file"),
+                    ))
+                    art_local_path = relative_path
+                else:
+                    # Already present (thumbprint match) -> skip the ROM, attach artwork
+                    # to the existing local ROM so it shows after a gamelist refresh.
+                    art_local_path = local_match or relative_path
+            if include_artwork or artwork_only:
                 gamelist = item.get("gamelist") if isinstance(item.get("gamelist"), dict) else {}
                 fields = [field for field in ARTWORK_FIELDS if gamelist.get(field)]
                 if not overwrite_artwork and fields:
@@ -7115,6 +7125,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         item = payload.get("item") if isinstance(payload.get("item"), dict) else payload
         include_artwork = bool(payload.get("include_artwork", True))
         overwrite_artwork = bool(payload.get("overwrite_artwork", True))
+        artwork_only = bool(payload.get("artwork_only", False))
         peer = _local_network.get_paired_peer(self.settings, peer_id)
         manager = _get_download_manager()
         if not peer:
@@ -7133,13 +7144,17 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             default_system=str(payload.get("system") or ""),
             include_artwork=include_artwork,
             overwrite_artwork=overwrite_artwork,
+            artwork_only=artwork_only,
         )
         rom_skipped = asset_type == "roms" and not any(job.get("file_type") == "ROM" for job in jobs)
+        # Artwork-only against a ROM we don't have here -> nothing to do.
+        rom_absent = artwork_only and not jobs
         self._send_json(202, {
             "status": "queued",
             "job": jobs[0] if jobs else None,
             "jobs": jobs,
             "rom_skipped": rom_skipped,
+            "rom_absent": rom_absent,
         })
 
     def _handle_admin_local_sync_bulk(self, payload: dict) -> None:
@@ -7166,6 +7181,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         query = str(payload.get("q") or "").strip()
         include_artwork = bool(payload.get("include_artwork", True))
         overwrite_artwork = bool(payload.get("overwrite_artwork", True))
+        artwork_only = bool(payload.get("artwork_only", False))
         peer = _local_network.get_paired_peer(self.settings, peer_id)
         manager = _get_download_manager()
         if not peer:
@@ -7209,13 +7225,14 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                     default_system=system,
                     include_artwork=include_artwork,
                     overwrite_artwork=overwrite_artwork,
+                    artwork_only=artwork_only,
                     local_index_cache=local_index_cache,
                     local_artwork_cache=local_artwork_cache,
                 )
                 asset_jobs = [job for job in jobs if job.get("file_type") != "ARTWORK"]
                 queued_assets += len(asset_jobs)
                 queued_artwork += len(jobs) - len(asset_jobs)
-                if asset_type == "roms" and not asset_jobs:
+                if asset_type == "roms" and not artwork_only and not asset_jobs:
                     skipped_existing += 1
             offset += len(items)
             if total is not None and offset >= int(total):

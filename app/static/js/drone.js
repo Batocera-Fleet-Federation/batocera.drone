@@ -3631,7 +3631,8 @@ async function renderLocalNetworkIntegrationPanel(target) {
         <div class="d-flex flex-wrap align-items-center gap-2 mb-3">
           <button class="btn btn-primary" id="localAssetLoadBtn"><i class="bi bi-search me-1"></i>Request</button>
           <button class="btn btn-success" id="localAssetCopyAllBtn" disabled><i class="bi bi-cloud-arrow-down me-1"></i>Download All</button>
-          <div class="form-check ms-lg-2 d-none" id="localAssetArtworkWrap"><input class="form-check-input" type="checkbox" id="localAssetIncludeArtwork" checked><label class="form-check-label small" for="localAssetIncludeArtwork">Include artwork (places art &amp; updates gamelist.xml)</label></div>
+          <div class="form-check ms-lg-2 d-none" id="localAssetArtworkOnlyWrap"><input class="form-check-input" type="checkbox" id="localAssetArtworkOnly"><label class="form-check-label small" for="localAssetArtworkOnly">Artwork only &mdash; skip ROM files, only for ROMs already on this Drone</label></div>
+          <div class="form-check d-none" id="localAssetArtworkWrap"><input class="form-check-input" type="checkbox" id="localAssetIncludeArtwork" checked><label class="form-check-label small" for="localAssetIncludeArtwork">Include artwork (places art &amp; updates gamelist.xml)</label></div>
           <div class="form-check d-none" id="localAssetOverwriteArtworkWrap"><input class="form-check-input" type="checkbox" id="localAssetOverwriteArtwork"><label class="form-check-label small" for="localAssetOverwriteArtwork">Overwrite existing artwork (otherwise only artwork missing here is downloaded)</label></div>
         </div>
         <div id="localAssetsBody"><div class="themed-empty">Pair a nearby Drone, then request its assets here.</div></div>
@@ -3680,6 +3681,7 @@ async function renderLocalNetworkIntegrationPanel(target) {
   document.getElementById("localAssetCopyAllBtn").addEventListener("click", copyAllLocalAssets);
   document.getElementById("localAssetType").addEventListener("change", updateLocalAssetTypeUi);
   document.getElementById("localAssetIncludeArtwork").addEventListener("change", updateLocalAssetTypeUi);
+  document.getElementById("localAssetArtworkOnly").addEventListener("change", updateLocalAssetTypeUi);
   document.getElementById("localAssetPeer").addEventListener("change", async () => {
     localPeerAssetContext.autoLoadedPeerId = "";
     await loadLocalPeerSystems();
@@ -3702,14 +3704,28 @@ function localAssetOverwriteArtwork() {
   return checkbox ? !!checkbox.checked : false;
 }
 
+function localAssetArtworkOnly() {
+  const checkbox = document.getElementById("localAssetArtworkOnly");
+  return checkbox ? !!checkbox.checked : false;
+}
+
 function updateLocalAssetTypeUi() {
   const type = (document.getElementById("localAssetType") || {}).value || "roms";
-  // The artwork options only apply when copying ROMs.
+  const isRoms = type === "roms";
+  const artworkOnly = isRoms && localAssetArtworkOnly();
+  // "Artwork only" applies only to ROMs.
+  const artworkOnlyWrap = document.getElementById("localAssetArtworkOnlyWrap");
+  if (artworkOnlyWrap) artworkOnlyWrap.classList.toggle("d-none", !isRoms);
+  // Artwork-only implies copying artwork, so the "Include artwork" toggle is
+  // redundant -- force it on and hide it in that mode.
+  const includeArtwork = document.getElementById("localAssetIncludeArtwork");
+  if (includeArtwork && artworkOnly) includeArtwork.checked = true;
   const wrap = document.getElementById("localAssetArtworkWrap");
-  if (wrap) wrap.classList.toggle("d-none", type !== "roms");
-  // "Overwrite existing artwork" is only meaningful when artwork is being included.
+  if (wrap) wrap.classList.toggle("d-none", !isRoms || artworkOnly);
+  // "Overwrite existing artwork" is meaningful whenever artwork is being copied
+  // (either alongside ROMs, or in artwork-only mode).
   const overwriteWrap = document.getElementById("localAssetOverwriteArtworkWrap");
-  if (overwriteWrap) overwriteWrap.classList.toggle("d-none", type !== "roms" || !localAssetIncludeArtwork());
+  if (overwriteWrap) overwriteWrap.classList.toggle("d-none", !isRoms || !(localAssetIncludeArtwork() || artworkOnly));
 }
 
 function selectedLocalAssetSystems() {
@@ -3853,21 +3869,25 @@ async function setLocalAssetPage(page) {
 async function copyLocalPeerAsset(index) {
   const item = localPeerAssetContext.items[index];
   if (!item) return;
+  const artworkOnly = localPeerAssetContext.assetType === "roms" && localAssetArtworkOnly();
   const result = await apiPost("/admin/local-network/sync", {
     peer_id: localPeerAssetContext.peerId,
     asset_type: localPeerAssetContext.assetType,
     system: item.system || item.root_name || "",
     include_artwork: localAssetIncludeArtwork(),
     overwrite_artwork: localAssetOverwriteArtwork(),
+    artwork_only: artworkOnly,
     item,
   });
-  if (result && result.rom_skipped) {
+  if (result && result.rom_absent) {
+    showToast("That ROM isn’t on this machine — artwork-only mode skipped it.", "info");
+  } else if (result && result.rom_skipped) {
     const artworkJobs = Array.isArray(result.jobs) ? result.jobs.length : 0;
     showToast(artworkJobs
       ? "ROM already on this machine — copying its artwork only."
-      : "ROM already on this machine — nothing to download.", "info");
+      : (artworkOnly ? "Artwork already on this machine — nothing to copy." : "ROM already on this machine — nothing to download."), "info");
   } else {
-    showToast("Asset queued for local transfer.", "success");
+    showToast(artworkOnly ? "Artwork queued for local transfer." : "Asset queued for local transfer.", "success");
   }
   await window.refreshLocalNetwork();
 }
@@ -3879,17 +3899,21 @@ async function copyAllLocalAssets() {
   const q = document.getElementById("localAssetQuery").value.trim();
   if (!peerId) { showToast("Pair a Drone before copying assets.", "warning"); return; }
   if (!LOCAL_TRANSFERABLE_TYPES.has(type)) { showToast("Bulk download supports ROMs, BIOS, and saves.", "warning"); return; }
-  const scope = systems.length ? `all ${type} for ${systems.join(", ")}` : (q ? `all ${type} matching “${q}”` : `every ${type} asset`);
+  const artworkOnly = type === "roms" && localAssetArtworkOnly();
+  const scopeNoun = artworkOnly ? "artwork (for ROMs already here)" : type;
+  const scope = systems.length ? `all ${scopeNoun} for ${systems.join(", ")}` : (q ? `all ${scopeNoun} matching “${q}”` : `every ${scopeNoun}`);
   if (!window.confirm(`Queue ${scope} from this Drone for download?`)) return;
-  await queueLocalBulkCopy({ peer_id: peerId, asset_type: type, systems, q, include_artwork: localAssetIncludeArtwork(), overwrite_artwork: localAssetOverwriteArtwork() });
+  await queueLocalBulkCopy({ peer_id: peerId, asset_type: type, systems, q, include_artwork: localAssetIncludeArtwork(), overwrite_artwork: localAssetOverwriteArtwork(), artwork_only: artworkOnly });
 }
 
 async function copyAllRomsForSystem(encodedSystem) {
   const system = decodeURIComponent(encodedSystem);
   const peerId = document.getElementById("localAssetPeer").value || localPeerAssetContext.peerId;
   if (!peerId) { showToast("Pair a Drone before copying assets.", "warning"); return; }
-  if (!window.confirm(`Queue all ROMs for ${system} from this Drone for download?`)) return;
-  await queueLocalBulkCopy({ peer_id: peerId, asset_type: "roms", system, include_artwork: localAssetIncludeArtwork(), overwrite_artwork: localAssetOverwriteArtwork() });
+  const artworkOnly = localAssetArtworkOnly();
+  const what = artworkOnly ? `artwork for ${system} ROMs already on this Drone` : `all ROMs for ${system}`;
+  if (!window.confirm(`Queue ${what} from this Drone for download?`)) return;
+  await queueLocalBulkCopy({ peer_id: peerId, asset_type: "roms", system, include_artwork: localAssetIncludeArtwork(), overwrite_artwork: localAssetOverwriteArtwork(), artwork_only: artworkOnly });
 }
 
 async function queueLocalBulkCopy(body) {
@@ -3898,6 +3922,16 @@ async function queueLocalBulkCopy(body) {
     const assets = Number(result.queued_assets) || 0;
     const artwork = Number(result.queued_artwork) || 0;
     const skipped = Number(result.skipped_existing) || 0;
+    if (body.artwork_only) {
+      // Artwork-only: no ROM files are copied; report just the artwork queued.
+      if (!artwork) {
+        showToast("No artwork to copy — either no matching ROMs are on this machine, or their artwork is already present.", "info");
+      } else {
+        showToast(`Queued ${artwork} artwork files for ROMs already on this Drone.`, "success");
+      }
+      await window.refreshLocalNetwork();
+      return;
+    }
     const skippedNote = skipped ? ` ${skipped} already on this machine were skipped.` : "";
     if (!assets && !artwork) {
       showToast(skipped ? `All ${skipped} already on this machine — nothing to download.` : "Nothing matched to download.", skipped ? "info" : "warning");

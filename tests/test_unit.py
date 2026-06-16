@@ -4670,6 +4670,68 @@ class LocalNetworkAssetCopyTests(unittest.TestCase):
             artwork = [j for j in jobs if j.get("file_type") == "ARTWORK"]
             self.assertEqual(sorted(j["artwork_type"] for j in artwork), ["marquee"])
 
+    def test_artwork_only_copies_artwork_for_existing_rom_without_the_rom(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            self._seed_two_systems(root)
+            settings = self._settings(root)
+            repo = drone_api.RomRepository(root / "roms", root / "bios")
+            handler = self._handler(settings, repo)
+            with mock.patch("app.drone_api.Thread.start"):
+                manager = drone_api.DownloadManager(settings, repo)
+
+            inventory = handler._collect_peer_inventory("roms", {"system": ["snes"]})
+            local_item = inventory["items"][0]  # matches the seeded local ROM
+
+            jobs = handler._enqueue_local_asset(
+                manager, {}, {"drone_id": "source-a"}, "roms", local_item,
+                default_system="snes", artwork_only=True, overwrite_artwork=True,
+            )
+            # No ROM file is ever queued; only its artwork is.
+            self.assertFalse(any(j.get("file_type") == "ROM" for j in jobs))
+            artwork = [j for j in jobs if j.get("file_type") == "ARTWORK"]
+            self.assertEqual(sorted(j["artwork_type"] for j in artwork), ["image", "marquee"])
+
+    def test_artwork_only_skips_rom_not_present_on_this_machine(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            self._seed_two_systems(root)
+            settings = self._settings(root)
+            repo = drone_api.RomRepository(root / "roms", root / "bios")
+            handler = self._handler(settings, repo)
+            with mock.patch("app.drone_api.Thread.start"):
+                manager = drone_api.DownloadManager(settings, repo)
+
+            # A peer ROM that is NOT on this machine -> artwork-only must do nothing
+            # (neither the ROM nor its artwork is queued).
+            jobs = handler._enqueue_local_asset(
+                manager, {}, {"drone_id": "source-a"}, "roms", self._peer_only_rom_item(),
+                default_system="snes", artwork_only=True,
+            )
+            self.assertEqual(jobs, [])
+            self.assertEqual(manager.snapshot()["queued"], [])
+
+    def test_artwork_only_respects_overwrite_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            self._seed_two_systems(root)
+            settings = self._settings(root)
+            repo = drone_api.RomRepository(root / "roms", root / "bios")
+            handler = self._handler(settings, repo)
+            with mock.patch("app.drone_api.Thread.start"):
+                manager = drone_api.DownloadManager(settings, repo)
+
+            inventory = handler._collect_peer_inventory("roms", {"system": ["snes"]})
+            local_item = inventory["items"][0]
+
+            # Existing ROM whose image+marquee are already present on disk: artwork-only
+            # with overwrite disabled has nothing to do.
+            jobs = handler._enqueue_local_asset(
+                manager, {}, {"drone_id": "source-a"}, "roms", local_item,
+                default_system="snes", artwork_only=True, overwrite_artwork=False,
+            )
+            self.assertEqual(jobs, [])
+
     def test_existing_rom_on_disk_is_skipped_even_when_metadata_is_stale(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
