@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.1.16] - 2026-06-15
+
+- New control: "Overwrite existing artwork"
+
 ## [v0.1.15] - 2026-06-15
 
 - Removed the Request Assets button from the nearby/paired drone table. Auto-loads assets for the first paired drone in Request Assets from Connected Drone. Removed artwork as a selectable asset type. Added system ROM counts beside each system checkbox. Made local-network tables more compact/readable. Changed BIOS/saves copy actions to icon-only buttons. Changed emulator config/gameplay details to icon-only buttons with a themed modal. Modal shows config content in native text form when available, and readable field/value details instead of raw JSON. Fixed asset pagination so clicking a page scrolls back to the asset card instead of dumping the user at the bottom. Added backend system_counts to peer inventory summaries and page-level config content enrichment.
