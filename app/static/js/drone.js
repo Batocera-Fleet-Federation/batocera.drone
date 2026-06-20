@@ -518,6 +518,17 @@ function clearSystemTheme() {
 function setHash(hash) {
   window.location.hash = hash;
 }
+function scrollContentToTop() {
+  // Reset scroll position on navigation so paging/links/back don't leave the
+  // viewport parked at the bottom of the previous page.
+  try {
+    window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+  } catch (_) {
+    window.scrollTo(0, 0);
+  }
+  const main = document.querySelector("main");
+  if (main) main.scrollTop = 0;
+}
 function stopLogAutoRefresh() {
   if (logRefreshTimer) {
     clearInterval(logRefreshTimer);
@@ -806,7 +817,7 @@ function renderRomGrid(system, items, page = 1, total = items.length) {
           ];
           return `
           <div class="col-12 col-md-6 col-xl-3">
-            <div class="card shadow-sm tile h-100 pointer" onclick="setHash('#system/${encodeURIComponent(system)}/rom/${encodeURIComponent(item.unique_id)}')">
+            <div class="card shadow-sm tile h-100 pointer" onclick="setHash('${romMediaHash(system, item.unique_id, page)}')">
               <img
                 src=""
                 data-src="${primaryImage}"
@@ -831,15 +842,23 @@ function renderRomGrid(system, items, page = 1, total = items.length) {
     </div>
   `;
 }
+function romMediaHash(system, uniqueId, page = 1) {
+  const safePage = Math.max(1, Number(page || 1));
+  return `#system/${encodeURIComponent(system)}/rom/${encodeURIComponent(uniqueId)}${safePage > 1 ? `?page=${safePage}` : ""}`;
+}
 function parseSystemRomHash(hash) {
   if (!hash.startsWith("#system/")) return null;
   const rest = hash.substring("#system/".length);
   const marker = "/rom/";
   const markerIndex = rest.indexOf(marker);
   if (markerIndex < 0) return null;
+  const tail = rest.substring(markerIndex + marker.length);
+  const [idPart, queryPart = ""] = tail.split("?", 2);
+  const params = new URLSearchParams(queryPart);
   return {
     system: decodeURIComponent(rest.substring(0, markerIndex)),
-    uniqueId: decodeURIComponent(rest.substring(markerIndex + marker.length)),
+    uniqueId: decodeURIComponent(idPart),
+    page: Math.max(1, Number.parseInt(params.get("page") || "1", 10) || 1),
   };
 }
 function romMediaItems(system, rom) {
@@ -879,7 +898,7 @@ function romGamelistSummaryHtml(rom) {
     `;
   }).filter(Boolean).join("");
 }
-async function renderRomMediaPage(system, uniqueId) {
+async function renderRomMediaPage(system, uniqueId, page = 1) {
   currentSystemContext = system;
   backBtn.classList.remove("d-none");
   setSearchMode("system", system);
@@ -899,7 +918,7 @@ async function renderRomMediaPage(system, uniqueId) {
     subtitleNode.textContent = `${system} artwork and gamelist.xml metadata`;
     content.innerHTML = `
       <div class="mb-3 d-flex flex-wrap gap-2">
-        <button class="btn btn-outline-secondary" onclick="setHash('#system/${encodeURIComponent(system)}')">← Back to ${escapeHtml(system)}</button>
+        <button class="btn btn-outline-secondary" onclick="setHash('${systemHash(system, page)}')">← Back to ${escapeHtml(system)}</button>
         ${
           rom.is_downloadable === false
             ? `<button class="btn btn-outline-secondary" type="button" disabled><i class="bi bi-folder2-open me-1"></i>Folder ROM</button>`
@@ -976,7 +995,7 @@ async function renderRomMediaPage(system, uniqueId) {
       });
   } catch (err) {
     showToast(`Failed to load ROM media: ${escapeHtml(err.message || "unknown error")}`, "danger");
-    setHash(`#system/${encodeURIComponent(system)}`);
+    setHash(systemHash(system, page));
   } finally {
     setLoading(false);
   }
@@ -5002,6 +5021,7 @@ async function loadSystemInfoBar() {
 }
 async function router() {
   clearError();
+  scrollContentToTop();
   try {
     const hash = window.location.hash || "";
     if (!hash.startsWith("#admin/logs/")) {
@@ -5111,7 +5131,7 @@ async function router() {
       await renderApiAdminPage();
     } else if (parseSystemRomHash(hash)) {
       const parsed = parseSystemRomHash(hash);
-      await renderRomMediaPage(parsed.system, parsed.uniqueId);
+      await renderRomMediaPage(parsed.system, parsed.uniqueId, parsed.page);
     } else if (hash.startsWith("#search-system/")) {
       const rest = hash.substring("#search-system/".length);
       const slashIndex = rest.indexOf("/");
