@@ -1,5 +1,10 @@
 # Changelog
 
+## [v0.1.20] - 2026-06-24
+
+- Adding ability to turn volume down after 5 minutes of not being used so machine does not sit there making noise.
+- Updating UI to function better when a link or button is clicked.  Now it should properly scroll to the area expected by user.
+
 ## [v0.1.19] - 2026-06-15
 
 - fixing bug when bulk downloading roms and artwork.
