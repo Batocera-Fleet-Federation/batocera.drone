@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.1.22] - 2026-06-24
+
+- Updating drone to send update to overmind when automation is updated.
+
 ## [v0.1.21] - 2026-06-24
 
 - Adding ability to remote control automation settings on drone from overmind (idle volume)
