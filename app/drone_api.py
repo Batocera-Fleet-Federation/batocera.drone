@@ -9924,6 +9924,7 @@ def _collect_system_info_payload(settings: Settings) -> dict:
         "asset_cache": asset_cache,
         "screen_mode": _get_screen_mode(settings),
         "audio_volume": _get_audio_volume(settings),
+        "idle_volume_automation": _load_automation_config(settings)["idle_volume"],
         "network": network,
         "uptime_seconds": uptime,
         "container": Path("/.dockerenv").exists() or os.environ.get("RUNNING_IN_DOCKER") == "1",
@@ -12808,6 +12809,21 @@ def _execute_overmind_action(
             "level": applied,
             "muted": applied <= 0,
         }
+
+    if action_name == "set_idle_volume_automation":
+        global _IDLE_VOLUME_LAST_ARMED_ACTIVITY
+        payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
+        config = _load_automation_config(settings)
+        merged = {**config["idle_volume"], **payload}
+        saved = _save_automation_config(settings, {"idle_volume": merged})["idle_volume"]
+        # Re-evaluate from scratch against the new settings on the next poll tick.
+        _IDLE_VOLUME_LAST_ARMED_ACTIVITY = None
+        state = "enabled" if saved["enabled"] else "disabled"
+        message = (
+            f"Idle volume automation {state}: lower to {saved['target_volume']}% "
+            f"after {saved['idle_minutes']} min of no input."
+        )
+        return "completed", message, {"type": "idle_volume_automation", **saved}
 
     if action_name == "update":
         if settings.use_fake_data:

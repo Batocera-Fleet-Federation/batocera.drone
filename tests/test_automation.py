@@ -6,7 +6,9 @@ from unittest import mock
 
 import app.drone_api as drone_api
 from app.drone_api import (
+    RomRepository,
     Settings,
+    _execute_overmind_action,
     _load_automation_config,
     _normalize_idle_volume_config,
     _read_last_input_activity,
@@ -169,6 +171,48 @@ class IdleVolumeAutomationRunnerTests(unittest.TestCase):
                  mock.patch.object(drone_api, "_apply_audio_volume") as apply_mock:
                 _run_idle_volume_automation_once(settings)
                 apply_mock.assert_not_called()
+
+
+class IdleVolumeOvermindActionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        drone_api._IDLE_VOLUME_LAST_ARMED_ACTIVITY = None
+
+    def test_action_saves_config_and_reports_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            repo = RomRepository(Path(tmp) / "roms", Path(tmp) / "bios")
+            status, message, result = _execute_overmind_action(
+                settings,
+                repo,
+                {
+                    "action": "set_idle_volume_automation",
+                    "payload": {"enabled": True, "idle_minutes": 12, "target_volume": 10},
+                },
+            )
+            self.assertEqual(status, "completed")
+            self.assertEqual(result["type"], "idle_volume_automation")
+            self.assertEqual(result["enabled"], True)
+            self.assertEqual(result["idle_minutes"], 12)
+            self.assertEqual(result["target_volume"], 10)
+            self.assertIn("enabled", message)
+            stored = _load_automation_config(settings)["idle_volume"]
+            self.assertEqual(stored, {"enabled": True, "idle_minutes": 12, "target_volume": 10})
+
+    def test_action_partial_payload_merges_and_clamps(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            repo = RomRepository(Path(tmp) / "roms", Path(tmp) / "bios")
+            _save_automation_config(
+                settings,
+                {"idle_volume": {"enabled": True, "idle_minutes": 5, "target_volume": 25}},
+            )
+            status, _message, result = _execute_overmind_action(
+                settings, repo, {"action": "set_idle_volume_automation", "payload": {"target_volume": 999}}
+            )
+            self.assertEqual(status, "completed")
+            self.assertEqual(result["enabled"], True)  # preserved
+            self.assertEqual(result["idle_minutes"], 5)  # preserved
+            self.assertEqual(result["target_volume"], 100)  # clamped
 
 
 if __name__ == "__main__":
