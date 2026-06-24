@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.1.21] - 2026-06-24
+
+- Adding ability to remote control automation settings on drone from overmind (idle volume)
+
 ## [v0.1.20] - 2026-06-24
 
 - Adding ability to turn volume down after 5 minutes of not being used so machine does not sit there making noise.
