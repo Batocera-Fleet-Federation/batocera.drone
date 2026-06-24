@@ -2248,6 +2248,39 @@ def _start_automation_poller(settings: Settings) -> None:
     print(f"Automation poller thread started: poll_seconds={poll_seconds}", file=sys.stdout, flush=True)
 
 
+def _report_idle_volume_to_overmind(settings: Settings) -> bool:
+    """Best-effort immediate push of the idle-volume automation config to Overmind.
+
+    Heartbeats only rebuild the full system_info hourly, so a local change made on
+    the Drone would otherwise take up to an hour to appear in Overmind. This sends a
+    heartbeat now carrying a full system_info snapshot (which includes the idle-volume
+    config). A full snapshot — rather than a partial one — avoids clobbering other
+    system_info columns on Overmind's full-state mirror path. Returns True only on a
+    successful post. Never raises.
+    """
+    if settings.use_fake_data or not _local_network.is_overmind_mode(settings):
+        return False
+    try:
+        config = _load_overmind_config_for_settings(settings)
+        base_url = str(config.get("overmind_url") or "").strip().rstrip("/")
+        token = str(config.get("overmind_token") or "").strip() or str(config.get("overmind_auth_token") or "").strip()
+        if not base_url or not token:
+            return False
+        device_id = quote(settings.overmind_device_id, safe="")
+        url = f"{base_url}/api/devices/{device_id}/heartbeat"
+        payload = {
+            "device_id": settings.overmind_device_id,
+            "device_name": str(config.get("drone_name") or "").strip() or socket.gethostname(),
+            "system_info": _collect_system_info_payload(settings),
+        }
+        _overmind_post_json(url, payload, token=token, settings=settings)
+        _overmind_log(f"Idle-volume automation pushed to Overmind for {settings.overmind_device_id}")
+        return True
+    except Exception as error:
+        _overmind_log(f"Idle-volume Overmind push failed; heartbeat will reconcile: {_format_overmind_error(error)}")
+        return False
+
+
 def _emulationstation_restart_command() -> Optional[List[str]]:
     init_script = Path("/etc/init.d/S31emulationstation")
     if init_script.exists():
@@ -4868,6 +4901,16 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         saved = _save_automation_config(self.settings, {"idle_volume": merged})
         # Re-evaluate from scratch against the new settings on the next poll tick.
         _IDLE_VOLUME_LAST_ARMED_ACTIVITY = None
+        # Push the change to Overmind immediately so the per-Drone admin view reflects
+        # it without waiting for the next hourly system_info refresh. Best-effort and
+        # off-thread so the UI save isn't blocked on Overmind latency; the heartbeat
+        # reconciles it regardless.
+        Thread(
+            target=_report_idle_volume_to_overmind,
+            args=(self.settings,),
+            name="idle-volume-overmind-push",
+            daemon=True,
+        ).start()
         self._send_json(200, {"idle_volume": saved["idle_volume"]})
 
     def _handle_admin_api_certificate(self) -> None:
@@ -12884,6 +12927,7 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                     system_info_payload["updated_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
                     system_info_payload["screen_mode"] = _get_screen_mode(settings)
                     system_info_payload["audio_volume"] = _get_audio_volume(settings)
+                    system_info_payload["idle_volume_automation"] = _load_automation_config(settings)["idle_volume"]
                 network_payload = _drone_network_payload(settings)
                 heartbeat_payload = {
                     "device_id": settings.overmind_device_id,

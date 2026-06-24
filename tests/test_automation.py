@@ -12,6 +12,7 @@ from app.drone_api import (
     _load_automation_config,
     _normalize_idle_volume_config,
     _read_last_input_activity,
+    _report_idle_volume_to_overmind,
     _run_idle_volume_automation_once,
     _save_automation_config,
 )
@@ -213,6 +214,68 @@ class IdleVolumeOvermindActionTests(unittest.TestCase):
             self.assertEqual(result["enabled"], True)  # preserved
             self.assertEqual(result["idle_minutes"], 5)  # preserved
             self.assertEqual(result["target_volume"], 100)  # clamped
+
+
+class IdleVolumeOvermindPushTests(unittest.TestCase):
+    def test_collect_system_info_includes_idle_volume_automation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            _save_automation_config(
+                settings,
+                {"idle_volume": {"enabled": True, "idle_minutes": 8, "target_volume": 10}},
+            )
+            payload = drone_api._collect_system_info_payload(settings)
+            self.assertEqual(
+                payload["idle_volume_automation"],
+                {"enabled": True, "idle_minutes": 8, "target_volume": 10},
+            )
+
+    def test_push_sends_full_heartbeat_with_current_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            _save_automation_config(
+                settings,
+                {"idle_volume": {"enabled": False, "idle_minutes": 8, "target_volume": 0}},
+            )
+            with mock.patch.object(drone_api._local_network, "is_overmind_mode", return_value=True), \
+                 mock.patch.object(
+                     drone_api,
+                     "_load_overmind_config_for_settings",
+                     return_value={"overmind_url": "https://overmind.local/", "overmind_token": "tok"},
+                 ), \
+                 mock.patch.object(drone_api, "_overmind_post_json", return_value={}) as post_mock:
+                ok = _report_idle_volume_to_overmind(settings)
+            self.assertTrue(ok)
+            post_mock.assert_called_once()
+            url = post_mock.call_args.args[0]
+            body = post_mock.call_args.args[1]
+            self.assertTrue(url.endswith("/heartbeat"))
+            # A full system_info snapshot (not a partial one) is sent.
+            self.assertIn("hostname", body["system_info"])
+            self.assertEqual(
+                body["system_info"]["idle_volume_automation"],
+                {"enabled": False, "idle_minutes": 8, "target_volume": 0},
+            )
+
+    def test_push_no_op_when_overmind_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            with mock.patch.object(drone_api._local_network, "is_overmind_mode", return_value=False), \
+                 mock.patch.object(drone_api, "_overmind_post_json") as post_mock:
+                self.assertFalse(_report_idle_volume_to_overmind(settings))
+                post_mock.assert_not_called()
+
+    def test_push_swallows_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            with mock.patch.object(drone_api._local_network, "is_overmind_mode", return_value=True), \
+                 mock.patch.object(
+                     drone_api,
+                     "_load_overmind_config_for_settings",
+                     return_value={"overmind_url": "https://overmind.local", "overmind_token": "tok"},
+                 ), \
+                 mock.patch.object(drone_api, "_overmind_post_json", side_effect=OSError("boom")):
+                self.assertFalse(_report_idle_volume_to_overmind(settings))
 
 
 if __name__ == "__main__":
