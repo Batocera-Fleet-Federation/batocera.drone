@@ -1,0 +1,175 @@
+import tempfile
+import time
+import unittest
+from pathlib import Path
+from unittest import mock
+
+import app.drone_api as drone_api
+from app.drone_api import (
+    Settings,
+    _load_automation_config,
+    _normalize_idle_volume_config,
+    _read_last_input_activity,
+    _run_idle_volume_automation_once,
+    _save_automation_config,
+)
+
+
+def _build_settings(root: Path) -> Settings:
+    env = {
+        "USERDATA_ROOT": str(root),
+        "ROMS_ROOT": str(root / "roms"),
+        "BIOS_ROOT": str(root / "bios"),
+        "SAVES_ROOT": str(root / "saves"),
+        "DRONE_STATE_DATABASE_FILE": str(root / "state.sqlite3"),
+        "OVERMIND_DEVICE_ID": "local-test",
+    }
+    with mock.patch.dict("os.environ", env, clear=True):
+        return Settings.from_env()
+
+
+class IdleVolumeConfigTests(unittest.TestCase):
+    def test_defaults_are_disabled_with_5_minutes_and_25_percent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            config = _load_automation_config(settings)["idle_volume"]
+            self.assertFalse(config["enabled"])
+            self.assertEqual(config["idle_minutes"], 5)
+            self.assertEqual(config["target_volume"], 25)
+
+    def test_normalize_clamps_and_coerces(self) -> None:
+        normalized = _normalize_idle_volume_config(
+            {"enabled": "yes", "idle_minutes": "0", "target_volume": "250"}
+        )
+        self.assertTrue(normalized["enabled"])
+        self.assertEqual(normalized["idle_minutes"], 1)
+        self.assertEqual(normalized["target_volume"], 100)
+
+    def test_normalize_handles_garbage_values(self) -> None:
+        normalized = _normalize_idle_volume_config(
+            {"idle_minutes": "abc", "target_volume": None}
+        )
+        self.assertEqual(normalized["idle_minutes"], 5)
+        self.assertEqual(normalized["target_volume"], 25)
+
+    def test_save_round_trips_and_normalizes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            _save_automation_config(
+                settings,
+                {"idle_volume": {"enabled": True, "idle_minutes": 9999, "target_volume": -5}},
+            )
+            config = _load_automation_config(settings)["idle_volume"]
+            self.assertTrue(config["enabled"])
+            self.assertEqual(config["idle_minutes"], 1440)
+            self.assertEqual(config["target_volume"], 0)
+
+
+class InputActivityFileTests(unittest.TestCase):
+    def test_read_missing_file_returns_none(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(
+                "os.environ",
+                {"DRONE_INPUT_ACTIVITY_FILE": str(Path(tmp) / "missing")},
+                clear=False,
+            ):
+                self.assertIsNone(_read_last_input_activity())
+
+    def test_read_parses_epoch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "last-input-activity"
+            path.write_text("1700000000\n", encoding="utf-8")
+            with mock.patch.dict(
+                "os.environ", {"DRONE_INPUT_ACTIVITY_FILE": str(path)}, clear=False
+            ):
+                self.assertEqual(_read_last_input_activity(), 1700000000.0)
+
+    def test_read_blank_file_returns_none(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "last-input-activity"
+            path.write_text("   \n", encoding="utf-8")
+            with mock.patch.dict(
+                "os.environ", {"DRONE_INPUT_ACTIVITY_FILE": str(path)}, clear=False
+            ):
+                self.assertIsNone(_read_last_input_activity())
+
+
+class IdleVolumeAutomationRunnerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # The runner uses module-level arming state; reset it per test.
+        drone_api._IDLE_VOLUME_LAST_ARMED_ACTIVITY = None
+
+    def _enable(self, settings: Settings, *, idle_minutes: int = 5, target: int = 25) -> None:
+        _save_automation_config(
+            settings,
+            {"idle_volume": {"enabled": True, "idle_minutes": idle_minutes, "target_volume": target}},
+        )
+
+    def test_disabled_does_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            with mock.patch.object(drone_api, "_apply_audio_volume") as apply_mock:
+                _run_idle_volume_automation_once(settings)
+                apply_mock.assert_not_called()
+
+    def test_no_monitor_data_does_not_lower(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            self._enable(settings)
+            with mock.patch.object(drone_api, "_read_last_input_activity", return_value=None), \
+                 mock.patch.object(drone_api, "_apply_audio_volume") as apply_mock:
+                _run_idle_volume_automation_once(settings)
+                apply_mock.assert_not_called()
+
+    def test_recent_input_does_not_lower(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            self._enable(settings, idle_minutes=5)
+            recent = time.time() - 60  # 1 minute idle, threshold is 5
+            with mock.patch.object(drone_api, "_read_last_input_activity", return_value=recent), \
+                 mock.patch.object(drone_api, "_get_audio_volume", return_value=80), \
+                 mock.patch.object(drone_api, "_apply_audio_volume") as apply_mock:
+                _run_idle_volume_automation_once(settings)
+                apply_mock.assert_not_called()
+
+    def test_idle_past_threshold_lowers_once_then_holds(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            self._enable(settings, idle_minutes=5, target=25)
+            idle = time.time() - 600  # 10 minutes idle
+            with mock.patch.object(drone_api, "_read_last_input_activity", return_value=idle), \
+                 mock.patch.object(drone_api, "_get_audio_volume", return_value=80), \
+                 mock.patch.object(drone_api, "_apply_audio_volume", return_value=25) as apply_mock:
+                _run_idle_volume_automation_once(settings)
+                _run_idle_volume_automation_once(settings)  # still idle, same activity stamp
+                apply_mock.assert_called_once_with(settings, 25)
+
+    def test_new_input_rearms_and_lowers_again(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            self._enable(settings, idle_minutes=5, target=25)
+            first_idle = time.time() - 600
+            with mock.patch.object(drone_api, "_get_audio_volume", return_value=80), \
+                 mock.patch.object(drone_api, "_apply_audio_volume", return_value=25) as apply_mock:
+                with mock.patch.object(drone_api, "_read_last_input_activity", return_value=first_idle):
+                    _run_idle_volume_automation_once(settings)
+                # Fresh input arrives, then the device goes idle again.
+                second_idle = time.time() - 600 + 1
+                with mock.patch.object(drone_api, "_read_last_input_activity", return_value=second_idle):
+                    _run_idle_volume_automation_once(settings)
+                self.assertEqual(apply_mock.call_count, 2)
+
+    def test_already_below_target_does_not_set_volume(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            self._enable(settings, idle_minutes=5, target=25)
+            idle = time.time() - 600
+            with mock.patch.object(drone_api, "_read_last_input_activity", return_value=idle), \
+                 mock.patch.object(drone_api, "_get_audio_volume", return_value=10), \
+                 mock.patch.object(drone_api, "_apply_audio_volume") as apply_mock:
+                _run_idle_volume_automation_once(settings)
+                apply_mock.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()

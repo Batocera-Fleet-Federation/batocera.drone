@@ -4,12 +4,11 @@ const backBtn = document.getElementById("backBtn") || {
   addEventListener() {},
 };
 const systemsMenuBtn = document.getElementById("systemsMenuBtn");
-const biosBtn = document.getElementById("biosBtn");
 const brandHomeBtn = document.getElementById("brandHomeBtn");
-const emulatorsMenuBtn = document.getElementById("emulatorsMenuBtn");
 const themeMenuBtn = document.getElementById("themeMenuBtn");
 const systemInfoMenuBtn = document.getElementById("systemInfoMenuBtn");
 const adminMenuBtn = document.getElementById("adminMenuBtn");
+const apiAccessBtn = document.getElementById("apiAccessBtn");
 const searchForm = document.getElementById("searchForm");
 const searchInput = document.getElementById("searchInput");
 const clearSearchBtn = document.getElementById("clearSearchBtn");
@@ -150,7 +149,7 @@ function setSearchMode(mode, systemName = "") {
   }
 }
 function applyAdminVisibility() {
-  const adminLinks = [adminMenuBtn, systemInfoMenuBtn, emulatorsMenuBtn].filter(Boolean);
+  const adminLinks = [adminMenuBtn, systemInfoMenuBtn, apiAccessBtn].filter(Boolean);
   if (adminEnabled) {
     adminLinks.forEach((link) => link.classList.remove("d-none"));
   } else {
@@ -1608,10 +1607,18 @@ async function renderAdminMenu() {
         </div>
       </div>
       <div class="col-md-4 mb-3">
-        <div class="card admin-tile pointer h-100" onclick="setHash('#admin/api')">
+        <div class="card admin-tile pointer h-100" onclick="setHash('#admin/automation')">
           <div class="card-body">
-            <h5 class="card-title"><i class="bi bi-braces me-2"></i>API Access</h5>
-            <p class="card-text">Open Swagger docs, view certificate metadata, and download the public certificate.</p>
+            <h5 class="card-title"><i class="bi bi-robot me-2"></i>Automation</h5>
+            <p class="card-text">Configure hands-off device behaviors, like lowering the volume after a period of no input.</p>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-4 mb-3">
+        <div class="card admin-tile pointer h-100" onclick="setHash('#bios')">
+          <div class="card-body">
+            <h5 class="card-title"><i class="bi bi-cpu me-2"></i>BIOS</h5>
+            <p class="card-text">Browse and download BIOS files detected across emulator systems.</p>
           </div>
         </div>
       </div>
@@ -4297,6 +4304,100 @@ async function renderOvermindIntegrationPanel(target) {
     setLoading(false);
   }
 }
+function formatIdleDuration(seconds) {
+  if (seconds === null || seconds === undefined) return "unknown";
+  const value = Math.max(0, Math.floor(Number(seconds)));
+  if (value < 60) return `${value}s`;
+  const minutes = Math.floor(value / 60);
+  const remainder = value % 60;
+  if (minutes < 60) return remainder ? `${minutes}m ${remainder}s` : `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${minutes % 60}m`;
+}
+async function renderAutomationPage() {
+  currentSystemContext = null;
+  titleNode.textContent = "Automation";
+  subtitleNode.textContent = "Hands-off behaviors for this device";
+  setSearchMode("hidden");
+  clearSystemTheme();
+  setLoading(true, "Loading automation settings...");
+  let payload;
+  try {
+    payload = await api("/admin/automation");
+  } catch (err) {
+    setLoading(false);
+    content.innerHTML = `<div class="mb-3"><button class="btn btn-outline-secondary" onclick="setHash('#admin')">← Back to Admin</button></div><div class="alert alert-danger">Failed to load automation settings: ${escapeHtml(err.message || "unknown error")}</div>`;
+    return;
+  } finally {
+    setLoading(false);
+  }
+  refreshRandomThemeLogo().catch(() => {});
+  const idleVolume = payload.idle_volume || {};
+  const monitor = payload.input_monitor || {};
+  const enabled = !!idleVolume.enabled;
+  const idleMinutes = Number(idleVolume.idle_minutes ?? 5);
+  const targetVolume = Number(idleVolume.target_volume ?? 25);
+  const currentVolume = payload.current_volume;
+  const monitorAlert = monitor.available
+    ? `<div class="text-muted small mb-3"><i class="bi bi-activity me-1"></i>Input monitor active — last input ${escapeHtml(formatIdleDuration(monitor.idle_seconds))} ago${currentVolume === null || currentVolume === undefined ? "" : ` · current volume ${escapeHtml(String(currentVolume))}%`}.</div>`
+    : `<div class="alert alert-warning"><i class="bi bi-exclamation-triangle me-1"></i>The input activity monitor is not reporting yet. This automation only runs once the privileged Drone service is updated and restarted on this machine.</div>`;
+  content.innerHTML = `
+    <div class="mb-3"><button class="btn btn-outline-secondary" onclick="setHash('#admin')">← Back to Admin</button></div>
+    <div class="row">
+      <div class="col-lg-8">
+        <div class="card">
+          <div class="card-header"><i class="bi bi-volume-down me-2"></i>Lower volume when idle</div>
+          <div class="card-body">
+            ${monitorAlert}
+            <p class="card-text text-muted">Automatically lower this device's output volume after it has gone without any controller or keyboard input for a set amount of time. The volume stays lowered until the device is used again.</p>
+            <div class="form-check form-switch mb-3">
+              <input class="form-check-input" type="checkbox" role="switch" id="idleVolumeEnabled" ${enabled ? "checked" : ""}>
+              <label class="form-check-label" for="idleVolumeEnabled">Enable idle volume lowering</label>
+            </div>
+            <div class="row g-3 mb-3">
+              <div class="col-sm-6">
+                <label class="form-label" for="idleVolumeMinutes">Idle time before lowering (minutes)</label>
+                <input class="form-control" type="number" id="idleVolumeMinutes" min="1" max="1440" step="1" value="${escapeHtml(String(idleMinutes))}">
+              </div>
+              <div class="col-sm-6">
+                <label class="form-label" for="idleVolumeTarget">Target volume (%)</label>
+                <input class="form-control" type="number" id="idleVolumeTarget" min="0" max="100" step="5" value="${escapeHtml(String(targetVolume))}">
+                <div class="form-text">0 = mute.</div>
+              </div>
+            </div>
+            <button class="btn btn-primary" id="idleVolumeSaveBtn"><i class="bi bi-save me-1"></i>Save</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+  document.getElementById("idleVolumeSaveBtn").addEventListener("click", async () => {
+    const minutesValue = parseInt(document.getElementById("idleVolumeMinutes").value, 10);
+    const targetValue = parseInt(document.getElementById("idleVolumeTarget").value, 10);
+    if (!Number.isFinite(minutesValue) || minutesValue < 1) {
+      showToast("Idle time must be at least 1 minute.", "warning");
+      return;
+    }
+    if (!Number.isFinite(targetValue) || targetValue < 0 || targetValue > 100) {
+      showToast("Target volume must be between 0 and 100.", "warning");
+      return;
+    }
+    setLoading(true, "Saving automation settings...");
+    try {
+      await apiPost("/admin/automation/idle-volume", {
+        enabled: document.getElementById("idleVolumeEnabled").checked,
+        idle_minutes: minutesValue,
+        target_volume: targetValue,
+      });
+      showToast("Automation settings saved.", "success");
+      await renderAutomationPage();
+    } catch (err) {
+      showToast(`Failed to save automation settings: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    } finally {
+      setLoading(false);
+    }
+  });
+}
 async function renderApiAdminPage() {
   titleNode.textContent = "API Access";
   subtitleNode.textContent = "Swagger documentation and mTLS certificate guidance";
@@ -5129,6 +5230,12 @@ async function router() {
         return;
       }
       await renderApiAdminPage();
+    } else if (hash === "#admin/automation") {
+      if (!adminEnabled) {
+        setHash("");
+        return;
+      }
+      await renderAutomationPage();
     } else if (parseSystemRomHash(hash)) {
       const parsed = parseSystemRomHash(hash);
       await renderRomMediaPage(parsed.system, parsed.uniqueId, parsed.page);
@@ -5169,10 +5276,6 @@ backBtn.addEventListener("click", (event) => {
 brandHomeBtn.addEventListener("click", (event) => {
   event.preventDefault();
   setHash("#home");
-});
-biosBtn.addEventListener("click", (event) => {
-  event.preventDefault();
-  setHash("#bios");
 });
 systemsMenuBtn.addEventListener("click", (event) => {
   event.preventDefault();

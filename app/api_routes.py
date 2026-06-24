@@ -226,6 +226,10 @@ class ApiRoutesMixin:
                 self._handle_admin_api_status()
                 return
 
+            if len(parts) == 2 and parts[0] == "admin" and parts[1] == "automation":
+                self._handle_admin_automation_status()
+                return
+
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "api" and parts[2] == "certificate":
                 self._handle_admin_api_certificate()
                 return
@@ -452,6 +456,11 @@ class ApiRoutesMixin:
 
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "api" and parts[2] == "certificate" and parts[3] == "rotate":
                 self._handle_admin_api_certificate_rotate()
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "automation" and parts[2] == "idle-volume":
+                payload = self._read_json_body()
+                self._handle_admin_automation_idle_volume(payload)
                 return
 
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "system" and parts[2] == "update-drone":

@@ -25,7 +25,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Lock, RLock, Thread
 from threading import Event
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from urllib.parse import quote
@@ -207,6 +207,11 @@ _PEER_HEALTH_CHECK_THREAD_STARTED = False
 _LOCAL_NETWORK_WORKERS_STARTED = False
 _GAME_PROCESS_MONITOR_STARTED = False
 _GAME_PROCESS_MONITOR = None
+_AUTOMATION_POLLER_STARTED = False
+# Last input-activity timestamp (from the privileged input monitor) for which the
+# idle-volume automation already lowered the volume. Cleared on fresh input so the
+# automation re-arms; keeps us from fighting a user who raises the volume manually.
+_IDLE_VOLUME_LAST_ARMED_ACTIVITY: Optional[float] = None
 _ROM_METADATA_ACTIVE = Event()
 _ROM_METADATA_WAKE = Event()
 # Set when an Overmind heartbeat reports asset thumbprints that differ from what the
@@ -2112,6 +2117,135 @@ def _apply_audio_volume(settings: Settings, level: int) -> int:
             "control worker may not be running."
         )
     return level
+
+
+# --- Device automation (idle-volume) -------------------------------------------------
+#
+# The Drone runs unprivileged and cannot read the kernel input devices, so the root
+# service control worker runs ``input_activity_monitor.py``, which records the wall-clock
+# epoch of the most recent controller/keyboard/mouse event in a small file. The poller
+# below reads that file and lowers the volume once the device has been idle long enough.
+
+AUTOMATION_STATE_NAMESPACE = "automation_config.json"
+AUTOMATION_POLL_SECONDS = 15
+DEFAULT_IDLE_VOLUME_MINUTES = 5
+DEFAULT_IDLE_VOLUME_TARGET = 25
+INPUT_ACTIVITY_FILENAME = "last-input-activity"
+
+
+def _input_activity_file_path() -> Path:
+    override = os.environ.get("DRONE_INPUT_ACTIVITY_FILE")
+    if override:
+        return Path(override)
+    control_dir = Path(os.environ.get("DRONE_SERVICE_CONTROL_DIR", "/userdata/system/drone-app/control"))
+    return control_dir / INPUT_ACTIVITY_FILENAME
+
+
+def _read_last_input_activity() -> Optional[float]:
+    """Epoch seconds of the most recent input the privileged monitor saw, or None."""
+    try:
+        text = _input_activity_file_path().read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not text:
+        return None
+    try:
+        return float(text.split()[0])
+    except (ValueError, IndexError):
+        return None
+
+
+def _normalize_idle_volume_config(raw: Any) -> dict:
+    raw = raw if isinstance(raw, dict) else {}
+    try:
+        idle_minutes = int(raw.get("idle_minutes", DEFAULT_IDLE_VOLUME_MINUTES))
+    except (TypeError, ValueError):
+        idle_minutes = DEFAULT_IDLE_VOLUME_MINUTES
+    try:
+        target_volume = int(raw.get("target_volume", DEFAULT_IDLE_VOLUME_TARGET))
+    except (TypeError, ValueError):
+        target_volume = DEFAULT_IDLE_VOLUME_TARGET
+    return {
+        "enabled": bool(raw.get("enabled", False)),
+        "idle_minutes": max(1, min(1440, idle_minutes)),
+        "target_volume": max(0, min(100, target_volume)),
+    }
+
+
+def _load_automation_config(settings: Settings) -> dict:
+    stored = _load_state_payload(
+        _state_database_path(settings.userdata_root),
+        AUTOMATION_STATE_NAMESPACE,
+        {},
+    )
+    stored = stored if isinstance(stored, dict) else {}
+    return {"idle_volume": _normalize_idle_volume_config(stored.get("idle_volume"))}
+
+
+def _save_automation_config(settings: Settings, config: dict) -> dict:
+    normalized = {"idle_volume": _normalize_idle_volume_config((config or {}).get("idle_volume"))}
+    _save_state_payload(
+        _state_database_path(settings.userdata_root),
+        AUTOMATION_STATE_NAMESPACE,
+        normalized,
+    )
+    return normalized
+
+
+def _run_idle_volume_automation_once(settings: Settings) -> None:
+    """Lower the volume once if the device has been idle past the configured threshold."""
+    global _IDLE_VOLUME_LAST_ARMED_ACTIVITY
+    if settings.use_fake_data:
+        return
+    config = _load_automation_config(settings)["idle_volume"]
+    if not config.get("enabled"):
+        _IDLE_VOLUME_LAST_ARMED_ACTIVITY = None
+        return
+    last_activity = _read_last_input_activity()
+    if last_activity is None:
+        # No monitor data yet; never lower a machine we cannot confirm is idle.
+        return
+    # Any input since we last lowered re-arms the automation for the next idle period.
+    if _IDLE_VOLUME_LAST_ARMED_ACTIVITY is not None and last_activity != _IDLE_VOLUME_LAST_ARMED_ACTIVITY:
+        _IDLE_VOLUME_LAST_ARMED_ACTIVITY = None
+    if _IDLE_VOLUME_LAST_ARMED_ACTIVITY is not None:
+        return  # already lowered for this idle period
+    idle_seconds = time.time() - last_activity
+    if idle_seconds < config["idle_minutes"] * 60:
+        return
+    target = config["target_volume"]
+    current = _get_audio_volume(settings)
+    if current is not None and current <= target:
+        # Already at or below target; mark armed so we don't re-check every tick.
+        _IDLE_VOLUME_LAST_ARMED_ACTIVITY = last_activity
+        return
+    try:
+        applied = _apply_audio_volume(settings, target)
+    except (OSError, subprocess.SubprocessError, ValueError) as error:
+        print(f"Idle-volume automation could not set volume: {error}", file=sys.stderr, flush=True)
+        return
+    _IDLE_VOLUME_LAST_ARMED_ACTIVITY = last_activity
+    print(
+        f"Idle-volume automation lowered volume to {applied}% after {int(idle_seconds)}s idle",
+        file=sys.stdout,
+        flush=True,
+    )
+
+
+def _start_automation_poller(settings: Settings) -> None:
+    poll_seconds = max(5, int(os.environ.get("AUTOMATION_POLL_SECONDS", str(AUTOMATION_POLL_SECONDS))))
+
+    def loop() -> None:
+        while True:
+            try:
+                _run_idle_volume_automation_once(settings)
+            except Exception as error:
+                print(f"Automation poll failed: {error}", file=sys.stderr, flush=True)
+            time.sleep(poll_seconds)
+
+    thread = Thread(target=loop, name="drone-automation-poller", daemon=True)
+    thread.start()
+    print(f"Automation poller thread started: poll_seconds={poll_seconds}", file=sys.stdout, flush=True)
 
 
 def _emulationstation_restart_command() -> Optional[List[str]]:
@@ -4121,6 +4255,18 @@ OPENAPI_SPEC = {
                 "responses": {"200": {"description": "API admin status and certificate metadata"}},
             }
         },
+        "/admin/automation": {
+            "get": {
+                "summary": "Get device automation settings and input-idle status",
+                "responses": {"200": {"description": "Automation config plus input monitor status"}},
+            }
+        },
+        "/admin/automation/idle-volume": {
+            "post": {
+                "summary": "Update the idle-volume automation (lower volume after no input)",
+                "responses": {"200": {"description": "Saved idle-volume automation config"}},
+            }
+        },
         "/admin/api/certificate": {
             "get": {
                 "summary": "Download Drone public certificate",
@@ -4696,6 +4842,33 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
                 },
             },
         )
+
+    def _handle_admin_automation_status(self) -> None:
+        config = _load_automation_config(self.settings)
+        last_activity = _read_last_input_activity()
+        idle_seconds = int(time.time() - last_activity) if last_activity is not None else None
+        self._send_json(
+            200,
+            {
+                "idle_volume": config["idle_volume"],
+                "input_monitor": {
+                    "available": last_activity is not None,
+                    "idle_seconds": idle_seconds,
+                    "last_activity_epoch": last_activity,
+                },
+                "current_volume": _get_audio_volume(self.settings),
+            },
+        )
+
+    def _handle_admin_automation_idle_volume(self, payload: dict) -> None:
+        global _IDLE_VOLUME_LAST_ARMED_ACTIVITY
+        payload = payload if isinstance(payload, dict) else {}
+        config = _load_automation_config(self.settings)
+        merged = {**config["idle_volume"], **payload}
+        saved = _save_automation_config(self.settings, {"idle_volume": merged})
+        # Re-evaluate from scratch against the new settings on the next poll tick.
+        _IDLE_VOLUME_LAST_ARMED_ACTIVITY = None
+        self._send_json(200, {"idle_volume": saved["idle_volume"]})
 
     def _handle_admin_api_certificate(self) -> None:
         metadata = DroneCertificateManager(self.settings).ensure_certificate()
@@ -13733,7 +13906,7 @@ def _apply_server_tls(settings: Settings, server: ThreadingHTTPServer) -> None:
 
 
 def create_server(settings: Settings) -> ThreadingHTTPServer:
-    global _OVERMIND_POLLER_STARTED, _ROM_METADATA_POLLER_STARTED, _ROM_METADATA_WATCHER_STARTED, _PEER_HEALTH_CHECK_THREAD_STARTED, _LOCAL_NETWORK_WORKERS_STARTED, _GAME_PROCESS_MONITOR_STARTED, _GAME_PROCESS_MONITOR, _DOWNLOAD_MANAGER
+    global _OVERMIND_POLLER_STARTED, _ROM_METADATA_POLLER_STARTED, _ROM_METADATA_WATCHER_STARTED, _PEER_HEALTH_CHECK_THREAD_STARTED, _LOCAL_NETWORK_WORKERS_STARTED, _GAME_PROCESS_MONITOR_STARTED, _GAME_PROCESS_MONITOR, _DOWNLOAD_MANAGER, _AUTOMATION_POLLER_STARTED
     roms_root, bios_root = _real_data_roots(settings)
     repository = RomRepository(
         roms_root,
@@ -13822,6 +13995,9 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
     if not _LOCAL_NETWORK_WORKERS_STARTED:
         _start_local_network_workers(settings)
         _LOCAL_NETWORK_WORKERS_STARTED = True
+    if not _AUTOMATION_POLLER_STARTED:
+        _start_automation_poller(settings)
+        _AUTOMATION_POLLER_STARTED = True
     if settings.rom_metadata_poll_seconds == 0:
         print("Asset metadata poller disabled: ROM_METADATA_POLL_SECONDS=0", file=sys.stdout, flush=True)
     elif not _ROM_METADATA_POLLER_STARTED:

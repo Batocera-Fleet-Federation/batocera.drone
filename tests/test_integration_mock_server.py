@@ -219,10 +219,14 @@ class MockServerIntegrationTests(unittest.TestCase):
     def test_header_places_github_icon_beside_drone_brand(self) -> None:
         html = self._get_bytes("/").decode("utf-8")
         self.assertIn("Batocera Drone", html)
-        self.assertIn('id="emulatorsMenuBtn"', html)
+        self.assertIn('id="systemsMenuBtn"', html)
         self.assertIn('class="resource-links"', html)
         self.assertIn('class="resource-icon-link" title="GitHub" aria-label="GitHub"', html)
+        self.assertIn('id="apiAccessBtn"', html)
         self.assertNotIn('<i class="bi bi-github me-2"></i>GitHub', html)
+        # Emulators and BIOS moved out of the navbar into the Admin page.
+        self.assertNotIn('id="emulatorsMenuBtn"', html)
+        self.assertNotIn('id="biosBtn"', html)
 
     def test_emulators_page_ui_hooks_are_served(self) -> None:
         js = self._get_bytes("/static/js/drone.js").decode("utf-8")

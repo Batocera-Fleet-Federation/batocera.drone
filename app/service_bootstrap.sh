@@ -17,7 +17,9 @@ WORK_DIR="/userdata/system/drone-app"
 ACTION="$1"
 PID_FILE="/tmp/drone-server.pid"
 CONTROL_PID_FILE="/tmp/drone-server-control.pid"
+INPUT_MONITOR_PID_FILE="/tmp/drone-input-activity-monitor.pid"
 CONTROL_DIR="/userdata/system/drone-app/control"
+INPUT_ACTIVITY_FILE="/userdata/system/drone-app/control/last-input-activity"
 STARTUP_LOG="/userdata/system/logs/drone-app/startup.log"
 
 # Media subdirectories where scraped/peer-copied artwork lands. Artwork fields map
@@ -394,15 +396,42 @@ _script_signature() {
     || echo "unknown"
 }
 
+# Run the input-activity monitor as root so it can read /dev/input/event* and
+# record the last input time for idle automations (e.g. lowering the volume).
+# The unprivileged Drone app cannot read the input devices itself. Idempotent:
+# does nothing if the monitor is already running.
+start_input_activity_monitor() {
+  helper="$WORK_DIR/app/input_activity_monitor.py"
+  [ -f "$helper" ] || return 0
+  if [ -f "$INPUT_MONITOR_PID_FILE" ]; then
+    existing_pid="$(cat "$INPUT_MONITOR_PID_FILE" 2>/dev/null || true)"
+    if [ -n "$existing_pid" ] && kill -0 "$existing_pid" 2>/dev/null; then
+      return 0
+    fi
+  fi
+  python3 "$helper" "$INPUT_ACTIVITY_FILE" >/dev/null 2>&1 &
+  echo $! > "$INPUT_MONITOR_PID_FILE"
+  echo "[drone-service] Input activity monitor started (pid $(cat "$INPUT_MONITOR_PID_FILE" 2>/dev/null))."
+}
+
 service_control_worker() {
   worker_script_sig="$(_script_signature)"
+  start_input_activity_monitor
   while true; do
+    # Keep the input-activity monitor alive (it may exit if all input devices
+    # disappear, or after a bundle update ships a new helper).
+    start_input_activity_monitor
     # If the bundle's service_bootstrap.sh changed under us (an app self-update
     # shipped a new service layer), re-exec into it so new root-side logic --
     # permission repair, new control commands -- takes effect without waiting for
     # a full DRONE_SERVER restart.
     if [ "$(_script_signature)" != "$worker_script_sig" ]; then
       echo "[drone-service] Service bundle changed; re-execing control worker to adopt the update."
+      # Stop the monitor so the re-exec'd worker starts the (possibly updated) helper.
+      if [ -f "$INPUT_MONITOR_PID_FILE" ]; then
+        kill "$(cat "$INPUT_MONITOR_PID_FILE" 2>/dev/null)" 2>/dev/null || true
+        rm -f "$INPUT_MONITOR_PID_FILE"
+      fi
       exec sh "$WORK_DIR/app/service_bootstrap.sh" control-worker
     fi
     if [ -f "$CONTROL_DIR/restart-emulationstation.request" ]; then
@@ -531,6 +560,10 @@ start_app() {
 }
 
 stop_app() {
+  if [ -f "$INPUT_MONITOR_PID_FILE" ]; then
+    kill "$(cat "$INPUT_MONITOR_PID_FILE" 2>/dev/null)" 2>/dev/null || true
+    rm -f "$INPUT_MONITOR_PID_FILE"
+  fi
   if [ -f "$CONTROL_PID_FILE" ]; then
     kill "$(cat "$CONTROL_PID_FILE" 2>/dev/null)" 2>/dev/null || true
   fi
