@@ -4592,7 +4592,7 @@ async function renderGameplayLogsPage() {
           <td>${escapeHtml(session.system_name || "n/a")}</td>
           <td>
             <div class="fw-semibold">${escapeHtml(session.game_name || session.name || "Unknown game")}</div>
-            <div class="text-muted small mono">${escapeHtml(session.rom_path || "")}</div>
+            <div class="text-muted small mono d-none d-md-block">${escapeHtml(session.rom_path || "")}</div>
           </td>
           <td class="text-nowrap">${escapeHtml(duration)}</td>
         </tr>
