@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.1.23] - 2026-06-26
+
+- Make Drone UI mobile-responsive
+
 ## [v0.1.22] - 2026-06-24
 
 - Updating drone to send update to overmind when automation is updated.
