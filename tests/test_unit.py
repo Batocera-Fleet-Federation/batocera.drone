@@ -2493,7 +2493,7 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("_sample_speed() if include_speed else", drone_source)
         self.assertNotIn('id="${prefix}FilterToggle" data-bs-toggle="dropdown"', js_source)
         self.assertIn('event.stopPropagation();', js_source)
-        self.assertIn('class="table table-hover align-middle themed-table bios-table"', js_source)
+        self.assertIn('class="table table-hover align-middle themed-table bios-table bff-stack"', js_source)
         self.assertIn('const selected = themeFilterInitialized && !(themeFilterSelectedSystems || []).length ? ["__none__"]', js_source)
         self.assertIn('class="system-health-row"', js_source)
         self.assertIn("emulatorConfigSelectionRequestId", js_source)

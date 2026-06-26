@@ -16,6 +16,41 @@ const droneVersionBadge = document.getElementById("droneVersionBadge");
 const titleNode = document.querySelector(".h3.mb-1");
 const subtitleNode = document.getElementById("pageSubtitle");
 const API_BASE = "/v1/api";
+
+// Stamp each `table.bff-stack` cell with its column header so the CSS can render a
+// label:value stacked card per row on phone widths (see drone.css .bff-stack).
+function decorateStackTables(root) {
+  const scope = root || document;
+  scope.querySelectorAll("table.bff-stack").forEach((table) => {
+    const headers = Array.from(table.querySelectorAll("thead th")).map((th) => th.textContent.trim());
+    if (!headers.length) return;
+    table.querySelectorAll("tbody tr").forEach((tr) => {
+      Array.from(tr.children).forEach((td, index) => {
+        if (td.colSpan && td.colSpan > 1) return; // full-width/empty-state rows
+        if (index < headers.length && !td.hasAttribute("data-label")) {
+          td.setAttribute("data-label", headers[index]);
+        }
+      });
+    });
+  });
+}
+
+function setupStackTables() {
+  const target = content || document.body;
+  if (!target) return;
+  let scheduled = false;
+  const observer = new MutationObserver(() => {
+    if (scheduled) return;
+    scheduled = true;
+    requestAnimationFrame(() => {
+      scheduled = false;
+      decorateStackTables(target);
+    });
+  });
+  observer.observe(target, { childList: true, subtree: true });
+  decorateStackTables(target);
+}
+
 let imageObserver = null;
 let activeThemeMeta = null;
 let activeGlobalThemeCssNode = null;
@@ -1052,7 +1087,7 @@ function renderBiosList(data) {
       systems.length
         ? `<div class="card log-card">
           <div class="table-responsive">
-            <table class="table table-hover align-middle themed-table bios-table">
+            <table class="table table-hover align-middle themed-table bios-table bff-stack">
               <thead><tr><th>System</th><th>BIOS File</th><th>Size</th><th>MD5</th><th></th></tr></thead>
               <tbody>
                 ${systems.map((system) => grouped[system].map((item) => `
@@ -1705,7 +1740,7 @@ function renderQueueEta(payload) {
 
 function renderDownloadRows(rows, allowCancel = true) {
   if (!rows.length) return '<div class="themed-empty">No downloads in this group.</div>';
-  return `<div class="table-responsive"><table class="table table-sm table-hover align-middle themed-table download-table">
+  return `<div class="table-responsive"><table class="table table-sm table-hover align-middle themed-table download-table bff-stack">
     <thead><tr><th>Status</th><th>Source</th><th>File</th><th>System</th><th>Progress</th><th>Speed</th><th>Started</th><th></th></tr></thead>
     <tbody>${rows.map(row => {
       const pct = Number(row.percentage || 0);
@@ -2378,7 +2413,7 @@ async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh 
             </div>
             <div class="card-body p-0">
               <div class="table-responsive" style="max-height: 620px;">
-                <table class="table table-sm table-hover align-middle mb-0">
+                <table class="table table-sm table-hover align-middle mb-0 bff-stack">
                   <thead class="table-light">
                     <tr>
                       <th>System</th>
@@ -3316,7 +3351,7 @@ function localPeerStatusBadge(peer) {
 
 function renderLocalPeerRows(peers) {
   if (!peers.length) return '<div class="themed-empty">No nearby Drones discovered yet.</div>';
-  return `<div class="table-responsive"><table class="table table-sm table-hover align-middle themed-table">
+  return `<div class="table-responsive"><table class="table table-sm table-hover align-middle themed-table bff-stack">
     <thead><tr><th>Drone</th><th>Drone ID</th><th>Status</th><th>Error</th><th>Address</th><th>Last Seen</th><th>Certificate</th><th></th></tr></thead>
     <tbody>${peers.map(peer => {
       const rawPeerId = String(peer.drone_id || "");
@@ -3453,7 +3488,7 @@ function renderLocalAssetRows(payload) {
       </div>`;
     }
   }
-  return systemBar + `<div class="table-responsive"><table class="table table-sm table-hover align-middle themed-table local-assets-table">
+  return systemBar + `<div class="table-responsive"><table class="table table-sm table-hover align-middle themed-table local-assets-table bff-stack">
     <thead><tr><th>Name</th><th>Path</th><th>System / Source</th><th>Size</th><th>Details</th><th></th></tr></thead>
     <tbody>${localPeerAssetContext.items.map((item, index) => {
       const exists = isRoms && item.exists_locally === true;
@@ -4082,7 +4117,7 @@ async function renderOvermindIntegrationPanel(target) {
       </div>` : "";
     actionsBody.innerHTML = pageItems.length ? `
       <div class="table-responsive">
-        <table class="table table-sm align-middle themed-table">
+        <table class="table table-sm align-middle themed-table bff-stack">
           <thead>
             <tr>
               <th>Processed</th>
@@ -4575,7 +4610,7 @@ async function renderGameplayLogsPage() {
         </div>
         <div class="card-body">
           <div class="table-responsive">
-            <table class="table table-sm table-hover align-middle themed-table">
+            <table class="table table-sm table-hover align-middle themed-table bff-stack">
               <thead><tr><th>Played</th><th>System</th><th>Game</th><th>Duration</th></tr></thead>
               <tbody>${rows || '<tr><td colspan="4" class="text-muted">No gameplay sessions detected yet.</td></tr>'}</tbody>
             </table>
@@ -5320,6 +5355,7 @@ async function bootstrap() {
     adminEnabled = !(msg.includes("admin disabled") || msg.includes("request failed: 403"));
   }
   applyAdminVisibility();
+  setupStackTables();
   loadSystemInfoBar();
   // Render immediately so UI/menu works even if theme discovery is slow.
   await router();

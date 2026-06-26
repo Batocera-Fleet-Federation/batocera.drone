@@ -361,6 +361,51 @@
       color: var(--admin-text);
       border-color: var(--admin-border);
     }
+    /* Shared BFF mobile patterns (mirrored in overmind.css) */
+    @media (max-width: 767.98px) {
+      /* Segmented button groups: swipe horizontally instead of overflowing */
+      .bff-segmented {
+        display: flex;
+        flex-wrap: nowrap;
+        max-width: 100%;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+      }
+      .bff-segmented .btn { flex: 0 0 auto; white-space: nowrap; }
+      /* Stacked label:value tables on phone widths */
+      table.bff-stack thead { display: none; }
+      table.bff-stack,
+      table.bff-stack tbody,
+      table.bff-stack tr,
+      table.bff-stack td { display: block; width: 100%; }
+      table.bff-stack tr {
+        border: 1px solid var(--admin-border);
+        border-radius: 0.5rem;
+        margin-bottom: 0.6rem;
+        padding: 0.25rem 0.6rem;
+        background: rgba(255, 255, 255, 0.02);
+      }
+      table.bff-stack td {
+        border: 0;
+        background: transparent;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 1rem;
+        padding: 0.4rem 0.15rem;
+        text-align: right;
+        word-break: break-word;
+      }
+      table.bff-stack td::before {
+        content: attr(data-label);
+        font-weight: 700;
+        color: var(--admin-muted);
+        text-align: left;
+        flex: 0 0 auto;
+      }
+      table.bff-stack td:empty { display: none; }
+      table.bff-stack td[data-label=""]::before { content: none; }
+    }
     .themed-table tbody td {
       background: rgba(21, 31, 50, 0.54);
       border-color: var(--admin-border);
