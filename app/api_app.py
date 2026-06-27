@@ -97,8 +97,19 @@ def _merged_openapi() -> dict:
             from drone_api import OPENAPI_SPEC as LEGACY  # type: ignore
     except Exception:
         LEGACY = {}
+    for section_name, section_values in (LEGACY or {}).get("components", {}).items():
+        if not isinstance(section_values, dict):
+            continue
+        target = schema.setdefault("components", {}).setdefault(section_name, {})
+        if not isinstance(target, dict):
+            continue
+        for key, value in section_values.items():
+            target.setdefault(key, value)
+    for key in ("security", "tags", "servers"):
+        if key in (LEGACY or {}) and key not in schema:
+            schema[key] = LEGACY[key]
     for path, item in (LEGACY or {}).get("paths", {}).items():
-        prefixed = path if path.startswith(API_PREFIX) else api_url(path)
+        prefixed = path if path.startswith(API_PREFIX) or path == "/health" else api_url(path)
         schema.setdefault("paths", {}).setdefault(prefixed, item)
     app.openapi_schema = schema
     return schema
