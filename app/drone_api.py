@@ -119,6 +119,7 @@ try:
         TransferContext,
         TransportSelector,
     )
+    from .transport.mux_client import MuxClient, MuxSession, connect_tls
     from .ui_routes import UiRoutesMixin
 except ImportError:
     if __package__ not in (None, ""):
@@ -204,6 +205,7 @@ except ImportError:
         TransferContext,
         TransportSelector,
     )
+    from transport.mux_client import MuxClient, MuxSession, connect_tls  # type: ignore
     from ui_routes import UiRoutesMixin  # type: ignore
 
 
@@ -219,6 +221,7 @@ _SAVES_METADATA_WATCHER = None
 _OVERMIND_LOG_STREAM = None
 _PEER_HEALTH_CHECK_THREAD_STARTED = False
 _LOCAL_NETWORK_WORKERS_STARTED = False
+_EDGE_MUX_STARTED = False
 _GAME_PROCESS_MONITOR_STARTED = False
 _GAME_PROCESS_MONITOR = None
 _AUTOMATION_POLLER_STARTED = False
@@ -1379,6 +1382,11 @@ class Settings:
     drone_mtls_enabled: bool
     drone_mtls_mode: str
     drone_mtls_ca_file: Optional[Path]
+    # Persistent outbound connection to the Overmind Edge (opt-in during rollout).
+    edge_enabled: bool
+    edge_url: Optional[str]
+    edge_ping_seconds: int
+    edge_verify_tls: bool
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -1459,6 +1467,10 @@ class Settings:
             drone_mtls_enabled=_env_bool(False, "DRONE_MTLS_ENABLED", "DRONE_TO_DRONE_MTLS_ENABLED"),
             drone_mtls_mode=(os.environ.get("DRONE_MTLS_MODE") or "self-signed").strip().lower(),
             drone_mtls_ca_file=Path(os.environ["DRONE_MTLS_CA_FILE"]) if os.environ.get("DRONE_MTLS_CA_FILE") else None,
+            edge_enabled=_env_bool(False, "DRONE_EDGE_ENABLED"),
+            edge_url=(os.environ.get("DRONE_EDGE_URL") or "").strip() or None,
+            edge_ping_seconds=int(os.environ.get("DRONE_EDGE_PING_SECONDS", "20")),
+            edge_verify_tls=_env_bool(True, "DRONE_EDGE_VERIFY_TLS"),
         )
 
 
@@ -11404,6 +11416,67 @@ def _get_download_manager() -> Optional[DownloadManager]:
     return _DOWNLOAD_MANAGER
 
 
+def _start_edge_mux_client(settings: Settings) -> None:
+    """Open the persistent outbound connection to the Overmind Edge service.
+
+    Opt-in during rollout (``DRONE_EDGE_ENABLED=1`` + ``DRONE_EDGE_URL``). This is
+    what removes the need for any inbound connectivity / port-forwarding: the
+    Drone dials out and the Edge pushes presence (and, in later phases, transfer
+    signaling and relayed data) back down the same connection.
+
+    Phase 1 scope: authenticate with the Drone's Overmind token, advertise
+    capabilities + LAN addresses, and keep the link warm with PING/PONG so the
+    Edge can track liveness and report a reflexive (NAT-observed) address.
+    """
+    edge_url = (settings.edge_url or "").strip()
+    token = (settings.overmind_token or "").strip()
+    if not edge_url:
+        print("Edge mux disabled: no DRONE_EDGE_URL configured", file=sys.stdout, flush=True)
+        return
+    if not token:
+        print(
+            "Edge mux deferred: Drone is not yet paired with Overmind (no drone token)",
+            file=sys.stdout,
+            flush=True,
+        )
+        return
+
+    try:
+        lan_addrs = [ip for ip in _build_local_certificate_ips() if ip and ip != "127.0.0.1"]
+    except Exception:
+        lan_addrs = []
+
+    def make_session() -> "MuxSession":
+        return MuxSession(
+            device_id=settings.overmind_device_id,
+            token=token,
+            capabilities=["relay"],  # LAN / hole-punch advertised in later phases
+            lan_addrs=lan_addrs,
+            app_version=_drone_app_version(),
+            on_presence=lambda swarm: print(
+                f"[edge-mux] presence update: {len(swarm)} peer(s)", file=sys.stdout, flush=True
+            ),
+        )
+
+    def connect() -> "MuxLink":
+        return connect_tls(
+            edge_url,
+            verify=settings.edge_verify_tls,
+            cafile=str(settings.drone_mtls_ca_file) if settings.drone_mtls_ca_file else None,
+            client_cert=str(settings.drone_cert_file) if settings.drone_cert_file.exists() else None,
+            client_key=str(settings.drone_key_file) if settings.drone_key_file.exists() else None,
+        )
+
+    client = MuxClient(
+        connect=connect,
+        session_factory=make_session,
+        ping_interval=float(max(1, settings.edge_ping_seconds)),
+        log=lambda message: print(f"[edge-mux] {message}", file=sys.stdout, flush=True),
+    )
+    Thread(target=client.run_forever, name="edge-mux-client", daemon=True).start()
+    print(f"Edge mux client started: {edge_url}", file=sys.stdout, flush=True)
+
+
 def _cached_rom_fingerprint_exists(settings: Settings, expected_fingerprint: Optional[str]) -> bool:
     expected = str(expected_fingerprint or "").strip().lower()
     if not expected:
@@ -13751,7 +13824,7 @@ def _apply_server_tls(settings: Settings, server: ThreadingHTTPServer) -> None:
 
 
 def create_server(settings: Settings) -> ThreadingHTTPServer:
-    global _OVERMIND_POLLER_STARTED, _ROM_METADATA_POLLER_STARTED, _ROM_METADATA_WATCHER_STARTED, _PEER_HEALTH_CHECK_THREAD_STARTED, _LOCAL_NETWORK_WORKERS_STARTED, _GAME_PROCESS_MONITOR_STARTED, _GAME_PROCESS_MONITOR, _DOWNLOAD_MANAGER, _AUTOMATION_POLLER_STARTED
+    global _OVERMIND_POLLER_STARTED, _ROM_METADATA_POLLER_STARTED, _ROM_METADATA_WATCHER_STARTED, _PEER_HEALTH_CHECK_THREAD_STARTED, _LOCAL_NETWORK_WORKERS_STARTED, _GAME_PROCESS_MONITOR_STARTED, _GAME_PROCESS_MONITOR, _DOWNLOAD_MANAGER, _AUTOMATION_POLLER_STARTED, _EDGE_MUX_STARTED
     roms_root, bios_root = _real_data_roots(settings)
     repository = RomRepository(
         roms_root,
@@ -13843,6 +13916,9 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
     if not _AUTOMATION_POLLER_STARTED:
         _start_automation_poller(settings)
         _AUTOMATION_POLLER_STARTED = True
+    if settings.edge_enabled and not _EDGE_MUX_STARTED:
+        _start_edge_mux_client(settings)
+        _EDGE_MUX_STARTED = True
     if settings.rom_metadata_poll_seconds == 0:
         print("Asset metadata poller disabled: ROM_METADATA_POLL_SECONDS=0", file=sys.stdout, flush=True)
     elif not _ROM_METADATA_POLLER_STARTED:
