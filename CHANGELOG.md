@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.1.25] - 2026-06-27
+
+- Add opt-in FastAPI typed-API bridge + verify Overmind contract
+
 ## [v0.1.24] - 2026-06-26
 
 - Hide full ROM path in gameplay logs on mobile
