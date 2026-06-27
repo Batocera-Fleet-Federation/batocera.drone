@@ -113,6 +113,12 @@ try:
         rom_fingerprint_exists as _rom_fingerprint_exists,
         safe_rom_relative_path as _safe_rom_relative_path,
     )
+    from .transport import (
+        DirectPublicTransport,
+        DownloadRequest,
+        TransferContext,
+        TransportSelector,
+    )
     from .ui_routes import UiRoutesMixin
 except ImportError:
     if __package__ not in (None, ""):
@@ -191,6 +197,12 @@ except ImportError:
         rom_exists as _rom_exists,
         rom_fingerprint_exists as _rom_fingerprint_exists,
         safe_rom_relative_path as _safe_rom_relative_path,
+    )
+    from transport import (  # type: ignore
+        DirectPublicTransport,
+        DownloadRequest,
+        TransferContext,
+        TransportSelector,
     )
     from ui_routes import UiRoutesMixin  # type: ignore
 
@@ -10698,6 +10710,85 @@ def _kick_asset_metadata_sync_after_download(settings: Settings, repository: "Ro
     Thread(target=run, name="asset-metadata-follow-up-sync", daemon=True).start()
 
 
+def _directpublic_fetch(request: "DownloadRequest", context: "TransferContext") -> dict:
+    """Run the legacy direct mTLS peer download for one asset.
+
+    This is the body of the DirectPublic transport: it dispatches on
+    ``asset_type`` to the appropriate ``_download_*_from_peer`` helper (defined
+    later in this module) and returns its activity dict unchanged. Injected into
+    :class:`DirectPublicTransport` so the transport package needs no dependency
+    on this module.
+    """
+    settings = context.settings
+    config = context.config
+    peer = context.peer
+    progress = context.progress_callback
+    cancel_event = context.cancellation_event
+    asset_type = request.asset_type
+    system = request.system
+    rel = request.relative_path
+    expected_size = request.expected_size
+    expected_fingerprint = request.expected_fingerprint
+    if asset_type == "artwork":
+        return _download_artwork_from_peer(
+            settings,
+            context.repository,
+            config,
+            peer,
+            system,
+            request.rom_path,
+            request.artwork_type,
+            progress_callback=progress,
+            cancellation_event=cancel_event,
+            overwrite=request.overwrite,
+            local_rom_path=request.local_rom_path,
+        )
+    if asset_type == "saves":
+        return _download_save_from_peer(
+            settings,
+            config,
+            peer,
+            system,
+            rel,
+            expected_size=expected_size,
+            expected_fingerprint=expected_fingerprint,
+            cancellation_event=cancel_event,
+        )
+    if asset_type == "bios":
+        return _download_bios_from_peer(
+            settings,
+            config,
+            peer,
+            rel,
+            expected_size=expected_size,
+            expected_md5=expected_fingerprint,
+            progress_callback=progress,
+            cancellation_event=cancel_event,
+        )
+    if request.entry_type == "folder":
+        return _download_rom_folder_from_peer(
+            settings,
+            config,
+            peer,
+            system,
+            rel,
+            expected_size=expected_size,
+            progress_callback=progress,
+            cancellation_event=cancel_event,
+        )
+    return _download_rom_from_peer(
+        settings,
+        config,
+        peer,
+        system,
+        rel,
+        expected_size=expected_size,
+        expected_fingerprint=expected_fingerprint,
+        progress_callback=progress,
+        cancellation_event=cancel_event,
+    )
+
+
 class DownloadManager:
     """Per-target Drone download queue with a small pool of worker threads.
 
@@ -10709,6 +10800,10 @@ class DownloadManager:
     def __init__(self, settings: Settings, repository: "RomRepository") -> None:
         self.settings = settings
         self.repository = repository
+        # Transport seam: Phase 0 has a single transport (DirectPublic) that wraps
+        # the legacy _download_*_from_peer dispatch, so behavior is unchanged.
+        # Later phases register LAN / hole-punch / relay transports here.
+        self._selector = TransportSelector([DirectPublicTransport(_directpublic_fetch)])
         self._lock = Lock()
         self._jobs: OrderedDict[str, dict] = OrderedDict()
         self._cancel_events: Dict[str, Event] = {}
@@ -11216,66 +11311,28 @@ class DownloadManager:
                 self._push_download_state(config, "progress", force=True)
 
         try:
-            if asset_type == "artwork":
-                activity = _download_artwork_from_peer(
-                    self.settings,
-                    self.repository,
-                    config,
-                    peer,
-                    system,
-                    rom_path,
-                    artwork_type,
-                    progress_callback=progress,
-                    cancellation_event=cancel_event,
-                    overwrite=artwork_overwrite,
-                    local_rom_path=artwork_local_rom_path,
-                )
-            elif asset_type == "saves":
-                activity = _download_save_from_peer(
-                    self.settings,
-                    config,
-                    peer,
-                    system,
-                    rel,
-                    expected_size=expected_size,
-                    expected_fingerprint=expected_fingerprint,
-                    cancellation_event=cancel_event,
-                )
-            elif asset_type == "bios":
-                activity = _download_bios_from_peer(
-                    self.settings,
-                    config,
-                    peer,
-                    rel,
-                    expected_size=expected_size,
-                    expected_md5=expected_fingerprint,
-                    progress_callback=progress,
-                    cancellation_event=cancel_event,
-                )
-            else:
-                if entry_type == "folder":
-                    activity = _download_rom_folder_from_peer(
-                        self.settings,
-                        config,
-                        peer,
-                        system,
-                        rel,
-                        expected_size=expected_size,
-                        progress_callback=progress,
-                        cancellation_event=cancel_event,
-                    )
-                else:
-                    activity = _download_rom_from_peer(
-                        self.settings,
-                        config,
-                        peer,
-                        system,
-                        rel,
-                        expected_size=expected_size,
-                        expected_fingerprint=expected_fingerprint,
-                        progress_callback=progress,
-                        cancellation_event=cancel_event,
-                    )
+            request = DownloadRequest(
+                asset_type=asset_type,
+                system=system,
+                relative_path=rel,
+                rom_path=rom_path,
+                artwork_type=artwork_type,
+                entry_type=entry_type,
+                expected_size=expected_size,
+                expected_fingerprint=expected_fingerprint,
+                overwrite=artwork_overwrite,
+                local_rom_path=artwork_local_rom_path,
+            )
+            context = TransferContext(
+                settings=self.settings,
+                repository=self.repository,
+                config=config,
+                peer=peer,
+                progress_callback=progress,
+                cancellation_event=cancel_event,
+            )
+            transport = self._selector.select(request, context)
+            activity = transport.fetch(request, context)
             refresh_started = time.monotonic()
             try:
                 refreshed = (
