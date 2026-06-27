@@ -4377,6 +4377,144 @@ OPENAPI_SPEC = {
     },
 }
 
+
+# ==================== Decoupled service functions ====================
+# Module-level, settings-parameterized versions of handler logic so the same implementation
+# backs both the legacy stdlib handler methods and the FastAPI routes (app/api_app.py). Kept in
+# this module to reuse the existing helpers without an import cycle.
+
+def overmind_config_path(settings) -> Path:
+    return (settings.userdata_root / "system" / "drone-app" / "overmind_integration.json").resolve()
+
+
+def overmind_swarm_path(settings) -> Path:
+    return (settings.userdata_root / "system" / "drone-app" / "overmind_swarm.json").resolve()
+
+
+def overmind_peer_results_path(settings) -> Path:
+    return (settings.userdata_root / "system" / "drone-app" / "peer_checks.json").resolve()
+
+
+def overmind_load_json_file(settings, path: Path, fallback):
+    return _load_state_payload(
+        _state_database_path(settings.userdata_root),
+        path.name,
+        fallback,
+        legacy_path=path,
+    )
+
+
+def mask_secret(value: str) -> str:
+    if not value:
+        return ""
+    if len(value) <= 4:
+        return "*" * len(value)
+    return f"{value[:2]}{'*' * (len(value) - 4)}{value[-2:]}"
+
+
+def overmind_load_config(settings) -> dict:
+    fake_email = FAKE_OVERMIND_EMAIL if settings.use_fake_data else ""
+    fake_password = FAKE_OVERMIND_PASSWORD if settings.use_fake_data else ""
+    fake_token = FAKE_OVERMIND_TOKEN if settings.use_fake_data else ""
+    auth_token = settings.overmind_auth_token or ""
+    default = {
+        "overmind_url": (settings.overmind_url or "").strip(),
+        "overmind_email": (fake_email if settings.use_fake_data else settings.overmind_email or "").strip(),
+        "drone_name": socket.gethostname(),
+        "integration_enabled": False,
+        "integration_state": "not_started",
+        "requested_at": None,
+        "last_started_at": None,
+        "last_error": None,
+        "notes": "Stub integration until batocera.overmind app is available.",
+    }
+    if settings.overmind_password or fake_password:
+        default["overmind_password"] = fake_password if settings.use_fake_data else settings.overmind_password
+    if settings.overmind_token or fake_token:
+        default["overmind_token"] = fake_token if settings.use_fake_data else settings.overmind_token
+    if auth_token:
+        default["overmind_auth_token"] = auth_token
+
+    loaded = overmind_load_json_file(settings, overmind_config_path(settings), {})
+    if not isinstance(loaded, dict) or not loaded:
+        return default
+    merged = dict(default)
+    merged.update(loaded)
+    if settings.use_fake_data:
+        merged["overmind_email"] = FAKE_OVERMIND_EMAIL
+        merged["overmind_password"] = FAKE_OVERMIND_PASSWORD
+        merged["overmind_token"] = FAKE_OVERMIND_TOKEN
+    else:
+        _strip_fake_overmind_values(merged)
+    return merged
+
+
+def overmind_save_config(settings, payload: dict) -> None:
+    _save_state_payload(
+        _state_database_path(settings.userdata_root),
+        overmind_config_path(settings).name,
+        payload,
+    )
+    overmind_config_path(settings).unlink(missing_ok=True)
+
+
+def overmind_public_payload(settings, config: dict) -> dict:
+    config = dict(config)
+    _normalize_overmind_link_state(config)
+    password = str(config.get("overmind_password") or "")
+    auth_token = str(config.get("overmind_auth_token") or "")
+    token = str(config.get("overmind_token") or "")
+    email = str(config.get("overmind_email") or "")
+    state = str(config.get("integration_state") or "not_started")
+    connected = bool(token) and bool(config.get("integration_enabled")) and state not in {"pending_failed", "not_started"}
+    swarm_status = str(config.get("swarm_connection_status") or "")
+    if state == "pending_failed" or not config.get("integration_enabled"):
+        swarm_status = "disconnected"
+    elif not swarm_status:
+        swarm_status = "connected" if connected else ("pending approval" if state == "pending_approval" else "disconnected")
+    status = {
+        "configured": connected,
+        "integration_enabled": bool(config.get("integration_enabled")),
+        "integration_state": state,
+        "swarm_connection_status": swarm_status,
+        "requested_at": config.get("requested_at"),
+        "last_started_at": config.get("last_started_at"),
+        "last_error": config.get("last_error"),
+        "last_onboarding_attempt": config.get("last_onboarding_attempt") if isinstance(config.get("last_onboarding_attempt"), dict) else None,
+        "notes": config.get("notes") or "Stub integration until batocera.overmind app is available.",
+    }
+    return {
+        "overmind_url": config.get("overmind_url") or "",
+        "overmind_email": email,
+        "drone_name": config.get("drone_name") or socket.gethostname(),
+        "machine_id": settings.overmind_device_id,
+        "password_configured": bool(password),
+        "password_masked": mask_secret(password) if password else "",
+        "auth_token_configured": bool(auth_token),
+        "auth_token_masked": mask_secret(auth_token) if auth_token else "",
+        "token_configured": bool(token),
+        "token_masked": mask_secret(token) if token else "",
+        "status": status,
+        "swarm": overmind_load_json_file(settings, overmind_swarm_path(settings), []),
+        "peer_checks": overmind_load_json_file(settings, overmind_peer_results_path(settings), []),
+        "certificate": DroneCertificateManager(settings).metadata(),
+    }
+
+
+def build_overmind_status(settings) -> dict:
+    config = overmind_load_config(settings)
+    if _normalize_overmind_link_state(config):
+        overmind_save_config(settings, config)
+    payload = overmind_public_payload(settings, config)
+    payload["network_mode"] = _network_mode(settings)
+    payload["overmind_active"] = _local_network.is_overmind_mode(settings)
+    if not payload["overmind_active"]:
+        payload["status"]["integration_enabled"] = False
+        payload["status"]["integration_state"] = "disabled"
+        payload["status"]["swarm_connection_status"] = "disconnected"
+    return payload
+
+
 class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
     server_version = "DroneApp/4.0"
     openapi_spec = OPENAPI_SPEC
@@ -4706,7 +4844,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
     def _overmind_config_path(self) -> Path:
-        return (self.settings.userdata_root / "system" / "drone-app" / "overmind_integration.json").resolve()
+        return overmind_config_path(self.settings)
 
     def _overmind_actions_path(self) -> Path:
         return Path(os.environ.get(
@@ -4715,66 +4853,22 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         )).resolve()
 
     def _overmind_swarm_path(self) -> Path:
-        return (self.settings.userdata_root / "system" / "drone-app" / "overmind_swarm.json").resolve()
+        return overmind_swarm_path(self.settings)
 
     def _overmind_peer_results_path(self) -> Path:
-        return (self.settings.userdata_root / "system" / "drone-app" / "peer_checks.json").resolve()
+        return overmind_peer_results_path(self.settings)
 
     def _rom_fingerprint_cache_path(self) -> Path:
         return (self.settings.userdata_root / "system" / "drone-app" / "rom_fingerprint_cache.json").resolve()
 
     def _mask_secret(self, value: str) -> str:
-        if not value:
-            return ""
-        if len(value) <= 4:
-            return "*" * len(value)
-        return f"{value[:2]}{'*' * (len(value) - 4)}{value[-2:]}"
+        return mask_secret(value)
 
     def _load_overmind_config(self) -> dict:
-        fake_email = FAKE_OVERMIND_EMAIL if self.settings.use_fake_data else ""
-        fake_password = FAKE_OVERMIND_PASSWORD if self.settings.use_fake_data else ""
-        fake_token = FAKE_OVERMIND_TOKEN if self.settings.use_fake_data else ""
-        auth_token = self.settings.overmind_auth_token or ""
-        default = {
-            "overmind_url": (self.settings.overmind_url or "").strip(),
-            "overmind_email": (fake_email if self.settings.use_fake_data else self.settings.overmind_email or "").strip(),
-            "drone_name": socket.gethostname(),
-            "integration_enabled": False,
-            "integration_state": "not_started",
-            "requested_at": None,
-            "last_started_at": None,
-            "last_error": None,
-            "notes": "Stub integration until batocera.overmind app is available.",
-        }
-
-        if self.settings.overmind_password or fake_password:
-            default["overmind_password"] = fake_password if self.settings.use_fake_data else self.settings.overmind_password
-        if self.settings.overmind_token or fake_token:
-            default["overmind_token"] = fake_token if self.settings.use_fake_data else self.settings.overmind_token
-        if auth_token:
-            default["overmind_auth_token"] = auth_token
-
-        loaded = self._load_json_file(self._overmind_config_path(), {})
-        if not isinstance(loaded, dict) or not loaded:
-            return default
-
-        merged = dict(default)
-        merged.update(loaded)
-        if self.settings.use_fake_data:
-            merged["overmind_email"] = FAKE_OVERMIND_EMAIL
-            merged["overmind_password"] = FAKE_OVERMIND_PASSWORD
-            merged["overmind_token"] = FAKE_OVERMIND_TOKEN
-        else:
-            _strip_fake_overmind_values(merged)
-        return merged
+        return overmind_load_config(self.settings)
 
     def _save_overmind_config(self, payload: dict) -> None:
-        _save_state_payload(
-            _state_database_path(self.settings.userdata_root),
-            self._overmind_config_path().name,
-            payload,
-        )
-        self._overmind_config_path().unlink(missing_ok=True)
+        overmind_save_config(self.settings, payload)
 
     def _load_json_file(self, path: Path, fallback):
         return _load_state_payload(
@@ -4793,46 +4887,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
         path.unlink(missing_ok=True)
 
     def _overmind_public_payload(self, config: dict) -> dict:
-        config = dict(config)
-        _normalize_overmind_link_state(config)
-        password = str(config.get("overmind_password") or "")
-        auth_token = str(config.get("overmind_auth_token") or "")
-        token = str(config.get("overmind_token") or "")
-        email = str(config.get("overmind_email") or "")
-        state = str(config.get("integration_state") or "not_started")
-        connected = bool(token) and bool(config.get("integration_enabled")) and state not in {"pending_failed", "not_started"}
-        swarm_status = str(config.get("swarm_connection_status") or "")
-        if state == "pending_failed" or not config.get("integration_enabled"):
-            swarm_status = "disconnected"
-        elif not swarm_status:
-            swarm_status = "connected" if connected else ("pending approval" if state == "pending_approval" else "disconnected")
-        status = {
-            "configured": connected,
-            "integration_enabled": bool(config.get("integration_enabled")),
-            "integration_state": state,
-            "swarm_connection_status": swarm_status,
-            "requested_at": config.get("requested_at"),
-            "last_started_at": config.get("last_started_at"),
-            "last_error": config.get("last_error"),
-            "last_onboarding_attempt": config.get("last_onboarding_attempt") if isinstance(config.get("last_onboarding_attempt"), dict) else None,
-            "notes": config.get("notes") or "Stub integration until batocera.overmind app is available.",
-        }
-        return {
-            "overmind_url": config.get("overmind_url") or "",
-            "overmind_email": email,
-            "drone_name": config.get("drone_name") or socket.gethostname(),
-            "machine_id": self.settings.overmind_device_id,
-            "password_configured": bool(password),
-            "password_masked": self._mask_secret(password) if password else "",
-            "auth_token_configured": bool(auth_token),
-            "auth_token_masked": self._mask_secret(auth_token) if auth_token else "",
-            "token_configured": bool(token),
-            "token_masked": self._mask_secret(token) if token else "",
-            "status": status,
-            "swarm": self._load_json_file(self._overmind_swarm_path(), []),
-            "peer_checks": self._load_json_file(self._overmind_peer_results_path(), []),
-            "certificate": DroneCertificateManager(self.settings).metadata(),
-        }
+        return overmind_public_payload(self.settings, config)
 
     def _load_processed_overmind_actions(self) -> List[dict]:
         return _load_state_events(
@@ -6899,17 +6954,7 @@ class RomRequestHandler(ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
             )
 
     def _handle_admin_overmind_status(self) -> None:
-        config = self._load_overmind_config()
-        if _normalize_overmind_link_state(config):
-            self._save_overmind_config(config)
-        payload = self._overmind_public_payload(config)
-        payload["network_mode"] = _network_mode(self.settings)
-        payload["overmind_active"] = _local_network.is_overmind_mode(self.settings)
-        if not payload["overmind_active"]:
-            payload["status"]["integration_enabled"] = False
-            payload["status"]["integration_state"] = "disabled"
-            payload["status"]["swarm_connection_status"] = "disconnected"
-        self._send_json(200, payload)
+        self._send_json(200, build_overmind_status(self.settings))
 
     def _require_overmind_mode(self) -> bool:
         if _local_network.is_overmind_mode(self.settings):
@@ -14091,6 +14136,16 @@ def main() -> None:
             print(f"USE_FAKE_DATA enabled: seeded fake dataset at {settings.userdata_root}")
         _configure_rotating_logs(settings)
         server = create_server(settings)
+        # Optional, opt-in (DRONE_API_FASTAPI_BRIDGE=1): start the FastAPI typed-API bridge.
+        # Fully guarded — any failure leaves it inactive and the stdlib server serves everything.
+        try:
+            try:
+                from .api_bridge import maybe_start as _maybe_start_api_bridge
+            except ImportError:
+                from api_bridge import maybe_start as _maybe_start_api_bridge  # type: ignore
+            _maybe_start_api_bridge(settings)
+        except Exception as _bridge_error:  # noqa: BLE001
+            print(f"FastAPI bridge startup skipped: {_bridge_error}", file=sys.stderr, flush=True)
         print(f"Log files: {settings.log_dir / settings.stdout_log_file}, {settings.log_dir / settings.stderr_log_file}")
         server_auth = getattr(server, "auth", None)
         credential_store = getattr(server_auth, "credential_store", None)

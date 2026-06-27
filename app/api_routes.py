@@ -6,6 +6,11 @@ try:
 except ImportError:
     from route_config import API_PREFIX  # type: ignore
 
+try:
+    from .api_bridge import active as _api_bridge_active
+except ImportError:  # pragma: no cover - flat execution
+    from api_bridge import active as _api_bridge_active  # type: ignore
+
 
 class ApiRoutesMixin:
     def do_GET(self) -> None:
@@ -74,6 +79,11 @@ class ApiRoutesMixin:
 
             if not self.auth.check(self.headers.get("Authorization")):
                 self._send_unauthorized()
+                return
+
+            _bridge = _api_bridge_active()
+            if _bridge is not None and _bridge.owns(api_path):
+                _bridge.proxy(self, "GET")
                 return
 
             if api_path == "/":
@@ -388,6 +398,11 @@ class ApiRoutesMixin:
 
             if not self.auth.check(self.headers.get("Authorization")):
                 self._send_unauthorized()
+                return
+
+            _bridge = _api_bridge_active()
+            if _bridge is not None and _bridge.owns(api_path):
+                _bridge.proxy(self, "POST")
                 return
 
             if parts and parts[0] == "admin" and not self.settings.admin_enabled:
