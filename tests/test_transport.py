@@ -161,5 +161,40 @@ class DirectPublicDispatchTests(unittest.TestCase):
         )
 
 
+class EdgeTokenTests(unittest.TestCase):
+    """_edge_token_for must read the live (post-claim) token, falling back to env."""
+
+    def _settings(self, token_env=None):
+        env = {"OVERMIND_DEVICE_ID": "dev1"}
+        if token_env is not None:
+            env["OVERMIND_DRONE_TOKEN"] = token_env
+        with mock.patch.dict("os.environ", env, clear=True):
+            return drone_api.Settings.from_env()
+
+    def test_prefers_live_config_token(self):
+        settings = self._settings(token_env="env-token")
+        with mock.patch.object(
+            drone_api, "overmind_load_config", return_value={"overmind_token": "live-token"}
+        ):
+            self.assertEqual(drone_api._edge_token_for(settings), "live-token")
+
+    def test_falls_back_to_env_token_when_config_empty(self):
+        settings = self._settings(token_env="env-token")
+        with mock.patch.object(drone_api, "overmind_load_config", return_value={}):
+            self.assertEqual(drone_api._edge_token_for(settings), "env-token")
+
+    def test_empty_when_no_token_anywhere(self):
+        settings = self._settings()
+        with mock.patch.object(drone_api, "overmind_load_config", return_value={}):
+            self.assertEqual(drone_api._edge_token_for(settings), "")
+
+    def test_handles_config_error(self):
+        settings = self._settings(token_env="env-token")
+        with mock.patch.object(
+            drone_api, "overmind_load_config", side_effect=RuntimeError("boom")
+        ):
+            self.assertEqual(drone_api._edge_token_for(settings), "env-token")
+
+
 if __name__ == "__main__":
     unittest.main()

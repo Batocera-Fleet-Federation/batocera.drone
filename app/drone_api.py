@@ -11416,6 +11416,20 @@ def _get_download_manager() -> Optional[DownloadManager]:
     return _DOWNLOAD_MANAGER
 
 
+def _edge_token_for(settings: Settings) -> str:
+    """Return the Drone's current Overmind token for Edge authentication.
+
+    Reads the live runtime config (which merges the token persisted at claim
+    time) so a Drone claimed *after* startup authenticates on its next reconnect
+    without a restart; falls back to the static env token.
+    """
+    try:
+        token = str(overmind_load_config(settings).get("overmind_token") or "").strip()
+    except Exception:
+        token = ""
+    return token or (settings.overmind_token or "").strip()
+
+
 def _start_edge_mux_client(settings: Settings) -> None:
     """Open the persistent outbound connection to the Overmind Edge service.
 
@@ -11426,19 +11440,13 @@ def _start_edge_mux_client(settings: Settings) -> None:
 
     Phase 1 scope: authenticate with the Drone's Overmind token, advertise
     capabilities + LAN addresses, and keep the link warm with PING/PONG so the
-    Edge can track liveness and report a reflexive (NAT-observed) address.
+    Edge can track liveness and report a reflexive (NAT-observed) address. The
+    client starts even before the Drone is claimed; the token is read lazily per
+    reconnect so it begins authenticating as soon as a token exists.
     """
     edge_url = (settings.edge_url or "").strip()
-    token = (settings.overmind_token or "").strip()
     if not edge_url:
         print("Edge mux disabled: no DRONE_EDGE_URL configured", file=sys.stdout, flush=True)
-        return
-    if not token:
-        print(
-            "Edge mux deferred: Drone is not yet paired with Overmind (no drone token)",
-            file=sys.stdout,
-            flush=True,
-        )
         return
 
     try:
@@ -11449,7 +11457,7 @@ def _start_edge_mux_client(settings: Settings) -> None:
     def make_session() -> "MuxSession":
         return MuxSession(
             device_id=settings.overmind_device_id,
-            token=token,
+            token=_edge_token_for(settings),
             capabilities=["relay"],  # LAN / hole-punch advertised in later phases
             lan_addrs=lan_addrs,
             app_version=_drone_app_version(),
