@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.1.26] - 2026-06-27
+
+- Finishing updating api to be strongly typed and updating swagger/openapi spec.
+
 ## [v0.1.25] - 2026-06-27
 
 - Add opt-in FastAPI typed-API bridge + verify Overmind contract
