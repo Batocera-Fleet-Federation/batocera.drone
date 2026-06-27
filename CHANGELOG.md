@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.1.24] - 2026-06-26
+
+- Hide full ROM path in gameplay logs on mobile
+
 ## [v0.1.23] - 2026-06-26
 
 - Make Drone UI mobile-responsive
