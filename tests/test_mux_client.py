@@ -273,6 +273,82 @@ class MuxClientRelayTests(unittest.TestCase):
         self.assertNotIn("error", results)
         self.assertEqual(results.get("data"), b"payload")
 
+    def _connect(self, **client_kwargs):
+        client_sock, edge_sock = socket.socketpair()
+        edge_sock.settimeout(5.0)
+        session = MuxSession(device_id="d1", token="t", capabilities=["relay"])
+        stop = threading.Event()
+        client = MuxClient(
+            connect=lambda: TlsMuxLink(client_sock),
+            session_factory=lambda: session,
+            ping_interval=30.0,
+            stop_event=stop,
+            **client_kwargs,
+        )
+        thread = threading.Thread(target=client.run_forever, daemon=True)
+        thread.start()
+        edge_reader = mux.reader_from_fileobj(edge_sock.makefile("rb"))
+        self.assertEqual(mux.decode_control(mux.read_frame(edge_reader)[1])["type"], mux.MSG_HELLO)
+        edge_sock.sendall(
+            mux.encode_control({"type": mux.MSG_HELLO_ACK, "session_id": "x", "reflexive_addr": "1:1"})
+        )
+        return client, edge_sock, edge_reader, stop, thread
+
+    @staticmethod
+    def _teardown(edge_sock, stop, thread):
+        stop.set()
+        for action in (lambda: edge_sock.shutdown(socket.SHUT_RDWR), edge_sock.close):
+            try:
+                action()
+            except OSError:
+                pass
+        thread.join(5.0)
+
+    def test_transfer_offer_invokes_hook(self):
+        offers = []
+        client, edge_sock, edge_reader, stop, thread = self._connect(on_transfer_offer=offers.append)
+        try:
+            edge_sock.sendall(
+                mux.encode_control(
+                    {
+                        "type": mux.MSG_TRANSFER_OFFER,
+                        "session_id": "a" * 32,
+                        "from_device": "TX",
+                        "to_device": "d1",
+                        "asset": {"kind": "rom", "relative_path": "g"},
+                    }
+                )
+            )
+            deadline = time.time() + 5.0
+            while not offers and time.time() < deadline:
+                time.sleep(0.02)
+            self.assertEqual(len(offers), 1)
+            self.assertEqual(offers[0]["from_device"], "TX")
+        finally:
+            self._teardown(edge_sock, stop, thread)
+
+    def test_transfer_error_fails_channel(self):
+        client, edge_sock, edge_reader, stop, thread = self._connect()
+        try:
+            session_id = "a" * 32
+            channel = client.start_relay_session(session_id, "receiver")
+            self.assertEqual(
+                mux.decode_control(mux.read_frame(edge_reader)[1])["type"], mux.MSG_RELAY_OPEN
+            )
+            client.send_transfer_request(session_id, "tok", "TX", {"kind": "rom", "relative_path": "g"})
+            self.assertEqual(
+                mux.decode_control(mux.read_frame(edge_reader)[1])["type"], mux.MSG_TRANSFER_REQUEST
+            )
+            edge_sock.sendall(
+                mux.encode_control(
+                    {"type": mux.MSG_TRANSFER_ERROR, "session_id": session_id, "reason": "offline"}
+                )
+            )
+            self.assertTrue(channel.wait_ready(5.0))  # fail() unblocks wait_ready
+            self.assertTrue(channel.failed)
+        finally:
+            self._teardown(edge_sock, stop, thread)
+
 
 def _bytes_reader(data: bytes):
     return io.BytesIO(data)

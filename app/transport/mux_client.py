@@ -121,11 +121,16 @@ class RelayChannel:
         self._cond = threading.Condition()
         self._buffer = bytearray()
         self._closed = False
+        self._failed = False
         self._ready = threading.Event()
 
     @property
     def session_id(self) -> str:
         return self._session_id
+
+    @property
+    def failed(self) -> bool:
+        return self._failed
 
     # --- PeerChannel interface (called from the worker thread) ---
     def send(self, data: bytes) -> None:
@@ -160,6 +165,15 @@ class RelayChannel:
 
     def wait_ready(self, timeout: float) -> bool:
         return self._ready.wait(timeout)
+
+    def fail(self) -> None:
+        """Mark the session rejected (e.g. Edge sent TRANSFER_ERROR): unblock a
+        pending wait_ready and stop reads."""
+        with self._cond:
+            self._failed = True
+            self._closed = True
+            self._cond.notify_all()
+        self._ready.set()
 
     def close_remote(self) -> None:
         with self._cond:
@@ -255,9 +269,13 @@ class MuxClient:
         now: Callable[[], float] = time.monotonic,
         log: Callable[[str], None] = lambda message: None,
         stop_event: Optional[threading.Event] = None,
+        on_transfer_offer: Optional[Callable[[dict], None]] = None,
     ) -> None:
         self._connect = connect
         self._session_factory = session_factory
+        # Invoked (from the read loop) when the Edge offers a transfer to serve;
+        # the handler must not block -- it should hand off to a worker thread.
+        self._on_transfer_offer = on_transfer_offer
         self._ping_interval = max(1.0, float(ping_interval))
         self._idle_timeout = self._ping_interval * max(2.0, float(idle_timeout_multiplier))
         self._backoff_initial = backoff_initial
@@ -294,11 +312,9 @@ class MuxClient:
             self._sleep(backoff)
 
     # --- relay session API (called from worker threads) ---
-    def open_relay_session(
-        self, session_id: str, role: str, *, ready_timeout: float = 20.0
-    ) -> RelayChannel:
-        """Open a relay transfer leg: send RELAY_OPEN, wait for RELAY_READY, and
-        return a :class:`RelayChannel`. Raises on timeout or if disconnected."""
+    def start_relay_session(self, session_id: str, role: str) -> RelayChannel:
+        """Register a relay leg and send RELAY_OPEN, **without** waiting for
+        RELAY_READY (the receiver sends a TRANSFER_REQUEST before waiting)."""
         if role not in ("sender", "receiver"):
             raise ValueError(f"invalid relay role: {role!r}")
         channel = RelayChannel(session_id, self._send)
@@ -313,11 +329,37 @@ class MuxClient:
         except ConnectionError:
             self._unregister(session_id)
             raise
+        return channel
+
+    def open_relay_session(
+        self, session_id: str, role: str, *, ready_timeout: float = 20.0
+    ) -> RelayChannel:
+        """start_relay_session + wait for RELAY_READY. Raises on timeout/rejection."""
+        channel = self.start_relay_session(session_id, role)
         if not channel.wait_ready(ready_timeout):
             self._unregister(session_id)
             channel.close_remote()
             raise TimeoutError(f"relay peer not ready for session {session_id}")
+        if channel.failed:
+            self._unregister(session_id)
+            raise ConnectionError(f"relay transfer rejected for session {session_id}")
         return channel
+
+    def send_transfer_request(
+        self, session_id: str, token: str, from_device: str, asset: dict
+    ) -> None:
+        """Ask the Edge to offer this transfer to the sender (receiver side)."""
+        self._send(
+            mux.encode_control(
+                {
+                    "type": mux.MSG_TRANSFER_REQUEST,
+                    "session_id": session_id,
+                    "token": token,
+                    "from_device": from_device,
+                    "asset": asset,
+                }
+            )
+        )
 
     def close_relay_session(self, session_id: str) -> None:
         channel = self._unregister(session_id)
@@ -415,6 +457,15 @@ class MuxClient:
             channel = self._unregister(message.get("session_id"))
             if channel is not None:
                 channel.close_remote()
+            return
+        if message_type == mux.MSG_TRANSFER_OFFER:
+            if self._on_transfer_offer is not None:
+                self._on_transfer_offer(message)
+            return
+        if message_type == mux.MSG_TRANSFER_ERROR:
+            channel = self._get_channel(message.get("session_id"))
+            if channel is not None:
+                channel.fail()
             return
         # Presence / keepalive: delegate to the pure session core.
         for frame in session.handle_frame(kind, payload):
