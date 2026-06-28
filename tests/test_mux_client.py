@@ -1,13 +1,16 @@
 """Tests for the Drone Edge mux client (app.transport.mux_client)."""
 
+import io
 import socket
 import threading
+import time
 import unittest
 
 from app.transport import mux
 from app.transport.mux_client import (
     MuxClient,
     MuxSession,
+    RelayChannel,
     TlsMuxLink,
     parse_edge_endpoint,
 )
@@ -150,9 +153,128 @@ class MuxClientSocketPairTests(unittest.TestCase):
         self.assertEqual(session.reflexive_addr, "203.0.113.7:5555")
 
 
-def _bytes_reader(data: bytes):
-    import io
+class RelayChannelTests(unittest.TestCase):
+    def _channel(self):
+        sent = []
+        return RelayChannel("s" * 32, sent.append), sent
 
+    def test_read_exactly_returns_fed_bytes(self):
+        channel, _ = self._channel()
+        channel.feed(b"hello world")
+        self.assertEqual(channel.read_exactly(5), b"hello")
+        self.assertEqual(channel.read_exactly(6), b" world")
+
+    def test_read_exactly_across_feeds(self):
+        channel, _ = self._channel()
+        channel.feed(b"ab")
+        channel.feed(b"cd")
+        self.assertEqual(channel.read_exactly(4), b"abcd")
+
+    def test_read_exactly_returns_partial_then_empty_after_close(self):
+        channel, _ = self._channel()
+        channel.feed(b"abc")
+        channel.close_remote()
+        self.assertEqual(channel.read_exactly(10), b"abc")  # partial at EOF
+        self.assertEqual(channel.read_exactly(10), b"")  # subsequent reads = EOF
+
+    def test_send_encodes_relay_data(self):
+        channel, sent = self._channel()
+        channel.send(b"payload")
+        kind, payload = mux.read_frame(mux.reader_from_fileobj(io.BytesIO(sent[0])))
+        self.assertEqual(kind, mux.FRAME_DATA)
+        self.assertEqual(mux.parse_relay_data(payload), ("s" * 32, b"payload"))
+
+    def test_close_sends_relay_close_and_eofs(self):
+        channel, sent = self._channel()
+        channel.close()
+        message = mux.decode_control(mux.read_frame(mux.reader_from_fileobj(io.BytesIO(sent[0])))[1])
+        self.assertEqual(message["type"], mux.MSG_RELAY_CLOSE)
+        self.assertEqual(channel.read_exactly(1), b"")
+
+    def test_ready_event(self):
+        channel, _ = self._channel()
+        self.assertFalse(channel.wait_ready(0.01))
+        channel.mark_ready()
+        self.assertTrue(channel.wait_ready(0.01))
+
+    def test_read_blocks_until_fed(self):
+        channel, _ = self._channel()
+
+        def feeder():
+            time.sleep(0.05)
+            channel.feed(b"late")
+
+        thread = threading.Thread(target=feeder)
+        thread.start()
+        self.assertEqual(channel.read_exactly(4), b"late")
+        thread.join()
+
+
+class MuxClientRelayTests(unittest.TestCase):
+    """The mux client demultiplexes relay READY/DATA to the right RelayChannel."""
+
+    def test_open_session_then_receive_and_send(self):
+        client_sock, edge_sock = socket.socketpair()
+        edge_sock.settimeout(5.0)
+        session = MuxSession(device_id="d1", token="t", capabilities=["relay"])
+        stop = threading.Event()
+        client = MuxClient(
+            connect=lambda: TlsMuxLink(client_sock),
+            session_factory=lambda: session,
+            ping_interval=30.0,
+            stop_event=stop,
+        )
+        client_thread = threading.Thread(target=client.run_forever, daemon=True)
+        client_thread.start()
+
+        sid = "a" * 32
+        results = {}
+
+        def receiver():
+            try:
+                channel = client.open_relay_session(sid, "receiver", ready_timeout=5.0)
+                results["data"] = channel.read_exactly(7)
+                channel.send(b"ackack")
+            except Exception as error:  # noqa: BLE001
+                results["error"] = error
+
+        try:
+            edge_reader = mux.reader_from_fileobj(edge_sock.makefile("rb"))
+            # HELLO -> HELLO_ACK so the client is connected.
+            self.assertEqual(mux.decode_control(mux.read_frame(edge_reader)[1])["type"], mux.MSG_HELLO)
+            edge_sock.sendall(
+                mux.encode_control({"type": mux.MSG_HELLO_ACK, "session_id": "x", "reflexive_addr": "1:1"})
+            )
+
+            worker = threading.Thread(target=receiver, daemon=True)
+            worker.start()
+
+            # Edge sees RELAY_OPEN, answers RELAY_READY, then streams a DATA frame.
+            open_msg = mux.decode_control(mux.read_frame(edge_reader)[1])
+            self.assertEqual(open_msg["type"], mux.MSG_RELAY_OPEN)
+            self.assertEqual((open_msg["session_id"], open_msg["role"]), (sid, "receiver"))
+            edge_sock.sendall(mux.encode_control({"type": mux.MSG_RELAY_READY, "session_id": sid}))
+            edge_sock.sendall(mux.encode_relay_data(sid, b"payload"))
+
+            # The channel.send(b"ackack") must arrive as a relay DATA frame.
+            kind, payload = mux.read_frame(edge_reader)
+            self.assertEqual(kind, mux.FRAME_DATA)
+            self.assertEqual(mux.parse_relay_data(payload), (sid, b"ackack"))
+            worker.join(5.0)
+        finally:
+            stop.set()
+            for action in (lambda: edge_sock.shutdown(socket.SHUT_RDWR), edge_sock.close):
+                try:
+                    action()
+                except OSError:
+                    pass
+            client_thread.join(5.0)
+
+        self.assertNotIn("error", results)
+        self.assertEqual(results.get("data"), b"payload")
+
+
+def _bytes_reader(data: bytes):
     return io.BytesIO(data)
 
 
