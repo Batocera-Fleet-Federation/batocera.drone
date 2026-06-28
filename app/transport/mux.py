@@ -58,6 +58,7 @@ MSG_RELAY_CLOSE = "relay_close"  # either direction: tear down a transfer sessio
 MSG_TRANSFER_REQUEST = "transfer_request"  # receiver -> Edge: ask to pull an asset
 MSG_TRANSFER_OFFER = "transfer_offer"  # Edge -> sender: serve this asset
 MSG_TRANSFER_ERROR = "transfer_error"  # Edge -> receiver: offer could not be set up
+MSG_SIGNAL = "signal"  # Drone <-> Edge <-> Drone: hole-punch candidate exchange
 
 #: A relay DATA frame's payload is a fixed-width transfer session id (uuid4 hex)
 #: followed by the chunk bytes, so the Edge can route it to the paired leg.
