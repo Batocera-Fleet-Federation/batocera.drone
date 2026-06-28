@@ -120,6 +120,7 @@ try:
         TransportSelector,
     )
     from .transport.mux_client import MuxClient, MuxSession, connect_tls
+    from .transport import relay_transfer as _relay_transfer
     from .ui_routes import UiRoutesMixin
 except ImportError:
     if __package__ not in (None, ""):
@@ -206,6 +207,7 @@ except ImportError:
         TransportSelector,
     )
     from transport.mux_client import MuxClient, MuxSession, connect_tls  # type: ignore
+    from transport import relay_transfer as _relay_transfer  # type: ignore
     from ui_routes import UiRoutesMixin  # type: ignore
 
 
@@ -222,6 +224,9 @@ _OVERMIND_LOG_STREAM = None
 _PEER_HEALTH_CHECK_THREAD_STARTED = False
 _LOCAL_NETWORK_WORKERS_STARTED = False
 _EDGE_MUX_STARTED = False
+# The running persistent Edge connection, exposed so the relay transport (sender
+# serve + receiver fetch) can multiplex transfers over it.
+_EDGE_MUX_CLIENT = None
 _GAME_PROCESS_MONITOR_STARTED = False
 _GAME_PROCESS_MONITOR = None
 _AUTOMATION_POLLER_STARTED = False
@@ -11416,6 +11421,67 @@ def _get_download_manager() -> Optional[DownloadManager]:
     return _DOWNLOAD_MANAGER
 
 
+def _resolve_asset_root(settings: Settings, kind: str) -> Optional[Path]:
+    """Map an asset kind to the local root directory it lives under."""
+    kind = str(kind or "").strip().lower()
+    if kind == "rom":
+        return settings.roms_root
+    if kind == "bios":
+        return settings.bios_root
+    if kind in ("save", "saves"):
+        return settings.saves_root
+    return None
+
+
+def _serve_transfer_offer(settings: Settings, client: "MuxClient", offer: dict) -> dict:
+    """Sender side: stream the offered asset to the receiver over a relay leg.
+
+    Resolves the asset ref to a local file (path-safe, under the kind's root) and
+    serves it via relay_transfer.serve_asset. Returns the serve result dict.
+    """
+    session_id = str(offer.get("session_id") or "")
+    asset = offer.get("asset") if isinstance(offer.get("asset"), dict) else {}
+    if not session_id or not asset:
+        return {"status": "error", "bytes": 0}
+
+    def resolve(requested_asset, offset):
+        root = _resolve_asset_root(settings, requested_asset.get("kind"))
+        if root is None:
+            return None
+        return _relay_transfer.open_local_file_source(
+            root, requested_asset.get("relative_path"), offset
+        )
+
+    return _relay_transfer.serve_asset(client, session_id, resolve)
+
+
+def _handle_transfer_offer(settings: Settings, offer: dict) -> None:
+    """Handle a TRANSFER_OFFER from the Edge by serving it on a worker thread
+    (the mux read loop invokes this and must not block)."""
+    client = _EDGE_MUX_CLIENT
+    if client is None:
+        return
+    session_id = str(offer.get("session_id") or "")
+
+    def run() -> None:
+        try:
+            result = _serve_transfer_offer(settings, client, offer)
+            print(
+                f"[edge-relay] served transfer session={session_id} "
+                f"status={result.get('status')} bytes={result.get('bytes')}",
+                file=sys.stdout,
+                flush=True,
+            )
+        except Exception as error:  # noqa: BLE001 -- never let a serve crash the mux
+            print(
+                f"[edge-relay] serve failed session={session_id}: {error}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+    Thread(target=run, name="edge-relay-serve", daemon=True).start()
+
+
 def _edge_token_for(settings: Settings) -> str:
     """Return the Drone's current Overmind token for Edge authentication.
 
@@ -11475,12 +11541,15 @@ def _start_edge_mux_client(settings: Settings) -> None:
             client_key=str(settings.drone_key_file) if settings.drone_key_file.exists() else None,
         )
 
+    global _EDGE_MUX_CLIENT
     client = MuxClient(
         connect=connect,
         session_factory=make_session,
         ping_interval=float(max(1, settings.edge_ping_seconds)),
         log=lambda message: print(f"[edge-mux] {message}", file=sys.stdout, flush=True),
+        on_transfer_offer=lambda offer: _handle_transfer_offer(settings, offer),
     )
+    _EDGE_MUX_CLIENT = client
     Thread(target=client.run_forever, name="edge-mux-client", daemon=True).start()
     print(f"Edge mux client started: {edge_url}", file=sys.stdout, flush=True)
 

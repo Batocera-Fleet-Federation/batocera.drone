@@ -6,7 +6,11 @@ download dispatch: the selector returns the single DirectPublic transport, and
 the arguments ``DownloadManager._run_job`` used before the refactor.
 """
 
+import socket
+import tempfile
+import threading
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import app.drone_api as drone_api
@@ -15,8 +19,10 @@ from app.transport import (
     DownloadRequest,
     TransferContext,
     TransportSelector,
+    assetfetch,
 )
 from app.transport.base import PeerTransport
+from app.transport.mux_client import TlsMuxLink
 
 
 def _ctx(**overrides) -> TransferContext:
@@ -194,6 +200,66 @@ class EdgeTokenTests(unittest.TestCase):
             drone_api, "overmind_load_config", side_effect=RuntimeError("boom")
         ):
             self.assertEqual(drone_api._edge_token_for(settings), "env-token")
+
+
+class TransferOfferServeTests(unittest.TestCase):
+    """Sender side: a TRANSFER_OFFER serves the local asset over a relay leg."""
+
+    def _settings(self, **roots):
+        env = {"OVERMIND_DEVICE_ID": "dev1"}
+        env.update(roots)
+        with mock.patch.dict("os.environ", env, clear=True):
+            return drone_api.Settings.from_env()
+
+    def test_resolve_asset_root(self):
+        settings = self._settings(ROMS_ROOT="/r", BIOS_ROOT="/b", SAVES_ROOT="/sv")
+        self.assertEqual(str(drone_api._resolve_asset_root(settings, "rom")), "/r")
+        self.assertEqual(str(drone_api._resolve_asset_root(settings, "bios")), "/b")
+        self.assertEqual(str(drone_api._resolve_asset_root(settings, "saves")), "/sv")
+        self.assertEqual(str(drone_api._resolve_asset_root(settings, "save")), "/sv")
+        self.assertIsNone(drone_api._resolve_asset_root(settings, "artwork"))
+
+    def test_serve_transfer_offer_streams_local_rom(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "snes").mkdir()
+            (root / "snes" / "g.sfc").write_bytes(b"X" * 5000)
+            settings = self._settings(ROMS_ROOT=str(root))
+
+            sender_sock, receiver_sock = socket.socketpair()
+
+            class FakeMux:
+                def open_relay_session(self, session_id, role, ready_timeout=20.0):
+                    assert role == "sender"
+                    return TlsMuxLink(sender_sock)
+
+            offer = {
+                "session_id": "a" * 32,
+                "asset": {"kind": "rom", "relative_path": "snes/g.sfc"},
+            }
+            result = {}
+
+            def run():
+                result.update(drone_api._serve_transfer_offer(settings, FakeMux(), offer))
+
+            thread = threading.Thread(target=run, daemon=True)
+            thread.start()
+            try:
+                received = bytearray()
+                assetfetch.download(
+                    TlsMuxLink(receiver_sock),
+                    {"kind": "rom", "relative_path": "snes/g.sfc"},
+                    received.extend,
+                )
+                thread.join(5.0)
+                self.assertEqual(bytes(received), b"X" * 5000)
+                self.assertEqual(result.get("status"), "completed")
+            finally:
+                for sock in (sender_sock, receiver_sock):
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
 
 
 if __name__ == "__main__":
