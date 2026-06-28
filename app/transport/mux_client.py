@@ -123,6 +123,7 @@ class RelayChannel:
         self._closed = False
         self._failed = False
         self._ready = threading.Event()
+        self._signals: "queue.Queue[dict]" = queue.Queue()  # inbound MSG_SIGNAL for this session
 
     @property
     def session_id(self) -> str:
@@ -165,6 +166,20 @@ class RelayChannel:
 
     def wait_ready(self, timeout: float) -> bool:
         return self._ready.wait(timeout)
+
+    # --- hole-punch signaling (MSG_SIGNAL over the mux, routed by session) ---
+    def send_signal(self, payload: dict) -> None:
+        message = {"type": mux.MSG_SIGNAL, "session_id": self._session_id, **payload}
+        self._send_frame(mux.encode_control(message))
+
+    def feed_signal(self, message: dict) -> None:
+        self._signals.put(message)
+
+    def recv_signal(self, timeout: float) -> Optional[dict]:
+        try:
+            return self._signals.get(timeout=timeout)
+        except queue.Empty:
+            return None
 
     def fail(self) -> None:
         """Mark the session rejected (e.g. Edge sent TRANSFER_ERROR): unblock a
@@ -466,6 +481,11 @@ class MuxClient:
             channel = self._get_channel(message.get("session_id"))
             if channel is not None:
                 channel.fail()
+            return
+        if message_type == mux.MSG_SIGNAL:
+            channel = self._get_channel(message.get("session_id"))
+            if channel is not None:
+                channel.feed_signal(message)
             return
         # Presence / keepalive: delegate to the pure session core.
         for frame in session.handle_frame(kind, payload):

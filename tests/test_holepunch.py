@@ -9,6 +9,7 @@ from app.transport.holepunch import (
     HolePunchUnavailable,
     gather_udp_candidate,
     hole_punch,
+    negotiate_direct_channel,
     parse_addr,
 )
 
@@ -102,6 +103,86 @@ class HolePunchTests(unittest.TestCase):
             self.assertFalse(hole_punch(sock, dead_addr, attempts=2, interval=0.05))
         finally:
             sock.close()
+
+
+class _FakeSock:
+    def __init__(self):
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
+class _FakeSignalChannel:
+    def __init__(self, recvs=()):
+        self.sent = []
+        self._recvs = list(recvs)
+
+    def send_signal(self, payload):
+        self.sent.append(payload)
+
+    def recv_signal(self, timeout):
+        return self._recvs.pop(0) if self._recvs else None
+
+
+class NegotiateDirectChannelTests(unittest.TestCase):
+    def test_success_returns_direct_channel(self):
+        sock = _FakeSock()
+        # Peer sends its candidate, then confirms the punch.
+        channel = _FakeSignalChannel([{"candidate": "198.51.100.4:6000"}, {"punched": True}])
+        result, is_direct = negotiate_direct_channel(
+            channel,
+            ("stun", 9444),
+            gather=lambda addr: (sock, "203.0.113.7:5000"),
+            punch=lambda s, addr, attempts=20: True,
+            make_channel=lambda s, addr: ("udp", addr),
+        )
+        self.assertTrue(is_direct)
+        self.assertEqual(result, ("udp", ("198.51.100.4", 6000)))
+        self.assertEqual(channel.sent, [{"candidate": "203.0.113.7:5000"}, {"punched": True}])
+
+    def test_no_peer_candidate_falls_back_to_relay(self):
+        sock = _FakeSock()
+        channel = _FakeSignalChannel([])  # no peer candidate
+        result, is_direct = negotiate_direct_channel(
+            channel, ("s", 1), gather=lambda a: (sock, "x:1"), punch=lambda *a, **k: True
+        )
+        self.assertFalse(is_direct)
+        self.assertIs(result, channel)
+        self.assertTrue(sock.closed)
+
+    def test_punch_failure_falls_back_to_relay(self):
+        sock = _FakeSock()
+        channel = _FakeSignalChannel([{"candidate": "198.51.100.4:6000"}])
+        result, is_direct = negotiate_direct_channel(
+            channel, ("s", 1), gather=lambda a: (sock, "x:1"), punch=lambda *a, **k: False
+        )
+        self.assertFalse(is_direct)
+        self.assertIs(result, channel)
+        self.assertTrue(sock.closed)
+
+    def test_unconfirmed_punch_falls_back_to_relay(self):
+        sock = _FakeSock()
+        # Peer sent a candidate but never confirms the punch.
+        channel = _FakeSignalChannel([{"candidate": "198.51.100.4:6000"}])
+        result, is_direct = negotiate_direct_channel(
+            channel, ("s", 1), gather=lambda a: (sock, "x:1"), punch=lambda *a, **k: True
+        )
+        self.assertFalse(is_direct)
+        self.assertIs(result, channel)
+        self.assertTrue(sock.closed)
+
+    def test_gather_failure_falls_back_to_relay(self):
+        channel = _FakeSignalChannel([{"candidate": "x:1"}])
+
+        def boom(addr):
+            raise HolePunchUnavailable("no stun")
+
+        result, is_direct = negotiate_direct_channel(
+            channel, ("s", 1), gather=boom, punch=lambda *a, **k: True
+        )
+        self.assertFalse(is_direct)
+        self.assertIs(result, channel)
 
 
 if __name__ == "__main__":

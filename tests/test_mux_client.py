@@ -327,6 +327,32 @@ class MuxClientRelayTests(unittest.TestCase):
         finally:
             self._teardown(edge_sock, stop, thread)
 
+    def test_signal_routed_to_channel(self):
+        client, edge_sock, edge_reader, stop, thread = self._connect()
+        try:
+            session_id = "b" * 32
+            channel = client.start_relay_session(session_id, "receiver")
+            mux.read_frame(edge_reader)  # RELAY_OPEN
+
+            channel.send_signal({"candidate": "203.0.113.7:5000"})
+            sent = mux.decode_control(mux.read_frame(edge_reader)[1])
+            self.assertEqual(sent["type"], mux.MSG_SIGNAL)
+            self.assertEqual(sent["candidate"], "203.0.113.7:5000")
+
+            edge_sock.sendall(
+                mux.encode_control(
+                    {
+                        "type": mux.MSG_SIGNAL,
+                        "session_id": session_id,
+                        "candidate": "198.51.100.9:6000",
+                    }
+                )
+            )
+            received = channel.recv_signal(5.0)
+            self.assertEqual(received["candidate"], "198.51.100.9:6000")
+        finally:
+            self._teardown(edge_sock, stop, thread)
+
     def test_transfer_error_fails_channel(self):
         client, edge_sock, edge_reader, stop, thread = self._connect()
         try:

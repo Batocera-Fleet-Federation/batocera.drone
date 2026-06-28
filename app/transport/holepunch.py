@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import json
 import socket
-from typing import Optional, Tuple
+from typing import Any, Callable, Optional, Tuple
+
+from .reliable_udp import ReliableUDPChannel
 
 PUNCH_MAGIC = b"BFF-PUNCH"
 
@@ -96,3 +98,50 @@ def hole_punch(
                 pass
             return True
     return False
+
+
+def negotiate_direct_channel(
+    channel: Any,
+    stun_addr: Tuple[str, int],
+    *,
+    signal_timeout: float = 5.0,
+    punch_attempts: int = 20,
+    gather: Callable[..., Tuple[socket.socket, str]] = gather_udp_candidate,
+    punch: Callable[..., bool] = hole_punch,
+    make_channel: Optional[Callable[[socket.socket, Tuple[str, int]], Any]] = None,
+) -> Tuple[Any, bool]:
+    """Try to upgrade a paired relay session to a direct, hole-punched channel.
+
+    Both peers call this after their relay session is ready: each gathers a UDP
+    candidate from the Edge STUN reflector, exchanges it over the mux
+    (``channel.send_signal`` / ``recv_signal``), and punches toward the peer.
+    Returns ``(transfer_channel, is_direct)`` -- a reliable-UDP channel when the
+    punch succeeds, otherwise the original relay ``channel`` (caller relays).
+    """
+    try:
+        sock, my_candidate = gather(stun_addr)
+    except HolePunchUnavailable:
+        return channel, False
+    try:
+        channel.send_signal({"candidate": my_candidate})
+        peer = channel.recv_signal(signal_timeout)
+        peer_candidate = (peer or {}).get("candidate")
+        if not peer_candidate:
+            sock.close()
+            return channel, False
+        peer_addr = parse_addr(peer_candidate)
+        if not punch(sock, peer_addr, attempts=punch_attempts):
+            sock.close()
+            return channel, False
+        # Both sides must agree to use the punched path, or one could switch to
+        # UDP while the other keeps relaying. Confirm mutually before committing.
+        channel.send_signal({"punched": True})
+        confirm = channel.recv_signal(signal_timeout)
+        if not (confirm or {}).get("punched"):
+            sock.close()
+            return channel, False
+    except Exception:  # noqa: BLE001 -- any failure falls back to relay
+        sock.close()
+        return channel, False
+    factory = make_channel or (lambda s, addr: ReliableUDPChannel.over_socket(s, addr))
+    return factory(sock, peer_addr), True
