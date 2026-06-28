@@ -122,6 +122,7 @@ try:
     from .transport.mux_client import MuxClient, MuxSession, connect_tls
     from .transport import assetfetch as _assetfetch
     from .transport import relay_transfer as _relay_transfer
+    from .transport.lan import LanDirectTransport
     from .ui_routes import UiRoutesMixin
 except ImportError:
     if __package__ not in (None, ""):
@@ -210,6 +211,7 @@ except ImportError:
     from transport.mux_client import MuxClient, MuxSession, connect_tls  # type: ignore
     from transport import assetfetch as _assetfetch  # type: ignore
     from transport import relay_transfer as _relay_transfer  # type: ignore
+    from transport.lan import LanDirectTransport  # type: ignore
     from ui_routes import UiRoutesMixin  # type: ignore
 
 
@@ -10819,10 +10821,14 @@ class DownloadManager:
     def __init__(self, settings: Settings, repository: "RomRepository") -> None:
         self.settings = settings
         self.repository = repository
-        # Transport seam: DirectPublic wraps the legacy _download_*_from_peer
-        # dispatch; when the Edge mux is enabled, the relay transport is added as a
-        # fallback tier (tried when the direct path is unusable or fails).
-        transports = [DirectPublicTransport(_directpublic_fetch)]
+        # Transport seam, in priority order: LAN-direct (same-network peers) ->
+        # public-direct (the legacy _download_*_from_peer path) -> relay (when the
+        # Edge mux is enabled). The selector tries each usable tier and falls back
+        # to the next on failure.
+        transports = [
+            LanDirectTransport(_directpublic_fetch, local_network=_local_network_snapshot),
+            DirectPublicTransport(_directpublic_fetch),
+        ]
         if settings.edge_enabled:
             transports.append(
                 _relay_transfer.RelayReceiverTransport(_relay_fetch, is_available=_edge_mux_available)
@@ -11492,6 +11498,31 @@ def _edge_mux_available() -> bool:
     """True when a live Edge mux is connected (so relay transfers can run)."""
     client = _EDGE_MUX_CLIENT
     return client is not None and client.connected
+
+
+_LOCAL_NETWORK_CACHE: dict = {"at": 0.0, "value": {}}
+_LOCAL_NETWORK_SNAPSHOT_TTL_SECONDS = 120.0
+
+
+def _local_network_snapshot() -> dict:
+    """This drone's network info (public_ip + LAN ipv4), cached briefly.
+
+    Used by the LAN-direct transport to detect same-LAN peers (peers behind the
+    same NAT report the same public IP). Cached because resolving the public IP
+    makes a network call; brief staleness is harmless -- a wrong guess just fails
+    the LAN attempt and the selector falls back to the next transport.
+    """
+    now = time.monotonic()
+    cache = _LOCAL_NETWORK_CACHE
+    if cache["value"] and now - cache["at"] < _LOCAL_NETWORK_SNAPSHOT_TTL_SECONDS:
+        return cache["value"]
+    try:
+        value = _build_local_ip_addresses()
+    except Exception:
+        value = {}
+    cache["at"] = now
+    cache["value"] = value
+    return value
 
 
 def _request_transfer_session(

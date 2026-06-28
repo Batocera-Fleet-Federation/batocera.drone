@@ -25,6 +25,7 @@ from app.transport import (
 )
 from app.peer_selection import select_best_peer
 from app.transport.base import PeerTransport
+from app.transport.lan import LanDirectTransport
 from app.transport.mux_client import RelayChannel, TlsMuxLink
 
 
@@ -388,6 +389,54 @@ class RelayDownloadEndToEndTests(unittest.TestCase):
                     settings, {}, {"drone_id": "TX"}, "snes", "g.sfc"
                 )
             self.assertEqual(activity["status"], "skipped")
+
+
+class LanDirectTransportTests(unittest.TestCase):
+    def _transport(self, my_public, fetch_fn=lambda r, c: {"status": "completed"}):
+        return LanDirectTransport(fetch_fn, local_network=lambda: {"public_ip": my_public})
+
+    def test_lan_url_when_same_public_ip(self):
+        transport = self._transport("203.0.113.7")
+        peer = {"public_ip": "203.0.113.7", "local_ip": "192.168.1.50", "api_port": 8443}
+        self.assertEqual(transport.lan_url(peer), "https://192.168.1.50:8443")
+
+    def test_lan_url_default_port_omitted(self):
+        transport = self._transport("203.0.113.7")
+        peer = {"public_ip": "203.0.113.7", "local_ip": "192.168.1.50", "api_port": 443}
+        self.assertEqual(transport.lan_url(peer), "https://192.168.1.50")
+
+    def test_no_lan_url_when_public_ip_differs(self):
+        transport = self._transport("203.0.113.7")
+        self.assertIsNone(transport.lan_url({"public_ip": "198.51.100.9", "local_ip": "192.168.1.50"}))
+
+    def test_no_lan_url_without_local_ip_or_own_public(self):
+        self.assertIsNone(self._transport("203.0.113.7").lan_url({"public_ip": "203.0.113.7"}))
+        self.assertIsNone(self._transport("").lan_url({"public_ip": "203.0.113.7", "local_ip": "192.168.1.5"}))
+
+    def test_usable_reflects_lan_url(self):
+        transport = self._transport("203.0.113.7")
+        same = self._ctx({"public_ip": "203.0.113.7", "local_ip": "192.168.1.5"})
+        other = self._ctx({"public_ip": "198.51.100.9", "local_ip": "192.168.1.5"})
+        self.assertTrue(transport.usable(DownloadRequest(asset_type="rom"), same))
+        self.assertFalse(transport.usable(DownloadRequest(asset_type="rom"), other))
+
+    def test_fetch_points_direct_path_at_lan_address(self):
+        captured = {}
+
+        def fake(request, context):
+            captured["peer"] = context.peer
+            return {"status": "completed"}
+
+        transport = self._transport("203.0.113.7", fetch_fn=fake)
+        ctx = self._ctx({"drone_id": "p", "public_ip": "203.0.113.7", "local_ip": "192.168.1.50"})
+        transport.fetch(DownloadRequest(asset_type="rom"), ctx)
+        self.assertEqual(captured["peer"]["public_reachable_url"], "https://192.168.1.50")
+        self.assertEqual(captured["peer"]["reachable_url"], "https://192.168.1.50")
+        self.assertEqual(captured["peer"]["drone_id"], "p")  # original fields preserved
+
+    @staticmethod
+    def _ctx(peer):
+        return TransferContext(settings=None, repository=None, config={}, peer=peer)
 
 
 class PeerSelectionRelayTests(unittest.TestCase):
