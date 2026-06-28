@@ -55,6 +55,9 @@ MSG_ERROR = "error"  # either direction: protocol/auth error before close
 MSG_RELAY_OPEN = "relay_open"  # Drone -> Edge: join a transfer session as a role
 MSG_RELAY_READY = "relay_ready"  # Edge -> Drone: both legs present, data may flow
 MSG_RELAY_CLOSE = "relay_close"  # either direction: tear down a transfer session
+MSG_TRANSFER_REQUEST = "transfer_request"  # receiver -> Edge: ask to pull an asset
+MSG_TRANSFER_OFFER = "transfer_offer"  # Edge -> sender: serve this asset
+MSG_TRANSFER_ERROR = "transfer_error"  # Edge -> receiver: offer could not be set up
 
 #: A relay DATA frame's payload is a fixed-width transfer session id (uuid4 hex)
 #: followed by the chunk bytes, so the Edge can route it to the paired leg.
