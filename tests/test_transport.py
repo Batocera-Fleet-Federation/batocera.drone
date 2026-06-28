@@ -23,6 +23,7 @@ from app.transport import (
     assetfetch,
     mux,
 )
+from app.peer_selection import select_best_peer
 from app.transport.base import PeerTransport
 from app.transport.mux_client import RelayChannel, TlsMuxLink
 
@@ -387,6 +388,42 @@ class RelayDownloadEndToEndTests(unittest.TestCase):
                     settings, {}, {"drone_id": "TX"}, "snes", "g.sfc"
                 )
             self.assertEqual(activity["status"], "skipped")
+
+
+class PeerSelectionRelayTests(unittest.TestCase):
+    DIRECT = {
+        "device_id": "direct",
+        "online": True,
+        "public_resolvable": True,
+        "public_reachable_url": "https://198.51.100.5:443",
+    }
+    RELAY = {"device_id": "relay-src", "online": True, "edge_online": True}
+
+    def test_edge_online_peer_selected_when_no_direct(self):
+        peer = select_best_peer([self.RELAY], [], "me")
+        self.assertEqual(peer["device_id"], "relay-src")
+
+    def test_direct_preferred_over_relay_even_if_slower(self):
+        fast_relay = {**self.RELAY, "last_speed_sample": {"upload_mbps": 999}}
+        slow_direct = {**self.DIRECT, "last_speed_sample": {"upload_mbps": 1}}
+        peer = select_best_peer([fast_relay, slow_direct], [], "me")
+        self.assertEqual(peer["device_id"], "direct")
+
+    def test_unreachable_peer_skipped(self):
+        self.assertIsNone(select_best_peer([{"device_id": "nope", "online": True}], [], "me"))
+
+    def test_allow_relay_false_excludes_edge_only(self):
+        self.assertIsNone(select_best_peer([self.RELAY], [], "me", allow_relay=False))
+
+    def test_failed_direct_check_falls_back_to_relay(self):
+        peer_both = {**self.DIRECT, "device_id": "p", "edge_online": True}
+        checks = [{"target_drone_id": "p", "status": "fail"}]
+        self.assertEqual(select_best_peer([peer_both], checks, "me")["device_id"], "p")
+
+    def test_failed_direct_check_without_relay_is_skipped(self):
+        peer_direct = {**self.DIRECT, "device_id": "p"}
+        checks = [{"target_drone_id": "p", "status": "fail"}]
+        self.assertIsNone(select_best_peer([peer_direct], checks, "me"))
 
 
 if __name__ == "__main__":
