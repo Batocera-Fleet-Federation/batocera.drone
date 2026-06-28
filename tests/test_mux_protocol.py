@@ -94,5 +94,24 @@ class ReadFrameTests(unittest.TestCase):
         self.assertEqual(mux.decode_control(payload)["device_id"], "abcdefghij")
 
 
+class RelayFramingTests(unittest.TestCase):
+    def test_relay_data_round_trip(self):
+        session_id = "a" * mux.RELAY_SESSION_ID_LEN
+        frame = mux.encode_relay_data(session_id, b"chunk-bytes")
+        kind, payload = mux.read_frame(mux.reader_from_fileobj(io.BytesIO(frame)))
+        self.assertEqual(kind, mux.FRAME_DATA)
+        got_session, data = mux.parse_relay_data(payload)
+        self.assertEqual(got_session, session_id)
+        self.assertEqual(data, b"chunk-bytes")
+
+    def test_session_id_must_be_fixed_width(self):
+        with self.assertRaises(mux.MuxProtocolError):
+            mux.encode_relay_data("too-short", b"x")
+
+    def test_parse_rejects_short_payload(self):
+        with self.assertRaises(mux.MuxProtocolError):
+            mux.parse_relay_data(b"shorter-than-session-id")
+
+
 if __name__ == "__main__":
     unittest.main()
