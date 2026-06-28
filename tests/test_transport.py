@@ -390,6 +390,60 @@ class RelayDownloadEndToEndTests(unittest.TestCase):
                 )
             self.assertEqual(activity["status"], "skipped")
 
+    def test_tags_holepunch_when_direct(self):
+        with tempfile.TemporaryDirectory() as directory:
+            settings = self._settings(directory)
+            content = b"ROM!" * 1000
+            fake = _FakeRelayMux(content)
+            config = {"overmind_url": "https://o", "overmind_token": "t"}
+            with mock.patch.object(drone_api, "_EDGE_MUX_CLIENT", fake), mock.patch.object(
+                drone_api, "_request_transfer_session", return_value=("s" * 32, "tok")
+            ), mock.patch.object(drone_api, "_maybe_holepunch", side_effect=lambda s, ch: (ch, True)):
+                activity = drone_api._relay_download_rom(
+                    settings, config, {"drone_id": "TX"}, "snes", "g.sfc", expected_size=len(content)
+                )
+            self.assertEqual(activity["transport"], "holepunch")
+            self.assertEqual((Path(directory) / "snes" / "g.sfc").read_bytes(), content)
+
+
+class HolepunchWiringTests(unittest.TestCase):
+    def _settings(self, **env):
+        base = {"OVERMIND_DEVICE_ID": "dev1"}
+        base.update(env)
+        with mock.patch.dict("os.environ", base, clear=True):
+            return drone_api.Settings.from_env()
+
+    def test_edge_stun_addr(self):
+        settings = self._settings(DRONE_EDGE_URL="tls://edge.example:9443", DRONE_EDGE_STUN_PORT="9444")
+        self.assertEqual(drone_api._edge_stun_addr(settings), ("edge.example", 9444))
+
+    def test_edge_stun_addr_none_without_url(self):
+        self.assertIsNone(drone_api._edge_stun_addr(self._settings()))
+
+    def test_maybe_holepunch_disabled_or_no_stun(self):
+        channel = object()
+        disabled = self._settings(DRONE_HOLEPUNCH_ENABLED="0", DRONE_EDGE_URL="tls://e:9443")
+        self.assertEqual(drone_api._maybe_holepunch(disabled, channel), (channel, False))
+        self.assertEqual(drone_api._maybe_holepunch(self._settings(), channel), (channel, False))
+
+    def test_maybe_holepunch_delegates_with_stun_addr(self):
+        settings = self._settings(DRONE_EDGE_URL="tls://edge.example:9443")
+        channel, udp = object(), object()
+        with mock.patch.object(
+            drone_api._holepunch, "negotiate_direct_channel", return_value=(udp, True)
+        ) as negotiate:
+            self.assertEqual(drone_api._maybe_holepunch(settings, channel), (udp, True))
+        self.assertEqual(negotiate.call_args[0][0], channel)
+        self.assertEqual(negotiate.call_args[0][1], ("edge.example", 9444))
+
+    def test_maybe_holepunch_swallows_errors(self):
+        settings = self._settings(DRONE_EDGE_URL="tls://edge.example:9443")
+        channel = object()
+        with mock.patch.object(
+            drone_api._holepunch, "negotiate_direct_channel", side_effect=RuntimeError("boom")
+        ):
+            self.assertEqual(drone_api._maybe_holepunch(settings, channel), (channel, False))
+
 
 class LanDirectTransportTests(unittest.TestCase):
     def _transport(self, my_public, fetch_fn=lambda r, c: {"status": "completed"}):

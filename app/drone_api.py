@@ -119,9 +119,10 @@ try:
         TransferContext,
         TransportSelector,
     )
-    from .transport.mux_client import MuxClient, MuxSession, connect_tls
+    from .transport.mux_client import MuxClient, MuxSession, connect_tls, parse_edge_endpoint
     from .transport import assetfetch as _assetfetch
     from .transport import relay_transfer as _relay_transfer
+    from .transport import holepunch as _holepunch
     from .transport.lan import LanDirectTransport
     from .ui_routes import UiRoutesMixin
 except ImportError:
@@ -208,9 +209,10 @@ except ImportError:
         TransferContext,
         TransportSelector,
     )
-    from transport.mux_client import MuxClient, MuxSession, connect_tls  # type: ignore
+    from transport.mux_client import MuxClient, MuxSession, connect_tls, parse_edge_endpoint  # type: ignore
     from transport import assetfetch as _assetfetch  # type: ignore
     from transport import relay_transfer as _relay_transfer  # type: ignore
+    from transport import holepunch as _holepunch  # type: ignore
     from transport.lan import LanDirectTransport  # type: ignore
     from ui_routes import UiRoutesMixin  # type: ignore
 
@@ -1396,6 +1398,8 @@ class Settings:
     edge_url: Optional[str]
     edge_ping_seconds: int
     edge_verify_tls: bool
+    edge_stun_port: int
+    holepunch_enabled: bool
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -1480,6 +1484,8 @@ class Settings:
             edge_url=(os.environ.get("DRONE_EDGE_URL") or "").strip() or None,
             edge_ping_seconds=int(os.environ.get("DRONE_EDGE_PING_SECONDS", "20")),
             edge_verify_tls=_env_bool(True, "DRONE_EDGE_VERIFY_TLS"),
+            edge_stun_port=int(os.environ.get("DRONE_EDGE_STUN_PORT", "9444")),
+            holepunch_enabled=_env_bool(True, "DRONE_HOLEPUNCH_ENABLED"),
         )
 
 
@@ -11446,10 +11452,11 @@ def _resolve_asset_root(settings: Settings, kind: str) -> Optional[Path]:
 
 
 def _serve_transfer_offer(settings: Settings, client: "MuxClient", offer: dict) -> dict:
-    """Sender side: stream the offered asset to the receiver over a relay leg.
+    """Sender side: stream the offered asset to the receiver.
 
-    Resolves the asset ref to a local file (path-safe, under the kind's root) and
-    serves it via relay_transfer.serve_asset. Returns the serve result dict.
+    Opens a sender relay leg, tries to upgrade it to a direct hole-punched path
+    (falling back to relay), then serves the asset (path-safe, under the kind's
+    root) over whichever channel resulted. Returns the serve result dict.
     """
     session_id = str(offer.get("session_id") or "")
     asset = offer.get("asset") if isinstance(offer.get("asset"), dict) else {}
@@ -11464,7 +11471,19 @@ def _serve_transfer_offer(settings: Settings, client: "MuxClient", offer: dict) 
             root, requested_asset.get("relative_path"), offset
         )
 
-    return _relay_transfer.serve_asset(client, session_id, resolve)
+    relay_channel = client.open_relay_session(session_id, "sender")
+    transfer_channel, is_direct = _maybe_holepunch(settings, relay_channel)
+    try:
+        result = _assetfetch.serve_one(transfer_channel, resolve)
+        result["transport"] = "holepunch" if is_direct else "relay"
+        return result
+    finally:
+        if is_direct:
+            try:
+                transfer_channel.close()
+            except Exception:  # noqa: BLE001
+                pass
+        relay_channel.close()
 
 
 def _handle_transfer_offer(settings: Settings, offer: dict) -> None:
@@ -11498,6 +11517,35 @@ def _edge_mux_available() -> bool:
     """True when a live Edge mux is connected (so relay transfers can run)."""
     client = _EDGE_MUX_CLIENT
     return client is not None and client.connected
+
+
+def _edge_stun_addr(settings: Settings) -> Optional[Tuple[str, int]]:
+    """The Edge's UDP STUN reflector address (host from the edge URL + STUN port)."""
+    if not settings.edge_url:
+        return None
+    try:
+        host, _ = parse_edge_endpoint(settings.edge_url)
+    except ValueError:
+        return None
+    return host, int(settings.edge_stun_port)
+
+
+def _maybe_holepunch(settings: Settings, channel):
+    """Try to upgrade a paired relay ``channel`` to a direct hole-punched channel.
+
+    Returns ``(transfer_channel, is_direct)``: a reliable-UDP channel when both
+    drones successfully punch + confirm, else the original relay channel so the
+    transfer falls back to relaying. Any failure is swallowed (relay fallback)."""
+    if not settings.holepunch_enabled:
+        return channel, False
+    stun_addr = _edge_stun_addr(settings)
+    if stun_addr is None:
+        return channel, False
+    try:
+        return _holepunch.negotiate_direct_channel(channel, stun_addr)
+    except Exception as error:  # noqa: BLE001 -- never let punch negotiation break a transfer
+        print(f"[edge-relay] hole-punch negotiation failed: {error}", file=sys.stderr, flush=True)
+        return channel, False
 
 
 _LOCAL_NETWORK_CACHE: dict = {"at": 0.0, "value": {}}
@@ -11643,9 +11691,10 @@ def _relay_download_rom(
     asset = {"kind": "rom", "relative_path": f"{system}/{rel}"}
     target.parent.mkdir(parents=True, exist_ok=True)
     session_id, transfer_token = _request_transfer_session(settings, config, source_device_id, asset)
-    channel = _relay_transfer.open_receiver_channel(
+    relay_channel = _relay_transfer.open_receiver_channel(
         client, session_id, transfer_token, source_device_id, asset
     )
+    transfer_channel, is_direct = _maybe_holepunch(settings, relay_channel)
     bytes_written = 0
     total_bytes = int(expected_size) if expected_size not in (None, "") else None
     try:
@@ -11660,7 +11709,7 @@ def _relay_download_rom(
                     progress_callback(received_total, total_bytes)
 
             _assetfetch.download(
-                channel, asset, write, offset=0, progress=progress, cancel=cancellation_event
+                transfer_channel, asset, write, offset=0, progress=progress, cancel=cancellation_event
             )
     except _assetfetch.AssetFetchCancelled as error:
         if partial_target.exists():
@@ -11671,7 +11720,12 @@ def _relay_download_rom(
             partial_target.unlink()
         raise
     finally:
-        channel.close()
+        if is_direct:
+            try:
+                transfer_channel.close()
+            except Exception:  # noqa: BLE001
+                pass
+        relay_channel.close()
 
     if expected_size not in (None, ""):
         try:
@@ -11697,7 +11751,7 @@ def _relay_download_rom(
         "relative_path": target.relative_to(system_dir).as_posix(),
         "action": "download",
         "status": "completed",
-        "transport": "relay",
+        "transport": "holepunch" if is_direct else "relay",
         "bytes_transferred": bytes_written,
         "file_size": expected_size or bytes_written,
         "fingerprint": actual_fingerprint,
@@ -11708,7 +11762,11 @@ def _relay_download_rom(
         "completed_at": completed_dt.isoformat(),
         "duration_ms": duration_ms,
         "duration_seconds": round(duration_ms / 1000, 3),
-        "selected_peer_reason": "relayed via Overmind edge",
+        "selected_peer_reason": (
+            "direct hole-punched path via Overmind edge"
+            if is_direct
+            else "relayed via Overmind edge"
+        ),
     }
 
 
