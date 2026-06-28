@@ -7,8 +7,10 @@ import unittest
 from pathlib import Path
 
 from app.transport import assetfetch
+from app.transport.base import DownloadRequest, TransferContext
 from app.transport.mux_client import RelayChannel, TlsMuxLink
 from app.transport.relay_transfer import (
+    RelayReceiverTransport,
     open_local_file_source,
     open_receiver_channel,
     serve_asset,
@@ -130,6 +132,33 @@ class OpenReceiverChannelTests(unittest.TestCase):
         with self.assertRaises(ConnectionError):
             open_receiver_channel(mux, "s" * 32, "tok", "B", {}, ready_timeout=1.0)
         self.assertIn(("close", "s" * 32), mux.calls)
+
+
+class RelayReceiverTransportTests(unittest.TestCase):
+    @staticmethod
+    def _ctx(peer):
+        return TransferContext(settings=None, repository=None, config={}, peer=peer)
+
+    def test_usable_requires_rom_mux_and_peer(self):
+        peer = {"drone_id": "TX"}
+        available = RelayReceiverTransport(lambda r, c: {}, is_available=lambda: True)
+        self.assertTrue(available.usable(DownloadRequest(asset_type="rom"), self._ctx(peer)))
+        # v1 only relays ROM files.
+        self.assertFalse(available.usable(DownloadRequest(asset_type="bios"), self._ctx(peer)))
+        # No live mux -> not usable.
+        offline = RelayReceiverTransport(lambda r, c: {}, is_available=lambda: False)
+        self.assertFalse(offline.usable(DownloadRequest(asset_type="rom"), self._ctx(peer)))
+        # No peer device id -> not usable.
+        self.assertFalse(available.usable(DownloadRequest(asset_type="rom"), self._ctx({})))
+
+    def test_fetch_delegates_to_fetch_fn(self):
+        transport = RelayReceiverTransport(
+            lambda request, context: {"status": "completed", "transport": "relay"},
+            is_available=lambda: True,
+        )
+        result = transport.fetch(DownloadRequest(asset_type="rom"), self._ctx({"drone_id": "TX"}))
+        self.assertEqual(result["transport"], "relay")
+        self.assertEqual(transport.name, "relay")
 
 
 if __name__ == "__main__":

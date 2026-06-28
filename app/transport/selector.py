@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import List, Sequence
+from typing import List, Optional, Sequence
 
 from .base import DownloadRequest, PeerTransport, TransferContext
 
@@ -34,3 +34,28 @@ class TransportSelector:
         # transport rather than failing the job before the underlying helper can
         # raise its own descriptive error.
         return self._transports[0]
+
+    def usable_transports(self, request: DownloadRequest, context: TransferContext) -> List[PeerTransport]:
+        usable = [t for t in self._transports if t.usable(request, context)]
+        return usable or [self._transports[0]]
+
+    def fetch(self, request: DownloadRequest, context: TransferContext) -> dict:
+        """Fetch via the best usable transport, falling back to the next on failure.
+
+        Tries each usable transport in priority order. A cancellation (the job's
+        cancellation_event is set) is never retried -- it re-raises immediately so
+        a user cancel doesn't silently fall back to another transport. Otherwise
+        the last error is raised if every transport fails.
+        """
+        last_error: Optional[BaseException] = None
+        for transport in self.usable_transports(request, context):
+            try:
+                return transport.fetch(request, context)
+            except Exception as error:  # noqa: BLE001 -- try the next transport
+                last_error = error
+                cancel = context.cancellation_event
+                if cancel is not None and cancel.is_set():
+                    raise
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("no transport available")

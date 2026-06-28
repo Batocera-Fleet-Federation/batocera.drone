@@ -6,6 +6,7 @@ download dispatch: the selector returns the single DirectPublic transport, and
 the arguments ``DownloadManager._run_job`` used before the refactor.
 """
 
+import io
 import socket
 import tempfile
 import threading
@@ -20,9 +21,10 @@ from app.transport import (
     TransferContext,
     TransportSelector,
     assetfetch,
+    mux,
 )
 from app.transport.base import PeerTransport
-from app.transport.mux_client import TlsMuxLink
+from app.transport.mux_client import RelayChannel, TlsMuxLink
 
 
 def _ctx(**overrides) -> TransferContext:
@@ -260,6 +262,131 @@ class TransferOfferServeTests(unittest.TestCase):
                         sock.close()
                     except OSError:
                         pass
+
+
+class SelectorFetchTests(unittest.TestCase):
+    """TransportSelector.fetch tries transports in order, falling back on failure."""
+
+    class _Recording(PeerTransport):
+        def __init__(self, name, result=None, error=None):
+            self.name = name
+            self._result = result
+            self._error = error
+            self.called = []
+
+        def fetch(self, request, context):
+            self.called.append(self.name)
+            if self._error is not None:
+                raise self._error
+            return self._result
+
+    def test_falls_back_to_next_on_failure(self):
+        failing = self._Recording("fail", error=RuntimeError("boom"))
+        working = self._Recording("ok", result={"status": "completed"})
+        selector = TransportSelector([failing, working])
+        out = selector.fetch(DownloadRequest(asset_type="rom"), _ctx(cancellation_event=None))
+        self.assertEqual(out, {"status": "completed"})
+        self.assertEqual(failing.called + working.called, ["fail", "ok"])
+
+    def test_all_fail_raises_last_error(self):
+        selector = TransportSelector(
+            [
+                self._Recording("a", error=RuntimeError("e1")),
+                self._Recording("b", error=RuntimeError("e2")),
+            ]
+        )
+        with self.assertRaises(RuntimeError) as caught:
+            selector.fetch(DownloadRequest(asset_type="rom"), _ctx(cancellation_event=None))
+        self.assertEqual(str(caught.exception), "e2")
+
+    def test_cancellation_is_not_retried(self):
+        cancel = threading.Event()
+
+        class CancelOnFetch(PeerTransport):
+            name = "cancel"
+
+            def fetch(self, request, context):
+                cancel.set()
+                raise RuntimeError("cancelled")
+
+        nope = self._Recording("nope", result={"status": "completed"})
+        selector = TransportSelector([CancelOnFetch(), nope])
+        with self.assertRaises(RuntimeError):
+            selector.fetch(DownloadRequest(asset_type="rom"), _ctx(cancellation_event=cancel))
+        self.assertEqual(nope.called, [])  # never retried after cancel
+
+
+class _FakeRelayMux:
+    """Stands in for the Edge+sender: marks the receiver channel ready on request
+    and, when the receiver sends an AssetFetch FETCH, feeds back CHUNK + DONE."""
+
+    def __init__(self, content: bytes):
+        self._content = content
+        self.channel = None
+
+    def start_relay_session(self, session_id, role):
+        self.channel = RelayChannel(session_id, self._on_send)
+        return self.channel
+
+    def send_transfer_request(self, session_id, token, source_device, asset):
+        self.channel.mark_ready()
+
+    def close_relay_session(self, session_id):
+        if self.channel is not None:
+            self.channel.close()
+
+    def _on_send(self, frame_bytes):
+        kind, payload = mux.read_frame(mux.reader_from_fileobj(io.BytesIO(frame_bytes)))
+        if kind != mux.FRAME_DATA:
+            return
+        _, asset_frame = mux.parse_relay_data(payload)
+        message_type, _ = assetfetch.read_message(mux.reader_from_fileobj(io.BytesIO(asset_frame)))
+        if message_type == assetfetch.AF_FETCH:
+            self.channel.feed(assetfetch.encode_chunk(self._content))
+            self.channel.feed(assetfetch.encode_done(len(self._content)))
+
+
+class RelayDownloadEndToEndTests(unittest.TestCase):
+    def _settings(self, roms_root):
+        with mock.patch.dict(
+            "os.environ", {"OVERMIND_DEVICE_ID": "rx", "ROMS_ROOT": str(roms_root)}, clear=True
+        ):
+            return drone_api.Settings.from_env()
+
+    def test_relay_download_rom_writes_and_verifies(self):
+        with tempfile.TemporaryDirectory() as directory:
+            settings = self._settings(directory)
+            content = b"ROM!" * 1000
+            fake = _FakeRelayMux(content)
+            config = {"overmind_url": "https://o", "overmind_token": "t"}
+            with mock.patch.object(drone_api, "_EDGE_MUX_CLIENT", fake), mock.patch.object(
+                drone_api, "_request_transfer_session", return_value=("s" * 32, "tok")
+            ):
+                activity = drone_api._relay_download_rom(
+                    settings,
+                    config,
+                    {"drone_id": "TX"},
+                    "snes",
+                    "g.sfc",
+                    expected_size=len(content),
+                    expected_fingerprint=None,
+                )
+            self.assertEqual(activity["status"], "completed")
+            self.assertEqual(activity["transport"], "relay")
+            self.assertEqual(activity["bytes_transferred"], len(content))
+            self.assertEqual(activity["source_drone_id"], "TX")
+            self.assertEqual((Path(directory) / "snes" / "g.sfc").read_bytes(), content)
+
+    def test_relay_download_rom_skips_existing_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            settings = self._settings(directory)
+            (Path(directory) / "snes").mkdir()
+            (Path(directory) / "snes" / "g.sfc").write_bytes(b"already here")
+            with mock.patch.object(drone_api, "_EDGE_MUX_CLIENT", _FakeRelayMux(b"x")):
+                activity = drone_api._relay_download_rom(
+                    settings, {}, {"drone_id": "TX"}, "snes", "g.sfc"
+                )
+            self.assertEqual(activity["status"], "skipped")
 
 
 if __name__ == "__main__":

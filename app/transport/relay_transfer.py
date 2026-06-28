@@ -17,9 +17,10 @@ transfer never touches the control plane; it is relayed Drone-to-Drone.
 from __future__ import annotations
 
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterable, Mapping, Optional, Tuple
+from typing import Any, Callable, Iterable, Mapping, Optional, Tuple
 
 from . import assetfetch
+from .base import DownloadRequest, PeerTransport, TransferContext
 
 
 def open_local_file_source(
@@ -105,3 +106,36 @@ def open_receiver_channel(
         mux_client.close_relay_session(session_id)
         raise ConnectionError(f"relay transfer rejected by Edge for session {session_id}")
     return channel
+
+
+class RelayReceiverTransport(PeerTransport):
+    """Receiver-side relay transport: pull an asset from a peer via the Edge relay.
+
+    Plugged into the TransportSelector as a fallback after the direct path. The
+    actual fetch (session minting, channel, AssetFetch, disk write + verify) is
+    injected from ``drone_api`` as ``fetch_fn`` to avoid an import cycle.
+    """
+
+    name = "relay"
+    #: v1 relays ROM files; other asset types fall back to other transports.
+    SUPPORTED_ASSET_TYPES = ("rom",)
+
+    def __init__(
+        self,
+        fetch_fn: Callable[[DownloadRequest, TransferContext], dict],
+        *,
+        is_available: Callable[[], bool],
+    ) -> None:
+        self._fetch_fn = fetch_fn
+        self._is_available = is_available
+
+    def usable(self, request: DownloadRequest, context: TransferContext) -> bool:
+        if request.asset_type not in self.SUPPORTED_ASSET_TYPES:
+            return False
+        if not self._is_available():
+            return False
+        peer = context.peer or {}
+        return bool(peer.get("drone_id") or peer.get("device_id"))
+
+    def fetch(self, request: DownloadRequest, context: TransferContext) -> dict:
+        return self._fetch_fn(request, context)

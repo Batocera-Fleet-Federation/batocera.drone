@@ -120,6 +120,7 @@ try:
         TransportSelector,
     )
     from .transport.mux_client import MuxClient, MuxSession, connect_tls
+    from .transport import assetfetch as _assetfetch
     from .transport import relay_transfer as _relay_transfer
     from .ui_routes import UiRoutesMixin
 except ImportError:
@@ -207,6 +208,7 @@ except ImportError:
         TransportSelector,
     )
     from transport.mux_client import MuxClient, MuxSession, connect_tls  # type: ignore
+    from transport import assetfetch as _assetfetch  # type: ignore
     from transport import relay_transfer as _relay_transfer  # type: ignore
     from ui_routes import UiRoutesMixin  # type: ignore
 
@@ -10817,10 +10819,15 @@ class DownloadManager:
     def __init__(self, settings: Settings, repository: "RomRepository") -> None:
         self.settings = settings
         self.repository = repository
-        # Transport seam: Phase 0 has a single transport (DirectPublic) that wraps
-        # the legacy _download_*_from_peer dispatch, so behavior is unchanged.
-        # Later phases register LAN / hole-punch / relay transports here.
-        self._selector = TransportSelector([DirectPublicTransport(_directpublic_fetch)])
+        # Transport seam: DirectPublic wraps the legacy _download_*_from_peer
+        # dispatch; when the Edge mux is enabled, the relay transport is added as a
+        # fallback tier (tried when the direct path is unusable or fails).
+        transports = [DirectPublicTransport(_directpublic_fetch)]
+        if settings.edge_enabled:
+            transports.append(
+                _relay_transfer.RelayReceiverTransport(_relay_fetch, is_available=_edge_mux_available)
+            )
+        self._selector = TransportSelector(transports)
         self._lock = Lock()
         self._jobs: OrderedDict[str, dict] = OrderedDict()
         self._cancel_events: Dict[str, Event] = {}
@@ -11348,8 +11355,7 @@ class DownloadManager:
                 progress_callback=progress,
                 cancellation_event=cancel_event,
             )
-            transport = self._selector.select(request, context)
-            activity = transport.fetch(request, context)
+            activity = self._selector.fetch(request, context)
             refresh_started = time.monotonic()
             try:
                 refreshed = (
@@ -11480,6 +11486,216 @@ def _handle_transfer_offer(settings: Settings, offer: dict) -> None:
             )
 
     Thread(target=run, name="edge-relay-serve", daemon=True).start()
+
+
+def _edge_mux_available() -> bool:
+    """True when a live Edge mux is connected (so relay transfers can run)."""
+    client = _EDGE_MUX_CLIENT
+    return client is not None and client.connected
+
+
+def _request_transfer_session(
+    settings: Settings, config: dict, source_device_id: str, asset: dict
+) -> Tuple[str, str]:
+    """Ask Overmind to authorize a relayed pull; return ``(session_id, token)``."""
+    base_url = str(config.get("overmind_url") or "").strip().rstrip("/")
+    token = str(config.get("overmind_token") or "").strip()
+    if not base_url or not token:
+        raise RuntimeError("Overmind is not configured; cannot mint a transfer")
+    device_id = quote(settings.overmind_device_id, safe="")
+    endpoint = f"{base_url}/api/devices/{device_id}/transfers"
+    response = _overmind_post_json(
+        endpoint, {"source_device_id": source_device_id, "asset": asset}, token=token, settings=settings
+    )
+    session_id = str(response.get("session_id") or "")
+    transfer_token = str(response.get("token") or "")
+    if not session_id or not transfer_token:
+        raise RuntimeError("transfer authorization returned no session/token")
+    return session_id, transfer_token
+
+
+def _relay_download_rom(
+    settings: Settings,
+    config: dict,
+    peer: dict,
+    system: str,
+    relative_path: str,
+    expected_size=None,
+    expected_fingerprint=None,
+    progress_callback=None,
+    cancellation_event: Optional[Event] = None,
+) -> dict:
+    """Pull a ROM from ``peer`` over the Edge relay, writing + verifying it locally.
+
+    Mirrors _download_rom_from_peer's skip-if-present + fingerprint-verify +
+    activity-dict contract (so a relayed ROM is indistinguishable from a direct
+    one to the queue/UI); only the byte source differs (AssetFetch over the mux
+    instead of an mTLS HTTP GET).
+    """
+    source_device_id = str(peer.get("drone_id") or peer.get("device_id") or "")
+    if not source_device_id:
+        raise RuntimeError("relay peer has no device id")
+    client = _EDGE_MUX_CLIENT
+    if client is None:
+        raise RuntimeError("edge mux not connected")
+
+    rel = _safe_rom_relative_path(relative_path)
+    system_dir = (settings.roms_root / system).resolve()
+    target = (system_dir / rel).resolve()
+    if target == system_dir or system_dir not in target.parents:
+        raise ValueError("invalid target path")
+    partial_target = target.with_name(f"{target.name}.part")
+    started_dt = datetime.now(timezone.utc).replace(microsecond=0)
+    started = started_dt.isoformat()
+    started_mono = time.monotonic()
+    expected_fingerprint_clean = str(expected_fingerprint or "").strip().lower()
+
+    def skipped_activity(existing: Path, reason: str) -> dict:
+        completed_dt = datetime.now(timezone.utc).replace(microsecond=0)
+        duration_ms = int((time.monotonic() - started_mono) * 1000)
+        try:
+            size = int(existing.stat().st_size)
+        except OSError:
+            try:
+                size = int(expected_size or 0) if expected_size not in (None, "") else 0
+            except (TypeError, ValueError):
+                size = 0
+        try:
+            fingerprint = (
+                RomRepository.build_fingerprint(existing)
+                if existing.is_file()
+                else expected_fingerprint_clean
+            )
+        except Exception:
+            fingerprint = expected_fingerprint_clean
+        return {
+            "source_drone_id": source_device_id,
+            "target_drone_id": settings.overmind_device_id,
+            "system": system,
+            "rom_name": rel,
+            "relative_path": existing.relative_to(system_dir).as_posix(),
+            "action": "download",
+            "status": "skipped",
+            "skip_reason": reason,
+            "failure_reason": reason,
+            "bytes_transferred": 0,
+            "file_size": size or expected_size,
+            "fingerprint": fingerprint,
+            "rom_fingerprint": expected_fingerprint_clean or fingerprint,
+            "download_started_at": started,
+            "download_completed_at": completed_dt.isoformat(),
+            "started_at": started,
+            "completed_at": completed_dt.isoformat(),
+            "duration_ms": duration_ms,
+            "duration_seconds": round(duration_ms / 1000, 3),
+            "selected_peer_reason": "local ROM already exists",
+        }
+
+    if target.exists():
+        return skipped_activity(target, "target path already exists")
+    if expected_fingerprint_clean and system_dir.exists() and system_dir.is_dir():
+        for candidate in sorted(
+            system_dir.rglob("*"), key=lambda path: path.relative_to(system_dir).as_posix().lower()
+        ):
+            if not candidate.is_file():
+                continue
+            if RomRepository.should_ignore_rom_path(Path(candidate.relative_to(system_dir).as_posix())):
+                continue
+            try:
+                if RomRepository.build_fingerprint(candidate).lower() == expected_fingerprint_clean:
+                    return skipped_activity(candidate, "matching ROM already exists")
+            except Exception:
+                continue
+
+    # asset.relative_path is relative to roms_root (system/<file>) so the sender
+    # resolves it under its own roms_root.
+    asset = {"kind": "rom", "relative_path": f"{system}/{rel}"}
+    target.parent.mkdir(parents=True, exist_ok=True)
+    session_id, transfer_token = _request_transfer_session(settings, config, source_device_id, asset)
+    channel = _relay_transfer.open_receiver_channel(
+        client, session_id, transfer_token, source_device_id, asset
+    )
+    bytes_written = 0
+    total_bytes = int(expected_size) if expected_size not in (None, "") else None
+    try:
+        with partial_target.open("wb") as handle:
+            def write(chunk: bytes) -> None:
+                nonlocal bytes_written
+                handle.write(chunk)
+                bytes_written += len(chunk)
+
+            def progress(received_total: int) -> None:
+                if progress_callback:
+                    progress_callback(received_total, total_bytes)
+
+            _assetfetch.download(
+                channel, asset, write, offset=0, progress=progress, cancel=cancellation_event
+            )
+    except _assetfetch.AssetFetchCancelled as error:
+        if partial_target.exists():
+            partial_target.unlink()
+        raise DownloadCancelled(str(error) or "download cancelled") from error
+    except Exception:
+        if partial_target.exists():
+            partial_target.unlink()
+        raise
+    finally:
+        channel.close()
+
+    if expected_size not in (None, ""):
+        try:
+            if int(expected_size) != bytes_written:
+                raise RuntimeError(f"size mismatch expected={expected_size} actual={bytes_written}")
+        except ValueError:
+            pass
+    actual_fingerprint = RomRepository.build_fingerprint(partial_target)
+    if expected_fingerprint_clean and actual_fingerprint.lower() != expected_fingerprint_clean:
+        if partial_target.exists():
+            partial_target.unlink()
+        raise RuntimeError(
+            f"fingerprint mismatch expected={expected_fingerprint_clean} actual={actual_fingerprint}"
+        )
+    partial_target.replace(target)
+    completed_dt = datetime.now(timezone.utc).replace(microsecond=0)
+    duration_ms = int((time.monotonic() - started_mono) * 1000)
+    return {
+        "source_drone_id": source_device_id,
+        "target_drone_id": settings.overmind_device_id,
+        "system": system,
+        "rom_name": rel,
+        "relative_path": target.relative_to(system_dir).as_posix(),
+        "action": "download",
+        "status": "completed",
+        "transport": "relay",
+        "bytes_transferred": bytes_written,
+        "file_size": expected_size or bytes_written,
+        "fingerprint": actual_fingerprint,
+        "rom_fingerprint": expected_fingerprint_clean or actual_fingerprint,
+        "download_started_at": started,
+        "download_completed_at": completed_dt.isoformat(),
+        "started_at": started,
+        "completed_at": completed_dt.isoformat(),
+        "duration_ms": duration_ms,
+        "duration_seconds": round(duration_ms / 1000, 3),
+        "selected_peer_reason": "relayed via Overmind edge",
+    }
+
+
+def _relay_fetch(request: "DownloadRequest", context: "TransferContext") -> dict:
+    """RelayReceiverTransport fetch dispatch (v1 supports ROM files)."""
+    if request.asset_type != "rom":
+        raise RuntimeError(f"relay transport does not support asset type {request.asset_type}")
+    return _relay_download_rom(
+        context.settings,
+        context.config,
+        context.peer,
+        request.system,
+        request.relative_path,
+        expected_size=request.expected_size,
+        expected_fingerprint=request.expected_fingerprint,
+        progress_callback=context.progress_callback,
+        cancellation_event=context.cancellation_event,
+    )
 
 
 def _edge_token_for(settings: Settings) -> str:
