@@ -59,6 +59,10 @@ game saves to Overmind. Heartbeat thumbprint mismatch
 
 ## Transport layer (`app/transport/`) — the outbound-only networking
 
+This is **single-source P2P, not torrent-style swarming**: each transfer pulls the
+whole asset from **one** best peer (`peer_selection.select_best_peer` → one peer;
+`DownloadManager` keeps one active download) — no piece-level multi-peer fetch.
+
 The download path is **transport-agnostic**. `DownloadManager._run_job` calls
 `TransportSelector.fetch` (`selector.py`), which tries `PeerTransport`s best-first
 and falls through to the next on failure:
@@ -99,6 +103,16 @@ mux → the Edge offers it to the sender → both sides try transports best-firs
 cert-pinned mTLS `/peer/*`; relay runs `assetfetch` over the mux and the bytes are
 relayed Drone↔Drone (the Edge never sees plaintext on the other tiers; relay legs
 are TLS to the Edge). Bytes never touch the control plane.
+
+**Without the Edge (`DRONE_EDGE_ENABLED` off / `enable_edge=false`):** the relay
+tier is dropped and the selector is `[LAN-direct, direct-public]`. **Same-LAN P2P
+still works** — LAN-direct compares the peer's public IP (Overmind metadata)
+against this drone's own (`_build_local_ip_addresses`, not the Edge) and connects
+over the local mTLS path. **Cross-network P2P does not** unless the peer is
+port-forwarded *and* Overmind's reachability probe is on (which auto-defaults on
+when there's no Edge). So: one-LAN fleet → no Edge needed; multi-site fleet → run
+the Edge (or self-host it) or go back to port-forwarding. Hole-punch + relay both
+require the Edge.
 
 ## Conventions
 
