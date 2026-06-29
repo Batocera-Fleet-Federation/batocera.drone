@@ -113,6 +113,17 @@ try:
         rom_fingerprint_exists as _rom_fingerprint_exists,
         safe_rom_relative_path as _safe_rom_relative_path,
     )
+    from .transport import (
+        DirectPublicTransport,
+        DownloadRequest,
+        TransferContext,
+        TransportSelector,
+    )
+    from .transport.mux_client import MuxClient, MuxSession, connect_tls, parse_edge_endpoint
+    from .transport import assetfetch as _assetfetch
+    from .transport import relay_transfer as _relay_transfer
+    from .transport import holepunch as _holepunch
+    from .transport.lan import LanDirectTransport
     from .ui_routes import UiRoutesMixin
 except ImportError:
     if __package__ not in (None, ""):
@@ -192,6 +203,17 @@ except ImportError:
         rom_fingerprint_exists as _rom_fingerprint_exists,
         safe_rom_relative_path as _safe_rom_relative_path,
     )
+    from transport import (  # type: ignore
+        DirectPublicTransport,
+        DownloadRequest,
+        TransferContext,
+        TransportSelector,
+    )
+    from transport.mux_client import MuxClient, MuxSession, connect_tls, parse_edge_endpoint  # type: ignore
+    from transport import assetfetch as _assetfetch  # type: ignore
+    from transport import relay_transfer as _relay_transfer  # type: ignore
+    from transport import holepunch as _holepunch  # type: ignore
+    from transport.lan import LanDirectTransport  # type: ignore
     from ui_routes import UiRoutesMixin  # type: ignore
 
 
@@ -207,6 +229,10 @@ _SAVES_METADATA_WATCHER = None
 _OVERMIND_LOG_STREAM = None
 _PEER_HEALTH_CHECK_THREAD_STARTED = False
 _LOCAL_NETWORK_WORKERS_STARTED = False
+_EDGE_MUX_STARTED = False
+# The running persistent Edge connection, exposed so the relay transport (sender
+# serve + receiver fetch) can multiplex transfers over it.
+_EDGE_MUX_CLIENT = None
 _GAME_PROCESS_MONITOR_STARTED = False
 _GAME_PROCESS_MONITOR = None
 _AUTOMATION_POLLER_STARTED = False
@@ -1367,6 +1393,13 @@ class Settings:
     drone_mtls_enabled: bool
     drone_mtls_mode: str
     drone_mtls_ca_file: Optional[Path]
+    # Persistent outbound connection to the Overmind Edge (opt-in during rollout).
+    edge_enabled: bool
+    edge_url: Optional[str]
+    edge_ping_seconds: int
+    edge_verify_tls: bool
+    edge_stun_port: int
+    holepunch_enabled: bool
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -1447,6 +1480,12 @@ class Settings:
             drone_mtls_enabled=_env_bool(False, "DRONE_MTLS_ENABLED", "DRONE_TO_DRONE_MTLS_ENABLED"),
             drone_mtls_mode=(os.environ.get("DRONE_MTLS_MODE") or "self-signed").strip().lower(),
             drone_mtls_ca_file=Path(os.environ["DRONE_MTLS_CA_FILE"]) if os.environ.get("DRONE_MTLS_CA_FILE") else None,
+            edge_enabled=_env_bool(False, "DRONE_EDGE_ENABLED"),
+            edge_url=(os.environ.get("DRONE_EDGE_URL") or "").strip() or None,
+            edge_ping_seconds=int(os.environ.get("DRONE_EDGE_PING_SECONDS", "20")),
+            edge_verify_tls=_env_bool(True, "DRONE_EDGE_VERIFY_TLS"),
+            edge_stun_port=int(os.environ.get("DRONE_EDGE_STUN_PORT", "9444")),
+            holepunch_enabled=_env_bool(True, "DRONE_HOLEPUNCH_ENABLED"),
         )
 
 
@@ -10698,6 +10737,85 @@ def _kick_asset_metadata_sync_after_download(settings: Settings, repository: "Ro
     Thread(target=run, name="asset-metadata-follow-up-sync", daemon=True).start()
 
 
+def _directpublic_fetch(request: "DownloadRequest", context: "TransferContext") -> dict:
+    """Run the legacy direct mTLS peer download for one asset.
+
+    This is the body of the DirectPublic transport: it dispatches on
+    ``asset_type`` to the appropriate ``_download_*_from_peer`` helper (defined
+    later in this module) and returns its activity dict unchanged. Injected into
+    :class:`DirectPublicTransport` so the transport package needs no dependency
+    on this module.
+    """
+    settings = context.settings
+    config = context.config
+    peer = context.peer
+    progress = context.progress_callback
+    cancel_event = context.cancellation_event
+    asset_type = request.asset_type
+    system = request.system
+    rel = request.relative_path
+    expected_size = request.expected_size
+    expected_fingerprint = request.expected_fingerprint
+    if asset_type == "artwork":
+        return _download_artwork_from_peer(
+            settings,
+            context.repository,
+            config,
+            peer,
+            system,
+            request.rom_path,
+            request.artwork_type,
+            progress_callback=progress,
+            cancellation_event=cancel_event,
+            overwrite=request.overwrite,
+            local_rom_path=request.local_rom_path,
+        )
+    if asset_type == "saves":
+        return _download_save_from_peer(
+            settings,
+            config,
+            peer,
+            system,
+            rel,
+            expected_size=expected_size,
+            expected_fingerprint=expected_fingerprint,
+            cancellation_event=cancel_event,
+        )
+    if asset_type == "bios":
+        return _download_bios_from_peer(
+            settings,
+            config,
+            peer,
+            rel,
+            expected_size=expected_size,
+            expected_md5=expected_fingerprint,
+            progress_callback=progress,
+            cancellation_event=cancel_event,
+        )
+    if request.entry_type == "folder":
+        return _download_rom_folder_from_peer(
+            settings,
+            config,
+            peer,
+            system,
+            rel,
+            expected_size=expected_size,
+            progress_callback=progress,
+            cancellation_event=cancel_event,
+        )
+    return _download_rom_from_peer(
+        settings,
+        config,
+        peer,
+        system,
+        rel,
+        expected_size=expected_size,
+        expected_fingerprint=expected_fingerprint,
+        progress_callback=progress,
+        cancellation_event=cancel_event,
+    )
+
+
 class DownloadManager:
     """Per-target Drone download queue with a small pool of worker threads.
 
@@ -10709,6 +10827,19 @@ class DownloadManager:
     def __init__(self, settings: Settings, repository: "RomRepository") -> None:
         self.settings = settings
         self.repository = repository
+        # Transport seam, in priority order: LAN-direct (same-network peers) ->
+        # public-direct (the legacy _download_*_from_peer path) -> relay (when the
+        # Edge mux is enabled). The selector tries each usable tier and falls back
+        # to the next on failure.
+        transports = [
+            LanDirectTransport(_directpublic_fetch, local_network=_local_network_snapshot),
+            DirectPublicTransport(_directpublic_fetch),
+        ]
+        if settings.edge_enabled:
+            transports.append(
+                _relay_transfer.RelayReceiverTransport(_relay_fetch, is_available=_edge_mux_available)
+            )
+        self._selector = TransportSelector(transports)
         self._lock = Lock()
         self._jobs: OrderedDict[str, dict] = OrderedDict()
         self._cancel_events: Dict[str, Event] = {}
@@ -11216,66 +11347,27 @@ class DownloadManager:
                 self._push_download_state(config, "progress", force=True)
 
         try:
-            if asset_type == "artwork":
-                activity = _download_artwork_from_peer(
-                    self.settings,
-                    self.repository,
-                    config,
-                    peer,
-                    system,
-                    rom_path,
-                    artwork_type,
-                    progress_callback=progress,
-                    cancellation_event=cancel_event,
-                    overwrite=artwork_overwrite,
-                    local_rom_path=artwork_local_rom_path,
-                )
-            elif asset_type == "saves":
-                activity = _download_save_from_peer(
-                    self.settings,
-                    config,
-                    peer,
-                    system,
-                    rel,
-                    expected_size=expected_size,
-                    expected_fingerprint=expected_fingerprint,
-                    cancellation_event=cancel_event,
-                )
-            elif asset_type == "bios":
-                activity = _download_bios_from_peer(
-                    self.settings,
-                    config,
-                    peer,
-                    rel,
-                    expected_size=expected_size,
-                    expected_md5=expected_fingerprint,
-                    progress_callback=progress,
-                    cancellation_event=cancel_event,
-                )
-            else:
-                if entry_type == "folder":
-                    activity = _download_rom_folder_from_peer(
-                        self.settings,
-                        config,
-                        peer,
-                        system,
-                        rel,
-                        expected_size=expected_size,
-                        progress_callback=progress,
-                        cancellation_event=cancel_event,
-                    )
-                else:
-                    activity = _download_rom_from_peer(
-                        self.settings,
-                        config,
-                        peer,
-                        system,
-                        rel,
-                        expected_size=expected_size,
-                        expected_fingerprint=expected_fingerprint,
-                        progress_callback=progress,
-                        cancellation_event=cancel_event,
-                    )
+            request = DownloadRequest(
+                asset_type=asset_type,
+                system=system,
+                relative_path=rel,
+                rom_path=rom_path,
+                artwork_type=artwork_type,
+                entry_type=entry_type,
+                expected_size=expected_size,
+                expected_fingerprint=expected_fingerprint,
+                overwrite=artwork_overwrite,
+                local_rom_path=artwork_local_rom_path,
+            )
+            context = TransferContext(
+                settings=self.settings,
+                repository=self.repository,
+                config=config,
+                peer=peer,
+                progress_callback=progress,
+                cancellation_event=cancel_event,
+            )
+            activity = self._selector.fetch(request, context)
             refresh_started = time.monotonic()
             try:
                 refreshed = (
@@ -11345,6 +11437,426 @@ class DownloadManager:
 
 def _get_download_manager() -> Optional[DownloadManager]:
     return _DOWNLOAD_MANAGER
+
+
+def _resolve_asset_root(settings: Settings, kind: str) -> Optional[Path]:
+    """Map an asset kind to the local root directory it lives under."""
+    kind = str(kind or "").strip().lower()
+    if kind == "rom":
+        return settings.roms_root
+    if kind == "bios":
+        return settings.bios_root
+    if kind in ("save", "saves"):
+        return settings.saves_root
+    return None
+
+
+def _serve_transfer_offer(settings: Settings, client: "MuxClient", offer: dict) -> dict:
+    """Sender side: stream the offered asset to the receiver.
+
+    Opens a sender relay leg, tries to upgrade it to a direct hole-punched path
+    (falling back to relay), then serves the asset (path-safe, under the kind's
+    root) over whichever channel resulted. Returns the serve result dict.
+    """
+    session_id = str(offer.get("session_id") or "")
+    asset = offer.get("asset") if isinstance(offer.get("asset"), dict) else {}
+    if not session_id or not asset:
+        return {"status": "error", "bytes": 0}
+
+    def resolve(requested_asset, offset):
+        root = _resolve_asset_root(settings, requested_asset.get("kind"))
+        if root is None:
+            return None
+        return _relay_transfer.open_local_file_source(
+            root, requested_asset.get("relative_path"), offset
+        )
+
+    relay_channel = client.open_relay_session(session_id, "sender")
+    transfer_channel, is_direct = _maybe_holepunch(settings, relay_channel)
+    try:
+        result = _assetfetch.serve_one(transfer_channel, resolve)
+        result["transport"] = "holepunch" if is_direct else "relay"
+        return result
+    finally:
+        if is_direct:
+            try:
+                transfer_channel.close()
+            except Exception:  # noqa: BLE001
+                pass
+        relay_channel.close()
+
+
+def _handle_transfer_offer(settings: Settings, offer: dict) -> None:
+    """Handle a TRANSFER_OFFER from the Edge by serving it on a worker thread
+    (the mux read loop invokes this and must not block)."""
+    client = _EDGE_MUX_CLIENT
+    if client is None:
+        return
+    session_id = str(offer.get("session_id") or "")
+
+    def run() -> None:
+        try:
+            result = _serve_transfer_offer(settings, client, offer)
+            print(
+                f"[edge-relay] served transfer session={session_id} "
+                f"status={result.get('status')} bytes={result.get('bytes')}",
+                file=sys.stdout,
+                flush=True,
+            )
+        except Exception as error:  # noqa: BLE001 -- never let a serve crash the mux
+            print(
+                f"[edge-relay] serve failed session={session_id}: {error}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+    Thread(target=run, name="edge-relay-serve", daemon=True).start()
+
+
+def _edge_mux_available() -> bool:
+    """True when a live Edge mux is connected (so relay transfers can run)."""
+    client = _EDGE_MUX_CLIENT
+    return client is not None and client.connected
+
+
+def _edge_stun_addr(settings: Settings) -> Optional[Tuple[str, int]]:
+    """The Edge's UDP STUN reflector address (host from the edge URL + STUN port)."""
+    if not settings.edge_url:
+        return None
+    try:
+        host, _ = parse_edge_endpoint(settings.edge_url)
+    except ValueError:
+        return None
+    return host, int(settings.edge_stun_port)
+
+
+def _maybe_holepunch(settings: Settings, channel):
+    """Try to upgrade a paired relay ``channel`` to a direct hole-punched channel.
+
+    Returns ``(transfer_channel, is_direct)``: a reliable-UDP channel when both
+    drones successfully punch + confirm, else the original relay channel so the
+    transfer falls back to relaying. Any failure is swallowed (relay fallback)."""
+    if not settings.holepunch_enabled:
+        return channel, False
+    stun_addr = _edge_stun_addr(settings)
+    if stun_addr is None:
+        return channel, False
+    try:
+        return _holepunch.negotiate_direct_channel(channel, stun_addr)
+    except Exception as error:  # noqa: BLE001 -- never let punch negotiation break a transfer
+        print(f"[edge-relay] hole-punch negotiation failed: {error}", file=sys.stderr, flush=True)
+        return channel, False
+
+
+_LOCAL_NETWORK_CACHE: dict = {"at": 0.0, "value": {}}
+_LOCAL_NETWORK_SNAPSHOT_TTL_SECONDS = 120.0
+
+
+def _local_network_snapshot() -> dict:
+    """This drone's network info (public_ip + LAN ipv4), cached briefly.
+
+    Used by the LAN-direct transport to detect same-LAN peers (peers behind the
+    same NAT report the same public IP). Cached because resolving the public IP
+    makes a network call; brief staleness is harmless -- a wrong guess just fails
+    the LAN attempt and the selector falls back to the next transport.
+    """
+    now = time.monotonic()
+    cache = _LOCAL_NETWORK_CACHE
+    if cache["value"] and now - cache["at"] < _LOCAL_NETWORK_SNAPSHOT_TTL_SECONDS:
+        return cache["value"]
+    try:
+        value = _build_local_ip_addresses()
+    except Exception:
+        value = {}
+    cache["at"] = now
+    cache["value"] = value
+    return value
+
+
+def _request_transfer_session(
+    settings: Settings, config: dict, source_device_id: str, asset: dict
+) -> Tuple[str, str]:
+    """Ask Overmind to authorize a relayed pull; return ``(session_id, token)``."""
+    base_url = str(config.get("overmind_url") or "").strip().rstrip("/")
+    token = str(config.get("overmind_token") or "").strip()
+    if not base_url or not token:
+        raise RuntimeError("Overmind is not configured; cannot mint a transfer")
+    device_id = quote(settings.overmind_device_id, safe="")
+    endpoint = f"{base_url}/api/devices/{device_id}/transfers"
+    response = _overmind_post_json(
+        endpoint, {"source_device_id": source_device_id, "asset": asset}, token=token, settings=settings
+    )
+    session_id = str(response.get("session_id") or "")
+    transfer_token = str(response.get("token") or "")
+    if not session_id or not transfer_token:
+        raise RuntimeError("transfer authorization returned no session/token")
+    return session_id, transfer_token
+
+
+def _relay_download_rom(
+    settings: Settings,
+    config: dict,
+    peer: dict,
+    system: str,
+    relative_path: str,
+    expected_size=None,
+    expected_fingerprint=None,
+    progress_callback=None,
+    cancellation_event: Optional[Event] = None,
+) -> dict:
+    """Pull a ROM from ``peer`` over the Edge relay, writing + verifying it locally.
+
+    Mirrors _download_rom_from_peer's skip-if-present + fingerprint-verify +
+    activity-dict contract (so a relayed ROM is indistinguishable from a direct
+    one to the queue/UI); only the byte source differs (AssetFetch over the mux
+    instead of an mTLS HTTP GET).
+    """
+    source_device_id = str(peer.get("drone_id") or peer.get("device_id") or "")
+    if not source_device_id:
+        raise RuntimeError("relay peer has no device id")
+    client = _EDGE_MUX_CLIENT
+    if client is None:
+        raise RuntimeError("edge mux not connected")
+
+    rel = _safe_rom_relative_path(relative_path)
+    system_dir = (settings.roms_root / system).resolve()
+    target = (system_dir / rel).resolve()
+    if target == system_dir or system_dir not in target.parents:
+        raise ValueError("invalid target path")
+    partial_target = target.with_name(f"{target.name}.part")
+    started_dt = datetime.now(timezone.utc).replace(microsecond=0)
+    started = started_dt.isoformat()
+    started_mono = time.monotonic()
+    expected_fingerprint_clean = str(expected_fingerprint or "").strip().lower()
+
+    def skipped_activity(existing: Path, reason: str) -> dict:
+        completed_dt = datetime.now(timezone.utc).replace(microsecond=0)
+        duration_ms = int((time.monotonic() - started_mono) * 1000)
+        try:
+            size = int(existing.stat().st_size)
+        except OSError:
+            try:
+                size = int(expected_size or 0) if expected_size not in (None, "") else 0
+            except (TypeError, ValueError):
+                size = 0
+        try:
+            fingerprint = (
+                RomRepository.build_fingerprint(existing)
+                if existing.is_file()
+                else expected_fingerprint_clean
+            )
+        except Exception:
+            fingerprint = expected_fingerprint_clean
+        return {
+            "source_drone_id": source_device_id,
+            "target_drone_id": settings.overmind_device_id,
+            "system": system,
+            "rom_name": rel,
+            "relative_path": existing.relative_to(system_dir).as_posix(),
+            "action": "download",
+            "status": "skipped",
+            "skip_reason": reason,
+            "failure_reason": reason,
+            "bytes_transferred": 0,
+            "file_size": size or expected_size,
+            "fingerprint": fingerprint,
+            "rom_fingerprint": expected_fingerprint_clean or fingerprint,
+            "download_started_at": started,
+            "download_completed_at": completed_dt.isoformat(),
+            "started_at": started,
+            "completed_at": completed_dt.isoformat(),
+            "duration_ms": duration_ms,
+            "duration_seconds": round(duration_ms / 1000, 3),
+            "selected_peer_reason": "local ROM already exists",
+        }
+
+    if target.exists():
+        return skipped_activity(target, "target path already exists")
+    if expected_fingerprint_clean and system_dir.exists() and system_dir.is_dir():
+        for candidate in sorted(
+            system_dir.rglob("*"), key=lambda path: path.relative_to(system_dir).as_posix().lower()
+        ):
+            if not candidate.is_file():
+                continue
+            if RomRepository.should_ignore_rom_path(Path(candidate.relative_to(system_dir).as_posix())):
+                continue
+            try:
+                if RomRepository.build_fingerprint(candidate).lower() == expected_fingerprint_clean:
+                    return skipped_activity(candidate, "matching ROM already exists")
+            except Exception:
+                continue
+
+    # asset.relative_path is relative to roms_root (system/<file>) so the sender
+    # resolves it under its own roms_root.
+    asset = {"kind": "rom", "relative_path": f"{system}/{rel}"}
+    target.parent.mkdir(parents=True, exist_ok=True)
+    session_id, transfer_token = _request_transfer_session(settings, config, source_device_id, asset)
+    relay_channel = _relay_transfer.open_receiver_channel(
+        client, session_id, transfer_token, source_device_id, asset
+    )
+    transfer_channel, is_direct = _maybe_holepunch(settings, relay_channel)
+    bytes_written = 0
+    total_bytes = int(expected_size) if expected_size not in (None, "") else None
+    try:
+        with partial_target.open("wb") as handle:
+            def write(chunk: bytes) -> None:
+                nonlocal bytes_written
+                handle.write(chunk)
+                bytes_written += len(chunk)
+
+            def progress(received_total: int) -> None:
+                if progress_callback:
+                    progress_callback(received_total, total_bytes)
+
+            _assetfetch.download(
+                transfer_channel, asset, write, offset=0, progress=progress, cancel=cancellation_event
+            )
+    except _assetfetch.AssetFetchCancelled as error:
+        if partial_target.exists():
+            partial_target.unlink()
+        raise DownloadCancelled(str(error) or "download cancelled") from error
+    except Exception:
+        if partial_target.exists():
+            partial_target.unlink()
+        raise
+    finally:
+        if is_direct:
+            try:
+                transfer_channel.close()
+            except Exception:  # noqa: BLE001
+                pass
+        relay_channel.close()
+
+    if expected_size not in (None, ""):
+        try:
+            if int(expected_size) != bytes_written:
+                raise RuntimeError(f"size mismatch expected={expected_size} actual={bytes_written}")
+        except ValueError:
+            pass
+    actual_fingerprint = RomRepository.build_fingerprint(partial_target)
+    if expected_fingerprint_clean and actual_fingerprint.lower() != expected_fingerprint_clean:
+        if partial_target.exists():
+            partial_target.unlink()
+        raise RuntimeError(
+            f"fingerprint mismatch expected={expected_fingerprint_clean} actual={actual_fingerprint}"
+        )
+    partial_target.replace(target)
+    completed_dt = datetime.now(timezone.utc).replace(microsecond=0)
+    duration_ms = int((time.monotonic() - started_mono) * 1000)
+    return {
+        "source_drone_id": source_device_id,
+        "target_drone_id": settings.overmind_device_id,
+        "system": system,
+        "rom_name": rel,
+        "relative_path": target.relative_to(system_dir).as_posix(),
+        "action": "download",
+        "status": "completed",
+        "transport": "holepunch" if is_direct else "relay",
+        "bytes_transferred": bytes_written,
+        "file_size": expected_size or bytes_written,
+        "fingerprint": actual_fingerprint,
+        "rom_fingerprint": expected_fingerprint_clean or actual_fingerprint,
+        "download_started_at": started,
+        "download_completed_at": completed_dt.isoformat(),
+        "started_at": started,
+        "completed_at": completed_dt.isoformat(),
+        "duration_ms": duration_ms,
+        "duration_seconds": round(duration_ms / 1000, 3),
+        "selected_peer_reason": (
+            "direct hole-punched path via Overmind edge"
+            if is_direct
+            else "relayed via Overmind edge"
+        ),
+    }
+
+
+def _relay_fetch(request: "DownloadRequest", context: "TransferContext") -> dict:
+    """RelayReceiverTransport fetch dispatch (v1 supports ROM files)."""
+    if request.asset_type != "rom":
+        raise RuntimeError(f"relay transport does not support asset type {request.asset_type}")
+    return _relay_download_rom(
+        context.settings,
+        context.config,
+        context.peer,
+        request.system,
+        request.relative_path,
+        expected_size=request.expected_size,
+        expected_fingerprint=request.expected_fingerprint,
+        progress_callback=context.progress_callback,
+        cancellation_event=context.cancellation_event,
+    )
+
+
+def _edge_token_for(settings: Settings) -> str:
+    """Return the Drone's current Overmind token for Edge authentication.
+
+    Reads the live runtime config (which merges the token persisted at claim
+    time) so a Drone claimed *after* startup authenticates on its next reconnect
+    without a restart; falls back to the static env token.
+    """
+    try:
+        token = str(overmind_load_config(settings).get("overmind_token") or "").strip()
+    except Exception:
+        token = ""
+    return token or (settings.overmind_token or "").strip()
+
+
+def _start_edge_mux_client(settings: Settings) -> None:
+    """Open the persistent outbound connection to the Overmind Edge service.
+
+    Opt-in during rollout (``DRONE_EDGE_ENABLED=1`` + ``DRONE_EDGE_URL``). This is
+    what removes the need for any inbound connectivity / port-forwarding: the
+    Drone dials out and the Edge pushes presence (and, in later phases, transfer
+    signaling and relayed data) back down the same connection.
+
+    Phase 1 scope: authenticate with the Drone's Overmind token, advertise
+    capabilities + LAN addresses, and keep the link warm with PING/PONG so the
+    Edge can track liveness and report a reflexive (NAT-observed) address. The
+    client starts even before the Drone is claimed; the token is read lazily per
+    reconnect so it begins authenticating as soon as a token exists.
+    """
+    edge_url = (settings.edge_url or "").strip()
+    if not edge_url:
+        print("Edge mux disabled: no DRONE_EDGE_URL configured", file=sys.stdout, flush=True)
+        return
+
+    try:
+        lan_addrs = [ip for ip in _build_local_certificate_ips() if ip and ip != "127.0.0.1"]
+    except Exception:
+        lan_addrs = []
+
+    def make_session() -> "MuxSession":
+        return MuxSession(
+            device_id=settings.overmind_device_id,
+            token=_edge_token_for(settings),
+            capabilities=["relay"],  # LAN / hole-punch advertised in later phases
+            lan_addrs=lan_addrs,
+            app_version=_drone_app_version(),
+            on_presence=lambda swarm: print(
+                f"[edge-mux] presence update: {len(swarm)} peer(s)", file=sys.stdout, flush=True
+            ),
+        )
+
+    def connect() -> "MuxLink":
+        return connect_tls(
+            edge_url,
+            verify=settings.edge_verify_tls,
+            cafile=str(settings.drone_mtls_ca_file) if settings.drone_mtls_ca_file else None,
+            client_cert=str(settings.drone_cert_file) if settings.drone_cert_file.exists() else None,
+            client_key=str(settings.drone_key_file) if settings.drone_key_file.exists() else None,
+        )
+
+    global _EDGE_MUX_CLIENT
+    client = MuxClient(
+        connect=connect,
+        session_factory=make_session,
+        ping_interval=float(max(1, settings.edge_ping_seconds)),
+        log=lambda message: print(f"[edge-mux] {message}", file=sys.stdout, flush=True),
+        on_transfer_offer=lambda offer: _handle_transfer_offer(settings, offer),
+    )
+    _EDGE_MUX_CLIENT = client
+    Thread(target=client.run_forever, name="edge-mux-client", daemon=True).start()
+    print(f"Edge mux client started: {edge_url}", file=sys.stdout, flush=True)
 
 
 def _cached_rom_fingerprint_exists(settings: Settings, expected_fingerprint: Optional[str]) -> bool:
@@ -13694,7 +14206,7 @@ def _apply_server_tls(settings: Settings, server: ThreadingHTTPServer) -> None:
 
 
 def create_server(settings: Settings) -> ThreadingHTTPServer:
-    global _OVERMIND_POLLER_STARTED, _ROM_METADATA_POLLER_STARTED, _ROM_METADATA_WATCHER_STARTED, _PEER_HEALTH_CHECK_THREAD_STARTED, _LOCAL_NETWORK_WORKERS_STARTED, _GAME_PROCESS_MONITOR_STARTED, _GAME_PROCESS_MONITOR, _DOWNLOAD_MANAGER, _AUTOMATION_POLLER_STARTED
+    global _OVERMIND_POLLER_STARTED, _ROM_METADATA_POLLER_STARTED, _ROM_METADATA_WATCHER_STARTED, _PEER_HEALTH_CHECK_THREAD_STARTED, _LOCAL_NETWORK_WORKERS_STARTED, _GAME_PROCESS_MONITOR_STARTED, _GAME_PROCESS_MONITOR, _DOWNLOAD_MANAGER, _AUTOMATION_POLLER_STARTED, _EDGE_MUX_STARTED
     roms_root, bios_root = _real_data_roots(settings)
     repository = RomRepository(
         roms_root,
@@ -13786,6 +14298,9 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
     if not _AUTOMATION_POLLER_STARTED:
         _start_automation_poller(settings)
         _AUTOMATION_POLLER_STARTED = True
+    if settings.edge_enabled and not _EDGE_MUX_STARTED:
+        _start_edge_mux_client(settings)
+        _EDGE_MUX_STARTED = True
     if settings.rom_metadata_poll_seconds == 0:
         print("Asset metadata poller disabled: ROM_METADATA_POLL_SECONDS=0", file=sys.stdout, flush=True)
     elif not _ROM_METADATA_POLLER_STARTED:
