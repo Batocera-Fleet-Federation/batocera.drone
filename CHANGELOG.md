@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.1.27] - 2026-06-30
+
+- Outbound-only networking: transport tiers + Edge mux client (#6)
+
 ## [v0.1.26] - 2026-06-27
 
 - Finishing updating api to be strongly typed and updating swagger/openapi spec.
