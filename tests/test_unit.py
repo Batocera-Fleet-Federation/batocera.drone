@@ -4431,6 +4431,94 @@ class DroneTlsHandshakeTests(unittest.TestCase):
         self.assertTrue(kwargs.get("server_side"))
         self.assertEqual(server.socket, "wrapped")
 
+    def test_apply_server_tls_skips_empty_peer_certificate_path(self) -> None:
+        # Regression: a paired peer whose certificate_path is empty/blank/"." must be
+        # skipped. Path("") == Path(".") *exists* as a directory, so the old exists()
+        # check let such an entry reach load_verify_locations(cafile="."), which raises
+        # IsADirectoryError -- an OSError the ssl.SSLError handler did NOT catch, so it
+        # crashed drone startup. The empty-string + is_file() guards must skip these.
+        from unittest import mock as _mock
+        import app.drone_api as da
+
+        settings = _mock.Mock()
+        settings.http_only = False
+        settings.drone_mtls_mode = "self-signed"
+        settings.drone_mtls_enabled = True
+        settings.drone_mtls_ca_file = None
+        cert = _mock.Mock(); cert.exists.return_value = True
+        key = _mock.Mock(); key.exists.return_value = True
+        settings.drone_cert_file = cert
+        settings.drone_key_file = key
+
+        ctx = _mock.Mock()
+        ctx.wrap_socket.return_value = "wrapped"
+        server = _mock.Mock()
+        server.socket = "raw"
+
+        bogus_peers = [
+            {"certificate_path": ""},
+            {"certificate_path": "   "},
+            {"certificate_path": "."},
+            {"certificate_path": None},
+            {},  # certificate_path missing entirely
+        ]
+        with tempfile.TemporaryDirectory() as tmp, \
+                _mock.patch("app.drone_api.ssl.SSLContext", return_value=ctx), \
+                _mock.patch.object(da._local_network, "is_local_mode", return_value=False), \
+                _mock.patch.object(da._local_network, "paired_peers", return_value=bogus_peers), \
+                _mock.patch("app.drone_api._local_peer_cert_cache_path",
+                            return_value=Path(tmp) / "nope" / "x"):
+            # Must not raise (previously IsADirectoryError on cafile=".").
+            da._apply_server_tls(settings, server)
+
+        # No bogus path may reach load_verify_locations -- the "." case is the crash.
+        loaded = [c.kwargs.get("cafile") for c in ctx.load_verify_locations.call_args_list]
+        self.assertNotIn(".", loaded)
+        self.assertNotIn("", loaded)
+        self.assertEqual(ctx.load_verify_locations.call_count, 0)
+        self.assertEqual(server.socket, "wrapped")
+
+    def test_apply_server_tls_survives_oserror_loading_peer_cert(self) -> None:
+        # The peer-cert load is guarded by (ssl.SSLError, OSError): a paired peer cert
+        # that exists as a real file but is unreadable/garbage (raising OSError such as
+        # IsADirectoryError/PermissionError from load_verify_locations) must be skipped,
+        # not crash startup.
+        from unittest import mock as _mock
+        import app.drone_api as da
+
+        settings = _mock.Mock()
+        settings.http_only = False
+        settings.drone_mtls_mode = "self-signed"
+        settings.drone_mtls_enabled = True
+        settings.drone_mtls_ca_file = None
+        cert = _mock.Mock(); cert.exists.return_value = True
+        key = _mock.Mock(); key.exists.return_value = True
+        settings.drone_cert_file = cert
+        settings.drone_key_file = key
+
+        ctx = _mock.Mock()
+        ctx.wrap_socket.return_value = "wrapped"
+        ctx.load_verify_locations.side_effect = OSError("unreadable cert")
+        server = _mock.Mock()
+        server.socket = "raw"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            peer_cert = Path(tmp) / "peer.crt"
+            peer_cert.write_text("not-a-real-cert")
+            with _mock.patch("app.drone_api.ssl.SSLContext", return_value=ctx), \
+                    _mock.patch.object(da._local_network, "is_local_mode", return_value=False), \
+                    _mock.patch.object(da._local_network, "paired_peers",
+                                       return_value=[{"certificate_path": str(peer_cert)}]), \
+                    _mock.patch("app.drone_api._local_peer_cert_cache_path",
+                                return_value=Path(tmp) / "nope" / "x"):
+                # Must not raise even though load_verify_locations raises OSError.
+                da._apply_server_tls(settings, server)
+
+        # The real file passed is_file() so a load was attempted, but the OSError was
+        # swallowed rather than propagated.
+        self.assertGreaterEqual(ctx.load_verify_locations.call_count, 1)
+        self.assertEqual(server.socket, "wrapped")
+
 
 class LocalNetworkAssetCopyTests(unittest.TestCase):
     """Local Network 'Request Assets' panel: system-optional browse, paging,

@@ -1450,7 +1450,15 @@ except ImportError:
     from web.handlers_system import HandlersSystemMixin  # type: ignore
 
 
-class RomRequestHandler(HandlersSystemMixin, HandlersDownloadsMixin, HandlersDiagnosticsMixin, HandlersConfigMixin, HandlersOvermindMixin, HandlersNetworkMixin, HandlersArtworkMixin, HandlersContentMixin, HandlersPeerMixin, ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
+try:
+    from .web.handlers_theme import ThemeMetaMixin
+except ImportError:
+    if __package__ not in (None, ""):
+        raise
+    from web.handlers_theme import ThemeMetaMixin  # type: ignore
+
+
+class RomRequestHandler(HandlersSystemMixin, HandlersDownloadsMixin, HandlersDiagnosticsMixin, HandlersConfigMixin, HandlersOvermindMixin, HandlersNetworkMixin, HandlersArtworkMixin, HandlersContentMixin, ThemeMetaMixin, HandlersPeerMixin, ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
     server_version = "DroneApp/4.0"
     openapi_spec = OPENAPI_SPEC
     # Per-connection idle timeout (applied to the socket in BaseHTTPRequestHandler.setup).
@@ -1853,114 +1861,7 @@ class RomRequestHandler(HandlersSystemMixin, HandlersDownloadsMixin, HandlersDia
         cache_key = f"json:/search?q={query.lower()}&system={(system_filter or '').lower()}"
         self._send_json(200, {"query": query, "system": system_filter, "results": results}, cache_key=cache_key)
 
-    def _build_theme_meta(self) -> dict:
-        explicit = self.settings.batocera_theme_name
-        from_batocera_conf = _parse_batocera_theme_name(self.settings.batocera_conf_file)
-        resolved_es_settings_file = _resolve_es_settings_file(self.settings)
-        from_es_settings = _parse_es_theme_name(resolved_es_settings_file) if resolved_es_settings_file else None
-        selected = explicit or from_batocera_conf or from_es_settings
-        theme_dir = _resolve_theme_dir(self.settings)
-        if not theme_dir:
-            return {
-                "enabled": False,
-                "selected_theme_name": selected,
-                "theme_sources": {
-                    "env": explicit,
-                    "batocera_conf": from_batocera_conf,
-                    "es_settings": from_es_settings,
-                },
-                "themes_root": str(self.settings.themes_root),
-                "es_settings_file": str(resolved_es_settings_file) if resolved_es_settings_file else None,
-            }
-
-        css_candidates = ["theme.css", "style.css", "theme/theme.css", "theme/style.css", "_inc/theme.css", "_inc/style.css"]
-        bg_name_candidates = ["background", "fond", "bg", "backdrop", "wallpaper"]
-        logo_name_candidates = ["logo", "brand", "title", "system-logo"]
-
-        def first_existing(candidates: List[str]) -> Optional[str]:
-            for rel in candidates:
-                target = (theme_dir / rel).resolve()
-                if target.exists() and target.is_file() and theme_dir in target.parents:
-                    return rel
-            return None
-
-        def first_match_recursive(name_fragments: List[str], allowed_suffixes: Tuple[str, ...]) -> Optional[str]:
-            # Keep this bounded for large theme trees.
-            checked = 0
-            for path in theme_dir.rglob("*"):
-                if checked > 5000:
-                    break
-                checked += 1
-                if not path.is_file():
-                    continue
-                suffix = path.suffix.lower()
-                if suffix not in allowed_suffixes:
-                    continue
-                name_lower = path.stem.lower()
-                if any(fragment in name_lower for fragment in name_fragments):
-                    try:
-                        return path.relative_to(theme_dir).as_posix()
-                    except Exception:
-                        continue
-            return None
-
-        css_file = first_existing(css_candidates)
-        if not css_file:
-            css_file = first_match_recursive(["theme", "style"], (".css",))
-
-        bg_file = first_existing(
-            [
-                "art/background.png",
-                "art/background.jpg",
-                "art/fond.png",
-                "art/fond.jpg",
-                "background.png",
-                "background.jpg",
-            ]
-        )
-        if not bg_file:
-            bg_file = first_match_recursive(bg_name_candidates, (".png", ".jpg", ".jpeg", ".webp"))
-
-        logo_file = first_existing(["art/logo.png", "art/logo.svg", "logo.png", "logo.svg"])
-        if not logo_file:
-            logo_file = first_match_recursive(logo_name_candidates, (".png", ".jpg", ".jpeg", ".webp", ".svg"))
-
-        css_url = api_url(f"/theme/assets/{css_file}") if css_file else None
-        if self.settings.use_fake_data and css_url:
-            css_url = None
-        background_url = self._fake_theme_asset_url(bg_file) if (self.settings.use_fake_data and bg_file) else (api_url(f"/theme/assets/{bg_file}") if bg_file else None)
-        logo_url = self._fake_theme_asset_url(logo_file) if (self.settings.use_fake_data and logo_file) else (api_url(f"/theme/assets/{logo_file}") if logo_file else None)
-
-        return {
-            "enabled": True,
-            "theme_name": theme_dir.name,
-            "theme_dir": str(theme_dir),
-            "selected_theme_name": selected,
-            "theme_sources": {
-                "env": explicit,
-                "batocera_conf": from_batocera_conf,
-                "es_settings": from_es_settings,
-            },
-            "themes_root": str(self.settings.themes_root),
-            "es_settings_file": str(resolved_es_settings_file) if resolved_es_settings_file else None,
-            "api": {
-                "theme_assets_base": api_url("/theme/assets/"),
-                "system_theme_meta": api_url("/theme/system/{system}"),
-            },
-            "ui": {
-                "css_url": css_url,
-                "background_url": background_url,
-                "logo_url": logo_url,
-            },
-            "css_url": css_url,
-            "background_url": background_url,
-            "logo_url": logo_url,
-            "resolved_files": {
-                "css": css_file,
-                "background": bg_file,
-                "logo": logo_file,
-            },
-        }
+    # _build_theme_meta now lives in web/handlers_theme.py (ThemeMetaMixin, composed onto RomRequestHandler).
 
     # HandlersContentMixin methods now live in web/handlers_content.py (composed onto RomRequestHandler).
 
@@ -2210,14 +2111,21 @@ def _apply_server_tls(settings: Settings, server: ThreadingHTTPServer) -> None:
     ssl_context.load_cert_chain(certfile=str(cert_file), keyfile=str(key_file))
     if settings.drone_mtls_enabled or _local_network.is_local_mode(settings):
         ssl_context.verify_mode = ssl.CERT_OPTIONAL
-        if settings.drone_mtls_ca_file and settings.drone_mtls_ca_file.exists():
+        if settings.drone_mtls_ca_file and settings.drone_mtls_ca_file.is_file():
             ssl_context.load_verify_locations(cafile=str(settings.drone_mtls_ca_file))
         for peer in _local_network.paired_peers(settings):
-            cert_path = Path(str(peer.get("certificate_path") or ""))
-            if cert_path.exists():
+            raw_cert_path = str(peer.get("certificate_path") or "").strip()
+            # is_file() (not exists()) is deliberate: an empty/missing certificate_path
+            # collapses to Path("") == Path("."), which *exists* as a directory, and a
+            # directory (or empty) path makes load_verify_locations raise IsADirectoryError
+            # — an OSError the ssl.SSLError handler below does NOT catch, crashing startup.
+            if not raw_cert_path:
+                continue
+            cert_path = Path(raw_cert_path)
+            if cert_path.is_file():
                 try:
                     ssl_context.load_verify_locations(cafile=str(cert_path))
-                except ssl.SSLError:
+                except (ssl.SSLError, OSError):
                     continue
         # Belt-and-suspenders: also trust every cert in the local-peer-certs store
         # so a paired peer stays trusted across restarts even if its record's
@@ -2227,9 +2135,11 @@ def _apply_server_tls(settings: Settings, server: ThreadingHTTPServer) -> None:
         local_certs_dir = _local_peer_cert_cache_path(settings, "x").parent
         if local_certs_dir.exists():
             for cert_file_path in sorted(local_certs_dir.glob("*.crt")):
+                if not cert_file_path.is_file():
+                    continue
                 try:
                     ssl_context.load_verify_locations(cafile=str(cert_file_path))
-                except ssl.SSLError:
+                except (ssl.SSLError, OSError):
                     continue
     server.ssl_context = ssl_context  # type: ignore[attr-defined]
     # do_handshake_on_connect=False is critical: wrapping the LISTENING socket otherwise
