@@ -51,7 +51,8 @@ working. Layout:
   request + local thumbprint readers), saves_sync (`_sync_saves_to_overmind`),
   rom_sync (the ROM-metadata→Overmind poll/upload pipeline: `_poll_rom_metadata_once`,
   `_sync_rom_metadata_to_overmind(_locked)`, `_complete`/`_defer` — param-based on
-  `RomRepository`; the poller *threads* stay in drone_api)
+  `RomRepository`), action_poller (`_start_overmind_action_poller` — the heartbeat +
+  action-poll background loop)
 - `device/` — device_control, system_metrics, automation
 - `roms/` — scrapers, rom_fs_watcher, gamelist, rom_inventory, rom_metadata_state
   (cache snapshot build + upload-clean marking + status + poll-activity guard),
@@ -100,6 +101,17 @@ drone_api"`) + the full suite after each move. Files referenced **by path** in
 `app/service_bootstrap.sh` / `scripts/run_now.sh` (main, drone_api,
 web/{api_routes,ui_routes,route_config}, set_screen_mode, set_volume,
 input_activity_monitor) require updating those scripts in lockstep.
+
+**Deploy staging (important now that `app/` is ~87 modules):** the device path is safe —
+`service_bootstrap.sh` sets `DRONE_APP_ARCHIVE_URL=drone-app.tar.gz` and `run_now.sh` stages
+the **whole `app/` tree** from that archive (or from a `file://` `DRONE_APP_BASE_URL` via
+`copytree`). Both cover every module automatically — **no per-file list to maintain.** The
+**legacy individual-file fallback** in `run_now.sh` (the `else` branch when
+`DRONE_APP_BASE_URL` is unset) only downloads `drone_api.py` + `web/{api_routes,ui_routes,
+route_config}.py` and therefore **cannot stage the multi-module app** — it has been
+incomplete since the first extractions and is not used by the device. Don't rely on it; use
+the archive or `file://` path. `service_bootstrap.sh`'s `validate_local_app` file list +
+import check are a post-deploy sanity gate, not the staging mechanism.
 
 **SQLite cache:** `storage/rom_metadata_store.py` + `storage/saves_store.py` persist
 scanned asset metadata in the shared state DB (`storage/state_store.py`). Files are
