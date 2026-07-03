@@ -4,12 +4,12 @@ from urllib.parse import parse_qs
 try:
     from .route_config import API_PREFIX
 except ImportError:
-    from route_config import API_PREFIX  # type: ignore
+    from web.route_config import API_PREFIX  # type: ignore
 
 try:
     from .api_bridge import active as _api_bridge_active
 except ImportError:  # pragma: no cover - flat execution
-    from api_bridge import active as _api_bridge_active  # type: ignore
+    from web.api_bridge import active as _api_bridge_active  # type: ignore
 
 
 class ApiRoutesMixin:

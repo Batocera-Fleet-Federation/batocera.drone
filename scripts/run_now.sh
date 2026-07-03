@@ -43,25 +43,25 @@ APP_DIR="$WORK_DIR/app"
 APP_PATH="$APP_DIR/drone_api.py"
 MAIN_PATH="$APP_DIR/main.py"
 INIT_PATH="$APP_DIR/__init__.py"
-TEMPLATES_DIR="$APP_DIR/templates"
+TEMPLATES_DIR="$APP_DIR/web/templates"
 TEMPLATE_PATH="$TEMPLATES_DIR/index.html"
-STATIC_DIR="$APP_DIR/static"
+STATIC_DIR="$APP_DIR/web/static"
 CSS_PATH="$STATIC_DIR/css/drone.css"
 JS_PATH="$STATIC_DIR/js/drone.js"
 CONTENT_DIR="$WORK_DIR/content"
-API_ROUTES_PATH="$APP_DIR/api_routes.py"
-UI_ROUTES_PATH="$APP_DIR/ui_routes.py"
-ROUTE_CONFIG_PATH="$APP_DIR/route_config.py"
+API_ROUTES_PATH="$APP_DIR/web/api_routes.py"
+UI_ROUTES_PATH="$APP_DIR/web/ui_routes.py"
+ROUTE_CONFIG_PATH="$APP_DIR/web/route_config.py"
 
 if [[ -n "$DRONE_APP_BASE_URL" ]]; then
   DRONE_APP_BASE_URL="${DRONE_APP_BASE_URL%/}"
   DRONE_APP_URL="${DRONE_APP_URL:-$DRONE_APP_BASE_URL/app/drone_api.py}"
-  DRONE_APP_API_ROUTES_URL="${DRONE_APP_API_ROUTES_URL:-$DRONE_APP_BASE_URL/app/api_routes.py}"
-  DRONE_APP_UI_ROUTES_URL="${DRONE_APP_UI_ROUTES_URL:-$DRONE_APP_BASE_URL/app/ui_routes.py}"
-  DRONE_APP_ROUTE_CONFIG_URL="${DRONE_APP_ROUTE_CONFIG_URL:-$DRONE_APP_BASE_URL/app/route_config.py}"
-  DRONE_APP_TEMPLATE_URL="${DRONE_APP_TEMPLATE_URL:-$DRONE_APP_BASE_URL/app/templates/index.html}"
-  DRONE_APP_CSS_URL="${DRONE_APP_CSS_URL:-$DRONE_APP_BASE_URL/app/static/css/drone.css}"
-  DRONE_APP_JS_URL="${DRONE_APP_JS_URL:-$DRONE_APP_BASE_URL/app/static/js/drone.js}"
+  DRONE_APP_API_ROUTES_URL="${DRONE_APP_API_ROUTES_URL:-$DRONE_APP_BASE_URL/app/web/api_routes.py}"
+  DRONE_APP_UI_ROUTES_URL="${DRONE_APP_UI_ROUTES_URL:-$DRONE_APP_BASE_URL/app/web/ui_routes.py}"
+  DRONE_APP_ROUTE_CONFIG_URL="${DRONE_APP_ROUTE_CONFIG_URL:-$DRONE_APP_BASE_URL/app/web/route_config.py}"
+  DRONE_APP_TEMPLATE_URL="${DRONE_APP_TEMPLATE_URL:-$DRONE_APP_BASE_URL/app/web/templates/index.html}"
+  DRONE_APP_CSS_URL="${DRONE_APP_CSS_URL:-$DRONE_APP_BASE_URL/app/web/static/css/drone.css}"
+  DRONE_APP_JS_URL="${DRONE_APP_JS_URL:-$DRONE_APP_BASE_URL/app/web/static/js/drone.js}"
   DRONE_APP_CONTENT_URL="${DRONE_APP_CONTENT_URL:-$DRONE_APP_BASE_URL/content}"
 
   if [[ -z "$DRONE_APP_ARCHIVE_URL" && "$DRONE_APP_BASE_URL" == https://raw.githubusercontent.com/Batocera-Fleet-Federation/batocera.drone/* ]]; then
@@ -192,12 +192,16 @@ if [[ -n "$DRONE_APP_BASE_URL" ]]; then
 else
   mkdir -p "$APP_DIR"
   download_file "$DRONE_APP_URL" "$APP_PATH"
+  mkdir -p "$APP_DIR/web"
   download_file "$DRONE_APP_API_ROUTES_URL" "$API_ROUTES_PATH"
   download_file "$DRONE_APP_UI_ROUTES_URL" "$UI_ROUTES_PATH"
   download_file "$DRONE_APP_ROUTE_CONFIG_URL" "$ROUTE_CONFIG_PATH"
   mkdir -p "$TEMPLATES_DIR"
   mkdir -p "$(dirname "$CSS_PATH")" "$(dirname "$JS_PATH")"
   cat > "$INIT_PATH" <<'EOF'
+# package marker
+EOF
+  cat > "$APP_DIR/web/__init__.py" <<'EOF'
 # package marker
 EOF
   cat > "$MAIN_PATH" <<'EOF'
@@ -255,8 +259,8 @@ if ! PYTHONPATH="$WORK_DIR" python3 - <<'PY'
 import importlib
 
 required = {
-    "app.api_routes": "ApiRoutesMixin",
-    "app.ui_routes": "UiRoutesMixin",
+    "app.web.api_routes": "ApiRoutesMixin",
+    "app.web.ui_routes": "UiRoutesMixin",
 }
 
 for module_name, symbol in required.items():

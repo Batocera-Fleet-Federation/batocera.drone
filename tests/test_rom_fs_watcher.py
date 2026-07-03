@@ -12,7 +12,7 @@ import time
 import unittest
 from pathlib import Path
 
-from app.rom_fs_watcher import RomFilesystemWatcher
+from app.roms.rom_fs_watcher import RomFilesystemWatcher
 
 
 class RomFilesystemWatcherTests(unittest.TestCase):

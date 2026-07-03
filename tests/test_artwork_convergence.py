@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 from app.drone_api import RomRepository, Settings, _poll_rom_metadata_cache
-from app.rom_metadata_store import (
+from app.storage.rom_metadata_store import (
     _clear_pending_rom_metadata_changes,
     _read_pending_rom_metadata_changes,
 )

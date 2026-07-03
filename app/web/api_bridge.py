@@ -110,7 +110,7 @@ def maybe_start(settings=None) -> Optional["_Bridge"]:
             try:
                 from .api_app import OWNED_EXACT, OWNED_PREFIXES, app, set_settings
             except ImportError:  # pragma: no cover - flat execution
-                from api_app import OWNED_EXACT, OWNED_PREFIXES, app, set_settings  # type: ignore
+                from web.api_app import OWNED_EXACT, OWNED_PREFIXES, app, set_settings  # type: ignore
 
             if settings is not None:
                 set_settings(settings)

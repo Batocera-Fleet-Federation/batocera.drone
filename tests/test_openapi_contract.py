@@ -4,9 +4,9 @@ import unittest
 
 from fastapi.testclient import TestClient
 
-from app.api_app import app
+from app.web.api_app import app
 from app.drone_api import OPENAPI_SPEC
-from app.route_config import api_url
+from app.web.route_config import api_url
 
 
 def _json_schema(response: dict):

@@ -33,14 +33,79 @@ is order-flaky — re-run or run isolated. Tests use `unittest.TestCase`.
 
 ## Architecture
 
-**Web app:** `app/drone_api.py` is the large core (HTTP handlers via
-`ApiRoutesMixin`/`UiRoutesMixin`, scanning, sync, peer transfer).
-`Settings.from_env()` reads `*_ROOT` env vars (default `/userdata/{roms,bios,saves}`).
+**Web app + package layout (refactor in progress).** `app/` is being decomposed
+from one giant `app/drone_api.py` into cohesive subpackages. `drone_api.py` is now a
+**compatibility shim** that re-exports the moved names — dual
+`try: from .pkg.mod ... except ImportError: from pkg.mod` — so
+`from app.drone_api import X` and the flat `python app/main.py` entrypoint both keep
+working. Layout:
 
-**SQLite cache:** `rom_metadata_store.py` + `saves_store.py` persist scanned asset
-metadata in the shared state DB (`state_store.py`). Files are fingerprinted with a
-sampled hash (`RomRepository.build_fingerprint`, `sample-fp-v1` — head/middle/tail
-windows, constant cost; BIOS uses full-file MD5). A `cache_changes`/pending-changes
+- `common/` — settings, device_identity, logging_setup, http_cache, fingerprint, auth,
+  runtime_state (shared mutable Event/Lock singletons: `_ROM_METADATA_ACTIVE/_WAKE/_LOCK`,
+  `_ASSET_/_SAVES_PUSH_REQUESTED`, `_GAMELIST_WRITE_LOCK` — imported by every module that
+  needs one; reassigned `*_STARTED` flags/singletons stay in drone_api)
+- `storage/` — state_store, rom_metadata_store, saves_store (SQLite)
+- `overmind/` — contract/reporting/game_logs/filesystem/collectors + overmind_client,
+  overmind_config, registration (token register/claim + action reporting), actions
+  (`_execute_overmind_action` dispatcher), heartbeat_sync (heartbeat-drift → resync
+  request + local thumbprint readers), saves_sync (`_sync_saves_to_overmind`),
+  rom_sync (the ROM-metadata→Overmind poll/upload pipeline: `_poll_rom_metadata_once`,
+  `_sync_rom_metadata_to_overmind(_locked)`, `_complete`/`_defer` — param-based on
+  `RomRepository`; the poller *threads* stay in drone_api)
+- `device/` — device_control, system_metrics, automation
+- `roms/` — scrapers, rom_fs_watcher, gamelist, rom_inventory, rom_metadata_state
+  (cache snapshot build + upload-clean marking + status + poll-activity guard),
+  rom_scanner (`_poll_rom_metadata_cache` filesystem scan + `_hash_rom_metadata_batches`
+  sampled-fingerprint hashing; takes `RomRepository` as a param), and the `RomRepository`
+  **mixins** — rom_artwork_apply, rom_artwork_gamelist, rom_scan, rom_systems,
+  rom_asset_bios (the class is now a slim `__init__` + static delegators composed from
+  these; see the god-class-split note below)
+- `transfer/` — peer_selection, peer_connectivity (cert trust/pinning + peer HTTP
+  client + health/pairing), peer_workers (public-IP probe + health-check/local-net
+  worker threads), peer_download (`_download_*_from_peer` direct tier + state helpers),
+  edge_relay (Edge mux client + relay/hole-punch tiers), download_manager
+  (`DownloadManager` queue + tier dispatch + `_directpublic_fetch`), download_errors
+  (`DownloadCancelled`), transfer_files, local_network, network_identity,
+  drone_network, drone_tls (`DroneCertificateManager`)
+- `web/` — api_routes/ui_routes (handler mixins), route_config, api_models, the FastAPI
+  bridge (api_app/api_bridge/openapi_spec), the `RomRequestHandler` `_handle_*` **mixins**
+  (handlers_peer/content/artwork/network/overmind/config), **plus `static/` + `templates/`**
+- `transport/` — the outbound P2P stack (unchanged; also imported cross-repo as
+  `app.transport` by `.github` tests, so it stays at `app/`)
+
+**Still in `drone_api.py`** (not yet extracted): `RomRequestHandler` (most `_handle_*`
+methods — being split into `web/handlers_*.py` **mixins**; `HandlersPeerMixin` done), the
+poller-*starter* threads (they reassign `*_STARTED` flags), the server bootstrap
+(`create_server`/`main`/`DroneThreadingHTTPServer` + TLS), and a few aggregators
+(`_collect_system_info_payload`, `_get_download_manager`, `_resolve_asset_root`).
+`RomRepository` is now a slim query object composed from mixins in `roms/` (split done).
+
+**God-class split via mixins:** extract a cohesive method group into `class SomeMixin:` in
+a new module and compose it — `class RomRepository(SomeMixin, ...):`. Methods stay
+`self`-bound so call sites (`repo.method()`) and tests (`repo.method`, `patch.object(repo,
+…)`) are unchanged — **no test repoints**. Module-level deps (helpers/constants the methods
+call that aren't `self.*`) are imported in the mixin module; anything still in `drone_api`
+is lazy-imported. First done: `roms/rom_artwork_apply.py`.
+`Settings.from_env()` (now `common/settings.py`, re-exported) reads `*_ROOT` env vars
+(default `/userdata/{roms,bios,saves}`).
+
+**Extracting more:** move the code to the right subpackage, add the dual re-export to
+`drone_api.py`, then **repoint test monkeypatches** — tests patch `app.drone_api.X`,
+but if the *caller* of `X` also moved, patch the new module (e.g.
+`app.device.device_control._request_volume_service_control`). Find missing deps with
+an AST undefined-name check (watch `global`-declared module vars) and, if you lose a
+function body mid-edit, recover it from `git show HEAD:app/drone_api.py`. Verify BOTH
+import modes (`import app.drone_api` **and** `PYTHONPATH=app python3 -c "import
+drone_api"`) + the full suite after each move. Files referenced **by path** in
+`app/service_bootstrap.sh` / `scripts/run_now.sh` (main, drone_api,
+web/{api_routes,ui_routes,route_config}, set_screen_mode, set_volume,
+input_activity_monitor) require updating those scripts in lockstep.
+
+**SQLite cache:** `storage/rom_metadata_store.py` + `storage/saves_store.py` persist
+scanned asset metadata in the shared state DB (`storage/state_store.py`). Files are
+fingerprinted with a sampled hash (`RomRepository.build_fingerprint`, a delegating
+static method whose impl now lives in `common/fingerprint.py` — `sample-fp-v1`,
+head/middle/tail windows, constant cost; BIOS uses full-file MD5). A `cache_changes`/pending-changes
 queue tracks created/updated/deleted so uploads send deltas; whole-set thumbprints
 are echoed in the heartbeat. Schema is created inline with `CREATE TABLE IF NOT
 EXISTS` + `_ensure_column`; **never bump applied schema in place** — add
@@ -53,8 +118,12 @@ game saves to Overmind. Heartbeat thumbprint mismatch
 
 **P2P transfer (direct tier):** peers serve assets at
 `GET /peer/{roms,bios,saves}/...` (mTLS-gated, path-traversal-safe via
-`transfer_files.py`) and fetch with `_download_*_from_peer` (cert pinning via
-`_peer_trust_cafile`, SSL-retry). Peer selection in `peer_selection.py`. See
+`transfer/transfer_files.py`) and fetch with `_download_*_from_peer` (now in
+`transfer/peer_download.py`; cert pinning + peer client in
+`transfer/peer_connectivity.py` via `_peer_trust_cafile`/`_fetch_peer_certificate`,
+SSL-retry; the mTLS identity itself is `DroneCertificateManager` in
+`transfer/drone_tls.py`; the Edge mux client + relay/hole-punch tiers are
+`transfer/edge_relay.py`). Peer selection in `transfer/peer_selection.py`. See
 `drone-p2p-transfer-security` skill.
 
 ## Transport layer (`app/transport/`) — the outbound-only networking
@@ -121,8 +190,11 @@ require the Edge.
 - **UI:** Bootstrap 5.3 dark theme; `table table-sm align-middle` in
   `table-responsive`; always `escapeHtml` user data. Mirror Overmind's
   branding/paging. See `bff-ui-theme-functionality` skill.
-- `drone_api.py` is large — prefer targeted edits over restructuring; match
-  surrounding comment density + idiom.
+- `drone_api.py` is being **actively decomposed** into the `app/` subpackages above
+  (via the re-export shim). Land new code in the fitting subpackage, not the shim;
+  when you touch a cohesive cluster still in `drone_api.py`, prefer extracting it
+  (behavior-preserving) over growing the monolith. Match surrounding comment density
+  + idiom. See the "Web app + package layout" section for the move recipe.
 - Add focused `unittest.TestCase` tests beside existing ones.
 
 ## Skills (`.claude/skills/`, auto-surfaced)

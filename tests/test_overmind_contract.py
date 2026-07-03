@@ -12,7 +12,7 @@ import unittest
 
 from pydantic import ValidationError
 
-from app.overmind_contract import (
+from app.overmind.overmind_contract import (
     BatoceraInfoContract,
     DeviceRegisterContract,
     DeviceRegisterResponseContract,

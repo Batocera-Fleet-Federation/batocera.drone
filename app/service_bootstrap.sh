@@ -280,9 +280,9 @@ validate_local_app() {
   for required_file in \
     "$WORK_DIR/app/main.py" \
     "$WORK_DIR/app/drone_api.py" \
-    "$WORK_DIR/app/api_routes.py" \
-    "$WORK_DIR/app/ui_routes.py" \
-    "$WORK_DIR/app/route_config.py"; do
+    "$WORK_DIR/app/web/api_routes.py" \
+    "$WORK_DIR/app/web/ui_routes.py" \
+    "$WORK_DIR/app/web/route_config.py"; do
     if [ ! -s "$required_file" ]; then
       echo "[drone-service] Local Drone app validation failed: missing or empty ${required_file}"
       return 1
@@ -293,8 +293,8 @@ validate_local_app() {
 import importlib
 
 required = {
-    "app.api_routes": "ApiRoutesMixin",
-    "app.ui_routes": "UiRoutesMixin",
+    "app.web.api_routes": "ApiRoutesMixin",
+    "app.web.ui_routes": "UiRoutesMixin",
 }
 
 for module_name, symbol in required.items():

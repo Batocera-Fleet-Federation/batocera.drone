@@ -11,9 +11,9 @@ from pathlib import Path
 from typing import Any, Tuple
 
 try:
-    from .state_store import database_path, load_payload, save_payload
+    from ..storage.state_store import database_path, load_payload, save_payload
 except ImportError:
-    from state_store import database_path, load_payload, save_payload  # type: ignore
+    from storage.state_store import database_path, load_payload, save_payload  # type: ignore
 
 
 _STATE_SCHEMA_VERSION = 2

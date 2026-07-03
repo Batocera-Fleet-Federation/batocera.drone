@@ -1,9 +1,9 @@
 from pathlib import Path
 
 try:
-    from .state_store import database_path, save_payload
+    from .storage.state_store import database_path, save_payload
 except ImportError:
-    from state_store import database_path, save_payload  # type: ignore
+    from storage.state_store import database_path, save_payload  # type: ignore
 
 
 def _write_text(path: Path, content: str) -> None:

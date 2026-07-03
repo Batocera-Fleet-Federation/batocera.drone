@@ -14,8 +14,8 @@ try:
     from .state_store import database_path as _state_database_path
     from .state_store import open_database as _open_state_database
 except ImportError:
-    from state_store import database_path as _state_database_path  # type: ignore
-    from state_store import open_database as _open_state_database  # type: ignore
+    from storage.state_store import database_path as _state_database_path  # type: ignore
+    from storage.state_store import open_database as _open_state_database  # type: ignore
 
 
 ROM_METADATA_CACHE_VERSION = 5

@@ -9,9 +9,9 @@ from unittest import mock
 
 from fastapi.testclient import TestClient
 
-from app import api_app, api_bridge
-from app.api_app import OWNED_EXACT, OWNED_PREFIXES, app
-from app.route_config import API_PREFIX, api_url
+from app.web import api_app, api_bridge
+from app.web.api_app import OWNED_EXACT, OWNED_PREFIXES, app
+from app.web.route_config import API_PREFIX, api_url
 
 
 class ApiAppTest(unittest.TestCase):

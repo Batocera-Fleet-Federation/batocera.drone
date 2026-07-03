@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import app.saves_store as saves_store
+import app.storage.saves_store as saves_store
 
 
 class SavesStoreTest(unittest.TestCase):

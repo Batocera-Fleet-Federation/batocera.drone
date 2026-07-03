@@ -16,10 +16,10 @@ from fastapi.responses import JSONResponse, RedirectResponse
 try:  # package vs. flat-module execution (mirrors app/main.py)
     from .route_config import API_PREFIX, api_url
     from .api_models import ApiInfoResponse, OvermindStatusResponse
-    from .app_version import drone_app_version
+    from ..app_version import drone_app_version
 except ImportError:  # pragma: no cover - flat execution path
-    from route_config import API_PREFIX, api_url  # type: ignore
-    from api_models import ApiInfoResponse, OvermindStatusResponse  # type: ignore
+    from web.route_config import API_PREFIX, api_url  # type: ignore
+    from web.api_models import ApiInfoResponse, OvermindStatusResponse  # type: ignore
     from app_version import drone_app_version  # type: ignore
 
 
@@ -41,7 +41,7 @@ def get_settings():
     global _settings
     if _settings is None:  # pragma: no cover - exercised only outside the bridge
         try:
-            from .drone_api import Settings
+            from ..drone_api import Settings
         except ImportError:
             from drone_api import Settings  # type: ignore
         _settings = Settings.from_env()
@@ -78,7 +78,7 @@ def admin_overmind_status(settings=Depends(get_settings)):
     if not settings.admin_enabled:
         return JSONResponse(status_code=403, content={"error": "admin disabled"})
     try:
-        from .drone_api import build_overmind_status
+        from ..drone_api import build_overmind_status
     except ImportError:  # pragma: no cover - flat execution
         from drone_api import build_overmind_status  # type: ignore
     return build_overmind_status(settings)
@@ -92,7 +92,7 @@ def _merged_openapi() -> dict:
     schema = get_openapi(title=app.title, version=app.version, routes=app.routes)
     try:  # legacy spec lives in the stdlib module; import lazily to avoid an import cycle
         try:
-            from .drone_api import OPENAPI_SPEC as LEGACY  # type: ignore
+            from ..drone_api import OPENAPI_SPEC as LEGACY  # type: ignore
         except ImportError:  # pragma: no cover
             from drone_api import OPENAPI_SPEC as LEGACY  # type: ignore
     except Exception:

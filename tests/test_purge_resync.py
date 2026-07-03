@@ -21,7 +21,7 @@ from app.drone_api import (
     _persist_rom_metadata_cache,
     _poll_rom_metadata_cache,
 )
-from app.rom_metadata_store import (
+from app.storage.rom_metadata_store import (
     _clear_pending_rom_metadata_changes,
     _purge_asset_cache_keep_fingerprint,
 )
@@ -69,8 +69,8 @@ class PurgeResyncTest(unittest.TestCase):
                 posted.append({"update_mode": payload.get("update_mode"), "replace_all": payload.get("replace_all")})
                 return 200, {"rom_count": len(payload.get("roms") or []), "bios_count": 0, "artwork_count": 0}
 
-            with mock.patch("app.drone_api._overmind_post_json_with_status", side_effect=fake_post), mock.patch(
-                "app.drone_api._load_overmind_config_for_settings",
+            with mock.patch("app.overmind.rom_sync._overmind_post_json_with_status", side_effect=fake_post), mock.patch(
+                "app.overmind.rom_sync._load_overmind_config_for_settings",
                 return_value={"overmind_url": "https://ov.local", "overmind_token": "tok"},
             ), mock.patch.object(
                 RomRepository, "build_fingerprint", side_effect=AssertionError("purge must not re-fingerprint; fingerprint is reused")
@@ -108,8 +108,8 @@ class PurgeResyncTest(unittest.TestCase):
                 posted.append(payload.get("update_mode"))
                 return 200, {"rom_count": 0, "bios_count": 0, "artwork_count": 0}
 
-            with mock.patch("app.drone_api._overmind_post_json_with_status", side_effect=fake_post), mock.patch(
-                "app.drone_api._load_overmind_config_for_settings",
+            with mock.patch("app.overmind.rom_sync._overmind_post_json_with_status", side_effect=fake_post), mock.patch(
+                "app.overmind.rom_sync._load_overmind_config_for_settings",
                 return_value={"overmind_url": "https://ov.local", "overmind_token": "tok"},
             ):
                 buf = io.StringIO()

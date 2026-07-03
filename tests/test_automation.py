@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest import mock
 
 import app.drone_api as drone_api
+import app.device.automation as automation
 from app.drone_api import (
     RomRepository,
     Settings,
@@ -111,7 +112,7 @@ class IdleVolumeAutomationRunnerTests(unittest.TestCase):
     def test_disabled_does_nothing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(Path(tmp))
-            with mock.patch.object(drone_api, "_apply_audio_volume") as apply_mock:
+            with mock.patch.object(automation, "_apply_audio_volume") as apply_mock:
                 _run_idle_volume_automation_once(settings)
                 apply_mock.assert_not_called()
 
@@ -119,8 +120,8 @@ class IdleVolumeAutomationRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(Path(tmp))
             self._enable(settings)
-            with mock.patch.object(drone_api, "_read_last_input_activity", return_value=None), \
-                 mock.patch.object(drone_api, "_apply_audio_volume") as apply_mock:
+            with mock.patch.object(automation, "_read_last_input_activity", return_value=None), \
+                 mock.patch.object(automation, "_apply_audio_volume") as apply_mock:
                 _run_idle_volume_automation_once(settings)
                 apply_mock.assert_not_called()
 
@@ -129,9 +130,9 @@ class IdleVolumeAutomationRunnerTests(unittest.TestCase):
             settings = _build_settings(Path(tmp))
             self._enable(settings, idle_minutes=5)
             recent = time.time() - 60  # 1 minute idle, threshold is 5
-            with mock.patch.object(drone_api, "_read_last_input_activity", return_value=recent), \
-                 mock.patch.object(drone_api, "_get_audio_volume", return_value=80), \
-                 mock.patch.object(drone_api, "_apply_audio_volume") as apply_mock:
+            with mock.patch.object(automation, "_read_last_input_activity", return_value=recent), \
+                 mock.patch.object(automation, "_get_audio_volume", return_value=80), \
+                 mock.patch.object(automation, "_apply_audio_volume") as apply_mock:
                 _run_idle_volume_automation_once(settings)
                 apply_mock.assert_not_called()
 
@@ -140,9 +141,9 @@ class IdleVolumeAutomationRunnerTests(unittest.TestCase):
             settings = _build_settings(Path(tmp))
             self._enable(settings, idle_minutes=5, target=25)
             idle = time.time() - 600  # 10 minutes idle
-            with mock.patch.object(drone_api, "_read_last_input_activity", return_value=idle), \
-                 mock.patch.object(drone_api, "_get_audio_volume", return_value=80), \
-                 mock.patch.object(drone_api, "_apply_audio_volume", return_value=25) as apply_mock:
+            with mock.patch.object(automation, "_read_last_input_activity", return_value=idle), \
+                 mock.patch.object(automation, "_get_audio_volume", return_value=80), \
+                 mock.patch.object(automation, "_apply_audio_volume", return_value=25) as apply_mock:
                 _run_idle_volume_automation_once(settings)
                 _run_idle_volume_automation_once(settings)  # still idle, same activity stamp
                 apply_mock.assert_called_once_with(settings, 25)
@@ -152,13 +153,13 @@ class IdleVolumeAutomationRunnerTests(unittest.TestCase):
             settings = _build_settings(Path(tmp))
             self._enable(settings, idle_minutes=5, target=25)
             first_idle = time.time() - 600
-            with mock.patch.object(drone_api, "_get_audio_volume", return_value=80), \
-                 mock.patch.object(drone_api, "_apply_audio_volume", return_value=25) as apply_mock:
-                with mock.patch.object(drone_api, "_read_last_input_activity", return_value=first_idle):
+            with mock.patch.object(automation, "_get_audio_volume", return_value=80), \
+                 mock.patch.object(automation, "_apply_audio_volume", return_value=25) as apply_mock:
+                with mock.patch.object(automation, "_read_last_input_activity", return_value=first_idle):
                     _run_idle_volume_automation_once(settings)
                 # Fresh input arrives, then the device goes idle again.
                 second_idle = time.time() - 600 + 1
-                with mock.patch.object(drone_api, "_read_last_input_activity", return_value=second_idle):
+                with mock.patch.object(automation, "_read_last_input_activity", return_value=second_idle):
                     _run_idle_volume_automation_once(settings)
                 self.assertEqual(apply_mock.call_count, 2)
 
@@ -167,9 +168,9 @@ class IdleVolumeAutomationRunnerTests(unittest.TestCase):
             settings = _build_settings(Path(tmp))
             self._enable(settings, idle_minutes=5, target=25)
             idle = time.time() - 600
-            with mock.patch.object(drone_api, "_read_last_input_activity", return_value=idle), \
-                 mock.patch.object(drone_api, "_get_audio_volume", return_value=10), \
-                 mock.patch.object(drone_api, "_apply_audio_volume") as apply_mock:
+            with mock.patch.object(automation, "_read_last_input_activity", return_value=idle), \
+                 mock.patch.object(automation, "_get_audio_volume", return_value=10), \
+                 mock.patch.object(automation, "_apply_audio_volume") as apply_mock:
                 _run_idle_volume_automation_once(settings)
                 apply_mock.assert_not_called()
 
@@ -239,11 +240,11 @@ class IdleVolumeOvermindPushTests(unittest.TestCase):
             )
             with mock.patch.object(drone_api._local_network, "is_overmind_mode", return_value=True), \
                  mock.patch.object(
-                     drone_api,
+                     automation,
                      "_load_overmind_config_for_settings",
                      return_value={"overmind_url": "https://overmind.local/", "overmind_token": "tok"},
                  ), \
-                 mock.patch.object(drone_api, "_overmind_post_json", return_value={}) as post_mock:
+                 mock.patch.object(automation, "_overmind_post_json", return_value={}) as post_mock:
                 ok = _report_idle_volume_to_overmind(settings)
             self.assertTrue(ok)
             post_mock.assert_called_once()
@@ -261,7 +262,7 @@ class IdleVolumeOvermindPushTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(Path(tmp))
             with mock.patch.object(drone_api._local_network, "is_overmind_mode", return_value=False), \
-                 mock.patch.object(drone_api, "_overmind_post_json") as post_mock:
+                 mock.patch.object(automation, "_overmind_post_json") as post_mock:
                 self.assertFalse(_report_idle_volume_to_overmind(settings))
                 post_mock.assert_not_called()
 
@@ -270,11 +271,11 @@ class IdleVolumeOvermindPushTests(unittest.TestCase):
             settings = _build_settings(Path(tmp))
             with mock.patch.object(drone_api._local_network, "is_overmind_mode", return_value=True), \
                  mock.patch.object(
-                     drone_api,
+                     automation,
                      "_load_overmind_config_for_settings",
                      return_value={"overmind_url": "https://overmind.local", "overmind_token": "tok"},
                  ), \
-                 mock.patch.object(drone_api, "_overmind_post_json", side_effect=OSError("boom")):
+                 mock.patch.object(automation, "_overmind_post_json", side_effect=OSError("boom")):
                 self.assertFalse(_report_idle_volume_to_overmind(settings))
 
 

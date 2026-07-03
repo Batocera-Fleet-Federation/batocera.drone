@@ -30,18 +30,15 @@ from typing import Iterable, Optional
 try:
     from .state_store import database_path as _state_database_path
     from .state_store import open_database as _open_state_database
+    from ..common import fingerprint as _fp
 except ImportError:  # pragma: no cover - direct script execution fallback
-    from state_store import database_path as _state_database_path  # type: ignore
-    from state_store import open_database as _open_state_database  # type: ignore
+    from storage.state_store import database_path as _state_database_path  # type: ignore
+    from storage.state_store import open_database as _open_state_database  # type: ignore
+    from common import fingerprint as _fp  # type: ignore
 
 
-SAVES_FINGERPRINT_ALGORITHM = "sample-fp-v1"
+SAVES_FINGERPRINT_ALGORITHM = _fp.FINGERPRINT_ALGORITHM
 SAVES_INVENTORY_FINGERPRINT_ALGORITHM = "saves-inventory-sha256-v1"
-
-# Match the ROM fingerprint sampling so the same file yields the same fingerprint
-# whether it is scanned as a ROM or a save.
-_SAMPLE_BYTES = max(4096, int(os.environ.get("ROM_METADATA_FINGERPRINT_SAMPLE_BYTES", str(64 * 1024))))
-_SMALL_FILE_BYTES = max(3 * _SAMPLE_BYTES, int(os.environ.get("ROM_METADATA_FINGERPRINT_SMALL_FILE_BYTES", str(3 * _SAMPLE_BYTES))))
 
 # Files Batocera writes next to saves that are not themselves transferable saves.
 _IGNORED_SUFFIXES = {".tmp", ".bak", ".lock"}
@@ -81,20 +78,12 @@ class SaveEntry:
 
 
 def build_save_fingerprint(path: Path) -> str:
-    """Sampled content fingerprint (``sample-fp-v1``); identical to RomRepository."""
-    size = int(path.stat().st_size)
-    digest = hashlib.md5()
-    digest.update(size.to_bytes(8, "little"))
-    with path.open("rb") as handle:
-        if size <= _SMALL_FILE_BYTES:
-            digest.update(handle.read())
-        else:
-            digest.update(handle.read(_SAMPLE_BYTES))
-            handle.seek(max(0, size // 2 - _SAMPLE_BYTES // 2))
-            digest.update(handle.read(_SAMPLE_BYTES))
-            handle.seek(size - _SAMPLE_BYTES)
-            digest.update(handle.read(_SAMPLE_BYTES))
-    return digest.hexdigest()
+    """Sampled content fingerprint (``sample-fp-v1``); identical to ROM fingerprints.
+
+    Delegates to the shared ``fingerprint`` module so saves and ROMs share one
+    algorithm and the same bytes yield the same identity across drones.
+    """
+    return _fp.build_fingerprint(path)
 
 
 def _normalize_path(value: object) -> str:

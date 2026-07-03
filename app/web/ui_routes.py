@@ -2,11 +2,11 @@ from pathlib import Path
 from urllib.parse import quote
 
 try:
-    from .app_version import drone_app_version
+    from ..app_version import drone_app_version
     from .route_config import API_PREFIX, api_url
 except ImportError:
     from app_version import drone_app_version  # type: ignore
-    from route_config import API_PREFIX, api_url  # type: ignore
+    from web.route_config import API_PREFIX, api_url  # type: ignore
 
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 STATIC_DIR = Path(__file__).resolve().parent / "static"

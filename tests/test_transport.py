@@ -15,6 +15,7 @@ from pathlib import Path
 from unittest import mock
 
 import app.drone_api as drone_api
+from app.transfer import download_manager, edge_relay
 from app.transport import (
     DirectPublicTransport,
     DownloadRequest,
@@ -23,7 +24,7 @@ from app.transport import (
     assetfetch,
     mux,
 )
-from app.peer_selection import select_best_peer
+from app.transfer.peer_selection import select_best_peer
 from app.transport.base import PeerTransport
 from app.transport.lan import LanDirectTransport
 from app.transport.mux_client import RelayChannel, TlsMuxLink
@@ -100,7 +101,7 @@ class DirectPublicTransportTests(unittest.TestCase):
 
 class DirectPublicDispatchTests(unittest.TestCase):
     def test_rom_file(self):
-        with mock.patch.object(drone_api, "_download_rom_from_peer", return_value={"status": "completed"}) as m:
+        with mock.patch.object(download_manager, "_download_rom_from_peer", return_value={"status": "completed"}) as m:
             req = DownloadRequest(
                 asset_type="rom", system="snes", relative_path="g.sfc",
                 expected_size=10, expected_fingerprint="fp", entry_type="file",
@@ -115,7 +116,7 @@ class DirectPublicDispatchTests(unittest.TestCase):
         )
 
     def test_rom_folder(self):
-        with mock.patch.object(drone_api, "_download_rom_folder_from_peer", return_value={"s": 1}) as m:
+        with mock.patch.object(download_manager, "_download_rom_folder_from_peer", return_value={"s": 1}) as m:
             req = DownloadRequest(
                 asset_type="rom", system="ps2", relative_path="game",
                 expected_size=99, entry_type="folder",
@@ -129,7 +130,7 @@ class DirectPublicDispatchTests(unittest.TestCase):
         )
 
     def test_bios(self):
-        with mock.patch.object(drone_api, "_download_bios_from_peer", return_value={}) as m:
+        with mock.patch.object(download_manager, "_download_bios_from_peer", return_value={}) as m:
             req = DownloadRequest(
                 asset_type="bios", relative_path="scph.bin",
                 expected_size=512, expected_fingerprint="md5x",
@@ -143,7 +144,7 @@ class DirectPublicDispatchTests(unittest.TestCase):
         )
 
     def test_saves(self):
-        with mock.patch.object(drone_api, "_download_save_from_peer", return_value={}) as m:
+        with mock.patch.object(download_manager, "_download_save_from_peer", return_value={}) as m:
             req = DownloadRequest(
                 asset_type="saves", system="snes", relative_path="g.srm",
                 expected_size=8, expected_fingerprint="fp",
@@ -157,7 +158,7 @@ class DirectPublicDispatchTests(unittest.TestCase):
         )
 
     def test_artwork(self):
-        with mock.patch.object(drone_api, "_download_artwork_from_peer", return_value={}) as m:
+        with mock.patch.object(download_manager, "_download_artwork_from_peer", return_value={}) as m:
             req = DownloadRequest(
                 asset_type="artwork", system="snes", rom_path="g.sfc",
                 artwork_type="boxart", overwrite=True, local_rom_path="/roms/snes/g.sfc",
@@ -184,24 +185,24 @@ class EdgeTokenTests(unittest.TestCase):
     def test_prefers_live_config_token(self):
         settings = self._settings(token_env="env-token")
         with mock.patch.object(
-            drone_api, "overmind_load_config", return_value={"overmind_token": "live-token"}
+            edge_relay, "overmind_load_config", return_value={"overmind_token": "live-token"}
         ):
             self.assertEqual(drone_api._edge_token_for(settings), "live-token")
 
     def test_falls_back_to_env_token_when_config_empty(self):
         settings = self._settings(token_env="env-token")
-        with mock.patch.object(drone_api, "overmind_load_config", return_value={}):
+        with mock.patch.object(edge_relay, "overmind_load_config", return_value={}):
             self.assertEqual(drone_api._edge_token_for(settings), "env-token")
 
     def test_empty_when_no_token_anywhere(self):
         settings = self._settings()
-        with mock.patch.object(drone_api, "overmind_load_config", return_value={}):
+        with mock.patch.object(edge_relay, "overmind_load_config", return_value={}):
             self.assertEqual(drone_api._edge_token_for(settings), "")
 
     def test_handles_config_error(self):
         settings = self._settings(token_env="env-token")
         with mock.patch.object(
-            drone_api, "overmind_load_config", side_effect=RuntimeError("boom")
+            edge_relay, "overmind_load_config", side_effect=RuntimeError("boom")
         ):
             self.assertEqual(drone_api._edge_token_for(settings), "env-token")
 
@@ -361,8 +362,8 @@ class RelayDownloadEndToEndTests(unittest.TestCase):
             content = b"ROM!" * 1000
             fake = _FakeRelayMux(content)
             config = {"overmind_url": "https://o", "overmind_token": "t"}
-            with mock.patch.object(drone_api, "_EDGE_MUX_CLIENT", fake), mock.patch.object(
-                drone_api, "_request_transfer_session", return_value=("s" * 32, "tok")
+            with mock.patch.object(edge_relay, "_EDGE_MUX_CLIENT", fake), mock.patch.object(
+                edge_relay, "_request_transfer_session", return_value=("s" * 32, "tok")
             ):
                 activity = drone_api._relay_download_rom(
                     settings,
@@ -384,7 +385,7 @@ class RelayDownloadEndToEndTests(unittest.TestCase):
             settings = self._settings(directory)
             (Path(directory) / "snes").mkdir()
             (Path(directory) / "snes" / "g.sfc").write_bytes(b"already here")
-            with mock.patch.object(drone_api, "_EDGE_MUX_CLIENT", _FakeRelayMux(b"x")):
+            with mock.patch.object(edge_relay, "_EDGE_MUX_CLIENT", _FakeRelayMux(b"x")):
                 activity = drone_api._relay_download_rom(
                     settings, {}, {"drone_id": "TX"}, "snes", "g.sfc"
                 )
@@ -396,9 +397,9 @@ class RelayDownloadEndToEndTests(unittest.TestCase):
             content = b"ROM!" * 1000
             fake = _FakeRelayMux(content)
             config = {"overmind_url": "https://o", "overmind_token": "t"}
-            with mock.patch.object(drone_api, "_EDGE_MUX_CLIENT", fake), mock.patch.object(
-                drone_api, "_request_transfer_session", return_value=("s" * 32, "tok")
-            ), mock.patch.object(drone_api, "_maybe_holepunch", side_effect=lambda s, ch: (ch, True)):
+            with mock.patch.object(edge_relay, "_EDGE_MUX_CLIENT", fake), mock.patch.object(
+                edge_relay, "_request_transfer_session", return_value=("s" * 32, "tok")
+            ), mock.patch.object(edge_relay, "_maybe_holepunch", side_effect=lambda s, ch: (ch, True)):
                 activity = drone_api._relay_download_rom(
                     settings, config, {"drone_id": "TX"}, "snes", "g.sfc", expected_size=len(content)
                 )

@@ -15,10 +15,10 @@ from pathlib import Path
 from urllib.error import URLError
 
 import app.drone_api as drone_api
-from app import local_network
+from app.transfer import local_network
 from app.mock_data import seed_mock_userdata
-from app.state_store import database_path, database_path_for_legacy_file, load_payload, open_database, save_payload
-from app.overmind_reporting import (
+from app.storage.state_store import database_path, database_path_for_legacy_file, load_payload, open_database, save_payload
+from app.overmind.overmind_reporting import (
     list_emulator_config_files,
     read_emulator_config_file,
 )
@@ -130,8 +130,8 @@ class BasicAuthTests(unittest.TestCase):
         self.assertFalse(_is_external_client_ip("10.0.0.2"))
         self.assertFalse(_is_external_client_ip("127.0.0.1"))
         self.assertTrue(_is_external_client_ip("8.8.8.8"))
-        with mock.patch("app.drone_api.DRONE_UNAUTH_RATE_LIMIT_REQUESTS", 2), mock.patch(
-            "app.drone_api.DRONE_UNAUTH_RATE_LIMIT_WINDOW_SECONDS", 10
+        with mock.patch("app.common.auth.DRONE_UNAUTH_RATE_LIMIT_REQUESTS", 2), mock.patch(
+            "app.common.auth.DRONE_UNAUTH_RATE_LIMIT_WINDOW_SECONDS", 10
         ):
             self.assertTrue(_unauthenticated_request_allowed("8.8.8.8", now=100.0))
             self.assertTrue(_unauthenticated_request_allowed("8.8.8.8", now=101.0))
@@ -221,7 +221,7 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.compatibility_https_ports, (8444,))
         self.assertEqual(_drone_reachable_url(settings, {"ipv4": ["172.20.0.10"]}), "https://bff-drone-b:8444")
 
-        with mock.patch("app.drone_api._get_local_ip_addresses", return_value={"ipv4": ["172.20.0.10"], "ipv6": []}):
+        with mock.patch("app.transfer.drone_network._get_local_ip_addresses", return_value={"ipv4": ["172.20.0.10"], "ipv6": []}):
             network = _drone_network_payload(settings)
 
         self.assertEqual(network["public_ip"], "bff-drone-b")
@@ -248,18 +248,18 @@ class SettingsTests(unittest.TestCase):
             device_id_file = root / "system" / "drone-app" / "device-id"
             device_id_file.parent.mkdir(parents=True)
             with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True), mock.patch(
-                "app.drone_api._physical_mac_candidates",
+                "app.common.device_identity._physical_mac_candidates",
                 return_value=["58:47:ca:7e:38:57"],
-            ), mock.patch("app.drone_api._runtime_machine_id", return_value="2c:cf:67:97:8c:8f"):
+            ), mock.patch("app.common.device_identity._runtime_machine_id", return_value="2c:cf:67:97:8c:8f"):
                 first = Settings.from_env()
 
             self.assertEqual(first.overmind_device_id, "58:47:ca:7e:38:57")
             self.assertEqual(device_id_file.read_text(encoding="utf-8").strip(), "58:47:ca:7e:38:57")
 
             with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True), mock.patch(
-                "app.drone_api._physical_mac_candidates",
+                "app.common.device_identity._physical_mac_candidates",
                 return_value=["2c:cf:67:97:8c:8f"],
-            ), mock.patch("app.drone_api._runtime_machine_id", return_value="aa:bb:cc:dd:ee:ff"):
+            ), mock.patch("app.common.device_identity._runtime_machine_id", return_value="aa:bb:cc:dd:ee:ff"):
                 restarted = Settings.from_env()
 
             self.assertEqual(restarted.overmind_device_id, "58:47:ca:7e:38:57")
@@ -390,7 +390,7 @@ class SettingsTests(unittest.TestCase):
 
             peer = {"drone_id": "bff-drone-b", "public_ip": "bff-drone-b", "api_port": 8444}
             config = {"overmind_url": "https://overmind.example", "overmind_token": "token"}
-            with mock.patch("app.drone_api._peer_get_json", side_effect=fake_peer_get_json):
+            with mock.patch("app.transfer.peer_workers._peer_get_json", side_effect=fake_peer_get_json):
                 result = _probe_peer_public_ip(settings, peer, config=config)
 
             self.assertEqual(result["status"], "pass")
@@ -550,7 +550,7 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(session["played_at"], "2026-06-08T23:25:36+00:00")
 
     def test_collect_emulator_configs_includes_batocera_conf(self) -> None:
-        from app.overmind_reporting import collect_emulator_configs
+        from app.overmind.overmind_reporting import collect_emulator_configs
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
@@ -572,7 +572,7 @@ class SettingsTests(unittest.TestCase):
             self.assertIn("retroarch/retroarchcustom.cfg", rel_paths)
 
     def test_game_event_spool_produces_session_with_duration(self) -> None:
-        from app.overmind_game_logs import collect_game_event_sessions, delete_game_event_spool, load_gameplay_history
+        from app.overmind.overmind_game_logs import collect_game_event_sessions, delete_game_event_spool, load_gameplay_history
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
@@ -615,7 +615,7 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(load_gameplay_history(settings), [session])
 
     def test_game_process_monitor_emits_start_and_stop_events(self) -> None:
-        from app.overmind_game_logs import GameProcessMonitor, collect_game_event_sessions, find_running_emulatorlauncher
+        from app.overmind.overmind_game_logs import GameProcessMonitor, collect_game_event_sessions, find_running_emulatorlauncher
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
@@ -659,12 +659,12 @@ class SettingsTests(unittest.TestCase):
             self.assertIn("duration_seconds", sessions[0])
 
     def test_game_process_monitor_retries_failed_spool_write(self) -> None:
-        from app.overmind_game_logs import GameProcessMonitor
+        from app.overmind.overmind_game_logs import GameProcessMonitor
 
         monitor = GameProcessMonitor(mock.Mock())
         running = {"system_name": "snes", "rom_path": "/userdata/roms/snes/Game.sfc"}
-        with mock.patch("app.overmind_game_logs.find_running_emulatorlauncher", return_value=running):
-            with mock.patch("app.overmind_game_logs.write_game_process_event", side_effect=[None, Path("/tmp/start.json")]) as write_event:
+        with mock.patch("app.overmind.overmind_game_logs.find_running_emulatorlauncher", return_value=running):
+            with mock.patch("app.overmind.overmind_game_logs.write_game_process_event", side_effect=[None, Path("/tmp/start.json")]) as write_event:
                 monitor.poll_once()
                 self.assertIsNone(monitor.active_game)
                 monitor.poll_once()
@@ -843,7 +843,7 @@ class SettingsTests(unittest.TestCase):
             ):
                 settings = Settings.from_env()
 
-            with mock.patch("app.drone_api._fetch_peer_certificate") as fetch:
+            with mock.patch("app.transfer.peer_connectivity._fetch_peer_certificate") as fetch:
                 self.assertEqual(_peer_trust_cafile(settings, peer_id="bff-drone-b", config={}), ca_file)
                 fetch.assert_not_called()
 
@@ -957,9 +957,9 @@ class SettingsTests(unittest.TestCase):
                 "reachable_url": "https://bff-drone-b:443",
                 "resolved_network": {"ipv4": ["172.20.0.4"]},
             }
-            with mock.patch("app.drone_api._drone_client_ssl_context", side_effect=fake_context), mock.patch(
-                "app.drone_api.urlopen", side_effect=fake_urlopen
-            ), mock.patch("app.drone_api._fetch_peer_certificate") as fetch:
+            with mock.patch("app.transfer.peer_download._drone_client_ssl_context", side_effect=fake_context), mock.patch(
+                "app.transfer.peer_download.urlopen", side_effect=fake_urlopen
+            ), mock.patch("app.transfer.peer_connectivity._fetch_peer_certificate") as fetch:
                 result = _download_rom_from_peer(settings, {}, peer, "atari7800", "Asteroids (USA).zip", expected_size=7)
 
             self.assertEqual(result["source_drone_id"], "bff-drone-b")
@@ -982,7 +982,7 @@ class SettingsTests(unittest.TestCase):
             target.parent.mkdir(parents=True)
             target.write_bytes(b"already here")
 
-            with mock.patch("app.drone_api.urlopen", side_effect=AssertionError("duplicate download attempted")):
+            with mock.patch("app.transfer.peer_download.urlopen", side_effect=AssertionError("duplicate download attempted")):
                 result = _download_rom_from_peer(
                     settings,
                     {},
@@ -1009,7 +1009,7 @@ class SettingsTests(unittest.TestCase):
             existing.write_bytes(b"same rom bytes")
             fingerprint = RomRepository.build_fingerprint(existing)
 
-            with mock.patch("app.drone_api.urlopen", side_effect=AssertionError("duplicate download attempted")):
+            with mock.patch("app.transfer.peer_download.urlopen", side_effect=AssertionError("duplicate download attempted")):
                 result = _download_rom_from_peer(
                     settings,
                     {},
@@ -1055,7 +1055,7 @@ class SettingsTests(unittest.TestCase):
                 cancel.set()
 
             peer = {"drone_id": "source-a", "reachable_url": "http://source-a:8080"}
-            with mock.patch("app.drone_api.urlopen", return_value=FakeResponse()):
+            with mock.patch("app.transfer.peer_download.urlopen", return_value=FakeResponse()):
                 with self.assertRaises(DownloadCancelled):
                     _download_rom_from_peer(
                         settings,
@@ -1116,8 +1116,8 @@ class SettingsTests(unittest.TestCase):
                 raise AssertionError(url)
 
             peer = {"drone_id": "source-a", "reachable_url": "http://source-a:8080"}
-            with mock.patch("app.drone_api._peer_get_json", return_value=manifest), mock.patch(
-                "app.drone_api.urlopen", side_effect=fake_urlopen
+            with mock.patch("app.transfer.peer_download._peer_get_json", return_value=manifest), mock.patch(
+                "app.transfer.peer_download.urlopen", side_effect=fake_urlopen
             ), mock.patch.object(RomRepository, "build_fingerprint", side_effect=AssertionError("folder sync should not hash")):
                 result = _download_rom_folder_from_peer(settings, {}, peer, "ps3", "Game.ps3", expected_size=10)
 
@@ -1293,11 +1293,11 @@ class SettingsTests(unittest.TestCase):
                     progress(8, 8)
                 return dict(completed)
 
-            with mock.patch("app.drone_api.DOWNLOAD_PROGRESS_PUSH_SECONDS", 0), mock.patch(
-                "app.drone_api._download_rom_from_peer", side_effect=fake_download
+            with mock.patch("app.transfer.download_manager.DOWNLOAD_PROGRESS_PUSH_SECONDS", 0), mock.patch(
+                "app.transfer.download_manager._download_rom_from_peer", side_effect=fake_download
             ), mock.patch.object(repo, "list_assets", return_value=(root / "roms" / "snes", [])), mock.patch(
-                "app.drone_api._post_download_state"
-            ) as post_download_state, mock.patch("app.drone_api._post_rom_sync_activity") as post_activity:
+                "app.transfer.download_manager._post_download_state"
+            ) as post_download_state, mock.patch("app.transfer.download_manager._post_rom_sync_activity") as post_activity:
                 manager._run_job(queued["job_id"])
 
             push_reasons = [call.kwargs.get("reason") for call in post_download_state.call_args_list]
@@ -1430,7 +1430,7 @@ class SettingsTests(unittest.TestCase):
 
             with mock.patch("app.drone_api._get_download_manager") as manager, mock.patch(
                 "app.drone_api._best_peer_for_rom", return_value=None
-            ), mock.patch("app.drone_api._post_rom_sync_activity") as post_activity:
+            ), mock.patch("app.overmind.actions._post_rom_sync_activity") as post_activity:
                 manager.return_value = object()
                 status, message, result = _execute_overmind_action(settings, repo, action, config, "https://overmind.local", "drone-token")
 
@@ -1864,7 +1864,7 @@ class SettingsTests(unittest.TestCase):
                 repo = RomRepository(root / "roms", root / "bios")
 
                 with mock.patch("app.drone_api.os.geteuid", return_value=999):
-                    with mock.patch("app.drone_api._request_screen_mode_service_control", return_value=True) as screen_control:
+                    with mock.patch("app.device.device_control._request_screen_mode_service_control", return_value=True) as screen_control:
                         with mock.patch("app.drone_api.subprocess.Popen") as popen:
                             kiosk_status, kiosk_message, kiosk_result = _execute_overmind_action(
                                 settings, repo, {"action": "set_screen_mode", "payload": {"mode": "kiosk"}}
@@ -1945,7 +1945,7 @@ class SettingsTests(unittest.TestCase):
             repo = RomRepository(root / "roms", root / "bios")
             with mock.patch("app.drone_api.os.geteuid", return_value=999):
                 # Worker cannot be dispatched at all (control dir not writable).
-                with mock.patch("app.drone_api._request_screen_mode_service_control", return_value=False):
+                with mock.patch("app.device.device_control._request_screen_mode_service_control", return_value=False):
                     status, message, result = _execute_overmind_action(
                         settings, repo, {"action": "set_screen_mode", "payload": {"mode": "kiosk"}}
                     )
@@ -1961,7 +1961,7 @@ class SettingsTests(unittest.TestCase):
             repo = RomRepository(root / "roms", root / "bios")
             with mock.patch("app.drone_api.os.geteuid", return_value=999):
                 with mock.patch(
-                    "app.drone_api._request_screen_mode_service_control",
+                    "app.device.device_control._request_screen_mode_service_control",
                     side_effect=OSError("Timed out waiting for the privileged screen mode service operation"),
                 ):
                     status, message, result = _execute_overmind_action(
@@ -1991,7 +1991,7 @@ class SettingsTests(unittest.TestCase):
                 settings = Settings.from_env()
             repo = RomRepository(root / "roms", root / "bios")
             with mock.patch("app.drone_api.os.geteuid", return_value=999):
-                with mock.patch("app.drone_api._request_volume_service_control", return_value=True) as volume_control:
+                with mock.patch("app.device.device_control._request_volume_service_control", return_value=True) as volume_control:
                     status, message, result = _execute_overmind_action(
                         settings, repo, {"action": "set_volume", "payload": {"level": 60}}
                     )
@@ -2009,7 +2009,7 @@ class SettingsTests(unittest.TestCase):
                 settings = Settings.from_env()
             repo = RomRepository(root / "roms", root / "bios")
             with mock.patch("app.drone_api.os.geteuid", return_value=999):
-                with mock.patch("app.drone_api._request_volume_service_control", return_value=True) as volume_control:
+                with mock.patch("app.device.device_control._request_volume_service_control", return_value=True) as volume_control:
                     high_status, high_message, high_result = _execute_overmind_action(
                         settings, repo, {"action": "set_volume", "payload": {"level": 150}}
                     )
@@ -2086,9 +2086,9 @@ class SettingsTests(unittest.TestCase):
                 raise HTTPError(url, 401, "Unauthorized", {}, io.BytesIO(b'{"detail":"Invalid Drone token"}'))
             return {}
 
-        with mock.patch("app.drone_api._overmind_post_json", side_effect=fake_post):
+        with mock.patch("app.overmind.registration._overmind_post_json", side_effect=fake_post):
             with mock.patch(
-                "app.drone_api._reclaim_overmind_token_after_unauthorized", return_value="new-token"
+                "app.overmind.registration._reclaim_overmind_token_after_unauthorized", return_value="new-token"
             ) as reclaim:
                 new_token = _report_overmind_action_completion(
                     mock.Mock(), mock.Mock(), {"integration_enabled": True}, "https://overmind.local",
@@ -2324,7 +2324,7 @@ class SettingsTests(unittest.TestCase):
                 {},
                 io.BytesIO(b'{"detail":"Invalid Drone token"}'),
             )
-            with mock.patch("app.drone_api._register_or_claim_overmind_token", return_value="onboarding-token") as register:
+            with mock.patch("app.overmind.registration._register_or_claim_overmind_token", return_value="onboarding-token") as register:
                 token = _reclaim_overmind_token_after_unauthorized(
                     settings,
                     RomRepository(root / "roms", root / "bios"),
@@ -2339,9 +2339,9 @@ class SettingsTests(unittest.TestCase):
             register.assert_called_once()
 
     def test_drone_overmind_client_uses_typed_overmind_endpoints(self) -> None:
-        source = Path(__file__).resolve().parents[1].joinpath("app/drone_api.py").read_text(encoding="utf-8")
-        reporting_source = Path(__file__).resolve().parents[1].joinpath("app/overmind_reporting.py").read_text(encoding="utf-8")
-        game_log_source = Path(__file__).resolve().parents[1].joinpath("app/overmind_game_logs.py").read_text(encoding="utf-8")
+        source = Path(__file__).resolve().parents[1].joinpath("app/drone_api.py").read_text(encoding="utf-8") + Path(__file__).resolve().parents[1].joinpath("app/overmind/registration.py").read_text(encoding="utf-8") + Path(__file__).resolve().parents[1].joinpath("app/transfer/peer_download.py").read_text(encoding="utf-8") + Path(__file__).resolve().parents[1].joinpath("app/transfer/peer_workers.py").read_text(encoding="utf-8") + Path(__file__).resolve().parents[1].joinpath("app/overmind/rom_sync.py").read_text(encoding="utf-8") + Path(__file__).resolve().parents[1].joinpath("app/roms/rom_collect.py").read_text(encoding="utf-8")
+        reporting_source = Path(__file__).resolve().parents[1].joinpath("app/overmind/overmind_reporting.py").read_text(encoding="utf-8")
+        game_log_source = Path(__file__).resolve().parents[1].joinpath("app/overmind/overmind_game_logs.py").read_text(encoding="utf-8")
 
         for endpoint in [
             "/api/devices/{device_id}/heartbeat",
@@ -2362,14 +2362,14 @@ class SettingsTests(unittest.TestCase):
         self.assertIn('"type": "emulator_configs"', reporting_source)
 
     def test_bios_ui_displays_cached_md5_column(self) -> None:
-        source = Path(__file__).resolve().parents[1].joinpath("app/static/js/drone.js").read_text(encoding="utf-8")
+        source = Path(__file__).resolve().parents[1].joinpath("app/web/static/js/drone.js").read_text(encoding="utf-8")
         self.assertIn("<th>MD5</th>", source)
         self.assertIn("item.bios_md5 || item.md5 || item.fingerprint", source)
 
     def test_admin_ui_exposes_drone_self_update_action(self) -> None:
-        api_routes = Path(__file__).resolve().parents[1].joinpath("app/api_routes.py").read_text(encoding="utf-8")
-        js_source = Path(__file__).resolve().parents[1].joinpath("app/static/js/drone.js").read_text(encoding="utf-8")
-        drone_source = Path(__file__).resolve().parents[1].joinpath("app/drone_api.py").read_text(encoding="utf-8")
+        api_routes = Path(__file__).resolve().parents[1].joinpath("app/web/api_routes.py").read_text(encoding="utf-8")
+        js_source = Path(__file__).resolve().parents[1].joinpath("app/web/static/js/drone.js").read_text(encoding="utf-8")
+        drone_source = Path(__file__).resolve().parents[1].joinpath("app/common/self_update.py").read_text(encoding="utf-8")
 
         self.assertIn('parts[1] == "system" and parts[2] == "update-drone"', api_routes)
         self.assertIn("async function updateDroneApp()", js_source)
@@ -2379,7 +2379,7 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("os._exit(DRONE_SELF_UPDATE_EXIT_CODE)", drone_source)
 
     def test_drone_update_overlays_release_files_without_deleting_app_tree(self) -> None:
-        drone_source = Path(__file__).resolve().parents[1].joinpath("app/drone_api.py").read_text(encoding="utf-8")
+        drone_source = Path(__file__).resolve().parents[1].joinpath("app/common/self_update.py").read_text(encoding="utf-8")
 
         self.assertIn("def _overlay_drone_release_tree", drone_source)
         self.assertIn('if "__pycache__" in relative.parts or item.name.endswith(".pyc"):', drone_source)
@@ -2389,14 +2389,14 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("copied_files", drone_source)
 
     def test_mame_config_source_accepts_batocera_cfg_directory(self) -> None:
-        drone_source = Path(__file__).resolve().parents[1].joinpath("app/drone_api.py").read_text(encoding="utf-8")
+        drone_source = Path(__file__).resolve().parents[1].joinpath("app/drone_api.py").read_text(encoding="utf-8") + Path(__file__).resolve().parents[1].joinpath("app/web/handlers_config.py").read_text(encoding="utf-8")
 
         self.assertIn('"/userdata/system/configs/mame/default.cfg"', drone_source)
         self.assertIn('"/userdata/system/configs/mame"', drone_source)
 
     def test_route_mixins_export_for_package_startup(self) -> None:
-        api_routes = importlib.import_module("app.api_routes")
-        ui_routes = importlib.import_module("app.ui_routes")
+        api_routes = importlib.import_module("app.web.api_routes")
+        ui_routes = importlib.import_module("app.web.ui_routes")
         drone_api = importlib.import_module("app.drone_api")
 
         self.assertTrue(hasattr(api_routes, "ApiRoutesMixin"))
@@ -2426,7 +2426,7 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("validate_local_app()", bootstrap)
         self.assertIn("missing or empty ${required_file}", bootstrap)
         self.assertIn("Local Drone app import check failed; downloading a fresh app bundle.", bootstrap)
-        self.assertIn('"app.ui_routes": "UiRoutesMixin"', bootstrap)
+        self.assertIn('"app.web.ui_routes": "UiRoutesMixin"', bootstrap)
         self.assertIn("DRONE_REMOTE_REBOOT_EXIT_CODE", bootstrap)
         self.assertIn("request_host_reboot()", bootstrap)
         self.assertIn("service_control_worker()", bootstrap)
@@ -2437,7 +2437,7 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("for mode in full kiosk kid", bootstrap)
         self.assertIn("set_volume_as_root()", bootstrap)
         self.assertIn("set-volume.request", bootstrap)
-        self.assertIn("DRONE_SERVICE_CONTROL_DIR", drone_source)
+        self.assertIn("DRONE_SERVICE_CONTROL_DIR", root.joinpath("app/device/device_control.py").read_text(encoding="utf-8"))
         self.assertIn('system_info_payload["screen_mode"] = _get_screen_mode(settings)', drone_source)
         self.assertIn('system_info_payload["audio_volume"] = _get_audio_volume(settings)', drone_source)
         self.assertIn("ensure_dns_fallback()", bootstrap)
@@ -2467,7 +2467,7 @@ class SettingsTests(unittest.TestCase):
         self.assertNotIn("ensure_permissions\n    wait_for_network\n\n    supervise_drone", bootstrap)
         self.assertIn("Missing or empty required file", run_now)
         self.assertIn("Downloaded Drone App failed import validation", run_now)
-        self.assertIn('"app.api_routes": "ApiRoutesMixin"', run_now)
+        self.assertIn('"app.web.api_routes": "ApiRoutesMixin"', run_now)
         self.assertIn("import shutil", run_now)
         self.assertIn("Drone App staged successfully", run_now)
         self.assertEqual(run_now.count("source = archive.extractfile(member)"), 1)
@@ -2479,9 +2479,9 @@ class SettingsTests(unittest.TestCase):
 
     def test_home_page_does_not_block_on_speed_test(self) -> None:
         root = Path(__file__).resolve().parents[1]
-        js_source = root.joinpath("app/static/js/drone.js").read_text(encoding="utf-8")
-        api_routes = root.joinpath("app/api_routes.py").read_text(encoding="utf-8")
-        drone_source = root.joinpath("app/drone_api.py").read_text(encoding="utf-8")
+        js_source = root.joinpath("app/web/static/js/drone.js").read_text(encoding="utf-8")
+        api_routes = root.joinpath("app/web/api_routes.py").read_text(encoding="utf-8")
+        drone_source = root.joinpath("app/drone_api.py").read_text(encoding="utf-8") + root.joinpath("app/web/handlers_diagnostics.py").read_text(encoding="utf-8")
 
         self.assertIn("loadSystemInfoBar();", js_source)
         self.assertNotIn("await loadSystemInfoBar();", js_source)
@@ -2513,7 +2513,7 @@ class SettingsTests(unittest.TestCase):
                 "integration_enabled": True,
             }
             with mock.patch(
-                "app.drone_api._overmind_post_json",
+                "app.overmind.registration._overmind_post_json",
                 return_value={
                     "status": "pending",
                     "message": "Psionic connection detected. Awaiting Overlord approval.",
@@ -2573,7 +2573,7 @@ class SettingsTests(unittest.TestCase):
                 fp=None,
             )
             error.url = "https://bff-overmind:8000/api/devices/register"
-            with mock.patch("app.drone_api._overmind_post_json", side_effect=error):
+            with mock.patch("app.overmind.registration._overmind_post_json", side_effect=error):
                 token = _register_or_claim_overmind_token(
                     settings,
                     RomRepository(root / "roms", root / "bios"),
@@ -2612,7 +2612,7 @@ class SettingsTests(unittest.TestCase):
             settings.es_settings_file.parent.mkdir(parents=True, exist_ok=True)
             settings.es_settings_file.write_text('<map><string name="UIMode" value="Kiosk"/></map>', encoding="utf-8")
 
-            with mock.patch("app.drone_api._get_audio_volume", return_value=55):
+            with mock.patch("app.device.system_info._get_audio_volume", return_value=55):
                 info = _collect_system_info_payload(settings)
 
             self.assertIn("performance", info)
@@ -2942,7 +2942,7 @@ class SettingsTests(unittest.TestCase):
             db_path.parent.mkdir(parents=True)
             db_path.write_bytes(b"not touched")
 
-            with mock.patch("app.rom_metadata_store._read_sqlite_rom_metadata_cache", side_effect=sqlite3.OperationalError("unable to open database file")):
+            with mock.patch("app.storage.rom_metadata_store._read_sqlite_rom_metadata_cache", side_effect=sqlite3.OperationalError("unable to open database file")):
                 cache, missing = _load_rom_metadata_cache(settings)
 
             self.assertFalse(missing)
@@ -3191,7 +3191,7 @@ class SettingsTests(unittest.TestCase):
                     raise RuntimeError("simulated reset")
 
             with mock.patch("app.drone_api.ROM_METADATA_PROGRESS_FILES", 1), mock.patch(
-                "app.drone_api._persist_rom_metadata_cache", side_effect=interrupt_after_checkpoint
+                "app.roms.rom_scanner._persist_rom_metadata_cache", side_effect=interrupt_after_checkpoint
             ):
                 with self.assertRaisesRegex(RuntimeError, "simulated reset"):
                     _poll_rom_metadata_cache(settings, repo)
@@ -3328,7 +3328,7 @@ class SettingsTests(unittest.TestCase):
                 }
 
             with mock.patch.object(RomRepository, "build_fingerprint", side_effect=AssertionError("unchanged ROM should not hash")), mock.patch(
-                "app.drone_api._overmind_post_json_with_status", side_effect=fake_post
+                "app.overmind.rom_sync._overmind_post_json_with_status", side_effect=fake_post
             ):
                 result = _sync_rom_metadata_to_overmind(
                     settings,
@@ -3385,7 +3385,7 @@ class SettingsTests(unittest.TestCase):
                 }
 
             with mock.patch.object(RomRepository, "build_fingerprint", side_effect=AssertionError("force inventory should not rehash clean ROM")), mock.patch(
-                "app.drone_api._overmind_post_json_with_status", side_effect=fake_post
+                "app.overmind.rom_sync._overmind_post_json_with_status", side_effect=fake_post
             ):
                 result = _sync_rom_metadata_to_overmind(
                     settings,
@@ -3440,7 +3440,7 @@ class SettingsTests(unittest.TestCase):
                 }
 
             with mock.patch.object(RomRepository, "build_fingerprint", side_effect=AssertionError("clean cache should not rehash")), mock.patch(
-                "app.drone_api._overmind_post_json_with_status", side_effect=fake_post
+                "app.overmind.rom_sync._overmind_post_json_with_status", side_effect=fake_post
             ):
                 result = _sync_rom_metadata_to_overmind(
                     settings,
@@ -3568,7 +3568,7 @@ class SettingsTests(unittest.TestCase):
             with mock.patch("app.drone_api.ROM_METADATA_FINGERPRINT_BATCH_SIZE", 1), mock.patch(
                 "app.drone_api.ROM_METADATA_HASH_ROMS_ENABLED", True
             ), mock.patch(
-                "app.drone_api._overmind_post_json_with_status", side_effect=fake_post
+                "app.overmind.rom_sync._overmind_post_json_with_status", side_effect=fake_post
             ):
                 result = _sync_rom_metadata_to_overmind(
                     settings,
@@ -3587,7 +3587,7 @@ class SettingsTests(unittest.TestCase):
             self.assertTrue(all(len(payload["roms"]) == 1 and payload["roms"][0].get("rom_fingerprint") for payload in uploads[1:]))
 
     def test_rom_metadata_delta_upload_clears_pending_so_next_poll_skips(self) -> None:
-        from app.rom_metadata_store import _read_pending_rom_metadata_changes
+        from app.storage.rom_metadata_store import _read_pending_rom_metadata_changes
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
@@ -3616,7 +3616,7 @@ class SettingsTests(unittest.TestCase):
                 }
 
             with mock.patch("app.drone_api.ROM_METADATA_HASH_ROMS_ENABLED", False), mock.patch(
-                "app.drone_api._overmind_post_json_with_status", side_effect=fake_post
+                "app.overmind.rom_sync._overmind_post_json_with_status", side_effect=fake_post
             ):
                 # First sync establishes a clean, uploaded cache (full refresh).
                 _sync_rom_metadata_to_overmind(settings, repo, {"overmind_token": "t"}, "https://overmind.local", "t")
@@ -3665,7 +3665,7 @@ class SettingsTests(unittest.TestCase):
             with mock.patch("app.drone_api.ROM_METADATA_FINGERPRINT_BATCH_SIZE", 1), mock.patch(
                 "app.drone_api.ROM_METADATA_HASH_ROMS_ENABLED", True
             ), mock.patch(
-                "app.drone_api._overmind_post_json_with_status", side_effect=fake_post
+                "app.overmind.rom_sync._overmind_post_json_with_status", side_effect=fake_post
             ):
                 # The failed hash patch must not abort the poll; it should flag a
                 # full refresh so the next poll resends md5 instead of losing it.
@@ -3711,7 +3711,7 @@ class SettingsTests(unittest.TestCase):
                 }
 
             with mock.patch("app.drone_api.ROM_METADATA_HASH_ROMS_ENABLED", True), mock.patch(
-                "app.drone_api._overmind_post_json_with_status", side_effect=fake_post
+                "app.overmind.rom_sync._overmind_post_json_with_status", side_effect=fake_post
             ):
                 # First sync hashes md5 and records the true fingerprint.
                 _sync_rom_metadata_to_overmind(
@@ -3767,7 +3767,7 @@ class SettingsTests(unittest.TestCase):
                     "artwork_count": len(payload.get("artwork") or []),
                 }
 
-            with mock.patch("app.drone_api._overmind_post_json_with_status", side_effect=fake_post):
+            with mock.patch("app.overmind.rom_sync._overmind_post_json_with_status", side_effect=fake_post):
                 _sync_rom_metadata_to_overmind(settings, repo, {}, "https://overmind.local", "drone-token")
                 second.write_bytes(b"two")
                 self._write_gamelist(system, "First Game.zip", "Second Game.zip")
@@ -3825,8 +3825,8 @@ class SettingsTests(unittest.TestCase):
                     "artwork_count": len(payload.get("artwork") or []),
                 }
 
-            with mock.patch("app.drone_api.ROM_METADATA_UPLOAD_CHUNK_SIZE", 1), mock.patch(
-                "app.drone_api._overmind_post_json_with_status", side_effect=failing_post
+            with mock.patch("app.roms.rom_inventory.ROM_METADATA_UPLOAD_CHUNK_SIZE", 1), mock.patch(
+                "app.overmind.rom_sync._overmind_post_json_with_status", side_effect=failing_post
             ):
                 with self.assertRaises(URLError):
                     _sync_rom_metadata_to_overmind(settings, repo, {}, "https://overmind.local", "drone-token")
@@ -3845,8 +3845,8 @@ class SettingsTests(unittest.TestCase):
                     "artwork_count": len(payload.get("artwork") or []),
                 }
 
-            with mock.patch("app.drone_api.ROM_METADATA_UPLOAD_CHUNK_SIZE", 1), mock.patch(
-                "app.drone_api._overmind_post_json_with_status", side_effect=successful_post
+            with mock.patch("app.roms.rom_inventory.ROM_METADATA_UPLOAD_CHUNK_SIZE", 1), mock.patch(
+                "app.overmind.rom_sync._overmind_post_json_with_status", side_effect=successful_post
             ):
                 result = _sync_rom_metadata_to_overmind(settings, repo, {}, "https://overmind.local", "drone-token")
 
@@ -3945,7 +3945,7 @@ class SettingsTests(unittest.TestCase):
                 settings = Settings.from_env()
 
             with mock.patch(
-                "app.drone_api._overmind_post_json_with_status",
+                "app.overmind.rom_sync._overmind_post_json_with_status",
                 side_effect=URLError("offline"),
             ):
                 with self.assertRaises(URLError):
@@ -3965,7 +3965,7 @@ class SettingsTests(unittest.TestCase):
                 return b""
 
             with mock.patch.dict("os.environ", {}, clear=True), mock.patch(
-                "app.drone_api._speed_test_raw_request", side_effect=fake_raw_request
+                "app.device.system_metrics._speed_test_raw_request", side_effect=fake_raw_request
             ):
                 sample = _sample_speed()
 
@@ -3987,7 +3987,7 @@ class SettingsTests(unittest.TestCase):
             "os.environ",
             {"DRONE_SPEED_TEST_BASE_URL": "https://speed.example.test/", "DRONE_SPEED_TEST_BYTES": "4096"},
             clear=True,
-        ), mock.patch("app.drone_api._speed_test_raw_request", side_effect=URLError("offline")):
+        ), mock.patch("app.device.system_metrics._speed_test_raw_request", side_effect=URLError("offline")):
             sample = _sample_speed()
 
         self.assertEqual(sample["source"], "external-speed-test-failed")
@@ -4844,7 +4844,7 @@ class LocalNetworkAssetCopyTests(unittest.TestCase):
                 def geturl(self):
                     return "http://src:8080/v1/api/peer/artwork/snes/image/Super%20Mario%20World.zip"
 
-            with mock.patch("app.drone_api.urlopen", return_value=FakeResponse(b"NEWART")):
+            with mock.patch("app.transfer.peer_download.urlopen", return_value=FakeResponse(b"NEWART")):
                 result = drone_api._download_artwork_from_peer(
                     settings, repo, {}, peer, "snes", "Super Mario World.zip", "image",
                     overwrite=True, local_rom_path="Super Mario World.zip",
@@ -4860,7 +4860,7 @@ class LocalNetworkAssetCopyTests(unittest.TestCase):
             self.assertIn("images/Super Mario World-image.png", gamelist)
 
             # A second copy overwrites the same file (no "-1" duplicate).
-            with mock.patch("app.drone_api.urlopen", return_value=FakeResponse(b"NEWER!")):
+            with mock.patch("app.transfer.peer_download.urlopen", return_value=FakeResponse(b"NEWER!")):
                 drone_api._download_artwork_from_peer(
                     settings, repo, {}, peer, "snes", "Super Mario World.zip", "image",
                     overwrite=True, local_rom_path="Super Mario World.zip",
@@ -4880,7 +4880,7 @@ class LocalNetworkAssetCopyTests(unittest.TestCase):
                 return True
 
             with mock.patch.dict("os.environ", {"DRONE_SERVICE_CONTROL_DIR": str(control)}), \
-                 mock.patch("app.drone_api._request_rom_permission_repair", side_effect=fake_request):
+                 mock.patch("app.device.device_control._request_rom_permission_repair", side_effect=fake_request):
                 self.assertTrue(drone_api._ensure_rom_write_access(settings, "snes", timeout_seconds=2))
 
     def test_ensure_rom_write_access_times_out_without_result(self):
@@ -4889,10 +4889,10 @@ class LocalNetworkAssetCopyTests(unittest.TestCase):
             control.mkdir()
             settings = self._settings(Path(tmp) / "userdata")
             with mock.patch.dict("os.environ", {"DRONE_SERVICE_CONTROL_DIR": str(control)}), \
-                 mock.patch("app.drone_api._request_rom_permission_repair", return_value=True):
+                 mock.patch("app.device.device_control._request_rom_permission_repair", return_value=True):
                 self.assertFalse(drone_api._ensure_rom_write_access(settings, "snes", timeout_seconds=0.6))
             # And when the request itself can't be queued, it fails fast.
-            with mock.patch("app.drone_api._request_rom_permission_repair", return_value=False):
+            with mock.patch("app.device.device_control._request_rom_permission_repair", return_value=False):
                 self.assertFalse(drone_api._ensure_rom_write_access(settings, "snes", timeout_seconds=2))
 
     def test_artwork_gamelist_eacces_triggers_repair_and_retry(self):
@@ -4930,9 +4930,9 @@ class LocalNetworkAssetCopyTests(unittest.TestCase):
                 return real_update(*args, **kwargs)
 
             ensure = mock.Mock(return_value=True)
-            with mock.patch("app.drone_api.urlopen", return_value=FakeResponse(b"ART")), \
+            with mock.patch("app.transfer.peer_download.urlopen", return_value=FakeResponse(b"ART")), \
                  mock.patch.object(repo, "update_gamelist_artwork_reference", side_effect=flaky_update), \
-                 mock.patch("app.drone_api._ensure_rom_write_access", ensure):
+                 mock.patch("app.transfer.peer_download._ensure_rom_write_access", ensure):
                 result = drone_api._download_artwork_from_peer(
                     settings, repo, {}, peer, "snes", "Super Mario World.zip", "image",
                     overwrite=True, local_rom_path="Super Mario World.zip",
@@ -4970,7 +4970,7 @@ class LocalNetworkAssetCopyTests(unittest.TestCase):
                 def geturl(self):
                     return "http://src:8080/v1/api/peer/artwork/snes/video/Super%20Mario%20World.zip"
 
-            with mock.patch("app.drone_api.urlopen", return_value=FakeResponse(b"VID")):
+            with mock.patch("app.transfer.peer_download.urlopen", return_value=FakeResponse(b"VID")):
                 result = drone_api._download_artwork_from_peer(
                     settings, repo, {}, peer, "snes", "Super Mario World.zip", "video",
                     overwrite=True, local_rom_path="Super Mario World.zip",

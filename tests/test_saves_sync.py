@@ -8,6 +8,7 @@ from unittest import mock
 
 import app.drone_api as drone_api
 from app.drone_api import Settings
+from app.overmind import saves_sync
 
 
 class SavesSyncTest(unittest.TestCase):
@@ -45,7 +46,7 @@ class SavesSyncTest(unittest.TestCase):
             calls.append((url, payload))
             return 200, {"saves_count": len(payload.get("saves") or [])}
 
-        with mock.patch.object(drone_api, "_overmind_post_json_with_status", fake_post):
+        with mock.patch.object(saves_sync, "_overmind_post_json_with_status", fake_post):
             first = drone_api._sync_saves_to_overmind(self.settings, "https://overmind.example", "tok")
             self.assertEqual(first["status"], "ok")
             self.assertEqual(first["upserts"], 1)
@@ -64,7 +65,7 @@ class SavesSyncTest(unittest.TestCase):
 
     def test_deleted_save_is_sent_in_delta(self):
         self._write_save("snes/A.srm")
-        with mock.patch.object(drone_api, "_overmind_post_json_with_status", lambda *a, **k: (200, {})):
+        with mock.patch.object(saves_sync, "_overmind_post_json_with_status", lambda *a, **k: (200, {})):
             drone_api._sync_saves_to_overmind(self.settings, "https://o", "tok")
         (self.userdata / "saves" / "snes" / "A.srm").unlink()
         captured = {}
@@ -73,20 +74,20 @@ class SavesSyncTest(unittest.TestCase):
             captured["payload"] = payload
             return 200, {}
 
-        with mock.patch.object(drone_api, "_overmind_post_json_with_status", fake_post):
+        with mock.patch.object(saves_sync, "_overmind_post_json_with_status", fake_post):
             result = drone_api._sync_saves_to_overmind(self.settings, "https://o", "tok")
         self.assertEqual(result["deletes"], 1)
         self.assertEqual(captured["payload"]["deleted"]["saves"][0]["file_path"], "snes/A.srm")
 
     def test_heartbeat_thumbprint_helper_reflects_synced_state(self):
         self._write_save("snes/A.srm")
-        with mock.patch.object(drone_api, "_overmind_post_json_with_status", lambda *a, **k: (200, {})):
+        with mock.patch.object(saves_sync, "_overmind_post_json_with_status", lambda *a, **k: (200, {})):
             drone_api._sync_saves_to_overmind(self.settings, "https://o", "tok")
         self.assertTrue(drone_api._local_saves_thumbprint(self.settings))
 
     def test_heartbeat_mismatch_queues_saves_push(self):
         self._write_save("snes/A.srm")
-        with mock.patch.object(drone_api, "_overmind_post_json_with_status", lambda *a, **k: (200, {})):
+        with mock.patch.object(saves_sync, "_overmind_post_json_with_status", lambda *a, **k: (200, {})):
             drone_api._sync_saves_to_overmind(self.settings, "https://o", "tok")
         drone_api._SAVES_PUSH_REQUESTED.clear()
         # Overmind echoes a different saves thumbprint -> a resync push is queued.
@@ -101,7 +102,7 @@ class SavesSyncTest(unittest.TestCase):
     def test_sync_logs_trigger_reason(self):
         # The trigger log must explain WHY a saves sync fired (or was skipped).
         self._write_save("snes/A.srm")
-        with mock.patch.object(drone_api, "_overmind_post_json_with_status", lambda *a, **k: (200, {})):
+        with mock.patch.object(saves_sync, "_overmind_post_json_with_status", lambda *a, **k: (200, {})):
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 drone_api._sync_saves_to_overmind(self.settings, "https://o", "tok")
@@ -122,7 +123,7 @@ class SavesSyncTest(unittest.TestCase):
         # An Overmind that doesn't echo a saves thumbprint must NOT be treated as drift,
         # or the drone re-pushes the full saves set on every heartbeat (the resync loop).
         self._write_save("snes/A.srm")
-        with mock.patch.object(drone_api, "_overmind_post_json_with_status", lambda *a, **k: (200, {})):
+        with mock.patch.object(saves_sync, "_overmind_post_json_with_status", lambda *a, **k: (200, {})):
             drone_api._sync_saves_to_overmind(self.settings, "https://o", "tok")
         drone_api._SAVES_PUSH_REQUESTED.clear()
         for response in ({}, {"saves_files_thumbprint": ""}, {"saves_files_thumbprint": None}):

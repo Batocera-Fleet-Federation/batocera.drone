@@ -10,22 +10,23 @@ from pathlib import Path
 from unittest import mock
 
 import app.drone_api as drone_api
+import app.common.logging_setup as logging_setup
 from app.drone_api import Settings, _TeeRotatingStream, _overmind_log
-from app.overmind_reporting import collect_log_sources
+from app.overmind.overmind_reporting import collect_log_sources
 
 
 class OvermindLoggingTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.log_dir = Path(self._tmp.name)
-        self._prev_stream = drone_api._OVERMIND_LOG_STREAM
+        self._prev_stream = logging_setup._OVERMIND_LOG_STREAM
         self.overmind_path = self.log_dir / "overmind.log"
-        drone_api._OVERMIND_LOG_STREAM = _TeeRotatingStream(
+        logging_setup._OVERMIND_LOG_STREAM = _TeeRotatingStream(
             original_stream=None, log_path=self.overmind_path, max_bytes=0, backup_count=0
         )
 
     def tearDown(self):
-        drone_api._OVERMIND_LOG_STREAM = self._prev_stream
+        logging_setup._OVERMIND_LOG_STREAM = self._prev_stream
         self._tmp.cleanup()
 
     def test_detail_goes_to_overmind_log_only_high_level_also_stdout(self):
@@ -46,7 +47,7 @@ class OvermindLoggingTest(unittest.TestCase):
         self.assertIn("Asset metadata sync finished: uploaded=True", stdout_text)
 
     def test_fallback_to_stdout_when_stream_unconfigured(self):
-        drone_api._OVERMIND_LOG_STREAM = None
+        logging_setup._OVERMIND_LOG_STREAM = None
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             _overmind_log("orphan overmind line")

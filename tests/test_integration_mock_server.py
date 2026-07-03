@@ -7,7 +7,7 @@ import unittest
 import urllib.request
 from pathlib import Path
 
-from app import local_network
+from app.transfer import local_network
 from app.mock_data import seed_mock_userdata
 from app.drone_api import Settings, create_server
 

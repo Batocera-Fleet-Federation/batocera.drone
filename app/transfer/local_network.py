@@ -14,9 +14,9 @@ from threading import Thread
 from typing import Any, Callable, Optional
 
 try:
-    from .state_store import append_event, database_path, load_events, load_payload, save_payload
+    from ..storage.state_store import append_event, database_path, load_events, load_payload, save_payload
 except ImportError:
-    from state_store import append_event, database_path, load_events, load_payload, save_payload  # type: ignore
+    from storage.state_store import append_event, database_path, load_events, load_payload, save_payload  # type: ignore
 
 
 MODE_OVERMIND = "overmind"

@@ -14,9 +14,9 @@ from pathlib import Path
 from typing import Any, Callable, List, Optional, Tuple
 
 try:
-    from .state_store import database_path, load_payload, save_payload
+    from ..storage.state_store import database_path, load_payload, save_payload
 except ImportError:
-    from state_store import database_path, load_payload, save_payload  # type: ignore
+    from storage.state_store import database_path, load_payload, save_payload  # type: ignore
 
 
 LogCollector = Callable[[Any], dict]
