@@ -81,33 +81,10 @@ def _maybe_request_asset_push_from_heartbeat(settings: Settings, response: dict)
 
 
 def _local_saves_thumbprint(settings: Settings) -> str:
-    """Return the saves thumbprint the Drone last persisted for its on-disk saves."""
-    try:
-        state = _read_rom_metadata_cache_state(settings, "saves_files_thumbprint")
-    except Exception:
-        return ""
-    return str(state.get("saves_files_thumbprint") or "").strip()
+    """Compatibility shim: saves are no longer reported to Overmind heartbeats."""
+    return ""
 
 
 def _maybe_request_saves_push_from_heartbeat(settings: Settings, response: dict) -> None:
-    """Queue a saves resync when Overmind's echoed saves thumbprint drifts from ours."""
-    if not isinstance(response, dict):
-        return
-    overmind_saves = str(response.get("saves_files_thumbprint") or "").strip()
-    local_saves = _local_saves_thumbprint(settings)
-    # Only act once the Drone has stored a saves thumbprint AND Overmind actually echoed one
-    # that differs. Treating an empty/absent Overmind thumbprint as drift (an Overmind that
-    # doesn't yet report saves) would re-push the full saves set on every heartbeat — mirror
-    # the bios guard (bool(overmind_bios) and ...) in _maybe_request_asset_push_from_heartbeat.
-    if not local_saves or not overmind_saves or overmind_saves == local_saves:
-        return
-    if _SAVES_PUSH_REQUESTED.is_set():
-        return
-    _SAVES_PUSH_REQUESTED.set()
-    _ROM_METADATA_WAKE.set()
-    print(
-        "Saves thumbprint mismatch from heartbeat; queued resync push: "
-        f"overmind_saves={overmind_saves[:12]} local_saves={local_saves[:12]}",
-        file=sys.stdout,
-        flush=True,
-    )
+    """Compatibility shim: saves are no longer pushed as UI metadata."""
+    _SAVES_PUSH_REQUESTED.clear()

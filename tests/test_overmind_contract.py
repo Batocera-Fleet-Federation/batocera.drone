@@ -26,7 +26,7 @@ HEARTBEAT_KEYS = {
     "device_id", "device_name", "network", "api_port", "scheme", "reachable_url",
     "certificate", "system_info", "downloads", "rom_inventory_fingerprint",
     "rom_inventory_fingerprint_algorithm", "romset_files_thumbprint",
-    "bios_files_thumbprint", "saves_files_thumbprint",
+    "bios_files_thumbprint",
 }
 
 
@@ -45,7 +45,6 @@ def _representative_heartbeat() -> dict:
         "rom_inventory_fingerprint_algorithm": "sample-fp-v1",
         "romset_files_thumbprint": "rt-1",
         "bios_files_thumbprint": "bt-1",
-        "saves_files_thumbprint": "st-1",
     }
 
 
@@ -99,7 +98,7 @@ class OvermindContractCompatTest(unittest.TestCase):
 
     def test_response_models_cover_fields_the_drone_reads(self):
         hb = set(HeartbeatResponseContract.model_fields)
-        for field in ("actions", "swarm", "romset_files_thumbprint", "bios_files_thumbprint", "saves_files_thumbprint"):
+        for field in ("actions", "swarm", "romset_files_thumbprint", "bios_files_thumbprint"):
             self.assertIn(field, hb)
         reg = set(DeviceRegisterResponseContract.model_fields)
         for field in ("message", "status", "device_id", "drone_token"):

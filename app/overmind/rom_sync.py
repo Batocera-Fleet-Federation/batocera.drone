@@ -46,7 +46,6 @@ try:
     from .overmind_client import _format_overmind_error, _overmind_post_json_with_status
     from .overmind_config import _load_overmind_config_for_settings
     from .registration import _reclaim_overmind_token_after_unauthorized, _register_or_claim_overmind_token
-    from .saves_sync import _sync_saves_to_overmind
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.logging_setup import _overmind_log  # type: ignore
     from common.runtime_state import _ASSET_PUSH_REQUESTED  # type: ignore
@@ -79,7 +78,6 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from overmind.overmind_client import _format_overmind_error, _overmind_post_json_with_status  # type: ignore
     from overmind.overmind_config import _load_overmind_config_for_settings  # type: ignore
     from overmind.registration import _reclaim_overmind_token_after_unauthorized, _register_or_claim_overmind_token  # type: ignore
-    from overmind.saves_sync import _sync_saves_to_overmind  # type: ignore
 
 # Local copy (drone_api keeps its own; both read the same env). Not test-patched.
 OVERMIND_UPLOAD_TIMEOUT_SECONDS = max(10, int(os.environ.get("OVERMIND_UPLOAD_TIMEOUT_SECONDS", "60")))
@@ -227,7 +225,9 @@ def _sync_rom_metadata_to_overmind_locked(
     pending_roms = len(pending_changes.get("roms") or [])
     pending_bios = len(pending_changes.get("bios") or [])
     pending_artwork = len(pending_changes.get("artwork") or [])
-    pending_deleted = len(_pending_deleted.get("roms") or []) + len(_pending_deleted.get("bios") or []) + len(_pending_deleted.get("artwork") or [])
+    pending_deleted_assets = len(_pending_deleted.get("roms") or []) + len(_pending_deleted.get("bios") or [])
+    pending_artwork_deleted = len(_pending_deleted.get("artwork") or [])
+    pending_deleted = pending_deleted_assets + pending_artwork_deleted
     first_upload_after_cache = bool(has_cached_assets and not stats.get("had_successful_upload"))
     sync_reasons = []
     if force_upload:
@@ -243,10 +243,8 @@ def _sync_rom_metadata_to_overmind_locked(
             sync_reasons.append(f"delta_roms={pending_roms}")
         if pending_bios:
             sync_reasons.append(f"delta_bios={pending_bios}")
-        if pending_artwork:
-            sync_reasons.append(f"delta_artwork={pending_artwork}")
-        if pending_deleted:
-            sync_reasons.append(f"delta_deletes={pending_deleted}")
+        if pending_deleted_assets:
+            sync_reasons.append(f"delta_deletes={pending_deleted_assets}")
     if not should_upload_inventory:
         sync_reasons.append("no_changes")
     decision = "full_refresh" if full_refresh else ("delta" if should_upload_inventory else "skip")
@@ -299,6 +297,11 @@ def _sync_rom_metadata_to_overmind_locked(
         # Without this the same pending rows re-upload on every poll forever (observed as
         # a steady "decision=delta delta_roms=N" loop in overmind.log).
         _clear_pending_rom_metadata_changes(settings)
+    elif pending_artwork or pending_artwork_deleted:
+        _clear_pending_rom_metadata_changes(settings)
+        _overmind_log(
+            f"Asset metadata artwork changes ignored and marked clean: pending_artwork={pending_artwork} pending_artwork_deletes={pending_artwork_deleted}"
+        )
 
     hash_batches = 0
     hashed_roms = 0
@@ -429,10 +432,6 @@ def _defer_rom_metadata_upload(settings: Settings, reason: str) -> dict:
         "changed": False,
     }
 
-
-# _sync_saves_to_overmind now lives in overmind/saves_sync.py (re-exported below).
-
-
 def _poll_rom_metadata_once(settings: Settings, repository: "RomRepository") -> dict:
     if not _begin_rom_metadata_activity("poll"):
         return {"status": "skipped", "reason": "metadata_already_running", "changed": False}
@@ -460,11 +459,6 @@ def _poll_rom_metadata_once(settings: Settings, repository: "RomRepository") -> 
         except Exception:
             _defer_rom_metadata_upload(settings, "overmind_upload_failed")
             raise
-        # Best-effort: a saves sync failure must not affect ROM metadata results.
-        try:
-            _sync_saves_to_overmind(settings, base_url, token)
-        except Exception as error:
-            _overmind_log(f"Saves sync failed: error={_format_overmind_error(error)}")
         return result
     finally:
         _end_rom_metadata_activity()

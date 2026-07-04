@@ -118,9 +118,8 @@ def _rom_metadata_inventory_id(settings: Settings, snapshot: dict) -> str:
     counts = (
         len(snapshot.get("roms") if isinstance(snapshot.get("roms"), list) else []),
         len(snapshot.get("bios") if isinstance(snapshot.get("bios"), list) else []),
-        len(snapshot.get("artwork") if isinstance(snapshot.get("artwork"), list) else []),
     )
-    return f"{settings.overmind_device_id}:{snapshot.get('collected_at') or ''}:{counts[0]}:{counts[1]}:{counts[2]}"
+    return f"{settings.overmind_device_id}:{snapshot.get('collected_at') or ''}:{counts[0]}:{counts[1]}"
 
 
 def _chunk_rom_metadata_inventory(
@@ -133,8 +132,7 @@ def _chunk_rom_metadata_inventory(
     chunk_size = max(1, int(chunk_size or ROM_METADATA_UPLOAD_CHUNK_SIZE))
     roms = _wire_asset_rows(snapshot.get("roms") if isinstance(snapshot.get("roms"), list) else [])
     bios = _wire_asset_rows(snapshot.get("bios") if isinstance(snapshot.get("bios"), list) else [])
-    artwork = _wire_asset_rows(snapshot.get("artwork") if isinstance(snapshot.get("artwork"), list) else [])
-    rows = [("roms", row) for row in roms] + [("bios", row) for row in bios] + [("artwork", row) for row in artwork]
+    rows = [("roms", row) for row in roms] + [("bios", row) for row in bios]
     base = {
         "device_id": settings.overmind_device_id,
         "type": snapshot.get("type") or "asset_metadata",
@@ -151,12 +149,12 @@ def _chunk_rom_metadata_inventory(
         "replace_all": bool(replace_all),
     }
     if len(rows) <= chunk_size:
-        return [{**base, "update_mode": "inventory", "roms": roms, "bios": bios, "artwork": artwork}]
+        return [{**base, "update_mode": "inventory", "roms": roms, "bios": bios, "artwork": []}]
 
     chunks = []
     total = (len(rows) + chunk_size - 1) // chunk_size
     inventory_id = _rom_metadata_inventory_id(settings, snapshot)
-    counts = {"roms": len(roms), "bios": len(bios), "artwork": len(artwork)}
+    counts = {"roms": len(roms), "bios": len(bios), "artwork": 0}
     for index in range(total):
         chunk_rows = rows[index * chunk_size:(index + 1) * chunk_size]
         payload = {
@@ -191,10 +189,8 @@ def _chunk_rom_metadata_delta(settings: Settings, snapshot: dict, changes: dict,
     rows = (
         [("roms", "upsert", row) for row in _wire_asset_rows(changes.get("roms") or [])]
         + [("bios", "upsert", row) for row in _wire_asset_rows(changes.get("bios") or [])]
-        + [("artwork", "upsert", row) for row in _wire_asset_rows(changes.get("artwork") or [])]
         + [("roms", "delete", row) for row in _wire_asset_rows(deleted.get("roms") or [])]
         + [("bios", "delete", row) for row in _wire_asset_rows(deleted.get("bios") or [])]
-        + [("artwork", "delete", row) for row in _wire_asset_rows(deleted.get("artwork") or [])]
     )
     if not rows:
         return []

@@ -48,9 +48,7 @@ try:
     )
     from ..overmind.heartbeat_sync import (
         _local_asset_thumbprints,
-        _local_saves_thumbprint,
         _maybe_request_asset_push_from_heartbeat,
-        _maybe_request_saves_push_from_heartbeat,
     )
     from ..overmind.overmind_client import (
         _format_overmind_error,
@@ -131,9 +129,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     )
     from overmind.heartbeat_sync import (
         _local_asset_thumbprints,
-        _local_saves_thumbprint,
         _maybe_request_asset_push_from_heartbeat,
-        _maybe_request_saves_push_from_heartbeat,
     )
     from overmind.overmind_client import (
         _format_overmind_error,
@@ -269,9 +265,6 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                     heartbeat_payload["romset_files_thumbprint"] = local_romset_thumbprint
                 if local_bios_thumbprint:
                     heartbeat_payload["bios_files_thumbprint"] = local_bios_thumbprint
-                local_saves_thumbprint = _local_saves_thumbprint(settings)
-                if local_saves_thumbprint:
-                    heartbeat_payload["saves_files_thumbprint"] = local_saves_thumbprint
                 heartbeat_url = f"{base_url}/api/devices/{device_id}/heartbeat"
                 heartbeat_started = time.monotonic()
                 _overmind_log(
@@ -323,7 +316,6 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                 # drifted (or is missing) — wake the metadata poller to push a fresh
                 # inventory and resync. The Drone, not Overmind, decides to resend.
                 _maybe_request_asset_push_from_heartbeat(settings, response)
-                _maybe_request_saves_push_from_heartbeat(settings, response)
 
                 # Telemetry steps below are best-effort and independent: a failure in
                 # one (e.g. a flaky speed test) must not abort the heartbeat iteration
