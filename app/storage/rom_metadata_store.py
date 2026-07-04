@@ -80,8 +80,9 @@ class RomCacheRow:
         rom_name = str(payload.get("rom_name") or payload.get("name") or payload.get("title") or Path(file_path).stem).strip()
         gamelist_path = str(payload.get("gamelist_path") or "")
         gamelist_game_id = str(payload.get("gamelist_game_id") or file_path)
-        if gamelist_path:
-            rom_name = Path(file_path).stem
+        # rom_name is the gamelist <name> (the game's display name) -- that is the "name"
+        # reported to Overmind. (Previously this was overridden to the filename stem when a
+        # gamelist was present, discarding the real title.)
         return cls(
             entry_key=entry_key,
             system=system,

@@ -24,7 +24,7 @@ try:
         _read_preserved_asset_fingerprint,
     )
     from .gamelist import _database_rom_metadata_fields
-    from .rom_inventory import _bios_cache_entry_key, _rom_cache_entry_key
+    from .rom_inventory import _bios_cache_entry_key, _rom_cache_entry_key, _wire_rom_rows
     from .rom_metadata_state import _build_rom_metadata_snapshot_from_cache
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.logging_setup import _overmind_log  # type: ignore
@@ -36,7 +36,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         _read_preserved_asset_fingerprint,
     )
     from roms.gamelist import _database_rom_metadata_fields  # type: ignore
-    from roms.rom_inventory import _bios_cache_entry_key, _rom_cache_entry_key  # type: ignore
+    from roms.rom_inventory import _bios_cache_entry_key, _rom_cache_entry_key, _wire_rom_rows  # type: ignore
     from roms.rom_metadata_state import _build_rom_metadata_snapshot_from_cache  # type: ignore
 
 # Local copies of the scan/hash tuning knobs (drone_api keeps its own copies for the
@@ -436,7 +436,9 @@ def _hash_rom_metadata_batches(settings: Settings, repository: "RomRepository", 
             updated = {**entry, "fingerprint": fingerprint_value, "rom_fingerprint": fingerprint_value}
             entries[key] = updated
             pending_updates[key] = updated
-            patch.append({k: v for k, v in updated.items() if k != "absolute_path"})
+            # Slim wire shape: Overmind's rom_hash_patch updates rom_fingerprint by
+            # (system, gamelist_id), so only those slim fields are sent.
+            patch.append(_wire_rom_rows([updated])[0])
             hashed += 1
         now = time.monotonic()
         checkpoint_due = (

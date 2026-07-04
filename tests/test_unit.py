@@ -3299,7 +3299,7 @@ class SettingsTests(unittest.TestCase):
 
             self.assertEqual(hashed_after_restart, ["B.zip"])
             self.assertEqual(len(patches), 1)
-            self.assertEqual(patches[0]["roms"][0]["file_path"], "B.zip")
+            self.assertEqual(patches[0]["roms"][0]["gamelist_game_id"], "B.zip")
 
     def test_rom_metadata_sync_skips_unchanged_cache_without_rehashing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3789,7 +3789,9 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(len(full_refreshes), 1)
             self.assertTrue(full_refreshes[0]["replace_all"])
             self.assertEqual([len(payload["roms"]) for payload in inventories], [1, 0])
-            self.assertEqual(inventories[-1]["deleted"]["roms"][0]["file_path"], "First Game.zip")
+            # Deleted rows are identified by gamelist id on the wire (the slim upload no
+            # longer carries the ROM path); an unscraped game's id is its relative path.
+            self.assertEqual(inventories[-1]["deleted"]["roms"][0]["gamelist_game_id"], "First Game.zip")
             self.assertEqual(added["stats"]["new_or_changed"], 1)
             self.assertEqual(deleted["stats"]["deleted"], 1)
             cache, _ = _load_rom_metadata_cache(settings)
