@@ -6,14 +6,12 @@ produces the combined gamelist+filesystem ROM metadata. Composed onto ``RomRepos
 so the methods stay ``self``-bound with call sites unchanged.
 """
 
-import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import List, Optional, Tuple
 
 try:
     from ..common.http_cache import valid_segment
-    from ..overmind.overmind_client import _format_overmind_error
     from .gamelist import (
         ARTWORK_FIELDS,
         _gamelist_details,
@@ -23,7 +21,6 @@ try:
     )
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.http_cache import valid_segment  # type: ignore
-    from overmind.overmind_client import _format_overmind_error  # type: ignore
     from roms.gamelist import (  # type: ignore
         ARTWORK_FIELDS,
         _gamelist_details,
@@ -322,36 +319,11 @@ class RomScanMixin:
                 "has_gamelist_entry": True,
             }
             items.append(item)
-        try:
-            disk_items = self._list_rom_items(system, system_dir, include_fingerprint=False)
-        except Exception as error:
-            print(f"ROM metadata disk supplement skipped: system={system} error={_format_overmind_error(error)}", file=sys.stderr, flush=True)
-            disk_items = []
-        for disk_item in disk_items:
-            relative_path = _normalize_gamelist_rom_path(
-                disk_item.get("file_path") or disk_item.get("relative_path") or disk_item.get("rom_path") or ""
-            )
-            if not relative_path:
-                continue
-            normalized_key = relative_path.lower()
-            if normalized_key in seen_paths:
-                continue
-            seen_paths.add(normalized_key)
-            disk_item = dict(disk_item)
-            disk_item["name"] = disk_item.get("name") or Path(relative_path).stem
-            disk_item["rom_name"] = disk_item.get("rom_name") or disk_item.get("name") or Path(relative_path).stem
-            disk_item["title"] = disk_item.get("title") or disk_item.get("rom_name")
-            disk_item["relative_path"] = relative_path
-            disk_item["rom_path"] = relative_path
-            disk_item["file_path"] = relative_path
-            disk_item["source"] = "filesystem"
-            disk_item["metadata_source"] = "filesystem"
-            disk_item["gamelist"] = {}
-            disk_item["gamelist_path"] = ""
-            disk_item["gamelist_game_id"] = relative_path
-            disk_item["has_gamelist_entry"] = False
-            disk_item.setdefault("existing", {})
-            items.append(disk_item)
+        # Strict gamelist-as-source-of-truth: only <game> entries are tracked. ROM files
+        # present on disk but absent from gamelist.xml are intentionally NOT supplemented
+        # here -- this keeps the per-system gamelist.xml MD5 a complete change signal (a
+        # ROM that isn't in the gamelist can't change what we report). A system with no
+        # gamelist.xml therefore reports zero games.
         items.sort(key=lambda item: str(item.get("relative_path") or "").lower())
         gamelist = {
             "system": system,

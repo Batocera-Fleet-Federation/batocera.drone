@@ -18,7 +18,7 @@ except ImportError:
     from storage.state_store import open_database as _open_state_database  # type: ignore
 
 
-ROM_METADATA_CACHE_VERSION = 5
+ROM_METADATA_CACHE_VERSION = 6
 _ROW_EXTRA_KEYS = {
     "system",
     "system_name",
@@ -322,8 +322,12 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
     connection.execute(
         "CREATE TABLE IF NOT EXISTS asset_gamelists ("
         "system TEXT PRIMARY KEY, path TEXT NOT NULL, exists_flag INTEGER NOT NULL DEFAULT 0, "
-        "file_size INTEGER, modified_time INTEGER, rom_count INTEGER NOT NULL DEFAULT 0)"
+        "file_size INTEGER, modified_time INTEGER, rom_count INTEGER NOT NULL DEFAULT 0, "
+        "gamelist_md5 TEXT NOT NULL DEFAULT '')"
     )
+    # gamelist_md5 is the per-system change signal: the poll re-indexes a system only when
+    # its gamelist.xml MD5 differs from the stored value (gamelist.xml = source of truth).
+    _ensure_column(connection, "asset_gamelists", "gamelist_md5", "TEXT NOT NULL DEFAULT ''")
     connection.execute(
         "CREATE TABLE IF NOT EXISTS rom_cache_entries ("
         "entry_key TEXT PRIMARY KEY, system TEXT NOT NULL, file_path TEXT NOT NULL, rom_name TEXT NOT NULL, "
@@ -580,7 +584,7 @@ def _persist_rom_metadata_cache(
         if isinstance(cache.get("gamelists"), list):
             connection.execute("DELETE FROM asset_gamelists")
             connection.executemany(
-                "INSERT INTO asset_gamelists (system, path, exists_flag, file_size, modified_time, rom_count) VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO asset_gamelists (system, path, exists_flag, file_size, modified_time, rom_count, gamelist_md5) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 [
                     (
                         str(row.get("system") or row.get("system_name") or ""),
@@ -589,6 +593,7 @@ def _persist_rom_metadata_cache(
                         _int(row.get("file_size")),
                         _int(row.get("modified_time")),
                         _int(row.get("rom_count")),
+                        str(row.get("gamelist_md5") or ""),
                     )
                     for row in cache["gamelists"]
                     if isinstance(row, dict) and str(row.get("system") or row.get("system_name") or "").strip()
@@ -1059,9 +1064,10 @@ def _read_sqlite_rom_metadata_cache(settings: Any) -> dict:
                 "file_size": file_size,
                 "modified_time": modified_time,
                 "rom_count": rom_count,
+                "gamelist_md5": gamelist_md5,
             }
-            for system, path, exists_flag, file_size, modified_time, rom_count in connection.execute(
-                "SELECT system, path, exists_flag, file_size, modified_time, rom_count FROM asset_gamelists ORDER BY system"
+            for system, path, exists_flag, file_size, modified_time, rom_count, gamelist_md5 in connection.execute(
+                "SELECT system, path, exists_flag, file_size, modified_time, rom_count, gamelist_md5 FROM asset_gamelists ORDER BY system"
             )
         ]
         cache["entries"] = _read_rom_rows(connection)
