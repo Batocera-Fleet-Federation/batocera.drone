@@ -1,5 +1,11 @@
 # Changelog
 
+## [v0.1.28] - 2026-07-03
+
+- Fix drone TLS startup crash on empty peer cert + extract theme-meta builder
+- Finalizing refactoring of code into smaller units
+- Refactoring mega files out into logical directories and break out files making it easier to read, understand, and debug.
+
 ## [v0.1.27] - 2026-06-30
 
 - Outbound-only networking: transport tiers + Edge mux client (#6)
