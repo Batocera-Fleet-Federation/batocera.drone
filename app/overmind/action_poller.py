@@ -66,12 +66,6 @@ try:
         collect_game_event_sessions as _collect_game_event_sessions,
         delete_game_event_spool as _delete_game_event_spool,
     )
-    from ..overmind.overmind_reporting import (
-        collect_emulator_configs as _collect_emulator_configs,
-        collect_log_sources as _collect_log_sources,
-        commit_emulator_config_fingerprints as _commit_emulator_config_fingerprints,
-        commit_log_cursors as _commit_log_cursors,
-    )
     from ..overmind.registration import (
         _reclaim_overmind_token_after_unauthorized,
         _record_processed_overmind_action,
@@ -147,12 +141,6 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         collect_game_event_sessions as _collect_game_event_sessions,
         delete_game_event_spool as _delete_game_event_spool,
     )
-    from overmind.overmind_reporting import (
-        collect_emulator_configs as _collect_emulator_configs,
-        collect_log_sources as _collect_log_sources,
-        commit_emulator_config_fingerprints as _commit_emulator_config_fingerprints,
-        commit_log_cursors as _commit_log_cursors,
-    )
     from overmind.registration import (
         _reclaim_overmind_token_after_unauthorized,
         _record_processed_overmind_action,
@@ -184,8 +172,6 @@ except ImportError:  # pragma: no cover - direct script execution fallback
 OVERMIND_SPEED_SAMPLE_SECONDS = int(os.environ.get("OVERMIND_SPEED_SAMPLE_SECONDS", "600"))
 OVERMIND_HEARTBEAT_SECONDS = int(os.environ.get("OVERMIND_POLL_SECONDS", "30"))
 OVERMIND_HEARTBEAT_TIMEOUT_SECONDS = max(10, int(os.environ.get("OVERMIND_HEARTBEAT_TIMEOUT_SECONDS", "20")))
-OVERMIND_CONFIG_REPORT_SECONDS = int(os.environ.get("OVERMIND_CONFIG_REPORT_SECONDS", "300"))
-PERSISTENT_OVERMIND_LOG_SOURCES = ("drone_stderr", "es_launch_stdout", "es_launch_stderr")
 DRONE_REMOTE_REBOOT_EXIT_CODE = 76
 
 
@@ -199,16 +185,14 @@ def _get_download_manager():
 def _start_overmind_action_poller(settings: Settings, repository: "RomRepository") -> None:
     poll_seconds = max(5, int(settings.overmind_poll_seconds or OVERMIND_HEARTBEAT_SECONDS))
     speed_sample_seconds = OVERMIND_SPEED_SAMPLE_SECONDS
-    config_report_seconds = max(0, int(OVERMIND_CONFIG_REPORT_SECONDS))
     system_info_refresh_seconds = max(300, int(os.environ.get("DRONE_SYSTEM_INFO_REFRESH_SECONDS", "3600")))
     last_speed_sample_at: Optional[float] = None
-    last_config_report_at = -float(config_report_seconds or 0)
     last_system_info_at = -float(system_info_refresh_seconds)
     system_info_payload: dict = {}
     fs_snapshot = _filesystem_snapshot(settings)
 
     def loop() -> None:
-        nonlocal last_speed_sample_at, last_config_report_at, last_system_info_at, system_info_payload, fs_snapshot
+        nonlocal last_speed_sample_at, last_system_info_at, system_info_payload, fs_snapshot
         while True:
             if not _local_network.is_overmind_mode(settings):
                 time.sleep(poll_seconds)
@@ -370,51 +354,9 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                     # Leave spool files in place so the next heartbeat retries them.
                     _overmind_log(f"Game log upload failed; will retry next heartbeat: {_format_overmind_error(error)}")
 
-                persistent_logs = _collect_log_sources(settings, sources=PERSISTENT_OVERMIND_LOG_SOURCES)
-                persistent_log_cursors = persistent_logs.pop("_cursors", {})
-                if persistent_logs.get("logs"):
-                    try:
-                        _overmind_post_json(f"{base_url}/api/devices/{device_id}/log-sources", persistent_logs, token=token, settings=settings)
-                    except (HTTPError, URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError) as error:
-                        _overmind_log(
-                            f"Persistent log upload failed; heartbeat/action poll will continue: {_format_overmind_error(error)}"
-                        )
-                    else:
-                        _commit_log_cursors(settings, persistent_log_cursors)
-                        _overmind_log(
-                            f"Sent {len(persistent_logs.get('logs') or [])} persistent log source(s) to Overmind"
-                        )
-
-                if bool(response.get("log_stream_requested")):
-                    log_sources = _collect_log_sources(settings)
-                    log_cursors = log_sources.pop("_cursors", {})
-                    if log_sources.get("logs"):
-                        try:
-                            _overmind_post_json(f"{base_url}/api/devices/{device_id}/log-sources", log_sources, token=token, settings=settings)
-                        except (HTTPError, URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError) as error:
-                            _overmind_log(
-                                f"Log stream upload failed; heartbeat/action poll will continue: {_format_overmind_error(error)}"
-                            )
-                        else:
-                            _commit_log_cursors(settings, log_cursors)
-                            _overmind_log(
-                                f"Streamed {len(log_sources.get('logs') or [])} log source(s) to Overmind"
-                            )
-
-                if (
-                    config_report_seconds > 0
-                    and now - last_config_report_at >= config_report_seconds
-                    and not _ROM_METADATA_ACTIVE.is_set()
-                ):
-                    emulator_configs = _collect_emulator_configs(settings)
-                    emulator_config_fingerprints = emulator_configs.pop("_fingerprints", {})
-                    if emulator_configs.get("configs"):
-                        _overmind_post_json(f"{base_url}/api/devices/{device_id}/emulator-configs", emulator_configs, token=token, settings=settings)
-                        _commit_emulator_config_fingerprints(settings, emulator_config_fingerprints)
-                        _overmind_log(
-                            f"Sent {len(emulator_configs.get('configs') or [])} changed emulator config(s) to Overmind"
-                        )
-                    last_config_report_at = now
+                # Drone/ES logs and emulator configs are no longer uploaded to Overmind --
+                # Overmind neither stores nor displays them (gameplay history is still sent
+                # above via /game-logs). Only device telemetry + gameplay flow to Overmind now.
 
                 actions = response.get("actions") if isinstance(response.get("actions"), list) else None
                 if actions is None:

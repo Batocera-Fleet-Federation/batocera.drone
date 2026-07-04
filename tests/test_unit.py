@@ -2341,9 +2341,10 @@ class SettingsTests(unittest.TestCase):
 
     def test_drone_overmind_client_uses_typed_overmind_endpoints(self) -> None:
         source = Path(__file__).resolve().parents[1].joinpath("app/drone_api.py").read_text(encoding="utf-8") + Path(__file__).resolve().parents[1].joinpath("app/overmind/registration.py").read_text(encoding="utf-8") + Path(__file__).resolve().parents[1].joinpath("app/transfer/peer_download.py").read_text(encoding="utf-8") + Path(__file__).resolve().parents[1].joinpath("app/transfer/peer_workers.py").read_text(encoding="utf-8") + Path(__file__).resolve().parents[1].joinpath("app/overmind/rom_sync.py").read_text(encoding="utf-8") + Path(__file__).resolve().parents[1].joinpath("app/roms/rom_collect.py").read_text(encoding="utf-8") + Path(__file__).resolve().parents[1].joinpath("app/overmind/action_poller.py").read_text(encoding="utf-8")
-        reporting_source = Path(__file__).resolve().parents[1].joinpath("app/overmind/overmind_reporting.py").read_text(encoding="utf-8")
         game_log_source = Path(__file__).resolve().parents[1].joinpath("app/overmind/overmind_game_logs.py").read_text(encoding="utf-8")
 
+        # Logs (/log-sources) and emulator configs (/emulator-configs) are intentionally
+        # NOT in this list -- the drone no longer reports either to Overmind.
         for endpoint in [
             "/api/devices/{device_id}/heartbeat",
             "/api/devices/{device_id}/rom-metadata",
@@ -2352,15 +2353,11 @@ class SettingsTests(unittest.TestCase):
             "/api/devices/{device_id}/events",
             "/api/devices/{device_id}/peer-checks",
             "/api/devices/{device_id}/game-logs",
-            "/api/devices/{device_id}/log-sources",
-            "/api/devices/{device_id}/emulator-configs",
             "/api/devices/{device_id}/actions/{action_id}/complete",
         ]:
             self.assertIn(endpoint, source)
         self.assertIn('"type": "asset_metadata"', source)
         self.assertIn('"type": "game_logs"', game_log_source)
-        self.assertIn('"type": "log_sources"', reporting_source)
-        self.assertIn('"type": "emulator_configs"', reporting_source)
 
     def test_bios_ui_displays_cached_md5_column(self) -> None:
         source = Path(__file__).resolve().parents[1].joinpath("app/web/static/js/drone.js").read_text(encoding="utf-8")

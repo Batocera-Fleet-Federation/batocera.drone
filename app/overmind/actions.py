@@ -33,7 +33,6 @@ try:
     from ..transfer.transfer_files import bios_md5_exists as _bios_md5_exists
     from .overmind_config import _load_overmind_config_for_settings
     from .overmind_game_logs import load_gameplay_history as _load_gameplay_history
-    from .overmind_reporting import collect_emulator_configs as _collect_emulator_configs
     from .registration import _summarize_overmind_result
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.settings import Settings  # type: ignore
@@ -54,7 +53,6 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from transfer.transfer_files import bios_md5_exists as _bios_md5_exists  # type: ignore
     from overmind.overmind_config import _load_overmind_config_for_settings  # type: ignore
     from overmind.overmind_game_logs import load_gameplay_history as _load_gameplay_history  # type: ignore
-    from overmind.overmind_reporting import collect_emulator_configs as _collect_emulator_configs  # type: ignore
     from overmind.registration import _summarize_overmind_result  # type: ignore
 
 
@@ -119,17 +117,10 @@ def _execute_overmind_action(
         result = {"type": "game_logs", "sessions": sessions}
         return "completed", f"Collected {_summarize_overmind_result(result)}.", result
 
-    if action_name == "collect_emulator_configs":
-        result = _collect_emulator_configs(settings, include_unchanged=True)
-        result.pop("_fingerprints", None)
-        return "completed", f"Collected {_summarize_overmind_result(result)}.", result
-
-    if action_name == "collect_log_sources":
-        return "skipped", "Raw log streaming is only active while the Overmind logs UI is open.", {
-            "type": "log_sources",
-            "logs": [],
-            "streaming_required": True,
-        }
+    if action_name in ("collect_emulator_configs", "collect_log_sources"):
+        # Emulator configs and drone/ES logs are no longer collected or uploaded to
+        # Overmind. Answer any stale request from an older Overmind as a no-op.
+        return "skipped", "Emulator configs and logs are no longer reported to Overmind.", {"type": action_name, "removed": True}
 
     if action_name == "sync_bios":
         config = _load_overmind_config_for_settings(settings)
