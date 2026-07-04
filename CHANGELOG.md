@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.1.29] - 2026-07-03
+
+- Implemented the data diet. Changed Drone so UI metadata sync no longer sends saves or ROM artwork: ROM inventory/delta payloads now include only ROMs + BIOS. Saves sync is now local-only maintenance and never posts to Overmind. Heartbeats no longer send saves thumbprints or trigger saves resync loops. Artwork-only pending changes are marked clean locally so they don’t cause repeated uploads. Changed Overmind so older Drones cannot refill the bulky data: /rom-metadata now strips artwork, saves, save thumbprints, and deleted save/artwork entries before storing. Heartbeat responses no longer echo saves_files_thumbprint. store_rom_metadata no longer stores or notifies on artwork/saves from UI metadata. Emulator config history now keeps only the latest version. Added cleanup migration: 0018.prune_obsolete_ui_payloads.sql Deletes stored artwork/saves rows from asset tables and legacy tables. Clears saved saves thumbprints. Prunes emulator config versions to latest-only. Runs as a background migration so it doesn’t block Lambda cold start.
+
 ## [v0.1.28] - 2026-07-03
 
 - Fix drone TLS startup crash on empty peer cert + extract theme-meta builder
