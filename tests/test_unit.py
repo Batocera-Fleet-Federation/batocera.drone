@@ -4378,6 +4378,40 @@ class LaunchBoxMappingTests(unittest.TestCase):
         self.assertTrue(urls)
         self.assertIn("platform=Sony%20Playstation%202", urls[0])
 
+    def test_launchbox_client_sanitizes_dns_failures(self) -> None:
+        from app.roms.scrapers import ScraperUnavailableError
+
+        with mock.patch("app.roms.scrapers.urlopen", side_effect=URLError(socket.gaierror(-2, "Name or service not known"))):
+            with self.assertRaises(ScraperUnavailableError) as raised:
+                LaunchBoxClient().search("Chrono Trigger", system="snes")
+
+        self.assertEqual(str(raised.exception), "LaunchBox could not be reached from this Drone")
+
+    def test_launchbox_search_handler_degrades_when_launchbox_unavailable(self) -> None:
+        from app.roms.scrapers import ScraperUnavailableError
+        from app.web import handlers_artwork
+
+        class FakeLaunchBoxClient:
+            def search(self, query, system=None):
+                raise ScraperUnavailableError("LaunchBox could not be reached from this Drone")
+
+        class FakeHandler(handlers_artwork.HandlersArtworkMixin):
+            def __init__(self) -> None:
+                self.response = None
+
+            def _send_json(self, status_code: int, payload: dict) -> None:
+                self.response = (status_code, payload)
+
+        handler = FakeHandler()
+        with mock.patch("app.web.handlers_artwork.LaunchBoxClient", FakeLaunchBoxClient):
+            handler._handle_admin_launchbox_search("snes", "", "", "Chrono Trigger")
+
+        self.assertIsNotNone(handler.response)
+        status_code, payload = handler.response
+        self.assertEqual(status_code, 200)
+        self.assertTrue(payload["launchbox_unavailable"])
+        self.assertEqual(payload["matches"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
