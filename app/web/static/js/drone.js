@@ -3673,8 +3673,6 @@ async function renderOvermindIntegrationPage() {
   content.innerHTML = `<div class="mb-3"><button class="btn btn-outline-secondary" onclick="setHash('#admin/integration')">← Back to Integration</button></div><div id="overmindPagePanel"></div>`;
   const panel = document.getElementById("overmindPagePanel");
   await renderOvermindIntegrationPanel(panel);
-  const configurationCard = panel.querySelector(".card.log-card");
-  if (configurationCard) configurationCard.remove();
 }
 
 async function renderLocalNetworkIntegrationPanel(target) {
