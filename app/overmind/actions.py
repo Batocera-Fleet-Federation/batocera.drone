@@ -295,6 +295,7 @@ def _execute_overmind_action(
             if not system or (not rel and not gamelist_id):
                 continue
             display_name = rel or gamelist_id
+            resolved_artwork_types = []
             started_wall = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
             started_mono = time.monotonic()
             if expected_fingerprint and _cached_rom_fingerprint_exists(settings, expected_fingerprint):
@@ -367,6 +368,7 @@ def _execute_overmind_action(
                     expected_fingerprint = resolved.get("rom_fingerprint")
                 if not item.get("file_size") and resolved.get("file_size"):
                     item = {**item, "file_size": resolved.get("file_size")}
+                resolved_artwork_types = resolved.get("artwork_types") if isinstance(resolved.get("artwork_types"), list) else []
             try:
                 activity = manager.enqueue_rom(
                     config,
@@ -378,6 +380,7 @@ def _execute_overmind_action(
                     source_action_id=str(action.get("id") or ""),
                     entry_type=entry_type,
                     sync_id=sync_id,
+                    artwork_types=resolved_artwork_types,
                 )
                 activity["sync_id"] = sync_id
                 activity["rom_fingerprint"] = activity.get("rom_fingerprint") or expected_fingerprint

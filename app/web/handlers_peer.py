@@ -335,6 +335,13 @@ class HandlersPeerMixin:
                 response["rom_fingerprint"] = self.repository.build_fingerprint(target)
             except Exception:
                 pass
+        # Tell the receiver which artwork fields this game has on disk so it can pull
+        # them (receiver-driven) right after the ROM instead of guessing every field.
+        try:
+            present = self.repository.list_present_artwork(system)
+            response["artwork_types"] = sorted(present.get(relative_path.lower(), set()))
+        except Exception:
+            response["artwork_types"] = []
         self.log_message("peer rom resolve-by-id system=%s gid=%s rom=%s type=%s", system, gid, relative_path, entry_type)
         self._send_json(200, response)
 
