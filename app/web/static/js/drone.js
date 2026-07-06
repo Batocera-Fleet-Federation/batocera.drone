@@ -1482,7 +1482,7 @@ async function renderHelpPage() {
                 },
                 {
                   q: "Will my saves stay in sync?",
-                  a: "Drone tracks your save files and reports changes, so Overmind can keep them aligned across the fleet. Pick up a game on one cabinet and continue on another."
+                  a: "Drone tracks your save files locally and can copy them peer-to-peer to another cabinet on request. Pick up a game on one cabinet and continue on another."
                 },
                 {
                   q: "What does the BIOS page do?",
@@ -1575,7 +1575,7 @@ async function renderHelpPage() {
           <li>Older bookmarks and router rules can still use <code>https://BATOCERA-HOSTNAME.local:8443</code>.</li>
         </ol>
         <h3 class="h5 mb-3"><i class="bi bi-router me-2"></i>Enable content syncing (port forwarding)</h3>
-        <p class="text-muted">Only needed so Overmind and other Drones can pull games, saves, BIOS, artwork, and configs from this machine. The Drone still connects to Overmind for monitoring and remote actions without it.</p>
+        <p class="text-muted">Only needed so other Drones can pull games, saves, BIOS, and artwork from this machine. The Drone still connects to Overmind for monitoring and remote actions without it.</p>
         <ol class="mb-0">
           <li>Find your router address in <strong>System Info</strong> &gt; <strong>Router IP Address</strong>, then open that IP in a browser to sign in to your router.</li>
           <li>In the router, look for <strong>NAT</strong>, <strong>Port Forwarding</strong>, or <strong>Connected Devices</strong>.</li>
@@ -1621,7 +1621,7 @@ async function renderAdminMenu() {
         <div class="card admin-tile pointer h-100" onclick="setHash('#admin/emulators')">
           <div class="card-body">
             <h5 class="card-title"><i class="bi bi-file-earmark-code me-2"></i>Emulators</h5>
-            <p class="card-text">View emulator config files mirrored to Overmind.</p>
+            <p class="card-text">View emulator config files on this machine.</p>
           </div>
         </div>
       </div>
@@ -2984,35 +2984,39 @@ async function selectArtworkRom(index, activeTab = "matches") {
   try {
     const data = await api(`/admin/artwork/launchbox/search?system=${encodeURIComponent(rom.system || "")}&rom_id=${encodeURIComponent(rom.unique_id || "")}&rom_path=${encodeURIComponent(rom.rom_path || "")}&q=${encodeURIComponent(artworkRomSearchTitle(rom))}`);
     const matches = data.matches || [];
-    const platformNote = data.launchbox_platform
-      ? `<div class="text-muted small mb-2">Filtered by LaunchBox platform: ${escapeHtml(data.launchbox_platform)}</div>`
-      : `<div class="text-muted small mb-2">No LaunchBox platform mapping found for this system; showing title matches.</div>`;
-    matchesEl.innerHTML = platformNote + (matches.length ? `
-      <div class="list-group">
-        ${matches.map((match) => `
-          <button type="button" class="list-group-item list-group-item-action launchbox-match-btn" data-launchbox-game-key="${escapeHtml(String(match.game_key || ""))}">
-            <div class="d-flex gap-3 align-items-center">
-              ${match.thumbnail_url ? `<img src="${match.thumbnail_url}" alt="" style="width: 56px; height: 56px; object-fit: cover; background:#111;">` : `<div style="width:56px;height:56px;background:#111;"></div>`}
-              <div>
-                <div class="fw-semibold">${escapeHtml(match.name || "")}</div>
-                <div class="text-muted small">${escapeHtml(match.platform || "unknown platform")}</div>
+    if (data.launchbox_unavailable) {
+      matchesEl.innerHTML = `<div class="text-muted">LaunchBox could not be reached from this Drone. You can still use the external LaunchBox link or TheGamesDB matches below.</div>`;
+    } else {
+      const platformNote = data.launchbox_platform
+        ? `<div class="text-muted small mb-2">Filtered by LaunchBox platform: ${escapeHtml(data.launchbox_platform)}</div>`
+        : `<div class="text-muted small mb-2">No LaunchBox platform mapping found for this system; showing title matches.</div>`;
+      matchesEl.innerHTML = platformNote + (matches.length ? `
+        <div class="list-group">
+          ${matches.map((match) => `
+            <button type="button" class="list-group-item list-group-item-action launchbox-match-btn" data-launchbox-game-key="${escapeHtml(String(match.game_key || ""))}">
+              <div class="d-flex gap-3 align-items-center">
+                ${match.thumbnail_url ? `<img src="${match.thumbnail_url}" alt="" style="width: 56px; height: 56px; object-fit: cover; background:#111;">` : `<div style="width:56px;height:56px;background:#111;"></div>`}
+                <div>
+                  <div class="fw-semibold">${escapeHtml(match.name || "")}</div>
+                  <div class="text-muted small">${escapeHtml(match.platform || "unknown platform")}</div>
+                </div>
               </div>
-            </div>
-          </button>
-        `).join("")}
-      </div>
-    ` : `<div class="text-muted">No LaunchBox matches found.</div>`);
-    matchesEl.querySelectorAll(".launchbox-match-btn").forEach((button) => {
-      button.addEventListener("click", () => {
-        applyLaunchboxArtwork(
-          index,
-          rom.system || "",
-          rom.unique_id || "",
-          rom.rom_path || "",
-          button.getAttribute("data-launchbox-game-key") || ""
-        );
+            </button>
+          `).join("")}
+        </div>
+      ` : `<div class="text-muted">No LaunchBox matches found.</div>`);
+      matchesEl.querySelectorAll(".launchbox-match-btn").forEach((button) => {
+        button.addEventListener("click", () => {
+          applyLaunchboxArtwork(
+            index,
+            rom.system || "",
+            rom.unique_id || "",
+            rom.rom_path || "",
+            button.getAttribute("data-launchbox-game-key") || ""
+          );
+        });
       });
-    });
+    }
   } catch (err) {
     showToast(`LaunchBox search failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
     matchesEl.innerHTML = `<div class="text-muted">LaunchBox matches could not be loaded.</div>`;

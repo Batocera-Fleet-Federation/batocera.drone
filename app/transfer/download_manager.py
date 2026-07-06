@@ -193,7 +193,7 @@ class DownloadManager:
             value = 3
         return max(1, min(value, 8))
 
-    def enqueue_rom(self, config: dict, peer: dict, system: str, relative_path: str, expected_size=None, expected_fingerprint=None, source_action_id: Optional[str] = None, entry_type: str = "file", sync_id: Optional[str] = None) -> dict:
+    def enqueue_rom(self, config: dict, peer: dict, system: str, relative_path: str, expected_size=None, expected_fingerprint=None, source_action_id: Optional[str] = None, entry_type: str = "file", sync_id: Optional[str] = None, artwork_types=None) -> dict:
         job_id = str(uuid.uuid4())
         peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
         now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -231,6 +231,7 @@ class DownloadManager:
             "_peer": peer,
             "_expected_fingerprint": expected_fingerprint,
             "_entry_type": entry_type,
+            "_artwork_types": [str(value).strip() for value in (artwork_types or []) if str(value).strip()],
         }
         with self._lock:
             self._jobs[job_id] = job
@@ -652,6 +653,7 @@ class DownloadManager:
             entry_type = str(job.get("_entry_type") or job.get("entry_type") or "file").lower()
             cancel_event = self._cancel_events.get(job_id) or Event()
             asset_type = str(job.get("_asset_type") or "rom").lower()
+            rom_artwork_types = list(job.get("_artwork_types") or [])
         self._push_download_state(config, "started", force=True)
 
         def progress(downloaded: int, total: Optional[int]) -> None:
@@ -753,6 +755,20 @@ class DownloadManager:
                 _post_rom_sync_activity(self.settings, config, terminal_activity)
                 if asset_type == "rom" and terminal_activity.get("status") == "completed":
                     _kick_asset_metadata_sync_after_download(self.settings, self.repository, config, "rom_download_completed")
+                    # Receiver-driven artwork: pull the game's artwork from the same
+                    # peer (Overmind no longer carries artwork to queue sync_artwork).
+                    completed_rel = str(terminal_activity.get("relative_path") or rel or "")
+                    if completed_rel and rom_artwork_types:
+                        for field in rom_artwork_types:
+                            try:
+                                self.enqueue_artwork(
+                                    config, peer, system, completed_rel, field,
+                                    source_action_id=terminal_activity.get("source_action_id"),
+                                    local_rom_path=completed_rel,
+                                )
+                            except Exception:
+                                # Best-effort: artwork is a nice-to-have on top of the ROM.
+                                pass
 
     def _push_download_state(self, config: dict, reason: str, force: bool = False) -> None:
         if not force:

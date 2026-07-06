@@ -130,7 +130,10 @@ def _chunk_rom_metadata_inventory(
     replace_all: bool = False,
 ) -> List[dict]:
     chunk_size = max(1, int(chunk_size or ROM_METADATA_UPLOAD_CHUNK_SIZE))
-    roms = _wire_asset_rows(snapshot.get("roms") if isinstance(snapshot.get("roms"), list) else [])
+    # The romset thumbprint is computed from the FULL cached rows (which carry the complete
+    # identity) so it stays stable across polls; only the wire rows are slimmed.
+    snapshot_roms = snapshot.get("roms") if isinstance(snapshot.get("roms"), list) else []
+    roms = _wire_rom_rows(snapshot_roms)
     bios = _wire_asset_rows(snapshot.get("bios") if isinstance(snapshot.get("bios"), list) else [])
     rows = [("roms", row) for row in roms] + [("bios", row) for row in bios]
     base = {
@@ -139,9 +142,9 @@ def _chunk_rom_metadata_inventory(
         "collected_at": snapshot.get("collected_at"),
         "roms_root": snapshot.get("roms_root"),
         "bios_root": snapshot.get("bios_root"),
-        "rom_inventory_fingerprint": snapshot.get("rom_inventory_fingerprint") or _rom_inventory_fingerprint(roms),
+        "rom_inventory_fingerprint": snapshot.get("rom_inventory_fingerprint") or _rom_inventory_fingerprint(snapshot_roms),
         "rom_inventory_fingerprint_algorithm": snapshot.get("rom_inventory_fingerprint_algorithm") or ROM_INVENTORY_FINGERPRINT_ALGORITHM,
-        "romset_files_thumbprint": snapshot.get("romset_files_thumbprint") or snapshot.get("rom_inventory_fingerprint") or _rom_inventory_fingerprint(roms),
+        "romset_files_thumbprint": snapshot.get("romset_files_thumbprint") or snapshot.get("rom_inventory_fingerprint") or _rom_inventory_fingerprint(snapshot_roms),
         "bios_files_thumbprint": snapshot.get("bios_files_thumbprint") or _bios_inventory_fingerprint(bios),
         "systems": snapshot.get("systems") if isinstance(snapshot.get("systems"), list) else [],
         "gamelists": snapshot.get("gamelists") if isinstance(snapshot.get("gamelists"), list) else [],
@@ -149,12 +152,12 @@ def _chunk_rom_metadata_inventory(
         "replace_all": bool(replace_all),
     }
     if len(rows) <= chunk_size:
-        return [{**base, "update_mode": "inventory", "roms": roms, "bios": bios, "artwork": []}]
+        return [{**base, "update_mode": "inventory", "roms": roms, "bios": bios}]
 
     chunks = []
     total = (len(rows) + chunk_size - 1) // chunk_size
     inventory_id = _rom_metadata_inventory_id(settings, snapshot)
-    counts = {"roms": len(roms), "bios": len(bios), "artwork": 0}
+    counts = {"roms": len(roms), "bios": len(bios)}
     for index in range(total):
         chunk_rows = rows[index * chunk_size:(index + 1) * chunk_size]
         payload = {
@@ -167,7 +170,6 @@ def _chunk_rom_metadata_inventory(
             "inventory_counts": counts,
             "roms": [],
             "bios": [],
-            "artwork": [],
         }
         for asset_type, row in chunk_rows:
             payload[asset_type].append(row)
@@ -183,13 +185,38 @@ def _wire_asset_rows(rows: list) -> list:
     ]
 
 
+def _wire_rom_rows(rows: list) -> list:
+    """Project each cached ROM row to the slim shape uploaded to Overmind: only the
+    gamelist id, display name, system, file size, and sampled fingerprint. gamelist.xml
+    is the source of truth, so the ROM path, artwork, and other local-only fields are
+    never sent -- Overmind identifies a game by (system, gamelist_id) + fingerprint, and
+    the sender resolves the actual file from its own gamelist at transfer time."""
+    slim = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        fingerprint = row.get("rom_fingerprint") or row.get("fingerprint")
+        wire = {
+            "gamelist_game_id": str(row.get("gamelist_game_id") or ""),
+            "system_name": str(row.get("system") or row.get("system_name") or ""),
+            "name": str(row.get("name") or row.get("rom_name") or row.get("title") or ""),
+            "file_size": int(row.get("file_size") or row.get("byte_count") or row.get("size") or 0),
+        }
+        # Omit the fingerprint until it is computed (folders and freshly-scanned files carry
+        # no fingerprint yet; it arrives later via a rom_hash_patch upload).
+        if fingerprint:
+            wire["rom_fingerprint"] = str(fingerprint)
+        slim.append(wire)
+    return slim
+
+
 def _chunk_rom_metadata_delta(settings: Settings, snapshot: dict, changes: dict, chunk_size: Optional[int] = None) -> List[dict]:
     chunk_size = max(1, int(chunk_size or ROM_METADATA_UPLOAD_CHUNK_SIZE))
     deleted = changes.get("deleted") if isinstance(changes.get("deleted"), dict) else {}
     rows = (
-        [("roms", "upsert", row) for row in _wire_asset_rows(changes.get("roms") or [])]
+        [("roms", "upsert", row) for row in _wire_rom_rows(changes.get("roms") or [])]
         + [("bios", "upsert", row) for row in _wire_asset_rows(changes.get("bios") or [])]
-        + [("roms", "delete", row) for row in _wire_asset_rows(deleted.get("roms") or [])]
+        + [("roms", "delete", row) for row in _wire_rom_rows(deleted.get("roms") or [])]
         + [("bios", "delete", row) for row in _wire_asset_rows(deleted.get("bios") or [])]
     )
     if not rows:
@@ -215,8 +242,7 @@ def _chunk_rom_metadata_delta(settings: Settings, snapshot: dict, changes: dict,
             "inventory_complete": index == total - 1,
             "roms": [],
             "bios": [],
-            "artwork": [],
-            "deleted": {"roms": [], "bios": [], "artwork": []},
+            "deleted": {"roms": [], "bios": []},
         }
         for asset_type, operation, row in rows[start:start + chunk_size]:
             if operation == "delete":

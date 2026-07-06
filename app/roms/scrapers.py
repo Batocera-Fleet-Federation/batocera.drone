@@ -13,6 +13,7 @@ import os
 import re
 from pathlib import Path
 from typing import List, Optional, Tuple
+from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 
@@ -125,6 +126,10 @@ LAUNCHBOX_FIELD_TYPES = {
 }
 
 
+class ScraperUnavailableError(RuntimeError):
+    """Raised when an optional external scraper cannot be reached."""
+
+
 def _clean_rom_title(value: str) -> str:
     name = Path(value or "").stem
     name = re.sub(r"[:,\-;\[\]\(\)<>_]+", " ", name)
@@ -149,8 +154,13 @@ class LaunchBoxClient:
 
     def _get_json(self, url: str) -> dict:
         request = Request(url, headers={"User-Agent": SCRAPER_USER_AGENT, "Accept": "application/json"})
-        with urlopen(request, timeout=self.timeout_seconds) as response:
-            return json.loads(response.read().decode("utf-8"))
+        try:
+            with urlopen(request, timeout=self.timeout_seconds) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except HTTPError as error:
+            raise ScraperUnavailableError(f"LaunchBox returned HTTP {error.code}") from error
+        except (URLError, TimeoutError, OSError) as error:
+            raise ScraperUnavailableError("LaunchBox could not be reached from this Drone") from error
 
     def search(self, query: str, system: Optional[str] = None, limit: int = 20) -> List[dict]:
         normalized_query = (query or "").strip()

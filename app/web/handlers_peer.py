@@ -295,6 +295,56 @@ class HandlersPeerMixin:
         self.log_message("peer rom download system=%s rom=%s bytes=%s", system, rel, target.stat().st_size)
         self._stream_file(target, "application/octet-stream", as_attachment=True)
 
+    def _handle_peer_rom_resolve_by_id(self, system: str, gamelist_id: str) -> None:
+        """Resolve a ROM by its gamelist ``<game id>`` to the sender's local path.
+
+        The receiver was told only ``(system, gamelist_id)`` by Overmind (no path),
+        so it asks the source drone to map the id -> ``<path>`` from that drone's own
+        gamelist.xml. It then pulls the bytes over the normal path-based ``/peer/roms``
+        (or ``/peer/rom-manifest`` for folders) endpoint and places the file at the
+        same relative path locally.
+        """
+        if not self._peer_request_authorized():
+            return
+        gid = unquote(gamelist_id or "").strip()
+        if not gid:
+            self._send_json(400, {"error": "invalid gamelist id"})
+            return
+        try:
+            target, relative_path, entry_type = self.repository.resolve_rom_file_by_gamelist_id(system, gid)
+        except ValueError as error:
+            self._send_json(400, {"error": str(error)})
+            return
+        except Exception:
+            self.log_error("peer rom resolve-by-id failed system=%s gid=%s reason=not_found", system, gid)
+            self._send_json(404, {"error": "not found"})
+            return
+        response = {
+            "system": system,
+            "gamelist_id": gid,
+            "relative_path": relative_path,
+            "entry_type": entry_type,
+        }
+        if entry_type == "file":
+            try:
+                stat = target.stat()
+                response["file_size"] = int(stat.st_size)
+            except OSError:
+                pass
+            try:
+                response["rom_fingerprint"] = self.repository.build_fingerprint(target)
+            except Exception:
+                pass
+        # Tell the receiver which artwork fields this game has on disk so it can pull
+        # them (receiver-driven) right after the ROM instead of guessing every field.
+        try:
+            present = self.repository.list_present_artwork(system)
+            response["artwork_types"] = sorted(present.get(relative_path.lower(), set()))
+        except Exception:
+            response["artwork_types"] = []
+        self.log_message("peer rom resolve-by-id system=%s gid=%s rom=%s type=%s", system, gid, relative_path, entry_type)
+        self._send_json(200, response)
+
     def _handle_peer_rom_manifest(self, system: str, relative_path: str) -> None:
         if not self._peer_request_authorized():
             return

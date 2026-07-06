@@ -18,6 +18,7 @@ try:
         ARTWORK_DUPLICATE_FILTER,
         ARTWORK_FIELDS,
         _artwork_identity,
+        _find_gamelist_entry_by_game_id,
         _gamelist_details,
         _normalize_gamelist_rom_path,
         _remove_child,
@@ -31,6 +32,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         ARTWORK_DUPLICATE_FILTER,
         ARTWORK_FIELDS,
         _artwork_identity,
+        _find_gamelist_entry_by_game_id,
         _gamelist_details,
         _normalize_gamelist_rom_path,
         _remove_child,
@@ -118,6 +120,31 @@ class RomArtworkGamelistMixin:
         if not target.exists() or not target.is_file() or (target != system_dir and system_dir not in target.parents):
             raise FileNotFoundError()
         return target, target.relative_to(system_dir).as_posix(), artwork_ref
+
+    def resolve_rom_file_by_gamelist_id(self, system: str, gamelist_id: str) -> Tuple[Path, str, str]:
+        """Resolve a ROM by its gamelist ``<game id>`` -> (target, relative_path, entry_type).
+
+        The sender maps the gamelist id to the game's ``<path>`` in its own
+        gamelist.xml (mirroring ``resolve_artwork_file``) so a receiver can pull the
+        ROM without Overmind ever carrying a filesystem path. Raises FileNotFoundError
+        when the id is unknown or the resolved path escapes the system directory.
+        """
+        gid = str(gamelist_id or "").strip()
+        if not gid:
+            raise ValueError("gamelist_id is required")
+        system_dir = self.get_system_dir(system).resolve()
+        _, root = self._read_gamelist(system_dir)
+        game = _find_gamelist_entry_by_game_id(root, gid)
+        if game is None:
+            raise FileNotFoundError()
+        rom_ref = _normalize_gamelist_rom_path(_text_or_empty(game, "path"))
+        if not rom_ref or "\x00" in rom_ref:
+            raise FileNotFoundError()
+        target = (system_dir / rom_ref).resolve()
+        if (target != system_dir and system_dir not in target.parents) or not target.exists():
+            raise FileNotFoundError()
+        entry_type = "folder" if target.is_dir() else "file"
+        return target, target.relative_to(system_dir).as_posix(), entry_type
 
     def list_present_artwork(self, system: str) -> Dict[str, set]:
         """Map normalized ROM path -> set of artwork fields that are both referenced

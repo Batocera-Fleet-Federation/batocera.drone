@@ -1692,7 +1692,10 @@ class SettingsTests(unittest.TestCase):
             self.assertTrue(roms[0]["has_gamelist_entry"])
             self.assertEqual(roms[0]["metadata_source"], "gamelist.xml")
 
-    def test_gamelist_rom_metadata_includes_disk_rows_missing_from_stale_gamelist(self) -> None:
+    def test_gamelist_rom_metadata_ignores_disk_rows_missing_from_gamelist(self) -> None:
+        # Strict gamelist-as-source-of-truth: a ROM present on disk but absent from
+        # gamelist.xml is NOT reported, so the gamelist.xml MD5 stays a complete change
+        # signal (a ROM outside the gamelist can't change what we report/upload).
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             system = root / "roms" / "fbneo"
@@ -1708,12 +1711,12 @@ class SettingsTests(unittest.TestCase):
             _, roms = repo.list_gamelist_rom_metadata("fbneo")
 
             by_path = {row["file_path"]: row for row in roms}
-            self.assertEqual(set(by_path), {"Known.zip", "1943.zip"})
+            self.assertEqual(set(by_path), {"Known.zip"})
             self.assertTrue(by_path["Known.zip"]["has_gamelist_entry"])
-            self.assertFalse(by_path["1943.zip"]["has_gamelist_entry"])
-            self.assertEqual(by_path["1943.zip"]["metadata_source"], "filesystem")
+            self.assertEqual(by_path["Known.zip"]["metadata_source"], "gamelist.xml")
 
-    def test_gamelist_rom_metadata_uses_disk_rows_when_gamelist_is_absent(self) -> None:
+    def test_gamelist_rom_metadata_empty_when_gamelist_absent(self) -> None:
+        # Strict mode: no gamelist.xml -> zero games reported, even if ROMs sit on disk.
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             rom = root / "roms" / "fbneo" / "1942.zip"
@@ -1721,12 +1724,10 @@ class SettingsTests(unittest.TestCase):
             rom.write_bytes(b"rom")
             repo = RomRepository(root / "roms", root / "bios")
 
-            _, roms = repo.list_gamelist_rom_metadata("fbneo")
+            gamelist, roms = repo.list_gamelist_rom_metadata("fbneo")
 
-            self.assertEqual(len(roms), 1)
-            self.assertEqual(roms[0]["file_path"], "1942.zip")
-            self.assertFalse(roms[0]["has_gamelist_entry"])
-            self.assertEqual(roms[0]["metadata_source"], "filesystem")
+            self.assertEqual(roms, [])
+            self.assertFalse(gamelist["exists"])
 
     def test_rom_list_can_skip_fingerprint_for_fast_ui_loads(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2340,9 +2341,10 @@ class SettingsTests(unittest.TestCase):
 
     def test_drone_overmind_client_uses_typed_overmind_endpoints(self) -> None:
         source = Path(__file__).resolve().parents[1].joinpath("app/drone_api.py").read_text(encoding="utf-8") + Path(__file__).resolve().parents[1].joinpath("app/overmind/registration.py").read_text(encoding="utf-8") + Path(__file__).resolve().parents[1].joinpath("app/transfer/peer_download.py").read_text(encoding="utf-8") + Path(__file__).resolve().parents[1].joinpath("app/transfer/peer_workers.py").read_text(encoding="utf-8") + Path(__file__).resolve().parents[1].joinpath("app/overmind/rom_sync.py").read_text(encoding="utf-8") + Path(__file__).resolve().parents[1].joinpath("app/roms/rom_collect.py").read_text(encoding="utf-8") + Path(__file__).resolve().parents[1].joinpath("app/overmind/action_poller.py").read_text(encoding="utf-8")
-        reporting_source = Path(__file__).resolve().parents[1].joinpath("app/overmind/overmind_reporting.py").read_text(encoding="utf-8")
         game_log_source = Path(__file__).resolve().parents[1].joinpath("app/overmind/overmind_game_logs.py").read_text(encoding="utf-8")
 
+        # Logs (/log-sources) and emulator configs (/emulator-configs) are intentionally
+        # NOT in this list -- the drone no longer reports either to Overmind.
         for endpoint in [
             "/api/devices/{device_id}/heartbeat",
             "/api/devices/{device_id}/rom-metadata",
@@ -2351,15 +2353,11 @@ class SettingsTests(unittest.TestCase):
             "/api/devices/{device_id}/events",
             "/api/devices/{device_id}/peer-checks",
             "/api/devices/{device_id}/game-logs",
-            "/api/devices/{device_id}/log-sources",
-            "/api/devices/{device_id}/emulator-configs",
             "/api/devices/{device_id}/actions/{action_id}/complete",
         ]:
             self.assertIn(endpoint, source)
         self.assertIn('"type": "asset_metadata"', source)
         self.assertIn('"type": "game_logs"', game_log_source)
-        self.assertIn('"type": "log_sources"', reporting_source)
-        self.assertIn('"type": "emulator_configs"', reporting_source)
 
     def test_bios_ui_displays_cached_md5_column(self) -> None:
         source = Path(__file__).resolve().parents[1].joinpath("app/web/static/js/drone.js").read_text(encoding="utf-8")
@@ -2826,6 +2824,10 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(snapshot["roms"][0]["rom_fingerprint"], first_fingerprint)
             self.assertEqual(snapshot["bios"][0]["bios_md5"], first_bios_md5)
 
+            # Deletes are detected via gamelist.xml (the source of truth): removing the game
+            # from the gamelist changes its MD5, so the system re-indexes without the ROM.
+            # BIOS is not gamelist-gated, so its filesystem delete is detected directly.
+            (rom.parent / "gamelist.xml").write_text("<gameList></gameList>\n", encoding="utf-8")
             rom.unlink()
             bios.unlink()
             snapshot, changed, stats = _poll_rom_metadata_cache(settings, repo)
@@ -2835,7 +2837,10 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(snapshot["roms"], [])
             self.assertEqual(snapshot["bios"], [])
 
-    def test_asset_metadata_cache_detects_artwork_updates_without_rehashing_roms(self) -> None:
+    def test_gamelist_edit_reindexes_but_reuses_unchanged_rom_fingerprint(self) -> None:
+        # Editing gamelist.xml changes its MD5, so the system re-indexes; but a ROM whose
+        # bytes (size) are unchanged reuses its cached fingerprint instead of re-hashing.
+        # (Artwork is no longer scanned/stored/uploaded -- resolved live from gamelist for P2P.)
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
             system = root / "roms" / "snes"
@@ -2843,9 +2848,7 @@ class SettingsTests(unittest.TestCase):
             (system / "Game.zip").write_bytes(b"rom-data")
             gamelist = system / "gamelist.xml"
             gamelist.write_text(
-                "<gameList><game><path>./Game.zip</path><name>Game</name>"
-                "<image>./images/game.png</image>"
-                "</game></gameList>\n",
+                "<gameList><game><path>./Game.zip</path><name>Game</name></game></gameList>\n",
                 encoding="utf-8",
             )
             with mock.patch.dict(
@@ -2857,23 +2860,25 @@ class SettingsTests(unittest.TestCase):
             repo = RomRepository(settings.roms_root, settings.bios_root)
             _poll_rom_metadata_cache(settings, repo)
             with mock.patch("app.drone_api.ROM_METADATA_HASH_ROMS_ENABLED", True):
-                list(_hash_rom_metadata_batches(settings, repo, batch_size=1))
+                patches = list(_hash_rom_metadata_batches(settings, repo, batch_size=1))
+            first_fingerprint = patches[0]["roms"][0]["rom_fingerprint"]
             _mark_rom_metadata_upload_clean(settings)
+            # Edit the game's metadata (not the ROM bytes) -> gamelist MD5 changes.
             gamelist.write_text(
-                "<gameList><game><path>./Game.zip</path><name>Game</name>"
-                "<image>./images/game.png</image><marquee>./images/game-marquee.png</marquee>"
-                "</game></gameList>\n",
+                "<gameList><game><path>./Game.zip</path><name>Game (Renamed)</name></game></gameList>\n",
                 encoding="utf-8",
             )
 
-            with mock.patch.object(RomRepository, "build_fingerprint", side_effect=AssertionError("unchanged ROM should not hash")):
+            with mock.patch.object(RomRepository, "build_fingerprint", side_effect=AssertionError("unchanged ROM should not re-hash")):
                 snapshot, changed, stats = _poll_rom_metadata_cache(settings, repo)
 
             self.assertTrue(changed)
-            self.assertTrue(stats["artwork_changed"])
-            self.assertEqual(snapshot["artwork"][0]["artwork_types"], ["image", "marquee"])
+            self.assertEqual(snapshot["roms"][0]["rom_fingerprint"], first_fingerprint)
 
-    def test_rom_metadata_cache_reuses_fingerprint_when_only_mtime_changes(self) -> None:
+    def test_rom_metadata_cache_skips_rescan_when_gamelist_unchanged(self) -> None:
+        # Strict gamelist-as-source-of-truth: a ROM file change (here an mtime bump) that is
+        # NOT reflected in gamelist.xml triggers no re-scan or re-hash -- the gamelist MD5 is
+        # the sole change signal, so the cached fingerprint is preserved untouched.
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
             rom = root / "roms" / "snes" / "Game.zip"
@@ -2898,11 +2903,11 @@ class SettingsTests(unittest.TestCase):
 
             os.utime(rom, (rom.stat().st_atime + 10, rom.stat().st_mtime + 10))
 
-            with mock.patch.object(RomRepository, "build_fingerprint", side_effect=AssertionError("mtime-only ROM change should reuse cached fingerprint")):
+            with mock.patch.object(RomRepository, "build_fingerprint", side_effect=AssertionError("gamelist unchanged -> no re-scan or re-hash")):
                 snapshot, changed, stats = _poll_rom_metadata_cache(settings, repo)
                 patches = list(_hash_rom_metadata_batches(settings, repo, batch_size=1))
 
-            self.assertTrue(changed)
+            self.assertFalse(changed)
             self.assertEqual(stats["new_or_changed"], 0)
             self.assertEqual(stats["roms_pending_fingerprint"], 0)
             self.assertEqual(snapshot["roms"][0]["rom_fingerprint"], first_fingerprint)
@@ -3291,7 +3296,7 @@ class SettingsTests(unittest.TestCase):
 
             self.assertEqual(hashed_after_restart, ["B.zip"])
             self.assertEqual(len(patches), 1)
-            self.assertEqual(patches[0]["roms"][0]["file_path"], "B.zip")
+            self.assertEqual(patches[0]["roms"][0]["gamelist_game_id"], "B.zip")
 
     def test_rom_metadata_sync_skips_unchanged_cache_without_rehashing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3781,7 +3786,9 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(len(full_refreshes), 1)
             self.assertTrue(full_refreshes[0]["replace_all"])
             self.assertEqual([len(payload["roms"]) for payload in inventories], [1, 0])
-            self.assertEqual(inventories[-1]["deleted"]["roms"][0]["file_path"], "First Game.zip")
+            # Deleted rows are identified by gamelist id on the wire (the slim upload no
+            # longer carries the ROM path); an unscraped game's id is its relative path.
+            self.assertEqual(inventories[-1]["deleted"]["roms"][0]["gamelist_game_id"], "First Game.zip")
             self.assertEqual(added["stats"]["new_or_changed"], 1)
             self.assertEqual(deleted["stats"]["deleted"], 1)
             cache, _ = _load_rom_metadata_cache(settings)
@@ -4370,6 +4377,40 @@ class LaunchBoxMappingTests(unittest.TestCase):
         FakeLaunchBoxClient().search("Chrono Trigger", system="ps2")
         self.assertTrue(urls)
         self.assertIn("platform=Sony%20Playstation%202", urls[0])
+
+    def test_launchbox_client_sanitizes_dns_failures(self) -> None:
+        from app.roms.scrapers import ScraperUnavailableError
+
+        with mock.patch("app.roms.scrapers.urlopen", side_effect=URLError(socket.gaierror(-2, "Name or service not known"))):
+            with self.assertRaises(ScraperUnavailableError) as raised:
+                LaunchBoxClient().search("Chrono Trigger", system="snes")
+
+        self.assertEqual(str(raised.exception), "LaunchBox could not be reached from this Drone")
+
+    def test_launchbox_search_handler_degrades_when_launchbox_unavailable(self) -> None:
+        from app.roms.scrapers import ScraperUnavailableError
+        from app.web import handlers_artwork
+
+        class FakeLaunchBoxClient:
+            def search(self, query, system=None):
+                raise ScraperUnavailableError("LaunchBox could not be reached from this Drone")
+
+        class FakeHandler(handlers_artwork.HandlersArtworkMixin):
+            def __init__(self) -> None:
+                self.response = None
+
+            def _send_json(self, status_code: int, payload: dict) -> None:
+                self.response = (status_code, payload)
+
+        handler = FakeHandler()
+        with mock.patch("app.web.handlers_artwork.LaunchBoxClient", FakeLaunchBoxClient):
+            handler._handle_admin_launchbox_search("snes", "", "", "Chrono Trigger")
+
+        self.assertIsNotNone(handler.response)
+        status_code, payload = handler.response
+        self.assertEqual(status_code, 200)
+        self.assertTrue(payload["launchbox_unavailable"])
+        self.assertEqual(payload["matches"], [])
 
 
 if __name__ == "__main__":

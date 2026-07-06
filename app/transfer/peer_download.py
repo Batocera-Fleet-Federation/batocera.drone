@@ -165,6 +165,36 @@ def _post_rom_sync_activity(settings: Settings, config: dict, activity: dict) ->
         )
 
 
+def _resolve_rom_by_gamelist_id_from_peer(
+    settings: Settings,
+    config: dict,
+    peer: dict,
+    system: str,
+    gamelist_id: str,
+) -> Optional[dict]:
+    """Ask a source peer to map ``(system, gamelist_id)`` -> its local ROM path.
+
+    Overmind identifies ROMs by the gamelist ``<game id>`` (no path), so the receiver
+    resolves the id against the sender's gamelist.xml before pulling bytes over the
+    normal path-based ``/peer/roms`` tier. Returns the peer JSON
+    ``{relative_path, entry_type, file_size?, rom_fingerprint?}`` or None.
+    """
+    peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
+    address = _peer_address(peer)
+    gid = str(gamelist_id or "").strip()
+    if not address or not gid:
+        return None
+    url = f"{address}/v1/api/peer/roms-by-id/{quote(system, safe='')}/{quote(gid, safe='')}"
+    try:
+        data = _peer_get_json(url, settings, peer_id=peer_id, config=config)
+    except Exception:
+        return None
+    rel = str(data.get("relative_path") or "").strip()
+    if not rel:
+        return None
+    return data
+
+
 def _best_peer_for_rom(
     settings: Settings,
     repository: "RomRepository",

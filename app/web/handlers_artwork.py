@@ -29,6 +29,7 @@ try:
     from ..roms.scrapers import (
         LaunchBoxClient,
         MobyGamesClient,
+        ScraperUnavailableError,
         TheGamesDBScraper,
         _clean_rom_title,
         _launchbox_platform_for_system,
@@ -49,6 +50,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from roms.scrapers import (  # type: ignore
         LaunchBoxClient,
         MobyGamesClient,
+        ScraperUnavailableError,
         TheGamesDBScraper,
         _clean_rom_title,
         _launchbox_platform_for_system,
@@ -184,13 +186,22 @@ class HandlersArtworkMixin:
         if not query_value:
             raise ValueError("q or system+rom_id/rom_path is required")
         client = LaunchBoxClient()
-        matches = client.search(query_value, system=system_value or None)
+        launchbox_unavailable = False
+        launchbox_error = ""
+        try:
+            matches = client.search(query_value, system=system_value or None)
+        except ScraperUnavailableError as error:
+            matches = []
+            launchbox_unavailable = True
+            launchbox_error = str(error)
         self._send_json(
             200,
             {
                 "query": query_value,
                 "system": system_value,
                 "launchbox_platform": _launchbox_platform_for_system(system_value),
+                "launchbox_unavailable": launchbox_unavailable,
+                "launchbox_error": launchbox_error,
                 "rom_id": rom_id_value,
                 "rom_path": rom_path_value,
                 "matches": matches,

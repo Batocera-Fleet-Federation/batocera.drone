@@ -6,6 +6,7 @@ persists the delta; ``_hash_rom_metadata_batches`` fills in sampled fingerprints
 time-budgeted batches. Both take the ``RomRepository`` as a parameter (query object).
 """
 
+import hashlib
 import os
 import sys
 import time
@@ -18,13 +19,12 @@ try:
     from ..common.settings import Settings
     from ..overmind.overmind_client import _format_overmind_error
     from ..storage.rom_metadata_store import (
-        ArtworkCacheRow,
         _load_rom_metadata_cache,
         _persist_rom_metadata_cache,
         _read_preserved_asset_fingerprint,
     )
     from .gamelist import _database_rom_metadata_fields
-    from .rom_inventory import _artwork_cache_entry_key, _bios_cache_entry_key, _rom_cache_entry_key
+    from .rom_inventory import _bios_cache_entry_key, _rom_cache_entry_key, _wire_rom_rows
     from .rom_metadata_state import _build_rom_metadata_snapshot_from_cache
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.logging_setup import _overmind_log  # type: ignore
@@ -36,7 +36,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         _read_preserved_asset_fingerprint,
     )
     from roms.gamelist import _database_rom_metadata_fields  # type: ignore
-    from roms.rom_inventory import _artwork_cache_entry_key, _bios_cache_entry_key, _rom_cache_entry_key  # type: ignore
+    from roms.rom_inventory import _bios_cache_entry_key, _rom_cache_entry_key, _wire_rom_rows  # type: ignore
     from roms.rom_metadata_state import _build_rom_metadata_snapshot_from_cache  # type: ignore
 
 # Local copies of the scan/hash tuning knobs (drone_api keeps its own copies for the
@@ -139,6 +139,18 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
         system_names = repository.list_system_names()
     except FileNotFoundError:
         system_names = []
+    # Per-system gamelist.xml MD5 recorded on the previous poll -- the change signal.
+    stored_gamelist_md5 = {
+        str(entry.get("system") or entry.get("system_name") or "").strip().lower(): str(entry.get("gamelist_md5") or "")
+        for entry in (cache.get("gamelists") if isinstance(cache.get("gamelists"), list) else [])
+        if isinstance(entry, dict)
+    }
+    # Group cached ROM entries by system so an unchanged system can be carried forward
+    # whole (no per-file stat/hash) when its gamelist.xml MD5 has not changed.
+    existing_by_system: Dict[str, Dict[str, dict]] = {}
+    for entry_key, entry in existing_entries.items():
+        sys_key = str((entry or {}).get("system") or "").strip().lower() or entry_key.split(":", 1)[0]
+        existing_by_system.setdefault(sys_key, {})[entry_key] = entry
     systems = []
     gamelists = []
     for system_name in system_names:
@@ -146,51 +158,91 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
         if not system_name:
             continue
         systems_scanned += 1
+        sys_key = system_name.lower()
         try:
             system_dir = repository.get_system_dir(system_name)
-            gamelist, roms = repository.list_gamelist_rom_metadata(system_name, system_dir)
-            gamelists.append(gamelist)
         except Exception as error:
             print(f"ROM metadata scan warning: system={system_name} error={_format_overmind_error(error)}", file=sys.stderr, flush=True)
             continue
-        system_discovered = 0
-        for rom in roms:
-            file_path = str(rom.get("file_path") or rom.get("relative_path") or rom.get("rom_path") or rom.get("rom_file") or "").strip()
-            absolute_path = str(rom.get("absolute_path") or "").strip()
-            if not file_path or not absolute_path:
+        gamelist_file = system_dir / "gamelist.xml"
+        try:
+            gamelist_bytes = gamelist_file.read_bytes() if gamelist_file.is_file() else None
+        except OSError:
+            gamelist_bytes = None
+        # Strict gamelist-as-source-of-truth: a system with no gamelist.xml reports zero
+        # games. Its cached rows are intentionally dropped from next_entries (-> deleted).
+        if gamelist_bytes is None:
+            continue
+        current_md5 = hashlib.md5(gamelist_bytes).hexdigest()
+        try:
+            gamelist_stat = gamelist_file.stat()
+        except OSError:
+            gamelist_stat = None
+        system_rom_count = 0
+        if current_md5 == stored_gamelist_md5.get(sys_key) and sys_key in existing_by_system:
+            # Unchanged gamelist.xml -> carry this system's cached rows forward untouched.
+            # This is the whole point of the MD5 gate: no directory walk, stat, or hash.
+            for entry_key, entry in existing_by_system[sys_key].items():
+                next_entries[entry_key] = entry
+                system_rom_count += 1
+        else:
+            # New or changed gamelist.xml -> re-index this system from gamelist.xml.
+            try:
+                _, roms = repository.list_gamelist_rom_metadata(system_name, system_dir)
+            except Exception as error:
+                print(f"ROM metadata scan warning: system={system_name} error={_format_overmind_error(error)}", file=sys.stderr, flush=True)
                 continue
-            absolute = Path(absolute_path)
-            entry_type = str(rom.get("entry_type") or "file").strip().lower()
-            discovered += 1
-            system_discovered += 1
-            key = _rom_cache_entry_key(system_name, file_path)
-            stat_size = int(rom.get("file_size") or rom.get("byte_count") or absolute.stat().st_size)
-            stat_mtime = int(rom.get("modified_time") or rom.get("mtime") or absolute.stat().st_mtime)
-            previous = existing_entries.get(key) if isinstance(existing_entries.get(key), dict) else {}
-            base_entry = _database_rom_metadata_fields(rom, system_name, file_path, absolute, stat_size, stat_mtime)
-            previous_fingerprint = (previous.get("rom_fingerprint") or previous.get("fingerprint")) if previous else None
-            reuse_fingerprint = None
-            if previous and previous.get("file_size") == stat_size and previous_fingerprint:
-                reuse_fingerprint = previous_fingerprint
-            else:
-                # After a purge the entry rows are gone; reuse fingerprint from the
-                # snapshot for files whose size and mtime are unchanged.
-                kept = preserved_rom_fingerprint.get(key)
-                if kept and kept.get("fingerprint") and kept.get("file_size") == stat_size and kept.get("modified_time") == stat_mtime:
-                    reuse_fingerprint = kept["fingerprint"]
-            if reuse_fingerprint:
-                next_entries[key] = dict(base_entry)
-                next_entries[key].update({"fingerprint": reuse_fingerprint, "rom_fingerprint": reuse_fingerprint})
-            else:
-                # No reusable fingerprint (new/changed file, or a value cleared by the
-                # md5->fingerprint migration) -> queue it for hashing. Folders are never
-                # hashed, so they just carry forward without a fingerprint.
-                next_entries[key] = base_entry
-                if entry_type != "folder":
-                    new_or_changed.append((key, absolute, base_entry))
-            checkpoint_scan("rom_scan")
-        if system_discovered:
-            systems.append({"name": system_name, "rom_count": system_discovered})
+            for rom in roms:
+                file_path = str(rom.get("file_path") or rom.get("relative_path") or rom.get("rom_path") or rom.get("rom_file") or "").strip()
+                absolute_path = str(rom.get("absolute_path") or "").strip()
+                if not file_path or not absolute_path:
+                    continue
+                absolute = Path(absolute_path)
+                entry_type = str(rom.get("entry_type") or "file").strip().lower()
+                discovered += 1
+                system_rom_count += 1
+                key = _rom_cache_entry_key(system_name, file_path)
+                stat_size = int(rom.get("file_size") or rom.get("byte_count") or absolute.stat().st_size)
+                stat_mtime = int(rom.get("modified_time") or rom.get("mtime") or absolute.stat().st_mtime)
+                previous = existing_entries.get(key) if isinstance(existing_entries.get(key), dict) else {}
+                base_entry = _database_rom_metadata_fields(rom, system_name, file_path, absolute, stat_size, stat_mtime)
+                previous_fingerprint = (previous.get("rom_fingerprint") or previous.get("fingerprint")) if previous else None
+                reuse_fingerprint = None
+                if previous and previous.get("file_size") == stat_size and previous_fingerprint:
+                    reuse_fingerprint = previous_fingerprint
+                else:
+                    # After a purge the entry rows are gone; reuse fingerprint from the
+                    # snapshot for files whose size and mtime are unchanged.
+                    kept = preserved_rom_fingerprint.get(key)
+                    if kept and kept.get("fingerprint") and kept.get("file_size") == stat_size and kept.get("modified_time") == stat_mtime:
+                        reuse_fingerprint = kept["fingerprint"]
+                if reuse_fingerprint:
+                    next_entries[key] = dict(base_entry)
+                    next_entries[key].update({"fingerprint": reuse_fingerprint, "rom_fingerprint": reuse_fingerprint})
+                else:
+                    # No reusable fingerprint (new/changed file) -> queue it for hashing.
+                    # Folders are never hashed, so they carry forward without a fingerprint.
+                    next_entries[key] = base_entry
+                    if entry_type != "folder":
+                        new_or_changed.append((key, absolute, base_entry))
+                checkpoint_scan("rom_scan")
+        if system_rom_count:
+            systems.append({"name": system_name, "rom_count": system_rom_count})
+        # Always record the gamelist (with its MD5) so the change gate works next poll,
+        # even for an empty gamelist (0 games) -- otherwise it would re-index every poll.
+        gamelists.append(
+            {
+                "system": system_name,
+                "system_name": system_name,
+                "path": str(gamelist_file),
+                "file_path": str(gamelist_file),
+                "exists": True,
+                "rom_count": system_rom_count,
+                "gamelist_md5": current_md5,
+                "file_size": int(gamelist_stat.st_size) if gamelist_stat else len(gamelist_bytes),
+                "modified_time": int(gamelist_stat.st_mtime) if gamelist_stat else 0,
+            }
+        )
 
     checkpoint_scan("rom_scan_complete", force=bool(discovered))
     deleted = previous_keys - set(next_entries.keys())
@@ -239,20 +291,10 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
         print(f"BIOS metadata scan warning: error={_format_overmind_error(error)}", file=sys.stderr, flush=True)
     checkpoint_scan("bios_scan_complete", force=bool(bios_discovered))
     bios_deleted = previous_bios_keys - set(next_bios_entries.keys()) - {key for key, _, _ in bios_new_or_changed}
-    try:
-        for artwork in repository.list_artwork_metadata():
-            key = _artwork_cache_entry_key(str(artwork.get("system") or ""), str(artwork.get("rom_path") or artwork.get("file_path") or ""))
-            if not key.split(":", 1)[-1]:
-                continue
-            artwork_discovered += 1
-            # Normalize the scanned artwork into the same canonical payload shape the cache
-            # round-trips (ArtworkCacheRow.to_payload). Without this, the raw scan dict never
-            # equals the cached entry, so every artwork is re-queued as "changed" on every
-            # poll and the whole artwork set is re-uploaded forever (a CPU-pinning resync loop).
-            clean = ArtworkCacheRow.from_payload(key, {**artwork, "asset_type": "artwork"}).to_payload()
-            next_artwork_entries[key] = clean
-    except Exception as error:
-        print(f"Artwork metadata scan warning: error={_format_overmind_error(error)}", file=sys.stderr, flush=True)
+    # Artwork is no longer collected or uploaded to Overmind. Artwork is resolved live from
+    # gamelist.xml only at peer-to-peer transfer time (see rom_artwork_gamelist), so the poll
+    # never scans it. Leaving next_artwork_entries empty purges any previously-cached artwork
+    # rows through the normal delete path below.
     artwork_deleted = previous_artwork_keys - set(next_artwork_entries.keys())
     artwork_changed = next_artwork_entries != existing_artwork_entries
     print(
@@ -394,7 +436,9 @@ def _hash_rom_metadata_batches(settings: Settings, repository: "RomRepository", 
             updated = {**entry, "fingerprint": fingerprint_value, "rom_fingerprint": fingerprint_value}
             entries[key] = updated
             pending_updates[key] = updated
-            patch.append({k: v for k, v in updated.items() if k != "absolute_path"})
+            # Slim wire shape: Overmind's rom_hash_patch updates rom_fingerprint by
+            # (system, gamelist_id), so only those slim fields are sent.
+            patch.append(_wire_rom_rows([updated])[0])
             hashed += 1
         now = time.monotonic()
         checkpoint_due = (
