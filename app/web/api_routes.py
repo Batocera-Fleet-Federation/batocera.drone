@@ -57,6 +57,10 @@ class ApiRoutesMixin:
                 self._handle_peer_inventory(parts[2], query_params)
                 return
 
+            if len(parts) >= 4 and parts[0] == "peer" and parts[1] == "roms-by-id":
+                self._handle_peer_rom_resolve_by_id(parts[2], "/".join(parts[3:]))
+                return
+
             if len(parts) >= 4 and parts[0] == "peer" and parts[1] == "roms":
                 self._handle_peer_rom_download(parts[2], "/".join(parts[3:]))
                 return

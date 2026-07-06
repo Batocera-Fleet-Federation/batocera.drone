@@ -29,6 +29,7 @@ try:
         _best_peer_for_rom,
         _cached_rom_fingerprint_exists,
         _post_rom_sync_activity,
+        _resolve_rom_by_gamelist_id_from_peer,
     )
     from ..transfer.transfer_files import bios_md5_exists as _bios_md5_exists
     from .overmind_config import _load_overmind_config_for_settings
@@ -49,6 +50,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         _best_peer_for_rom,
         _cached_rom_fingerprint_exists,
         _post_rom_sync_activity,
+        _resolve_rom_by_gamelist_id_from_peer,
     )
     from transfer.transfer_files import bios_md5_exists as _bios_md5_exists  # type: ignore
     from overmind.overmind_config import _load_overmind_config_for_settings  # type: ignore
@@ -277,7 +279,11 @@ def _execute_overmind_action(
         failures = 0
         for item in requested:
             system = str(item.get("system_name") or item.get("system") or payload.get("system_name") or "").strip()
-            rel = str(item.get("file_path") or item.get("rom_name") or "").strip()
+            gamelist_id = str(item.get("gamelist_id") or "").strip()
+            # Overmind identifies the ROM by its gamelist <game id>; the sender path is
+            # resolved from the source peer's own gamelist below. file_path/relative_path
+            # may still arrive from a legacy Overmind, in which case we use it directly.
+            rel = str(item.get("file_path") or item.get("relative_path") or "").strip()
             expected_fingerprint = item.get("rom_fingerprint") or item.get("fingerprint")
             entry_type = str(item.get("entry_type") or "file").strip().lower()
             sync_id = str(item.get("sync_id") or payload.get("sync_id") or uuid.uuid4())
@@ -286,8 +292,9 @@ def _execute_overmind_action(
                 for device in item.get("devices", [])
                 if isinstance(device, dict)
             }
-            if not system or not rel:
+            if not system or (not rel and not gamelist_id):
                 continue
+            display_name = rel or gamelist_id
             started_wall = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
             started_mono = time.monotonic()
             if expected_fingerprint and _cached_rom_fingerprint_exists(settings, expected_fingerprint):
@@ -295,8 +302,8 @@ def _execute_overmind_action(
                     "sync_id": sync_id,
                     "target_drone_id": settings.overmind_device_id,
                     "system": system,
-                    "rom_name": rel,
-                    "relative_path": rel,
+                    "rom_name": display_name,
+                    "relative_path": rel or display_name,
                     "entry_type": entry_type,
                     "action": "download",
                     "status": "skipped",
@@ -316,8 +323,8 @@ def _execute_overmind_action(
                     "sync_id": sync_id,
                     "target_drone_id": settings.overmind_device_id,
                     "system": system,
-                    "rom_name": rel,
-                    "relative_path": rel,
+                    "rom_name": display_name,
+                    "relative_path": rel or display_name,
                     "entry_type": entry_type,
                     "action": "download",
                     "status": "failed",
@@ -330,6 +337,36 @@ def _execute_overmind_action(
                 _post_rom_sync_activity(settings, config, activity)
                 activities.append(activity)
                 continue
+            if not rel and gamelist_id:
+                # Map the gamelist id -> the sender's own ROM path before pulling bytes.
+                resolved = _resolve_rom_by_gamelist_id_from_peer(settings, config, peer, system, gamelist_id)
+                if not resolved or not resolved.get("relative_path"):
+                    failures += 1
+                    activity = {
+                        "sync_id": sync_id,
+                        "source_drone_id": str(peer.get("drone_id") or peer.get("device_id") or ""),
+                        "target_drone_id": settings.overmind_device_id,
+                        "system": system,
+                        "rom_name": display_name,
+                        "relative_path": display_name,
+                        "entry_type": entry_type,
+                        "action": "download",
+                        "status": "failed",
+                        "failure_reason": "Source peer could not resolve ROM by gamelist id",
+                        "rom_fingerprint": expected_fingerprint,
+                        "download_started_at": started_wall,
+                        "download_completed_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                        "duration_ms": int((time.monotonic() - started_mono) * 1000),
+                    }
+                    _post_rom_sync_activity(settings, config, activity)
+                    activities.append(activity)
+                    continue
+                rel = str(resolved.get("relative_path") or "").strip()
+                entry_type = str(resolved.get("entry_type") or entry_type).strip().lower()
+                if not expected_fingerprint:
+                    expected_fingerprint = resolved.get("rom_fingerprint")
+                if not item.get("file_size") and resolved.get("file_size"):
+                    item = {**item, "file_size": resolved.get("file_size")}
             try:
                 activity = manager.enqueue_rom(
                     config,
