@@ -1482,7 +1482,7 @@ async function renderHelpPage() {
                 },
                 {
                   q: "Will my saves stay in sync?",
-                  a: "Drone tracks your save files and reports changes, so Overmind can keep them aligned across the fleet. Pick up a game on one cabinet and continue on another."
+                  a: "Drone tracks your save files locally and can copy them peer-to-peer to another cabinet on request. Pick up a game on one cabinet and continue on another."
                 },
                 {
                   q: "What does the BIOS page do?",
@@ -1575,7 +1575,7 @@ async function renderHelpPage() {
           <li>Older bookmarks and router rules can still use <code>https://BATOCERA-HOSTNAME.local:8443</code>.</li>
         </ol>
         <h3 class="h5 mb-3"><i class="bi bi-router me-2"></i>Enable content syncing (port forwarding)</h3>
-        <p class="text-muted">Only needed so Overmind and other Drones can pull games, saves, BIOS, artwork, and configs from this machine. The Drone still connects to Overmind for monitoring and remote actions without it.</p>
+        <p class="text-muted">Only needed so other Drones can pull games, saves, BIOS, and artwork from this machine. The Drone still connects to Overmind for monitoring and remote actions without it.</p>
         <ol class="mb-0">
           <li>Find your router address in <strong>System Info</strong> &gt; <strong>Router IP Address</strong>, then open that IP in a browser to sign in to your router.</li>
           <li>In the router, look for <strong>NAT</strong>, <strong>Port Forwarding</strong>, or <strong>Connected Devices</strong>.</li>
@@ -1621,7 +1621,7 @@ async function renderAdminMenu() {
         <div class="card admin-tile pointer h-100" onclick="setHash('#admin/emulators')">
           <div class="card-body">
             <h5 class="card-title"><i class="bi bi-file-earmark-code me-2"></i>Emulators</h5>
-            <p class="card-text">View emulator config files mirrored to Overmind.</p>
+            <p class="card-text">View emulator config files on this machine.</p>
           </div>
         </div>
       </div>
