@@ -18,7 +18,11 @@ from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 
 
-LAUNCHBOX_API_BASE = "https://api.gamesdb.launchbox-app.com/api"
+LAUNCHBOX_API_BASE = "https://gamesdb-api.launchbox-app.com/api"
+LAUNCHBOX_API_BASE_FALLBACKS = (
+    "https://gamesdb-api.launchbox-app.com/api",
+    "https://api.gamesdb.launchbox-app.com/api",
+)
 LAUNCHBOX_IMAGE_BASE = "https://images.launchbox-app.com"
 SCRAPER_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -151,6 +155,14 @@ def _launchbox_platform_for_system(system: Optional[str]) -> Optional[str]:
 class LaunchBoxClient:
     def __init__(self, timeout_seconds: int = 15):
         self.timeout_seconds = timeout_seconds
+        configured = os.environ.get("LAUNCHBOX_API_BASE") or os.environ.get("DRONE_LAUNCHBOX_API_BASE")
+        bases = [configured] if configured else []
+        bases.extend(LAUNCHBOX_API_BASE_FALLBACKS)
+        self.api_bases = []
+        for base in bases:
+            normalized = str(base or "").strip().rstrip("/")
+            if normalized and normalized not in self.api_bases:
+                self.api_bases.append(normalized)
 
     def _get_json(self, url: str) -> dict:
         request = Request(url, headers={"User-Agent": SCRAPER_USER_AGENT, "Accept": "application/json"})
@@ -162,6 +174,18 @@ class LaunchBoxClient:
         except (URLError, TimeoutError, OSError) as error:
             raise ScraperUnavailableError("LaunchBox could not be reached from this Drone") from error
 
+    def _get_json_from_bases(self, path: str, query: Optional[str] = None) -> dict:
+        last_error: Optional[ScraperUnavailableError] = None
+        suffix = f"{path}{query or ''}"
+        for base in self.api_bases:
+            try:
+                return self._get_json(f"{base}{suffix}")
+            except ScraperUnavailableError as error:
+                last_error = error
+        if last_error:
+            raise last_error
+        raise ScraperUnavailableError("LaunchBox could not be reached from this Drone")
+
     def search(self, query: str, system: Optional[str] = None, limit: int = 20) -> List[dict]:
         normalized_query = (query or "").strip()
         if not normalized_query:
@@ -169,10 +193,10 @@ class LaunchBoxClient:
         expected_platform = _launchbox_platform_for_system(system)
 
         def _search_payload(platform: Optional[str]) -> dict:
-            url = f"{LAUNCHBOX_API_BASE}/search/{quote(normalized_query, safe='')}"
+            query_string = ""
             if platform:
-                url = f"{url}?platform={quote(platform, safe='')}"
-            return self._get_json(url)
+                query_string = f"?platform={quote(platform, safe='')}"
+            return self._get_json_from_bases(f"/search/{quote(normalized_query, safe='')}", query_string)
 
         payload = _search_payload(expected_platform)
         results = payload.get("data") if isinstance(payload, dict) else []
@@ -216,7 +240,7 @@ class LaunchBoxClient:
         safe_key = re.sub(r"[^0-9]", "", str(game_key or ""))
         if not safe_key:
             raise ValueError("game_key is required")
-        payload = self._get_json(f"{LAUNCHBOX_API_BASE}/games/details/{safe_key}")
+        payload = self._get_json_from_bases(f"/games/details/{safe_key}")
         images = []
         for item in payload.get("gameImages") or []:
             if not isinstance(item, dict):

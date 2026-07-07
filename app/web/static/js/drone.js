@@ -180,16 +180,12 @@ function setLoading(isLoading, text = "Loading...") {
   }
 }
 function setSearchMode(mode, systemName = "") {
-  if (mode === "hidden") {
+  if (mode !== "global") {
     searchForm.classList.add("d-none");
     return;
   }
   searchForm.classList.remove("d-none");
-  if (mode === "system" && systemName) {
-    searchInput.placeholder = `Search ROMS in ${systemName} system`;
-  } else {
-    searchInput.placeholder = "Search ROMs across all systems";
-  }
+  searchInput.placeholder = "Search ROMs across all systems";
 }
 function applyAdminVisibility() {
   const adminLinks = [adminMenuBtn, systemInfoMenuBtn, apiAccessBtn].filter(Boolean);
@@ -1811,7 +1807,7 @@ async function renderHelpPage() {
             <div class="help-link-list">
               <button class="help-link-row" type="button" onclick="setHash('#admin/integration')"><i class="bi bi-arrow-left-right"></i><span><strong>Share across cabinets</strong><small>Copy games, saves, BIOS, and artwork peer-to-peer instead of downloading them everywhere.</small></span></button>
               <button class="help-link-row" type="button" onclick="setHash('#admin/artwork')"><i class="bi bi-images"></i><span><strong>Polish your library</strong><small>Fix titles, descriptions, box art, and marquees so everything looks complete.</small></span></button>
-              <button class="help-link-row" type="button" onclick="setHash('#admin/gameplay-logs')"><i class="bi bi-clock-history"></i><span><strong>See what's been played</strong><small>Review detected game launches and recent play sessions.</small></span></button>
+              <button class="help-link-row" type="button" onclick="setHash('#admin/logs/gameplay?lines=200')"><i class="bi bi-clock-history"></i><span><strong>See what's been played</strong><small>Review detected game launches and recent play sessions.</small></span></button>
               <button class="help-link-row" type="button" onclick="setHash('#admin/system-info')"><i class="bi bi-pc-display"></i><span><strong>Check machine health</strong><small>CPU, memory, storage, network, and connection speed at a glance.</small></span></button>
             </div>
             <div class="mt-2 small">
@@ -1870,18 +1866,10 @@ async function renderAdminMenu() {
   content.innerHTML = `
     <div class="row">
       <div class="col-md-4 mb-3">
-        <div class="card admin-tile pointer h-100" onclick="setHash('#admin/gameplay-logs')">
-          <div class="card-body">
-            <h5 class="card-title"><i class="bi bi-clock-history me-2"></i>Gameplay Logs</h5>
-            <p class="card-text">View detected game launches and recent gameplay sessions.</p>
-          </div>
-        </div>
-      </div>
-      <div class="col-md-4 mb-3">
         <div class="card admin-tile pointer h-100" onclick="setHash('#admin/logs/es_launch_stdout?lines=200')">
           <div class="card-body">
             <h5 class="card-title"><i class="bi bi-journal-text me-2"></i>System Logs</h5>
-            <p class="card-text">View system and emulator logs</p>
+            <p class="card-text">View Drone, EmulationStation, emulator launch, and gameplay logs.</p>
           </div>
         </div>
       </div>
@@ -1917,23 +1905,6 @@ async function renderAdminMenu() {
           </div>
         </div>
       </div>
-      <div class="col-md-4 mb-3">
-        <div class="card admin-tile pointer h-100" onclick="setHash('${systemsTreeHash('', BIOS_TREE_ROOT)}')">
-          <div class="card-body">
-            <h5 class="card-title"><i class="bi bi-cpu me-2"></i>BIOS</h5>
-            <p class="card-text">Browse BIOS inside the Systems file tree with games and other files.</p>
-          </div>
-        </div>
-      </div>
-      <div class="col-md-4 mb-3">
-        <div class="card admin-tile h-100">
-          <div class="card-body d-flex flex-column">
-            <h5 class="card-title"><i class="bi bi-cloud-download me-2"></i>Drone Update</h5>
-            <p class="card-text">Download the latest Drone release and restart the app process without rebooting Batocera.</p>
-            <button class="btn btn-primary mt-auto" onclick="updateDroneApp()"><i class="bi bi-arrow-clockwise me-1"></i>Download & Restart</button>
-          </div>
-        </div>
-      </div>
     </div>
   `;
 }
@@ -1952,6 +1923,19 @@ async function updateDroneApp() {
   } catch (error) {
     dismissToast(toast);
     showToast(`Drone update request ended unexpectedly: ${escapeHtml(error.message || "unknown error")}. If the service restarted, reload this page in a few seconds.`, "warning", 12000);
+  }
+}
+
+async function runPixenUpdate() {
+  if (!window.confirm("Run the PixeN upgrade script on this Drone?")) return;
+  const toast = showToast('<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Starting PixeN update...', "info", null);
+  try {
+    const payload = await apiPost("/admin/system/run-pixen-update", {});
+    dismissToast(toast);
+    showToast(`PixeN update started${payload.pid ? ` (pid ${payload.pid})` : ""}.`, "success", 8000);
+  } catch (error) {
+    dismissToast(toast);
+    showToast(`PixeN update could not start: ${escapeHtml(error.message || "unknown error")}`, "danger", 10000);
   }
 }
 
@@ -3614,6 +3598,7 @@ let localPeerAssetContext = {
 };
 
 function localPeerStatusBadge(peer) {
+  if (peer.identity_conflict) return '<span class="badge text-bg-danger">Identity Conflict</span>';
   if (!peer.paired) return '<span class="badge text-bg-warning">Discovered</span>';
   const health = peer.health || {};
   if (health.status === "pass") return '<span class="badge text-bg-success">Paired · Online</span>';
@@ -3634,7 +3619,9 @@ function renderLocalPeerRows(peers) {
       const url = String(peer.reachable_url || "");
       const insecure = !peer.paired && url !== "" && !/^https:/i.test(url);
       let actionCell;
-      if (peer.paired) {
+      if (peer.identity_conflict) {
+        actionCell = `<button class="btn btn-sm btn-outline-secondary" disabled title="This Drone advertises the same machine id as this device. Reset the Drone id on one machine before pairing.">Resolve ID</button>`;
+      } else if (peer.paired) {
         actionCell = `<button class="btn btn-sm btn-outline-danger" onclick="forgetLocalPeer(decodeURIComponent('${peerToken}'))">Forget</button>`;
       } else if (insecure) {
         actionCell = `<button class="btn btn-sm btn-outline-secondary" disabled title="This Drone is advertising ${escapeHtml(url)} (not HTTPS), so it can't be paired for secure transfers. Update/repair the Drone on that machine.">Not secure</button>`;
@@ -3642,10 +3629,10 @@ function renderLocalPeerRows(peers) {
         actionCell = `<button class="btn btn-sm btn-outline-primary" onclick="pairLocalPeer(decodeURIComponent('${peerToken}'))">Pair</button>`;
       }
       return `<tr>
-        <td><strong>${escapeHtml(peer.name || peer.hostname || peerId)}</strong>${insecure ? '<span class="badge text-bg-danger ms-2" title="Not running HTTPS — cannot pair">Not secure</span>' : ""}</td>
+        <td><strong>${escapeHtml(peer.name || peer.hostname || peerId)}</strong>${insecure ? '<span class="badge text-bg-danger ms-2" title="Not running HTTPS — cannot pair">Not secure</span>' : ""}${peer.identity_conflict ? '<span class="badge text-bg-danger ms-2" title="This peer is advertising the same Drone id as this machine">Same ID</span>' : ""}</td>
         <td class="small mono">${peerId}</td>
         <td>${localPeerStatusBadge(peer)}</td>
-        <td class="small text-danger">${escapeHtml(peer.health?.failure_reason || "")}</td>
+        <td class="small text-danger">${escapeHtml(peer.identity_conflict ? `Conflicts with ${peer.conflicting_drone_id || "this Drone id"}` : (peer.health?.failure_reason || ""))}</td>
         <td class="small mono">${escapeHtml(peer.reachable_url || peer.source_ip || "n/a")}</td>
         <td class="small text-nowrap">${escapeHtml(formatCompactLocalDate(peer.last_seen) || "n/a")}</td>
         <td class="small mono">${escapeHtml(String(peer.certificate_fingerprint || "").slice(0, 16) || "pending")}</td>
@@ -4784,13 +4771,14 @@ async function renderLogsPage(selectedSource = null, selectedLines = 200) {
     ["drone_overmind", "Overmind", "bi-broadcast"],
     ["es_launch_stdout", "ES Launch Stdout", "bi-terminal"],
     ["es_launch_stderr", "ES Launch Stderr", "bi-exclamation-triangle"],
+    ["gameplay", "Gameplay", "bi-clock-history"],
   ];
   const validSources = new Set(logSources.map(([source]) => source));
   const effectiveSource = validSources.has(selectedSource) ? selectedSource : null;
   const effectiveLines = clampLogLines(selectedLines);
 
   titleNode.textContent = "System Logs";
-  subtitleNode.textContent = "View Drone application and EmulationStation launch logs";
+  subtitleNode.textContent = "View Drone application, EmulationStation launch, emulator, and gameplay logs";
   content.innerHTML = `
     <div class="mb-3">
       <button class="btn btn-outline-secondary" onclick="renderAdminPage()">← Back to Admin</button>
@@ -4825,7 +4813,7 @@ async function renderLogsPage(selectedSource = null, selectedLines = 200) {
               <button class="btn btn-sm btn-outline-primary" onclick="refreshCurrentLog()">Refresh</button>
             </div>
           </div>
-          <div class="card-body">
+          <div class="card-body" id="logBody">
             <div class="small text-muted mb-2">Newest lines are shown first. Automatic updates preserve your reading position.</div>
             <textarea id="logContent" class="mono log-content bg-dark text-light p-3 form-control" readonly spellcheck="false">Select a log source from the left panel to view its contents.</textarea>
           </div>
@@ -4843,64 +4831,82 @@ async function renderLogsPage(selectedSource = null, selectedLines = 200) {
   }
   startLogAutoRefresh();
 }
-async function renderGameplayLogsPage() {
-  stopLogAutoRefresh();
-  currentLogSource = null;
-  titleNode.textContent = "Gameplay Logs";
-  subtitleNode.textContent = "Detected game launches from EmulationStation";
-  setLoading(true, "Loading gameplay logs...");
+function renderGameplayLogTable(payload) {
+  const sessions = Array.isArray(payload.sessions) ? payload.sessions : [];
+  const rows = sessions.map((session) => {
+    const duration = session.duration_seconds !== undefined && session.duration_seconds !== null
+      ? `${Math.round(Number(session.duration_seconds) || 0)}s`
+      : "n/a";
+    return `
+      <tr>
+        <td class="text-nowrap">${escapeHtml(session.played_at || "n/a")}</td>
+        <td>${escapeHtml(session.system_name || "n/a")}</td>
+        <td>
+          <div class="fw-semibold">${escapeHtml(session.game_name || session.name || "Unknown game")}</div>
+          <div class="text-muted small mono d-none d-md-block">${escapeHtml(session.rom_path || "")}</div>
+        </td>
+        <td class="text-nowrap">${escapeHtml(duration)}</td>
+      </tr>
+    `;
+  }).join("");
+  return `
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+      <div class="small text-muted">Detected game launches and recent gameplay sessions.</div>
+      <span class="badge text-bg-secondary">${sessions.length} session${sessions.length === 1 ? "" : "s"}${payload.pending_spool_events ? ` · ${payload.pending_spool_events} pending event${payload.pending_spool_events === 1 ? "" : "s"}` : ""}</span>
+    </div>
+    <div class="table-responsive">
+      <table class="table table-sm table-hover align-middle themed-table bff-stack">
+        <thead><tr><th>Played</th><th>System</th><th>Game</th><th>Duration</th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="4" class="text-muted">No gameplay sessions detected yet.</td></tr>'}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+function ensureTextLogBody() {
+  const logBody = document.getElementById("logBody");
+  if (!logBody) return;
+  if (document.getElementById("logContent")) return;
+  logBody.innerHTML = `
+    <div class="small text-muted mb-2">Newest lines are shown first. Automatic updates preserve your reading position.</div>
+    <textarea id="logContent" class="mono log-content bg-dark text-light p-3 form-control" readonly spellcheck="false">Select a log source from the left panel to view its contents.</textarea>
+  `;
+}
+
+async function loadGameplayLog(triggerEl = null, updateHash = true, silent = false) {
+  currentLogSource = "gameplay";
+  const lines = clampLogLines(document.getElementById("linesInput")?.value || "200");
+  const targetHash = `#admin/logs/gameplay?lines=${encodeURIComponent(lines)}`;
+  if (updateHash && window.location.hash !== targetHash) {
+    setHash(targetHash);
+    return;
+  }
+  if (!silent) setLoading(true, "Loading gameplay logs...");
   try {
     const payload = await api("/admin/gameplay-logs");
-    const sessions = Array.isArray(payload.sessions) ? payload.sessions : [];
-    const rows = sessions.map((session) => {
-      const duration = session.duration_seconds !== undefined && session.duration_seconds !== null
-        ? `${Math.round(Number(session.duration_seconds) || 0)}s`
-        : "n/a";
-      return `
-        <tr>
-          <td class="text-nowrap">${escapeHtml(session.played_at || "n/a")}</td>
-          <td>${escapeHtml(session.system_name || "n/a")}</td>
-          <td>
-            <div class="fw-semibold">${escapeHtml(session.game_name || session.name || "Unknown game")}</div>
-            <div class="text-muted small mono d-none d-md-block">${escapeHtml(session.rom_path || "")}</div>
-          </td>
-          <td class="text-nowrap">${escapeHtml(duration)}</td>
-        </tr>
-      `;
-    }).join("");
-    content.innerHTML = `
-      <div class="mb-3 d-flex flex-wrap justify-content-between gap-2">
-        <button class="btn btn-outline-secondary" onclick="renderAdminPage()">Back to Admin</button>
-        <button class="btn btn-outline-primary" onclick="renderGameplayLogsPage()"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
-      </div>
-      <div class="card log-card mb-3">
-        <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
-          <span>Gameplay Sessions</span>
-          <span class="badge text-bg-secondary">${sessions.length} session${sessions.length === 1 ? "" : "s"}${payload.pending_spool_events ? ` · ${payload.pending_spool_events} pending event${payload.pending_spool_events === 1 ? "" : "s"}` : ""}</span>
-        </div>
-        <div class="card-body">
-          <div class="table-responsive">
-            <table class="table table-sm table-hover align-middle themed-table bff-stack">
-              <thead><tr><th>Played</th><th>System</th><th>Game</th><th>Duration</th></tr></thead>
-              <tbody>${rows || '<tr><td colspan="4" class="text-muted">No gameplay sessions detected yet.</td></tr>'}</tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-    `;
+    const logTitle = document.getElementById("logTitle");
+    const logBody = document.getElementById("logBody");
+    if (logTitle) logTitle.textContent = "Gameplay Sessions";
+    if (logBody) logBody.innerHTML = renderGameplayLogTable(payload);
+    decorateStackTables(logBody || content);
+    document.querySelectorAll('#logSources .list-group-item').forEach(el => el.classList.remove('active'));
+    const activeEl = triggerEl || document.querySelector('#logSources .list-group-item[data-log-source="gameplay"]');
+    if (activeEl) activeEl.classList.add('active');
   } catch (err) {
-    showToast(`Failed to load gameplay logs: ${escapeHtml(err.message || "unknown error")}`, "danger");
-    content.innerHTML = `
-      <div class="mb-3">
-        <button class="btn btn-outline-secondary" onclick="renderAdminPage()">Back to Admin</button>
-      </div>
-      <div class="text-muted">Gameplay logs could not be loaded.</div>
-    `;
+    if (!silent) showToast(`Failed to load gameplay logs: ${escapeHtml(err.message || "unknown error")}`, "danger");
   } finally {
-    setLoading(false);
+    if (!silent) setLoading(false);
   }
 }
+
+async function renderGameplayLogsPage() {
+  setHash("#admin/logs/gameplay?lines=200");
+}
 async function loadLog(source, triggerEl = null, updateHash = true, silent = false) {
+  if (source === "gameplay") {
+    await loadGameplayLog(triggerEl, updateHash, silent);
+    return;
+  }
   currentLogSource = source;
   const lines = clampLogLines(document.getElementById("linesInput")?.value || "200");
   const targetHash = `#admin/logs/${encodeURIComponent(source)}?lines=${encodeURIComponent(lines)}`;
@@ -4910,6 +4916,7 @@ async function loadLog(source, triggerEl = null, updateHash = true, silent = fal
   }
   if (!silent) setLoading(true, `Loading ${source} logs...`);
   try {
+    ensureTextLogBody();
     const data = await api(`/admin/logs/${source}?lines=${lines}`);
     const logTitle = document.getElementById("logTitle");
     const logContent = document.getElementById("logContent");
@@ -5011,7 +5018,7 @@ async function renderEmulatorsPage() {
                 <div id="emulatorConfigPath" class="small text-muted"></div>
                 <div id="emulatorConfigFingerprint" class="small text-muted mono"></div>
               </div>
-              <pre id="emulatorConfigContent" class="mono bg-dark text-light p-3" style="max-height: 640px; overflow-y: auto; white-space: pre-wrap;">Select a config from the left panel to view its contents.</pre>
+              <pre id="emulatorConfigContent" class="mono admin-config-content bg-dark text-light p-3" style="max-height: 640px; overflow-y: auto; white-space: pre-wrap;">Select a config from the left panel to view its contents.</pre>
             </div>
           </div>
         </div>
@@ -5201,7 +5208,7 @@ async function renderConfigsPage(selectedSource = null, selectedMaxBytes = 13107
             </div>
           </div>
           <div class="card-body">
-            <pre id="configContent" class="mono bg-dark text-light p-3" style="max-height: 600px; overflow-y: auto; white-space: pre-wrap;">Select an emulator from the left panel to view its config.</pre>
+            <pre id="configContent" class="mono admin-config-content bg-dark text-light p-3" style="max-height: 600px; overflow-y: auto; white-space: pre-wrap;">Select an emulator from the left panel to view its config.</pre>
           </div>
         </div>
       </div>
@@ -5262,6 +5269,7 @@ async function renderAdminSystemInfoPage() {
     const disks = Array.isArray(metrics.disks) && metrics.disks.length ? metrics.disks : [disk];
     const process = metrics.process || {};
     const speed = payload.speed_sample || {};
+    const pixenInstalled = payload.pixen_installed === true || fields.pixen_installed === true || String(fields.pixen_installed || "").toLowerCase() === "yes";
     const detail = (label, value) => `<div class="asset-detail"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value || "n/a")}</strong></div>`;
     const pct = (value) => value === null || value === undefined || value === "" ? "n/a" : `${Number(value).toFixed(1)}%`;
     const numericPct = (value) => Math.max(0, Math.min(100, Number(value || 0)));
@@ -5286,7 +5294,11 @@ async function renderAdminSystemInfoPage() {
     content.innerHTML = `
       <div class="mb-3 d-flex flex-wrap justify-content-between gap-2">
         <button class="btn btn-outline-secondary" onclick="setHash('#admin')">Back to Admin</button>
-        <button class="btn btn-outline-primary" onclick="setHash('#admin/system-info')"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
+        <div class="d-flex flex-wrap gap-2">
+          <button class="btn btn-outline-primary" onclick="setHash('#admin/system-info')"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
+          <button class="btn btn-outline-warning" onclick="updateDroneApp()"><i class="bi bi-cloud-download me-1"></i>Download & Restart</button>
+          ${pixenInstalled ? `<button class="btn btn-outline-success" onclick="runPixenUpdate()"><i class="bi bi-play-circle me-1"></i>Run PixeN Update</button>` : ""}
+        </div>
       </div>
       <div class="card log-card mb-3">
         <div class="card-header">System Health</div>
@@ -5326,6 +5338,7 @@ async function renderAdminSystemInfoPage() {
                 ${detail("Network IP", fields.network_ip_address)}
                 ${detail("Router IP", fields.router_ip_address)}
                 ${detail("Batocera", fields.batocera_version || fields.system)}
+                ${detail("PixeN", pixenInstalled ? "Installed" : "Not installed")}
               </div>
             </div>
             <div class="col-12 col-lg-6">

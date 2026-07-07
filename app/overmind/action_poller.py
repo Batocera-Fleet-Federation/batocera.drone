@@ -32,6 +32,10 @@ try:
         _get_audio_volume,
         _get_screen_mode,
     )
+    from ..device.pixen import (
+        is_pixen_installed,
+        pixen_script_path,
+    )
     from ..device.system_info import (
         _collect_system_info_payload,
     )
@@ -106,6 +110,10 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from device.device_control import (
         _get_audio_volume,
         _get_screen_mode,
+    )
+    from device.pixen import (
+        is_pixen_installed,
+        pixen_script_path,
     )
     from device.system_info import (
         _collect_system_info_payload,
@@ -228,6 +236,8 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                     system_info_payload["screen_mode"] = _get_screen_mode(settings)
                     system_info_payload["audio_volume"] = _get_audio_volume(settings)
                     system_info_payload["idle_volume_automation"] = _load_automation_config(settings)["idle_volume"]
+                    system_info_payload["pixen_installed"] = is_pixen_installed(settings)
+                    system_info_payload["pixen_script_path"] = str(pixen_script_path(settings))
                 network_payload = _drone_network_payload(settings)
                 heartbeat_payload = {
                     "device_id": settings.overmind_device_id,

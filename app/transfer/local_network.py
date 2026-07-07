@@ -31,6 +31,11 @@ DISCOVERY_PORT = int(os.environ.get("DRONE_LOCAL_DISCOVERY_PORT", "42042"))
 DISCOVERY_INTERVAL_SECONDS = max(5, int(os.environ.get("DRONE_LOCAL_DISCOVERY_INTERVAL_SECONDS", "30")))
 DISCOVERY_STALE_SECONDS = max(60, int(os.environ.get("DRONE_LOCAL_DISCOVERY_STALE_SECONDS", "300")))
 PAIRING_CODE_MINUTES = max(1, int(os.environ.get("DRONE_LOCAL_PAIRING_CODE_MINUTES", "15")))
+DISCOVERY_BROADCAST_ADDRESSES = tuple(
+    address.strip()
+    for address in os.environ.get("DRONE_LOCAL_DISCOVERY_BROADCASTS", "255.255.255.255").split(",")
+    if address.strip()
+)
 
 
 def _now() -> datetime:
@@ -127,6 +132,47 @@ def _save_peer_map(settings: Any, namespace: str, peers: dict[str, dict]) -> Non
     save_payload(_db(settings), namespace, peers)
 
 
+def _local_ipv4_addresses() -> list[str]:
+    addresses = {"127.0.0.1"}
+    try:
+        hostname = socket.gethostname()
+        for result in socket.getaddrinfo(hostname, None, socket.AF_INET, socket.SOCK_DGRAM):
+            address = result[4][0]
+            if address:
+                addresses.add(address)
+    except OSError:
+        pass
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            probe.connect(("8.8.8.8", 80))
+            addresses.add(probe.getsockname()[0])
+        finally:
+            probe.close()
+    except OSError:
+        pass
+    return sorted(addresses)
+
+
+def _is_self_source_ip(source_ip: Optional[str]) -> bool:
+    source = str(source_ip or "").strip()
+    return not source or source.startswith("127.") or source in set(_local_ipv4_addresses())
+
+
+def _join_multicast_group(sock: socket.socket) -> None:
+    interfaces = ["0.0.0.0", *_local_ipv4_addresses()]
+    joined = set()
+    for interface in interfaces:
+        if interface in joined:
+            continue
+        joined.add(interface)
+        try:
+            membership = struct.pack("4s4s", socket.inet_aton(DISCOVERY_GROUP), socket.inet_aton(interface))
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, membership)
+        except OSError:
+            continue
+
+
 def discovered_peers(settings: Any, include_stale: bool = False) -> list[dict]:
     peers = _load_peer_map(settings, "local_discovered_peers")
     cutoff = _now() - timedelta(seconds=DISCOVERY_STALE_SECONDS)
@@ -154,10 +200,16 @@ def record_discovered_peer(settings: Any, payload: dict, source_ip: Optional[str
     if not is_local_mode(settings) or str(payload.get("service") or "") != DISCOVERY_SERVICE:
         return None
     peer_id = str(payload.get("drone_id") or "").strip()
-    if not peer_id or peer_id == str(settings.overmind_device_id):
+    own_id = str(settings.overmind_device_id)
+    if not peer_id:
         return None
+    self_source = _is_self_source_ip(source_ip) if peer_id == own_id else False
+    if peer_id == own_id and self_source:
+        return None
+    identity_conflict = peer_id == own_id
+    storage_id = f"identity-conflict:{source_ip or peer_id}" if identity_conflict else peer_id
     peers = _load_peer_map(settings, "local_discovered_peers")
-    existing = dict(peers.get(peer_id) or {})
+    existing = dict(peers.get(storage_id) or {})
     scheme = str(payload.get("scheme") or "https")
     api_port = int(payload.get("api_port") or 443)
     advertised_url = str(payload.get("reachable_url") or "")
@@ -165,11 +217,13 @@ def record_discovered_peer(settings: Any, payload: dict, source_ip: Optional[str
     if source_ip:
         suffix = "" if scheme == "https" and api_port == 443 else f":{api_port}"
         reachable_url = f"{scheme}://{source_ip}{suffix}"
-    trusted_peer = get_paired_peer(settings, peer_id)
+    trusted_peer = None if identity_conflict else get_paired_peer(settings, peer_id)
     peer = {
         **existing,
-        "drone_id": peer_id,
+        "drone_id": storage_id if identity_conflict else peer_id,
         "device_id": peer_id,
+        "conflicting_drone_id": peer_id if identity_conflict else "",
+        "identity_conflict": identity_conflict,
         "name": str(payload.get("name") or peer_id),
         "hostname": str(payload.get("hostname") or ""),
         "reachable_url": reachable_url,
@@ -181,7 +235,7 @@ def record_discovered_peer(settings: Any, payload: dict, source_ip: Optional[str
         "last_seen": _now_iso(),
         "paired": bool(trusted_peer),
     }
-    peers[peer_id] = peer
+    peers[storage_id] = peer
     _save_peer_map(settings, "local_discovered_peers", peers)
     if trusted_peer:
         save_paired_peer(
@@ -301,12 +355,22 @@ def announce(settings: Any, certificate_fingerprint: str = "") -> bool:
         return False
     data = json.dumps(discovery_payload(settings, certificate_fingerprint)).encode("utf-8")
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    sent = False
     try:
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
         sock.sendto(data, (DISCOVERY_GROUP, DISCOVERY_PORT))
-        return True
+        sent = True
     except OSError:
-        return False
+        pass
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        for address in DISCOVERY_BROADCAST_ADDRESSES:
+            try:
+                sock.sendto(data, (address, DISCOVERY_PORT))
+                sent = True
+            except OSError:
+                continue
+        return sent
     finally:
         sock.close()
 
@@ -335,8 +399,7 @@ def start_discovery_worker(
                     if hasattr(socket, "SO_REUSEPORT"):
                         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
                     sock.bind(("", DISCOVERY_PORT))
-                    membership = struct.pack("4s4s", socket.inet_aton(DISCOVERY_GROUP), socket.inet_aton("0.0.0.0"))
-                    sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, membership)
+                    _join_multicast_group(sock)
                     sock.settimeout(1.0)
                 except OSError:
                     if sock is not None:

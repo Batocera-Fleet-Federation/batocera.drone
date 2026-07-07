@@ -18,6 +18,7 @@ try:
     from ..common.settings import Settings
     from ..device.automation import _load_automation_config, _reset_idle_volume_armed_state, _save_automation_config
     from ..device.device_control import _apply_audio_volume, _apply_screen_mode, _restart_emulationstation
+    from ..device.pixen import run_pixen_upgrade
     from ..storage.rom_metadata_store import (
         _clear_sqlite_asset_metadata_cache,
         _empty_rom_metadata_cache,
@@ -39,6 +40,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from common.settings import Settings  # type: ignore
     from device.automation import _load_automation_config, _reset_idle_volume_armed_state, _save_automation_config  # type: ignore
     from device.device_control import _apply_audio_volume, _apply_screen_mode, _restart_emulationstation  # type: ignore
+    from device.pixen import run_pixen_upgrade  # type: ignore
     from storage.rom_metadata_store import (  # type: ignore
         _clear_sqlite_asset_metadata_cache,
         _empty_rom_metadata_cache,
@@ -451,6 +453,22 @@ def _execute_overmind_action(
             "type": "emulator_list_refresh",
             "emulationstation_restarted": True,
         }
+
+    if action_name == "run_pixen_update":
+        try:
+            result = run_pixen_upgrade(settings)
+        except FileNotFoundError:
+            return "failed", "PixeN update script was not found on this Drone.", {
+                "type": "pixen_update",
+                "status": "missing",
+            }
+        except (OSError, subprocess.SubprocessError, ValueError) as error:
+            return "failed", f"Unable to start PixeN update: {error}", {
+                "type": "pixen_update",
+                "status": "failed",
+                "error": str(error),
+            }
+        return "completed", "PixeN update script started.", result
 
     if action_name == "set_screen_mode":
         payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}

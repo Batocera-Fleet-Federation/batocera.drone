@@ -20,6 +20,7 @@ try:
     from ..transfer.drone_network import _get_local_ip_addresses
     from .automation import _load_automation_config
     from .device_control import _get_audio_volume, _get_screen_mode
+    from .pixen import is_pixen_installed, pixen_script_path
     from .system_metrics import _collect_gpu_info, _collect_performance_metrics
 except ImportError:  # pragma: no cover - direct script execution fallback
     from app_version import drone_app_version as _drone_app_version  # type: ignore
@@ -29,6 +30,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from transfer.drone_network import _get_local_ip_addresses  # type: ignore
     from device.automation import _load_automation_config  # type: ignore
     from device.device_control import _get_audio_volume, _get_screen_mode  # type: ignore
+    from device.pixen import is_pixen_installed, pixen_script_path  # type: ignore
     from device.system_metrics import _collect_gpu_info, _collect_performance_metrics  # type: ignore
 def _collect_system_info_payload(settings: Settings) -> dict:
     hostname = socket.gethostname()
@@ -103,6 +105,8 @@ def _collect_system_info_payload(settings: Settings) -> dict:
         "disk": disk,
         "gpu": _collect_gpu_info(),
         "performance": _collect_performance_metrics(settings.userdata_root),
+        "pixen_installed": is_pixen_installed(settings),
+        "pixen_script_path": str(pixen_script_path(settings)),
         "asset_cache": asset_cache,
         "screen_mode": _get_screen_mode(settings),
         "audio_volume": _get_audio_volume(settings),

@@ -23,6 +23,7 @@ try:
         _save_automation_config,
     )
     from ..device.device_control import _get_audio_volume
+    from ..device.pixen import run_pixen_upgrade
     from ..transfer.drone_tls import DroneCertificateManager
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.self_update import (  # type: ignore
@@ -38,6 +39,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         _save_automation_config,
     )
     from device.device_control import _get_audio_volume  # type: ignore
+    from device.pixen import run_pixen_upgrade  # type: ignore
     from transfer.drone_tls import DroneCertificateManager  # type: ignore
     from web.route_config import api_url  # type: ignore
 
@@ -59,6 +61,10 @@ class HandlersSystemMixin:
         except Exception:
             pass
         _restart_drone_process_soon()
+
+    def _handle_admin_pixen_update(self) -> None:
+        result = run_pixen_upgrade(self.settings)
+        self._send_json(200, result)
 
     def _handle_admin_api_status(self) -> None:
         metadata = DroneCertificateManager(self.settings).ensure_certificate()

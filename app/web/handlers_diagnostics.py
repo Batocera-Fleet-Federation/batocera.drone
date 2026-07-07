@@ -12,6 +12,8 @@ from pathlib import Path
 try:
     from ..app_version import drone_app_version as _drone_app_version
     from ..common.logtail import _tail_lines
+    from ..device.pixen import is_pixen_installed as _is_pixen_installed
+    from ..device.pixen import pixen_script_path as _pixen_script_path
     from ..device.system_metrics import _collect_performance_metrics, _sample_speed
     from ..overmind.overmind_client import _format_overmind_error
     from ..overmind.overmind_game_logs import (
@@ -22,6 +24,8 @@ try:
 except ImportError:  # pragma: no cover - direct script execution fallback
     from app_version import drone_app_version as _drone_app_version  # type: ignore
     from common.logtail import _tail_lines  # type: ignore
+    from device.pixen import is_pixen_installed as _is_pixen_installed  # type: ignore
+    from device.pixen import pixen_script_path as _pixen_script_path  # type: ignore
     from device.system_metrics import _collect_performance_metrics, _sample_speed  # type: ignore
     from overmind.overmind_client import _format_overmind_error  # type: ignore
     from overmind.overmind_game_logs import (  # type: ignore
@@ -165,6 +169,8 @@ class HandlersDiagnosticsMixin:
     def _handle_admin_system_info(self, include_speed: bool = False) -> None:
         router_ip_address = _get_router_ip_address() or "Unavailable"
         runtime_metrics = _collect_performance_metrics(self.settings.userdata_root)
+        pixen_installed = _is_pixen_installed(self.settings)
+        pixen_script = str(_pixen_script_path(self.settings))
         speed_sample = _sample_speed() if include_speed else {
             "upload_mbps": None,
             "download_mbps": None,
@@ -191,6 +197,7 @@ class HandlersDiagnosticsMixin:
                 {"key": "Data partition available space", "value": "812 GiB"},
                 {"key": "Network IP address", "value": "192.168.1.123"},
                 {"key": "Router IP Address", "value": fake_router_ip_address},
+                {"key": "PixeN Installed", "value": "yes" if pixen_installed else "no"},
                 {"key": "Battery", "value": "N/A"},
             ]
             fields = {
@@ -212,6 +219,8 @@ class HandlersDiagnosticsMixin:
                 "machine_id": self.settings.overmind_device_id,
                 "overmind_integrated": "yes" if self._load_overmind_config().get("integration_enabled") else "no",
                 "drone_app_version": _drone_app_version(),
+                "pixen_installed": pixen_installed,
+                "pixen_script_path": pixen_script,
             }
             raw = "\n".join(f"{item['key']}: {item['value']}" for item in entries)
             self._send_json(
@@ -222,6 +231,8 @@ class HandlersDiagnosticsMixin:
                     "entries": entries,
                     "fields": fields,
                     "drone_app_version": _drone_app_version(),
+                    "pixen_installed": pixen_installed,
+                    "pixen_script_path": pixen_script,
                     "runtime_metrics": runtime_metrics,
                     "speed_sample": speed_sample,
                 },
@@ -289,6 +300,7 @@ class HandlersDiagnosticsMixin:
             overmind_integrated = "yes" if self._load_overmind_config().get("integration_enabled") else "no"
             entries.insert(0, {"key": "Integrated with Overmind", "value": overmind_integrated})
             entries.insert(0, {"key": "Machine ID", "value": self.settings.overmind_device_id})
+            entries.append({"key": "PixeN Installed", "value": "yes" if pixen_installed else "no"})
             if not fields.get("router_ip_address"):
                 router_entry = {"key": "Router IP Address", "value": router_ip_address}
                 network_index = next(
@@ -307,6 +319,8 @@ class HandlersDiagnosticsMixin:
             fields["machine_id"] = self.settings.overmind_device_id
             fields["overmind_integrated"] = overmind_integrated
             fields["drone_app_version"] = _drone_app_version()
+            fields["pixen_installed"] = pixen_installed
+            fields["pixen_script_path"] = pixen_script
 
             self._send_json(
                 200,
@@ -316,6 +330,8 @@ class HandlersDiagnosticsMixin:
                     "entries": entries,
                     "fields": fields,
                     "drone_app_version": _drone_app_version(),
+                    "pixen_installed": pixen_installed,
+                    "pixen_script_path": pixen_script,
                     "runtime_metrics": runtime_metrics,
                     "speed_sample": speed_sample,
                 },
@@ -326,6 +342,7 @@ class HandlersDiagnosticsMixin:
                 {"key": "Machine ID", "value": self.settings.overmind_device_id},
                 {"key": "Integrated with Overmind", "value": overmind_integrated},
                 {"key": "Router IP Address", "value": router_ip_address},
+                {"key": "PixeN Installed", "value": "yes" if pixen_installed else "no"},
                 {"key": "System Info", "value": f"batocera-info unavailable: {str(error)}"},
             ]
             raw = "\n".join(f"{item['key']}: {item['value']}" for item in entries)
@@ -340,8 +357,12 @@ class HandlersDiagnosticsMixin:
                         "overmind_integrated": overmind_integrated,
                         "router_ip_address": router_ip_address,
                         "drone_app_version": _drone_app_version(),
+                        "pixen_installed": pixen_installed,
+                        "pixen_script_path": pixen_script,
                     },
                     "drone_app_version": _drone_app_version(),
+                    "pixen_installed": pixen_installed,
+                    "pixen_script_path": pixen_script,
                     "runtime_metrics": runtime_metrics,
                     "speed_sample": speed_sample,
                     "warning": f"Failed to run batocera-info: {str(error)}",

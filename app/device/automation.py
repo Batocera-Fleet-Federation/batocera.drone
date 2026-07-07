@@ -25,6 +25,7 @@ try:
     from ..storage.state_store import save_payload as _save_state_payload
     from ..transfer import local_network as _local_network
     from .device_control import _apply_audio_volume, _get_audio_volume
+    from ..overmind.overmind_game_logs import find_running_emulatorlauncher as _find_running_emulatorlauncher
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.settings import Settings  # type: ignore
     from common.logging_setup import _overmind_log  # type: ignore
@@ -35,6 +36,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from storage.state_store import save_payload as _save_state_payload  # type: ignore
     from transfer import local_network as _local_network  # type: ignore
     from device.device_control import _apply_audio_volume, _get_audio_volume  # type: ignore
+    from overmind.overmind_game_logs import find_running_emulatorlauncher as _find_running_emulatorlauncher  # type: ignore
 
 
 AUTOMATION_STATE_NAMESPACE = "automation_config.json"
@@ -122,6 +124,12 @@ def _run_idle_volume_automation_once(settings: Settings) -> None:
     if not config.get("enabled"):
         _IDLE_VOLUME_LAST_ARMED_ACTIVITY = None
         return
+    try:
+        if _find_running_emulatorlauncher():
+            _IDLE_VOLUME_LAST_ARMED_ACTIVITY = None
+            return
+    except Exception:
+        pass
     last_activity = _read_last_input_activity()
     if last_activity is None:
         # No monitor data yet; never lower a machine we cannot confirm is idle.

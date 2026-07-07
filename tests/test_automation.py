@@ -6,6 +6,7 @@ from unittest import mock
 
 import app.drone_api as drone_api
 import app.device.automation as automation
+import app.overmind.actions as overmind_actions
 from app.drone_api import (
     RomRepository,
     Settings,
@@ -136,6 +137,17 @@ class IdleVolumeAutomationRunnerTests(unittest.TestCase):
                 _run_idle_volume_automation_once(settings)
                 apply_mock.assert_not_called()
 
+    def test_active_game_process_does_not_lower(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            self._enable(settings, idle_minutes=5, target=25)
+            idle = time.time() - 600
+            with mock.patch.object(automation, "_find_running_emulatorlauncher", return_value={"pid": 123, "rom_path": "/userdata/roms/snes/game.sfc"}), \
+                 mock.patch.object(automation, "_read_last_input_activity", return_value=idle), \
+                 mock.patch.object(automation, "_apply_audio_volume") as apply_mock:
+                _run_idle_volume_automation_once(settings)
+                apply_mock.assert_not_called()
+
     def test_idle_past_threshold_lowers_once_then_holds(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(Path(tmp))
@@ -216,6 +228,25 @@ class IdleVolumeOvermindActionTests(unittest.TestCase):
             self.assertEqual(result["idle_minutes"], 5)  # preserved
             self.assertEqual(result["target_volume"], 100)  # clamped
 
+    def test_pixen_update_action_runs_installed_script(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            repo = RomRepository(Path(tmp) / "roms", Path(tmp) / "bios")
+            with mock.patch.object(
+                overmind_actions,
+                "run_pixen_upgrade",
+                return_value={"type": "pixen_update", "status": "started", "pid": 123},
+            ) as run_mock:
+                status, message, result = _execute_overmind_action(
+                    settings,
+                    repo,
+                    {"action": "run_pixen_update"},
+                )
+            self.assertEqual(status, "completed")
+            self.assertIn("PixeN", message)
+            self.assertEqual(result["type"], "pixen_update")
+            run_mock.assert_called_once_with(settings)
+
 
 class IdleVolumeOvermindPushTests(unittest.TestCase):
     def test_collect_system_info_includes_idle_volume_automation(self) -> None:
@@ -230,6 +261,16 @@ class IdleVolumeOvermindPushTests(unittest.TestCase):
                 payload["idle_volume_automation"],
                 {"enabled": True, "idle_minutes": 8, "target_volume": 10},
             )
+
+    def test_collect_system_info_reports_pixen_installation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            script = settings.userdata_root / "roms" / "rgs" / "rgs_upgrade.sh"
+            script.parent.mkdir(parents=True, exist_ok=True)
+            script.write_text("#!/bin/sh\n", encoding="utf-8")
+            payload = drone_api._collect_system_info_payload(settings)
+            self.assertTrue(payload["pixen_installed"])
+            self.assertEqual(payload["pixen_script_path"], str(script.resolve()))
 
     def test_push_sends_full_heartbeat_with_current_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

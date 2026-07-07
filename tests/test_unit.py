@@ -191,6 +191,29 @@ class SettingsTests(unittest.TestCase):
                 self.assertTrue(paired["paired"])
                 self.assertEqual(local_network.get_paired_peer(settings, "local-b")["certificate_fingerprint"], "abc")
 
+    def test_discovery_surfaces_same_id_conflicts_from_other_hosts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root), "DRONE_DEVICE_ID": "local-a"}, clear=True):
+                settings = Settings.from_env()
+                local_network.set_mode(settings, local_network.MODE_LOCAL_NETWORK)
+                with mock.patch.object(local_network, "_local_ipv4_addresses", return_value=["192.168.1.10"]):
+                    discovered = local_network.record_discovered_peer(
+                        settings,
+                        {
+                            "service": local_network.DISCOVERY_SERVICE,
+                            "drone_id": "local-a",
+                            "name": "Cloned Cabinet",
+                            "scheme": "https",
+                            "api_port": 443,
+                        },
+                        "192.168.1.22",
+                    )
+                self.assertIsNotNone(discovered)
+                self.assertTrue(discovered["identity_conflict"])
+                self.assertEqual(discovered["conflicting_drone_id"], "local-a")
+                self.assertFalse(discovered["paired"])
+
     def test_hostname_override_builds_reported_drone_url(self) -> None:
         with mock.patch.dict(
             "os.environ",
@@ -2496,8 +2519,10 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("_sample_speed() if include_speed else", drone_source)
         self.assertNotIn('id="${prefix}FilterToggle" data-bs-toggle="dropdown"', js_source)
         self.assertIn('event.stopPropagation();', js_source)
-        self.assertIn("systemsTreeHash('', BIOS_TREE_ROOT)", js_source)
+        self.assertNotIn("Browse BIOS inside the Systems file tree", js_source)
         self.assertNotIn('class="table table-hover align-middle themed-table bios-table bff-stack"', js_source)
+        self.assertIn("Run PixeN Update", js_source)
+        self.assertIn("admin-config-content", js_source)
         self.assertIn('const selected = themeFilterInitialized && !(themeFilterSelectedSystems || []).length ? ["__none__"]', js_source)
         self.assertIn('class="system-health-row"', js_source)
         self.assertIn("emulatorConfigSelectionRequestId", js_source)
@@ -4445,6 +4470,9 @@ class LaunchBoxMappingTests(unittest.TestCase):
     def test_batocera_system_maps_to_launchbox_platform_name(self) -> None:
         self.assertEqual(_launchbox_platform_for_system("ps2"), "Sony Playstation 2")
         self.assertEqual(_launchbox_platform_for_system("snes"), "Super Nintendo Entertainment System")
+
+    def test_launchbox_client_uses_current_api_host_first(self) -> None:
+        self.assertEqual(LaunchBoxClient().api_bases[0], "https://gamesdb-api.launchbox-app.com/api")
 
     def test_launchbox_search_supplies_platform_filter(self) -> None:
         urls = []

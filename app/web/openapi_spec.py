@@ -635,6 +635,7 @@ def _schemas() -> Dict[str, Schema]:
         "OvermindClaimOwnershipRequest": _object({"overmind_url": _string(fmt="uri"), "email": _string(), "password": _string(), "drone_name": _string()}, ("overmind_url", "email", "password")),
         "CertificateRotateResponse": _object({"status": _enum(["rotated", "failed"]), "error": _string(), "certificate": _ref("CertificateMetadata")}, ("status", "certificate")),
         "DroneUpdateResponse": _object({"status": _string(), "version": _string(), "archive_url": _string(fmt="uri"), "elapsed_seconds": _number(), "restart": freeform}, description="Self-update result plus restart metadata."),
+        "PixenUpdateResponse": _object({"type": _string(), "status": _string(), "pid": _integer(nullable=True), "script": _string()}, ("type", "status", "script"), description="PixeN upgrade script launch result."),
         "CredentialsUpdateRequest": _object({"username": _string(), "password": _string()}, ("username", "password")),
         "CredentialsUpdateResponse": _object({"credentials": freeform, "message": _string()}, ("credentials", "message")),
         "NetworkModeResponse": _object(
@@ -1023,6 +1024,7 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             "/admin/automation": {"get": _operation("Get device automation settings and input-idle status", {"200": _json_response("AutomationStatusResponse")}, tags=["admin"])},
             "/admin/automation/idle-volume": {"post": _operation("Update idle-volume automation", {"200": _json_response("IdleVolumeResponse")}, request_body=_json_request("IdleVolumeUpdateRequest"), tags=["admin"])},
             "/admin/system/update-drone": {"post": _operation("Download and stage the latest Drone app release", {"200": _json_response("DroneUpdateResponse")}, tags=["admin"], error_codes=("400", "401", "403", "429", "500", "502"))},
+            "/admin/system/run-pixen-update": {"post": _operation("Run the installed PixeN upgrade script", {"200": _json_response("PixenUpdateResponse")}, tags=["admin"], error_codes=("400", "401", "403", "404", "429", "500"))},
             "/admin/artwork/missing": {
                 "get": _operation(
                     "List ROMs for the artwork and metadata hub",
