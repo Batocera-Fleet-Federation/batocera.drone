@@ -212,4 +212,5 @@ require the Edge.
 ## Skills (`.claude/skills/`, auto-surfaced)
 
 `drone-db-management`, `drone-p2p-transfer-security`, `drone-edge-networking`,
-`bff-ui-theme-functionality`. Consult the matching skill before non-trivial work.
+`drone-admin-features`, `bff-ui-theme-functionality`. Consult the matching skill
+before non-trivial work.
