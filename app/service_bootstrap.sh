@@ -2,17 +2,14 @@
 # Versioned Drone service bootstrap.
 #
 # This script lives in the auto-updating app bundle (app/) and contains ALL of
-# the service-side logic: drone-app user/group setup, filesystem permissions,
-# DNS/port preparation, the privileged control worker (Kiosk/volume/restart),
-# and the Drone app supervisor. The installed /userdata/system/services/DRONE_SERVER
-# is a thin shim that only ensures the bundle is present and then delegates here,
-# so new Drone releases apply their service-side changes automatically on the next
-# service restart -- no need to re-run batocera_install.sh on every machine.
+# the service-side logic: root-owned filesystem permissions, DNS/port
+# preparation, privileged controls (Kiosk/volume/restart), and the Drone app
+# supervisor. The installed /userdata/system/services/DRONE_SERVER is a thin shim
+# that only ensures the bundle is present and then delegates here, so new Drone
+# releases apply their service-side changes automatically on the next service
+# restart -- no need to re-run batocera_install.sh on every machine.
 
-DRONE_USER="drone-app"
-DRONE_GROUP="drone-app"
-DRONE_UID="999"
-DRONE_GID="999"
+DRONE_GROUP="root"
 WORK_DIR="/userdata/system/drone-app"
 ACTION="$1"
 PID_FILE="/tmp/drone-server.pid"
@@ -27,12 +24,11 @@ STARTUP_LOG="/userdata/system/logs/drone-app/startup.log"
 # manuals (manual). The others are included so existing scraper layouts also work.
 DRONE_ROM_MEDIA_DIRS="images videos manuals downloaded_images covers media"
 
-# Make a single ROM system writable enough for the unprivileged Drone (group
-# ${DRONE_GROUP}) to place peer-copied artwork (in any media subdir) and update
-# gamelist.xml. Cheap (creates/chmods the media dirs themselves + gamelist, no
-# recursive per-file walk) -- safe to run for every system on each boot and on
-# demand from the privileged control worker. setgid (2775) makes new files the
-# Drone creates inherit the group so EmulationStation can still read them.
+# Make a single ROM system writable enough for the root-run Drone to place
+# peer-copied artwork (in any media subdir) and update gamelist.xml. Cheap
+# (creates/chmods the media dirs themselves + gamelist, no recursive per-file
+# walk) -- safe to run for every system on each boot and on demand from the
+# control worker.
 ensure_rom_write_access() {
   romdir="$1"
   [ -d "$romdir" ] || return 0
@@ -69,32 +65,6 @@ ensure_rom_write_access_all() {
   done
 }
 
-ensure_drone_user() {
-  echo "[drone-service] Ensuring ${DRONE_USER} user/group exists..."
-
-  if grep -q "^${DRONE_GROUP}:" /etc/group 2>/dev/null; then
-    sed -i "s#^${DRONE_GROUP}:.*#${DRONE_GROUP}:x:${DRONE_GID}:#" /etc/group
-  else
-    echo "${DRONE_GROUP}:x:${DRONE_GID}:" >> /etc/group
-  fi
-
-  if grep -q "^${DRONE_USER}:" /etc/passwd 2>/dev/null; then
-    sed -i "s#^${DRONE_USER}:.*#${DRONE_USER}:x:${DRONE_UID}:${DRONE_GID}:drone-app:${WORK_DIR}:/bin/sh#" /etc/passwd
-  else
-    echo "${DRONE_USER}:x:${DRONE_UID}:${DRONE_GID}:drone-app:${WORK_DIR}:/bin/sh" >> /etc/passwd
-  fi
-
-  if [ -f /etc/shadow ]; then
-    if grep -q "^${DRONE_USER}:" /etc/shadow 2>/dev/null; then
-      sed -i "s#^${DRONE_USER}:.*#${DRONE_USER}:*:19000:0:99999:7:::#" /etc/shadow
-    else
-      echo "${DRONE_USER}:*:19000:0:99999:7:::" >> /etc/shadow
-    fi
-  fi
-
-  echo "[drone-service] ✓ User ${DRONE_USER} ready"
-}
-
 ensure_permissions() {
   echo "[drone-service] Applying filesystem permissions..."
 
@@ -118,15 +88,13 @@ ensure_permissions() {
     /userdata/system/certs \
     /userdata/system/logs/drone-app 2>/dev/null || true
 
-  chown "$DRONE_USER":"$DRONE_GROUP" /userdata/system/drone-app/rom_metadata_cache.sqlite3* 2>/dev/null || true
+  chown root:root /userdata/system/drone-app/rom_metadata_cache.sqlite3* 2>/dev/null || true
   chmod 600 /userdata/system/drone-app/rom_metadata_cache.sqlite3* 2>/dev/null || true
 
   chmod o+rx /userdata/system 2>/dev/null || true
   chmod o+rx /userdata/system/configs 2>/dev/null || true
 
   # Drone manages EmulationStation settings for remote Kiosk mode actions.
-  # Keep root ownership while allowing the dedicated Drone group to update the
-  # existing file or create it when Batocera has not generated it yet.
   mkdir -p /userdata/system/configs/emulationstation 2>/dev/null || true
   chown root:"$DRONE_GROUP" /userdata/system/configs/emulationstation 2>/dev/null || true
   chmod 2775 /userdata/system/configs/emulationstation 2>/dev/null || true
@@ -212,47 +180,9 @@ ensure_dns_fallback() {
   fi
 }
 
-ensure_low_port_binding() {
-  primary_port="${HTTPS_PORT:-443}"
-  compat_ports="${DRONE_COMPAT_HTTPS_PORTS:-8443}"
-  case " ${primary_port} ${compat_ports} " in
-    *" 443 "*)
-      if [ -w /proc/sys/net/ipv4/ip_unprivileged_port_start ]; then
-        current_start="$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start 2>/dev/null || echo 1024)"
-        if [ "${current_start:-1024}" -gt 0 ] 2>/dev/null; then
-          echo 0 > /proc/sys/net/ipv4/ip_unprivileged_port_start 2>/dev/null || true
-          echo "[drone-service] Enabled unprivileged binding for HTTPS port 443"
-        fi
-      else
-        echo "[drone-service] Cannot adjust unprivileged port binding; HTTPS port 443 may fail for ${DRONE_USER}"
-      fi
-      ;;
-  esac
-}
-
-run_as_drone() {
-  if command -v runuser >/dev/null 2>&1; then
-    runuser -u "$DRONE_USER" -- "$@"
-  elif command -v chpst >/dev/null 2>&1; then
-    chpst -u "$DRONE_USER" "$@"
-  elif command -v sudo >/dev/null 2>&1; then
-    sudo -u "$DRONE_USER" "$@"
-  else
-    su -s /bin/sh -c "$*" "$DRONE_USER"
-  fi
-}
-
-run_as_drone_shell() {
+run_as_root_shell() {
   command="$1"
-  if command -v runuser >/dev/null 2>&1; then
-    runuser -u "$DRONE_USER" -- sh -c "$command"
-  elif command -v chpst >/dev/null 2>&1; then
-    chpst -u "$DRONE_USER" sh -c "$command"
-  elif command -v sudo >/dev/null 2>&1; then
-    sudo -u "$DRONE_USER" sh -c "$command"
-  else
-    su -s /bin/sh -c "$command" "$DRONE_USER"
-  fi
+  sh -c "$command"
 }
 
 wait_for_network() {
@@ -310,7 +240,7 @@ launch_drone() {
   if [ -f "$WORK_DIR/app/main.py" ] && [ -f "$WORK_DIR/app/drone_api.py" ]; then
     if validate_local_app; then
       echo "[drone-service] Launching local Drone app from ${WORK_DIR}..."
-      run_as_drone_shell "cd '$WORK_DIR' && env PYTHONPATH='$WORK_DIR' HTTPS_PORT='${HTTPS_PORT:-443}' DRONE_COMPAT_HTTPS_PORTS='${DRONE_COMPAT_HTTPS_PORTS:-8443}' ROMS_ROOT='${ROMS_ROOT:-/userdata/roms}' BIOS_ROOT='${BIOS_ROOT:-/userdata/bios}' TLS_SELF_SIGNED_DIR='${TLS_SELF_SIGNED_DIR:-/userdata/system/certs}' LOG_DIR='${LOG_DIR:-/userdata/system/logs/drone-app}' LOG_MAX_BYTES='${LOG_MAX_BYTES:-5242880}' LOG_BACKUP_COUNT='${LOG_BACKUP_COUNT:-5}' DRONE_LOG_UNAUTHORIZED_REQUESTS='${DRONE_LOG_UNAUTHORIZED_REQUESTS:-0}' DRONE_UNAUTH_RATE_LIMIT_ENABLED='${DRONE_UNAUTH_RATE_LIMIT_ENABLED:-1}' DRONE_UNAUTH_RATE_LIMIT_REQUESTS='${DRONE_UNAUTH_RATE_LIMIT_REQUESTS:-60}' DRONE_UNAUTH_RATE_LIMIT_WINDOW_SECONDS='${DRONE_UNAUTH_RATE_LIMIT_WINDOW_SECONDS:-60}' ROM_METADATA_POLL_SECONDS='${ROM_METADATA_POLL_SECONDS:-900}' ROM_METADATA_INITIAL_DELAY_SECONDS='${ROM_METADATA_INITIAL_DELAY_SECONDS:-60}' ROM_METADATA_PROGRESS_SECONDS='${ROM_METADATA_PROGRESS_SECONDS:-30}' ROM_METADATA_PROGRESS_FILES='${ROM_METADATA_PROGRESS_FILES:-250}' ROM_METADATA_UPLOAD_CHUNK_SIZE='${ROM_METADATA_UPLOAD_CHUNK_SIZE:-250}' ROM_METADATA_HASH_IO_YIELD_SECONDS='${ROM_METADATA_HASH_IO_YIELD_SECONDS:-0.05}' ROM_METADATA_HASH_ROMS_ENABLED='${ROM_METADATA_HASH_ROMS_ENABLED:-1}' IMAGE_CACHE_TTL_SECONDS='${IMAGE_CACHE_TTL_SECONDS:-3600}' IMAGE_MISS_CACHE_TTL_SECONDS='${IMAGE_MISS_CACHE_TTL_SECONDS:-300}' IMAGE_CACHE_MAX_ITEMS='${IMAGE_CACHE_MAX_ITEMS:-1000}' IMAGE_CACHE_MAX_BYTES='${IMAGE_CACHE_MAX_BYTES:-134217728}' JSON_CACHE_TTL_SECONDS='${JSON_CACHE_TTL_SECONDS:-3600}' JSON_CACHE_MAX_ITEMS='${JSON_CACHE_MAX_ITEMS:-1000}' JSON_CACHE_MAX_BYTES='${JSON_CACHE_MAX_BYTES:-33554432}' OVERMIND_DRONE_TOKEN='${OVERMIND_DRONE_TOKEN:-}' OVERMIND_POLL_SECONDS='${OVERMIND_POLL_SECONDS:-60}' OVERMIND_SPEED_SAMPLE_SECONDS='${OVERMIND_SPEED_SAMPLE_SECONDS:-600}' python3 -m app.main"
+      run_as_root_shell "cd '$WORK_DIR' && env PYTHONPATH='$WORK_DIR' HTTPS_PORT='${HTTPS_PORT:-443}' DRONE_COMPAT_HTTPS_PORTS='${DRONE_COMPAT_HTTPS_PORTS:-8443}' ROMS_ROOT='${ROMS_ROOT:-/userdata/roms}' BIOS_ROOT='${BIOS_ROOT:-/userdata/bios}' TLS_SELF_SIGNED_DIR='${TLS_SELF_SIGNED_DIR:-/userdata/system/certs}' LOG_DIR='${LOG_DIR:-/userdata/system/logs/drone-app}' LOG_MAX_BYTES='${LOG_MAX_BYTES:-5242880}' LOG_BACKUP_COUNT='${LOG_BACKUP_COUNT:-5}' DRONE_LOG_UNAUTHORIZED_REQUESTS='${DRONE_LOG_UNAUTHORIZED_REQUESTS:-0}' DRONE_UNAUTH_RATE_LIMIT_ENABLED='${DRONE_UNAUTH_RATE_LIMIT_ENABLED:-1}' DRONE_UNAUTH_RATE_LIMIT_REQUESTS='${DRONE_UNAUTH_RATE_LIMIT_REQUESTS:-60}' DRONE_UNAUTH_RATE_LIMIT_WINDOW_SECONDS='${DRONE_UNAUTH_RATE_LIMIT_WINDOW_SECONDS:-60}' ROM_METADATA_POLL_SECONDS='${ROM_METADATA_POLL_SECONDS:-900}' ROM_METADATA_INITIAL_DELAY_SECONDS='${ROM_METADATA_INITIAL_DELAY_SECONDS:-60}' ROM_METADATA_PROGRESS_SECONDS='${ROM_METADATA_PROGRESS_SECONDS:-30}' ROM_METADATA_PROGRESS_FILES='${ROM_METADATA_PROGRESS_FILES:-250}' ROM_METADATA_UPLOAD_CHUNK_SIZE='${ROM_METADATA_UPLOAD_CHUNK_SIZE:-250}' ROM_METADATA_HASH_IO_YIELD_SECONDS='${ROM_METADATA_HASH_IO_YIELD_SECONDS:-0.05}' ROM_METADATA_HASH_ROMS_ENABLED='${ROM_METADATA_HASH_ROMS_ENABLED:-1}' IMAGE_CACHE_TTL_SECONDS='${IMAGE_CACHE_TTL_SECONDS:-3600}' IMAGE_MISS_CACHE_TTL_SECONDS='${IMAGE_MISS_CACHE_TTL_SECONDS:-300}' IMAGE_CACHE_MAX_ITEMS='${IMAGE_CACHE_MAX_ITEMS:-1000}' IMAGE_CACHE_MAX_BYTES='${IMAGE_CACHE_MAX_BYTES:-134217728}' JSON_CACHE_TTL_SECONDS='${JSON_CACHE_TTL_SECONDS:-3600}' JSON_CACHE_MAX_ITEMS='${JSON_CACHE_MAX_ITEMS:-1000}' JSON_CACHE_MAX_BYTES='${JSON_CACHE_MAX_BYTES:-33554432}' OVERMIND_DRONE_TOKEN='${OVERMIND_DRONE_TOKEN:-}' OVERMIND_POLL_SECONDS='${OVERMIND_POLL_SECONDS:-60}' OVERMIND_SPEED_SAMPLE_SECONDS='${OVERMIND_SPEED_SAMPLE_SECONDS:-600}' python3 -m app.main"
       return "$?"
     fi
     echo "[drone-service] Local Drone app import check failed; downloading a fresh app bundle."
@@ -326,7 +256,7 @@ launch_drone() {
   fi
   chmod 755 "$runner" 2>/dev/null || true
   export DRONE_APP_ARCHIVE_URL="${DRONE_APP_ARCHIVE_URL:-https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/drone-app.tar.gz}"
-  run_as_drone bash "$runner"
+  bash "$runner"
   exit_code="$?"
   rm -f "$runner"
   return "$exit_code"
@@ -386,10 +316,10 @@ set_volume_as_root() {
 }
 
 # Signature of the on-disk bootstrap script. The Drone app self-updates by
-# re-exec'ing its own (unprivileged) process in place, which leaves this root-side
-# service layer running the OLD code (old ensure_permissions + control worker) until
-# the next full service restart. We use this signature so the privileged control
-# worker can detect a shipped service-layer update and adopt it on its own.
+# re-exec'ing its own app process in place, which leaves this service layer
+# running the OLD code (old ensure_permissions + control worker) until the next
+# full service restart. We use this signature so the control worker can detect a
+# shipped service-layer update and adopt it on its own.
 _script_signature() {
   stat -c '%Y %s' "$WORK_DIR/app/service_bootstrap.sh" 2>/dev/null \
     || md5sum "$WORK_DIR/app/service_bootstrap.sh" 2>/dev/null | awk '{print $1}' \
@@ -398,8 +328,7 @@ _script_signature() {
 
 # Run the input-activity monitor as root so it can read /dev/input/event* and
 # record the last input time for idle automations (e.g. lowering the volume).
-# The unprivileged Drone app cannot read the input devices itself. Idempotent:
-# does nothing if the monitor is already running.
+# Idempotent: does nothing if the monitor is already running.
 start_input_activity_monitor() {
   helper="$WORK_DIR/app/input_activity_monitor.py"
   [ -f "$helper" ] || return 0
@@ -545,10 +474,8 @@ start_app() {
     exit 0
   fi
   (
-    ensure_drone_user
     ensure_permissions
     ensure_dns_fallback
-    ensure_low_port_binding
     start_control_worker
 
     supervise_drone

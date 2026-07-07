@@ -2468,7 +2468,13 @@ class SettingsTests(unittest.TestCase):
         self.assertIn('system_info_payload["audio_volume"] = _get_audio_volume(settings)', drone_source)
         self.assertIn("ensure_dns_fallback()", bootstrap)
         self.assertIn("nameserver 1.1.1.1", bootstrap)
-        self.assertIn("ensure_drone_user", bootstrap)
+        self.assertNotIn("ensure_drone_user", bootstrap)
+        self.assertNotIn("DRONE_USER", bootstrap)
+        self.assertNotIn("run_as_drone", bootstrap)
+        self.assertNotIn("su -s /bin/sh -c", installer)
+        self.assertIn('DRONE_GROUP="root"', bootstrap)
+        self.assertIn("bash \"$runner\"", bootstrap)
+        self.assertIn("| bash", installer)
         self.assertIn("/userdata/system/drone-app/rom_metadata_cache.sqlite3*", bootstrap)
         self.assertIn('chown root:"$DRONE_GROUP" /userdata/system/batocera.conf', bootstrap)
         self.assertIn("chmod 664 /userdata/system/batocera.conf", bootstrap)
@@ -4485,6 +4491,31 @@ class LaunchBoxMappingTests(unittest.TestCase):
         FakeLaunchBoxClient().search("Chrono Trigger", system="ps2")
         self.assertTrue(urls)
         self.assertIn("platform=Sony%20Playstation%202", urls[0])
+
+    def test_launchbox_details_imports_metadata_values(self) -> None:
+        testcase = self
+
+        class FakeLaunchBoxClient(LaunchBoxClient):
+            def _get_json_from_bases(self, path: str, query=None) -> dict:
+                testcase.assertEqual(path, "/games/details/123")
+                return {
+                    "gameKey": 123,
+                    "name": "Chrono Trigger",
+                    "genres": [{"name": "Role-Playing"}],
+                    "developers": [{"name": "Square"}],
+                    "publishers": [{"displayName": "Square"}],
+                    "players": {"value": "1"},
+                    "communityStarRating": 4.8,
+                    "gameImages": [],
+                }
+
+        details = FakeLaunchBoxClient().details("123")
+
+        self.assertEqual(details["genre"], "Role-Playing")
+        self.assertEqual(details["developer"], "Square")
+        self.assertEqual(details["publisher"], "Square")
+        self.assertEqual(details["players"], "1")
+        self.assertEqual(details["rating"], "4.8")
 
     def test_launchbox_client_sanitizes_dns_failures(self) -> None:
         from app.roms.scrapers import ScraperUnavailableError
