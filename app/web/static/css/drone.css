@@ -671,6 +671,8 @@
       margin-bottom: 0.65rem;
       font-weight: 800;
     }
+    .collapse-caret { transition: transform .2s ease; display: inline-block; }
+    [aria-expanded="true"] > .collapse-caret { transform: rotate(90deg); }
     .asset-flow {
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -923,6 +925,15 @@
     .admin-config-content {
       overflow-y: auto;
       white-space: pre-wrap;
+      font-size: 0.72rem;
+      line-height: 1.3;
+    }
+    /* Matches .log-content / .admin-config-content (System Logs / Emulators)
+       so tables of similar diagnostic content read at the same scale. */
+    .small-mono-table,
+    .small-mono-table td,
+    .small-mono-table th {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-size: 0.72rem;
       line-height: 1.3;
     }

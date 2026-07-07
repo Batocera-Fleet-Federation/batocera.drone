@@ -87,8 +87,11 @@ let themeFilterInitialized = false;
 let currentLogSource = null;
 let logRefreshTimer = null;
 let logRefreshInFlight = false;
-let localTransfersTimer = null;
-let localTransfersInFlight = false;
+let transfersTimer = null;
+let transfersInFlight = false;
+let integrationActiveTab = "overmind";
+let integrationOvermindLoaded = false;
+let integrationLocalLoaded = false;
 let currentConfigSource = null;
 let emulatorConfigRows = [];
 let selectedEmulatorConfigIndex = 0;
@@ -601,33 +604,33 @@ function stopLogAutoRefresh() {
   }
   logRefreshInFlight = false;
 }
-function stopLocalTransfersAutoRefresh() {
-  if (localTransfersTimer) {
-    clearInterval(localTransfersTimer);
-    localTransfersTimer = null;
+function stopTransfersAutoRefresh() {
+  if (transfersTimer) {
+    clearInterval(transfersTimer);
+    transfersTimer = null;
   }
-  localTransfersInFlight = false;
+  transfersInFlight = false;
 }
-function startLocalTransfersAutoRefresh() {
-  // Live-update only the Local Transfers data while a copy is in progress --
-  // never re-render the whole panel, so the user's asset request form, paging,
-  // and selections are left untouched.
-  stopLocalTransfersAutoRefresh();
-  localTransfersTimer = setInterval(async () => {
-    if (document.hidden || localTransfersInFlight) return;
-    if (!["#admin/integration", "#admin/local-network"].includes(window.location.hash)) return;
-    const downloadsBody = document.getElementById("localDownloadsBody");
-    if (!downloadsBody) return;
-    localTransfersInFlight = true;
+function startTransfersAutoRefresh() {
+  // Live-update only the Transfers data while a copy is in progress -- never
+  // re-render the whole page, so the Overmind/Local Network forms, paging, and
+  // selections are left untouched.
+  stopTransfersAutoRefresh();
+  transfersTimer = setInterval(async () => {
+    if (document.hidden || transfersInFlight) return;
+    if (!window.location.hash.startsWith("#admin/integration")) return;
+    const transfersBody = document.getElementById("transfersBody");
+    if (!transfersBody) return;
+    transfersInFlight = true;
     try {
-      const status = await api("/admin/local-network/status");
-      if (!downloadsBody.contains(document.activeElement)) {
-        downloadsBody.innerHTML = renderLocalTransfersPanel(status.downloads || {});
+      const payload = await api("/admin/downloads");
+      if (!transfersBody.contains(document.activeElement)) {
+        transfersBody.innerHTML = renderTransfersPanel(payload);
       }
     } catch (err) {
       // Transient poll failure: leave the last good data in place silently.
     } finally {
-      localTransfersInFlight = false;
+      transfersInFlight = false;
     }
   }, 3000);
 }
@@ -2067,14 +2070,14 @@ function renderDownloadsPanel(payload, includeHeader = true) {
   `;
 }
 
-let localTransferPayload = {};
-const localTransferViews = {
+let transferPayload = {};
+const transferViews = {
   queued: { query: "", limit: 10, page: 1 },
   recent: { query: "", limit: 10, page: 1 },
 };
 
-function localTransferPage(kind, rows) {
-  const view = localTransferViews[kind];
+function transferPage(kind, rows) {
+  const view = transferViews[kind];
   const query = view.query.trim().toLowerCase();
   const filtered = query ? rows.filter(row => JSON.stringify(row).toLowerCase().includes(query)) : rows;
   const pages = Math.max(1, Math.ceil(filtered.length / view.limit));
@@ -2083,23 +2086,23 @@ function localTransferPage(kind, rows) {
   return { rows: filtered.slice(start, start + view.limit), total: filtered.length, pages };
 }
 
-function renderLocalTransferGroup(kind, label, icon, tone, rows, allowCancel) {
-  const page = localTransferPage(kind, rows);
-  const view = localTransferViews[kind];
+function renderTransferGroup(kind, label, icon, tone, rows, allowCancel) {
+  const page = transferPage(kind, rows);
+  const view = transferViews[kind];
   return `<div class="download-section">
     <div class="download-section-title"><span><i class="bi ${icon} me-2"></i>${label}</span><span class="badge text-bg-${tone}">${page.total}</span></div>
     <div class="d-flex flex-wrap gap-2 mb-2">
-      <input class="form-control form-control-sm" style="max-width:260px" placeholder="Search ${label.toLowerCase()}" value="${escapeHtml(view.query)}" onchange="setLocalTransferSearch('${kind}', this.value)" onkeydown="if(event.key==='Enter'){event.preventDefault();setLocalTransferSearch('${kind}',this.value)}">
-      <select class="form-select form-select-sm" style="width:auto" onchange="setLocalTransferLimit('${kind}', this.value)">${[10, 50, 100, 200].map(size => `<option value="${size}" ${view.limit === size ? "selected" : ""}>${size}</option>`).join("")}</select>
-      <button class="btn btn-sm btn-outline-secondary" ${view.page <= 1 ? "disabled" : ""} onclick="setLocalTransferPage('${kind}', ${view.page - 1})">Previous</button>
+      <input class="form-control form-control-sm" style="max-width:260px" placeholder="Search ${label.toLowerCase()}" value="${escapeHtml(view.query)}" onchange="setTransferSearch('${kind}', this.value)" onkeydown="if(event.key==='Enter'){event.preventDefault();setTransferSearch('${kind}',this.value)}">
+      <select class="form-select form-select-sm" style="width:auto" onchange="setTransferLimit('${kind}', this.value)">${[10, 50, 100, 200].map(size => `<option value="${size}" ${view.limit === size ? "selected" : ""}>${size}</option>`).join("")}</select>
+      <button class="btn btn-sm btn-outline-secondary" ${view.page <= 1 ? "disabled" : ""} onclick="setTransferPage('${kind}', ${view.page - 1})">Previous</button>
       <span class="small text-muted align-self-center">Page ${view.page} of ${page.pages}</span>
-      <button class="btn btn-sm btn-outline-secondary" ${view.page >= page.pages ? "disabled" : ""} onclick="setLocalTransferPage('${kind}', ${view.page + 1})">Next</button>
+      <button class="btn btn-sm btn-outline-secondary" ${view.page >= page.pages ? "disabled" : ""} onclick="setTransferPage('${kind}', ${view.page + 1})">Next</button>
     </div>
     ${renderDownloadRows(page.rows, allowCancel)}
   </div>`;
 }
 
-function renderLocalTransferControls(payload, active, queued) {
+function renderTransferControls(payload, active, queued) {
   return `<div class="d-flex flex-wrap align-items-center gap-2 mb-3">
     ${payload.paused
       ? `<span class="badge text-bg-warning"><i class="bi bi-pause-circle me-1"></i>Queue paused</span><button class="btn btn-sm btn-success" type="button" onclick="resumeDroneDownloads()"><i class="bi bi-play-fill me-1"></i>Resume</button>`
@@ -2109,31 +2112,31 @@ function renderLocalTransferControls(payload, active, queued) {
   </div>`;
 }
 
-function renderLocalTransfersPanel(payload) {
-  localTransferPayload = payload || {};
-  const active = localTransferPayload.active || [];
-  const queued = localTransferPayload.queued || [];
-  const recent = localTransferPayload.recent || [];
+function renderTransfersPanel(payload) {
+  transferPayload = payload || {};
+  const active = transferPayload.active || [];
+  const queued = transferPayload.queued || [];
+  const recent = transferPayload.recent || [];
   // Reserve a fixed height for the Active section based on the max number of
   // concurrent downloads, so it doesn't grow/shrink (and shove the rest of the
   // page around) as transfers start and finish on each refresh.
-  const activeLimit = Math.max(1, Number(localTransferPayload.concurrency && localTransferPayload.concurrency.active_limit) || 1);
+  const activeLimit = Math.max(1, Number(transferPayload.concurrency && transferPayload.concurrency.active_limit) || 1);
   const activeMinHeight = 44 + activeLimit * 46;
-  return `${renderQueueEta(localTransferPayload)}${renderLocalTransferControls(localTransferPayload, active, queued)}<div class="download-section">
+  return `${renderQueueEta(transferPayload)}${renderTransferControls(transferPayload, active, queued)}<div class="download-section">
       <div class="download-section-title"><span><i class="bi bi-lightning-charge me-2"></i>Active</span><span class="badge text-bg-info">${active.length}</span></div>
       <div style="min-height:${activeMinHeight}px">${renderDownloadRows(active)}</div>
     </div>
-    ${renderLocalTransferGroup("queued", "Queued", "bi-hourglass-split", "warning", queued, true)}
-    ${renderLocalTransferGroup("recent", "Recent", "bi-clock-history", "secondary", recent, false)}`;
+    ${renderTransferGroup("queued", "Queued", "bi-hourglass-split", "warning", queued, true)}
+    ${renderTransferGroup("recent", "Recent", "bi-clock-history", "secondary", recent, false)}`;
 }
 
-function refreshLocalTransfersPanel() {
-  const node = document.getElementById("localDownloadsBody");
-  if (node) node.innerHTML = renderLocalTransfersPanel(localTransferPayload);
+function refreshTransfersPanel() {
+  const node = document.getElementById("transfersBody");
+  if (node) node.innerHTML = renderTransfersPanel(transferPayload);
 }
-function setLocalTransferSearch(kind, value) { localTransferViews[kind].query = value; localTransferViews[kind].page = 1; refreshLocalTransfersPanel(); }
-function setLocalTransferLimit(kind, value) { localTransferViews[kind].limit = Number(value) || 10; localTransferViews[kind].page = 1; refreshLocalTransfersPanel(); }
-function setLocalTransferPage(kind, value) { localTransferViews[kind].page = Number(value) || 1; refreshLocalTransfersPanel(); }
+function setTransferSearch(kind, value) { transferViews[kind].query = value; transferViews[kind].page = 1; refreshTransfersPanel(); }
+function setTransferLimit(kind, value) { transferViews[kind].limit = Number(value) || 10; transferViews[kind].page = 1; refreshTransfersPanel(); }
+function setTransferPage(kind, value) { transferViews[kind].page = Number(value) || 1; refreshTransfersPanel(); }
 
 async function renderDownloadsPage() {
   currentSystemContext = null;
@@ -2159,32 +2162,18 @@ async function renderDownloadsPage() {
 async function cancelDroneDownload(jobId) {
   if (!jobId || !window.confirm("Cancel this download?")) return;
   await apiPost(`/admin/downloads/${encodeURIComponent(jobId)}/cancel`, {});
-  if (["#admin/integration", "#admin/overmind", "#admin/local-network"].includes(window.location.hash)) {
-    const refresh = window.refreshLocalNetwork || window.refreshOvermindDownloads;
-    if (typeof refresh === "function") await refresh();
-    else await renderIntegrationPage();
-  } else {
-    await renderDownloadsPage();
-  }
+  await refreshDownloadsView();
 }
 
 async function retryDroneDownload(jobId) {
   if (!jobId) return;
   await apiPost(`/admin/downloads/${encodeURIComponent(jobId)}/retry`, {});
-  if (["#admin/integration", "#admin/overmind", "#admin/local-network"].includes(window.location.hash)) {
-    const refresh = window.refreshLocalNetwork || window.refreshOvermindDownloads;
-    if (typeof refresh === "function") await refresh();
-    else await renderIntegrationPage();
-  } else {
-    await renderDownloadsPage();
-  }
+  await refreshDownloadsView();
 }
 
 async function refreshDownloadsView() {
-  if (["#admin/integration", "#admin/overmind", "#admin/local-network"].includes(window.location.hash)) {
-    const refresh = window.refreshLocalNetwork || window.refreshOvermindDownloads;
-    if (typeof refresh === "function") await refresh();
-    else await renderIntegrationPage();
+  if (window.location.hash.startsWith("#admin/integration") && typeof window.refreshTransfers === "function") {
+    await window.refreshTransfers();
   } else {
     await renderDownloadsPage();
   }
@@ -2232,8 +2221,8 @@ async function purgeAssetCache() {
   try {
     const result = await apiPost("/admin/asset-cache/purge", {});
     showToast(result.message || "Asset cache purge queued.", "success");
-    if (["#admin/integration", "#admin/overmind"].includes(window.location.hash) && typeof window.refreshOvermindAssetCache === "function") {
-      await window.refreshOvermindAssetCache();
+    if (window.location.hash === "#admin/system-info" && typeof window.refreshSystemInfoAssetCache === "function") {
+      await window.refreshSystemInfoAssetCache();
     } else {
       await renderAssetCachePage();
     }
@@ -2253,8 +2242,8 @@ async function clearPendingAssetChanges() {
   try {
     const result = await apiPost("/admin/asset-cache/clear-pending", {});
     showToast(result.message || "Pending asset changes cleared.", "success");
-    if (["#admin/integration", "#admin/overmind"].includes(window.location.hash) && typeof window.refreshOvermindAssetCache === "function") {
-      await window.refreshOvermindAssetCache();
+    if (window.location.hash === "#admin/system-info" && typeof window.refreshSystemInfoAssetCache === "function") {
+      await window.refreshSystemInfoAssetCache();
     } else {
       await renderAssetCachePage();
     }
@@ -3802,6 +3791,40 @@ function renderLocalAssetsPagination() {
     </div>`;
 }
 
+function parseIntegrationHash(hash) {
+  const queryIndex = hash.indexOf("?");
+  const params = new URLSearchParams(queryIndex >= 0 ? hash.substring(queryIndex + 1) : "");
+  return { tab: params.get("tab") === "local_network" ? "local_network" : "overmind" };
+}
+
+function applyIntegrationTab() {
+  const isLocal = integrationActiveTab === "local_network";
+  const overmindPanel = document.getElementById("overmindPagePanel");
+  const localPanel = document.getElementById("localNetworkPagePanel");
+  if (overmindPanel) overmindPanel.classList.toggle("d-none", isLocal);
+  if (localPanel) localPanel.classList.toggle("d-none", !isLocal);
+  const overmindTabBtn = document.getElementById("integrationTabOvermind");
+  const localTabBtn = document.getElementById("integrationTabLocal");
+  if (overmindTabBtn) { overmindTabBtn.classList.toggle("btn-primary", !isLocal); overmindTabBtn.classList.toggle("btn-outline-primary", isLocal); }
+  if (localTabBtn) { localTabBtn.classList.toggle("btn-primary", isLocal); localTabBtn.classList.toggle("btn-outline-primary", !isLocal); }
+}
+
+function setIntegrationTab(tab) {
+  integrationActiveTab = tab === "local_network" ? "local_network" : "overmind";
+  applyIntegrationTab();
+  const nextHash = `#admin/integration?tab=${integrationActiveTab}`;
+  if (window.location.hash !== nextHash) history.replaceState(null, "", nextHash);
+  // Lazily load whichever tab wasn't shown on initial page load -- avoids an
+  // unnecessary peer/status fetch for a tab the user never opens.
+  if (integrationActiveTab === "overmind" && !integrationOvermindLoaded) {
+    integrationOvermindLoaded = true;
+    renderOvermindIntegrationPanel(document.getElementById("overmindPagePanel"));
+  } else if (integrationActiveTab === "local_network" && !integrationLocalLoaded) {
+    integrationLocalLoaded = true;
+    renderLocalNetworkIntegrationPanel(document.getElementById("localNetworkPagePanel"));
+  }
+}
+
 async function renderIntegrationPage() {
   currentSystemContext = null;
   setSearchMode("hidden");
@@ -3810,84 +3833,62 @@ async function renderIntegrationPage() {
   subtitleNode.textContent = "Manage this Drone through Overmind or directly on the local network";
   setLoading(true, "Loading integration...");
   try {
+    // Overmind and Local Network are always both on -- no manual toggle. Heal
+    // any Drone still carrying an old exclusive/disabled mode from before this
+    // was a per-integration switch.
     const modeStatus = await api("/admin/network-mode");
-    const overmindActive = !!modeStatus.overmind_enabled;
-    const localActive = !!modeStatus.local_network_enabled;
+    if (!modeStatus.overmind_enabled || !modeStatus.local_network_enabled) {
+      await apiPost("/admin/network-mode", { overmind_enabled: true, local_network_enabled: true });
+    }
+    integrationActiveTab = parseIntegrationHash(window.location.hash).tab;
+    const isLocal = integrationActiveTab === "local_network";
     content.innerHTML = `
       <div class="mb-3"><button class="btn btn-outline-secondary" onclick="setHash('#admin')">← Back to Admin</button></div>
-      <div class="card log-card mb-3">
-        <div class="card-header">Integration Enablement</div>
-        <div class="card-body">
-          <div class="small text-muted mb-3">Enable either integration independently, or run both at the same time.</div>
-          <div class="row g-3">
-            <div class="col-12 col-lg-6"><div class="p-3 rounded border h-100" style="border-color:var(--admin-border)!important">
-              <div class="form-check form-switch"><input id="integrationOvermindToggle" class="form-check-input" type="checkbox" ${overmindActive ? "checked" : ""}><label class="form-check-label fw-semibold" for="integrationOvermindToggle">Overmind Integration</label></div>
-              <div class="small text-muted mt-2">Heartbeats, actions, fleet reporting, and Overmind-managed syncing.</div>
-              <button class="btn btn-sm btn-outline-primary mt-3" type="button" onclick="setHash('#admin/overmind')">Open Overmind Integration</button>
-            </div></div>
-            <div class="col-12 col-lg-6"><div class="p-3 rounded border h-100" style="border-color:var(--admin-border)!important">
-              <div class="form-check form-switch"><input id="integrationLocalToggle" class="form-check-input" type="checkbox" ${localActive ? "checked" : ""}><label class="form-check-label fw-semibold" for="integrationLocalToggle">Local Network</label></div>
-              <div class="small text-muted mt-2">Discover, pair, browse, and sync directly with nearby Drones.</div>
-              <button class="btn btn-sm btn-outline-primary mt-3" type="button" onclick="setHash('#admin/local-network')">Open Local Network</button>
-            </div></div>
-          </div>
+      <div class="btn-group bff-segmented mb-3" role="group" aria-label="Integration section">
+        <button id="integrationTabOvermind" class="btn btn-sm ${isLocal ? "btn-outline-primary" : "btn-primary"}" type="button" onclick="setIntegrationTab('overmind')"><i class="bi bi-cloud me-1"></i>Overmind</button>
+        <button id="integrationTabLocal" class="btn btn-sm ${isLocal ? "btn-primary" : "btn-outline-primary"}" type="button" onclick="setIntegrationTab('local_network')"><i class="bi bi-wifi me-1"></i>Local Network</button>
+      </div>
+      <div id="overmindPagePanel" class="${isLocal ? "d-none" : ""}"></div>
+      <div id="localNetworkPagePanel" class="${isLocal ? "" : "d-none"}"></div>
+      <div class="card log-card mt-3">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <span><i class="bi bi-arrow-left-right me-2"></i>Transfers</span>
+          <button id="transfersRefreshBtn" class="btn btn-sm btn-outline-primary" type="button"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
         </div>
+        <div class="small text-muted px-3 pt-3">All drone-to-drone asset transfers to this machine, whether started from Overmind or Local Network.</div>
+        <div class="card-body" id="transfersBody"><div class="text-muted">Loading transfers...</div></div>
       </div>`;
 
-    document.getElementById("integrationOvermindToggle").addEventListener("change", (event) => setIntegrationEnabled("overmind", event.target.checked));
-    document.getElementById("integrationLocalToggle").addEventListener("change", (event) => setIntegrationEnabled("local_network", event.target.checked));
-    window.refreshLocalNetwork = null;
-    window.refreshOvermindDownloads = null;
-    window.refreshOvermindAssetCache = null;
-    stopLocalTransfersAutoRefresh();
+    async function loadTransfers() {
+      const payload = await api("/admin/downloads");
+      document.getElementById("transfersBody").innerHTML = renderTransfersPanel(payload);
+    }
+    window.refreshTransfers = loadTransfers;
+    document.getElementById("transfersRefreshBtn").addEventListener("click", async () => {
+      try {
+        await loadTransfers();
+      } catch (err) {
+        showToast(`Failed to load transfers: ${escapeHtml(err.message || "unknown error")}`, "danger");
+      }
+    });
+
+    // Only load the tab shown on entry -- the other tab lazily loads in
+    // setIntegrationTab() the first time the user switches to it, so opening
+    // Integration doesn't fire off a Local Network peer/status fetch (or vice
+    // versa) the user never asked to see.
+    integrationOvermindLoaded = !isLocal;
+    integrationLocalLoaded = isLocal;
+    const activeTabLoad = isLocal
+      ? renderLocalNetworkIntegrationPanel(document.getElementById("localNetworkPagePanel"))
+      : renderOvermindIntegrationPanel(document.getElementById("overmindPagePanel"));
+    await Promise.allSettled([activeTabLoad, loadTransfers()]);
+    startTransfersAutoRefresh();
   } catch (err) {
     showToast(`Failed to load integration: ${escapeHtml(err.message || "unknown error")}`, "danger");
     content.innerHTML = '<div class="themed-empty">Integration status could not be loaded.</div>';
   } finally {
     setLoading(false);
   }
-}
-
-async function setIntegrationEnabled(integration, enabled) {
-  const label = integration === "local_network" ? "Local Network" : "Overmind";
-  setLoading(true, `${enabled ? "Enabling" : "Disabling"} ${label}...`);
-  try {
-    const current = await api("/admin/network-mode");
-    await apiPost("/admin/network-mode", {
-      overmind_enabled: integration === "overmind" ? enabled : !!current.overmind_enabled,
-      local_network_enabled: integration === "local_network" ? enabled : !!current.local_network_enabled,
-    });
-    showToast(`${label} integration ${enabled ? "enabled" : "disabled"}.`, "success");
-    await renderIntegrationPage();
-  } catch (err) {
-    showToast(`Failed to update ${label}: ${escapeHtml(err.message || "unknown error")}`, "danger");
-  } finally {
-    setLoading(false);
-  }
-}
-
-async function renderLocalNetworkPage() {
-  currentSystemContext = null;
-  setSearchMode("hidden");
-  clearSystemTheme();
-  titleNode.textContent = "Local Network";
-  subtitleNode.textContent = "Pair nearby Drones and manage direct asset transfers";
-  window.refreshOvermindDownloads = null;
-  window.refreshOvermindAssetCache = null;
-  content.innerHTML = `<div class="mb-3"><button class="btn btn-outline-secondary" onclick="setHash('#admin/integration')">← Back to Integration</button></div><div id="localNetworkPagePanel"></div>`;
-  await renderLocalNetworkIntegrationPanel(document.getElementById("localNetworkPagePanel"));
-}
-
-async function renderOvermindIntegrationPage() {
-  currentSystemContext = null;
-  setSearchMode("hidden");
-  clearSystemTheme();
-  titleNode.textContent = "Overmind Integration";
-  subtitleNode.textContent = "Monitor Overmind activity, downloads, cache, and actions";
-  window.refreshLocalNetwork = null;
-  content.innerHTML = `<div class="mb-3"><button class="btn btn-outline-secondary" onclick="setHash('#admin/integration')">← Back to Integration</button></div><div id="overmindPagePanel"></div>`;
-  const panel = document.getElementById("overmindPagePanel");
-  await renderOvermindIntegrationPanel(panel);
 }
 
 async function renderLocalNetworkIntegrationPanel(target) {
@@ -3915,8 +3916,7 @@ async function renderLocalNetworkIntegrationPanel(target) {
         </div>
         <div id="localAssetsBody"><div class="themed-empty">Pair a nearby Drone, then request its assets here.</div></div>
         <div id="localAssetsPagination" class="mt-2"></div>
-      </div></div>
-    <div class="card log-card"><div class="card-header">Local Transfers</div><div class="card-body" id="localDownloadsBody"></div></div>`;
+      </div></div>`;
 
   async function refresh() {
     const status = await api("/admin/local-network/status");
@@ -3924,7 +3924,6 @@ async function renderLocalNetworkIntegrationPanel(target) {
       ? `<div class="d-flex flex-wrap align-items-center gap-3"><div><div class="small text-muted">Pairing code</div><div class="display-6 mono">${escapeHtml(status.pairing?.code || "")}</div></div><div class="small text-muted">Expires ${escapeHtml(status.pairing?.expires_at || "")}. Enter this code on the other Drone to approve it.</div></div>`
       : '<div class="themed-empty">Enable Local Network integration to discover and pair nearby Drones.</div>';
     document.getElementById("localPeersBody").innerHTML = renderLocalPeerRows(status.peers || []);
-    document.getElementById("localDownloadsBody").innerHTML = renderLocalTransfersPanel(status.downloads || {});
     document.getElementById("localDiscoverBtn").disabled = !status.active;
     document.getElementById("localPairCodeRotateBtn").disabled = !status.active;
     const pairedPeers = (status.peers || []).filter(peer => peer.paired);
@@ -3969,7 +3968,6 @@ async function renderLocalNetworkIntegrationPanel(target) {
   document.getElementById("localAssetQuery").addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); loadLocalPeerAssets(); } });
   updateLocalAssetTypeUi();
   await refresh();
-  startLocalTransfersAutoRefresh();
 }
 
 function localAssetIncludeArtwork() {
@@ -4272,29 +4270,15 @@ async function renderOvermindIntegrationPanel(target) {
     </div>
     <div class="card log-card mt-3">
       <div class="card-header d-flex justify-content-between align-items-center">
-        <span><i class="bi bi-cloud-arrow-down me-2"></i>Downloads</span>
-        <button id="overmindDownloadsRefreshBtn" class="btn btn-sm btn-outline-primary" type="button"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
-      </div>
-      <div class="card-body" id="overmindDownloadsBody"><div class="text-muted">Loading downloads...</div></div>
-    </div>
-    <div class="card log-card mt-3">
-      <div class="card-header d-flex justify-content-between align-items-center">
-        <span><i class="bi bi-database-check me-2"></i>Asset Cache</span>
-        <div class="d-flex gap-2">
-          <button id="overmindAssetCacheRefreshBtn" class="btn btn-sm btn-outline-primary" type="button"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
-          <button class="btn btn-sm btn-outline-warning" type="button" onclick="clearPendingAssetChanges()"><i class="bi bi-x-circle me-1"></i>Clear Pending</button>
-          <button class="btn btn-sm btn-outline-danger" type="button" onclick="purgeAssetCache()">Purge &amp; Resync</button>
-        </div>
-      </div>
-      <div class="card-body" id="overmindAssetCacheBody"><div class="text-muted">Loading asset cache...</div></div>
-    </div>
-    <div class="card log-card mt-3">
-      <div class="card-header d-flex justify-content-between align-items-center">
-        <span>Processed Overmind Actions</span>
+        <button class="btn btn-sm btn-link text-decoration-none p-0" type="button" data-bs-toggle="collapse" data-bs-target="#overmindActionsCollapse" aria-expanded="false" aria-controls="overmindActionsCollapse">
+          <i class="bi bi-chevron-right me-1 collapse-caret"></i>Processed Overmind Actions
+        </button>
         <button id="overmindActionsRefreshBtn" class="btn btn-sm btn-outline-primary" type="button">Refresh</button>
       </div>
-      <div class="card-body" id="overmindActionsBody">
-        <div class="text-muted">Loading processed actions...</div>
+      <div class="collapse" id="overmindActionsCollapse">
+        <div class="card-body" id="overmindActionsBody">
+          <div class="text-muted">Loading processed actions...</div>
+        </div>
       </div>
     </div>
   `;
@@ -4310,10 +4294,6 @@ async function renderOvermindIntegrationPanel(target) {
   const refreshBtn = document.getElementById("overmindRefreshBtn");
   const actionsRefreshBtn = document.getElementById("overmindActionsRefreshBtn");
   const actionsBody = document.getElementById("overmindActionsBody");
-  const downloadsRefreshBtn = document.getElementById("overmindDownloadsRefreshBtn");
-  const downloadsBody = document.getElementById("overmindDownloadsBody");
-  const assetCacheRefreshBtn = document.getElementById("overmindAssetCacheRefreshBtn");
-  const assetCacheBody = document.getElementById("overmindAssetCacheBody");
   const ACTIONS_PER_PAGE = 10;
   let allActions = [];
   let actionsPage = 0;
@@ -4334,7 +4314,7 @@ async function renderOvermindIntegrationPanel(target) {
       </div>` : "";
     actionsBody.innerHTML = pageItems.length ? `
       <div class="table-responsive">
-        <table class="table table-sm align-middle themed-table bff-stack">
+        <table class="table table-sm align-middle themed-table bff-stack small-mono-table">
           <thead>
             <tr>
               <th>Processed</th>
@@ -4368,54 +4348,14 @@ async function renderOvermindIntegrationPanel(target) {
 
   function renderStatus(payload) {
     const status = payload.status || {};
-    const configured = status.configured ? "yes" : "no";
-    const enabled = status.integration_enabled ? "yes" : "no";
-    const state = status.integration_state || "not_started";
     const swarmStatus = status.swarm_connection_status || "disconnected";
-    const requestedAt = status.requested_at || "n/a";
-    const startedAt = status.last_started_at || "n/a";
-    const errorMsg = status.last_error || "none";
-    const authTokenMask = payload.auth_token_masked || "(not set)";
-    const droneName = payload.drone_name || "(not set)";
-    const machineId = payload.machine_id || "n/a";
-    const cert = payload.certificate || {};
-    const swarm = payload.swarm || [];
-    const peerChecks = payload.peer_checks || [];
     const overmindActive = payload.overmind_active !== false;
     statusEl.innerHTML = `
-      <div class="d-flex flex-wrap gap-2 mb-2">
+      <div class="d-flex flex-wrap gap-2">
         <span class="badge ${overmindActive ? "text-bg-success" : "text-bg-secondary"}">Overmind: ${overmindActive ? "enabled" : "disabled"}</span>
         <span class="badge ${status.configured ? "text-bg-success" : "text-bg-secondary"}">Overmind: ${status.configured ? "linked" : "disconnected"}</span>
         <span class="badge ${swarmStatus === "connected" ? "text-bg-success" : swarmStatus.includes("pending") || swarmStatus.includes("requested") ? "text-bg-warning" : "text-bg-secondary"}">Connected to Swarm: ${escapeHtml(swarmStatus)}</span>
       </div>
-      <div><strong>Configured:</strong> ${escapeHtml(configured)}</div>
-      <div><strong>Integration Enabled:</strong> ${escapeHtml(enabled)}</div>
-      <div><strong>Machine ID:</strong> ${escapeHtml(machineId)}</div>
-      <div><strong>Action Polling:</strong> Drone sends a heartbeat request and receives one pending action per poll.</div>
-      <div><strong>State:</strong> ${escapeHtml(state)}</div>
-      <div><strong>Drone Name:</strong> ${escapeHtml(droneName)}</div>
-      <div><strong>Authorization Token:</strong> ${escapeHtml(authTokenMask)}</div>
-      <div><strong>Requested At:</strong> ${escapeHtml(requestedAt)}</div>
-      <div><strong>Last Started At:</strong> ${escapeHtml(startedAt)}</div>
-      <div><strong>Last Error:</strong> ${escapeHtml(errorMsg)}</div>
-      <div><strong>Certificate:</strong> ${escapeHtml(cert.status || "unknown")}${cert.fingerprint ? ` · ${escapeHtml(String(cert.fingerprint).slice(0, 16))}` : ""}</div>
-      <div><strong>Swarm Drones:</strong> ${swarm.length}</div>
-      <div class="mt-2"><strong>Notes:</strong> ${escapeHtml(status.notes || "")}</div>
-      ${swarm.filter(d => String(d.drone_id || d.device_id || "") !== machineId).length ? `<div class="mt-3"><strong>Last Swarm Snapshot (P2P Health via Public IP)</strong>${swarm.filter(d => String(d.drone_id || d.device_id || "") !== machineId).map((drone) => {
-        const dronePeerId = String(drone.drone_id || drone.device_id || "");
-        const checks = peerChecks.filter((item) => String(item.target_drone_id || "") === dronePeerId);
-        const latest = checks[0] || {};
-        const passed = latest.status === "pass";
-        const hasPublicIp = !!(drone.public_ip || "").trim();
-        return `<div class="mt-2 p-2 rounded border" style="border-color:var(--admin-border)!important;background:rgba(31,42,68,.45)">
-          <div class="d-flex justify-content-between gap-2"><span>${escapeHtml(drone.name || drone.hostname || drone.device_name || dronePeerId || "Drone")}</span><span class="badge ${!hasPublicIp ? "text-bg-secondary" : (passed ? "text-bg-success" : (latest.status ? "text-bg-danger" : "text-bg-warning"))}">${!hasPublicIp ? "no public IP" : (latest.status ? (passed ? "RESOLVED" : "FAILED") : "pending")}</span></div>
-          <div class="small text-muted mono">${escapeHtml(dronePeerId)}</div>
-          <div class="small text-muted">Public IP: ${escapeHtml(drone.public_ip || "n/a")}</div>
-          <div class="small text-muted">Checked: ${escapeHtml(latest.checked_at || "n/a")}${latest.latency_ms != null ? ` · ${latest.latency_ms} ms` : ""}</div>
-          ${latest.failure_reason ? `<div class="small text-danger">${escapeHtml(latest.failure_reason)}</div>` : ""}
-        </div>`;
-      }).join("")}</div>` : ""}
-      ${!overmindActive ? '<div class="alert alert-warning mt-3 mb-0">Overmind communication is disabled. Enable it on the Integration page to resume it.</div>' : ""}
     `;
     urlInput.value = payload.overmind_url || "https://www.batocera-swarm.com";
     droneNameInput.value = payload.drone_name || "";
@@ -4433,19 +4373,6 @@ async function renderOvermindIntegrationPanel(target) {
     actionsPage = 0;
     renderActionsPage();
   }
-
-  async function loadDownloads() {
-    const payload = await api("/admin/downloads");
-    downloadsBody.innerHTML = renderDownloadsPanel(payload, false);
-  }
-
-  async function loadAssetCache() {
-    const payload = await api("/admin/asset-cache");
-    assetCacheBody.innerHTML = renderAssetCachePanel(payload, false);
-  }
-
-  window.refreshOvermindDownloads = loadDownloads;
-  window.refreshOvermindAssetCache = loadAssetCache;
 
   async function saveConfig() {
     const overmindUrl = (urlInput.value || "").trim();
@@ -4522,28 +4449,11 @@ async function renderOvermindIntegrationPanel(target) {
       setLoading(false);
     }
   });
-  downloadsRefreshBtn.addEventListener("click", async () => {
-    try {
-      await loadDownloads();
-    } catch (err) {
-      showToast(escapeHtml(err.message || "Failed to load downloads"), "danger");
-    }
-  });
-  assetCacheRefreshBtn.addEventListener("click", async () => {
-    try {
-      await loadAssetCache();
-    } catch (err) {
-      showToast(escapeHtml(err.message || "Failed to load asset cache"), "danger");
-    }
-  });
-
   setLoading(true, "Loading Overmind status...");
   try {
     const loaders = [
       ["status", loadStatus],
       ["actions", loadActions],
-      ["downloads", loadDownloads],
-      ["asset cache", loadAssetCache],
     ];
     const results = await Promise.allSettled(loaders.map(([, loader]) => loader()));
     results.forEach((result, index) => {
@@ -5419,7 +5329,36 @@ async function renderAdminSystemInfoPage() {
           </div>
         </div>
       </div>
+      <div class="card log-card mt-3">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <span><i class="bi bi-database-check me-2"></i>Asset Cache</span>
+          <div class="d-flex gap-2">
+            <button id="systemInfoAssetCacheRefreshBtn" class="btn btn-sm btn-outline-primary" type="button"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
+            <button class="btn btn-sm btn-outline-warning" type="button" onclick="clearPendingAssetChanges()"><i class="bi bi-x-circle me-1"></i>Clear Pending</button>
+            <button class="btn btn-sm btn-outline-danger" type="button" onclick="purgeAssetCache()">Purge &amp; Resync</button>
+          </div>
+        </div>
+        <div class="card-body" id="systemInfoAssetCacheBody"><div class="text-muted">Loading asset cache...</div></div>
+      </div>
     `;
+
+    async function loadAssetCache() {
+      const cachePayload = await api("/admin/asset-cache");
+      document.getElementById("systemInfoAssetCacheBody").innerHTML = renderAssetCachePanel(cachePayload, false);
+    }
+    window.refreshSystemInfoAssetCache = loadAssetCache;
+    document.getElementById("systemInfoAssetCacheRefreshBtn").addEventListener("click", async () => {
+      try {
+        await loadAssetCache();
+      } catch (err) {
+        showToast(`Failed to load asset cache: ${escapeHtml(err.message || "unknown error")}`, "danger");
+      }
+    });
+    try {
+      await loadAssetCache();
+    } catch (err) {
+      showToast(`Failed to load asset cache: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    }
   } catch (err) {
     showToast(`Failed to load system information: ${escapeHtml(err.message || "unknown error")}`, "danger");
     content.innerHTML = `
@@ -5513,8 +5452,8 @@ async function router() {
       stopLogAutoRefresh();
       currentLogSource = null;
     }
-    if (!["#admin/integration", "#admin/local-network", "#admin/overmind"].includes(hash)) {
-      stopLocalTransfersAutoRefresh();
+    if (!hash.startsWith("#admin/integration")) {
+      stopTransfersAutoRefresh();
     }
     document.body.classList.toggle("artwork-page", hash.startsWith("#admin/artwork"));
     if (hash === "#bios") {
@@ -5591,7 +5530,7 @@ async function router() {
         return;
       }
       await renderAssetCachePage();
-    } else if (hash === "#admin/integration") {
+    } else if (hash.startsWith("#admin/integration")) {
       if (!adminEnabled) {
         setHash("");
         return;
@@ -5602,13 +5541,15 @@ async function router() {
         setHash("");
         return;
       }
-      await renderOvermindIntegrationPage();
+      setHash("#admin/integration?tab=overmind");
+      return;
     } else if (hash === "#admin/local-network") {
       if (!adminEnabled) {
         setHash("");
         return;
       }
-      await renderLocalNetworkPage();
+      setHash("#admin/integration?tab=local_network");
+      return;
     } else if (hash === "#admin/api") {
       if (!adminEnabled) {
         setHash("");

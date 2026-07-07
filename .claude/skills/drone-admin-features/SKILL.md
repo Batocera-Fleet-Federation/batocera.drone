@@ -55,11 +55,17 @@ doc documents only the first.
 Drone log sources), sidebar + main viewer UI. Gameplay logs (`/admin/gameplay-logs`)
 were folded into this tile's scope rather than getting their own. **System Info**
 is a sibling page reached from within this area (`renderAdminSystemInfoPage`,
-`drone.js` ~line 5322, `GET /admin/system-info?speed=1`): runtime/CPU/memory/disk
+`drone.js` ~line 5289, `GET /admin/system-info?speed=1`): runtime/CPU/memory/disk
 health, network fields, and the **Drone/PixeN self-update buttons**
 (`updateDroneApp()`/`runPixenUpdate()`, `drone.js` ~lines 1913-1941, routes
 `/admin/system/update-drone` and `/admin/system/run-pixen-update`) — these live
 on the System Info page, not a separate tile. Backend: `handlers_diagnostics.py`.
+System Info also now hosts an **Asset Cache** card (moved off the Integration
+page's Overmind tab): `renderAssetCachePanel(payload, false)` fed by
+`GET /admin/asset-cache`, refreshed via `window.refreshSystemInfoAssetCache`.
+`purgeAssetCache()`/`clearPendingAssetChanges()` check
+`window.location.hash === "#admin/system-info"` before calling that refresh hook
+(falling back to the standalone orphaned `#admin/asset-cache` route otherwise).
 
 ### Emulators
 
@@ -77,25 +83,76 @@ mobygames}/{search,apply}`; gamelist maintenance: `/admin/artwork/gamelist/
 
 ### Integration
 
-`renderIntegrationPage()` (`drone.js` line 3805) toggles the Overmind and Local
-Network integrations independently. Two sub-panels:
+**Consolidated onto one page** (`renderIntegrationPage()`, `drone.js` ~line 3800):
+a `btn-group bff-segmented` tab switcher ("Overmind" / "Local Network", state
+kept in `#admin/integration?tab=overmind|local_network` via `setIntegrationTab()`
++ `history.replaceState` — no full re-render on tab switch), and a single
+**Transfers** card below the tabs shared by both. The old separate
+`#admin/overmind` / `#admin/overmind/actions` / `#admin/local-network` pages are
+gone; the router redirects those hashes to `#admin/integration?tab=...` for
+old-link compatibility. Each tab's panel is **lazy-loaded** — only the tab shown
+on entry fetches its status/peers on page load; switching tabs fetches the other
+one for the first time via `setIntegrationTab()` (`integrationOvermindLoaded`/
+`integrationLocalLoaded` gate booleans) — this matters because Local Network's
+panel eagerly requests the first paired peer's assets, which you don't want
+firing just because someone opened the Overmind tab.
 
-- **Open Overmind Integration** — `renderOvermindIntegrationPanel()`
-  (`drone.js` line 4225): Configuration, Downloads, Asset Cache, and Processed
-  Actions cards. Routes: `/admin/integrations/overmind/{status,actions,config,
-  start,claim-ownership,swarm/connect,swarm/disconnect}`. Backend:
-  `handlers_overmind.py`. **Regression to watch for**: commit `68f7283`
-  ("Overmind integration page was being closed prematurely") fixed this panel
-  deleting its own Configuration card on open — a `panel.querySelector(".card
-  .log-card").remove()` call that fired unconditionally during render instead of
-  only on a genuine close. Any future change to this panel's render/refresh
-  lifecycle should re-check that opening it doesn't tear down its own DOM.
-- **Local Network integration** — `renderLocalNetworkIntegrationPanel()`
-  (`drone.js` line 3893): peer discovery, pairing-code rotation, per-peer
-  pair/forget, browsing a peer's ROM/BIOS/save/config/gameplay-history assets,
-  and bulk sync. Routes: `/admin/local-network/{status,discover,pairing-code/
-  rotate,peers/{id}/{pair,forget,assets},sync,sync-bulk}`. Backend:
-  `handlers_network.py`.
+**Both integrations are always on — no enable/disable toggle.** The old
+"Integration Enablement" card (two `form-switch` checkboxes posting to
+`/admin/network-mode`) is gone entirely, along with `setIntegrationEnabled()`.
+`renderIntegrationPage()` instead calls `GET /admin/network-mode` on every load
+and, if either flag is false, silently `POST`s `{overmind_enabled: true,
+local_network_enabled: true}` — a self-heal for any Drone still carrying an old
+exclusive/disabled mode from before this was toggleable (the backend's
+`local_network.py` mode model already supported `both` simultaneously; only the
+UI ever exposed a way to turn one off). Whether Overmind is actually *working*
+is now judged purely by the existing status pills (`Overmind: enabled/disabled`,
+`Overmind: linked/disconnected`, `Connected to Swarm: connected/pending/
+disconnected`), not a manual switch — a valid token + successful registration is
+what makes it "connected."
+
+- **Overmind tab** — `renderOvermindIntegrationPanel()` (`drone.js` ~line 4190):
+  Configuration card, then a collapsed-by-default **Processed Overmind Actions**
+  card (Bootstrap `.collapse`, `.collapse-caret` rotates via CSS on
+  `aria-expanded`, table given `.small-mono-table` so it reads at the same
+  font/size as System Logs/Emulators content — `.mono` + `0.72rem` — instead of
+  default table text). Routes: `/admin/integrations/overmind/{status,actions,
+  config,start,claim-ownership,swarm/connect,swarm/disconnect}`. Backend:
+  `handlers_overmind.py`. Downloads and Asset Cache cards that used to live here
+  were removed — Downloads merged into the shared Transfers card below the tabs;
+  Asset Cache moved to the System Info page (see below). `renderStatus()` now
+  renders **only the 3 status pills** — the old verbose field dump (Configured,
+  Integration Enabled, Machine ID, Action Polling, State, Drone Name,
+  Authorization Token, Requested At, Last Started At, Last Error, Certificate,
+  Swarm Drones, Notes, the "Last Swarm Snapshot" P2P-health block, and the
+  "Overmind communication is disabled" alert) was deleted outright — users only
+  want connected/pending/disconnected via the pills, not a raw field dump
+  (Machine ID etc. are already shown elsewhere: navbar chips, System Info page).
+  **Regression to watch for**: commit `68f7283` ("Overmind integration page was
+  being closed prematurely") fixed this panel deleting its own Configuration
+  card on open — a `panel.querySelector(".card.log-card").remove()` call that
+  fired unconditionally during render instead of only on a genuine close. Any
+  future change to this panel's render/refresh lifecycle should re-check that
+  opening it doesn't tear down its own DOM.
+- **Local Network tab** — `renderLocalNetworkIntegrationPanel()` (`drone.js`
+  ~line 3878): Pairing, Nearby Drones, and Request Assets from Connected Drone
+  cards — peer discovery, pairing-code rotation, per-peer pair/forget, browsing a
+  peer's ROM/BIOS/save/config/gameplay-history assets, and bulk sync. Routes:
+  `/admin/local-network/{status,discover,pairing-code/rotate,peers/{id}/
+  {pair,forget,assets},sync,sync-bulk}`. Backend: `handlers_network.py`. The
+  "Local Transfers" card that used to live here was removed (merged into the
+  shared Transfers card).
+- **Transfers card** (shared, not tab-scoped) — Active/Queued/Recent for **all**
+  drone-to-drone asset transfers to this machine, regardless of whether Overmind
+  or Local Network queued them (both write into the same backend
+  `DownloadManager` singleton, `/admin/downloads` — confirmed the old "Downloads"
+  card and "Local Transfers" card were rendering the exact same
+  `manager.snapshot()` data twice, just embedded via two different endpoints).
+  Renderer functions were renamed from `renderLocalTransferGroup`/
+  `renderLocalTransfersPanel`/etc. to the generic `renderTransferGroup`/
+  `renderTransfersPanel`/etc. since they're no longer Local-Network-specific.
+  Auto-refreshes every 3s while on `#admin/integration` via
+  `startTransfersAutoRefresh()`/`stopTransfersAutoRefresh()`.
 
 ### Automation
 
@@ -147,6 +204,11 @@ cancel/retry/clear (`/admin/downloads/{pause,resume,clear}`,
 - Forgetting the `admin_enabled` gate check when adding a new `admin/*` route.
 - Reintroducing the premature Overmind-integration-panel-close bug class when
   touching that panel's render/refresh lifecycle.
+- Eagerly loading both Integration tabs on page entry instead of lazily loading
+  the inactive one on first switch — Local Network's panel auto-requests the
+  first paired peer's assets, so loading it unconditionally fires an unwanted
+  (and, against an unreachable/offline peer, failing) network request every time
+  someone just wants the Overmind tab.
 - Filing a BIOS file under one system when it actually matches zero or
   multiple systems (must land in the shared/unassigned bucket instead).
 - Adding a log/config/emulator-file viewer route without validating the
