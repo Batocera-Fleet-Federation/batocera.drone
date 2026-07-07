@@ -1,5 +1,10 @@
 # Changelog
 
+## [v0.1.36] - 2026-07-07
+
+- Consolidating UIs for admin integration to be easier to follow and configure.
+- Adding more claude skills
+
 ## [v0.1.35] - 2026-07-07
 
 - Removed the installer’s read/write allowlist output. Installer now says Drone runs as root and does not rewrite ROM, BIOS, emulator, or Batocera config permissions. service_bootstrap.sh no longer chowns/chmods ROM folders, gamelist.xml, Batocera config, EmulationStation config, or emulator config paths. The old ROM permission repair control path remains compatible but is now a no-op because root does not need it. README security section now reflects root/full-access behavior.
