@@ -1,5 +1,10 @@
 # Changelog
 
+## [v0.1.31] - 2026-07-06
+
+- Updating UI to show systems & bios in a much cleaner way.
+- Bug fix: Overmind integration page was being closed prematurely.
+
 ## [v0.1.30] - 2026-07-06
 
 - Merge refactor/gamelist-source-of-truth: gamelist.xml as source of truth
