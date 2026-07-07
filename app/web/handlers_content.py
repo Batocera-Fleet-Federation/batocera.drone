@@ -380,6 +380,8 @@ class HandlersContentMixin:
         offset: int = 0,
         query: Optional[str] = None,
         system_filters: Optional[List[str]] = None,
+        system: Optional[str] = None,
+        unassigned: bool = False,
     ) -> None:
         cache, _ = _load_rom_metadata_cache(self.settings)
         cached_bios = cache.get("bios_entries") if isinstance(cache.get("bios_entries"), dict) else {}
@@ -429,6 +431,20 @@ class HandlersContentMixin:
         elif selected_systems:
             filtered = [item for item in filtered if _entry_system(item) in selected_systems]
 
+        # Real (accurate) system association, resolved at scan time against the vendored
+        # BIOS-md5 reference table -- distinct from the coarse folder-path heuristic above.
+        # `system` files to one known system; `unassigned` is the fallback bucket for BIOS
+        # with zero known systems (the common case) or more than one (legitimately shared).
+        clean_system = str(system or "").strip().lower()
+        if unassigned:
+            filtered = [item for item in filtered if len(item.get("systems") or []) != 1]
+        elif clean_system:
+            filtered = [
+                item
+                for item in filtered
+                if clean_system in {str(value).strip().lower() for value in (item.get("systems") or [])}
+            ]
+
         total = len(filtered)
         offset = max(0, offset)
         limit = max(1, min(limit, 5000))
@@ -443,7 +459,7 @@ class HandlersContentMixin:
         systems_filtered = sorted({_entry_system(item) for item in filtered})
         cache_key = (
             f"json:/bios?limit={limit}&offset={offset}&q={query_value}"
-            f"&systems={','.join(sorted(selected_systems))}"
+            f"&systems={','.join(sorted(selected_systems))}&system={clean_system}&unassigned={unassigned}"
         )
         self._send_json(
             200,

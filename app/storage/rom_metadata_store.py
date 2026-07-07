@@ -151,6 +151,8 @@ class BiosCacheRow:
     @classmethod
     def from_payload(cls, entry_key: str, payload: dict) -> "BiosCacheRow":
         file_path = _normalize_path(payload.get("file_path") or payload.get("relative_path") or payload.get("path") or payload.get("name"))
+        systems = payload.get("systems")
+        extra = {"systems": [str(value) for value in systems if str(value or "").strip()]} if isinstance(systems, list) else {}
         return cls(
             entry_key=entry_key,
             file_path=file_path,
@@ -160,7 +162,7 @@ class BiosCacheRow:
             file_size=_int(payload.get("file_size") or payload.get("byte_count") or payload.get("size")),
             modified_time=_int(payload.get("modified_time") or payload.get("mtime")),
             md5=_clean_optional(payload.get("bios_md5") or payload.get("md5")),
-            extra={},
+            extra=extra,
         )
 
     def to_payload(self) -> dict:

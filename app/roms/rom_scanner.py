@@ -24,6 +24,7 @@ try:
         _read_preserved_asset_fingerprint,
     )
     from .gamelist import _database_rom_metadata_fields
+    from .rom_asset_bios import bios_systems_for_md5
     from .rom_inventory import _bios_cache_entry_key, _rom_cache_entry_key, _wire_rom_rows
     from .rom_metadata_state import _build_rom_metadata_snapshot_from_cache
 except ImportError:  # pragma: no cover - direct script execution fallback
@@ -36,6 +37,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         _read_preserved_asset_fingerprint,
     )
     from roms.gamelist import _database_rom_metadata_fields  # type: ignore
+    from roms.rom_asset_bios import bios_systems_for_md5  # type: ignore
     from roms.rom_inventory import _bios_cache_entry_key, _rom_cache_entry_key, _wire_rom_rows  # type: ignore
     from roms.rom_metadata_state import _build_rom_metadata_snapshot_from_cache  # type: ignore
 
@@ -280,7 +282,12 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
                 if kept and kept.get("md5") and kept.get("file_size") == stat_size and kept.get("modified_time") == stat_mtime:
                     reuse_bios_md5 = kept["md5"]
             if reuse_bios_md5:
-                next_bios_entries[key] = {**base_entry, "md5": reuse_bios_md5, "bios_md5": (previous.get("bios_md5") if previous else None) or reuse_bios_md5}
+                next_bios_entries[key] = {
+                    **base_entry,
+                    "md5": reuse_bios_md5,
+                    "bios_md5": (previous.get("bios_md5") if previous else None) or reuse_bios_md5,
+                    "systems": bios_systems_for_md5(reuse_bios_md5),
+                }
             else:
                 next_bios_entries[key] = base_entry
                 bios_new_or_changed.append((key, bios_path, base_entry))
@@ -310,7 +317,12 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
         for bios_index, (key, absolute, entry) in enumerate(bios_new_or_changed, start=1):
             # BIOS uses a full-file MD5 (exact emulator identity), not the sampled ROM fingerprint.
             md5_value = RomRepository.build_md5(absolute)
-            next_bios_entries[key] = {**entry, "md5": md5_value, "bios_md5": md5_value}
+            next_bios_entries[key] = {
+                **entry,
+                "md5": md5_value,
+                "bios_md5": md5_value,
+                "systems": bios_systems_for_md5(md5_value),
+            }
             now = time.monotonic()
             if bios_index == len(bios_new_or_changed) or bios_index % max(1, ROM_METADATA_PROGRESS_FILES) == 0 or now - last_log >= ROM_METADATA_PROGRESS_SECONDS:
                 checkpoint_scan("bios_md5", force=True)

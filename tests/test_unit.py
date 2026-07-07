@@ -2763,6 +2763,80 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(result["bios"][0]["path"], "dc/flash.bin")
             self.assertTrue(result["bios"][0]["bios_md5"])
 
+    def test_collect_rom_metadata_attaches_known_bios_system(self) -> None:
+        import app.roms.rom_asset_bios as rom_asset_bios
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            bios = root / "bios" / "known.bin"
+            bios.parent.mkdir(parents=True)
+            bios.write_bytes(b"known-bios-data")
+            known_md5 = hashlib.md5(b"known-bios-data").hexdigest()
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
+                clear=True,
+            ):
+                settings = Settings.from_env()
+
+            with mock.patch.object(rom_asset_bios, "_BIOS_SYSTEM_MAP", {known_md5: ["psx"]}):
+                result = _collect_rom_metadata(settings, RomRepository(settings.roms_root, settings.bios_root))
+            self.assertEqual(result["bios"][0]["systems"], ["psx"])
+
+    def test_collect_rom_metadata_unknown_bios_has_no_systems(self) -> None:
+        import app.roms.rom_asset_bios as rom_asset_bios
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            bios = root / "bios" / "unknown.bin"
+            bios.parent.mkdir(parents=True)
+            bios.write_bytes(b"unrecognized-bios-data")
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
+                clear=True,
+            ):
+                settings = Settings.from_env()
+
+            with mock.patch.object(rom_asset_bios, "_BIOS_SYSTEM_MAP", {}):
+                result = _collect_rom_metadata(settings, RomRepository(settings.roms_root, settings.bios_root))
+            self.assertEqual(result["bios"][0]["systems"], [])
+
+    def test_poll_rom_metadata_cache_attaches_bios_systems_fresh_and_reused(self) -> None:
+        import app.roms.rom_asset_bios as rom_asset_bios
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            bios = root / "bios" / "known.bin"
+            bios.parent.mkdir(parents=True)
+            bios.write_bytes(b"known-bios-data")
+            known_md5 = hashlib.md5(b"known-bios-data").hexdigest()
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            repo = RomRepository(settings.roms_root, settings.bios_root)
+
+            with mock.patch.object(rom_asset_bios, "_BIOS_SYSTEM_MAP", {known_md5: ["psx"]}):
+                # First poll: BIOS is new, so the md5 gets freshly hashed (rom_scanner's
+                # bios_new_or_changed branch) -- systems must be attached there too.
+                snapshot, changed, stats = _poll_rom_metadata_cache(settings, repo)
+                self.assertTrue(changed)
+                self.assertEqual(stats["bios_new_or_changed"], 1)
+                self.assertEqual(snapshot["bios"][0]["systems"], ["psx"])
+                cache_data, _ = _load_rom_metadata_cache(settings)
+                cache_data["dirty"] = False
+                _persist_rom_metadata_cache(settings, cache_data)
+
+                # Second poll: file unchanged (same size/mtime) -> md5 is reused, not
+                # re-hashed (rom_scanner's reuse branch) -- systems must still be attached.
+                with mock.patch.object(RomRepository, "build_md5", side_effect=AssertionError("unchanged BIOS should not re-hash")):
+                    snapshot, changed, stats = _poll_rom_metadata_cache(settings, repo)
+                self.assertFalse(changed)
+                self.assertEqual(snapshot["bios"][0]["systems"], ["psx"])
+
     def test_collect_asset_metadata_includes_artwork_types_from_gamelist(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"

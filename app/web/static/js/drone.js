@@ -77,6 +77,10 @@ let selectedSystemsTreeCategory = null;
 let systemsTreeRomPages = {};
 let systemsTreeBiosSummary = { total: 0, loading: false, error: false };
 let systemsTreeBiosPage = { bios: [], total: 0, nextOffset: 0, loading: false, error: false };
+// Per-system BIOS pagination (the "BIOS" category under each system, filtered to that
+// system's known BIOS files) -- distinct from systemsTreeBiosPage, which backs the
+// top-level "Shared / Unassigned BIOS" root.
+let systemsTreeSystemBiosPages = {};
 let filterDropdownGlobalCloseBound = false;
 let filterDropdownState = {};
 let themeFilterInitialized = false;
@@ -836,6 +840,8 @@ function renderSystems(data) {
   bindSystemsTreeToolbar();
   if (selectedSystemsTreeRoot === BIOS_TREE_ROOT) {
     renderBiosTreeFiles();
+  } else if (selectedSystemsTreeRoot && selectedSystemsTreeCategory === "bios") {
+    renderSystemBiosTreeFiles(selectedSystemsTreeRoot);
   } else if (selectedSystemsTreeRoot) {
     renderSystemTreeFiles(selectedSystemsTreeRoot);
   }
@@ -863,7 +869,14 @@ function renderSystemTreeRoot(system) {
             </div>
             <div class="tree-grid-meta">${romCount.toLocaleString()} files</div>
           </button>
-          <div id="tree-files-${cssSafeId(name)}" class="tree-files"></div>
+          ${selectedSystemsTreeCategory === "games" ? `<div id="tree-files-${cssSafeId(name)}" class="tree-files"></div>` : ""}
+          <button type="button" class="tree-grid-row tree-category-row ${selectedSystemsTreeCategory === "bios" ? "is-active" : ""}" onclick="selectSystemTreeCategory(${jsAttr(name)}, 'bios')">
+            <div class="tree-grid-main">
+              <i class="bi bi-cpu tree-grid-icon"></i>
+              <div class="tree-grid-label"><span class="fw-semibold">BIOS</span></div>
+            </div>
+          </button>
+          ${selectedSystemsTreeCategory === "bios" ? `<div id="tree-system-bios-files-${cssSafeId(name)}" class="tree-files"></div>` : ""}
         </div>
       ` : ""}
     </div>
@@ -877,7 +890,7 @@ function renderBiosTreeRoot(total) {
         <div class="tree-grid-main">
           <i class="bi ${active ? "bi-chevron-down" : "bi-chevron-right"} tree-grid-caret"></i>
           <i class="bi bi-folder2${active ? "-open" : ""} tree-grid-icon"></i>
-          <div class="tree-grid-label"><span class="fw-semibold">BIOS</span></div>
+          <div class="tree-grid-label"><span class="fw-semibold">Shared / Unassigned BIOS</span></div>
         </div>
         <div class="tree-grid-meta">${Number(total || 0).toLocaleString()} files</div>
       </button>
@@ -906,6 +919,7 @@ function bindSystemsTreeToolbar() {
     selectedSystemsTreeCategory = null;
     systemsTreeRomPages = {};
     systemsTreeBiosPage = { bios: [], total: 0, nextOffset: 0, loading: false, error: false };
+    systemsTreeSystemBiosPages = {};
     updateSystemsTreeHash();
     renderSystemsPage();
   };
@@ -931,7 +945,7 @@ function systemTreeState(system) {
   }
   return systemsTreeRomPages[key];
 }
-function selectSystemTreeRoot(system) {
+function selectSystemTreeRoot(system, category = "games") {
   if (selectedSystemsTreeRoot === system) {
     selectedSystemsTreeRoot = null;
     selectedSystemsTreeCategory = null;
@@ -940,11 +954,15 @@ function selectSystemTreeRoot(system) {
     return;
   }
   selectedSystemsTreeRoot = system;
-  selectedSystemsTreeCategory = "games";
-  systemsTreeRomPages[system] = { roms: [], total: 0, nextOffset: 0, loading: true, error: false };
+  selectedSystemsTreeCategory = category;
   updateSystemsTreeHash();
   renderSystems(systemsTreeData);
-  loadSystemTreeFiles(system, { reset: true });
+  if (category === "bios") {
+    loadSystemBiosTreeFiles(system, { reset: true });
+  } else {
+    systemsTreeRomPages[system] = { roms: [], total: 0, nextOffset: 0, loading: true, error: false };
+    loadSystemTreeFiles(system, { reset: true });
+  }
 }
 function selectBiosTreeRoot() {
   if (selectedSystemsTreeRoot === BIOS_TREE_ROOT) {
@@ -962,7 +980,7 @@ function selectBiosTreeRoot() {
   loadBiosTreeFiles({ reset: true });
 }
 function selectSystemTreeCategory(root, category) {
-  if (root === BIOS_TREE_ROOT || category === "bios") {
+  if (root === BIOS_TREE_ROOT) {
     if (selectedSystemsTreeRoot !== BIOS_TREE_ROOT) {
       selectBiosTreeRoot();
       return;
@@ -973,12 +991,27 @@ function selectSystemTreeCategory(root, category) {
     return;
   }
   if (selectedSystemsTreeRoot !== root) {
-    selectSystemTreeRoot(root);
+    selectSystemTreeRoot(root, category);
     return;
   }
-  selectedSystemsTreeCategory = "games";
+  if (selectedSystemsTreeCategory === category) {
+    return;
+  }
+  // Capture "already loaded" BEFORE re-rendering: renderSystems()'s trailing dispatch
+  // calls renderSystemBiosTreeFiles/renderSystemTreeFiles, whose state-lookup helpers
+  // lazily create an empty entry as a side effect -- checking hasOwnProperty *after*
+  // that render would always see the just-created entry and wrongly skip the fetch.
+  const alreadyLoadedBios = Object.prototype.hasOwnProperty.call(systemsTreeSystemBiosPages, root);
+  const alreadyLoadedGames = Object.prototype.hasOwnProperty.call(systemsTreeRomPages, root);
+  selectedSystemsTreeCategory = category;
   updateSystemsTreeHash();
   renderSystems(systemsTreeData);
+  if (category === "bios" && !alreadyLoadedBios) {
+    loadSystemBiosTreeFiles(root, { reset: true });
+  } else if (category === "games" && !alreadyLoadedGames) {
+    systemsTreeRomPages[root] = { roms: [], total: 0, nextOffset: 0, loading: true, error: false };
+    loadSystemTreeFiles(root, { reset: true });
+  }
 }
 async function loadSystemTreeFiles(system, options = {}) {
   if (!system) return;
@@ -991,7 +1024,7 @@ async function loadSystemTreeFiles(system, options = {}) {
   renderSystemTreeFiles(system);
   try {
     const payload = await getSystemRomPage(system, offset, systemsTreeQuery);
-    if (selectedSystemsTreeRoot !== system) {
+    if (selectedSystemsTreeRoot !== system || selectedSystemsTreeCategory !== "games") {
       if (systemsTreeRomPages[system]) systemsTreeRomPages[system] = { ...systemsTreeRomPages[system], loading: false };
       return;
     }
@@ -1016,6 +1049,7 @@ async function loadBiosTreeSummary() {
     const params = new URLSearchParams();
     params.set("limit", "1");
     params.set("offset", "0");
+    params.set("unassigned", "true");
     if ((systemsTreeQuery || "").trim()) params.set("q", systemsTreeQuery.trim());
     const payload = await api(`/bios?${params.toString()}`);
     systemsTreeBiosSummary = { total: Number(payload.count || 0), loading: false, error: false };
@@ -1036,6 +1070,7 @@ async function loadBiosTreeFiles(options = {}) {
     const params = new URLSearchParams();
     params.set("limit", String(TREE_FILE_LOAD_SIZE));
     params.set("offset", String(offset));
+    params.set("unassigned", "true");
     if ((systemsTreeQuery || "").trim()) params.set("q", systemsTreeQuery.trim());
     const payload = await api(`/bios?${params.toString()}`);
     if (selectedSystemsTreeRoot !== BIOS_TREE_ROOT) {
@@ -1149,6 +1184,97 @@ function renderBiosTreeFiles() {
       <div class="tree-grid-more">
         <span class="small text-muted">${total ? `Showing ${loaded.toLocaleString()} of ${total.toLocaleString()}` : "No BIOS files reported"}</span>
         <button class="btn btn-outline-primary btn-sm" type="button" ${!hasMore || payload.loading ? "disabled" : ""} onclick="loadBiosTreeFiles({ reset: false })">
+          ${payload.loading && loaded ? '<span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>' : '<i class="bi bi-plus-circle me-1"></i>'}
+          Show more
+        </button>
+      </div>
+    `;
+}
+function systemBiosTreeState(system) {
+  const key = String(system || "");
+  if (!systemsTreeSystemBiosPages[key]) {
+    systemsTreeSystemBiosPages[key] = { bios: [], total: 0, nextOffset: 0, loading: false, error: false };
+  }
+  return systemsTreeSystemBiosPages[key];
+}
+async function loadSystemBiosTreeFiles(system, options = {}) {
+  if (!system) return;
+  const reset = options.reset === true;
+  const state = reset ? { bios: [], total: 0, nextOffset: 0, loading: false, error: false } : systemBiosTreeState(system);
+  if (!reset && state.loading) return;
+  const existingRows = reset ? [] : (state.bios || []);
+  const offset = reset ? 0 : Number(state.nextOffset ?? existingRows.length);
+  systemsTreeSystemBiosPages[system] = { ...state, bios: existingRows, loading: true, error: false };
+  renderSystemBiosTreeFiles(system);
+  try {
+    const params = new URLSearchParams();
+    params.set("limit", String(TREE_FILE_LOAD_SIZE));
+    params.set("offset", String(offset));
+    params.set("system", system);
+    if ((systemsTreeQuery || "").trim()) params.set("q", systemsTreeQuery.trim());
+    const payload = await api(`/bios?${params.toString()}`);
+    if (selectedSystemsTreeRoot !== system || selectedSystemsTreeCategory !== "bios") {
+      if (systemsTreeSystemBiosPages[system]) systemsTreeSystemBiosPages[system] = { ...systemsTreeSystemBiosPages[system], loading: false };
+      return;
+    }
+    const rows = payload.bios || [];
+    const loadedRows = reset ? rows : [...(systemsTreeSystemBiosPages[system]?.bios || []), ...rows];
+    systemsTreeSystemBiosPages[system] = {
+      bios: loadedRows,
+      total: Number(payload.count ?? loadedRows.length),
+      nextOffset: offset + rows.length,
+      loading: false,
+      error: false,
+    };
+  } catch (error) {
+    console.error("Error loading system BIOS tree files:", error);
+    systemsTreeSystemBiosPages[system] = { ...state, bios: existingRows, total: Number(state.total || 0), nextOffset: offset, loading: false, error: true };
+  }
+  renderSystemBiosTreeFiles(system);
+}
+function renderSystemBiosTreeFiles(system) {
+  const target = document.getElementById(`tree-system-bios-files-${cssSafeId(system)}`);
+  if (!target) return;
+  const payload = systemBiosTreeState(system);
+  const rows = payload.bios || [];
+  const total = Number(payload.total || rows.length);
+  const loaded = rows.length;
+  const hasMore = loaded < total;
+  const firstLoad = payload.loading && !loaded;
+  target.innerHTML = firstLoad
+    ? '<div class="tree-grid-empty small text-muted">Loading first 10 BIOS files...</div>'
+    : `
+      ${payload.error ? '<div class="alert alert-danger py-2 small mb-2">Unable to load BIOS files.</div>' : ''}
+      <div class="tree-leaf-list">
+        ${rows.map((item) => {
+          const path = item.path || item.name || "";
+          const label = item.name || path;
+          const fingerprint = item.bios_md5 || item.md5 || item.fingerprint || "";
+          const tooltip = fingerprint ? `${path} · ${fingerprint}` : path;
+          const size = item.byte_count !== undefined ? formatBytes(item.byte_count) : "n/a";
+          return `
+            <div class="tree-grid-row tree-leaf-row">
+              <div class="tree-grid-main">
+                <i class="bi bi-cpu tree-grid-icon"></i>
+                <div class="tree-grid-label text-truncate" title="${escapeHtml(tooltip)}">
+                  <span class="fw-semibold">${escapeHtml(label)}</span>
+                </div>
+              </div>
+              <div class="tree-grid-meta">${escapeHtml(size)}</div>
+              <div class="tree-grid-action">
+                ${
+                  item.is_downloadable === false
+                    ? `<button class="btn btn-secondary btn-sm" type="button" title="Disabled" disabled><i class="bi bi-slash-circle"></i></button>`
+                    : `<a class="btn btn-primary btn-sm" title="Download" href="${biosDownloadUrl(item.unique_id)}"><i class="bi bi-download"></i></a>`
+                }
+              </div>
+            </div>
+          `;
+        }).join("") || '<div class="tree-grid-empty small text-muted">No BIOS files found for this system.</div>'}
+      </div>
+      <div class="tree-grid-more">
+        <span class="small text-muted">${total ? `Showing ${loaded.toLocaleString()} of ${total.toLocaleString()}` : "No BIOS files reported"}</span>
+        <button class="btn btn-outline-primary btn-sm" type="button" ${!hasMore || payload.loading ? "disabled" : ""} onclick="loadSystemBiosTreeFiles(${jsAttr(system)}, { reset: false })">
           ${payload.loading && loaded ? '<span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>' : '<i class="bi bi-plus-circle me-1"></i>'}
           Show more
         </button>

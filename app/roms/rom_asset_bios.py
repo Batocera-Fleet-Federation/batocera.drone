@@ -6,6 +6,7 @@ BIOS file by unique-id. Composed onto ``RomRepository`` (methods stay ``self``-b
 """
 
 import hashlib
+import json
 import os
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -18,6 +19,37 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from common.http_cache import valid_segment  # type: ignore
     from storage.rom_metadata_store import _load_rom_metadata_cache, list_rom_rows_by_system, rom_cache_ready  # type: ignore
     from roms.rom_metadata_state import _build_rom_metadata_snapshot_from_cache  # type: ignore
+
+
+_BIOS_SYSTEM_MAP_PATH = Path(__file__).resolve().parent / "data" / "bios_system_map.json"
+_BIOS_SYSTEM_MAP: Optional[dict] = None
+
+
+def _load_bios_system_map() -> dict:
+    """Load the vendored BIOS-md5 -> system_name(s) reference table once (see
+    ``data/bios_system_map.json`` for provenance). Missing/corrupt file degrades to an
+    empty map (every BIOS just reports no known system) rather than failing a scan."""
+    global _BIOS_SYSTEM_MAP
+    if _BIOS_SYSTEM_MAP is None:
+        try:
+            with _BIOS_SYSTEM_MAP_PATH.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            _BIOS_SYSTEM_MAP = data.get("md5_to_systems") if isinstance(data.get("md5_to_systems"), dict) else {}
+        except Exception:
+            _BIOS_SYSTEM_MAP = {}
+    return _BIOS_SYSTEM_MAP
+
+
+def bios_systems_for_md5(md5: Optional[str]) -> List[str]:
+    """Return the system_name(s) a BIOS file with this MD5 is known to belong to, per
+    the vendored reference table. Empty when the MD5 is unknown or ambiguous-free info
+    isn't available -- most BIOS files won't match (the flat majority aren't in the
+    reference set), which is expected, not an error."""
+    key = str(md5 or "").strip().lower()
+    if not key:
+        return []
+    systems = _load_bios_system_map().get(key)
+    return list(systems) if isinstance(systems, list) else []
 
 
 class RomAssetBiosMixin:
@@ -149,6 +181,7 @@ class RomAssetBiosMixin:
                     "byte_count": size,
                     "md5": bios_md5,
                     "bios_md5": bios_md5,
+                    "systems": bios_systems_for_md5(bios_md5),
                 }
             )
 

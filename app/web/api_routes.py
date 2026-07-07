@@ -154,6 +154,8 @@ class ApiRoutesMixin:
                 query = query_params.get("q", [None])[0]
                 systems_raw = query_params.get("systems", [None])[0]
                 system_filters = [part.strip() for part in (systems_raw or "").split(",") if part.strip()]
+                system = query_params.get("system", [None])[0]
+                unassigned = query_params.get("unassigned", ["false"])[0].strip().lower() in {"1", "true", "yes"}
                 try:
                     limit = int(limit_raw)
                 except Exception:
@@ -162,7 +164,14 @@ class ApiRoutesMixin:
                     offset = int(offset_raw)
                 except Exception:
                     offset = 0
-                self._handle_bios_list(limit=limit, offset=offset, query=query, system_filters=system_filters)
+                self._handle_bios_list(
+                    limit=limit,
+                    offset=offset,
+                    query=query,
+                    system_filters=system_filters,
+                    system=system,
+                    unassigned=unassigned,
+                )
                 return
 
             if len(parts) == 2 and parts[0] == "systems":
