@@ -32,8 +32,8 @@ echo ""
 mkdir -p "$WORK_DIR"
 
 echo ""
-echo "Root-owned permissions are applied at service startup via"
-echo "the ensure_permissions() function in DRONE_SERVER."
+echo "Drone runs as root. The service startup only creates Drone runtime directories;"
+echo "it does not rewrite ROM, BIOS, emulator, or Batocera config permissions."
 
 if [ "$USE_LEGACY_METHOD" = false ]; then
   echo ""
@@ -51,7 +51,7 @@ if [ "$USE_LEGACY_METHOD" = false ]; then
 # All service-side logic lives in the versioned app bundle at
 # app/service_bootstrap.sh, which auto-updates with every Drone release. This
 # shim only ensures that bundle is present and then delegates to it, so
-# service-side changes (root-owned permissions, privileged controls, and the
+# service-side changes (runtime directory setup, privileged controls, and the
 # supervisor) apply automatically on the next service restart
 # without re-running batocera_install.sh on each machine.
 
@@ -116,8 +116,6 @@ SERVICEBLOCK
       DRONE_APP_ARCHIVE_URL="${DRONE_APP_ARCHIVE_URL:-https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/drone-app.tar.gz}" \
       bash "$RUNNER"
     rm -f "$RUNNER"
-    chown -R root:root "$WORK_DIR" 2>/dev/null || true
-    chmod -R 755 "$WORK_DIR" 2>/dev/null || true
     echo "✓ Updated Drone app bundle in $WORK_DIR"
     if [ "$APP_WAS_RUNNING" = true ]; then
       echo "Restarting Drone service with updated app bundle..."
@@ -176,21 +174,9 @@ fi
 echo ""
 echo "Installation complete!"
 echo ""
-echo "Drone runs as root and can read:"
-echo "  /userdata/system/configs/PCSX2/**"
-echo ""
-echo "Drone runs as root and can write to:"
-echo "  /userdata/roms/*/images/"
-echo "  /userdata/roms/*/videos/"
-echo "  /userdata/roms/*/manuals/"
-echo "  /userdata/roms/*/{downloaded_images,covers,media}/"
-echo "  /userdata/roms/*/gamelist.xml"
-echo "  /userdata/system/drone-app/"
-echo "  /userdata/system/drone-app/certs/"
-echo "  /userdata/system/certs/"
-echo "  /userdata/system/logs/drone-app/"
-echo ""
-echo "ROM files and Batocera system config remain guarded by Drone application logic."
+echo "Drone runs as root and can access Batocera files as root."
+echo "The installer does not maintain a read/write allowlist or rewrite ROM,"
+echo "BIOS, emulator, or Batocera config permissions."
 
 # Show the exact local URL the Drone resolves at, front and center, so the user
 # knows precisely where to open it from any device on their network.

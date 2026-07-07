@@ -2,14 +2,13 @@
 # Versioned Drone service bootstrap.
 #
 # This script lives in the auto-updating app bundle (app/) and contains ALL of
-# the service-side logic: root-owned filesystem permissions, DNS/port
-# preparation, privileged controls (Kiosk/volume/restart), and the Drone app
-# supervisor. The installed /userdata/system/services/DRONE_SERVER is a thin shim
-# that only ensures the bundle is present and then delegates here, so new Drone
-# releases apply their service-side changes automatically on the next service
-# restart -- no need to re-run batocera_install.sh on every machine.
+# the service-side logic: runtime directory setup, DNS preparation, privileged
+# controls (Kiosk/volume/restart), and the Drone app supervisor. The installed
+# /userdata/system/services/DRONE_SERVER is a thin shim that only ensures the
+# bundle is present and then delegates here, so new Drone releases apply their
+# service-side changes automatically on the next service restart -- no need to
+# re-run batocera_install.sh on every machine.
 
-DRONE_GROUP="root"
 WORK_DIR="/userdata/system/drone-app"
 ACTION="$1"
 PID_FILE="/tmp/drone-server.pid"
@@ -19,54 +18,13 @@ CONTROL_DIR="/userdata/system/drone-app/control"
 INPUT_ACTIVITY_FILE="/userdata/system/drone-app/control/last-input-activity"
 STARTUP_LOG="/userdata/system/logs/drone-app/startup.log"
 
-# Media subdirectories where scraped/peer-copied artwork lands. Artwork fields map
-# to these: images (image/thumbnail/marquee/boxart/wheel/fanart), videos (video),
-# manuals (manual). The others are included so existing scraper layouts also work.
-DRONE_ROM_MEDIA_DIRS="images videos manuals downloaded_images covers media"
-
-# Make a single ROM system writable enough for the root-run Drone to place
-# peer-copied artwork (in any media subdir) and update gamelist.xml. Cheap
-# (creates/chmods the media dirs themselves + gamelist, no recursive per-file
-# walk) -- safe to run for every system on each boot and on demand from the
-# control worker.
-ensure_rom_write_access() {
-  romdir="$1"
-  [ -d "$romdir" ] || return 0
-
-  chown root:"$DRONE_GROUP" "$romdir" 2>/dev/null || true
-  chmod 2775 "$romdir" 2>/dev/null || true
-
-  for subdir in $DRONE_ROM_MEDIA_DIRS; do
-    target="${romdir}/${subdir}"
-    mkdir -p "$target" 2>/dev/null || true
-    chown root:"$DRONE_GROUP" "$target" 2>/dev/null || true
-    chmod 2775 "$target" 2>/dev/null || true
-  done
-
-  gamelist="${romdir}/gamelist.xml"
-  if [ -f "$gamelist" ]; then
-    chown root:"$DRONE_GROUP" "$gamelist" 2>/dev/null || true
-    chmod 664 "$gamelist" 2>/dev/null || true
-  fi
-}
-
-# Apply ensure_rom_write_access to one system (by name) or, when no name is
-# given, every ROM system directory.
 ensure_rom_write_access_all() {
-  target_system="$1"
-  if [ -n "$target_system" ]; then
-    ensure_rom_write_access "/userdata/roms/${target_system}"
-    return 0
-  fi
-  # -L follows symlinks so systems whose folder is a symlink to an external
-  # drive (e.g. snes -> /media/roms_retro/...) are repaired too.
-  find -L /userdata/roms -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while read romdir; do
-    ensure_rom_write_access "$romdir"
-  done
+  echo "[drone-service] Drone runs as root; ROM permission repair is not required."
+  return 0
 }
 
 ensure_permissions() {
-  echo "[drone-service] Applying filesystem permissions..."
+  echo "[drone-service] Ensuring Drone runtime directories..."
 
   mkdir -p \
     /userdata/system/drone-app \
@@ -77,96 +35,15 @@ ensure_permissions() {
     /userdata/system/certs \
     /userdata/system/logs/drone-app
 
-  chown -R root:"$DRONE_GROUP" \
-    /userdata/system/drone-app \
-    /userdata/system/certs \
-    /userdata/system/logs/drone-app 2>/dev/null || true
-
-  chmod -R 775 \
-    /userdata/system/drone-app \
-    "$CONTROL_DIR" \
-    /userdata/system/certs \
-    /userdata/system/logs/drone-app 2>/dev/null || true
-
-  chown root:root /userdata/system/drone-app/rom_metadata_cache.sqlite3* 2>/dev/null || true
-  chmod 600 /userdata/system/drone-app/rom_metadata_cache.sqlite3* 2>/dev/null || true
-
-  chmod o+rx /userdata/system 2>/dev/null || true
-  chmod o+rx /userdata/system/configs 2>/dev/null || true
-
-  # Drone manages EmulationStation settings for remote Kiosk mode actions.
-  mkdir -p /userdata/system/configs/emulationstation 2>/dev/null || true
-  chown root:"$DRONE_GROUP" /userdata/system/configs/emulationstation 2>/dev/null || true
-  chmod 2775 /userdata/system/configs/emulationstation 2>/dev/null || true
-  if [ -f /userdata/system/configs/emulationstation/es_settings.cfg ]; then
-    chown root:"$DRONE_GROUP" /userdata/system/configs/emulationstation/es_settings.cfg 2>/dev/null || true
-    chmod 664 /userdata/system/configs/emulationstation/es_settings.cfg 2>/dev/null || true
-  fi
-
-  if [ -d /userdata/system/configs/PCSX2 ]; then
-    chmod -R o+rX /userdata/system/configs/PCSX2 2>/dev/null || true
-  fi
-
   # Gameplay event spool. Drone's procfs monitor writes one file per game
   # start/stop here and drains it after successful Overmind delivery.
   mkdir -p /userdata/system/drone-app/game-events 2>/dev/null || true
-  chown root:"$DRONE_GROUP" /userdata/system/drone-app/game-events 2>/dev/null || true
-  chmod 2775 /userdata/system/drone-app/game-events 2>/dev/null || true
 
   # Remove the legacy EmulationStation hook. Gameplay detection now watches
   # emulatorlauncher directly through /proc from the Drone process.
   rm -f /userdata/system/scripts/drone-game-event.sh 2>/dev/null || true
 
-  repair_rom_content_permissions() {
-    romdir="$1"
-    [ -d "$romdir" ] || return 0
-    system_name="$(basename "$romdir")"
-
-    chown root:"$DRONE_GROUP" "$romdir" 2>/dev/null || true
-    chmod 2775 "$romdir" 2>/dev/null || true
-
-    for subdir in images videos manuals downloaded_images covers media; do
-      target="${romdir}/${subdir}"
-      mkdir -p "$target"
-      chown root:"$DRONE_GROUP" "$target" 2>/dev/null || true
-      chmod 2775 "$target" 2>/dev/null || true
-      find "$target" -type d -exec chown root:"$DRONE_GROUP" {} \; -exec chmod 2775 {} \; 2>/dev/null || true
-      find "$target" -type f -exec chown root:"$DRONE_GROUP" {} \; -exec chmod 664 {} \; 2>/dev/null || true
-    done
-
-    gamelist="${romdir}/gamelist.xml"
-    if [ -f "$gamelist" ]; then
-      chown root:"$DRONE_GROUP" "$gamelist" 2>/dev/null || true
-      chmod 664 "$gamelist" 2>/dev/null || true
-    fi
-
-    if [ -d "$romdir" ] && [ ! -f "$gamelist" ]; then
-      touch "$gamelist" 2>/dev/null || true
-      if [ -f "$gamelist" ] && [ ! -s "$gamelist" ]; then
-        printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' '<gameList />' > "$gamelist" 2>/dev/null || true
-      fi
-      chown root:"$DRONE_GROUP" "$gamelist" 2>/dev/null || true
-      chmod 664 "$gamelist" 2>/dev/null || true
-    fi
-  }
-
-  if [ "${DRONE_REPAIR_ROM_PERMISSIONS:-0}" = "1" ]; then
-    find /userdata/roms -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while read romdir; do
-      repair_rom_content_permissions "$romdir"
-    done
-  else
-    # Cheap, ungated per-system write access: top-level dir + images/ + an
-    # existing gamelist.xml become group-writable so the Drone can copy peer
-    # artwork and link it in gamelist.xml. The full recursive repair (every
-    # asset file) stays behind DRONE_REPAIR_ROM_PERMISSIONS=1.
-    ensure_rom_write_access_all
-    echo "[drone-service] Applied lightweight ROM write access (images/ + gamelist.xml); set DRONE_REPAIR_ROM_PERMISSIONS=1 for full recursive repair."
-  fi
-
-  chown root:"$DRONE_GROUP" /userdata/system/batocera.conf 2>/dev/null || true
-  chmod 664 /userdata/system/batocera.conf 2>/dev/null || true
-
-  echo "[drone-service] ✓ Permissions applied"
+  echo "[drone-service] ✓ Runtime directories ready"
 }
 
 ensure_dns_fallback() {
@@ -351,9 +228,8 @@ service_control_worker() {
     # disappear, or after a bundle update ships a new helper).
     start_input_activity_monitor
     # If the bundle's service_bootstrap.sh changed under us (an app self-update
-    # shipped a new service layer), re-exec into it so new root-side logic --
-    # permission repair, new control commands -- takes effect without waiting for
-    # a full DRONE_SERVER restart.
+    # shipped a new service layer), re-exec into it so new root-side logic and
+    # control commands take effect without waiting for a full DRONE_SERVER restart.
     if [ "$(_script_signature)" != "$worker_script_sig" ]; then
       echo "[drone-service] Service bundle changed; re-execing control worker to adopt the update."
       # Stop the monitor so the re-exec'd worker starts the (possibly updated) helper.
@@ -383,8 +259,6 @@ service_control_worker() {
           printf 'Privileged screen mode %s operation failed: %s\n' "$mode" "$(printf '%s' "$helper_output" | tr '\n' ' ' | cut -c1-300)" > "$result"
         fi
         echo "[drone-service] Screen mode ${mode} result: ${helper_output}"
-        chown root:"$DRONE_GROUP" "$result" 2>/dev/null || true
-        chmod 664 "$result" 2>/dev/null || true
       fi
     done
     perm_request="$CONTROL_DIR/repair-rom-permissions.request"
@@ -393,14 +267,12 @@ service_control_worker() {
       # First line (optional) names a single system; empty means all systems.
       perm_system="$(head -n 1 "$perm_request" 2>/dev/null | tr -d '\r\n' | tr -cd 'A-Za-z0-9._-')"
       rm -f "$perm_request" "$perm_result"
-      echo "[drone-service] ROM write-access repair requested by Drone app (system='${perm_system:-all}')."
+      echo "[drone-service] ROM permission request ignored because Drone runs as root (system='${perm_system:-all}')."
       if perm_output="$(ensure_rom_write_access_all "$perm_system" 2>&1)"; then
         printf '%s\n' "ok" > "$perm_result"
       else
-        printf 'ROM permission repair failed: %s\n' "$(printf '%s' "$perm_output" | tr '\n' ' ' | cut -c1-300)" > "$perm_result"
+        printf 'ROM permission check failed: %s\n' "$(printf '%s' "$perm_output" | tr '\n' ' ' | cut -c1-300)" > "$perm_result"
       fi
-      chown root:"$DRONE_GROUP" "$perm_result" 2>/dev/null || true
-      chmod 664 "$perm_result" 2>/dev/null || true
     fi
     volume_request="$CONTROL_DIR/set-volume.request"
     volume_result="$CONTROL_DIR/set-volume.result"
@@ -414,8 +286,6 @@ service_control_worker() {
         printf 'Privileged volume operation failed: %s\n' "$(printf '%s' "${volume_output:-no level provided}" | tr '\n' ' ' | cut -c1-300)" > "$volume_result"
       fi
       echo "[drone-service] Volume change result: ${volume_output:-no level provided}"
-      chown root:"$DRONE_GROUP" "$volume_result" 2>/dev/null || true
-      chmod 664 "$volume_result" 2>/dev/null || true
     fi
     sleep 1
   done
@@ -520,10 +390,9 @@ case "$ACTION" in
     ;;
   control-worker)
     # Re-entry point used by the control worker's own self-re-exec after a bundle
-    # update. Reapply ROM write access with the new code, then resume processing
-    # privileged control requests. Runs in the foreground (it has replaced the
+    # update. Resume processing privileged control requests with the new code.
+    # Runs in the foreground (it has replaced the
     # previous worker process via exec, so CONTROL_PID_FILE still points at it).
-    ensure_rom_write_access_all
     service_control_worker
     ;;
   *)

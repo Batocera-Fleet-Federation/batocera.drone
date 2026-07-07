@@ -71,16 +71,11 @@ Use the username and password you entered during installation. Do not use an eas
 
 ## Security
 
-Drone is designed to avoid running as root for normal app work.
+Drone runs as root on Batocera.
 
-The installer creates a dedicated local user called `drone-app`. Drone runs as that limited user and only receives write access to the files it needs to manage:
+The installer only creates the Drone service and runtime directories. It does not create a dedicated `drone-app` user, maintain a read/write allowlist, or rewrite ROM, BIOS, emulator, or Batocera config permissions.
 
-- Artwork, videos, manuals, and `gamelist.xml`.
-- Drone runtime files, local certificates, and Drone logs.
-
-The app should only have read-only access to ROM files, Batocera system configuration, emulator configuration, and most other system files.
-
-In plain language: Drone can update library metadata and media, but it is not supposed to freely modify or delete your ROM collection or Batocera system files.
+In plain language: Drone can access Batocera files as root, so only run it on machines and networks you trust.
 
 ## API
 
