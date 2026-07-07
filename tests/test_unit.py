@@ -2512,6 +2512,7 @@ class SettingsTests(unittest.TestCase):
     def test_home_page_does_not_block_on_speed_test(self) -> None:
         root = Path(__file__).resolve().parents[1]
         js_source = root.joinpath("app/web/static/js/drone.js").read_text(encoding="utf-8")
+        css_source = root.joinpath("app/web/static/css/drone.css").read_text(encoding="utf-8")
         api_routes = root.joinpath("app/web/api_routes.py").read_text(encoding="utf-8")
         drone_source = root.joinpath("app/drone_api.py").read_text(encoding="utf-8") + root.joinpath("app/web/handlers_diagnostics.py").read_text(encoding="utf-8")
 
@@ -2529,6 +2530,13 @@ class SettingsTests(unittest.TestCase):
         self.assertNotIn('class="table table-hover align-middle themed-table bios-table bff-stack"', js_source)
         self.assertIn("Run PixeN Update", js_source)
         self.assertIn("admin-config-content", js_source)
+        self.assertIn("function buildEmulatorConfigTree", js_source)
+        self.assertIn("function toggleEmulatorConfigFolder", js_source)
+        self.assertIn("emulator-config-tree", js_source)
+        self.assertIn(".tree-grid-row.emulator-tree-row", css_source)
+        self.assertIn("var(--tree-depth, 0) * 1.35rem", css_source)
+        self.assertNotIn("Overmind Configuration", js_source)
+        self.assertNotIn("integrationOvermindConfiguration", js_source)
         self.assertIn('const selected = themeFilterInitialized && !(themeFilterSelectedSystems || []).length ? ["__none__"]', js_source)
         self.assertIn('class="system-health-row"', js_source)
         self.assertIn("emulatorConfigSelectionRequestId", js_source)

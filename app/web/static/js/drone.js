@@ -94,6 +94,7 @@ let emulatorConfigRows = [];
 let selectedEmulatorConfigIndex = 0;
 let selectedEmulatorConfigVersionIndex = 0;
 let emulatorConfigSelectionRequestId = 0;
+let emulatorConfigTreeExpanded = new Set();
 let artworkCurrentOffset = 0;
 let artworkIncludeFilesystem = false;
 let artworkSelectedFields = ["image", "marquee"];
@@ -3831,12 +3832,10 @@ async function renderIntegrationPage() {
             </div></div>
           </div>
         </div>
-      </div>
-      <div id="integrationOvermindConfiguration"></div>`;
+      </div>`;
 
     document.getElementById("integrationOvermindToggle").addEventListener("change", (event) => setIntegrationEnabled("overmind", event.target.checked));
     document.getElementById("integrationLocalToggle").addEventListener("change", (event) => setIntegrationEnabled("local_network", event.target.checked));
-    await renderIntegrationOvermindConfiguration(document.getElementById("integrationOvermindConfiguration"));
     window.refreshLocalNetwork = null;
     window.refreshOvermindDownloads = null;
     window.refreshOvermindAssetCache = null;
@@ -3847,45 +3846,6 @@ async function renderIntegrationPage() {
   } finally {
     setLoading(false);
   }
-}
-
-async function renderIntegrationOvermindConfiguration(target) {
-  target.innerHTML = `<div class="card log-card mb-3"><div class="card-header">Overmind Configuration</div><div class="card-body">
-    <div class="row g-2">
-      <div class="col-12 col-lg-4"><label class="form-label small">Overmind URL</label><input id="integrationOvermindUrl" class="form-control" type="url"></div>
-      <div class="col-12 col-lg-4"><label class="form-label small">Authorization Token</label><input id="integrationOvermindToken" class="form-control" type="password" placeholder="Leave blank to keep current token"></div>
-      <div class="col-12 col-lg-4"><label class="form-label small">Drone Name</label><input id="integrationOvermindName" class="form-control"></div>
-      <div class="col-12 col-lg-6"><label class="form-label small">Claim Email <span class="text-muted">(optional)</span></label><input id="integrationOvermindEmail" class="form-control" type="email"></div>
-      <div class="col-12 col-lg-6"><label class="form-label small">Claim Password <span class="text-muted">(optional)</span></label><input id="integrationOvermindPassword" class="form-control" type="password"></div>
-    </div>
-    <button id="integrationOvermindSave" class="btn btn-primary mt-3" type="button">Save Overmind Configuration</button>
-    <span id="integrationOvermindConfigStatus" class="small text-muted ms-2"></span>
-  </div></div>`;
-  const payload = await api("/admin/integrations/overmind/status");
-  document.getElementById("integrationOvermindUrl").value = payload.overmind_url || "https://www.batocera-swarm.com";
-  document.getElementById("integrationOvermindName").value = payload.drone_name || "";
-  document.getElementById("integrationOvermindEmail").value = payload.overmind_email || "";
-  document.getElementById("integrationOvermindConfigStatus").textContent = `Status: ${(payload.status || {}).integration_state || "not configured"}`;
-  document.getElementById("integrationOvermindSave").addEventListener("click", async () => {
-    const body = {
-      overmind_url: document.getElementById("integrationOvermindUrl").value.trim(),
-      drone_name: document.getElementById("integrationOvermindName").value.trim(),
-    };
-    const token = document.getElementById("integrationOvermindToken").value;
-    const email = document.getElementById("integrationOvermindEmail").value.trim();
-    const password = document.getElementById("integrationOvermindPassword").value;
-    if (token) body.overmind_auth_token = token;
-    if (email) body.overmind_email = email;
-    if (password) body.overmind_password = password;
-    try {
-      await apiPost("/admin/integrations/overmind/config", body);
-      document.getElementById("integrationOvermindToken").value = "";
-      document.getElementById("integrationOvermindPassword").value = "";
-      showToast("Overmind configuration saved.", "success");
-    } catch (err) {
-      showToast(`Failed to save Overmind configuration: ${escapeHtml(err.message || "unknown error")}`, "danger");
-    }
-  });
 }
 
 async function setIntegrationEnabled(integration, enabled) {
@@ -4990,12 +4950,8 @@ async function renderEmulatorsPage() {
             <div class="emulator-config-filter-wrap p-2">
               <input id="emulatorConfigFilter" class="form-control form-control-sm" type="search" placeholder="Filter configs" autocomplete="off" oninput="filterEmulatorConfigs(this.value)">
             </div>
-            <div class="list-group list-group-flush emulator-config-source-scroll" id="emulatorConfigSources">
-              ${emulatorConfigRows.map((row, index) => `
-                <button type="button" class="list-group-item list-group-item-action text-start" data-config-index="${index}" onclick="selectEmulatorConfig(${index})">
-                  <i class="bi bi-file-earmark-code me-2"></i>${escapeHtml(row.label)}
-                </button>
-              `).join("")}
+            <div class="emulator-config-source-scroll" id="emulatorConfigSources">
+              ${renderEmulatorConfigTree()}
             </div>
             <div id="emulatorConfigFilterEmpty" class="small text-muted px-3 py-2" style="display:none;">No configs match.</div>
             <div class="small text-muted px-3 py-2 border-top" style="border-color:var(--admin-border)!important;">Only configuration files selected for Overmind synchronization are shown${payload.max_configs ? `, up to ${payload.max_configs}` : ""}.</div>
@@ -5027,6 +4983,8 @@ async function renderEmulatorsPage() {
     if (!emulatorConfigRows.length) {
       document.getElementById("emulatorConfigContent").textContent = "No emulator config files were found in the Overmind reporting set.";
     } else {
+      expandEmulatorConfigAncestors(selectedEmulatorConfigIndex);
+      renderEmulatorConfigTreeIntoContainer();
       setTimeout(() => selectEmulatorConfig(selectedEmulatorConfigIndex), 0);
     }
   } catch (err) {
@@ -5054,15 +5012,128 @@ async function loadSelectedEmulatorConfigContent(row) {
   row.versions = [{ collected_at: data.collected_at || "", fingerprint: row.fingerprint, content: row.content }];
   return row;
 }
+function emulatorConfigPathParts(row) {
+  const raw = String((row && row.label) || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+  const parts = raw.split("/").map(part => part.trim()).filter(Boolean);
+  return parts.length ? parts : [raw || "config"];
+}
+function buildEmulatorConfigTree(rows) {
+  const root = { key: "", name: "", dirs: new Map(), files: [] };
+  (rows || []).forEach((row, index) => {
+    const parts = emulatorConfigPathParts(row);
+    let node = root;
+    parts.slice(0, -1).forEach((part) => {
+      const key = node.key ? `${node.key}/${part}` : part;
+      if (!node.dirs.has(part)) {
+        node.dirs.set(part, { key, name: part, dirs: new Map(), files: [] });
+      }
+      node = node.dirs.get(part);
+    });
+    node.files.push({ name: parts[parts.length - 1] || row.label || `config-${index + 1}`, index, row });
+  });
+  return root;
+}
+function sortEmulatorConfigTreeEntries(entries) {
+  return entries.sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), undefined, { sensitivity: "base" }));
+}
+function emulatorConfigNodeMatches(node, query) {
+  if (!query) return true;
+  if (String(node.name || "").toLowerCase().includes(query)) return true;
+  for (const file of node.files || []) {
+    if (String(file.row?.label || file.name || "").toLowerCase().includes(query)) return true;
+  }
+  for (const child of node.dirs.values()) {
+    if (emulatorConfigNodeMatches(child, query)) return true;
+  }
+  return false;
+}
+function emulatorConfigVisibleFiles(files, query) {
+  if (!query) return files;
+  return files.filter(file => String(file.row?.label || file.name || "").toLowerCase().includes(query));
+}
+function renderEmulatorConfigTreeNode(node, depth, query) {
+  if (!emulatorConfigNodeMatches(node, query)) return "";
+  const dirs = sortEmulatorConfigTreeEntries(Array.from(node.dirs.values())).map(child => renderEmulatorConfigTreeNode(child, depth + 1, query)).join("");
+  const files = sortEmulatorConfigTreeEntries(emulatorConfigVisibleFiles(node.files || [], query)).map(file => {
+    const row = file.row || {};
+    const meta = row.size ? `${Number(row.size).toLocaleString()} bytes` : (row.fingerprint ? String(row.fingerprint).slice(0, 8) : "");
+    return `<button type="button" class="tree-grid-row tree-leaf-row emulator-tree-row text-start" style="--tree-depth:${depth + 1}" data-config-index="${file.index}" onclick="selectEmulatorConfig(${file.index})">
+      <span class="tree-grid-main"><i class="bi bi-file-earmark-code tree-grid-icon"></i><span class="tree-grid-label text-truncate" title="${escapeHtml(row.label || file.name)}">${escapeHtml(file.name)}</span></span>
+      <span class="tree-grid-meta">${escapeHtml(meta)}</span>
+      <span class="tree-grid-action"></span>
+    </button>`;
+  }).join("");
+  const expanded = query || emulatorConfigTreeExpanded.has(node.key);
+  const descendantCount = countEmulatorConfigFiles(node);
+  return `<div class="emulator-tree-node" data-folder-key="${escapeHtml(node.key)}">
+    <button type="button" class="tree-grid-row tree-category-row emulator-tree-row text-start" style="--tree-depth:${depth}" onclick="toggleEmulatorConfigFolder(this.closest('.emulator-tree-node').dataset.folderKey)">
+      <span class="tree-grid-main"><i class="bi ${expanded ? "bi-chevron-down" : "bi-chevron-right"} tree-grid-caret"></i><i class="bi ${expanded ? "bi-folder2-open" : "bi-folder"} tree-grid-icon"></i><span class="tree-grid-label text-truncate" title="${escapeHtml(node.key)}">${escapeHtml(node.name)}</span></span>
+      <span class="tree-grid-meta">${descendantCount} file${descendantCount === 1 ? "" : "s"}</span>
+      <span class="tree-grid-action"></span>
+    </button>
+    <div class="tree-branch emulator-tree-children" style="${expanded ? "" : "display:none;"}">${dirs}${files}</div>
+  </div>`;
+}
+function countEmulatorConfigFiles(node) {
+  let total = (node.files || []).length;
+  for (const child of node.dirs.values()) {
+    total += countEmulatorConfigFiles(child);
+  }
+  return total;
+}
+function renderEmulatorConfigTree(queryValue = null) {
+  const filter = queryValue === null ? document.getElementById("emulatorConfigFilter")?.value : queryValue;
+  const query = String(filter || "").trim().toLowerCase();
+  const tree = buildEmulatorConfigTree(emulatorConfigRows);
+  const roots = sortEmulatorConfigTreeEntries(Array.from(tree.dirs.values())).map(node => renderEmulatorConfigTreeNode(node, 0, query)).join("");
+  const rootFiles = sortEmulatorConfigTreeEntries(emulatorConfigVisibleFiles(tree.files, query)).map(file => `
+    <button type="button" class="tree-grid-row tree-leaf-row emulator-tree-row text-start" style="--tree-depth:0" data-config-index="${file.index}" onclick="selectEmulatorConfig(${file.index})">
+      <span class="tree-grid-main"><i class="bi bi-file-earmark-code tree-grid-icon"></i><span class="tree-grid-label text-truncate" title="${escapeHtml(file.row?.label || file.name)}">${escapeHtml(file.name)}</span></span>
+      <span class="tree-grid-meta">${file.row?.size ? `${Number(file.row.size).toLocaleString()} bytes` : ""}</span>
+      <span class="tree-grid-action"></span>
+    </button>`).join("");
+  return `<div class="tree-grid emulator-config-tree">${roots}${rootFiles}</div>`;
+}
+function renderEmulatorConfigTreeIntoContainer(queryValue = null) {
+  const container = document.getElementById("emulatorConfigSources");
+  if (!container) return;
+  container.innerHTML = renderEmulatorConfigTree(queryValue);
+  updateSelectedEmulatorConfigTreeRow();
+}
+function toggleEmulatorConfigFolder(key) {
+  const normalized = String(key || "");
+  if (!normalized) return;
+  if (emulatorConfigTreeExpanded.has(normalized)) {
+    emulatorConfigTreeExpanded.delete(normalized);
+  } else {
+    emulatorConfigTreeExpanded.add(normalized);
+  }
+  renderEmulatorConfigTreeIntoContainer();
+}
+function expandEmulatorConfigAncestors(index) {
+  const row = emulatorConfigRows[index];
+  if (!row) return;
+  const parts = emulatorConfigPathParts(row).slice(0, -1);
+  let key = "";
+  parts.forEach((part) => {
+    key = key ? `${key}/${part}` : part;
+    emulatorConfigTreeExpanded.add(key);
+  });
+}
+function updateSelectedEmulatorConfigTreeRow() {
+  document.querySelectorAll("#emulatorConfigSources [data-config-index]").forEach((node) => {
+    node.classList.toggle("is-active", Number(node.dataset.configIndex) === selectedEmulatorConfigIndex);
+  });
+}
 async function selectEmulatorConfig(index) {
   const row = emulatorConfigRows[index];
   if (!row) return;
   const requestId = ++emulatorConfigSelectionRequestId;
   selectedEmulatorConfigIndex = index;
   selectedEmulatorConfigVersionIndex = 0;
-  document.querySelectorAll("#emulatorConfigSources .list-group-item").forEach((node) => {
-    node.classList.toggle("active", Number(node.dataset.configIndex) === index);
-  });
+  expandEmulatorConfigAncestors(index);
+  renderEmulatorConfigTreeIntoContainer();
+  updateSelectedEmulatorConfigTreeRow();
   const title = document.getElementById("emulatorConfigTitle");
   const path = document.getElementById("emulatorConfigPath");
   const fingerprint = document.getElementById("emulatorConfigFingerprint");
@@ -5109,13 +5180,8 @@ function selectEmulatorConfigVersion(value) {
 }
 function filterEmulatorConfigs(value) {
   const query = String(value || "").trim().toLowerCase();
-  const buttons = Array.from(document.querySelectorAll("#emulatorConfigSources .list-group-item"));
-  const visible = [];
-  buttons.forEach((button) => {
-    const matched = !query || button.textContent.toLowerCase().includes(query);
-    button.style.display = matched ? "" : "none";
-    if (matched) visible.push(button);
-  });
+  renderEmulatorConfigTreeIntoContainer(query);
+  const visible = Array.from(document.querySelectorAll("#emulatorConfigSources [data-config-index]"));
   const empty = document.getElementById("emulatorConfigFilterEmpty");
   if (empty) empty.style.display = visible.length ? "none" : "block";
   const selectedVisible = visible.some((button) => Number(button.dataset.configIndex) === selectedEmulatorConfigIndex);
