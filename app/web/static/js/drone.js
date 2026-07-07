@@ -61,20 +61,24 @@ let currentSystemContext = null;
 let themeFilterSelectedSystems = [];
 let themeFilterQuery = "";
 const THEME_GALLERY_PAGE_SIZE = 100;
-const BIOS_PAGE_SIZE = 100;
-const SYSTEM_ROM_PAGE_SIZE = 200;
+const TREE_FILE_LOAD_SIZE = 10;
+const BIOS_TREE_ROOT = "__bios__";
 const ARTWORK_PAGE_SIZE = 200;
 const GAMELIST_EDIT_FIELDS = [
   "name", "sortname", "desc", "genre", "developer", "publisher", "releasedate",
   "players", "rating", "favorite", "hidden", "kidgame", "adult",
   "image", "thumbnail", "marquee", "fanart", "boxart", "video"
 ];
-let biosCurrentPage = 1;
-let biosFilterQuery = "";
-let biosFilterSelectedSystems = [];
+let systemsTreeQuery = "";
+let systemsTreeData = { systems: [] };
+let systemsTreeMatchedSystems = new Set();
+let selectedSystemsTreeRoot = null;
+let selectedSystemsTreeCategory = null;
+let systemsTreeRomPages = {};
+let systemsTreeBiosSummary = { total: 0, loading: false, error: false };
+let systemsTreeBiosPage = { bios: [], total: 0, nextOffset: 0, loading: false, error: false };
 let filterDropdownGlobalCloseBound = false;
 let filterDropdownState = {};
-let biosFilterInitialized = false;
 let themeFilterInitialized = false;
 let currentLogSource = null;
 let logRefreshTimer = null;
@@ -199,9 +203,8 @@ function escapeHtml(value) {
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
 }
-function formatBytesToMb(byteCount) {
-  const value = Number(byteCount || 0);
-  return `${(value / (1024 * 1024)).toFixed(2)} MB`;
+function jsAttr(value) {
+  return escapeHtml(JSON.stringify(value));
 }
 async function api(url) {
   const absoluteUrl = url.startsWith("http://") || url.startsWith("https://")
@@ -264,6 +267,33 @@ async function getSystemRomData(system, forceRefresh = false) {
   const data = await api(`/systems/${encodeURIComponent(key)}`);
   systemRomCache[key] = { data, loadedAt: Date.now() };
   return data;
+}
+async function getSystemRomPage(system, offset = 0, query = systemsTreeQuery) {
+  const params = new URLSearchParams();
+  params.set("limit", String(TREE_FILE_LOAD_SIZE));
+  params.set("offset", String(Math.max(0, Number(offset || 0))));
+  if ((query || "").trim()) params.set("q", query.trim());
+  return await api(`/systems/${encodeURIComponent(system)}?${params.toString()}`);
+}
+function systemsTreeHash(query = systemsTreeQuery, root = selectedSystemsTreeRoot) {
+  const params = new URLSearchParams();
+  if ((query || "").trim()) params.set("q", query.trim());
+  if (root) params.set("root", root);
+  const qs = params.toString();
+  return `#systems${qs ? `?${qs}` : ""}`;
+}
+function parseSystemsHash(hash) {
+  if (!hash.startsWith("#systems")) return null;
+  const queryIndex = hash.indexOf("?");
+  const params = new URLSearchParams(queryIndex >= 0 ? hash.substring(queryIndex + 1) : "");
+  return {
+    q: params.get("q") || "",
+    root: params.get("root") || null,
+  };
+}
+function updateSystemsTreeHash() {
+  const nextHash = systemsTreeHash();
+  if (window.location.hash !== nextHash) history.replaceState(null, "", nextHash);
 }
 function wildcardToRegExp(pattern) {
   const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&");
@@ -763,37 +793,367 @@ function setupLazyImages() {
   lazyImages.forEach((img) => imageObserver.observe(img));
 }
 function renderSystems(data) {
-  backBtn.classList.add("d-none");
+  if (selectedSystemsTreeRoot) backBtn.classList.remove("d-none");
+  else backBtn.classList.add("d-none");
   setSearchMode("global");
-  const systems = data.systems || [];
+  systemsTreeData = data || { systems: [] };
+  const query = (systemsTreeQuery || "").trim().toLowerCase();
+  const systems = (data.systems || [])
+    .filter((system) => !query || String(system.name || "").toLowerCase().includes(query) || systemsTreeMatchedSystems.has(String(system.name || "")))
+    .sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
+  const biosTotal = Number(systemsTreeBiosSummary.total || 0);
+  const showBiosRoot = biosTotal > 0 || selectedSystemsTreeRoot === BIOS_TREE_ROOT;
+  if (selectedSystemsTreeRoot && selectedSystemsTreeRoot !== BIOS_TREE_ROOT && !systems.some((system) => system.name === selectedSystemsTreeRoot)) {
+    selectedSystemsTreeRoot = null;
+    selectedSystemsTreeCategory = null;
+  }
+  if (selectedSystemsTreeRoot === BIOS_TREE_ROOT && !showBiosRoot) {
+    selectedSystemsTreeRoot = null;
+    selectedSystemsTreeCategory = null;
+  }
   content.innerHTML = `
-    <div class="row g-3">
-      ${systems.map(system => `
-        <div class="col-12 col-sm-6 col-lg-4 col-xl-3">
-          <div class="card shadow-sm tile pointer" onclick="setHash('#system/${encodeURIComponent(system.name)}')">
-            <img
-              src=""
-              data-src="${systemThemeImageCandidates(system.name)[0]}"
-              data-fallbacks='${JSON.stringify(systemThemeImageCandidates(system.name).slice(1))}'
-              class="card-img-top"
-              alt="${escapeHtml(system.name)} theme artwork"
-              style="height: 140px; object-fit: cover; background: #0f172a;"
-              loading="lazy"
-            >
-            <div class="card-body">
-              <h2 class="h5 card-title mb-2"><i class="bi bi-controller me-2"></i>${escapeHtml(system.name)}</h2>
-              <div class="text-muted"><i class="bi bi-collection-play me-1"></i>ROM Files: ${system.rom_count}</div>
-            </div>
-          </div>
+    <div class="mb-3 systems-tree-toolbar">
+      <label class="form-label" for="systemsTreeSearch">Search systems, games, or BIOS</label>
+      <div class="input-group">
+        <span class="input-group-text"><i class="bi bi-funnel"></i></span>
+        <input id="systemsTreeSearch" class="form-control" type="search" value="${escapeHtml(systemsTreeQuery)}" placeholder="Filter systems, game names, paths, or BIOS">
+        <button id="systemsTreeSearchBtn" type="button" class="btn btn-primary">Filter</button>
+        <button id="systemsTreeClearBtn" type="button" class="btn btn-outline-secondary">Clear</button>
+      </div>
+    </div>
+    <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2 small text-muted">
+      <span>${systems.length.toLocaleString()} systems · ${biosTotal.toLocaleString()} BIOS files</span>
+    </div>
+    ${
+      systems.length || showBiosRoot
+        ? `<div class="tree-grid">
+          ${systems.map((system) => renderSystemTreeRoot(system)).join("")}
+          ${showBiosRoot ? renderBiosTreeRoot(biosTotal) : ""}
+        </div>`
+        : `<div class="text-muted">No systems, games, or BIOS files matched your filter.</div>`
+    }
+  `;
+  bindSystemsTreeToolbar();
+  if (selectedSystemsTreeRoot === BIOS_TREE_ROOT) {
+    renderBiosTreeFiles();
+  } else if (selectedSystemsTreeRoot) {
+    renderSystemTreeFiles(selectedSystemsTreeRoot);
+  }
+}
+function renderSystemTreeRoot(system) {
+  const name = system.name || "";
+  const active = selectedSystemsTreeRoot === name;
+  const romCount = Number(system.rom_count || 0);
+  return `
+    <div class="tree-root ${active ? "is-expanded" : ""}">
+      <button type="button" class="tree-grid-row tree-root-row ${active ? "is-active" : ""}" onclick="selectSystemTreeRoot(${jsAttr(name)})">
+        <div class="tree-grid-main">
+          <i class="bi ${active ? "bi-chevron-down" : "bi-chevron-right"} tree-grid-caret"></i>
+          <i class="bi bi-folder2${active ? "-open" : ""} tree-grid-icon"></i>
+          <div class="tree-grid-label"><span class="fw-semibold">${escapeHtml(name)}</span></div>
         </div>
-      `).join("")}
+        <div class="tree-grid-meta">${romCount.toLocaleString()} files</div>
+      </button>
+      ${active ? `
+        <div class="tree-branch">
+          <button type="button" class="tree-grid-row tree-category-row ${selectedSystemsTreeCategory === "games" ? "is-active" : ""}" onclick="selectSystemTreeCategory(${jsAttr(name)}, 'games')">
+            <div class="tree-grid-main">
+              <i class="bi bi-controller tree-grid-icon"></i>
+              <div class="tree-grid-label"><span class="fw-semibold">Games</span></div>
+            </div>
+            <div class="tree-grid-meta">${romCount.toLocaleString()} files</div>
+          </button>
+          <div id="tree-files-${cssSafeId(name)}" class="tree-files"></div>
+        </div>
+      ` : ""}
     </div>
   `;
-  setupLazyImages();
 }
-function systemHash(system, page = 1) {
-  const safePage = Math.max(1, Number(page || 1));
-  return `#system/${encodeURIComponent(system)}${safePage > 1 ? `?page=${safePage}` : ""}`;
+function renderBiosTreeRoot(total) {
+  const active = selectedSystemsTreeRoot === BIOS_TREE_ROOT;
+  return `
+    <div class="tree-root ${active ? "is-expanded" : ""}">
+      <button type="button" class="tree-grid-row tree-root-row ${active ? "is-active" : ""}" onclick="selectBiosTreeRoot()">
+        <div class="tree-grid-main">
+          <i class="bi ${active ? "bi-chevron-down" : "bi-chevron-right"} tree-grid-caret"></i>
+          <i class="bi bi-folder2${active ? "-open" : ""} tree-grid-icon"></i>
+          <div class="tree-grid-label"><span class="fw-semibold">BIOS</span></div>
+        </div>
+        <div class="tree-grid-meta">${Number(total || 0).toLocaleString()} files</div>
+      </button>
+      ${active ? `
+        <div class="tree-branch">
+          <button type="button" class="tree-grid-row tree-category-row ${selectedSystemsTreeCategory === "bios" ? "is-active" : ""}" onclick="selectSystemTreeCategory(${jsAttr(BIOS_TREE_ROOT)}, 'bios')">
+            <div class="tree-grid-main">
+              <i class="bi bi-cpu tree-grid-icon"></i>
+              <div class="tree-grid-label"><span class="fw-semibold">BIOS files</span></div>
+            </div>
+            <div class="tree-grid-meta">${Number(total || 0).toLocaleString()} files</div>
+          </button>
+          <div id="tree-files-${cssSafeId(BIOS_TREE_ROOT)}" class="tree-files"></div>
+        </div>
+      ` : ""}
+    </div>
+  `;
+}
+function bindSystemsTreeToolbar() {
+  const input = document.getElementById("systemsTreeSearch");
+  const filterBtn = document.getElementById("systemsTreeSearchBtn");
+  const clearBtn = document.getElementById("systemsTreeClearBtn");
+  const apply = () => {
+    systemsTreeQuery = (input ? input.value : "").trim();
+    selectedSystemsTreeRoot = null;
+    selectedSystemsTreeCategory = null;
+    systemsTreeRomPages = {};
+    systemsTreeBiosPage = { bios: [], total: 0, nextOffset: 0, loading: false, error: false };
+    updateSystemsTreeHash();
+    renderSystemsPage();
+  };
+  if (input) input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      apply();
+    }
+  });
+  if (filterBtn) filterBtn.addEventListener("click", apply);
+  if (clearBtn) clearBtn.addEventListener("click", () => {
+    if (input) input.value = "";
+    apply();
+  });
+}
+function cssSafeId(value) {
+  return btoa(unescape(encodeURIComponent(String(value)))).replace(/=+$/g, "").replace(/[^a-zA-Z0-9_-]/g, "_");
+}
+function systemTreeState(system) {
+  const key = String(system || "");
+  if (!systemsTreeRomPages[key]) {
+    systemsTreeRomPages[key] = { roms: [], total: 0, nextOffset: 0, loading: false, error: false };
+  }
+  return systemsTreeRomPages[key];
+}
+function selectSystemTreeRoot(system) {
+  if (selectedSystemsTreeRoot === system) {
+    selectedSystemsTreeRoot = null;
+    selectedSystemsTreeCategory = null;
+    updateSystemsTreeHash();
+    renderSystems(systemsTreeData);
+    return;
+  }
+  selectedSystemsTreeRoot = system;
+  selectedSystemsTreeCategory = "games";
+  systemsTreeRomPages[system] = { roms: [], total: 0, nextOffset: 0, loading: true, error: false };
+  updateSystemsTreeHash();
+  renderSystems(systemsTreeData);
+  loadSystemTreeFiles(system, { reset: true });
+}
+function selectBiosTreeRoot() {
+  if (selectedSystemsTreeRoot === BIOS_TREE_ROOT) {
+    selectedSystemsTreeRoot = null;
+    selectedSystemsTreeCategory = null;
+    updateSystemsTreeHash();
+    renderSystems(systemsTreeData);
+    return;
+  }
+  selectedSystemsTreeRoot = BIOS_TREE_ROOT;
+  selectedSystemsTreeCategory = "bios";
+  systemsTreeBiosPage = { bios: [], total: systemsTreeBiosSummary.total || 0, nextOffset: 0, loading: true, error: false };
+  updateSystemsTreeHash();
+  renderSystems(systemsTreeData);
+  loadBiosTreeFiles({ reset: true });
+}
+function selectSystemTreeCategory(root, category) {
+  if (root === BIOS_TREE_ROOT || category === "bios") {
+    if (selectedSystemsTreeRoot !== BIOS_TREE_ROOT) {
+      selectBiosTreeRoot();
+      return;
+    }
+    selectedSystemsTreeCategory = "bios";
+    updateSystemsTreeHash();
+    renderSystems(systemsTreeData);
+    return;
+  }
+  if (selectedSystemsTreeRoot !== root) {
+    selectSystemTreeRoot(root);
+    return;
+  }
+  selectedSystemsTreeCategory = "games";
+  updateSystemsTreeHash();
+  renderSystems(systemsTreeData);
+}
+async function loadSystemTreeFiles(system, options = {}) {
+  if (!system) return;
+  const reset = options.reset === true;
+  const state = reset ? { roms: [], total: 0, nextOffset: 0, loading: false, error: false } : systemTreeState(system);
+  if (!reset && state.loading) return;
+  const existingRows = reset ? [] : (state.roms || []);
+  const offset = reset ? 0 : Number(state.nextOffset ?? existingRows.length);
+  systemsTreeRomPages[system] = { ...state, roms: existingRows, loading: true, error: false };
+  renderSystemTreeFiles(system);
+  try {
+    const payload = await getSystemRomPage(system, offset, systemsTreeQuery);
+    if (selectedSystemsTreeRoot !== system) {
+      if (systemsTreeRomPages[system]) systemsTreeRomPages[system] = { ...systemsTreeRomPages[system], loading: false };
+      return;
+    }
+    const rows = payload.roms || [];
+    const loadedRows = reset ? rows : [...(systemsTreeRomPages[system]?.roms || []), ...rows];
+    systemsTreeRomPages[system] = {
+      roms: loadedRows,
+      total: Number(payload.count ?? loadedRows.length),
+      nextOffset: offset + rows.length,
+      loading: false,
+      error: false,
+    };
+  } catch (error) {
+    console.error("Error loading system tree files:", error);
+    systemsTreeRomPages[system] = { ...state, roms: existingRows, total: Number(state.total || 0), nextOffset: offset, loading: false, error: true };
+  }
+  renderSystemTreeFiles(system);
+}
+async function loadBiosTreeSummary() {
+  systemsTreeBiosSummary = { ...systemsTreeBiosSummary, loading: true, error: false };
+  try {
+    const params = new URLSearchParams();
+    params.set("limit", "1");
+    params.set("offset", "0");
+    if ((systemsTreeQuery || "").trim()) params.set("q", systemsTreeQuery.trim());
+    const payload = await api(`/bios?${params.toString()}`);
+    systemsTreeBiosSummary = { total: Number(payload.count || 0), loading: false, error: false };
+  } catch (error) {
+    console.error("Error loading BIOS tree summary:", error);
+    systemsTreeBiosSummary = { total: 0, loading: false, error: true };
+  }
+}
+async function loadBiosTreeFiles(options = {}) {
+  const reset = options.reset === true;
+  const state = reset ? { bios: [], total: systemsTreeBiosSummary.total || 0, nextOffset: 0, loading: false, error: false } : systemsTreeBiosPage;
+  if (!reset && state.loading) return;
+  const existingRows = reset ? [] : (state.bios || []);
+  const offset = reset ? 0 : Number(state.nextOffset ?? existingRows.length);
+  systemsTreeBiosPage = { ...state, bios: existingRows, loading: true, error: false };
+  renderBiosTreeFiles();
+  try {
+    const params = new URLSearchParams();
+    params.set("limit", String(TREE_FILE_LOAD_SIZE));
+    params.set("offset", String(offset));
+    if ((systemsTreeQuery || "").trim()) params.set("q", systemsTreeQuery.trim());
+    const payload = await api(`/bios?${params.toString()}`);
+    if (selectedSystemsTreeRoot !== BIOS_TREE_ROOT) {
+      systemsTreeBiosPage = { ...systemsTreeBiosPage, loading: false };
+      return;
+    }
+    const rows = payload.bios || [];
+    const loadedRows = reset ? rows : [...(systemsTreeBiosPage.bios || []), ...rows];
+    systemsTreeBiosPage = {
+      bios: loadedRows,
+      total: Number(payload.count ?? systemsTreeBiosSummary.total ?? loadedRows.length),
+      nextOffset: offset + rows.length,
+      loading: false,
+      error: false,
+    };
+    systemsTreeBiosSummary = { total: systemsTreeBiosPage.total, loading: false, error: false };
+  } catch (error) {
+    console.error("Error loading BIOS tree files:", error);
+    systemsTreeBiosPage = { ...state, bios: existingRows, total: Number(state.total || systemsTreeBiosSummary.total || 0), nextOffset: offset, loading: false, error: true };
+  }
+  renderBiosTreeFiles();
+}
+function renderSystemTreeFiles(system) {
+  const target = document.getElementById(`tree-files-${cssSafeId(system)}`);
+  if (!target) return;
+  const payload = systemTreeState(system);
+  const roms = payload.roms || [];
+  const total = Number(payload.total || roms.length);
+  const loaded = roms.length;
+  const hasMore = loaded < total;
+  const firstLoad = payload.loading && !loaded;
+  target.innerHTML = firstLoad
+    ? '<div class="tree-grid-empty small text-muted">Loading first 10 games...</div>'
+    : `
+      ${payload.error ? '<div class="alert alert-danger py-2 small mb-2">Unable to load games for this system.</div>' : ''}
+      <div class="tree-leaf-list">
+        ${roms.map((item) => {
+          const fileName = item.rom_file || item.name || "";
+          const label = item.title || item.name || fileName;
+          const size = item.byte_count !== undefined ? formatBytes(item.byte_count) : "n/a";
+          return `
+            <div class="tree-grid-row tree-leaf-row">
+              <div class="tree-grid-main">
+                <i class="bi bi-file-earmark-binary tree-grid-icon"></i>
+                <div class="tree-grid-label text-truncate" title="${escapeHtml(fileName || label)}">
+                  <span class="fw-semibold">${escapeHtml(label)}</span>
+                </div>
+              </div>
+              <div class="tree-grid-meta">${escapeHtml(size)}</div>
+              <div class="tree-grid-action">
+                <button class="btn btn-outline-primary btn-sm" type="button" title="View" onclick="setHash('${romMediaHash(system, item.unique_id, 1)}')"><i class="bi bi-eye"></i></button>
+                ${
+                  item.is_downloadable === false
+                    ? `<button class="btn btn-secondary btn-sm" type="button" title="Folder ROM (not downloadable)" disabled><i class="bi bi-folder2-open"></i></button>`
+                    : `<a class="btn btn-primary btn-sm" title="Download" href="${romDownloadUrl(system, item.unique_id)}"><i class="bi bi-download"></i></a>`
+                }
+              </div>
+            </div>
+          `;
+        }).join("") || '<div class="tree-grid-empty small text-muted">No games found for this filter.</div>'}
+      </div>
+      <div class="tree-grid-more">
+        <span class="small text-muted">${total ? `Showing ${loaded.toLocaleString()} of ${total.toLocaleString()}` : "No games reported"}</span>
+        <button class="btn btn-outline-primary btn-sm" type="button" ${!hasMore || payload.loading ? "disabled" : ""} onclick="loadSystemTreeFiles(${jsAttr(system)}, { reset: false })">
+          ${payload.loading && loaded ? '<span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>' : '<i class="bi bi-plus-circle me-1"></i>'}
+          Show more
+        </button>
+      </div>
+    `;
+}
+function renderBiosTreeFiles() {
+  const target = document.getElementById(`tree-files-${cssSafeId(BIOS_TREE_ROOT)}`);
+  if (!target) return;
+  const payload = systemsTreeBiosPage;
+  const rows = payload.bios || [];
+  const total = Number(payload.total || systemsTreeBiosSummary.total || rows.length);
+  const loaded = rows.length;
+  const hasMore = loaded < total;
+  const firstLoad = payload.loading && !loaded;
+  target.innerHTML = firstLoad
+    ? '<div class="tree-grid-empty small text-muted">Loading first 10 BIOS files...</div>'
+    : `
+      ${payload.error ? '<div class="alert alert-danger py-2 small mb-2">Unable to load BIOS files.</div>' : ''}
+      <div class="tree-leaf-list">
+        ${rows.map((item) => {
+          const path = item.path || item.name || "";
+          const label = item.name || path;
+          const fingerprint = item.bios_md5 || item.md5 || item.fingerprint || "";
+          const tooltip = fingerprint ? `${path} · ${fingerprint}` : path;
+          const size = item.byte_count !== undefined ? formatBytes(item.byte_count) : "n/a";
+          return `
+            <div class="tree-grid-row tree-leaf-row">
+              <div class="tree-grid-main">
+                <i class="bi bi-cpu tree-grid-icon"></i>
+                <div class="tree-grid-label text-truncate" title="${escapeHtml(tooltip)}">
+                  <span class="fw-semibold">${escapeHtml(label)}</span>
+                </div>
+              </div>
+              <div class="tree-grid-meta">${escapeHtml(size)}</div>
+              <div class="tree-grid-action">
+                ${
+                  item.is_downloadable === false
+                    ? `<button class="btn btn-secondary btn-sm" type="button" title="Disabled" disabled><i class="bi bi-slash-circle"></i></button>`
+                    : `<a class="btn btn-primary btn-sm" title="Download" href="${biosDownloadUrl(item.unique_id)}"><i class="bi bi-download"></i></a>`
+                }
+              </div>
+            </div>
+          `;
+        }).join("") || '<div class="tree-grid-empty small text-muted">No BIOS files found for this filter.</div>'}
+      </div>
+      <div class="tree-grid-more">
+        <span class="small text-muted">${total ? `Showing ${loaded.toLocaleString()} of ${total.toLocaleString()}` : "No BIOS files reported"}</span>
+        <button class="btn btn-outline-primary btn-sm" type="button" ${!hasMore || payload.loading ? "disabled" : ""} onclick="loadBiosTreeFiles({ reset: false })">
+          ${payload.loading && loaded ? '<span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>' : '<i class="bi bi-plus-circle me-1"></i>'}
+          Show more
+        </button>
+      </div>
+    `;
 }
 function parseSystemHash(hash) {
   if (!hash.startsWith("#system/") || hash.includes("/rom/")) return null;
@@ -804,77 +1164,6 @@ function parseSystemHash(hash) {
     system: decodeURIComponent(systemPart),
     page: Math.max(1, Number.parseInt(params.get("page") || "1", 10) || 1),
   };
-}
-function renderSystemPagination(system, page, totalPages) {
-  if (totalPages <= 1) return "";
-  const pages = [];
-  const start = Math.max(1, page - 3);
-  const end = Math.min(totalPages, page + 3);
-  for (let item = start; item <= end; item += 1) pages.push(item);
-  return `
-    <div class="d-flex flex-wrap gap-2 align-items-center justify-content-between mt-3">
-      <div class="text-muted small">Page ${page} of ${totalPages}</div>
-      <div class="btn-group flex-wrap" role="group" aria-label="ROM pages">
-        <button class="btn btn-sm btn-outline-primary" type="button" ${page <= 1 ? "disabled" : ""} onclick="setHash('${systemHash(system, page - 1)}')">Previous</button>
-        ${start > 1 ? `<button class="btn btn-sm btn-outline-primary" type="button" onclick="setHash('${systemHash(system, 1)}')">1</button>${start > 2 ? `<button class="btn btn-sm btn-outline-secondary" type="button" disabled>...</button>` : ""}` : ""}
-        ${pages.map((item) => `<button class="btn btn-sm ${item === page ? "btn-primary" : "btn-outline-primary"}" type="button" onclick="setHash('${systemHash(system, item)}')">${item}</button>`).join("")}
-        ${end < totalPages ? `${end < totalPages - 1 ? `<button class="btn btn-sm btn-outline-secondary" type="button" disabled>...</button>` : ""}<button class="btn btn-sm btn-outline-primary" type="button" onclick="setHash('${systemHash(system, totalPages)}')">${totalPages}</button>` : ""}
-        <button class="btn btn-sm btn-outline-primary" type="button" ${page >= totalPages ? "disabled" : ""} onclick="setHash('${systemHash(system, page + 1)}')">Next</button>
-      </div>
-    </div>
-  `;
-}
-function renderRomGrid(system, items, page = 1, total = items.length) {
-  const totalPages = Math.max(1, Math.ceil(total / SYSTEM_ROM_PAGE_SIZE));
-  return `
-    <div class="mb-4">
-      <div class="d-flex flex-wrap gap-2 justify-content-between align-items-center mb-3">
-        <h3 class="h5 mb-0">ROM Files <span class="text-muted">(${total})</span></h3>
-        <div class="text-muted small">Showing ${total ? ((page - 1) * SYSTEM_ROM_PAGE_SIZE) + 1 : 0}-${Math.min(total, page * SYSTEM_ROM_PAGE_SIZE)} of ${total}</div>
-      </div>
-      <div class="row g-3">
-        ${items.map(item => {
-          const existing = item.existing || {};
-          const gamelistImage = ["image", "thumbnail", "boxart", "fanart", "marquee"]
-            .map((field) => artworkExistingImageUrl({ ...item, system }, existing[field] || ""))
-            .find(Boolean) || "";
-          const primaryImage = gamelistImage || romImageByIdUrl(system, item.unique_id);
-          const fallbacks = [
-            publicRomImageUrl(system, item.name, item.image_stem, ".png", true),
-            publicRomImageUrl(system, item.name, item.image_stem, ".jpg", true),
-            publicRomImageUrl(system, item.name, item.image_stem, ".jpeg", true),
-            publicRomImageUrl(system, item.name, item.image_stem, ".webp", true),
-            publicRomImageUrl(system, item.name, item.image_stem, ".png", false),
-            publicRomImageUrl(system, item.name, item.image_stem, ".jpg", false),
-            publicRomImageUrl(system, item.name, item.image_stem, ".jpeg", false),
-            publicRomImageUrl(system, item.name, item.image_stem, ".webp", false),
-          ];
-          return `
-          <div class="col-12 col-md-6 col-xl-3">
-            <div class="card shadow-sm tile h-100 pointer" onclick="setHash('${romMediaHash(system, item.unique_id, page)}')">
-              <img
-                src=""
-                data-src="${primaryImage}"
-                data-fallbacks='${JSON.stringify(fallbacks)}'
-                class="card-img-top"
-                alt="${escapeHtml(item.name)}"
-                style="height: 220px; object-fit: contain; background: #111;"
-                loading="lazy"
-              >
-              <div class="card-body d-flex flex-column">
-                <div class="fw-semibold truncate-2 mb-2">${escapeHtml(item.title || item.name)}</div>
-                ${item.byte_count !== undefined ? `<div class="text-muted small mono mb-3">${formatBytesToMb(item.byte_count)}</div>` : ""}
-                <div class="text-muted small mb-3">${item.has_gamelist_entry ? "gamelist.xml media available" : "no gamelist.xml entry"}</div>
-                <div class="mt-auto text-muted small">${item.is_downloadable === false ? "Folder ROM" : "Open details to download"}</div>
-              </div>
-            </div>
-          </div>
-        `;
-        }).join("") || `<div class="col-12"><div class="text-muted">No roms found.</div></div>`}
-      </div>
-      ${renderSystemPagination(system, page, totalPages)}
-    </div>
-  `;
 }
 function romMediaHash(system, uniqueId, page = 1) {
   const safePage = Math.max(1, Number(page || 1));
@@ -952,7 +1241,7 @@ async function renderRomMediaPage(system, uniqueId, page = 1) {
     subtitleNode.textContent = `${system} artwork and gamelist.xml metadata`;
     content.innerHTML = `
       <div class="mb-3 d-flex flex-wrap gap-2">
-        <button class="btn btn-outline-secondary" onclick="setHash('${systemHash(system, page)}')">← Back to ${escapeHtml(system)}</button>
+        <button class="btn btn-outline-secondary" onclick="setHash('${systemsTreeHash("", system)}')">← Back to ${escapeHtml(system)}</button>
         ${
           rom.is_downloadable === false
             ? `<button class="btn btn-outline-secondary" type="button" disabled><i class="bi bi-folder2-open me-1"></i>Folder ROM</button>`
@@ -1029,126 +1318,9 @@ async function renderRomMediaPage(system, uniqueId, page = 1) {
       });
   } catch (err) {
     showToast(`Failed to load ROM media: ${escapeHtml(err.message || "unknown error")}`, "danger");
-    setHash(systemHash(system, page));
+    setHash(systemsTreeHash("", system));
   } finally {
     setLoading(false);
-  }
-}
-function renderBiosList(data) {
-  backBtn.classList.remove("d-none");
-  const files = (data.bios || []).filter((entry) => entry.entry_type === "file");
-  const allSystems = (data.systems || []).slice().sort((a, b) => a.localeCompare(b));
-  if (!biosFilterInitialized) {
-    biosFilterSelectedSystems = [...allSystems];
-    biosFilterInitialized = true;
-  }
-  const total = Number(data.count || 0);
-  const offset = Number(data.offset || 0);
-  const limit = Number(data.limit || BIOS_PAGE_SIZE);
-  const totalPages = Math.max(1, Math.ceil(total / limit));
-  biosCurrentPage = Math.floor(offset / limit) + 1;
-  if (biosCurrentPage > totalPages) biosCurrentPage = totalPages;
-  if (biosCurrentPage < 1) biosCurrentPage = 1;
-  const grouped = {};
-
-  files.forEach((item) => {
-    const path = item.path || item.name || "";
-    const firstSegment = path.includes("/") ? path.split("/")[0] : "_root";
-    if (!grouped[firstSegment]) grouped[firstSegment] = [];
-    grouped[firstSegment].push(item);
-  });
-
-  const systems = Object.keys(grouped).sort((a, b) => a.localeCompare(b));
-  content.innerHTML = `
-    <div class="mb-3">
-      <h2 class="h4 mb-1"><i class="bi bi-cpu me-2"></i>BIOS Files</h2>
-      <div class="text-muted">Groups: ${systems.length} · Files: ${total} · Page: ${biosCurrentPage}/${totalPages}</div>
-    </div>
-    <div class="card shadow-sm mb-3">
-      <div class="card-body">
-        <div class="row g-3">
-          <div class="col-12 col-lg-6">
-            <label class="form-label mb-1">Search path/system (supports wildcard <code>*</code> and <code>?</code>)</label>
-            <div class="input-group">
-              <span class="input-group-text"><i class="bi bi-funnel"></i></span>
-              <input id="biosSearchInput" class="form-control" type="search" value="${escapeHtml(biosFilterQuery)}" placeholder="examples: ps2/* , */firmware*">
-              <button id="biosSearchBtn" type="button" class="btn btn-primary">Search</button>
-              <button id="biosSearchClearBtn" type="button" class="btn btn-outline-secondary">Clear</button>
-            </div>
-          </div>
-          <div class="col-12 col-lg-6">
-            <label class="form-label mb-1">System filters</label>
-            ${renderFilterDropdown("bios", allSystems, biosFilterSelectedSystems)}
-          </div>
-        </div>
-      </div>
-    </div>
-    ${
-      systems.length
-        ? `<div class="card log-card">
-          <div class="table-responsive">
-            <table class="table table-hover align-middle themed-table bios-table bff-stack">
-              <thead><tr><th>System</th><th>BIOS File</th><th>Size</th><th>MD5</th><th></th></tr></thead>
-              <tbody>
-                ${systems.map((system) => grouped[system].map((item) => `
-                  <tr>
-                    <td><span class="badge text-bg-secondary">${escapeHtml(system === "_root" ? "root" : system)}</span></td>
-                    <td><div class="fw-semibold">${escapeHtml(item.name)}</div><div class="small text-muted mono">${escapeHtml(item.path || item.name || "")}</div></td>
-                    <td class="text-nowrap">${item.byte_count !== undefined ? formatBytes(item.byte_count) : "n/a"}</td>
-                    <td class="small mono bios-fingerprint">${escapeHtml(item.bios_md5 || item.md5 || item.fingerprint || "n/a")}</td>
-                    <td class="text-end">${
-                      item.is_downloadable === false
-                        ? `<button class="btn btn-secondary btn-sm" type="button" disabled><i class="bi bi-slash-circle me-1"></i>Disabled</button>`
-                        : `<a class="btn btn-primary btn-sm" href="${biosDownloadUrl(item.unique_id)}"><i class="bi bi-download me-1"></i>Download</a>`
-                    }</td>
-                  </tr>
-                `).join("")).join("")}
-              </tbody>
-            </table>
-          </div>
-        </div>`
-        : `<div class="text-muted">No BIOS files found.</div>`
-    }
-    <div class="mt-3 d-flex gap-2">
-      <button id="biosPrevBtn" type="button" class="btn btn-outline-primary btn-sm" ${biosCurrentPage <= 1 ? "disabled" : ""}>Previous</button>
-      <button id="biosNextBtn" type="button" class="btn btn-outline-primary btn-sm" ${!data.has_more ? "disabled" : ""}>Next</button>
-    </div>
-  `;
-  const biosPrevBtn = document.getElementById("biosPrevBtn");
-  const biosNextBtn = document.getElementById("biosNextBtn");
-  const biosSearchInputEl = document.getElementById("biosSearchInput");
-  const biosSearchBtn = document.getElementById("biosSearchBtn");
-  const biosSearchClearBtn = document.getElementById("biosSearchClearBtn");
-  if (biosSearchInputEl) biosSearchInputEl.style.color = "#eef4ff";
-  if (biosSearchBtn && biosSearchInputEl) {
-    biosSearchBtn.addEventListener("click", async () => {
-      biosFilterQuery = biosSearchInputEl.value || "";
-      await loadBiosPage(0);
-    });
-  }
-  if (biosSearchClearBtn && biosSearchInputEl) {
-    biosSearchClearBtn.addEventListener("click", async () => {
-      biosSearchInputEl.value = "";
-      biosFilterQuery = "";
-      await loadBiosPage(0);
-    });
-  }
-  setupFilterDropdown("bios", async () => {
-      const checked = Array.from(document.querySelectorAll(".bios-system-filter:checked")).map((el) => el.value);
-      biosFilterSelectedSystems = checked;
-      await loadBiosPage(0);
-  });
-  if (biosPrevBtn) {
-    biosPrevBtn.addEventListener("click", async () => {
-      const nextOffset = Math.max(0, offset - BIOS_PAGE_SIZE);
-      await loadBiosPage(nextOffset);
-    });
-  }
-  if (biosNextBtn) {
-    biosNextBtn.addEventListener("click", async () => {
-      const nextOffset = offset + BIOS_PAGE_SIZE;
-      await loadBiosPage(nextOffset);
-    });
   }
 }
 function renderThemeGallery(data) {
@@ -1321,33 +1493,6 @@ function renderSearchResults(data) {
   `;
   setupLazyImages();
 }
-async function renderSystem(system, page = 1) {
-  currentSystemContext = system;
-  backBtn.classList.remove("d-none");
-  setSearchMode("system", system);
-  setLoading(true, `Loading ${system} ROMs...`);
-  const [romsData] = await Promise.all([
-    getSystemRomData(system),
-    applySystemTheme(system),
-  ]);
-  const allRoms = romsData.roms || [];
-  const totalPages = Math.max(1, Math.ceil(allRoms.length / SYSTEM_ROM_PAGE_SIZE));
-  const safePage = Math.max(1, Math.min(Number(page || 1), totalPages));
-  const pageRoms = allRoms.slice((safePage - 1) * SYSTEM_ROM_PAGE_SIZE, safePage * SYSTEM_ROM_PAGE_SIZE);
-
-  content.innerHTML = `
-    <div class="mb-4">
-      <h2 class="h4 mb-1">${escapeHtml(system)}</h2>
-      <div class="text-muted">
-        ROMs: ${allRoms.length} · Page ${safePage}/${totalPages}
-      </div>
-    </div>
-
-    ${renderRomGrid(system, pageRoms, safePage, allRoms.length)}
-  `;
-  setupLazyImages();
-  setLoading(false);
-}
 async function renderSearch(query) {
   setSearchMode("hidden");
   setLoading(true, `Searching for "${query}"...`);
@@ -1361,26 +1506,6 @@ async function renderSearch(query) {
   const data = await api(url);
   renderSearchResults(data);
   setLoading(false);
-}
-async function renderBios() {
-  currentSystemContext = null;
-  setSearchMode("hidden");
-  setLoading(true, "Loading BIOS files...");
-  clearSystemTheme();
-  await refreshRandomThemeLogo();
-  biosCurrentPage = 1;
-  biosFilterQuery = "";
-  biosFilterSelectedSystems = [];
-  biosFilterInitialized = false;
-  await loadBiosPage(0);
-  setLoading(false);
-}
-async function loadBiosPage(offset = 0) {
-  const selected = biosFilterInitialized && !(biosFilterSelectedSystems || []).length ? ["__none__"] : (biosFilterSelectedSystems || []);
-  const systemsParam = encodeURIComponent(selected.join(","));
-  const url = `/bios?limit=${BIOS_PAGE_SIZE}&offset=${Math.max(0, offset)}&q=${encodeURIComponent(biosFilterQuery || "")}&systems=${systemsParam}`;
-  const data = await api(url);
-  renderBiosList(data);
 }
 async function renderThemeGalleryPage() {
   currentSystemContext = null;
@@ -1398,8 +1523,25 @@ async function renderSystemsPage() {
   setSearchMode("global");
   setLoading(true, "Loading systems...");
   clearSystemTheme();
-  const data = await getSystemsData();
+  const parsed = parseSystemsHash(window.location.hash) || { q: "", root: null };
+  systemsTreeQuery = parsed.q || "";
+  selectedSystemsTreeRoot = parsed.root || null;
+  selectedSystemsTreeCategory = selectedSystemsTreeRoot === BIOS_TREE_ROOT ? "bios" : (selectedSystemsTreeRoot ? "games" : null);
+  systemsTreeRomPages = {};
+  systemsTreeMatchedSystems = new Set();
+  systemsTreeBiosPage = { bios: [], total: 0, nextOffset: 0, loading: false, error: false };
+  const [data, _biosSummary, searchData] = await Promise.all([
+    getSystemsData(),
+    loadBiosTreeSummary(),
+    systemsTreeQuery ? api(`/search?q=${encodeURIComponent(systemsTreeQuery)}`).catch(() => ({ results: [] })) : Promise.resolve({ results: [] }),
+  ]);
+  systemsTreeMatchedSystems = new Set((searchData.results || []).map((item) => String(item.system || "")).filter(Boolean));
   renderSystems(data);
+  if (selectedSystemsTreeRoot === BIOS_TREE_ROOT) {
+    await loadBiosTreeFiles({ reset: true });
+  } else if (selectedSystemsTreeRoot) {
+    await loadSystemTreeFiles(selectedSystemsTreeRoot, { reset: true });
+  }
   setLoading(false);
   refreshRandomThemeLogo().catch(() => {});
 }
@@ -1650,10 +1792,10 @@ async function renderAdminMenu() {
         </div>
       </div>
       <div class="col-md-4 mb-3">
-        <div class="card admin-tile pointer h-100" onclick="setHash('#bios')">
+        <div class="card admin-tile pointer h-100" onclick="setHash('${systemsTreeHash('', BIOS_TREE_ROOT)}')">
           <div class="card-body">
             <h5 class="card-title"><i class="bi bi-cpu me-2"></i>BIOS</h5>
-            <p class="card-text">Browse and download BIOS files detected across emulator systems.</p>
+            <p class="card-text">Browse BIOS inside the Systems file tree with games and other files.</p>
           </div>
         </div>
       </div>
@@ -5171,12 +5313,13 @@ async function router() {
     }
     document.body.classList.toggle("artwork-page", hash.startsWith("#admin/artwork"));
     if (hash === "#bios") {
-      await renderBios();
+      setHash(systemsTreeHash("", BIOS_TREE_ROOT));
+      return;
     } else if (hash === "#theme") {
       await renderThemeGalleryPage();
     } else if (hash === "" || hash === "#" || hash === "#home" || hash === "#help") {
       await renderHelpPage();
-    } else if (hash === "#systems") {
+    } else if (hash.startsWith("#systems")) {
       await renderSystemsPage();
     } else if (hash === "#admin") {
       if (!adminEnabled) {
@@ -5297,7 +5440,8 @@ async function router() {
       await renderSearch(q);
     } else if (parseSystemHash(hash)) {
       const parsed = parseSystemHash(hash);
-      await renderSystem(parsed.system, parsed.page);
+      setHash(systemsTreeHash("", parsed.system));
+      return;
     } else {
       await renderHelpPage();
     }

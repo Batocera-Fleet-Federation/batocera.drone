@@ -166,7 +166,18 @@ class ApiRoutesMixin:
                 return
 
             if len(parts) == 2 and parts[0] == "systems":
-                self._handle_rom_list(parts[1])
+                limit = None
+                offset = 0
+                if query_params.get("limit", [None])[0] is not None:
+                    try:
+                        limit = int(query_params.get("limit", ["100"])[0])
+                    except Exception:
+                        limit = 100
+                try:
+                    offset = int(query_params.get("offset", ["0"])[0])
+                except Exception:
+                    offset = 0
+                self._handle_rom_list(parts[1], limit=limit, offset=offset, query=query_params.get("q", [None])[0])
                 return
 
             if len(parts) == 2 and parts[0] == "bios":

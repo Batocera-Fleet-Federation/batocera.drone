@@ -314,12 +314,49 @@ class HandlersContentMixin:
                 systems = [item for item in systems if str(item.get("name", "")).lower() in visible]
         self._send_json(200, {"systems": systems}, cache_key="json:/systems")
 
-    def _handle_rom_list(self, system: str) -> None:
+    def _handle_rom_list(
+        self,
+        system: str,
+        limit: Optional[int] = None,
+        offset: int = 0,
+        query: Optional[str] = None,
+    ) -> None:
         _, roms = self.repository.list_assets(system, "roms", include_fingerprint=False)
+        query_value = str(query or "").strip().lower()
+        if query_value:
+            roms = [
+                item for item in roms
+                if query_value in " ".join([
+                    str(item.get("name") or ""),
+                    str(item.get("title") or ""),
+                    str(item.get("rom_file") or ""),
+                    str(item.get("path") or ""),
+                    str(item.get("unique_id") or ""),
+                ]).lower()
+            ]
+        total = len(roms)
+        if limit is not None:
+            safe_limit = max(1, min(int(limit), 5000))
+            safe_offset = max(0, int(offset))
+            roms = roms[safe_offset : safe_offset + safe_limit]
+        else:
+            safe_limit = None
+            safe_offset = 0
         if not self.settings.downloads_enabled:
             for item in roms:
                 item["is_downloadable"] = False
-        self._send_json(200, {"system": system, "roms": roms}, cache_key=f"json:/systems/{system}?fingerprint=0")
+        payload = {"system": system, "roms": roms}
+        cache_key = f"json:/systems/{system}?fingerprint=0"
+        if safe_limit is not None:
+            payload.update({
+                "count": total,
+                "offset": safe_offset,
+                "limit": safe_limit,
+                "returned": len(roms),
+                "has_more": (safe_offset + len(roms)) < total,
+            })
+            cache_key = f"json:/systems/{system}?limit={safe_limit}&offset={safe_offset}&q={query_value}"
+        self._send_json(200, payload, cache_key=cache_key)
 
     def _handle_images_list(self, system: str) -> None:
         _, images = self.repository.list_assets(system, "images")

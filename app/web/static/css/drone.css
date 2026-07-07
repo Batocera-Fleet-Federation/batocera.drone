@@ -405,6 +405,21 @@
       }
       table.bff-stack td:empty { display: none; }
       table.bff-stack td[data-label=""]::before { content: none; }
+      .tree-grid-row {
+        grid-template-columns: minmax(0, 1fr);
+      }
+      .tree-category-row,
+      .tree-leaf-row,
+      .tree-grid-more,
+      .tree-grid-empty {
+        padding-left: 1.15rem;
+      }
+      .tree-grid-meta,
+      .tree-grid-action {
+        justify-content: flex-start;
+        padding-left: 2.3rem;
+        white-space: normal;
+      }
     }
     .themed-table tbody td {
       background: rgba(21, 31, 50, 0.54);
@@ -486,12 +501,100 @@
       white-space: nowrap;
       text-align: right;
     }
-    .bios-table td {
-      vertical-align: middle;
+    .systems-tree-toolbar {
+      background: rgba(31, 42, 68, 0.72);
+      border: 1px solid var(--admin-border);
+      border-radius: 8px;
+      padding: 0.9rem;
     }
-    .bios-table .bios-md5 {
-      max-width: 18rem;
-      overflow-wrap: anywhere;
+    .tree-grid {
+      border: 1px solid var(--admin-border);
+      border-radius: 8px;
+      overflow: hidden;
+      background: rgba(15, 23, 42, 0.22);
+      font-size: 0.9rem;
+    }
+    .tree-root + .tree-root {
+      border-top: 1px solid var(--admin-border);
+    }
+    .tree-grid-row {
+      align-items: center;
+      background: transparent;
+      border: 0;
+      color: var(--admin-text);
+      display: grid;
+      gap: 0.5rem;
+      grid-template-columns: minmax(0, 1fr) auto auto;
+      min-height: 2.1rem;
+      padding: 0.3rem 0.75rem;
+      text-align: left;
+      width: 100%;
+    }
+    .tree-grid-row:hover,
+    .tree-grid-row.is-active {
+      background: rgba(0, 194, 255, 0.08);
+    }
+    .tree-category-row {
+      padding-left: 1.75rem;
+    }
+    .tree-leaf-row {
+      padding-left: 2.75rem;
+    }
+    .tree-grid-main {
+      align-items: center;
+      display: flex;
+      gap: 0.45rem;
+      min-width: 0;
+    }
+    .tree-grid-label {
+      min-width: 0;
+    }
+    .tree-grid-caret,
+    .tree-grid-icon {
+      color: var(--admin-muted);
+      flex: 0 0 auto;
+      font-size: 0.85rem;
+      width: 0.9rem;
+    }
+    .tree-branch {
+      border-top: 1px solid rgba(255, 255, 255, 0.06);
+      background: rgba(255, 255, 255, 0.025);
+    }
+    .tree-files {
+      border-top: 1px solid rgba(255, 255, 255, 0.06);
+    }
+    .tree-leaf-list {
+      display: flex;
+      flex-direction: column;
+    }
+    .tree-leaf-row + .tree-leaf-row {
+      border-top: 1px solid rgba(255, 255, 255, 0.05);
+    }
+    .tree-grid-meta {
+      color: var(--admin-muted);
+      font-size: 0.8rem;
+      white-space: nowrap;
+    }
+    .tree-grid-action {
+      align-items: center;
+      display: flex;
+      gap: 0.3rem;
+      justify-content: flex-end;
+    }
+    .tree-grid-action .btn {
+      line-height: 1;
+      padding: 0.25rem 0.5rem;
+    }
+    .tree-grid-more {
+      align-items: center;
+      border-top: 1px solid rgba(255, 255, 255, 0.06);
+      display: flex;
+      gap: 0.75rem;
+      justify-content: space-between;
+      padding: 0.5rem 0.75rem 0.5rem 2.75rem;
+    }
+    .tree-grid-empty {
+      padding: 0.6rem 0.75rem 0.6rem 2.75rem;
     }
     .download-summary-grid,
     .asset-metric-grid {
