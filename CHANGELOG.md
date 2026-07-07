@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.1.32] - 2026-07-06
+
+- Add per-system BIOS association so the tree groups BIOS under its system.
+
 ## [v0.1.31] - 2026-07-06
 
 - Updating UI to show systems & bios in a much cleaner way.
