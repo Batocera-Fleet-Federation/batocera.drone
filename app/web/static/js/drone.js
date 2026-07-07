@@ -5362,7 +5362,7 @@ async function renderAdminSystemInfoPage() {
         <button class="btn btn-outline-secondary" onclick="setHash('#admin')">Back to Admin</button>
         <div class="d-flex flex-wrap gap-2">
           <button class="btn btn-outline-primary" onclick="setHash('#admin/system-info')"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
-          <button class="btn btn-outline-warning" onclick="updateDroneApp()"><i class="bi bi-cloud-download me-1"></i>Download & Restart</button>
+          <button class="btn btn-outline-warning" onclick="updateDroneApp()"><i class="bi bi-cloud-download me-1"></i>Update Drone</button>
           ${pixenInstalled ? `<button class="btn btn-outline-success" onclick="runPixenUpdate()"><i class="bi bi-play-circle me-1"></i>Run PixeN Update</button>` : ""}
         </div>
       </div>
