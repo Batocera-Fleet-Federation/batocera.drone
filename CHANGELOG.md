@@ -1,5 +1,10 @@
 # Changelog
 
+## [v0.1.34] - 2026-07-07
+
+- Updating emulator view to be treeview instead.
+- scripts/batocera_install.sh now installs/stages as root and no longer uses drone-app or su. app/service_bootstrap.sh no longer creates or switches to a drone-app user; the Drone process runs directly as root. Removed the now-unneeded low-port unprivileged binding tweak. Fixed LaunchBox artwork apply/search metadata path by importing _first_metadata_value and _looks_like_placeholder_image in app/roms/scrapers.py. Added a regression test for LaunchBox details metadata parsing.
+
 ## [v0.1.33] - 2026-07-06
 
 - Fixed Drone discovery to broadcast more reliably, join multicast on local interfaces, and surface duplicate Drone-ID conflicts instead of silently hiding peers. Fixed Overmind heartbeat handling so Drone performance metrics and PixeN state persist and render properly. Moved Overmind Rotate Token beside Disconnect and removed the selected-drone token panel. Added PixeN detection plus local Drone and remote Overmind trigger support for /userdata/roms/rgs/rgs_upgrade.sh. Moved Drone Update into System Info, hid global ROM search outside Systems, folded Gameplay Logs into System Logs, and matched emulator config font styling. Updated LaunchBox scraping to use the current gamesdb-api.launchbox-app.com endpoint with fallback/override support. Fixed idle volume behavior so active gameplay via emulatorlauncher prevents volume lowering even when controller input is not seen.
