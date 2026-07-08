@@ -9,9 +9,6 @@ const themeMenuBtn = document.getElementById("themeMenuBtn");
 const systemInfoMenuBtn = document.getElementById("systemInfoMenuBtn");
 const adminMenuBtn = document.getElementById("adminMenuBtn");
 const apiAccessBtn = document.getElementById("apiAccessBtn");
-const searchForm = document.getElementById("searchForm");
-const searchInput = document.getElementById("searchInput");
-const clearSearchBtn = document.getElementById("clearSearchBtn");
 const droneVersionBadge = document.getElementById("droneVersionBadge");
 const titleNode = document.querySelector(".h3.mb-1");
 const subtitleNode = document.getElementById("pageSubtitle");
@@ -182,14 +179,6 @@ function setLoading(isLoading, text = "Loading...") {
   } else {
     hideLoadingToast();
   }
-}
-function setSearchMode(mode, systemName = "") {
-  if (mode !== "global") {
-    searchForm.classList.add("d-none");
-    return;
-  }
-  searchForm.classList.remove("d-none");
-  searchInput.placeholder = "Search ROMs across all systems";
 }
 function applyAdminVisibility() {
   const adminLinks = [adminMenuBtn, systemInfoMenuBtn, apiAccessBtn].filter(Boolean);
@@ -799,7 +788,6 @@ function setupLazyImages() {
 function renderSystems(data) {
   if (selectedSystemsTreeRoot) backBtn.classList.remove("d-none");
   else backBtn.classList.add("d-none");
-  setSearchMode("global");
   systemsTreeData = data || { systems: [] };
   const query = (systemsTreeQuery || "").trim().toLowerCase();
   const systems = (data.systems || [])
@@ -1350,7 +1338,6 @@ function romGamelistSummaryHtml(rom) {
 async function renderRomMediaPage(system, uniqueId, page = 1) {
   currentSystemContext = system;
   backBtn.classList.remove("d-none");
-  setSearchMode("system", system);
   setLoading(true, "Loading ROM media...");
   try {
     const [romsData] = await Promise.all([
@@ -1555,87 +1542,8 @@ function renderThemeGallery(data) {
   }
   setupLazyImages();
 }
-function renderSearchResults(data) {
-  backBtn.classList.add("d-none");
-  const results = data.results || [];
-  const grouped = {};
-  results.forEach((item) => {
-    const key = item.system || "unknown";
-    if (!grouped[key]) grouped[key] = [];
-    grouped[key].push(item);
-  });
-  const systems = Object.keys(grouped).sort((a, b) => a.localeCompare(b));
-  content.innerHTML = `
-    <div class="mb-3">
-      <h2 class="h4 mb-1"><i class="bi bi-binoculars me-2"></i>Search Results</h2>
-      <div class="text-muted">Query: "${escapeHtml(data.query || "")}" · Scope: ${escapeHtml(data.system || "all systems")} · Matches: ${results.length} · Systems: ${systems.length}</div>
-    </div>
-    ${
-      systems.length
-        ? systems.map((system) => `
-          <section class="mb-4">
-            <h3 class="h5 mb-2"><i class="bi bi-controller me-2"></i>${escapeHtml(system)} <span class="text-muted">(${grouped[system].length})</span></h3>
-            <div class="row g-3">
-              ${grouped[system].map(item => {
-                const fallbacks = [
-                  publicRomImageUrl(item.system, item.name, item.image_stem, ".png", true),
-                  publicRomImageUrl(item.system, item.name, item.image_stem, ".jpg", true),
-                  publicRomImageUrl(item.system, item.name, item.image_stem, ".jpeg", true),
-                  publicRomImageUrl(item.system, item.name, item.image_stem, ".webp", true),
-                  publicRomImageUrl(item.system, item.name, item.image_stem, ".png", false),
-                  publicRomImageUrl(item.system, item.name, item.image_stem, ".jpg", false),
-                  publicRomImageUrl(item.system, item.name, item.image_stem, ".jpeg", false),
-                  publicRomImageUrl(item.system, item.name, item.image_stem, ".webp", false),
-                ];
-                return `
-                <div class="col-12 col-md-6 col-xl-3">
-                  <div class="card shadow-sm tile h-100">
-                    <img
-                      src=""
-                      data-src="${romImageByIdUrl(item.system, item.unique_id)}"
-                      data-fallbacks='${JSON.stringify(fallbacks)}'
-                      class="card-img-top"
-                      alt="${escapeHtml(item.name)}"
-                      style="height: 170px; object-fit: contain; background: #111;"
-                      loading="lazy"
-                    >
-                    <div class="card-body">
-                      <div class="fw-semibold mb-3">${escapeHtml(item.name)}</div>
-                      ${
-                        item.is_downloadable === false
-                          ? `<button class="btn btn-secondary btn-sm" type="button" disabled><i class="bi bi-folder2-open me-1"></i>Folder ROM (No Download)</button>`
-                          : `<a class="btn btn-primary btn-sm" href="${romDownloadUrl(item.system, item.unique_id)}"><i class="bi bi-download me-1"></i>Download</a>`
-                      }
-                    </div>
-                  </div>
-                </div>
-              `;
-              }).join("")}
-            </div>
-          </section>
-        `).join("")
-        : `<div class="text-muted">No matches found.</div>`
-    }
-  `;
-  setupLazyImages();
-}
-async function renderSearch(query) {
-  setSearchMode("hidden");
-  setLoading(true, `Searching for "${query}"...`);
-  const systemFilter = currentSystemContext || null;
-  if (!systemFilter) {
-    clearSystemTheme();
-  }
-  const url = systemFilter
-    ? `/search?q=${encodeURIComponent(query)}&system=${encodeURIComponent(systemFilter)}`
-    : `/search?q=${encodeURIComponent(query)}`;
-  const data = await api(url);
-  renderSearchResults(data);
-  setLoading(false);
-}
 async function renderThemeGalleryPage() {
   currentSystemContext = null;
-  setSearchMode("hidden");
   setLoading(true, "Loading theme images...");
   clearSystemTheme();
   await refreshRandomThemeLogo();
@@ -1646,7 +1554,6 @@ async function renderThemeGalleryPage() {
 }
 async function renderSystemsPage() {
   currentSystemContext = null;
-  setSearchMode("global");
   setLoading(true, "Loading systems...");
   clearSystemTheme();
   const parsed = parseSystemsHash(window.location.hash) || { q: "", root: null };
@@ -1673,7 +1580,6 @@ async function renderSystemsPage() {
 }
 async function renderHelpPage() {
   currentSystemContext = null;
-  setSearchMode("hidden");
   clearSystemTheme();
   await refreshRandomThemeLogo();
   titleNode.textContent = "Batocera Drone";
@@ -1857,7 +1763,6 @@ async function renderHelpPage() {
 }
 async function renderAdminPage() {
   currentSystemContext = null;
-  setSearchMode("hidden");
   setLoading(true, "Loading admin panel...");
   clearSystemTheme();
   renderAdminMenu();
@@ -2140,7 +2045,6 @@ function setTransferPage(kind, value) { transferViews[kind].page = Number(value)
 
 async function renderDownloadsPage() {
   currentSystemContext = null;
-  setSearchMode("hidden");
   setLoading(true, "Loading downloads...");
   clearSystemTheme();
   titleNode.textContent = "Downloads";
@@ -2315,7 +2219,6 @@ function renderAssetCachePanel(payload, includeActions = true) {
 
 async function renderAssetCachePage() {
   currentSystemContext = null;
-  setSearchMode("hidden");
   clearSystemTheme();
   titleNode.textContent = "Asset Cache";
   subtitleNode.textContent = "ROM, BIOS, artwork cache and Overmind upload state";
@@ -2591,7 +2494,6 @@ async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh 
   artworkFilterQuery = query || "";
   artworkRomStatus = ["any", "exists", "missing"].includes(romStatus) ? romStatus : "any";
   syncArtworkHash();
-  setSearchMode("hidden");
   setLoading(true, includeFilesystem ? "Scanning ROM directories..." : "Scanning gamelists...");
   clearSystemTheme();
   await refreshRandomThemeLogo();
@@ -3827,7 +3729,6 @@ function setIntegrationTab(tab) {
 
 async function renderIntegrationPage() {
   currentSystemContext = null;
-  setSearchMode("hidden");
   clearSystemTheme();
   titleNode.textContent = "Integration";
   subtitleNode.textContent = "Manage this Drone through Overmind or directly on the local network";
@@ -4480,7 +4381,6 @@ async function renderAutomationPage() {
   currentSystemContext = null;
   titleNode.textContent = "Automation";
   subtitleNode.textContent = "Hands-off behaviors for this device";
-  setSearchMode("hidden");
   clearSystemTheme();
   setLoading(true, "Loading automation settings...");
   let payload;
@@ -4819,7 +4719,6 @@ async function refreshCurrentLog() {
   await loadLog(currentLogSource, activeSource);
 }
 async function renderEmulatorsPage() {
-  setSearchMode("hidden");
   titleNode.textContent = "Emulators";
   subtitleNode.textContent = "Emulator config files mirrored to Overmind";
   clearSystemTheme();
@@ -5230,7 +5129,6 @@ async function refreshCurrentConfig() {
   await loadConfig(currentConfigSource, activeSource);
 }
 async function renderAdminSystemInfoPage() {
-  setSearchMode("hidden");
   titleNode.textContent = "System Info";
   subtitleNode.textContent = "Runtime, network, and Batocera details";
   setLoading(true, "Loading system information...");
@@ -5565,25 +5463,6 @@ async function router() {
     } else if (parseSystemRomHash(hash)) {
       const parsed = parseSystemRomHash(hash);
       await renderRomMediaPage(parsed.system, parsed.uniqueId, parsed.page);
-    } else if (hash.startsWith("#search-system/")) {
-      const rest = hash.substring("#search-system/".length);
-      const slashIndex = rest.indexOf("/");
-      if (slashIndex > 0) {
-        const system = decodeURIComponent(rest.substring(0, slashIndex));
-        const q = decodeURIComponent(rest.substring(slashIndex + 1));
-        currentSystemContext = system;
-        searchInput.value = q;
-        await renderSearch(q);
-      } else {
-        currentSystemContext = null;
-        setHash("");
-      }
-    } else if (hash.startsWith("#search/")) {
-      const q = decodeURIComponent(hash.substring("#search/".length));
-      currentSystemContext = null;
-      await refreshRandomThemeLogo();
-      searchInput.value = q;
-      await renderSearch(q);
     } else if (parseSystemHash(hash)) {
       const parsed = parseSystemHash(hash);
       setHash(systemsTreeHash("", parsed.system));
@@ -5621,21 +5500,6 @@ adminMenuBtn.addEventListener("click", (event) => {
   event.preventDefault();
   if (!adminEnabled) return;
   setHash("#admin");
-});
-searchForm.addEventListener("submit", (event) => {
-  event.preventDefault();
-  const q = (searchInput.value || "").trim();
-  if (!q) return;
-  if (currentSystemContext) {
-    setHash(`#search-system/${encodeURIComponent(currentSystemContext)}/${encodeURIComponent(q)}`);
-  } else {
-    setHash(`#search/${encodeURIComponent(q)}`);
-  }
-});
-clearSearchBtn.addEventListener("click", () => {
-  searchInput.value = "";
-  currentSystemContext = null;
-  setHash("#systems");
 });
 window.addEventListener("hashchange", router);
 async function bootstrap() {
