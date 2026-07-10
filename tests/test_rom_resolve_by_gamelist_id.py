@@ -111,6 +111,34 @@ class ResolveRomByGamelistIdTest(unittest.TestCase):
             self.assertEqual(marker, "Sonic Adventure (USA)/Sonic Adventure (USA).gdi")
             self.assertTrue(target.is_dir())
 
+    def test_nested_marker_resolves_to_top_level_folder(self):
+        # Lindbergh: marker nested in elf/ beside the fs/ data dir -- the transfer
+        # unit is the whole top-level game folder, not the marker's parent.
+        tmp = tempfile.TemporaryDirectory()
+        root = Path(tmp.name) / "userdata"
+        system = root / "roms" / "lindbergh"
+        (system / "hotd4a" / "elf").mkdir(parents=True)
+        (system / "hotd4a" / "elf" / "hotd4a.game").write_bytes(b"marker")
+        (system / "hotd4a" / "fs").mkdir()
+        (system / "hotd4a" / "fs" / "disk0.bin").write_bytes(b"f" * 64)
+        (system / "gamelist.xml").write_text(
+            "<gameList><game id='5'><path>./hotd4a/elf/hotd4a.game</path><name>HOTD4</name></game></gameList>",
+            encoding="utf-8",
+        )
+        with mock.patch.dict(
+            "os.environ",
+            {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
+            clear=True,
+        ):
+            settings = Settings.from_env()
+        repo = RomRepository(settings.roms_root, settings.bios_root)
+        with tmp:
+            target, relative_path, entry_type, marker = repo.resolve_rom_file_by_gamelist_id("lindbergh", "5")
+            self.assertEqual(entry_type, "folder")
+            self.assertEqual(relative_path, "hotd4a")
+            self.assertEqual(marker, "hotd4a/elf/hotd4a.game")
+            self.assertTrue((target / "fs" / "disk0.bin").is_file())
+
     def test_non_table_system_keeps_single_file(self):
         # The same layout under a system NOT in the folder-unit table stays a file.
         tmp, repo = self._repo_with_folder_unit_rom("snes")

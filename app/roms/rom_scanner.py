@@ -48,6 +48,12 @@ ROM_METADATA_PROGRESS_SECONDS = float(os.environ.get("ROM_METADATA_PROGRESS_SECO
 # lazy-imported inside the scan/hash fns below so those patches take effect.
 ROM_METADATA_FINGERPRINT_BATCH_SIZE = max(1, int(os.environ.get("ROM_METADATA_FINGERPRINT_BATCH_SIZE", "250")))
 ROM_METADATA_HASH_BUDGET_SECONDS = max(0.0, float(os.environ.get("ROM_METADATA_HASH_BUDGET_SECONDS", "120")))
+# Version of the ROM classification rules (the folder-unit table + resolution in
+# rom_transfer_unit). The per-system gamelist.xml MD5 gate skips unchanged systems, so
+# a rule change would otherwise never re-classify existing entries -- bump this to
+# force a one-time full re-index on the next poll. v2: folder-unit ROMs (marker file in
+# a per-game top-level folder) replace the immediate-parent resolution.
+ROM_CLASSIFIER_VERSION = 2
 # ROM_METADATA_HASH_ROMS_ENABLED stays the single source in drone_api (tests patch it there
 # + rom_metadata_state reads it); lazy-imported inside _hash_rom_metadata_batches below.
 
@@ -137,6 +143,18 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
         last_checkpoint = now
 
     _overmind_log("Asset metadata poll phase=scan")
+    # A classification-rule change must re-index every system once, even when no
+    # gamelist.xml changed (the MD5 gate below would otherwise carry stale rows
+    # forward forever). The stored version is only stamped after a COMPLETE pass, so
+    # an interrupted re-index resumes on the next poll.
+    classifier_stale = str(cache.get("rom_classifier_version") or "") != str(ROM_CLASSIFIER_VERSION)
+    if classifier_stale:
+        print(
+            f"ROM metadata classifier version changed: stored={cache.get('rom_classifier_version')!r} "
+            f"current={ROM_CLASSIFIER_VERSION} -> re-indexing every system this poll",
+            file=sys.stdout,
+            flush=True,
+        )
     try:
         system_names = repository.list_system_names()
     except FileNotFoundError:
@@ -181,7 +199,7 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
         except OSError:
             gamelist_stat = None
         system_rom_count = 0
-        if current_md5 == stored_gamelist_md5.get(sys_key) and sys_key in existing_by_system:
+        if not classifier_stale and current_md5 == stored_gamelist_md5.get(sys_key) and sys_key in existing_by_system:
             # Unchanged gamelist.xml -> carry this system's cached rows forward untouched.
             # This is the whole point of the MD5 gate: no directory walk, stat, or hash.
             for entry_key, entry in existing_by_system[sys_key].items():
@@ -359,6 +377,8 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
     cache["last_full_scan_at"] = now_iso
     cache["dirty"] = changed
     cache["scan_in_progress"] = False
+    # Stamp the classifier version only on a completed pass (see classifier_stale above).
+    cache["rom_classifier_version"] = ROM_CLASSIFIER_VERSION
     _overmind_log("Asset metadata poll phase=cache_write")
     cache_write_started = time.monotonic()
     rom_updates = {
