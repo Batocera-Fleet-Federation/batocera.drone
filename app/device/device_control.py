@@ -143,6 +143,7 @@ def _request_service_control(command: str, body: Optional[str] = None) -> bool:
         "set-screen-mode-kiosk",
         "set-screen-mode-kid",
         "repair-rom-permissions",
+        "kill-emulator",
     }:
         return False
     control_dir = Path(os.environ.get("DRONE_SERVICE_CONTROL_DIR", "/userdata/system/drone-app/control"))
@@ -299,6 +300,24 @@ def _restart_emulationstation() -> bool:
     if _request_service_control("restart-emulationstation"):
         return True
     command = _emulationstation_restart_command()
+    if not command:
+        return False
+    subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return True
+
+
+def _emulator_kill_command() -> Optional[List[str]]:
+    kill_tool = shutil.which("batocera-es-swissknife")
+    if kill_tool:
+        return [kill_tool, "--emukill"]
+    return None
+
+
+def _kill_running_emulator() -> bool:
+    """Exit the currently running game, returning to EmulationStation."""
+    if _request_service_control("kill-emulator"):
+        return True
+    command = _emulator_kill_command()
     if not command:
         return False
     subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

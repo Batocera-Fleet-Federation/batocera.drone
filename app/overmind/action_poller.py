@@ -235,7 +235,9 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                     system_info_payload["updated_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
                     system_info_payload["screen_mode"] = _get_screen_mode(settings)
                     system_info_payload["audio_volume"] = _get_audio_volume(settings)
-                    system_info_payload["idle_volume_automation"] = _load_automation_config(settings)["idle_volume"]
+                    _automation_config = _load_automation_config(settings)
+                    system_info_payload["idle_volume_automation"] = _automation_config["idle_volume"]
+                    system_info_payload["idle_game_exit_automation"] = _automation_config["idle_game_exit"]
                     system_info_payload["pixen_installed"] = is_pixen_installed(settings)
                     system_info_payload["pixen_script_path"] = str(pixen_script_path(settings))
                 network_payload = _drone_network_payload(settings)

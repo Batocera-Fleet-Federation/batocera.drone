@@ -172,6 +172,14 @@ restart_emulationstation_as_root() {
   echo "[drone-service] Unable to restart EmulationStation: restart command was not found."
 }
 
+kill_emulator_as_root() {
+  if command -v batocera-es-swissknife >/dev/null 2>&1; then
+    batocera-es-swissknife --emukill
+    return
+  fi
+  echo "[drone-service] Unable to exit the running game: batocera-es-swissknife command was not found."
+}
+
 set_screen_mode_as_root() {
   mode="$1"
   helper="$WORK_DIR/app/set_screen_mode.py"
@@ -243,6 +251,11 @@ service_control_worker() {
       rm -f "$CONTROL_DIR/restart-emulationstation.request"
       echo "[drone-service] EmulationStation restart requested by Drone app."
       restart_emulationstation_as_root
+    fi
+    if [ -f "$CONTROL_DIR/kill-emulator.request" ]; then
+      rm -f "$CONTROL_DIR/kill-emulator.request"
+      echo "[drone-service] Emulator exit requested by Drone app (idle game-exit automation)."
+      kill_emulator_as_root
     fi
     for mode in full kiosk kid; do
       request="$CONTROL_DIR/set-screen-mode-${mode}.request"

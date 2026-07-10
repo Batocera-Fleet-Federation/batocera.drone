@@ -12,9 +12,11 @@ from app.drone_api import (
     Settings,
     _execute_overmind_action,
     _load_automation_config,
+    _normalize_idle_game_exit_config,
     _normalize_idle_volume_config,
+    _push_automation_config_to_overmind,
     _read_last_input_activity,
-    _report_idle_volume_to_overmind,
+    _run_idle_game_exit_automation_once,
     _run_idle_volume_automation_once,
     _save_automation_config,
 )
@@ -68,6 +70,57 @@ class IdleVolumeConfigTests(unittest.TestCase):
             self.assertTrue(config["enabled"])
             self.assertEqual(config["idle_minutes"], 1440)
             self.assertEqual(config["target_volume"], 0)
+
+
+class IdleGameExitConfigTests(unittest.TestCase):
+    def test_defaults_are_disabled_with_15_minutes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            config = _load_automation_config(settings)["idle_game_exit"]
+            self.assertFalse(config["enabled"])
+            self.assertEqual(config["idle_minutes"], 15)
+
+    def test_normalize_clamps_and_coerces(self) -> None:
+        normalized = _normalize_idle_game_exit_config({"enabled": "yes", "idle_minutes": "0"})
+        self.assertTrue(normalized["enabled"])
+        self.assertEqual(normalized["idle_minutes"], 1)
+
+    def test_normalize_handles_garbage_values(self) -> None:
+        normalized = _normalize_idle_game_exit_config({"idle_minutes": "abc"})
+        self.assertEqual(normalized["idle_minutes"], 15)
+
+    def test_save_round_trips_and_normalizes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            _save_automation_config(
+                settings,
+                {"idle_game_exit": {"enabled": True, "idle_minutes": 9999}},
+            )
+            config = _load_automation_config(settings)["idle_game_exit"]
+            self.assertTrue(config["enabled"])
+            self.assertEqual(config["idle_minutes"], 1440)
+
+    def test_saving_one_section_preserves_the_other(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            _save_automation_config(
+                settings,
+                {"idle_volume": {"enabled": True, "idle_minutes": 7, "target_volume": 15}},
+            )
+            _save_automation_config(
+                settings,
+                {"idle_game_exit": {"enabled": True, "idle_minutes": 20}},
+            )
+            config = _load_automation_config(settings)
+            # Saving idle_game_exit must not reset the idle_volume section back to defaults.
+            self.assertEqual(
+                config["idle_volume"],
+                {"enabled": True, "idle_minutes": 7, "target_volume": 15},
+            )
+            self.assertEqual(
+                config["idle_game_exit"],
+                {"enabled": True, "idle_minutes": 20},
+            )
 
 
 class InputActivityFileTests(unittest.TestCase):
@@ -187,6 +240,99 @@ class IdleVolumeAutomationRunnerTests(unittest.TestCase):
                 apply_mock.assert_not_called()
 
 
+_RUNNING_GAME = {"pid": 123, "rom_path": "/userdata/roms/snes/game.sfc"}
+
+
+class IdleGameExitAutomationRunnerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # The runner uses module-level arming state; reset it per test.
+        drone_api._IDLE_GAME_EXIT_LAST_ARMED_ACTIVITY = None
+
+    def _enable(self, settings: Settings, *, idle_minutes: int = 15) -> None:
+        _save_automation_config(
+            settings,
+            {"idle_game_exit": {"enabled": True, "idle_minutes": idle_minutes}},
+        )
+
+    def test_disabled_does_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            with mock.patch.object(automation, "_kill_running_emulator") as kill_mock:
+                _run_idle_game_exit_automation_once(settings)
+                kill_mock.assert_not_called()
+
+    def test_no_game_running_does_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            self._enable(settings, idle_minutes=5)
+            idle = time.time() - 600
+            with mock.patch.object(automation, "_find_running_emulatorlauncher", return_value=None), \
+                 mock.patch.object(automation, "_read_last_input_activity", return_value=idle), \
+                 mock.patch.object(automation, "_kill_running_emulator") as kill_mock:
+                _run_idle_game_exit_automation_once(settings)
+                kill_mock.assert_not_called()
+
+    def test_no_monitor_data_does_not_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            self._enable(settings)
+            with mock.patch.object(automation, "_find_running_emulatorlauncher", return_value=_RUNNING_GAME), \
+                 mock.patch.object(automation, "_read_last_input_activity", return_value=None), \
+                 mock.patch.object(automation, "_kill_running_emulator") as kill_mock:
+                _run_idle_game_exit_automation_once(settings)
+                kill_mock.assert_not_called()
+
+    def test_recent_input_does_not_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            self._enable(settings, idle_minutes=5)
+            recent = time.time() - 60  # 1 minute idle, threshold is 5
+            with mock.patch.object(automation, "_find_running_emulatorlauncher", return_value=_RUNNING_GAME), \
+                 mock.patch.object(automation, "_read_last_input_activity", return_value=recent), \
+                 mock.patch.object(automation, "_kill_running_emulator") as kill_mock:
+                _run_idle_game_exit_automation_once(settings)
+                kill_mock.assert_not_called()
+
+    def test_idle_past_threshold_exits_once_then_holds(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            self._enable(settings, idle_minutes=5)
+            idle = time.time() - 600  # 10 minutes idle
+            with mock.patch.object(automation, "_find_running_emulatorlauncher", return_value=_RUNNING_GAME), \
+                 mock.patch.object(automation, "_read_last_input_activity", return_value=idle), \
+                 mock.patch.object(automation, "_kill_running_emulator") as kill_mock:
+                _run_idle_game_exit_automation_once(settings)
+                _run_idle_game_exit_automation_once(settings)  # still idle, same activity stamp
+                kill_mock.assert_called_once()
+
+    def test_new_input_rearms_and_exits_again(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            self._enable(settings, idle_minutes=5)
+            first_idle = time.time() - 600
+            with mock.patch.object(automation, "_find_running_emulatorlauncher", return_value=_RUNNING_GAME), \
+                 mock.patch.object(automation, "_kill_running_emulator") as kill_mock:
+                with mock.patch.object(automation, "_read_last_input_activity", return_value=first_idle):
+                    _run_idle_game_exit_automation_once(settings)
+                # Fresh input arrives (e.g. a new game is launched), then idle again.
+                second_idle = time.time() - 600 + 1
+                with mock.patch.object(automation, "_read_last_input_activity", return_value=second_idle):
+                    _run_idle_game_exit_automation_once(settings)
+                self.assertEqual(kill_mock.call_count, 2)
+
+    def test_kill_failure_does_not_arm(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            self._enable(settings, idle_minutes=5)
+            idle = time.time() - 600
+            with mock.patch.object(automation, "_find_running_emulatorlauncher", return_value=_RUNNING_GAME), \
+                 mock.patch.object(automation, "_read_last_input_activity", return_value=idle), \
+                 mock.patch.object(automation, "_kill_running_emulator", side_effect=OSError("boom")) as kill_mock:
+                _run_idle_game_exit_automation_once(settings)
+                _run_idle_game_exit_automation_once(settings)
+                self.assertEqual(kill_mock.call_count, 2)
+
+
 class IdleVolumeOvermindActionTests(unittest.TestCase):
     def setUp(self) -> None:
         drone_api._IDLE_VOLUME_LAST_ARMED_ACTIVITY = None
@@ -248,6 +394,62 @@ class IdleVolumeOvermindActionTests(unittest.TestCase):
             run_mock.assert_called_once_with(settings)
 
 
+class IdleGameExitOvermindActionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        drone_api._IDLE_GAME_EXIT_LAST_ARMED_ACTIVITY = None
+
+    def test_action_saves_config_and_reports_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            repo = RomRepository(Path(tmp) / "roms", Path(tmp) / "bios")
+            status, message, result = _execute_overmind_action(
+                settings,
+                repo,
+                {
+                    "action": "set_idle_game_exit_automation",
+                    "payload": {"enabled": True, "idle_minutes": 20},
+                },
+            )
+            self.assertEqual(status, "completed")
+            self.assertEqual(result["type"], "idle_game_exit_automation")
+            self.assertEqual(result["enabled"], True)
+            self.assertEqual(result["idle_minutes"], 20)
+            self.assertIn("enabled", message)
+            stored = _load_automation_config(settings)["idle_game_exit"]
+            self.assertEqual(stored, {"enabled": True, "idle_minutes": 20})
+
+    def test_action_partial_payload_merges_and_clamps(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            repo = RomRepository(Path(tmp) / "roms", Path(tmp) / "bios")
+            _save_automation_config(
+                settings,
+                {"idle_game_exit": {"enabled": True, "idle_minutes": 15}},
+            )
+            status, _message, result = _execute_overmind_action(
+                settings, repo, {"action": "set_idle_game_exit_automation", "payload": {"idle_minutes": 9999}}
+            )
+            self.assertEqual(status, "completed")
+            self.assertEqual(result["enabled"], True)  # preserved
+            self.assertEqual(result["idle_minutes"], 1440)  # clamped
+
+    def test_action_does_not_disturb_idle_volume_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            repo = RomRepository(Path(tmp) / "roms", Path(tmp) / "bios")
+            _save_automation_config(
+                settings,
+                {"idle_volume": {"enabled": True, "idle_minutes": 5, "target_volume": 25}},
+            )
+            _execute_overmind_action(
+                settings,
+                repo,
+                {"action": "set_idle_game_exit_automation", "payload": {"enabled": True, "idle_minutes": 20}},
+            )
+            stored = _load_automation_config(settings)["idle_volume"]
+            self.assertEqual(stored, {"enabled": True, "idle_minutes": 5, "target_volume": 25})
+
+
 class IdleVolumeOvermindPushTests(unittest.TestCase):
     def test_collect_system_info_includes_idle_volume_automation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -260,6 +462,19 @@ class IdleVolumeOvermindPushTests(unittest.TestCase):
             self.assertEqual(
                 payload["idle_volume_automation"],
                 {"enabled": True, "idle_minutes": 8, "target_volume": 10},
+            )
+
+    def test_collect_system_info_includes_idle_game_exit_automation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            _save_automation_config(
+                settings,
+                {"idle_game_exit": {"enabled": True, "idle_minutes": 20}},
+            )
+            payload = drone_api._collect_system_info_payload(settings)
+            self.assertEqual(
+                payload["idle_game_exit_automation"],
+                {"enabled": True, "idle_minutes": 20},
             )
 
     def test_collect_system_info_reports_pixen_installation(self) -> None:
@@ -286,7 +501,7 @@ class IdleVolumeOvermindPushTests(unittest.TestCase):
                      return_value={"overmind_url": "https://overmind.local/", "overmind_token": "tok"},
                  ), \
                  mock.patch.object(automation, "_overmind_post_json", return_value={}) as post_mock:
-                ok = _report_idle_volume_to_overmind(settings)
+                ok = _push_automation_config_to_overmind(settings)
             self.assertTrue(ok)
             post_mock.assert_called_once()
             url = post_mock.call_args.args[0]
@@ -304,7 +519,7 @@ class IdleVolumeOvermindPushTests(unittest.TestCase):
             settings = _build_settings(Path(tmp))
             with mock.patch.object(drone_api._local_network, "is_overmind_mode", return_value=False), \
                  mock.patch.object(automation, "_overmind_post_json") as post_mock:
-                self.assertFalse(_report_idle_volume_to_overmind(settings))
+                self.assertFalse(_push_automation_config_to_overmind(settings))
                 post_mock.assert_not_called()
 
     def test_push_swallows_errors(self) -> None:
@@ -317,7 +532,7 @@ class IdleVolumeOvermindPushTests(unittest.TestCase):
                      return_value={"overmind_url": "https://overmind.local", "overmind_token": "tok"},
                  ), \
                  mock.patch.object(automation, "_overmind_post_json", side_effect=OSError("boom")):
-                self.assertFalse(_report_idle_volume_to_overmind(settings))
+                self.assertFalse(_push_automation_config_to_overmind(settings))
 
 
 if __name__ == "__main__":

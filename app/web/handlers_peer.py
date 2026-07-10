@@ -28,6 +28,7 @@ try:
     from ..transfer.drone_tls import DroneCertificateManager
     from ..transfer.network_identity import drone_scheme as _drone_scheme
     from ..transfer.peer_connectivity import _public_local_peer, _save_local_peer_certificate
+    from ..transfer.transfer_files import build_folder_manifest as _build_folder_manifest
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.auth import record_unauthorized_response  # type: ignore
     from overmind.overmind_game_logs import load_gameplay_history as _load_gameplay_history  # type: ignore
@@ -42,6 +43,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from transfer.drone_tls import DroneCertificateManager  # type: ignore
     from transfer.network_identity import drone_scheme as _drone_scheme  # type: ignore
     from transfer.peer_connectivity import _public_local_peer, _save_local_peer_certificate  # type: ignore
+    from transfer.transfer_files import build_folder_manifest as _build_folder_manifest  # type: ignore
 
 
 class HandlersPeerMixin:
@@ -311,7 +313,7 @@ class HandlersPeerMixin:
             self._send_json(400, {"error": "invalid gamelist id"})
             return
         try:
-            target, relative_path, entry_type = self.repository.resolve_rom_file_by_gamelist_id(system, gid)
+            target, relative_path, entry_type, marker_relative_path = self.repository.resolve_rom_file_by_gamelist_id(system, gid)
         except ValueError as error:
             self._send_json(400, {"error": str(error)})
             return
@@ -324,6 +326,7 @@ class HandlersPeerMixin:
             "gamelist_id": gid,
             "relative_path": relative_path,
             "entry_type": entry_type,
+            "marker_relative_path": marker_relative_path,
         }
         if entry_type == "file":
             try:
@@ -335,11 +338,27 @@ class HandlersPeerMixin:
                 response["rom_fingerprint"] = self.repository.build_fingerprint(target)
             except Exception:
                 pass
+        else:
+            try:
+                size, _ = self.repository.build_directory_stats(target)
+                response["file_size"] = int(size)
+            except OSError:
+                pass
+            # Folder-unit ROMs keep the marker file as the identity: fingerprint the
+            # marker so the receiver's present-check matches its own scan. True
+            # directory entries (marker == the folder itself) carry no fingerprint.
+            marker_target = (self.repository.get_system_dir(system).resolve() / marker_relative_path).resolve()
+            if marker_relative_path != relative_path and marker_target.is_file():
+                try:
+                    response["rom_fingerprint"] = self.repository.build_fingerprint(marker_target)
+                except Exception:
+                    pass
         # Tell the receiver which artwork fields this game has on disk so it can pull
         # them (receiver-driven) right after the ROM instead of guessing every field.
+        # Keyed by the gamelist <path> -- the marker for folder-unit ROMs.
         try:
             present = self.repository.list_present_artwork(system)
-            response["artwork_types"] = sorted(present.get(relative_path.lower(), set()))
+            response["artwork_types"] = sorted(present.get(marker_relative_path.lower(), set()))
         except Exception:
             response["artwork_types"] = []
         self.log_message("peer rom resolve-by-id system=%s gid=%s rom=%s type=%s", system, gid, relative_path, entry_type)
@@ -358,34 +377,7 @@ class HandlersPeerMixin:
             self.log_error("peer rom manifest failed system=%s rom=%s resolved=%s reason=not_found", system, rel, str(target))
             self._send_json(404, {"error": "not found"})
             return
-        files = []
-        directories = []
-        total_size = 0
-        latest_mtime = int(target.stat().st_mtime)
-        for child in sorted(target.rglob("*"), key=lambda p: p.relative_to(target).as_posix().lower()):
-            child_rel = child.relative_to(target).as_posix()
-            if child.is_dir():
-                directories.append(child_rel)
-                continue
-            if not child.is_file():
-                continue
-            stat = child.stat()
-            total_size += int(stat.st_size)
-            latest_mtime = max(latest_mtime, int(stat.st_mtime))
-            files.append({"relative_path": child_rel, "file_size": int(stat.st_size), "modified_time": int(stat.st_mtime)})
-        self._send_json(
-            200,
-            {
-                "system": system,
-                "relative_path": rel,
-                "entry_type": "folder",
-                "file_count": len(files),
-                "file_size": total_size,
-                "modified_time": latest_mtime,
-                "directories": directories,
-                "files": files,
-            },
-        )
+        self._send_json(200, {"system": system, "relative_path": rel, **_build_folder_manifest(target)})
 
     def _handle_peer_bios_download(self, relative_path: str) -> None:
         if not self._peer_request_authorized():

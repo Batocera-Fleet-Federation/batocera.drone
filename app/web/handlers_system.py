@@ -17,13 +17,15 @@ try:
     )
     from ..device.automation import (
         _load_automation_config,
+        _push_automation_config_to_overmind,
         _read_last_input_activity,
-        _report_idle_volume_to_overmind,
+        _reset_idle_game_exit_armed_state,
         _reset_idle_volume_armed_state,
         _save_automation_config,
     )
     from ..device.device_control import _get_audio_volume
     from ..device.pixen import run_pixen_upgrade
+    from ..overmind.overmind_game_logs import find_running_emulatorlauncher as _find_running_emulatorlauncher
     from ..transfer.drone_tls import DroneCertificateManager
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.self_update import (  # type: ignore
@@ -33,13 +35,15 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     )
     from device.automation import (  # type: ignore
         _load_automation_config,
+        _push_automation_config_to_overmind,
         _read_last_input_activity,
-        _report_idle_volume_to_overmind,
+        _reset_idle_game_exit_armed_state,
         _reset_idle_volume_armed_state,
         _save_automation_config,
     )
     from device.device_control import _get_audio_volume  # type: ignore
     from device.pixen import run_pixen_upgrade  # type: ignore
+    from overmind.overmind_game_logs import find_running_emulatorlauncher as _find_running_emulatorlauncher  # type: ignore
     from transfer.drone_tls import DroneCertificateManager  # type: ignore
     from web.route_config import api_url  # type: ignore
 
@@ -88,16 +92,22 @@ class HandlersSystemMixin:
         config = _load_automation_config(self.settings)
         last_activity = _read_last_input_activity()
         idle_seconds = int(time.time() - last_activity) if last_activity is not None else None
+        try:
+            game_running = _find_running_emulatorlauncher() is not None
+        except Exception:
+            game_running = False
         self._send_json(
             200,
             {
                 "idle_volume": config["idle_volume"],
+                "idle_game_exit": config["idle_game_exit"],
                 "input_monitor": {
                     "available": last_activity is not None,
                     "idle_seconds": idle_seconds,
                     "last_activity_epoch": last_activity,
                 },
                 "current_volume": _get_audio_volume(self.settings),
+                "game_running": game_running,
             },
         )
 
@@ -113,12 +123,28 @@ class HandlersSystemMixin:
         # off-thread so the UI save isn't blocked on Overmind latency; the heartbeat
         # reconciles it regardless.
         Thread(
-            target=_report_idle_volume_to_overmind,
+            target=_push_automation_config_to_overmind,
             args=(self.settings,),
             name="idle-volume-overmind-push",
             daemon=True,
         ).start()
         self._send_json(200, {"idle_volume": saved["idle_volume"]})
+
+    def _handle_admin_automation_idle_game_exit(self, payload: dict) -> None:
+        payload = payload if isinstance(payload, dict) else {}
+        config = _load_automation_config(self.settings)
+        merged = {**config["idle_game_exit"], **payload}
+        saved = _save_automation_config(self.settings, {"idle_game_exit": merged})
+        # Re-evaluate from scratch against the new settings on the next poll tick.
+        _reset_idle_game_exit_armed_state()
+        # Same best-effort immediate Overmind push as idle-volume (see above).
+        Thread(
+            target=_push_automation_config_to_overmind,
+            args=(self.settings,),
+            name="idle-game-exit-overmind-push",
+            daemon=True,
+        ).start()
+        self._send_json(200, {"idle_game_exit": saved["idle_game_exit"]})
 
     def _handle_admin_api_certificate(self) -> None:
         metadata = DroneCertificateManager(self.settings).ensure_certificate()

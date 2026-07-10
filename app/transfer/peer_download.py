@@ -12,7 +12,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Event
-from typing import Optional
+from typing import Optional, Tuple
 from urllib.error import URLError
 from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
@@ -245,6 +245,29 @@ def _best_peer_for_bios(
     return _select_best_peer(swarm, peer_checks, settings.overmind_device_id, source_device_ids=source_device_ids)
 
 
+def _folder_rom_marker_state(
+    settings: Settings,
+    system: str,
+    relative_path: str,
+    marker_relative_path: Optional[str],
+) -> Optional[Tuple[Path, str]]:
+    """For a folder-unit ROM (marker file inside the transferred folder), return the
+    resolved local marker path + its folder-relative path. ``None`` for true directory
+    entries (marker == the folder itself) or when no marker was provided."""
+    marker = str(marker_relative_path or "").strip()
+    rel = _safe_rom_relative_path(relative_path)
+    if not marker:
+        return None
+    marker = _safe_rom_relative_path(marker)
+    if marker == rel or not marker.startswith(rel + "/"):
+        return None
+    system_dir = (settings.roms_root / system).resolve()
+    marker_target = (system_dir / marker).resolve()
+    if system_dir not in marker_target.parents:
+        return None
+    return marker_target, marker[len(rel) + 1:]
+
+
 def _download_rom_folder_from_peer(
     settings: Settings,
     config: dict,
@@ -252,9 +275,16 @@ def _download_rom_folder_from_peer(
     system: str,
     relative_path: str,
     expected_size=None,
+    expected_fingerprint=None,
+    marker_relative_path=None,
     progress_callback=None,
     cancellation_event: Optional[Event] = None,
 ) -> dict:
+    # RomRepository stays in drone_api (Phase 4/6 will move it); lazy-import to avoid a cycle.
+    try:
+        from ..drone_api import RomRepository
+    except ImportError:  # pragma: no cover - flat execution
+        from drone_api import RomRepository  # type: ignore
     peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
     address = _peer_address(peer)
     if not address:
@@ -267,6 +297,51 @@ def _download_rom_folder_from_peer(
         raise ValueError("invalid target path")
     if target_dir.exists() and not target_dir.is_dir():
         raise ValueError("target path exists and is not a directory")
+    started_dt = datetime.now(timezone.utc).replace(microsecond=0)
+    started = started_dt.isoformat()
+    started_mono = time.monotonic()
+    expected_fingerprint_clean = str(expected_fingerprint or "").strip().lower()
+    marker_state = _folder_rom_marker_state(settings, system, rel, marker_relative_path)
+
+    # Present-check for folder-unit ROMs: the marker file is written LAST (below), so
+    # its presence (plus a fingerprint match when one is expected) proves the whole
+    # folder arrived. True directory entries keep their historical re-pull behavior.
+    if marker_state is not None:
+        marker_target, _ = marker_state
+        if marker_target.is_file():
+            marker_fingerprint = None
+            try:
+                marker_fingerprint = RomRepository.build_fingerprint(marker_target).lower()
+            except Exception:
+                pass
+            if not expected_fingerprint_clean or marker_fingerprint == expected_fingerprint_clean:
+                completed_dt = datetime.now(timezone.utc).replace(microsecond=0)
+                duration_ms = int((time.monotonic() - started_mono) * 1000)
+                return {
+                    "entry_type": "folder",
+                    "source_drone_id": peer_id,
+                    "target_drone_id": settings.overmind_device_id,
+                    "system": system,
+                    "rom_name": rel,
+                    "relative_path": rel,
+                    "marker_relative_path": _safe_rom_relative_path(str(marker_relative_path)),
+                    "action": "download",
+                    "status": "skipped",
+                    "skip_reason": "folder ROM marker already exists",
+                    "failure_reason": "folder ROM marker already exists",
+                    "bytes_transferred": 0,
+                    "file_size": expected_size,
+                    "fingerprint": marker_fingerprint or expected_fingerprint_clean,
+                    "rom_fingerprint": expected_fingerprint_clean or marker_fingerprint,
+                    "download_started_at": started,
+                    "download_completed_at": completed_dt.isoformat(),
+                    "started_at": started,
+                    "completed_at": completed_dt.isoformat(),
+                    "duration_ms": duration_ms,
+                    "duration_seconds": round(duration_ms / 1000, 3),
+                    "selected_peer_reason": "local folder ROM already exists",
+                }
+
     cafile = _peer_trust_cafile(settings, peer_id=peer_id, config=config)
     if address.startswith("https://") and not cafile:
         raise ssl.SSLError(f"no trusted certificate cached for peer {peer_id}")
@@ -275,10 +350,11 @@ def _download_rom_folder_from_peer(
     directories = manifest.get("directories") if isinstance(manifest.get("directories"), list) else []
     if not files and not directories:
         raise RuntimeError("folder manifest is empty")
+    if marker_state is not None:
+        # Write the marker last so the present-check above can't see a half-copied folder.
+        marker_folder_rel = marker_state[1].lower()
+        files = sorted(files, key=lambda item: str((item or {}).get("relative_path") or "").replace("\\", "/").lower() == marker_folder_rel)
 
-    started_dt = datetime.now(timezone.utc).replace(microsecond=0)
-    started = started_dt.isoformat()
-    started_mono = time.monotonic()
     bytes_written = 0
     total_bytes = None
     try:
@@ -348,9 +424,25 @@ def _download_rom_folder_from_peer(
                 raise RuntimeError(f"size mismatch expected={expected_size} actual={bytes_written}")
         except ValueError:
             pass
+    activity_fingerprint = None
+    if marker_state is not None and expected_fingerprint_clean:
+        # Identity check: the marker is the ROM's fingerprint carrier. Remove it on
+        # mismatch so the present-check can't accept a wrong/half-written folder.
+        marker_target, _ = marker_state
+        if not marker_target.is_file():
+            raise RuntimeError(f"folder manifest did not include marker file {marker_relative_path}")
+        try:
+            activity_fingerprint = RomRepository.build_fingerprint(marker_target).lower()
+        except Exception as error:
+            raise RuntimeError(f"failed to fingerprint marker file {marker_relative_path}: {error}")
+        if activity_fingerprint != expected_fingerprint_clean:
+            marker_target.unlink()
+            raise RuntimeError(
+                f"fingerprint mismatch for marker {marker_relative_path} expected={expected_fingerprint_clean} actual={activity_fingerprint}"
+            )
     completed_dt = datetime.now(timezone.utc).replace(microsecond=0)
     duration_ms = int((time.monotonic() - started_mono) * 1000)
-    return {
+    activity = {
         "entry_type": "folder",
         "source_drone_id": peer_id,
         "target_drone_id": settings.overmind_device_id,
@@ -369,6 +461,12 @@ def _download_rom_folder_from_peer(
         "duration_seconds": round(duration_ms / 1000, 3),
         "selected_peer_reason": "healthy peer with requested directory ROM and best sampled score",
     }
+    if marker_state is not None:
+        activity["marker_relative_path"] = _safe_rom_relative_path(str(marker_relative_path))
+        if activity_fingerprint:
+            activity["fingerprint"] = activity_fingerprint
+            activity["rom_fingerprint"] = expected_fingerprint_clean or activity_fingerprint
+    return activity
 
 
 def _download_rom_from_peer(

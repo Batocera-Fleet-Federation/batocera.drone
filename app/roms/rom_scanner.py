@@ -223,9 +223,11 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
                     next_entries[key].update({"fingerprint": reuse_fingerprint, "rom_fingerprint": reuse_fingerprint})
                 else:
                     # No reusable fingerprint (new/changed file) -> queue it for hashing.
-                    # Folders are never hashed, so they carry forward without a fingerprint.
+                    # True directory entries are never hashed and carry forward without a
+                    # fingerprint; folder-unit ROMs (entry_type "folder" but absolute_path
+                    # is the marker file) still hash the marker so identity keeps working.
                     next_entries[key] = base_entry
-                    if entry_type != "folder":
+                    if absolute.is_file():
                         new_or_changed.append((key, absolute, base_entry))
                 checkpoint_scan("rom_scan")
         if system_rom_count:

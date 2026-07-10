@@ -19,6 +19,7 @@ try:
         _normalize_gamelist_rom_path,
         _text_or_empty,
     )
+    from .rom_transfer_unit import gamelist_folder_entry_counts, resolve_transfer_unit
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.http_cache import valid_segment  # type: ignore
     from roms.gamelist import (  # type: ignore
@@ -28,6 +29,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         _normalize_gamelist_rom_path,
         _text_or_empty,
     )
+    from roms.rom_transfer_unit import gamelist_folder_entry_counts, resolve_transfer_unit  # type: ignore
 
 
 class RomScanMixin:
@@ -262,6 +264,7 @@ class RomScanMixin:
         items: List[dict] = []
         seen_paths = set()
         system_lower = system.lower()
+        folder_entry_counts = gamelist_folder_entry_counts(root)
         for game in root.findall("game"):
             relative_path = _normalize_gamelist_rom_path(_text_or_empty(game, "path"))
             if not relative_path:
@@ -277,16 +280,26 @@ class RomScanMixin:
                 continue
             if not rom_path.exists():
                 continue
+            transfer_unit = None
             if rom_path.is_dir():
                 size, mtime = self.build_directory_stats(rom_path)
                 entry_type = "folder"
                 is_downloadable = False
             elif rom_path.is_file():
-                stat = rom_path.stat()
-                size = int(stat.st_size)
-                mtime = int(stat.st_mtime)
-                entry_type = "file"
-                is_downloadable = system_lower != "steam"
+                transfer_unit = resolve_transfer_unit(system, relative_path, rom_path, system_dir, folder_entry_counts)
+                if transfer_unit is not None:
+                    # Folder-unit ROM (marker/index file in a per-game folder): identity
+                    # stays the marker file, but size/type describe the whole folder so
+                    # transfers move every file the game needs.
+                    size, mtime = self.build_directory_stats(transfer_unit["unit_dir"])
+                    entry_type = "folder"
+                    is_downloadable = False
+                else:
+                    stat = rom_path.stat()
+                    size = int(stat.st_size)
+                    mtime = int(stat.st_mtime)
+                    entry_type = "file"
+                    is_downloadable = system_lower != "steam"
             else:
                 continue
             display_name = Path(relative_path).stem
@@ -318,6 +331,9 @@ class RomScanMixin:
                 "gamelist_game_id": _gamelist_game_id(game, relative_path),
                 "has_gamelist_entry": True,
             }
+            if transfer_unit is not None:
+                item["transfer_unit_path"] = transfer_unit["unit_rel_path"]
+                item["marker_relative_path"] = transfer_unit["marker_rel_path"]
             items.append(item)
         # Strict gamelist-as-source-of-truth: only <game> entries are tracked. ROM files
         # present on disk but absent from gamelist.xml are intentionally NOT supplemented

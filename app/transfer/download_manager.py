@@ -129,6 +129,8 @@ def _directpublic_fetch(request: "DownloadRequest", context: "TransferContext") 
             system,
             rel,
             expected_size=expected_size,
+            expected_fingerprint=expected_fingerprint,
+            marker_relative_path=request.marker_relative_path,
             progress_callback=progress,
             cancellation_event=cancel_event,
         )
@@ -193,7 +195,7 @@ class DownloadManager:
             value = 3
         return max(1, min(value, 8))
 
-    def enqueue_rom(self, config: dict, peer: dict, system: str, relative_path: str, expected_size=None, expected_fingerprint=None, source_action_id: Optional[str] = None, entry_type: str = "file", sync_id: Optional[str] = None, artwork_types=None) -> dict:
+    def enqueue_rom(self, config: dict, peer: dict, system: str, relative_path: str, expected_size=None, expected_fingerprint=None, source_action_id: Optional[str] = None, entry_type: str = "file", sync_id: Optional[str] = None, artwork_types=None, marker_relative_path: Optional[str] = None) -> dict:
         job_id = str(uuid.uuid4())
         peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
         now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -231,6 +233,7 @@ class DownloadManager:
             "_peer": peer,
             "_expected_fingerprint": expected_fingerprint,
             "_entry_type": entry_type,
+            "_marker_relative_path": str(marker_relative_path or "").strip() or None,
             "_artwork_types": [str(value).strip() for value in (artwork_types or []) if str(value).strip()],
         }
         with self._lock:
@@ -651,6 +654,7 @@ class DownloadManager:
             expected_size = job.get("file_size") or job.get("total_bytes")
             expected_fingerprint = job.get("_expected_fingerprint")
             entry_type = str(job.get("_entry_type") or job.get("entry_type") or "file").lower()
+            marker_relative_path = job.get("_marker_relative_path")
             cancel_event = self._cancel_events.get(job_id) or Event()
             asset_type = str(job.get("_asset_type") or "rom").lower()
             rom_artwork_types = list(job.get("_artwork_types") or [])
@@ -689,6 +693,7 @@ class DownloadManager:
                 expected_fingerprint=expected_fingerprint,
                 overwrite=artwork_overwrite,
                 local_rom_path=artwork_local_rom_path,
+                marker_relative_path=marker_relative_path,
             )
             context = TransferContext(
                 settings=self.settings,
@@ -757,7 +762,9 @@ class DownloadManager:
                     _kick_asset_metadata_sync_after_download(self.settings, self.repository, config, "rom_download_completed")
                     # Receiver-driven artwork: pull the game's artwork from the same
                     # peer (Overmind no longer carries artwork to queue sync_artwork).
-                    completed_rel = str(terminal_activity.get("relative_path") or rel or "")
+                    # Artwork is keyed by the gamelist <path>, so folder-unit ROMs
+                    # look it up by the marker file, not the transferred folder.
+                    completed_rel = str(marker_relative_path or terminal_activity.get("relative_path") or rel or "")
                     if completed_rel and rom_artwork_types:
                         for field in rom_artwork_types:
                             try:

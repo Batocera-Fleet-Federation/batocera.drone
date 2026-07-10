@@ -146,13 +146,8 @@ def download(
 AssetResolver = Callable[[Mapping[str, Any], int], Optional[Tuple[Iterable[bytes], Mapping[str, Any]]]]
 
 
-def serve_one(channel: PeerChannel, resolve: AssetResolver) -> dict:
-    """Handle a single FETCH on ``channel``: stream the asset then send DONE.
-
-    ``resolve(asset, offset)`` returns a ``(byte_iterable, meta)`` pair, or None
-    to report the asset is unavailable. Returns a small result dict for logging.
-    """
-    message_type, payload = read_message(channel.read_exactly)
+def _serve_fetch(channel: PeerChannel, resolve: AssetResolver, message_type: int, payload: bytes) -> dict:
+    """Handle one already-read AssetFetch message: stream the asset then send DONE."""
     if message_type == AF_CANCEL:
         return {"status": "cancelled", "bytes": 0}
     if message_type != AF_FETCH:
@@ -176,3 +171,41 @@ def serve_one(channel: PeerChannel, resolve: AssetResolver) -> dict:
         sent += len(chunk)
     channel.send(encode_done(int(meta.get("size", sent)), meta.get("hash")))
     return {"status": "completed", "bytes": sent}
+
+
+def serve_one(channel: PeerChannel, resolve: AssetResolver) -> dict:
+    """Handle a single FETCH on ``channel``: stream the asset then send DONE.
+
+    ``resolve(asset, offset)`` returns a ``(byte_iterable, meta)`` pair, or None
+    to report the asset is unavailable. Returns a small result dict for logging.
+    """
+    message_type, payload = read_message(channel.read_exactly)
+    return _serve_fetch(channel, resolve, message_type, payload)
+
+
+def serve_session(channel: PeerChannel, resolve: AssetResolver) -> dict:
+    """Serve FETCHes on ``channel`` until the receiver closes it or sends CANCEL.
+
+    Folder ROMs pull many assets (a manifest, then each file) over ONE offered
+    channel; the receiver drives the sequence and simply closes the channel when
+    done, which surfaces here as ``EOFError`` at a frame boundary. A single-file
+    receiver that closes after its one DONE terminates the loop the same way, so
+    the sender can always serve sessions. Per-fetch errors (e.g. ``not_found``)
+    are reported to the receiver and the loop keeps serving -- the receiver
+    decides whether to abort. Returns ``{"status", "bytes", "fetches"}``.
+    """
+    total_bytes = 0
+    fetches = 0
+    status = "completed"
+    while True:
+        try:
+            message_type, payload = read_message(channel.read_exactly)
+        except EOFError:
+            break
+        result = _serve_fetch(channel, resolve, message_type, payload)
+        if result.get("status") == "cancelled":
+            status = "cancelled"
+            break
+        fetches += 1
+        total_bytes += int(result.get("bytes") or 0)
+    return {"status": status, "bytes": total_bytes, "fetches": fetches}

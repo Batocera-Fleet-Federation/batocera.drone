@@ -133,5 +133,97 @@ class EndToEndTests(unittest.TestCase):
                 pass
 
 
+class ServeSessionTests(unittest.TestCase):
+    """serve_session serves many FETCHes over one channel until close/CANCEL."""
+
+    @staticmethod
+    def _close(sock):
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+    def test_multiple_fetches_then_close(self):
+        a, b = socket.socketpair()
+        assets = {"one": b"first asset", "two": b"second asset bytes"}
+
+        def resolve(asset, offset):
+            data = assets.get(str(asset.get("relative_path") or ""))
+            if data is None:
+                return None
+            return [data[offset:]], {"size": len(data), "hash": None}
+
+        server_result = {}
+
+        def serve():
+            server_result.update(assetfetch.serve_session(TlsMuxLink(b), resolve))
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+
+        link = TlsMuxLink(a)
+        for name, expected in assets.items():
+            received = bytearray()
+            assetfetch.download(link, {"kind": "rom", "relative_path": name}, received.extend)
+            self.assertEqual(bytes(received), expected)
+        # Receiver closing the channel is what ends the session (EOF at a frame
+        # boundary), exactly like a single-file receiver from an older drone.
+        self._close(a)
+        thread.join(5.0)
+        self.assertEqual(server_result.get("status"), "completed")
+        self.assertEqual(server_result.get("fetches"), 2)
+        self.assertEqual(server_result.get("bytes"), sum(len(v) for v in assets.values()))
+        self._close(b)
+
+    def test_not_found_keeps_session_alive(self):
+        a, b = socket.socketpair()
+
+        def resolve(asset, offset):
+            if asset.get("relative_path") == "missing":
+                return None
+            return [b"ok"], {"size": 2, "hash": None}
+
+        server_result = {}
+
+        def serve():
+            server_result.update(assetfetch.serve_session(TlsMuxLink(b), resolve))
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+
+        link = TlsMuxLink(a)
+        with self.assertRaises(assetfetch.AssetFetchError):
+            assetfetch.download(link, {"kind": "rom", "relative_path": "missing"}, lambda c: None)
+        received = bytearray()
+        assetfetch.download(link, {"kind": "rom", "relative_path": "there"}, received.extend)
+        self.assertEqual(bytes(received), b"ok")
+        self._close(a)
+        thread.join(5.0)
+        self.assertEqual(server_result.get("status"), "completed")
+        self._close(b)
+
+    def test_cancel_ends_session(self):
+        a, b = socket.socketpair()
+        server_result = {}
+
+        def serve():
+            server_result.update(
+                assetfetch.serve_session(TlsMuxLink(b), lambda asset, offset: ([b"x"], {"size": 1, "hash": None}))
+            )
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        TlsMuxLink(a).send(assetfetch.encode_cancel())
+        thread.join(5.0)
+        self.assertEqual(server_result.get("status"), "cancelled")
+        self.assertEqual(server_result.get("fetches"), 0)
+        for sock in (a, b):
+            self._close(sock)
+
+
 if __name__ == "__main__":
     unittest.main()

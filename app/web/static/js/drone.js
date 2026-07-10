@@ -1810,7 +1810,7 @@ async function renderAdminMenu() {
         <div class="card admin-tile pointer h-100" onclick="setHash('#admin/automation')">
           <div class="card-body">
             <h5 class="card-title"><i class="bi bi-robot me-2"></i>Automation</h5>
-            <p class="card-text">Configure hands-off device behaviors, like lowering the volume after a period of no input.</p>
+            <p class="card-text">Configure hands-off device behaviors, like lowering the volume or exiting a game after a period of no input.</p>
           </div>
         </div>
       </div>
@@ -4395,19 +4395,26 @@ async function renderAutomationPage() {
   }
   refreshRandomThemeLogo().catch(() => {});
   const idleVolume = payload.idle_volume || {};
+  const idleGameExit = payload.idle_game_exit || {};
   const monitor = payload.input_monitor || {};
   const enabled = !!idleVolume.enabled;
   const idleMinutes = Number(idleVolume.idle_minutes ?? 5);
   const targetVolume = Number(idleVolume.target_volume ?? 25);
   const currentVolume = payload.current_volume;
+  const gameExitEnabled = !!idleGameExit.enabled;
+  const gameExitMinutes = Number(idleGameExit.idle_minutes ?? 15);
+  const gameRunning = !!payload.game_running;
   const monitorAlert = monitor.available
     ? `<div class="text-muted small mb-3"><i class="bi bi-activity me-1"></i>Input monitor active — last input ${escapeHtml(formatIdleDuration(monitor.idle_seconds))} ago${currentVolume === null || currentVolume === undefined ? "" : ` · current volume ${escapeHtml(String(currentVolume))}%`}.</div>`
     : `<div class="alert alert-warning"><i class="bi bi-exclamation-triangle me-1"></i>The input activity monitor is not reporting yet. This automation only runs once the privileged Drone service is updated and restarted on this machine.</div>`;
+  const gameExitStatus = monitor.available
+    ? `<div class="text-muted small mb-3"><i class="bi bi-controller me-1"></i>${gameRunning ? "A game is currently running." : "No game is currently running."}</div>`
+    : "";
   content.innerHTML = `
     <div class="mb-3"><button class="btn btn-outline-secondary" onclick="setHash('#admin')">← Back to Admin</button></div>
     <div class="row">
       <div class="col-lg-8">
-        <div class="card">
+        <div class="card mb-3">
           <div class="card-header"><i class="bi bi-volume-down me-2"></i>Lower volume when idle</div>
           <div class="card-body">
             ${monitorAlert}
@@ -4430,6 +4437,25 @@ async function renderAutomationPage() {
             <button class="btn btn-primary" id="idleVolumeSaveBtn"><i class="bi bi-save me-1"></i>Save</button>
           </div>
         </div>
+        <div class="card">
+          <div class="card-header"><i class="bi bi-power me-2"></i>Exit game when idle</div>
+          <div class="card-body">
+            ${monitorAlert}
+            ${gameExitStatus}
+            <p class="card-text text-muted">Automatically exit the running game and return to EmulationStation after it has gone without any controller or keyboard input for a set amount of time. Only applies while a game is actually running.</p>
+            <div class="form-check form-switch mb-3">
+              <input class="form-check-input" type="checkbox" role="switch" id="idleGameExitEnabled" ${gameExitEnabled ? "checked" : ""}>
+              <label class="form-check-label" for="idleGameExitEnabled">Enable idle game exit</label>
+            </div>
+            <div class="row g-3 mb-3">
+              <div class="col-sm-6">
+                <label class="form-label" for="idleGameExitMinutes">Idle time before exiting (minutes)</label>
+                <input class="form-control" type="number" id="idleGameExitMinutes" min="1" max="1440" step="1" value="${escapeHtml(String(gameExitMinutes))}">
+              </div>
+            </div>
+            <button class="btn btn-primary" id="idleGameExitSaveBtn"><i class="bi bi-save me-1"></i>Save</button>
+          </div>
+        </div>
       </div>
     </div>
   `;
@@ -4450,6 +4476,26 @@ async function renderAutomationPage() {
         enabled: document.getElementById("idleVolumeEnabled").checked,
         idle_minutes: minutesValue,
         target_volume: targetValue,
+      });
+      showToast("Automation settings saved.", "success");
+      await renderAutomationPage();
+    } catch (err) {
+      showToast(`Failed to save automation settings: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    } finally {
+      setLoading(false);
+    }
+  });
+  document.getElementById("idleGameExitSaveBtn").addEventListener("click", async () => {
+    const minutesValue = parseInt(document.getElementById("idleGameExitMinutes").value, 10);
+    if (!Number.isFinite(minutesValue) || minutesValue < 1) {
+      showToast("Idle time must be at least 1 minute.", "warning");
+      return;
+    }
+    setLoading(true, "Saving automation settings...");
+    try {
+      await apiPost("/admin/automation/idle-game-exit", {
+        enabled: document.getElementById("idleGameExitEnabled").checked,
+        idle_minutes: minutesValue,
       });
       showToast("Automation settings saved.", "success");
       await renderAutomationPage();

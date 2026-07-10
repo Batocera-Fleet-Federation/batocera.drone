@@ -80,6 +80,13 @@ class RomCacheRow:
         rom_name = str(payload.get("rom_name") or payload.get("name") or payload.get("title") or Path(file_path).stem).strip()
         gamelist_path = str(payload.get("gamelist_path") or "")
         gamelist_game_id = str(payload.get("gamelist_game_id") or file_path)
+        # Folder-unit ROMs (marker file in a per-game folder) carry the folder rel path +
+        # marker rel path through extra_json so peer inventory can serve them.
+        extra = {
+            key: str(payload[key])
+            for key in ("transfer_unit_path", "marker_relative_path")
+            if str(payload.get(key) or "").strip()
+        }
         # rom_name is the gamelist <name> (the game's display name) -- that is the "name"
         # reported to Overmind. (Previously this was overridden to the filename stem when a
         # gamelist was present, discarding the real title.)
@@ -98,7 +105,7 @@ class RomCacheRow:
             gamelist_game_id=gamelist_game_id,
             is_downloadable=bool(payload.get("is_downloadable", True)),
             image_stem=str(payload.get("image_stem") or Path(file_path).stem),
-            extra={},
+            extra=extra,
         )
 
     def to_payload(self) -> dict:
@@ -1380,7 +1387,7 @@ def list_rom_rows_by_system(settings: Any, system: str, *, include_fingerprint: 
     whole library into memory — the key win for large libraries on small hardware.
     Returns ``None`` only on a SQL error so the caller can fall back to the filesystem.
     """
-    columns = "system, file_path, rom_name, unique_id, file_size, entry_type, is_downloadable, image_stem, fingerprint"
+    columns = "system, file_path, rom_name, unique_id, file_size, entry_type, is_downloadable, image_stem, fingerprint, extra_json"
     try:
         with _open_rom_metadata_cache(settings) as connection:
             rows = connection.execute(
@@ -1394,6 +1401,7 @@ def list_rom_rows_by_system(settings: Any, system: str, *, include_fingerprint: 
     result: List[dict] = []
     for row in rows:
         item = {
+            **_loads_dict(row[9]),
             "system": row[0],
             "file_path": row[1],
             "rom_name": row[2],

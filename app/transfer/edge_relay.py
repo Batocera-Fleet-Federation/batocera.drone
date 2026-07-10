@@ -7,6 +7,7 @@ relay (``_relay_download_rom`` and the ``_relay_fetch`` transport tier).
 ``_edge_token_for`` resolves the live Edge auth token.
 """
 
+import json
 import sys
 import time
 from datetime import datetime, timezone
@@ -28,6 +29,8 @@ try:
     from .download_errors import DownloadCancelled
     from .network_identity import get_local_certificate_ips as _build_local_certificate_ips
     from .network_identity import get_local_ip_addresses as _build_local_ip_addresses
+    from .peer_download import _folder_rom_marker_state
+    from .transfer_files import build_folder_manifest as _build_folder_manifest
     from .transfer_files import safe_rom_relative_path as _safe_rom_relative_path
 except ImportError:  # pragma: no cover - direct script execution fallback
     from app_version import drone_app_version as _drone_app_version  # type: ignore
@@ -42,6 +45,8 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from transfer.download_errors import DownloadCancelled  # type: ignore
     from transfer.network_identity import get_local_certificate_ips as _build_local_certificate_ips  # type: ignore
     from transfer.network_identity import get_local_ip_addresses as _build_local_ip_addresses  # type: ignore
+    from transfer.peer_download import _folder_rom_marker_state  # type: ignore
+    from transfer.transfer_files import build_folder_manifest as _build_folder_manifest  # type: ignore
     from transfer.transfer_files import safe_rom_relative_path as _safe_rom_relative_path  # type: ignore
 
 # The running persistent Edge connection, exposed so the relay transport (sender serve +
@@ -49,12 +54,38 @@ except ImportError:  # pragma: no cover - direct script execution fallback
 _EDGE_MUX_CLIENT = None
 
 
+def _open_folder_manifest_source(root, relative_path, offset=0):
+    """Resolve a ``rom-manifest`` asset ref: the folder's manifest as JSON bytes.
+
+    Same path-safety contract as ``open_local_file_source`` but the target must be
+    a directory; the receiver uses the manifest to fetch each file individually."""
+    rel = str(relative_path or "").replace("\\", "/").lstrip("/")
+    if not rel or ".." in Path(rel).parts:
+        return None
+    root_path = Path(root).resolve()
+    target = (root_path / rel).resolve()
+    if target == root_path or root_path not in target.parents:
+        return None
+    if not target.is_dir():
+        return None
+    try:
+        payload = json.dumps(_build_folder_manifest(target), separators=(",", ":")).encode("utf-8")
+    except OSError:
+        return None
+    start = max(0, int(offset or 0))
+    return iter([payload[start:]]), {"size": len(payload), "hash": None}
+
+
 def _serve_transfer_offer(settings: Settings, client: "MuxClient", offer: dict) -> dict:
     """Sender side: stream the offered asset to the receiver.
 
     Opens a sender relay leg, tries to upgrade it to a direct hole-punched path
-    (falling back to relay), then serves the asset (path-safe, under the kind's
-    root) over whichever channel resulted. Returns the serve result dict.
+    (falling back to relay), then serves the asset over whichever channel resulted.
+    The resolver is scoped to the offer: a single-file offer serves exactly the
+    offered ref; an offer whose path is a folder ROM on disk serves the folder's
+    manifest (``rom-manifest``) plus any file inside that folder -- the receiver
+    drives the per-file sequence over the one channel (``serve_session``).
+    Returns the serve result dict.
     """
     # _resolve_asset_root stays in drone_api (Phase 6 will move it); lazy-import to avoid a cycle.
     try:
@@ -65,19 +96,33 @@ def _serve_transfer_offer(settings: Settings, client: "MuxClient", offer: dict) 
     asset = offer.get("asset") if isinstance(offer.get("asset"), dict) else {}
     if not session_id or not asset:
         return {"status": "error", "bytes": 0}
+    offered_kind = str(asset.get("kind") or "")
+    offered_rel = str(asset.get("relative_path") or "").replace("\\", "/").strip("/")
 
     def resolve(requested_asset, offset):
-        root = _resolve_asset_root(settings, requested_asset.get("kind"))
-        if root is None:
+        kind = str(requested_asset.get("kind") or "")
+        requested_rel = str(requested_asset.get("relative_path") or "").replace("\\", "/").strip("/")
+        root = _resolve_asset_root(settings, offered_kind)
+        if root is None or not offered_rel or not requested_rel:
             return None
-        return _relay_transfer.open_local_file_source(
-            root, requested_asset.get("relative_path"), offset
-        )
+        # Folder ROM offer (detected from disk, so no asset-ref/protocol change is
+        # needed): serve the folder's manifest + files inside it, nothing else.
+        if offered_kind == "rom" and (Path(root).resolve() / offered_rel).is_dir():
+            if kind == "rom-manifest" and requested_rel == offered_rel:
+                return _open_folder_manifest_source(root, requested_rel, offset)
+            if kind == "rom" and requested_rel.startswith(offered_rel + "/"):
+                return _relay_transfer.open_local_file_source(root, requested_rel, offset)
+            return None
+        # Single-file offer: serve exactly the offered ref (the receiver always
+        # fetches the same ref its transfer session was minted for).
+        if kind != offered_kind or requested_rel != offered_rel:
+            return None
+        return _relay_transfer.open_local_file_source(root, requested_rel, offset)
 
     relay_channel = client.open_relay_session(session_id, "sender")
     transfer_channel, is_direct = _maybe_holepunch(settings, relay_channel)
     try:
-        result = _assetfetch.serve_one(transfer_channel, resolve)
+        result = _assetfetch.serve_session(transfer_channel, resolve)
         result["transport"] = "holepunch" if is_direct else "relay"
         return result
     finally:
@@ -378,10 +423,265 @@ def _relay_download_rom(
     }
 
 
+#: Upper bound for a relayed folder manifest (JSON); a manifest larger than this
+#: means something is wrong (or hostile) on the sender side.
+_RELAY_MANIFEST_MAX_BYTES = 8 * 1024 * 1024
+
+
+def _relay_download_rom_folder(
+    settings: Settings,
+    config: dict,
+    peer: dict,
+    system: str,
+    relative_path: str,
+    expected_size=None,
+    expected_fingerprint=None,
+    marker_relative_path=None,
+    progress_callback=None,
+    cancellation_event: Optional[Event] = None,
+) -> dict:
+    """Pull a folder ROM from ``peer`` over the Edge relay.
+
+    Mirrors ``_download_rom_folder_from_peer``'s contract (manifest -> per-file
+    ``.part`` writes with the marker last, skip-if-present via the marker, marker
+    fingerprint verify) but moves the bytes as a sequence of AssetFetches over ONE
+    relay/hole-punch channel: first a ``rom-manifest`` ref, then each file. One
+    transfer session covers the whole folder, so monitoring and the per-session
+    bandwidth limit see a single transfer.
+    """
+    # RomRepository stays in drone_api (Phase 4 will move it); lazy-import to avoid a cycle.
+    try:
+        from ..drone_api import RomRepository
+    except ImportError:  # pragma: no cover - flat execution
+        from drone_api import RomRepository  # type: ignore
+    source_device_id = str(peer.get("drone_id") or peer.get("device_id") or "")
+    if not source_device_id:
+        raise RuntimeError("relay peer has no device id")
+    client = _EDGE_MUX_CLIENT
+    if client is None:
+        raise RuntimeError("edge mux not connected")
+
+    rel = _safe_rom_relative_path(relative_path)
+    system_dir = (settings.roms_root / system).resolve()
+    target_dir = (system_dir / rel).resolve()
+    if target_dir == system_dir or system_dir not in target_dir.parents:
+        raise ValueError("invalid target path")
+    if target_dir.exists() and not target_dir.is_dir():
+        raise ValueError("target path exists and is not a directory")
+    started_dt = datetime.now(timezone.utc).replace(microsecond=0)
+    started = started_dt.isoformat()
+    started_mono = time.monotonic()
+    expected_fingerprint_clean = str(expected_fingerprint or "").strip().lower()
+    marker_state = _folder_rom_marker_state(settings, system, rel, marker_relative_path)
+
+    def folder_activity(status: str, bytes_transferred: int, transport: str, **extra) -> dict:
+        completed_dt = datetime.now(timezone.utc).replace(microsecond=0)
+        duration_ms = int((time.monotonic() - started_mono) * 1000)
+        activity = {
+            "entry_type": "folder",
+            "source_drone_id": source_device_id,
+            "target_drone_id": settings.overmind_device_id,
+            "system": system,
+            "rom_name": rel,
+            "relative_path": rel,
+            "action": "download",
+            "status": status,
+            "transport": transport,
+            "bytes_transferred": bytes_transferred,
+            "download_started_at": started,
+            "download_completed_at": completed_dt.isoformat(),
+            "started_at": started,
+            "completed_at": completed_dt.isoformat(),
+            "duration_ms": duration_ms,
+            "duration_seconds": round(duration_ms / 1000, 3),
+        }
+        if marker_state is not None:
+            activity["marker_relative_path"] = _safe_rom_relative_path(str(marker_relative_path))
+        activity.update(extra)
+        return activity
+
+    # Present-check: the marker is written last, so its presence (+ fingerprint
+    # match when expected) proves the folder arrived -- same rule as the HTTP tier.
+    if marker_state is not None:
+        marker_target, _ = marker_state
+        if marker_target.is_file():
+            marker_fingerprint = None
+            try:
+                marker_fingerprint = RomRepository.build_fingerprint(marker_target).lower()
+            except Exception:
+                pass
+            if not expected_fingerprint_clean or marker_fingerprint == expected_fingerprint_clean:
+                return folder_activity(
+                    "skipped",
+                    0,
+                    "none",
+                    skip_reason="folder ROM marker already exists",
+                    failure_reason="folder ROM marker already exists",
+                    file_size=expected_size,
+                    fingerprint=marker_fingerprint or expected_fingerprint_clean,
+                    rom_fingerprint=expected_fingerprint_clean or marker_fingerprint,
+                    selected_peer_reason="local folder ROM already exists",
+                )
+
+    # entry_type rides along for monitoring only; the sender detects the folder
+    # from its own disk, so old senders just answer not_found and the tier fails.
+    asset = {"kind": "rom", "relative_path": f"{system}/{rel}", "entry_type": "folder"}
+    session_id, transfer_token = _request_transfer_session(settings, config, source_device_id, asset)
+    relay_channel = _relay_transfer.open_receiver_channel(
+        client, session_id, transfer_token, source_device_id, asset
+    )
+    transfer_channel, is_direct = _maybe_holepunch(settings, relay_channel)
+    bytes_written = 0
+    current_partial: Optional[Path] = None
+    try:
+        manifest_buffer = bytearray()
+
+        def write_manifest(chunk: bytes) -> None:
+            manifest_buffer.extend(chunk)
+            if len(manifest_buffer) > _RELAY_MANIFEST_MAX_BYTES:
+                raise RuntimeError("folder manifest too large")
+
+        _assetfetch.download(
+            transfer_channel,
+            {"kind": "rom-manifest", "relative_path": f"{system}/{rel}"},
+            write_manifest,
+            cancel=cancellation_event,
+        )
+        manifest = json.loads(bytes(manifest_buffer).decode("utf-8"))
+        files = manifest.get("files") if isinstance(manifest.get("files"), list) else []
+        directories = manifest.get("directories") if isinstance(manifest.get("directories"), list) else []
+        if not files and not directories:
+            raise RuntimeError("folder manifest is empty")
+        if marker_state is not None:
+            # Write the marker last so the present-check can't see a half-copied folder.
+            marker_folder_rel = marker_state[1].lower()
+            files = sorted(
+                files,
+                key=lambda item: str((item or {}).get("relative_path") or "").replace("\\", "/").lower() == marker_folder_rel,
+            )
+        total_bytes = None
+        try:
+            total_bytes = int(manifest.get("file_size") or expected_size or 0) or None
+        except Exception:
+            total_bytes = None
+
+        target_dir.mkdir(parents=True, exist_ok=True)
+        for directory in directories:
+            child_dir = (target_dir / _safe_rom_relative_path(str(directory or ""))).resolve()
+            if child_dir == target_dir or target_dir not in child_dir.parents:
+                raise ValueError("invalid manifest directory path")
+            child_dir.mkdir(parents=True, exist_ok=True)
+
+        for item in files:
+            if not isinstance(item, dict):
+                continue
+            if cancellation_event is not None and cancellation_event.is_set():
+                raise DownloadCancelled("download cancelled")
+            child_rel = _safe_rom_relative_path(str(item.get("relative_path") or ""))
+            target = (target_dir / child_rel).resolve()
+            if target == target_dir or target_dir not in target.parents:
+                raise ValueError("invalid manifest file path")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            partial_target = target.with_name(f"{target.name}.part")
+            current_partial = partial_target
+            bytes_before_file = bytes_written
+            file_bytes = 0
+            with partial_target.open("wb") as handle:
+
+                def write(chunk: bytes) -> None:
+                    nonlocal bytes_written, file_bytes
+                    handle.write(chunk)
+                    file_bytes += len(chunk)
+                    bytes_written += len(chunk)
+
+                def progress(received_total: int) -> None:
+                    if progress_callback:
+                        progress_callback(bytes_before_file + received_total, total_bytes)
+
+                _assetfetch.download(
+                    transfer_channel,
+                    {"kind": "rom", "relative_path": f"{system}/{rel}/{child_rel}"},
+                    write,
+                    offset=0,
+                    progress=progress,
+                    cancel=cancellation_event,
+                )
+            expected_file_size = item.get("file_size")
+            if expected_file_size not in (None, ""):
+                try:
+                    if int(expected_file_size) != file_bytes:
+                        raise RuntimeError(
+                            f"size mismatch for {child_rel} expected={expected_file_size} actual={file_bytes}"
+                        )
+                except ValueError:
+                    pass
+            partial_target.replace(target)
+            current_partial = None
+    except _assetfetch.AssetFetchCancelled as error:
+        if current_partial is not None and current_partial.exists():
+            current_partial.unlink()
+        raise DownloadCancelled(str(error) or "download cancelled") from error
+    except Exception:
+        if current_partial is not None and current_partial.exists():
+            current_partial.unlink()
+        raise
+    finally:
+        if is_direct:
+            try:
+                transfer_channel.close()
+            except Exception:  # noqa: BLE001
+                pass
+        relay_channel.close()
+
+    if expected_size not in (None, ""):
+        try:
+            if int(expected_size) != bytes_written:
+                raise RuntimeError(f"size mismatch expected={expected_size} actual={bytes_written}")
+        except ValueError:
+            pass
+    activity_fingerprint = None
+    if marker_state is not None and expected_fingerprint_clean:
+        marker_target, _ = marker_state
+        if not marker_target.is_file():
+            raise RuntimeError(f"folder manifest did not include marker file {marker_relative_path}")
+        try:
+            activity_fingerprint = RomRepository.build_fingerprint(marker_target).lower()
+        except Exception as error:
+            raise RuntimeError(f"failed to fingerprint marker file {marker_relative_path}: {error}")
+        if activity_fingerprint != expected_fingerprint_clean:
+            marker_target.unlink()
+            raise RuntimeError(
+                f"fingerprint mismatch for marker {marker_relative_path} expected={expected_fingerprint_clean} actual={activity_fingerprint}"
+            )
+    extra = {
+        "file_size": expected_size or bytes_written,
+        "selected_peer_reason": (
+            "direct hole-punched path via Overmind edge" if is_direct else "relayed via Overmind edge"
+        ),
+    }
+    if activity_fingerprint:
+        extra["fingerprint"] = activity_fingerprint
+        extra["rom_fingerprint"] = expected_fingerprint_clean or activity_fingerprint
+    return folder_activity("completed", bytes_written, "holepunch" if is_direct else "relay", **extra)
+
+
 def _relay_fetch(request: "DownloadRequest", context: "TransferContext") -> dict:
-    """RelayReceiverTransport fetch dispatch (v1 supports ROM files)."""
+    """RelayReceiverTransport fetch dispatch (ROM files + folder ROMs)."""
     if request.asset_type != "rom":
         raise RuntimeError(f"relay transport does not support asset type {request.asset_type}")
+    if request.entry_type == "folder":
+        return _relay_download_rom_folder(
+            context.settings,
+            context.config,
+            context.peer,
+            request.system,
+            request.relative_path,
+            expected_size=request.expected_size,
+            expected_fingerprint=request.expected_fingerprint,
+            marker_relative_path=request.marker_relative_path,
+            progress_callback=context.progress_callback,
+            cancellation_event=context.cancellation_event,
+        )
     return _relay_download_rom(
         context.settings,
         context.config,

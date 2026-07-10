@@ -7,6 +7,7 @@ the arguments ``DownloadManager._run_job`` used before the refactor.
 """
 
 import io
+import json
 import socket
 import tempfile
 import threading
@@ -125,7 +126,8 @@ class DirectPublicDispatchTests(unittest.TestCase):
             drone_api._directpublic_fetch(req, ctx)
         m.assert_called_once_with(
             ctx.settings, ctx.config, ctx.peer, "ps2", "game",
-            expected_size=99, progress_callback=ctx.progress_callback,
+            expected_size=99, expected_fingerprint=None, marker_relative_path=None,
+            progress_callback=ctx.progress_callback,
             cancellation_event=ctx.cancellation_event,
         )
 
@@ -256,11 +258,119 @@ class TransferOfferServeTests(unittest.TestCase):
                     {"kind": "rom", "relative_path": "snes/g.sfc"},
                     received.extend,
                 )
+                # The sender serves a session (folder ROMs fetch many assets over
+                # one channel); closing the receiver leg is what ends it.
+                try:
+                    receiver_sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                receiver_sock.close()
                 thread.join(5.0)
                 self.assertEqual(bytes(received), b"X" * 5000)
                 self.assertEqual(result.get("status"), "completed")
             finally:
                 for sock in (sender_sock, receiver_sock):
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
+
+    def _serve_offer(self, settings, offer):
+        """Run _serve_transfer_offer against a socketpair; return (link, thread, result, socks)."""
+        sender_sock, receiver_sock = socket.socketpair()
+
+        class FakeMux:
+            def open_relay_session(self, session_id, role, ready_timeout=20.0):
+                assert role == "sender"
+                return TlsMuxLink(sender_sock)
+
+        result = {}
+
+        def run():
+            result.update(drone_api._serve_transfer_offer(settings, FakeMux(), offer))
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        return TlsMuxLink(receiver_sock), thread, result, (sender_sock, receiver_sock)
+
+    @staticmethod
+    def _end_session(receiver_sock, thread):
+        try:
+            receiver_sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        receiver_sock.close()
+        thread.join(5.0)
+
+    def test_single_file_offer_refuses_other_paths(self):
+        # The resolver is scoped to the offer: a session minted for one file must
+        # not serve a sibling.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "snes").mkdir()
+            (root / "snes" / "g.sfc").write_bytes(b"G" * 100)
+            (root / "snes" / "other.sfc").write_bytes(b"O" * 100)
+            settings = self._settings(ROMS_ROOT=str(root))
+            offer = {"session_id": "a" * 32, "asset": {"kind": "rom", "relative_path": "snes/g.sfc"}}
+            link, thread, _, socks = self._serve_offer(settings, offer)
+            try:
+                with self.assertRaises(assetfetch.AssetFetchError):
+                    assetfetch.download(
+                        link, {"kind": "rom", "relative_path": "snes/other.sfc"}, lambda c: None
+                    )
+                received = bytearray()
+                assetfetch.download(link, {"kind": "rom", "relative_path": "snes/g.sfc"}, received.extend)
+                self.assertEqual(bytes(received), b"G" * 100)
+            finally:
+                self._end_session(socks[1], thread)
+                for sock in socks:
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
+
+    def test_folder_offer_serves_manifest_and_files(self):
+        # A folder ROM offer (detected from disk) serves the manifest + files inside
+        # the folder, and nothing outside it.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            game = root / "dreamcast" / "Game"
+            game.mkdir(parents=True)
+            (game / "Game.gdi").write_bytes(b"gdi index")
+            (game / "track01.bin").write_bytes(b"T" * 500)
+            (root / "dreamcast" / "outside.bin").write_bytes(b"NO")
+            settings = self._settings(ROMS_ROOT=str(root))
+            offer = {
+                "session_id": "b" * 32,
+                "asset": {"kind": "rom", "relative_path": "dreamcast/Game", "entry_type": "folder"},
+            }
+            link, thread, result, socks = self._serve_offer(settings, offer)
+            try:
+                manifest_bytes = bytearray()
+                assetfetch.download(
+                    link, {"kind": "rom-manifest", "relative_path": "dreamcast/Game"}, manifest_bytes.extend
+                )
+                manifest = json.loads(bytes(manifest_bytes).decode("utf-8"))
+                self.assertEqual(manifest["entry_type"], "folder")
+                self.assertEqual(manifest["file_count"], 2)
+                names = {item["relative_path"] for item in manifest["files"]}
+                self.assertEqual(names, {"Game.gdi", "track01.bin"})
+                for name in names:
+                    received = bytearray()
+                    assetfetch.download(
+                        link, {"kind": "rom", "relative_path": f"dreamcast/Game/{name}"}, received.extend
+                    )
+                    self.assertEqual(bytes(received), (game / name).read_bytes())
+                with self.assertRaises(assetfetch.AssetFetchError):
+                    assetfetch.download(
+                        link, {"kind": "rom", "relative_path": "dreamcast/outside.bin"}, lambda c: None
+                    )
+                self._end_session(socks[1], thread)
+                self.assertEqual(result.get("status"), "completed")
+                # manifest + 2 files + the refused outside.bin fetch
+                self.assertEqual(result.get("fetches"), 4)
+            finally:
+                for sock in socks:
                     try:
                         sock.close()
                     except OSError:

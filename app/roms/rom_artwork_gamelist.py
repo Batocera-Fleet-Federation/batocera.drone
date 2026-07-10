@@ -25,6 +25,7 @@ try:
         _set_child_text,
         _text_or_empty,
     )
+    from .rom_transfer_unit import gamelist_folder_entry_counts, resolve_transfer_unit
     from .scrapers import _clean_rom_title
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.runtime_state import _GAMELIST_WRITE_LOCK  # type: ignore
@@ -39,6 +40,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         _set_child_text,
         _text_or_empty,
     )
+    from roms.rom_transfer_unit import gamelist_folder_entry_counts, resolve_transfer_unit  # type: ignore
     from roms.scrapers import _clean_rom_title  # type: ignore
 
 
@@ -121,13 +123,18 @@ class RomArtworkGamelistMixin:
             raise FileNotFoundError()
         return target, target.relative_to(system_dir).as_posix(), artwork_ref
 
-    def resolve_rom_file_by_gamelist_id(self, system: str, gamelist_id: str) -> Tuple[Path, str, str]:
-        """Resolve a ROM by its gamelist ``<game id>`` -> (target, relative_path, entry_type).
+    def resolve_rom_file_by_gamelist_id(self, system: str, gamelist_id: str) -> Tuple[Path, str, str, str]:
+        """Resolve a ROM by its gamelist ``<game id>`` -> (target, relative_path,
+        entry_type, marker_relative_path).
 
         The sender maps the gamelist id to the game's ``<path>`` in its own
         gamelist.xml (mirroring ``resolve_artwork_file``) so a receiver can pull the
-        ROM without Overmind ever carrying a filesystem path. Raises FileNotFoundError
-        when the id is unknown or the resolved path escapes the system directory.
+        ROM without Overmind ever carrying a filesystem path. Folder-unit ROMs (a
+        marker/index file in a per-game folder, per ``rom_transfer_unit``) resolve to
+        the FOLDER as the transfer unit with the gamelist path kept as
+        ``marker_relative_path``; for everything else ``marker_relative_path`` equals
+        ``relative_path``. Raises FileNotFoundError when the id is unknown or the
+        resolved path escapes the system directory.
         """
         gid = str(gamelist_id or "").strip()
         if not gid:
@@ -143,8 +150,13 @@ class RomArtworkGamelistMixin:
         target = (system_dir / rom_ref).resolve()
         if (target != system_dir and system_dir not in target.parents) or not target.exists():
             raise FileNotFoundError()
+        if target.is_file():
+            unit = resolve_transfer_unit(system, rom_ref, target, system_dir, gamelist_folder_entry_counts(root))
+            if unit is not None:
+                return unit["unit_dir"], unit["unit_rel_path"], "folder", unit["marker_rel_path"]
         entry_type = "folder" if target.is_dir() else "file"
-        return target, target.relative_to(system_dir).as_posix(), entry_type
+        relative_path = target.relative_to(system_dir).as_posix()
+        return target, relative_path, entry_type, relative_path
 
     def list_present_artwork(self, system: str) -> Dict[str, set]:
         """Map normalized ROM path -> set of artwork fields that are both referenced

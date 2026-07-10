@@ -100,16 +100,6 @@ SERVICEBLOCK
   RUNNER="/tmp/drone-run-now-install.$$"
   if curl -fsSL --connect-timeout 10 --max-time 120 -o "$RUNNER" https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/run_now.sh; then
     chmod 755 "$RUNNER" 2>/dev/null || true
-    APP_WAS_RUNNING=false
-    if [ -f /tmp/drone-server.pid ]; then
-      EXISTING_PID="$(cat /tmp/drone-server.pid 2>/dev/null || true)"
-      if [ -n "$EXISTING_PID" ] && kill -0 "$EXISTING_PID" 2>/dev/null; then
-        APP_WAS_RUNNING=true
-      fi
-    fi
-    if lsof -i:"${HTTPS_PORT:-443}" >/dev/null 2>&1; then
-      APP_WAS_RUNNING=true
-    fi
     "$SERVICE_FILE" stop >/dev/null 2>&1 || true
     DRONE_APP_STAGE_ONLY=1 \
       DRONE_APP_WORK_DIR="$WORK_DIR" \
@@ -117,17 +107,19 @@ SERVICEBLOCK
       bash "$RUNNER"
     rm -f "$RUNNER"
     echo "✓ Updated Drone app bundle in $WORK_DIR"
-    if [ "$APP_WAS_RUNNING" = true ]; then
-      echo "Restarting Drone service with updated app bundle..."
-      "$SERVICE_FILE" start
-    fi
   else
     rm -f "$RUNNER"
     echo "Could not download latest Drone app bundle now; service will download it on next startup if the local app is invalid."
   fi
 
-  echo "Start now with:"
-  echo "  $SERVICE_FILE start"
+  echo ""
+  echo "Starting Drone service so it is ready immediately..."
+  if "$SERVICE_FILE" start; then
+    echo "✓ Drone service started"
+  else
+    echo "Could not start Drone service automatically. Start it manually with:"
+    echo "  $SERVICE_FILE start"
+  fi
 
 else
   echo ""

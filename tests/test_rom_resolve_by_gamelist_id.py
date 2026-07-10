@@ -41,9 +41,10 @@ class ResolveRomByGamelistIdTest(unittest.TestCase):
     def test_resolves_by_id_attribute(self):
         tmp, repo = self._repo_with_rom()
         with tmp:
-            target, relative_path, entry_type = repo.resolve_rom_file_by_gamelist_id("snes", "2144")
+            target, relative_path, entry_type, marker = repo.resolve_rom_file_by_gamelist_id("snes", "2144")
             self.assertEqual(relative_path, "Zelda.zip")
             self.assertEqual(entry_type, "file")
+            self.assertEqual(marker, "Zelda.zip")
             self.assertTrue(target.is_file())
             self.assertEqual(target.read_bytes(), b"rombytes")
 
@@ -51,9 +52,10 @@ class ResolveRomByGamelistIdTest(unittest.TestCase):
         # Entries without an id attribute fall back to the normalized <path>.
         tmp, repo = self._repo_with_rom()
         with tmp:
-            target, relative_path, entry_type = repo.resolve_rom_file_by_gamelist_id("snes", "Metroid.zip")
+            target, relative_path, entry_type, marker = repo.resolve_rom_file_by_gamelist_id("snes", "Metroid.zip")
             self.assertEqual(relative_path, "Metroid.zip")
             self.assertEqual(entry_type, "file")
+            self.assertEqual(marker, "Metroid.zip")
 
     def test_unknown_id_raises_not_found(self):
         tmp, repo = self._repo_with_rom()
@@ -74,6 +76,50 @@ class ResolveRomByGamelistIdTest(unittest.TestCase):
             (repo.get_system_dir("snes") / "Zelda.zip").unlink()
             with self.assertRaises(FileNotFoundError):
                 repo.resolve_rom_file_by_gamelist_id("snes", "2144")
+
+    def _repo_with_folder_unit_rom(self, system_name):
+        tmp = tempfile.TemporaryDirectory()
+        root = Path(tmp.name) / "userdata"
+        system = root / "roms" / system_name
+        game_dir = system / "Sonic Adventure (USA)"
+        game_dir.mkdir(parents=True)
+        (game_dir / "Sonic Adventure (USA).gdi").write_bytes(b"gdi index")
+        (game_dir / "track01.bin").write_bytes(b"track one bytes")
+        (game_dir / "track02.bin").write_bytes(b"track two bytes")
+        (system / "gamelist.xml").write_text(
+            "<gameList>"
+            "<game id='77'><path>./Sonic Adventure (USA)/Sonic Adventure (USA).gdi</path><name>Sonic</name></game>"
+            "</gameList>",
+            encoding="utf-8",
+        )
+        with mock.patch.dict(
+            "os.environ",
+            {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
+            clear=True,
+        ):
+            settings = Settings.from_env()
+        return tmp, RomRepository(settings.roms_root, settings.bios_root)
+
+    def test_folder_unit_system_resolves_marker_to_folder(self):
+        # A table system (dreamcast): the .gdi entry resolves to its per-game folder
+        # as the transfer unit, keeping the marker path for identity/artwork.
+        tmp, repo = self._repo_with_folder_unit_rom("dreamcast")
+        with tmp:
+            target, relative_path, entry_type, marker = repo.resolve_rom_file_by_gamelist_id("dreamcast", "77")
+            self.assertEqual(entry_type, "folder")
+            self.assertEqual(relative_path, "Sonic Adventure (USA)")
+            self.assertEqual(marker, "Sonic Adventure (USA)/Sonic Adventure (USA).gdi")
+            self.assertTrue(target.is_dir())
+
+    def test_non_table_system_keeps_single_file(self):
+        # The same layout under a system NOT in the folder-unit table stays a file.
+        tmp, repo = self._repo_with_folder_unit_rom("snes")
+        with tmp:
+            target, relative_path, entry_type, marker = repo.resolve_rom_file_by_gamelist_id("snes", "77")
+            self.assertEqual(entry_type, "file")
+            self.assertEqual(relative_path, "Sonic Adventure (USA)/Sonic Adventure (USA).gdi")
+            self.assertEqual(marker, relative_path)
+            self.assertTrue(target.is_file())
 
 
 if __name__ == "__main__":

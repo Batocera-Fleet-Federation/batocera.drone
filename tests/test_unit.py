@@ -1150,6 +1150,100 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual((root / "roms" / "ps3" / "Game.ps3" / "PS3_GAME" / "PARAM.SFO").read_bytes(), b"param")
             self.assertEqual((root / "roms" / "ps3" / "Game.ps3" / "PS3_GAME" / "USRDIR" / "EBOOT.BIN").read_bytes(), b"eboot")
 
+    def test_download_folder_unit_rom_marker_last_skip_and_verify(self) -> None:
+        """Folder-unit ROMs (marker file in a per-game folder): the marker is written
+        LAST, its fingerprint is verified, and a present marker skips the re-download."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
+                clear=True,
+            ):
+                settings = Settings.from_env()
+
+            marker_bytes = b"gdi index"
+            track_bytes = b"track bytes"
+            fingerprint_probe = Path(tmp) / "probe.gdi"
+            fingerprint_probe.write_bytes(marker_bytes)
+            expected_fingerprint = RomRepository.build_fingerprint(fingerprint_probe)
+
+            # Manifest lists the marker FIRST; the receiver must reorder it last.
+            manifest = {
+                "relative_path": "Game",
+                "entry_type": "folder",
+                "file_size": len(marker_bytes) + len(track_bytes),
+                "directories": [],
+                "files": [
+                    {"relative_path": "Game.gdi", "file_size": len(marker_bytes)},
+                    {"relative_path": "track01.bin", "file_size": len(track_bytes)},
+                ],
+            }
+
+            class FakeResponse:
+                def __init__(self, data):
+                    self._chunks = [data, b""]
+                    self.headers = {"Content-Length": str(len(data))}
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self, _size=-1):
+                    return self._chunks.pop(0)
+
+            fetched = []
+
+            def fake_urlopen(request, timeout=None, context=None):
+                url = request.full_url
+                if url.endswith("/Game/Game.gdi"):
+                    fetched.append("Game.gdi")
+                    return FakeResponse(marker_bytes)
+                if url.endswith("/Game/track01.bin"):
+                    fetched.append("track01.bin")
+                    return FakeResponse(track_bytes)
+                raise AssertionError(url)
+
+            peer = {"drone_id": "source-a", "reachable_url": "http://source-a:8080"}
+            kwargs = dict(
+                expected_size=len(marker_bytes) + len(track_bytes),
+                expected_fingerprint=expected_fingerprint,
+                marker_relative_path="Game/Game.gdi",
+            )
+            with mock.patch("app.transfer.peer_download._peer_get_json", return_value=manifest), mock.patch(
+                "app.transfer.peer_download.urlopen", side_effect=fake_urlopen
+            ):
+                result = _download_rom_folder_from_peer(settings, {}, peer, "dreamcast", "Game", **kwargs)
+
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(fetched, ["track01.bin", "Game.gdi"], "marker must be written last")
+            self.assertEqual(result["marker_relative_path"], "Game/Game.gdi")
+            self.assertEqual(result["rom_fingerprint"], expected_fingerprint)
+            game_dir = root / "roms" / "dreamcast" / "Game"
+            self.assertEqual((game_dir / "Game.gdi").read_bytes(), marker_bytes)
+            self.assertEqual((game_dir / "track01.bin").read_bytes(), track_bytes)
+
+            # Present marker (matching fingerprint) -> skipped without touching the peer.
+            with mock.patch(
+                "app.transfer.peer_download._peer_get_json", side_effect=AssertionError("must not fetch manifest")
+            ), mock.patch("app.transfer.peer_download.urlopen", side_effect=AssertionError("must not download")):
+                skipped = _download_rom_folder_from_peer(settings, {}, peer, "dreamcast", "Game", **kwargs)
+            self.assertEqual(skipped["status"], "skipped")
+            self.assertEqual(skipped["skip_reason"], "folder ROM marker already exists")
+
+            # Wrong expected fingerprint -> the transfer fails and removes the marker
+            # so the present-check cannot accept the bad folder later.
+            bad_kwargs = dict(kwargs, expected_fingerprint="0" * 32)
+            (game_dir / "Game.gdi").unlink()  # fresh marker so the present-check passes through
+            with mock.patch("app.transfer.peer_download._peer_get_json", return_value=manifest), mock.patch(
+                "app.transfer.peer_download.urlopen", side_effect=fake_urlopen
+            ):
+                with self.assertRaises(RuntimeError):
+                    _download_rom_folder_from_peer(settings, {}, peer, "dreamcast", "Game", **bad_kwargs)
+            self.assertFalse((game_dir / "Game.gdi").exists())
+
     def test_download_manager_tracks_queue_and_idempotent_cancel(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
@@ -2446,7 +2540,7 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("ensure_bundle", installer)
         self.assertIn("DRONE_APP_STAGE_ONLY=1", installer)
         self.assertIn("✓ Updated Drone app bundle", installer)
-        self.assertIn("Restarting Drone service with updated app bundle", installer)
+        self.assertIn("Starting Drone service so it is ready immediately", installer)
 
         # All service-side behavior is in the versioned bootstrap.
         self.assertIn("validate_local_app()", bootstrap)

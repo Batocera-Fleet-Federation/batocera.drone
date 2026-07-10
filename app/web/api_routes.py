@@ -502,6 +502,11 @@ class ApiRoutesMixin:
                 self._handle_admin_automation_idle_volume(payload)
                 return
 
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "automation" and parts[2] == "idle-game-exit":
+                payload = self._read_json_body()
+                self._handle_admin_automation_idle_game_exit(payload)
+                return
+
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "system" and parts[2] == "update-drone":
                 self._handle_admin_drone_update()
                 return

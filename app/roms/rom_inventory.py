@@ -201,6 +201,10 @@ def _wire_rom_rows(rows: list) -> list:
             "system_name": str(row.get("system") or row.get("system_name") or ""),
             "name": str(row.get("name") or row.get("rom_name") or row.get("title") or ""),
             "file_size": int(row.get("file_size") or row.get("byte_count") or row.get("size") or 0),
+            # "folder" covers both true directory entries and folder-unit ROMs (a marker
+            # file whose per-game folder is the transfer unit); file_size is then the
+            # folder's total bytes, so Overmind can show the real download size.
+            "entry_type": str(row.get("entry_type") or "file"),
         }
         # Omit the fingerprint until it is computed (folders and freshly-scanned files carry
         # no fingerprint yet; it arrives later via a rom_hash_patch upload).

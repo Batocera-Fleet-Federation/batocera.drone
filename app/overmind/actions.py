@@ -16,7 +16,12 @@ from typing import Optional, Tuple
 
 try:
     from ..common.settings import Settings
-    from ..device.automation import _load_automation_config, _reset_idle_volume_armed_state, _save_automation_config
+    from ..device.automation import (
+        _load_automation_config,
+        _reset_idle_game_exit_armed_state,
+        _reset_idle_volume_armed_state,
+        _save_automation_config,
+    )
     from ..device.device_control import _apply_audio_volume, _apply_screen_mode, _restart_emulationstation
     from ..device.pixen import run_pixen_upgrade
     from ..storage.rom_metadata_store import (
@@ -38,7 +43,12 @@ try:
     from .registration import _summarize_overmind_result
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.settings import Settings  # type: ignore
-    from device.automation import _load_automation_config, _reset_idle_volume_armed_state, _save_automation_config  # type: ignore
+    from device.automation import (  # type: ignore
+        _load_automation_config,
+        _reset_idle_game_exit_armed_state,
+        _reset_idle_volume_armed_state,
+        _save_automation_config,
+    )
     from device.device_control import _apply_audio_volume, _apply_screen_mode, _restart_emulationstation  # type: ignore
     from device.pixen import run_pixen_upgrade  # type: ignore
     from storage.rom_metadata_store import (  # type: ignore
@@ -298,6 +308,7 @@ def _execute_overmind_action(
                 continue
             display_name = rel or gamelist_id
             resolved_artwork_types = []
+            marker_relative_path = None
             started_wall = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
             started_mono = time.monotonic()
             if expected_fingerprint and _cached_rom_fingerprint_exists(settings, expected_fingerprint):
@@ -366,6 +377,9 @@ def _execute_overmind_action(
                     continue
                 rel = str(resolved.get("relative_path") or "").strip()
                 entry_type = str(resolved.get("entry_type") or entry_type).strip().lower()
+                # Folder-unit ROMs: rel is the per-game folder; the marker (the
+                # sender's gamelist <path>) carries identity + artwork lookup.
+                marker_relative_path = str(resolved.get("marker_relative_path") or "").strip() or None
                 if not expected_fingerprint:
                     expected_fingerprint = resolved.get("rom_fingerprint")
                 if not item.get("file_size") and resolved.get("file_size"):
@@ -383,6 +397,7 @@ def _execute_overmind_action(
                     entry_type=entry_type,
                     sync_id=sync_id,
                     artwork_types=resolved_artwork_types,
+                    marker_relative_path=marker_relative_path,
                 )
                 activity["sync_id"] = sync_id
                 activity["rom_fingerprint"] = activity.get("rom_fingerprint") or expected_fingerprint
@@ -520,6 +535,20 @@ def _execute_overmind_action(
             f"after {saved['idle_minutes']} min of no input."
         )
         return "completed", message, {"type": "idle_volume_automation", **saved}
+
+    if action_name == "set_idle_game_exit_automation":
+        payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
+        config = _load_automation_config(settings)
+        merged = {**config["idle_game_exit"], **payload}
+        saved = _save_automation_config(settings, {"idle_game_exit": merged})["idle_game_exit"]
+        # Re-evaluate from scratch against the new settings on the next poll tick.
+        _reset_idle_game_exit_armed_state()
+        state = "enabled" if saved["enabled"] else "disabled"
+        message = (
+            f"Idle game-exit automation {state}: exit the running game "
+            f"after {saved['idle_minutes']} min of no input."
+        )
+        return "completed", message, {"type": "idle_game_exit_automation", **saved}
 
     if action_name == "update":
         if settings.use_fake_data:

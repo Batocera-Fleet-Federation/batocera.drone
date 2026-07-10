@@ -401,15 +401,23 @@ class HandlersNetworkMixin:
                 else:
                     pending_match = None
                 if local_match is None and pending_match is None:
-                    # Not on this machine yet -> download it.
+                    # Not on this machine yet -> download it. Folder-unit ROMs (marker
+                    # file in a per-game folder) pull the folder; relative_path stays
+                    # the marker (the gamelist identity + artwork key).
+                    transfer_rel = relative_path
+                    marker_rel = None
+                    if str(item.get("entry_type") or "").strip().lower() == "folder" and item.get("transfer_unit_path"):
+                        transfer_rel = str(item.get("transfer_unit_path") or "").strip() or relative_path
+                        marker_rel = str(item.get("marker_relative_path") or relative_path).strip() or None
                     jobs.append(manager.enqueue_rom(
                         config,
                         peer,
                         system,
-                        relative_path,
+                        transfer_rel,
                         expected_size=item.get("byte_count") or item.get("file_size"),
                         expected_fingerprint=item.get("rom_fingerprint") or item.get("fingerprint"),
                         entry_type=str(item.get("entry_type") or "file"),
+                        marker_relative_path=marker_rel,
                     ))
                     art_local_path = relative_path
                 else:

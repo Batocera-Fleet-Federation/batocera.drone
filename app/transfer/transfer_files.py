@@ -13,6 +13,35 @@ def safe_rom_relative_path(value: str) -> str:
     return rel
 
 
+def build_folder_manifest(folder: Path) -> dict:
+    """Walk a folder ROM into the manifest shape both transfer paths share: the mTLS
+    ``/peer/rom-manifest`` endpoint returns it as JSON and the Edge relay sender serves
+    it as a ``rom-manifest`` asset, so receivers pull the same per-file list either way."""
+    files = []
+    directories = []
+    total_size = 0
+    latest_mtime = int(folder.stat().st_mtime)
+    for child in sorted(folder.rglob("*"), key=lambda p: p.relative_to(folder).as_posix().lower()):
+        child_rel = child.relative_to(folder).as_posix()
+        if child.is_dir():
+            directories.append(child_rel)
+            continue
+        if not child.is_file():
+            continue
+        stat = child.stat()
+        total_size += int(stat.st_size)
+        latest_mtime = max(latest_mtime, int(stat.st_mtime))
+        files.append({"relative_path": child_rel, "file_size": int(stat.st_size), "modified_time": int(stat.st_mtime)})
+    return {
+        "entry_type": "folder",
+        "file_count": len(files),
+        "file_size": total_size,
+        "modified_time": latest_mtime,
+        "directories": directories,
+        "files": files,
+    }
+
+
 def rom_exists(repository: Any, system: str, relative_path: str) -> bool:
     try:
         system_dir = repository.get_system_dir(system).resolve()

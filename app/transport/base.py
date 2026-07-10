@@ -39,6 +39,9 @@ class DownloadRequest:
     expected_fingerprint: Optional[str] = None  # fingerprint (rom/save) or md5 (bios)
     overwrite: bool = False  # artwork only
     local_rom_path: Optional[str] = None  # artwork only
+    # Folder-unit ROMs only: the gamelist <path> (marker file) inside the transferred
+    # folder; carries the ROM's identity/fingerprint and is written last on receive.
+    marker_relative_path: Optional[str] = None
 
 
 @dataclass

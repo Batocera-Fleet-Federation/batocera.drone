@@ -1,0 +1,20 @@
+{
+  "_comment": "Systems whose games are conventionally one FOLDER of many files, referenced from gamelist.xml by a marker/index file inside that folder (Sega Lindbergh's .game marker; disc systems' .gdi/.cue next to their .bin tracks). For these systems a gamelist <path> that is a file inside a subfolder transfers its immediate parent folder as the unit. Systems NOT listed here (e.g. c64/scummvm sets organized into shared category folders) always keep single-file behavior. Vendored point-in-time snapshot seeded from Batocera es_systems conventions; NOT auto-updated.",
+  "_generated_at": "2026-07-09",
+  "folder_unit_systems": [
+    "3do",
+    "amigacd32",
+    "amigacdtv",
+    "dreamcast",
+    "jaguarcd",
+    "lindbergh",
+    "megacd",
+    "neogeocd",
+    "pcenginecd",
+    "ps2",
+    "psp",
+    "psx",
+    "saturn",
+    "segacd"
+  ]
+}

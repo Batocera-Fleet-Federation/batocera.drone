@@ -88,6 +88,11 @@ class RomAssetBiosMixin:
                         "is_downloadable": rom.get("is_downloadable", True),
                         "image_stem": rom.get("image_stem") or Path(relative_path).stem,
                     }
+                    # Folder-unit ROMs: peers need the folder + marker paths to fetch the
+                    # whole game (relative_path stays the marker, the gamelist identity).
+                    for key in ("transfer_unit_path", "marker_relative_path"):
+                        if rom.get(key):
+                            row[key] = str(rom[key])
                     if include_fingerprint:
                         row["fingerprint"] = rom.get("fingerprint")
                         row["rom_fingerprint"] = row["fingerprint"]

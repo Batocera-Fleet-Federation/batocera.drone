@@ -91,6 +91,7 @@ def _collect_system_info_payload(settings: Settings) -> dict:
         }
     except Exception as error:
         asset_cache = {"health": "red", "error": _format_overmind_error(error)}
+    automation_config = _load_automation_config(settings)
     return {
         "hostname": hostname,
         "device_name": hostname,
@@ -110,7 +111,8 @@ def _collect_system_info_payload(settings: Settings) -> dict:
         "asset_cache": asset_cache,
         "screen_mode": _get_screen_mode(settings),
         "audio_volume": _get_audio_volume(settings),
-        "idle_volume_automation": _load_automation_config(settings)["idle_volume"],
+        "idle_volume_automation": automation_config["idle_volume"],
+        "idle_game_exit_automation": automation_config["idle_game_exit"],
         "network": network,
         "uptime_seconds": uptime,
         "container": Path("/.dockerenv").exists() or os.environ.get("RUNNING_IN_DOCKER") == "1",
