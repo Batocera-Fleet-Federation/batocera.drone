@@ -1,5 +1,10 @@
 # Changelog
 
+## [v0.1.37] - 2026-07-09
+
+- Add multi-file (folder-unit) ROM transfers; include idle game-exit automation
+- Fixing double search textbox.
+
 ## [v0.1.36] - 2026-07-07
 
 - Consolidating UIs for admin integration to be easier to follow and configure.
