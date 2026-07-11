@@ -212,5 +212,8 @@ require the Edge.
 ## Skills (`.claude/skills/`, auto-surfaced)
 
 `drone-db-management`, `drone-p2p-transfer-security`, `drone-edge-networking`,
-`drone-admin-features`, `bff-ui-theme-functionality`. Consult the matching skill
-before non-trivial work.
+`drone-admin-features`, `drone-live-debugging` (debugging a real running Drone via
+SSH — logs, the local SQLite state DB, peer-cert trust, reproducing
+swallowed-exception peer calls live, and identifying a Drone you can't SSH to
+directly), `bff-ui-theme-functionality`. Consult the matching skill before
+non-trivial work.
