@@ -230,9 +230,16 @@ def _run_idle_game_exit_automation_once(settings: Settings) -> None:
     if idle_seconds < config["idle_minutes"] * 60:
         return
     try:
-        _kill_running_emulator()
+        killed = _kill_running_emulator()
     except (OSError, subprocess.SubprocessError) as error:
         print(f"Idle-game-exit automation could not exit the game: {error}", file=sys.stderr, flush=True)
+        return
+    if not killed:
+        print(
+            "Idle-game-exit automation could not exit the game: no supported emulator exit command is available",
+            file=sys.stderr,
+            flush=True,
+        )
         return
     _IDLE_GAME_EXIT_LAST_ARMED_ACTIVITY = last_activity
     print(

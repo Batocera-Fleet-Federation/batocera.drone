@@ -17,6 +17,7 @@ INPUT_MONITOR_PID_FILE="/tmp/drone-input-activity-monitor.pid"
 CONTROL_DIR="/userdata/system/drone-app/control"
 INPUT_ACTIVITY_FILE="/userdata/system/drone-app/control/last-input-activity"
 STARTUP_LOG="/userdata/system/logs/drone-app/startup.log"
+STARTUP_UPDATE_ATTEMPTED=0
 
 ensure_rom_write_access_all() {
   echo "[drone-service] Drone runs as root; ROM permission repair is not required."
@@ -113,12 +114,44 @@ importlib.import_module("app.drone_api")
 PY
 }
 
+stage_latest_app_once() {
+  if [ "${DRONE_UPDATE_ON_STARTUP:-1}" != "1" ]; then
+    return 0
+  fi
+  runner="/tmp/drone-startup-update.$$"
+  echo "[drone-service] Checking for the latest Drone app bundle..."
+  wait_for_network
+  if ! curl -fsSL --connect-timeout 10 --max-time 45 -o "$runner" https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/run_now.sh; then
+    rm -f "$runner"
+    echo "[drone-service] Latest bundle check failed; continuing with the validated local app."
+    return 0
+  fi
+  chmod 755 "$runner" 2>/dev/null || true
+  if DRONE_APP_STAGE_ONLY=1 \
+      DRONE_APP_WORK_DIR="$WORK_DIR" \
+      DRONE_APP_ARCHIVE_URL="${DRONE_APP_ARCHIVE_URL:-https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/drone-app.tar.gz}" \
+      bash "$runner"; then
+    echo "[drone-service] Latest Drone app bundle staged."
+  else
+    echo "[drone-service] Latest bundle staging failed; validating the local app before launch."
+  fi
+  rm -f "$runner"
+}
+
 launch_drone() {
   if [ -f "$WORK_DIR/app/main.py" ] && [ -f "$WORK_DIR/app/drone_api.py" ]; then
     if validate_local_app; then
-      echo "[drone-service] Launching local Drone app from ${WORK_DIR}..."
-      run_as_root_shell "cd '$WORK_DIR' && env PYTHONPATH='$WORK_DIR' HTTPS_PORT='${HTTPS_PORT:-443}' DRONE_COMPAT_HTTPS_PORTS='${DRONE_COMPAT_HTTPS_PORTS:-8443}' ROMS_ROOT='${ROMS_ROOT:-/userdata/roms}' BIOS_ROOT='${BIOS_ROOT:-/userdata/bios}' TLS_SELF_SIGNED_DIR='${TLS_SELF_SIGNED_DIR:-/userdata/system/certs}' LOG_DIR='${LOG_DIR:-/userdata/system/logs/drone-app}' LOG_MAX_BYTES='${LOG_MAX_BYTES:-5242880}' LOG_BACKUP_COUNT='${LOG_BACKUP_COUNT:-5}' DRONE_LOG_UNAUTHORIZED_REQUESTS='${DRONE_LOG_UNAUTHORIZED_REQUESTS:-0}' DRONE_UNAUTH_RATE_LIMIT_ENABLED='${DRONE_UNAUTH_RATE_LIMIT_ENABLED:-1}' DRONE_UNAUTH_RATE_LIMIT_REQUESTS='${DRONE_UNAUTH_RATE_LIMIT_REQUESTS:-60}' DRONE_UNAUTH_RATE_LIMIT_WINDOW_SECONDS='${DRONE_UNAUTH_RATE_LIMIT_WINDOW_SECONDS:-60}' ROM_METADATA_POLL_SECONDS='${ROM_METADATA_POLL_SECONDS:-900}' ROM_METADATA_INITIAL_DELAY_SECONDS='${ROM_METADATA_INITIAL_DELAY_SECONDS:-60}' ROM_METADATA_PROGRESS_SECONDS='${ROM_METADATA_PROGRESS_SECONDS:-30}' ROM_METADATA_PROGRESS_FILES='${ROM_METADATA_PROGRESS_FILES:-250}' ROM_METADATA_UPLOAD_CHUNK_SIZE='${ROM_METADATA_UPLOAD_CHUNK_SIZE:-250}' ROM_METADATA_HASH_IO_YIELD_SECONDS='${ROM_METADATA_HASH_IO_YIELD_SECONDS:-0.05}' ROM_METADATA_HASH_ROMS_ENABLED='${ROM_METADATA_HASH_ROMS_ENABLED:-1}' IMAGE_CACHE_TTL_SECONDS='${IMAGE_CACHE_TTL_SECONDS:-3600}' IMAGE_MISS_CACHE_TTL_SECONDS='${IMAGE_MISS_CACHE_TTL_SECONDS:-300}' IMAGE_CACHE_MAX_ITEMS='${IMAGE_CACHE_MAX_ITEMS:-1000}' IMAGE_CACHE_MAX_BYTES='${IMAGE_CACHE_MAX_BYTES:-134217728}' JSON_CACHE_TTL_SECONDS='${JSON_CACHE_TTL_SECONDS:-3600}' JSON_CACHE_MAX_ITEMS='${JSON_CACHE_MAX_ITEMS:-1000}' JSON_CACHE_MAX_BYTES='${JSON_CACHE_MAX_BYTES:-33554432}' OVERMIND_DRONE_TOKEN='${OVERMIND_DRONE_TOKEN:-}' OVERMIND_POLL_SECONDS='${OVERMIND_POLL_SECONDS:-60}' OVERMIND_SPEED_SAMPLE_SECONDS='${OVERMIND_SPEED_SAMPLE_SECONDS:-600}' python3 -m app.main"
-      return "$?"
+      if [ "$STARTUP_UPDATE_ATTEMPTED" -eq 0 ]; then
+        STARTUP_UPDATE_ATTEMPTED=1
+        stage_latest_app_once
+      fi
+      if ! validate_local_app; then
+        echo "[drone-service] Staged Drone app failed validation; downloading a clean bundle."
+      else
+        echo "[drone-service] Launching local Drone app from ${WORK_DIR}..."
+        run_as_root_shell "cd '$WORK_DIR' && env PYTHONPATH='$WORK_DIR' HTTPS_PORT='${HTTPS_PORT:-443}' DRONE_COMPAT_HTTPS_PORTS='${DRONE_COMPAT_HTTPS_PORTS:-8443}' ROMS_ROOT='${ROMS_ROOT:-/userdata/roms}' BIOS_ROOT='${BIOS_ROOT:-/userdata/bios}' TLS_SELF_SIGNED_DIR='${TLS_SELF_SIGNED_DIR:-/userdata/system/certs}' LOG_DIR='${LOG_DIR:-/userdata/system/logs/drone-app}' LOG_MAX_BYTES='${LOG_MAX_BYTES:-5242880}' LOG_BACKUP_COUNT='${LOG_BACKUP_COUNT:-5}' DRONE_LOG_UNAUTHORIZED_REQUESTS='${DRONE_LOG_UNAUTHORIZED_REQUESTS:-0}' DRONE_UNAUTH_RATE_LIMIT_ENABLED='${DRONE_UNAUTH_RATE_LIMIT_ENABLED:-1}' DRONE_UNAUTH_RATE_LIMIT_REQUESTS='${DRONE_UNAUTH_RATE_LIMIT_REQUESTS:-60}' DRONE_UNAUTH_RATE_LIMIT_WINDOW_SECONDS='${DRONE_UNAUTH_RATE_LIMIT_WINDOW_SECONDS:-60}' ROM_METADATA_POLL_SECONDS='${ROM_METADATA_POLL_SECONDS:-900}' ROM_METADATA_INITIAL_DELAY_SECONDS='${ROM_METADATA_INITIAL_DELAY_SECONDS:-60}' ROM_METADATA_PROGRESS_SECONDS='${ROM_METADATA_PROGRESS_SECONDS:-30}' ROM_METADATA_PROGRESS_FILES='${ROM_METADATA_PROGRESS_FILES:-250}' ROM_METADATA_UPLOAD_CHUNK_SIZE='${ROM_METADATA_UPLOAD_CHUNK_SIZE:-250}' ROM_METADATA_HASH_IO_YIELD_SECONDS='${ROM_METADATA_HASH_IO_YIELD_SECONDS:-0.05}' ROM_METADATA_HASH_ROMS_ENABLED='${ROM_METADATA_HASH_ROMS_ENABLED:-1}' IMAGE_CACHE_TTL_SECONDS='${IMAGE_CACHE_TTL_SECONDS:-3600}' IMAGE_MISS_CACHE_TTL_SECONDS='${IMAGE_MISS_CACHE_TTL_SECONDS:-300}' IMAGE_CACHE_MAX_ITEMS='${IMAGE_CACHE_MAX_ITEMS:-1000}' IMAGE_CACHE_MAX_BYTES='${IMAGE_CACHE_MAX_BYTES:-134217728}' JSON_CACHE_TTL_SECONDS='${JSON_CACHE_TTL_SECONDS:-3600}' JSON_CACHE_MAX_ITEMS='${JSON_CACHE_MAX_ITEMS:-1000}' JSON_CACHE_MAX_BYTES='${JSON_CACHE_MAX_BYTES:-33554432}' OVERMIND_DRONE_TOKEN='${OVERMIND_DRONE_TOKEN:-}' OVERMIND_POLL_SECONDS='${OVERMIND_POLL_SECONDS:-60}' OVERMIND_SPEED_SAMPLE_SECONDS='${OVERMIND_SPEED_SAMPLE_SECONDS:-600}' python3 -m app.main"
+        return "$?"
+      fi
     fi
     echo "[drone-service] Local Drone app import check failed; downloading a fresh app bundle."
   fi
@@ -175,9 +208,10 @@ restart_emulationstation_as_root() {
 kill_emulator_as_root() {
   if command -v batocera-es-swissknife >/dev/null 2>&1; then
     batocera-es-swissknife --emukill
-    return
+    return "$?"
   fi
   echo "[drone-service] Unable to exit the running game: batocera-es-swissknife command was not found."
+  return 1
 }
 
 set_screen_mode_as_root() {
@@ -253,9 +287,15 @@ service_control_worker() {
       restart_emulationstation_as_root
     fi
     if [ -f "$CONTROL_DIR/kill-emulator.request" ]; then
-      rm -f "$CONTROL_DIR/kill-emulator.request"
+      kill_result="$CONTROL_DIR/kill-emulator.result"
+      rm -f "$CONTROL_DIR/kill-emulator.request" "$kill_result"
       echo "[drone-service] Emulator exit requested by Drone app (idle game-exit automation)."
-      kill_emulator_as_root
+      if kill_output="$(kill_emulator_as_root 2>&1)"; then
+        printf '%s\n' "ok" > "$kill_result"
+      else
+        printf 'Privileged emulator exit failed: %s\n' "$(printf '%s' "$kill_output" | tr '\n' ' ' | cut -c1-300)" > "$kill_result"
+      fi
+      echo "[drone-service] Emulator exit result: ${kill_output}"
     fi
     for mode in full kiosk kid; do
       request="$CONTROL_DIR/set-screen-mode-${mode}.request"

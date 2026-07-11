@@ -313,14 +313,65 @@ def _emulator_kill_command() -> Optional[List[str]]:
     return None
 
 
+def _request_emulator_kill_service_control() -> bool:
+    control_dir = Path(os.environ.get("DRONE_SERVICE_CONTROL_DIR", "/userdata/system/drone-app/control"))
+    request_path = control_dir / "kill-emulator.request"
+    result_path = control_dir / "kill-emulator.result"
+    try:
+        result_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+    if not _request_service_control("kill-emulator"):
+        return False
+    deadline = time.monotonic() + max(
+        3.0,
+        float(os.environ.get("DRONE_SERVICE_CONTROL_TIMEOUT_SECONDS", "30")),
+    )
+    while time.monotonic() < deadline:
+        try:
+            if result_path.exists():
+                result = result_path.read_text(encoding="utf-8", errors="ignore").strip()
+                result_path.unlink(missing_ok=True)
+                if result == "ok":
+                    return True
+                raise OSError(result or "Privileged emulator exit failed")
+        except OSError:
+            raise
+        time.sleep(0.25)
+    try:
+        request_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+    raise OSError("Timed out waiting for the privileged emulator exit operation")
+
+
 def _kill_running_emulator() -> bool:
     """Exit the currently running game, returning to EmulationStation."""
-    if _request_service_control("kill-emulator"):
-        return True
     command = _emulator_kill_command()
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        if not command:
+            return False
+        result = subprocess.run(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            raise OSError(f"Emulator exit command failed with status {result.returncode}")
+        return True
+    if _request_emulator_kill_service_control():
+        return True
     if not command:
         return False
-    subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    result = subprocess.run(
+        command,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        raise OSError(f"Emulator exit command failed with status {result.returncode}")
     return True
 
 

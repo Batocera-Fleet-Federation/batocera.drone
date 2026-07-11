@@ -86,9 +86,9 @@ let logRefreshTimer = null;
 let logRefreshInFlight = false;
 let transfersTimer = null;
 let transfersInFlight = false;
-let integrationActiveTab = "overmind";
-let integrationOvermindLoaded = false;
-let integrationLocalLoaded = false;
+let integrationActiveTab = "transfers";
+let integrationTransfersLoaded = false;
+let integrationConfigurationLoaded = false;
 let currentConfigSource = null;
 let emulatorConfigRows = [];
 let selectedEmulatorConfigIndex = 0;
@@ -1799,12 +1799,12 @@ async function renderAdminMenu() {
         </div>
       </div>
       <div class="col-md-4 mb-3">
-        <div class="card admin-tile pointer h-100" onclick="setHash('#admin/integration')">
-          <div class="card-body">
-            <h5 class="card-title"><i class="bi bi-diagram-3 me-2"></i>Integration</h5>
-            <p class="card-text">Enable and configure Overmind and Local Network integrations independently.</p>
-          </div>
-        </div>
+	        <div class="card admin-tile pointer h-100" onclick="setHash('#admin/integration')">
+	          <div class="card-body">
+	            <h5 class="card-title"><i class="bi bi-diagram-3 me-2"></i>Integration</h5>
+	            <p class="card-text">Request peer assets, monitor transfers, and configure Overmind or Local Network.</p>
+	          </div>
+	        </div>
       </div>
       <div class="col-md-4 mb-3">
         <div class="card admin-tile pointer h-100" onclick="setHash('#admin/automation')">
@@ -1899,15 +1899,18 @@ function renderQueueEta(payload) {
   return `<div class="alert alert-info py-2 mb-3"><strong>Queue ETA:</strong> ${formatDuration(etaSeconds)} remaining, approximately ${escapeHtml(completion)} at ${formatBytes(speed)}/s. ${remaining}.${unknownNote}</div>`;
 }
 
-function renderDownloadRows(rows, allowCancel = true) {
-  if (!rows.length) return '<div class="themed-empty">No downloads in this group.</div>';
+function renderDownloadRows(rows, allowCancel = true, options = {}) {
+  if (!rows.length) return `<div class="themed-empty">${escapeHtml(options.emptyText || "No downloads in this group.")}</div>`;
+  const includeStarted = options.includeStarted !== false;
+  const usePendingLabel = options.usePendingLabel === true;
   return `<div class="table-responsive"><table class="table table-sm table-hover align-middle themed-table download-table bff-stack">
-    <thead><tr><th>Status</th><th>Source</th><th>File</th><th>System</th><th>Progress</th><th>Speed</th><th>Started</th><th></th></tr></thead>
+    <thead><tr><th>Status</th><th>Source</th><th>File</th><th>System</th><th>Progress</th><th>Speed</th>${includeStarted ? "<th>Started</th>" : ""}<th>Actions</th></tr></thead>
     <tbody>${rows.map(row => {
       const pct = Number(row.percentage || 0);
       const active = ["queued", "downloading"].includes(String(row.status || ""));
       const retryable = ["failed", "cancelled"].includes(String(row.status || ""));
       const statusClass = row.status === "failed" ? "danger" : row.status === "completed" ? "success" : row.status === "cancelled" ? "secondary" : row.status === "downloading" ? "info" : "primary";
+      const displayStatus = usePendingLabel && row.status === "queued" ? "pending" : (row.status || "queued");
       const filePath = row.file_path || row.relative_path || row.rom_name || "";
       const errorText = row.error_message || row.failure_reason || "";
       const jobId = escapeHtml(row.job_id || row.id || "");
@@ -1924,13 +1927,13 @@ function renderDownloadRows(rows, allowCancel = true) {
         retryable && jobId ? `<button class="btn btn-sm btn-outline-primary" title="Retry download" aria-label="Retry download" onclick="retryDroneDownload('${jobId}')"><i class="bi bi-arrow-clockwise"></i></button>` : "",
       ].filter(Boolean).join(" ");
       return `<tr>
-        <td><span class="badge text-bg-${statusClass}" title="${escapeHtml(errorText)}">${escapeHtml(row.status || "queued")}${row.queue_position ? ` #${row.queue_position}` : ""}</span>${gamelistWarning}</td>
+        <td><span class="badge text-bg-${statusClass}" title="${escapeHtml(errorText)}">${escapeHtml(displayStatus)}${row.queue_position ? ` #${row.queue_position}` : ""}</span>${gamelistWarning}</td>
         <td class="small mono">${escapeHtml(row.source_drone_id || "n/a")}</td>
-        <td class="small mono" title="${escapeHtml(errorText || row.rom_fingerprint || "")}">${escapeHtml(filePath)}</td>
+        <td class="small mono download-file" title="${escapeHtml(errorText || row.rom_fingerprint || "")}">${escapeHtml(filePath)}</td>
         <td class="small">${escapeHtml(row.system || "")}</td>
         <td class="small text-nowrap">${pct.toFixed(1)}% (${formatBytes(row.downloaded_bytes || row.bytes_transferred)} / ${formatBytes(row.total_bytes || row.file_size)})</td>
         <td class="small">${row.transfer_speed_bps ? `${formatBytes(row.transfer_speed_bps)}/s` : ""}</td>
-        <td class="small text-nowrap">${escapeHtml(formatCompactLocalDate(row.started_at || row.download_started_at || row.created_at))}</td>
+        ${includeStarted ? `<td class="small text-nowrap">${escapeHtml(formatCompactLocalDate(row.started_at || row.download_started_at || row.created_at))}</td>` : ""}
         <td>${actions}</td>
       </tr>`;
     }).join("")}</tbody></table></div>`;
@@ -1977,7 +1980,7 @@ function renderDownloadsPanel(payload, includeHeader = true) {
 
 let transferPayload = {};
 const transferViews = {
-  queued: { query: "", limit: 10, page: 1 },
+  active: { query: "", limit: 10, page: 1 },
   recent: { query: "", limit: 10, page: 1 },
 };
 
@@ -1991,20 +1994,16 @@ function transferPage(kind, rows) {
   return { rows: filtered.slice(start, start + view.limit), total: filtered.length, pages };
 }
 
-function renderTransferGroup(kind, label, icon, tone, rows, allowCancel) {
+function renderTransferPager(kind, label, rows) {
   const page = transferPage(kind, rows);
   const view = transferViews[kind];
-  return `<div class="download-section">
-    <div class="download-section-title"><span><i class="bi ${icon} me-2"></i>${label}</span><span class="badge text-bg-${tone}">${page.total}</span></div>
-    <div class="d-flex flex-wrap gap-2 mb-2">
+  return { page, html: `<div class="d-flex flex-wrap gap-2 mb-2">
       <input class="form-control form-control-sm" style="max-width:260px" placeholder="Search ${label.toLowerCase()}" value="${escapeHtml(view.query)}" onchange="setTransferSearch('${kind}', this.value)" onkeydown="if(event.key==='Enter'){event.preventDefault();setTransferSearch('${kind}',this.value)}">
       <select class="form-select form-select-sm" style="width:auto" onchange="setTransferLimit('${kind}', this.value)">${[10, 50, 100, 200].map(size => `<option value="${size}" ${view.limit === size ? "selected" : ""}>${size}</option>`).join("")}</select>
       <button class="btn btn-sm btn-outline-secondary" ${view.page <= 1 ? "disabled" : ""} onclick="setTransferPage('${kind}', ${view.page - 1})">Previous</button>
       <span class="small text-muted align-self-center">Page ${view.page} of ${page.pages}</span>
       <button class="btn btn-sm btn-outline-secondary" ${view.page >= page.pages ? "disabled" : ""} onclick="setTransferPage('${kind}', ${view.page + 1})">Next</button>
-    </div>
-    ${renderDownloadRows(page.rows, allowCancel)}
-  </div>`;
+    </div>` };
 }
 
 function renderTransferControls(payload, active, queued) {
@@ -2022,17 +2021,17 @@ function renderTransfersPanel(payload) {
   const active = transferPayload.active || [];
   const queued = transferPayload.queued || [];
   const recent = transferPayload.recent || [];
-  // Reserve a fixed height for the Active section based on the max number of
-  // concurrent downloads, so it doesn't grow/shrink (and shove the rest of the
-  // page around) as transfers start and finish on each refresh.
-  const activeLimit = Math.max(1, Number(transferPayload.concurrency && transferPayload.concurrency.active_limit) || 1);
-  const activeMinHeight = 44 + activeLimit * 46;
-  return `${renderQueueEta(transferPayload)}${renderTransferControls(transferPayload, active, queued)}<div class="download-section">
-      <div class="download-section-title"><span><i class="bi bi-lightning-charge me-2"></i>Active</span><span class="badge text-bg-info">${active.length}</span></div>
-      <div style="min-height:${activeMinHeight}px">${renderDownloadRows(active)}</div>
-    </div>
-    ${renderTransferGroup("queued", "Queued", "bi-hourglass-split", "warning", queued, true)}
-    ${renderTransferGroup("recent", "Recent", "bi-clock-history", "secondary", recent, false)}`;
+  const current = [...active, ...queued];
+  const currentPager = renderTransferPager("active", "Transfers", current);
+  const recentPager = renderTransferPager("recent", "Recent", recent);
+  return `${renderQueueEta(transferPayload)}${renderTransferControls(transferPayload, active, queued)}
+    ${currentPager.html}
+    ${renderDownloadRows(currentPager.page.rows, true, { includeStarted: false, usePendingLabel: true, emptyText: "No pending or downloading transfers." })}
+    <div class="download-section mt-3 mb-0">
+      <div class="download-section-title"><span><i class="bi bi-clock-history me-2"></i>Recent</span><span class="badge text-bg-secondary">${recentPager.page.total}</span></div>
+      ${recentPager.html}
+      ${renderDownloadRows(recentPager.page.rows, false)}
+    </div>`;
 }
 
 function refreshTransfersPanel() {
@@ -3514,7 +3513,7 @@ function renderLocalPeerRows(peers) {
       if (peer.identity_conflict) {
         actionCell = `<button class="btn btn-sm btn-outline-secondary" disabled title="This Drone advertises the same machine id as this device. Reset the Drone id on one machine before pairing.">Resolve ID</button>`;
       } else if (peer.paired) {
-        actionCell = `<button class="btn btn-sm btn-outline-danger" onclick="forgetLocalPeer(decodeURIComponent('${peerToken}'))">Forget</button>`;
+        actionCell = `<div class="d-flex gap-2 justify-content-end"><button class="btn btn-sm btn-outline-primary" onclick="browseLocalPeer(decodeURIComponent('${peerToken}'))">Browse</button><button class="btn btn-sm btn-outline-danger" onclick="forgetLocalPeer(decodeURIComponent('${peerToken}'))">Forget</button></div>`;
       } else if (insecure) {
         actionCell = `<button class="btn btn-sm btn-outline-secondary" disabled title="This Drone is advertising ${escapeHtml(url)} (not HTTPS), so it can't be paired for secure transfers. Update/repair the Drone on that machine.">Not secure</button>`;
       } else {
@@ -3696,34 +3695,33 @@ function renderLocalAssetsPagination() {
 function parseIntegrationHash(hash) {
   const queryIndex = hash.indexOf("?");
   const params = new URLSearchParams(queryIndex >= 0 ? hash.substring(queryIndex + 1) : "");
-  return { tab: params.get("tab") === "local_network" ? "local_network" : "overmind" };
+  const tab = params.get("tab");
+  return { tab: tab === "configuration" || tab === "overmind" || tab === "local_network" ? "configuration" : "transfers" };
 }
 
 function applyIntegrationTab() {
-  const isLocal = integrationActiveTab === "local_network";
-  const overmindPanel = document.getElementById("overmindPagePanel");
-  const localPanel = document.getElementById("localNetworkPagePanel");
-  if (overmindPanel) overmindPanel.classList.toggle("d-none", isLocal);
-  if (localPanel) localPanel.classList.toggle("d-none", !isLocal);
-  const overmindTabBtn = document.getElementById("integrationTabOvermind");
-  const localTabBtn = document.getElementById("integrationTabLocal");
-  if (overmindTabBtn) { overmindTabBtn.classList.toggle("btn-primary", !isLocal); overmindTabBtn.classList.toggle("btn-outline-primary", isLocal); }
-  if (localTabBtn) { localTabBtn.classList.toggle("btn-primary", isLocal); localTabBtn.classList.toggle("btn-outline-primary", !isLocal); }
+  const isConfiguration = integrationActiveTab === "configuration";
+  const transfersPanel = document.getElementById("integrationTransfersPanel");
+  const configPanel = document.getElementById("integrationConfigurationPanel");
+  if (transfersPanel) transfersPanel.classList.toggle("d-none", isConfiguration);
+  if (configPanel) configPanel.classList.toggle("d-none", !isConfiguration);
+  const transfersTabBtn = document.getElementById("integrationTabTransfers");
+  const configTabBtn = document.getElementById("integrationTabConfiguration");
+  if (transfersTabBtn) { transfersTabBtn.classList.toggle("btn-primary", !isConfiguration); transfersTabBtn.classList.toggle("btn-outline-primary", isConfiguration); }
+  if (configTabBtn) { configTabBtn.classList.toggle("btn-primary", isConfiguration); configTabBtn.classList.toggle("btn-outline-primary", !isConfiguration); }
 }
 
-function setIntegrationTab(tab) {
-  integrationActiveTab = tab === "local_network" ? "local_network" : "overmind";
+async function setIntegrationTab(tab) {
+  integrationActiveTab = tab === "configuration" ? "configuration" : "transfers";
   applyIntegrationTab();
   const nextHash = `#admin/integration?tab=${integrationActiveTab}`;
   if (window.location.hash !== nextHash) history.replaceState(null, "", nextHash);
-  // Lazily load whichever tab wasn't shown on initial page load -- avoids an
-  // unnecessary peer/status fetch for a tab the user never opens.
-  if (integrationActiveTab === "overmind" && !integrationOvermindLoaded) {
-    integrationOvermindLoaded = true;
-    renderOvermindIntegrationPanel(document.getElementById("overmindPagePanel"));
-  } else if (integrationActiveTab === "local_network" && !integrationLocalLoaded) {
-    integrationLocalLoaded = true;
-    renderLocalNetworkIntegrationPanel(document.getElementById("localNetworkPagePanel"));
+  if (integrationActiveTab === "transfers" && !integrationTransfersLoaded) {
+    integrationTransfersLoaded = true;
+    await renderIntegrationTransfersPanel(document.getElementById("integrationTransfersPanel"));
+  } else if (integrationActiveTab === "configuration" && !integrationConfigurationLoaded) {
+    integrationConfigurationLoaded = true;
+    await renderIntegrationConfigurationPanel(document.getElementById("integrationConfigurationPanel"));
   }
 }
 
@@ -3731,7 +3729,7 @@ async function renderIntegrationPage() {
   currentSystemContext = null;
   clearSystemTheme();
   titleNode.textContent = "Integration";
-  subtitleNode.textContent = "Manage this Drone through Overmind or directly on the local network";
+  subtitleNode.textContent = "Transfer assets between Drones and configure Overmind or local-network control";
   setLoading(true, "Loading integration...");
   try {
     // Overmind and Local Network are always both on -- no manual toggle. Heal
@@ -3742,47 +3740,22 @@ async function renderIntegrationPage() {
       await apiPost("/admin/network-mode", { overmind_enabled: true, local_network_enabled: true });
     }
     integrationActiveTab = parseIntegrationHash(window.location.hash).tab;
-    const isLocal = integrationActiveTab === "local_network";
+    const isConfiguration = integrationActiveTab === "configuration";
     content.innerHTML = `
-      <div class="mb-3"><button class="btn btn-outline-secondary" onclick="setHash('#admin')">← Back to Admin</button></div>
+      <div class="mb-3"><button class="btn btn-outline-secondary" onclick="setHash('#admin')">Back to Admin</button></div>
       <div class="btn-group bff-segmented mb-3" role="group" aria-label="Integration section">
-        <button id="integrationTabOvermind" class="btn btn-sm ${isLocal ? "btn-outline-primary" : "btn-primary"}" type="button" onclick="setIntegrationTab('overmind')"><i class="bi bi-cloud me-1"></i>Overmind</button>
-        <button id="integrationTabLocal" class="btn btn-sm ${isLocal ? "btn-primary" : "btn-outline-primary"}" type="button" onclick="setIntegrationTab('local_network')"><i class="bi bi-wifi me-1"></i>Local Network</button>
+        <button id="integrationTabTransfers" class="btn btn-sm ${isConfiguration ? "btn-outline-primary" : "btn-primary"}" type="button" onclick="setIntegrationTab('transfers')"><i class="bi bi-arrow-left-right me-1"></i>Transfers</button>
+        <button id="integrationTabConfiguration" class="btn btn-sm ${isConfiguration ? "btn-primary" : "btn-outline-primary"}" type="button" onclick="setIntegrationTab('configuration')"><i class="bi bi-sliders me-1"></i>Configuration</button>
       </div>
-      <div id="overmindPagePanel" class="${isLocal ? "d-none" : ""}"></div>
-      <div id="localNetworkPagePanel" class="${isLocal ? "" : "d-none"}"></div>
-      <div class="card log-card mt-3">
-        <div class="card-header d-flex justify-content-between align-items-center">
-          <span><i class="bi bi-arrow-left-right me-2"></i>Transfers</span>
-          <button id="transfersRefreshBtn" class="btn btn-sm btn-outline-primary" type="button"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
-        </div>
-        <div class="small text-muted px-3 pt-3">All drone-to-drone asset transfers to this machine, whether started from Overmind or Local Network.</div>
-        <div class="card-body" id="transfersBody"><div class="text-muted">Loading transfers...</div></div>
-      </div>`;
+      <div id="integrationTransfersPanel" class="${isConfiguration ? "d-none" : ""}"></div>
+      <div id="integrationConfigurationPanel" class="${isConfiguration ? "" : "d-none"}"></div>`;
 
-    async function loadTransfers() {
-      const payload = await api("/admin/downloads");
-      document.getElementById("transfersBody").innerHTML = renderTransfersPanel(payload);
-    }
-    window.refreshTransfers = loadTransfers;
-    document.getElementById("transfersRefreshBtn").addEventListener("click", async () => {
-      try {
-        await loadTransfers();
-      } catch (err) {
-        showToast(`Failed to load transfers: ${escapeHtml(err.message || "unknown error")}`, "danger");
-      }
-    });
-
-    // Only load the tab shown on entry -- the other tab lazily loads in
-    // setIntegrationTab() the first time the user switches to it, so opening
-    // Integration doesn't fire off a Local Network peer/status fetch (or vice
-    // versa) the user never asked to see.
-    integrationOvermindLoaded = !isLocal;
-    integrationLocalLoaded = isLocal;
-    const activeTabLoad = isLocal
-      ? renderLocalNetworkIntegrationPanel(document.getElementById("localNetworkPagePanel"))
-      : renderOvermindIntegrationPanel(document.getElementById("overmindPagePanel"));
-    await Promise.allSettled([activeTabLoad, loadTransfers()]);
+    integrationTransfersLoaded = !isConfiguration;
+    integrationConfigurationLoaded = isConfiguration;
+    const activeTabLoad = isConfiguration
+      ? renderIntegrationConfigurationPanel(document.getElementById("integrationConfigurationPanel"))
+      : renderIntegrationTransfersPanel(document.getElementById("integrationTransfersPanel"));
+    await activeTabLoad;
     startTransfersAutoRefresh();
   } catch (err) {
     showToast(`Failed to load integration: ${escapeHtml(err.message || "unknown error")}`, "danger");
@@ -3792,26 +3765,64 @@ async function renderIntegrationPage() {
   }
 }
 
-async function renderLocalNetworkIntegrationPanel(target) {
+async function renderIntegrationTransfersPanel(target) {
   target.innerHTML = `
-    <div class="card log-card mb-3"><div class="card-header d-flex justify-content-between align-items-center"><span>Pairing</span><button class="btn btn-sm btn-outline-primary" id="localPairCodeRotateBtn">Rotate Code</button></div>
-      <div class="card-body" id="localPairingBody"></div></div>
-    <div class="card log-card mb-3"><div class="card-header d-flex justify-content-between align-items-center"><span>Nearby Drones</span><div class="d-flex gap-2"><button class="btn btn-sm btn-outline-primary" id="localDiscoverBtn"><i class="bi bi-radar me-1"></i>Discover</button><button class="btn btn-sm btn-outline-secondary" id="localRefreshBtn"><i class="bi bi-arrow-repeat"></i></button></div></div>
-      <div class="card-body" id="localPeersBody"><div class="text-muted">Loading peers...</div></div></div>
+    <div id="localTransferRequestPanel"></div>
+    <div class="card log-card mt-3">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-arrow-left-right me-2"></i>Transfers</span>
+        <button id="transfersRefreshBtn" class="btn btn-sm btn-outline-primary" type="button"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
+      </div>
+      <div class="small text-muted px-3 pt-3">All drone-to-drone asset transfers to this machine, whether started from Overmind or Local Network.</div>
+      <div class="card-body" id="transfersBody"><div class="text-muted">Loading transfers...</div></div>
+    </div>`;
+
+  async function loadTransfers() {
+    const payload = await api("/admin/downloads");
+    const body = document.getElementById("transfersBody");
+    if (body) body.innerHTML = renderTransfersPanel(payload);
+  }
+  window.refreshTransfers = loadTransfers;
+  document.getElementById("transfersRefreshBtn").addEventListener("click", async () => {
+    try {
+      await loadTransfers();
+    } catch (err) {
+      showToast(`Failed to load transfers: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    }
+  });
+
+  await Promise.allSettled([
+    renderLocalTransferRequestPanel(document.getElementById("localTransferRequestPanel")),
+    loadTransfers(),
+  ]);
+}
+
+async function renderIntegrationConfigurationPanel(target) {
+  target.innerHTML = `
+    <div id="localNetworkConfigurationPanel"></div>
+    <div id="overmindConfigurationPanel" class="mt-3"></div>`;
+  await Promise.allSettled([
+    renderLocalNetworkIntegrationPanel(document.getElementById("localNetworkConfigurationPanel")),
+    renderOvermindIntegrationPanel(document.getElementById("overmindConfigurationPanel")),
+  ]);
+}
+
+async function renderLocalTransferRequestPanel(target) {
+  target.innerHTML = `
     <div class="card log-card mb-3" id="localAssetsCard"><div class="card-header"><span id="localAssetsTitle">Request Assets from Connected Drone</span></div>
       <div class="card-body">
         <div class="small text-muted mb-3">Request inventories from a paired Drone, then download what you need. ROMs, BIOS, and saves can be copied here; emulator configs and gameplay history are available for inspection.</div>
         <div class="row g-2 mb-2">
           <div class="col-12 col-lg-3"><label class="form-label small" for="localAssetPeer">Connected Drone</label><select id="localAssetPeer" class="form-select"></select></div>
           <div class="col-6 col-lg-2"><label class="form-label small" for="localAssetType">Asset Type</label><select id="localAssetType" class="form-select"><option value="roms">ROMs</option><option value="bios">BIOS</option><option value="saves">Saves</option><option value="emulator_configs">Emulator Configs</option><option value="gameplay">Gameplay History</option></select></div>
-          <div class="col-6 col-lg-2"><label class="form-label small">Systems</label><div class="dropdown"><button id="localAssetSystemsToggle" class="btn btn-outline-secondary dropdown-toggle w-100 text-start" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside">All systems</button><div id="localAssetSystemsMenu" class="dropdown-menu p-2 w-100"><div class="small text-muted">Select a connected Drone to load systems.</div></div></div></div>
+          <div class="col-6 col-lg-2"><label class="form-label small">Systems</label><div class="dropdown"><button id="localAssetSystemsToggle" class="btn btn-outline-secondary dropdown-toggle w-100 text-start" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside">All systems</button><div id="localAssetSystemsMenu" class="dropdown-menu p-2 w-100"><div class="small text-muted">Request assets to load systems.</div></div></div></div>
           <div class="col-8 col-lg-3"><label class="form-label small" for="localAssetQuery">Search</label><input id="localAssetQuery" class="form-control" placeholder="Search assets"></div>
           <div class="col-4 col-lg-2"><label class="form-label small" for="localAssetPageSize">Per Page</label><select id="localAssetPageSize" class="form-select"><option value="50">50</option><option value="100">100</option><option value="200">200</option></select></div>
         </div>
         <div class="d-flex flex-wrap align-items-center gap-2 mb-3">
           <button class="btn btn-primary" id="localAssetLoadBtn"><i class="bi bi-search me-1"></i>Request</button>
           <button class="btn btn-success" id="localAssetCopyAllBtn" disabled><i class="bi bi-cloud-arrow-down me-1"></i>Download All</button>
-          <div class="form-check ms-lg-2 d-none" id="localAssetArtworkOnlyWrap"><input class="form-check-input" type="checkbox" id="localAssetArtworkOnly"><label class="form-check-label small" for="localAssetArtworkOnly">Artwork only &mdash; skip ROM files, only for ROMs already on this Drone</label></div>
+          <div class="form-check ms-lg-2 d-none" id="localAssetArtworkOnlyWrap"><input class="form-check-input" type="checkbox" id="localAssetArtworkOnly"><label class="form-check-label small" for="localAssetArtworkOnly">Artwork only; skip ROM files, only for ROMs already on this Drone</label></div>
           <div class="form-check d-none" id="localAssetArtworkWrap"><input class="form-check-input" type="checkbox" id="localAssetIncludeArtwork" checked><label class="form-check-label small" for="localAssetIncludeArtwork">Include artwork (places art &amp; updates gamelist.xml)</label></div>
           <div class="form-check d-none" id="localAssetOverwriteArtworkWrap"><input class="form-check-input" type="checkbox" id="localAssetOverwriteArtwork"><label class="form-check-label small" for="localAssetOverwriteArtwork">Overwrite existing artwork (otherwise only artwork missing here is downloaded)</label></div>
         </div>
@@ -3821,12 +3832,6 @@ async function renderLocalNetworkIntegrationPanel(target) {
 
   async function refresh() {
     const status = await api("/admin/local-network/status");
-    document.getElementById("localPairingBody").innerHTML = status.active
-      ? `<div class="d-flex flex-wrap align-items-center gap-3"><div><div class="small text-muted">Pairing code</div><div class="display-6 mono">${escapeHtml(status.pairing?.code || "")}</div></div><div class="small text-muted">Expires ${escapeHtml(status.pairing?.expires_at || "")}. Enter this code on the other Drone to approve it.</div></div>`
-      : '<div class="themed-empty">Enable Local Network integration to discover and pair nearby Drones.</div>';
-    document.getElementById("localPeersBody").innerHTML = renderLocalPeerRows(status.peers || []);
-    document.getElementById("localDiscoverBtn").disabled = !status.active;
-    document.getElementById("localPairCodeRotateBtn").disabled = !status.active;
     const pairedPeers = (status.peers || []).filter(peer => peer.paired);
     const peerSelect = document.getElementById("localAssetPeer");
     const selectedPeerId = peerSelect.value || localPeerAssetContext.peerId;
@@ -3834,40 +3839,62 @@ async function renderLocalNetworkIntegrationPanel(target) {
       ? pairedPeers.map(peer => `<option value="${escapeHtml(peer.drone_id || "")}">${escapeHtml(peer.name || peer.hostname || peer.drone_id || "Drone")}</option>`).join("")
       : '<option value="">No paired Drones</option>';
     if (pairedPeers.some(peer => String(peer.drone_id || "") === selectedPeerId)) peerSelect.value = selectedPeerId;
-    if (peerSelect.value && localPeerAssetContext.systemsLoadedPeerId !== peerSelect.value) {
-      // Peer changed (or systems were never loaded for it) -- load from the peer.
-      localPeerAssetContext.peerId = peerSelect.value;
-      await loadLocalPeerSystems();
-    } else if (peerSelect.value) {
-      // Same peer, systems already loaded: the menu DOM was reset to its
-      // placeholder by this panel re-render, so repaint it from cache instead of
-      // letting the loaded systems silently vanish.
-      renderLocalAssetSystems();
-    }
-    if (peerSelect.value && localPeerAssetContext.autoLoadedPeerId !== peerSelect.value) {
-      localPeerAssetContext.autoLoadedPeerId = peerSelect.value;
-      await loadLocalPeerAssets();
-    }
+    localPeerAssetContext.peerId = peerSelect.value || "";
     document.getElementById("localAssetLoadBtn").disabled = !pairedPeers.length;
     document.getElementById("localAssetCopyAllBtn").disabled = !pairedPeers.length;
+  }
+  window.refreshLocalNetworkAssets = refresh;
+  document.getElementById("localAssetLoadBtn").addEventListener("click", requestLocalPeerAssets);
+  document.getElementById("localAssetCopyAllBtn").addEventListener("click", copyAllLocalAssets);
+  document.getElementById("localAssetType").addEventListener("change", updateLocalAssetTypeUi);
+  document.getElementById("localAssetIncludeArtwork").addEventListener("change", updateLocalAssetTypeUi);
+  document.getElementById("localAssetArtworkOnly").addEventListener("change", updateLocalAssetTypeUi);
+  document.getElementById("localAssetPeer").addEventListener("change", () => {
+    localPeerAssetContext.peerId = document.getElementById("localAssetPeer").value || "";
+    localPeerAssetContext.systems = [];
+    localPeerAssetContext.availableSystems = [];
+    localPeerAssetContext.systemCounts = {};
+    localPeerAssetContext.systemsLoadedPeerId = "";
+    localPeerAssetContext.items = [];
+    localPeerAssetContext.total = 0;
+    renderLocalAssetSystems();
+    document.getElementById("localAssetsBody").innerHTML = '<div class="themed-empty">Request assets from this Drone when you are ready.</div>';
+    document.getElementById("localAssetsPagination").innerHTML = "";
+  });
+  document.getElementById("localAssetPageSize").addEventListener("change", () => {
+    document.getElementById("localAssetsBody").innerHTML = '<div class="themed-empty">Press Request to load assets with the new page size.</div>';
+    document.getElementById("localAssetsPagination").innerHTML = "";
+  });
+  document.getElementById("localAssetQuery").addEventListener("keydown", async (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      await requestLocalPeerAssets();
+    }
+  });
+  updateLocalAssetTypeUi();
+  await refresh();
+}
+
+async function renderLocalNetworkIntegrationPanel(target) {
+  target.innerHTML = `
+    <div class="card log-card mb-3"><div class="card-header d-flex justify-content-between align-items-center"><span>Pairing</span><button class="btn btn-sm btn-outline-primary" id="localPairCodeRotateBtn">Rotate Code</button></div>
+      <div class="card-body" id="localPairingBody"></div></div>
+    <div class="card log-card mb-3"><div class="card-header d-flex justify-content-between align-items-center"><span>Nearby Drones</span><div class="d-flex gap-2"><button class="btn btn-sm btn-outline-primary" id="localDiscoverBtn"><i class="bi bi-radar me-1"></i>Discover</button><button class="btn btn-sm btn-outline-secondary" id="localRefreshBtn"><i class="bi bi-arrow-repeat"></i></button></div></div>
+      <div class="card-body" id="localPeersBody"><div class="text-muted">Loading peers...</div></div></div>`;
+
+  async function refresh() {
+    const status = await api("/admin/local-network/status");
+    document.getElementById("localPairingBody").innerHTML = status.active
+      ? `<div class="d-flex flex-wrap align-items-center gap-3"><div><div class="small text-muted">Pairing code</div><div class="display-6 mono">${escapeHtml(status.pairing?.code || "")}</div></div><div class="small text-muted">Expires ${escapeHtml(status.pairing?.expires_at || "")}. Enter this code on the other Drone to approve it.</div></div>`
+      : '<div class="themed-empty">Enable Local Network integration to discover and pair nearby Drones.</div>';
+    document.getElementById("localPeersBody").innerHTML = renderLocalPeerRows(status.peers || []);
+    document.getElementById("localDiscoverBtn").disabled = !status.active;
+    document.getElementById("localPairCodeRotateBtn").disabled = !status.active;
   }
   window.refreshLocalNetwork = refresh;
   document.getElementById("localDiscoverBtn").addEventListener("click", async () => { await apiPost("/admin/local-network/discover", {}); await refresh(); });
   document.getElementById("localRefreshBtn").addEventListener("click", refresh);
   document.getElementById("localPairCodeRotateBtn").addEventListener("click", async () => { await apiPost("/admin/local-network/pairing-code/rotate", {}); await refresh(); });
-  document.getElementById("localAssetLoadBtn").addEventListener("click", () => loadLocalPeerAssets());
-  document.getElementById("localAssetCopyAllBtn").addEventListener("click", copyAllLocalAssets);
-  document.getElementById("localAssetType").addEventListener("change", updateLocalAssetTypeUi);
-  document.getElementById("localAssetIncludeArtwork").addEventListener("change", updateLocalAssetTypeUi);
-  document.getElementById("localAssetArtworkOnly").addEventListener("change", updateLocalAssetTypeUi);
-  document.getElementById("localAssetPeer").addEventListener("change", async () => {
-    localPeerAssetContext.autoLoadedPeerId = "";
-    await loadLocalPeerSystems();
-    await loadLocalPeerAssets();
-  });
-  document.getElementById("localAssetPageSize").addEventListener("change", () => loadLocalPeerAssets());
-  document.getElementById("localAssetQuery").addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); loadLocalPeerAssets(); } });
-  updateLocalAssetTypeUi();
   await refresh();
 }
 
@@ -3978,22 +4005,36 @@ async function loadLocalPeerSystems() {
   renderLocalAssetSystems();
 }
 
+async function requestLocalPeerAssets() {
+  const peerId = (document.getElementById("localAssetPeer") || {}).value || localPeerAssetContext.peerId;
+  if (!peerId) { showToast("Pair a Drone before requesting assets.", "warning"); return; }
+  if (localPeerAssetContext.systemsLoadedPeerId !== peerId) {
+    await loadLocalPeerSystems();
+  }
+  await loadLocalPeerAssets();
+}
+
 async function pairLocalPeer(peerId) {
   const code = window.prompt("Enter the 8-digit pairing code shown on the other Drone:");
   if (!code) return;
   await apiPost(`/admin/local-network/peers/${encodeURIComponent(peerId)}/pair`, { pairing_code: code.trim() });
   showToast("Drone paired.", "success");
-  await window.refreshLocalNetwork();
+  if (typeof window.refreshLocalNetwork === "function") await window.refreshLocalNetwork();
+  if (typeof window.refreshLocalNetworkAssets === "function") await window.refreshLocalNetworkAssets();
 }
 
 async function forgetLocalPeer(peerId) {
   if (!window.confirm("Forget this paired Drone? It will need to be paired again before browsing or syncing.")) return;
   await apiPost(`/admin/local-network/peers/${encodeURIComponent(peerId)}/forget`, {});
-  await window.refreshLocalNetwork();
+  if (typeof window.refreshLocalNetwork === "function") await window.refreshLocalNetwork();
+  if (typeof window.refreshLocalNetworkAssets === "function") await window.refreshLocalNetworkAssets();
 }
 
 async function browseLocalPeer(peerId) {
   localPeerAssetContext = { peerId, peerName: peerId, assetType: "roms", systems: [], availableSystems: [], systemCounts: {}, systemsLoadedPeerId: "", items: [], query: "", limit: 50, offset: 0, total: 0, autoLoadedPeerId: "" };
+  if (!document.getElementById("localAssetPeer")) {
+    await setIntegrationTab("transfers");
+  }
   document.getElementById("localAssetPeer").value = peerId;
   document.getElementById("localAssetType").value = "roms";
   document.getElementById("localAssetQuery").value = "";
@@ -4066,7 +4107,7 @@ async function copyLocalPeerAsset(index) {
   } else {
     showToast(artworkOnly ? "Artwork queued for local transfer." : "Asset queued for local transfer.", "success");
   }
-  await window.refreshLocalNetwork();
+  if (typeof window.refreshTransfers === "function") await window.refreshTransfers();
 }
 
 async function copyAllLocalAssets() {
@@ -4106,7 +4147,7 @@ async function queueLocalBulkCopy(body) {
       } else {
         showToast(`Queued ${artwork} artwork files for ROMs already on this Drone.`, "success");
       }
-      await window.refreshLocalNetwork();
+      if (typeof window.refreshTransfers === "function") await window.refreshTransfers();
       return;
     }
     const skippedNote = skipped ? ` ${skipped} already on this machine were skipped.` : "";
@@ -4115,7 +4156,7 @@ async function queueLocalBulkCopy(body) {
     } else {
       showToast(`Queued ${assets} ${body.asset_type}${artwork ? ` (+${artwork} artwork files)` : ""} for local transfer.${skippedNote}`, "success");
     }
-    await window.refreshLocalNetwork();
+    if (typeof window.refreshTransfers === "function") await window.refreshTransfers();
   } catch (err) {
     showToast(`Bulk download failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
   }
@@ -5467,7 +5508,8 @@ async function router() {
         setHash("");
         return;
       }
-      await renderDownloadsPage();
+      setHash("#admin/integration?tab=transfers");
+      return;
     } else if (hash === "#admin/asset-cache") {
       if (!adminEnabled) {
         setHash("");
@@ -5485,14 +5527,14 @@ async function router() {
         setHash("");
         return;
       }
-      setHash("#admin/integration?tab=overmind");
+      setHash("#admin/integration?tab=configuration");
       return;
     } else if (hash === "#admin/local-network") {
       if (!adminEnabled) {
         setHash("");
         return;
       }
-      setHash("#admin/integration?tab=local_network");
+      setHash("#admin/integration?tab=configuration");
       return;
     } else if (hash === "#admin/api") {
       if (!adminEnabled) {

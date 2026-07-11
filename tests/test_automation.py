@@ -6,6 +6,7 @@ from unittest import mock
 
 import app.drone_api as drone_api
 import app.device.automation as automation
+import app.device.device_control as device_control
 import app.overmind.actions as overmind_actions
 from app.drone_api import (
     RomRepository,
@@ -243,6 +244,24 @@ class IdleVolumeAutomationRunnerTests(unittest.TestCase):
 _RUNNING_GAME = {"pid": 123, "rom_path": "/userdata/roms/snes/game.sfc"}
 
 
+class EmulatorKillControlTests(unittest.TestCase):
+    def test_root_kill_waits_for_command_success(self) -> None:
+        completed = mock.Mock(returncode=0)
+        with mock.patch.object(device_control.os, "geteuid", return_value=0), \
+             mock.patch.object(device_control, "_emulator_kill_command", return_value=["swissknife", "--emukill"]), \
+             mock.patch.object(device_control.subprocess, "run", return_value=completed) as run:
+            self.assertTrue(device_control._kill_running_emulator())
+        run.assert_called_once()
+
+    def test_root_kill_reports_command_failure(self) -> None:
+        completed = mock.Mock(returncode=1)
+        with mock.patch.object(device_control.os, "geteuid", return_value=0), \
+             mock.patch.object(device_control, "_emulator_kill_command", return_value=["swissknife", "--emukill"]), \
+             mock.patch.object(device_control.subprocess, "run", return_value=completed):
+            with self.assertRaises(OSError):
+                device_control._kill_running_emulator()
+
+
 class IdleGameExitAutomationRunnerTests(unittest.TestCase):
     def setUp(self) -> None:
         # The runner uses module-level arming state; reset it per test.
@@ -328,6 +347,18 @@ class IdleGameExitAutomationRunnerTests(unittest.TestCase):
             with mock.patch.object(automation, "_find_running_emulatorlauncher", return_value=_RUNNING_GAME), \
                  mock.patch.object(automation, "_read_last_input_activity", return_value=idle), \
                  mock.patch.object(automation, "_kill_running_emulator", side_effect=OSError("boom")) as kill_mock:
+                _run_idle_game_exit_automation_once(settings)
+                _run_idle_game_exit_automation_once(settings)
+                self.assertEqual(kill_mock.call_count, 2)
+
+    def test_unavailable_kill_command_does_not_arm(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            self._enable(settings, idle_minutes=5)
+            idle = time.time() - 600
+            with mock.patch.object(automation, "_find_running_emulatorlauncher", return_value=_RUNNING_GAME), \
+                 mock.patch.object(automation, "_read_last_input_activity", return_value=idle), \
+                 mock.patch.object(automation, "_kill_running_emulator", return_value=False) as kill_mock:
                 _run_idle_game_exit_automation_once(settings)
                 _run_idle_game_exit_automation_once(settings)
                 self.assertEqual(kill_mock.call_count, 2)

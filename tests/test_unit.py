@@ -2015,23 +2015,20 @@ class SettingsTests(unittest.TestCase):
             config.write_text('<?xml version="1.0"?><map><string name="ThemeSet" value="carbon"/></map>', encoding="utf-8")
             with mock.patch.object(set_screen_mode, "CONFIG", config):
                 with mock.patch("app.set_screen_mode.subprocess.run", return_value=mock.Mock(returncode=0, stdout="")) as run:
-                    with mock.patch("app.set_screen_mode.subprocess.Popen") as popen:
-                        set_screen_mode.set_screen_mode("kiosk")
-                        self.assertIn('name="UIMode" value="Kiosk"', config.read_text(encoding="utf-8"))
-                        set_screen_mode.set_screen_mode("full")
-                        set_screen_mode.set_screen_mode("kid")
+                    set_screen_mode.set_screen_mode("kiosk")
+                    self.assertIn('name="UIMode" value="Kiosk"', config.read_text(encoding="utf-8"))
+                    set_screen_mode.set_screen_mode("full")
+                    set_screen_mode.set_screen_mode("kid")
 
             self.assertIn('name="ThemeSet" value="carbon"', config.read_text(encoding="utf-8"))
             self.assertIn('name="UIMode" value="Kid"', config.read_text(encoding="utf-8"))
-            # Each invocation runs stop ES + save overlay (2 run calls) then relaunches
-            # ES detached (1 Popen call).
-            self.assertEqual(run.call_count, 6)
-            self.assertEqual(popen.call_count, 3)
+            # Each invocation synchronously runs stop ES + save overlay + start ES so
+            # success is not reported before the display service accepted the start.
+            self.assertEqual(run.call_count, 9)
             run_commands = [call.args[0] for call in run.call_args_list]
             self.assertIn([set_screen_mode.EMULATIONSTATION_SERVICE, "stop"], run_commands)
             self.assertIn(["batocera-save-overlay"], run_commands)
-            popen_commands = [call.args[0] for call in popen.call_args_list]
-            self.assertIn([set_screen_mode.EMULATIONSTATION_SERVICE, "start"], popen_commands)
+            self.assertIn([set_screen_mode.EMULATIONSTATION_SERVICE, "start"], run_commands)
 
     def test_screen_mode_helper_restarts_emulationstation_even_when_overlay_fails(self) -> None:
         from app import set_screen_mode
@@ -2046,14 +2043,29 @@ class SettingsTests(unittest.TestCase):
 
             with mock.patch.object(set_screen_mode, "CONFIG", config):
                 with mock.patch("app.set_screen_mode.subprocess.run", side_effect=fake_run):
-                    with mock.patch("app.set_screen_mode.subprocess.Popen") as popen:
-                        set_screen_mode.set_screen_mode("kiosk")
+                    set_screen_mode.set_screen_mode("kiosk")
 
             # The overlay step failed, but EmulationStation must still be restarted and the
             # new UIMode must still be written (so the screen comes back in Kiosk mode).
             self.assertIn('name="UIMode" value="Kiosk"', config.read_text(encoding="utf-8"))
-            popen_commands = [call.args[0] for call in popen.call_args_list]
-            self.assertIn([set_screen_mode.EMULATIONSTATION_SERVICE, "start"], popen_commands)
+
+    def test_screen_mode_helper_falls_back_when_service_start_fails(self) -> None:
+        from app import set_screen_mode
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "es_settings.cfg"
+
+            def fake_run(command, **kwargs):
+                rc = 1 if command == [set_screen_mode.EMULATIONSTATION_SERVICE, "start"] else 0
+                return mock.Mock(returncode=rc, stdout="start failure" if rc else "")
+
+            with mock.patch.object(set_screen_mode, "CONFIG", config), \
+                 mock.patch("app.set_screen_mode.subprocess.run", side_effect=fake_run) as run, \
+                 mock.patch("app.set_screen_mode.shutil.which", return_value="/usr/bin/batocera-es-swissknife"):
+                set_screen_mode.set_screen_mode("kiosk")
+
+            commands = [call.args[0] for call in run.call_args_list]
+            self.assertIn(["/usr/bin/batocera-es-swissknife", "--restart"], commands)
 
     def test_screen_mode_action_reports_failure_when_worker_unavailable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2557,6 +2569,10 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("for mode in full kiosk kid", bootstrap)
         self.assertIn("set_volume_as_root()", bootstrap)
         self.assertIn("set-volume.request", bootstrap)
+        self.assertIn("stage_latest_app_once()", bootstrap)
+        self.assertIn("DRONE_UPDATE_ON_STARTUP", bootstrap)
+        self.assertIn("DRONE_APP_STAGE_ONLY=1", bootstrap)
+        self.assertIn('kill_result="$CONTROL_DIR/kill-emulator.result"', bootstrap)
         self.assertIn("DRONE_SERVICE_CONTROL_DIR", root.joinpath("app/device/device_control.py").read_text(encoding="utf-8"))
         self.assertIn('system_info_payload["screen_mode"] = _get_screen_mode(settings)', drone_source)
         self.assertIn('system_info_payload["audio_volume"] = _get_audio_volume(settings)', drone_source)

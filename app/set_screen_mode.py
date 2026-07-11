@@ -16,6 +16,7 @@ Every step is logged to stdout so the service worker captures it for diagnostics
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 import time
@@ -79,15 +80,16 @@ def set_screen_mode(mode: str, config: Optional[Path] = None) -> None:
     print(f"[set_screen_mode] wrote UIMode={target} to {config}")
     # Persist to the overlay so the change survives a reboot, but never let a slow or
     # failing overlay save block the EmulationStation restart below.
-    _run_step(["batocera-save-overlay"], timeout=120)
+    _run_step(["batocera-save-overlay"], timeout=30)
     print("[set_screen_mode] starting EmulationStation")
-    subprocess.Popen(
-        [EMULATIONSTATION_SERVICE, "start"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-    print("[set_screen_mode] EmulationStation start issued")
+    started = _run_step([EMULATIONSTATION_SERVICE, "start"], timeout=60)
+    if not started:
+        restart_tool = shutil.which("batocera-es-swissknife")
+        if restart_tool:
+            started = _run_step([restart_tool, "--restart"], timeout=60)
+    if not started:
+        raise RuntimeError("EmulationStation did not restart after the screen mode change")
+    print("[set_screen_mode] EmulationStation start completed")
 
 
 def main() -> int:
