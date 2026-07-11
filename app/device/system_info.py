@@ -113,6 +113,7 @@ def _collect_system_info_payload(settings: Settings) -> dict:
         "audio_volume": _get_audio_volume(settings),
         "idle_volume_automation": automation_config["idle_volume"],
         "idle_game_exit_automation": automation_config["idle_game_exit"],
+        "wifi_recovery_automation": automation_config["wifi_recovery"],
         "network": network,
         "uptime_seconds": uptime,
         "container": Path("/.dockerenv").exists() or os.environ.get("RUNNING_IN_DOCKER") == "1",

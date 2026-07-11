@@ -20,6 +20,7 @@ try:
         _load_automation_config,
         _reset_idle_game_exit_armed_state,
         _reset_idle_volume_armed_state,
+        _reset_wifi_recovery_check_state,
         _save_automation_config,
     )
     from ..device.device_control import _apply_audio_volume, _apply_screen_mode, _restart_emulationstation
@@ -47,6 +48,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         _load_automation_config,
         _reset_idle_game_exit_armed_state,
         _reset_idle_volume_armed_state,
+        _reset_wifi_recovery_check_state,
         _save_automation_config,
     )
     from device.device_control import _apply_audio_volume, _apply_screen_mode, _restart_emulationstation  # type: ignore
@@ -549,6 +551,16 @@ def _execute_overmind_action(
             f"after {saved['idle_minutes']} min of no input."
         )
         return "completed", message, {"type": "idle_game_exit_automation", **saved}
+
+    if action_name == "set_wifi_recovery_automation":
+        payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
+        config = _load_automation_config(settings)
+        merged = {**config["wifi_recovery"], **payload}
+        saved = _save_automation_config(settings, {"wifi_recovery": merged})["wifi_recovery"]
+        _reset_wifi_recovery_check_state()
+        state = "enabled" if saved["enabled"] else "disabled"
+        message = f"Wi-Fi recovery automation {state}: check the wireless connection every 60 seconds."
+        return "completed", message, {"type": "wifi_recovery_automation", **saved}
 
     if action_name == "update":
         if settings.use_fake_data:

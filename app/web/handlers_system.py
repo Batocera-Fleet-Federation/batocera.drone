@@ -21,7 +21,9 @@ try:
         _read_last_input_activity,
         _reset_idle_game_exit_armed_state,
         _reset_idle_volume_armed_state,
+        _reset_wifi_recovery_check_state,
         _save_automation_config,
+        _wifi_recovery_status,
     )
     from ..device.device_control import _get_audio_volume
     from ..device.pixen import run_pixen_upgrade
@@ -39,7 +41,9 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         _read_last_input_activity,
         _reset_idle_game_exit_armed_state,
         _reset_idle_volume_armed_state,
+        _reset_wifi_recovery_check_state,
         _save_automation_config,
+        _wifi_recovery_status,
     )
     from device.device_control import _get_audio_volume  # type: ignore
     from device.pixen import run_pixen_upgrade  # type: ignore
@@ -101,6 +105,8 @@ class HandlersSystemMixin:
             {
                 "idle_volume": config["idle_volume"],
                 "idle_game_exit": config["idle_game_exit"],
+                "wifi_recovery": config["wifi_recovery"],
+                "wifi_status": _wifi_recovery_status(self.settings),
                 "input_monitor": {
                     "available": last_activity is not None,
                     "idle_seconds": idle_seconds,
@@ -145,6 +151,20 @@ class HandlersSystemMixin:
             daemon=True,
         ).start()
         self._send_json(200, {"idle_game_exit": saved["idle_game_exit"]})
+
+    def _handle_admin_automation_wifi_recovery(self, payload: dict) -> None:
+        payload = payload if isinstance(payload, dict) else {}
+        config = _load_automation_config(self.settings)
+        merged = {**config["wifi_recovery"], **payload}
+        saved = _save_automation_config(self.settings, {"wifi_recovery": merged})
+        _reset_wifi_recovery_check_state()
+        Thread(
+            target=_push_automation_config_to_overmind,
+            args=(self.settings,),
+            name="wifi-recovery-overmind-push",
+            daemon=True,
+        ).start()
+        self._send_json(200, {"wifi_recovery": saved["wifi_recovery"]})
 
     def _handle_admin_api_certificate(self) -> None:
         metadata = DroneCertificateManager(self.settings).ensure_certificate()

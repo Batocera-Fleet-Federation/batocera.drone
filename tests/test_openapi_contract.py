@@ -111,6 +111,8 @@ class DroneOpenApiContractTest(unittest.TestCase):
             "/admin/api/certificate/rotate",
             "/admin/automation",
             "/admin/automation/idle-volume",
+            "/admin/automation/idle-game-exit",
+            "/admin/automation/wifi-recovery",
             "/admin/system/run-pixen-update",
             "/admin/system/update-drone",
             "/admin/artwork/missing",

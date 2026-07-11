@@ -124,6 +124,76 @@ class IdleGameExitConfigTests(unittest.TestCase):
             )
 
 
+class WifiRecoveryAutomationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        automation._reset_wifi_recovery_check_state()
+
+    def _enable(self, settings: Settings) -> None:
+        _save_automation_config(settings, {"wifi_recovery": {"enabled": True}})
+
+    def test_defaults_disabled_and_round_trips(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            self.assertEqual(_load_automation_config(settings)["wifi_recovery"], {"enabled": False})
+            self._enable(settings)
+            self.assertEqual(_load_automation_config(settings)["wifi_recovery"], {"enabled": True})
+            self.assertFalse(_load_automation_config(settings)["idle_volume"]["enabled"])
+
+    def test_healthy_wifi_does_not_recover(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            self._enable(settings)
+            with mock.patch.object(
+                automation,
+                "_wifi_health",
+                return_value={"wifi_enabled": True, "wifi_connected": True, "wireless_interfaces": ["wlan0"]},
+            ), mock.patch.object(automation, "_recover_wifi") as recover_mock:
+                automation._run_wifi_recovery_automation_once(settings, now_monotonic=100)
+            recover_mock.assert_not_called()
+
+    def test_disabled_or_disconnected_wifi_recovers_once_per_minute(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            self._enable(settings)
+            with mock.patch.object(
+                automation,
+                "_wifi_health",
+                return_value={"wifi_enabled": False, "wifi_connected": False, "wireless_interfaces": ["wlan0"]},
+            ), mock.patch.object(automation, "_recover_wifi") as recover_mock:
+                automation._run_wifi_recovery_automation_once(settings, now_monotonic=100)
+                automation._run_wifi_recovery_automation_once(settings, now_monotonic=159)
+                automation._run_wifi_recovery_automation_once(settings, now_monotonic=160)
+            self.assertEqual(recover_mock.call_count, 2)
+
+    def test_recovery_runs_requested_command_sequence(self) -> None:
+        with mock.patch.object(automation.shutil, "which", return_value="/usr/bin/batocera-wifi"), \
+             mock.patch.object(automation.subprocess, "run") as run_mock, \
+             mock.patch.object(automation.time, "sleep") as sleep_mock:
+            automation._recover_wifi()
+        self.assertEqual(
+            run_mock.call_args_list,
+            [
+                mock.call(["/usr/bin/batocera-wifi", "disable"], check=True, timeout=30),
+                mock.call(["/usr/bin/batocera-wifi", "enable"], check=True, timeout=30),
+            ],
+        )
+        sleep_mock.assert_called_once_with(3)
+
+    def test_overmind_action_saves_wifi_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            repo = RomRepository(Path(tmp) / "roms", Path(tmp) / "bios")
+            status, message, result = _execute_overmind_action(
+                settings,
+                repo,
+                {"action": "set_wifi_recovery_automation", "payload": {"enabled": True}},
+            )
+            self.assertEqual(status, "completed")
+            self.assertIn("enabled", message)
+            self.assertEqual(result, {"type": "wifi_recovery_automation", "enabled": True})
+            self.assertEqual(_load_automation_config(settings)["wifi_recovery"], {"enabled": True})
+
+
 class InputActivityFileTests(unittest.TestCase):
     def test_read_missing_file_returns_none(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

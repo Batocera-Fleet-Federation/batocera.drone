@@ -4437,6 +4437,8 @@ async function renderAutomationPage() {
   refreshRandomThemeLogo().catch(() => {});
   const idleVolume = payload.idle_volume || {};
   const idleGameExit = payload.idle_game_exit || {};
+  const wifiRecovery = payload.wifi_recovery || {};
+  const wifiStatus = payload.wifi_status || {};
   const monitor = payload.input_monitor || {};
   const enabled = !!idleVolume.enabled;
   const idleMinutes = Number(idleVolume.idle_minutes ?? 5);
@@ -4445,6 +4447,9 @@ async function renderAutomationPage() {
   const gameExitEnabled = !!idleGameExit.enabled;
   const gameExitMinutes = Number(idleGameExit.idle_minutes ?? 15);
   const gameRunning = !!payload.game_running;
+  const wifiRecoveryEnabled = !!wifiRecovery.enabled;
+  const wifiEnabledLabel = wifiStatus.wifi_enabled === true ? "enabled" : (wifiStatus.wifi_enabled === false ? "disabled" : "unknown");
+  const wifiConnectedLabel = wifiStatus.wifi_connected ? "connected" : "not connected";
   const monitorAlert = monitor.available
     ? `<div class="text-muted small mb-3"><i class="bi bi-activity me-1"></i>Input monitor active — last input ${escapeHtml(formatIdleDuration(monitor.idle_seconds))} ago${currentVolume === null || currentVolume === undefined ? "" : ` · current volume ${escapeHtml(String(currentVolume))}%`}.</div>`
     : `<div class="alert alert-warning"><i class="bi bi-exclamation-triangle me-1"></i>The input activity monitor is not reporting yet. This automation only runs once the privileged Drone service is updated and restarted on this machine.</div>`;
@@ -4478,7 +4483,7 @@ async function renderAutomationPage() {
             <button class="btn btn-primary" id="idleVolumeSaveBtn"><i class="bi bi-save me-1"></i>Save</button>
           </div>
         </div>
-        <div class="card">
+        <div class="card mb-3">
           <div class="card-header"><i class="bi bi-power me-2"></i>Exit game when idle</div>
           <div class="card-body">
             ${monitorAlert}
@@ -4495,6 +4500,18 @@ async function renderAutomationPage() {
               </div>
             </div>
             <button class="btn btn-primary" id="idleGameExitSaveBtn"><i class="bi bi-save me-1"></i>Save</button>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-header"><i class="bi bi-wifi me-2"></i>Recover Wi-Fi connection</div>
+          <div class="card-body">
+            <div class="text-muted small mb-3"><i class="bi bi-router me-1"></i>Wi-Fi is ${escapeHtml(wifiEnabledLabel)} and ${escapeHtml(wifiConnectedLabel)}.</div>
+            <p class="card-text text-muted">Check the wireless connection every 60 seconds. When Wi-Fi is disabled or disconnected, Drone turns it off, waits three seconds, and turns it back on.</p>
+            <div class="form-check form-switch mb-3">
+              <input class="form-check-input" type="checkbox" role="switch" id="wifiRecoveryEnabled" ${wifiRecoveryEnabled ? "checked" : ""}>
+              <label class="form-check-label" for="wifiRecoveryEnabled">Enable Wi-Fi recovery</label>
+            </div>
+            <button class="btn btn-primary" id="wifiRecoverySaveBtn"><i class="bi bi-save me-1"></i>Save</button>
           </div>
         </div>
       </div>
@@ -4537,6 +4554,20 @@ async function renderAutomationPage() {
       await apiPost("/admin/automation/idle-game-exit", {
         enabled: document.getElementById("idleGameExitEnabled").checked,
         idle_minutes: minutesValue,
+      });
+      showToast("Automation settings saved.", "success");
+      await renderAutomationPage();
+    } catch (err) {
+      showToast(`Failed to save automation settings: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    } finally {
+      setLoading(false);
+    }
+  });
+  document.getElementById("wifiRecoverySaveBtn").addEventListener("click", async () => {
+    setLoading(true, "Saving automation settings...");
+    try {
+      await apiPost("/admin/automation/wifi-recovery", {
+        enabled: document.getElementById("wifiRecoveryEnabled").checked,
       });
       showToast("Automation settings saved.", "success");
       await renderAutomationPage();

@@ -1083,10 +1083,13 @@ try:
         _read_last_input_activity,
         _reset_idle_game_exit_armed_state,
         _reset_idle_volume_armed_state,
+        _reset_wifi_recovery_check_state,
         _run_idle_game_exit_automation_once,
         _run_idle_volume_automation_once,
+        _run_wifi_recovery_automation_once,
         _save_automation_config,
         _start_automation_poller,
+        _wifi_recovery_status,
     )
 except ImportError:
     if __package__ not in (None, ""):
@@ -1106,10 +1109,13 @@ except ImportError:
         _read_last_input_activity,
         _reset_idle_game_exit_armed_state,
         _reset_idle_volume_armed_state,
+        _reset_wifi_recovery_check_state,
         _run_idle_game_exit_automation_once,
         _run_idle_volume_automation_once,
+        _run_wifi_recovery_automation_once,
         _save_automation_config,
         _start_automation_poller,
+        _wifi_recovery_status,
     )
 
 
