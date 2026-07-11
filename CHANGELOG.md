@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.1.39] - 2026-07-10
+
+- Fixing various bugs and issues found.  Consolidating transfer page.
+
 ## [v0.1.37] - 2026-07-09
 
 - Add multi-file (folder-unit) ROM transfers; include idle game-exit automation
