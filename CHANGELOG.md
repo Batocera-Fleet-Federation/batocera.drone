@@ -1,5 +1,10 @@
 # Changelog
 
+## [v0.1.40] - 2026-07-11
+
+- Updates to be more defensive when identify resolvable peers.
+- Adding skill for debugging
+
 ## [v0.1.39] - 2026-07-10
 
 - Fixing various bugs and issues found.  Consolidating transfer page.
