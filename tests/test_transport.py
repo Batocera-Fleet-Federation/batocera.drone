@@ -639,6 +639,33 @@ class PeerSelectionRelayTests(unittest.TestCase):
         checks = [{"target_drone_id": "p", "status": "fail"}]
         self.assertIsNone(select_best_peer([peer_direct], checks, "me"))
 
+    def test_own_passing_probe_overrides_unresolvable_swarm_flag(self):
+        # Regression: Overmind's swarm payload graded a genuinely-reachable peer
+        # public_resolvable=false (its heartbeat was served by a Lambda container
+        # whose in-memory peer-check state was empty), so cross-network syncs
+        # intermittently failed with "No healthy source peer" even though this
+        # drone's OWN probe of the peer had just passed. The drone's own passing
+        # probe is ground truth for its connectivity: the peer must be selected,
+        # enriched with the address the probe actually reached.
+        peer = {"device_id": "p", "online": True, "public_resolvable": False, "public_reachable_url": None}
+        checks = [{"target_drone_id": "p", "status": "pass", "target_address": "https://198.51.100.9"}]
+        selected = select_best_peer([peer], checks, "me")
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected["device_id"], "p")
+        self.assertTrue(selected["public_resolvable"])
+        self.assertEqual(selected["public_reachable_url"], "https://198.51.100.9")
+
+    def test_own_passing_probe_does_not_clobber_existing_url(self):
+        peer = {**self.DIRECT, "device_id": "p"}
+        checks = [{"target_drone_id": "p", "status": "pass", "target_address": "https://203.0.113.99"}]
+        selected = select_best_peer([peer], checks, "me")
+        self.assertEqual(selected["public_reachable_url"], "https://198.51.100.5:443")
+
+    def test_unresolvable_peer_with_failed_own_probe_still_skipped(self):
+        peer = {"device_id": "p", "online": True, "public_resolvable": False}
+        checks = [{"target_drone_id": "p", "status": "fail", "target_address": "https://198.51.100.9"}]
+        self.assertIsNone(select_best_peer([peer], checks, "me"))
+
 
 if __name__ == "__main__":
     unittest.main()

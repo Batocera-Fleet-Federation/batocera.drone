@@ -38,11 +38,22 @@ def select_best_peer(
             system_names = {str(item.get("name") if isinstance(item, dict) else item).lower() for item in systems}
             if system_names and required_system.lower() not in system_names:
                 continue
+        check = checks.get(peer_id) or {}
+        own_probe_address = str(check.get("target_address") or "").strip()
+        if check.get("status") == "pass" and own_probe_address and not (
+            peer.get("public_resolvable") and str(peer.get("public_reachable_url") or "").strip()
+        ):
+            # This drone's OWN probe reached the peer even though the swarm
+            # snapshot says it isn't publicly resolvable. Our own measurement is
+            # the ground truth for OUR connectivity (Overmind's flag reflects an
+            # AWS-side probe and can lag or flap), so treat the peer as directly
+            # reachable at the address we actually probed -- on an enriched copy,
+            # so downstream address resolution (_peer_address) uses it too.
+            peer = {**peer, "public_resolvable": True, "public_reachable_url": own_probe_address}
         directly_reachable = bool(peer.get("public_resolvable")) and bool(
             str(peer.get("public_reachable_url") or "").strip()
         )
         relay_reachable = bool(allow_relay) and bool(peer.get("edge_online"))
-        check = checks.get(peer_id) or {}
         if directly_reachable and check.get("status") == "fail":
             # Known-bad direct path: keep the peer only if relay can carry it.
             directly_reachable = False

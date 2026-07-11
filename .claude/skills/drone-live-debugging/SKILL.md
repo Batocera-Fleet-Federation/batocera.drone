@@ -87,22 +87,42 @@ for ns in (\"overmind_swarm.json\", \"peer_checks.json\"):
 "'
 ```
 
-Useful namespaces:
-- `overmind_swarm.json` — this Drone's **cached view of every other Drone**:
-  `drone_id`, self-reported `name`, `online`, `public_ip`, `public_resolvable`,
-  `reachable_url`, `public_reachable_url`, `edge_online`, `last_speed_sample`. This
-  is the input to peer selection (`select_best_peer` in
-  `app/transfer/peer_selection.py`) — if a sync failed with "no healthy source
-  peer", check whether the source's row here shows `online: false` or
-  `public_resolvable: false` at roughly the right time.
-- `peer_checks.json` — the last connectivity probe results this Drone ran against
-  its peers: `target_drone_id`, `status` (`pass`/`fail`), `latency_ms`,
-  `failure_reason` (verbose — includes the actual SSL/network error text), and
-  which local cert file was used. **This is the fastest way to catch a stale/bad
-  peer certificate** — a `failure_reason` like `missing or incorrect trusted CA
-  bundle ... self-signed certificate` means the cached cert for that peer no
-  longer matches what the peer is actually presenting (common after a peer's
-  device was reinstalled/reset while keeping the same `device_id`).
+Useful namespaces — **and, critically, who writes each and when** (the store only
+holds the latest snapshot; knowing the writer + cadence is how you reason about
+what the state was at a *past* failure instant):
+
+- `overmind_swarm.json` — this Drone's **cached copy of OVERMIND's view** of every
+  other Drone: `drone_id`, self-reported `name`, `online`, `public_ip`,
+  `public_resolvable`, `reachable_url`, `public_reachable_url`, `edge_online`,
+  `last_speed_sample`. **Writer: the heartbeat loop (`action_poller.py`) wholesale
+  overwrites it with the server's response every poll (~60s).** Two consequences:
+  (a) whatever you read now tells you nothing about what it contained one heartbeat
+  ago — a server-side flap self-heals before you can observe it; (b) if this cache
+  flaps while the Drone's own probes are steady, the bug is in how *Overmind builds
+  the heartbeat response*, not on the Drone (that was exactly the "No healthy
+  source peer" root cause: the server graded reachability from per-Lambda-container
+  in-memory state).
+- `peer_checks.json` — **this Drone's own ground-truth probe results** against its
+  peers: `target_drone_id`, `status` (`pass`/`fail`), `latency_ms`, `target_address`
+  actually probed, `failure_reason` (verbose — includes the actual SSL/network
+  error text and which local cert file was used). **Writer: the peer-health worker
+  (`peer_workers.py`), every `DRONE_PEER_CHECK_INTERVAL_SECONDS` (default 300s),
+  overwriting the whole list after probing all peers.** Its history is
+  reconstructible: each run logs one `Peer health check: source=... target=...
+  status=... latency=...` line per peer to `overmind.log`, so you can line up "what
+  did the checks say at time T" from the log even though the store only keeps the
+  latest run. A `Failed to report peer health checks to Overmind: ... gaierror`
+  line alongside means the *Drone's own* DNS/network was flapping at that moment —
+  useful independent evidence of device-side connectivity trouble.
+  **This is also the fastest way to catch a stale/bad peer certificate** — a
+  `failure_reason` like `missing or incorrect trusted CA bundle ... self-signed
+  certificate` means the cached cert for that peer no longer matches what the peer
+  presents (common after a peer reinstall that kept the same `device_id`).
+
+When a namespace's provenance matters, find **every** writer before reasoning:
+`grep -rn "overmind_swarm.json" app/` — a cache with a scheduled wholesale
+overwriter means "state at failure time" must come from the writer's logs, never
+from the current store contents.
 
 Also read-only and useful: the ROM/BIOS cache tables (`rom_cache_entries`,
 `bios_cache_entries`, `cache_state`) if you need to confirm what the Drone
@@ -167,6 +187,35 @@ Running `cd .../app` first matters — the app's modules import as a flat packag
 A successful reproduction is informative, not proof the *original* failure had the
 same cause — note that explicitly if you can't pin the exact historical moment
 (cross-network peer connectivity can be transient).
+
+The same on-device technique works for **pure decision functions**, not just
+network calls — and it's the decisive move when a failure looks impossible from
+the current state. Example: reproduce peer selection with the app's own loaders
+and the real state DB, exactly as `sync_rom` would run it:
+
+```python
+# probe_select.py — run from /userdata/system/drone-app/app
+from common.settings import Settings
+from transfer.peer_download import _best_peer_for_rom
+from transfer.peer_selection import select_best_peer
+from storage.state_store import database_path, load_payload
+from overmind.overmind_config import _load_overmind_config_for_settings
+
+settings = Settings.from_env()
+db = database_path(settings.userdata_root)
+swarm = load_payload(db, "overmind_swarm.json", [])
+checks = load_payload(db, "peer_checks.json", [])
+print(select_best_peer(swarm, checks, settings.overmind_device_id,
+                       source_device_ids={"<source device_id>"}, required_system="ps3"))
+print(_best_peer_for_rom(settings, None, _load_overmind_config_for_settings(settings),
+                         "ps3", "", source_device_ids={"<source device_id>"}))
+```
+
+If this returns the right peer *now* but the same call failed minutes ago, the code
+is exonerated — the input state differed at the failure instant. Pivot to the
+namespace-provenance analysis above (who overwrote the input, when, with what) and
+reconstruct the failure-time state from the writers' log lines rather than
+re-checking the code again.
 
 ### Process/version sanity check
 
