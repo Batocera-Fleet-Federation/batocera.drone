@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.1.41] - 2026-07-11
+
+- Adding ability to optionally enable automation to detect if internet / wifi has stopped working and, only if it has, reset the wifi to get it back online.
+
 ## [v0.1.40] - 2026-07-11
 
 - Updates to be more defensive when identify resolvable peers.
