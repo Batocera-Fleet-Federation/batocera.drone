@@ -299,16 +299,31 @@ class IdleVolumeAutomationRunnerTests(unittest.TestCase):
                     _run_idle_volume_automation_once(settings)
                 self.assertEqual(apply_mock.call_count, 2)
 
-    def test_already_below_target_does_not_set_volume(self) -> None:
+    def test_already_at_target_does_not_reapply(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(Path(tmp))
             self._enable(settings, idle_minutes=5, target=25)
             idle = time.time() - 600
             with mock.patch.object(automation, "_read_last_input_activity", return_value=idle), \
-                 mock.patch.object(automation, "_get_audio_volume", return_value=10), \
+                 mock.patch.object(automation, "_get_audio_volume", return_value=25), \
                  mock.patch.object(automation, "_apply_audio_volume") as apply_mock:
                 _run_idle_volume_automation_once(settings)
                 apply_mock.assert_not_called()
+
+    def test_current_below_target_raises_volume(self) -> None:
+        # The automation sets the volume to the configured target regardless of
+        # direction -- a target above the current volume must raise it, not just
+        # lower it. (Previously the runner only ever lowered, so a target higher
+        # than the current volume silently did nothing forever.)
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            self._enable(settings, idle_minutes=5, target=80)
+            idle = time.time() - 600
+            with mock.patch.object(automation, "_read_last_input_activity", return_value=idle), \
+                 mock.patch.object(automation, "_get_audio_volume", return_value=20), \
+                 mock.patch.object(automation, "_apply_audio_volume", return_value=80) as apply_mock:
+                _run_idle_volume_automation_once(settings)
+                apply_mock.assert_called_once_with(settings, 80)
 
 
 _RUNNING_GAME = {"pid": 123, "rom_path": "/userdata/roms/snes/game.sfc"}

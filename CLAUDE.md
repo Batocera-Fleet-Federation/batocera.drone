@@ -215,5 +215,9 @@ require the Edge.
 `drone-admin-features`, `drone-live-debugging` (debugging a real running Drone via
 SSH — logs, the local SQLite state DB, peer-cert trust, reproducing
 swallowed-exception peer calls live, and identifying a Drone you can't SSH to
-directly), `bff-ui-theme-functionality`. Consult the matching skill before
-non-trivial work.
+directly), `drone-batocera-emulationstation` (what's Drone-owned vs.
+Batocera/EmulationStation-owned state — es_settings.cfg/es_systems.cfg keys,
+the stop/write/overlay-save/start EmulationStation restart pattern, the
+privileged-worker request/result file dance, and how to find ground truth in
+the upstream batocera-emulationstation source), `bff-ui-theme-functionality`.
+Consult the matching skill before non-trivial work.

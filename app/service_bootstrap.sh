@@ -234,6 +234,16 @@ set_volume_as_root() {
   python3 "$helper" "$level"
 }
 
+set_es_collections_as_root() {
+  request_file="$1"
+  helper="$WORK_DIR/app/set_es_collections.py"
+  if [ ! -f "$helper" ]; then
+    echo "[drone-service] Unable to update ES collections: helper was not found."
+    return 1
+  fi
+  python3 "$helper" "$request_file"
+}
+
 # Signature of the on-disk bootstrap script. The Drone app self-updates by
 # re-exec'ing its own app process in place, which leaves this service layer
 # running the OLD code (old ensure_permissions + control worker) until the next
@@ -339,6 +349,23 @@ service_control_worker() {
         printf 'Privileged volume operation failed: %s\n' "$(printf '%s' "${volume_output:-no level provided}" | tr '\n' ' ' | cut -c1-300)" > "$volume_result"
       fi
       echo "[drone-service] Volume change result: ${volume_output:-no level provided}"
+    fi
+    collections_request="$CONTROL_DIR/set-es-collections.request"
+    collections_result="$CONTROL_DIR/set-es-collections.result"
+    if [ -f "$collections_request" ]; then
+      # Unlike the scalar requests above, the helper reads the request file's
+      # JSON content itself -- keep the file in place until it returns, then
+      # clean up (the loop is single-threaded/synchronous, so there's no risk
+      # of this request being picked up again before removal).
+      rm -f "$collections_result"
+      echo "[drone-service] EmulationStation collections/settings update requested by Drone app."
+      if collections_output="$(set_es_collections_as_root "$collections_request" 2>&1)"; then
+        printf '%s\n' "ok" > "$collections_result"
+      else
+        printf 'Privileged ES collections operation failed: %s\n' "$(printf '%s' "$collections_output" | tr '\n' ' ' | cut -c1-300)" > "$collections_result"
+      fi
+      rm -f "$collections_request"
+      echo "[drone-service] ES collections update result: ${collections_output}"
     fi
     sleep 1
   done

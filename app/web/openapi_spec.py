@@ -493,6 +493,48 @@ def _schemas() -> Dict[str, Schema]:
             {"audio_volume": _integer(minimum=0, maximum=100)},
             ("audio_volume",),
         ),
+        "ScreenModeResponse": _object({"screen_mode": _string(nullable=True)}),
+        "ScreenModeUpdateRequest": _object(
+            {"mode": _string()},
+            ("mode",),
+            description="One of: full, kiosk, kid. Applying this restarts EmulationStation.",
+        ),
+        "ScreenModeUpdateResponse": _object(
+            {"screen_mode": _string(), "emulationstation_restarted": _boolean()},
+            ("screen_mode", "emulationstation_restarted"),
+        ),
+        "MusicVolumeUpdateRequest": _object(
+            {"level": _integer(minimum=0, maximum=100)},
+            ("level",),
+            description="Music volume level. Applying this restarts EmulationStation (it only re-reads es_settings.cfg at its own startup).",
+        ),
+        "EsSystemEntry": _object({"name": _string(), "full_name": _string(), "displayed": _boolean()}),
+        "EsGroupChild": _object({"name": _string(), "full_name": _string(), "grouped": _boolean()}),
+        "EsSystemGroup": _object({"group": _string(), "children": _array(_ref("EsGroupChild"))}),
+        "EsAutoCollection": _object({"name": _string(), "label": _string(), "enabled": _boolean()}),
+        "EsCustomCollection": _object({"name": _string(), "enabled": _boolean()}),
+        "EsCollectionsState": _object(
+            {
+                "music_volume": _integer(minimum=0, maximum=100),
+                "screensaver_minutes": _integer(minimum=0, maximum=120, description="Idle minutes before the screensaver starts; 0 = disabled."),
+                "systems": _array(_ref("EsSystemEntry")),
+                "groups": _array(_ref("EsSystemGroup")),
+                "auto_collections": _array(_ref("EsAutoCollection")),
+                "custom_collections": _array(_ref("EsCustomCollection")),
+            },
+            description="Current EmulationStation systems-displayed / grouped-systems / collections / music volume / screensaver configuration.",
+        ),
+        "EsCollectionsUpdateRequest": _object(
+            {
+                "music_volume": _integer(minimum=0, maximum=100),
+                "screensaver_minutes": _integer(minimum=0, maximum=120),
+                "hidden_systems": _array(_string()),
+                "ungrouped_systems": _array(_string()),
+                "auto_collections": _array(_string()),
+                "custom_collections": _array(_string()),
+            },
+            description="Partial update: each field is optional and, when present, replaces that setting's FULL desired value/list (not a diff). Applying this restarts EmulationStation.",
+        ),
         "DownloadJob": download_job,
         "AdminDownloadsResponse": _object(
             {
@@ -1075,6 +1117,43 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
                     tags=["admin"],
                     error_codes=("400", "401", "403", "429", "500", "503"),
                 )
+            },
+            "/admin/system-info/screen-mode": {
+                "get": _operation(
+                    "Get the current EmulationStation screen (UI) mode",
+                    {"200": _json_response("ScreenModeResponse")},
+                    tags=["admin"],
+                ),
+                "post": _operation(
+                    "Set the EmulationStation screen mode (restarts EmulationStation)",
+                    {"200": _json_response("ScreenModeUpdateResponse")},
+                    request_body=_json_request("ScreenModeUpdateRequest"),
+                    tags=["admin"],
+                    error_codes=("400", "401", "403", "429", "500", "503"),
+                ),
+            },
+            "/admin/system-info/music-volume": {
+                "post": _operation(
+                    "Set EmulationStation music volume (restarts EmulationStation)",
+                    {"200": _json_response("EsCollectionsState")},
+                    request_body=_json_request("MusicVolumeUpdateRequest"),
+                    tags=["admin"],
+                    error_codes=("400", "401", "403", "429", "500", "503"),
+                )
+            },
+            "/admin/es-collections": {
+                "get": _operation(
+                    "Get EmulationStation systems-displayed / grouped-systems / collections state",
+                    {"200": _json_response("EsCollectionsState")},
+                    tags=["admin"],
+                ),
+                "post": _operation(
+                    "Update EmulationStation systems-displayed / grouped-systems / collections (restarts EmulationStation)",
+                    {"200": _json_response("EsCollectionsState")},
+                    request_body=_json_request("EsCollectionsUpdateRequest"),
+                    tags=["admin"],
+                    error_codes=("400", "401", "403", "429", "500", "503"),
+                ),
             },
             "/admin/downloads": {"get": _operation("Get download queue status", {"200": _json_response("AdminDownloadsResponse", "Download queue snapshot")}, tags=["admin", "downloads"])},
             "/admin/downloads/{job_id}/cancel": {

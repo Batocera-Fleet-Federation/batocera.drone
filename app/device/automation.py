@@ -1,7 +1,8 @@
 """Device automations and input-activity tracking.
 
 Extracted from ``drone_api.py``. Polls the last-input-activity timestamp (written by
-the privileged input monitor) and, after an idle threshold, lowers the volume; also
+the privileged input monitor) and, after an idle threshold, sets the volume to the
+configured target (raising or lowering it, whichever the target requires); also
 reports the idle-volume config to Overmind. Config persists in the state DB.
 """
 
@@ -315,7 +316,10 @@ def _run_wifi_recovery_automation_once(
 
 
 def _run_idle_volume_automation_once(settings: Settings) -> None:
-    """Lower the volume once if the device has been idle past the configured threshold."""
+    """Set the volume to the configured target once the device has been idle past
+    the threshold. Applies regardless of direction -- raises the volume just as
+    readily as it lowers it -- since the target is whatever the user configured,
+    not necessarily a quieter level than the current one."""
     global _IDLE_VOLUME_LAST_ARMED_ACTIVITY
     if settings.use_fake_data:
         return
@@ -331,20 +335,20 @@ def _run_idle_volume_automation_once(settings: Settings) -> None:
         pass
     last_activity = _read_last_input_activity()
     if last_activity is None:
-        # No monitor data yet; never lower a machine we cannot confirm is idle.
+        # No monitor data yet; never touch volume on a machine we cannot confirm is idle.
         return
-    # Any input since we last lowered re-arms the automation for the next idle period.
+    # Any input since we last applied re-arms the automation for the next idle period.
     if _IDLE_VOLUME_LAST_ARMED_ACTIVITY is not None and last_activity != _IDLE_VOLUME_LAST_ARMED_ACTIVITY:
         _IDLE_VOLUME_LAST_ARMED_ACTIVITY = None
     if _IDLE_VOLUME_LAST_ARMED_ACTIVITY is not None:
-        return  # already lowered for this idle period
+        return  # already applied for this idle period
     idle_seconds = time.time() - last_activity
     if idle_seconds < config["idle_minutes"] * 60:
         return
     target = config["target_volume"]
     current = _get_audio_volume(settings)
-    if current is not None and current <= target:
-        # Already at or below target; mark armed so we don't re-check every tick.
+    if current is not None and current == target:
+        # Already at target; mark armed so we don't re-check every tick.
         _IDLE_VOLUME_LAST_ARMED_ACTIVITY = last_activity
         return
     try:
@@ -354,7 +358,7 @@ def _run_idle_volume_automation_once(settings: Settings) -> None:
         return
     _IDLE_VOLUME_LAST_ARMED_ACTIVITY = last_activity
     print(
-        f"Idle-volume automation lowered volume to {applied}% after {int(idle_seconds)}s idle",
+        f"Idle-volume automation set volume to {applied}% after {int(idle_seconds)}s idle",
         file=sys.stdout,
         flush=True,
     )

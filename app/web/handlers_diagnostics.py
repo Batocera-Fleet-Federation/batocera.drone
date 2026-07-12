@@ -6,6 +6,7 @@ onto ``RomRequestHandler``.
 """
 
 import subprocess
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -14,7 +15,7 @@ try:
     from ..common.logtail import _tail_lines
     from ..device.pixen import is_pixen_installed as _is_pixen_installed
     from ..device.pixen import pixen_script_path as _pixen_script_path
-    from ..device.device_control import _apply_audio_volume, _get_audio_volume
+    from ..device.device_control import _apply_audio_volume, _apply_screen_mode, _get_audio_volume, _get_screen_mode
     from ..device.system_metrics import _collect_performance_metrics, _sample_speed
     from ..overmind.overmind_client import _format_overmind_error
     from ..overmind.overmind_game_logs import (
@@ -27,7 +28,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from common.logtail import _tail_lines  # type: ignore
     from device.pixen import is_pixen_installed as _is_pixen_installed  # type: ignore
     from device.pixen import pixen_script_path as _pixen_script_path  # type: ignore
-    from device.device_control import _apply_audio_volume, _get_audio_volume  # type: ignore
+    from device.device_control import _apply_audio_volume, _apply_screen_mode, _get_audio_volume, _get_screen_mode  # type: ignore
     from device.system_metrics import _collect_performance_metrics, _sample_speed  # type: ignore
     from overmind.overmind_client import _format_overmind_error  # type: ignore
     from overmind.overmind_game_logs import (  # type: ignore
@@ -394,6 +395,22 @@ class HandlersDiagnosticsMixin:
             self._send_json(500, {"error": f"Unable to set volume: {error}"})
             return
         self._send_json(200, {"audio_volume": applied})
+
+    def _handle_admin_screen_mode_get(self) -> None:
+        self._send_json(200, {"screen_mode": _get_screen_mode(self.settings)})
+
+    def _handle_admin_screen_mode_post(self, payload: dict) -> None:
+        payload = payload if isinstance(payload, dict) else {}
+        mode = str(payload.get("mode") or "").strip().lower()
+        if mode not in {"full", "kiosk", "kid"}:
+            self._send_json(400, {"error": "Screen mode must be one of: full, kiosk, kid"})
+            return
+        try:
+            _settings_path, restarted = _apply_screen_mode(self.settings, mode)
+        except (OSError, subprocess.SubprocessError, ET.ParseError, ValueError) as error:
+            self._send_json(500, {"error": f"Unable to update screen mode: {error}"})
+            return
+        self._send_json(200, {"screen_mode": mode, "emulationstation_restarted": restarted})
 
     # HandlersNetworkMixin methods now live in web/handlers_network.py (composed onto RomRequestHandler).
 

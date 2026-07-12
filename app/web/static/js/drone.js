@@ -1810,7 +1810,7 @@ async function renderAdminMenu() {
         <div class="card admin-tile pointer h-100" onclick="setHash('#admin/automation')">
           <div class="card-body">
             <h5 class="card-title"><i class="bi bi-robot me-2"></i>Automation</h5>
-            <p class="card-text">Configure hands-off device behaviors, like lowering the volume or exiting a game after a period of no input.</p>
+            <p class="card-text">Configure hands-off device behaviors, like setting the volume or exiting a game after a period of no input.</p>
           </div>
         </div>
       </div>
@@ -4545,17 +4545,17 @@ async function renderAutomationPage() {
     <div class="row">
       <div class="col-lg-8">
         <div class="card mb-3">
-          <div class="card-header"><i class="bi bi-volume-down me-2"></i>Lower volume when idle</div>
+          <div class="card-header"><i class="bi bi-sliders me-2"></i>Set volume when idle</div>
           <div class="card-body">
             ${monitorAlert}
-            <p class="card-text text-muted">Automatically lower this device's output volume after it has gone without any controller or keyboard input for a set amount of time. The volume stays lowered until the device is used again.</p>
+            <p class="card-text text-muted">Automatically set this device's output volume to a target level after it has gone without any controller or keyboard input for a set amount of time -- raising or lowering it, whichever the target requires. The volume stays at the target until the device is used again.</p>
             <div class="form-check form-switch mb-3">
               <input class="form-check-input" type="checkbox" role="switch" id="idleVolumeEnabled" ${enabled ? "checked" : ""}>
-              <label class="form-check-label" for="idleVolumeEnabled">Enable idle volume lowering</label>
+              <label class="form-check-label" for="idleVolumeEnabled">Enable idle volume automation</label>
             </div>
             <div class="row g-3 mb-3">
               <div class="col-sm-6">
-                <label class="form-label" for="idleVolumeMinutes">Idle time before lowering (minutes)</label>
+                <label class="form-label" for="idleVolumeMinutes">Idle time before adjusting (minutes)</label>
                 <input class="form-control" type="number" id="idleVolumeMinutes" min="1" max="1440" step="1" value="${escapeHtml(String(idleMinutes))}">
               </div>
               <div class="col-sm-6">
@@ -5330,6 +5330,154 @@ async function refreshCurrentConfig() {
   const activeSource = document.querySelector("#configSources .list-group-item.active");
   await loadConfig(currentConfigSource, activeSource);
 }
+
+function syncMusicVolumeControls(musicVolume) {
+  const slider = document.getElementById("musicVolumeSlider");
+  const value = document.getElementById("musicVolumeValue");
+  const saveBtn = document.getElementById("musicVolumeSaveBtn");
+  if (!slider || musicVolume === undefined || musicVolume === null) return;
+  slider.value = String(musicVolume);
+  slider.disabled = false;
+  if (value) value.textContent = `${musicVolume}%`;
+  if (saveBtn) saveBtn.disabled = false;
+}
+
+function syncScreensaverControls(screensaverMinutes) {
+  const slider = document.getElementById("screensaverSlider");
+  const value = document.getElementById("screensaverValue");
+  const saveBtn = document.getElementById("screensaverSaveBtn");
+  if (!slider || screensaverMinutes === undefined || screensaverMinutes === null) return;
+  slider.value = String(screensaverMinutes);
+  slider.disabled = false;
+  if (value) value.textContent = Number(screensaverMinutes) === 0 ? "Off" : `${screensaverMinutes} min`;
+  if (saveBtn) saveBtn.disabled = false;
+}
+
+function syncScreenModeControls(mode) {
+  const current = document.getElementById("screenModeCurrent");
+  if (current) current.textContent = mode ? `Current: ${mode}` : "not yet reported";
+  document.querySelectorAll('#screenModeButtons [data-screen-mode]').forEach((btn) => {
+    const isActive = btn.dataset.screenMode === mode;
+    btn.classList.toggle("btn-primary", isActive);
+    btn.classList.toggle("btn-outline-primary", !isActive);
+  });
+}
+
+async function loadScreenMode() {
+  try {
+    const payload = await api("/admin/system-info/screen-mode");
+    syncScreenModeControls(payload.screen_mode);
+  } catch (err) {
+    const current = document.getElementById("screenModeCurrent");
+    if (current) current.textContent = "Unavailable";
+  }
+}
+
+async function applyDroneScreenMode(mode) {
+  if (!window.confirm(`Set screen mode to ${mode} and restart EmulationStation now?`)) return;
+  try {
+    const result = await apiPost("/admin/system-info/screen-mode", {mode});
+    syncScreenModeControls(result.screen_mode);
+    showToast(`Screen mode set to ${result.screen_mode}; EmulationStation restarted.`, "success");
+  } catch (err) {
+    showToast(`Failed to set screen mode: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  }
+}
+
+function renderEsCheckboxGrid(items, field) {
+  if (!items.length) return '<div class="small text-muted">None found.</div>';
+  return `<div class="row row-cols-2 row-cols-md-3 row-cols-lg-4 g-1">
+    ${items.map((item) => `
+      <div class="col">
+        <div class="form-check">
+          <input class="form-check-input" type="checkbox" data-es-field="${field}" data-es-name="${escapeHtml(item.name)}" id="es-${field}-${cssSafeId(item.name)}" ${item.checked ? "checked" : ""}>
+          <label class="form-check-label small" for="es-${field}-${cssSafeId(item.name)}">${escapeHtml(item.label)}</label>
+        </div>
+      </div>
+    `).join("")}
+  </div>`;
+}
+
+function renderEsCollectionsCard(state) {
+  const systems = state.systems || [];
+  const groups = state.groups || [];
+  const autoCollections = state.auto_collections || [];
+  const customCollections = state.custom_collections || [];
+  const groupsHtml = groups.length
+    ? groups.map((group) => `
+      <div class="mb-2">
+        <div class="small fw-semibold text-muted text-uppercase">${escapeHtml(group.group)}</div>
+        ${renderEsCheckboxGrid((group.children || []).map((c) => ({name: c.name, label: c.full_name || c.name, checked: c.grouped})), "grouped")}
+      </div>
+    `).join("")
+    : '<div class="small text-muted">No groupable systems found.</div>';
+  return `
+    <div class="mb-3">
+      <div class="fw-semibold mb-1">Systems Displayed</div>
+      ${renderEsCheckboxGrid(systems.map((s) => ({name: s.name, label: s.full_name || s.name, checked: s.displayed})), "displayed")}
+    </div>
+    <div class="mb-3">
+      <div class="fw-semibold mb-1">Grouped Systems</div>
+      <div class="small text-muted mb-2">Checked systems stay folded into their group's shared entry; uncheck to show a system standalone.</div>
+      ${groupsHtml}
+    </div>
+    <div class="mb-3">
+      <div class="fw-semibold mb-1">Automatic Game Collections</div>
+      ${renderEsCheckboxGrid(autoCollections.map((a) => ({name: a.name, label: a.label || a.name, checked: a.enabled})), "auto")}
+    </div>
+    <div class="mb-0">
+      <div class="fw-semibold mb-1">Custom Game Collections</div>
+      ${renderEsCheckboxGrid(customCollections.map((c) => ({name: c.name, label: c.name, checked: c.enabled})), "custom")}
+    </div>
+    <button class="btn btn-primary mt-3" id="esCollectionsSaveBtn"><i class="bi bi-save me-1"></i>Save &amp; Restart EmulationStation</button>
+  `;
+}
+
+function collectEsCollectionsPayload() {
+  const container = document.getElementById("esCollectionsBody");
+  if (!container) return {};
+  const names = (field, wantChecked) => Array.from(container.querySelectorAll(`input[data-es-field="${field}"]`))
+    .filter((el) => el.checked === wantChecked)
+    .map((el) => el.dataset.esName);
+  return {
+    hidden_systems: names("displayed", false),
+    ungrouped_systems: names("grouped", false),
+    auto_collections: names("auto", true),
+    custom_collections: names("custom", true),
+  };
+}
+
+function wireEsCollectionsSaveButton() {
+  const saveBtn = document.getElementById("esCollectionsSaveBtn");
+  if (!saveBtn) return;
+  saveBtn.addEventListener("click", async () => {
+    if (!window.confirm("Save collections/systems changes and restart EmulationStation now?")) return;
+    saveBtn.disabled = true;
+    try {
+      const updated = await apiPost("/admin/es-collections", collectEsCollectionsPayload());
+      renderEsCollectionsBody(updated);
+      showToast("EmulationStation collections updated; EmulationStation restarted.", "success");
+    } catch (err) {
+      showToast(`Failed to update collections: ${escapeHtml(err.message || "unknown error")}`, "danger");
+      const btn = document.getElementById("esCollectionsSaveBtn");
+      if (btn) btn.disabled = false;
+    }
+  });
+}
+
+function renderEsCollectionsBody(state) {
+  const body = document.getElementById("esCollectionsBody");
+  if (!body) return;
+  body.innerHTML = renderEsCollectionsCard(state);
+  wireEsCollectionsSaveButton();
+  syncMusicVolumeControls(state.music_volume);
+  syncScreensaverControls(state.screensaver_minutes);
+}
+
+async function loadEsCollections() {
+  const payload = await api("/admin/es-collections");
+  renderEsCollectionsBody(payload);
+}
 async function renderAdminSystemInfoPage() {
   titleNode.textContent = "System Info";
   subtitleNode.textContent = "Runtime, network, and Batocera details";
@@ -5408,6 +5556,20 @@ async function renderAdminSystemInfoPage() {
       </div>
       <div class="card log-card mb-3">
         <div class="card-header d-flex justify-content-between align-items-center gap-2">
+          <span><i class="bi bi-display me-2"></i>Screen Mode</span>
+          <span class="small text-muted" id="screenModeCurrent">Loading...</span>
+        </div>
+        <div class="card-body">
+          <div class="small text-muted mb-2">Changing screen mode restarts EmulationStation.</div>
+          <div class="btn-group bff-segmented" role="group" aria-label="Screen mode" id="screenModeButtons">
+            <button class="btn btn-outline-primary btn-sm" type="button" data-screen-mode="full" onclick="applyDroneScreenMode('full')"><i class="bi bi-unlock me-1"></i>Full</button>
+            <button class="btn btn-outline-primary btn-sm" type="button" data-screen-mode="kiosk" onclick="applyDroneScreenMode('kiosk')"><i class="bi bi-lock me-1"></i>Kiosk</button>
+            <button class="btn btn-outline-primary btn-sm" type="button" data-screen-mode="kid" onclick="applyDroneScreenMode('kid')"><i class="bi bi-person me-1"></i>Kid</button>
+          </div>
+        </div>
+      </div>
+      <div class="card log-card mb-3">
+        <div class="card-header d-flex justify-content-between align-items-center gap-2">
           <span><i class="bi bi-volume-up me-2"></i>Volume</span>
           <output id="systemVolumeValue" for="systemVolumeSlider" class="badge text-bg-primary">${volumeAvailable ? `${currentVolume}%` : "Unavailable"}</output>
         </div>
@@ -5418,6 +5580,44 @@ async function renderAdminSystemInfoPage() {
             <i class="bi bi-volume-up fs-5" aria-hidden="true"></i>
           </div>
         </div>
+      </div>
+      <div class="card log-card mb-3">
+        <div class="card-header d-flex justify-content-between align-items-center gap-2">
+          <span><i class="bi bi-music-note-beamed me-2"></i>Music Volume</span>
+          <output id="musicVolumeValue" for="musicVolumeSlider" class="badge text-bg-primary">--</output>
+        </div>
+        <div class="card-body">
+          <div class="small text-muted mb-2">EmulationStation's background music volume. Applying this briefly restarts EmulationStation.</div>
+          <div class="d-flex align-items-center gap-3">
+            <i class="bi bi-volume-mute fs-5" aria-hidden="true"></i>
+            <input class="form-range flex-grow-1" type="range" id="musicVolumeSlider" min="0" max="100" step="5" value="80" aria-label="Music volume" disabled>
+            <i class="bi bi-volume-up fs-5" aria-hidden="true"></i>
+          </div>
+          <button class="btn btn-sm btn-primary mt-2" id="musicVolumeSaveBtn" disabled><i class="bi bi-save me-1"></i>Save &amp; Restart EmulationStation</button>
+        </div>
+      </div>
+      <div class="card log-card mb-3">
+        <div class="card-header d-flex justify-content-between align-items-center gap-2">
+          <span><i class="bi bi-moon-stars me-2"></i>Screensaver</span>
+          <output id="screensaverValue" for="screensaverSlider" class="badge text-bg-primary">--</output>
+        </div>
+        <div class="card-body">
+          <div class="small text-muted mb-2">How long EmulationStation waits with no input before starting the screensaver. 0 = disabled. Applying this restarts EmulationStation.</div>
+          <div class="d-flex align-items-center gap-3">
+            <i class="bi bi-moon fs-5" aria-hidden="true"></i>
+            <input class="form-range flex-grow-1" type="range" id="screensaverSlider" min="0" max="120" step="1" value="5" aria-label="Screensaver delay in minutes" disabled>
+            <span class="small text-muted text-nowrap">min</span>
+          </div>
+          <button class="btn btn-sm btn-primary mt-2" id="screensaverSaveBtn" disabled><i class="bi bi-save me-1"></i>Save &amp; Restart EmulationStation</button>
+        </div>
+      </div>
+      <div class="card log-card mb-3">
+        <div class="card-header d-flex justify-content-between align-items-center gap-2">
+          <span><i class="bi bi-collection-play me-2"></i>Game Collections &amp; Systems</span>
+          <button id="esCollectionsRefreshBtn" class="btn btn-sm btn-outline-primary" type="button"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
+        </div>
+        <div class="small text-muted px-3 pt-3">Which systems appear, which are grouped together, and which automatic/custom collections are enabled. Saving restarts EmulationStation.</div>
+        <div class="card-body" id="esCollectionsBody"><div class="text-muted">Loading...</div></div>
       </div>
       <div class="card log-card">
         <div class="card-header">System Details</div>
@@ -5483,6 +5683,71 @@ async function renderAdminSystemInfoPage() {
           volumeSlider.disabled = false;
         }
       });
+    }
+
+    const musicVolumeSlider = document.getElementById("musicVolumeSlider");
+    const musicVolumeValue = document.getElementById("musicVolumeValue");
+    const musicVolumeSaveBtn = document.getElementById("musicVolumeSaveBtn");
+    if (musicVolumeSlider && musicVolumeValue) {
+      musicVolumeSlider.addEventListener("input", () => {
+        musicVolumeValue.textContent = `${musicVolumeSlider.value}%`;
+      });
+    }
+    if (musicVolumeSaveBtn) {
+      musicVolumeSaveBtn.addEventListener("click", async () => {
+        if (!window.confirm("Set music volume and restart EmulationStation now?")) return;
+        musicVolumeSaveBtn.disabled = true;
+        try {
+          const result = await apiPost("/admin/system-info/music-volume", {level: Number(musicVolumeSlider.value)});
+          syncMusicVolumeControls(result.music_volume);
+          showToast(`Music volume set to ${result.music_volume}%; EmulationStation restarted.`, "success");
+        } catch (err) {
+          showToast(`Failed to set music volume: ${escapeHtml(err.message || "unknown error")}`, "danger");
+        } finally {
+          const btn = document.getElementById("musicVolumeSaveBtn");
+          if (btn) btn.disabled = false;
+        }
+      });
+    }
+
+    const screensaverSlider = document.getElementById("screensaverSlider");
+    const screensaverValue = document.getElementById("screensaverValue");
+    const screensaverSaveBtn = document.getElementById("screensaverSaveBtn");
+    if (screensaverSlider && screensaverValue) {
+      screensaverSlider.addEventListener("input", () => {
+        screensaverValue.textContent = Number(screensaverSlider.value) === 0 ? "Off" : `${screensaverSlider.value} min`;
+      });
+    }
+    if (screensaverSaveBtn) {
+      screensaverSaveBtn.addEventListener("click", async () => {
+        if (!window.confirm("Set screensaver delay and restart EmulationStation now?")) return;
+        screensaverSaveBtn.disabled = true;
+        try {
+          const result = await apiPost("/admin/es-collections", {screensaver_minutes: Number(screensaverSlider.value)});
+          syncScreensaverControls(result.screensaver_minutes);
+          showToast(`Screensaver delay set to ${result.screensaver_minutes} min; EmulationStation restarted.`, "success");
+        } catch (err) {
+          showToast(`Failed to set screensaver delay: ${escapeHtml(err.message || "unknown error")}`, "danger");
+        } finally {
+          const btn = document.getElementById("screensaverSaveBtn");
+          if (btn) btn.disabled = false;
+        }
+      });
+    }
+
+    loadScreenMode();
+
+    document.getElementById("esCollectionsRefreshBtn")?.addEventListener("click", async () => {
+      try {
+        await loadEsCollections();
+      } catch (err) {
+        showToast(`Failed to load collections: ${escapeHtml(err.message || "unknown error")}`, "danger");
+      }
+    });
+    try {
+      await loadEsCollections();
+    } catch (err) {
+      document.getElementById("esCollectionsBody").innerHTML = '<div class="empty-state">Unable to load collections.</div>';
     }
 
     async function loadAssetCache() {

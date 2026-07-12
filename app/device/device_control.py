@@ -422,7 +422,7 @@ def _parse_es_systems_cfg(path: Path) -> List[dict]:
     systems: List[dict] = []
     for system_node in root.findall(".//system"):
         data: dict = {}
-        for tag in ("name", "fullname", "path", "extension", "command", "platform", "theme"):
+        for tag in ("name", "fullname", "path", "extension", "command", "platform", "theme", "group"):
             node = system_node.find(tag)
             if node is not None and node.text is not None:
                 data[tag] = node.text.strip()

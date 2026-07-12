@@ -24,6 +24,8 @@ try:
         _save_automation_config,
     )
     from ..device.device_control import _apply_audio_volume, _apply_screen_mode, _restart_emulationstation
+    from ..device.es_collections import apply_es_collections as _apply_es_collections
+    from ..device.es_collections import get_es_collections_state as _get_es_collections_state
     from ..device.pixen import run_pixen_upgrade
     from ..storage.rom_metadata_store import (
         _clear_sqlite_asset_metadata_cache,
@@ -52,6 +54,8 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         _save_automation_config,
     )
     from device.device_control import _apply_audio_volume, _apply_screen_mode, _restart_emulationstation  # type: ignore
+    from device.es_collections import apply_es_collections as _apply_es_collections  # type: ignore
+    from device.es_collections import get_es_collections_state as _get_es_collections_state  # type: ignore
     from device.pixen import run_pixen_upgrade  # type: ignore
     from storage.rom_metadata_store import (  # type: ignore
         _clear_sqlite_asset_metadata_cache,
@@ -585,6 +589,50 @@ def _execute_overmind_action(
             "muted": applied <= 0,
         }
 
+    if action_name == "get_es_collections_state":
+        try:
+            state = _get_es_collections_state(settings)
+        except Exception as error:
+            return "failed", f"Unable to read EmulationStation collections state: {error}", None
+        return "completed", "EmulationStation collections state collected.", {
+            "type": "es_collections_state",
+            **state,
+        }
+
+    if action_name == "set_music_volume":
+        payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
+        raw_level = payload.get("level")
+        try:
+            level = int(raw_level)
+        except (TypeError, ValueError):
+            return "failed", "A numeric music volume level (0-100) is required.", None
+        try:
+            state = _apply_es_collections(settings, {"music_volume": max(0, min(100, level))})
+        except (OSError, subprocess.SubprocessError, ValueError) as error:
+            return "failed", f"Unable to set music volume: {error}", None
+        return "completed", f"Music volume set to {state['music_volume']}%; EmulationStation restarted.", {
+            "type": "es_collections_state",
+            **state,
+        }
+
+    if action_name == "set_es_collections":
+        payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
+        updates = {
+            key: payload[key]
+            for key in ("music_volume", "screensaver_minutes", "hidden_systems", "ungrouped_systems", "auto_collections", "custom_collections")
+            if key in payload
+        }
+        if not updates:
+            return "failed", "No recognized collections fields were provided.", None
+        try:
+            state = _apply_es_collections(settings, updates)
+        except (OSError, subprocess.SubprocessError, ValueError) as error:
+            return "failed", f"Unable to update EmulationStation collections: {error}", None
+        return "completed", f"EmulationStation collections updated ({', '.join(sorted(updates))}); EmulationStation restarted.", {
+            "type": "es_collections_state",
+            **state,
+        }
+
     if action_name == "set_idle_volume_automation":
         payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
         config = _load_automation_config(settings)
@@ -594,7 +642,7 @@ def _execute_overmind_action(
         _reset_idle_volume_armed_state()
         state = "enabled" if saved["enabled"] else "disabled"
         message = (
-            f"Idle volume automation {state}: lower to {saved['target_volume']}% "
+            f"Idle volume automation {state}: set to {saved['target_volume']}% "
             f"after {saved['idle_minutes']} min of no input."
         )
         return "completed", message, {"type": "idle_volume_automation", **saved}
