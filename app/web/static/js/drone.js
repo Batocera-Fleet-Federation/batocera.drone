@@ -1943,43 +1943,57 @@ function renderDownloadRows(rows, allowCancel = true, options = {}) {
     }).join("")}</tbody></table></div>`;
 }
 
-function renderUploadRows(rows) {
-  if (!rows.length) return `<div class="themed-empty">No uploads in this group.</div>`;
+function renderTransferRows(rows, options = {}) {
+  if (!rows.length) return `<div class="themed-empty">${escapeHtml(options.emptyText || "No transfers in this group.")}</div>`;
   return `<div class="table-responsive"><table class="table table-sm table-hover align-middle themed-table download-table bff-stack">
-    <thead><tr><th>Status</th><th>Peer</th><th>File</th><th>System</th><th>Progress</th><th>Speed</th><th>Transport</th></tr></thead>
+    <thead><tr><th></th><th>Status</th><th>Peer</th><th>File</th><th>System</th><th>Progress</th><th>Speed</th><th>Actions</th></tr></thead>
     <tbody>${rows.map(row => {
+      const isUpload = row._direction === "upload";
       const pct = Number(row.percentage || 0);
-      const status = String(row.status || "uploading");
-      const statusClass = status === "failed" ? "danger" : status === "completed" ? "success" : status === "cancelled" ? "secondary" : "info";
-      const filePath = row.file_path || row.relative_path || row.file_name || "";
-      const errorText = row.error_message || "";
-      const progressText = row.total_bytes
-        ? `${pct.toFixed(1)}% (${formatBytes(row.bytes_transferred)} / ${formatBytes(row.total_bytes)})`
-        : formatBytes(row.bytes_transferred);
+      const status = String(row.status || (isUpload ? "uploading" : "queued"));
+      const statusClass = status === "failed" ? "danger" : status === "completed" ? "success" : status === "cancelled" ? "secondary" : status === "downloading" ? "info" : status === "paused" ? "warning" : status === "pending" ? "dark" : "primary";
+      const filePath = row.file_path || row.relative_path || row.rom_name || row.file_name || "";
+      const errorText = row.error_message || row.failure_reason || "";
+      const peerLabel = isUpload ? (row.peer_device_id || "unknown peer") : (row.source_drone_id || "n/a");
+      const directionIcon = isUpload
+        ? `<i class="bi bi-cloud-arrow-up text-info" title="Upload -- serving to a peer"></i>`
+        : `<i class="bi bi-cloud-arrow-down text-primary" title="Download -- pulling from a peer"></i>`;
+      const progressText = (row.total_bytes || row.file_size)
+        ? `${pct.toFixed(1)}% (${formatBytes(row.downloaded_bytes || row.bytes_transferred)} / ${formatBytes(row.total_bytes || row.file_size)})`
+        : formatBytes(row.downloaded_bytes || row.bytes_transferred);
+      // The artwork file can copy successfully while linking it into gamelist.xml
+      // fails (e.g. a root-owned, non-writable gamelist). Surface that instead of
+      // letting it look like a clean success.
+      const gamelistFailed = row.gamelist_update_status === "failed";
+      const gamelistError = (row.gamelist_update && row.gamelist_update.error) ? String(row.gamelist_update.error) : "gamelist.xml was not updated";
+      const gamelistWarning = gamelistFailed
+        ? ` <span class="badge text-bg-warning" title="${escapeHtml(`Artwork copied but not linked: ${gamelistError}`)}"><i class="bi bi-exclamation-triangle me-1"></i>gamelist not linked</span>`
+        : "";
+      let actions = "";
+      if (!isUpload) {
+        const jobId = escapeHtml(row.job_id || row.id || "");
+        const cancelable = ["queued", "downloading", "pending", "paused"].includes(status);
+        const pausable = ["queued", "pending", "downloading"].includes(status);
+        const resumable = status === "paused";
+        const retryable = ["failed", "cancelled"].includes(status);
+        actions = [
+          cancelable && jobId ? `<button class="btn btn-sm btn-outline-danger" title="Cancel download" aria-label="Cancel download" onclick="cancelDroneDownload('${jobId}')"><i class="bi bi-x-circle"></i></button>` : "",
+          pausable && jobId ? `<button class="btn btn-sm btn-outline-warning" title="Pause download" aria-label="Pause download" onclick="pauseDroneDownload('${jobId}')"><i class="bi bi-pause-fill"></i></button>` : "",
+          resumable && jobId ? `<button class="btn btn-sm btn-outline-success" title="Resume download" aria-label="Resume download" onclick="resumeDroneDownload('${jobId}')"><i class="bi bi-play-fill"></i></button>` : "",
+          retryable && jobId ? `<button class="btn btn-sm btn-outline-primary" title="Retry download" aria-label="Retry download" onclick="retryDroneDownload('${jobId}')"><i class="bi bi-arrow-clockwise"></i></button>` : "",
+        ].filter(Boolean).join(" ");
+      }
       return `<tr>
-        <td><span class="badge text-bg-${statusClass}" title="${escapeHtml(errorText)}">${escapeHtml(status)}</span></td>
-        <td class="small mono">${escapeHtml(row.peer_device_id || "unknown peer")}</td>
-        <td class="small mono download-file" title="${escapeHtml(errorText)}">${escapeHtml(filePath)}</td>
+        <td>${directionIcon}</td>
+        <td><span class="badge text-bg-${statusClass}" title="${escapeHtml(errorText)}">${escapeHtml(status)}${row.queue_position ? ` #${row.queue_position}` : ""}</span>${gamelistWarning}</td>
+        <td class="small mono">${escapeHtml(peerLabel)}</td>
+        <td class="small mono download-file" title="${escapeHtml(errorText || row.rom_fingerprint || "")}">${escapeHtml(filePath)}</td>
         <td class="small">${escapeHtml(row.system || "")}</td>
         <td class="small text-nowrap">${progressText}</td>
         <td class="small">${row.transfer_speed_bps ? `${formatBytes(row.transfer_speed_bps)}/s` : ""}</td>
-        <td class="small text-muted">${escapeHtml(row.transport || "")}</td>
+        <td>${actions}</td>
       </tr>`;
     }).join("")}</tbody></table></div>`;
-}
-
-function renderUploadsPanel(payload) {
-  const active = payload.active || [];
-  const recent = payload.recent || [];
-  return `
-    <div class="download-section">
-      <div class="download-section-title"><span><i class="bi bi-cloud-arrow-up me-2"></i>Active</span><span class="badge text-bg-info">${active.length}</span></div>
-      ${renderUploadRows(active)}
-    </div>
-    <div class="download-section mt-3 mb-0">
-      <div class="download-section-title"><span><i class="bi bi-clock-history me-2"></i>Recent</span><span class="badge text-bg-secondary">${recent.length}</span></div>
-      ${renderUploadRows(recent)}
-    </div>`;
 }
 
 function renderDownloadsPanel(payload, includeHeader = true) {
@@ -2022,6 +2036,7 @@ function renderDownloadsPanel(payload, includeHeader = true) {
 }
 
 let transferPayload = {};
+let uploadPayload = {};
 const transferViews = {
   active: { query: "", limit: 10, page: 1 },
   recent: { query: "", limit: 10, page: 1 },
@@ -2059,27 +2074,41 @@ function renderTransferControls(payload, active, queued) {
   </div>`;
 }
 
-function renderTransfersPanel(payload) {
+function renderTransfersPanel(payload, uploads) {
   transferPayload = payload || {};
+  uploadPayload = uploads || {};
   const active = transferPayload.active || [];
   const queued = transferPayload.queued || [];
   const recent = transferPayload.recent || [];
-  const current = [...active, ...queued];
+  const uploadActive = uploadPayload.active || [];
+  const uploadRecent = uploadPayload.recent || [];
+  // Downloads and uploads are consolidated into one set of tables (tagged with
+  // a direction icon per row) instead of two separate cards/sections, so both
+  // directions of transfer are visible together without doubling the chrome.
+  const current = [
+    ...active.map(row => ({ ...row, _direction: "download" })),
+    ...queued.map(row => ({ ...row, _direction: "download" })),
+    ...uploadActive.map(row => ({ ...row, _direction: "upload" })),
+  ];
+  const allRecent = [
+    ...recent.map(row => ({ ...row, _direction: "download" })),
+    ...uploadRecent.map(row => ({ ...row, _direction: "upload" })),
+  ];
   const currentPager = renderTransferPager("active", "Transfers", current);
-  const recentPager = renderTransferPager("recent", "Recent", recent);
+  const recentPager = renderTransferPager("recent", "Recent", allRecent);
   return `${renderQueueEta(transferPayload)}${renderTransferControls(transferPayload, active, queued)}
     ${currentPager.html}
-    ${renderDownloadRows(currentPager.page.rows, true, { includeStarted: false, emptyText: "No pending or downloading transfers." })}
+    ${renderTransferRows(currentPager.page.rows, { emptyText: "No pending, downloading, or uploading transfers." })}
     <div class="download-section mt-3 mb-0">
       <div class="download-section-title"><span><i class="bi bi-clock-history me-2"></i>Recent</span><span class="badge text-bg-secondary">${recentPager.page.total}</span></div>
       ${recentPager.html}
-      ${renderDownloadRows(recentPager.page.rows, false)}
+      ${renderTransferRows(recentPager.page.rows)}
     </div>`;
 }
 
 function refreshTransfersPanel() {
   const node = document.getElementById("transfersBody");
-  if (node) node.innerHTML = renderTransfersPanel(transferPayload);
+  if (node) node.innerHTML = renderTransfersPanel(transferPayload, uploadPayload);
 }
 function setTransferSearch(kind, value) { transferViews[kind].query = value; transferViews[kind].page = 1; refreshTransfersPanel(); }
 function setTransferLimit(kind, value) { transferViews[kind].limit = Number(value) || 10; transferViews[kind].page = 1; refreshTransfersPanel(); }
@@ -3828,28 +3857,16 @@ async function renderIntegrationTransfersPanel(target) {
         <span><i class="bi bi-arrow-left-right me-2"></i>Transfers</span>
         <button id="transfersRefreshBtn" class="btn btn-sm btn-outline-primary" type="button"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
       </div>
-      <div class="small text-muted px-3 pt-3">All drone-to-drone asset transfers to this machine, whether started from Overmind or Local Network.</div>
+      <div class="small text-muted px-3 pt-3">All drone-to-drone asset transfers to and from this machine -- downloads and uploads -- whether started from Overmind or Local Network.</div>
       <div class="card-body" id="transfersBody"><div class="text-muted">Loading transfers...</div></div>
-    </div>
-    <div class="card log-card mt-3">
-      <div class="card-header"><i class="bi bi-cloud-arrow-up me-2"></i>Uploads</div>
-      <div class="small text-muted px-3 pt-3">Assets this Drone is currently serving -- or recently served -- to peers.</div>
-      <div class="card-body" id="uploadsBody"><div class="text-muted">Loading uploads...</div></div>
     </div>`;
 
   async function loadTransfers() {
-    const payload = await api("/admin/downloads");
+    const [downloads, uploads] = await Promise.all([api("/admin/downloads"), api("/admin/uploads")]);
     const body = document.getElementById("transfersBody");
-    if (body) body.innerHTML = renderTransfersPanel(payload);
+    if (body) body.innerHTML = renderTransfersPanel(downloads, uploads);
   }
-  async function loadUploads() {
-    const payload = await api("/admin/uploads");
-    const body = document.getElementById("uploadsBody");
-    if (body) body.innerHTML = renderUploadsPanel(payload);
-  }
-  window.refreshTransfers = async () => {
-    await Promise.allSettled([loadTransfers(), loadUploads()]);
-  };
+  window.refreshTransfers = loadTransfers;
   document.getElementById("transfersRefreshBtn").addEventListener("click", async () => {
     try {
       await window.refreshTransfers();
@@ -3861,7 +3878,6 @@ async function renderIntegrationTransfersPanel(target) {
   await Promise.allSettled([
     renderLocalTransferRequestPanel(document.getElementById("localTransferRequestPanel")),
     loadTransfers(),
-    loadUploads(),
   ]);
 }
 

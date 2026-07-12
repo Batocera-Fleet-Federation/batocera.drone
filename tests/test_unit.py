@@ -2927,14 +2927,22 @@ class SettingsTests(unittest.TestCase):
         self.assertNotIn("function renderBios()", source)
         self.assertNotIn("function renderBiosList", source)
 
-    def test_integration_transfers_page_shows_uploads_and_download_pause_resume(self) -> None:
+    def test_integration_transfers_page_consolidates_uploads_and_downloads(self) -> None:
         js = Path(__file__).resolve().parents[1].joinpath("app/web/static/js/drone.js").read_text(encoding="utf-8")
 
-        # Uploads panel: rendered alongside Transfers in the admin integration page.
-        self.assertIn("function renderUploadRows(rows)", js)
-        self.assertIn("function renderUploadsPanel(payload)", js)
-        self.assertIn('id="uploadsBody"', js)
-        self.assertIn('await api("/admin/uploads")', js)
+        # Downloads and uploads are one consolidated table (direction-tagged rows)
+        # under a single Transfers card -- not two separate cards/sections.
+        self.assertIn("function renderTransferRows(rows, options = {})", js)
+        self.assertIn('row._direction === "upload"', js)
+        self.assertNotIn('id="uploadsBody"', js)
+        self.assertNotIn("function renderUploadRows", js)
+        self.assertNotIn("function renderUploadsPanel", js)
+        panel_start = js.index("async function renderIntegrationTransfersPanel(target)")
+        panel_end = js.index("async function renderIntegrationConfigurationPanel(target)")
+        panel_source = js[panel_start:panel_end]
+        self.assertEqual(panel_source.count("card log-card"), 1)  # exactly one card, not two
+        self.assertIn('api("/admin/downloads")', panel_source)
+        self.assertIn('api("/admin/uploads")', panel_source)
 
         # Per-job pause/resume, wired the same way as the existing cancel/retry.
         self.assertIn("async function pauseDroneDownload(jobId)", js)
@@ -2945,8 +2953,8 @@ class SettingsTests(unittest.TestCase):
         # 'pending'/'paused' are real statuses now, not a cosmetic-only relabel of
         # 'queued' (which would now conflate two materially different states).
         self.assertNotIn("usePendingLabel", js)
-        render_start = js.index("function renderDownloadRows(rows, allowCancel = true, options = {})")
-        render_end = js.index("function renderUploadRows(rows)")
+        render_start = js.index("function renderTransferRows(rows, options = {})")
+        render_end = js.index("function renderDownloadsPanel(payload, includeHeader = true)")
         render_source = js[render_start:render_end]
         self.assertIn('"pending", "paused"', render_source)
 
