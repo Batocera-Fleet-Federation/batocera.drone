@@ -113,12 +113,31 @@ SERVICEBLOCK
   fi
 
   echo ""
-  echo "Starting Drone service so it is ready immediately..."
-  if "$SERVICE_FILE" start; then
-    echo "✓ Drone service started"
+  echo "Enabling Drone service for automatic startup..."
+  if command -v batocera-services >/dev/null 2>&1; then
+    if batocera-services enable DRONE_SERVER; then
+      echo "✓ Drone service enabled"
+    else
+      echo "Could not enable DRONE_SERVER with batocera-services."
+      exit 1
+    fi
+
+    echo ""
+    echo "Starting Drone service so it is ready immediately..."
+    if batocera-services start DRONE_SERVER; then
+      echo "✓ Drone service started"
+    else
+      echo "batocera-services could not start DRONE_SERVER; trying the service script directly..."
+      if "$SERVICE_FILE" start; then
+        echo "✓ Drone service started"
+      else
+        echo "Could not start Drone service automatically. Start it manually with:"
+        echo "  batocera-services start DRONE_SERVER"
+      fi
+    fi
   else
-    echo "Could not start Drone service automatically. Start it manually with:"
-    echo "  $SERVICE_FILE start"
+    echo "batocera-services is unavailable; DRONE_SERVER cannot be enabled for automatic startup."
+    exit 1
   fi
 
 else

@@ -3012,6 +3012,12 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("ensure_bundle", installer)
         self.assertIn("DRONE_APP_STAGE_ONLY=1", installer)
         self.assertIn("✓ Updated Drone app bundle", installer)
+        self.assertIn("batocera-services enable DRONE_SERVER", installer)
+        self.assertIn("batocera-services start DRONE_SERVER", installer)
+        self.assertLess(
+            installer.index("batocera-services enable DRONE_SERVER"),
+            installer.index("batocera-services start DRONE_SERVER"),
+        )
         self.assertIn("Starting Drone service so it is ready immediately", installer)
 
         # All service-side behavior is in the versioned bootstrap.

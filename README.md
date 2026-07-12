@@ -41,10 +41,10 @@ curl -fsSL https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/
 
 The installer will ask for the username and password you want to use when opening Drone in your browser.
 
-On Batocera v43+, the installer starts the Drone service itself, so it is ready immediately — no reboot needed. (On older Batocera versions, Drone starts on the next boot via `custom.sh`.) If you ever need to start it manually:
+On Batocera v43+, the installer enables the Drone service for future boots and starts it immediately, so no reboot or manual service toggle is needed. (On older Batocera versions, Drone starts on the next boot via `custom.sh`.) If you ever need to start it manually:
 
 ```bash
-/userdata/system/services/DRONE_SERVER start
+batocera-services start DRONE_SERVER
 ```
 
 Then open Drone in your browser:
