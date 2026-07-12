@@ -4,8 +4,10 @@ import os
 import tempfile
 import threading
 import unittest
+import urllib.error
 import urllib.request
 from pathlib import Path
+from unittest import mock
 
 from app.transfer import local_network
 from app.mock_data import seed_mock_userdata
@@ -106,6 +108,24 @@ class MockServerIntegrationTests(unittest.TestCase):
 
         spec = self._get_json("/v1/api/openapi.json")
         self.assertIn("mtls", json.dumps(spec).lower())
+
+    def test_system_info_volume_slider_api(self) -> None:
+        with mock.patch("app.web.handlers_diagnostics._get_audio_volume", return_value=55), \
+             mock.patch("app.web.handlers_diagnostics._apply_audio_volume", return_value=65) as apply_volume:
+            info = self._get_json("/v1/api/admin/system-info")
+            updated = self._post_json("/v1/api/admin/system-info/volume", {"level": 65})
+        self.assertEqual(info["audio_volume"], 55)
+        self.assertEqual(updated["audio_volume"], 65)
+        apply_volume.assert_called_once_with(self.settings, 65)
+
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            self._post_json("/v1/api/admin/system-info/volume", {"level": 63})
+        self.assertEqual(error.exception.code, 400)
+
+        js = self._get_bytes("/static/js/drone.js").decode("utf-8")
+        self.assertIn('id="systemVolumeSlider"', js)
+        self.assertIn('step="5"', js)
+        self.assertIn('apiPost("/admin/system-info/volume"', js)
 
     def test_overmind_integration_uses_authorization_token_label(self) -> None:
         js = self._get_bytes("/static/js/drone.js")

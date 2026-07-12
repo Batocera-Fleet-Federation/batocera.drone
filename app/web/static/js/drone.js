@@ -5345,6 +5345,10 @@ async function renderAdminSystemInfoPage() {
     const disks = Array.isArray(metrics.disks) && metrics.disks.length ? metrics.disks : [disk];
     const process = metrics.process || {};
     const speed = payload.speed_sample || {};
+    const rawVolume = payload.audio_volume ?? fields.audio_volume;
+    const reportedVolume = Number(rawVolume);
+    const volumeAvailable = rawVolume !== null && rawVolume !== undefined && Number.isFinite(reportedVolume);
+    const currentVolume = volumeAvailable ? Math.max(0, Math.min(100, Math.round(reportedVolume / 5) * 5)) : 50;
     const pixenInstalled = payload.pixen_installed === true || fields.pixen_installed === true || String(fields.pixen_installed || "").toLowerCase() === "yes";
     const detail = (label, value) => `<div class="asset-detail"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value || "n/a")}</strong></div>`;
     const pct = (value) => value === null || value === undefined || value === "" ? "n/a" : `${Number(value).toFixed(1)}%`;
@@ -5402,6 +5406,19 @@ async function renderAdminSystemInfoPage() {
           </div>
         </div>
       </div>
+      <div class="card log-card mb-3">
+        <div class="card-header d-flex justify-content-between align-items-center gap-2">
+          <span><i class="bi bi-volume-up me-2"></i>Volume</span>
+          <output id="systemVolumeValue" for="systemVolumeSlider" class="badge text-bg-primary">${volumeAvailable ? `${currentVolume}%` : "Unavailable"}</output>
+        </div>
+        <div class="card-body">
+          <div class="d-flex align-items-center gap-3">
+            <i class="bi bi-volume-mute fs-5" aria-hidden="true"></i>
+            <input class="form-range flex-grow-1" type="range" id="systemVolumeSlider" min="0" max="100" step="5" value="${currentVolume}" aria-label="System volume" ${volumeAvailable ? "" : "disabled"}>
+            <i class="bi bi-volume-up fs-5" aria-hidden="true"></i>
+          </div>
+        </div>
+      </div>
       <div class="card log-card">
         <div class="card-header">System Details</div>
         <div class="card-body">
@@ -5441,6 +5458,32 @@ async function renderAdminSystemInfoPage() {
         <div class="card-body" id="systemInfoAssetCacheBody"><div class="text-muted">Loading asset cache...</div></div>
       </div>
     `;
+
+    const volumeSlider = document.getElementById("systemVolumeSlider");
+    const volumeValue = document.getElementById("systemVolumeValue");
+    let appliedVolume = currentVolume;
+    if (volumeSlider && volumeValue && volumeAvailable) {
+      volumeSlider.addEventListener("input", () => {
+        volumeValue.textContent = `${volumeSlider.value}%`;
+      });
+      volumeSlider.addEventListener("change", async () => {
+        const requestedVolume = Number(volumeSlider.value);
+        volumeSlider.disabled = true;
+        try {
+          const result = await apiPost("/admin/system-info/volume", {level: requestedVolume});
+          appliedVolume = Number(result.audio_volume);
+          volumeSlider.value = String(appliedVolume);
+          volumeValue.textContent = `${appliedVolume}%`;
+          showToast(`Volume set to ${appliedVolume}%.`, "success");
+        } catch (err) {
+          volumeSlider.value = String(appliedVolume);
+          volumeValue.textContent = `${appliedVolume}%`;
+          showToast(`Failed to set volume: ${escapeHtml(err.message || "unknown error")}`, "danger");
+        } finally {
+          volumeSlider.disabled = false;
+        }
+      });
+    }
 
     async function loadAssetCache() {
       const cachePayload = await api("/admin/asset-cache");

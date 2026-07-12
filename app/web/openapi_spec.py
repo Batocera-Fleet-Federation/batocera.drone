@@ -477,11 +477,21 @@ def _schemas() -> Dict[str, Schema]:
                 "entries": _array(_ref("SystemInfoEntry")),
                 "fields": string_map,
                 "drone_app_version": _string(),
+                "audio_volume": _integer(nullable=True, minimum=0, maximum=100),
                 "runtime_metrics": freeform,
                 "speed_sample": _ref("SpeedSample"),
                 "warning": _string(),
             },
             ("raw", "lines", "entries", "fields", "drone_app_version", "runtime_metrics", "speed_sample"),
+        ),
+        "SystemVolumeUpdateRequest": _object(
+            {"level": _integer(minimum=0, maximum=100)},
+            ("level",),
+            description="Volume level in increments of 5.",
+        ),
+        "SystemVolumeResponse": _object(
+            {"audio_volume": _integer(minimum=0, maximum=100)},
+            ("audio_volume",),
         ),
         "DownloadJob": download_job,
         "AdminDownloadsResponse": _object(
@@ -1055,6 +1065,15 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
                     {"200": _json_response("SystemInfoResponse", "Structured system information")},
                     parameters=[_query_param("speed", _boolean(default=False), "Include an active network speed sample")],
                     tags=["admin"],
+                )
+            },
+            "/admin/system-info/volume": {
+                "post": _operation(
+                    "Set Batocera system volume",
+                    {"200": _json_response("SystemVolumeResponse")},
+                    request_body=_json_request("SystemVolumeUpdateRequest"),
+                    tags=["admin"],
+                    error_codes=("400", "401", "403", "429", "500", "503"),
                 )
             },
             "/admin/downloads": {"get": _operation("Get download queue status", {"200": _json_response("AdminDownloadsResponse", "Download queue snapshot")}, tags=["admin", "downloads"])},

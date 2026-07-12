@@ -14,6 +14,7 @@ try:
     from ..common.logtail import _tail_lines
     from ..device.pixen import is_pixen_installed as _is_pixen_installed
     from ..device.pixen import pixen_script_path as _pixen_script_path
+    from ..device.device_control import _apply_audio_volume, _get_audio_volume
     from ..device.system_metrics import _collect_performance_metrics, _sample_speed
     from ..overmind.overmind_client import _format_overmind_error
     from ..overmind.overmind_game_logs import (
@@ -26,6 +27,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from common.logtail import _tail_lines  # type: ignore
     from device.pixen import is_pixen_installed as _is_pixen_installed  # type: ignore
     from device.pixen import pixen_script_path as _pixen_script_path  # type: ignore
+    from device.device_control import _apply_audio_volume, _get_audio_volume  # type: ignore
     from device.system_metrics import _collect_performance_metrics, _sample_speed  # type: ignore
     from overmind.overmind_client import _format_overmind_error  # type: ignore
     from overmind.overmind_game_logs import (  # type: ignore
@@ -169,6 +171,7 @@ class HandlersDiagnosticsMixin:
     def _handle_admin_system_info(self, include_speed: bool = False) -> None:
         router_ip_address = _get_router_ip_address() or "Unavailable"
         runtime_metrics = _collect_performance_metrics(self.settings.userdata_root)
+        audio_volume = 75 if self.settings.use_fake_data else _get_audio_volume(self.settings)
         pixen_installed = _is_pixen_installed(self.settings)
         pixen_script = str(_pixen_script_path(self.settings))
         speed_sample = _sample_speed() if include_speed else {
@@ -221,6 +224,7 @@ class HandlersDiagnosticsMixin:
                 "drone_app_version": _drone_app_version(),
                 "pixen_installed": pixen_installed,
                 "pixen_script_path": pixen_script,
+                "audio_volume": audio_volume,
             }
             raw = "\n".join(f"{item['key']}: {item['value']}" for item in entries)
             self._send_json(
@@ -233,6 +237,7 @@ class HandlersDiagnosticsMixin:
                     "drone_app_version": _drone_app_version(),
                     "pixen_installed": pixen_installed,
                     "pixen_script_path": pixen_script,
+                    "audio_volume": audio_volume,
                     "runtime_metrics": runtime_metrics,
                     "speed_sample": speed_sample,
                 },
@@ -321,6 +326,7 @@ class HandlersDiagnosticsMixin:
             fields["drone_app_version"] = _drone_app_version()
             fields["pixen_installed"] = pixen_installed
             fields["pixen_script_path"] = pixen_script
+            fields["audio_volume"] = audio_volume
 
             self._send_json(
                 200,
@@ -332,6 +338,7 @@ class HandlersDiagnosticsMixin:
                     "drone_app_version": _drone_app_version(),
                     "pixen_installed": pixen_installed,
                     "pixen_script_path": pixen_script,
+                    "audio_volume": audio_volume,
                     "runtime_metrics": runtime_metrics,
                     "speed_sample": speed_sample,
                 },
@@ -359,15 +366,34 @@ class HandlersDiagnosticsMixin:
                         "drone_app_version": _drone_app_version(),
                         "pixen_installed": pixen_installed,
                         "pixen_script_path": pixen_script,
+                        "audio_volume": audio_volume,
                     },
                     "drone_app_version": _drone_app_version(),
                     "pixen_installed": pixen_installed,
                     "pixen_script_path": pixen_script,
+                    "audio_volume": audio_volume,
                     "runtime_metrics": runtime_metrics,
                     "speed_sample": speed_sample,
                     "warning": f"Failed to run batocera-info: {str(error)}",
                 },
             )
+
+    def _handle_admin_system_volume(self, payload: dict) -> None:
+        payload = payload if isinstance(payload, dict) else {}
+        try:
+            level = int(payload.get("level"))
+        except (TypeError, ValueError):
+            self._send_json(400, {"error": "A numeric volume level from 0 to 100 is required"})
+            return
+        if level < 0 or level > 100 or level % 5 != 0:
+            self._send_json(400, {"error": "Volume must be from 0 to 100 in increments of 5"})
+            return
+        try:
+            applied = _apply_audio_volume(self.settings, level)
+        except (OSError, subprocess.SubprocessError, ValueError) as error:
+            self._send_json(500, {"error": f"Unable to set volume: {error}"})
+            return
+        self._send_json(200, {"audio_volume": applied})
 
     # HandlersNetworkMixin methods now live in web/handlers_network.py (composed onto RomRequestHandler).
 

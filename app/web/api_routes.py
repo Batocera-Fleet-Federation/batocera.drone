@@ -514,6 +514,10 @@ class ApiRoutesMixin:
                 payload = self._read_json_body()
                 self._handle_admin_automation_wifi_recovery(payload)
                 return
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "system-info" and parts[2] == "volume":
+                payload = self._read_json_body()
+                self._handle_admin_system_volume(payload)
+                return
 
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "system" and parts[2] == "update-drone":
                 self._handle_admin_drone_update()

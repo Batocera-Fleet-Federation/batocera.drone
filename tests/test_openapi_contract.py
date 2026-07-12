@@ -116,6 +116,7 @@ class DroneOpenApiContractTest(unittest.TestCase):
             "/admin/automation/idle-volume",
             "/admin/automation/idle-game-exit",
             "/admin/automation/wifi-recovery",
+            "/admin/system-info/volume",
             "/admin/system/run-pixen-update",
             "/admin/system/update-drone",
             "/admin/artwork/missing",
