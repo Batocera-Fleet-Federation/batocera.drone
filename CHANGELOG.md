@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.1.43] - 2026-07-11
+
+- Consolidate Transfers page: downloads and uploads in one table
+
 ## [v0.1.42] - 2026-07-11
 
 - Add per-job pause/resume, pending-state retry, and upload visibility
