@@ -1,5 +1,10 @@
 # Changelog
 
+## [v0.1.44] - 2026-07-12
+
+- Adding ability to control volume from API and UI
+- Adding code to auto-enable Drone after install.
+
 ## [v0.1.43] - 2026-07-11
 
 - Consolidate Transfers page: downloads and uploads in one table
