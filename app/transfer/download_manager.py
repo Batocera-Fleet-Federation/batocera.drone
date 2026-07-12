@@ -15,10 +15,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from threading import Event, Lock, Thread
 from typing import Dict, List, Optional
+from urllib.error import HTTPError
 
 try:
     from ..common.settings import Settings
     from ..storage import saves_store as _saves_store
+    from ..storage.state_store import database_path as _state_database_path
+    from ..storage.state_store import load_payload as _load_state_payload
+    from ..storage.state_store import save_payload as _save_state_payload
     from ..transport import DirectPublicTransport, DownloadRequest, TransferContext, TransportSelector
     from ..transport import relay_transfer as _relay_transfer
     from ..transport.lan import LanDirectTransport
@@ -26,6 +30,8 @@ try:
     from .download_errors import DownloadCancelled
     from .edge_relay import _edge_mux_available, _local_network_snapshot, _relay_fetch
     from .peer_download import (
+        _best_peer_for_bios,
+        _best_peer_for_rom,
         _download_artwork_from_peer,
         _download_bios_from_peer,
         _download_rom_folder_from_peer,
@@ -33,10 +39,14 @@ try:
         _download_save_from_peer,
         _post_download_state,
         _post_rom_sync_activity,
+        _resolve_rom_by_gamelist_id_from_peer,
     )
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.settings import Settings  # type: ignore
     from storage import saves_store as _saves_store  # type: ignore
+    from storage.state_store import database_path as _state_database_path  # type: ignore
+    from storage.state_store import load_payload as _load_state_payload  # type: ignore
+    from storage.state_store import save_payload as _save_state_payload  # type: ignore
     from transport import DirectPublicTransport, DownloadRequest, TransferContext, TransportSelector  # type: ignore
     from transport import relay_transfer as _relay_transfer  # type: ignore
     from transport.lan import LanDirectTransport  # type: ignore
@@ -44,6 +54,8 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from transfer.download_errors import DownloadCancelled  # type: ignore
     from transfer.edge_relay import _edge_mux_available, _local_network_snapshot, _relay_fetch  # type: ignore
     from transfer.peer_download import (  # type: ignore
+        _best_peer_for_bios,
+        _best_peer_for_rom,
         _download_artwork_from_peer,
         _download_bios_from_peer,
         _download_rom_folder_from_peer,
@@ -51,10 +63,15 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         _download_save_from_peer,
         _post_download_state,
         _post_rom_sync_activity,
+        _resolve_rom_by_gamelist_id_from_peer,
     )
 
 DOWNLOAD_PROGRESS_PUSH_SECONDS = float(os.environ.get("DOWNLOAD_PROGRESS_PUSH_SECONDS", "5"))
 DOWNLOAD_TERMINAL_STATUSES = {"completed", "failed", "cancelled", "skipped"}
+DOWNLOAD_QUEUE_STATE_NAMESPACE = "download_manager.json"
+DOWNLOAD_RECONNECT_INITIAL_SECONDS = 5
+DOWNLOAD_RECONNECT_MAX_SECONDS = 60
+DOWNLOAD_PERSISTED_RECENT_LIMIT = 25
 
 
 def _kick_asset_metadata_sync_after_download(*args, **kwargs):
@@ -178,6 +195,7 @@ class DownloadManager:
         self._paused = False
         self._last_download_state_push_at = 0.0
         self._concurrency = self._resolve_concurrency()
+        self._restore_state()
         # Job selection + the queued->downloading transition happen atomically under
         # self._lock, so multiple workers never claim the same job. Per-job state is
         # likewise mutated under the lock, so running _run_job concurrently is safe.
@@ -186,6 +204,160 @@ class DownloadManager:
             thread = Thread(target=self._worker, name=f"drone-download-worker-{index + 1}", daemon=True)
             thread.start()
             self._threads.append(thread)
+
+    def _persistent_jobs_locked(self) -> list[dict]:
+        pending = [
+            dict(job)
+            for job in self._jobs.values()
+            if job.get("status") not in DOWNLOAD_TERMINAL_STATUSES
+        ]
+        recent = [
+            dict(job)
+            for job in self._jobs.values()
+            if job.get("status") in DOWNLOAD_TERMINAL_STATUSES
+        ][-DOWNLOAD_PERSISTED_RECENT_LIMIT:]
+        return pending + recent
+
+    def _persist_state_locked(self) -> None:
+        _save_state_payload(
+            _state_database_path(self.settings.userdata_root),
+            DOWNLOAD_QUEUE_STATE_NAMESPACE,
+            {
+                "version": 1,
+                "paused": self._paused,
+                "jobs": self._persistent_jobs_locked(),
+            },
+        )
+
+    def _restore_state(self) -> None:
+        stored = _load_state_payload(
+            _state_database_path(self.settings.userdata_root),
+            DOWNLOAD_QUEUE_STATE_NAMESPACE,
+            {},
+        )
+        if not isinstance(stored, dict):
+            return
+        self._paused = bool(stored.get("paused", False))
+        jobs = stored.get("jobs") if isinstance(stored.get("jobs"), list) else []
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        restored_pending = False
+        for raw_job in jobs:
+            if not isinstance(raw_job, dict):
+                continue
+            job = dict(raw_job)
+            job_id = str(job.get("job_id") or job.get("id") or "").strip()
+            if not job_id or job_id in self._jobs:
+                continue
+            job["id"] = job_id
+            job["job_id"] = job_id
+            status = str(job.get("status") or "queued").lower()
+            job["_resolving"] = False
+            if status == "paused":
+                # A user-parked job stays parked across a restart -- it must not
+                # silently resume on its own.
+                job["status"] = "paused"
+            elif status == "pending":
+                # Still no source peer as of the last run; re-check right away
+                # instead of waiting out a pre-restart backoff timer.
+                job["status"] = "pending"
+                job["reconnect_after_epoch"] = 0
+            elif status not in DOWNLOAD_TERMINAL_STATUSES:
+                if job.get("cancellation_requested"):
+                    job["status"] = "cancelled"
+                    job["completed_at"] = now
+                    job["download_completed_at"] = now
+                    job["failure_reason"] = job.get("cancel_reason") or "cancelled before restart"
+                    job["error_message"] = job["failure_reason"]
+                else:
+                    job["status"] = "queued"
+                    job["started_at"] = None
+                    job["download_started_at"] = None
+                    job["completed_at"] = None
+                    job["download_completed_at"] = None
+                    job["downloaded_bytes"] = 0
+                    job["bytes_transferred"] = 0
+                    job["percentage"] = 0
+                    job["transfer_speed_bps"] = 0
+                    job["cancellation_requested"] = False
+                    job["resume_reason"] = "Drone restarted before the transfer completed"
+                    job.pop("_started_mono", None)
+                    restored_pending = True
+            self._jobs[job_id] = job
+            self._cancel_events[job_id] = Event()
+        self._update_queue_positions_locked()
+        if jobs:
+            self._persist_state_locked()
+        if restored_pending and not self._paused:
+            self._wake.set()
+
+    @staticmethod
+    def _is_reconnectable_error(error: Exception) -> bool:
+        if isinstance(error, ValueError):
+            return False
+        if isinstance(error, HTTPError):
+            return error.code in {408, 425, 429} or error.code >= 500
+        message = str(error or "").strip().lower()
+        permanent_markers = (
+            "fingerprint mismatch",
+            "md5 mismatch",
+            "invalid target path",
+            "invalid save target path",
+            "invalid artwork type",
+            "unsafe artwork target path",
+            "folder manifest is empty",
+            "folder manifest did not include marker",
+            "does not support asset type",
+        )
+        return not any(marker in message for marker in permanent_markers)
+
+    @staticmethod
+    def _reconnect_delay(attempt: int) -> int:
+        try:
+            initial = max(1, int(os.environ.get("DOWNLOAD_RECONNECT_INITIAL_SECONDS", str(DOWNLOAD_RECONNECT_INITIAL_SECONDS))))
+        except (TypeError, ValueError):
+            initial = DOWNLOAD_RECONNECT_INITIAL_SECONDS
+        try:
+            maximum = max(initial, int(os.environ.get("DOWNLOAD_RECONNECT_MAX_SECONDS", str(DOWNLOAD_RECONNECT_MAX_SECONDS))))
+        except (TypeError, ValueError):
+            maximum = max(initial, DOWNLOAD_RECONNECT_MAX_SECONDS)
+        exponent = min(16, max(0, attempt - 1))
+        return min(maximum, initial * (2 ** exponent))
+
+    def _refresh_connection_metadata_locked(self, job: dict) -> None:
+        try:
+            from ..overmind.overmind_config import _load_overmind_config_for_settings
+        except ImportError:  # pragma: no cover - flat execution
+            from overmind.overmind_config import _load_overmind_config_for_settings  # type: ignore
+
+        stored_config = job.get("_config") if isinstance(job.get("_config"), dict) else {}
+        overmind_job = bool(stored_config.get("overmind_url") or stored_config.get("overmind_token"))
+        use_overmind = overmind_job and _local_network.is_overmind_mode(self.settings)
+        if use_overmind:
+            current_config = _load_overmind_config_for_settings(self.settings)
+            if isinstance(current_config, dict):
+                job["_config"] = {**stored_config, **current_config}
+        source_id = str(job.get("source_drone_id") or "").strip()
+        if not source_id:
+            return
+        current_peer = None if use_overmind else _local_network.get_paired_peer(self.settings, source_id)
+        if use_overmind:
+            swarm = _load_state_payload(
+                _state_database_path(self.settings.userdata_root),
+                "overmind_swarm.json",
+                [],
+            )
+            if isinstance(swarm, list):
+                current_peer = next(
+                    (
+                        row
+                        for row in swarm
+                        if isinstance(row, dict)
+                        and str(row.get("drone_id") or row.get("device_id") or "").strip() == source_id
+                    ),
+                    None,
+                )
+        if isinstance(current_peer, dict):
+            job["_peer"] = {**(job.get("_peer") or {}), **current_peer}
 
     @staticmethod
     def _resolve_concurrency() -> int:
@@ -240,6 +412,7 @@ class DownloadManager:
             self._jobs[job_id] = job
             self._cancel_events[job_id] = Event()
             self._update_queue_positions_locked()
+            self._persist_state_locked()
             snapshot = self._public_job_locked(job)
         self._wake.set()
         return snapshot
@@ -289,6 +462,142 @@ class DownloadManager:
             self._jobs[job_id] = job
             self._cancel_events[job_id] = Event()
             self._update_queue_positions_locked()
+            self._persist_state_locked()
+            snapshot = self._public_job_locked(job)
+        self._wake.set()
+        return snapshot
+
+    def enqueue_pending_rom(
+        self,
+        config: dict,
+        system: str,
+        gamelist_id: str = "",
+        relative_path: str = "",
+        expected_size=None,
+        expected_fingerprint=None,
+        source_action_id: Optional[str] = None,
+        entry_type: str = "file",
+        sync_id: Optional[str] = None,
+        source_device_ids: Optional[set] = None,
+    ) -> dict:
+        """Queue a ROM sync with no source peer resolved yet.
+
+        Used when Overmind named candidate Drones for this ROM but none is
+        currently peer-resolvable. The job sits in 'pending' -- invisible to the
+        normal queued-job scan -- while the worker periodically retries peer (and,
+        if only a gamelist_id was given, path) resolution against
+        ``source_device_ids`` and promotes it to 'queued' once a source answers.
+        """
+        job_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        job = {
+            "id": job_id,
+            "job_id": job_id,
+            "sync_id": sync_id or job_id,
+            "source_action_id": source_action_id,
+            "source_drone_id": None,
+            "target_drone_id": self.settings.overmind_device_id,
+            "file_path": relative_path or gamelist_id,
+            "file_name": Path(relative_path).name if relative_path else gamelist_id,
+            "file_type": "ROM",
+            "entry_type": entry_type,
+            "system": system,
+            "rom_name": relative_path or gamelist_id,
+            "relative_path": relative_path,
+            "total_bytes": expected_size,
+            "file_size": expected_size,
+            "downloaded_bytes": 0,
+            "bytes_transferred": 0,
+            "percentage": 0,
+            "transfer_speed_bps": 0,
+            "status": "pending",
+            "queue_position": None,
+            "started_at": None,
+            "download_started_at": None,
+            "completed_at": None,
+            "download_completed_at": None,
+            "error_message": None,
+            "failure_reason": "Waiting for a source Drone with this ROM to become reachable",
+            "cancellation_requested": False,
+            "created_at": now,
+            "reconnect_after_epoch": None,
+            "pending_attempts": 0,
+            "_resolving": False,
+            "_config": config,
+            "_gamelist_id": gamelist_id,
+            "_expected_fingerprint": expected_fingerprint,
+            "_entry_type": entry_type,
+            "_pending_kind": "rom",
+            "_source_device_ids": sorted(str(v) for v in (source_device_ids or set()) if str(v).strip()),
+        }
+        with self._lock:
+            self._jobs[job_id] = job
+            self._cancel_events[job_id] = Event()
+            self._update_queue_positions_locked()
+            self._persist_state_locked()
+            snapshot = self._public_job_locked(job)
+        self._wake.set()
+        return snapshot
+
+    def enqueue_pending_bios(
+        self,
+        config: dict,
+        relative_path: str,
+        expected_size=None,
+        expected_md5=None,
+        source_action_id: Optional[str] = None,
+        sync_id: Optional[str] = None,
+        source_device_ids: Optional[set] = None,
+    ) -> dict:
+        """BIOS counterpart to :meth:`enqueue_pending_rom` -- see its docstring."""
+        job_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        job = {
+            "id": job_id,
+            "job_id": job_id,
+            "sync_id": sync_id or job_id,
+            "source_action_id": source_action_id,
+            "source_drone_id": None,
+            "target_drone_id": self.settings.overmind_device_id,
+            "asset_type": "bios",
+            "file_path": relative_path,
+            "file_name": Path(relative_path).name,
+            "file_type": "BIOS",
+            "system": "bios",
+            "bios_name": relative_path,
+            "rom_name": relative_path,
+            "relative_path": relative_path,
+            "total_bytes": expected_size,
+            "file_size": expected_size,
+            "downloaded_bytes": 0,
+            "bytes_transferred": 0,
+            "percentage": 0,
+            "transfer_speed_bps": 0,
+            "status": "pending",
+            "queue_position": None,
+            "started_at": None,
+            "download_started_at": None,
+            "completed_at": None,
+            "download_completed_at": None,
+            "error_message": None,
+            "failure_reason": "Waiting for a source Drone with this BIOS to become reachable",
+            "cancellation_requested": False,
+            "created_at": now,
+            "bios_md5": expected_md5,
+            "reconnect_after_epoch": None,
+            "pending_attempts": 0,
+            "_resolving": False,
+            "_asset_type": "bios",
+            "_config": config,
+            "_expected_fingerprint": expected_md5,
+            "_pending_kind": "bios",
+            "_source_device_ids": sorted(str(v) for v in (source_device_ids or set()) if str(v).strip()),
+        }
+        with self._lock:
+            self._jobs[job_id] = job
+            self._cancel_events[job_id] = Event()
+            self._update_queue_positions_locked()
+            self._persist_state_locked()
             snapshot = self._public_job_locked(job)
         self._wake.set()
         return snapshot
@@ -340,6 +649,7 @@ class DownloadManager:
             self._jobs[job_id] = job
             self._cancel_events[job_id] = Event()
             self._update_queue_positions_locked()
+            self._persist_state_locked()
             snapshot = self._public_job_locked(job)
         self._wake.set()
         return snapshot
@@ -385,6 +695,7 @@ class DownloadManager:
             self._jobs[job_id] = job
             self._cancel_events[job_id] = Event()
             self._update_queue_positions_locked()
+            self._persist_state_locked()
             snapshot = self._public_job_locked(job)
         self._wake.set()
         return snapshot
@@ -401,16 +712,86 @@ class DownloadManager:
             event = self._cancel_events.get(job_id)
             if event:
                 event.set()
-            if job.get("status") == "queued":
+            # queued/paused/pending all have no worker thread actively running them
+            # right now, so cancellation lands immediately (same as the pre-existing
+            # queued case) instead of waiting for _run_job to observe the event.
+            if job.get("status") in {"queued", "paused", "pending"}:
                 job["status"] = "cancelled"
                 job["completed_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
                 job["download_completed_at"] = job["completed_at"]
                 job["failure_reason"] = reason
                 job["error_message"] = reason
+                job["pause_requested"] = False
                 self._update_queue_positions_locked()
+            self._persist_state_locked()
             snapshot = self._public_job_locked(job)
         self._wake.set()
         return {"status": snapshot.get("status"), "job": snapshot}
+
+    def pause_job(self, job_id: str) -> dict:
+        """Pause a single job. A queued/pending job is parked immediately (nothing
+        is running for it); an in-flight download is asked to stop -- like cancel,
+        reusing the same cancellation event -- but lands in 'paused' instead of
+        'cancelled' so resume_job can re-run it."""
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if not job:
+                return {"status": "not_found", "job_id": job_id}
+            current_status = job.get("status")
+            if current_status in DOWNLOAD_TERMINAL_STATUSES:
+                return {"status": "not_pausable", "job_id": job_id, "job": self._public_job_locked(job)}
+            if current_status == "paused":
+                return {"status": "paused", "job": self._public_job_locked(job)}
+            if current_status == "downloading":
+                job["pause_requested"] = True
+                event = self._cancel_events.get(job_id)
+                if event:
+                    event.set()
+                self._persist_state_locked()
+                snapshot = self._public_job_locked(job)
+                self._wake.set()
+                return {"status": "pausing", "job": snapshot}
+            job["status"] = "paused"
+            job["queue_position"] = None
+            job["reconnect_after_epoch"] = None
+            self._update_queue_positions_locked()
+            self._persist_state_locked()
+            snapshot = self._public_job_locked(job)
+        return {"status": "paused", "job": snapshot}
+
+    def resume_job(self, job_id: str) -> dict:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if not job:
+                return {"status": "not_found", "job_id": job_id}
+            if job.get("status") != "paused":
+                return {"status": "not_resumable", "job_id": job_id, "job": self._public_job_locked(job)}
+            job["status"] = "queued"
+            job["pause_requested"] = False
+            job["resume_reason"] = "Resumed by user"
+            self._update_queue_positions_locked()
+            self._persist_state_locked()
+            snapshot = self._public_job_locked(job)
+        self._wake.set()
+        return {"status": "queued", "job": snapshot}
+
+    @staticmethod
+    def _land_paused_locked(job: dict) -> None:
+        """Land an in-flight job that was asked to pause. Must be called under
+        self._lock. Mirrors the reconnect-reset shape (progress zeroed) since the
+        underlying transfer was aborted mid-flight, not resumed from an offset."""
+        job["status"] = "paused"
+        job["pause_requested"] = False
+        job["resume_reason"] = None
+        job["failure_reason"] = None
+        job["error_message"] = None
+        job["started_at"] = None
+        job["download_started_at"] = None
+        job["downloaded_bytes"] = 0
+        job["bytes_transferred"] = 0
+        job["percentage"] = 0
+        job["transfer_speed_bps"] = 0
+        job.pop("_started_mono", None)
 
     def retry(self, job_id: str) -> dict:
         with self._lock:
@@ -447,6 +828,7 @@ class DownloadManager:
             self._jobs[retry_id] = retry_job
             self._cancel_events[retry_id] = Event()
             self._update_queue_positions_locked()
+            self._persist_state_locked()
             snapshot = self._public_job_locked(retry_job)
         self._wake.set()
         return {"status": "queued", "job": snapshot, "retried_from_job_id": job_id}
@@ -477,7 +859,11 @@ class DownloadManager:
             jobs = [self._public_job_locked(job) for job in self._jobs.values()]
             paused = self._paused
         active = [job for job in jobs if job.get("status") == "downloading"]
-        queued = [job for job in jobs if job.get("status") == "queued"]
+        # 'pending' (no source peer yet) and 'paused' jobs are bucketed with
+        # 'queued' for transport/storage purposes (the relational schema's
+        # state_bucket only allows active/queued/recent) -- each row's own
+        # 'status' field still distinguishes them for display.
+        queued = [job for job in jobs if job.get("status") in {"queued", "pending", "paused"}]
         recent = [job for job in jobs if job.get("status") in DOWNLOAD_TERMINAL_STATUSES][-25:]
         estimate = self._queue_estimate(active, queued, recent, paused, self._concurrency)
         return {
@@ -560,11 +946,13 @@ class DownloadManager:
         it sooner)."""
         with self._lock:
             self._paused = True
+            self._persist_state_locked()
         return self.snapshot()
 
     def resume(self) -> dict:
         with self._lock:
             self._paused = False
+            self._persist_state_locked()
         self._wake.set()
         return self.snapshot()
 
@@ -587,6 +975,7 @@ class DownloadManager:
                         event.set()
                     cleared += 1
             self._update_queue_positions_locked()
+            self._persist_state_locked()
         result = self.snapshot()
         result["cleared"] = cleared
         return result
@@ -618,12 +1007,29 @@ class DownloadManager:
     def _worker(self) -> None:
         while True:
             job_id = None
+            pending_id = None
             with self._lock:
                 if not self._paused:
                     for candidate_id, candidate in self._jobs.items():
-                        if candidate.get("status") == "queued":
+                        reconnect_after = float(candidate.get("reconnect_after_epoch") or 0)
+                        if candidate.get("status") == "queued" and reconnect_after <= time.time():
                             job_id = candidate_id
                             break
+                    if job_id is None:
+                        # No real download ready to run -- use the spare capacity to
+                        # retry peer resolution for a 'pending' (no source yet) job.
+                        # _resolving guards against two worker threads claiming the
+                        # same pending job.
+                        for candidate_id, candidate in self._jobs.items():
+                            reconnect_after = float(candidate.get("reconnect_after_epoch") or 0)
+                            if (
+                                candidate.get("status") == "pending"
+                                and not candidate.get("_resolving")
+                                and reconnect_after <= time.time()
+                            ):
+                                pending_id = candidate_id
+                                candidate["_resolving"] = True
+                                break
                 if job_id:
                     job = self._jobs[job_id]
                     now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -631,12 +1037,101 @@ class DownloadManager:
                     job["started_at"] = now
                     job["download_started_at"] = now
                     job["_started_mono"] = time.monotonic()
+                    job["reconnect_after_epoch"] = None
+                    job["failure_reason"] = None
+                    job["error_message"] = None
+                    job["resume_reason"] = None
+                    self._refresh_connection_metadata_locked(job)
                     self._update_queue_positions_locked()
-            if not job_id:
-                self._wake.wait(1)
-                self._wake.clear()
+                    self._persist_state_locked()
+            if job_id:
+                self._run_job(job_id)
                 continue
-            self._run_job(job_id)
+            if pending_id:
+                self._retry_pending_job(pending_id)
+                continue
+            self._wake.wait(1)
+            self._wake.clear()
+
+    def _retry_pending_job(self, job_id: str) -> None:
+        """Attempt to resolve a source peer (and, for a gamelist-id-only ROM, its
+        path) for one 'pending' job. Promotes it to 'queued' on success, or bumps
+        its backoff and leaves it 'pending' on failure. Peer selection reads only
+        locally-cached state (no network I/O); gamelist-id resolution makes one
+        HTTP call to the chosen peer -- both run unlocked, matching _run_job."""
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if not job or job.get("status") != "pending":
+                if job is not None:
+                    job["_resolving"] = False
+                return
+            kind = str(job.get("_pending_kind") or "rom")
+            system = str(job.get("system") or "")
+            gamelist_id = str(job.get("_gamelist_id") or "")
+            rel = str(job.get("relative_path") or "")
+            config = job.get("_config") or {}
+            source_device_ids = set(job.get("_source_device_ids") or [])
+            expected_fingerprint = job.get("_expected_fingerprint")
+            attempt = int(job.get("pending_attempts") or 0) + 1
+
+        def _back_off() -> None:
+            with self._lock:
+                current = self._jobs.get(job_id)
+                if current and current.get("status") == "pending":
+                    current["pending_attempts"] = attempt
+                    current["reconnect_after_epoch"] = time.time() + self._reconnect_delay(attempt)
+                if current is not None:
+                    current["_resolving"] = False
+                self._persist_state_locked()
+
+        try:
+            peer = (
+                _best_peer_for_bios(self.settings, config, rel, source_device_ids=source_device_ids)
+                if kind == "bios"
+                else _best_peer_for_rom(self.settings, self.repository, config, system, rel, source_device_ids=source_device_ids)
+            )
+            if not peer:
+                _back_off()
+                return
+            marker_relative_path = None
+            artwork_types: list = []
+            if kind == "rom" and not rel and gamelist_id:
+                resolved = _resolve_rom_by_gamelist_id_from_peer(self.settings, config, peer, system, gamelist_id)
+                if not resolved or not resolved.get("relative_path"):
+                    _back_off()
+                    return
+                rel = str(resolved.get("relative_path") or "").strip()
+                marker_relative_path = str(resolved.get("marker_relative_path") or "").strip() or None
+                if not expected_fingerprint:
+                    expected_fingerprint = resolved.get("rom_fingerprint")
+                artwork_types = resolved.get("artwork_types") if isinstance(resolved.get("artwork_types"), list) else []
+            with self._lock:
+                job = self._jobs.get(job_id)
+                if not job or job.get("status") != "pending":
+                    if job is not None:
+                        job["_resolving"] = False
+                    return
+                peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
+                job["status"] = "queued"
+                job["source_drone_id"] = peer_id
+                job["relative_path"] = rel
+                job["file_path"] = rel or job.get("file_path")
+                job["file_name"] = Path(rel).name if rel else job.get("file_name")
+                job["rom_name"] = rel or job.get("rom_name")
+                job["_peer"] = peer
+                job["_expected_fingerprint"] = expected_fingerprint
+                if kind == "rom":
+                    job["_marker_relative_path"] = marker_relative_path
+                    job["_artwork_types"] = [str(v).strip() for v in (artwork_types or []) if str(v).strip()]
+                job["reconnect_after_epoch"] = None
+                job["failure_reason"] = None
+                job["resume_reason"] = "A source Drone became reachable"
+                job["_resolving"] = False
+                self._update_queue_positions_locked()
+                self._persist_state_locked()
+            self._wake.set()
+        except Exception:
+            _back_off()
 
     def _run_job(self, job_id: str) -> None:
         with self._lock:
@@ -679,6 +1174,8 @@ class DownloadManager:
                     self._last_download_state_push_at = now
                     should_push = True
             if should_push:
+                with self._lock:
+                    self._persist_state_locked()
                 self._push_download_state(config, "progress", force=True)
 
         try:
@@ -731,7 +1228,9 @@ class DownloadManager:
         except DownloadCancelled as error:
             with self._lock:
                 current = self._jobs.get(job_id)
-                if current:
+                if current and current.get("pause_requested"):
+                    self._land_paused_locked(current)
+                elif current:
                     current["status"] = "cancelled"
                     current["failure_reason"] = str(error) or current.get("cancel_reason") or "cancelled"
                     current["error_message"] = current["failure_reason"]
@@ -740,12 +1239,31 @@ class DownloadManager:
         except Exception as error:
             with self._lock:
                 current = self._jobs.get(job_id)
-                if current:
-                    current["status"] = "failed"
-                    current["failure_reason"] = str(error)
-                    current["error_message"] = str(error)
-                    current["completed_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-                    current["download_completed_at"] = current["completed_at"]
+                if current and current.get("pause_requested"):
+                    self._land_paused_locked(current)
+                elif current:
+                    if self._is_reconnectable_error(error) and not current.get("cancellation_requested"):
+                        attempt = int(current.get("reconnect_attempts") or 0) + 1
+                        delay = self._reconnect_delay(attempt)
+                        current["status"] = "queued"
+                        current["reconnect_attempts"] = attempt
+                        current["reconnect_after_epoch"] = time.time() + delay
+                        current["resume_reason"] = f"Source unavailable; reconnecting in {delay} seconds"
+                        current["failure_reason"] = str(error)
+                        current["error_message"] = str(error)
+                        current["started_at"] = None
+                        current["download_started_at"] = None
+                        current["downloaded_bytes"] = 0
+                        current["bytes_transferred"] = 0
+                        current["percentage"] = 0
+                        current["transfer_speed_bps"] = 0
+                        current.pop("_started_mono", None)
+                    else:
+                        current["status"] = "failed"
+                        current["failure_reason"] = str(error)
+                        current["error_message"] = str(error)
+                        current["completed_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+                        current["download_completed_at"] = current["completed_at"]
         finally:
             terminal_activity = None
             with self._lock:
@@ -753,7 +1271,11 @@ class DownloadManager:
                 if current and current.get("status") in DOWNLOAD_TERMINAL_STATUSES:
                     terminal_activity = self._public_job_locked(current)
                 self._update_queue_positions_locked()
-            self._push_download_state(config, "completed", force=True)
+                self._persist_state_locked()
+                reconnecting = bool(current and current.get("status") == "queued" and current.get("reconnect_attempts"))
+                paused = bool(current and current.get("status") == "paused")
+            push_reason = "paused" if paused else ("reconnecting" if reconnecting else "completed")
+            self._push_download_state(config, push_reason, force=True)
             if terminal_activity:
                 if _local_network.is_local_mode(self.settings):
                     _local_network.record_activity(self.settings, terminal_activity)

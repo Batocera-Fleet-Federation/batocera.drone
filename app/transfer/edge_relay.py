@@ -32,6 +32,7 @@ try:
     from .peer_download import _folder_rom_marker_state
     from .transfer_files import build_folder_manifest as _build_folder_manifest
     from .transfer_files import safe_rom_relative_path as _safe_rom_relative_path
+    from .upload_tracker import get_upload_tracker as _get_upload_tracker
 except ImportError:  # pragma: no cover - direct script execution fallback
     from app_version import drone_app_version as _drone_app_version  # type: ignore
     from common.settings import Settings  # type: ignore
@@ -48,6 +49,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from transfer.peer_download import _folder_rom_marker_state  # type: ignore
     from transfer.transfer_files import build_folder_manifest as _build_folder_manifest  # type: ignore
     from transfer.transfer_files import safe_rom_relative_path as _safe_rom_relative_path  # type: ignore
+    from transfer.upload_tracker import get_upload_tracker as _get_upload_tracker  # type: ignore
 
 # The running persistent Edge connection, exposed so the relay transport (sender serve +
 # receiver fetch) can multiplex transfers over it. Only edge_relay reads/writes it.
@@ -99,6 +101,20 @@ def _serve_transfer_offer(settings: Settings, client: "MuxClient", offer: dict) 
     offered_kind = str(asset.get("kind") or "")
     offered_rel = str(asset.get("relative_path") or "").replace("\\", "/").strip("/")
 
+    # Session-level tracking, not per-file: a folder ROM pulls its manifest plus
+    # every file inside over this one offer, and assetfetch doesn't expose
+    # per-FETCH progress up to this layer. Live byte-progress isn't tracked for
+    # this tier (relay is the last-resort fallback, after LAN/direct-public);
+    # the row still shows in the Uploads panel while the session runs and lands
+    # with a final byte total once it finishes.
+    tracker = _get_upload_tracker()
+    upload_id = tracker.start(
+        peer_device_id=str(offer.get("to_device") or "").strip() or None,
+        asset_type=offered_kind or "rom",
+        relative_path=offered_rel,
+        transport="relay",
+    )
+
     def resolve(requested_asset, offset):
         kind = str(requested_asset.get("kind") or "")
         requested_rel = str(requested_asset.get("relative_path") or "").replace("\\", "/").strip("/")
@@ -124,7 +140,14 @@ def _serve_transfer_offer(settings: Settings, client: "MuxClient", offer: dict) 
     try:
         result = _assetfetch.serve_session(transfer_channel, resolve)
         result["transport"] = "holepunch" if is_direct else "relay"
+        tracker.finish(
+            upload_id,
+            "completed" if result.get("status") == "completed" else "cancelled",
+        )
         return result
+    except Exception as error:
+        tracker.finish(upload_id, "failed", error=str(error))
+        raise
     finally:
         if is_direct:
             try:

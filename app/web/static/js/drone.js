@@ -1902,15 +1902,17 @@ function renderQueueEta(payload) {
 function renderDownloadRows(rows, allowCancel = true, options = {}) {
   if (!rows.length) return `<div class="themed-empty">${escapeHtml(options.emptyText || "No downloads in this group.")}</div>`;
   const includeStarted = options.includeStarted !== false;
-  const usePendingLabel = options.usePendingLabel === true;
   return `<div class="table-responsive"><table class="table table-sm table-hover align-middle themed-table download-table bff-stack">
     <thead><tr><th>Status</th><th>Source</th><th>File</th><th>System</th><th>Progress</th><th>Speed</th>${includeStarted ? "<th>Started</th>" : ""}<th>Actions</th></tr></thead>
     <tbody>${rows.map(row => {
       const pct = Number(row.percentage || 0);
-      const active = ["queued", "downloading"].includes(String(row.status || ""));
-      const retryable = ["failed", "cancelled"].includes(String(row.status || ""));
-      const statusClass = row.status === "failed" ? "danger" : row.status === "completed" ? "success" : row.status === "cancelled" ? "secondary" : row.status === "downloading" ? "info" : "primary";
-      const displayStatus = usePendingLabel && row.status === "queued" ? "pending" : (row.status || "queued");
+      const status = String(row.status || "");
+      const cancelable = ["queued", "downloading", "pending", "paused"].includes(status);
+      const pausable = ["queued", "pending", "downloading"].includes(status);
+      const resumable = status === "paused";
+      const retryable = ["failed", "cancelled"].includes(status);
+      const statusClass = status === "failed" ? "danger" : status === "completed" ? "success" : status === "cancelled" ? "secondary" : status === "downloading" ? "info" : status === "paused" ? "warning" : status === "pending" ? "dark" : "primary";
+      const displayStatus = status || "queued";
       const filePath = row.file_path || row.relative_path || row.rom_name || "";
       const errorText = row.error_message || row.failure_reason || "";
       const jobId = escapeHtml(row.job_id || row.id || "");
@@ -1923,7 +1925,9 @@ function renderDownloadRows(rows, allowCancel = true, options = {}) {
         ? ` <span class="badge text-bg-warning" title="${escapeHtml(`Artwork copied but not linked: ${gamelistError}`)}"><i class="bi bi-exclamation-triangle me-1"></i>gamelist not linked</span>`
         : "";
       const actions = [
-        allowCancel && active && jobId ? `<button class="btn btn-sm btn-outline-danger" title="Cancel download" aria-label="Cancel download" onclick="cancelDroneDownload('${jobId}')"><i class="bi bi-x-circle"></i></button>` : "",
+        allowCancel && cancelable && jobId ? `<button class="btn btn-sm btn-outline-danger" title="Cancel download" aria-label="Cancel download" onclick="cancelDroneDownload('${jobId}')"><i class="bi bi-x-circle"></i></button>` : "",
+        pausable && jobId ? `<button class="btn btn-sm btn-outline-warning" title="Pause download" aria-label="Pause download" onclick="pauseDroneDownload('${jobId}')"><i class="bi bi-pause-fill"></i></button>` : "",
+        resumable && jobId ? `<button class="btn btn-sm btn-outline-success" title="Resume download" aria-label="Resume download" onclick="resumeDroneDownload('${jobId}')"><i class="bi bi-play-fill"></i></button>` : "",
         retryable && jobId ? `<button class="btn btn-sm btn-outline-primary" title="Retry download" aria-label="Retry download" onclick="retryDroneDownload('${jobId}')"><i class="bi bi-arrow-clockwise"></i></button>` : "",
       ].filter(Boolean).join(" ");
       return `<tr>
@@ -1937,6 +1941,45 @@ function renderDownloadRows(rows, allowCancel = true, options = {}) {
         <td>${actions}</td>
       </tr>`;
     }).join("")}</tbody></table></div>`;
+}
+
+function renderUploadRows(rows) {
+  if (!rows.length) return `<div class="themed-empty">No uploads in this group.</div>`;
+  return `<div class="table-responsive"><table class="table table-sm table-hover align-middle themed-table download-table bff-stack">
+    <thead><tr><th>Status</th><th>Peer</th><th>File</th><th>System</th><th>Progress</th><th>Speed</th><th>Transport</th></tr></thead>
+    <tbody>${rows.map(row => {
+      const pct = Number(row.percentage || 0);
+      const status = String(row.status || "uploading");
+      const statusClass = status === "failed" ? "danger" : status === "completed" ? "success" : status === "cancelled" ? "secondary" : "info";
+      const filePath = row.file_path || row.relative_path || row.file_name || "";
+      const errorText = row.error_message || "";
+      const progressText = row.total_bytes
+        ? `${pct.toFixed(1)}% (${formatBytes(row.bytes_transferred)} / ${formatBytes(row.total_bytes)})`
+        : formatBytes(row.bytes_transferred);
+      return `<tr>
+        <td><span class="badge text-bg-${statusClass}" title="${escapeHtml(errorText)}">${escapeHtml(status)}</span></td>
+        <td class="small mono">${escapeHtml(row.peer_device_id || "unknown peer")}</td>
+        <td class="small mono download-file" title="${escapeHtml(errorText)}">${escapeHtml(filePath)}</td>
+        <td class="small">${escapeHtml(row.system || "")}</td>
+        <td class="small text-nowrap">${progressText}</td>
+        <td class="small">${row.transfer_speed_bps ? `${formatBytes(row.transfer_speed_bps)}/s` : ""}</td>
+        <td class="small text-muted">${escapeHtml(row.transport || "")}</td>
+      </tr>`;
+    }).join("")}</tbody></table></div>`;
+}
+
+function renderUploadsPanel(payload) {
+  const active = payload.active || [];
+  const recent = payload.recent || [];
+  return `
+    <div class="download-section">
+      <div class="download-section-title"><span><i class="bi bi-cloud-arrow-up me-2"></i>Active</span><span class="badge text-bg-info">${active.length}</span></div>
+      ${renderUploadRows(active)}
+    </div>
+    <div class="download-section mt-3 mb-0">
+      <div class="download-section-title"><span><i class="bi bi-clock-history me-2"></i>Recent</span><span class="badge text-bg-secondary">${recent.length}</span></div>
+      ${renderUploadRows(recent)}
+    </div>`;
 }
 
 function renderDownloadsPanel(payload, includeHeader = true) {
@@ -2026,7 +2069,7 @@ function renderTransfersPanel(payload) {
   const recentPager = renderTransferPager("recent", "Recent", recent);
   return `${renderQueueEta(transferPayload)}${renderTransferControls(transferPayload, active, queued)}
     ${currentPager.html}
-    ${renderDownloadRows(currentPager.page.rows, true, { includeStarted: false, usePendingLabel: true, emptyText: "No pending or downloading transfers." })}
+    ${renderDownloadRows(currentPager.page.rows, true, { includeStarted: false, emptyText: "No pending or downloading transfers." })}
     <div class="download-section mt-3 mb-0">
       <div class="download-section-title"><span><i class="bi bi-clock-history me-2"></i>Recent</span><span class="badge text-bg-secondary">${recentPager.page.total}</span></div>
       ${recentPager.html}
@@ -2071,6 +2114,18 @@ async function cancelDroneDownload(jobId) {
 async function retryDroneDownload(jobId) {
   if (!jobId) return;
   await apiPost(`/admin/downloads/${encodeURIComponent(jobId)}/retry`, {});
+  await refreshDownloadsView();
+}
+
+async function pauseDroneDownload(jobId) {
+  if (!jobId) return;
+  await apiPost(`/admin/downloads/${encodeURIComponent(jobId)}/pause`, {});
+  await refreshDownloadsView();
+}
+
+async function resumeDroneDownload(jobId) {
+  if (!jobId) return;
+  await apiPost(`/admin/downloads/${encodeURIComponent(jobId)}/resume`, {});
   await refreshDownloadsView();
 }
 
@@ -3775,6 +3830,11 @@ async function renderIntegrationTransfersPanel(target) {
       </div>
       <div class="small text-muted px-3 pt-3">All drone-to-drone asset transfers to this machine, whether started from Overmind or Local Network.</div>
       <div class="card-body" id="transfersBody"><div class="text-muted">Loading transfers...</div></div>
+    </div>
+    <div class="card log-card mt-3">
+      <div class="card-header"><i class="bi bi-cloud-arrow-up me-2"></i>Uploads</div>
+      <div class="small text-muted px-3 pt-3">Assets this Drone is currently serving -- or recently served -- to peers.</div>
+      <div class="card-body" id="uploadsBody"><div class="text-muted">Loading uploads...</div></div>
     </div>`;
 
   async function loadTransfers() {
@@ -3782,10 +3842,17 @@ async function renderIntegrationTransfersPanel(target) {
     const body = document.getElementById("transfersBody");
     if (body) body.innerHTML = renderTransfersPanel(payload);
   }
-  window.refreshTransfers = loadTransfers;
+  async function loadUploads() {
+    const payload = await api("/admin/uploads");
+    const body = document.getElementById("uploadsBody");
+    if (body) body.innerHTML = renderUploadsPanel(payload);
+  }
+  window.refreshTransfers = async () => {
+    await Promise.allSettled([loadTransfers(), loadUploads()]);
+  };
   document.getElementById("transfersRefreshBtn").addEventListener("click", async () => {
     try {
-      await loadTransfers();
+      await window.refreshTransfers();
     } catch (err) {
       showToast(`Failed to load transfers: ${escapeHtml(err.message || "unknown error")}`, "danger");
     }
@@ -3794,6 +3861,7 @@ async function renderIntegrationTransfersPanel(target) {
   await Promise.allSettled([
     renderLocalTransferRequestPanel(document.getElementById("localTransferRequestPanel")),
     loadTransfers(),
+    loadUploads(),
   ]);
 }
 

@@ -252,6 +252,10 @@ class ApiRoutesMixin:
                 self._handle_admin_downloads()
                 return
 
+            if len(parts) == 2 and parts[0] == "admin" and parts[1] == "uploads":
+                self._handle_admin_uploads()
+                return
+
             if len(parts) == 2 and parts[0] == "admin" and parts[1] == "asset-cache":
                 self._handle_admin_asset_cache()
                 return
@@ -533,6 +537,14 @@ class ApiRoutesMixin:
 
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "downloads" and parts[3] == "retry":
                 self._handle_admin_download_retry(parts[2])
+                return
+
+            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "downloads" and parts[3] == "pause":
+                self._handle_admin_download_pause(parts[2])
+                return
+
+            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "downloads" and parts[3] == "resume":
+                self._handle_admin_download_resume(parts[2])
                 return
 
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "downloads" and parts[2] == "pause":

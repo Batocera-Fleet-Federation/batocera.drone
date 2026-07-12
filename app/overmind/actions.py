@@ -178,6 +178,22 @@ def _execute_overmind_action(
             return "completed", "BIOS sync skipped because matching file already exists.", result
         peer = _best_peer_for_bios(settings, config, rel, source_device_ids=source_device_ids)
         if not peer:
+            if source_device_ids:
+                # Overmind named at least one Drone that has this BIOS; none is
+                # reachable right now. Hold it 'pending' instead of failing outright
+                # -- the download manager's worker retries resolution until one
+                # answers (see DownloadManager._retry_pending_job).
+                activity = manager.enqueue_pending_bios(
+                    config,
+                    rel,
+                    expected_size=payload.get("file_size"),
+                    expected_md5=expected_md5,
+                    source_action_id=str(action.get("id") or ""),
+                    sync_id=sync_id,
+                    source_device_ids=source_device_ids,
+                )
+                activity["sync_id"] = sync_id
+                return "completed", "BIOS sync is pending a reachable source Drone.", {"type": "bios_sync", "activity": [activity]}
             result = {
                 "type": "bios_sync",
                 "activity": [{
@@ -334,6 +350,27 @@ def _execute_overmind_action(
                 continue
             peer = _best_peer_for_rom(settings, repository, config, system, rel, source_device_ids=source_device_ids)
             if not peer:
+                if source_device_ids:
+                    # Overmind named at least one Drone that has this ROM; none is
+                    # reachable right now. Hold it 'pending' instead of failing --
+                    # the download manager's worker retries resolution (and, if only
+                    # a gamelist_id was given, path resolution) until one answers.
+                    activity = manager.enqueue_pending_rom(
+                        config,
+                        system,
+                        gamelist_id=gamelist_id,
+                        relative_path=rel,
+                        expected_size=item.get("file_size"),
+                        expected_fingerprint=expected_fingerprint,
+                        source_action_id=str(action.get("id") or ""),
+                        entry_type=entry_type,
+                        sync_id=sync_id,
+                        source_device_ids=source_device_ids,
+                    )
+                    activity["sync_id"] = sync_id
+                    activity["entry_type"] = activity.get("entry_type") or entry_type
+                    activities.append(activity)
+                    continue
                 failures += 1
                 activity = {
                     "sync_id": sync_id,
@@ -441,6 +478,30 @@ def _execute_overmind_action(
         result = manager.cancel(job_id, "cancelled from Overmind")
         status_value = "completed" if result.get("status") != "not_found" else "failed"
         return status_value, f"Cancel request for download {job_id}: {result.get('status')}.", {"type": "download_cancel", **result}
+
+    if action_name == "pause_download":
+        payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
+        job_id = str(payload.get("job_id") or payload.get("download_id") or "").strip()
+        if not job_id:
+            return "failed", "job_id is required.", None
+        manager = _get_download_manager()
+        if manager is None:
+            return "failed", "Download manager is not available.", None
+        result = manager.pause_job(job_id)
+        status_value = "completed" if result.get("status") not in {"not_found", "not_pausable"} else "failed"
+        return status_value, f"Pause request for download {job_id}: {result.get('status')}.", {"type": "download_pause", **result}
+
+    if action_name == "resume_download":
+        payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
+        job_id = str(payload.get("job_id") or payload.get("download_id") or "").strip()
+        if not job_id:
+            return "failed", "job_id is required.", None
+        manager = _get_download_manager()
+        if manager is None:
+            return "failed", "Download manager is not available.", None
+        result = manager.resume_job(job_id)
+        status_value = "completed" if result.get("status") not in {"not_found", "not_resumable"} else "failed"
+        return status_value, f"Resume request for download {job_id}: {result.get('status')}.", {"type": "download_resume", **result}
 
     if action_name == "shutdown":
         return "failed", "Unsupported action: shutdown is disabled by Overmind safety policy.", None

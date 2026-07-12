@@ -6,6 +6,7 @@ downloads + manifests + inventory, plus peer pairing/health. Composed onto
 helpers + ``self.repository``/``self.settings``). See the ``drone-p2p-transfer-security`` skill.
 """
 
+import hashlib
 import json
 import socket
 import ssl
@@ -29,6 +30,7 @@ try:
     from ..transfer.network_identity import drone_scheme as _drone_scheme
     from ..transfer.peer_connectivity import _public_local_peer, _save_local_peer_certificate
     from ..transfer.transfer_files import build_folder_manifest as _build_folder_manifest
+    from ..transfer.upload_tracker import get_upload_tracker as _get_upload_tracker
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.auth import record_unauthorized_response  # type: ignore
     from overmind.overmind_game_logs import load_gameplay_history as _load_gameplay_history  # type: ignore
@@ -44,6 +46,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from transfer.network_identity import drone_scheme as _drone_scheme  # type: ignore
     from transfer.peer_connectivity import _public_local_peer, _save_local_peer_certificate  # type: ignore
     from transfer.transfer_files import build_folder_manifest as _build_folder_manifest  # type: ignore
+    from transfer.upload_tracker import get_upload_tracker as _get_upload_tracker  # type: ignore
 
 
 class HandlersPeerMixin:
@@ -295,7 +298,10 @@ class HandlersPeerMixin:
             self._send_json(404, {"error": "not found"})
             return
         self.log_message("peer rom download system=%s rom=%s bytes=%s", system, rel, target.stat().st_size)
-        self._stream_file(target, "application/octet-stream", as_attachment=True)
+        self._stream_file(
+            target, "application/octet-stream", as_attachment=True,
+            upload_meta={"asset_type": "rom", "system": system, "relative_path": rel},
+        )
 
     def _handle_peer_rom_resolve_by_id(self, system: str, gamelist_id: str) -> None:
         """Resolve a ROM by its gamelist ``<game id>`` to the sender's local path.
@@ -397,7 +403,10 @@ class HandlersPeerMixin:
             self._send_json(404, {"error": "not found"})
             return
         self.log_message("peer bios download bios=%s bytes=%s", rel, target.stat().st_size)
-        self._stream_file(target, "application/octet-stream", as_attachment=True)
+        self._stream_file(
+            target, "application/octet-stream", as_attachment=True,
+            upload_meta={"asset_type": "bios", "relative_path": rel},
+        )
 
     def _handle_peer_save_download(self, system: str, relative_path: str) -> None:
         """Serve a single game-save file to an authenticated peer (mTLS when enabled)."""
@@ -415,7 +424,10 @@ class HandlersPeerMixin:
             self._send_json(404, {"error": "not found"})
             return
         self.log_message("peer save download system=%s save=%s bytes=%s", system_clean, rel, target.stat().st_size)
-        self._stream_file(target, "application/octet-stream", as_attachment=True)
+        self._stream_file(
+            target, "application/octet-stream", as_attachment=True,
+            upload_meta={"asset_type": "saves", "system": system_clean, "relative_path": rel},
+        )
 
     def _handle_peer_artwork_download(self, system: str, artwork_type: str, rom_path: str) -> None:
         if not self._peer_request_authorized():
@@ -434,9 +446,34 @@ class HandlersPeerMixin:
             "application/octet-stream",
             as_attachment=True,
             extra_headers={"X-Asset-Relative-Path": relative_path, "X-Gamelist-Reference": gamelist_ref},
+            upload_meta={"asset_type": "artwork", "system": system, "relative_path": relative_path},
         )
 
-    def _stream_file(self, path: Path, content_type: str, as_attachment: bool = False, extra_headers: Optional[dict] = None) -> None:
+    def _peer_requester_device_id(self) -> Optional[str]:
+        """Best-effort identity of the peer on the other end of this mTLS
+        connection, for upload-activity display only -- the authorization
+        decision has already been made by _peer_request_authorized. Returns
+        None when it can't be determined (e.g. local HTTP-only mode)."""
+        try:
+            der = self.connection.getpeercert(binary_form=True) if hasattr(self.connection, "getpeercert") else None
+        except Exception:
+            der = None
+        if not der:
+            return None
+        fingerprint = hashlib.sha256(der).hexdigest().lower()
+        for peer in _local_network.paired_peers(self.settings):
+            if str(peer.get("certificate_fingerprint") or "").strip().lower() == fingerprint:
+                return str(peer.get("drone_id") or "") or None
+        return None
+
+    def _stream_file(
+        self,
+        path: Path,
+        content_type: str,
+        as_attachment: bool = False,
+        extra_headers: Optional[dict] = None,
+        upload_meta: Optional[dict] = None,
+    ) -> None:
         file_size = path.stat().st_size
         self.send_response(200)
         self.send_header("Content-Type", content_type)
@@ -448,12 +485,34 @@ class HandlersPeerMixin:
             self.send_header(str(key), str(value))
         self.end_headers()
 
-        with path.open("rb") as handle:
-            while True:
-                chunk = handle.read(1024 * 1024)
-                if not chunk:
-                    break
-                self.wfile.write(chunk)
+        tracker = _get_upload_tracker()
+        upload_id = None
+        if upload_meta is not None:
+            upload_id = tracker.start(
+                peer_device_id=self._peer_requester_device_id(),
+                asset_type=str(upload_meta.get("asset_type") or "rom"),
+                relative_path=str(upload_meta.get("relative_path") or path.name),
+                system=upload_meta.get("system"),
+                transport="direct",
+                total_bytes=file_size,
+            )
+        sent = 0
+        try:
+            with path.open("rb") as handle:
+                while True:
+                    chunk = handle.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    sent += len(chunk)
+                    if upload_id:
+                        tracker.progress(upload_id, sent)
+            if upload_id:
+                tracker.finish(upload_id, "completed")
+        except Exception as error:
+            if upload_id:
+                tracker.finish(upload_id, "failed", error=str(error))
+            raise
 
     def _stream_cached_image(self, path: Path) -> None:
         key = str(path)

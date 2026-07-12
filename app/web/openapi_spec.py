@@ -259,6 +259,27 @@ def _schemas() -> Dict[str, Schema]:
         description="Local Network or Overmind download job.",
     )
 
+    upload_job = _object(
+        {
+            "upload_id": _string("Upload identifier"),
+            "peer_device_id": _string("Requesting peer Drone identifier"),
+            "status": _string("Upload status"),
+            "asset_type": _string("Machine-readable asset type"),
+            "system": _string("Batocera system key"),
+            "relative_path": _string("Source relative path"),
+            "file_name": _string("Display file name"),
+            "transport": _string("Serving tier: direct or relay"),
+            "total_bytes": _integer(),
+            "bytes_transferred": _integer(),
+            "percentage": _number(),
+            "transfer_speed_bps": _number(),
+            "started_at": _string(fmt="date-time"),
+            "completed_at": _string(fmt="date-time"),
+            "error_message": _string(),
+        },
+        description="An asset this Drone is serving (or recently served) to a peer.",
+    )
+
     certificate_metadata = _object(
         {
             "status": _string("Certificate load/generation status"),
@@ -477,6 +498,15 @@ def _schemas() -> Dict[str, Schema]:
         "DownloadActionResponse": _object(
             {"status": _string(), "job": _ref("DownloadJob"), "job_id": _string(), "message": _string(), "downloads": _array(_ref("DownloadJob"))},
             description="Download queue mutation result.",
+        ),
+        "UploadJob": upload_job,
+        "AdminUploadsResponse": _object(
+            {
+                "target_drone_id": _string(),
+                "active": _array(_ref("UploadJob")),
+                "recent": _array(_ref("UploadJob")),
+            },
+            description="Upload activity snapshot: assets currently being served to peers, plus recently finished sends.",
         ),
         "AssetCacheResponse": _object(
             {
@@ -1034,9 +1064,16 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             "/admin/downloads/{job_id}/retry": {
                 "post": _operation("Retry a failed download job", {"200": _json_response("DownloadActionResponse"), "404": _json_response("DownloadActionResponse", "Job not found"), "409": _json_response("DownloadActionResponse", "Job is not retryable")}, parameters=[_path_param("job_id")], tags=["admin", "downloads"], error_codes=("400", "401", "403", "429", "500", "503"))
             },
+            "/admin/downloads/{job_id}/pause": {
+                "post": _operation("Pause a single download job", {"200": _json_response("DownloadActionResponse"), "404": _json_response("DownloadActionResponse", "Job not found"), "409": _json_response("DownloadActionResponse", "Job is not pausable")}, parameters=[_path_param("job_id")], tags=["admin", "downloads"], error_codes=("400", "401", "403", "429", "500", "503"))
+            },
+            "/admin/downloads/{job_id}/resume": {
+                "post": _operation("Resume a single paused download job", {"200": _json_response("DownloadActionResponse"), "404": _json_response("DownloadActionResponse", "Job not found"), "409": _json_response("DownloadActionResponse", "Job is not resumable")}, parameters=[_path_param("job_id")], tags=["admin", "downloads"], error_codes=("400", "401", "403", "429", "500", "503"))
+            },
             "/admin/downloads/pause": {"post": _operation("Pause download processing", {"200": _json_response("DownloadActionResponse")}, tags=["admin", "downloads"], error_codes=("401", "403", "429", "500", "503"))},
             "/admin/downloads/resume": {"post": _operation("Resume download processing", {"200": _json_response("DownloadActionResponse")}, tags=["admin", "downloads"], error_codes=("401", "403", "429", "500", "503"))},
             "/admin/downloads/clear": {"post": _operation("Clear completed and failed downloads", {"200": _json_response("DownloadActionResponse")}, tags=["admin", "downloads"], error_codes=("401", "403", "429", "500", "503"))},
+            "/admin/uploads": {"get": _operation("Get upload activity snapshot", {"200": _json_response("AdminUploadsResponse", "Assets currently being served to peers")}, tags=["admin", "downloads"])},
             "/admin/asset-cache": {"get": _operation("Get ROM, BIOS, and artwork asset cache progress", {"200": _json_response("AssetCacheResponse")}, tags=["admin"])},
             "/admin/asset-cache/purge": {"post": _operation("Purge cached asset metadata while keeping fingerprints", {"200": _json_response("AssetCachePurgeResponse")}, tags=["admin"])},
             "/admin/asset-cache/clear-pending": {"post": _operation("Clear pending asset metadata upload changes", {"200": _json_response("AssetCacheClearPendingResponse")}, tags=["admin"])},

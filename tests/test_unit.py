@@ -8,6 +8,7 @@ import socket
 import sqlite3
 import subprocess
 import tempfile
+import time
 import unittest
 from threading import Event
 from unittest import mock
@@ -1307,6 +1308,341 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(len(snapshot["queued"]), 1)
             self.assertEqual(snapshot["queued"][0]["job_id"], retry["job"]["job_id"])
 
+    def test_download_manager_restores_interrupted_jobs_after_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "USERDATA_ROOT": str(root),
+                    "ROMS_ROOT": str(root / "roms"),
+                    "BIOS_ROOT": str(root / "bios"),
+                    "OVERMIND_DEVICE_ID": "target-a",
+                },
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            repo = RomRepository(root / "roms", root / "bios")
+            with mock.patch("app.transfer.download_manager.Thread.start"):
+                first_manager = DownloadManager(settings, repo)
+                queued = first_manager.enqueue_rom(
+                    {"overmind_url": "https://overmind.local", "overmind_token": "token"},
+                    {"drone_id": "source-a", "reachable_url": "https://source-a.local"},
+                    "snes",
+                    "Game.zip",
+                    expected_size=100,
+                )
+                with first_manager._lock:
+                    interrupted = first_manager._jobs[queued["job_id"]]
+                    interrupted["status"] = "downloading"
+                    interrupted["downloaded_bytes"] = 60
+                    interrupted["bytes_transferred"] = 60
+                    first_manager._persist_state_locked()
+                restored_manager = DownloadManager(settings, repo)
+
+            restored = restored_manager.snapshot()["queued"]
+            self.assertEqual(len(restored), 1)
+            self.assertEqual(restored[0]["job_id"], queued["job_id"])
+            self.assertEqual(restored[0]["downloaded_bytes"], 0)
+            self.assertIn("restarted", restored[0]["resume_reason"])
+
+    def test_download_manager_preserves_manual_pause_across_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "USERDATA_ROOT": str(root),
+                    "ROMS_ROOT": str(root / "roms"),
+                    "BIOS_ROOT": str(root / "bios"),
+                    "OVERMIND_DEVICE_ID": "target-a",
+                },
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            repo = RomRepository(root / "roms", root / "bios")
+            with mock.patch("app.transfer.download_manager.Thread.start"):
+                first_manager = DownloadManager(settings, repo)
+                first_manager.enqueue_rom({}, {"drone_id": "source-a"}, "snes", "Game.zip")
+                first_manager.pause()
+                restored_manager = DownloadManager(settings, repo)
+            self.assertTrue(restored_manager.snapshot()["paused"])
+            self.assertEqual(len(restored_manager.snapshot()["queued"]), 1)
+
+    def _make_download_manager(self, root: Path, extra_env: dict = None) -> "DownloadManager":
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "USERDATA_ROOT": str(root),
+                "ROMS_ROOT": str(root / "roms"),
+                "BIOS_ROOT": str(root / "bios"),
+                "OVERMIND_DEVICE_ID": "target-a",
+                **(extra_env or {}),
+            },
+            clear=True,
+        ):
+            settings = Settings.from_env()
+        repo = RomRepository(root / "roms", root / "bios")
+        with mock.patch("app.transfer.download_manager.Thread.start"):
+            return DownloadManager(settings, repo)
+
+    def test_download_manager_pending_job_visible_in_queued_bucket(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = self._make_download_manager(Path(tmp) / "userdata")
+            pending = manager.enqueue_pending_rom(
+                {}, "snes", relative_path="Game.zip", sync_id="sync-1", source_device_ids={"source-a"},
+            )
+            self.assertEqual(pending["status"], "pending")
+            snapshot = manager.snapshot()
+            self.assertEqual([job["job_id"] for job in snapshot["queued"]], [pending["job_id"]])
+            self.assertEqual(snapshot["queued"][0]["sync_id"], "sync-1")
+            self.assertEqual(snapshot["active"], [])
+            self.assertEqual(snapshot["recent"], [])
+
+    def test_download_manager_retry_pending_job_promotes_to_queued_when_peer_found(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = self._make_download_manager(Path(tmp) / "userdata")
+            pending = manager.enqueue_pending_rom(
+                {}, "snes", relative_path="Game.zip", expected_size=100, source_device_ids={"source-a"},
+            )
+            peer = {"drone_id": "source-a", "reachable_url": "https://source-a.local"}
+            with mock.patch("app.transfer.download_manager._best_peer_for_rom", return_value=peer):
+                manager._retry_pending_job(pending["job_id"])
+            job = manager.snapshot()["queued"][0]
+            self.assertEqual(job["status"], "queued")
+            self.assertEqual(job["source_drone_id"], "source-a")
+            self.assertEqual(job["relative_path"], "Game.zip")
+            self.assertIn("reachable", job["resume_reason"])
+
+    def test_download_manager_retry_pending_job_resolves_gamelist_id_once_peer_found(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = self._make_download_manager(Path(tmp) / "userdata")
+            pending = manager.enqueue_pending_rom(
+                {}, "snes", gamelist_id="game-42", source_device_ids={"source-a"},
+            )
+            peer = {"drone_id": "source-a", "reachable_url": "https://source-a.local"}
+            resolved = {"relative_path": "Resolved/Game.zip", "marker_relative_path": None, "rom_fingerprint": "abc123", "artwork_types": ["screenshot"]}
+            with mock.patch("app.transfer.download_manager._best_peer_for_rom", return_value=peer), \
+                 mock.patch("app.transfer.download_manager._resolve_rom_by_gamelist_id_from_peer", return_value=resolved):
+                manager._retry_pending_job(pending["job_id"])
+            job = manager.snapshot()["queued"][0]
+            self.assertEqual(job["status"], "queued")
+            self.assertEqual(job["relative_path"], "Resolved/Game.zip")
+            with manager._lock:
+                stored = manager._jobs[pending["job_id"]]
+                self.assertEqual(stored["_expected_fingerprint"], "abc123")
+                self.assertEqual(stored["_artwork_types"], ["screenshot"])
+
+    def test_download_manager_retry_pending_job_backs_off_when_still_no_peer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = self._make_download_manager(Path(tmp) / "userdata")
+            pending = manager.enqueue_pending_rom({}, "snes", relative_path="Game.zip")
+            with mock.patch("app.transfer.download_manager._best_peer_for_rom", return_value=None):
+                manager._retry_pending_job(pending["job_id"])
+            snapshot = manager.snapshot()
+            self.assertEqual(len(snapshot["queued"]), 1)
+            job = snapshot["queued"][0]
+            self.assertEqual(job["status"], "pending")
+            self.assertEqual(job["pending_attempts"], 1)
+            self.assertGreater(job["reconnect_after_epoch"], time.time())
+            with manager._lock:
+                self.assertFalse(manager._jobs[pending["job_id"]]["_resolving"])
+
+    def test_download_manager_pending_bios_job_resolves(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = self._make_download_manager(Path(tmp) / "userdata")
+            pending = manager.enqueue_pending_bios({}, "bios.bin", expected_md5="deadbeef", source_device_ids={"source-a"})
+            self.assertEqual(pending["status"], "pending")
+            peer = {"drone_id": "source-a"}
+            with mock.patch("app.transfer.download_manager._best_peer_for_bios", return_value=peer):
+                manager._retry_pending_job(pending["job_id"])
+            job = manager.snapshot()["queued"][0]
+            self.assertEqual(job["status"], "queued")
+            self.assertEqual(job["source_drone_id"], "source-a")
+
+    def test_download_manager_cancel_pending_job_lands_immediately(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = self._make_download_manager(Path(tmp) / "userdata")
+            pending = manager.enqueue_pending_rom({}, "snes", relative_path="Game.zip")
+            result = manager.cancel(pending["job_id"])
+            self.assertEqual(result["status"], "cancelled")
+            snapshot = manager.snapshot()
+            self.assertEqual(snapshot["queued"], [])
+            self.assertEqual(snapshot["recent"][0]["status"], "cancelled")
+
+    def test_download_manager_pause_and_resume_queued_job(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = self._make_download_manager(Path(tmp) / "userdata")
+            queued = manager.enqueue_rom({}, {"drone_id": "source-a"}, "snes", "Game.zip")
+            result = manager.pause_job(queued["job_id"])
+            self.assertEqual(result["status"], "paused")
+            snapshot = manager.snapshot()
+            self.assertEqual(len(snapshot["queued"]), 1)
+            self.assertEqual(snapshot["queued"][0]["status"], "paused")
+            self.assertIsNone(snapshot["queued"][0]["queue_position"])
+
+            resumed = manager.resume_job(queued["job_id"])
+            self.assertEqual(resumed["status"], "queued")
+            snapshot = manager.snapshot()
+            self.assertEqual(snapshot["queued"][0]["status"], "queued")
+            self.assertEqual(snapshot["queued"][0]["queue_position"], 1)
+
+    def test_download_manager_pause_downloading_job_lands_paused_on_next_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = self._make_download_manager(Path(tmp) / "userdata")
+            queued = manager.enqueue_rom({}, {"drone_id": "source-a"}, "snes", "Game.zip")
+            job_id = queued["job_id"]
+            with manager._lock:
+                job = manager._jobs[job_id]
+                job["status"] = "downloading"
+                job["downloaded_bytes"] = 42
+                job["bytes_transferred"] = 42
+
+            pause_result = manager.pause_job(job_id)
+            self.assertEqual(pause_result["status"], "pausing")
+            with manager._lock:
+                self.assertTrue(manager._jobs[job_id]["pause_requested"])
+                self.assertTrue(manager._cancel_events[job_id].is_set())
+
+            # Simulate the in-flight fetch observing the cancellation event and
+            # raising, as the real transports do -- _run_job must land it
+            # 'paused' (not 'cancelled'/'failed') because pause_requested is set.
+            with mock.patch.object(manager._selector, "fetch", side_effect=DownloadCancelled("stopped for pause")), \
+                 mock.patch("app.transfer.download_manager._post_download_state"), \
+                 mock.patch("app.transfer.download_manager._post_rom_sync_activity") as post_activity:
+                manager._run_job(job_id)
+
+            snapshot = manager.snapshot()
+            self.assertEqual(len(snapshot["queued"]), 1)
+            self.assertEqual(snapshot["queued"][0]["status"], "paused")
+            self.assertEqual(snapshot["queued"][0]["downloaded_bytes"], 0)
+            post_activity.assert_not_called()  # pausing is not a terminal sync-activity event
+
+            resumed = manager.resume_job(job_id)
+            self.assertEqual(resumed["status"], "queued")
+
+    def test_download_manager_pause_not_allowed_on_terminal_job(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = self._make_download_manager(Path(tmp) / "userdata")
+            queued = manager.enqueue_rom({}, {"drone_id": "source-a"}, "snes", "Game.zip")
+            manager.cancel(queued["job_id"])
+            result = manager.pause_job(queued["job_id"])
+            self.assertEqual(result["status"], "not_pausable")
+
+    def test_download_manager_restart_preserves_pending_and_paused_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            first_manager = self._make_download_manager(root)
+            pending = first_manager.enqueue_pending_rom({}, "snes", relative_path="Pending.zip", source_device_ids={"source-a"})
+            queued = first_manager.enqueue_rom({}, {"drone_id": "source-a"}, "snes", "Paused.zip")
+            first_manager.pause_job(queued["job_id"])
+
+            with mock.patch("app.transfer.download_manager.Thread.start"):
+                restored_manager = DownloadManager(first_manager.settings, first_manager.repository)
+            snapshot = restored_manager.snapshot()
+            statuses = {job["job_id"]: job["status"] for job in snapshot["queued"]}
+            self.assertEqual(statuses[pending["job_id"]], "pending")
+            self.assertEqual(statuses[queued["job_id"]], "paused")
+            with restored_manager._lock:
+                # A restored pending job should retry resolution promptly, not
+                # wait out a stale pre-restart backoff timer.
+                self.assertEqual(restored_manager._jobs[pending["job_id"]]["reconnect_after_epoch"], 0)
+
+    def test_download_manager_requeues_transient_transport_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "USERDATA_ROOT": str(root),
+                    "ROMS_ROOT": str(root / "roms"),
+                    "BIOS_ROOT": str(root / "bios"),
+                    "OVERMIND_DEVICE_ID": "target-a",
+                    "DOWNLOAD_RECONNECT_INITIAL_SECONDS": "1",
+                    "DOWNLOAD_RECONNECT_MAX_SECONDS": "1",
+                },
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            repo = RomRepository(root / "roms", root / "bios")
+            with mock.patch("app.transfer.download_manager.Thread.start"):
+                manager = DownloadManager(settings, repo)
+            queued = manager.enqueue_rom({}, {"drone_id": "source-a"}, "snes", "Game.zip")
+            with mock.patch.object(manager._selector, "fetch", side_effect=OSError("connection refused")), \
+                 mock.patch("app.transfer.download_manager._post_download_state"), \
+                 mock.patch("app.transfer.download_manager._post_rom_sync_activity"):
+                manager._run_job(queued["job_id"])
+            restored = manager.snapshot()["queued"][0]
+            self.assertEqual(restored["status"], "queued")
+            self.assertEqual(restored["reconnect_attempts"], 1)
+            self.assertGreater(restored["reconnect_after_epoch"], time.time())
+            self.assertIn("reconnecting", restored["resume_reason"])
+
+    def test_download_manager_refreshes_overmind_peer_when_both_integrations_are_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "USERDATA_ROOT": str(root),
+                    "ROMS_ROOT": str(root / "roms"),
+                    "BIOS_ROOT": str(root / "bios"),
+                    "OVERMIND_DEVICE_ID": "target-a",
+                    "DRONE_NETWORK_MODE": "both",
+                },
+                clear=True,
+            ):
+                settings = Settings.from_env()
+                repo = RomRepository(root / "roms", root / "bios")
+                with mock.patch("app.transfer.download_manager.Thread.start"):
+                    manager = DownloadManager(settings, repo)
+                queued = manager.enqueue_rom(
+                    {"overmind_url": "https://overmind.local", "overmind_token": "old-token"},
+                    {"drone_id": "source-a", "reachable_url": "https://old-address"},
+                    "snes",
+                    "Game.zip",
+                )
+                save_payload(
+                    database_path(settings.userdata_root),
+                    "overmind_swarm.json",
+                    [{"device_id": "source-a", "reachable_url": "https://new-address"}],
+                )
+                with mock.patch(
+                    "app.overmind.overmind_config._load_overmind_config_for_settings",
+                    return_value={"overmind_url": "https://overmind.local", "overmind_token": "new-token"},
+                ):
+                    with manager._lock:
+                        job = manager._jobs[queued["job_id"]]
+                        manager._refresh_connection_metadata_locked(job)
+                        refreshed_peer = dict(job["_peer"])
+                        refreshed_config = dict(job["_config"])
+            self.assertEqual(refreshed_peer["reachable_url"], "https://new-address")
+            self.assertEqual(refreshed_config["overmind_token"], "new-token")
+
+    def test_download_manager_keeps_permanent_validation_failure_terminal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "USERDATA_ROOT": str(root),
+                    "ROMS_ROOT": str(root / "roms"),
+                    "BIOS_ROOT": str(root / "bios"),
+                    "OVERMIND_DEVICE_ID": "target-a",
+                },
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            repo = RomRepository(root / "roms", root / "bios")
+            with mock.patch("app.transfer.download_manager.Thread.start"):
+                manager = DownloadManager(settings, repo)
+            queued = manager.enqueue_rom({}, {"drone_id": "source-a"}, "snes", "../unsafe.zip")
+            with mock.patch.object(manager._selector, "fetch", side_effect=ValueError("invalid target path")), \
+                 mock.patch("app.transfer.download_manager._post_download_state"), \
+                 mock.patch("app.transfer.download_manager._post_rom_sync_activity"):
+                manager._run_job(queued["job_id"])
+            self.assertEqual(manager.snapshot()["recent"][0]["status"], "failed")
+
     def test_download_manager_estimates_entire_queue_completion(self) -> None:
         estimate = DownloadManager._queue_estimate(
             active=[{"total_bytes": 1000, "downloaded_bytes": 400, "transfer_speed_bps": 100}],
@@ -1516,6 +1852,10 @@ class SettingsTests(unittest.TestCase):
             self.assertIsNone(peer)
 
     def test_sync_system_posts_failed_activity_with_payload_sync_id(self) -> None:
+        # An EMPTY devices list means Overmind itself never named a known source for
+        # this ROM -- genuinely nothing to wait for, so this must still fail outright
+        # (as opposed to a non-empty-but-unreachable list, which now goes 'pending';
+        # see test_sync_system_holds_pending_when_named_source_is_unreachable).
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
             with mock.patch.dict(
@@ -1539,7 +1879,7 @@ class SettingsTests(unittest.TestCase):
                         "sync_id": "sync-row-1",
                         "system_name": "fbneo",
                         "file_path": "1943.zip",
-                        "devices": [{"device_id": "missing-source"}],
+                        "devices": [],
                     }],
                 },
             }
@@ -1556,6 +1896,95 @@ class SettingsTests(unittest.TestCase):
             pushed = post_activity.call_args.args[2]
             self.assertEqual(pushed["sync_id"], "sync-row-1")
             self.assertEqual(pushed["status"], "failed")
+
+    def test_pause_download_and_resume_download_actions_dispatch_to_manager(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "USERDATA_ROOT": str(root),
+                    "ROMS_ROOT": str(root / "roms"),
+                    "BIOS_ROOT": str(root / "bios"),
+                    "OVERMIND_DEVICE_ID": "target-a",
+                },
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            repo = RomRepository(root / "roms", root / "bios")
+            with mock.patch("app.transfer.download_manager.Thread.start"):
+                manager = DownloadManager(settings, repo)
+            queued = manager.enqueue_rom({}, {"drone_id": "source-a"}, "snes", "Game.zip")
+            config = {"overmind_url": "https://overmind.local", "overmind_token": "drone-token"}
+
+            with mock.patch("app.drone_api._get_download_manager", return_value=manager):
+                pause_action = {"id": "action-pause", "action": "pause_download", "payload": {"job_id": queued["job_id"]}}
+                status_value, message, result = _execute_overmind_action(settings, repo, pause_action, config, "https://overmind.local", "drone-token")
+                self.assertEqual(status_value, "completed")
+                self.assertIn("paused", message)
+                self.assertEqual(manager.snapshot()["queued"][0]["status"], "paused")
+
+                resume_action = {"id": "action-resume", "action": "resume_download", "payload": {"job_id": queued["job_id"]}}
+                status_value, message, result = _execute_overmind_action(settings, repo, resume_action, config, "https://overmind.local", "drone-token")
+                self.assertEqual(status_value, "completed")
+                self.assertIn("queued", message)
+                self.assertEqual(manager.snapshot()["queued"][0]["status"], "queued")
+
+                missing_action = {"id": "action-missing", "action": "pause_download", "payload": {"job_id": "does-not-exist"}}
+                status_value, message, result = _execute_overmind_action(settings, repo, missing_action, config, "https://overmind.local", "drone-token")
+                self.assertEqual(status_value, "failed")
+
+    def test_sync_system_holds_pending_when_named_source_is_unreachable(self) -> None:
+        # A non-empty devices list means Overmind named a Drone that has this ROM,
+        # just not currently peer-resolvable -- this must go 'pending' (queued on
+        # the download manager, retried later) rather than failing outright.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "USERDATA_ROOT": str(root),
+                    "ROMS_ROOT": str(root / "roms"),
+                    "BIOS_ROOT": str(root / "bios"),
+                    "OVERMIND_DEVICE_ID": "target-a",
+                },
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            repo = RomRepository(root / "roms", root / "bios")
+            with mock.patch("app.transfer.download_manager.Thread.start"):
+                manager = DownloadManager(settings, repo)
+            action = {
+                "id": "action-1",
+                "action": "sync_system",
+                "payload": {
+                    "system_name": "fbneo",
+                    "roms": [{
+                        "sync_id": "sync-row-1",
+                        "system_name": "fbneo",
+                        "file_path": "1943.zip",
+                        "file_size": 555,
+                        "devices": [{"device_id": "source-a"}],
+                    }],
+                },
+            }
+            config = {"overmind_url": "https://overmind.local", "overmind_token": "drone-token"}
+
+            with mock.patch("app.drone_api._get_download_manager", return_value=manager), mock.patch(
+                "app.drone_api._best_peer_for_rom", return_value=None
+            ), mock.patch("app.overmind.actions._post_rom_sync_activity") as post_activity:
+                status, message, result = _execute_overmind_action(settings, repo, action, config, "https://overmind.local", "drone-token")
+
+            self.assertEqual(status, "completed")
+            self.assertEqual(len(result["activity"]), 1)
+            pending_activity = result["activity"][0]
+            self.assertEqual(pending_activity["sync_id"], "sync-row-1")
+            self.assertEqual(pending_activity["status"], "pending")
+            post_activity.assert_not_called()
+            queued = manager.snapshot()["queued"]
+            self.assertEqual(len(queued), 1)
+            self.assertEqual(queued[0]["status"], "pending")
+            self.assertEqual(queued[0]["sync_id"], "sync-row-1")
             self.assertEqual(result["activity"][0]["sync_id"], "sync-row-1")
 
     def test_cached_rom_fingerprint_exists_uses_metadata_cache_without_scanning_files(self) -> None:
@@ -2497,6 +2926,29 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("item.bios_md5 || item.md5 || item.fingerprint", source)
         self.assertNotIn("function renderBios()", source)
         self.assertNotIn("function renderBiosList", source)
+
+    def test_integration_transfers_page_shows_uploads_and_download_pause_resume(self) -> None:
+        js = Path(__file__).resolve().parents[1].joinpath("app/web/static/js/drone.js").read_text(encoding="utf-8")
+
+        # Uploads panel: rendered alongside Transfers in the admin integration page.
+        self.assertIn("function renderUploadRows(rows)", js)
+        self.assertIn("function renderUploadsPanel(payload)", js)
+        self.assertIn('id="uploadsBody"', js)
+        self.assertIn('await api("/admin/uploads")', js)
+
+        # Per-job pause/resume, wired the same way as the existing cancel/retry.
+        self.assertIn("async function pauseDroneDownload(jobId)", js)
+        self.assertIn("async function resumeDroneDownload(jobId)", js)
+        self.assertIn("/admin/downloads/${encodeURIComponent(jobId)}/pause", js)
+        self.assertIn("/admin/downloads/${encodeURIComponent(jobId)}/resume", js)
+
+        # 'pending'/'paused' are real statuses now, not a cosmetic-only relabel of
+        # 'queued' (which would now conflate two materially different states).
+        self.assertNotIn("usePendingLabel", js)
+        render_start = js.index("function renderDownloadRows(rows, allowCancel = true, options = {})")
+        render_end = js.index("function renderUploadRows(rows)")
+        render_source = js[render_start:render_end]
+        self.assertIn('"pending", "paused"', render_source)
 
     def test_admin_ui_exposes_drone_self_update_action(self) -> None:
         api_routes = Path(__file__).resolve().parents[1].joinpath("app/web/api_routes.py").read_text(encoding="utf-8")
@@ -4673,6 +5125,129 @@ class LaunchBoxMappingTests(unittest.TestCase):
         self.assertEqual(status_code, 200)
         self.assertTrue(payload["launchbox_unavailable"])
         self.assertEqual(payload["matches"], [])
+
+
+class DownloadUploadAdminHandlerTests(unittest.TestCase):
+    class _FakeHandler:
+        def __init__(self, settings) -> None:
+            self.settings = settings
+            self.response = None
+
+        def _send_json(self, status_code: int, payload: dict) -> None:
+            self.response = (status_code, payload)
+
+    def _settings(self, tmp: str):
+        root = Path(tmp) / "userdata"
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "USERDATA_ROOT": str(root),
+                "ROMS_ROOT": str(root / "roms"),
+                "BIOS_ROOT": str(root / "bios"),
+                "OVERMIND_DEVICE_ID": "target-a",
+            },
+            clear=True,
+        ):
+            return Settings.from_env()
+
+    def test_admin_download_pause_and_resume_round_trip(self) -> None:
+        from app.web import handlers_downloads
+
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._settings(tmp)
+            repo = RomRepository(settings.roms_root, settings.bios_root)
+            with mock.patch("app.transfer.download_manager.Thread.start"):
+                manager = DownloadManager(settings, repo)
+            queued = manager.enqueue_rom({}, {"drone_id": "source-a"}, "snes", "Game.zip")
+
+            class FakeHandler(handlers_downloads.HandlersDownloadsMixin, self._FakeHandler):
+                pass
+
+            handler = FakeHandler(settings)
+            with mock.patch("app.drone_api._get_download_manager", return_value=manager):
+                handler._handle_admin_download_pause(queued["job_id"])
+                status_code, payload = handler.response
+                self.assertEqual(status_code, 200)
+                self.assertEqual(payload["status"], "paused")
+
+                handler._handle_admin_download_pause("does-not-exist")
+                self.assertEqual(handler.response[0], 404)
+
+                handler._handle_admin_download_resume(queued["job_id"])
+                status_code, payload = handler.response
+                self.assertEqual(status_code, 200)
+                self.assertEqual(payload["status"], "queued")
+
+                handler._handle_admin_download_resume(queued["job_id"])
+                self.assertEqual(handler.response[0], 409)  # already queued, not paused
+
+    def test_admin_uploads_endpoint_returns_tracker_snapshot(self) -> None:
+        from app.transfer.upload_tracker import UploadTracker
+        from app.web import handlers_downloads
+
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._settings(tmp)
+            tracker = UploadTracker()
+            tracker.start(peer_device_id="peer-a", asset_type="rom", relative_path="Game.zip", total_bytes=100)
+
+            class FakeHandler(handlers_downloads.HandlersDownloadsMixin, self._FakeHandler):
+                pass
+
+            handler = FakeHandler(settings)
+            with mock.patch("app.web.handlers_downloads._get_upload_tracker", return_value=tracker):
+                handler._handle_admin_uploads()
+            status_code, payload = handler.response
+            self.assertEqual(status_code, 200)
+            self.assertEqual(payload["target_drone_id"], "target-a")
+            self.assertEqual(len(payload["active"]), 1)
+            self.assertEqual(payload["active"][0]["peer_device_id"], "peer-a")
+            self.assertEqual(payload["recent"], [])
+
+
+class UploadTrackerTests(unittest.TestCase):
+    def test_start_progress_finish_lifecycle(self) -> None:
+        from app.transfer.upload_tracker import UploadTracker
+
+        tracker = UploadTracker()
+        upload_id = tracker.start(peer_device_id="peer-a", asset_type="rom", relative_path="snes/Game.zip", system="snes", total_bytes=1000)
+        snapshot = tracker.snapshot()
+        self.assertEqual(len(snapshot["active"]), 1)
+        self.assertEqual(snapshot["active"][0]["status"], "uploading")
+        self.assertEqual(snapshot["active"][0]["file_name"], "Game.zip")
+
+        tracker.progress(upload_id, 500)
+        snapshot = tracker.snapshot()
+        self.assertEqual(snapshot["active"][0]["bytes_transferred"], 500)
+        self.assertEqual(snapshot["active"][0]["percentage"], 50.0)
+
+        tracker.finish(upload_id, "completed")
+        snapshot = tracker.snapshot()
+        self.assertEqual(snapshot["active"], [])
+        self.assertEqual(len(snapshot["recent"]), 1)
+        self.assertEqual(snapshot["recent"][0]["status"], "completed")
+
+    def test_finish_with_error_marks_failed(self) -> None:
+        from app.transfer.upload_tracker import UploadTracker
+
+        tracker = UploadTracker()
+        upload_id = tracker.start(peer_device_id=None, asset_type="bios", relative_path="bios.bin")
+        tracker.finish(upload_id, "failed", error="peer disconnected")
+        snapshot = tracker.snapshot()
+        self.assertEqual(snapshot["recent"][0]["status"], "failed")
+        self.assertEqual(snapshot["recent"][0]["error_message"], "peer disconnected")
+        self.assertIsNone(snapshot["recent"][0]["peer_device_id"])
+
+    def test_recent_list_is_bounded(self) -> None:
+        from app.transfer.upload_tracker import UPLOAD_RECENT_LIMIT, UploadTracker
+
+        tracker = UploadTracker()
+        for index in range(UPLOAD_RECENT_LIMIT + 5):
+            upload_id = tracker.start(peer_device_id="peer-a", asset_type="rom", relative_path=f"Game{index}.zip")
+            tracker.finish(upload_id, "completed")
+        snapshot = tracker.snapshot()
+        self.assertEqual(len(snapshot["recent"]), UPLOAD_RECENT_LIMIT)
+        # Most recently finished first.
+        self.assertEqual(snapshot["recent"][0]["relative_path"], f"Game{UPLOAD_RECENT_LIMIT + 4}.zip")
 
 
 if __name__ == "__main__":

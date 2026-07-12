@@ -13,6 +13,7 @@ try:
         _purge_asset_cache_keep_fingerprint,
         _update_rom_metadata_cache_state,
     )
+    from ..transfer.upload_tracker import get_upload_tracker as _get_upload_tracker
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.runtime_state import _ROM_METADATA_WAKE  # type: ignore
     from roms.rom_metadata_state import _rom_metadata_cache_status  # type: ignore
@@ -21,6 +22,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         _purge_asset_cache_keep_fingerprint,
         _update_rom_metadata_cache_state,
     )
+    from transfer.upload_tracker import get_upload_tracker as _get_upload_tracker  # type: ignore
 
 
 def _get_download_manager():
@@ -93,6 +95,27 @@ class HandlersDownloadsMixin:
         result = manager.retry(job_id)
         status_code = 404 if result.get("status") == "not_found" else 409 if result.get("status") == "not_retryable" else 200
         self._send_json(status_code, result)
+
+    def _handle_admin_download_pause(self, job_id: str) -> None:
+        manager = _get_download_manager()
+        if manager is None:
+            self._send_json(503, {"error": "download manager unavailable"})
+            return
+        result = manager.pause_job(job_id)
+        status_code = 404 if result.get("status") == "not_found" else 409 if result.get("status") == "not_pausable" else 200
+        self._send_json(status_code, result)
+
+    def _handle_admin_download_resume(self, job_id: str) -> None:
+        manager = _get_download_manager()
+        if manager is None:
+            self._send_json(503, {"error": "download manager unavailable"})
+            return
+        result = manager.resume_job(job_id)
+        status_code = 404 if result.get("status") == "not_found" else 409 if result.get("status") == "not_resumable" else 200
+        self._send_json(status_code, result)
+
+    def _handle_admin_uploads(self) -> None:
+        self._send_json(200, {"target_drone_id": self.settings.overmind_device_id, **_get_upload_tracker().snapshot()})
 
     def _handle_admin_downloads_pause(self) -> None:
         manager = _get_download_manager()
