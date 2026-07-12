@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.1.45] - 2026-07-12
+
+- Fix idle-volume automation direction; add screen mode, music volume, screensaver, and EmulationStation collections management
+
 ## [v0.1.44] - 2026-07-12
 
 - Adding ability to control volume from API and UI
