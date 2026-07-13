@@ -3575,8 +3575,12 @@ let localPeerAssetContext = {
   limit: 50,
   offset: 0,
   total: 0,
-  autoLoadedPeerId: "",
 };
+// Set only by an explicit "Browse" click (never by refresh()'s dropdown
+// pre-selection), and consumed exactly once by renderLocalTransferRequestPanel
+// -- this is what keeps a plain Transfers page visit from auto-requesting
+// assets from whichever peer happens to be first in the dropdown.
+let pendingLocalPeerBrowse = null;
 
 function localPeerStatusBadge(peer) {
   if (peer.identity_conflict) return '<span class="badge text-bg-danger">Identity Conflict</span>';
@@ -3939,11 +3943,13 @@ async function renderLocalTransferRequestPanel(target) {
   });
   updateLocalAssetTypeUi();
   await refresh();
-  // A "Browse" click on the Configuration page's peer list stashes the target
-  // peer in localPeerAssetContext, then navigates here; pick it up once (not
-  // on every later refresh) and auto-load its assets.
-  if (localPeerAssetContext.peerId && localPeerAssetContext.autoLoadedPeerId !== localPeerAssetContext.peerId) {
-    localPeerAssetContext.autoLoadedPeerId = localPeerAssetContext.peerId;
+  // Only an explicit "Browse" click (Configuration page) sets
+  // pendingLocalPeerBrowse; a plain visit to this page (navbar, refresh,
+  // revisit) never auto-requests anything. Consume it exactly once, whether
+  // or not the peer is still available, so it can't fire again later.
+  const browsedPeerId = pendingLocalPeerBrowse;
+  pendingLocalPeerBrowse = null;
+  if (browsedPeerId && browsedPeerId === localPeerAssetContext.peerId) {
     document.getElementById("localAssetType").value = localPeerAssetContext.assetType || "roms";
     await loadLocalPeerSystems();
     updateLocalAssetTypeUi();
@@ -4110,9 +4116,11 @@ async function forgetLocalPeer(peerId) {
 async function browseLocalPeer(peerId) {
   // "Browse" lives on the Configuration page's paired-peer list; Configuration
   // and Transfers are separate pages, so this always navigates. The auto-load
-  // in renderLocalTransferRequestPanel picks up the pending peer once the
-  // Transfers page has actually rendered.
-  localPeerAssetContext = { peerId, peerName: peerId, assetType: "roms", systems: [], availableSystems: [], systemCounts: {}, systemsLoadedPeerId: "", items: [], query: "", limit: 50, offset: 0, total: 0, autoLoadedPeerId: "" };
+  // in renderLocalTransferRequestPanel picks up pendingLocalPeerBrowse once the
+  // Transfers page has actually rendered -- this is the ONLY way that auto-load
+  // fires; a plain visit to Transfers never requests anything on its own.
+  localPeerAssetContext = { peerId, peerName: peerId, assetType: "roms", systems: [], availableSystems: [], systemCounts: {}, systemsLoadedPeerId: "", items: [], query: "", limit: 50, offset: 0, total: 0 };
+  pendingLocalPeerBrowse = peerId;
   setHash("#admin/transfers");
 }
 
@@ -5717,7 +5725,7 @@ async function renderAdminControlsPage() {
         try {
           const result = await apiPost("/admin/system-info/music-volume", {level: Number(musicVolumeSlider.value)});
           syncMusicVolumeControls(result.music_volume);
-          showToast(`Music volume set to ${result.music_volume}%; EmulationStation restarted.`, "success");
+          showToast(`Music volume set to ${result.music_volume}%.`, "success");
         } catch (err) {
           showToast(`Failed to set music volume: ${escapeHtml(err.message || "unknown error")}`, "danger");
         } finally {
@@ -5737,7 +5745,7 @@ async function renderAdminControlsPage() {
         try {
           const result = await apiPost("/admin/es-collections", {screensaver_minutes: Number(screensaverSlider.value)});
           syncScreensaverControls(result.screensaver_minutes);
-          showToast(`Screensaver delay set to ${result.screensaver_minutes} min; EmulationStation restarted.`, "success");
+          showToast(`Screensaver delay set to ${result.screensaver_minutes} min.`, "success");
         } catch (err) {
           showToast(`Failed to set screensaver delay: ${escapeHtml(err.message || "unknown error")}`, "danger");
         } finally {

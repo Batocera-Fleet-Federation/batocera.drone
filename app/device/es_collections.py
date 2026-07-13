@@ -2,11 +2,14 @@
 music volume -- read current state from es_settings.cfg and apply changes.
 
 Extracted alongside device_control.py's screen-mode/volume helpers. Every
-setting here lives in es_settings.cfg and EmulationStation only re-reads it at
-its own startup, so every apply restarts EmulationStation (via the same
-stop -> write -> overlay-save -> start sequence as set_screen_mode.py) --
-see set_es_collections.py, the canonical (and self-contained) implementation
-shared by the root-direct and privileged-service-worker entry points below.
+setting here lives in es_settings.cfg; most of them EmulationStation only
+re-reads at its own startup, so applying them restarts EmulationStation (via
+the same stop -> write -> overlay-save -> start sequence as
+set_screen_mode.py) -- except music_volume/screensaver_minutes, confirmed on
+a real device to take effect live with no restart. See set_es_collections.py
+(RESTART_REQUIRED_FIELDS) for exactly which fields restart ES; it's the
+canonical (and self-contained) implementation shared by the root-direct and
+privileged-service-worker entry points below.
 """
 
 import json
@@ -17,10 +20,12 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 try:
+    from ..common.runtime_state import _ES_LIFECYCLE_LOCK
     from ..common.settings import Settings
     from ..set_es_collections import apply_es_collections as _apply_es_collections_helper
     from .device_control import _resolve_es_systems_effective
 except ImportError:  # pragma: no cover - direct script execution fallback
+    from common.runtime_state import _ES_LIFECYCLE_LOCK  # type: ignore
     from common.settings import Settings  # type: ignore
     from set_es_collections import apply_es_collections as _apply_es_collections_helper  # type: ignore
     from device.device_control import _resolve_es_systems_effective  # type: ignore
@@ -195,9 +200,11 @@ def _build_low_level_updates(settings: Settings, updates: dict) -> dict:
 
 
 def apply_es_collections(settings: Settings, updates: dict) -> dict:
-    """Apply a partial update (any subset of music_volume, hidden_systems,
-    ungrouped_systems, auto_collections, custom_collections -- each a full
-    desired list/value, not a diff) and restart EmulationStation. Returns the
+    """Apply a partial update (any subset of music_volume, screensaver_minutes,
+    hidden_systems, ungrouped_systems, auto_collections, custom_collections --
+    each a full desired list/value, not a diff). Restarts EmulationStation only
+    if a systems/collections field changed; music_volume/screensaver_minutes
+    apply live (see set_es_collections.RESTART_REQUIRED_FIELDS). Returns the
     freshly re-read state."""
     low_level = _build_low_level_updates(settings, updates)
     if not low_level:
@@ -205,8 +212,12 @@ def apply_es_collections(settings: Settings, updates: dict) -> dict:
     if settings.use_fake_data:
         return get_es_collections_state(settings)
     if hasattr(os, "geteuid") and os.geteuid() == 0:
-        _apply_es_collections_helper(low_level, config=settings.es_settings_file)
-        return get_es_collections_state(settings)
+        # Serialized against screen-mode and other ES collections changes: two
+        # overlapping stop/start sequences race the same EmulationStation/X
+        # session and can wedge it into a permanent crash loop.
+        with _ES_LIFECYCLE_LOCK:
+            _apply_es_collections_helper(low_level, config=settings.es_settings_file)
+            return get_es_collections_state(settings)
     if not _request_es_collections_service_control(low_level):
         raise OSError(
             "Unable to dispatch the privileged ES collections request; the Drone service "

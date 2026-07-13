@@ -21,10 +21,12 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 try:
+    from ..common.runtime_state import _ES_LIFECYCLE_LOCK
     from ..common.settings import Settings
     from ..set_screen_mode import set_screen_mode as _set_screen_mode_helper
     from ..set_volume import set_audio_volume as _set_audio_volume_helper
 except ImportError:  # pragma: no cover - direct script execution fallback
+    from common.runtime_state import _ES_LIFECYCLE_LOCK  # type: ignore
     from common.settings import Settings  # type: ignore
     from set_screen_mode import set_screen_mode as _set_screen_mode_helper  # type: ignore
     from set_volume import set_audio_volume as _set_audio_volume_helper  # type: ignore
@@ -381,7 +383,11 @@ def _apply_screen_mode(settings: Settings, mode: str) -> tuple[Path, bool]:
     # When the Drone app already runs as root, apply the change directly using the
     # proven stop -> write -> overlay -> start sequence shared with set_screen_mode.py.
     if hasattr(os, "geteuid") and os.geteuid() == 0:
-        _set_screen_mode_helper(mode, config=settings.es_settings_file)
+        # Serialized against ES collections/music-volume/screensaver changes: two
+        # overlapping stop/start sequences race the same EmulationStation/X session
+        # and can wedge it into a permanent crash loop.
+        with _ES_LIFECYCLE_LOCK:
+            _set_screen_mode_helper(mode, config=settings.es_settings_file)
         return settings.es_settings_file, True
     # Non-root (production): the privileged service worker runs set_screen_mode.py for us.
     # _request_screen_mode_service_control returns True only after the worker reports "ok"

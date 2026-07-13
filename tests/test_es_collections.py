@@ -1,4 +1,6 @@
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -263,14 +265,41 @@ class PrivilegedEsCollectionsHelperTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "es_settings.cfg"
+            calls = []
 
             def fake_run(command, **kwargs):
+                calls.append(command)
                 rc = 1 if command and command[0] == "batocera-save-overlay" else 0
                 return mock.Mock(returncode=rc, stdout="overlay failure" if rc else "")
 
             with mock.patch("app.set_es_collections.subprocess.run", side_effect=fake_run):
-                set_es_collections.apply_es_collections({"music_volume": 10}, config=config)
-            self.assertIn('name="MusicVolume" value="10"', config.read_text(encoding="utf-8"))
+                set_es_collections.apply_es_collections({"hidden_systems": "snes"}, config=config)
+            self.assertIn('name="HiddenSystems" value="snes"', config.read_text(encoding="utf-8"))
+            self.assertIn([set_es_collections.EMULATIONSTATION_SERVICE, "start"], calls)
+
+    def test_music_volume_and_screensaver_write_without_restarting(self) -> None:
+        from app import set_es_collections
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "es_settings.cfg"
+            calls = []
+
+            def fake_run(command, **kwargs):
+                calls.append(command)
+                return mock.Mock(returncode=0, stdout="")
+
+            with mock.patch("app.set_es_collections.subprocess.run", side_effect=fake_run):
+                set_es_collections.apply_es_collections(
+                    {"music_volume": 10, "screensaver_time_ms": 300000}, config=config
+                )
+            written = config.read_text(encoding="utf-8")
+            self.assertIn('name="MusicVolume" value="10"', written)
+            self.assertIn('name="ScreenSaverTime" value="300000"', written)
+            # Overlay save still runs (so the value survives a reboot), but ES is
+            # never stopped or started for these two fields.
+            self.assertIn(["batocera-save-overlay"], calls)
+            self.assertNotIn([set_es_collections.EMULATIONSTATION_SERVICE, "stop"], calls)
+            self.assertNotIn([set_es_collections.EMULATIONSTATION_SERVICE, "start"], calls)
 
     def test_raises_when_emulationstation_does_not_start(self) -> None:
         from app import set_es_collections
@@ -280,7 +309,7 @@ class PrivilegedEsCollectionsHelperTests(unittest.TestCase):
             with mock.patch("app.set_es_collections.subprocess.run", return_value=mock.Mock(returncode=1, stdout="")), \
                  mock.patch("app.set_es_collections.shutil.which", return_value=None):
                 with self.assertRaises(RuntimeError):
-                    set_es_collections.apply_es_collections({"music_volume": 10}, config=config)
+                    set_es_collections.apply_es_collections({"hidden_systems": "snes"}, config=config)
 
     def test_no_updates_raises(self) -> None:
         from app import set_es_collections
@@ -314,7 +343,7 @@ class EsCollectionsOvermindActionTests(unittest.TestCase):
             self.assertEqual(status, "completed")
             self.assertEqual(result["music_volume"], 80)
 
-    def test_set_music_volume_action_applies_and_restarts(self) -> None:
+    def test_set_music_volume_action_applies_without_restart_message(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(Path(tmp))
             repo = RomRepository(settings.roms_root, settings.bios_root)
@@ -326,6 +355,24 @@ class EsCollectionsOvermindActionTests(unittest.TestCase):
             self.assertEqual(status, "completed")
             helper.assert_called_once()
             self.assertEqual(helper.call_args[0][0], {"music_volume": 60})
+            self.assertNotIn("restart", message.lower())
+
+    def test_set_es_collections_action_message_notes_restart_only_when_needed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            repo = RomRepository(settings.roms_root, settings.bios_root)
+            with mock.patch("app.drone_api.os.geteuid", return_value=0), \
+                 mock.patch("app.device.es_collections._apply_es_collections_helper"):
+                _, no_restart_message, _ = _execute_overmind_action(
+                    settings, repo,
+                    {"action": "set_es_collections", "payload": {"music_volume": 55, "screensaver_minutes": 5}},
+                )
+                _, restart_message, _ = _execute_overmind_action(
+                    settings, repo,
+                    {"action": "set_es_collections", "payload": {"auto_collections": ["all"]}},
+                )
+            self.assertNotIn("restart", no_restart_message.lower())
+            self.assertIn("EmulationStation restarted", restart_message)
 
     def test_set_music_volume_action_rejects_invalid_level(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -679,10 +726,11 @@ class ControlsDashboardLayoutTests(unittest.TestCase):
 
 
 class FrictionlessSaveTests(unittest.TestCase):
-    """Music Volume, Screensaver, and Collections apply on click with a plain
-    'Save' label and no confirm dialog (the restart they trigger is real and
-    required, but it's presented as one smooth action, not a separate scary
-    step). Screen Mode intentionally keeps its confirm."""
+    """Music Volume, Screensaver, and Collections apply on click/slider-change
+    with no confirm dialog. Music Volume/Screensaver take effect live (no
+    EmulationStation restart, confirmed on a real device); Collections still
+    restarts ES since it changes which systems/collections are shown. Screen
+    Mode intentionally keeps its confirm."""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -719,6 +767,111 @@ class FrictionlessSaveTests(unittest.TestCase):
         # access until switched back, a more consequential action than a volume
         # or screensaver tweak.
         self.assertIn("restart EmulationStation now?", self.js)
+
+    def test_music_volume_and_screensaver_success_toasts_do_not_claim_a_restart(self) -> None:
+        music_start = self.js.index('musicVolumeSlider.addEventListener("change"')
+        music_end = self.js.index("const screensaverSlider", music_start)
+        music_body = self.js[music_start:music_end]
+        self.assertIn("Music volume set to ${result.music_volume}%.", music_body)
+        self.assertNotIn("restart", music_body.lower())
+
+        saver_start = self.js.index('screensaverSlider.addEventListener("change"')
+        saver_end = self.js.index("loadScreenMode();", saver_start)
+        saver_body = self.js[saver_start:saver_end]
+        self.assertIn("Screensaver delay set to ${result.screensaver_minutes} min.", saver_body)
+        self.assertNotIn("restart", saver_body.lower())
+
+    def test_es_collections_save_toast_still_mentions_restart(self) -> None:
+        save_start = self.js.index("function wireEsCollectionsSaveButton()")
+        save_end = self.js.index("\nfunction ", save_start + 1)
+        self.assertIn("EmulationStation restarted", self.js[save_start:save_end])
+
+
+class EsLifecycleLockTests(unittest.TestCase):
+    """Two overlapping root-direct calls that stop/write/start EmulationStation
+    (screen mode, ES collections) must never run concurrently. Confirmed live:
+    without serialization, two overlapping restarts race the same
+    EmulationStation/X session and wedge it into a permanent crash-restart loop
+    (black screen that never recovers on its own)."""
+
+    def test_concurrent_es_collections_calls_are_serialized(self) -> None:
+        import app.device.es_collections as es_collections_module
+
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            active = 0
+            max_active = 0
+            tracking_lock = threading.Lock()
+
+            def fake_helper(low_level, config=None):
+                nonlocal active, max_active
+                with tracking_lock:
+                    active += 1
+                    max_active = max(max_active, active)
+                time.sleep(0.05)
+                with tracking_lock:
+                    active -= 1
+
+            with mock.patch("app.device.es_collections._apply_es_collections_helper", side_effect=fake_helper), \
+                 mock.patch("app.device.es_collections.os.geteuid", return_value=0):
+                threads = [
+                    threading.Thread(target=es_collections_module.apply_es_collections, args=(settings, {"music_volume": 10})),
+                    threading.Thread(target=es_collections_module.apply_es_collections, args=(settings, {"screensaver_minutes": 5})),
+                ]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join(timeout=5)
+                    self.assertFalse(t.is_alive(), "a thread did not finish -- the lock may have deadlocked")
+
+            self.assertEqual(max_active, 1, "two ES-restart calls ran concurrently -- the lock did not serialize them")
+
+    def test_screen_mode_and_es_collections_share_the_same_lock(self) -> None:
+        from app.device import device_control
+        import app.device.es_collections as es_collections_module
+
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            active = 0
+            max_active = 0
+            tracking_lock = threading.Lock()
+
+            def fake_screen_mode_helper(mode, config=None):
+                nonlocal active, max_active
+                with tracking_lock:
+                    active += 1
+                    max_active = max(max_active, active)
+                time.sleep(0.05)
+                with tracking_lock:
+                    active -= 1
+
+            def fake_collections_helper(low_level, config=None):
+                nonlocal active, max_active
+                with tracking_lock:
+                    active += 1
+                    max_active = max(max_active, active)
+                time.sleep(0.05)
+                with tracking_lock:
+                    active -= 1
+
+            with mock.patch("app.device.device_control._set_screen_mode_helper", side_effect=fake_screen_mode_helper), \
+                 mock.patch("app.device.device_control.os.geteuid", return_value=0), \
+                 mock.patch("app.device.es_collections._apply_es_collections_helper", side_effect=fake_collections_helper), \
+                 mock.patch("app.device.es_collections.os.geteuid", return_value=0):
+                threads = [
+                    threading.Thread(target=device_control._apply_screen_mode, args=(settings, "kiosk")),
+                    threading.Thread(target=es_collections_module.apply_es_collections, args=(settings, {"hidden_systems": ["snes"]})),
+                ]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join(timeout=5)
+                    self.assertFalse(t.is_alive(), "a thread did not finish -- the lock may have deadlocked")
+
+            self.assertEqual(
+                max_active, 1,
+                "screen mode and ES collections restarts ran concurrently -- they must share one lock",
+            )
 
 
 if __name__ == "__main__":

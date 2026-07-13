@@ -29,3 +29,12 @@ _ROM_METADATA_LOCK = RLock()
 # download pool runs several at once) can't clobber each other's <image>/<video>
 # entries on the same system. Writes are sub-millisecond, so one global lock is free.
 _GAMELIST_WRITE_LOCK = Lock()
+# Serializes the root-direct "stop EmulationStation -> write config -> start
+# EmulationStation" sequence (screen mode, ES collections/music-volume/screensaver)
+# across concurrent HTTP handler threads. Without this, two overlapping requests each
+# call `stop`/`start` on the same process/X session -- confirmed live to corrupt the
+# session into a permanent crash-restart loop (black screen) that doesn't self-heal.
+# The whole stop->write->start sequence is held under this lock, not just the
+# subprocess calls, so a second caller waits for the first to fully finish (including
+# its own re-read of state) before starting its own -- never interleaves with it.
+_ES_LIFECYCLE_LOCK = Lock()

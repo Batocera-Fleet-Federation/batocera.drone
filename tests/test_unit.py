@@ -6121,11 +6121,24 @@ class NavRestructureTests(unittest.TestCase):
         self.assertIn('setHash("#admin/transfers");', body)
         self.assertNotIn("setIntegrationTab", body)
 
-    def test_transfer_request_panel_auto_loads_pending_peer_from_context(self) -> None:
+    def test_transfer_request_panel_only_auto_loads_from_explicit_browse(self) -> None:
+        # A plain page visit must never auto-request a peer's assets: only an
+        # explicit "Browse" click (which sets pendingLocalPeerBrowse) does, and
+        # it's consumed exactly once so it can't re-fire on a later refresh.
+        self.assertIn("let pendingLocalPeerBrowse = null;", self.js)
+        self.assertNotIn("autoLoadedPeerId", self.js)
+
+        browse_start = self.js.index("async function browseLocalPeer(peerId)")
+        browse_end = self.js.index("\nasync function ", browse_start + 1)
+        browse_body = self.js[browse_start:browse_end]
+        self.assertIn("pendingLocalPeerBrowse = peerId;", browse_body)
+
         fn_start = self.js.index("async function renderLocalTransferRequestPanel(target)")
         fn_end = self.js.index("\nasync function renderLocalNetworkIntegrationPanel(")
         body = self.js[fn_start:fn_end]
-        self.assertIn("localPeerAssetContext.autoLoadedPeerId !== localPeerAssetContext.peerId", body)
+        self.assertIn("const browsedPeerId = pendingLocalPeerBrowse;", body)
+        self.assertIn("pendingLocalPeerBrowse = null;", body)
+        self.assertIn("if (browsedPeerId && browsedPeerId === localPeerAssetContext.peerId)", body)
         self.assertIn("await loadLocalPeerSystems();", body)
         self.assertIn("await loadLocalPeerAssets();", body)
 

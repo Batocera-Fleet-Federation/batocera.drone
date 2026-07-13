@@ -76,6 +76,13 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from overmind.registration import _summarize_overmind_result  # type: ignore
 
 
+# Friendly-name counterpart of set_es_collections.RESTART_REQUIRED_FIELDS (that
+# module uses the low-level field names written to es_settings.cfg; this is the
+# set_es_collections action's friendly payload keys) -- music_volume/
+# screensaver_minutes apply live, everything else here restarts EmulationStation.
+_ES_RESTART_REQUIRED_UPDATE_KEYS = {"hidden_systems", "ungrouped_systems", "auto_collections", "custom_collections"}
+
+
 def _execute_overmind_action(
     settings: Settings,
     repository: "RomRepository",
@@ -610,7 +617,7 @@ def _execute_overmind_action(
             state = _apply_es_collections(settings, {"music_volume": max(0, min(100, level))})
         except (OSError, subprocess.SubprocessError, ValueError) as error:
             return "failed", f"Unable to set music volume: {error}", None
-        return "completed", f"Music volume set to {state['music_volume']}%; EmulationStation restarted.", {
+        return "completed", f"Music volume set to {state['music_volume']}%.", {
             "type": "es_collections_state",
             **state,
         }
@@ -628,7 +635,11 @@ def _execute_overmind_action(
             state = _apply_es_collections(settings, updates)
         except (OSError, subprocess.SubprocessError, ValueError) as error:
             return "failed", f"Unable to update EmulationStation collections: {error}", None
-        return "completed", f"EmulationStation collections updated ({', '.join(sorted(updates))}); EmulationStation restarted.", {
+        # music_volume/screensaver_minutes apply live; everything else here changes
+        # which systems/collections are shown and restarts EmulationStation.
+        restarted = bool(_ES_RESTART_REQUIRED_UPDATE_KEYS.intersection(updates))
+        suffix = " EmulationStation restarted." if restarted else ""
+        return "completed", f"EmulationStation collections updated ({', '.join(sorted(updates))}).{suffix}", {
             "type": "es_collections_state",
             **state,
         }

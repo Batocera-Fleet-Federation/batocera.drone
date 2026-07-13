@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 """Apply EmulationStation collection/display settings as the privileged service worker.
 
-Canonical implementation of "write es_settings.cfg values and restart
-EmulationStation", mirroring set_screen_mode.py's proven stop -> write ->
-overlay-save -> start sequence (same rationale: the ``stop``/overlay-save
-steps are best-effort and headless-safe, EmulationStation is ALWAYS restarted
-afterwards, and every step is logged to stdout for the service worker to
+Canonical implementation of "write es_settings.cfg values, restarting
+EmulationStation only when the field actually needs it", mirroring
+set_screen_mode.py's proven stop -> write -> overlay-save -> start sequence
+(same rationale: the ``stop``/overlay-save steps are best-effort and
+headless-safe, and every step is logged to stdout for the service worker to
 capture). The privileged (root) Drone service worker invokes it as
 ``python3 app/set_es_collections.py <path-to-request-json>``; the Drone app
 itself reuses ``apply_es_collections`` in-process when it happens to run as
 root, so the sequence can never drift between the two entry points.
 
-Every setting here lives in es_settings.cfg, which EmulationStation only
+Most settings here live in es_settings.cfg, which EmulationStation only
 re-reads at its own startup -- a change made externally while ES is already
-running is invisible until it restarts, which is why every field here always
-restarts ES rather than trying to apply changes live.
+running is invisible until it restarts. But confirmed on a real device,
+music_volume/screensaver_time_ms take effect live without a restart, so those
+two skip the stop/start dance entirely (see RESTART_REQUIRED_FIELDS); the
+fields that change which systems/collections are shown still restart ES.
 
 Deliberately self-contained (stdlib only, no imports from the rest of the
 ``app`` package) like set_screen_mode.py / set_volume.py: the caller (Drone
@@ -35,6 +37,12 @@ from typing import Optional
 
 CONFIG = Path("/userdata/system/configs/emulationstation/es_settings.cfg")
 EMULATIONSTATION_SERVICE = "/etc/init.d/S31emulationstation"
+
+# music_volume/screensaver_time_ms take effect live on this hardware without an
+# EmulationStation restart (confirmed on a real device) -- everything else here
+# (which systems/collections show up at all) genuinely needs ES to reinitialize
+# its systems list, so those fields still restart it.
+RESTART_REQUIRED_FIELDS = {"hidden_systems", "auto_collections", "custom_collections", "ungroup"}
 
 
 def _set_typed_value(root: ET.Element, tag: str, name: str, value: str) -> None:
@@ -86,7 +94,8 @@ def _run_step(command: list, *, timeout: int = 120) -> bool:
 
 
 def apply_es_collections(updates: dict, config: Optional[Path] = None) -> None:
-    """Write the given es_settings.cfg fields and (re)start EmulationStation.
+    """Write the given es_settings.cfg fields, restarting EmulationStation only
+    if a field that actually requires it (see RESTART_REQUIRED_FIELDS) changed.
 
     ``updates`` may contain any of: ``music_volume`` (int 0-100),
     ``screensaver_time_ms`` (int milliseconds, 0 = disabled), ``hidden_systems``
@@ -98,14 +107,19 @@ def apply_es_collections(updates: dict, config: Optional[Path] = None) -> None:
         raise ValueError("No updates were provided")
     if config is None:
         config = CONFIG
-    print(f"[set_es_collections] applying {sorted(updates.keys())}")
-    _run_step([EMULATIONSTATION_SERVICE, "stop"], timeout=60)
-    time.sleep(2)
+    needs_restart = bool(RESTART_REQUIRED_FIELDS.intersection(updates.keys()))
+    print(f"[set_es_collections] applying {sorted(updates.keys())} (restart={'yes' if needs_restart else 'no'})")
+    if needs_restart:
+        _run_step([EMULATIONSTATION_SERVICE, "stop"], timeout=60)
+        time.sleep(2)
     _write_updates(config, updates)
     print(f"[set_es_collections] wrote updates to {config}")
     # Persist to the overlay so the change survives a reboot, but never let a slow or
     # failing overlay save block the EmulationStation restart below.
     _run_step(["batocera-save-overlay"], timeout=30)
+    if not needs_restart:
+        print("[set_es_collections] no restart required for these fields")
+        return
     print("[set_es_collections] starting EmulationStation")
     started = _run_step([EMULATIONSTATION_SERVICE, "start"], timeout=60)
     if not started:
