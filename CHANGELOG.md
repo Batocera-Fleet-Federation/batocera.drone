@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.1.47] - 2026-07-12
+
+- Updating UI to move things around to be easier to naviate.
+
 ## [v0.1.46] - 2026-07-12
 
 - Split Controls into its own dashboard page; report ES-collections to Overmind
