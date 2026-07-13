@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.1.49] - 2026-07-13
+
+- Bug fix: ES stopping and not restarting after timer.
+
 ## [v0.1.48] - 2026-07-13
 
 - Stop restarting EmulationStation for volume/screensaver; fix a restart race that could black-screen the device
