@@ -278,7 +278,7 @@ class PrivilegedEsCollectionsHelperTests(unittest.TestCase):
             self.assertIn('name="HiddenSystems" value="snes"', config.read_text(encoding="utf-8"))
             self.assertIn([set_es_collections.EMULATIONSTATION_SERVICE, "start"], calls)
 
-    def test_music_volume_and_screensaver_write_without_restarting(self) -> None:
+    def test_screensaver_writes_without_restarting(self) -> None:
         from app import set_es_collections
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -290,17 +290,36 @@ class PrivilegedEsCollectionsHelperTests(unittest.TestCase):
                 return mock.Mock(returncode=0, stdout="")
 
             with mock.patch("app.set_es_collections.subprocess.run", side_effect=fake_run):
-                set_es_collections.apply_es_collections(
-                    {"music_volume": 10, "screensaver_time_ms": 300000}, config=config
-                )
+                set_es_collections.apply_es_collections({"screensaver_time_ms": 300000}, config=config)
             written = config.read_text(encoding="utf-8")
-            self.assertIn('name="MusicVolume" value="10"', written)
             self.assertIn('name="ScreenSaverTime" value="300000"', written)
             # Overlay save still runs (so the value survives a reboot), but ES is
-            # never stopped or started for these two fields.
+            # never stopped or started for this field.
             self.assertIn(["batocera-save-overlay"], calls)
             self.assertNotIn([set_es_collections.EMULATIONSTATION_SERVICE, "stop"], calls)
             self.assertNotIn([set_es_collections.EMULATIONSTATION_SERVICE, "start"], calls)
+
+    def test_music_volume_restarts_emulationstation(self) -> None:
+        # Reverted per a live device confirming music_volume genuinely needs the
+        # restart -- AudioManager.cpp reads MusicVolume from the same
+        # Settings::loadFile()-once map as everything else, so there is no live
+        # apply path for it (unlike system volume, which is OS-level ALSA).
+        from app import set_es_collections
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "es_settings.cfg"
+            calls = []
+
+            def fake_run(command, **kwargs):
+                calls.append(command)
+                return mock.Mock(returncode=0, stdout="")
+
+            with mock.patch("app.set_es_collections.subprocess.run", side_effect=fake_run):
+                set_es_collections.apply_es_collections({"music_volume": 10}, config=config)
+            written = config.read_text(encoding="utf-8")
+            self.assertIn('name="MusicVolume" value="10"', written)
+            self.assertIn([set_es_collections.EMULATIONSTATION_SERVICE, "stop"], calls)
+            self.assertIn([set_es_collections.EMULATIONSTATION_SERVICE, "start"], calls)
 
     def test_raises_when_emulationstation_does_not_start(self) -> None:
         from app import set_es_collections
@@ -374,7 +393,7 @@ class EsCollectionsOvermindActionTests(unittest.TestCase):
             self.assertEqual(status, "completed")
             self.assertEqual(result["music_volume"], 80)
 
-    def test_set_music_volume_action_applies_without_restart_message(self) -> None:
+    def test_set_music_volume_action_applies_and_restarts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(Path(tmp))
             repo = RomRepository(settings.roms_root, settings.bios_root)
@@ -386,7 +405,7 @@ class EsCollectionsOvermindActionTests(unittest.TestCase):
             self.assertEqual(status, "completed")
             helper.assert_called_once()
             self.assertEqual(helper.call_args[0][0], {"music_volume": 60})
-            self.assertNotIn("restart", message.lower())
+            self.assertIn("EmulationStation restarted", message)
 
     def test_set_es_collections_action_message_notes_restart_only_when_needed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -396,7 +415,7 @@ class EsCollectionsOvermindActionTests(unittest.TestCase):
                  mock.patch("app.device.es_collections._apply_es_collections_helper"):
                 _, no_restart_message, _ = _execute_overmind_action(
                     settings, repo,
-                    {"action": "set_es_collections", "payload": {"music_volume": 55, "screensaver_minutes": 5}},
+                    {"action": "set_es_collections", "payload": {"screensaver_minutes": 5}},
                 )
                 _, restart_message, _ = _execute_overmind_action(
                     settings, repo,
@@ -751,6 +770,9 @@ class ControlsDashboardLayoutTests(unittest.TestCase):
         self.assertEqual(body.count("control-tile"), 4)
         for marker in ("Screen Mode", "Volume</span>", "Music Volume", "Screensaver"):
             self.assertIn(marker, body)
+        # Screen Mode and Music Volume both restart EmulationStation and say so;
+        # System Volume never restarts (OS-level ALSA).
+        self.assertEqual(body.count("Restarts EmulationStation."), 2)
 
     def test_control_tile_css_defined(self) -> None:
         self.assertIn(".control-tile .card-body", self.css)
@@ -758,10 +780,11 @@ class ControlsDashboardLayoutTests(unittest.TestCase):
 
 class FrictionlessSaveTests(unittest.TestCase):
     """Music Volume, Screensaver, and Collections apply on click/slider-change
-    with no confirm dialog. Music Volume/Screensaver take effect live (no
-    EmulationStation restart, confirmed on a real device); Collections still
-    restarts ES since it changes which systems/collections are shown. Screen
-    Mode intentionally keeps its confirm."""
+    with no confirm dialog, even though Music Volume and Collections restart
+    EmulationStation to actually take effect (confirmed against the real ES
+    source and a live device -- there's no live-apply path for MusicVolume).
+    Screensaver is the current exception (unconfirmed either way, left as-is).
+    Screen Mode intentionally keeps its confirm."""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -799,12 +822,13 @@ class FrictionlessSaveTests(unittest.TestCase):
         # or screensaver tweak.
         self.assertIn("restart EmulationStation now?", self.js)
 
-    def test_music_volume_and_screensaver_success_toasts_do_not_claim_a_restart(self) -> None:
+    def test_music_volume_toast_claims_a_restart_but_screensaver_does_not(self) -> None:
+        # Reverted per a live device confirming music_volume genuinely needs the
+        # restart to take effect (no live-apply path in EmulationStation for it).
         music_start = self.js.index('musicVolumeSlider.addEventListener("change"')
         music_end = self.js.index("const screensaverSlider", music_start)
         music_body = self.js[music_start:music_end]
-        self.assertIn("Music volume set to ${result.music_volume}%.", music_body)
-        self.assertNotIn("restart", music_body.lower())
+        self.assertIn("Music volume set to ${result.music_volume}%; EmulationStation restarted.", music_body)
 
         saver_start = self.js.index('screensaverSlider.addEventListener("change"')
         saver_end = self.js.index("loadScreenMode();", saver_start)

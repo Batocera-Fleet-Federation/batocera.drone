@@ -11,12 +11,16 @@ capture). The privileged (root) Drone service worker invokes it as
 itself reuses ``apply_es_collections`` in-process when it happens to run as
 root, so the sequence can never drift between the two entry points.
 
-Most settings here live in es_settings.cfg, which EmulationStation only
+Every setting here lives in es_settings.cfg, which EmulationStation only
 re-reads at its own startup -- a change made externally while ES is already
-running is invisible until it restarts. But confirmed on a real device,
-music_volume/screensaver_time_ms take effect live without a restart, so those
-two skip the stop/start dance entirely (see RESTART_REQUIRED_FIELDS); the
-fields that change which systems/collections are shown still restart ES.
+running is invisible until it restarts. Confirmed by reading the real ES
+source (AudioManager.cpp reads MusicVolume from the same Settings singleton
+that Settings::loadFile() only populates once, at startup; the HTTP control
+API in HttpServerThread.cpp has no settings-reload endpoint) and by a live
+device: music_volume genuinely needs the restart, same as everything else
+here. screensaver_time_ms is presumed to need it too for the identical
+reason, but is left out of RESTART_REQUIRED_FIELDS for now pending explicit
+confirmation -- don't assume it's actually live-applying correctly.
 
 Deliberately self-contained (stdlib only, no imports from the rest of the
 ``app`` package) like set_screen_mode.py / set_volume.py: the caller (Drone
@@ -38,11 +42,20 @@ from typing import Optional
 CONFIG = Path("/userdata/system/configs/emulationstation/es_settings.cfg")
 EMULATIONSTATION_SERVICE = "/etc/init.d/S31emulationstation"
 
-# music_volume/screensaver_time_ms take effect live on this hardware without an
-# EmulationStation restart (confirmed on a real device) -- everything else here
-# (which systems/collections show up at all) genuinely needs ES to reinitialize
-# its systems list, so those fields still restart it.
-RESTART_REQUIRED_FIELDS = {"hidden_systems", "auto_collections", "custom_collections", "ungroup"}
+# Every field here needs EmulationStation to restart to actually take effect --
+# it only reads es_settings.cfg via Settings::loadFile() at its own startup, and
+# has no live-reload path (confirmed against the real ES source: AudioManager.cpp
+# reads MusicVolume from that same one-time-loaded map; the HTTP control API has
+# no settings-reload endpoint). screensaver_time_ms is the one exception left
+# here -- not yet confirmed either way, kept as-is until it's specifically
+# verified broken or fixed, unlike music_volume which a live device confirmed.
+RESTART_REQUIRED_FIELDS = {
+    "music_volume",
+    "hidden_systems",
+    "auto_collections",
+    "custom_collections",
+    "ungroup",
+}
 
 
 def _set_typed_value(root: ET.Element, tag: str, name: str, value: str) -> None:

@@ -2,14 +2,16 @@
 music volume -- read current state from es_settings.cfg and apply changes.
 
 Extracted alongside device_control.py's screen-mode/volume helpers. Every
-setting here lives in es_settings.cfg; most of them EmulationStation only
-re-reads at its own startup, so applying them restarts EmulationStation (via
-the same stop -> write -> overlay-save -> start sequence as
-set_screen_mode.py) -- except music_volume/screensaver_minutes, confirmed on
-a real device to take effect live with no restart. See set_es_collections.py
-(RESTART_REQUIRED_FIELDS) for exactly which fields restart ES; it's the
-canonical (and self-contained) implementation shared by the root-direct and
-privileged-service-worker entry points below.
+setting here lives in es_settings.cfg, which EmulationStation only re-reads
+at its own startup (confirmed against the real ES source -- Settings::loadFile()
+runs once at startup, AudioManager.cpp reads MusicVolume from that same
+one-time-loaded map, and the HTTP control API has no settings-reload
+endpoint), so applying almost all of them restarts EmulationStation (via the
+same stop -> write -> overlay-save -> start sequence as set_screen_mode.py).
+screensaver_minutes is the current exception, not yet confirmed either way.
+See set_es_collections.py (RESTART_REQUIRED_FIELDS) for exactly which fields
+restart ES; it's the canonical (and self-contained) implementation shared by
+the root-direct and privileged-service-worker entry points below.
 """
 
 import json
@@ -202,10 +204,10 @@ def _build_low_level_updates(settings: Settings, updates: dict) -> dict:
 def apply_es_collections(settings: Settings, updates: dict) -> dict:
     """Apply a partial update (any subset of music_volume, screensaver_minutes,
     hidden_systems, ungrouped_systems, auto_collections, custom_collections --
-    each a full desired list/value, not a diff). Restarts EmulationStation only
-    if a systems/collections field changed; music_volume/screensaver_minutes
-    apply live (see set_es_collections.RESTART_REQUIRED_FIELDS). Returns the
-    freshly re-read state."""
+    each a full desired list/value, not a diff). Restarts EmulationStation for
+    every field except screensaver_minutes (see
+    set_es_collections.RESTART_REQUIRED_FIELDS). Returns the freshly re-read
+    state."""
     low_level = _build_low_level_updates(settings, updates)
     if not low_level:
         raise ValueError("No recognized fields were provided")

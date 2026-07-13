@@ -5647,6 +5647,7 @@ async function renderAdminControlsPage() {
                 <input class="form-range flex-grow-1" type="range" id="musicVolumeSlider" min="0" max="100" step="5" value="80" aria-label="Music volume" disabled>
                 <i class="bi bi-volume-up" aria-hidden="true"></i>
               </div>
+              <div class="small text-muted mt-2">Restarts EmulationStation.</div>
             </div>
           </div>
         </div>
@@ -5724,7 +5725,7 @@ async function renderAdminControlsPage() {
         try {
           const result = await apiPost("/admin/system-info/music-volume", {level: Number(musicVolumeSlider.value)});
           syncMusicVolumeControls(result.music_volume);
-          showToast(`Music volume set to ${result.music_volume}%.`, "success");
+          showToast(`Music volume set to ${result.music_volume}%; EmulationStation restarted.`, "success");
         } catch (err) {
           showToast(`Failed to set music volume: ${escapeHtml(err.message || "unknown error")}`, "danger");
         } finally {
