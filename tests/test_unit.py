@@ -2459,6 +2459,37 @@ class SettingsTests(unittest.TestCase):
             self.assertIn(["batocera-save-overlay"], run_commands)
             self.assertIn([set_screen_mode.EMULATIONSTATION_SERVICE, "start"], run_commands)
 
+    def test_screen_mode_start_does_not_capture_output_via_pipe(self) -> None:
+        # Regression test: "start" backgrounds `startx &` without redirecting its
+        # own stdout/stderr, so a backgrounded EmulationStation/X process tree
+        # keeps the *inherited* pipe write-end open indefinitely. Capturing via
+        # stdout=PIPE (as every other step does) would make subprocess.run block
+        # until that pipe sees EOF -- which never happens while ES keeps running
+        # -- so every "start" would spuriously time out, even a fully successful
+        # one, and trigger an unnecessary/conflicting swissknife-restart fallback.
+        # Confirmed live: this was wedging the device into a permanent crash loop.
+        from app import set_screen_mode
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "es_settings.cfg"
+            calls = []
+
+            def fake_run(command, **kwargs):
+                calls.append((command, kwargs))
+                return mock.Mock(returncode=0, stdout="")
+
+            with mock.patch.object(set_screen_mode, "CONFIG", config):
+                with mock.patch("app.set_screen_mode.subprocess.run", side_effect=fake_run):
+                    set_screen_mode.set_screen_mode("kiosk")
+
+            start_calls = [kwargs for command, kwargs in calls if command == [set_screen_mode.EMULATIONSTATION_SERVICE, "start"]]
+            self.assertEqual(len(start_calls), 1)
+            self.assertEqual(start_calls[0].get("stdout"), subprocess.DEVNULL)
+            self.assertEqual(start_calls[0].get("stderr"), subprocess.DEVNULL)
+
+            stop_calls = [kwargs for command, kwargs in calls if command == [set_screen_mode.EMULATIONSTATION_SERVICE, "stop"]]
+            self.assertEqual(stop_calls[0].get("stdout"), subprocess.PIPE)
+
     def test_screen_mode_helper_restarts_emulationstation_even_when_overlay_fails(self) -> None:
         from app import set_screen_mode
 

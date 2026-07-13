@@ -5343,7 +5343,6 @@ function syncScreensaverControls(screensaverMinutes) {
   slider.value = String(screensaverMinutes);
   slider.disabled = false;
   if (value) value.textContent = Number(screensaverMinutes) === 0 ? "Off" : `${screensaverMinutes} min`;
-  if (saveBtn) saveBtn.disabled = false;
 }
 
 function syncScreenModeControls(mode) {

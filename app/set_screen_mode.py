@@ -44,15 +44,32 @@ def _write_ui_mode(config: Path, target: str) -> None:
     tree.write(config, encoding="utf-8", xml_declaration=True)
 
 
-def _run_step(command: list, *, timeout: int = 120) -> bool:
-    """Run a best-effort step, logging its combined output. Never raises."""
+def _run_step(command: list, *, timeout: int = 120, capture_output: bool = True) -> bool:
+    """Run a best-effort step, logging its combined output. Never raises.
+
+    ``capture_output=False`` for "start": its init-script action backgrounds
+    ``startx &`` without redirecting its own stdout/stderr, so a backgrounded
+    X/EmulationStation process tree keeps the *inherited* pipe write-end open
+    long after the init script itself has returned. With ``stdout=PIPE``,
+    ``subprocess.run`` blocks reading that pipe until it sees EOF -- which
+    never happens while EmulationStation keeps running -- so "start" would
+    spuriously time out on every call (even a perfectly successful one) and
+    trigger an unnecessary ``batocera-es-swissknife --restart`` fallback that
+    then fights the still-fine first attempt for the display. Without a pipe
+    to drain, ``subprocess.run`` only waits for the init script's own (fast)
+    exit, matching what actually happens.
+    """
     label = " ".join(command)
     try:
-        proc = subprocess.run(
-            command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=timeout
-        )
-        output = (proc.stdout or "").strip()
-        print(f"[set_screen_mode] {label} -> rc={proc.returncode} {output}".rstrip())
+        if capture_output:
+            proc = subprocess.run(
+                command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=timeout
+            )
+            output = (proc.stdout or "").strip()
+            print(f"[set_screen_mode] {label} -> rc={proc.returncode} {output}".rstrip())
+        else:
+            proc = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout)
+            print(f"[set_screen_mode] {label} -> rc={proc.returncode}")
         return proc.returncode == 0
     except (OSError, subprocess.SubprocessError) as error:
         print(f"[set_screen_mode] {label} -> error: {error}")
@@ -82,7 +99,7 @@ def set_screen_mode(mode: str, config: Optional[Path] = None) -> None:
     # failing overlay save block the EmulationStation restart below.
     _run_step(["batocera-save-overlay"], timeout=30)
     print("[set_screen_mode] starting EmulationStation")
-    started = _run_step([EMULATIONSTATION_SERVICE, "start"], timeout=60)
+    started = _run_step([EMULATIONSTATION_SERVICE, "start"], timeout=60, capture_output=False)
     if not started:
         restart_tool = shutil.which("batocera-es-swissknife")
         if restart_tool:

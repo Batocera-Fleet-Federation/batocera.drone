@@ -1,3 +1,4 @@
+import subprocess
 import tempfile
 import threading
 import time
@@ -310,6 +311,36 @@ class PrivilegedEsCollectionsHelperTests(unittest.TestCase):
                  mock.patch("app.set_es_collections.shutil.which", return_value=None):
                 with self.assertRaises(RuntimeError):
                     set_es_collections.apply_es_collections({"hidden_systems": "snes"}, config=config)
+
+    def test_start_does_not_capture_output_via_pipe(self) -> None:
+        # Regression test: "start" backgrounds `startx &` without redirecting its
+        # own stdout/stderr, so a backgrounded EmulationStation/X process tree
+        # keeps the *inherited* pipe write-end open indefinitely. Capturing via
+        # stdout=PIPE (as every other step does) would make subprocess.run block
+        # until that pipe sees EOF -- which never happens while ES keeps running
+        # -- so every "start" would spuriously time out, even a fully successful
+        # one, and trigger an unnecessary/conflicting swissknife-restart fallback.
+        # Confirmed live: this was wedging the device into a permanent crash loop.
+        from app import set_es_collections
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "es_settings.cfg"
+            calls = []
+
+            def fake_run(command, **kwargs):
+                calls.append((command, kwargs))
+                return mock.Mock(returncode=0, stdout="")
+
+            with mock.patch("app.set_es_collections.subprocess.run", side_effect=fake_run):
+                set_es_collections.apply_es_collections({"hidden_systems": "snes"}, config=config)
+
+            start_calls = [kwargs for command, kwargs in calls if command == [set_es_collections.EMULATIONSTATION_SERVICE, "start"]]
+            self.assertEqual(len(start_calls), 1)
+            self.assertEqual(start_calls[0].get("stdout"), subprocess.DEVNULL)
+            self.assertEqual(start_calls[0].get("stderr"), subprocess.DEVNULL)
+
+            stop_calls = [kwargs for command, kwargs in calls if command == [set_es_collections.EMULATIONSTATION_SERVICE, "stop"]]
+            self.assertEqual(stop_calls[0].get("stdout"), subprocess.PIPE)
 
     def test_no_updates_raises(self) -> None:
         from app import set_es_collections
