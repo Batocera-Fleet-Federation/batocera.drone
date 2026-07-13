@@ -7,6 +7,7 @@ const systemsMenuBtn = document.getElementById("systemsMenuBtn");
 const brandHomeBtn = document.getElementById("brandHomeBtn");
 const themeMenuBtn = document.getElementById("themeMenuBtn");
 const systemInfoMenuBtn = document.getElementById("systemInfoMenuBtn");
+const controlsMenuBtn = document.getElementById("controlsMenuBtn");
 const adminMenuBtn = document.getElementById("adminMenuBtn");
 const apiAccessBtn = document.getElementById("apiAccessBtn");
 const droneVersionBadge = document.getElementById("droneVersionBadge");
@@ -181,7 +182,7 @@ function setLoading(isLoading, text = "Loading...") {
   }
 }
 function applyAdminVisibility() {
-  const adminLinks = [adminMenuBtn, systemInfoMenuBtn, apiAccessBtn].filter(Boolean);
+  const adminLinks = [adminMenuBtn, systemInfoMenuBtn, controlsMenuBtn, apiAccessBtn].filter(Boolean);
   if (adminEnabled) {
     adminLinks.forEach((link) => link.classList.remove("d-none"));
   } else {
@@ -2208,7 +2209,7 @@ async function purgeAssetCache() {
   try {
     const result = await apiPost("/admin/asset-cache/purge", {});
     showToast(result.message || "Asset cache purge queued.", "success");
-    if (window.location.hash === "#admin/system-info" && typeof window.refreshSystemInfoAssetCache === "function") {
+    if (window.location.hash === "#admin/controls" && typeof window.refreshSystemInfoAssetCache === "function") {
       await window.refreshSystemInfoAssetCache();
     } else {
       await renderAssetCachePage();
@@ -2229,7 +2230,7 @@ async function clearPendingAssetChanges() {
   try {
     const result = await apiPost("/admin/asset-cache/clear-pending", {});
     showToast(result.message || "Pending asset changes cleared.", "success");
-    if (window.location.hash === "#admin/system-info" && typeof window.refreshSystemInfoAssetCache === "function") {
+    if (window.location.hash === "#admin/controls" && typeof window.refreshSystemInfoAssetCache === "function") {
       await window.refreshSystemInfoAssetCache();
     } else {
       await renderAssetCachePage();
@@ -5429,7 +5430,7 @@ function renderEsCollectionsCard(state) {
       <div class="fw-semibold mb-1">Custom Game Collections</div>
       ${renderEsCheckboxGrid(customCollections.map((c) => ({name: c.name, label: c.name, checked: c.enabled})), "custom")}
     </div>
-    <button class="btn btn-primary mt-3" id="esCollectionsSaveBtn"><i class="bi bi-save me-1"></i>Save &amp; Restart EmulationStation</button>
+    <button class="btn btn-primary mt-3" id="esCollectionsSaveBtn"><i class="bi bi-save me-1"></i>Save</button>
   `;
 }
 
@@ -5451,7 +5452,6 @@ function wireEsCollectionsSaveButton() {
   const saveBtn = document.getElementById("esCollectionsSaveBtn");
   if (!saveBtn) return;
   saveBtn.addEventListener("click", async () => {
-    if (!window.confirm("Save collections/systems changes and restart EmulationStation now?")) return;
     saveBtn.disabled = true;
     try {
       const updated = await apiPost("/admin/es-collections", collectEsCollectionsPayload());
@@ -5493,10 +5493,6 @@ async function renderAdminSystemInfoPage() {
     const disks = Array.isArray(metrics.disks) && metrics.disks.length ? metrics.disks : [disk];
     const process = metrics.process || {};
     const speed = payload.speed_sample || {};
-    const rawVolume = payload.audio_volume ?? fields.audio_volume;
-    const reportedVolume = Number(rawVolume);
-    const volumeAvailable = rawVolume !== null && rawVolume !== undefined && Number.isFinite(reportedVolume);
-    const currentVolume = volumeAvailable ? Math.max(0, Math.min(100, Math.round(reportedVolume / 5) * 5)) : 50;
     const pixenInstalled = payload.pixen_installed === true || fields.pixen_installed === true || String(fields.pixen_installed || "").toLowerCase() === "yes";
     const detail = (label, value) => `<div class="asset-detail"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value || "n/a")}</strong></div>`;
     const pct = (value) => value === null || value === undefined || value === "" ? "n/a" : `${Number(value).toFixed(1)}%`;
@@ -5554,71 +5550,6 @@ async function renderAdminSystemInfoPage() {
           </div>
         </div>
       </div>
-      <div class="card log-card mb-3">
-        <div class="card-header d-flex justify-content-between align-items-center gap-2">
-          <span><i class="bi bi-display me-2"></i>Screen Mode</span>
-          <span class="small text-muted" id="screenModeCurrent">Loading...</span>
-        </div>
-        <div class="card-body">
-          <div class="small text-muted mb-2">Changing screen mode restarts EmulationStation.</div>
-          <div class="btn-group bff-segmented" role="group" aria-label="Screen mode" id="screenModeButtons">
-            <button class="btn btn-outline-primary btn-sm" type="button" data-screen-mode="full" onclick="applyDroneScreenMode('full')"><i class="bi bi-unlock me-1"></i>Full</button>
-            <button class="btn btn-outline-primary btn-sm" type="button" data-screen-mode="kiosk" onclick="applyDroneScreenMode('kiosk')"><i class="bi bi-lock me-1"></i>Kiosk</button>
-            <button class="btn btn-outline-primary btn-sm" type="button" data-screen-mode="kid" onclick="applyDroneScreenMode('kid')"><i class="bi bi-person me-1"></i>Kid</button>
-          </div>
-        </div>
-      </div>
-      <div class="card log-card mb-3">
-        <div class="card-header d-flex justify-content-between align-items-center gap-2">
-          <span><i class="bi bi-volume-up me-2"></i>Volume</span>
-          <output id="systemVolumeValue" for="systemVolumeSlider" class="badge text-bg-primary">${volumeAvailable ? `${currentVolume}%` : "Unavailable"}</output>
-        </div>
-        <div class="card-body">
-          <div class="d-flex align-items-center gap-3">
-            <i class="bi bi-volume-mute fs-5" aria-hidden="true"></i>
-            <input class="form-range flex-grow-1" type="range" id="systemVolumeSlider" min="0" max="100" step="5" value="${currentVolume}" aria-label="System volume" ${volumeAvailable ? "" : "disabled"}>
-            <i class="bi bi-volume-up fs-5" aria-hidden="true"></i>
-          </div>
-        </div>
-      </div>
-      <div class="card log-card mb-3">
-        <div class="card-header d-flex justify-content-between align-items-center gap-2">
-          <span><i class="bi bi-music-note-beamed me-2"></i>Music Volume</span>
-          <output id="musicVolumeValue" for="musicVolumeSlider" class="badge text-bg-primary">--</output>
-        </div>
-        <div class="card-body">
-          <div class="small text-muted mb-2">EmulationStation's background music volume. Applying this briefly restarts EmulationStation.</div>
-          <div class="d-flex align-items-center gap-3">
-            <i class="bi bi-volume-mute fs-5" aria-hidden="true"></i>
-            <input class="form-range flex-grow-1" type="range" id="musicVolumeSlider" min="0" max="100" step="5" value="80" aria-label="Music volume" disabled>
-            <i class="bi bi-volume-up fs-5" aria-hidden="true"></i>
-          </div>
-          <button class="btn btn-sm btn-primary mt-2" id="musicVolumeSaveBtn" disabled><i class="bi bi-save me-1"></i>Save &amp; Restart EmulationStation</button>
-        </div>
-      </div>
-      <div class="card log-card mb-3">
-        <div class="card-header d-flex justify-content-between align-items-center gap-2">
-          <span><i class="bi bi-moon-stars me-2"></i>Screensaver</span>
-          <output id="screensaverValue" for="screensaverSlider" class="badge text-bg-primary">--</output>
-        </div>
-        <div class="card-body">
-          <div class="small text-muted mb-2">How long EmulationStation waits with no input before starting the screensaver. 0 = disabled. Applying this restarts EmulationStation.</div>
-          <div class="d-flex align-items-center gap-3">
-            <i class="bi bi-moon fs-5" aria-hidden="true"></i>
-            <input class="form-range flex-grow-1" type="range" id="screensaverSlider" min="0" max="120" step="1" value="5" aria-label="Screensaver delay in minutes" disabled>
-            <span class="small text-muted text-nowrap">min</span>
-          </div>
-          <button class="btn btn-sm btn-primary mt-2" id="screensaverSaveBtn" disabled><i class="bi bi-save me-1"></i>Save &amp; Restart EmulationStation</button>
-        </div>
-      </div>
-      <div class="card log-card mb-3">
-        <div class="card-header d-flex justify-content-between align-items-center gap-2">
-          <span><i class="bi bi-collection-play me-2"></i>Game Collections &amp; Systems</span>
-          <button id="esCollectionsRefreshBtn" class="btn btn-sm btn-outline-primary" type="button"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
-        </div>
-        <div class="small text-muted px-3 pt-3">Which systems appear, which are grouped together, and which automatic/custom collections are enabled. Saving restarts EmulationStation.</div>
-        <div class="card-body" id="esCollectionsBody"><div class="text-muted">Loading...</div></div>
-      </div>
       <div class="card log-card">
         <div class="card-header">System Details</div>
         <div class="card-body">
@@ -5640,13 +5571,121 @@ async function renderAdminSystemInfoPage() {
                 ${detail("Model", fields.model)}
                 ${detail("Architecture", fields.architecture)}
                 ${detail("CPU", fields.cpu_model || fields.cpu_topology)}
+                <h6 class="mt-3">GPU</h6>
+                ${detail("Vendor", fields.gpu_vendor)}
+                ${detail("Model", fields.gpu_model)}
+                ${detail("Driver", fields.gpu_driver)}
                 ${renderedRows}
               </div>
             </div>
           </div>
         </div>
       </div>
-      <div class="card log-card mt-3">
+    `;
+  } catch (err) {
+    showToast(`Failed to load system information: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    content.innerHTML = `
+      <div class="mb-3">
+        <button class="btn btn-outline-secondary" onclick="setHash('#admin')">← Back to Admin</button>
+      </div>
+      <div class="text-muted">System information could not be loaded.</div>
+    `;
+  } finally {
+    setLoading(false);
+  }
+}
+
+async function renderAdminControlsPage() {
+  titleNode.textContent = "Controls";
+  subtitleNode.textContent = "Screen mode, volume, screensaver, and EmulationStation configuration";
+  setLoading(true, "Loading controls...");
+  try {
+    const payload = await api("/admin/system-info");
+    const fields = payload.fields || {};
+    const rawVolume = payload.audio_volume ?? fields.audio_volume;
+    const reportedVolume = Number(rawVolume);
+    const volumeAvailable = rawVolume !== null && rawVolume !== undefined && Number.isFinite(reportedVolume);
+    const currentVolume = volumeAvailable ? Math.max(0, Math.min(100, Math.round(reportedVolume / 5) * 5)) : 50;
+
+    content.innerHTML = `
+      <div class="mb-3 d-flex flex-wrap justify-content-between gap-2">
+        <button class="btn btn-outline-secondary" onclick="setHash('#admin')">Back to Admin</button>
+        <button class="btn btn-outline-primary" onclick="setHash('#admin/controls')"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
+      </div>
+      <div class="row row-cols-1 row-cols-sm-2 row-cols-xl-4 g-3 mb-3">
+        <div class="col">
+          <div class="card control-tile h-100">
+            <div class="card-header d-flex justify-content-between align-items-center gap-2">
+              <span><i class="bi bi-display me-2"></i>Screen Mode</span>
+              <span class="small text-muted" id="screenModeCurrent">Loading...</span>
+            </div>
+            <div class="card-body">
+              <div class="btn-group bff-segmented w-100" role="group" aria-label="Screen mode" id="screenModeButtons">
+                <button class="btn btn-outline-primary btn-sm" type="button" data-screen-mode="full" onclick="applyDroneScreenMode('full')"><i class="bi bi-unlock me-1"></i>Full</button>
+                <button class="btn btn-outline-primary btn-sm" type="button" data-screen-mode="kiosk" onclick="applyDroneScreenMode('kiosk')"><i class="bi bi-lock me-1"></i>Kiosk</button>
+                <button class="btn btn-outline-primary btn-sm" type="button" data-screen-mode="kid" onclick="applyDroneScreenMode('kid')"><i class="bi bi-person me-1"></i>Kid</button>
+              </div>
+              <div class="small text-muted mt-2">Restarts EmulationStation.</div>
+            </div>
+          </div>
+        </div>
+        <div class="col">
+          <div class="card control-tile h-100">
+            <div class="card-header d-flex justify-content-between align-items-center gap-2">
+              <span><i class="bi bi-volume-up me-2"></i>Volume</span>
+              <output id="systemVolumeValue" for="systemVolumeSlider" class="badge text-bg-primary">${volumeAvailable ? `${currentVolume}%` : "Unavailable"}</output>
+            </div>
+            <div class="card-body">
+              <div class="d-flex align-items-center gap-2">
+                <i class="bi bi-volume-mute" aria-hidden="true"></i>
+                <input class="form-range flex-grow-1" type="range" id="systemVolumeSlider" min="0" max="100" step="5" value="${currentVolume}" aria-label="System volume" ${volumeAvailable ? "" : "disabled"}>
+                <i class="bi bi-volume-up" aria-hidden="true"></i>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="col">
+          <div class="card control-tile h-100">
+            <div class="card-header d-flex justify-content-between align-items-center gap-2">
+              <span><i class="bi bi-music-note-beamed me-2"></i>Music Volume</span>
+              <output id="musicVolumeValue" for="musicVolumeSlider" class="badge text-bg-primary">--</output>
+            </div>
+            <div class="card-body">
+              <div class="d-flex align-items-center gap-2">
+                <i class="bi bi-volume-mute" aria-hidden="true"></i>
+                <input class="form-range flex-grow-1" type="range" id="musicVolumeSlider" min="0" max="100" step="5" value="80" aria-label="Music volume" disabled>
+                <i class="bi bi-volume-up" aria-hidden="true"></i>
+              </div>
+              <button class="btn btn-sm btn-primary mt-2" id="musicVolumeSaveBtn" disabled><i class="bi bi-save me-1"></i>Save</button>
+            </div>
+          </div>
+        </div>
+        <div class="col">
+          <div class="card control-tile h-100">
+            <div class="card-header d-flex justify-content-between align-items-center gap-2">
+              <span><i class="bi bi-moon-stars me-2"></i>Screensaver</span>
+              <output id="screensaverValue" for="screensaverSlider" class="badge text-bg-primary">--</output>
+            </div>
+            <div class="card-body">
+              <div class="d-flex align-items-center gap-2">
+                <i class="bi bi-moon" aria-hidden="true"></i>
+                <input class="form-range flex-grow-1" type="range" id="screensaverSlider" min="0" max="120" step="1" value="5" aria-label="Screensaver delay in minutes" disabled>
+                <span class="small text-muted text-nowrap">min</span>
+              </div>
+              <button class="btn btn-sm btn-primary mt-2" id="screensaverSaveBtn" disabled><i class="bi bi-save me-1"></i>Save</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="card log-card mb-3">
+        <div class="card-header d-flex justify-content-between align-items-center gap-2">
+          <span><i class="bi bi-collection-play me-2"></i>Game Collections &amp; Systems</span>
+          <button id="esCollectionsRefreshBtn" class="btn btn-sm btn-outline-primary" type="button"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
+        </div>
+        <div class="small text-muted px-3 pt-3">Which systems appear, which are grouped together, and which automatic/custom collections are enabled. Saving restarts EmulationStation.</div>
+        <div class="card-body" id="esCollectionsBody"><div class="text-muted">Loading...</div></div>
+      </div>
+      <div class="card log-card">
         <div class="card-header d-flex justify-content-between align-items-center">
           <span><i class="bi bi-database-check me-2"></i>Asset Cache</span>
           <div class="d-flex gap-2">
@@ -5695,7 +5734,6 @@ async function renderAdminSystemInfoPage() {
     }
     if (musicVolumeSaveBtn) {
       musicVolumeSaveBtn.addEventListener("click", async () => {
-        if (!window.confirm("Set music volume and restart EmulationStation now?")) return;
         musicVolumeSaveBtn.disabled = true;
         try {
           const result = await apiPost("/admin/system-info/music-volume", {level: Number(musicVolumeSlider.value)});
@@ -5720,7 +5758,6 @@ async function renderAdminSystemInfoPage() {
     }
     if (screensaverSaveBtn) {
       screensaverSaveBtn.addEventListener("click", async () => {
-        if (!window.confirm("Set screensaver delay and restart EmulationStation now?")) return;
         screensaverSaveBtn.disabled = true;
         try {
           const result = await apiPost("/admin/es-collections", {screensaver_minutes: Number(screensaverSlider.value)});
@@ -5768,12 +5805,12 @@ async function renderAdminSystemInfoPage() {
       showToast(`Failed to load asset cache: ${escapeHtml(err.message || "unknown error")}`, "danger");
     }
   } catch (err) {
-    showToast(`Failed to load system information: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    showToast(`Failed to load controls: ${escapeHtml(err.message || "unknown error")}`, "danger");
     content.innerHTML = `
       <div class="mb-3">
         <button class="btn btn-outline-secondary" onclick="setHash('#admin')">← Back to Admin</button>
       </div>
-      <div class="text-muted">System information could not be loaded.</div>
+      <div class="text-muted">Controls could not be loaded.</div>
     `;
   } finally {
     setLoading(false);
@@ -5919,6 +5956,12 @@ async function router() {
         return;
       }
       await renderAdminSystemInfoPage();
+    } else if (hash === "#admin/controls") {
+      if (!adminEnabled) {
+        setHash("");
+        return;
+      }
+      await renderAdminControlsPage();
     } else if (hash.startsWith("#admin/artwork")) {
       if (!adminEnabled) {
         setHash("");
@@ -6006,6 +6049,11 @@ systemInfoMenuBtn.addEventListener("click", (event) => {
   event.preventDefault();
   if (!adminEnabled) return;
   setHash("#admin/system-info");
+});
+controlsMenuBtn.addEventListener("click", (event) => {
+  event.preventDefault();
+  if (!adminEnabled) return;
+  setHash("#admin/controls");
 });
 adminMenuBtn.addEventListener("click", (event) => {
   event.preventDefault();

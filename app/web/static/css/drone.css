@@ -328,6 +328,8 @@
     a { color: var(--admin-sidebar-accent); }
     a:hover { color: #3559bc; }
     .tile { height: 100%; }
+    .control-tile .card-body { padding: 0.85rem 1rem; }
+    .control-tile .card-header { padding: 0.5rem 0.85rem; }
     .pointer { cursor: pointer; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
     .truncate-2 {

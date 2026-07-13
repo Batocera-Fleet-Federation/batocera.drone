@@ -127,6 +127,21 @@ class MockServerIntegrationTests(unittest.TestCase):
         self.assertIn('step="5"', js)
         self.assertIn('apiPost("/admin/system-info/volume"', js)
 
+    def test_system_info_includes_gpu_info(self) -> None:
+        fake_gpu = {
+            "vendor": "NVIDIA",
+            "model": "GeForce GTX 1650",
+            "driver": "nvidia",
+            "renderer": "NVIDIA GeForce GTX 1650/PCIe/SSE2",
+            "pci_devices": [{"description": "VGA compatible controller: NVIDIA GeForce GTX 1650", "driver": "nvidia"}],
+        }
+        with mock.patch("app.web.handlers_diagnostics._collect_gpu_info", return_value=fake_gpu):
+            info = self._get_json("/v1/api/admin/system-info")
+        self.assertEqual(info["gpu_info"], fake_gpu)
+        self.assertEqual(info["fields"]["gpu_vendor"], "NVIDIA")
+        self.assertEqual(info["fields"]["gpu_model"], "GeForce GTX 1650")
+        self.assertEqual(info["fields"]["gpu_driver"], "nvidia")
+
     def test_overmind_integration_uses_authorization_token_label(self) -> None:
         js = self._get_bytes("/static/js/drone.js")
         self.assertIn(b"Authorization Token", js)

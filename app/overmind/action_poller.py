@@ -32,6 +32,9 @@ try:
         _get_audio_volume,
         _get_screen_mode,
     )
+    from ..device.es_collections import (
+        get_es_collections_state,
+    )
     from ..device.pixen import (
         is_pixen_installed,
         pixen_script_path,
@@ -110,6 +113,9 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from device.device_control import (
         _get_audio_volume,
         _get_screen_mode,
+    )
+    from device.es_collections import (
+        get_es_collections_state,
     )
     from device.pixen import (
         is_pixen_installed,
@@ -235,6 +241,7 @@ def _start_overmind_action_poller(settings: Settings, repository: "RomRepository
                     system_info_payload["updated_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
                     system_info_payload["screen_mode"] = _get_screen_mode(settings)
                     system_info_payload["audio_volume"] = _get_audio_volume(settings)
+                    system_info_payload["es_collections"] = get_es_collections_state(settings)
                     _automation_config = _load_automation_config(settings)
                     system_info_payload["idle_volume_automation"] = _automation_config["idle_volume"]
                     system_info_payload["idle_game_exit_automation"] = _automation_config["idle_game_exit"]

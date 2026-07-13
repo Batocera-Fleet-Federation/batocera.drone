@@ -529,5 +529,191 @@ class EsCollectionsUiContentTests(unittest.TestCase):
         self.assertIn('names("custom", true)', payload_source)
 
 
+class AdminControlsPageSplitTests(unittest.TestCase):
+    """System Info and Controls are separate pages: screen mode, volume, music
+    volume, screensaver, collections, and asset cache all live on Controls;
+    System Info keeps only health + details (with GPU added)."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        root = Path(__file__).resolve().parents[1]
+        cls.js = root.joinpath("app/web/static/js/drone.js").read_text(encoding="utf-8")
+        cls.html = root.joinpath("app/web/templates/index.html").read_text(encoding="utf-8")
+
+    def _function_body(self, name: str) -> str:
+        start = self.js.index(f"async function {name}(")
+        brace_start = self.js.index("{", start)
+        depth = 0
+        i = brace_start
+        while i < len(self.js):
+            char = self.js[i]
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    return self.js[start:i + 1]
+            i += 1
+        raise AssertionError(f"unbalanced braces scanning function {name}")
+
+    def test_navbar_has_controls_link_after_system_info(self) -> None:
+        self.assertIn('id="controlsMenuBtn" href="#admin/controls"', self.html)
+        system_info_pos = self.html.index('id="systemInfoMenuBtn"')
+        controls_pos = self.html.index('id="controlsMenuBtn"')
+        admin_pos = self.html.index('id="adminMenuBtn"')
+        self.assertTrue(system_info_pos < controls_pos < admin_pos)
+
+    def test_router_dispatches_controls_hash(self) -> None:
+        self.assertIn('hash === "#admin/controls"', self.js)
+        router_start = self.js.index('hash === "#admin/system-info"')
+        router_end = self.js.index('hash.startsWith("#admin/artwork")', router_start)
+        router_section = self.js[router_start:router_end]
+        self.assertIn("await renderAdminSystemInfoPage();", router_section)
+        self.assertIn("await renderAdminControlsPage();", router_section)
+
+    def test_system_info_page_keeps_only_health_and_details(self) -> None:
+        body = self._function_body("renderAdminSystemInfoPage")
+        self.assertIn("System Health", body)
+        self.assertIn("System Details", body)
+        self.assertIn(">GPU<", body)
+        self.assertIn("fields.gpu_vendor", body)
+        self.assertIn("fields.gpu_model", body)
+        self.assertIn("fields.gpu_driver", body)
+
+        for marker in (
+            "Screen Mode</span>",
+            "id=\"systemVolumeSlider\"",
+            "Music Volume</span>",
+            "Screensaver</span>",
+            "Game Collections",
+            "Asset Cache</span>",
+        ):
+            self.assertNotIn(marker, body, f"{marker!r} should have moved off System Info")
+
+    def test_controls_page_has_all_moved_cards(self) -> None:
+        body = self._function_body("renderAdminControlsPage")
+        self.assertIn('titleNode.textContent = "Controls";', body)
+
+        for marker in (
+            'id="screenModeButtons"',
+            'id="systemVolumeSlider"',
+            'id="musicVolumeSlider"',
+            'id="screensaverSlider"',
+            'id="esCollectionsBody"',
+            'id="systemInfoAssetCacheBody"',
+        ):
+            self.assertIn(marker, body)
+
+        self.assertNotIn("System Health", body)
+        self.assertNotIn("System Details", body)
+
+    def test_controls_nav_link_is_admin_gated(self) -> None:
+        self.assertIn('const controlsMenuBtn = document.getElementById("controlsMenuBtn");', self.js)
+        self.assertIn("const adminLinks = [adminMenuBtn, systemInfoMenuBtn, controlsMenuBtn, apiAccessBtn]", self.js)
+        self.assertIn('controlsMenuBtn.addEventListener("click"', self.js)
+        click_start = self.js.index('controlsMenuBtn.addEventListener("click"')
+        click_end = self.js.index("});", click_start)
+        click_body = self.js[click_start:click_end]
+        self.assertIn("if (!adminEnabled) return;", click_body)
+        self.assertIn('setHash("#admin/controls");', click_body)
+
+    def test_asset_cache_refresh_hooks_check_controls_hash(self) -> None:
+        purge_start = self.js.index("async function purgeAssetCache()")
+        purge_end = self.js.index("async function clearPendingAssetChanges()")
+        clear_start = purge_end
+        clear_end = self.js.index("function renderAssetCachePanel(")
+        for section in (self.js[purge_start:purge_end], self.js[clear_start:clear_end]):
+            self.assertIn('window.location.hash === "#admin/controls"', section)
+            self.assertNotIn('window.location.hash === "#admin/system-info"', section)
+
+
+class HeartbeatEsCollectionsTests(unittest.TestCase):
+    """The Drone proactively reports ES-collections state in its heartbeat so
+    Overmind can store it, without touching the existing live remote-control
+    (get_es_collections_state/set_es_collections) actions."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        root = Path(__file__).resolve().parents[1]
+        cls.source = root.joinpath("app/overmind/action_poller.py").read_text(encoding="utf-8")
+
+    def test_heartbeat_builder_imports_and_calls_get_es_collections_state(self) -> None:
+        self.assertIn("from ..device.es_collections import (\n        get_es_collections_state,", self.source)
+        self.assertIn("from device.es_collections import (\n        get_es_collections_state,", self.source)
+        self.assertIn(
+            'system_info_payload["es_collections"] = get_es_collections_state(settings)',
+            self.source,
+        )
+
+    def test_es_collections_assigned_alongside_screen_mode_and_audio_volume(self) -> None:
+        # Same per-tick refresh cadence as the other "current device configuration"
+        # fields it's conceptually grouped with (not the rarer full system_info
+        # refresh), so it has the same staleness characteristics users already see
+        # for screen_mode/audio_volume today.
+        screen_mode_pos = self.source.index('system_info_payload["screen_mode"]')
+        audio_volume_pos = self.source.index('system_info_payload["audio_volume"]')
+        es_collections_pos = self.source.index('system_info_payload["es_collections"]')
+        self.assertTrue(screen_mode_pos < audio_volume_pos < es_collections_pos)
+
+
+class ControlsDashboardLayoutTests(unittest.TestCase):
+    """Screen Mode/Volume/Music Volume/Screensaver are compact tiles in a
+    responsive grid on the Controls page, not full-width stacked cards."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        root = Path(__file__).resolve().parents[1]
+        cls.js = root.joinpath("app/web/static/js/drone.js").read_text(encoding="utf-8")
+        cls.css = root.joinpath("app/web/static/css/drone.css").read_text(encoding="utf-8")
+
+    def test_controls_page_wraps_simple_controls_in_a_tile_grid(self) -> None:
+        start = self.js.index("async function renderAdminControlsPage(")
+        end = self.js.index("Game Collections", start)
+        body = self.js[start:end]
+        self.assertIn("row row-cols-1 row-cols-sm-2 row-cols-xl-4 g-3", body)
+        self.assertEqual(body.count('class="col">'), 4)
+        self.assertEqual(body.count("control-tile"), 4)
+        for marker in ("Screen Mode", "Volume</span>", "Music Volume", "Screensaver"):
+            self.assertIn(marker, body)
+
+    def test_control_tile_css_defined(self) -> None:
+        self.assertIn(".control-tile .card-body", self.css)
+
+
+class FrictionlessSaveTests(unittest.TestCase):
+    """Music Volume, Screensaver, and Collections apply on click with a plain
+    'Save' label and no confirm dialog (the restart they trigger is real and
+    required, but it's presented as one smooth action, not a separate scary
+    step). Screen Mode intentionally keeps its confirm."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        root = Path(__file__).resolve().parents[1]
+        cls.js = root.joinpath("app/web/static/js/drone.js").read_text(encoding="utf-8")
+
+    def test_no_save_and_restart_button_labels_remain(self) -> None:
+        self.assertNotIn("Save &amp; Restart EmulationStation", self.js)
+
+    def test_music_volume_and_screensaver_save_have_no_confirm(self) -> None:
+        music_start = self.js.index('musicVolumeSaveBtn.addEventListener("click"')
+        music_end = self.js.index("});", music_start)
+        self.assertNotIn("window.confirm", self.js[music_start:music_end])
+
+        saver_start = self.js.index('screensaverSaveBtn.addEventListener("click"')
+        saver_end = self.js.index("});", saver_start)
+        self.assertNotIn("window.confirm", self.js[saver_start:saver_end])
+
+    def test_es_collections_save_has_no_confirm(self) -> None:
+        save_start = self.js.index("function wireEsCollectionsSaveButton()")
+        save_end = self.js.index("\nfunction ", save_start + 1)
+        self.assertNotIn("window.confirm", self.js[save_start:save_end])
+
+    def test_screen_mode_confirm_is_unchanged(self) -> None:
+        # Deliberately out of scope: switching to kiosk/kid can lock out admin
+        # access until switched back, a more consequential action than a volume
+        # or screensaver tweak.
+        self.assertIn("restart EmulationStation now?", self.js)
+
+
 if __name__ == "__main__":
     unittest.main()

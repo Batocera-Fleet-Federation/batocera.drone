@@ -16,7 +16,7 @@ try:
     from ..device.pixen import is_pixen_installed as _is_pixen_installed
     from ..device.pixen import pixen_script_path as _pixen_script_path
     from ..device.device_control import _apply_audio_volume, _apply_screen_mode, _get_audio_volume, _get_screen_mode
-    from ..device.system_metrics import _collect_performance_metrics, _sample_speed
+    from ..device.system_metrics import _collect_gpu_info, _collect_performance_metrics, _sample_speed
     from ..overmind.overmind_client import _format_overmind_error
     from ..overmind.overmind_game_logs import (
         load_gameplay_history as _load_gameplay_history,
@@ -29,7 +29,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from device.pixen import is_pixen_installed as _is_pixen_installed  # type: ignore
     from device.pixen import pixen_script_path as _pixen_script_path  # type: ignore
     from device.device_control import _apply_audio_volume, _apply_screen_mode, _get_audio_volume, _get_screen_mode  # type: ignore
-    from device.system_metrics import _collect_performance_metrics, _sample_speed  # type: ignore
+    from device.system_metrics import _collect_gpu_info, _collect_performance_metrics, _sample_speed  # type: ignore
     from overmind.overmind_client import _format_overmind_error  # type: ignore
     from overmind.overmind_game_logs import (  # type: ignore
         load_gameplay_history as _load_gameplay_history,
@@ -173,6 +173,17 @@ class HandlersDiagnosticsMixin:
         router_ip_address = _get_router_ip_address() or "Unavailable"
         runtime_metrics = _collect_performance_metrics(self.settings.userdata_root)
         audio_volume = 75 if self.settings.use_fake_data else _get_audio_volume(self.settings)
+        gpu_info = (
+            {
+                "vendor": "NVIDIA (Fake)",
+                "model": "GeForce RTX 4090 (Fake)",
+                "driver": "nvidia",
+                "renderer": "NVIDIA GeForce RTX 4090/PCIe/SSE2 (Fake)",
+                "pci_devices": [],
+            }
+            if self.settings.use_fake_data
+            else _collect_gpu_info()
+        )
         pixen_installed = _is_pixen_installed(self.settings)
         pixen_script = str(_pixen_script_path(self.settings))
         speed_sample = _sample_speed() if include_speed else {
@@ -226,6 +237,9 @@ class HandlersDiagnosticsMixin:
                 "pixen_installed": pixen_installed,
                 "pixen_script_path": pixen_script,
                 "audio_volume": audio_volume,
+                "gpu_vendor": gpu_info.get("vendor"),
+                "gpu_model": gpu_info.get("model"),
+                "gpu_driver": gpu_info.get("driver"),
             }
             raw = "\n".join(f"{item['key']}: {item['value']}" for item in entries)
             self._send_json(
@@ -239,6 +253,7 @@ class HandlersDiagnosticsMixin:
                     "pixen_installed": pixen_installed,
                     "pixen_script_path": pixen_script,
                     "audio_volume": audio_volume,
+                    "gpu_info": gpu_info,
                     "runtime_metrics": runtime_metrics,
                     "speed_sample": speed_sample,
                 },
@@ -328,6 +343,9 @@ class HandlersDiagnosticsMixin:
             fields["pixen_installed"] = pixen_installed
             fields["pixen_script_path"] = pixen_script
             fields["audio_volume"] = audio_volume
+            fields["gpu_vendor"] = gpu_info.get("vendor")
+            fields["gpu_model"] = gpu_info.get("model")
+            fields["gpu_driver"] = gpu_info.get("driver")
 
             self._send_json(
                 200,
@@ -340,6 +358,7 @@ class HandlersDiagnosticsMixin:
                     "pixen_installed": pixen_installed,
                     "pixen_script_path": pixen_script,
                     "audio_volume": audio_volume,
+                    "gpu_info": gpu_info,
                     "runtime_metrics": runtime_metrics,
                     "speed_sample": speed_sample,
                 },
@@ -368,11 +387,15 @@ class HandlersDiagnosticsMixin:
                         "pixen_installed": pixen_installed,
                         "pixen_script_path": pixen_script,
                         "audio_volume": audio_volume,
+                        "gpu_vendor": gpu_info.get("vendor"),
+                        "gpu_model": gpu_info.get("model"),
+                        "gpu_driver": gpu_info.get("driver"),
                     },
                     "drone_app_version": _drone_app_version(),
                     "pixen_installed": pixen_installed,
                     "pixen_script_path": pixen_script,
                     "audio_volume": audio_volume,
+                    "gpu_info": gpu_info,
                     "runtime_metrics": runtime_metrics,
                     "speed_sample": speed_sample,
                     "warning": f"Failed to run batocera-info: {str(error)}",
