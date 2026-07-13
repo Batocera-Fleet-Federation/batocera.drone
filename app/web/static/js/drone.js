@@ -5,9 +5,9 @@ const backBtn = document.getElementById("backBtn") || {
 };
 const systemsMenuBtn = document.getElementById("systemsMenuBtn");
 const brandHomeBtn = document.getElementById("brandHomeBtn");
-const themeMenuBtn = document.getElementById("themeMenuBtn");
 const systemInfoMenuBtn = document.getElementById("systemInfoMenuBtn");
 const controlsMenuBtn = document.getElementById("controlsMenuBtn");
+const transfersMenuBtn = document.getElementById("transfersMenuBtn");
 const adminMenuBtn = document.getElementById("adminMenuBtn");
 const apiAccessBtn = document.getElementById("apiAccessBtn");
 const droneVersionBadge = document.getElementById("droneVersionBadge");
@@ -87,9 +87,6 @@ let logRefreshTimer = null;
 let logRefreshInFlight = false;
 let transfersTimer = null;
 let transfersInFlight = false;
-let integrationActiveTab = "transfers";
-let integrationTransfersLoaded = false;
-let integrationConfigurationLoaded = false;
 let currentConfigSource = null;
 let emulatorConfigRows = [];
 let selectedEmulatorConfigIndex = 0;
@@ -182,7 +179,7 @@ function setLoading(isLoading, text = "Loading...") {
   }
 }
 function applyAdminVisibility() {
-  const adminLinks = [adminMenuBtn, systemInfoMenuBtn, controlsMenuBtn, apiAccessBtn].filter(Boolean);
+  const adminLinks = [adminMenuBtn, systemInfoMenuBtn, controlsMenuBtn, transfersMenuBtn, apiAccessBtn].filter(Boolean);
   if (adminEnabled) {
     adminLinks.forEach((link) => link.classList.remove("d-none"));
   } else {
@@ -603,12 +600,12 @@ function stopTransfersAutoRefresh() {
 }
 function startTransfersAutoRefresh() {
   // Live-update only the Transfers data while a copy is in progress -- never
-  // re-render the whole page, so the Overmind/Local Network forms, paging, and
+  // re-render the whole page, so the asset-request form, paging, and
   // selections are left untouched.
   stopTransfersAutoRefresh();
   transfersTimer = setInterval(async () => {
     if (document.hidden || transfersInFlight) return;
-    if (!window.location.hash.startsWith("#admin/integration")) return;
+    if (window.location.hash !== "#admin/transfers") return;
     const transfersBody = document.getElementById("transfersBody");
     if (!transfersBody) return;
     transfersInFlight = true;
@@ -1716,7 +1713,7 @@ async function renderHelpPage() {
           <div class="help-section mb-4">
             <h3 class="h5 mb-3"><i class="bi bi-stars me-2"></i>What Drone does for you</h3>
             <div class="help-link-list">
-              <button class="help-link-row" type="button" onclick="setHash('#admin/integration')"><i class="bi bi-arrow-left-right"></i><span><strong>Share across cabinets</strong><small>Copy games, saves, BIOS, and artwork peer-to-peer instead of downloading them everywhere.</small></span></button>
+              <button class="help-link-row" type="button" onclick="setHash('#admin/transfers')"><i class="bi bi-arrow-left-right"></i><span><strong>Share across cabinets</strong><small>Copy games, saves, BIOS, and artwork peer-to-peer instead of downloading them everywhere.</small></span></button>
               <button class="help-link-row" type="button" onclick="setHash('#admin/artwork')"><i class="bi bi-images"></i><span><strong>Polish your library</strong><small>Fix titles, descriptions, box art, and marquees so everything looks complete.</small></span></button>
               <button class="help-link-row" type="button" onclick="setHash('#admin/logs/gameplay?lines=200')"><i class="bi bi-clock-history"></i><span><strong>See what's been played</strong><small>Review detected game launches and recent play sessions.</small></span></button>
               <button class="help-link-row" type="button" onclick="setHash('#admin/system-info')"><i class="bi bi-pc-display"></i><span><strong>Check machine health</strong><small>CPU, memory, storage, network, and connection speed at a glance.</small></span></button>
@@ -1800,18 +1797,26 @@ async function renderAdminMenu() {
         </div>
       </div>
       <div class="col-md-4 mb-3">
-	        <div class="card admin-tile pointer h-100" onclick="setHash('#admin/integration')">
-	          <div class="card-body">
-	            <h5 class="card-title"><i class="bi bi-diagram-3 me-2"></i>Integration</h5>
-	            <p class="card-text">Request peer assets, monitor transfers, and configure Overmind or Local Network.</p>
-	          </div>
-	        </div>
+        <div class="card admin-tile pointer h-100" onclick="setHash('#admin/integration')">
+          <div class="card-body">
+            <h5 class="card-title"><i class="bi bi-diagram-3 me-2"></i>Integration</h5>
+            <p class="card-text">Configure Overmind or Local Network integration.</p>
+          </div>
+        </div>
       </div>
       <div class="col-md-4 mb-3">
         <div class="card admin-tile pointer h-100" onclick="setHash('#admin/automation')">
           <div class="card-body">
             <h5 class="card-title"><i class="bi bi-robot me-2"></i>Automation</h5>
             <p class="card-text">Configure hands-off device behaviors, like setting the volume or exiting a game after a period of no input.</p>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-4 mb-3">
+        <div class="card admin-tile pointer h-100" onclick="setHash('#theme')">
+          <div class="card-body">
+            <h5 class="card-title"><i class="bi bi-brush me-2"></i>Theme</h5>
+            <p class="card-text">Browse and preview installed EmulationStation theme artwork.</p>
           </div>
         </div>
       </div>
@@ -2124,7 +2129,7 @@ async function renderDownloadsPage() {
   try {
     const payload = await api("/admin/downloads");
     content.innerHTML = `
-      <div class="mb-3"><button class="btn btn-outline-secondary" onclick="setHash('#admin/integration')">Back to Integration</button></div>
+      <div class="mb-3"><button class="btn btn-outline-secondary" onclick="setHash('#admin/transfers')">Back to Transfers</button></div>
       <div class="card log-card mb-3"><div class="card-body py-3">
         ${renderDownloadsPanel(payload)}
       </div></div>`;
@@ -2160,7 +2165,7 @@ async function resumeDroneDownload(jobId) {
 }
 
 async function refreshDownloadsView() {
-  if (window.location.hash.startsWith("#admin/integration") && typeof window.refreshTransfers === "function") {
+  if (window.location.hash === "#admin/transfers" && typeof window.refreshTransfers === "function") {
     await window.refreshTransfers();
   } else {
     await renderDownloadsPage();
@@ -3777,44 +3782,11 @@ function renderLocalAssetsPagination() {
     </div>`;
 }
 
-function parseIntegrationHash(hash) {
-  const queryIndex = hash.indexOf("?");
-  const params = new URLSearchParams(queryIndex >= 0 ? hash.substring(queryIndex + 1) : "");
-  const tab = params.get("tab");
-  return { tab: tab === "configuration" || tab === "overmind" || tab === "local_network" ? "configuration" : "transfers" };
-}
-
-function applyIntegrationTab() {
-  const isConfiguration = integrationActiveTab === "configuration";
-  const transfersPanel = document.getElementById("integrationTransfersPanel");
-  const configPanel = document.getElementById("integrationConfigurationPanel");
-  if (transfersPanel) transfersPanel.classList.toggle("d-none", isConfiguration);
-  if (configPanel) configPanel.classList.toggle("d-none", !isConfiguration);
-  const transfersTabBtn = document.getElementById("integrationTabTransfers");
-  const configTabBtn = document.getElementById("integrationTabConfiguration");
-  if (transfersTabBtn) { transfersTabBtn.classList.toggle("btn-primary", !isConfiguration); transfersTabBtn.classList.toggle("btn-outline-primary", isConfiguration); }
-  if (configTabBtn) { configTabBtn.classList.toggle("btn-primary", isConfiguration); configTabBtn.classList.toggle("btn-outline-primary", !isConfiguration); }
-}
-
-async function setIntegrationTab(tab) {
-  integrationActiveTab = tab === "configuration" ? "configuration" : "transfers";
-  applyIntegrationTab();
-  const nextHash = `#admin/integration?tab=${integrationActiveTab}`;
-  if (window.location.hash !== nextHash) history.replaceState(null, "", nextHash);
-  if (integrationActiveTab === "transfers" && !integrationTransfersLoaded) {
-    integrationTransfersLoaded = true;
-    await renderIntegrationTransfersPanel(document.getElementById("integrationTransfersPanel"));
-  } else if (integrationActiveTab === "configuration" && !integrationConfigurationLoaded) {
-    integrationConfigurationLoaded = true;
-    await renderIntegrationConfigurationPanel(document.getElementById("integrationConfigurationPanel"));
-  }
-}
-
 async function renderIntegrationPage() {
   currentSystemContext = null;
   clearSystemTheme();
   titleNode.textContent = "Integration";
-  subtitleNode.textContent = "Transfer assets between Drones and configure Overmind or local-network control";
+  subtitleNode.textContent = "Configure Overmind or local-network control";
   setLoading(true, "Loading integration...");
   try {
     // Overmind and Local Network are always both on -- no manual toggle. Heal
@@ -3824,27 +3796,36 @@ async function renderIntegrationPage() {
     if (!modeStatus.overmind_enabled || !modeStatus.local_network_enabled) {
       await apiPost("/admin/network-mode", { overmind_enabled: true, local_network_enabled: true });
     }
-    integrationActiveTab = parseIntegrationHash(window.location.hash).tab;
-    const isConfiguration = integrationActiveTab === "configuration";
     content.innerHTML = `
       <div class="mb-3"><button class="btn btn-outline-secondary" onclick="setHash('#admin')">Back to Admin</button></div>
-      <div class="btn-group bff-segmented mb-3" role="group" aria-label="Integration section">
-        <button id="integrationTabTransfers" class="btn btn-sm ${isConfiguration ? "btn-outline-primary" : "btn-primary"}" type="button" onclick="setIntegrationTab('transfers')"><i class="bi bi-arrow-left-right me-1"></i>Transfers</button>
-        <button id="integrationTabConfiguration" class="btn btn-sm ${isConfiguration ? "btn-primary" : "btn-outline-primary"}" type="button" onclick="setIntegrationTab('configuration')"><i class="bi bi-sliders me-1"></i>Configuration</button>
-      </div>
-      <div id="integrationTransfersPanel" class="${isConfiguration ? "d-none" : ""}"></div>
-      <div id="integrationConfigurationPanel" class="${isConfiguration ? "" : "d-none"}"></div>`;
-
-    integrationTransfersLoaded = !isConfiguration;
-    integrationConfigurationLoaded = isConfiguration;
-    const activeTabLoad = isConfiguration
-      ? renderIntegrationConfigurationPanel(document.getElementById("integrationConfigurationPanel"))
-      : renderIntegrationTransfersPanel(document.getElementById("integrationTransfersPanel"));
-    await activeTabLoad;
-    startTransfersAutoRefresh();
+      <div id="integrationConfigurationPanel"></div>`;
+    await renderIntegrationConfigurationPanel(document.getElementById("integrationConfigurationPanel"));
   } catch (err) {
     showToast(`Failed to load integration: ${escapeHtml(err.message || "unknown error")}`, "danger");
     content.innerHTML = '<div class="themed-empty">Integration status could not be loaded.</div>';
+  } finally {
+    setLoading(false);
+  }
+}
+
+async function renderTransfersPage() {
+  currentSystemContext = null;
+  clearSystemTheme();
+  titleNode.textContent = "Transfers";
+  subtitleNode.textContent = "Request and monitor drone-to-drone asset transfers";
+  setLoading(true, "Loading transfers...");
+  try {
+    content.innerHTML = `
+      <div class="mb-3 d-flex flex-wrap justify-content-between gap-2">
+        <button class="btn btn-outline-secondary" onclick="setHash('#admin')">Back to Admin</button>
+        <button class="btn btn-outline-primary" onclick="setHash('#admin/transfers')"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
+      </div>
+      <div id="integrationTransfersPanel"></div>`;
+    await renderIntegrationTransfersPanel(document.getElementById("integrationTransfersPanel"));
+    startTransfersAutoRefresh();
+  } catch (err) {
+    showToast(`Failed to load transfers: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    content.innerHTML = '<div class="themed-empty">Transfers could not be loaded.</div>';
   } finally {
     setLoading(false);
   }
@@ -3958,6 +3939,17 @@ async function renderLocalTransferRequestPanel(target) {
   });
   updateLocalAssetTypeUi();
   await refresh();
+  // A "Browse" click on the Configuration page's peer list stashes the target
+  // peer in localPeerAssetContext, then navigates here; pick it up once (not
+  // on every later refresh) and auto-load its assets.
+  if (localPeerAssetContext.peerId && localPeerAssetContext.autoLoadedPeerId !== localPeerAssetContext.peerId) {
+    localPeerAssetContext.autoLoadedPeerId = localPeerAssetContext.peerId;
+    document.getElementById("localAssetType").value = localPeerAssetContext.assetType || "roms";
+    await loadLocalPeerSystems();
+    updateLocalAssetTypeUi();
+    await loadLocalPeerAssets();
+    document.getElementById("localAssetsCard")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
 }
 
 async function renderLocalNetworkIntegrationPanel(target) {
@@ -4116,17 +4108,12 @@ async function forgetLocalPeer(peerId) {
 }
 
 async function browseLocalPeer(peerId) {
+  // "Browse" lives on the Configuration page's paired-peer list; Configuration
+  // and Transfers are separate pages, so this always navigates. The auto-load
+  // in renderLocalTransferRequestPanel picks up the pending peer once the
+  // Transfers page has actually rendered.
   localPeerAssetContext = { peerId, peerName: peerId, assetType: "roms", systems: [], availableSystems: [], systemCounts: {}, systemsLoadedPeerId: "", items: [], query: "", limit: 50, offset: 0, total: 0, autoLoadedPeerId: "" };
-  if (!document.getElementById("localAssetPeer")) {
-    await setIntegrationTab("transfers");
-  }
-  document.getElementById("localAssetPeer").value = peerId;
-  document.getElementById("localAssetType").value = "roms";
-  document.getElementById("localAssetQuery").value = "";
-  await loadLocalPeerSystems();
-  updateLocalAssetTypeUi();
-  await loadLocalPeerAssets();
-  document.getElementById("localAssetsCard").scrollIntoView({ behavior: "smooth", block: "start" });
+  setHash("#admin/transfers");
 }
 
 async function loadLocalPeerAssets(resetPage = true) {
@@ -5335,18 +5322,15 @@ async function refreshCurrentConfig() {
 function syncMusicVolumeControls(musicVolume) {
   const slider = document.getElementById("musicVolumeSlider");
   const value = document.getElementById("musicVolumeValue");
-  const saveBtn = document.getElementById("musicVolumeSaveBtn");
   if (!slider || musicVolume === undefined || musicVolume === null) return;
   slider.value = String(musicVolume);
   slider.disabled = false;
   if (value) value.textContent = `${musicVolume}%`;
-  if (saveBtn) saveBtn.disabled = false;
 }
 
 function syncScreensaverControls(screensaverMinutes) {
   const slider = document.getElementById("screensaverSlider");
   const value = document.getElementById("screensaverValue");
-  const saveBtn = document.getElementById("screensaverSaveBtn");
   if (!slider || screensaverMinutes === undefined || screensaverMinutes === null) return;
   slider.value = String(screensaverMinutes);
   slider.disabled = false;
@@ -5656,7 +5640,6 @@ async function renderAdminControlsPage() {
                 <input class="form-range flex-grow-1" type="range" id="musicVolumeSlider" min="0" max="100" step="5" value="80" aria-label="Music volume" disabled>
                 <i class="bi bi-volume-up" aria-hidden="true"></i>
               </div>
-              <button class="btn btn-sm btn-primary mt-2" id="musicVolumeSaveBtn" disabled><i class="bi bi-save me-1"></i>Save</button>
             </div>
           </div>
         </div>
@@ -5672,7 +5655,6 @@ async function renderAdminControlsPage() {
                 <input class="form-range flex-grow-1" type="range" id="screensaverSlider" min="0" max="120" step="1" value="5" aria-label="Screensaver delay in minutes" disabled>
                 <span class="small text-muted text-nowrap">min</span>
               </div>
-              <button class="btn btn-sm btn-primary mt-2" id="screensaverSaveBtn" disabled><i class="bi bi-save me-1"></i>Save</button>
             </div>
           </div>
         </div>
@@ -5726,15 +5708,12 @@ async function renderAdminControlsPage() {
 
     const musicVolumeSlider = document.getElementById("musicVolumeSlider");
     const musicVolumeValue = document.getElementById("musicVolumeValue");
-    const musicVolumeSaveBtn = document.getElementById("musicVolumeSaveBtn");
     if (musicVolumeSlider && musicVolumeValue) {
       musicVolumeSlider.addEventListener("input", () => {
         musicVolumeValue.textContent = `${musicVolumeSlider.value}%`;
       });
-    }
-    if (musicVolumeSaveBtn) {
-      musicVolumeSaveBtn.addEventListener("click", async () => {
-        musicVolumeSaveBtn.disabled = true;
+      musicVolumeSlider.addEventListener("change", async () => {
+        musicVolumeSlider.disabled = true;
         try {
           const result = await apiPost("/admin/system-info/music-volume", {level: Number(musicVolumeSlider.value)});
           syncMusicVolumeControls(result.music_volume);
@@ -5742,23 +5721,19 @@ async function renderAdminControlsPage() {
         } catch (err) {
           showToast(`Failed to set music volume: ${escapeHtml(err.message || "unknown error")}`, "danger");
         } finally {
-          const btn = document.getElementById("musicVolumeSaveBtn");
-          if (btn) btn.disabled = false;
+          musicVolumeSlider.disabled = false;
         }
       });
     }
 
     const screensaverSlider = document.getElementById("screensaverSlider");
     const screensaverValue = document.getElementById("screensaverValue");
-    const screensaverSaveBtn = document.getElementById("screensaverSaveBtn");
     if (screensaverSlider && screensaverValue) {
       screensaverSlider.addEventListener("input", () => {
         screensaverValue.textContent = Number(screensaverSlider.value) === 0 ? "Off" : `${screensaverSlider.value} min`;
       });
-    }
-    if (screensaverSaveBtn) {
-      screensaverSaveBtn.addEventListener("click", async () => {
-        screensaverSaveBtn.disabled = true;
+      screensaverSlider.addEventListener("change", async () => {
+        screensaverSlider.disabled = true;
         try {
           const result = await apiPost("/admin/es-collections", {screensaver_minutes: Number(screensaverSlider.value)});
           syncScreensaverControls(result.screensaver_minutes);
@@ -5766,8 +5741,7 @@ async function renderAdminControlsPage() {
         } catch (err) {
           showToast(`Failed to set screensaver delay: ${escapeHtml(err.message || "unknown error")}`, "danger");
         } finally {
-          const btn = document.getElementById("screensaverSaveBtn");
-          if (btn) btn.disabled = false;
+          screensaverSlider.disabled = false;
         }
       });
     }
@@ -5897,7 +5871,7 @@ async function router() {
       stopLogAutoRefresh();
       currentLogSource = null;
     }
-    if (!hash.startsWith("#admin/integration")) {
+    if (hash !== "#admin/transfers") {
       stopTransfersAutoRefresh();
     }
     document.body.classList.toggle("artwork-page", hash.startsWith("#admin/artwork"));
@@ -5974,7 +5948,7 @@ async function router() {
         setHash("");
         return;
       }
-      setHash("#admin/integration?tab=transfers");
+      setHash("#admin/transfers");
       return;
     } else if (hash === "#admin/asset-cache") {
       if (!adminEnabled) {
@@ -5982,6 +5956,12 @@ async function router() {
         return;
       }
       await renderAssetCachePage();
+    } else if (hash === "#admin/transfers") {
+      if (!adminEnabled) {
+        setHash("");
+        return;
+      }
+      await renderTransfersPage();
     } else if (hash.startsWith("#admin/integration")) {
       if (!adminEnabled) {
         setHash("");
@@ -5993,14 +5973,14 @@ async function router() {
         setHash("");
         return;
       }
-      setHash("#admin/integration?tab=configuration");
+      setHash("#admin/integration");
       return;
     } else if (hash === "#admin/local-network") {
       if (!adminEnabled) {
         setHash("");
         return;
       }
-      setHash("#admin/integration?tab=configuration");
+      setHash("#admin/integration");
       return;
     } else if (hash === "#admin/api") {
       if (!adminEnabled) {
@@ -6041,10 +6021,6 @@ systemsMenuBtn.addEventListener("click", (event) => {
   event.preventDefault();
   setHash("#systems");
 });
-themeMenuBtn.addEventListener("click", (event) => {
-  event.preventDefault();
-  setHash("#theme");
-});
 systemInfoMenuBtn.addEventListener("click", (event) => {
   event.preventDefault();
   if (!adminEnabled) return;
@@ -6054,6 +6030,11 @@ controlsMenuBtn.addEventListener("click", (event) => {
   event.preventDefault();
   if (!adminEnabled) return;
   setHash("#admin/controls");
+});
+transfersMenuBtn.addEventListener("click", (event) => {
+  event.preventDefault();
+  if (!adminEnabled) return;
+  setHash("#admin/transfers");
 });
 adminMenuBtn.addEventListener("click", (event) => {
   event.preventDefault();

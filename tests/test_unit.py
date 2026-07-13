@@ -6019,3 +6019,118 @@ class LocalNetworkAssetCopyTests(unittest.TestCase):
 
             resumed = manager.resume()
             self.assertFalse(resumed["paused"])
+
+
+class NavRestructureTests(unittest.TestCase):
+    """Theme moved from a navbar link to an Admin-page card; Integration's
+    Transfers tab became its own navbar-linked page, leaving Integration as a
+    Configuration-only page."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        root = Path(__file__).resolve().parents[1]
+        cls.js = root.joinpath("app/web/static/js/drone.js").read_text(encoding="utf-8")
+        cls.html = root.joinpath("app/web/templates/index.html").read_text(encoding="utf-8")
+
+    def test_theme_is_not_a_navbar_link(self) -> None:
+        self.assertNotIn('id="themeMenuBtn"', self.html)
+        self.assertNotIn('const themeMenuBtn = document.getElementById("themeMenuBtn");', self.js)
+        self.assertNotIn("themeMenuBtn.addEventListener", self.js)
+
+    def test_theme_is_an_admin_menu_card(self) -> None:
+        menu_start = self.js.index("async function renderAdminMenu()")
+        menu_end = self.js.index("async function updateDroneApp()")
+        body = self.js[menu_start:menu_end]
+        self.assertIn("setHash('#theme')", body)
+        self.assertIn(">Theme<", body)
+
+    def test_theme_page_route_is_unchanged(self) -> None:
+        # Moving the entry point doesn't gate or rename the page itself.
+        self.assertIn('hash === "#theme"', self.js)
+        self.assertIn("await renderThemeGalleryPage();", self.js)
+
+    def test_transfers_is_an_admin_gated_navbar_link(self) -> None:
+        self.assertIn('id="transfersMenuBtn" href="#admin/transfers"', self.html)
+        system_info_pos = self.html.index('id="systemInfoMenuBtn"')
+        controls_pos = self.html.index('id="controlsMenuBtn"')
+        transfers_pos = self.html.index('id="transfersMenuBtn"')
+        admin_pos = self.html.index('id="adminMenuBtn"')
+        self.assertTrue(system_info_pos < controls_pos < transfers_pos < admin_pos)
+
+        self.assertIn('const transfersMenuBtn = document.getElementById("transfersMenuBtn");', self.js)
+        self.assertIn(
+            "const adminLinks = [adminMenuBtn, systemInfoMenuBtn, controlsMenuBtn, transfersMenuBtn, apiAccessBtn]",
+            self.js,
+        )
+        click_start = self.js.index('transfersMenuBtn.addEventListener("click"')
+        click_end = self.js.index("});", click_start)
+        click_body = self.js[click_start:click_end]
+        self.assertIn("if (!adminEnabled) return;", click_body)
+        self.assertIn('setHash("#admin/transfers");', click_body)
+
+    def test_router_dispatches_transfers_and_integration_separately(self) -> None:
+        transfers_route = self.js.index('} else if (hash === "#admin/transfers")')
+        self.assertIn("await renderTransfersPage();", self.js[transfers_route:transfers_route + 200])
+
+        integration_route = self.js.index('} else if (hash.startsWith("#admin/integration"))')
+        self.assertIn("await renderIntegrationPage();", self.js[integration_route:integration_route + 200])
+
+    def test_integration_page_has_no_tab_switcher(self) -> None:
+        # The old two-tab (Transfers/Configuration) UI inside one page is gone;
+        # Integration just renders the configuration panel directly.
+        self.assertNotIn("integrationTabTransfers", self.js)
+        self.assertNotIn("integrationTabConfiguration", self.js)
+        self.assertNotIn("function parseIntegrationHash", self.js)
+        self.assertNotIn("function setIntegrationTab", self.js)
+        self.assertNotIn("function applyIntegrationTab", self.js)
+
+        page_start = self.js.index("async function renderIntegrationPage()")
+        page_end = self.js.index("async function renderTransfersPage()")
+        body = self.js[page_start:page_end]
+        self.assertIn("integrationConfigurationPanel", body)
+        self.assertNotIn("integrationTransfersPanel", body)
+        self.assertIn('titleNode.textContent = "Integration";', body)
+
+    def test_transfers_page_renders_transfers_panel_and_auto_refreshes(self) -> None:
+        page_start = self.js.index("async function renderTransfersPage()")
+        page_end = self.js.index("async function renderIntegrationTransfersPanel(")
+        body = self.js[page_start:page_end]
+        self.assertIn('titleNode.textContent = "Transfers";', body)
+        self.assertIn("integrationTransfersPanel", body)
+        self.assertIn("renderIntegrationTransfersPanel(document.getElementById(\"integrationTransfersPanel\"))", body)
+        self.assertIn("startTransfersAutoRefresh();", body)
+
+    def test_legacy_hash_redirects_point_at_new_pages(self) -> None:
+        downloads_start = self.js.index('hash === "#admin/downloads"')
+        downloads_end = self.js.index("} else if", downloads_start)
+        self.assertIn('setHash("#admin/transfers");', self.js[downloads_start:downloads_end])
+
+        overmind_start = self.js.index('["#admin/overmind", "#admin/overmind/actions"]')
+        overmind_end = self.js.index("} else if", overmind_start)
+        self.assertIn('setHash("#admin/integration");', self.js[overmind_start:overmind_end])
+        self.assertNotIn("tab=configuration", self.js[overmind_start:overmind_end])
+
+        local_network_start = self.js.index('hash === "#admin/local-network"')
+        local_network_end = self.js.index("} else if", local_network_start)
+        self.assertIn('setHash("#admin/integration");', self.js[local_network_start:local_network_end])
+
+    def test_browse_local_peer_navigates_instead_of_switching_tabs(self) -> None:
+        fn_start = self.js.index("async function browseLocalPeer(peerId)")
+        fn_end = self.js.index("\nasync function ", fn_start + 1)
+        body = self.js[fn_start:fn_end]
+        self.assertIn('setHash("#admin/transfers");', body)
+        self.assertNotIn("setIntegrationTab", body)
+
+    def test_transfer_request_panel_auto_loads_pending_peer_from_context(self) -> None:
+        fn_start = self.js.index("async function renderLocalTransferRequestPanel(target)")
+        fn_end = self.js.index("\nasync function renderLocalNetworkIntegrationPanel(")
+        body = self.js[fn_start:fn_end]
+        self.assertIn("localPeerAssetContext.autoLoadedPeerId !== localPeerAssetContext.peerId", body)
+        self.assertIn("await loadLocalPeerSystems();", body)
+        self.assertIn("await loadLocalPeerAssets();", body)
+
+    def test_downloads_page_and_refresh_view_point_at_transfers(self) -> None:
+        self.assertIn('onclick="setHash(\'#admin/transfers\')">Back to Transfers</button>', self.js)
+        refresh_start = self.js.index("async function refreshDownloadsView()")
+        refresh_end = self.js.index("\nasync function ", refresh_start + 1)
+        self.assertIn('window.location.hash === "#admin/transfers"', self.js[refresh_start:refresh_end])

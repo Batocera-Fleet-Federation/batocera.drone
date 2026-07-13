@@ -496,7 +496,6 @@ class EsCollectionsUiContentTests(unittest.TestCase):
         js = root.joinpath("app/web/static/js/drone.js").read_text(encoding="utf-8")
 
         self.assertIn('id="screensaverSlider"', js)
-        self.assertIn('id="screensaverSaveBtn"', js)
         self.assertIn("function syncScreensaverControls(screensaverMinutes)", js)
         # Reuses the collections endpoint (one more optional field), not a new route.
         self.assertIn('apiPost("/admin/es-collections", {screensaver_minutes:', js)
@@ -509,7 +508,6 @@ class EsCollectionsUiContentTests(unittest.TestCase):
         js = root.joinpath("app/web/static/js/drone.js").read_text(encoding="utf-8")
 
         self.assertIn('id="musicVolumeSlider"', js)
-        self.assertIn('id="musicVolumeSaveBtn"', js)
         self.assertIn('apiPost("/admin/system-info/music-volume"', js)
 
         self.assertIn('id="esCollectionsBody"', js)
@@ -609,7 +607,7 @@ class AdminControlsPageSplitTests(unittest.TestCase):
 
     def test_controls_nav_link_is_admin_gated(self) -> None:
         self.assertIn('const controlsMenuBtn = document.getElementById("controlsMenuBtn");', self.js)
-        self.assertIn("const adminLinks = [adminMenuBtn, systemInfoMenuBtn, controlsMenuBtn, apiAccessBtn]", self.js)
+        self.assertIn("const adminLinks = [adminMenuBtn, systemInfoMenuBtn, controlsMenuBtn, transfersMenuBtn, apiAccessBtn]", self.js)
         self.assertIn('controlsMenuBtn.addEventListener("click"', self.js)
         click_start = self.js.index('controlsMenuBtn.addEventListener("click"')
         click_end = self.js.index("});", click_start)
@@ -694,14 +692,22 @@ class FrictionlessSaveTests(unittest.TestCase):
     def test_no_save_and_restart_button_labels_remain(self) -> None:
         self.assertNotIn("Save &amp; Restart EmulationStation", self.js)
 
-    def test_music_volume_and_screensaver_save_have_no_confirm(self) -> None:
-        music_start = self.js.index('musicVolumeSaveBtn.addEventListener("click"')
-        music_end = self.js.index("});", music_start)
-        self.assertNotIn("window.confirm", self.js[music_start:music_end])
+    def test_music_volume_and_screensaver_apply_on_slider_change_with_no_confirm(self) -> None:
+        # No separate Save button: moving the slider applies immediately.
+        self.assertNotIn('id="musicVolumeSaveBtn"', self.js)
+        self.assertNotIn('id="screensaverSaveBtn"', self.js)
 
-        saver_start = self.js.index('screensaverSaveBtn.addEventListener("click"')
+        music_start = self.js.index('musicVolumeSlider.addEventListener("change"')
+        music_end = self.js.index("});", music_start)
+        music_body = self.js[music_start:music_end]
+        self.assertNotIn("window.confirm", music_body)
+        self.assertIn('apiPost("/admin/system-info/music-volume"', music_body)
+
+        saver_start = self.js.index('screensaverSlider.addEventListener("change"')
         saver_end = self.js.index("});", saver_start)
-        self.assertNotIn("window.confirm", self.js[saver_start:saver_end])
+        saver_body = self.js[saver_start:saver_end]
+        self.assertNotIn("window.confirm", saver_body)
+        self.assertIn('apiPost("/admin/es-collections", {screensaver_minutes:', saver_body)
 
     def test_es_collections_save_has_no_confirm(self) -> None:
         save_start = self.js.index("function wireEsCollectionsSaveButton()")

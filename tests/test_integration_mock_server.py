@@ -212,8 +212,7 @@ class MockServerIntegrationTests(unittest.TestCase):
 
         js = self._get_bytes("/static/js/drone.js")
         self.assertIn(b"renderIntegrationPage", js)
-        self.assertIn(b"integrationTabTransfers", js)
-        self.assertIn(b"integrationTabConfiguration", js)
+        self.assertIn(b"renderTransfersPage", js)
         self.assertIn(b"renderOvermindIntegrationPanel", js)
         self.assertIn(b"renderLocalNetworkIntegrationPanel", js)
         self.assertIn(b"requestLocalPeerAssets", js)
