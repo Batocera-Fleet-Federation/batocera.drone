@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.1.48] - 2026-07-13
+
+- Stop restarting EmulationStation for volume/screensaver; fix a restart race that could black-screen the device
+
 ## [v0.1.47] - 2026-07-12
 
 - Updating UI to move things around to be easier to naviate.
