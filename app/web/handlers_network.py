@@ -16,7 +16,7 @@ from urllib.parse import quote, unquote
 
 try:
     from ..device.device_control import _ensure_rom_write_access
-    from ..device.tailnet_service import tailnet_enroll, tailnet_status
+    from ..device.tailnet_service import tailnet_enroll, tailnet_rotate_auth_key, tailnet_status
     from ..overmind.overmind_config import build_overmind_status
     from ..roms.gamelist import ARTWORK_FIELDS, _normalize_gamelist_rom_path
     from ..transfer import local_network as _local_network
@@ -33,7 +33,7 @@ try:
     )
 except ImportError:  # pragma: no cover - direct script execution fallback
     from device.device_control import _ensure_rom_write_access  # type: ignore
-    from device.tailnet_service import tailnet_enroll, tailnet_status  # type: ignore
+    from device.tailnet_service import tailnet_enroll, tailnet_rotate_auth_key, tailnet_status  # type: ignore
     from overmind.overmind_config import build_overmind_status  # type: ignore
     from roms.gamelist import ARTWORK_FIELDS, _normalize_gamelist_rom_path  # type: ignore
     from transfer import local_network as _local_network  # type: ignore
@@ -476,6 +476,17 @@ class HandlersNetworkMixin:
         """
         try:
             status = tailnet_enroll(str(payload.get("auth_key") or ""))
+        except ValueError:
+            raise
+        except RuntimeError as error:
+            self._send_json(502, {"error": str(error)})
+            return
+        self._send_json(200, {"status": "enrolled" if status.get("enrolled") else "pending", **status})
+
+    def _handle_admin_tailnet_rotate_auth_key(self, payload: dict) -> None:
+        """Re-enroll this Drone with a replacement key without retaining it."""
+        try:
+            status = tailnet_rotate_auth_key(str(payload.get("auth_key") or ""))
         except ValueError:
             raise
         except RuntimeError as error:

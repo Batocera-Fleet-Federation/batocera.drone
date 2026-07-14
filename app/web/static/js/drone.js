@@ -3924,6 +3924,41 @@ async function swarmEnrollTailnet() {
   }
 }
 
+function swarmToggleTailnetAuthRotation(show = true) {
+  const form = document.getElementById("swarmTailnetRotateForm");
+  if (!form) return;
+  form.classList.toggle("d-none", !show);
+  if (show) document.getElementById("swarmTailnetRotateKey")?.focus();
+}
+
+async function swarmRotateTailnetAuthKey() {
+  const input = document.getElementById("swarmTailnetRotateKey");
+  const button = document.getElementById("swarmTailnetRotateSubmitBtn");
+  const authKey = (input?.value || "").trim();
+  if (!authKey) {
+    showToast("Paste the replacement auth key first.", "warning");
+    return;
+  }
+  if (!window.confirm("Rotate the Tailnet auth token? This Drone will briefly disconnect while it re-enrolls with the replacement key.")) return;
+  button.disabled = true;
+  button.innerHTML = '<span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>Rotating...';
+  try {
+    const status = await apiPost("/admin/tailnet/rotate-auth-key", { auth_key: authKey });
+    showToast(
+      status.tailnet_ip
+        ? `Tailnet auth token rotated. Connected as ${escapeHtml(status.tailnet_ip)}.`
+        : "Tailnet auth token rotated; the address will appear shortly.",
+      "success",
+    );
+    input.value = "";
+    await renderSwarmPage();
+  } catch (err) {
+    showToast(`Tailnet auth token rotation failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    button.disabled = false;
+    button.innerHTML = '<i class="bi bi-arrow-repeat me-1"></i>Rotate';
+  }
+}
+
 function renderSwarmTailnetCard(tailnet) {
   const state = tailnet || {};
   let body;
@@ -3934,7 +3969,15 @@ function renderSwarmTailnetCard(tailnet) {
         <span class="badge text-bg-success">Connected</span>
         ${state.tailnet_ip ? `<code>${escapeHtml(state.tailnet_ip)}</code>` : ""}
       </div>
-      <div class="small text-muted">This Drone is on your tailnet. Your phone (with the Tailscale app signed in to the same account) and Drones in other homes can reach it${address ? ` at <a href="${address}" target="_blank" rel="noopener noreferrer">${address}</a>` : ""} from anywhere -- no port forwarding.</div>`;
+      <div class="small text-muted">This Drone is on your tailnet. Your phone (with the Tailscale app signed in to the same account) and Drones in other homes can reach it${address ? ` at <a href="${address}" target="_blank" rel="noopener noreferrer">${address}</a>` : ""} from anywhere -- no port forwarding.</div>
+      <div class="d-none mt-3" id="swarmTailnetRotateForm">
+        <label class="form-label small" for="swarmTailnetRotateKey">Replacement auth key</label>
+        <div class="d-flex flex-column flex-sm-row gap-2">
+          <input id="swarmTailnetRotateKey" class="form-control" type="password" placeholder="tskey-auth-..." autocomplete="new-password">
+          <button id="swarmTailnetRotateSubmitBtn" class="btn btn-primary text-nowrap" type="button" onclick="swarmRotateTailnetAuthKey()"><i class="bi bi-arrow-repeat me-1"></i>Rotate</button>
+          <button class="btn btn-outline-secondary" type="button" onclick="swarmToggleTailnetAuthRotation(false)">Cancel</button>
+        </div>
+      </div>`;
   } else if (!state.installed) {
     body = `
       <div class="d-flex align-items-center gap-2 mb-2"><span class="badge text-bg-secondary">Not installed</span></div>
@@ -3961,7 +4004,10 @@ function renderSwarmTailnetCard(tailnet) {
   }
   return `
     <div class="card log-card h-100">
-      <div class="card-header"><i class="bi bi-globe2 me-2" aria-hidden="true"></i>Tailnet (access from anywhere)</div>
+      <div class="card-header d-flex justify-content-between align-items-center gap-2">
+        <span><i class="bi bi-globe2 me-2" aria-hidden="true"></i>Tailnet (access from anywhere)</span>
+        ${state.enrolled ? '<button class="btn btn-sm btn-outline-primary text-nowrap" type="button" onclick="swarmToggleTailnetAuthRotation(true)"><i class="bi bi-arrow-repeat me-1"></i>Rotate Auth Token</button>' : ""}
+      </div>
       <div class="card-body">${body}</div>
     </div>`;
 }

@@ -209,3 +209,40 @@ def tailnet_enroll(auth_key: str) -> dict:
             "Tailnet enrollment failed: " + (detail[-1] if detail else f"exit code {proc.returncode}")
         )
     return tailnet_status()
+
+
+def tailnet_rotate_auth_key(auth_key: str) -> dict:
+    """Re-authenticate this Drone with a replacement Tailscale auth key.
+
+    Tailscale auth keys are enrollment credentials rather than durable session
+    tokens, so changing the credential for an already-enrolled node requires a
+    logout followed by a fresh ``up``. The caller must confirm that brief
+    disconnect before invoking this operation.
+    """
+    key = str(auth_key or "").strip()
+    if not key:
+        raise ValueError("auth key is required")
+    current = tailnet_status()
+    if not current.get("installed"):
+        raise RuntimeError(
+            "Tailscale is not installed on this Drone. Re-run the Drone installer "
+            "(batocera_install.sh) once to add it, then try again."
+        )
+    if not current.get("enrolled"):
+        raise RuntimeError("Tailnet is not connected; use Connect with the new auth key instead.")
+    try:
+        proc = _run_cli(["logout"], timeout=30)
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError("Tailnet auth token rotation timed out while disconnecting.") from error
+    except (OSError, subprocess.SubprocessError) as error:
+        raise RuntimeError(f"Tailnet auth token rotation could not disconnect: {error}") from error
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        message = detail[-1] if detail else f"exit code {proc.returncode}"
+        raise RuntimeError(f"Tailnet auth token rotation could not disconnect: {message.replace(key, '[redacted]')}")
+    try:
+        return tailnet_enroll(key)
+    except RuntimeError as error:
+        raise RuntimeError(
+            "Tailnet auth token rotation disconnected this Drone but re-enrollment failed: " + str(error).replace(key, "[redacted]")
+        ) from error

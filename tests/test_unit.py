@@ -6642,6 +6642,18 @@ class SwarmPageTests(unittest.TestCase):
         enroll_body = self.js[enroll_start:self.js.index("function renderSwarmTailnetCard(", enroll_start)]
         self.assertIn('apiPost("/admin/tailnet/enroll", { auth_key: authKey })', enroll_body)
 
+    def test_tailnet_connected_card_can_rotate_auth_token(self) -> None:
+        rotate_start = self.js.index("async function swarmRotateTailnetAuthKey()")
+        rotate_body = self.js[rotate_start:self.js.index("function renderSwarmTailnetCard(", rotate_start)]
+        self.assertIn('apiPost("/admin/tailnet/rotate-auth-key", { auth_key: authKey })', rotate_body)
+        self.assertIn("window.confirm", rotate_body)
+
+        card_start = self.js.index("function renderSwarmTailnetCard(")
+        card_body = self.js[card_start:self.js.index("async function renderSwarmPage()", card_start)]
+        self.assertIn("Rotate Auth Token", card_body)
+        self.assertIn('id="swarmTailnetRotateKey"', card_body)
+        self.assertIn('type="password"', card_body)
+
     def test_admin_menu_has_no_redundant_swarm_tile(self) -> None:
         # Swarm is a navbar link (like Controls/Transfers); the Admin page
         # should not also carry a duplicate tile for it.
@@ -6798,6 +6810,39 @@ class TailnetServiceTests(unittest.TestCase):
             status = tailnet_service.tailnet_enroll("tskey-auth-test")
         self.assertTrue(status["enrolled"])
         self.assertEqual(status["tailnet_ip"], "100.64.0.7")
+
+    def test_rotate_auth_key_logs_out_then_reenrolls_without_returning_key(self) -> None:
+        from app.device import tailnet_service
+
+        commands = []
+
+        def fake_run(command, **kwargs):
+            commands.append(command)
+            if "logout" in command or "up" in command:
+                return mock.Mock(returncode=0, stdout="", stderr="")
+            payload = {"BackendState": "Running", "Self": {"TailscaleIPs": ["100.64.0.8"]}}
+            return mock.Mock(returncode=0, stdout=json.dumps(payload), stderr="")
+
+        with tempfile.NamedTemporaryFile() as fake_cli, \
+                mock.patch.object(tailnet_service, "TAILSCALE_CLI", Path(fake_cli.name)), \
+                mock.patch.object(tailnet_service.subprocess, "run", side_effect=fake_run):
+            status = tailnet_service.tailnet_rotate_auth_key("tskey-auth-ROTATED")
+        logout_index = next(index for index, command in enumerate(commands) if "logout" in command)
+        up_index = next(index for index, command in enumerate(commands) if "up" in command)
+        self.assertLess(logout_index, up_index)
+        self.assertTrue(status["enrolled"])
+        self.assertEqual(status["tailnet_ip"], "100.64.0.8")
+        self.assertNotIn("ROTATED", json.dumps(status))
+
+    def test_rotate_auth_key_requires_connected_tailnet(self) -> None:
+        from app.device import tailnet_service
+
+        proc = mock.Mock(returncode=0, stdout=json.dumps({"BackendState": "NeedsLogin"}), stderr="")
+        with tempfile.NamedTemporaryFile() as fake_cli, \
+                mock.patch.object(tailnet_service, "TAILSCALE_CLI", Path(fake_cli.name)), \
+                mock.patch.object(tailnet_service.subprocess, "run", return_value=proc):
+            with self.assertRaisesRegex(RuntimeError, "not connected"):
+                tailnet_service.tailnet_rotate_auth_key("tskey-auth-test")
 
 
 class InstallerTailscaleTests(unittest.TestCase):

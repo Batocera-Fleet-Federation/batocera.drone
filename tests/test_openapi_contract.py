@@ -161,6 +161,7 @@ class DroneOpenApiContractTest(unittest.TestCase):
             "/admin/local-network/sync",
             "/admin/local-network/sync-bulk",
             "/admin/tailnet/discover",
+            "/admin/tailnet/rotate-auth-key",
             "/admin/credentials/update",
             "/admin/configs/{source}",
             "/admin/configs/sources",
