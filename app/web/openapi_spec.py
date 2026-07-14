@@ -307,6 +307,7 @@ def _schemas() -> Dict[str, Schema]:
             "advertised_reachable_url": _string("Peer-advertised API base URL", fmt="uri"),
             "scheme": _enum(["http", "https"]),
             "api_port": _integer(),
+            "tailnet_ip": _string("Peer mesh-VPN (tailnet) address, empty when not on a tailnet"),
             "certificate_fingerprint": _string("Peer certificate SHA-256 fingerprint"),
             "source_ip": _string("Observed source IP"),
             "paired": _boolean(),
@@ -772,6 +773,13 @@ def _schemas() -> Dict[str, Schema]:
         ),
         "PairingCodeResponse": _object({"pairing": _ref("PairingInfo")}, ("pairing",)),
         "LocalPeerPairRequest": _object({"pairing_code": _string()}, ("pairing_code",)),
+        "LocalPeerPairByAddressRequest": _object(
+            {
+                "address": _string(description="Peer address: host[:port] or http(s)://host[:port]; e.g. a tailnet IP"),
+                "pairing_code": _string(),
+            },
+            ("address", "pairing_code"),
+        ),
         "LocalPeerPairResponse": _object({"status": _enum(["paired"]), "peer": _ref("LocalPeer")}, ("status", "peer")),
         "LocalPeerForgetResponse": _object({"status": _enum(["forgotten", "not_found"]), "peer_id": _string()}, ("status", "peer_id")),
         "LocalSyncRequest": _object(
@@ -816,6 +824,7 @@ def _schemas() -> Dict[str, Schema]:
                 "scheme": _enum(["http", "https"]),
                 "api_port": _integer(),
                 "reachable_url": _string(fmt="uri"),
+                "tailnet_ip": _string(description="Initiator's mesh-VPN (tailnet) address, empty when not on a tailnet"),
                 "certificate_pem": _string(),
                 "certificate_fingerprint": _string(),
             },
@@ -830,10 +839,27 @@ def _schemas() -> Dict[str, Schema]:
                 "scheme": _enum(["http", "https"]),
                 "api_port": _integer(),
                 "reachable_url": _string(fmt="uri"),
+                "tailnet_ip": _string(description="Responder's mesh-VPN (tailnet) address, empty when not on a tailnet"),
                 "certificate_pem": _string(),
                 "certificate_fingerprint": _string(),
             },
             ("status", "peer", "drone_id", "name", "scheme", "api_port", "certificate_pem", "certificate_fingerprint"),
+        ),
+        "PeerInfoResponse": _object(
+            {
+                "service": _string(),
+                "kind": _string(),
+                "drone_id": _string(),
+                "name": _string(),
+                "hostname": _string(),
+                "scheme": _enum(["http", "https"]),
+                "api_port": _integer(),
+                "reachable_url": _string(fmt="uri"),
+                "tailnet_ip": _string(description="Mesh-VPN (tailnet) address, empty when not on a tailnet"),
+                "certificate_fingerprint": _string(),
+                "sent_at": _string(fmt="date-time"),
+            },
+            ("service", "drone_id", "name", "scheme", "api_port", "reachable_url", "certificate_fingerprint"),
         ),
         "PeerHealthResponse": _object(
             {"status": _enum(["ok"]), "drone_id": _string(), "checked_at": _string(fmt="date-time"), "mtls": _boolean(), "network_mode": _string()},
@@ -1223,6 +1249,7 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             "/admin/local-network/status": {"get": _operation("Get Local Network discovery and pairing status", {"200": _json_response("LocalNetworkStatusResponse")}, tags=["admin", "local-network"])},
             "/admin/local-network/discover": {"post": _operation("Broadcast Local Network discovery announcement", {"200": _json_response("LocalNetworkStatusResponse")}, tags=["admin", "local-network"], error_codes=("401", "403", "409", "429", "500"))},
             "/admin/local-network/pairing-code/rotate": {"post": _operation("Rotate Local Network pairing code", {"200": _json_response("PairingCodeResponse")}, tags=["admin", "local-network"], error_codes=("401", "403", "409", "429", "500"))},
+            "/admin/local-network/pair-by-address": {"post": _operation("Pair with a peer at an operator-entered address (e.g. a tailnet IP; no multicast discovery needed)", {"200": _json_response("LocalPeerPairResponse")}, request_body=_json_request("LocalPeerPairByAddressRequest"), tags=["admin", "local-network"], error_codes=("400", "401", "403", "409", "429", "500", "502"))},
             "/admin/local-network/peers/{peer_id}/pair": {"post": _operation("Pair with a discovered Local Network peer", {"200": _json_response("LocalPeerPairResponse")}, parameters=[_path_param("peer_id")], request_body=_json_request("LocalPeerPairRequest"), tags=["admin", "local-network"], error_codes=("400", "401", "403", "404", "409", "429", "500"))},
             "/admin/local-network/peers/{peer_id}/forget": {"post": _operation("Forget a paired Local Network peer", {"200": _json_response("LocalPeerForgetResponse")}, parameters=[_path_param("peer_id")], tags=["admin", "local-network"])},
             "/admin/local-network/peers/{peer_id}/assets": {"get": _operation("Browse a paired peer's asset inventory", {"200": _json_response("PeerInventoryEnvelope")}, parameters=[_path_param("peer_id"), *peer_inventory_params], tags=["admin", "local-network"], error_codes=("400", "401", "403", "404", "409", "429", "500", "502"))},
@@ -1255,6 +1282,16 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
                     tags=["peer"],
                     security=[],
                     error_codes=("400", "403", "409", "429", "500"),
+                )
+            },
+            "/peer/info": {
+                "get": _operation(
+                    "Open pairing-bootstrap identity (what the multicast announce broadcasts)",
+                    {"200": _json_response("PeerInfoResponse")},
+                    description="Unauthenticated by design, like POST /peer/pair: lets a Drone be discovered by dialing its address directly across links multicast cannot cross (e.g. a tailnet).",
+                    tags=["peer"],
+                    security=[],
+                    error_codes=("409", "429", "500"),
                 )
             },
             "/peer/health": {

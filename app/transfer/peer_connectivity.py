@@ -5,6 +5,7 @@ per-peer SSL trust store, performs authenticated GETs against a peer, resolves p
 addresses/ports, runs the local-network pairing handshake, and probes peer health.
 """
 
+import ipaddress
 import json
 import os
 import re
@@ -29,6 +30,7 @@ try:
     from ..storage.state_store import database_path as _state_database_path
     from ..storage.state_store import save_payload as _save_state_payload
     from . import local_network as _local_network
+    from ..transport.tailnet import get_tailnet_ip, is_tailnet_address
     from .drone_network import _certificate_pem_fingerprint, _drone_advertised_api_port
     from .drone_tls import DroneCertificateManager
     from .network_identity import drone_scheme as _drone_scheme
@@ -42,6 +44,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from storage.state_store import database_path as _state_database_path  # type: ignore
     from storage.state_store import save_payload as _save_state_payload  # type: ignore
     from transfer import local_network as _local_network  # type: ignore
+    from transport.tailnet import get_tailnet_ip, is_tailnet_address  # type: ignore
     from transfer.drone_network import _certificate_pem_fingerprint, _drone_advertised_api_port  # type: ignore
     from transfer.drone_tls import DroneCertificateManager  # type: ignore
     from transfer.network_identity import drone_scheme as _drone_scheme  # type: ignore
@@ -231,6 +234,7 @@ def _local_pair_peer(settings: Settings, peer: dict, pairing_code: str) -> dict:
         "scheme": _drone_scheme(settings),
         "api_port": _drone_advertised_api_port(settings),
         "reachable_url": own_discovery.get("reachable_url"),
+        "tailnet_ip": str(own_discovery.get("tailnet_ip") or ""),
         "certificate_pem": certificate_pem,
         "certificate_fingerprint": str(certificate.get("fingerprint") or ""),
     }
@@ -265,11 +269,70 @@ def _local_pair_peer(settings: Settings, peer: dict, pairing_code: str) -> dict:
             "advertised_reachable_url": str(result.get("reachable_url") or peer.get("advertised_reachable_url") or ""),
             "scheme": str(result.get("scheme") or peer.get("scheme") or "https"),
             "api_port": int(result.get("api_port") or peer.get("api_port") or 443),
+            "tailnet_ip": str(result.get("tailnet_ip") or peer.get("tailnet_ip") or ""),
             "certificate_fingerprint": fingerprint,
             "certificate_path": str(cert_path),
         },
     )
     return stored
+
+
+def _normalize_peer_address(raw: str) -> str:
+    """Normalize an operator-entered peer address to ``scheme://host[:port]``.
+
+    Accepts a bare host/IP (``100.64.0.7``, ``drone-den.local``), ``host:port``,
+    or a full ``http(s)://`` URL; defaults to https and omits default ports,
+    matching how reachable_urls are built everywhere else.
+    """
+    address = str(raw or "").strip()
+    if not address:
+        raise ValueError("peer address is required")
+    if "://" not in address:
+        try:
+            # A bare IPv6 literal must be bracketed before URL parsing, or its
+            # colons are misread as a port separator.
+            if ipaddress.ip_address(address).version == 6:
+                address = f"[{address}]"
+        except ValueError:
+            pass
+        address = f"https://{address}"
+    address = address.rstrip("/")
+    parsed = urlparse(address)
+    try:
+        port = parsed.port
+    except ValueError as error:
+        raise ValueError(f"invalid peer address port: {error}") from error
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("peer address must be host[:port] or http(s)://host[:port]")
+    host = parsed.hostname
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    if port is None or (port == 443 and parsed.scheme == "https") or (port == 80 and parsed.scheme == "http"):
+        return f"{parsed.scheme}://{host}"
+    return f"{parsed.scheme}://{host}:{port}"
+
+
+def _fetch_peer_info(address: str, timeout: float = 5.0) -> dict:
+    """Fetch a drone's open pairing-bootstrap identity (``GET /v1/api/peer/info``).
+
+    This is how a peer is "discovered" across links the multicast announce
+    cannot cross (e.g. a tailnet) -- by dialing its address directly. Same TOFU
+    trust model as the pair POST itself: TLS is unverified because no
+    certificate is pinned yet; the pairing code plus the fingerprint
+    cross-checks in ``_local_pair_peer`` are the authorization.
+    """
+    base = _normalize_peer_address(address)
+    request = Request(
+        f"{base}/v1/api/peer/info",
+        headers={"Accept": "application/json", "User-Agent": "batocera-drone-local-pair/1.0"},
+    )
+    context = ssl._create_unverified_context() if base.startswith("https://") else None
+    with urlopen(request, timeout=timeout, context=context) as response:
+        raw = response.read()
+    payload = json.loads(raw.decode("utf-8")) if raw else {}
+    if not isinstance(payload, dict) or str(payload.get("service") or "") != _local_network.DISCOVERY_SERVICE:
+        raise ValueError("address did not answer as a Batocera Drone peer")
+    return payload
 
 
 def _peer_health_url(address: str) -> str:

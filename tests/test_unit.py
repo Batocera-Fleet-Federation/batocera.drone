@@ -192,6 +192,151 @@ class SettingsTests(unittest.TestCase):
                 self.assertTrue(paired["paired"])
                 self.assertEqual(local_network.get_paired_peer(settings, "local-b")["certificate_fingerprint"], "abc")
 
+    def test_local_ip_addresses_and_cert_ips_include_tailnet(self) -> None:
+        from app.transfer import network_identity
+
+        with mock.patch.object(network_identity, "get_tailnet_ip", return_value="100.101.1.2"):
+            network = network_identity.get_local_ip_addresses()
+            cert_ips = network_identity.get_local_certificate_ips()
+        self.assertEqual(network["tailnet_ip"], "100.101.1.2")
+        self.assertNotIn("100.101.1.2", network["ipv4"])  # host/report selection unchanged
+        self.assertIn("100.101.1.2", cert_ips)
+
+        with mock.patch.object(network_identity, "get_tailnet_ip", return_value=None):
+            network = network_identity.get_local_ip_addresses()
+            cert_ips = network_identity.get_local_certificate_ips()
+        self.assertIsNone(network["tailnet_ip"])
+        self.assertFalse(any(ip.startswith("100.101.") for ip in cert_ips))
+
+    def test_discovery_payload_and_record_carry_tailnet_ip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root), "DRONE_DEVICE_ID": "local-a"}, clear=True):
+                settings = Settings.from_env()
+                local_network.set_mode(settings, local_network.MODE_LOCAL_NETWORK)
+                with mock.patch.object(local_network, "get_tailnet_ip", return_value="100.64.0.5"):
+                    payload = local_network.discovery_payload(settings, "aa:bb")
+                self.assertEqual(payload["tailnet_ip"], "100.64.0.5")
+                with mock.patch.object(local_network, "get_tailnet_ip", return_value=None):
+                    self.assertEqual(local_network.discovery_payload(settings, "aa:bb")["tailnet_ip"], "")
+
+                announcement = {
+                    "service": local_network.DISCOVERY_SERVICE,
+                    "drone_id": "local-b",
+                    "name": "Cabinet B",
+                    "scheme": "https",
+                    "api_port": 443,
+                    "tailnet_ip": "100.64.0.9",
+                }
+                discovered = local_network.record_discovered_peer(settings, announcement, "192.168.1.22")
+                self.assertEqual(discovered["tailnet_ip"], "100.64.0.9")
+                # An announce without the key (older peer version) keeps the stored value...
+                legacy = {key: value for key, value in announcement.items() if key != "tailnet_ip"}
+                self.assertEqual(local_network.record_discovered_peer(settings, legacy, "192.168.1.22")["tailnet_ip"], "100.64.0.9")
+                # ...but an explicit empty value clears it (the peer left the tailnet).
+                cleared = local_network.record_discovered_peer(settings, {**announcement, "tailnet_ip": ""}, "192.168.1.22")
+                self.assertEqual(cleared["tailnet_ip"], "")
+
+    def test_tailnet_announce_refreshes_paired_peer_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root), "DRONE_DEVICE_ID": "local-a"}, clear=True):
+                settings = Settings.from_env()
+                local_network.set_mode(settings, local_network.MODE_LOCAL_NETWORK)
+                local_network.save_paired_peer(settings, {"drone_id": "local-b", "certificate_fingerprint": "abc"})
+                local_network.record_discovered_peer(
+                    settings,
+                    {
+                        "service": local_network.DISCOVERY_SERVICE,
+                        "drone_id": "local-b",
+                        "name": "Cabinet B",
+                        "scheme": "https",
+                        "api_port": 443,
+                        "tailnet_ip": "100.64.0.9",
+                    },
+                    "192.168.1.22",
+                )
+                self.assertEqual(local_network.get_paired_peer(settings, "local-b")["tailnet_ip"], "100.64.0.9")
+
+    def test_normalize_peer_address_accepts_bare_hosts_and_urls(self) -> None:
+        from app.transfer.peer_connectivity import _normalize_peer_address
+
+        self.assertEqual(_normalize_peer_address("100.64.0.7"), "https://100.64.0.7")
+        self.assertEqual(_normalize_peer_address("100.64.0.7:8443"), "https://100.64.0.7:8443")
+        self.assertEqual(_normalize_peer_address("https://100.64.0.7:443/"), "https://100.64.0.7")
+        self.assertEqual(_normalize_peer_address("http://drone-den.local:80"), "http://drone-den.local")
+        self.assertEqual(_normalize_peer_address("fd7a:115c:a1e0::1"), "https://[fd7a:115c:a1e0::1]")
+        for bad in ("", "ftp://host", "https://", "host:notaport"):
+            with self.assertRaises(ValueError):
+                _normalize_peer_address(bad)
+
+    def test_fetch_peer_info_validates_service_and_dials_info_endpoint(self) -> None:
+        from app.transfer import peer_connectivity
+
+        info = {
+            "service": local_network.DISCOVERY_SERVICE,
+            "drone_id": "local-b",
+            "name": "Cabinet B",
+            "scheme": "https",
+            "api_port": 443,
+            "tailnet_ip": "100.64.0.9",
+            "certificate_fingerprint": "aa:bb",
+        }
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps(info).encode("utf-8")
+        with mock.patch.object(peer_connectivity, "urlopen", return_value=response) as opened:
+            fetched = peer_connectivity._fetch_peer_info("100.64.0.9")
+        self.assertEqual(fetched["drone_id"], "local-b")
+        self.assertEqual(opened.call_args[0][0].full_url, "https://100.64.0.9/v1/api/peer/info")
+
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps({"service": "not-a-drone"}).encode("utf-8")
+        with mock.patch.object(peer_connectivity, "urlopen", return_value=response):
+            with self.assertRaisesRegex(ValueError, "did not answer as a Batocera Drone"):
+                peer_connectivity._fetch_peer_info("100.64.0.9")
+
+    def test_local_pair_peer_exchanges_tailnet_addresses(self) -> None:
+        from app.transfer import peer_connectivity
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root), "DRONE_DEVICE_ID": "local-a"}, clear=True):
+                settings = Settings.from_env()
+                local_network.set_mode(settings, local_network.MODE_LOCAL_NETWORK)
+                pair_response = {
+                    "status": "paired",
+                    "drone_id": "local-b",
+                    "name": "Cabinet B",
+                    "scheme": "https",
+                    "api_port": 443,
+                    "reachable_url": "https://cabinet-b.local",
+                    "tailnet_ip": "100.64.0.9",
+                    "certificate_pem": "-----BEGIN CERTIFICATE-----fake",
+                    "certificate_fingerprint": "aa:bb",
+                }
+                response = mock.MagicMock()
+                response.__enter__.return_value.read.return_value = json.dumps(pair_response).encode("utf-8")
+                fake_manager = mock.MagicMock()
+                fake_manager.return_value.ensure_certificate.return_value = {
+                    "public_certificate": "-----BEGIN CERTIFICATE-----own",
+                    "fingerprint": "cc:dd",
+                }
+                cert_path = root / "peer-certs" / "local-b.pem"
+                cert_path.parent.mkdir(parents=True, exist_ok=True)
+                with mock.patch.object(peer_connectivity, "urlopen", return_value=response) as opened, \
+                        mock.patch.object(peer_connectivity, "DroneCertificateManager", fake_manager), \
+                        mock.patch.object(peer_connectivity, "_save_local_peer_certificate", return_value=(cert_path, "aa:bb")), \
+                        mock.patch.object(local_network, "get_tailnet_ip", return_value="100.64.0.2"):
+                    stored = peer_connectivity._local_pair_peer(
+                        settings,
+                        {"drone_id": "local-b", "reachable_url": "https://100.64.0.9", "tailnet_ip": "100.64.0.9"},
+                        "CODE1234",
+                    )
+                sent = json.loads(opened.call_args[0][0].data.decode("utf-8"))
+                self.assertEqual(sent["tailnet_ip"], "100.64.0.2")  # our side advertised
+                self.assertEqual(stored["tailnet_ip"], "100.64.0.9")  # their side recorded
+                self.assertEqual(stored["reachable_url"], "https://100.64.0.9")  # the dialed address sticks
+
     def test_discovery_surfaces_same_id_conflicts_from_other_hosts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"

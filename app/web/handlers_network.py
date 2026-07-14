@@ -19,8 +19,10 @@ try:
     from ..transfer.drone_network import _network_mode
     from ..transfer.drone_tls import DroneCertificateManager
     from ..transfer.peer_connectivity import (
+        _fetch_peer_info,
         _local_pair_peer,
         _local_peer_cert_cache_path,
+        _normalize_peer_address,
         _peer_address,
         _peer_get_json,
         _public_local_peer,
@@ -33,8 +35,10 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from transfer.drone_network import _network_mode  # type: ignore
     from transfer.drone_tls import DroneCertificateManager  # type: ignore
     from transfer.peer_connectivity import (  # type: ignore
+        _fetch_peer_info,
         _local_pair_peer,
         _local_peer_cert_cache_path,
+        _normalize_peer_address,
         _peer_address,
         _peer_get_json,
         _public_local_peer,
@@ -178,6 +182,56 @@ class HandlersNetworkMixin:
         if not peer:
             self._send_json(404, {"error": "discovered peer not found"})
             return
+        paired = _local_pair_peer(self.settings, peer, str(payload.get("pairing_code") or ""))
+        ssl_context = getattr(self.server, "ssl_context", None)
+        cert_path = Path(str(paired.get("certificate_path") or ""))
+        if ssl_context is not None and cert_path.exists():
+            try:
+                ssl_context.load_verify_locations(cafile=str(cert_path))
+            except ssl.SSLError:
+                pass
+        self._send_json(200, {"status": "paired", "peer": _public_local_peer(paired)})
+
+    def _handle_admin_local_peer_pair_by_address(self, payload: dict) -> None:
+        """Pair with a peer at an operator-entered address (no multicast needed).
+
+        The LAN flow requires the peer to have been multicast-discovered first;
+        that can't happen across routed links (a tailnet, another subnet). Here
+        the operator supplies the address, we fetch the peer's open bootstrap
+        identity from it, then run the exact same pairing handshake.
+        """
+        if not _local_network.is_local_mode(self.settings):
+            self._send_json(409, {"error": "Enable Local Network mode before pairing"})
+            return
+        address = str(payload.get("address") or "").strip()
+        dialed = _normalize_peer_address(address)
+        try:
+            info = _fetch_peer_info(dialed)
+        except ValueError:
+            raise
+        except Exception as error:
+            self._send_json(502, {"error": f"could not reach a Drone at {dialed}: {error}"})
+            return
+        peer_id = str(info.get("drone_id") or "").strip()
+        if not peer_id:
+            self._send_json(502, {"error": "peer did not report a drone id"})
+            return
+        if peer_id == self.settings.overmind_device_id:
+            self._send_json(409, {"error": "that address answered as this Drone itself"})
+            return
+        peer = {
+            "drone_id": peer_id,
+            "name": str(info.get("name") or peer_id),
+            "hostname": str(info.get("hostname") or ""),
+            "scheme": str(info.get("scheme") or ("http" if dialed.startswith("http://") else "https")),
+            "api_port": int(info.get("api_port") or 443),
+            # The dialed address demonstrably routes from here (e.g. over the
+            # tailnet); the peer's advertised .local URL may not.
+            "reachable_url": dialed,
+            "advertised_reachable_url": str(info.get("reachable_url") or ""),
+            "tailnet_ip": str(info.get("tailnet_ip") or ""),
+            "certificate_fingerprint": str(info.get("certificate_fingerprint") or ""),
+        }
         paired = _local_pair_peer(self.settings, peer, str(payload.get("pairing_code") or ""))
         ssl_context = getattr(self.server, "ssl_context", None)
         cert_path = Path(str(paired.get("certificate_path") or ""))

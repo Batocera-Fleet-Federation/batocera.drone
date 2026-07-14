@@ -148,6 +148,56 @@ class MockServerIntegrationTests(unittest.TestCase):
         self.assertIn(b"Claim Ownership", js)
         self.assertNotIn(b"Integration Password", js)
 
+    def _get_json_unauthenticated(self, path: str) -> dict:
+        url = f"http://127.0.0.1:{self.port}{path}"
+        with urllib.request.urlopen(urllib.request.Request(url), timeout=5) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
+    def test_peer_info_and_pair_by_address_endpoints(self) -> None:
+        # Outside local-network mode the bootstrap endpoint refuses.
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            self._get_json_unauthenticated("/v1/api/peer/info")
+        self.assertEqual(error.exception.code, 409)
+
+        self._post_json("/v1/api/admin/network-mode", {"mode": "local_network"})
+        fake_manager = mock.MagicMock()
+        fake_manager.return_value.ensure_certificate.return_value = {"fingerprint": "ff:ee"}
+        with mock.patch("app.web.handlers_peer.DroneCertificateManager", fake_manager), \
+                mock.patch.object(local_network, "get_tailnet_ip", return_value="100.64.0.5"):
+            # No Authorization header on purpose: pairing bootstrap must work
+            # before any trust exists, exactly like POST /peer/pair.
+            info = self._get_json_unauthenticated("/v1/api/peer/info")
+        self.assertEqual(info["service"], local_network.DISCOVERY_SERVICE)
+        self.assertEqual(info["drone_id"], self.settings.overmind_device_id)
+        self.assertEqual(info["tailnet_ip"], "100.64.0.5")
+        self.assertEqual(info["certificate_fingerprint"], "ff:ee")
+
+        # Pair-by-address pointed at this drone's own address answers as self.
+        with mock.patch("app.web.handlers_peer.DroneCertificateManager", fake_manager):
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                self._post_json(
+                    "/v1/api/admin/local-network/pair-by-address",
+                    {"address": f"http://127.0.0.1:{self.port}", "pairing_code": "XXXXXXXX"},
+                )
+        self.assertEqual(error.exception.code, 409)
+        self.assertIn("itself", json.loads(error.exception.read().decode("utf-8"))["error"])
+
+        # Nothing listening there -> 502, not a stack trace.
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            self._post_json(
+                "/v1/api/admin/local-network/pair-by-address",
+                {"address": "http://127.0.0.1:9", "pairing_code": "XXXXXXXX"},
+            )
+        self.assertEqual(error.exception.code, 502)
+
+        # Unparseable address -> 400.
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            self._post_json(
+                "/v1/api/admin/local-network/pair-by-address",
+                {"address": "ftp://nope", "pairing_code": "XXXXXXXX"},
+            )
+        self.assertEqual(error.exception.code, 400)
+
     def test_network_mode_and_local_network_admin_endpoints(self) -> None:
         initial = self._get_json("/v1/api/admin/network-mode")
         self.assertEqual(initial["mode"], "overmind")

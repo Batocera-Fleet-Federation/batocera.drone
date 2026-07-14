@@ -556,9 +556,50 @@ class HolepunchWiringTests(unittest.TestCase):
             self.assertEqual(drone_api._maybe_holepunch(settings, channel), (channel, False))
 
 
+class TailnetHelperTests(unittest.TestCase):
+    def test_is_tailnet_address_classification(self):
+        from app.transport.tailnet import is_tailnet_address
+
+        for inside in ("100.64.0.1", "100.101.102.103", "100.127.255.254", "fd7a:115c:a1e0::1", "[100.64.0.9]"):
+            self.assertTrue(is_tailnet_address(inside), inside)
+        for outside in ("100.63.255.255", "100.128.0.1", "192.168.1.5", "fd00::1", "8.8.8.8", "", None, "garbage"):
+            self.assertFalse(is_tailnet_address(outside), repr(outside))
+
+    def _fake_socket_module(self, sockname=None, error=None):
+        module = mock.MagicMock()
+        if error is not None:
+            module.socket.side_effect = error
+        else:
+            probe = mock.MagicMock()
+            probe.getsockname.return_value = (sockname, 0)
+            module.socket.return_value.__enter__.return_value = probe
+        return module
+
+    def test_get_tailnet_ip_returns_own_address_when_route_exists(self):
+        from app.transport.tailnet import get_tailnet_ip
+
+        module = self._fake_socket_module(sockname="100.101.102.5")
+        self.assertEqual(get_tailnet_ip(socket_module=module), "100.101.102.5")
+
+    def test_get_tailnet_ip_none_when_probe_resolves_via_default_route(self):
+        # Without a tailnet route the kernel answers with the regular LAN
+        # address, which must not be mistaken for a tailnet identity.
+        from app.transport.tailnet import get_tailnet_ip
+
+        module = self._fake_socket_module(sockname="192.168.1.10")
+        self.assertIsNone(get_tailnet_ip(socket_module=module))
+
+    def test_get_tailnet_ip_none_on_socket_error(self):
+        from app.transport.tailnet import get_tailnet_ip
+
+        module = self._fake_socket_module(error=OSError("no sockets here"))
+        self.assertIsNone(get_tailnet_ip(socket_module=module))
+
+
 class LanDirectTransportTests(unittest.TestCase):
-    def _transport(self, my_public, fetch_fn=lambda r, c: {"status": "completed"}):
-        return LanDirectTransport(fetch_fn, local_network=lambda: {"public_ip": my_public})
+    def _transport(self, my_public, fetch_fn=lambda r, c: {"status": "completed"}, my_tailnet=None):
+        network = {"public_ip": my_public, "tailnet_ip": my_tailnet}
+        return LanDirectTransport(fetch_fn, local_network=lambda: network)
 
     def test_lan_url_when_same_public_ip(self):
         transport = self._transport("203.0.113.7")
@@ -598,6 +639,54 @@ class LanDirectTransportTests(unittest.TestCase):
         self.assertEqual(captured["peer"]["public_reachable_url"], "https://192.168.1.50")
         self.assertEqual(captured["peer"]["reachable_url"], "https://192.168.1.50")
         self.assertEqual(captured["peer"]["drone_id"], "p")  # original fields preserved
+
+    def test_lan_url_via_tailnet_when_both_on_tailnet(self):
+        transport = self._transport("203.0.113.7", my_tailnet="100.64.0.2")
+        self.assertEqual(
+            transport.lan_url({"tailnet_ip": "100.64.0.9", "api_port": 8443}),
+            "https://100.64.0.9:8443",
+        )
+        self.assertEqual(
+            transport.lan_url({"tailnet_ip": "100.64.0.9", "api_port": 443}),
+            "https://100.64.0.9",
+        )
+
+    def test_tailnet_url_from_resolved_network_field(self):
+        transport = self._transport("203.0.113.7", my_tailnet="100.64.0.2")
+        peer = {"resolved_network": {"tailnet_ip": "100.64.0.9"}, "api_port": 443}
+        self.assertEqual(transport.lan_url(peer), "https://100.64.0.9")
+
+    def test_same_lan_match_preferred_over_tailnet(self):
+        # A genuine same-LAN peer keeps the real LAN address (no WireGuard hop)
+        # even when both sides are also on the tailnet.
+        transport = self._transport("203.0.113.7", my_tailnet="100.64.0.2")
+        peer = {"public_ip": "203.0.113.7", "local_ip": "192.168.1.50", "tailnet_ip": "100.64.0.9"}
+        self.assertEqual(transport.lan_url(peer), "https://192.168.1.50")
+
+    def test_no_tailnet_url_when_self_not_on_tailnet(self):
+        transport = self._transport("203.0.113.7", my_tailnet=None)
+        self.assertIsNone(transport.lan_url({"tailnet_ip": "100.64.0.9"}))
+
+    def test_tailnet_peer_value_must_be_in_tailnet_range(self):
+        # A stale/garbage tailnet_ip field must not open an arbitrary-address path.
+        transport = self._transport("203.0.113.7", my_tailnet="100.64.0.2")
+        self.assertIsNone(transport.lan_url({"tailnet_ip": "192.168.1.9"}))
+        self.assertIsNone(transport.lan_url({"tailnet_ip": ""}))
+
+    def test_fetch_points_direct_path_at_tailnet_address(self):
+        captured = {}
+
+        def fake(request, context):
+            captured["peer"] = context.peer
+            return {"status": "completed"}
+
+        transport = self._transport("203.0.113.7", fetch_fn=fake, my_tailnet="100.64.0.2")
+        ctx = self._ctx({"drone_id": "p", "public_ip": "198.51.100.9", "tailnet_ip": "100.64.0.9"})
+        self.assertTrue(transport.usable(DownloadRequest(asset_type="rom"), ctx))
+        transport.fetch(DownloadRequest(asset_type="rom"), ctx)
+        self.assertEqual(captured["peer"]["public_reachable_url"], "https://100.64.0.9")
+        self.assertEqual(captured["peer"]["reachable_url"], "https://100.64.0.9")
+        self.assertEqual(captured["peer"]["drone_id"], "p")
 
     @staticmethod
     def _ctx(peer):

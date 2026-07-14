@@ -15,8 +15,10 @@ from typing import Any, Callable, Optional
 
 try:
     from ..storage.state_store import append_event, database_path, load_events, load_payload, save_payload
+    from ..transport.tailnet import get_tailnet_ip
 except ImportError:
     from storage.state_store import append_event, database_path, load_events, load_payload, save_payload  # type: ignore
+    from transport.tailnet import get_tailnet_ip  # type: ignore
 
 
 MODE_OVERMIND = "overmind"
@@ -231,6 +233,10 @@ def record_discovered_peer(settings: Any, payload: dict, source_ip: Optional[str
         "scheme": scheme,
         "api_port": api_port,
         "certificate_fingerprint": str(payload.get("certificate_fingerprint") or ""),
+        # Take the announced value verbatim when the key is present (an empty
+        # announce clears a stale address after the peer leaves the tailnet);
+        # fall back to the stored one only for announces from older versions.
+        "tailnet_ip": str((payload.get("tailnet_ip") if "tailnet_ip" in payload else existing.get("tailnet_ip")) or ""),
         "source_ip": str(source_ip or existing.get("source_ip") or ""),
         "last_seen": _now_iso(),
         "paired": bool(trusted_peer),
@@ -248,6 +254,7 @@ def record_discovered_peer(settings: Any, payload: dict, source_ip: Optional[str
                 "advertised_reachable_url": peer["advertised_reachable_url"],
                 "scheme": peer["scheme"],
                 "api_port": peer["api_port"],
+                "tailnet_ip": peer["tailnet_ip"],
                 "source_ip": peer["source_ip"],
                 "last_seen": peer["last_seen"],
             },
@@ -345,6 +352,7 @@ def discovery_payload(settings: Any, certificate_fingerprint: str = "") -> dict:
         "scheme": scheme,
         "api_port": port,
         "reachable_url": f"{scheme}://{local_hostname}{suffix}",
+        "tailnet_ip": get_tailnet_ip() or "",
         "certificate_fingerprint": certificate_fingerprint,
         "sent_at": _now_iso(),
     }

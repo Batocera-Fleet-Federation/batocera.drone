@@ -11,6 +11,11 @@ import sys
 from typing import Any, Callable, List, Optional
 from urllib.request import Request, urlopen
 
+try:
+    from ..transport.tailnet import get_tailnet_ip, is_tailnet_address
+except ImportError:  # pragma: no cover - direct script execution fallback
+    from transport.tailnet import get_tailnet_ip, is_tailnet_address  # type: ignore
+
 
 def drone_scheme(settings: Any) -> str:
     return "http" if settings.http_only else "https"
@@ -164,6 +169,9 @@ def get_local_ip_addresses(
     if "127.0.0.1" not in ipv4:
         ipv4.append("127.0.0.1")
     gateway_ip = (gateway_loader or get_router_ip_address)()
+    # Mesh-VPN overlay address (None off-tailnet) -- kept out of the ipv4 list so
+    # host/report selection is unchanged; consumers read the dedicated field.
+    tailnet_ip = get_tailnet_ip(socket_module=socket_api)
     public_ip = None
     try:
         request = (request_factory or Request)("https://api.ipify.org", headers={"User-Agent": "batocera-drone-app/4.0"})
@@ -171,8 +179,8 @@ def get_local_ip_addresses(
             public_ip = response.read().decode("utf-8", errors="replace").strip() or None
     except Exception:
         public_ip = None
-    print(f"Overmind network resolved ipv4={ipv4} ipv6={ipv6} gateway={gateway_ip} public={public_ip}", file=sys.stdout, flush=True)
-    return {"ipv4": ipv4, "ipv6": ipv6, "gateway_ip": gateway_ip, "public_ip": public_ip}
+    print(f"Overmind network resolved ipv4={ipv4} ipv6={ipv6} gateway={gateway_ip} public={public_ip} tailnet={tailnet_ip}", file=sys.stdout, flush=True)
+    return {"ipv4": ipv4, "ipv6": ipv6, "gateway_ip": gateway_ip, "public_ip": public_ip, "tailnet_ip": tailnet_ip}
 
 
 def get_local_certificate_ips(*, socket_module: Any = None) -> List[str]:
@@ -194,4 +202,10 @@ def get_local_certificate_ips(*, socket_module: Any = None) -> List[str]:
                 ips.append(value)
     except OSError:
         pass
+    # Include the tailnet address so certs generated while on a tailnet carry
+    # it as a SAN (only the Overmind-CA verify mode checks hostnames; pinned
+    # local pairing sets check_hostname=False and doesn't need it).
+    tailnet_ip = get_tailnet_ip(socket_module=socket_api)
+    if tailnet_ip and tailnet_ip not in ips:
+        ips.append(tailnet_ip)
     return ips

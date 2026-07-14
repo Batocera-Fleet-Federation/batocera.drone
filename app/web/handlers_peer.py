@@ -86,6 +86,7 @@ class HandlersPeerMixin:
                 "advertised_reachable_url": advertised_reachable_url,
                 "scheme": scheme,
                 "api_port": port,
+                "tailnet_ip": str(payload.get("tailnet_ip") or ""),
                 "certificate_fingerprint": fingerprint,
                 "certificate_path": str(cert_path),
                 "source_ip": source_ip,
@@ -113,9 +114,25 @@ class HandlersPeerMixin:
                 "scheme": _drone_scheme(self.settings),
                 "api_port": _drone_advertised_api_port(self.settings),
                 "reachable_url": own_discovery.get("reachable_url"),
+                "tailnet_ip": str(own_discovery.get("tailnet_ip") or ""),
                 "certificate_pem": str(own_certificate.get("public_certificate") or ""),
                 "certificate_fingerprint": str(own_certificate.get("fingerprint") or ""),
             },
+        )
+
+    def _handle_peer_info(self) -> None:
+        # Unauthenticated by design, like POST /peer/pair: this is the pairing
+        # bootstrap (no trust exists yet) and returns exactly what the multicast
+        # discovery announce already broadcasts on the LAN -- identity, not
+        # secrets. It lets a drone be "discovered" across links multicast can't
+        # cross (e.g. a tailnet) by dialing its address directly.
+        if not _local_network.is_local_mode(self.settings):
+            self._send_json(409, {"error": "Drone is not in local network mode"})
+            return
+        certificate = DroneCertificateManager(self.settings).ensure_certificate()
+        self._send_json(
+            200,
+            _local_network.discovery_payload(self.settings, str(certificate.get("fingerprint") or "")),
         )
 
     def _handle_peer_health(self) -> None:

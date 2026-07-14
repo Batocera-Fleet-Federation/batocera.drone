@@ -6,10 +6,16 @@ directly at its ``local_ip`` -- far faster than relaying and with no WAN hop or
 port-forward. This reuses the existing direct mTLS ``/peer/*`` path (the drone
 cert's SANs already include its LAN IPs); only the address differs.
 
+A **tailnet** peer counts as LAN too: when both drones run a mesh-VPN daemon
+(see ``tailnet.py``), the peer's tailnet address is directly reachable across
+NATs, so it is tried as the second choice inside this tier -- after a genuine
+same-LAN match (no WireGuard hop when the real LAN will do), and ahead of the
+public-direct and relay tiers.
+
 It is registered ahead of the public-direct and relay tiers, so a same-LAN peer
 is served over the LAN first. A false positive (e.g. two homes sharing a CGNAT
-public IP) simply fails the LAN attempt and the selector falls back to the next
-transport.
+public IP, or a stale tailnet address) simply fails the LAN attempt and the
+selector falls back to the next transport.
 """
 
 from __future__ import annotations
@@ -18,6 +24,7 @@ from dataclasses import replace
 from typing import Any, Callable, Optional
 
 from .base import DownloadRequest, PeerTransport, TransferContext
+from .tailnet import is_tailnet_address
 
 
 class LanDirectTransport(PeerTransport):
@@ -35,7 +42,10 @@ class LanDirectTransport(PeerTransport):
         self._local_network = local_network
 
     def lan_url(self, peer: dict) -> Optional[str]:
-        """Return the peer's LAN URL if it is on this drone's LAN, else None."""
+        """Return the peer's LAN (or tailnet) URL if directly reachable, else None."""
+        return self._same_network_url(peer) or self._tailnet_url(peer)
+
+    def _same_network_url(self, peer: dict) -> Optional[str]:
         # Check the peer's cheap fields first so we only resolve our own network
         # (a probe) for actual LAN candidates -- not on every transfer/peer.
         peer_public = str(peer.get("public_ip") or peer.get("public") or "").strip()
@@ -46,12 +56,29 @@ class LanDirectTransport(PeerTransport):
         my_public = str(network.get("public_ip") or "").strip()
         if not my_public or my_public != peer_public:
             return None
+        return self._peer_url(peer, local_ip)
+
+    def _tailnet_url(self, peer: dict) -> Optional[str]:
+        # A peer's tailnet address is only reachable if this drone is on the
+        # tailnet too (own snapshot carries tailnet_ip). Same cheap-fields-first
+        # ordering as _same_network_url.
+        resolved = peer.get("resolved_network") if isinstance(peer.get("resolved_network"), dict) else {}
+        peer_tailnet = str(peer.get("tailnet_ip") or resolved.get("tailnet_ip") or "").strip()
+        if not peer_tailnet or not is_tailnet_address(peer_tailnet):
+            return None
+        network = self._local_network() or {}
+        if not str(network.get("tailnet_ip") or "").strip():
+            return None
+        return self._peer_url(peer, peer_tailnet)
+
+    @staticmethod
+    def _peer_url(peer: dict, host_ip: str) -> str:
         scheme = str(peer.get("scheme") or "https")
         try:
             port = int(peer.get("api_port") or 443)
         except (TypeError, ValueError):
             port = 443
-        host = f"[{local_ip}]" if ":" in local_ip and not local_ip.startswith("[") else local_ip
+        host = f"[{host_ip}]" if ":" in host_ip and not host_ip.startswith("[") else host_ip
         suffix = "" if (port == 443 and scheme == "https") else f":{port}"
         return f"{scheme}://{host}{suffix}"
 
