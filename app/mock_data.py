@@ -96,6 +96,7 @@ def seed_mock_userdata(userdata_root: Path) -> None:
     logs_root = userdata_root / "system" / "logs"
     _write_text(logs_root / "es_launch_stdout.log", "INFO launch emulator=snes\nINFO rom=Chrono Trigger\n")
     _write_text(logs_root / "es_launch_stderr.log", "WARN no joystick hotplug event\n")
+    _write_text(logs_root / "tailscaled.log", "INFO magicsock: connected to derp-9 (dfw)\n")
 
     # Core system config files
     _write_text(

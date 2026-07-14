@@ -146,6 +146,31 @@ class MockServerIntegrationTests(unittest.TestCase):
         self.assertEqual(info["fields"]["gpu_model"], "GeForce GTX 1650")
         self.assertEqual(info["fields"]["gpu_driver"], "nvidia")
 
+    def test_system_info_includes_tailnet_diagnostics(self) -> None:
+        tailnet = {
+            "installed": True,
+            "running": True,
+            "enrolled": True,
+            "tailnet_ip": "100.64.0.5",
+            "hostname": "cabinet-a",
+            "backend_state": "Running",
+            "version": "1.80.0",
+            "dns_name": "cabinet-a.example.ts.net",
+            "tailnet_name": "example.ts.net",
+            "magic_dns_suffix": "example.ts.net",
+            "relay": "dfw",
+            "health": [],
+            "peers": [{"tailnet_ip": "100.64.0.9", "online": True}],
+        }
+        with mock.patch("app.web.handlers_diagnostics.tailnet_status", return_value=tailnet):
+            info = self._get_json("/v1/api/admin/system-info")
+        self.assertEqual(info["tailnet_status"], tailnet)
+
+        js = self._get_bytes("/static/js/drone.js").decode("utf-8")
+        self.assertIn("Tailnet / Tailscale", js)
+        self.assertIn("tailnet.backend_state", js)
+        self.assertIn("#admin/logs/tailscaled?lines=200", js)
+
     def test_overmind_configuration_ui_is_gone(self) -> None:
         # The Overmind config panel (URL/token inputs, claim flow) left with the
         # retired Integration page.
@@ -403,6 +428,10 @@ class MockServerIntegrationTests(unittest.TestCase):
         payload = self._get_json("/v1/api/admin/logs/es_launch_stdout?lines=20")
         self.assertEqual(payload["source"], "es_launch_stdout")
         self.assertTrue(any("launch emulator" in line for line in payload["content"]))
+
+        tailscale = self._get_json("/v1/api/admin/logs/tailscaled?lines=20")
+        self.assertEqual(tailscale["source"], "tailscaled")
+        self.assertTrue(any("magicsock" in line for line in tailscale["content"]))
 
     def test_admin_configs_endpoint(self) -> None:
         payload = self._get_json("/v1/api/admin/configs/retroarch?max_bytes=65536")

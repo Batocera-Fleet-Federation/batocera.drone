@@ -430,10 +430,6 @@ supervise_drone() {
     launch_ended="$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date)"
     echo "[drone-service] Drone app process exited at ${launch_ended} with code ${exit_code}"
 
-    if [ "$exit_code" -eq 0 ]; then
-      exit 0
-    fi
-
     if [ "$exit_code" -eq "$remote_reboot_exit_code" ]; then
       request_host_reboot
       exit "$exit_code"
@@ -464,17 +460,41 @@ start_app() {
     echo "Startup log: $STARTUP_LOG"
     exit 0
   fi
-  (
-    ensure_permissions
-    ensure_dns_fallback
-    start_control_worker
-
-    supervise_drone
-  ) >> "$STARTUP_LOG" 2>&1 &
+  # Re-enter this versioned script under nohup so Batocera's service launcher,
+  # an SSH session ending, or a network transition cannot take the long-lived
+  # supervisor down with its parent shell. The supervisor owns the app and
+  # restarts every ordinary exit, including exit code 0.
+  nohup sh "$WORK_DIR/app/service_bootstrap.sh" supervisor \
+    >> "$STARTUP_LOG" 2>&1 </dev/null &
 
   echo $! > "$PID_FILE"
   echo "Web Server running on https://$(hostname).local (compatibility: https://$(hostname).local:8443)"
   echo "Startup log: $STARTUP_LOG"
+}
+
+run_supervisor() {
+  ensure_permissions
+  ensure_dns_fallback
+  start_control_worker
+  supervise_drone
+}
+
+service_status() {
+  supervisor_pid=""
+  if [ -f "$PID_FILE" ]; then
+    supervisor_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+  fi
+  if [ -n "$supervisor_pid" ] && kill -0 "$supervisor_pid" 2>/dev/null; then
+    echo "Drone service supervisor running: pid=${supervisor_pid}"
+    return 0
+  fi
+  HTTPS_PORT="${HTTPS_PORT:-443}"
+  if lsof -i:"$HTTPS_PORT" >/dev/null 2>&1; then
+    echo "Drone app is listening on port ${HTTPS_PORT} without its supervisor"
+    return 1
+  fi
+  echo "Drone service is not running"
+  return 1
 }
 
 stop_app() {
@@ -509,6 +529,13 @@ case "$ACTION" in
     stop_app
     start_app
     ;;
+  status)
+    service_status
+    ;;
+  supervisor)
+    # Internal re-entry point launched under nohup by start_app.
+    run_supervisor
+    ;;
   control-worker)
     # Re-entry point used by the control worker's own self-re-exec after a bundle
     # update. Resume processing privileged control requests with the new code.
@@ -517,7 +544,7 @@ case "$ACTION" in
     service_control_worker
     ;;
   *)
-    echo "Usage: $0 {start|stop|restart}"
+    echo "Usage: $0 {start|stop|restart|status}"
     exit 1
     ;;
 esac

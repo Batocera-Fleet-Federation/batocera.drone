@@ -181,6 +181,7 @@ class HandlersNetworkMixin:
         tailnet_peer = {
             **info,
             "drone_id": peer_id,
+            "tailnet_id": str(row.get("tailnet_id") or ""),
             "name": str(info.get("name") or row.get("name") or peer_id),
             "hostname": str(info.get("hostname") or row.get("hostname") or ""),
             "reachable_url": _normalize_peer_address(tailnet_ip),
@@ -201,7 +202,29 @@ class HandlersNetworkMixin:
         discovered = local_match or _local_network.record_discovered_peer(self.settings, tailnet_peer, tailnet_ip)
         existing = _local_network.get_paired_peer(self.settings, peer_id)
         if existing:
-            return _public_local_peer(existing)
+            # A LAN announce may have arrived while the peer's tailscaled was
+            # temporarily down and cleared its tailnet_ip. A successful probe
+            # over the authenticated tailnet is authoritative reachability
+            # evidence, so restore the route without replacing the preferred
+            # LAN URL or requiring the already-paired Drone to pair again.
+            expected_fingerprint = str(existing.get("certificate_fingerprint") or "").strip().lower()
+            observed_fingerprint = str(info.get("certificate_fingerprint") or "").strip().lower()
+            if expected_fingerprint and observed_fingerprint and expected_fingerprint != observed_fingerprint:
+                return _public_local_peer(
+                    {
+                        **existing,
+                        "tailnet_identity_error": "Tailnet peer certificate fingerprint does not match paired Drone",
+                    }
+                )
+            restored = _local_network.save_paired_peer(
+                self.settings,
+                {
+                    **existing,
+                    "tailnet_id": str(row.get("tailnet_id") or existing.get("tailnet_id") or ""),
+                    "tailnet_ip": tailnet_ip,
+                },
+            )
+            return _public_local_peer(restored)
         if _local_network.is_tailnet_peer_forgotten(self.settings, peer_id) and restore_peer_id != peer_id:
             return _public_local_peer({**(discovered or tailnet_peer), "tailnet_forgotten": True, "paired": False})
         try:

@@ -85,7 +85,7 @@ def _tailnet_peers(payload: dict) -> list[dict]:
 
 
 def tailnet_status() -> dict:
-    """Installed / running / enrolled / tailnet_ip, for the Swarm page card."""
+    """Installed / running / enrolled details for admin diagnostics and Swarm."""
     status = {
         "installed": TAILSCALE_CLI.exists(),
         "running": False,
@@ -93,6 +93,12 @@ def tailnet_status() -> dict:
         "tailnet_ip": get_tailnet_ip() or "",
         "hostname": socket.gethostname().lower(),
         "backend_state": "",
+        "version": "",
+        "dns_name": "",
+        "tailnet_name": "",
+        "magic_dns_suffix": "",
+        "relay": "",
+        "health": [],
         "peers": [],
     }
     if not status["installed"]:
@@ -111,6 +117,7 @@ def tailnet_status() -> dict:
         payload = {}
     backend_state = str(payload.get("BackendState") or "")
     status["backend_state"] = backend_state
+    status["version"] = str(payload.get("Version") or "")
     # "Running" (connected) and "Starting" (has a node key, coming up) both
     # mean the device is enrolled; "NeedsLogin"/"NoState" mean it is not.
     status["enrolled"] = backend_state in {"Running", "Starting"}
@@ -118,6 +125,16 @@ def tailnet_status() -> dict:
     own_address = _first_address(self_info.get("TailscaleIPs") or [])
     if own_address:
         status["tailnet_ip"] = own_address
+    status["dns_name"] = str(self_info.get("DNSName") or "").strip().rstrip(".")
+    status["relay"] = str(self_info.get("Relay") or "").strip()
+    current_tailnet = payload.get("CurrentTailnet") if isinstance(payload.get("CurrentTailnet"), dict) else {}
+    status["tailnet_name"] = str(current_tailnet.get("Name") or "").strip()
+    status["magic_dns_suffix"] = str(
+        current_tailnet.get("MagicDNSSuffix") or payload.get("MagicDNSSuffix") or ""
+    ).strip().rstrip(".")
+    raw_health = payload.get("Health")
+    if isinstance(raw_health, list):
+        status["health"] = [str(item).strip() for item in raw_health if str(item or "").strip()]
     status["peers"] = _tailnet_peers(payload)
     return status
 

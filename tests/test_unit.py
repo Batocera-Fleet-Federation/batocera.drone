@@ -254,9 +254,14 @@ class SettingsTests(unittest.TestCase):
                 # An announce without the key (older peer version) keeps the stored value...
                 legacy = {key: value for key, value in announcement.items() if key != "tailnet_ip"}
                 self.assertEqual(local_network.record_discovered_peer(settings, legacy, "192.168.1.22")["tailnet_ip"], "100.64.0.9")
-                # ...but an explicit empty value clears it (the peer left the tailnet).
-                cleared = local_network.record_discovered_peer(settings, {**announcement, "tailnet_ip": ""}, "192.168.1.22")
-                self.assertEqual(cleared["tailnet_ip"], "")
+                # A temporary empty announce keeps the stable route so a peer
+                # can still be reached after it moves off this LAN.
+                preserved = local_network.record_discovered_peer(
+                    settings,
+                    {**announcement, "tailnet_ip": ""},
+                    "192.168.1.22",
+                )
+                self.assertEqual(preserved["tailnet_ip"], "100.64.0.9")
 
     def test_tailnet_announce_refreshes_paired_peer_record(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3423,8 +3428,28 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("Run PixN Update", controls_source)
         self.assertIn("droneAutoUpdateCheckbox", controls_source)
         self.assertIn("DRONE_LATEST_ARCHIVE_URL", drone_source)
+        self.assertIn("_schedule_supervised_service_restart", drone_source)
+        self.assertIn("start_new_session=True", drone_source)
         self.assertIn("os.execv(sys.executable, [sys.executable, *sys.argv])", drone_source)
         self.assertIn("os._exit(DRONE_SELF_UPDATE_EXIT_CODE)", drone_source)
+
+    def test_drone_self_update_schedules_detached_service_restart_when_supervised(self) -> None:
+        from app.common import self_update
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bootstrap = Path(tmp) / "service_bootstrap.sh"
+            pid_file = Path(tmp) / "drone-server.pid"
+            bootstrap.write_text("#!/bin/sh\n", encoding="utf-8")
+            pid_file.write_text("123\n", encoding="utf-8")
+            with mock.patch.object(self_update, "DRONE_SERVICE_BOOTSTRAP", bootstrap), \
+                    mock.patch.object(self_update, "DRONE_SERVICE_PID_FILE", pid_file), \
+                    mock.patch.object(self_update.subprocess, "Popen") as popen:
+                scheduled = self_update._schedule_supervised_service_restart(1.5)
+
+        self.assertTrue(scheduled)
+        command = popen.call_args.args[0]
+        self.assertEqual(command[-2:], ["1.5", str(bootstrap)])
+        self.assertTrue(popen.call_args.kwargs["start_new_session"])
 
     def test_drone_update_overlays_release_files_without_deleting_app_tree(self) -> None:
         drone_source = Path(__file__).resolve().parents[1].joinpath("app/common/self_update.py").read_text(encoding="utf-8")
@@ -3500,6 +3525,11 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("auto-update.enabled", bootstrap)
         self.assertIn('if [ -f "$AUTO_UPDATE_FILE" ]', bootstrap)
         self.assertIn("DRONE_APP_STAGE_ONLY=1", bootstrap)
+        self.assertIn('nohup sh "$WORK_DIR/app/service_bootstrap.sh" supervisor', bootstrap)
+        self.assertIn("run_supervisor()", bootstrap)
+        self.assertIn("service_status()", bootstrap)
+        self.assertIn("status)", bootstrap)
+        self.assertNotIn('if [ "$exit_code" -eq 0 ]; then\n      exit 0', bootstrap)
         self.assertIn('kill_result="$CONTROL_DIR/kill-emulator.result"', bootstrap)
         self.assertIn("DRONE_SERVICE_CONTROL_DIR", root.joinpath("app/device/device_control.py").read_text(encoding="utf-8"))
         self.assertIn('system_info_payload["screen_mode"] = _get_screen_mode(settings)', drone_source)
@@ -6623,6 +6653,74 @@ class TailnetDiscoveryMergeTests(unittest.TestCase):
         self.assertEqual(payload["peers"][0]["source"], "Local Network")
         self.assertEqual(payload["peers"][1]["source"], "Tailnet")
 
+    def test_tailnet_sync_restores_route_on_existing_paired_peer(self) -> None:
+        from app.web import handlers_network
+
+        handler = handlers_network.HandlersNetworkMixin()
+        handler.settings = mock.MagicMock(overmind_device_id="local-a")
+        existing = {
+            "drone_id": "local-b",
+            "reachable_url": "https://192.168.1.22",
+            "tailnet_ip": "",
+            "certificate_fingerprint": "aa:bb",
+            "paired": True,
+        }
+        device = {
+            "tailnet_id": "node-b",
+            "name": "Cabinet B",
+            "hostname": "cabinet-b",
+            "tailnet_ip": "100.64.0.9",
+        }
+        info = {
+            "service": local_network.DISCOVERY_SERVICE,
+            "drone_id": "local-b",
+            "name": "Cabinet B",
+            "hostname": "cabinet-b",
+            "reachable_url": "https://cabinet-b.local",
+            "certificate_fingerprint": "aa:bb",
+        }
+        with mock.patch.object(handlers_network._local_network, "discovered_peers", return_value=[]), \
+                mock.patch.object(handlers_network._local_network, "record_discovered_peer", return_value=info), \
+                mock.patch.object(handlers_network._local_network, "get_paired_peer", return_value=existing), \
+                mock.patch.object(
+                    handlers_network._local_network,
+                    "save_paired_peer",
+                    side_effect=lambda settings, peer: {**peer, "paired": True},
+                ) as saved:
+            result = handler._sync_tailnet_device(device, info=info)
+
+        restored = saved.call_args.args[1]
+        self.assertEqual(restored["reachable_url"], "https://192.168.1.22")
+        self.assertEqual(restored["tailnet_ip"], "100.64.0.9")
+        self.assertEqual(restored["tailnet_id"], "node-b")
+        self.assertEqual(result["tailnet_ip"], "100.64.0.9")
+
+    def test_tailnet_sync_does_not_rebind_peer_on_certificate_mismatch(self) -> None:
+        from app.web import handlers_network
+
+        handler = handlers_network.HandlersNetworkMixin()
+        handler.settings = mock.MagicMock(overmind_device_id="local-a")
+        existing = {
+            "drone_id": "local-b",
+            "tailnet_ip": "",
+            "certificate_fingerprint": "aa:bb",
+            "paired": True,
+        }
+        device = {"tailnet_id": "node-b", "tailnet_ip": "100.64.0.9"}
+        info = {
+            "service": local_network.DISCOVERY_SERVICE,
+            "drone_id": "local-b",
+            "certificate_fingerprint": "cc:dd",
+        }
+        with mock.patch.object(handlers_network._local_network, "discovered_peers", return_value=[]), \
+                mock.patch.object(handlers_network._local_network, "record_discovered_peer", return_value=info), \
+                mock.patch.object(handlers_network._local_network, "get_paired_peer", return_value=existing), \
+                mock.patch.object(handlers_network._local_network, "save_paired_peer") as saved:
+            result = handler._sync_tailnet_device(device, info=info)
+
+        saved.assert_not_called()
+        self.assertIn("fingerprint", result["tailnet_identity_error"])
+
 
 class SwarmPageTests(unittest.TestCase):
     """The Swarm page: navbar entry, hash route, fleet cards, and automatic
@@ -6772,7 +6870,15 @@ class TailnetServiceTests(unittest.TestCase):
 
         payload = {
             "BackendState": "Running",
-            "Self": {"TailscaleIPs": ["100.64.0.5", "fd7a:115c:a1e0::5"]},
+            "Version": "1.80.0-tfake",
+            "MagicDNSSuffix": "example.ts.net",
+            "CurrentTailnet": {"Name": "example.ts.net", "MagicDNSSuffix": "example.ts.net"},
+            "Health": ["relay connection is degraded"],
+            "Self": {
+                "TailscaleIPs": ["100.64.0.5", "fd7a:115c:a1e0::5"],
+                "DNSName": "cabinet-a.example.ts.net.",
+                "Relay": "dfw",
+            },
             "Peer": {
                 "nodekey:online": {
                     "ID": "peer-online",
@@ -6799,6 +6905,12 @@ class TailnetServiceTests(unittest.TestCase):
         self.assertTrue(status["running"])
         self.assertTrue(status["enrolled"])
         self.assertEqual(status["tailnet_ip"], "100.64.0.5")
+        self.assertEqual(status["version"], "1.80.0-tfake")
+        self.assertEqual(status["dns_name"], "cabinet-a.example.ts.net")
+        self.assertEqual(status["tailnet_name"], "example.ts.net")
+        self.assertEqual(status["magic_dns_suffix"], "example.ts.net")
+        self.assertEqual(status["relay"], "dfw")
+        self.assertEqual(status["health"], ["relay connection is degraded"])
         self.assertEqual(len(status["peers"]), 1)
         self.assertEqual(status["peers"][0]["tailnet_id"], "peer-online")
         self.assertEqual(status["peers"][0]["tailnet_ip"], "100.64.0.9")

@@ -250,6 +250,16 @@ def record_discovered_peer(settings: Any, payload: dict, source_ip: Optional[str
         suffix = "" if scheme == "https" and api_port == 443 else f":{api_port}"
         reachable_url = f"{scheme}://{source_ip}{suffix}"
     trusted_peer = None if identity_conflict else get_paired_peer(settings, peer_id)
+    # A peer can announce while its Tailnet daemon is still starting. Preserve
+    # the last authenticated mesh route through that temporary empty value;
+    # a stale route only fails over, while erasing it makes cross-network
+    # recovery impossible once multicast discovery is no longer available.
+    tailnet_ip = str(
+        payload.get("tailnet_ip")
+        or existing.get("tailnet_ip")
+        or ((trusted_peer or {}).get("tailnet_ip"))
+        or ""
+    )
     peer = {
         **existing,
         "drone_id": storage_id if identity_conflict else peer_id,
@@ -263,10 +273,7 @@ def record_discovered_peer(settings: Any, payload: dict, source_ip: Optional[str
         "scheme": scheme,
         "api_port": api_port,
         "certificate_fingerprint": str(payload.get("certificate_fingerprint") or ""),
-        # Take the announced value verbatim when the key is present (an empty
-        # announce clears a stale address after the peer leaves the tailnet);
-        # fall back to the stored one only for announces from older versions.
-        "tailnet_ip": str((payload.get("tailnet_ip") if "tailnet_ip" in payload else existing.get("tailnet_ip")) or ""),
+        "tailnet_ip": tailnet_ip,
         "source": str(payload.get("source") or "Local Network"),
         "source_ip": str(source_ip or existing.get("source_ip") or ""),
         "last_seen": _now_iso(),

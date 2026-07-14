@@ -4729,6 +4729,7 @@ async function renderLogsPage(selectedSource = null, selectedLines = 200) {
     ["drone_stdout", "Drone Stdout", "bi-file-text"],
     ["drone_stderr", "Drone Stderr", "bi-bug"],
     ["drone_overmind", "Overmind", "bi-broadcast"],
+    ["tailscaled", "Tailscale", "bi-diagram-3"],
     ["es_launch_stdout", "ES Launch Stdout", "bi-terminal"],
     ["es_launch_stderr", "ES Launch Stderr", "bi-exclamation-triangle"],
     ["gameplay", "Gameplay", "bi-clock-history"],
@@ -4738,7 +4739,7 @@ async function renderLogsPage(selectedSource = null, selectedLines = 200) {
   const effectiveLines = clampLogLines(selectedLines);
 
   titleNode.textContent = "System Logs";
-  subtitleNode.textContent = "View Drone application, EmulationStation launch, emulator, and gameplay logs";
+  subtitleNode.textContent = "View Drone, Tailscale, EmulationStation launch, emulator, and gameplay logs";
   content.innerHTML = `
     <div class="row">
       <div class="col-md-3 col-xl-2">
@@ -5474,6 +5475,20 @@ async function renderAdminSystemInfoPage() {
     const disks = Array.isArray(metrics.disks) && metrics.disks.length ? metrics.disks : [disk];
     const process = metrics.process || {};
     const speed = payload.speed_sample || {};
+    const tailnet = payload.tailnet_status || {};
+    const tailnetPeers = Array.isArray(tailnet.peers) ? tailnet.peers : [];
+    const tailnetHealth = Array.isArray(tailnet.health) ? tailnet.health.filter(Boolean) : [];
+    const tailnetConnected = tailnet.installed === true && tailnet.running === true && tailnet.backend_state === "Running";
+    const tailnetState = !tailnet.installed
+      ? "Not installed"
+      : (!tailnet.running
+        ? "Daemon offline"
+        : (tailnetConnected ? "Connected" : (tailnet.backend_state || (tailnet.enrolled ? "Connecting" : "Not connected"))));
+    const tailnetTone = tailnetConnected ? "success" : (tailnet.running ? "warning" : "danger");
+    const tailnetName = tailnet.tailnet_name || tailnet.magic_dns_suffix || "n/a";
+    const tailnetHealthText = tailnetHealth.length
+      ? tailnetHealth.join(" · ")
+      : (tailnetConnected ? "Healthy" : "No health information reported");
     const pixnInstalled = payload.pixen_installed === true || fields.pixen_installed === true || String(fields.pixen_installed || "").toLowerCase() === "yes";
     const detail = (label, value) => `<div class="asset-detail"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value || "n/a")}</strong></div>`;
     const pct = (value) => value === null || value === undefined || value === "" ? "n/a" : `${Number(value).toFixed(1)}%`;
@@ -5521,6 +5536,41 @@ async function renderAdminSystemInfoPage() {
                 ${detail("Internet", `${speed.download_mbps ?? "n/a"} Mbps down · ${speed.upload_mbps ?? "n/a"} Mbps up`)}
                 ${detail("Latency", speed.latency_ms !== undefined ? `${speed.latency_ms} ms` : "n/a")}
                 ${detail("Speed source", speed.source || "n/a")}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="card log-card mb-3">
+        <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
+          <span><i class="bi bi-diagram-3 me-2"></i>Tailnet / Tailscale</span>
+          <div class="d-flex align-items-center gap-2">
+            <span class="badge text-bg-${tailnetTone}">${escapeHtml(tailnetState)}</span>
+            <button class="btn btn-sm btn-outline-primary" type="button" onclick="setHash('#admin/logs/tailscaled?lines=200')"><i class="bi bi-journal-text me-1"></i>View Logs</button>
+          </div>
+        </div>
+        <div class="card-body">
+          <div class="row g-3">
+            <div class="col-12 col-lg-6">
+              <div class="asset-detail-panel h-100">
+                <h6>Connection</h6>
+                ${detail("Status", tailnetState)}
+                ${detail("Installed", tailnet.installed ? "Yes" : "No")}
+                ${detail("Daemon", tailnet.running ? "Running" : "Stopped")}
+                ${detail("Backend state", tailnet.backend_state)}
+                ${detail("Tailnet IP", tailnet.tailnet_ip)}
+                ${detail("Online peers", String(tailnetPeers.length))}
+              </div>
+            </div>
+            <div class="col-12 col-lg-6">
+              <div class="asset-detail-panel h-100">
+                <h6>Identity &amp; Health</h6>
+                ${detail("Version", tailnet.version)}
+                ${detail("Hostname", tailnet.hostname)}
+                ${detail("DNS name", tailnet.dns_name)}
+                ${detail("Tailnet", tailnetName)}
+                ${detail("DERP relay", tailnet.relay)}
+                ${detail("Health", tailnetHealthText)}
               </div>
             </div>
           </div>

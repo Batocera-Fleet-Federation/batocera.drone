@@ -3,6 +3,7 @@
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -24,6 +25,8 @@ DRONE_LATEST_RELEASE_URL = "https://github.com/Batocera-Fleet-Federation/batocer
 DRONE_SELF_UPDATE_EXIT_CODE = 75
 DRONE_AUTO_UPDATE_FILE = "auto-update.enabled"
 DRONE_AUTO_UPDATE_POLL_SECONDS = 60
+DRONE_SERVICE_BOOTSTRAP = Path(__file__).resolve().parents[1] / "service_bootstrap.sh"
+DRONE_SERVICE_PID_FILE = Path("/tmp/drone-server.pid")
 
 _DRONE_UPDATE_LOCK = Lock()
 _SEMANTIC_VERSION_PATTERN = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$")
@@ -194,8 +197,44 @@ def _download_latest_drone_app(settings: Settings) -> dict:
         return _download_latest_drone_app_unlocked(settings)
 
 
+def _schedule_supervised_service_restart(delay_seconds: float) -> bool:
+    """Ask the newly staged bootstrap to replace the whole service tree.
+
+    A plain app-process exec cannot adopt changes to the already-running shell
+    supervisor. Launch the restart in a detached session so it survives killing
+    this app and its old supervisor. Unsupervised/dev runs retain the exec path.
+    """
+    if not DRONE_SERVICE_BOOTSTRAP.is_file() or not DRONE_SERVICE_PID_FILE.is_file():
+        return False
+    try:
+        subprocess.Popen(
+            [
+                "sh",
+                "-c",
+                'sleep "$1"; exec sh "$2" restart',
+                "drone-service-update",
+                str(max(0.1, delay_seconds)),
+                str(DRONE_SERVICE_BOOTSTRAP),
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError:
+        return False
+    return True
+
+
 def _restart_drone_process_soon(delay_seconds: float = 1.0) -> None:
     def restart() -> None:
+        if _schedule_supervised_service_restart(delay_seconds):
+            print(
+                "Drone self-update restart requested: replacing supervised service",
+                file=sys.stderr,
+                flush=True,
+            )
+            return
         time.sleep(max(0.1, delay_seconds))
         print(
             "Drone self-update restart requested: re-executing app process",

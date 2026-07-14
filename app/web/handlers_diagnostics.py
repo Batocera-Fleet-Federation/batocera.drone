@@ -13,6 +13,7 @@ from pathlib import Path
 try:
     from ..app_version import drone_app_version as _drone_app_version
     from ..common.logtail import _tail_lines
+    from ..device.tailnet_service import tailnet_status
     from ..device.pixen import is_pixen_installed as _is_pixen_installed
     from ..device.pixen import pixen_script_path as _pixen_script_path
     from ..device.device_control import _apply_audio_volume, _apply_screen_mode, _get_audio_volume, _get_screen_mode
@@ -26,6 +27,7 @@ try:
 except ImportError:  # pragma: no cover - direct script execution fallback
     from app_version import drone_app_version as _drone_app_version  # type: ignore
     from common.logtail import _tail_lines  # type: ignore
+    from device.tailnet_service import tailnet_status  # type: ignore
     from device.pixen import is_pixen_installed as _is_pixen_installed  # type: ignore
     from device.pixen import pixen_script_path as _pixen_script_path  # type: ignore
     from device.device_control import _apply_audio_volume, _apply_screen_mode, _get_audio_volume, _get_screen_mode  # type: ignore
@@ -47,10 +49,12 @@ class HandlersDiagnosticsMixin:
         normalized_source = requested_source.lower()
         safe_lines = max(1, min(int(lines), 5000))
 
-        # For now, only expose EmulationStation launch stdout/stderr logs.
+        # Only expose explicit, installer-owned diagnostic files. Never accept
+        # a path from the request or turn the log viewer into a file browser.
         log_path_candidates = {
             "es_launch_stdout": ["/userdata/system/logs/es_launch_stdout.log"],
             "es_launch_stderr": ["/userdata/system/logs/es_launch_stderr.log"],
+            "tailscaled": ["/userdata/system/logs/tailscaled.log"],
             "drone_stdout": [str((self.settings.log_dir / self.settings.stdout_log_file).resolve())],
             "drone_stderr": [str((self.settings.log_dir / self.settings.stderr_log_file).resolve())],
             "drone_overmind": [str((self.settings.log_dir / self.settings.overmind_log_file).resolve())],
@@ -173,6 +177,50 @@ class HandlersDiagnosticsMixin:
         router_ip_address = _get_router_ip_address() or "Unavailable"
         runtime_metrics = _collect_performance_metrics(self.settings.userdata_root)
         audio_volume = 75 if self.settings.use_fake_data else _get_audio_volume(self.settings)
+        if self.settings.use_fake_data:
+            tailnet = {
+                "installed": True,
+                "running": True,
+                "enrolled": True,
+                "tailnet_ip": "100.64.0.10",
+                "hostname": "batocera-devbox",
+                "backend_state": "Running",
+                "version": "1.80.0 (Fake)",
+                "dns_name": "batocera-devbox.example.ts.net",
+                "tailnet_name": "example.ts.net",
+                "magic_dns_suffix": "example.ts.net",
+                "relay": "dfw",
+                "health": [],
+                "peers": [
+                    {
+                        "tailnet_id": "fake-peer",
+                        "name": "Demo Arcade Cabinet",
+                        "tailnet_ip": "100.64.0.11",
+                        "online": True,
+                    }
+                ],
+            }
+        else:
+            try:
+                tailnet = tailnet_status()
+            except Exception as error:
+                # System Info remains useful even if an unexpected CLI/status
+                # parsing failure occurs. Surface the failure in the Tailnet card.
+                tailnet = {
+                    "installed": False,
+                    "running": False,
+                    "enrolled": False,
+                    "tailnet_ip": "",
+                    "hostname": "",
+                    "backend_state": "Unavailable",
+                    "version": "",
+                    "dns_name": "",
+                    "tailnet_name": "",
+                    "magic_dns_suffix": "",
+                    "relay": "",
+                    "health": [f"Unable to read Tailscale status: {error}"],
+                    "peers": [],
+                }
         gpu_info = (
             {
                 "vendor": "NVIDIA (Fake)",
@@ -256,6 +304,7 @@ class HandlersDiagnosticsMixin:
                     "gpu_info": gpu_info,
                     "runtime_metrics": runtime_metrics,
                     "speed_sample": speed_sample,
+                    "tailnet_status": tailnet,
                 },
             )
             return
@@ -361,6 +410,7 @@ class HandlersDiagnosticsMixin:
                     "gpu_info": gpu_info,
                     "runtime_metrics": runtime_metrics,
                     "speed_sample": speed_sample,
+                    "tailnet_status": tailnet,
                 },
             )
         except Exception as error:
@@ -398,6 +448,7 @@ class HandlersDiagnosticsMixin:
                     "gpu_info": gpu_info,
                     "runtime_metrics": runtime_metrics,
                     "speed_sample": speed_sample,
+                    "tailnet_status": tailnet,
                     "warning": f"Failed to run batocera-info: {str(error)}",
                 },
             )
