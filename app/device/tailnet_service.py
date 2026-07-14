@@ -141,9 +141,14 @@ def ensure_tailnet_networking() -> None:
 
     Batocera's kernel omits the iptables filter modules expected by Tailscale.
     Re-applying this at Drone startup also repairs already-enrolled nodes whose
-    persisted preference predates the installer/enrollment fix.
+    persisted preference predates the installer/enrollment fix. Start the
+    bundled daemon first when it is installed but no longer running; its
+    service is a launcher rather than a long-lived supervisor, so a stale PID
+    must not leave Tailnet recovery dependent on a reboot.
     """
     if not TAILSCALE_CLI.exists():
+        return
+    if _start_daemon_if_needed():
         return
     try:
         _run_cli(["set", "--netfilter-mode=off"], timeout=10)

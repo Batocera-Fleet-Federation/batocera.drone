@@ -17,7 +17,7 @@ from urllib.parse import quote
 try:
     from ..common.logging_setup import _overmind_log
     from ..common.settings import Settings
-    from ..device.tailnet_service import ensure_tailnet_networking
+    from ..device.tailnet_service import ensure_tailnet_networking, tailnet_status
     from ..overmind.overmind_client import _format_overmind_error, _overmind_post_json
     from ..overmind.overmind_config import (
         _load_overmind_config_for_settings,
@@ -40,7 +40,7 @@ try:
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.logging_setup import _overmind_log  # type: ignore
     from common.settings import Settings  # type: ignore
-    from device.tailnet_service import ensure_tailnet_networking  # type: ignore
+    from device.tailnet_service import ensure_tailnet_networking, tailnet_status  # type: ignore
     from overmind.overmind_client import _format_overmind_error, _overmind_post_json  # type: ignore
     from overmind.overmind_config import (  # type: ignore
         _load_overmind_config_for_settings,
@@ -182,6 +182,15 @@ def _start_peer_health_check_thread(settings: Settings) -> None:
 
 def _start_local_network_workers(settings: Settings) -> None:
     Thread(target=ensure_tailnet_networking, name="drone-tailnet-networking", daemon=True).start()
+
+    def tailnet_watchdog() -> None:
+        interval = max(30, int(os.environ.get("DRONE_TAILNET_WATCHDOG_INTERVAL_SECONDS", "60")))
+        while True:
+            time.sleep(interval)
+            if not tailnet_status().get("running"):
+                ensure_tailnet_networking()
+
+    Thread(target=tailnet_watchdog, name="drone-tailnet-watchdog", daemon=True).start()
 
     def fingerprint() -> str:
         return str(DroneCertificateManager(settings).metadata().get("fingerprint") or "")

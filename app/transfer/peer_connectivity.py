@@ -397,9 +397,10 @@ def _peer_address_candidates(peer: dict) -> list[str]:
     """Return trusted peer routes in failover order.
 
     Keep the existing LAN/public route first so same-network traffic remains
-    fast, then try the peer's stable tailnet address and advertised hostname.
+    fast, then try its advertised LAN hostname and stable tailnet address.
     A paired peer can retain a stale LAN address after it moves networks; the
-    tailnet candidate is what lets callers recover without re-pairing.
+    tailnet candidate is what lets callers recover without re-pairing and is
+    intentionally last so its failure remains the useful final diagnostic.
     """
     candidates: list[str] = []
 
@@ -409,6 +410,7 @@ def _peer_address_candidates(peer: dict) -> list[str]:
             candidates.append(value)
 
     add(_peer_address(peer))
+    add(peer.get("advertised_reachable_url"))
     resolved = peer.get("resolved_network") if isinstance(peer.get("resolved_network"), dict) else {}
     tailnet_ip = str(peer.get("tailnet_ip") or resolved.get("tailnet_ip") or "").strip()
     if is_tailnet_address(tailnet_ip):
@@ -417,7 +419,6 @@ def _peer_address_candidates(peer: dict) -> list[str]:
         host = f"[{tailnet_ip}]" if ":" in tailnet_ip and not tailnet_ip.startswith("[") else tailnet_ip
         port_suffix = "" if (scheme == "https" and port == 443) or (scheme == "http" and port == 80) else f":{port}"
         add(f"{scheme}://{host}{port_suffix}")
-    add(peer.get("advertised_reachable_url"))
     return candidates
 
 

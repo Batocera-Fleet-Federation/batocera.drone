@@ -597,8 +597,8 @@ class SettingsTests(unittest.TestCase):
             _peer_address_candidates(peer),
             [
                 "https://192.168.0.180",
-                "https://100.91.173.37",
                 "https://BATOCERA-LAPTOP.local",
+                "https://100.91.173.37",
             ],
         )
 
@@ -6852,11 +6852,24 @@ class TailnetServiceTests(unittest.TestCase):
         proc = mock.Mock(returncode=0, stdout="", stderr="")
         with tempfile.NamedTemporaryFile() as fake_cli, \
                 mock.patch.object(tailnet_service, "TAILSCALE_CLI", Path(fake_cli.name)), \
+                mock.patch.object(tailnet_service, "_start_daemon_if_needed", return_value=None) as start_daemon, \
                 mock.patch.object(tailnet_service.subprocess, "run", return_value=proc) as run:
             tailnet_service.ensure_tailnet_networking()
 
+        start_daemon.assert_called_once_with()
         self.assertIn("set", run.call_args.args[0])
         self.assertIn("--netfilter-mode=off", run.call_args.args[0])
+
+    def test_startup_does_not_configure_tailnet_when_daemon_cannot_start(self) -> None:
+        from app.device import tailnet_service
+
+        with tempfile.NamedTemporaryFile() as fake_cli, \
+                mock.patch.object(tailnet_service, "TAILSCALE_CLI", Path(fake_cli.name)), \
+                mock.patch.object(tailnet_service, "_start_daemon_if_needed", return_value="daemon unavailable"), \
+                mock.patch.object(tailnet_service, "_run_cli") as run_cli:
+            tailnet_service.ensure_tailnet_networking()
+
+        run_cli.assert_not_called()
 
     def test_enroll_success_returns_fresh_status(self) -> None:
         from app.device import tailnet_service
