@@ -2342,17 +2342,11 @@ async function renderAssetCachePage() {
   try {
     const payload = await api("/admin/asset-cache");
     content.innerHTML = `
-      <div class="mb-3 d-flex flex-wrap gap-2">
-        <button class="btn btn-outline-secondary" onclick="setHash('#admin')">Back to Admin</button>
-      </div>
       <div class="card log-card"><div class="card-body">${renderAssetCachePanel(payload)}</div></div>
     `;
   } catch (err) {
     showToast(`Failed to load asset cache: ${escapeHtml(err.message || "unknown error")}`, "danger");
     content.innerHTML = `
-      <div class="mb-3">
-        <button class="btn btn-outline-secondary" onclick="setHash('#admin')">Back to Admin</button>
-      </div>
       <div class="text-muted">Asset cache status could not be loaded.</div>
     `;
   } finally {
@@ -2628,7 +2622,6 @@ async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh 
     const lastItem = pageOffset + roms.length;
     content.innerHTML = `
       <div class="mb-3 d-flex flex-wrap gap-2">
-        <button class="btn btn-outline-secondary" onclick="setHash('#admin')">← Back to Admin</button>
         <button class="btn btn-outline-primary" onclick="renderMissingArtworkPage(false, true, 0, artworkSelectedFields, artworkSelectedSystems, artworkFilterQuery, artworkRomStatus)">Refresh</button>
         <button id="removeMissingGamelistBtn" class="btn btn-outline-danger" type="button">Remove Missing ROM Entries</button>
       </div>
@@ -2785,9 +2778,6 @@ async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh 
   } catch (err) {
     showToast(`Failed to scan artwork: ${escapeHtml(err.message || "unknown error")}`, "danger");
     content.innerHTML = `
-      <div class="mb-3">
-        <button class="btn btn-outline-secondary" onclick="setHash('#admin')">← Back to Admin</button>
-      </div>
       <div class="text-muted">Artwork results could not be loaded.</div>
     `;
   } finally {
@@ -3819,8 +3809,7 @@ async function renderTransfersPage() {
   setLoading(true, "Loading transfers...");
   try {
     content.innerHTML = `
-      <div class="mb-3 d-flex flex-wrap justify-content-between gap-2">
-        <button class="btn btn-outline-secondary" onclick="setHash('#admin')">Back to Admin</button>
+      <div class="mb-3 d-flex flex-wrap justify-content-end gap-2">
         <button class="btn btn-outline-primary" onclick="setHash('#admin/transfers')"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
       </div>
       <div id="integrationTransfersPanel"></div>`;
@@ -4009,8 +3998,7 @@ async function renderSwarmPage() {
           <button class="btn btn-sm btn-primary" onclick="swarmEnableLocalNetwork()">Enable</button>
         </div>`;
     content.innerHTML = `
-      <div class="mb-3 d-flex flex-wrap justify-content-between gap-2">
-        <button class="btn btn-outline-secondary" onclick="setHash('#admin')">Back to Admin</button>
+      <div class="mb-3 d-flex flex-wrap justify-content-end gap-2">
         <button class="btn btn-outline-primary" onclick="renderSwarmPage()"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
       </div>
       ${inactiveNote}
@@ -4477,7 +4465,7 @@ async function renderAutomationPage() {
     payload = await api("/admin/automation");
   } catch (err) {
     setLoading(false);
-    content.innerHTML = `<div class="mb-3"><button class="btn btn-outline-secondary" onclick="setHash('#admin')">← Back to Admin</button></div><div class="alert alert-danger">Failed to load automation settings: ${escapeHtml(err.message || "unknown error")}</div>`;
+    content.innerHTML = `<div class="alert alert-danger">Failed to load automation settings: ${escapeHtml(err.message || "unknown error")}</div>`;
     return;
   } finally {
     setLoading(false);
@@ -4505,7 +4493,6 @@ async function renderAutomationPage() {
     ? `<div class="text-muted small mb-3"><i class="bi bi-controller me-1"></i>${gameRunning ? "A game is currently running." : "No game is currently running."}</div>`
     : "";
   content.innerHTML = `
-    <div class="mb-3"><button class="btn btn-outline-secondary" onclick="setHash('#admin')">← Back to Admin</button></div>
     <div class="row">
       <div class="col-lg-8">
         <div class="card mb-3">
@@ -4645,7 +4632,6 @@ async function renderApiAdminPage() {
       ["Source", cert.source],
     ];
     content.innerHTML = `
-      <div class="mb-3"><button class="btn btn-outline-secondary" onclick="setHash('#admin')">← Back to Admin</button></div>
       <div class="card log-card mb-3">
         <div class="card-header">API Documentation</div>
         <div class="card-body">
@@ -4716,9 +4702,6 @@ async function renderLogsPage(selectedSource = null, selectedLines = 200) {
   titleNode.textContent = "System Logs";
   subtitleNode.textContent = "View Drone application, EmulationStation launch, emulator, and gameplay logs";
   content.innerHTML = `
-    <div class="mb-3">
-      <button class="btn btn-outline-secondary" onclick="renderAdminPage()">← Back to Admin</button>
-    </div>
     <div class="row">
       <div class="col-md-3 col-xl-2">
         <div class="card log-card">
@@ -5215,9 +5198,6 @@ async function renderConfigsPage(selectedSource = null, selectedMaxBytes = 13107
   titleNode.textContent = "Emulators";
   subtitleNode.textContent = "View emulator config files and detected versions";
   content.innerHTML = `
-    <div class="mb-3">
-      <button class="btn btn-outline-secondary" onclick="setHash('#admin')">← Back to Admin</button>
-    </div>
     <div class="row">
       <div class="col-md-3">
         <div class="card log-card">
@@ -5479,11 +5459,8 @@ async function renderAdminSystemInfoPage() {
     }).join("");
 
     content.innerHTML = `
-      <div class="mb-3 d-flex flex-wrap justify-content-between gap-2">
-        <button class="btn btn-outline-secondary" onclick="setHash('#admin')">Back to Admin</button>
-        <div class="d-flex flex-wrap gap-2">
-          <button class="btn btn-outline-primary" onclick="setHash('#admin/system-info')"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
-        </div>
+      <div class="mb-3 d-flex flex-wrap justify-content-end gap-2">
+        <button class="btn btn-outline-primary" onclick="setHash('#admin/system-info')"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
       </div>
       <div class="card log-card mb-3">
         <div class="card-header">System Health</div>
@@ -5546,9 +5523,6 @@ async function renderAdminSystemInfoPage() {
   } catch (err) {
     showToast(`Failed to load system information: ${escapeHtml(err.message || "unknown error")}`, "danger");
     content.innerHTML = `
-      <div class="mb-3">
-        <button class="btn btn-outline-secondary" onclick="setHash('#admin')">← Back to Admin</button>
-      </div>
       <div class="text-muted">System information could not be loaded.</div>
     `;
   } finally {
@@ -5573,9 +5547,7 @@ async function renderAdminControlsPage() {
     const currentVolume = volumeAvailable ? Math.max(0, Math.min(100, Math.round(reportedVolume / 5) * 5)) : 50;
 
     content.innerHTML = `
-      <div class="mb-3 d-flex flex-wrap justify-content-between gap-2">
-        <button class="btn btn-outline-secondary" onclick="setHash('#admin')">Back to Admin</button>
-        <div class="d-flex flex-wrap align-items-center gap-2">
+      <div class="mb-3 d-flex flex-wrap justify-content-end gap-2">
           <button class="btn btn-outline-primary" onclick="setHash('#admin/controls')"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
           <div class="form-check mb-0 px-2">
             <input class="form-check-input ms-0 me-2" type="checkbox" id="droneAutoUpdateCheckbox" ${autoUpdate.enabled ? "checked" : ""} onchange="setDroneAutoUpdate(this)">
@@ -5583,7 +5555,6 @@ async function renderAdminControlsPage() {
           </div>
           <button class="btn btn-outline-warning" onclick="updateDroneApp()"><i class="bi bi-cloud-download me-1"></i>Update Drone</button>
           ${pixnInstalled ? `<button class="btn btn-outline-success" onclick="runPixnUpdate()"><i class="bi bi-play-circle me-1"></i>Run PixN Update</button>` : ""}
-        </div>
       </div>
       <div class="row row-cols-1 row-cols-sm-2 row-cols-xl-4 g-3 mb-3">
         <div class="col">
@@ -5779,9 +5750,6 @@ async function renderAdminControlsPage() {
   } catch (err) {
     showToast(`Failed to load controls: ${escapeHtml(err.message || "unknown error")}`, "danger");
     content.innerHTML = `
-      <div class="mb-3">
-        <button class="btn btn-outline-secondary" onclick="setHash('#admin')">← Back to Admin</button>
-      </div>
       <div class="text-muted">Controls could not be loaded.</div>
     `;
   } finally {
