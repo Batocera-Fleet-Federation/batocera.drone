@@ -12,6 +12,7 @@ skipping ``__pycache__``/``.pyc`` and unrelated roots. See ``drone-p2p-transfer-
 import io
 import tarfile
 import tempfile
+import threading
 import types
 import unittest
 from pathlib import Path
@@ -141,6 +142,99 @@ class DroneAutoUpdateSettingTests(unittest.TestCase):
             self.assertTrue(self_update.set_drone_auto_update_enabled(self.settings, True))
             self.assertTrue(self_update.is_drone_auto_update_enabled(self.settings))
             self.assertEqual((self.work_dir / self_update.DRONE_AUTO_UPDATE_FILE).read_text(), "1\n")
+
+
+class DroneAutoUpdatePollerTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.work_dir = self.root / "drone-app"
+        (self.work_dir / "app").mkdir(parents=True)
+        self.settings = types.SimpleNamespace(userdata_root=self.root / "userdata")
+        self.env = mock.patch.dict("os.environ", {"DRONE_APP_WORK_DIR": str(self.work_dir)})
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop()
+        self._tmp.cleanup()
+
+    def _set_version(self, version):
+        (self.work_dir / "app" / "VERSION").write_text(f"{version}\n", encoding="utf-8")
+
+    def test_semantic_version_comparison(self):
+        self.assertEqual(self_update._semantic_version("v1.4.12"), (1, 4, 12))
+        self.assertEqual(self_update._semantic_version("1.4.12"), (1, 4, 12))
+        self.assertIsNone(self_update._semantic_version("dev"))
+
+    def test_release_version_is_read_from_latest_redirect(self):
+        location = "https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/tag/v1.2.3"
+        self.assertEqual(self_update._release_version_from_redirect(location), "v1.2.3")
+
+    def test_latest_release_check_uses_head_without_downloading_a_body(self):
+        class Response:
+            headers = {"Location": "https://github.com/example/drone/releases/tag/v2.0.1"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def geturl(self):
+                return ""
+
+        opener = mock.Mock()
+        opener.open.return_value = Response()
+        with mock.patch.object(self_update, "build_opener", return_value=opener):
+            version = self_update._latest_drone_release_version()
+
+        self.assertEqual(version, "v2.0.1")
+        request = opener.open.call_args.args[0]
+        self.assertEqual(request.get_method(), "HEAD")
+        self.assertEqual(opener.open.call_args.kwargs["timeout"], 10.0)
+
+    def test_disabled_check_does_not_touch_network(self):
+        self._set_version("v1.0.0")
+        self_update.set_drone_auto_update_enabled(self.settings, False)
+        with mock.patch.object(self_update, "_latest_drone_release_version") as latest:
+            result = self_update._run_drone_auto_update_check_once(self.settings)
+        self.assertEqual(result["status"], "disabled")
+        latest.assert_not_called()
+
+    def test_current_version_does_not_download(self):
+        self._set_version("v1.2.3")
+        with mock.patch.object(self_update, "_latest_drone_release_version", return_value="v1.2.3"), \
+             mock.patch.object(self_update, "_download_latest_drone_app") as download:
+            result = self_update._run_drone_auto_update_check_once(self.settings)
+        self.assertEqual(result["status"], "current")
+        download.assert_not_called()
+
+    def test_newer_version_downloads_and_schedules_restart(self):
+        self._set_version("v1.2.3")
+        with mock.patch.object(self_update, "_latest_drone_release_version", return_value="v1.2.4"), \
+             mock.patch.object(self_update, "_download_latest_drone_app", return_value={"copied_files": 10}) as download, \
+             mock.patch.object(self_update, "_restart_drone_process_soon") as restart:
+            result = self_update._run_drone_auto_update_check_once(self.settings)
+        self.assertEqual(result["status"], "updated")
+        self.assertEqual(result["latest_version"], "v1.2.4")
+        download.assert_called_once_with(self.settings)
+        restart.assert_called_once_with()
+
+    def test_poller_runs_on_daemon_thread_without_blocking_caller(self):
+        stopped = threading.Event()
+        checked = threading.Event()
+
+        def check_once(settings):
+            checked.set()
+            stopped.set()
+            return {"status": "current"}
+
+        with mock.patch.object(self_update, "_run_drone_auto_update_check_once", side_effect=check_once):
+            thread = self_update._start_drone_auto_update_poller(self.settings, poll_seconds=0.01, stop_event=stopped)
+            self.assertIsNotNone(thread)
+            self.assertTrue(thread.daemon)
+            self.assertTrue(checked.wait(1))
+            thread.join(timeout=1)
 
 
 class OverlayReleaseTreeTests(unittest.TestCase):

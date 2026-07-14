@@ -5767,7 +5767,7 @@ async function renderAdminControlsPage() {
           <button class="btn btn-outline-primary" onclick="setHash('#admin/controls')"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
           <div class="form-check mb-0 px-2">
             <input class="form-check-input ms-0 me-2" type="checkbox" id="droneAutoUpdateCheckbox" ${autoUpdate.enabled ? "checked" : ""} onchange="setDroneAutoUpdate(this)">
-            <label class="form-check-label text-nowrap" for="droneAutoUpdateCheckbox" title="Check for the latest Drone release whenever the Drone service starts">Auto-update Drone</label>
+            <label class="form-check-label text-nowrap" for="droneAutoUpdateCheckbox" title="Check for a newer Drone release every 60 seconds and update in the background">Auto-update Drone</label>
           </div>
           <button class="btn btn-outline-warning" onclick="updateDroneApp()"><i class="bi bi-cloud-download me-1"></i>Update Drone</button>
           ${pixnInstalled ? `<button class="btn btn-outline-success" onclick="runPixnUpdate()"><i class="bi bi-play-circle me-1"></i>Run PixN Update</button>` : ""}

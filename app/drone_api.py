@@ -548,6 +548,7 @@ try:
         _drone_work_dir,
         _overlay_drone_release_tree,
         _restart_drone_process_soon,
+        _start_drone_auto_update_poller,
     )
 except ImportError:
     if __package__ not in (None, ""):
@@ -559,6 +560,7 @@ except ImportError:
         _drone_work_dir,
         _overlay_drone_release_tree,
         _restart_drone_process_soon,
+        _start_drone_auto_update_poller,
     )
 
 
@@ -2306,6 +2308,7 @@ def main() -> None:
             print(f"USE_FAKE_DATA enabled: seeded fake dataset at {settings.userdata_root}")
         _configure_rotating_logs(settings)
         server = create_server(settings)
+        _start_drone_auto_update_poller(settings)
         # Optional, opt-in (DRONE_API_FASTAPI_BRIDGE=1): start the FastAPI typed-API bridge.
         # Fully guarded — any failure leaves it inactive and the stdlib server serves everything.
         try:
