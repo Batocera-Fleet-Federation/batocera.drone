@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.1.51] - 2026-07-14
+
+- Updating issue where emulationstation does not open after restart.
+
 ## [v0.1.50] - 2026-07-14
 
 - Installer sets up the Tailscale mesh automatically (DRONE_TAILNET service)
