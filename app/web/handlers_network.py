@@ -515,7 +515,9 @@ class HandlersNetworkMixin:
         item: dict,
         default_system: str = "",
         include_artwork: bool = True,
-        overwrite_artwork: bool = True,
+        include_roms: bool = True,
+        overwrite_files: Optional[bool] = None,
+        overwrite_artwork: Optional[bool] = None,
         artwork_only: bool = False,
         local_index_cache: Optional[dict] = None,
         local_artwork_cache: Optional[dict] = None,
@@ -523,16 +525,24 @@ class HandlersNetworkMixin:
         """Enqueue a single peer asset (and, for ROMs, its artwork when present).
 
         ROMs already present on this machine (matched by content fingerprint, or
-        path when no fingerprint is available) are NOT re-downloaded; their artwork
-        is still copied and linked into the local gamelist. When `overwrite_artwork`
-        is False, artwork fields the local ROM already has (referenced in gamelist.xml
-        and present on disk) are left untouched -- only missing artwork is fetched.
-        When `artwork_only` is True, ROM files are never downloaded and artwork is
-        attached only to ROMs that already exist on this machine (peer ROMs missing
-        here are skipped entirely). Returns the list of jobs created. Shared by the
-        single-item sync and the bulk "copy all" handlers.
+        path when no fingerprint is available) are skipped unless `overwrite_files`
+        is enabled; their artwork can still be copied and linked into the local
+        gamelist. With `include_roms` disabled, artwork is attached only to ROMs
+        already on this machine. `overwrite_artwork` and `artwork_only` remain as
+        compatibility aliases for older Drone clients.
         `local_index_cache`/`local_artwork_cache` (system -> index) let the bulk path
         reuse the local ROM and artwork lookups across many items."""
+        overwrite_artwork_files = (
+            bool(overwrite_files)
+            if overwrite_files is not None
+            else (True if overwrite_artwork is None else bool(overwrite_artwork))
+        )
+        # Older clients only controlled artwork replacement; they never requested
+        # replacement of ROM, BIOS, or save files.
+        overwrite_files = bool(overwrite_files) if overwrite_files is not None else False
+        if artwork_only:
+            include_roms = False
+            include_artwork = True
         jobs: List[dict] = []
         if asset_type == "roms":
             system = str(item.get("system") or default_system or "").strip()
@@ -541,22 +551,17 @@ class HandlersNetworkMixin:
                 return jobs
             index = self._local_rom_index(system, cache=local_index_cache)
             local_match = self._match_local_rom(index, item)
-            if artwork_only:
-                # Artwork-only sync: never copy the ROM file. Attach artwork only to
-                # ROMs that already exist on this machine; skip peer ROMs we don't have.
+            if not include_roms:
                 if local_match is None:
                     return jobs
                 art_local_path = local_match
             else:
-                if local_match is None:
-                    pending_match = (
-                        manager.find_pending_rom(system, relative_path, item.get("rom_fingerprint") or item.get("fingerprint"))
-                        if hasattr(manager, "find_pending_rom")
-                        else None
-                    )
-                else:
-                    pending_match = None
-                if local_match is None and pending_match is None:
+                pending_match = (
+                    manager.find_pending_rom(system, relative_path, item.get("rom_fingerprint") or item.get("fingerprint"))
+                    if hasattr(manager, "find_pending_rom")
+                    else None
+                )
+                if (local_match is None or overwrite_files) and pending_match is None:
                     # Not on this machine yet -> download it. Folder-unit ROMs (marker
                     # file in a per-game folder) pull the folder; relative_path stays
                     # the marker (the gamelist identity + artwork key).
@@ -574,16 +579,17 @@ class HandlersNetworkMixin:
                         expected_fingerprint=item.get("rom_fingerprint") or item.get("fingerprint"),
                         entry_type=str(item.get("entry_type") or "file"),
                         marker_relative_path=marker_rel,
+                        overwrite=overwrite_files,
                     ))
                     art_local_path = relative_path
                 else:
                     # Already present (thumbprint match) -> skip the ROM, attach artwork
                     # to the existing local ROM so it shows after a gamelist refresh.
                     art_local_path = local_match or relative_path
-            if include_artwork or artwork_only:
+            if include_artwork:
                 gamelist = item.get("gamelist") if isinstance(item.get("gamelist"), dict) else {}
                 fields = [field for field in ARTWORK_FIELDS if gamelist.get(field)]
-                if not overwrite_artwork and fields:
+                if not overwrite_artwork_files and fields:
                     # Skip artwork the local ROM already has -- only fetch what's
                     # missing so user-curated/scraped art isn't clobbered.
                     present = self._local_artwork_index(system, cache=local_artwork_cache).get(
@@ -614,6 +620,7 @@ class HandlersNetworkMixin:
                 relative_path,
                 expected_size=item.get("byte_count") or item.get("file_size"),
                 expected_md5=item.get("bios_md5") or item.get("md5"),
+                overwrite=overwrite_files,
             ))
         elif asset_type == "artwork":
             artwork_types = item.get("artwork_types")
@@ -629,7 +636,7 @@ class HandlersNetworkMixin:
                 system,
                 str(item.get("rom_path") or item.get("file_path") or ""),
                 str(item.get("artwork_type") or default_artwork_type),
-                overwrite=True,
+                overwrite=overwrite_files,
             ))
         elif asset_type == "saves":
             relative_path = str(item.get("file_path") or item.get("relative_path") or "").strip()
@@ -642,6 +649,7 @@ class HandlersNetworkMixin:
                 relative_path,
                 expected_size=item.get("file_size"),
                 expected_fingerprint=item.get("saves_fingerprint") or item.get("fingerprint"),
+                overwrite=overwrite_files,
             ))
         else:
             raise ValueError("asset_type must be roms, bios, artwork, or saves")
@@ -655,8 +663,10 @@ class HandlersNetworkMixin:
         asset_type = str(payload.get("asset_type") or "").strip().lower()
         item = payload.get("item") if isinstance(payload.get("item"), dict) else payload
         include_artwork = bool(payload.get("include_artwork", True))
-        overwrite_artwork = bool(payload.get("overwrite_artwork", True))
         artwork_only = bool(payload.get("artwork_only", False))
+        include_roms = bool(payload.get("include_roms", not artwork_only))
+        overwrite_files = bool(payload.get("overwrite_files")) if "overwrite_files" in payload else None
+        overwrite_artwork = bool(payload.get("overwrite_artwork", True))
         peer = _local_network.get_paired_peer(self.settings, peer_id)
         manager = _get_download_manager()
         if not peer:
@@ -674,12 +684,16 @@ class HandlersNetworkMixin:
             item,
             default_system=str(payload.get("system") or ""),
             include_artwork=include_artwork,
+            include_roms=include_roms,
+            overwrite_files=overwrite_files,
             overwrite_artwork=overwrite_artwork,
             artwork_only=artwork_only,
         )
         rom_skipped = asset_type == "roms" and not any(job.get("file_type") == "ROM" for job in jobs)
-        # Artwork-only against a ROM we don't have here -> nothing to do.
-        rom_absent = artwork_only and not jobs
+        rom_absent = False
+        if asset_type == "roms" and not include_roms:
+            system = str(item.get("system") or payload.get("system") or "").strip()
+            rom_absent = self._match_local_rom(self._local_rom_index(system), item) is None
         self._send_json(202, {
             "status": "queued",
             "job": jobs[0] if jobs else None,
@@ -711,8 +725,10 @@ class HandlersNetworkMixin:
         ]
         query = str(payload.get("q") or "").strip()
         include_artwork = bool(payload.get("include_artwork", True))
-        overwrite_artwork = bool(payload.get("overwrite_artwork", True))
         artwork_only = bool(payload.get("artwork_only", False))
+        include_roms = bool(payload.get("include_roms", not artwork_only))
+        overwrite_files = bool(payload.get("overwrite_files")) if "overwrite_files" in payload else None
+        overwrite_artwork = bool(payload.get("overwrite_artwork", True))
         peer = _local_network.get_paired_peer(self.settings, peer_id)
         manager = _get_download_manager()
         if not peer:
@@ -761,6 +777,8 @@ class HandlersNetworkMixin:
                         entry,
                         default_system=scope_system or system,
                         include_artwork=include_artwork,
+                        include_roms=include_roms,
+                        overwrite_files=overwrite_files,
                         overwrite_artwork=overwrite_artwork,
                         artwork_only=artwork_only,
                         local_index_cache=local_index_cache,
@@ -769,7 +787,7 @@ class HandlersNetworkMixin:
                     asset_jobs = [job for job in jobs if job.get("file_type") != "ARTWORK"]
                     queued_assets += len(asset_jobs)
                     queued_artwork += len(jobs) - len(asset_jobs)
-                    if asset_type == "roms" and not artwork_only and not asset_jobs:
+                    if asset_type == "roms" and include_roms and not asset_jobs:
                         skipped_existing += 1
                 offset += len(items)
                 if scope_total is not None and offset >= int(scope_total):

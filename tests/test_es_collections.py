@@ -677,12 +677,16 @@ class AdminControlsPageSplitTests(unittest.TestCase):
             i += 1
         raise AssertionError(f"unbalanced braces scanning function {name}")
 
-    def test_navbar_has_controls_link_after_system_info(self) -> None:
+    def test_system_info_is_an_admin_card_not_a_navbar_link(self) -> None:
         self.assertIn('id="controlsMenuBtn" href="#admin/controls"', self.html)
-        system_info_pos = self.html.index('id="systemInfoMenuBtn"')
-        controls_pos = self.html.index('id="controlsMenuBtn"')
-        admin_pos = self.html.index('id="adminMenuBtn"')
-        self.assertTrue(system_info_pos < controls_pos < admin_pos)
+        self.assertNotIn('id="systemInfoMenuBtn"', self.html)
+        self.assertNotIn('const systemInfoMenuBtn =', self.js)
+        self.assertNotIn('systemInfoMenuBtn.addEventListener', self.js)
+        menu_start = self.js.index("async function renderAdminMenu()")
+        menu_end = self.js.index("async function updateDroneApp()")
+        menu = self.js[menu_start:menu_end]
+        self.assertIn("setHash('#admin/system-info')", menu)
+        self.assertIn(">System Info<", menu)
 
     def test_router_dispatches_controls_hash(self) -> None:
         self.assertIn('hash === "#admin/controls"', self.js)
@@ -730,7 +734,7 @@ class AdminControlsPageSplitTests(unittest.TestCase):
 
     def test_controls_nav_link_is_admin_gated(self) -> None:
         self.assertIn('const controlsMenuBtn = document.getElementById("controlsMenuBtn");', self.js)
-        self.assertIn("const adminLinks = [adminMenuBtn, systemInfoMenuBtn, controlsMenuBtn, transfersMenuBtn, swarmMenuBtn, apiAccessBtn]", self.js)
+        self.assertIn("const adminLinks = [adminMenuBtn, controlsMenuBtn, transfersMenuBtn, swarmMenuBtn, apiAccessBtn]", self.js)
         self.assertIn('controlsMenuBtn.addEventListener("click"', self.js)
         click_start = self.js.index('controlsMenuBtn.addEventListener("click"')
         click_end = self.js.index("});", click_start)

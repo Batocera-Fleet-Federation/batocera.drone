@@ -126,6 +126,7 @@ def _directpublic_fetch(request: "DownloadRequest", context: "TransferContext") 
             expected_size=expected_size,
             expected_fingerprint=expected_fingerprint,
             cancellation_event=cancel_event,
+            overwrite=request.overwrite,
         )
     if asset_type == "bios":
         return _download_bios_from_peer(
@@ -137,6 +138,7 @@ def _directpublic_fetch(request: "DownloadRequest", context: "TransferContext") 
             expected_md5=expected_fingerprint,
             progress_callback=progress,
             cancellation_event=cancel_event,
+            overwrite=request.overwrite,
         )
     if request.entry_type == "folder":
         return _download_rom_folder_from_peer(
@@ -150,6 +152,7 @@ def _directpublic_fetch(request: "DownloadRequest", context: "TransferContext") 
             marker_relative_path=request.marker_relative_path,
             progress_callback=progress,
             cancellation_event=cancel_event,
+            overwrite=request.overwrite,
         )
     return _download_rom_from_peer(
         settings,
@@ -161,6 +164,7 @@ def _directpublic_fetch(request: "DownloadRequest", context: "TransferContext") 
         expected_fingerprint=expected_fingerprint,
         progress_callback=progress,
         cancellation_event=cancel_event,
+        overwrite=request.overwrite,
     )
 
 
@@ -367,7 +371,7 @@ class DownloadManager:
             value = 3
         return max(1, min(value, 8))
 
-    def enqueue_rom(self, config: dict, peer: dict, system: str, relative_path: str, expected_size=None, expected_fingerprint=None, source_action_id: Optional[str] = None, entry_type: str = "file", sync_id: Optional[str] = None, artwork_types=None, marker_relative_path: Optional[str] = None) -> dict:
+    def enqueue_rom(self, config: dict, peer: dict, system: str, relative_path: str, expected_size=None, expected_fingerprint=None, source_action_id: Optional[str] = None, entry_type: str = "file", sync_id: Optional[str] = None, artwork_types=None, marker_relative_path: Optional[str] = None, overwrite: bool = False) -> dict:
         job_id = str(uuid.uuid4())
         peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
         now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -407,6 +411,7 @@ class DownloadManager:
             "_entry_type": entry_type,
             "_marker_relative_path": str(marker_relative_path or "").strip() or None,
             "_artwork_types": [str(value).strip() for value in (artwork_types or []) if str(value).strip()],
+            "_overwrite": bool(overwrite),
         }
         with self._lock:
             self._jobs[job_id] = job
@@ -417,7 +422,7 @@ class DownloadManager:
         self._wake.set()
         return snapshot
 
-    def enqueue_bios(self, config: dict, peer: dict, relative_path: str, expected_size=None, expected_md5=None, source_action_id: Optional[str] = None) -> dict:
+    def enqueue_bios(self, config: dict, peer: dict, relative_path: str, expected_size=None, expected_md5=None, source_action_id: Optional[str] = None, overwrite: bool = False) -> dict:
         job_id = str(uuid.uuid4())
         peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
         now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -457,6 +462,7 @@ class DownloadManager:
             "_config": config,
             "_peer": peer,
             "_expected_fingerprint": expected_md5,
+            "_overwrite": bool(overwrite),
         }
         with self._lock:
             self._jobs[job_id] = job
@@ -654,7 +660,7 @@ class DownloadManager:
         self._wake.set()
         return snapshot
 
-    def enqueue_save(self, config: dict, peer: dict, system: str, relative_path: str, expected_size=None, expected_fingerprint=None) -> dict:
+    def enqueue_save(self, config: dict, peer: dict, system: str, relative_path: str, expected_size=None, expected_fingerprint=None, overwrite: bool = True) -> dict:
         job_id = str(uuid.uuid4())
         peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
         now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -690,6 +696,7 @@ class DownloadManager:
             "_config": config,
             "_peer": peer,
             "_expected_fingerprint": expected_fingerprint,
+            "_overwrite": bool(overwrite),
         }
         with self._lock:
             self._jobs[job_id] = job
@@ -1144,7 +1151,6 @@ class DownloadManager:
             rel = str(job.get("relative_path") or job.get("file_path") or "")
             rom_path = str(job.get("rom_path") or job.get("rom_name") or rel)
             artwork_type = str(job.get("artwork_type") or "")
-            artwork_overwrite = bool(job.get("_overwrite"))
             artwork_local_rom_path = job.get("_local_rom_path")
             expected_size = job.get("file_size") or job.get("total_bytes")
             expected_fingerprint = job.get("_expected_fingerprint")
@@ -1152,6 +1158,7 @@ class DownloadManager:
             marker_relative_path = job.get("_marker_relative_path")
             cancel_event = self._cancel_events.get(job_id) or Event()
             asset_type = str(job.get("_asset_type") or "rom").lower()
+            overwrite = bool(job.get("_overwrite")) if "_overwrite" in job else asset_type == "saves"
             rom_artwork_types = list(job.get("_artwork_types") or [])
         self._push_download_state(config, "started", force=True)
 
@@ -1188,7 +1195,7 @@ class DownloadManager:
                 entry_type=entry_type,
                 expected_size=expected_size,
                 expected_fingerprint=expected_fingerprint,
-                overwrite=artwork_overwrite,
+                overwrite=overwrite,
                 local_rom_path=artwork_local_rom_path,
                 marker_relative_path=marker_relative_path,
             )

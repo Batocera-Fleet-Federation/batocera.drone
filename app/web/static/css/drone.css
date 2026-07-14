@@ -512,8 +512,7 @@
     .download-table .progress-bar {
       background: linear-gradient(90deg, #00c2ff, #45e3b6);
     }
-    .download-table th:last-child,
-    .download-table td:last-child {
+    .download-table .download-actions {
       width: 1%;
       white-space: nowrap;
       text-align: right;

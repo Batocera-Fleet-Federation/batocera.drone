@@ -5,7 +5,6 @@ const backBtn = document.getElementById("backBtn") || {
 };
 const systemsMenuBtn = document.getElementById("systemsMenuBtn");
 const brandHomeBtn = document.getElementById("brandHomeBtn");
-const systemInfoMenuBtn = document.getElementById("systemInfoMenuBtn");
 const controlsMenuBtn = document.getElementById("controlsMenuBtn");
 const transfersMenuBtn = document.getElementById("transfersMenuBtn");
 const swarmMenuBtn = document.getElementById("swarmMenuBtn");
@@ -180,7 +179,7 @@ function setLoading(isLoading, text = "Loading...") {
   }
 }
 function applyAdminVisibility() {
-  const adminLinks = [adminMenuBtn, systemInfoMenuBtn, controlsMenuBtn, transfersMenuBtn, swarmMenuBtn, apiAccessBtn].filter(Boolean);
+  const adminLinks = [adminMenuBtn, controlsMenuBtn, transfersMenuBtn, swarmMenuBtn, apiAccessBtn].filter(Boolean);
   if (adminEnabled) {
     adminLinks.forEach((link) => link.classList.remove("d-none"));
   } else {
@@ -1779,6 +1778,14 @@ async function renderAdminMenu() {
   content.innerHTML = `
     <div class="row">
       <div class="col-md-4 mb-3">
+        <div class="card admin-tile pointer h-100" onclick="setHash('#admin/system-info')">
+          <div class="card-body">
+            <h5 class="card-title"><i class="bi bi-pc-display me-2"></i>System Info</h5>
+            <p class="card-text">View runtime health, storage, network, and Batocera details.</p>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-4 mb-3">
         <div class="card admin-tile pointer h-100" onclick="setHash('#admin/logs/es_launch_stdout?lines=200')">
           <div class="card-body">
             <h5 class="card-title"><i class="bi bi-journal-text me-2"></i>System Logs</h5>
@@ -1930,7 +1937,7 @@ function renderDownloadRows(rows, allowCancel = true, options = {}) {
   if (!rows.length) return `<div class="themed-empty">${escapeHtml(options.emptyText || "No downloads in this group.")}</div>`;
   const includeStarted = options.includeStarted !== false;
   return `<div class="table-responsive"><table class="table table-sm table-hover align-middle themed-table download-table bff-stack">
-    <thead><tr><th>Status</th><th>Source</th><th>File</th><th>System</th><th>Progress</th><th>Speed</th>${includeStarted ? "<th>Started</th>" : ""}<th>Actions</th></tr></thead>
+    <thead><tr><th>Status</th><th>Source</th><th>File</th><th>System</th><th>Progress</th><th>Speed</th>${includeStarted ? "<th>Started</th>" : ""}<th class="download-actions">Actions</th></tr></thead>
     <tbody>${rows.map(row => {
       const pct = Number(row.percentage || 0);
       const status = String(row.status || "");
@@ -1965,15 +1972,18 @@ function renderDownloadRows(rows, allowCancel = true, options = {}) {
         <td class="small text-nowrap">${pct.toFixed(1)}% (${formatBytes(row.downloaded_bytes || row.bytes_transferred)} / ${formatBytes(row.total_bytes || row.file_size)})</td>
         <td class="small">${row.transfer_speed_bps ? `${formatBytes(row.transfer_speed_bps)}/s` : ""}</td>
         ${includeStarted ? `<td class="small text-nowrap">${escapeHtml(formatCompactLocalDate(row.started_at || row.download_started_at || row.created_at))}</td>` : ""}
-        <td>${actions}</td>
+        <td class="download-actions">${actions}</td>
       </tr>`;
     }).join("")}</tbody></table></div>`;
 }
 
 function renderTransferRows(rows, options = {}) {
   if (!rows.length) return `<div class="themed-empty">${escapeHtml(options.emptyText || "No transfers in this group.")}</div>`;
-  return `<div class="table-responsive"><table class="table table-sm table-hover align-middle themed-table download-table bff-stack">
-    <thead><tr><th></th><th>Status</th><th>Peer</th><th>File</th><th>System</th><th>Progress</th><th>Speed</th><th>Actions</th></tr></thead>
+  const showActions = options.showActions !== false;
+  const assetTableText = options.assetTableText === true;
+  const tableClass = assetTableText ? "download-table local-assets-table" : "download-table";
+  return `<div class="table-responsive"><table class="table table-sm table-hover align-middle themed-table ${tableClass} bff-stack">
+    <thead><tr><th></th><th>Status</th><th>Peer</th><th>File</th><th>System</th><th>Progress</th><th>Speed</th>${showActions ? '<th class="download-actions">Actions</th>' : ""}</tr></thead>
     <tbody>${rows.map(row => {
       const isUpload = row._direction === "upload";
       const pct = Number(row.percentage || 0);
@@ -1997,7 +2007,7 @@ function renderTransferRows(rows, options = {}) {
         ? ` <span class="badge text-bg-warning" title="${escapeHtml(`Artwork copied but not linked: ${gamelistError}`)}"><i class="bi bi-exclamation-triangle me-1"></i>gamelist not linked</span>`
         : "";
       let actions = "";
-      if (!isUpload) {
+      if (showActions && !isUpload) {
         const jobId = escapeHtml(row.job_id || row.id || "");
         const cancelable = ["queued", "downloading", "pending", "paused"].includes(status);
         const pausable = ["queued", "pending", "downloading"].includes(status);
@@ -2014,11 +2024,16 @@ function renderTransferRows(rows, options = {}) {
         <td>${directionIcon}</td>
         <td><span class="badge text-bg-${statusClass}" title="${escapeHtml(errorText)}">${escapeHtml(status)}${row.queue_position ? ` #${row.queue_position}` : ""}</span>${gamelistWarning}</td>
         <td class="small mono">${escapeHtml(peerLabel)}</td>
-        <td class="small mono download-file" title="${escapeHtml(errorText || row.rom_fingerprint || "")}">${escapeHtml(filePath)}</td>
+        ${assetTableText
+          ? `<td title="${escapeHtml(errorText || row.rom_fingerprint || "")}"><strong>${escapeHtml(filePath)}</strong></td>
+        <td>${escapeHtml(row.system || "")}</td>
+        <td class="text-nowrap">${progressText}</td>
+        <td>${row.transfer_speed_bps ? `${formatBytes(row.transfer_speed_bps)}/s` : ""}</td>`
+          : `<td class="small mono download-file" title="${escapeHtml(errorText || row.rom_fingerprint || "")}">${escapeHtml(filePath)}</td>
         <td class="small">${escapeHtml(row.system || "")}</td>
         <td class="small text-nowrap">${progressText}</td>
-        <td class="small">${row.transfer_speed_bps ? `${formatBytes(row.transfer_speed_bps)}/s` : ""}</td>
-        <td>${actions}</td>
+        <td class="small">${row.transfer_speed_bps ? `${formatBytes(row.transfer_speed_bps)}/s` : ""}</td>`}
+        ${showActions ? `<td class="download-actions">${actions}</td>` : ""}
       </tr>`;
     }).join("")}</tbody></table></div>`;
 }
@@ -2129,7 +2144,7 @@ function renderTransfersPanel(payload, uploads) {
     <div class="download-section mt-3 mb-0">
       <div class="download-section-title"><span><i class="bi bi-clock-history me-2"></i>Recent</span><span class="badge text-bg-secondary">${recentPager.page.total}</span></div>
       ${recentPager.html}
-      ${renderTransferRows(recentPager.page.rows)}
+      ${renderTransferRows(recentPager.page.rows, { showActions: false, assetTableText: true })}
     </div>`;
 }
 
@@ -4031,11 +4046,11 @@ async function renderLocalTransferRequestPanel(target) {
           <div class="col-4 col-lg-2"><label class="form-label small" for="localAssetPageSize">Per Page</label><select id="localAssetPageSize" class="form-select"><option value="50">50</option><option value="100">100</option><option value="200">200</option></select></div>
         </div>
         <div class="d-flex flex-wrap align-items-center gap-2 mb-3">
-          <button class="btn btn-primary" id="localAssetLoadBtn"><i class="bi bi-search me-1"></i>Request</button>
-          <button class="btn btn-success" id="localAssetCopyAllBtn" disabled><i class="bi bi-cloud-arrow-down me-1"></i>Download All</button>
-          <div class="form-check ms-lg-2 d-none" id="localAssetArtworkOnlyWrap"><input class="form-check-input" type="checkbox" id="localAssetArtworkOnly"><label class="form-check-label small" for="localAssetArtworkOnly">Artwork only; skip ROM files, only for ROMs already on this Drone</label></div>
-          <div class="form-check d-none" id="localAssetArtworkWrap"><input class="form-check-input" type="checkbox" id="localAssetIncludeArtwork" checked><label class="form-check-label small" for="localAssetIncludeArtwork">Include artwork (places art &amp; updates gamelist.xml)</label></div>
-          <div class="form-check d-none" id="localAssetOverwriteArtworkWrap"><input class="form-check-input" type="checkbox" id="localAssetOverwriteArtwork"><label class="form-check-label small" for="localAssetOverwriteArtwork">Overwrite existing artwork (otherwise only artwork missing here is downloaded)</label></div>
+          <button class="btn btn-sm btn-primary" id="localAssetLoadBtn"><i class="bi bi-search me-1"></i>Request</button>
+          <button class="btn btn-sm btn-success" id="localAssetCopyAllBtn" disabled><i class="bi bi-cloud-arrow-down me-1"></i>Download All</button>
+          <div class="form-check ms-lg-2 d-none" id="localAssetIncludeArtworkWrap"><input class="form-check-input" type="checkbox" id="localAssetIncludeArtwork" checked><label class="form-check-label small" for="localAssetIncludeArtwork">Include Artwork</label></div>
+          <div class="form-check d-none" id="localAssetIncludeRomsWrap"><input class="form-check-input" type="checkbox" id="localAssetIncludeRoms" checked><label class="form-check-label small" for="localAssetIncludeRoms">Include ROMs</label></div>
+          <div class="form-check d-none" id="localAssetOverwriteFilesWrap"><input class="form-check-input" type="checkbox" id="localAssetOverwriteFiles"><label class="form-check-label small" for="localAssetOverwriteFiles">Overwrite Files</label></div>
         </div>
         <div id="localAssetsBody"><div class="themed-empty">Pair a nearby Drone, then request its assets here.</div></div>
         <div id="localAssetsPagination" class="mt-2"></div>
@@ -4059,7 +4074,6 @@ async function renderLocalTransferRequestPanel(target) {
   document.getElementById("localAssetCopyAllBtn").addEventListener("click", copyAllLocalAssets);
   document.getElementById("localAssetType").addEventListener("change", updateLocalAssetTypeUi);
   document.getElementById("localAssetIncludeArtwork").addEventListener("change", updateLocalAssetTypeUi);
-  document.getElementById("localAssetArtworkOnly").addEventListener("change", updateLocalAssetTypeUi);
   document.getElementById("localAssetPeer").addEventListener("change", () => {
     localPeerAssetContext.peerId = document.getElementById("localAssetPeer").value || "";
     localPeerAssetContext.systems = [];
@@ -4127,33 +4141,23 @@ function localAssetIncludeArtwork() {
   return checkbox ? !!checkbox.checked : false;
 }
 
-function localAssetOverwriteArtwork() {
-  const checkbox = document.getElementById("localAssetOverwriteArtwork");
-  return checkbox ? !!checkbox.checked : false;
+function localAssetIncludeRoms() {
+  const checkbox = document.getElementById("localAssetIncludeRoms");
+  return checkbox ? !!checkbox.checked : true;
 }
 
-function localAssetArtworkOnly() {
-  const checkbox = document.getElementById("localAssetArtworkOnly");
+function localAssetOverwriteFiles() {
+  const checkbox = document.getElementById("localAssetOverwriteFiles");
   return checkbox ? !!checkbox.checked : false;
 }
 
 function updateLocalAssetTypeUi() {
   const type = (document.getElementById("localAssetType") || {}).value || "roms";
   const isRoms = type === "roms";
-  const artworkOnly = isRoms && localAssetArtworkOnly();
-  // "Artwork only" applies only to ROMs.
-  const artworkOnlyWrap = document.getElementById("localAssetArtworkOnlyWrap");
-  if (artworkOnlyWrap) artworkOnlyWrap.classList.toggle("d-none", !isRoms);
-  // Artwork-only implies copying artwork, so the "Include artwork" toggle is
-  // redundant -- force it on and hide it in that mode.
-  const includeArtwork = document.getElementById("localAssetIncludeArtwork");
-  if (includeArtwork && artworkOnly) includeArtwork.checked = true;
-  const wrap = document.getElementById("localAssetArtworkWrap");
-  if (wrap) wrap.classList.toggle("d-none", !isRoms || artworkOnly);
-  // "Overwrite existing artwork" is meaningful whenever artwork is being copied
-  // (either alongside ROMs, or in artwork-only mode).
-  const overwriteWrap = document.getElementById("localAssetOverwriteArtworkWrap");
-  if (overwriteWrap) overwriteWrap.classList.toggle("d-none", !isRoms || !(localAssetIncludeArtwork() || artworkOnly));
+  const transferable = LOCAL_TRANSFERABLE_TYPES.has(type);
+  document.getElementById("localAssetIncludeArtworkWrap")?.classList.toggle("d-none", !isRoms);
+  document.getElementById("localAssetIncludeRomsWrap")?.classList.toggle("d-none", !isRoms);
+  document.getElementById("localAssetOverwriteFilesWrap")?.classList.toggle("d-none", !transferable);
 }
 
 function selectedLocalAssetSystems() {
@@ -4308,25 +4312,29 @@ async function setLocalAssetPage(page) {
 async function copyLocalPeerAsset(index) {
   const item = localPeerAssetContext.items[index];
   if (!item) return;
-  const artworkOnly = localPeerAssetContext.assetType === "roms" && localAssetArtworkOnly();
+  const includeRoms = localPeerAssetContext.assetType !== "roms" || localAssetIncludeRoms();
+  if (localPeerAssetContext.assetType === "roms" && !includeRoms && !localAssetIncludeArtwork()) {
+    showToast("Select Include Artwork or Include ROMs before downloading.", "warning");
+    return;
+  }
   const result = await apiPost("/admin/local-network/sync", {
     peer_id: localPeerAssetContext.peerId,
     asset_type: localPeerAssetContext.assetType,
     system: item.system || item.root_name || "",
     include_artwork: localAssetIncludeArtwork(),
-    overwrite_artwork: localAssetOverwriteArtwork(),
-    artwork_only: artworkOnly,
+    include_roms: includeRoms,
+    overwrite_files: localAssetOverwriteFiles(),
     item,
   });
   if (result && result.rom_absent) {
-    showToast("That ROM isn’t on this machine — artwork-only mode skipped it.", "info");
+    showToast("That ROM is not on this Drone, so there is no local game to attach artwork to.", "info");
   } else if (result && result.rom_skipped) {
     const artworkJobs = Array.isArray(result.jobs) ? result.jobs.length : 0;
     showToast(artworkJobs
       ? "ROM already on this machine — copying its artwork only."
-      : (artworkOnly ? "Artwork already on this machine — nothing to copy." : "ROM already on this machine — nothing to download."), "info");
+      : (!includeRoms ? "No missing artwork was found for ROMs on this Drone." : "ROM already on this machine — nothing to download."), "info");
   } else {
-    showToast(artworkOnly ? "Artwork queued for local transfer." : "Asset queued for local transfer.", "success");
+    showToast(!includeRoms ? "Artwork queued for local transfer." : "Asset queued for local transfer.", "success");
   }
   if (typeof window.refreshTransfers === "function") await window.refreshTransfers();
 }
@@ -4338,21 +4346,29 @@ async function copyAllLocalAssets() {
   const q = document.getElementById("localAssetQuery").value.trim();
   if (!peerId) { showToast("Pair a Drone before copying assets.", "warning"); return; }
   if (!LOCAL_TRANSFERABLE_TYPES.has(type)) { showToast("Bulk download supports ROMs, BIOS, and saves.", "warning"); return; }
-  const artworkOnly = type === "roms" && localAssetArtworkOnly();
-  const scopeNoun = artworkOnly ? "artwork (for ROMs already here)" : type;
+  const includeRoms = type !== "roms" || localAssetIncludeRoms();
+  if (type === "roms" && !includeRoms && !localAssetIncludeArtwork()) {
+    showToast("Select Include Artwork or Include ROMs before downloading.", "warning");
+    return;
+  }
+  const scopeNoun = !includeRoms ? "artwork for ROMs already here" : type;
   const scope = systems.length ? `all ${scopeNoun} for ${systems.join(", ")}` : (q ? `all ${scopeNoun} matching “${q}”` : `every ${scopeNoun}`);
   if (!window.confirm(`Queue ${scope} from this Drone for download?`)) return;
-  await queueLocalBulkCopy({ peer_id: peerId, asset_type: type, systems, q, include_artwork: localAssetIncludeArtwork(), overwrite_artwork: localAssetOverwriteArtwork(), artwork_only: artworkOnly });
+  await queueLocalBulkCopy({ peer_id: peerId, asset_type: type, systems, q, include_artwork: localAssetIncludeArtwork(), include_roms: includeRoms, overwrite_files: localAssetOverwriteFiles() });
 }
 
 async function copyAllRomsForSystem(encodedSystem) {
   const system = decodeURIComponent(encodedSystem);
   const peerId = document.getElementById("localAssetPeer").value || localPeerAssetContext.peerId;
   if (!peerId) { showToast("Pair a Drone before copying assets.", "warning"); return; }
-  const artworkOnly = localAssetArtworkOnly();
-  const what = artworkOnly ? `artwork for ${system} ROMs already on this Drone` : `all ROMs for ${system}`;
+  const includeRoms = localAssetIncludeRoms();
+  if (!includeRoms && !localAssetIncludeArtwork()) {
+    showToast("Select Include Artwork or Include ROMs before downloading.", "warning");
+    return;
+  }
+  const what = includeRoms ? `all ROMs for ${system}` : `artwork for ${system} ROMs already on this Drone`;
   if (!window.confirm(`Queue ${what} from this Drone for download?`)) return;
-  await queueLocalBulkCopy({ peer_id: peerId, asset_type: "roms", system, include_artwork: localAssetIncludeArtwork(), overwrite_artwork: localAssetOverwriteArtwork(), artwork_only: artworkOnly });
+  await queueLocalBulkCopy({ peer_id: peerId, asset_type: "roms", system, include_artwork: localAssetIncludeArtwork(), include_roms: includeRoms, overwrite_files: localAssetOverwriteFiles() });
 }
 
 async function queueLocalBulkCopy(body) {
@@ -4361,8 +4377,7 @@ async function queueLocalBulkCopy(body) {
     const assets = Number(result.queued_assets) || 0;
     const artwork = Number(result.queued_artwork) || 0;
     const skipped = Number(result.skipped_existing) || 0;
-    if (body.artwork_only) {
-      // Artwork-only: no ROM files are copied; report just the artwork queued.
+    if (body.asset_type === "roms" && !body.include_roms) {
       if (!artwork) {
         showToast("No artwork to copy — either no matching ROMs are on this machine, or their artwork is already present.", "info");
       } else {
@@ -6197,11 +6212,6 @@ brandHomeBtn.addEventListener("click", (event) => {
 systemsMenuBtn.addEventListener("click", (event) => {
   event.preventDefault();
   setHash("#systems");
-});
-systemInfoMenuBtn.addEventListener("click", (event) => {
-  event.preventDefault();
-  if (!adminEnabled) return;
-  setHash("#admin/system-info");
 });
 controlsMenuBtn.addEventListener("click", (event) => {
   event.preventDefault();

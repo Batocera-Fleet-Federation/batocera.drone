@@ -279,6 +279,7 @@ def _download_rom_folder_from_peer(
     marker_relative_path=None,
     progress_callback=None,
     cancellation_event: Optional[Event] = None,
+    overwrite: bool = False,
 ) -> dict:
     # RomRepository stays in drone_api (Phase 4/6 will move it); lazy-import to avoid a cycle.
     try:
@@ -306,7 +307,7 @@ def _download_rom_folder_from_peer(
     # Present-check for folder-unit ROMs: the marker file is written LAST (below), so
     # its presence (plus a fingerprint match when one is expected) proves the whole
     # folder arrived. True directory entries keep their historical re-pull behavior.
-    if marker_state is not None:
+    if marker_state is not None and not overwrite:
         marker_target, _ = marker_state
         if marker_target.is_file():
             marker_fingerprint = None
@@ -479,6 +480,7 @@ def _download_rom_from_peer(
     expected_fingerprint=None,
     progress_callback=None,
     cancellation_event: Optional[Event] = None,
+    overwrite: bool = False,
 ) -> dict:
     # RomRepository stay in drone_api (Phase 4/6 will move them); lazy-import to avoid a cycle.
     try:
@@ -538,9 +540,9 @@ def _download_rom_from_peer(
             "selected_peer_reason": "local ROM already exists",
         }
 
-    if target.exists():
+    if target.exists() and not overwrite:
         return skipped_activity(target, "target path already exists")
-    if expected_fingerprint_clean and system_dir.exists() and system_dir.is_dir():
+    if not overwrite and expected_fingerprint_clean and system_dir.exists() and system_dir.is_dir():
         for candidate in sorted(system_dir.rglob("*"), key=lambda path: path.relative_to(system_dir).as_posix().lower()):
             if not candidate.is_file():
                 continue
@@ -674,6 +676,7 @@ def _download_bios_from_peer(
     expected_md5=None,
     progress_callback=None,
     cancellation_event: Optional[Event] = None,
+    overwrite: bool = False,
 ) -> dict:
     # RomRepository stay in drone_api (Phase 4/6 will move them); lazy-import to avoid a cycle.
     try:
@@ -687,16 +690,49 @@ def _download_bios_from_peer(
     rel = _safe_rom_relative_path(relative_path)
     url = f"{address}/v1/api/peer/bios/{quote(rel, safe='/')}"
     bios_root = settings.bios_root.resolve()
-    target = _collision_safe_target(bios_root, rel)
+    target = (bios_root / rel).resolve()
+    if target == bios_root or bios_root not in target.parents:
+        raise ValueError("invalid target path")
     partial_target = target.with_name(f"{target.name}.part")
+    started_dt = datetime.now(timezone.utc).replace(microsecond=0)
+    started = started_dt.isoformat()
+    started_mono = time.monotonic()
+    expected_md5_clean = str(expected_md5 or "").strip().lower()
+
+    def skipped_activity(existing: Path, reason: str) -> dict:
+        completed_dt = datetime.now(timezone.utc).replace(microsecond=0)
+        duration_ms = int((time.monotonic() - started_mono) * 1000)
+        return {
+            "asset_type": "bios", "file_type": "BIOS", "source_drone_id": peer_id,
+            "target_drone_id": settings.overmind_device_id, "system": "bios",
+            "bios_name": rel, "rom_name": rel,
+            "relative_path": existing.relative_to(bios_root).as_posix(),
+            "action": "download", "status": "skipped", "skip_reason": reason,
+            "failure_reason": reason, "bytes_transferred": 0,
+            "file_size": existing.stat().st_size, "bios_md5": expected_md5_clean,
+            "download_started_at": started, "download_completed_at": completed_dt.isoformat(),
+            "started_at": started, "completed_at": completed_dt.isoformat(),
+            "duration_ms": duration_ms, "duration_seconds": round(duration_ms / 1000, 3),
+        }
+
+    if not overwrite:
+        if target.is_file():
+            return skipped_activity(target, "target path already exists")
+        if expected_md5_clean and bios_root.is_dir():
+            for candidate in bios_root.rglob("*"):
+                if not candidate.is_file() or candidate.name.endswith(".part"):
+                    continue
+                try:
+                    if RomRepository.build_md5(candidate).lower() == expected_md5_clean:
+                        return skipped_activity(candidate, "matching BIOS already exists")
+                except OSError:
+                    continue
+
     target.parent.mkdir(parents=True, exist_ok=True)
     cafile = _peer_trust_cafile(settings, peer_id=peer_id, config=config)
     if address.startswith("https://") and not cafile:
         raise ssl.SSLError(f"no trusted certificate cached for peer {peer_id}")
     context = _drone_client_ssl_context(settings, url, verify=bool(cafile), cafile=cafile)
-    started_dt = datetime.now(timezone.utc).replace(microsecond=0)
-    started = started_dt.isoformat()
-    started_mono = time.monotonic()
     bytes_written = 0
     request = Request(url, headers={"User-Agent": "batocera-drone-bios-sync/1.0"})
 
@@ -777,7 +813,6 @@ def _download_bios_from_peer(
             pass
     # BIOS verifies against a full-file MD5 (exact emulator identity), not the sampled fingerprint.
     actual_md5 = RomRepository.build_md5(partial_target)
-    expected_md5_clean = str(expected_md5 or "").strip().lower()
     if expected_md5_clean and actual_md5.lower() != expected_md5_clean:
         if partial_target.exists():
             partial_target.unlink()
@@ -819,13 +854,13 @@ def _download_save_from_peer(
     expected_size=None,
     expected_fingerprint=None,
     cancellation_event: Optional[Event] = None,
+    overwrite: bool = True,
 ) -> dict:
     """Fetch a single game-save file from a peer and write it under saves_root.
 
-    Unlike ROMs/BIOS (which never overwrite an existing file), saves resolve
-    newest-modified-wins, so the fetched copy replaces the local one at the exact
-    path. The sampled fingerprint is verified when the caller supplies the expected
-    value. ``relative_path`` is the path WITHIN the system directory.
+    The fetched copy replaces the local one only when ``overwrite`` is enabled.
+    The sampled fingerprint is verified when the caller supplies the expected value.
+    ``relative_path`` is the path WITHIN the system directory.
     """
     # RomRepository stay in drone_api (Phase 4/6 will move them); lazy-import to avoid a cycle.
     try:
@@ -843,6 +878,16 @@ def _download_save_from_peer(
     target = (saves_root / system_clean / rel).resolve()
     if saves_root not in target.parents:
         raise ValueError("invalid save target path")
+    if target.is_file() and not overwrite:
+        return {
+            "asset_type": "saves", "file_type": "Save", "source_drone_id": peer_id,
+            "target_drone_id": settings.overmind_device_id, "system": system_clean,
+            "save_name": rel, "relative_path": f"{system_clean}/{rel}",
+            "action": "download", "status": "skipped",
+            "skip_reason": "target path already exists", "failure_reason": "target path already exists",
+            "bytes_transferred": 0, "file_size": target.stat().st_size,
+            "fingerprint": str(expected_fingerprint or ""), "duration_ms": 0, "duration_seconds": 0,
+        }
     partial_target = target.with_name(f"{target.name}.part")
     target.parent.mkdir(parents=True, exist_ok=True)
     cafile = _peer_trust_cafile(settings, peer_id=peer_id, config=config)
@@ -881,7 +926,7 @@ def _download_save_from_peer(
             if partial_target.exists():
                 partial_target.unlink()
             raise RuntimeError(f"fingerprint mismatch expected={expected_fp} actual={actual_fp}")
-    partial_target.replace(target)  # newest-wins: overwrite any existing local save
+    partial_target.replace(target)
     duration_ms = int((time.monotonic() - started_mono) * 1000)
     return {
         "asset_type": "saves",

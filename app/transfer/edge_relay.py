@@ -274,6 +274,7 @@ def _relay_download_rom(
     expected_fingerprint=None,
     progress_callback=None,
     cancellation_event: Optional[Event] = None,
+    overwrite: bool = False,
 ) -> dict:
     """Pull a ROM from ``peer`` over the Edge relay, writing + verifying it locally.
 
@@ -346,9 +347,9 @@ def _relay_download_rom(
             "selected_peer_reason": "local ROM already exists",
         }
 
-    if target.exists():
+    if target.exists() and not overwrite:
         return skipped_activity(target, "target path already exists")
-    if expected_fingerprint_clean and system_dir.exists() and system_dir.is_dir():
+    if not overwrite and expected_fingerprint_clean and system_dir.exists() and system_dir.is_dir():
         for candidate in sorted(
             system_dir.rglob("*"), key=lambda path: path.relative_to(system_dir).as_posix().lower()
         ):
@@ -462,6 +463,7 @@ def _relay_download_rom_folder(
     marker_relative_path=None,
     progress_callback=None,
     cancellation_event: Optional[Event] = None,
+    overwrite: bool = False,
 ) -> dict:
     """Pull a folder ROM from ``peer`` over the Edge relay.
 
@@ -525,7 +527,7 @@ def _relay_download_rom_folder(
 
     # Present-check: the marker is written last, so its presence (+ fingerprint
     # match when expected) proves the folder arrived -- same rule as the HTTP tier.
-    if marker_state is not None:
+    if marker_state is not None and not overwrite:
         marker_target, _ = marker_state
         if marker_target.is_file():
             marker_fingerprint = None
@@ -704,6 +706,7 @@ def _relay_fetch(request: "DownloadRequest", context: "TransferContext") -> dict
             marker_relative_path=request.marker_relative_path,
             progress_callback=context.progress_callback,
             cancellation_event=context.cancellation_event,
+            overwrite=request.overwrite,
         )
     return _relay_download_rom(
         context.settings,
@@ -715,6 +718,7 @@ def _relay_fetch(request: "DownloadRequest", context: "TransferContext") -> dict
         expected_fingerprint=request.expected_fingerprint,
         progress_callback=context.progress_callback,
         cancellation_event=context.cancellation_event,
+        overwrite=request.overwrite,
     )
 
 

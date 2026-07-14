@@ -114,6 +114,7 @@ class DirectPublicDispatchTests(unittest.TestCase):
             ctx.settings, ctx.config, ctx.peer, "snes", "g.sfc",
             expected_size=10, expected_fingerprint="fp",
             progress_callback=ctx.progress_callback, cancellation_event=ctx.cancellation_event,
+            overwrite=False,
         )
 
     def test_rom_folder(self):
@@ -129,6 +130,7 @@ class DirectPublicDispatchTests(unittest.TestCase):
             expected_size=99, expected_fingerprint=None, marker_relative_path=None,
             progress_callback=ctx.progress_callback,
             cancellation_event=ctx.cancellation_event,
+            overwrite=False,
         )
 
     def test_bios(self):
@@ -143,6 +145,7 @@ class DirectPublicDispatchTests(unittest.TestCase):
             ctx.settings, ctx.config, ctx.peer, "scph.bin",
             expected_size=512, expected_md5="md5x",
             progress_callback=ctx.progress_callback, cancellation_event=ctx.cancellation_event,
+            overwrite=False,
         )
 
     def test_saves(self):
@@ -156,7 +159,7 @@ class DirectPublicDispatchTests(unittest.TestCase):
         m.assert_called_once_with(
             ctx.settings, ctx.config, ctx.peer, "snes", "g.srm",
             expected_size=8, expected_fingerprint="fp",
-            cancellation_event=ctx.cancellation_event,
+            cancellation_event=ctx.cancellation_event, overwrite=False,
         )
 
     def test_artwork(self):

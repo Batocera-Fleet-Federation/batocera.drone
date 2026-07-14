@@ -44,6 +44,15 @@ class DroneOpenApiContractTest(unittest.TestCase):
                 op = OPENAPI_SPEC["paths"][path][method]
                 self.assertEqual(_ref_name(_json_schema(op["responses"][code])), schema_name)
 
+    def test_local_sync_contract_uses_file_transfer_options(self):
+        for schema_name in ("LocalSyncRequest", "LocalBulkSyncRequest"):
+            properties = OPENAPI_SPEC["components"]["schemas"][schema_name]["properties"]
+            self.assertIn("include_artwork", properties)
+            self.assertIn("include_roms", properties)
+            self.assertIn("overwrite_files", properties)
+            self.assertNotIn("artwork_only", properties)
+            self.assertNotIn("overwrite_artwork", properties)
+
     def test_all_json_responses_are_named_component_refs(self):
         schemas = OPENAPI_SPEC["components"]["schemas"]
         for path, item in OPENAPI_SPEC["paths"].items():

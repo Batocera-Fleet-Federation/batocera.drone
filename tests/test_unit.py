@@ -1164,6 +1164,43 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(result["skip_reason"], "target path already exists")
             self.assertFalse((root / "roms" / "nes" / "Game (2).nes").exists())
 
+    def test_download_rom_from_peer_overwrites_existing_target_when_requested(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            target = root / "roms" / "nes" / "Game.nes"
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b"old")
+
+            class FakeResponse:
+                headers = {}
+
+                def __init__(self):
+                    self.chunks = [b"replacement", b""]
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self, _size=-1):
+                    return self.chunks.pop(0)
+
+            with mock.patch("app.transfer.peer_download.urlopen", return_value=FakeResponse()):
+                result = _download_rom_from_peer(
+                    settings, {}, {"drone_id": "source-a", "reachable_url": "http://source-a:8080"},
+                    "nes", "Game.nes", overwrite=True,
+                )
+
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(target.read_bytes(), b"replacement")
+
     def test_download_rom_from_peer_skips_matching_local_fingerprint(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
@@ -3249,6 +3286,18 @@ class SettingsTests(unittest.TestCase):
         render_end = js.index("function renderDownloadsPanel(payload, includeHeader = true)")
         render_source = js[render_start:render_end]
         self.assertIn('"pending", "paused"', render_source)
+        self.assertIn("const showActions = options.showActions !== false;", render_source)
+        self.assertIn("const assetTableText = options.assetTableText === true;", render_source)
+        self.assertIn('class="download-actions">Actions</th>', render_source)
+        self.assertIn('showActions ? `<td class="download-actions">${actions}</td>` : ""', render_source)
+
+        recent_start = js.index('<div class="download-section mt-3 mb-0">', render_end)
+        recent_end = js.index("</div>`;", recent_start)
+        recent_source = js[recent_start:recent_end]
+        self.assertIn(
+            "renderTransferRows(recentPager.page.rows, { showActions: false, assetTableText: true })",
+            recent_source,
+        )
 
     def test_admin_controls_expose_drone_update_actions_and_auto_update(self) -> None:
         api_routes = Path(__file__).resolve().parents[1].joinpath("app/web/api_routes.py").read_text(encoding="utf-8")
@@ -5986,6 +6035,49 @@ class LocalNetworkAssetCopyTests(unittest.TestCase):
             artwork = [j for j in jobs if j.get("file_type") == "ARTWORK"]
             self.assertEqual(sorted(j["artwork_type"] for j in artwork), ["image", "marquee"])
 
+    def test_include_roms_disabled_copies_only_artwork_for_existing_rom(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            self._seed_two_systems(root)
+            settings = self._settings(root)
+            repo = drone_api.RomRepository(root / "roms", root / "bios")
+            handler = self._handler(settings, repo)
+            with mock.patch("app.drone_api.Thread.start"):
+                manager = drone_api.DownloadManager(settings, repo)
+
+            local_item = handler._collect_peer_inventory("roms", {"system": ["snes"]})["items"][0]
+            jobs = handler._enqueue_local_asset(
+                manager, {}, {"drone_id": "source-a"}, "roms", local_item,
+                default_system="snes", include_artwork=True, include_roms=False,
+                overwrite_files=True,
+            )
+
+            self.assertFalse(any(job.get("file_type") == "ROM" for job in jobs))
+            self.assertEqual(
+                sorted(job["artwork_type"] for job in jobs if job.get("file_type") == "ARTWORK"),
+                ["image", "marquee"],
+            )
+
+    def test_overwrite_files_queues_an_existing_rom_for_replacement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            self._seed_two_systems(root)
+            settings = self._settings(root)
+            repo = drone_api.RomRepository(root / "roms", root / "bios")
+            handler = self._handler(settings, repo)
+            with mock.patch("app.drone_api.Thread.start"):
+                manager = drone_api.DownloadManager(settings, repo)
+
+            local_item = handler._collect_peer_inventory("roms", {"system": ["snes"]})["items"][0]
+            jobs = handler._enqueue_local_asset(
+                manager, {}, {"drone_id": "source-a"}, "roms", local_item,
+                default_system="snes", include_artwork=False, include_roms=True,
+                overwrite_files=True,
+            )
+
+            rom_job = next(job for job in jobs if job.get("file_type") == "ROM")
+            self.assertTrue(manager._jobs[rom_job["job_id"]]["_overwrite"])
+
     def test_artwork_only_skips_rom_not_present_on_this_machine(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
@@ -6458,15 +6550,14 @@ class NavRestructureTests(unittest.TestCase):
 
     def test_transfers_is_an_admin_gated_navbar_link(self) -> None:
         self.assertIn('id="transfersMenuBtn" href="#admin/transfers"', self.html)
-        system_info_pos = self.html.index('id="systemInfoMenuBtn"')
         controls_pos = self.html.index('id="controlsMenuBtn"')
         transfers_pos = self.html.index('id="transfersMenuBtn"')
         admin_pos = self.html.index('id="adminMenuBtn"')
-        self.assertTrue(system_info_pos < controls_pos < transfers_pos < admin_pos)
+        self.assertTrue(controls_pos < transfers_pos < admin_pos)
 
         self.assertIn('const transfersMenuBtn = document.getElementById("transfersMenuBtn");', self.js)
         self.assertIn(
-            "const adminLinks = [adminMenuBtn, systemInfoMenuBtn, controlsMenuBtn, transfersMenuBtn, swarmMenuBtn, apiAccessBtn]",
+            "const adminLinks = [adminMenuBtn, controlsMenuBtn, transfersMenuBtn, swarmMenuBtn, apiAccessBtn]",
             self.js,
         )
         click_start = self.js.index('transfersMenuBtn.addEventListener("click"')
@@ -6512,6 +6603,19 @@ class NavRestructureTests(unittest.TestCase):
         refresh_body = self.js[refresh_start:refresh_end]
         self.assertIn('Promise.all([api("/admin/downloads"), api("/admin/uploads")])', refresh_body)
         self.assertIn("renderTransfersPanel(downloads, uploads)", refresh_body)
+
+    def test_transfer_request_uses_independent_file_options_and_small_buttons(self) -> None:
+        panel_start = self.js.index("async function renderLocalTransferRequestPanel(")
+        panel_end = self.js.index("async function renderLocalNetworkIntegrationPanel(")
+        body = self.js[panel_start:panel_end]
+        self.assertIn('id="localAssetIncludeArtwork" checked', body)
+        self.assertIn('for="localAssetIncludeArtwork">Include Artwork</label>', body)
+        self.assertIn('id="localAssetIncludeRoms" checked', body)
+        self.assertIn('for="localAssetIncludeRoms">Include ROMs</label>', body)
+        self.assertIn('for="localAssetOverwriteFiles">Overwrite Files</label>', body)
+        self.assertNotIn("localAssetArtworkOnly", body)
+        self.assertIn('class="btn btn-sm btn-primary" id="localAssetLoadBtn"', body)
+        self.assertIn('class="btn btn-sm btn-success" id="localAssetCopyAllBtn"', body)
 
     def test_legacy_hash_redirects_point_at_new_pages(self) -> None:
         downloads_start = self.js.index('hash === "#admin/downloads"')
