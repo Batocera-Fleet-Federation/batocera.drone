@@ -362,6 +362,10 @@ class ApiRoutesMixin:
                 self._handle_admin_local_network_status()
                 return
 
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "swarm" and parts[2] == "overview":
+                self._handle_admin_swarm_overview()
+                return
+
             if len(parts) == 5 and parts[0] == "admin" and parts[1] == "local-network" and parts[2] == "peers" and parts[4] == "assets":
                 self._handle_admin_local_peer_assets(parts[3], query_params)
                 return

@@ -6197,6 +6197,55 @@ class LocalNetworkAssetCopyTests(unittest.TestCase):
             self.assertFalse(resumed["paused"])
 
 
+class SwarmPageTests(unittest.TestCase):
+    """The Swarm page: navbar entry, hash route, fleet cards fed by the
+    /admin/swarm/overview fan-out, and the pair-by-address form that lets two
+    drones in different houses pair over a tailnet."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        root = Path(__file__).resolve().parents[1]
+        cls.js = root.joinpath("app/web/static/js/drone.js").read_text(encoding="utf-8")
+        cls.html = root.joinpath("app/web/templates/index.html").read_text(encoding="utf-8")
+
+    def test_swarm_is_a_navbar_link_gated_like_other_admin_pages(self) -> None:
+        self.assertIn('id="swarmMenuBtn" href="#admin/swarm"', self.html)
+        self.assertIn('const swarmMenuBtn = document.getElementById("swarmMenuBtn");', self.js)
+        self.assertIn('swarmMenuBtn.addEventListener("click"', self.js)
+        visibility_start = self.js.index("function applyAdminVisibility()")
+        visibility_end = self.js.index("function escapeHtml(", visibility_start)
+        self.assertIn("swarmMenuBtn", self.js[visibility_start:visibility_end])
+
+    def test_router_dispatches_swarm_hash(self) -> None:
+        router_start = self.js.index("async function router()")
+        router_body = self.js[router_start:self.js.index("catch (err)", router_start)]
+        self.assertIn('hash === "#admin/swarm"', router_body)
+        self.assertIn("await renderSwarmPage();", router_body)
+
+    def test_swarm_page_loads_overview_and_renders_cards(self) -> None:
+        page_start = self.js.index("async function renderSwarmPage()")
+        page_end = self.js.index("async function renderIntegrationTransfersPanel", page_start)
+        body = self.js[page_start:page_end]
+        self.assertIn('api("/admin/swarm/overview")', body)
+        self.assertIn("renderSwarmDroneCard", body)
+
+        card_start = self.js.index("function renderSwarmDroneCard(")
+        card_body = self.js[card_start:self.js.index("function swarmBrowsePeerAssets(", card_start)]
+        for expected in (">This Drone<", ">Online<", ">Offline<", "Request Assets", "Open UI", "escapeHtml(drone.ui_url)"):
+            self.assertIn(expected, card_body)
+
+    def test_pair_by_address_form_posts_to_the_new_endpoint(self) -> None:
+        pair_start = self.js.index("async function swarmPairByAddress()")
+        pair_body = self.js[pair_start:self.js.index("async function renderSwarmPage()", pair_start)]
+        self.assertIn('apiPost("/admin/local-network/pair-by-address", { address, pairing_code: code })', pair_body)
+
+    def test_request_assets_deep_links_into_the_transfers_picker(self) -> None:
+        browse_start = self.js.index("function swarmBrowsePeerAssets(")
+        browse_body = self.js[browse_start:self.js.index("async function swarmPairByAddress()", browse_start)]
+        self.assertIn("localPeerAssetContext.peerId", browse_body)
+        self.assertIn('setHash("#admin/transfers")', browse_body)
+
+
 class NavRestructureTests(unittest.TestCase):
     """Theme moved from a navbar link to an Admin-page card; Integration's
     Transfers tab became its own navbar-linked page, leaving Integration as a
@@ -6235,7 +6284,7 @@ class NavRestructureTests(unittest.TestCase):
 
         self.assertIn('const transfersMenuBtn = document.getElementById("transfersMenuBtn");', self.js)
         self.assertIn(
-            "const adminLinks = [adminMenuBtn, systemInfoMenuBtn, controlsMenuBtn, transfersMenuBtn, apiAccessBtn]",
+            "const adminLinks = [adminMenuBtn, systemInfoMenuBtn, controlsMenuBtn, transfersMenuBtn, swarmMenuBtn, apiAccessBtn]",
             self.js,
         )
         click_start = self.js.index('transfersMenuBtn.addEventListener("click"')

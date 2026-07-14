@@ -7,6 +7,9 @@ pair/forget/assets, and local sync (single + bulk). Composed onto ``RomRequestHa
 
 import os
 import ssl
+import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 from urllib.parse import quote, unquote
@@ -46,6 +49,11 @@ except ImportError:  # pragma: no cover - direct script execution fallback
 
 # Local copy (drone_api keeps its own; same env). Not test-patched.
 PEER_INVENTORY_TIMEOUT_SECONDS = float(os.environ.get("DRONE_PEER_INVENTORY_TIMEOUT_SECONDS", "120"))
+
+# Per-peer budget for the Swarm-overview fan-out. Deliberately short: an
+# offline drone should read as "Offline" quickly, not stall the whole page for
+# the full inventory timeout.
+SWARM_PEER_TIMEOUT_SECONDS = float(os.environ.get("DRONE_SWARM_PEER_TIMEOUT_SECONDS", "4"))
 
 
 def _get_download_manager():
@@ -241,6 +249,100 @@ class HandlersNetworkMixin:
             except ssl.SSLError:
                 pass
         self._send_json(200, {"status": "paired", "peer": _public_local_peer(paired)})
+
+    @staticmethod
+    def _swarm_peer_ui_url(peer: dict) -> str:
+        """Best URL for the *viewer's browser* to open the peer's own UI.
+
+        Prefer the tailnet address (works from any network the viewer's mesh
+        client is on); fall back to the peer-advertised URL (works on the
+        peer's LAN), then the address this drone dials.
+        """
+        tailnet_ip = str(peer.get("tailnet_ip") or "").strip()
+        if tailnet_ip:
+            scheme = str(peer.get("scheme") or "https")
+            try:
+                port = int(peer.get("api_port") or 443)
+            except (TypeError, ValueError):
+                port = 443
+            suffix = "" if (port == 443 and scheme == "https") else f":{port}"
+            return f"{scheme}://{tailnet_ip}{suffix}"
+        return str(peer.get("advertised_reachable_url") or peer.get("reachable_url") or "")
+
+    def _swarm_probe_peer(self, peer: dict) -> dict:
+        entry = {
+            "drone_id": str(peer.get("drone_id") or ""),
+            "name": str(peer.get("name") or peer.get("hostname") or peer.get("drone_id") or "Drone"),
+            "hostname": str(peer.get("hostname") or ""),
+            "is_self": False,
+            "online": False,
+            "paired": True,
+            "reachable_url": str(peer.get("reachable_url") or ""),
+            "advertised_reachable_url": str(peer.get("advertised_reachable_url") or ""),
+            "tailnet_ip": str(peer.get("tailnet_ip") or ""),
+            "ui_url": self._swarm_peer_ui_url(peer),
+            "error": None,
+            "latency_ms": None,
+            "summary": None,
+        }
+        try:
+            started = time.monotonic()
+            if self.settings.use_fake_data and peer.get("fake_data"):
+                summary = self._collect_peer_inventory("summary", {})
+            else:
+                address = _peer_address(peer)
+                if not address:
+                    raise ValueError("no reachable address recorded for this peer")
+                summary = _peer_get_json(
+                    f"{address}/v1/api/peer/inventory/summary",
+                    self.settings,
+                    peer_id=entry["drone_id"],
+                    config={"network_mode": "local_network"},
+                    timeout=SWARM_PEER_TIMEOUT_SECONDS,
+                )
+            entry["latency_ms"] = int((time.monotonic() - started) * 1000)
+            entry["summary"] = {key: summary.get(key) for key in ("systems", "system_counts", "counts", "updated_at")}
+            entry["online"] = True
+        except Exception as error:
+            entry["error"] = str(error) or error.__class__.__name__
+        return entry
+
+    def _handle_admin_swarm_overview(self) -> None:
+        """One entry per Drone in the federation: this machine plus every paired
+        peer, probed in parallel with a short per-peer budget so an offline
+        drone degrades to ``online: false`` instead of hanging the page."""
+        active = _local_network.is_local_mode(self.settings)
+        own = _local_network.discovery_payload(self.settings, "")
+        self_summary = self._collect_peer_inventory("summary", {})
+        drones = [
+            {
+                "drone_id": str(self.settings.overmind_device_id),
+                "name": str(self_summary.get("name") or own.get("name") or ""),
+                "hostname": str(own.get("hostname") or ""),
+                "is_self": True,
+                "online": True,
+                "paired": True,
+                "reachable_url": str(own.get("reachable_url") or ""),
+                "advertised_reachable_url": str(own.get("reachable_url") or ""),
+                "tailnet_ip": str(own.get("tailnet_ip") or ""),
+                "ui_url": "",
+                "error": None,
+                "latency_ms": 0,
+                "summary": {key: self_summary.get(key) for key in ("systems", "system_counts", "counts", "updated_at")},
+            }
+        ]
+        peers = _local_network.paired_peers(self.settings) if active else []
+        if peers:
+            with ThreadPoolExecutor(max_workers=min(8, len(peers))) as pool:
+                drones.extend(pool.map(self._swarm_probe_peer, peers))
+        self._send_json(
+            200,
+            {
+                "active": active,
+                "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                "drones": drones,
+            },
+        )
 
     def _handle_admin_local_peer_forget(self, peer_id: str) -> None:
         peer_id = unquote(peer_id)

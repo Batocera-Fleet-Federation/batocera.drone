@@ -198,6 +198,65 @@ class MockServerIntegrationTests(unittest.TestCase):
             )
         self.assertEqual(error.exception.code, 400)
 
+    def test_swarm_overview_endpoint(self) -> None:
+        # Outside local-network mode: still answers, with just this drone.
+        overview = self._get_json("/v1/api/admin/swarm/overview")
+        self.assertFalse(overview["active"])
+        self.assertEqual(len(overview["drones"]), 1)
+        me = overview["drones"][0]
+        self.assertTrue(me["is_self"])
+        self.assertTrue(me["online"])
+        self.assertEqual(me["drone_id"], self.settings.overmind_device_id)
+        self.assertIn("counts", me["summary"])
+        self.assertIn("systems", me["summary"])
+
+        self._post_json("/v1/api/admin/network-mode", {"mode": "local_network"})
+        object.__setattr__(self.settings, "use_fake_data", True)
+        # A fake paired peer (answered locally, like the assets browse endpoint)...
+        local_network.save_paired_peer(
+            self.settings,
+            {
+                "drone_id": "nearby-fake-drone",
+                "name": "Nearby Test Cabinet",
+                "scheme": "https",
+                "api_port": 8444,
+                "tailnet_ip": "100.64.0.9",
+                "fake_data": True,
+            },
+        )
+        # ...and a real one whose recorded address has nothing listening.
+        local_network.save_paired_peer(
+            self.settings,
+            {
+                "drone_id": "unreachable-drone",
+                "name": "Powered Off Cabinet",
+                "reachable_url": "http://127.0.0.1:9",
+                "scheme": "http",
+                "api_port": 9,
+            },
+        )
+        overview = self._get_json("/v1/api/admin/swarm/overview")
+        self.assertTrue(overview["active"])
+        drones = {drone["drone_id"]: drone for drone in overview["drones"]}
+        # seed_mock_userdata pre-seeds fake-local-peer-01 in fake mode, so
+        # assert on the drones this test placed rather than an exact count.
+        self.assertIn(self.settings.overmind_device_id, drones)
+        self.assertIn("nearby-fake-drone", drones)
+        self.assertIn("unreachable-drone", drones)
+
+        fake_peer = drones["nearby-fake-drone"]
+        self.assertTrue(fake_peer["online"])
+        self.assertFalse(fake_peer["is_self"])
+        self.assertIn("counts", fake_peer["summary"])
+        # ui_url prefers the tailnet address so the viewer's browser can open
+        # the peer from any network its mesh client is on.
+        self.assertEqual(fake_peer["ui_url"], "https://100.64.0.9:8444")
+
+        offline = drones["unreachable-drone"]
+        self.assertFalse(offline["online"])
+        self.assertIsNone(offline["summary"])
+        self.assertTrue(offline["error"])
+
     def test_network_mode_and_local_network_admin_endpoints(self) -> None:
         initial = self._get_json("/v1/api/admin/network-mode")
         self.assertEqual(initial["mode"], "overmind")

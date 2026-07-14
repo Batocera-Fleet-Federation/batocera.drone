@@ -8,6 +8,7 @@ const brandHomeBtn = document.getElementById("brandHomeBtn");
 const systemInfoMenuBtn = document.getElementById("systemInfoMenuBtn");
 const controlsMenuBtn = document.getElementById("controlsMenuBtn");
 const transfersMenuBtn = document.getElementById("transfersMenuBtn");
+const swarmMenuBtn = document.getElementById("swarmMenuBtn");
 const adminMenuBtn = document.getElementById("adminMenuBtn");
 const apiAccessBtn = document.getElementById("apiAccessBtn");
 const droneVersionBadge = document.getElementById("droneVersionBadge");
@@ -179,7 +180,7 @@ function setLoading(isLoading, text = "Loading...") {
   }
 }
 function applyAdminVisibility() {
-  const adminLinks = [adminMenuBtn, systemInfoMenuBtn, controlsMenuBtn, transfersMenuBtn, apiAccessBtn].filter(Boolean);
+  const adminLinks = [adminMenuBtn, systemInfoMenuBtn, controlsMenuBtn, transfersMenuBtn, swarmMenuBtn, apiAccessBtn].filter(Boolean);
   if (adminEnabled) {
     adminLinks.forEach((link) => link.classList.remove("d-none"));
   } else {
@@ -3835,6 +3836,126 @@ async function renderTransfersPage() {
   }
 }
 
+function renderSwarmDroneCard(drone) {
+  const summary = drone.summary || {};
+  const counts = summary.counts || {};
+  const systems = Array.isArray(summary.systems) ? summary.systems : [];
+  const badge = drone.is_self
+    ? '<span class="badge text-bg-info">This Drone</span>'
+    : drone.online
+      ? '<span class="badge text-bg-success">Online</span>'
+      : '<span class="badge text-bg-secondary">Offline</span>';
+  const latency = !drone.is_self && drone.online && drone.latency_ms != null
+    ? `<span class="small text-muted">${Number(drone.latency_ms)} ms</span>`
+    : "";
+  const addressLines = [];
+  if (drone.tailnet_ip) {
+    addressLines.push(`<div class="small text-truncate"><i class="bi bi-diagram-3 me-1" aria-hidden="true"></i>Tailnet <code>${escapeHtml(drone.tailnet_ip)}</code></div>`);
+  }
+  const lanUrl = drone.advertised_reachable_url || drone.reachable_url;
+  if (lanUrl) {
+    addressLines.push(`<div class="small text-truncate"><i class="bi bi-house me-1" aria-hidden="true"></i><span class="text-muted">${escapeHtml(lanUrl)}</span></div>`);
+  }
+  const stats = drone.online && drone.summary
+    ? `<div class="d-flex flex-wrap gap-3 small mt-2">
+        <span><strong>${Number(counts.roms || 0)}</strong> ROMs</span>
+        <span><strong>${Number(counts.bios || 0)}</strong> BIOS</span>
+        <span><strong>${Number(counts.artwork || 0)}</strong> artwork</span>
+        <span><strong>${systems.length}</strong> systems</span>
+      </div>`
+    : drone.error
+      ? `<div class="small text-warning mt-2"><i class="bi bi-exclamation-triangle me-1" aria-hidden="true"></i>${escapeHtml(drone.error)}</div>`
+      : "";
+  const actions = drone.is_self
+    ? ""
+    : `<div class="d-flex flex-wrap gap-2 mt-3">
+        ${drone.ui_url ? `<a class="btn btn-sm btn-outline-primary" href="${escapeHtml(drone.ui_url)}" target="_blank" rel="noopener noreferrer"><i class="bi bi-box-arrow-up-right me-1"></i>Open UI</a>` : ""}
+        <button class="btn btn-sm btn-outline-success" onclick="swarmBrowsePeerAssets('${escapeHtml(drone.drone_id)}')" ${drone.online ? "" : "disabled"}><i class="bi bi-cloud-arrow-down me-1"></i>Request Assets</button>
+      </div>`;
+  return `
+    <div class="col"><div class="card log-card h-100">
+      <div class="card-header d-flex justify-content-between align-items-center gap-2">
+        <span class="text-truncate"><i class="bi bi-hdd-network me-2" aria-hidden="true"></i>${escapeHtml(drone.name || drone.drone_id || "Drone")}</span>
+        <span class="d-flex align-items-center gap-2">${latency}${badge}</span>
+      </div>
+      <div class="card-body">
+        ${addressLines.join("") || '<div class="small text-muted">No address recorded.</div>'}
+        ${stats}
+        ${actions}
+      </div>
+    </div></div>`;
+}
+
+function swarmBrowsePeerAssets(peerId) {
+  localPeerAssetContext.peerId = String(peerId || "");
+  setHash("#admin/transfers");
+}
+
+async function swarmPairByAddress() {
+  const addressInput = document.getElementById("swarmPairAddress");
+  const codeInput = document.getElementById("swarmPairCode");
+  const button = document.getElementById("swarmPairBtn");
+  const address = (addressInput.value || "").trim();
+  const code = (codeInput.value || "").trim();
+  if (!address || !code) {
+    showToast("Enter the other Drone's address and its current pairing code.", "warning");
+    return;
+  }
+  button.disabled = true;
+  try {
+    const result = await apiPost("/admin/local-network/pair-by-address", { address, pairing_code: code });
+    const peer = result.peer || {};
+    showToast(`Paired with ${escapeHtml(peer.name || peer.drone_id || "Drone")}.`, "success");
+    await renderSwarmPage();
+  } catch (err) {
+    showToast(`Pairing failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    button.disabled = false;
+  }
+}
+
+async function renderSwarmPage() {
+  currentSystemContext = null;
+  clearSystemTheme();
+  titleNode.textContent = "Swarm";
+  subtitleNode.textContent = "Every Drone in your federation -- local and across the tailnet";
+  setLoading(true, "Loading swarm...");
+  try {
+    const overview = await api("/admin/swarm/overview");
+    const drones = Array.isArray(overview.drones) ? overview.drones : [];
+    const inactiveNote = overview.active
+      ? ""
+      : `<div class="alert alert-info d-flex align-items-center gap-2" role="alert">
+          <i class="bi bi-info-circle" aria-hidden="true"></i>
+          <span>Local Network mode is off, so paired Drones are hidden. Enable it under <a href="#admin/integration" class="alert-link">Integration</a> to pair and see the rest of the swarm.</span>
+        </div>`;
+    content.innerHTML = `
+      <div class="mb-3 d-flex flex-wrap justify-content-between gap-2">
+        <button class="btn btn-outline-secondary" onclick="setHash('#admin')">Back to Admin</button>
+        <button class="btn btn-outline-primary" onclick="renderSwarmPage()"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
+      </div>
+      ${inactiveNote}
+      <div class="row row-cols-1 row-cols-md-2 row-cols-xl-3 g-3 mb-3" id="swarmDroneGrid">
+        ${drones.map(renderSwarmDroneCard).join("")}
+      </div>
+      <div class="card log-card">
+        <div class="card-header"><i class="bi bi-plus-circle me-2" aria-hidden="true"></i>Add Drone by Address</div>
+        <div class="card-body">
+          <div class="small text-muted mb-3">Pair with a Drone that LAN discovery can't see -- for example one in another house reachable over your mesh VPN (tailnet). Enter its address and the pairing code shown on that Drone's Integration page.</div>
+          <div class="row g-2 align-items-end">
+            <div class="col-12 col-md-5"><label class="form-label small" for="swarmPairAddress">Drone address</label><input id="swarmPairAddress" class="form-control" placeholder="100.64.0.7 or https://host:port" autocomplete="off"></div>
+            <div class="col-8 col-md-4"><label class="form-label small" for="swarmPairCode">Pairing code</label><input id="swarmPairCode" class="form-control" placeholder="Code from the other Drone" autocomplete="off"></div>
+            <div class="col-4 col-md-3"><button id="swarmPairBtn" class="btn btn-primary w-100" onclick="swarmPairByAddress()"><i class="bi bi-link-45deg me-1"></i>Pair</button></div>
+          </div>
+        </div>
+      </div>`;
+  } catch (err) {
+    showToast(`Failed to load swarm: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    content.innerHTML = '<div class="themed-empty">Swarm could not be loaded.</div>';
+  } finally {
+    setLoading(false);
+  }
+}
+
 async function renderIntegrationTransfersPanel(target) {
   target.innerHTML = `
     <div id="localTransferRequestPanel"></div>
@@ -5970,6 +6091,12 @@ async function router() {
         return;
       }
       await renderTransfersPage();
+    } else if (hash === "#admin/swarm") {
+      if (!adminEnabled) {
+        setHash("");
+        return;
+      }
+      await renderSwarmPage();
     } else if (hash.startsWith("#admin/integration")) {
       if (!adminEnabled) {
         setHash("");
@@ -6043,6 +6170,11 @@ transfersMenuBtn.addEventListener("click", (event) => {
   event.preventDefault();
   if (!adminEnabled) return;
   setHash("#admin/transfers");
+});
+swarmMenuBtn.addEventListener("click", (event) => {
+  event.preventDefault();
+  if (!adminEnabled) return;
+  setHash("#admin/swarm");
 });
 adminMenuBtn.addEventListener("click", (event) => {
   event.preventDefault();
