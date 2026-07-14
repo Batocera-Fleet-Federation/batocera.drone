@@ -6552,6 +6552,28 @@ class SwarmPageTests(unittest.TestCase):
         enroll_body = self.js[enroll_start:self.js.index("function renderSwarmTailnetCard(", enroll_start)]
         self.assertIn('apiPost("/admin/tailnet/enroll", { auth_key: authKey })', enroll_body)
 
+    def test_admin_menu_has_no_redundant_swarm_tile(self) -> None:
+        # Swarm is a navbar link (like Controls/Transfers); the Admin page
+        # should not also carry a duplicate tile for it.
+        menu_start = self.js.index("async function renderAdminMenu()")
+        menu_end = self.js.index("async function updateDroneApp()")
+        menu_body = self.js[menu_start:menu_end]
+        self.assertNotIn("setHash('#admin/swarm')", menu_body)
+        self.assertNotIn(">Swarm<", menu_body)
+
+    def test_system_info_bar_shows_connected_count_not_overmind_or_swarm_badges(self) -> None:
+        bar_start = self.js.index("async function loadSystemInfoBar()")
+        bar_end = self.js.index("async function router()", bar_start)
+        body = self.js[bar_start:bar_end]
+        self.assertNotIn("Overmind: linked", body)
+        self.assertNotIn("Overmind: disconnected", body)
+        self.assertNotIn("Swarm: Connected", body)
+        self.assertNotIn("Swarm: Disconnected", body)
+        self.assertNotIn("integrations/overmind/status", body)
+        self.assertIn('api("/admin/swarm/overview")', body)
+        self.assertIn("Connected: ${connectedCount}", body)
+        self.assertIn("filter(drone => drone.online)", body)
+
     def test_swarm_page_owns_pairing_and_nearby_drones(self) -> None:
         page_start = self.js.index("async function renderSwarmPage()")
         page_end = self.js.index("async function renderIntegrationTransfersPanel", page_start)

@@ -1809,14 +1809,6 @@ async function renderAdminMenu() {
         </div>
       </div>
       <div class="col-md-4 mb-3">
-        <div class="card admin-tile pointer h-100" onclick="setHash('#admin/swarm')">
-          <div class="card-body">
-            <h5 class="card-title"><i class="bi bi-diagram-3 me-2"></i>Swarm</h5>
-            <p class="card-text">See every Drone, pair new ones, and connect the tailnet.</p>
-          </div>
-        </div>
-      </div>
-      <div class="col-md-4 mb-3">
         <div class="card admin-tile pointer h-100" onclick="setHash('#admin/automation')">
           <div class="card-body">
             <h5 class="card-title"><i class="bi bi-robot me-2"></i>Automation</h5>
@@ -5835,7 +5827,6 @@ async function loadSystemInfoBar() {
     const version = fields.batocera_version || fields.system || _extractInfoField(lines, ["version", "batocera version", "system"]);
     const droneAppVersion = fields.drone_app_version || payload.drone_app_version || "";
     const machineId = fields.machine_id || "";
-    const overmindIntegrated = fields.overmind_integrated || "no";
     const chips = [];
     if (droneVersionBadge && droneAppVersion) {
       droneVersionBadge.textContent = droneAppVersion;
@@ -5843,18 +5834,12 @@ async function loadSystemInfoBar() {
     }
     if (version) chips.push(`<span class="badge">Batocera: ${escapeHtml(version)}</span>`);
     if (machineId) chips.push(`<span class="badge">Machine ID: ${escapeHtml(machineId)}</span>`);
-    if (overmindIntegrated === "yes") {
-      chips.push(`<span class="badge" style="background:rgba(52,211,153,0.15);color:#34d399;border-color:rgba(52,211,153,0.4)">Overmind: linked</span>`);
-    } else {
-      chips.push(`<span class="badge" style="background:rgba(239,68,68,0.15);color:#ef4444;border-color:rgba(239,68,68,0.4)">Overmind: disconnected</span>`);
-    }
     try {
-      const overmindPayload = await api("/admin/integrations/overmind/status");
-      const swarmStatus = (overmindPayload.status || {}).swarm_connection_status || "disconnected";
-      const swarmConnected = String(swarmStatus).toLowerCase() === "connected";
-      chips.push(`<span class="badge" style="background:${swarmConnected ? "rgba(52,211,153,0.15)" : "rgba(239,68,68,0.15)"};color:${swarmConnected ? "#34d399" : "#ef4444"};border-color:${swarmConnected ? "rgba(52,211,153,0.4)" : "rgba(239,68,68,0.4)"}">Swarm: ${swarmConnected ? "Connected" : "Disconnected"}</span>`);
+      const overview = await api("/admin/swarm/overview");
+      const connectedCount = (overview.drones || []).filter(drone => drone.online).length;
+      chips.push(`<span class="badge" style="background:rgba(52,211,153,0.15);color:#34d399;border-color:rgba(52,211,153,0.4)">Connected: ${connectedCount}</span>`);
     } catch (_) {
-      chips.push(`<span class="badge" style="background:rgba(239,68,68,0.15);color:#ef4444;border-color:rgba(239,68,68,0.4)">Swarm: Disconnected</span>`);
+      // Swarm overview is best-effort context, not core system info.
     }
     if (machineNav && machineId) machineNav.textContent = `Machine ID: ${machineId}`;
     if (!chips.length && lines.length) {
