@@ -2604,6 +2604,46 @@ class SettingsTests(unittest.TestCase):
             self.assertIn(["batocera-save-overlay"], run_commands)
             self.assertIn([set_screen_mode.EMULATIONSTATION_SERVICE, "start"], run_commands)
 
+    def test_privileged_screen_mode_helper_skips_restart_when_mode_is_unchanged(self) -> None:
+        from app import set_screen_mode
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "es_settings.cfg"
+            config.write_text(
+                '<?xml version="1.0"?><map><string name="UIMode" value="Full"/></map>',
+                encoding="utf-8",
+            )
+            with mock.patch("app.set_screen_mode.subprocess.run") as run:
+                restarted = set_screen_mode.set_screen_mode("full", config=config)
+
+            self.assertFalse(restarted)
+            run.assert_not_called()
+
+    def test_non_root_screen_mode_skips_worker_when_mode_is_unchanged(self) -> None:
+        from app.device import device_control
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            es_settings = root / "system" / "configs" / "emulationstation" / "es_settings.cfg"
+            es_settings.parent.mkdir(parents=True)
+            es_settings.write_text(
+                '<?xml version="1.0"?><map><string name="UIMode" value="Full"/></map>',
+                encoding="utf-8",
+            )
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "ES_SETTINGS_FILE": str(es_settings)},
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            with mock.patch("app.device.device_control.os.geteuid", return_value=999), \
+                 mock.patch("app.device.device_control._request_screen_mode_service_control") as dispatch:
+                path, restarted = device_control._apply_screen_mode(settings, "full")
+
+            self.assertEqual(path, es_settings)
+            self.assertFalse(restarted)
+            dispatch.assert_not_called()
+
     def test_screen_mode_start_does_not_capture_output_via_pipe(self) -> None:
         # Regression test: "start" backgrounds `startx &` without redirecting its
         # own stdout/stderr, so a backgrounded EmulationStation/X process tree

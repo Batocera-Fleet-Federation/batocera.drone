@@ -44,6 +44,16 @@ def _write_ui_mode(config: Path, target: str) -> None:
     tree.write(config, encoding="utf-8", xml_declaration=True)
 
 
+def _read_ui_mode(config: Path) -> Optional[str]:
+    try:
+        root = ET.parse(config).getroot()
+    except (OSError, ET.ParseError):
+        return None
+    node = root.find(".//string[@name='UIMode']")
+    mode = str(node.get("value") if node is not None else "").strip().lower()
+    return mode if mode in {"full", "kiosk", "kid"} else None
+
+
 def _run_step(command: list, *, timeout: int = 120, capture_output: bool = True) -> bool:
     """Run a best-effort step, logging its combined output. Never raises.
 
@@ -76,19 +86,23 @@ def _run_step(command: list, *, timeout: int = 120, capture_output: bool = True)
         return False
 
 
-def set_screen_mode(mode: str, config: Optional[Path] = None) -> None:
+def set_screen_mode(mode: str, config: Optional[Path] = None) -> bool:
     """Set UIMode and (re)start EmulationStation.
 
-    Stop and overlay-save are best-effort; EmulationStation is always restarted so
-    the screen comes back even when an earlier step fails in the headless service
-    context. The UIMode is written to es_settings.cfg before the restart, so the new
-    mode takes effect as soon as EmulationStation relaunches.
+    If the requested mode is already active, return without touching EmulationStation.
+    Otherwise, stop and overlay-save are best-effort; EmulationStation is always
+    restarted so the screen comes back even when an earlier step fails in the
+    headless service context. The UIMode is written to es_settings.cfg before the
+    restart, so the new mode takes effect as soon as EmulationStation relaunches.
     """
     normalized_mode = str(mode or "").strip().lower()
     if normalized_mode not in {"full", "kiosk", "kid"}:
         raise ValueError("Screen mode must be one of: full, kiosk, kid")
     if config is None:
         config = CONFIG
+    if _read_ui_mode(config) == normalized_mode:
+        print(f"[set_screen_mode] UIMode is already {normalized_mode.title()}; restart skipped")
+        return False
     target = normalized_mode.title()
     print(f"[set_screen_mode] applying UIMode={target}")
     _run_step([EMULATIONSTATION_SERVICE, "stop"], timeout=60)
@@ -107,6 +121,7 @@ def set_screen_mode(mode: str, config: Optional[Path] = None) -> None:
     if not started:
         raise RuntimeError("EmulationStation did not restart after the screen mode change")
     print("[set_screen_mode] EmulationStation start completed")
+    return True
 
 
 def main() -> int:

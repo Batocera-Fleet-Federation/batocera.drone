@@ -568,7 +568,7 @@ def _execute_overmind_action(
             settings_path, restarted = _apply_screen_mode(settings, mode)
         except (OSError, subprocess.SubprocessError, ET.ParseError, ValueError) as error:
             return "failed", f"Unable to update screen mode settings: {error}", None
-        suffix = " EmulationStation restart issued." if restarted else " Applies on the next EmulationStation restart."
+        suffix = " EmulationStation restart issued." if restarted else " EmulationStation restart was not needed."
         return "completed", f"Screen mode set to {mode}.{suffix}", {
             "type": "screen_mode",
             "mode": mode,

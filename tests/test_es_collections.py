@@ -498,6 +498,20 @@ class ScreenModeAdminHandlerTests(unittest.TestCase):
             apply_mock.assert_called_once_with(settings, "kiosk")
             self.assertEqual(handler.response, (200, {"screen_mode": "kiosk", "emulationstation_restarted": True}))
 
+    def test_post_reports_no_restart_when_mode_is_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            handler = self._handler(settings)
+            with mock.patch(
+                "app.web.handlers_diagnostics._apply_screen_mode",
+                return_value=(settings.es_settings_file, False),
+            ):
+                handler._handle_admin_screen_mode_post({"mode": "full"})
+            self.assertEqual(
+                handler.response,
+                (200, {"screen_mode": "full", "emulationstation_restarted": False}),
+            )
+
     def test_post_rejects_invalid_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(Path(tmp))
@@ -821,6 +835,9 @@ class FrictionlessSaveTests(unittest.TestCase):
         # access until switched back, a more consequential action than a volume
         # or screensaver tweak.
         self.assertIn("restart EmulationStation now?", self.js)
+
+    def test_current_screen_mode_button_is_disabled(self) -> None:
+        self.assertIn("btn.disabled = isActive;", self.js)
 
     def test_music_volume_toast_claims_a_restart_but_screensaver_does_not(self) -> None:
         # Reverted per a live device confirming music_volume genuinely needs the

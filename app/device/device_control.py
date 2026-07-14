@@ -378,8 +378,13 @@ def _kill_running_emulator() -> bool:
 
 
 def _apply_screen_mode(settings: Settings, mode: str) -> tuple[Path, bool]:
+    normalized_mode = str(mode or "").strip().lower()
+    if normalized_mode not in {"full", "kiosk", "kid"}:
+        raise ValueError("Screen mode must be one of: full, kiosk, kid")
     if settings.use_fake_data:
-        return _set_screen_mode(settings, mode), False
+        if _get_screen_mode(settings) == normalized_mode:
+            return settings.es_settings_file, False
+        return _set_screen_mode(settings, normalized_mode), False
     # When the Drone app already runs as root, apply the change directly using the
     # proven stop -> write -> overlay -> start sequence shared with set_screen_mode.py.
     if hasattr(os, "geteuid") and os.geteuid() == 0:
@@ -387,13 +392,15 @@ def _apply_screen_mode(settings: Settings, mode: str) -> tuple[Path, bool]:
         # overlapping stop/start sequences race the same EmulationStation/X session
         # and can wedge it into a permanent crash loop.
         with _ES_LIFECYCLE_LOCK:
-            _set_screen_mode_helper(mode, config=settings.es_settings_file)
-        return settings.es_settings_file, True
+            restarted = _set_screen_mode_helper(normalized_mode, config=settings.es_settings_file)
+        return settings.es_settings_file, restarted
     # Non-root (production): the privileged service worker runs set_screen_mode.py for us.
     # _request_screen_mode_service_control returns True only after the worker reports "ok"
     # and raises on failure/timeout, so the result we report back to Overmind reflects
     # what actually happened instead of falsely claiming an EmulationStation restart.
-    if not _request_screen_mode_service_control(mode):
+    if _get_screen_mode(settings) == normalized_mode:
+        return settings.es_settings_file, False
+    if not _request_screen_mode_service_control(normalized_mode):
         raise OSError(
             "Unable to dispatch the privileged screen mode request; the Drone service "
             "control worker may not be running."

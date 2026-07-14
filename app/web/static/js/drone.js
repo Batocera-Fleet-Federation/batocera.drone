@@ -5473,6 +5473,7 @@ function syncScreenModeControls(mode) {
     const isActive = btn.dataset.screenMode === mode;
     btn.classList.toggle("btn-primary", isActive);
     btn.classList.toggle("btn-outline-primary", !isActive);
+    btn.disabled = isActive;
   });
 }
 
@@ -5491,7 +5492,10 @@ async function applyDroneScreenMode(mode) {
   try {
     const result = await apiPost("/admin/system-info/screen-mode", {mode});
     syncScreenModeControls(result.screen_mode);
-    showToast(`Screen mode set to ${result.screen_mode}; EmulationStation restarted.`, "success");
+    const outcome = result.emulationstation_restarted
+      ? "EmulationStation restarted."
+      : "EmulationStation was already in that mode; restart skipped.";
+    showToast(`Screen mode set to ${result.screen_mode}; ${outcome}`, "success");
   } catch (err) {
     showToast(`Failed to set screen mode: ${escapeHtml(err.message || "unknown error")}`, "danger");
   }
