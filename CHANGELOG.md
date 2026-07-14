@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.1.52] - 2026-07-14
+
+- Asset-cache error: Controls now stops stale async rendering after navigation and checks DOM elements before updating them. Uploader transfer disappearing: polling now refreshes both /admin/downloads and /admin/uploads, preserving Drone A’s upload row. Screensaver setting: updates now restart EmulationStation through the existing lifecycle lock so ScreenSaverTime takes effect.
+
 ## [v0.1.51] - 2026-07-14
 
 - Updating issue where emulationstation does not open after restart.
