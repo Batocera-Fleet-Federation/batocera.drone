@@ -44,7 +44,7 @@ The installer will ask for the username and password you want to use when openin
 On Batocera v43+, the installer enables the Drone service for future boots and starts it immediately, so no reboot or manual service toggle is needed. (On older Batocera versions, Drone starts on the next boot via `custom.sh`.) If you ever need to start it manually:
 
 ```bash
-batocera-services start DRONE_SERVER
+batocera-services start DRONE_SERVER 
 ```
 
 Then open Drone in your browser:
