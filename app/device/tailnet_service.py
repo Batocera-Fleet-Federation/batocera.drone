@@ -136,6 +136,21 @@ def tailnet_peer_ips() -> set[str]:
     }
 
 
+def ensure_tailnet_networking() -> None:
+    """Apply the Batocera-compatible netfilter preference, best effort.
+
+    Batocera's kernel omits the iptables filter modules expected by Tailscale.
+    Re-applying this at Drone startup also repairs already-enrolled nodes whose
+    persisted preference predates the installer/enrollment fix.
+    """
+    if not TAILSCALE_CLI.exists():
+        return
+    try:
+        _run_cli(["set", "--netfilter-mode=off"], timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return
+
+
 def _start_daemon_if_needed() -> Optional[str]:
     """Best-effort DRONE_TAILNET service start; returns an error string or None."""
     try:
@@ -195,6 +210,11 @@ def tailnet_enroll(auth_key: str) -> dict:
                 f"--authkey={key}",
                 f"--hostname={hostname}",
                 "--accept-dns=false",
+                # Batocera's kernel does not provide the iptables filter
+                # modules Tailscale tries to manage by default. Its base image
+                # also has no host firewall to configure, so leave filtering
+                # off and let tailscaled use the existing tailscale0 routes.
+                "--netfilter-mode=off",
                 "--timeout=45s",
             ],
             timeout=60,

@@ -29,6 +29,7 @@ try:
         _normalize_peer_address,
         _peer_address,
         _peer_get_json,
+        _peer_get_json_for_peer,
         _public_local_peer,
     )
 except ImportError:  # pragma: no cover - direct script execution fallback
@@ -46,6 +47,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         _normalize_peer_address,
         _peer_address,
         _peer_get_json,
+        _peer_get_json_for_peer,
         _public_local_peer,
     )
 
@@ -424,16 +426,15 @@ class HandlersNetworkMixin:
             if self.settings.use_fake_data and peer.get("fake_data"):
                 summary = self._collect_peer_inventory("summary", {})
             else:
-                address = _peer_address(peer)
-                if not address:
-                    raise ValueError("no reachable address recorded for this peer")
-                summary = _peer_get_json(
-                    f"{address}/v1/api/peer/inventory/summary",
+                summary, address = _peer_get_json_for_peer(
+                    peer,
+                    "/v1/api/peer/inventory/summary",
                     self.settings,
                     peer_id=entry["drone_id"],
                     config={"network_mode": "local_network"},
                     timeout=SWARM_PEER_TIMEOUT_SECONDS,
                 )
+                entry["reachable_url"] = address
             entry["latency_ms"] = int((time.monotonic() - started) * 1000)
             entry["summary"] = {key: summary.get(key) for key in ("systems", "system_counts", "counts", "updated_at")}
             entry["online"] = True
@@ -555,12 +556,10 @@ class HandlersNetworkMixin:
                 value = str((query_params.get(key) or [""])[0]).strip()
                 if value:
                     params.append(f"{quote(key, safe='')}={quote(value, safe='')}")
-            address = _peer_address(peer)
-            if not address:
-                raise ValueError("paired peer has no reachable address")
             suffix = f"?{'&'.join(params)}" if params else ""
-            result = _peer_get_json(
-                f"{address}/v1/api/peer/inventory/{quote(asset_type, safe='')}{suffix}",
+            result, _ = _peer_get_json_for_peer(
+                peer,
+                f"/v1/api/peer/inventory/{quote(asset_type, safe='')}{suffix}",
                 self.settings,
                 peer_id=peer_id,
                 config={"network_mode": "local_network"},
@@ -1023,14 +1022,13 @@ class HandlersNetworkMixin:
                     key, value = raw.split("=", 1)
                     query_params[unquote(key)] = [unquote(value)]
             return self._collect_peer_inventory(asset_type, query_params)
-        address = _peer_address(peer)
-        if not address:
-            raise ValueError("paired peer has no reachable address")
         suffix = f"?{'&'.join(params)}" if params else ""
-        return _peer_get_json(
-            f"{address}/v1/api/peer/inventory/{quote(asset_type, safe='')}{suffix}",
+        result, _ = _peer_get_json_for_peer(
+            peer,
+            f"/v1/api/peer/inventory/{quote(asset_type, safe='')}{suffix}",
             self.settings,
             peer_id=peer_id,
             config={"network_mode": "local_network"},
             timeout=PEER_INVENTORY_TIMEOUT_SECONDS,
         )
+        return result

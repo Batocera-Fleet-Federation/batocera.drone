@@ -361,17 +361,17 @@ TAILNETSTART
     echo "Enrolling in the tailnet with the provided auth key ..."
     # --accept-dns=false: keep Batocera's resolv.conf untouched (the Drone
     # tailnet integration works on raw 100.x addresses, not MagicDNS names).
-    if "$TS_DIR/bin/tailscale" --socket="$TS_SOCKET" up --authkey="$TS_AUTH" --hostname="$TS_HOSTNAME" --accept-dns=false; then
+    if "$TS_DIR/bin/tailscale" --socket="$TS_SOCKET" up --authkey="$TS_AUTH" --hostname="$TS_HOSTNAME" --accept-dns=false --netfilter-mode=off; then
       echo "✓ Enrolled in the tailnet as '$TS_HOSTNAME'"
     else
       echo "Tailnet enrollment failed; run it manually later:"
-      echo "  $TS_DIR/bin/tailscale --socket=$TS_SOCKET up --accept-dns=false"
+      echo "  $TS_DIR/bin/tailscale --socket=$TS_SOCKET up --accept-dns=false --netfilter-mode=off"
     fi
   else
     echo ""
     echo "Tailscale is installed and running but this drone is NOT enrolled yet."
     echo "Enroll it once (prints a login URL to open from any browser):"
-    echo "  $TS_DIR/bin/tailscale --socket=$TS_SOCKET up --hostname=$TS_HOSTNAME --accept-dns=false"
+    echo "  $TS_DIR/bin/tailscale --socket=$TS_SOCKET up --hostname=$TS_HOSTNAME --accept-dns=false --netfilter-mode=off"
     echo "Or re-run this installer with TS_AUTHKEY=tskey-auth-... for hands-free enrollment."
   fi
   return 0

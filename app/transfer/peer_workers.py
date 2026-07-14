@@ -17,6 +17,7 @@ from urllib.parse import quote
 try:
     from ..common.logging_setup import _overmind_log
     from ..common.settings import Settings
+    from ..device.tailnet_service import ensure_tailnet_networking
     from ..overmind.overmind_client import _format_overmind_error, _overmind_post_json
     from ..overmind.overmind_config import (
         _load_overmind_config_for_settings,
@@ -33,11 +34,13 @@ try:
         _peer_address,
         _peer_api_port,
         _peer_get_json,
+        _peer_get_json_for_peer,
         _peer_health_url,
     )
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.logging_setup import _overmind_log  # type: ignore
     from common.settings import Settings  # type: ignore
+    from device.tailnet_service import ensure_tailnet_networking  # type: ignore
     from overmind.overmind_client import _format_overmind_error, _overmind_post_json  # type: ignore
     from overmind.overmind_config import (  # type: ignore
         _load_overmind_config_for_settings,
@@ -54,6 +57,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         _peer_address,
         _peer_api_port,
         _peer_get_json,
+        _peer_get_json_for_peer,
         _peer_health_url,
     )
 
@@ -177,6 +181,8 @@ def _start_peer_health_check_thread(settings: Settings) -> None:
 
 
 def _start_local_network_workers(settings: Settings) -> None:
+    Thread(target=ensure_tailnet_networking, name="drone-tailnet-networking", daemon=True).start()
+
     def fingerprint() -> str:
         return str(DroneCertificateManager(settings).metadata().get("fingerprint") or "")
 
@@ -208,12 +214,14 @@ def _start_local_network_workers(settings: Settings) -> None:
                     continue
                 started = time.monotonic()
                 try:
-                    _peer_get_json(
-                        f"{address.rstrip('/')}/v1/api/peer/health",
+                    _, address = _peer_get_json_for_peer(
+                        peer,
+                        "/v1/api/peer/health",
                         settings,
                         peer_id=peer_id,
                         config={"network_mode": "local_network"},
                     )
+                    result["target_address"] = address
                     result["status"] = "pass"
                     result["latency_ms"] = int((time.monotonic() - started) * 1000)
                 except Exception as error:

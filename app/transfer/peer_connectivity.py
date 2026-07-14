@@ -393,10 +393,92 @@ def _peer_address(peer: dict) -> Optional[str]:
     return None
 
 
+def _peer_address_candidates(peer: dict) -> list[str]:
+    """Return trusted peer routes in failover order.
+
+    Keep the existing LAN/public route first so same-network traffic remains
+    fast, then try the peer's stable tailnet address and advertised hostname.
+    A paired peer can retain a stale LAN address after it moves networks; the
+    tailnet candidate is what lets callers recover without re-pairing.
+    """
+    candidates: list[str] = []
+
+    def add(address: object) -> None:
+        value = str(address or "").strip().rstrip("/")
+        if value and value not in candidates:
+            candidates.append(value)
+
+    add(_peer_address(peer))
+    resolved = peer.get("resolved_network") if isinstance(peer.get("resolved_network"), dict) else {}
+    tailnet_ip = str(peer.get("tailnet_ip") or resolved.get("tailnet_ip") or "").strip()
+    if is_tailnet_address(tailnet_ip):
+        scheme = str(peer.get("scheme") or peer.get("protocol") or "https").strip() or "https"
+        port = _peer_api_port(peer)
+        host = f"[{tailnet_ip}]" if ":" in tailnet_ip and not tailnet_ip.startswith("[") else tailnet_ip
+        port_suffix = "" if (scheme == "https" and port == 443) or (scheme == "http" and port == 80) else f":{port}"
+        add(f"{scheme}://{host}{port_suffix}")
+    add(peer.get("advertised_reachable_url"))
+    return candidates
+
+
+def _peer_get_json_for_peer(
+    peer: dict,
+    endpoint: str,
+    settings: Settings,
+    *,
+    peer_id: Optional[str] = None,
+    config: Optional[dict] = None,
+    refresh_cert: bool = False,
+    timeout: float = PEER_CHECK_TIMEOUT_SECONDS,
+) -> tuple[dict, str]:
+    """GET a peer endpoint, failing over from LAN/public to tailnet.
+
+    Non-final candidates use the short connectivity timeout so a stale LAN
+    route cannot hold an inventory request for its full (potentially two
+    minute) transfer timeout. Every attempt uses the same pinned peer identity
+    and mTLS client; this is address failover, never a TLS downgrade.
+    """
+    path = str(endpoint or "").strip()
+    if not path.startswith("/"):
+        raise ValueError("peer endpoint must start with /")
+    addresses = _peer_address_candidates(peer)
+    if not addresses:
+        raise ValueError("no peer address available")
+    last_error: Optional[Exception] = None
+    for index, address in enumerate(addresses):
+        attempt_timeout = timeout
+        if index < len(addresses) - 1:
+            attempt_timeout = min(float(timeout), PEER_CHECK_TIMEOUT_SECONDS)
+        try:
+            payload = _peer_get_json(
+                f"{address}{path}",
+                settings,
+                peer_id=peer_id,
+                config=config,
+                refresh_cert=refresh_cert,
+                timeout=attempt_timeout,
+            )
+            return payload, address
+        except HTTPError:
+            # The peer answered and rejected the request; changing routes
+            # cannot make an authorization or endpoint error succeed.
+            raise
+        except (OSError, URLError, ssl.SSLError) as error:
+            last_error = error
+        except Exception:
+            # Malformed payloads and programming errors are not reachability
+            # failures and should remain visible to the caller.
+            raise
+    if last_error is not None:
+        raise last_error
+    raise ValueError("no peer address available")
+
+
 def _check_peer(settings: Settings, peer: dict, config: Optional[dict] = None) -> dict:
     target_id = str(peer.get("drone_id") or peer.get("device_id") or peer.get("id") or "")
     peer_id = target_id
-    address = _peer_address(peer)
+    addresses = _peer_address_candidates(peer)
+    address = addresses[0] if addresses else None
     checked_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     result = {
         "source_drone_id": settings.overmind_device_id,
@@ -412,14 +494,29 @@ def _check_peer(settings: Settings, peer: dict, config: Optional[dict] = None) -
         return result
     started = time.monotonic()
     try:
-        _peer_get_json(_peer_health_url(address), settings, peer_id=peer_id, config=config)
+        _, address = _peer_get_json_for_peer(
+            peer,
+            "/health",
+            settings,
+            peer_id=peer_id,
+            config=config,
+        )
+        result["target_address"] = address
         result["status"] = "pass"
         result["latency_ms"] = int((time.monotonic() - started) * 1000)
     except ssl.SSLError as error:
         message = str(error)
         if config and any(term in message.lower() for term in ("unknown ca", "certificate", "cert")):
             try:
-                _peer_get_json(_peer_health_url(address), settings, peer_id=peer_id, config=config, refresh_cert=True)
+                _, address = _peer_get_json_for_peer(
+                    peer,
+                    "/health",
+                    settings,
+                    peer_id=peer_id,
+                    config=config,
+                    refresh_cert=True,
+                )
+                result["target_address"] = address
                 result["status"] = "pass"
                 result["latency_ms"] = int((time.monotonic() - started) * 1000)
                 return result

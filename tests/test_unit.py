@@ -583,6 +583,56 @@ class SettingsTests(unittest.TestCase):
         }
         self.assertEqual(_peer_address(peer), "https://bff-drone-b:443")
 
+    def test_peer_address_candidates_keep_lan_first_then_tailnet(self) -> None:
+        from app.transfer.peer_connectivity import _peer_address_candidates
+
+        peer = {
+            "reachable_url": "https://192.168.0.180",
+            "advertised_reachable_url": "https://BATOCERA-LAPTOP.local",
+            "tailnet_ip": "100.91.173.37",
+            "scheme": "https",
+            "api_port": 443,
+        }
+        self.assertEqual(
+            _peer_address_candidates(peer),
+            [
+                "https://192.168.0.180",
+                "https://100.91.173.37",
+                "https://BATOCERA-LAPTOP.local",
+            ],
+        )
+
+    def test_peer_json_falls_back_to_tailnet_with_short_lan_timeout(self) -> None:
+        from app.transfer import peer_connectivity
+
+        peer = {
+            "reachable_url": "https://192.168.0.180",
+            "tailnet_ip": "100.91.173.37",
+            "scheme": "https",
+            "api_port": 443,
+        }
+        settings = mock.Mock()
+        with mock.patch.object(
+            peer_connectivity,
+            "_peer_get_json",
+            side_effect=[URLError("timed out"), {"systems": ["snes"]}],
+        ) as get_json:
+            payload, address = peer_connectivity._peer_get_json_for_peer(
+                peer,
+                "/v1/api/peer/inventory/summary",
+                settings,
+                peer_id="peer-id",
+                config={"network_mode": "local_network"},
+                timeout=120,
+            )
+
+        self.assertEqual(payload, {"systems": ["snes"]})
+        self.assertEqual(address, "https://100.91.173.37")
+        self.assertEqual(get_json.call_args_list[0].args[0], "https://192.168.0.180/v1/api/peer/inventory/summary")
+        self.assertEqual(get_json.call_args_list[0].kwargs["timeout"], 3)
+        self.assertEqual(get_json.call_args_list[1].args[0], "https://100.91.173.37/v1/api/peer/inventory/summary")
+        self.assertEqual(get_json.call_args_list[1].kwargs["timeout"], 120)
+
     def test_peer_health_url_uses_public_health_endpoint(self) -> None:
         self.assertEqual(_peer_health_url("https://198.51.100.21"), "https://198.51.100.21/health")
         self.assertEqual(_peer_health_url("https://bff-drone-b:443/"), "https://bff-drone-b:443/health")
@@ -6793,7 +6843,20 @@ class TailnetServiceTests(unittest.TestCase):
         self.assertNotIn("SECRET", str(caught.exception))
         up_command = next(cmd for cmd in commands if "up" in cmd)
         self.assertIn("--accept-dns=false", up_command)
+        self.assertIn("--netfilter-mode=off", up_command)
         self.assertTrue(any(arg.startswith("--authkey=") for arg in up_command))
+
+    def test_startup_repairs_existing_tailnet_netfilter_preference(self) -> None:
+        from app.device import tailnet_service
+
+        proc = mock.Mock(returncode=0, stdout="", stderr="")
+        with tempfile.NamedTemporaryFile() as fake_cli, \
+                mock.patch.object(tailnet_service, "TAILSCALE_CLI", Path(fake_cli.name)), \
+                mock.patch.object(tailnet_service.subprocess, "run", return_value=proc) as run:
+            tailnet_service.ensure_tailnet_networking()
+
+        self.assertIn("set", run.call_args.args[0])
+        self.assertIn("--netfilter-mode=off", run.call_args.args[0])
 
     def test_enroll_success_returns_fresh_status(self) -> None:
         from app.device import tailnet_service
@@ -6873,6 +6936,7 @@ class InstallerTailscaleTests(unittest.TestCase):
         self.assertIn("DRONE_SKIP_TAILSCALE", self.install)
         self.assertIn("TS_AUTHKEY", self.install)
         self.assertIn("--authkey=", self.install)
+        self.assertIn("--netfilter-mode=off", self.install)
         # Keep Batocera's DNS untouched; the integration works on raw 100.x IPs.
         self.assertIn("--accept-dns=false", self.install)
         # A mesh-setup failure must not fail the Drone install itself.
