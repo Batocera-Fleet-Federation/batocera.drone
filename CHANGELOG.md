@@ -1,5 +1,12 @@
 # Changelog
 
+## [v0.1.50] - 2026-07-14
+
+- Installer sets up the Tailscale mesh automatically (DRONE_TAILNET service)
+- Swarm page: fleet overview dashboard + pair-by-address UI
+- Tailnet-as-LAN: mesh-VPN (Tailscale) peers pair and transfer like local peers
+- Updating drone to restart ES after music volume is set; only way to get it to stick.
+
 ## [v0.1.49] - 2026-07-13
 
 - Bug fix: ES stopping and not restarting after timer.
