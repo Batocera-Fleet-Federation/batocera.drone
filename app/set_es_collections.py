@@ -17,10 +17,8 @@ running is invisible until it restarts. Confirmed by reading the real ES
 source (AudioManager.cpp reads MusicVolume from the same Settings singleton
 that Settings::loadFile() only populates once, at startup; the HTTP control
 API in HttpServerThread.cpp has no settings-reload endpoint) and by a live
-device: music_volume genuinely needs the restart, same as everything else
-here. screensaver_time_ms is presumed to need it too for the identical
-reason, but is left out of RESTART_REQUIRED_FIELDS for now pending explicit
-confirmation -- don't assume it's actually live-applying correctly.
+device: music_volume and screensaver_time_ms both need the restart, the same
+as the other settings here.
 
 Deliberately self-contained (stdlib only, no imports from the rest of the
 ``app`` package) like set_screen_mode.py / set_volume.py: the caller (Drone
@@ -46,11 +44,11 @@ EMULATIONSTATION_SERVICE = "/etc/init.d/S31emulationstation"
 # it only reads es_settings.cfg via Settings::loadFile() at its own startup, and
 # has no live-reload path (confirmed against the real ES source: AudioManager.cpp
 # reads MusicVolume from that same one-time-loaded map; the HTTP control API has
-# no settings-reload endpoint). screensaver_time_ms is the one exception left
-# here -- not yet confirmed either way, kept as-is until it's specifically
-# verified broken or fixed, unlike music_volume which a live device confirmed.
+# no settings-reload endpoint). A live device confirms ScreenSaverTime follows
+# the same startup-only behavior, so screensaver changes restart ES as well.
 RESTART_REQUIRED_FIELDS = {
     "music_volume",
+    "screensaver_time_ms",
     "hidden_systems",
     "auto_collections",
     "custom_collections",

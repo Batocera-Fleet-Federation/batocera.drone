@@ -534,7 +534,7 @@ def _schemas() -> Dict[str, Schema]:
                 "auto_collections": _array(_string()),
                 "custom_collections": _array(_string()),
             },
-            description="Partial update: each field is optional and, when present, replaces that setting's FULL desired value/list (not a diff). music_volume/screensaver_minutes apply live; hidden_systems/ungrouped_systems/auto_collections/custom_collections restart EmulationStation.",
+            description="Partial update: each field is optional and, when present, replaces that setting's FULL desired value/list (not a diff). Applying these startup-only EmulationStation settings restarts EmulationStation.",
         ),
         "DownloadJob": download_job,
         "AdminDownloadsResponse": _object(
@@ -1200,7 +1200,7 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
                     tags=["admin"],
                 ),
                 "post": _operation(
-                    "Update EmulationStation systems-displayed / grouped-systems / collections / music volume / screensaver (restarts EmulationStation except for music_volume/screensaver_minutes, which apply live)",
+                    "Update EmulationStation systems-displayed / grouped-systems / collections / music volume / screensaver (restarts EmulationStation)",
                     {"200": _json_response("EsCollectionsState")},
                     request_body=_json_request("EsCollectionsUpdateRequest"),
                     tags=["admin"],

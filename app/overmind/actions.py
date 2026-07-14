@@ -78,9 +78,8 @@ except ImportError:  # pragma: no cover - direct script execution fallback
 
 # Friendly-name counterpart of set_es_collections.RESTART_REQUIRED_FIELDS (that
 # module uses the low-level field names written to es_settings.cfg; this is the
-# set_es_collections action's friendly payload keys) -- screensaver_minutes is
-# the only one that doesn't restart EmulationStation.
-_ES_RESTART_REQUIRED_UPDATE_KEYS = {"music_volume", "hidden_systems", "ungrouped_systems", "auto_collections", "custom_collections"}
+# set_es_collections action's friendly payload keys).
+_ES_RESTART_REQUIRED_UPDATE_KEYS = {"music_volume", "screensaver_minutes", "hidden_systems", "ungrouped_systems", "auto_collections", "custom_collections"}
 
 
 def _execute_overmind_action(
@@ -635,8 +634,8 @@ def _execute_overmind_action(
             state = _apply_es_collections(settings, updates)
         except (OSError, subprocess.SubprocessError, ValueError) as error:
             return "failed", f"Unable to update EmulationStation collections: {error}", None
-        # music_volume/screensaver_minutes apply live; everything else here changes
-        # which systems/collections are shown and restarts EmulationStation.
+        # These settings are loaded by EmulationStation at startup, so applying
+        # any recognized update restarts it.
         restarted = bool(_ES_RESTART_REQUIRED_UPDATE_KEYS.intersection(updates))
         suffix = " EmulationStation restarted." if restarted else ""
         return "completed", f"EmulationStation collections updated ({', '.join(sorted(updates))}).{suffix}", {

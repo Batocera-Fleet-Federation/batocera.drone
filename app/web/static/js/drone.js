@@ -611,9 +611,14 @@ function startTransfersAutoRefresh() {
     if (!transfersBody) return;
     transfersInFlight = true;
     try {
-      const payload = await api("/admin/downloads");
-      if (!transfersBody.contains(document.activeElement)) {
-        transfersBody.innerHTML = renderTransfersPanel(payload);
+      const [downloads, uploads] = await Promise.all([api("/admin/downloads"), api("/admin/uploads")]);
+      if (
+        window.location.hash === "#admin/transfers" &&
+        transfersBody.isConnected &&
+        document.getElementById("transfersBody") === transfersBody &&
+        !transfersBody.contains(document.activeElement)
+      ) {
+        transfersBody.innerHTML = renderTransfersPanel(downloads, uploads);
       }
     } catch (err) {
       // Transient poll failure: leave the last good data in place silently.
@@ -5788,6 +5793,7 @@ async function renderAdminControlsPage() {
                 <input class="form-range flex-grow-1" type="range" id="screensaverSlider" min="0" max="120" step="1" value="5" aria-label="Screensaver delay in minutes" disabled>
                 <span class="small text-muted text-nowrap">min</span>
               </div>
+              <div class="small text-muted mt-2">Restarts EmulationStation.</div>
             </div>
           </div>
         </div>
@@ -5870,7 +5876,7 @@ async function renderAdminControlsPage() {
         try {
           const result = await apiPost("/admin/es-collections", {screensaver_minutes: Number(screensaverSlider.value)});
           syncScreensaverControls(result.screensaver_minutes);
-          showToast(`Screensaver delay set to ${result.screensaver_minutes} min.`, "success");
+          showToast(`Screensaver delay set to ${result.screensaver_minutes} min.; EmulationStation restarted.`, "success");
         } catch (err) {
           showToast(`Failed to set screensaver delay: ${escapeHtml(err.message || "unknown error")}`, "danger");
         } finally {
@@ -5891,15 +5897,22 @@ async function renderAdminControlsPage() {
     try {
       await loadEsCollections();
     } catch (err) {
-      document.getElementById("esCollectionsBody").innerHTML = '<div class="empty-state">Unable to load collections.</div>';
+      const collectionsBody = document.getElementById("esCollectionsBody");
+      if (collectionsBody) collectionsBody.innerHTML = '<div class="empty-state">Unable to load collections.</div>';
     }
+
+    // Navigation can remove the Controls DOM while its API requests are still
+    // completing. Do not start another request or render into the next page.
+    if (window.location.hash !== "#admin/controls") return;
 
     async function loadAssetCache() {
       const cachePayload = await api("/admin/asset-cache");
-      document.getElementById("systemInfoAssetCacheBody").innerHTML = renderAssetCachePanel(cachePayload, false);
+      const cacheBody = document.getElementById("systemInfoAssetCacheBody");
+      if (!cacheBody || window.location.hash !== "#admin/controls") return;
+      cacheBody.innerHTML = renderAssetCachePanel(cachePayload, false);
     }
     window.refreshSystemInfoAssetCache = loadAssetCache;
-    document.getElementById("systemInfoAssetCacheRefreshBtn").addEventListener("click", async () => {
+    document.getElementById("systemInfoAssetCacheRefreshBtn")?.addEventListener("click", async () => {
       try {
         await loadAssetCache();
       } catch (err) {

@@ -6,12 +6,11 @@ setting here lives in es_settings.cfg, which EmulationStation only re-reads
 at its own startup (confirmed against the real ES source -- Settings::loadFile()
 runs once at startup, AudioManager.cpp reads MusicVolume from that same
 one-time-loaded map, and the HTTP control API has no settings-reload
-endpoint), so applying almost all of them restarts EmulationStation (via the
-same stop -> write -> overlay-save -> start sequence as set_screen_mode.py).
-screensaver_minutes is the current exception, not yet confirmed either way.
-See set_es_collections.py (RESTART_REQUIRED_FIELDS) for exactly which fields
-restart ES; it's the canonical (and self-contained) implementation shared by
-the root-direct and privileged-service-worker entry points below.
+endpoint), so applying them restarts EmulationStation via the same stop ->
+write -> overlay-save -> start sequence as set_screen_mode.py. This includes
+screensaver_minutes, confirmed on a live device. See set_es_collections.py
+(RESTART_REQUIRED_FIELDS) for the canonical implementation shared by the
+root-direct and privileged-service-worker entry points below.
 """
 
 import json
@@ -204,9 +203,8 @@ def _build_low_level_updates(settings: Settings, updates: dict) -> dict:
 def apply_es_collections(settings: Settings, updates: dict) -> dict:
     """Apply a partial update (any subset of music_volume, screensaver_minutes,
     hidden_systems, ungrouped_systems, auto_collections, custom_collections --
-    each a full desired list/value, not a diff). Restarts EmulationStation for
-    every field except screensaver_minutes (see
-    set_es_collections.RESTART_REQUIRED_FIELDS). Returns the freshly re-read
+    each a full desired list/value, not a diff). Restarts EmulationStation so
+    the startup-only settings take effect, then returns the freshly re-read
     state."""
     low_level = _build_low_level_updates(settings, updates)
     if not low_level:

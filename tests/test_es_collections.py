@@ -278,7 +278,7 @@ class PrivilegedEsCollectionsHelperTests(unittest.TestCase):
             self.assertIn('name="HiddenSystems" value="snes"', config.read_text(encoding="utf-8"))
             self.assertIn([set_es_collections.EMULATIONSTATION_SERVICE, "start"], calls)
 
-    def test_screensaver_writes_without_restarting(self) -> None:
+    def test_screensaver_writes_and_restarts_emulationstation(self) -> None:
         from app import set_es_collections
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -293,11 +293,9 @@ class PrivilegedEsCollectionsHelperTests(unittest.TestCase):
                 set_es_collections.apply_es_collections({"screensaver_time_ms": 300000}, config=config)
             written = config.read_text(encoding="utf-8")
             self.assertIn('name="ScreenSaverTime" value="300000"', written)
-            # Overlay save still runs (so the value survives a reboot), but ES is
-            # never stopped or started for this field.
             self.assertIn(["batocera-save-overlay"], calls)
-            self.assertNotIn([set_es_collections.EMULATIONSTATION_SERVICE, "stop"], calls)
-            self.assertNotIn([set_es_collections.EMULATIONSTATION_SERVICE, "start"], calls)
+            self.assertIn([set_es_collections.EMULATIONSTATION_SERVICE, "stop"], calls)
+            self.assertIn([set_es_collections.EMULATIONSTATION_SERVICE, "start"], calls)
 
     def test_music_volume_restarts_emulationstation(self) -> None:
         # Reverted per a live device confirming music_volume genuinely needs the
@@ -407,13 +405,13 @@ class EsCollectionsOvermindActionTests(unittest.TestCase):
             self.assertEqual(helper.call_args[0][0], {"music_volume": 60})
             self.assertIn("EmulationStation restarted", message)
 
-    def test_set_es_collections_action_message_notes_restart_only_when_needed(self) -> None:
+    def test_set_es_collections_action_message_notes_screensaver_restart(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(Path(tmp))
             repo = RomRepository(settings.roms_root, settings.bios_root)
             with mock.patch("app.drone_api.os.geteuid", return_value=0), \
                  mock.patch("app.device.es_collections._apply_es_collections_helper"):
-                _, no_restart_message, _ = _execute_overmind_action(
+                _, screensaver_message, _ = _execute_overmind_action(
                     settings, repo,
                     {"action": "set_es_collections", "payload": {"screensaver_minutes": 5}},
                 )
@@ -421,7 +419,7 @@ class EsCollectionsOvermindActionTests(unittest.TestCase):
                     settings, repo,
                     {"action": "set_es_collections", "payload": {"auto_collections": ["all"]}},
                 )
-            self.assertNotIn("restart", no_restart_message.lower())
+            self.assertIn("EmulationStation restarted", screensaver_message)
             self.assertIn("EmulationStation restarted", restart_message)
 
     def test_set_music_volume_action_rejects_invalid_level(self) -> None:
@@ -735,6 +733,12 @@ class AdminControlsPageSplitTests(unittest.TestCase):
             self.assertIn('window.location.hash === "#admin/controls"', section)
             self.assertNotIn('window.location.hash === "#admin/system-info"', section)
 
+    def test_controls_async_rendering_stops_after_navigation(self) -> None:
+        body = self._function_body("renderAdminControlsPage")
+        self.assertIn('if (window.location.hash !== "#admin/controls") return;', body)
+        self.assertIn('if (!cacheBody || window.location.hash !== "#admin/controls") return;', body)
+        self.assertIn('document.getElementById("systemInfoAssetCacheRefreshBtn")?.addEventListener', body)
+
 
 class HeartbeatEsCollectionsTests(unittest.TestCase):
     """The Drone proactively reports ES-collections state in its heartbeat so
@@ -784,9 +788,9 @@ class ControlsDashboardLayoutTests(unittest.TestCase):
         self.assertEqual(body.count("control-tile"), 4)
         for marker in ("Screen Mode", "Volume</span>", "Music Volume", "Screensaver"):
             self.assertIn(marker, body)
-        # Screen Mode and Music Volume both restart EmulationStation and say so;
+        # Screen Mode, Music Volume, and Screensaver restart EmulationStation;
         # System Volume never restarts (OS-level ALSA).
-        self.assertEqual(body.count("Restarts EmulationStation."), 2)
+        self.assertEqual(body.count("Restarts EmulationStation."), 3)
 
     def test_control_tile_css_defined(self) -> None:
         self.assertIn(".control-tile .card-body", self.css)
@@ -839,7 +843,7 @@ class FrictionlessSaveTests(unittest.TestCase):
     def test_current_screen_mode_button_is_disabled(self) -> None:
         self.assertIn("btn.disabled = isActive;", self.js)
 
-    def test_music_volume_toast_claims_a_restart_but_screensaver_does_not(self) -> None:
+    def test_music_volume_and_screensaver_toasts_claim_a_restart(self) -> None:
         # Reverted per a live device confirming music_volume genuinely needs the
         # restart to take effect (no live-apply path in EmulationStation for it).
         music_start = self.js.index('musicVolumeSlider.addEventListener("change"')
@@ -850,8 +854,7 @@ class FrictionlessSaveTests(unittest.TestCase):
         saver_start = self.js.index('screensaverSlider.addEventListener("change"')
         saver_end = self.js.index("loadScreenMode();", saver_start)
         saver_body = self.js[saver_start:saver_end]
-        self.assertIn("Screensaver delay set to ${result.screensaver_minutes} min.", saver_body)
-        self.assertNotIn("restart", saver_body.lower())
+        self.assertIn("Screensaver delay set to ${result.screensaver_minutes} min.; EmulationStation restarted.", saver_body)
 
     def test_es_collections_save_toast_still_mentions_restart(self) -> None:
         save_start = self.js.index("function wireEsCollectionsSaveButton()")

@@ -6409,6 +6409,12 @@ class NavRestructureTests(unittest.TestCase):
         self.assertIn("renderIntegrationTransfersPanel(document.getElementById(\"integrationTransfersPanel\"))", body)
         self.assertIn("startTransfersAutoRefresh();", body)
 
+        refresh_start = self.js.index("function startTransfersAutoRefresh()")
+        refresh_end = self.js.index("function startLogAutoRefresh()", refresh_start)
+        refresh_body = self.js[refresh_start:refresh_end]
+        self.assertIn('Promise.all([api("/admin/downloads"), api("/admin/uploads")])', refresh_body)
+        self.assertIn("renderTransfersPanel(downloads, uploads)", refresh_body)
+
     def test_legacy_hash_redirects_point_at_new_pages(self) -> None:
         downloads_start = self.js.index('hash === "#admin/downloads"')
         downloads_end = self.js.index("} else if", downloads_start)
