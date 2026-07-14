@@ -809,6 +809,21 @@ def _schemas() -> Dict[str, Schema]:
             },
             ("active", "generated_at", "drones"),
         ),
+        "TailnetStatusResponse": _object(
+            {
+                "installed": _boolean(description="tailscale binaries present under /userdata/system/tailscale"),
+                "running": _boolean(description="tailscaled answers on its control socket"),
+                "enrolled": _boolean(description="this drone holds a node key and is (re)connecting to the tailnet"),
+                "tailnet_ip": _string(),
+                "hostname": _string(),
+                "backend_state": _string(description="raw tailscale BackendState, e.g. Running / NeedsLogin"),
+            },
+            ("installed", "running", "enrolled", "tailnet_ip", "hostname"),
+        ),
+        "TailnetEnrollRequest": _object(
+            {"auth_key": _string(description="Tailscale auth key (tskey-auth-...) from https://login.tailscale.com/admin/settings/keys")},
+            ("auth_key",),
+        ),
         "LocalPeerForgetResponse": _object({"status": _enum(["forgotten", "not_found"]), "peer_id": _string()}, ("status", "peer_id")),
         "LocalSyncRequest": _object(
             {
@@ -1283,6 +1298,8 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             "/admin/local-network/pairing-code/rotate": {"post": _operation("Rotate Local Network pairing code", {"200": _json_response("PairingCodeResponse")}, tags=["admin", "local-network"], error_codes=("401", "403", "409", "429", "500"))},
             "/admin/local-network/pair-by-address": {"post": _operation("Pair with a peer at an operator-entered address (e.g. a tailnet IP; no multicast discovery needed)", {"200": _json_response("LocalPeerPairResponse")}, request_body=_json_request("LocalPeerPairByAddressRequest"), tags=["admin", "local-network"], error_codes=("400", "401", "403", "409", "429", "500", "502"))},
             "/admin/swarm/overview": {"get": _operation("Fleet overview: this Drone plus every paired peer, probed in parallel with a short per-peer budget", {"200": _json_response("SwarmOverviewResponse")}, tags=["admin", "local-network"])},
+            "/admin/tailnet/status": {"get": _operation("Tailscale mesh status for the Swarm page onboarding card", {"200": _json_response("TailnetStatusResponse")}, tags=["admin", "local-network"])},
+            "/admin/tailnet/enroll": {"post": _operation("Enroll this Drone in the tailnet with an auth key pasted in the UI", {"200": _json_response("TailnetStatusResponse")}, request_body=_json_request("TailnetEnrollRequest"), tags=["admin", "local-network"], error_codes=("400", "401", "403", "429", "500", "502"))},
             "/admin/local-network/peers/{peer_id}/pair": {"post": _operation("Pair with a discovered Local Network peer", {"200": _json_response("LocalPeerPairResponse")}, parameters=[_path_param("peer_id")], request_body=_json_request("LocalPeerPairRequest"), tags=["admin", "local-network"], error_codes=("400", "401", "403", "404", "409", "429", "500"))},
             "/admin/local-network/peers/{peer_id}/forget": {"post": _operation("Forget a paired Local Network peer", {"200": _json_response("LocalPeerForgetResponse")}, parameters=[_path_param("peer_id")], tags=["admin", "local-network"])},
             "/admin/local-network/peers/{peer_id}/assets": {"get": _operation("Browse a paired peer's asset inventory", {"200": _json_response("PeerInventoryEnvelope")}, parameters=[_path_param("peer_id"), *peer_inventory_params], tags=["admin", "local-network"], error_codes=("400", "401", "403", "404", "409", "429", "500", "502"))},

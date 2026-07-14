@@ -20,6 +20,7 @@ class SavesSyncTest(unittest.TestCase):
                 "USERDATA_ROOT": str(self.userdata),
                 "SAVES_ROOT": str(self.userdata / "saves"),
                 "OVERMIND_DEVICE_ID": "drone-test",
+                "DRONE_NETWORK_MODE": "overmind",
             },
             clear=True,
         )

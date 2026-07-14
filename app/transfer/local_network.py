@@ -53,6 +53,12 @@ def _db(settings: Any) -> Path:
 
 
 def get_integrations(settings: Any) -> dict:
+    """Which integrations are on. Overmind is **retired**: the fleet is moving to
+    an Overmind-free (local-network + tailnet) architecture, so Overmind is
+    forced off no matter what older stored state says -- existing drones flip on
+    update without a migration. The one escape hatch is the DRONE_NETWORK_MODE
+    env var (used by the .github docker swarm and integration tests, which still
+    exercise the Overmind stack), which is honored verbatim."""
     configured = str(os.environ.get("DRONE_NETWORK_MODE") or "").strip().lower()
     if configured in VALID_MODES:
         return {
@@ -62,22 +68,27 @@ def get_integrations(settings: Any) -> dict:
     try:
         db_path = _db(settings)
         if not db_path.exists():
-            return {"overmind_enabled": True, "local_network_enabled": False}
+            return {"overmind_enabled": False, "local_network_enabled": True}
         integrations = load_payload(db_path, "integration_enablement", {})
         if isinstance(integrations, dict) and (
             "overmind_enabled" in integrations or "local_network_enabled" in integrations
         ):
             return {
-                "overmind_enabled": bool(integrations.get("overmind_enabled")),
+                "overmind_enabled": False,
                 "local_network_enabled": bool(integrations.get("local_network_enabled")),
             }
-        payload = load_payload(db_path, "network_mode", {"mode": MODE_OVERMIND})
+        payload = load_payload(db_path, "network_mode", {"mode": MODE_LOCAL_NETWORK})
     except (AttributeError, TypeError, ValueError, OSError):
-        return {"overmind_enabled": True, "local_network_enabled": False}
+        return {"overmind_enabled": False, "local_network_enabled": True}
     mode = str(payload.get("mode") if isinstance(payload, dict) else payload or "").strip().lower()
+    if mode not in VALID_MODES:
+        return {"overmind_enabled": False, "local_network_enabled": True}
     return {
-        "overmind_enabled": mode in {MODE_OVERMIND, MODE_BOTH},
-        "local_network_enabled": mode in {MODE_LOCAL_NETWORK, MODE_BOTH},
+        "overmind_enabled": False,
+        # A drone that stored an Overmind-only mode has never turned local
+        # networking off on purpose -- flip it on rather than leaving the
+        # device with no integration at all.
+        "local_network_enabled": mode in {MODE_LOCAL_NETWORK, MODE_BOTH, MODE_OVERMIND},
     }
 
 
@@ -93,8 +104,12 @@ def get_mode(settings: Any) -> str:
 
 
 def set_integrations(settings: Any, *, overmind_enabled: bool, local_network_enabled: bool) -> dict:
+    if overmind_enabled:
+        raise ValueError(
+            "Overmind integration is retired on this Drone; only local_network or disabled are available"
+        )
     payload = {
-        "overmind_enabled": bool(overmind_enabled),
+        "overmind_enabled": False,
         "local_network_enabled": bool(local_network_enabled),
         "updated_at": _now_iso(),
     }
@@ -105,7 +120,7 @@ def set_integrations(settings: Any, *, overmind_enabled: bool, local_network_ena
 def set_mode(settings: Any, mode: str) -> dict:
     normalized = str(mode or "").strip().lower()
     if normalized not in VALID_MODES:
-        raise ValueError("mode must be overmind, local_network, both, or disabled")
+        raise ValueError("mode must be local_network or disabled")
     return set_integrations(
         settings,
         overmind_enabled=normalized in {MODE_OVERMIND, MODE_BOTH},

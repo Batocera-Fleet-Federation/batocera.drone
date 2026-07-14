@@ -370,6 +370,10 @@ class ApiRoutesMixin:
                 self._handle_admin_swarm_overview()
                 return
 
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "tailnet" and parts[2] == "status":
+                self._handle_admin_tailnet_status()
+                return
+
             if len(parts) == 5 and parts[0] == "admin" and parts[1] == "local-network" and parts[2] == "peers" and parts[4] == "assets":
                 self._handle_admin_local_peer_assets(parts[3], query_params)
                 return
@@ -483,6 +487,11 @@ class ApiRoutesMixin:
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "local-network" and parts[2] == "pair-by-address":
                 payload = self._read_json_body()
                 self._handle_admin_local_peer_pair_by_address(payload)
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "tailnet" and parts[2] == "enroll":
+                payload = self._read_json_body()
+                self._handle_admin_tailnet_enroll(payload)
                 return
 
             if len(parts) == 5 and parts[0] == "admin" and parts[1] == "local-network" and parts[2] == "peers" and parts[4] == "pair":

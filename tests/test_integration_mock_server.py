@@ -39,6 +39,10 @@ class MockServerIntegrationTests(unittest.TestCase):
         os.environ["DRONE_APP_PASSWORD"] = "changeme"
         os.environ["HTTPS_PORT"] = "0"
         os.environ["HTTP_ONLY"] = "1"
+        # Local-network mode is the default now and its peer API fails closed
+        # over plain HTTP; this harness is HTTP-only, so use the existing
+        # insecure-HTTP test knob for the /peer/* endpoints.
+        os.environ["DRONE_LOCAL_ALLOW_INSECURE_HTTP"] = "1"
         os.environ["LOG_DIR"] = str(Path(self._tmp.name) / "logs")
         os.environ["ALLOW_CONTENT_DOWNLOAD"] = "true"
         # Disable the background ROM metadata poller for these HTTP-endpoint tests. Left
@@ -142,11 +146,14 @@ class MockServerIntegrationTests(unittest.TestCase):
         self.assertEqual(info["fields"]["gpu_model"], "GeForce GTX 1650")
         self.assertEqual(info["fields"]["gpu_driver"], "nvidia")
 
-    def test_overmind_integration_uses_authorization_token_label(self) -> None:
+    def test_overmind_configuration_ui_is_gone(self) -> None:
+        # The Overmind config panel (URL/token inputs, claim flow) left with the
+        # retired Integration page.
         js = self._get_bytes("/static/js/drone.js")
-        self.assertIn(b"Authorization Token", js)
-        self.assertIn(b"Claim Ownership", js)
+        self.assertNotIn(b"Authorization Token", js)
+        self.assertNotIn(b"Claim Ownership", js)
         self.assertNotIn(b"Integration Password", js)
+        self.assertNotIn(b"overmindUrlInput", js)
 
     def _get_json_unauthenticated(self, path: str) -> dict:
         url = f"http://127.0.0.1:{self.port}{path}"
@@ -154,7 +161,8 @@ class MockServerIntegrationTests(unittest.TestCase):
             return json.loads(resp.read().decode("utf-8"))
 
     def test_peer_info_and_pair_by_address_endpoints(self) -> None:
-        # Outside local-network mode the bootstrap endpoint refuses.
+        # With local networking explicitly disabled the bootstrap endpoint refuses.
+        self._post_json("/v1/api/admin/network-mode", {"mode": "disabled"})
         with self.assertRaises(urllib.error.HTTPError) as error:
             self._get_json_unauthenticated("/v1/api/peer/info")
         self.assertEqual(error.exception.code, 409)
@@ -199,7 +207,8 @@ class MockServerIntegrationTests(unittest.TestCase):
         self.assertEqual(error.exception.code, 400)
 
     def test_swarm_overview_endpoint(self) -> None:
-        # Outside local-network mode: still answers, with just this drone.
+        # With local networking explicitly disabled: still answers, self only.
+        self._post_json("/v1/api/admin/network-mode", {"mode": "disabled"})
         overview = self._get_json("/v1/api/admin/swarm/overview")
         self.assertFalse(overview["active"])
         self.assertEqual(len(overview["drones"]), 1)
@@ -258,19 +267,25 @@ class MockServerIntegrationTests(unittest.TestCase):
         self.assertTrue(offline["error"])
 
     def test_network_mode_and_local_network_admin_endpoints(self) -> None:
+        # Overmind is retired: fresh drones come up local-only, and the API
+        # refuses to re-enable it.
         initial = self._get_json("/v1/api/admin/network-mode")
-        self.assertEqual(initial["mode"], "overmind")
+        self.assertEqual(initial["mode"], "local_network")
+        self.assertFalse(initial["overmind_enabled"])
+
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            self._post_json("/v1/api/admin/network-mode", {"mode": "both"})
+        self.assertEqual(error.exception.code, 400)
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            self._post_json(
+                "/v1/api/admin/network-mode",
+                {"overmind_enabled": True, "local_network_enabled": True},
+            )
+        self.assertEqual(error.exception.code, 400)
 
         updated = self._post_json("/v1/api/admin/network-mode", {"mode": "local_network"})
         self.assertEqual(updated["mode"], "local_network")
         self.assertTrue(updated["local_network_active"])
-        both = self._post_json(
-            "/v1/api/admin/network-mode",
-            {"overmind_enabled": True, "local_network_enabled": True},
-        )
-        self.assertEqual(both["mode"], "both")
-        self.assertTrue(both["overmind_active"])
-        self.assertTrue(both["local_network_active"])
 
         object.__setattr__(self.settings, "use_fake_data", True)
         local_network.record_discovered_peer(
@@ -320,12 +335,14 @@ class MockServerIntegrationTests(unittest.TestCase):
         self.assertTrue(peer_gameplay["items"])
 
         js = self._get_bytes("/static/js/drone.js")
-        self.assertIn(b"renderIntegrationPage", js)
+        # The Integration page and its Overmind panels are retired; the Swarm
+        # page owns pairing/peers/tailnet and Transfers owns asset requests.
+        self.assertNotIn(b"renderIntegrationPage", js)
+        self.assertNotIn(b"renderOvermindIntegrationPanel", js)
         self.assertIn(b"renderTransfersPage", js)
-        self.assertIn(b"renderOvermindIntegrationPanel", js)
-        self.assertIn(b"renderLocalNetworkIntegrationPanel", js)
+        self.assertIn(b"renderSwarmPage", js)
         self.assertIn(b"requestLocalPeerAssets", js)
-        self.assertIn(b"Pair a nearby Drone, then request its assets here.", js)
+        self.assertIn(b"Select a Drone to browse its assets.", js)
         self.assertIn(b"local-asset-system-check", js)
         self.assertIn(b"setTransferSearch", js)
         self.assertIn(b"Queue ETA:", js)

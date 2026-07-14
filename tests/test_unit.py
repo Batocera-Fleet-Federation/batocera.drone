@@ -153,23 +153,41 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(_format_overmind_error(TimeoutError()), "TimeoutError()")
         self.assertIn("URLError reason=", _format_overmind_error(URLError(TimeoutError())))
 
-    def test_network_mode_defaults_to_overmind_and_persists_local_mode(self) -> None:
+    def test_network_mode_defaults_to_local_and_overmind_is_retired(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
             with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root), "DRONE_DEVICE_ID": "local-a"}, clear=True):
                 settings = Settings.from_env()
-                self.assertEqual(local_network.get_mode(settings), local_network.MODE_OVERMIND)
+                # Overmind-free architecture: fresh drones come up local-only.
+                self.assertEqual(local_network.get_mode(settings), local_network.MODE_LOCAL_NETWORK)
+                self.assertFalse(local_network.is_overmind_mode(settings))
+                # Attempting to re-enable Overmind via the API surface is rejected.
+                with self.assertRaisesRegex(ValueError, "retired"):
+                    local_network.set_mode(settings, local_network.MODE_OVERMIND)
+                with self.assertRaisesRegex(ValueError, "retired"):
+                    local_network.set_integrations(settings, overmind_enabled=True, local_network_enabled=True)
+                # local_network <-> disabled still persists.
+                local_network.set_mode(settings, local_network.MODE_DISABLED)
+                self.assertEqual(local_network.get_mode(settings), local_network.MODE_DISABLED)
                 local_network.set_mode(settings, local_network.MODE_LOCAL_NETWORK)
                 self.assertEqual(local_network.get_mode(settings), local_network.MODE_LOCAL_NETWORK)
-                local_network.set_integrations(settings, overmind_enabled=True, local_network_enabled=True)
-                self.assertEqual(local_network.get_mode(settings), local_network.MODE_BOTH)
-                self.assertTrue(local_network.is_overmind_mode(settings))
-                self.assertTrue(local_network.is_local_mode(settings))
-                local_network.set_mode(settings, local_network.MODE_LOCAL_NETWORK)
+                # A drone that stored an Overmind-era mode flips to local-only on
+                # update, without a migration.
+                save_payload(database_path(root), "integration_enablement", {"overmind_enabled": True, "local_network_enabled": False})
+                self.assertFalse(local_network.is_overmind_mode(settings))
+                # Overmind client calls stay hard-gated off.
                 with mock.patch("app.drone_api.urlopen") as opened:
                     with self.assertRaisesRegex(RuntimeError, "Overmind integration is disabled"):
                         drone_api._overmind_post_json("https://overmind.example/api/test", {}, settings=settings)
                     opened.assert_not_called()
+            # The env escape hatch (docker swarm / integration tests) still works.
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "DRONE_DEVICE_ID": "local-a", "DRONE_NETWORK_MODE": "both"},
+                clear=True,
+            ):
+                self.assertTrue(local_network.is_overmind_mode(settings))
+                self.assertTrue(local_network.is_local_mode(settings))
 
     def test_discovery_requires_local_mode_and_pairing_is_explicit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -183,6 +201,9 @@ class SettingsTests(unittest.TestCase):
                     "scheme": "https",
                     "api_port": 443,
                 }
+                # Local networking is on by default now; only an explicit
+                # "disabled" mode refuses discovery.
+                local_network.set_mode(settings, local_network.MODE_DISABLED)
                 self.assertIsNone(local_network.record_discovered_peer(settings, announcement, "192.168.1.22"))
                 local_network.set_mode(settings, local_network.MODE_LOCAL_NETWORK)
                 discovered = local_network.record_discovered_peer(settings, announcement, "192.168.1.22")
@@ -1012,7 +1033,10 @@ class SettingsTests(unittest.TestCase):
             ):
                 settings = Settings.from_env()
 
-            with mock.patch("app.transfer.peer_connectivity._fetch_peer_certificate") as fetch:
+            # The configured-CA branch is the Overmind-swarm trust path, only
+            # reachable via the env escape hatch now.
+            with mock.patch.dict("os.environ", {"DRONE_NETWORK_MODE": "overmind"}), \
+                    mock.patch("app.transfer.peer_connectivity._fetch_peer_certificate") as fetch:
                 self.assertEqual(_peer_trust_cafile(settings, peer_id="bff-drone-b", config={}), ca_file)
                 fetch.assert_not_called()
 
@@ -1030,8 +1054,9 @@ class SettingsTests(unittest.TestCase):
             overmind_cert.write_text("overmind-peer-cert", encoding="utf-8")
 
             self.assertEqual(_peer_trust_cafile(settings, peer_id="local-b", config={}), local_cert)
-            local_network.set_mode(settings, local_network.MODE_OVERMIND)
-            self.assertEqual(_peer_trust_cafile(settings, peer_id="local-b", config={}), overmind_cert)
+            # Overmind mode is only reachable via the env escape hatch now.
+            with mock.patch.dict("os.environ", {"DRONE_NETWORK_MODE": "overmind"}):
+                self.assertEqual(_peer_trust_cafile(settings, peer_id="local-b", config={}), overmind_cert)
 
     def test_drone_client_ssl_context_loads_client_cert_for_mtls_peer_checks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1088,6 +1113,7 @@ class SettingsTests(unittest.TestCase):
             with mock.patch.dict(
                 "os.environ",
                 {
+                    "DRONE_NETWORK_MODE": "overmind",
                     "USERDATA_ROOT": str(root),
                     "ROMS_ROOT": str(root / "roms"),
                     "BIOS_ROOT": str(root / "bios"),
@@ -1126,7 +1152,9 @@ class SettingsTests(unittest.TestCase):
                 "reachable_url": "https://bff-drone-b:443",
                 "resolved_network": {"ipv4": ["172.20.0.4"]},
             }
-            with mock.patch("app.transfer.peer_download._drone_client_ssl_context", side_effect=fake_context), mock.patch(
+            with mock.patch.dict("os.environ", {"DRONE_NETWORK_MODE": "overmind"}), mock.patch(
+                "app.transfer.peer_download._drone_client_ssl_context", side_effect=fake_context
+            ), mock.patch(
                 "app.transfer.peer_download.urlopen", side_effect=fake_urlopen
             ), mock.patch("app.transfer.peer_connectivity._fetch_peer_certificate") as fetch:
                 result = _download_rom_from_peer(settings, {}, peer, "atari7800", "Asteroids (USA).zip", expected_size=7)
@@ -2914,7 +2942,8 @@ class SettingsTests(unittest.TestCase):
                 raise HTTPError(url, 401, "Unauthorized", {}, io.BytesIO(b'{"detail":"Invalid Drone token"}'))
             return {}
 
-        with mock.patch("app.overmind.registration._overmind_post_json", side_effect=fake_post):
+        with mock.patch.dict("os.environ", {"DRONE_NETWORK_MODE": "overmind"}), \
+                mock.patch("app.overmind.registration._overmind_post_json", side_effect=fake_post):
             with mock.patch(
                 "app.overmind.registration._reclaim_overmind_token_after_unauthorized", return_value="new-token"
             ) as reclaim:
@@ -3267,7 +3296,7 @@ class SettingsTests(unittest.TestCase):
         self.assertNotIn("function renderUploadRows", js)
         self.assertNotIn("function renderUploadsPanel", js)
         panel_start = js.index("async function renderIntegrationTransfersPanel(target)")
-        panel_end = js.index("async function renderIntegrationConfigurationPanel(target)")
+        panel_end = js.index("async function renderLocalTransferRequestPanel(target)")
         panel_source = js[panel_start:panel_end]
         self.assertEqual(panel_source.count("card log-card"), 1)  # exactly one card, not two
         self.assertIn('api("/admin/downloads")', panel_source)
@@ -4361,6 +4390,7 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(len(patches), 1)
             self.assertEqual(patches[0]["roms"][0]["gamelist_game_id"], "B.zip")
 
+    @mock.patch.dict("os.environ", {"DRONE_NETWORK_MODE": "overmind"})
     def test_rom_metadata_sync_skips_unchanged_cache_without_rehashing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
@@ -4371,6 +4401,7 @@ class SettingsTests(unittest.TestCase):
             with mock.patch.dict(
                 "os.environ",
                 {
+                    "DRONE_NETWORK_MODE": "overmind",
                     "USERDATA_ROOT": str(root),
                     "ROMS_ROOT": str(root / "roms"),
                     "BIOS_ROOT": str(root / "bios"),
@@ -4417,6 +4448,7 @@ class SettingsTests(unittest.TestCase):
             self.assertFalse(cache_after["dirty"])
             self.assertTrue(cache_after["last_successful_upload_at"])
 
+    @mock.patch.dict("os.environ", {"DRONE_NETWORK_MODE": "overmind"})
     def test_rom_metadata_sync_force_uploads_clean_database_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
@@ -4427,6 +4459,7 @@ class SettingsTests(unittest.TestCase):
             with mock.patch.dict(
                 "os.environ",
                 {
+                    "DRONE_NETWORK_MODE": "overmind",
                     "USERDATA_ROOT": str(root),
                     "ROMS_ROOT": str(root / "roms"),
                     "BIOS_ROOT": str(root / "bios"),
@@ -4471,6 +4504,7 @@ class SettingsTests(unittest.TestCase):
             self.assertTrue(uploads[0]["replace_all"])
             self.assertEqual(len(uploads[0]["roms"]), 1)
 
+    @mock.patch.dict("os.environ", {"DRONE_NETWORK_MODE": "overmind"})
     def test_rom_metadata_sync_full_refreshes_clean_cache_without_successful_upload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
@@ -4481,6 +4515,7 @@ class SettingsTests(unittest.TestCase):
             with mock.patch.dict(
                 "os.environ",
                 {
+                    "DRONE_NETWORK_MODE": "overmind",
                     "USERDATA_ROOT": str(root),
                     "ROMS_ROOT": str(root / "roms"),
                     "BIOS_ROOT": str(root / "bios"),
@@ -4603,6 +4638,7 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(result["roms"][0]["gamelist_game_id"], "Game.zip")
             self.assertEqual(result["gamelists"][0]["rom_count"], 1)
 
+    @mock.patch.dict("os.environ", {"DRONE_NETWORK_MODE": "overmind"})
     def test_rom_metadata_sync_uploads_inventory_then_batched_fingerprint_patches(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
@@ -4614,6 +4650,7 @@ class SettingsTests(unittest.TestCase):
             with mock.patch.dict(
                 "os.environ",
                 {
+                    "DRONE_NETWORK_MODE": "overmind",
                     "USERDATA_ROOT": str(root),
                     "ROMS_ROOT": str(root / "roms"),
                     "BIOS_ROOT": str(root / "bios"),
@@ -4654,6 +4691,7 @@ class SettingsTests(unittest.TestCase):
             self.assertTrue(all("rom_fingerprint" not in row for row in uploads[0]["roms"]))
             self.assertTrue(all(len(payload["roms"]) == 1 and payload["roms"][0].get("rom_fingerprint") for payload in uploads[1:]))
 
+    @mock.patch.dict("os.environ", {"DRONE_NETWORK_MODE": "overmind"})
     def test_rom_metadata_delta_upload_clears_pending_so_next_poll_skips(self) -> None:
         from app.storage.rom_metadata_store import _read_pending_rom_metadata_changes
 
@@ -4666,6 +4704,7 @@ class SettingsTests(unittest.TestCase):
             with mock.patch.dict(
                 "os.environ",
                 {
+                    "DRONE_NETWORK_MODE": "overmind",
                     "USERDATA_ROOT": str(root),
                     "ROMS_ROOT": str(root / "roms"),
                     "BIOS_ROOT": str(root / "bios"),
@@ -4701,6 +4740,7 @@ class SettingsTests(unittest.TestCase):
                 again = _sync_rom_metadata_to_overmind(settings, repo, {"overmind_token": "t"}, "https://overmind.local", "t")
                 self.assertEqual(again["status"], "skipped")
 
+    @mock.patch.dict("os.environ", {"DRONE_NETWORK_MODE": "overmind"})
     def test_rom_metadata_sync_flags_full_refresh_when_hash_patch_upload_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
@@ -4711,6 +4751,7 @@ class SettingsTests(unittest.TestCase):
             with mock.patch.dict(
                 "os.environ",
                 {
+                    "DRONE_NETWORK_MODE": "overmind",
                     "USERDATA_ROOT": str(root),
                     "ROMS_ROOT": str(root / "roms"),
                     "BIOS_ROOT": str(root / "bios"),
@@ -4751,6 +4792,7 @@ class SettingsTests(unittest.TestCase):
             self.assertTrue(state.get("full_refresh_pending"))
             self.assertTrue(state.get("dirty"))
 
+    @mock.patch.dict("os.environ", {"DRONE_NETWORK_MODE": "overmind"})
     def test_rom_metadata_sync_readvertises_true_fingerprint_when_state_is_stale(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
@@ -4761,6 +4803,7 @@ class SettingsTests(unittest.TestCase):
             with mock.patch.dict(
                 "os.environ",
                 {
+                    "DRONE_NETWORK_MODE": "overmind",
                     "USERDATA_ROOT": str(root),
                     "ROMS_ROOT": str(root / "roms"),
                     "BIOS_ROOT": str(root / "bios"),
@@ -4804,6 +4847,7 @@ class SettingsTests(unittest.TestCase):
             self.assertTrue(fingerprint)
             self.assertNotEqual(fingerprint, "stale-md5-less")
 
+    @mock.patch.dict("os.environ", {"DRONE_NETWORK_MODE": "overmind"})
     def test_rom_metadata_sync_persists_and_uploads_added_and_deleted_roms(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
@@ -4816,6 +4860,7 @@ class SettingsTests(unittest.TestCase):
             with mock.patch.dict(
                 "os.environ",
                 {
+                    "DRONE_NETWORK_MODE": "overmind",
                     "USERDATA_ROOT": str(root),
                     "ROMS_ROOT": str(root / "roms"),
                     "BIOS_ROOT": str(root / "bios"),
@@ -4859,6 +4904,7 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(next(iter(cache["entries"].values()))["file_path"], "Second Game.zip")
             self.assertFalse(cache["dirty"])
 
+    @mock.patch.dict("os.environ", {"DRONE_NETWORK_MODE": "overmind"})
     def test_rom_metadata_delta_upload_chunks_and_retries_until_confirmed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
@@ -4870,6 +4916,7 @@ class SettingsTests(unittest.TestCase):
             with mock.patch.dict(
                 "os.environ",
                 {
+                    "DRONE_NETWORK_MODE": "overmind",
                     "USERDATA_ROOT": str(root),
                     "ROMS_ROOT": str(root / "roms"),
                     "BIOS_ROOT": str(root / "bios"),
@@ -4926,6 +4973,7 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual([payload.get("delta_index") for payload in uploads if payload.get("update_mode") == "inventory_delta"], [0, 1])
             self.assertTrue(all(item.get("payload_bytes", 0) > 0 for item in result["uploads"]))
 
+    @mock.patch.dict("os.environ", {"DRONE_NETWORK_MODE": "overmind"})
     def test_rom_metadata_poll_hashes_roms_by_default_when_cached_locally(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
@@ -4936,6 +4984,7 @@ class SettingsTests(unittest.TestCase):
             with mock.patch.dict(
                 "os.environ",
                 {
+                    "DRONE_NETWORK_MODE": "overmind",
                     "USERDATA_ROOT": str(root),
                     "ROMS_ROOT": str(root / "roms"),
                     "BIOS_ROOT": str(root / "bios"),
@@ -4955,6 +5004,7 @@ class SettingsTests(unittest.TestCase):
             self.assertTrue(cache["dirty"])
             self.assertIn("rom_fingerprint", next(iter(cache["entries"].values())))
 
+    @mock.patch.dict("os.environ", {"DRONE_NETWORK_MODE": "overmind"})
     def test_rom_metadata_poll_does_not_register_without_auth_token(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
@@ -4965,6 +5015,7 @@ class SettingsTests(unittest.TestCase):
             with mock.patch.dict(
                 "os.environ",
                 {
+                    "DRONE_NETWORK_MODE": "overmind",
                     "USERDATA_ROOT": str(root),
                     "ROMS_ROOT": str(root / "roms"),
                     "BIOS_ROOT": str(root / "bios"),
@@ -4993,6 +5044,7 @@ class SettingsTests(unittest.TestCase):
             cache, _ = _load_rom_metadata_cache(settings)
             self.assertTrue(cache["dirty"])
 
+    @mock.patch.dict("os.environ", {"DRONE_NETWORK_MODE": "overmind"})
     def test_rom_metadata_poll_defers_hashing_when_overmind_upload_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
@@ -5003,6 +5055,7 @@ class SettingsTests(unittest.TestCase):
             with mock.patch.dict(
                 "os.environ",
                 {
+                    "DRONE_NETWORK_MODE": "overmind",
                     "USERDATA_ROOT": str(root),
                     "ROMS_ROOT": str(root / "roms"),
                     "BIOS_ROOT": str(root / "bios"),
@@ -5663,6 +5716,11 @@ class DroneTlsHandshakeTests(unittest.TestCase):
         from unittest import mock as _mock
         import app.drone_api as da
 
+        # The fixture settings are Mocks; keep the integration check on the env
+        # path (checked first) so local-mode cert loading is not attempted.
+        self._env = _mock.patch.dict("os.environ", {"DRONE_NETWORK_MODE": "overmind"})
+        self._env.start()
+        self.addCleanup(self._env.stop)
         settings = _mock.Mock()
         settings.http_only = False
         settings.drone_mtls_mode = "self-signed"
@@ -6475,6 +6533,123 @@ class SwarmPageTests(unittest.TestCase):
         self.assertIn("localPeerAssetContext.peerId", browse_body)
         self.assertIn('setHash("#admin/transfers")', browse_body)
 
+    def test_tailnet_card_explains_and_links_the_account_setup(self) -> None:
+        card_start = self.js.index("function renderSwarmTailnetCard(")
+        card_body = self.js[card_start:self.js.index("async function renderSwarmPage()", card_start)]
+        # Why it's needed, where to sign up, where to fetch the key.
+        self.assertIn("can't normally reach each other through home routers", card_body)
+        self.assertIn('href="https://login.tailscale.com/start"', card_body)
+        self.assertIn('href="https://login.tailscale.com/admin/settings/keys"', card_body)
+        # The three states: connected / not installed / ready to enroll.
+        self.assertIn(">Connected<", card_body)
+        self.assertIn(">Not installed<", card_body)
+        self.assertIn(">Not connected<", card_body)
+        self.assertIn('id="swarmTailnetKey"', card_body)
+        self.assertIn("swarmEnrollTailnet()", card_body)
+
+    def test_tailnet_enroll_posts_the_key_to_the_enroll_endpoint(self) -> None:
+        enroll_start = self.js.index("async function swarmEnrollTailnet()")
+        enroll_body = self.js[enroll_start:self.js.index("function renderSwarmTailnetCard(", enroll_start)]
+        self.assertIn('apiPost("/admin/tailnet/enroll", { auth_key: authKey })', enroll_body)
+
+    def test_swarm_page_owns_pairing_and_nearby_drones(self) -> None:
+        page_start = self.js.index("async function renderSwarmPage()")
+        page_end = self.js.index("async function renderIntegrationTransfersPanel", page_start)
+        body = self.js[page_start:page_end]
+        self.assertIn('api("/admin/tailnet/status")', body)
+        self.assertIn("renderSwarmTailnetCard(tailnet)", body)
+        self.assertIn("Pairing code", body)
+        self.assertIn("localPairCodeRotateBtn", body)
+        self.assertIn("Nearby Drones", body)
+        self.assertIn("renderLocalPeerRows(status.peers || [])", body)
+        self.assertIn("shown on that Drone's Swarm page", body)
+
+
+class TailnetServiceTests(unittest.TestCase):
+    """UI-driven tailnet enrollment: status probing and `tailscale up` with a
+    pasted auth key, never leaking the key into errors or logs."""
+
+    def test_status_reports_not_installed_without_binaries(self) -> None:
+        from app.device import tailnet_service
+
+        with mock.patch.object(tailnet_service, "TAILSCALE_CLI", Path("/nonexistent/tailscale")):
+            status = tailnet_service.tailnet_status()
+        self.assertFalse(status["installed"])
+        self.assertFalse(status["running"])
+        self.assertFalse(status["enrolled"])
+
+    def test_status_parses_backend_state_and_tailnet_ip(self) -> None:
+        from app.device import tailnet_service
+
+        payload = {"BackendState": "Running", "Self": {"TailscaleIPs": ["100.64.0.5", "fd7a:115c:a1e0::5"]}}
+        proc = mock.Mock(returncode=0, stdout=json.dumps(payload), stderr="")
+        with tempfile.NamedTemporaryFile() as fake_cli, \
+                mock.patch.object(tailnet_service, "TAILSCALE_CLI", Path(fake_cli.name)), \
+                mock.patch.object(tailnet_service.subprocess, "run", return_value=proc) as run:
+            status = tailnet_service.tailnet_status()
+        self.assertTrue(status["installed"])
+        self.assertTrue(status["running"])
+        self.assertTrue(status["enrolled"])
+        self.assertEqual(status["tailnet_ip"], "100.64.0.5")
+        self.assertIn("--json", run.call_args[0][0])
+
+    def test_status_running_but_needs_login_is_not_enrolled(self) -> None:
+        from app.device import tailnet_service
+
+        proc = mock.Mock(returncode=0, stdout=json.dumps({"BackendState": "NeedsLogin"}), stderr="")
+        with tempfile.NamedTemporaryFile() as fake_cli, \
+                mock.patch.object(tailnet_service, "TAILSCALE_CLI", Path(fake_cli.name)), \
+                mock.patch.object(tailnet_service.subprocess, "run", return_value=proc):
+            status = tailnet_service.tailnet_status()
+        self.assertTrue(status["running"])
+        self.assertFalse(status["enrolled"])
+
+    def test_enroll_requires_a_key_and_an_install(self) -> None:
+        from app.device import tailnet_service
+
+        with self.assertRaises(ValueError):
+            tailnet_service.tailnet_enroll("   ")
+        with mock.patch.object(tailnet_service, "TAILSCALE_CLI", Path("/nonexistent/tailscale")):
+            with self.assertRaisesRegex(RuntimeError, "Re-run the Drone installer"):
+                tailnet_service.tailnet_enroll("tskey-auth-test")
+
+    def test_enroll_runs_tailscale_up_and_never_echoes_the_key_on_failure(self) -> None:
+        from app.device import tailnet_service
+
+        commands = []
+
+        def fake_run(command, **kwargs):
+            commands.append(command)
+            if "up" in command:
+                return mock.Mock(returncode=1, stdout="", stderr="backend error: invalid key\n")
+            return mock.Mock(returncode=0, stdout=json.dumps({"BackendState": "NeedsLogin"}), stderr="")
+
+        with tempfile.NamedTemporaryFile() as fake_cli, \
+                mock.patch.object(tailnet_service, "TAILSCALE_CLI", Path(fake_cli.name)), \
+                mock.patch.object(tailnet_service.subprocess, "run", side_effect=fake_run):
+            with self.assertRaises(RuntimeError) as caught:
+                tailnet_service.tailnet_enroll("tskey-auth-SECRET")
+        self.assertNotIn("SECRET", str(caught.exception))
+        up_command = next(cmd for cmd in commands if "up" in cmd)
+        self.assertIn("--accept-dns=false", up_command)
+        self.assertTrue(any(arg.startswith("--authkey=") for arg in up_command))
+
+    def test_enroll_success_returns_fresh_status(self) -> None:
+        from app.device import tailnet_service
+
+        def fake_run(command, **kwargs):
+            if "up" in command:
+                return mock.Mock(returncode=0, stdout="", stderr="")
+            payload = {"BackendState": "Running", "Self": {"TailscaleIPs": ["100.64.0.7"]}}
+            return mock.Mock(returncode=0, stdout=json.dumps(payload), stderr="")
+
+        with tempfile.NamedTemporaryFile() as fake_cli, \
+                mock.patch.object(tailnet_service, "TAILSCALE_CLI", Path(fake_cli.name)), \
+                mock.patch.object(tailnet_service.subprocess, "run", side_effect=fake_run):
+            status = tailnet_service.tailnet_enroll("tskey-auth-test")
+        self.assertTrue(status["enrolled"])
+        self.assertEqual(status["tailnet_ip"], "100.64.0.7")
+
 
 class InstallerTailscaleTests(unittest.TestCase):
     """batocera_install.sh sets up the Tailscale mesh (binaries under /userdata,
@@ -6566,28 +6741,22 @@ class NavRestructureTests(unittest.TestCase):
         self.assertIn("if (!adminEnabled) return;", click_body)
         self.assertIn('setHash("#admin/transfers");', click_body)
 
-    def test_router_dispatches_transfers_and_integration_separately(self) -> None:
+    def test_router_dispatches_transfers_and_redirects_integration_to_swarm(self) -> None:
         transfers_route = self.js.index('} else if (hash === "#admin/transfers")')
         self.assertIn("await renderTransfersPage();", self.js[transfers_route:transfers_route + 200])
 
-        integration_route = self.js.index('} else if (hash.startsWith("#admin/integration"))')
-        self.assertIn("await renderIntegrationPage();", self.js[integration_route:integration_route + 200])
+        integration_route = self.js.index('hash.startsWith("#admin/integration")')
+        self.assertIn('setHash("#admin/swarm");', self.js[integration_route:integration_route + 500])
 
-    def test_integration_page_has_no_tab_switcher(self) -> None:
-        # The old two-tab (Transfers/Configuration) UI inside one page is gone;
-        # Integration just renders the configuration panel directly.
-        self.assertNotIn("integrationTabTransfers", self.js)
-        self.assertNotIn("integrationTabConfiguration", self.js)
-        self.assertNotIn("function parseIntegrationHash", self.js)
-        self.assertNotIn("function setIntegrationTab", self.js)
-        self.assertNotIn("function applyIntegrationTab", self.js)
-
-        page_start = self.js.index("async function renderIntegrationPage()")
-        page_end = self.js.index("async function renderTransfersPage()")
-        body = self.js[page_start:page_end]
-        self.assertIn("integrationConfigurationPanel", body)
-        self.assertNotIn("integrationTransfersPanel", body)
-        self.assertIn('titleNode.textContent = "Integration";', body)
+    def test_integration_page_and_overmind_panels_are_retired(self) -> None:
+        # Overmind is retired and the Integration page with it: no renderers
+        # remain, and the Swarm page owns pairing/peers/tailnet instead.
+        self.assertNotIn("async function renderIntegrationPage", self.js)
+        self.assertNotIn("renderIntegrationConfigurationPanel", self.js)
+        self.assertNotIn("renderOvermindIntegrationPanel", self.js)
+        self.assertNotIn("renderLocalNetworkIntegrationPanel", self.js)
+        # The Admin menu card points at Swarm now.
+        self.assertNotIn("setHash('#admin/integration')", self.js)
 
     def test_transfers_page_renders_transfers_panel_and_auto_refreshes(self) -> None:
         page_start = self.js.index("async function renderTransfersPage()")
@@ -6606,7 +6775,7 @@ class NavRestructureTests(unittest.TestCase):
 
     def test_transfer_request_uses_independent_file_options_and_small_buttons(self) -> None:
         panel_start = self.js.index("async function renderLocalTransferRequestPanel(")
-        panel_end = self.js.index("async function renderLocalNetworkIntegrationPanel(")
+        panel_end = self.js.index("\nfunction localAssetIncludeArtwork()")
         body = self.js[panel_start:panel_end]
         self.assertIn('id="localAssetIncludeArtwork" checked', body)
         self.assertIn('for="localAssetIncludeArtwork">Include Artwork</label>', body)
@@ -6622,42 +6791,34 @@ class NavRestructureTests(unittest.TestCase):
         downloads_end = self.js.index("} else if", downloads_start)
         self.assertIn('setHash("#admin/transfers");', self.js[downloads_start:downloads_end])
 
-        overmind_start = self.js.index('["#admin/overmind", "#admin/overmind/actions"]')
+        # Overmind/local-network/integration hashes all land on the Swarm page.
+        overmind_start = self.js.index('["#admin/overmind", "#admin/overmind/actions", "#admin/local-network"]')
         overmind_end = self.js.index("} else if", overmind_start)
-        self.assertIn('setHash("#admin/integration");', self.js[overmind_start:overmind_end])
-        self.assertNotIn("tab=configuration", self.js[overmind_start:overmind_end])
+        self.assertIn('setHash("#admin/swarm");', self.js[overmind_start:overmind_end])
 
-        local_network_start = self.js.index('hash === "#admin/local-network"')
-        local_network_end = self.js.index("} else if", local_network_start)
-        self.assertIn('setHash("#admin/integration");', self.js[local_network_start:local_network_end])
+    def test_peer_browse_buttons_deep_link_via_swarm_helper(self) -> None:
+        rows_start = self.js.index("function renderLocalPeerRows(")
+        rows_end = self.js.index("\nasync function ", rows_start + 1)
+        body = self.js[rows_start:rows_end]
+        self.assertIn("swarmBrowsePeerAssets(", body)
+        self.assertNotIn("browseLocalPeer(", body)
 
-    def test_browse_local_peer_navigates_instead_of_switching_tabs(self) -> None:
-        fn_start = self.js.index("async function browseLocalPeer(peerId)")
-        fn_end = self.js.index("\nasync function ", fn_start + 1)
-        body = self.js[fn_start:fn_end]
-        self.assertIn('setHash("#admin/transfers");', body)
-        self.assertNotIn("setIntegrationTab", body)
-
-    def test_transfer_request_panel_only_auto_loads_from_explicit_browse(self) -> None:
-        # A plain page visit must never auto-request a peer's assets: only an
-        # explicit "Browse" click (which sets pendingLocalPeerBrowse) does, and
-        # it's consumed exactly once so it can't re-fire on a later refresh.
-        self.assertIn("let pendingLocalPeerBrowse = null;", self.js)
+    def test_transfer_request_panel_never_auto_requests_assets(self) -> None:
+        # Asset data loads only on an explicit Request click. A page visit (or
+        # a Swarm-card deep link) may preselect a drone and load its SYSTEMS,
+        # but never its assets.
+        self.assertNotIn("pendingLocalPeerBrowse", self.js)
         self.assertNotIn("autoLoadedPeerId", self.js)
 
-        browse_start = self.js.index("async function browseLocalPeer(peerId)")
-        browse_end = self.js.index("\nasync function ", browse_start + 1)
-        browse_body = self.js[browse_start:browse_end]
-        self.assertIn("pendingLocalPeerBrowse = peerId;", browse_body)
-
         fn_start = self.js.index("async function renderLocalTransferRequestPanel(target)")
-        fn_end = self.js.index("\nasync function renderLocalNetworkIntegrationPanel(")
+        fn_end = self.js.index("\nfunction localAssetIncludeArtwork()")
         body = self.js[fn_start:fn_end]
-        self.assertIn("const browsedPeerId = pendingLocalPeerBrowse;", body)
-        self.assertIn("pendingLocalPeerBrowse = null;", body)
-        self.assertIn("if (browsedPeerId && browsedPeerId === localPeerAssetContext.peerId)", body)
+        self.assertIn('&lt;Select Drone&gt;', body)
+        self.assertIn('api("/admin/swarm/overview")', body)
+        self.assertIn("!drone.is_self && drone.online", body)
         self.assertIn("await loadLocalPeerSystems();", body)
-        self.assertIn("await loadLocalPeerAssets();", body)
+        self.assertNotIn("loadLocalPeerAssets()", body)
+        self.assertIn("await onPeerSelected();", body)
 
     def test_downloads_page_and_refresh_view_point_at_transfers(self) -> None:
         self.assertIn('onclick="setHash(\'#admin/transfers\')">Back to Transfers</button>', self.js)

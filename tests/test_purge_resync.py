@@ -41,12 +41,13 @@ class PurgeResyncTest(unittest.TestCase):
         self._write_gamelist(rom.parent, "Game.zip")
         with mock.patch.dict(
             "os.environ",
-            {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
+            {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios"), "DRONE_NETWORK_MODE": "overmind"},
             clear=True,
         ):
             settings = Settings.from_env()
         return tmp, settings, RomRepository(settings.roms_root, settings.bios_root)
 
+    @mock.patch.dict("os.environ", {"DRONE_NETWORK_MODE": "overmind"})
     def test_purge_triggers_full_replace_all_upload_without_rehashing(self) -> None:
         tmp, settings, repo = self._settings_with_rom()
         with tmp:
@@ -113,7 +114,7 @@ class PurgeResyncTest(unittest.TestCase):
                 return_value={"overmind_url": "https://ov.local", "overmind_token": "tok"},
             ):
                 buf = io.StringIO()
-                with contextlib.redirect_stdout(buf):
+                with contextlib.redirect_stdout(buf), mock.patch.dict("os.environ", {"DRONE_NETWORK_MODE": "overmind"}):
                     drone_api._poll_rom_metadata_once(settings, repo)
                 out = buf.getvalue()
 

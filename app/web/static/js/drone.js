@@ -1594,7 +1594,7 @@ async function renderHelpPage() {
           <div class="help-kicker">Batocera Drone</div>
           <h2 class="h3 mb-2">Run your whole collection like a fleet — not one machine at a time.</h2>
           <p class="mb-2 text-muted">Drone runs quietly on this Batocera machine and gives you a browser dashboard for everything on it — your library, saves, BIOS, artwork, and live health — from any phone, tablet, or computer on your network. No controller or TV required.</p>
-          <p class="mb-0 text-muted">Pair it with Overmind, the optional fleet coordinator at <a href="https://www.batocera-swarm.com" target="_blank" rel="noopener noreferrer">Batocera Swarm <i class="bi bi-box-arrow-up-right ms-1"></i></a>, and you can manage every cabinet from one place: copy content between machines, send remote actions, and watch the health of the whole swarm.</p>
+          <p class="mb-0 text-muted">Pair your machines together on the Swarm page and they become a federation: copy content cabinet-to-cabinet, watch every Drone's health from any of them, and — with the free tailnet connection — reach it all from your phone anywhere in the world. No central server, no port forwarding.</p>
         </div>
       </div>
 
@@ -1622,7 +1622,7 @@ async function renderHelpPage() {
             <i class="bi bi-sliders"></i>
             <div>
               <div class="help-metric-title">Manage remotely</div>
-              <div class="text-muted small">Kiosk mode, volume, restarts, and cache refreshes — straight from Overmind.</div>
+              <div class="text-muted small">Kiosk mode, volume, restarts, and cache refreshes — from any browser, anywhere via the tailnet.</div>
             </div>
           </div>
         </div>
@@ -1645,17 +1645,15 @@ async function renderHelpPage() {
               ${[
                 {
                   q: "Why would I use Batocera Drone?",
-                  a: "Drone turns this machine into something you can see and control from a browser. Check what's installed, fix missing artwork, watch gameplay history, read logs, and — through Overmind — manage it alongside every other cabinet you own. It's most powerful once you have more than one machine to keep in sync."
+                  a: "Drone turns this machine into something you can see and control from a browser. Check what's installed, fix missing artwork, watch gameplay history, read logs, and manage it alongside every other cabinet you own from the Swarm page. It's most powerful once you have more than one machine to keep in sync."
                 },
                 {
                   q: "Can I copy content between machines?",
-                  a: "Yes. When connected to Overmind, cabinets copy games, saves, BIOS, and artwork directly from each other over an encrypted peer-to-peer link. Set something up on one machine and let the others pull it — without re-downloading from the internet.",
-                  url: "https://www.batocera-swarm.com",
-                  linkText: "Open Batocera Swarm"
+                  a: "Yes. Pair your Drones on the Swarm page and they copy games, saves, BIOS, and artwork directly from each other over an encrypted peer-to-peer link — on the same network or across houses over the tailnet. Set something up on one machine and let the others pull it from the Transfers page."
                 },
                 {
                   q: "Can I manage the machine remotely?",
-                  a: "Yes. From Overmind you can turn Kiosk mode on or off, set the volume, restart the machine or EmulationStation, and rebuild the asset cache — then watch each action's status as it completes."
+                  a: "Yes. The Controls page covers Kiosk mode, volume, screensaver, EmulationStation restarts, and the asset cache — and with the tailnet connected (Swarm page) you can open this same dashboard from your phone anywhere, not just at home."
                 },
                 {
                   q: "Will my saves stay in sync?",
@@ -1675,13 +1673,15 @@ async function renderHelpPage() {
                 },
                 {
                   q: "What is the Asset Cache?",
-                  a: "Drone's fast snapshot of what this machine holds and what still needs uploading. It's how Overmind understands the cabinet's contents at a glance without rescanning every time."
+                  a: "Drone's fast snapshot of what this machine holds — ROMs, BIOS, and artwork with their fingerprints. It's what makes browsing, searching, and peer-to-peer transfers quick without rescanning the disk every time."
                 },
                 {
-                  q: "What is Overmind?",
-                  a: "The optional central coordinator for your fleet. Connect Drone to it to publish this machine's identity and inventory, run remote actions, and see swarm membership and health from one dashboard.",
-                  url: "https://www.batocera-swarm.com",
-                  linkText: "Open Batocera Swarm"
+                  q: "What is the Swarm page?",
+                  a: "Your federation's home: one card per Drone (this one plus every paired machine) with live online status and library counts, pairing tools for nearby and far-away Drones, and the tailnet connection that makes everything reachable from anywhere. There is no central server — every Drone shows the whole swarm."
+                },
+                {
+                  q: "What is a tailnet and why do I need an account?",
+                  a: "A tailnet is a free private mesh network (from Tailscale) between your own devices. Home routers block incoming connections, so without it your Drones in different houses — and your phone when you're out — couldn't reach each other. The account exists only so your devices can recognize each other; content still moves directly between your machines, encrypted. Set it up once from the Swarm page."
                 },
                 {
                   q: "Why are there Logs and Emulator Config pages?",
@@ -1724,7 +1724,7 @@ async function renderHelpPage() {
               <button class="help-link-row" type="button" onclick="setHash('#admin/system-info')"><i class="bi bi-pc-display"></i><span><strong>Check machine health</strong><small>CPU, memory, storage, network, and connection speed at a glance.</small></span></button>
             </div>
             <div class="mt-2 small">
-              <a href="https://www.batocera-swarm.com" target="_blank" rel="noopener noreferrer">Manage your whole fleet with Overmind <i class="bi bi-box-arrow-up-right ms-1"></i></a>
+              <button class="btn btn-link p-0 align-baseline" type="button" onclick="setHash('#admin/swarm')">Manage your whole fleet on the Swarm page <i class="bi bi-arrow-right ms-1"></i></button>
             </div>
           </div>
 
@@ -1732,7 +1732,7 @@ async function renderHelpPage() {
             <h3 class="h5 mb-3"><i class="bi bi-lightbulb me-2"></i>Good to know</h3>
             <dl class="help-terms mb-0">
               <dt>Better with more machines</dt>
-              <dd>A single Drone is a handy dashboard. A few of them with Overmind become a fleet you keep in sync and manage from one screen.</dd>
+              <dd>A single Drone is a handy dashboard. A few of them paired on the Swarm page become a fleet you keep in sync from any screen — no central server involved.</dd>
               <dt>Peer-to-peer sync</dt>
               <dd>Cabinets copy content directly from each other over encrypted links, so you don't re-download the same files on every machine.</dd>
               <dt>Serious about security</dt>
@@ -1751,13 +1751,12 @@ async function renderHelpPage() {
           <li>Not sure of the name? Check Batocera under <strong>Network Settings</strong> &gt; <strong>Hostname</strong> and use that in place of <code>BATOCERA-HOSTNAME</code>.</li>
           <li>Older bookmarks and router rules can still use <code>https://BATOCERA-HOSTNAME.local:8443</code>.</li>
         </ol>
-        <h3 class="h5 mb-3"><i class="bi bi-router me-2"></i>Enable content syncing (port forwarding)</h3>
-        <p class="text-muted">Only needed so other Drones can pull games, saves, BIOS, and artwork from this machine. The Drone still connects to Overmind for monitoring and remote actions without it.</p>
+        <h3 class="h5 mb-3"><i class="bi bi-globe2 me-2"></i>Reach this Drone from anywhere (tailnet)</h3>
+        <p class="text-muted">No port forwarding or router changes needed. Connect this Drone to your tailnet once, and it gets a private <code>100.x</code> address that works from any network.</p>
         <ol class="mb-0">
-          <li>Find your router address in <strong>System Info</strong> &gt; <strong>Router IP Address</strong>, then open that IP in a browser to sign in to your router.</li>
-          <li>In the router, look for <strong>NAT</strong>, <strong>Port Forwarding</strong>, or <strong>Connected Devices</strong>.</li>
-          <li>Forward port <code>443</code> to this machine's IP address (find it under <strong>Network Settings</strong> &gt; <strong>IP Address</strong>).</li>
-          <li>Need help? Open <a href="https://www.youtube.com/results?search_query=How+to+enable+Home+Router+NAT+Port+Forwarding" target="_blank" rel="noopener noreferrer">NAT Port Forwarding Help <i class="bi bi-box-arrow-up-right ms-1"></i></a>.</li>
+          <li>Open the <strong>Swarm</strong> page and follow the <strong>Tailnet</strong> card: create the free account, paste an auth key, done.</li>
+          <li>Install the Tailscale app on your phone and sign in to the same account.</li>
+          <li>Open <code>https://&lt;tailnet address&gt;</code> from anywhere — the Swarm page shows each Drone's address on its card.</li>
         </ol>
       </div>
     </div>
@@ -1810,10 +1809,10 @@ async function renderAdminMenu() {
         </div>
       </div>
       <div class="col-md-4 mb-3">
-        <div class="card admin-tile pointer h-100" onclick="setHash('#admin/integration')">
+        <div class="card admin-tile pointer h-100" onclick="setHash('#admin/swarm')">
           <div class="card-body">
-            <h5 class="card-title"><i class="bi bi-diagram-3 me-2"></i>Integration</h5>
-            <p class="card-text">Configure Overmind or Local Network integration.</p>
+            <h5 class="card-title"><i class="bi bi-diagram-3 me-2"></i>Swarm</h5>
+            <p class="card-text">See every Drone, pair new ones, and connect the tailnet.</p>
           </div>
         </div>
       </div>
@@ -2352,7 +2351,7 @@ async function renderAssetCachePage() {
     const payload = await api("/admin/asset-cache");
     content.innerHTML = `
       <div class="mb-3 d-flex flex-wrap gap-2">
-        <button class="btn btn-outline-secondary" onclick="setHash('#admin/integration')">Back to Integration</button>
+        <button class="btn btn-outline-secondary" onclick="setHash('#admin')">Back to Admin</button>
       </div>
       <div class="card log-card"><div class="card-body">${renderAssetCachePanel(payload)}</div></div>
     `;
@@ -3612,12 +3611,6 @@ let localPeerAssetContext = {
   offset: 0,
   total: 0,
 };
-// Set only by an explicit "Browse" click (never by refresh()'s dropdown
-// pre-selection), and consumed exactly once by renderLocalTransferRequestPanel
-// -- this is what keeps a plain Transfers page visit from auto-requesting
-// assets from whichever peer happens to be first in the dropdown.
-let pendingLocalPeerBrowse = null;
-
 function localPeerStatusBadge(peer) {
   if (peer.identity_conflict) return '<span class="badge text-bg-danger">Identity Conflict</span>';
   if (!peer.paired) return '<span class="badge text-bg-warning">Discovered</span>';
@@ -3643,7 +3636,7 @@ function renderLocalPeerRows(peers) {
       if (peer.identity_conflict) {
         actionCell = `<button class="btn btn-sm btn-outline-secondary" disabled title="This Drone advertises the same machine id as this device. Reset the Drone id on one machine before pairing.">Resolve ID</button>`;
       } else if (peer.paired) {
-        actionCell = `<div class="d-flex gap-2 justify-content-end"><button class="btn btn-sm btn-outline-primary" onclick="browseLocalPeer(decodeURIComponent('${peerToken}'))">Browse</button><button class="btn btn-sm btn-outline-danger" onclick="forgetLocalPeer(decodeURIComponent('${peerToken}'))">Forget</button></div>`;
+        actionCell = `<div class="d-flex gap-2 justify-content-end"><button class="btn btn-sm btn-outline-primary" onclick="swarmBrowsePeerAssets(decodeURIComponent('${peerToken}'))">Browse</button><button class="btn btn-sm btn-outline-danger" onclick="forgetLocalPeer(decodeURIComponent('${peerToken}'))">Forget</button></div>`;
       } else if (insecure) {
         actionCell = `<button class="btn btn-sm btn-outline-secondary" disabled title="This Drone is advertising ${escapeHtml(url)} (not HTTPS), so it can't be paired for secure transfers. Update/repair the Drone on that machine.">Not secure</button>`;
       } else {
@@ -3822,31 +3815,9 @@ function renderLocalAssetsPagination() {
     </div>`;
 }
 
-async function renderIntegrationPage() {
-  currentSystemContext = null;
-  clearSystemTheme();
-  titleNode.textContent = "Integration";
-  subtitleNode.textContent = "Configure Overmind or local-network control";
-  setLoading(true, "Loading integration...");
-  try {
-    // Overmind and Local Network are always both on -- no manual toggle. Heal
-    // any Drone still carrying an old exclusive/disabled mode from before this
-    // was a per-integration switch.
-    const modeStatus = await api("/admin/network-mode");
-    if (!modeStatus.overmind_enabled || !modeStatus.local_network_enabled) {
-      await apiPost("/admin/network-mode", { overmind_enabled: true, local_network_enabled: true });
-    }
-    content.innerHTML = `
-      <div class="mb-3"><button class="btn btn-outline-secondary" onclick="setHash('#admin')">Back to Admin</button></div>
-      <div id="integrationConfigurationPanel"></div>`;
-    await renderIntegrationConfigurationPanel(document.getElementById("integrationConfigurationPanel"));
-  } catch (err) {
-    showToast(`Failed to load integration: ${escapeHtml(err.message || "unknown error")}`, "danger");
-    content.innerHTML = '<div class="themed-empty">Integration status could not be loaded.</div>';
-  } finally {
-    setLoading(false);
-  }
-}
+// The Integration page is retired: Overmind integration is disabled (the
+// fleet is Overmind-free) and the Local Network configuration moved to the
+// Swarm page. #admin/integration redirects there in router().
 
 async function renderTransfersPage() {
   currentSystemContext = null;
@@ -3948,6 +3919,84 @@ async function swarmPairByAddress() {
   }
 }
 
+async function swarmEnableLocalNetwork() {
+  try {
+    await apiPost("/admin/network-mode", { mode: "local_network" });
+    showToast("Local networking enabled.", "success");
+    await renderSwarmPage();
+  } catch (err) {
+    showToast(`Failed to enable local networking: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  }
+}
+
+async function swarmEnrollTailnet() {
+  const input = document.getElementById("swarmTailnetKey");
+  const button = document.getElementById("swarmTailnetEnrollBtn");
+  const authKey = (input.value || "").trim();
+  if (!authKey) {
+    showToast("Paste an auth key from the Tailscale admin console first.", "warning");
+    return;
+  }
+  button.disabled = true;
+  button.innerHTML = '<span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>Connecting...';
+  try {
+    const status = await apiPost("/admin/tailnet/enroll", { auth_key: authKey });
+    showToast(
+      status.tailnet_ip
+        ? `Connected to the tailnet as ${escapeHtml(status.tailnet_ip)}.`
+        : "Tailnet enrollment accepted; the address will appear shortly.",
+      "success",
+    );
+    await renderSwarmPage();
+  } catch (err) {
+    showToast(`Tailnet enrollment failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    button.disabled = false;
+    button.innerHTML = '<i class="bi bi-link-45deg me-1"></i>Connect';
+  }
+}
+
+function renderSwarmTailnetCard(tailnet) {
+  const state = tailnet || {};
+  let body;
+  if (state.enrolled) {
+    const address = state.tailnet_ip ? `https://${escapeHtml(state.tailnet_ip)}` : "";
+    body = `
+      <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
+        <span class="badge text-bg-success">Connected</span>
+        ${state.tailnet_ip ? `<code>${escapeHtml(state.tailnet_ip)}</code>` : ""}
+      </div>
+      <div class="small text-muted">This Drone is on your tailnet. Your phone (with the Tailscale app signed in to the same account) and Drones in other homes can reach it${address ? ` at <a href="${address}" target="_blank" rel="noopener noreferrer">${address}</a>` : ""} from anywhere -- no port forwarding.</div>`;
+  } else if (!state.installed) {
+    body = `
+      <div class="d-flex align-items-center gap-2 mb-2"><span class="badge text-bg-secondary">Not installed</span></div>
+      <div class="small text-muted">Tailscale isn't installed on this Drone yet. Re-run the Drone installer once (it now sets the mesh up automatically), then come back here to connect:</div>
+      <pre class="small mt-2 mb-0"><code>curl -fsSL https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/batocera_install.sh | bash</code></pre>`;
+  } else {
+    body = `
+      <div class="d-flex align-items-center gap-2 mb-2"><span class="badge text-bg-warning text-dark">Not connected</span></div>
+      <div class="small text-muted mb-2">
+        Drones in different homes -- and your phone when you're away -- can't normally reach each other through home routers.
+        A <strong>tailnet</strong> (a free private mesh network from <a href="https://tailscale.com" target="_blank" rel="noopener noreferrer">Tailscale</a>) fixes that:
+        every device gets a private <code>100.x</code> address that works from anywhere, encrypted device-to-device, with no router changes or port forwarding.
+        The account is only used so your devices can recognize each other; game traffic flows directly between your machines.
+      </div>
+      <ol class="small text-muted mb-3">
+        <li>Create a free Tailscale account: <a href="https://login.tailscale.com/start" target="_blank" rel="noopener noreferrer">login.tailscale.com/start</a></li>
+        <li>Generate an auth key (mark it <em>reusable</em> so one key can enroll every Drone): <a href="https://login.tailscale.com/admin/settings/keys" target="_blank" rel="noopener noreferrer">login.tailscale.com/admin/settings/keys</a></li>
+        <li>Paste the key below. To reach your Drones from your phone, install the Tailscale app and sign in to the same account.</li>
+      </ol>
+      <div class="row g-2 align-items-end">
+        <div class="col-12 col-md-8"><label class="form-label small" for="swarmTailnetKey">Auth key</label><input id="swarmTailnetKey" class="form-control" type="password" placeholder="tskey-auth-..." autocomplete="off"></div>
+        <div class="col-12 col-md-4"><button id="swarmTailnetEnrollBtn" class="btn btn-primary w-100" onclick="swarmEnrollTailnet()"><i class="bi bi-link-45deg me-1"></i>Connect</button></div>
+      </div>`;
+  }
+  return `
+    <div class="card log-card mb-3">
+      <div class="card-header"><i class="bi bi-globe2 me-2" aria-hidden="true"></i>Tailnet (access from anywhere)</div>
+      <div class="card-body">${body}</div>
+    </div>`;
+}
+
 async function renderSwarmPage() {
   currentSystemContext = null;
   clearSystemTheme();
@@ -3955,13 +4004,17 @@ async function renderSwarmPage() {
   subtitleNode.textContent = "Every Drone in your federation -- local and across the tailnet";
   setLoading(true, "Loading swarm...");
   try {
-    const overview = await api("/admin/swarm/overview");
+    const [overview, tailnet] = await Promise.all([
+      api("/admin/swarm/overview"),
+      api("/admin/tailnet/status").catch(() => ({ installed: false })),
+    ]);
     const drones = Array.isArray(overview.drones) ? overview.drones : [];
     const inactiveNote = overview.active
       ? ""
-      : `<div class="alert alert-info d-flex align-items-center gap-2" role="alert">
+      : `<div class="alert alert-info d-flex flex-wrap align-items-center gap-2" role="alert">
           <i class="bi bi-info-circle" aria-hidden="true"></i>
-          <span>Local Network mode is off, so paired Drones are hidden. Enable it under <a href="#admin/integration" class="alert-link">Integration</a> to pair and see the rest of the swarm.</span>
+          <span>Local networking is disabled on this Drone, so pairing and paired Drones are hidden.</span>
+          <button class="btn btn-sm btn-primary" onclick="swarmEnableLocalNetwork()">Enable</button>
         </div>`;
     content.innerHTML = `
       <div class="mb-3 d-flex flex-wrap justify-content-between gap-2">
@@ -3972,10 +4025,19 @@ async function renderSwarmPage() {
       <div class="row row-cols-1 row-cols-md-2 row-cols-xl-3 g-3 mb-3" id="swarmDroneGrid">
         ${drones.map(renderSwarmDroneCard).join("")}
       </div>
+      ${renderSwarmTailnetCard(tailnet)}
+      <div class="card log-card mb-3">
+        <div class="card-header d-flex justify-content-between align-items-center"><span><i class="bi bi-key me-2" aria-hidden="true"></i>Pairing</span><button class="btn btn-sm btn-outline-primary" id="localPairCodeRotateBtn">Rotate Code</button></div>
+        <div class="card-body" id="localPairingBody"><div class="text-muted">Loading pairing...</div></div>
+      </div>
+      <div class="card log-card mb-3">
+        <div class="card-header d-flex justify-content-between align-items-center"><span><i class="bi bi-radar me-2" aria-hidden="true"></i>Nearby Drones</span><div class="d-flex gap-2"><button class="btn btn-sm btn-outline-primary" id="localDiscoverBtn"><i class="bi bi-radar me-1"></i>Discover</button><button class="btn btn-sm btn-outline-secondary" id="localRefreshBtn"><i class="bi bi-arrow-repeat"></i></button></div></div>
+        <div class="card-body" id="localPeersBody"><div class="text-muted">Loading peers...</div></div>
+      </div>
       <div class="card log-card">
         <div class="card-header"><i class="bi bi-plus-circle me-2" aria-hidden="true"></i>Add Drone by Address</div>
         <div class="card-body">
-          <div class="small text-muted mb-3">Pair with a Drone that LAN discovery can't see -- for example one in another house reachable over your mesh VPN (tailnet). Enter its address and the pairing code shown on that Drone's Integration page.</div>
+          <div class="small text-muted mb-3">Pair with a Drone that LAN discovery can't see -- for example one in another house reachable over your tailnet. Enter its address and the pairing code shown on that Drone's Swarm page.</div>
           <div class="row g-2 align-items-end">
             <div class="col-12 col-md-5"><label class="form-label small" for="swarmPairAddress">Drone address</label><input id="swarmPairAddress" class="form-control" placeholder="100.64.0.7 or https://host:port" autocomplete="off"></div>
             <div class="col-8 col-md-4"><label class="form-label small" for="swarmPairCode">Pairing code</label><input id="swarmPairCode" class="form-control" placeholder="Code from the other Drone" autocomplete="off"></div>
@@ -3983,6 +4045,21 @@ async function renderSwarmPage() {
           </div>
         </div>
       </div>`;
+
+    async function refreshPairing() {
+      const status = await api("/admin/local-network/status");
+      document.getElementById("localPairingBody").innerHTML = status.active
+        ? `<div class="d-flex flex-wrap align-items-center gap-3"><div><div class="small text-muted">Pairing code</div><div class="display-6 mono">${escapeHtml(status.pairing?.code || "")}</div></div><div class="small text-muted">Expires ${escapeHtml(status.pairing?.expires_at || "")}. Enter this code on the other Drone to approve it.</div></div>`
+        : '<div class="themed-empty">Local networking is disabled; enable it above to pair Drones.</div>';
+      document.getElementById("localPeersBody").innerHTML = renderLocalPeerRows(status.peers || []);
+      document.getElementById("localDiscoverBtn").disabled = !status.active;
+      document.getElementById("localPairCodeRotateBtn").disabled = !status.active;
+    }
+    window.refreshLocalNetwork = refreshPairing;
+    document.getElementById("localDiscoverBtn").addEventListener("click", async () => { await apiPost("/admin/local-network/discover", {}); await refreshPairing(); });
+    document.getElementById("localRefreshBtn").addEventListener("click", refreshPairing);
+    document.getElementById("localPairCodeRotateBtn").addEventListener("click", async () => { await apiPost("/admin/local-network/pairing-code/rotate", {}); await refreshPairing(); });
+    await refreshPairing();
   } catch (err) {
     showToast(`Failed to load swarm: ${escapeHtml(err.message || "unknown error")}`, "danger");
     content.innerHTML = '<div class="themed-empty">Swarm could not be loaded.</div>';
@@ -3999,7 +4076,7 @@ async function renderIntegrationTransfersPanel(target) {
         <span><i class="bi bi-arrow-left-right me-2"></i>Transfers</span>
         <button id="transfersRefreshBtn" class="btn btn-sm btn-outline-primary" type="button"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
       </div>
-      <div class="small text-muted px-3 pt-3">All drone-to-drone asset transfers to and from this machine -- downloads and uploads -- whether started from Overmind or Local Network.</div>
+      <div class="small text-muted px-3 pt-3">All drone-to-drone asset transfers to and from this machine -- downloads and uploads.</div>
       <div class="card-body" id="transfersBody"><div class="text-muted">Loading transfers...</div></div>
     </div>`;
 
@@ -4023,15 +4100,6 @@ async function renderIntegrationTransfersPanel(target) {
   ]);
 }
 
-async function renderIntegrationConfigurationPanel(target) {
-  target.innerHTML = `
-    <div id="localNetworkConfigurationPanel"></div>
-    <div id="overmindConfigurationPanel" class="mt-3"></div>`;
-  await Promise.allSettled([
-    renderLocalNetworkIntegrationPanel(document.getElementById("localNetworkConfigurationPanel")),
-    renderOvermindIntegrationPanel(document.getElementById("overmindConfigurationPanel")),
-  ]);
-}
 
 async function renderLocalTransferRequestPanel(target) {
   target.innerHTML = `
@@ -4052,29 +4120,44 @@ async function renderLocalTransferRequestPanel(target) {
           <div class="form-check d-none" id="localAssetIncludeRomsWrap"><input class="form-check-input" type="checkbox" id="localAssetIncludeRoms" checked><label class="form-check-label small" for="localAssetIncludeRoms">Include ROMs</label></div>
           <div class="form-check d-none" id="localAssetOverwriteFilesWrap"><input class="form-check-input" type="checkbox" id="localAssetOverwriteFiles"><label class="form-check-label small" for="localAssetOverwriteFiles">Overwrite Files</label></div>
         </div>
-        <div id="localAssetsBody"><div class="themed-empty">Pair a nearby Drone, then request its assets here.</div></div>
+        <div id="localAssetsBody"><div class="themed-empty">Select a Drone to browse its assets.</div></div>
         <div id="localAssetsPagination" class="mt-2"></div>
       </div></div>`;
 
+  function updateRequestButtons() {
+    const selected = !!(document.getElementById("localAssetPeer") || {}).value;
+    document.getElementById("localAssetLoadBtn").disabled = !selected;
+    document.getElementById("localAssetCopyAllBtn").disabled = !selected;
+  }
+
   async function refresh() {
-    const status = await api("/admin/local-network/status");
-    const pairedPeers = (status.peers || []).filter(peer => peer.paired);
+    // Only drones that answer the swarm probe are offered -- an unreachable
+    // peer in the dropdown is a dead end. Nothing is selected by default; the
+    // user picks a drone, its systems load, then Request fetches asset data.
     const peerSelect = document.getElementById("localAssetPeer");
-    const selectedPeerId = peerSelect.value || localPeerAssetContext.peerId;
-    peerSelect.innerHTML = pairedPeers.length
-      ? pairedPeers.map(peer => `<option value="${escapeHtml(peer.drone_id || "")}">${escapeHtml(peer.name || peer.hostname || peer.drone_id || "Drone")}</option>`).join("")
-      : '<option value="">No paired Drones</option>';
-    if (pairedPeers.some(peer => String(peer.drone_id || "") === selectedPeerId)) peerSelect.value = selectedPeerId;
-    localPeerAssetContext.peerId = peerSelect.value || "";
-    document.getElementById("localAssetLoadBtn").disabled = !pairedPeers.length;
-    document.getElementById("localAssetCopyAllBtn").disabled = !pairedPeers.length;
+    peerSelect.innerHTML = '<option value="">&lt;Select Drone&gt;</option>';
+    updateRequestButtons();
+    const overview = await api("/admin/swarm/overview");
+    const onlinePeers = (overview.drones || []).filter(drone => !drone.is_self && drone.online);
+    const preselect = localPeerAssetContext.peerId;
+    peerSelect.innerHTML = [
+      '<option value="">&lt;Select Drone&gt;</option>',
+      ...onlinePeers.map(drone => `<option value="${escapeHtml(drone.drone_id || "")}">${escapeHtml(drone.name || drone.hostname || drone.drone_id || "Drone")}</option>`),
+    ].join("");
+    if (preselect && onlinePeers.some(drone => String(drone.drone_id || "") === preselect)) {
+      peerSelect.value = preselect;
+    } else {
+      peerSelect.value = "";
+      localPeerAssetContext.peerId = "";
+    }
+    if (!onlinePeers.length) {
+      document.getElementById("localAssetsBody").innerHTML = '<div class="themed-empty">No connected Drones right now. Pair and check Drones on the Swarm page.</div>';
+    }
+    updateRequestButtons();
   }
   window.refreshLocalNetworkAssets = refresh;
-  document.getElementById("localAssetLoadBtn").addEventListener("click", requestLocalPeerAssets);
-  document.getElementById("localAssetCopyAllBtn").addEventListener("click", copyAllLocalAssets);
-  document.getElementById("localAssetType").addEventListener("change", updateLocalAssetTypeUi);
-  document.getElementById("localAssetIncludeArtwork").addEventListener("change", updateLocalAssetTypeUi);
-  document.getElementById("localAssetPeer").addEventListener("change", () => {
+
+  async function onPeerSelected() {
     localPeerAssetContext.peerId = document.getElementById("localAssetPeer").value || "";
     localPeerAssetContext.systems = [];
     localPeerAssetContext.availableSystems = [];
@@ -4083,9 +4166,25 @@ async function renderLocalTransferRequestPanel(target) {
     localPeerAssetContext.items = [];
     localPeerAssetContext.total = 0;
     renderLocalAssetSystems();
-    document.getElementById("localAssetsBody").innerHTML = '<div class="themed-empty">Request assets from this Drone when you are ready.</div>';
     document.getElementById("localAssetsPagination").innerHTML = "";
-  });
+    updateRequestButtons();
+    if (!localPeerAssetContext.peerId) {
+      document.getElementById("localAssetsBody").innerHTML = '<div class="themed-empty">Select a Drone to browse its assets.</div>';
+      return;
+    }
+    // Selecting a drone retrieves its systems (not its ROMs) so the Systems
+    // filter is ready; asset data itself only loads on an explicit Request.
+    const toggle = document.getElementById("localAssetSystemsToggle");
+    if (toggle) toggle.textContent = "Loading systems...";
+    await loadLocalPeerSystems();
+    document.getElementById("localAssetsBody").innerHTML = '<div class="themed-empty">Choose systems if you want to narrow things down, then press Request.</div>';
+  }
+
+  document.getElementById("localAssetLoadBtn").addEventListener("click", requestLocalPeerAssets);
+  document.getElementById("localAssetCopyAllBtn").addEventListener("click", copyAllLocalAssets);
+  document.getElementById("localAssetType").addEventListener("change", updateLocalAssetTypeUi);
+  document.getElementById("localAssetIncludeArtwork").addEventListener("change", updateLocalAssetTypeUi);
+  document.getElementById("localAssetPeer").addEventListener("change", onPeerSelected);
   document.getElementById("localAssetPageSize").addEventListener("change", () => {
     document.getElementById("localAssetsBody").innerHTML = '<div class="themed-empty">Press Request to load assets with the new page size.</div>';
     document.getElementById("localAssetsPagination").innerHTML = "";
@@ -4098,43 +4197,17 @@ async function renderLocalTransferRequestPanel(target) {
   });
   updateLocalAssetTypeUi();
   await refresh();
-  // Only an explicit "Browse" click (Configuration page) sets
-  // pendingLocalPeerBrowse; a plain visit to this page (navbar, refresh,
-  // revisit) never auto-requests anything. Consume it exactly once, whether
-  // or not the peer is still available, so it can't fire again later.
-  const browsedPeerId = pendingLocalPeerBrowse;
-  pendingLocalPeerBrowse = null;
-  if (browsedPeerId && browsedPeerId === localPeerAssetContext.peerId) {
-    document.getElementById("localAssetType").value = localPeerAssetContext.assetType || "roms";
-    await loadLocalPeerSystems();
-    updateLocalAssetTypeUi();
-    await loadLocalPeerAssets();
+  // Deep link from a Swarm card ("Request Assets") preselects the drone and
+  // loads its systems, but never auto-requests asset data -- fetching stays
+  // behind an explicit Request click.
+  if (localPeerAssetContext.peerId && document.getElementById("localAssetPeer").value === localPeerAssetContext.peerId) {
+    await onPeerSelected();
     document.getElementById("localAssetsCard")?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 }
 
-async function renderLocalNetworkIntegrationPanel(target) {
-  target.innerHTML = `
-    <div class="card log-card mb-3"><div class="card-header d-flex justify-content-between align-items-center"><span>Pairing</span><button class="btn btn-sm btn-outline-primary" id="localPairCodeRotateBtn">Rotate Code</button></div>
-      <div class="card-body" id="localPairingBody"></div></div>
-    <div class="card log-card mb-3"><div class="card-header d-flex justify-content-between align-items-center"><span>Nearby Drones</span><div class="d-flex gap-2"><button class="btn btn-sm btn-outline-primary" id="localDiscoverBtn"><i class="bi bi-radar me-1"></i>Discover</button><button class="btn btn-sm btn-outline-secondary" id="localRefreshBtn"><i class="bi bi-arrow-repeat"></i></button></div></div>
-      <div class="card-body" id="localPeersBody"><div class="text-muted">Loading peers...</div></div></div>`;
-
-  async function refresh() {
-    const status = await api("/admin/local-network/status");
-    document.getElementById("localPairingBody").innerHTML = status.active
-      ? `<div class="d-flex flex-wrap align-items-center gap-3"><div><div class="small text-muted">Pairing code</div><div class="display-6 mono">${escapeHtml(status.pairing?.code || "")}</div></div><div class="small text-muted">Expires ${escapeHtml(status.pairing?.expires_at || "")}. Enter this code on the other Drone to approve it.</div></div>`
-      : '<div class="themed-empty">Enable Local Network integration to discover and pair nearby Drones.</div>';
-    document.getElementById("localPeersBody").innerHTML = renderLocalPeerRows(status.peers || []);
-    document.getElementById("localDiscoverBtn").disabled = !status.active;
-    document.getElementById("localPairCodeRotateBtn").disabled = !status.active;
-  }
-  window.refreshLocalNetwork = refresh;
-  document.getElementById("localDiscoverBtn").addEventListener("click", async () => { await apiPost("/admin/local-network/discover", {}); await refresh(); });
-  document.getElementById("localRefreshBtn").addEventListener("click", refresh);
-  document.getElementById("localPairCodeRotateBtn").addEventListener("click", async () => { await apiPost("/admin/local-network/pairing-code/rotate", {}); await refresh(); });
-  await refresh();
-}
+// The Pairing / Nearby Drones panels now live on the Swarm page
+// (renderSwarmPage), which replaced the retired Integration page.
 
 function localAssetIncludeArtwork() {
   const checkbox = document.getElementById("localAssetIncludeArtwork");
@@ -4235,7 +4308,7 @@ async function loadLocalPeerSystems() {
 
 async function requestLocalPeerAssets() {
   const peerId = (document.getElementById("localAssetPeer") || {}).value || localPeerAssetContext.peerId;
-  if (!peerId) { showToast("Pair a Drone before requesting assets.", "warning"); return; }
+  if (!peerId) { showToast("Select a Drone first.", "warning"); return; }
   if (localPeerAssetContext.systemsLoadedPeerId !== peerId) {
     await loadLocalPeerSystems();
   }
@@ -4258,16 +4331,6 @@ async function forgetLocalPeer(peerId) {
   if (typeof window.refreshLocalNetworkAssets === "function") await window.refreshLocalNetworkAssets();
 }
 
-async function browseLocalPeer(peerId) {
-  // "Browse" lives on the Configuration page's paired-peer list; Configuration
-  // and Transfers are separate pages, so this always navigates. The auto-load
-  // in renderLocalTransferRequestPanel picks up pendingLocalPeerBrowse once the
-  // Transfers page has actually rendered -- this is the ONLY way that auto-load
-  // fires; a plain visit to Transfers never requests anything on its own.
-  localPeerAssetContext = { peerId, peerName: peerId, assetType: "roms", systems: [], availableSystems: [], systemCounts: {}, systemsLoadedPeerId: "", items: [], query: "", limit: 50, offset: 0, total: 0 };
-  pendingLocalPeerBrowse = peerId;
-  setHash("#admin/transfers");
-}
 
 async function loadLocalPeerAssets(resetPage = true) {
   const peerId = document.getElementById("localAssetPeer").value;
@@ -4275,7 +4338,7 @@ async function loadLocalPeerAssets(resetPage = true) {
   const systems = selectedLocalAssetSystems();
   const q = document.getElementById("localAssetQuery").value.trim();
   const limit = Math.max(1, Number(document.getElementById("localAssetPageSize").value) || 50);
-  if (!peerId) { showToast("Pair a Drone before requesting assets.", "warning"); return; }
+  if (!peerId) { showToast("Select a Drone first.", "warning"); return; }
   if (resetPage || type !== localPeerAssetContext.assetType || systems.join(",") !== localPeerAssetContext.systems.join(",") || q !== localPeerAssetContext.query || limit !== localPeerAssetContext.limit) {
     localPeerAssetContext.offset = 0;
   }
@@ -4398,252 +4461,9 @@ async function queueLocalBulkCopy(body) {
   }
 }
 
-async function renderOvermindIntegrationPanel(target) {
-  target.innerHTML = `
-    <div class="card log-card">
-      <div class="card-header d-flex justify-content-between align-items-center">
-        <span>Configuration</span>
-        <button id="overmindRefreshBtn" class="btn btn-sm btn-outline-primary" type="button">Refresh</button>
-      </div>
-      <div class="card-body">
-        <div class="row g-3">
-          <div class="col-12 col-lg-6">
-            <div class="mb-3">
-              <label class="form-label">Overmind URL <span class="text-danger">*</span> <span class="text-muted small">Required</span></label>
-              <input id="overmindUrlInput" class="form-control" type="url" placeholder="https://www.batocera-swarm.com">
-              <div class="text-muted small mt-1"><a href="https://www.batocera-swarm.com" target="_blank" rel="noopener noreferrer">Open Batocera Swarm <i class="bi bi-box-arrow-up-right ms-1"></i></a></div>
-            </div>
-            <div class="mb-3">
-              <label class="form-label">Authorization Token <span class="text-danger">*</span> <span class="text-muted small">Required</span></label>
-              <input id="overmindAuthTokenInput" class="form-control" type="password" placeholder="Token generated in Overmind">
-              <div class="text-muted small mt-1">Paste an authorization token from Overmind. This token is required to connect this Drone.</div>
-            </div>
-            <div class="mb-3">
-              <label class="form-label">Drone Name  <span class="text-muted small">Optional</span></label>
-              <input id="droneNameInput" class="form-control" type="text" placeholder="Arcade Cabinet">
-            </div>
-          </div>
-          <div class="col-12 col-lg-6">
-            <div class="p-3 rounded border h-100" style="border-color:var(--admin-border)!important;background:rgba(31,42,68,.35)">
-              <div class="fw-semibold mb-1">Claim Ownership <span class="text-muted small">Optional</span></div>
-              <div class="text-muted small mb-3">Use your Overmind account to identify this Drone as yours. This grants your Overmind account admin access to this Drone even when it belongs to another swarm.</div>
-              <div class="mb-3">
-                <label class="form-label">Overmind Email</label>
-                <input id="claimEmailInput" class="form-control" type="email" autocomplete="username">
-              </div>
-              <div class="mb-0">
-                <label class="form-label">Overmind Password</label>
-                <input id="claimPasswordInput" class="form-control" type="password" autocomplete="current-password">
-              </div>
-            </div>
-          </div>
-        </div>
-        <div class="d-flex gap-2">
-          <button id="overmindSaveBtn" class="btn btn-primary" type="button">Save Configuration</button>
-          <button id="overmindDisconnectBtn" class="btn btn-outline-danger" type="button">Disconnect Swarm</button>
-        </div>
-        <hr>
-        <div class="small" id="overmindStatus"></div>
-      </div>
-    </div>
-    <div class="card log-card mt-3">
-      <div class="card-header d-flex justify-content-between align-items-center">
-        <button class="btn btn-sm btn-link text-decoration-none p-0" type="button" data-bs-toggle="collapse" data-bs-target="#overmindActionsCollapse" aria-expanded="false" aria-controls="overmindActionsCollapse">
-          <i class="bi bi-chevron-right me-1 collapse-caret"></i>Processed Overmind Actions
-        </button>
-        <button id="overmindActionsRefreshBtn" class="btn btn-sm btn-outline-primary" type="button">Refresh</button>
-      </div>
-      <div class="collapse" id="overmindActionsCollapse">
-        <div class="card-body" id="overmindActionsBody">
-          <div class="text-muted">Loading processed actions...</div>
-        </div>
-      </div>
-    </div>
-  `;
+// The Overmind Integration panel was removed with the Integration page
+// (Overmind is retired; see renderSwarmPage for the replacement flows).
 
-  const statusEl = document.getElementById("overmindStatus");
-  const urlInput = document.getElementById("overmindUrlInput");
-  const droneNameInput = document.getElementById("droneNameInput");
-  const authTokenInput = document.getElementById("overmindAuthTokenInput");
-  const saveBtn = document.getElementById("overmindSaveBtn");
-  const disconnectBtn = document.getElementById("overmindDisconnectBtn");
-  const claimEmailInput = document.getElementById("claimEmailInput");
-  const claimPasswordInput = document.getElementById("claimPasswordInput");
-  const refreshBtn = document.getElementById("overmindRefreshBtn");
-  const actionsRefreshBtn = document.getElementById("overmindActionsRefreshBtn");
-  const actionsBody = document.getElementById("overmindActionsBody");
-  const ACTIONS_PER_PAGE = 10;
-  let allActions = [];
-  let actionsPage = 0;
-
-  function renderActionsPage() {
-    const total = allActions.length;
-    const totalPages = Math.max(1, Math.ceil(total / ACTIONS_PER_PAGE));
-    actionsPage = Math.max(0, Math.min(actionsPage, totalPages - 1));
-    const start = actionsPage * ACTIONS_PER_PAGE;
-    const pageItems = allActions.slice(start, start + ACTIONS_PER_PAGE);
-    const showPrev = actionsPage > 0;
-    const showNext = actionsPage < totalPages - 1;
-    const paginationHtml = totalPages > 1 ? `
-      <div class="d-flex align-items-center gap-2 mt-2 flex-wrap">
-        <button class="btn btn-sm btn-outline-secondary" onclick="overmindActionsPrev()" ${showPrev ? "" : "disabled"}>&#8249; Prev</button>
-        <span class="small text-muted">Page ${actionsPage + 1} of ${totalPages} &nbsp;(${total} total)</span>
-        <button class="btn btn-sm btn-outline-secondary" onclick="overmindActionsNext()" ${showNext ? "" : "disabled"}>Next &#8250;</button>
-      </div>` : "";
-    actionsBody.innerHTML = pageItems.length ? `
-      <div class="table-responsive">
-        <table class="table table-sm align-middle themed-table bff-stack small-mono-table">
-          <thead>
-            <tr>
-              <th>Processed</th>
-              <th>Action</th>
-              <th>Status</th>
-              <th>Device</th>
-              <th>Message</th>
-              <th>Returned Data</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${pageItems.map(action => `
-              <tr>
-                <td class="text-nowrap">${escapeHtml(formatCompactLocalDate(action.processed_at) || "n/a")}</td>
-                <td>${escapeHtml(action.action || "n/a")}</td>
-                <td><span class="badge text-bg-secondary">${escapeHtml(action.status || "n/a")}</span></td>
-                <td class="mono small">${escapeHtml(action.device_id || "n/a")}</td>
-                <td>${escapeHtml(action.message || "")}${action.fake_data ? ' <span class="badge text-bg-info ms-1">fake data</span>' : ''}</td>
-                <td>${escapeHtml(action.result_summary || "")}</td>
-              </tr>
-            `).join("")}
-          </tbody>
-        </table>
-      </div>
-      ${paginationHtml}
-    ` : `<div class="themed-empty">No processed actions yet.</div>`;
-  }
-
-  window.overmindActionsPrev = function() { actionsPage--; renderActionsPage(); };
-  window.overmindActionsNext = function() { actionsPage++; renderActionsPage(); };
-
-  function renderStatus(payload) {
-    const status = payload.status || {};
-    const swarmStatus = status.swarm_connection_status || "disconnected";
-    const overmindActive = payload.overmind_active !== false;
-    statusEl.innerHTML = `
-      <div class="d-flex flex-wrap gap-2">
-        <span class="badge ${overmindActive ? "text-bg-success" : "text-bg-secondary"}">Overmind: ${overmindActive ? "enabled" : "disabled"}</span>
-        <span class="badge ${status.configured ? "text-bg-success" : "text-bg-secondary"}">Overmind: ${status.configured ? "linked" : "disconnected"}</span>
-        <span class="badge ${swarmStatus === "connected" ? "text-bg-success" : swarmStatus.includes("pending") || swarmStatus.includes("requested") ? "text-bg-warning" : "text-bg-secondary"}">Connected to Swarm: ${escapeHtml(swarmStatus)}</span>
-      </div>
-    `;
-    urlInput.value = payload.overmind_url || "https://www.batocera-swarm.com";
-    droneNameInput.value = payload.drone_name || "";
-    claimEmailInput.value = payload.overmind_email || "";
-  }
-
-  async function loadStatus() {
-    const payload = await api("/admin/integrations/overmind/status");
-    renderStatus(payload);
-  }
-
-  async function loadActions() {
-    const payload = await api("/admin/integrations/overmind/actions");
-    allActions = payload.actions || [];
-    actionsPage = 0;
-    renderActionsPage();
-  }
-
-  async function saveConfig() {
-    const overmindUrl = (urlInput.value || "").trim();
-    const droneName = (droneNameInput.value || "").trim();
-    const overmindAuthToken = authTokenInput.value || "";
-    const claimEmail = (claimEmailInput.value || "").trim();
-    const claimPassword = claimPasswordInput.value || "";
-    const body = { overmind_url: overmindUrl, drone_name: droneName };
-    if (overmindAuthToken) {
-      body.overmind_auth_token = overmindAuthToken;
-    }
-    if (claimEmail) {
-      body.overmind_email = claimEmail;
-    }
-    if (claimPassword) {
-      body.overmind_email = claimEmail;
-      body.overmind_password = claimPassword;
-    }
-    const payload = await apiPost("/admin/integrations/overmind/config", body);
-    authTokenInput.value = "";
-    claimPasswordInput.value = "";
-    const state = payload.status?.integration_state || "";
-    const isActive = payload.status?.integration_enabled && state !== "pending_failed";
-    if (state === "pending_failed") {
-      console.error("Overmind authorization failed", payload.status?.last_error || "authorization token was rejected", payload.status?.last_onboarding_attempt || {});
-      showToast(`Overmind authorization failed: ${escapeHtml(payload.status?.last_error || "authorization token was rejected")}`, "danger");
-    } else {
-      showToast(isActive ? "Overmind registered and polling is active." : "Overmind configuration saved. Check status for registration details.", isActive ? "success" : "warning");
-    }
-    renderStatus(payload);
-  }
-
-  saveBtn.addEventListener("click", async () => {
-    setLoading(true, "Saving Overmind configuration...");
-    try {
-      await saveConfig();
-    } catch (err) {
-      showToast(escapeHtml(err.message || "Failed to save config"), "danger");
-      claimPasswordInput.value = "";
-    } finally {
-      setLoading(false);
-    }
-  });
-  disconnectBtn.addEventListener("click", async () => {
-    if (!window.confirm("Disconnect this Drone from its Overmind swarm?")) return;
-    setLoading(true, "Disconnecting from swarm...");
-    try {
-      const payload = await apiPost("/admin/integrations/overmind/swarm/disconnect", {});
-      renderStatus(payload);
-      showToast("Disconnected from swarm.", "success");
-    } catch (err) {
-      showToast(escapeHtml(err.message || "Failed to disconnect swarm"), "danger");
-    } finally {
-      setLoading(false);
-    }
-  });
-  refreshBtn.addEventListener("click", async () => {
-    setLoading(true, "Loading Overmind status...");
-    try {
-      await loadStatus();
-    } catch (err) {
-      showToast(escapeHtml(err.message || "Failed to load status"), "danger");
-    } finally {
-      setLoading(false);
-    }
-  });
-  actionsRefreshBtn.addEventListener("click", async () => {
-    setLoading(true, "Loading processed actions...");
-    try {
-      await loadActions();
-    } catch (err) {
-      showToast(escapeHtml(err.message || "Failed to load processed actions"), "danger");
-    } finally {
-      setLoading(false);
-    }
-  });
-  setLoading(true, "Loading Overmind status...");
-  try {
-    const loaders = [
-      ["status", loadStatus],
-      ["actions", loadActions],
-    ];
-    const results = await Promise.allSettled(loaders.map(([, loader]) => loader()));
-    results.forEach((result, index) => {
-      if (result.status === "rejected") {
-        const label = loaders[index][0];
-        showToast(`Failed to load Overmind ${label}: ${escapeHtml(result.reason?.message || "unknown error")}`, "danger");
-      }
-    });
-  } finally {
-    setLoading(false);
-  }
-}
 function formatIdleDuration(seconds) {
   if (seconds === null || seconds === undefined) return "unknown";
   const value = Math.max(0, Math.floor(Number(seconds)));
@@ -6154,25 +5974,17 @@ async function router() {
         return;
       }
       await renderSwarmPage();
-    } else if (hash.startsWith("#admin/integration")) {
+    } else if (
+      hash.startsWith("#admin/integration")
+      || ["#admin/overmind", "#admin/overmind/actions", "#admin/local-network"].includes(hash)
+    ) {
+      // Integration (and its Overmind panels) is retired; the Swarm page owns
+      // pairing, peers, and the tailnet now.
       if (!adminEnabled) {
         setHash("");
         return;
       }
-      await renderIntegrationPage();
-    } else if (["#admin/overmind", "#admin/overmind/actions"].includes(hash)) {
-      if (!adminEnabled) {
-        setHash("");
-        return;
-      }
-      setHash("#admin/integration");
-      return;
-    } else if (hash === "#admin/local-network") {
-      if (!adminEnabled) {
-        setHash("");
-        return;
-      }
-      setHash("#admin/integration");
+      setHash("#admin/swarm");
       return;
     } else if (hash === "#admin/api") {
       if (!adminEnabled) {
