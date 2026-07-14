@@ -3,7 +3,9 @@ from pathlib import Path
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "next-release-version.sh"
+DOCKER_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "docker-publish.sh"
 WORKFLOW = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "release.yml"
+CI_WORKFLOW = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml"
 
 
 def next_version(current: str, subject: str) -> str:
@@ -43,3 +45,23 @@ def test_release_workflow_is_main_only_and_uploads_drone_assets():
     assert "dist/drone-app.tar.gz" in workflow
     assert "scripts/batocera_install.sh" in workflow
     assert "refs/tags/latest --force" in workflow
+    assert 'args=(--version "$RELEASE_VERSION")' in workflow
+    assert "./scripts/docker-publish.sh" in workflow
+    assert "packages: write" in workflow
+
+
+def test_ci_workflow_does_not_duplicate_main_push_release():
+    workflow = CI_WORKFLOW.read_text(encoding="utf-8")
+    assert "pull_request:" in workflow
+    assert "  push:" not in workflow
+
+
+def test_docker_publish_accepts_release_workflow_version():
+    result = subprocess.run(
+        ["bash", str(DOCKER_SCRIPT), "--version", "v9.8.7", "--dry-run"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "Version: v9.8.7" in result.stdout
+    assert "batocera-drone:v9.8.7" in result.stdout
