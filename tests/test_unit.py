@@ -6246,6 +6246,50 @@ class SwarmPageTests(unittest.TestCase):
         self.assertIn('setHash("#admin/transfers")', browse_body)
 
 
+class InstallerTailscaleTests(unittest.TestCase):
+    """batocera_install.sh sets up the Tailscale mesh (binaries under /userdata,
+    DRONE_TAILNET service, optional auth-key enrollment) so the tailnet needs no
+    manual install; batocera_uninstall.sh removes it symmetrically."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        root = Path(__file__).resolve().parents[1]
+        cls.install = root.joinpath("scripts/batocera_install.sh").read_text(encoding="utf-8")
+        cls.uninstall = root.joinpath("scripts/batocera_uninstall.sh").read_text(encoding="utf-8")
+        cls.install_path = str(root / "scripts/batocera_install.sh")
+        cls.uninstall_path = str(root / "scripts/batocera_uninstall.sh")
+
+    def test_scripts_parse_cleanly(self) -> None:
+        for path in (self.install_path, self.uninstall_path):
+            result = subprocess.run(["sh", "-n", path], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_installer_places_everything_under_userdata(self) -> None:
+        # Binaries + state must survive Batocera OS updates (read-only rootfs).
+        self.assertIn('TS_DIR="/userdata/system/tailscale"', self.install)
+        self.assertIn('TS_SERVICE="/userdata/system/services/DRONE_TAILNET"', self.install)
+        self.assertIn('--statedir="$STATE_DIR"', self.install)
+
+    def test_installer_supports_hands_free_and_skip_paths(self) -> None:
+        self.assertIn("DRONE_SKIP_TAILSCALE", self.install)
+        self.assertIn("TS_AUTHKEY", self.install)
+        self.assertIn("--authkey=", self.install)
+        # Keep Batocera's DNS untouched; the integration works on raw 100.x IPs.
+        self.assertIn("--accept-dns=false", self.install)
+        # A mesh-setup failure must not fail the Drone install itself.
+        self.assertIn("if ! install_tailscale_mesh; then", self.install)
+
+    def test_service_falls_back_to_userspace_networking_without_tun(self) -> None:
+        self.assertIn("modprobe tun", self.install)
+        self.assertIn("--tun=userspace-networking", self.install)
+
+    def test_uninstaller_removes_the_mesh_and_releases_the_node(self) -> None:
+        self.assertIn("remove_tailscale_mesh", self.uninstall)
+        self.assertIn("logout", self.uninstall)
+        self.assertIn('rm -rf "$TS_DIR"', self.uninstall)
+        self.assertIn("DRONE_KEEP_TAILSCALE", self.uninstall)
+
+
 class NavRestructureTests(unittest.TestCase):
     """Theme moved from a navbar link to an Admin-page card; Integration's
     Transfers tab became its own navbar-linked page, leaving Integration as a

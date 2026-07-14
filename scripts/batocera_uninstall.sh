@@ -8,6 +8,9 @@ LOG_DIR="/userdata/system/logs/drone-app"
 SERVICE_SERVER="/userdata/system/services/DRONE_SERVER"
 SERVICE_APP="/userdata/system/services/DRONE_APP"
 SERVICE_FILES="${SERVICE_SERVER} ${SERVICE_APP}"
+TS_DIR="/userdata/system/tailscale"
+TS_SERVICE="/userdata/system/services/DRONE_TAILNET"
+TS_SOCKET="/var/run/tailscale/tailscaled.sock"
 CUSTOM_SH="/userdata/system/custom.sh"
 GAME_EVENT_HOOK="/userdata/system/scripts/drone-game-event.sh"
 PID_FILE="/tmp/drone-server.pid"
@@ -150,10 +153,55 @@ detect_install_method() {
   echo ""
 }
 
+remove_tailscale_mesh() {
+  if [ "${DRONE_KEEP_TAILSCALE:-0}" = "1" ]; then
+    echo "Keeping the Tailscale mesh install (DRONE_KEEP_TAILSCALE=1)."
+    return 0
+  fi
+  if [ ! -e "$TS_SERVICE" ] && [ ! -d "$TS_DIR" ]; then
+    echo "No Drone tailnet install was found."
+    return 0
+  fi
+  # Best-effort logout releases this node's key so it does not linger as a
+  # dead device in the tailnet admin console.
+  if [ -x "$TS_DIR/bin/tailscale" ]; then
+    "$TS_DIR/bin/tailscale" --socket="$TS_SOCKET" logout 2>/dev/null || true
+  fi
+  if [ -x "$TS_SERVICE" ]; then
+    "$TS_SERVICE" stop >/dev/null 2>&1 || true
+  fi
+  if command -v batocera-services >/dev/null 2>&1; then
+    batocera-services disable DRONE_TAILNET >/dev/null 2>&1 || true
+  fi
+  rm -f "$TS_SERVICE"
+  rm -rf "$TS_DIR"
+  if [ -f "$CUSTOM_SH" ] && grep -q "Start Drone tailnet mesh" "$CUSTOM_SH" 2>/dev/null; then
+    tmp_file="${CUSTOM_SH}.drone-tailnet-uninstall.$$"
+    awk '
+      /# Start Drone tailnet mesh: Batocera-Fleet-Federation\/batocera\.drone/ {
+        skip=1
+        next
+      }
+      skip && /^\) &$/ {
+        skip=0
+        next
+      }
+      !skip {
+        print
+      }
+    ' "$CUSTOM_SH" > "$tmp_file"
+    cat "$tmp_file" > "$CUSTOM_SH"
+    rm -f "$tmp_file"
+    echo "✓ Removed tailnet startup block from $CUSTOM_SH"
+  fi
+  echo "✓ Removed Drone tailnet install (service, binaries, and state)"
+}
+
 detect_install_method
 stop_drone
 remove_service_files
 remove_legacy_custom_sh_block
+remove_tailscale_mesh
 remove_drone_files
 remove_drone_account
 
