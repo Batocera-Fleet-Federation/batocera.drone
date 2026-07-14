@@ -121,7 +121,115 @@ class HandlersNetworkMixin:
             _local_network.announce(self.settings, str(DroneCertificateManager(self.settings).metadata().get("fingerprint") or ""))
         self._handle_admin_network_mode()
 
-    def _local_network_status_payload(self) -> dict:
+    def _activate_local_peer_certificate(self, peer: dict) -> None:
+        ssl_context = getattr(self.server, "ssl_context", None)
+        raw_path = str(peer.get("certificate_path") or "").strip()
+        if ssl_context is None or not raw_path:
+            return
+        cert_path = Path(raw_path)
+        if not cert_path.is_file():
+            return
+        try:
+            ssl_context.load_verify_locations(cafile=str(cert_path))
+        except (ssl.SSLError, OSError):
+            pass
+
+    @staticmethod
+    def _tailnet_device_row(device: dict) -> dict:
+        tailnet_ip = str(device.get("tailnet_ip") or "").strip()
+        return {
+            "drone_id": f"tailnet:{device.get('tailnet_id') or tailnet_ip}",
+            "tailnet_id": str(device.get("tailnet_id") or tailnet_ip),
+            "name": str(device.get("name") or device.get("hostname") or tailnet_ip or "Tailnet device"),
+            "hostname": str(device.get("hostname") or ""),
+            "reachable_url": _normalize_peer_address(tailnet_ip) if tailnet_ip else "",
+            "tailnet_ip": tailnet_ip,
+            "source": "Tailnet",
+            "last_seen": str(device.get("last_seen") or ""),
+            "paired": False,
+            "tailnet_device": True,
+            "tailnet_online": True,
+        }
+
+    @staticmethod
+    def _probe_tailnet_device(device: dict) -> tuple[dict, Optional[dict], str]:
+        tailnet_ip = str(device.get("tailnet_ip") or "").strip()
+        try:
+            return device, _fetch_peer_info(tailnet_ip, timeout=3.0), ""
+        except Exception as error:
+            return device, None, str(error) or error.__class__.__name__
+
+    def _sync_tailnet_device(
+        self,
+        device: dict,
+        *,
+        info: Optional[dict] = None,
+        probe_error: str = "",
+        restore_peer_id: str = "",
+    ) -> Optional[dict]:
+        row = self._tailnet_device_row(device)
+        tailnet_ip = str(row.get("tailnet_ip") or "")
+        if info is None and not probe_error:
+            _, info, probe_error = self._probe_tailnet_device(device)
+        if info is None:
+            return {**row, "tailnet_probe_error": probe_error}
+        peer_id = str(info.get("drone_id") or "").strip()
+        if not peer_id or peer_id == str(self.settings.overmind_device_id):
+            return None
+        tailnet_peer = {
+            **info,
+            "drone_id": peer_id,
+            "name": str(info.get("name") or row.get("name") or peer_id),
+            "hostname": str(info.get("hostname") or row.get("hostname") or ""),
+            "reachable_url": _normalize_peer_address(tailnet_ip),
+            "advertised_reachable_url": str(info.get("reachable_url") or ""),
+            "tailnet_ip": tailnet_ip,
+            "source": "Tailnet",
+            "pairing_source": "tailnet",
+            "tailnet_device": False,
+        }
+        local_match = next(
+            (
+                peer for peer in _local_network.discovered_peers(self.settings, include_stale=True)
+                if str(peer.get("drone_id") or "") == peer_id
+                and str(peer.get("source") or "Local Network") == "Local Network"
+            ),
+            None,
+        )
+        discovered = local_match or _local_network.record_discovered_peer(self.settings, tailnet_peer, tailnet_ip)
+        existing = _local_network.get_paired_peer(self.settings, peer_id)
+        if existing:
+            return _public_local_peer(existing)
+        if _local_network.is_tailnet_peer_forgotten(self.settings, peer_id) and restore_peer_id != peer_id:
+            return _public_local_peer({**(discovered or tailnet_peer), "tailnet_forgotten": True, "paired": False})
+        try:
+            paired = _local_pair_peer(
+                self.settings,
+                tailnet_peer,
+                "",
+                tailnet_auto_pair=True,
+            )
+            self._activate_local_peer_certificate(paired)
+            return _public_local_peer(paired)
+        except Exception as error:
+            return _public_local_peer(
+                {**(discovered or tailnet_peer), "paired": False, "tailnet_pair_error": str(error) or error.__class__.__name__}
+            )
+
+    def _sync_tailnet_peers(self, status: dict) -> list[dict]:
+        devices = [device for device in status.get("peers") or [] if isinstance(device, dict)]
+        if not status.get("enrolled") or not devices:
+            return []
+        with ThreadPoolExecutor(max_workers=min(8, len(devices))) as pool:
+            probes = list(pool.map(self._probe_tailnet_device, devices))
+        rows = []
+        for device, info, error in probes:
+            row = self._sync_tailnet_device(device, info=info, probe_error=error)
+            if row:
+                rows.append(row)
+        return rows
+
+    def _local_network_status_payload(self, tailnet_devices: Optional[list[dict]] = None) -> dict:
         hide_seeded_demo = False
         if self.settings.use_fake_data and _local_network.is_local_mode(self.settings):
             discovered_peers = _local_network.discovered_peers(self.settings, include_stale=True)
@@ -138,16 +246,40 @@ class HandlersNetworkMixin:
             if isinstance(check, dict)
         }
         discovered = []
-        seen = set()
+        seen_ids = set()
+        seen_addresses = set()
+        seen_hosts = set()
+        active_tailnet_ids = {str(peer.get("drone_id") or "") for peer in tailnet_devices or []}
+        active_tailnet_addresses = {str(peer.get("tailnet_ip") or "") for peer in tailnet_devices or []}
         for peer in _local_network.discovered_peers(self.settings, include_stale=True):
             peer_id = str(peer.get("drone_id") or "")
             if hide_seeded_demo and peer_id == "fake-local-peer-01":
                 continue
-            discovered.append(_public_local_peer({**peer, **paired.get(peer_id, {}), "health": checks.get(peer_id)}))
-            seen.add(peer_id)
-        for peer_id, peer in paired.items():
-            if peer_id not in seen:
-                discovered.append(_public_local_peer({**peer, "health": checks.get(peer_id)}))
+            if peer_id in paired:
+                continue
+            if tailnet_devices is not None and str(peer.get("source") or "") == "Tailnet":
+                tailnet_ip = str(peer.get("tailnet_ip") or "")
+                if peer_id not in active_tailnet_ids and tailnet_ip not in active_tailnet_addresses:
+                    continue
+            public_peer = _public_local_peer({**peer, "source": str(peer.get("source") or "Local Network"), "health": checks.get(peer_id)})
+            discovered.append(public_peer)
+            seen_ids.add(peer_id)
+            seen_addresses.add(str(peer.get("tailnet_ip") or ""))
+            seen_hosts.add(str(peer.get("hostname") or "").lower())
+        for device in tailnet_devices or []:
+            peer_id = str(device.get("drone_id") or "")
+            address = str(device.get("tailnet_ip") or "")
+            hostname = str(device.get("hostname") or "").lower()
+            if device.get("paired") or peer_id in paired:
+                continue
+            if peer_id in seen_ids or (address and address in seen_addresses) or (hostname and hostname in seen_hosts):
+                continue
+            discovered.append(_public_local_peer({**device, "source": "Tailnet"}))
+            seen_ids.add(peer_id)
+            if address:
+                seen_addresses.add(address)
+            if hostname:
+                seen_hosts.add(hostname)
         return {
             "mode": _network_mode(self.settings),
             "active": _local_network.is_local_mode(self.settings),
@@ -311,6 +443,30 @@ class HandlersNetworkMixin:
 
     def _handle_admin_tailnet_status(self) -> None:
         self._send_json(200, tailnet_status())
+
+    def _handle_admin_tailnet_discover(self) -> None:
+        status = tailnet_status()
+        tailnet_devices = self._sync_tailnet_peers(status)
+        self._send_json(
+            200,
+            {
+                "tailnet": status,
+                "network": self._local_network_status_payload(tailnet_devices),
+            },
+        )
+
+    def _handle_admin_tailnet_peer_restore(self, peer_id: str) -> None:
+        peer_id = unquote(peer_id)
+        status = tailnet_status()
+        if not status.get("enrolled"):
+            self._send_json(409, {"error": "Tailnet is not connected"})
+            return
+        for device in status.get("peers") or []:
+            row = self._sync_tailnet_device(device, restore_peer_id=peer_id)
+            if row and str(row.get("drone_id") or "") == peer_id and row.get("paired"):
+                self._send_json(200, {"status": "paired", "peer": row})
+                return
+        self._send_json(404, {"error": "Drone is not an online Tailnet peer"})
 
     def _handle_admin_tailnet_enroll(self, payload: dict) -> None:
         """Enroll this drone in the tailnet with an auth key pasted in the UI.

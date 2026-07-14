@@ -279,6 +279,23 @@ class SettingsTests(unittest.TestCase):
                 )
                 self.assertEqual(local_network.get_paired_peer(settings, "local-b")["tailnet_ip"], "100.64.0.9")
 
+    def test_forgetting_tailnet_peer_suppresses_automatic_repair_until_restored(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root), "DRONE_DEVICE_ID": "local-a"}, clear=True):
+                settings = Settings.from_env()
+                local_network.save_paired_peer(
+                    settings,
+                    {"drone_id": "local-b", "tailnet_ip": "100.64.0.9"},
+                )
+                self.assertTrue(local_network.forget_peer(settings, "local-b"))
+                self.assertTrue(local_network.is_tailnet_peer_forgotten(settings, "local-b"))
+                local_network.save_paired_peer(
+                    settings,
+                    {"drone_id": "local-b", "pairing_source": "tailnet", "tailnet_ip": "100.64.0.9"},
+                )
+                self.assertFalse(local_network.is_tailnet_peer_forgotten(settings, "local-b"))
+
     def test_normalize_peer_address_accepts_bare_hosts_and_urls(self) -> None:
         from app.transfer.peer_connectivity import _normalize_peer_address
 
@@ -351,12 +368,15 @@ class SettingsTests(unittest.TestCase):
                     stored = peer_connectivity._local_pair_peer(
                         settings,
                         {"drone_id": "local-b", "reachable_url": "https://100.64.0.9", "tailnet_ip": "100.64.0.9"},
-                        "CODE1234",
+                        "",
+                        tailnet_auto_pair=True,
                     )
                 sent = json.loads(opened.call_args[0][0].data.decode("utf-8"))
                 self.assertEqual(sent["tailnet_ip"], "100.64.0.2")  # our side advertised
+                self.assertTrue(sent["tailnet_auto_pair"])
                 self.assertEqual(stored["tailnet_ip"], "100.64.0.9")  # their side recorded
                 self.assertEqual(stored["reachable_url"], "https://100.64.0.9")  # the dialed address sticks
+                self.assertEqual(stored["pairing_source"], "tailnet")
 
     def test_discovery_surfaces_same_id_conflicts_from_other_hosts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -6485,10 +6505,78 @@ class LocalNetworkAssetCopyTests(unittest.TestCase):
             self.assertFalse(resumed["paused"])
 
 
+class TailnetDiscoveryMergeTests(unittest.TestCase):
+    def test_peer_pair_accepts_code_free_request_only_from_online_tailnet_ip(self) -> None:
+        from app.web import handlers_peer
+
+        handler = handlers_peer.HandlersPeerMixin()
+        handler.settings = mock.MagicMock(overmind_device_id="local-b")
+        handler.client_address = ("100.64.0.5", 12345)
+        handler.server = mock.MagicMock()
+        handler._send_json = mock.MagicMock()
+        payload = {
+            "tailnet_auto_pair": True,
+            "drone_id": "local-a",
+            "name": "Cabinet A",
+            "certificate_pem": "-----BEGIN CERTIFICATE-----fake",
+        }
+        certificate = {"public_certificate": "-----BEGIN CERTIFICATE-----own", "fingerprint": "cc:dd"}
+        manager = mock.MagicMock()
+        manager.return_value.ensure_certificate.return_value = certificate
+        with tempfile.TemporaryDirectory() as tmp:
+            cert_path = Path(tmp) / "local-a.crt"
+            cert_path.write_text("certificate", encoding="utf-8")
+            with mock.patch.object(handlers_peer._local_network, "is_local_mode", return_value=True), \
+                    mock.patch.object(handlers_peer, "tailnet_peer_ips", return_value={"100.64.0.5"}), \
+                    mock.patch.object(handlers_peer._local_network, "validate_pairing_code") as validate, \
+                    mock.patch.object(handlers_peer, "_save_local_peer_certificate", return_value=(cert_path, "aa:bb")), \
+                    mock.patch.object(handlers_peer._local_network, "save_paired_peer", side_effect=lambda settings, peer: {**peer, "paired": True}) as saved, \
+                    mock.patch.object(handlers_peer._local_network, "pairing_code"), \
+                    mock.patch.object(handlers_peer, "DroneCertificateManager", manager), \
+                    mock.patch.object(handlers_peer._local_network, "discovery_payload", return_value={"reachable_url": "https://cabinet-b.local"}):
+                handler._handle_peer_pair(payload)
+        validate.assert_not_called()
+        self.assertEqual(saved.call_args[0][1]["pairing_source"], "tailnet")
+        self.assertEqual(handler._send_json.call_args[0][0], 200)
+
+    def test_nearby_excludes_paired_and_prefers_local_duplicate(self) -> None:
+        from app.web import handlers_network
+
+        handler = handlers_network.HandlersNetworkMixin()
+        handler.settings = mock.MagicMock(use_fake_data=False)
+        paired = {"drone_id": "paired-b", "name": "Paired B", "paired": True}
+        local = {
+            "drone_id": "local-c",
+            "name": "Local C",
+            "hostname": "cabinet-c",
+            "tailnet_ip": "100.64.0.10",
+            "source": "Local Network",
+            "paired": False,
+        }
+        tailnet_devices = [
+            {**local, "source": "Tailnet"},
+            {"drone_id": "tailnet:phone", "name": "Phone", "hostname": "phone", "tailnet_ip": "100.64.0.20", "source": "Tailnet", "tailnet_device": True, "paired": False},
+            {**paired, "source": "Tailnet", "tailnet_ip": "100.64.0.9"},
+        ]
+        manager = mock.MagicMock()
+        manager.snapshot.return_value = {}
+        with mock.patch.object(handlers_network._local_network, "paired_peers", return_value=[paired]), \
+                mock.patch.object(handlers_network._local_network, "load_peer_checks", return_value=[]), \
+                mock.patch.object(handlers_network._local_network, "discovered_peers", return_value=[paired, local]), \
+                mock.patch.object(handlers_network._local_network, "is_local_mode", return_value=True), \
+                mock.patch.object(handlers_network._local_network, "pairing_code", return_value={"code": "12345678"}), \
+                mock.patch.object(handlers_network._local_network, "load_activity", return_value=[]), \
+                mock.patch.object(handlers_network, "_network_mode", return_value="local_network"), \
+                mock.patch.object(handlers_network, "_get_download_manager", return_value=manager):
+            payload = handler._local_network_status_payload(tailnet_devices)
+        self.assertEqual([peer["drone_id"] for peer in payload["peers"]], ["local-c", "tailnet:phone"])
+        self.assertEqual(payload["peers"][0]["source"], "Local Network")
+        self.assertEqual(payload["peers"][1]["source"], "Tailnet")
+
+
 class SwarmPageTests(unittest.TestCase):
-    """The Swarm page: navbar entry, hash route, fleet cards fed by the
-    /admin/swarm/overview fan-out, and the pair-by-address form that lets two
-    drones in different houses pair over a tailnet."""
+    """The Swarm page: navbar entry, hash route, fleet cards, and automatic
+    Tailnet discovery merged with Local Network discovery."""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -6522,14 +6610,16 @@ class SwarmPageTests(unittest.TestCase):
         for expected in (">This Drone<", ">Online<", ">Offline<", "Request Assets", "Open UI", "escapeHtml(drone.ui_url)"):
             self.assertIn(expected, card_body)
 
-    def test_pair_by_address_form_posts_to_the_new_endpoint(self) -> None:
-        pair_start = self.js.index("async function swarmPairByAddress()")
-        pair_body = self.js[pair_start:self.js.index("async function renderSwarmPage()", pair_start)]
-        self.assertIn('apiPost("/admin/local-network/pair-by-address", { address, pairing_code: code })', pair_body)
+    def test_manual_pair_by_address_ui_is_removed(self) -> None:
+        page_start = self.js.index("async function renderSwarmPage()")
+        page_body = self.js[page_start:self.js.index("async function renderIntegrationTransfersPanel", page_start)]
+        self.assertNotIn("swarmPairByAddress", self.js)
+        self.assertNotIn("Add Drone by Address", page_body)
+        self.assertNotIn("swarmPairAddress", page_body)
 
     def test_request_assets_deep_links_into_the_transfers_picker(self) -> None:
         browse_start = self.js.index("function swarmBrowsePeerAssets(")
-        browse_body = self.js[browse_start:self.js.index("async function swarmPairByAddress()", browse_start)]
+        browse_body = self.js[browse_start:self.js.index("async function swarmEnableLocalNetwork()", browse_start)]
         self.assertIn("localPeerAssetContext.peerId", browse_body)
         self.assertIn('setHash("#admin/transfers")', browse_body)
 
@@ -6578,13 +6668,28 @@ class SwarmPageTests(unittest.TestCase):
         page_start = self.js.index("async function renderSwarmPage()")
         page_end = self.js.index("async function renderIntegrationTransfersPanel", page_start)
         body = self.js[page_start:page_end]
-        self.assertIn('api("/admin/tailnet/status")', body)
+        self.assertIn('apiPost("/admin/tailnet/discover", {})', body)
         self.assertIn("renderSwarmTailnetCard(tailnet)", body)
         self.assertIn("Pairing code", body)
         self.assertIn("localPairCodeRotateBtn", body)
         self.assertIn("Nearby Drones", body)
         self.assertIn("renderLocalPeerRows(status.peers || [])", body)
-        self.assertIn("shown on that Drone's Swarm page", body)
+        self.assertIn('class="col-12 col-lg-6"', body)
+        self.assertNotIn("Enter this code on the other Drone", body)
+        self.assertNotIn("Add Drone by Address", body)
+        self.assertNotIn('onclick="renderSwarmPage()"><i class="bi bi-arrow-repeat', body)
+
+    def test_nearby_table_has_source_and_paired_cards_have_forget(self) -> None:
+        rows_start = self.js.index("function renderLocalPeerRows(")
+        rows_body = self.js[rows_start:self.js.index("function localAssetPath(", rows_start)]
+        self.assertIn("<th>Source</th>", rows_body)
+        self.assertIn('peer.source === "Local Network"', rows_body)
+        self.assertIn("Tailnet", rows_body)
+
+        card_start = self.js.index("function renderSwarmDroneCard(")
+        card_body = self.js[card_start:self.js.index("function swarmBrowsePeerAssets(", card_start)]
+        self.assertIn("forgetLocalPeer", card_body)
+        self.assertIn(">Forget</button>", card_body)
 
 
 class TailnetServiceTests(unittest.TestCase):
@@ -6603,7 +6708,26 @@ class TailnetServiceTests(unittest.TestCase):
     def test_status_parses_backend_state_and_tailnet_ip(self) -> None:
         from app.device import tailnet_service
 
-        payload = {"BackendState": "Running", "Self": {"TailscaleIPs": ["100.64.0.5", "fd7a:115c:a1e0::5"]}}
+        payload = {
+            "BackendState": "Running",
+            "Self": {"TailscaleIPs": ["100.64.0.5", "fd7a:115c:a1e0::5"]},
+            "Peer": {
+                "nodekey:online": {
+                    "ID": "peer-online",
+                    "HostName": "cabinet-b",
+                    "DNSName": "cabinet-b.example.ts.net.",
+                    "TailscaleIPs": ["100.64.0.9", "fd7a:115c:a1e0::9"],
+                    "Online": True,
+                    "OS": "linux",
+                },
+                "nodekey:offline": {
+                    "ID": "peer-offline",
+                    "HostName": "cabinet-c",
+                    "TailscaleIPs": ["100.64.0.10"],
+                    "Online": False,
+                },
+            },
+        }
         proc = mock.Mock(returncode=0, stdout=json.dumps(payload), stderr="")
         with tempfile.NamedTemporaryFile() as fake_cli, \
                 mock.patch.object(tailnet_service, "TAILSCALE_CLI", Path(fake_cli.name)), \
@@ -6613,6 +6737,9 @@ class TailnetServiceTests(unittest.TestCase):
         self.assertTrue(status["running"])
         self.assertTrue(status["enrolled"])
         self.assertEqual(status["tailnet_ip"], "100.64.0.5")
+        self.assertEqual(len(status["peers"]), 1)
+        self.assertEqual(status["peers"][0]["tailnet_id"], "peer-online")
+        self.assertEqual(status["peers"][0]["tailnet_ip"], "100.64.0.9")
         self.assertIn("--json", run.call_args[0][0])
 
     def test_status_running_but_needs_login_is_not_enrolled(self) -> None:

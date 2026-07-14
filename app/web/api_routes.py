@@ -494,6 +494,10 @@ class ApiRoutesMixin:
                 self._handle_admin_tailnet_enroll(payload)
                 return
 
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "tailnet" and parts[2] == "discover":
+                self._handle_admin_tailnet_discover()
+                return
+
             if len(parts) == 5 and parts[0] == "admin" and parts[1] == "local-network" and parts[2] == "peers" and parts[4] == "pair":
                 payload = self._read_json_body()
                 self._handle_admin_local_peer_pair(parts[3], payload)
@@ -501,6 +505,10 @@ class ApiRoutesMixin:
 
             if len(parts) == 5 and parts[0] == "admin" and parts[1] == "local-network" and parts[2] == "peers" and parts[4] == "forget":
                 self._handle_admin_local_peer_forget(parts[3])
+                return
+
+            if len(parts) == 5 and parts[0] == "admin" and parts[1] == "local-network" and parts[2] == "peers" and parts[4] == "restore-tailnet":
+                self._handle_admin_tailnet_peer_restore(parts[3])
                 return
 
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "local-network" and parts[2] == "sync":

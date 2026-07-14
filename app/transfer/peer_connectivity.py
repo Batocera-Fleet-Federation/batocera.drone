@@ -214,7 +214,13 @@ def _peer_get_json(url: str, settings: Settings, peer_id: Optional[str] = None, 
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _local_pair_peer(settings: Settings, peer: dict, pairing_code: str) -> dict:
+def _local_pair_peer(
+    settings: Settings,
+    peer: dict,
+    pairing_code: str,
+    *,
+    tailnet_auto_pair: bool = False,
+) -> dict:
     if not _local_network.is_local_mode(settings):
         raise ValueError("Drone is not in local network mode")
     peer_id = str(peer.get("drone_id") or peer.get("device_id") or "").strip()
@@ -228,6 +234,7 @@ def _local_pair_peer(settings: Settings, peer: dict, pairing_code: str) -> dict:
     own_discovery = _local_network.discovery_payload(settings, str(certificate.get("fingerprint") or ""))
     payload = {
         "pairing_code": str(pairing_code or "").strip(),
+        "tailnet_auto_pair": bool(tailnet_auto_pair),
         "drone_id": settings.overmind_device_id,
         "name": socket.gethostname(),
         "hostname": socket.gethostname(),
@@ -272,6 +279,7 @@ def _local_pair_peer(settings: Settings, peer: dict, pairing_code: str) -> dict:
             "tailnet_ip": str(result.get("tailnet_ip") or peer.get("tailnet_ip") or ""),
             "certificate_fingerprint": fingerprint,
             "certificate_path": str(cert_path),
+            "pairing_source": "tailnet" if tailnet_auto_pair else str(peer.get("pairing_source") or "local_network"),
         },
     )
     return stored
@@ -318,8 +326,9 @@ def _fetch_peer_info(address: str, timeout: float = 5.0) -> dict:
     This is how a peer is "discovered" across links the multicast announce
     cannot cross (e.g. a tailnet) -- by dialing its address directly. Same TOFU
     trust model as the pair POST itself: TLS is unverified because no
-    certificate is pinned yet; the pairing code plus the fingerprint
-    cross-checks in ``_local_pair_peer`` are the authorization.
+    certificate is pinned yet; current Tailnet membership or a pairing code
+    authorizes the exchange, and ``_local_pair_peer`` pins the advertised
+    certificate fingerprint before the peer can serve assets.
     """
     base = _normalize_peer_address(address)
     request = Request(

@@ -3595,6 +3595,9 @@ let localPeerAssetContext = {
 };
 function localPeerStatusBadge(peer) {
   if (peer.identity_conflict) return '<span class="badge text-bg-danger">Identity Conflict</span>';
+  if (peer.tailnet_forgotten) return '<span class="badge text-bg-secondary">Forgotten</span>';
+  if (peer.tailnet_device) return '<span class="badge text-bg-success">Connected</span>';
+  if (peer.tailnet_pair_error) return '<span class="badge text-bg-warning">Pairing failed</span>';
   if (!peer.paired) return '<span class="badge text-bg-warning">Discovered</span>';
   const health = peer.health || {};
   if (health.status === "pass") return '<span class="badge text-bg-success">Paired · Online</span>';
@@ -3605,7 +3608,7 @@ function localPeerStatusBadge(peer) {
 function renderLocalPeerRows(peers) {
   if (!peers.length) return '<div class="themed-empty">No nearby Drones discovered yet.</div>';
   return `<div class="table-responsive"><table class="table table-sm table-hover align-middle themed-table bff-stack">
-    <thead><tr><th>Drone</th><th>Drone ID</th><th>Status</th><th>Error</th><th>Address</th><th>Last Seen</th><th>Certificate</th><th></th></tr></thead>
+    <thead><tr><th>Drone</th><th>Drone ID</th><th>Source</th><th>Status</th><th>Error</th><th>Address</th><th>Last Seen</th><th>Certificate</th><th></th></tr></thead>
     <tbody>${peers.map(peer => {
       const rawPeerId = String(peer.drone_id || "");
       const peerId = escapeHtml(rawPeerId);
@@ -3619,6 +3622,10 @@ function renderLocalPeerRows(peers) {
         actionCell = `<button class="btn btn-sm btn-outline-secondary" disabled title="This Drone advertises the same machine id as this device. Reset the Drone id on one machine before pairing.">Resolve ID</button>`;
       } else if (peer.paired) {
         actionCell = `<div class="d-flex gap-2 justify-content-end"><button class="btn btn-sm btn-outline-primary" onclick="swarmBrowsePeerAssets(decodeURIComponent('${peerToken}'))">Browse</button><button class="btn btn-sm btn-outline-danger" onclick="forgetLocalPeer(decodeURIComponent('${peerToken}'))">Forget</button></div>`;
+      } else if (peer.tailnet_forgotten || peer.tailnet_pair_error) {
+        actionCell = `<button class="btn btn-sm btn-outline-primary" onclick="restoreTailnetPeer(decodeURIComponent('${peerToken}'))">${peer.tailnet_forgotten ? "Restore" : "Retry"}</button>`;
+      } else if (peer.tailnet_device) {
+        actionCell = '<span class="small text-muted">Not a Drone</span>';
       } else if (insecure) {
         actionCell = `<button class="btn btn-sm btn-outline-secondary" disabled title="This Drone is advertising ${escapeHtml(url)} (not HTTPS), so it can't be paired for secure transfers. Update/repair the Drone on that machine.">Not secure</button>`;
       } else {
@@ -3627,9 +3634,10 @@ function renderLocalPeerRows(peers) {
       return `<tr>
         <td><strong>${escapeHtml(peer.name || peer.hostname || peerId)}</strong>${insecure ? '<span class="badge text-bg-danger ms-2" title="Not running HTTPS — cannot pair">Not secure</span>' : ""}${peer.identity_conflict ? '<span class="badge text-bg-danger ms-2" title="This peer is advertising the same Drone id as this machine">Same ID</span>' : ""}</td>
         <td class="small mono">${peerId}</td>
+        <td><span class="badge text-bg-${peer.source === "Local Network" ? "info" : "primary"}">${escapeHtml(peer.source || "Local Network")}</span></td>
         <td>${localPeerStatusBadge(peer)}</td>
-        <td class="small text-danger">${escapeHtml(peer.identity_conflict ? `Conflicts with ${peer.conflicting_drone_id || "this Drone id"}` : (peer.health?.failure_reason || ""))}</td>
-        <td class="small mono">${escapeHtml(peer.reachable_url || peer.source_ip || "n/a")}</td>
+        <td class="small text-danger">${escapeHtml(peer.identity_conflict ? `Conflicts with ${peer.conflicting_drone_id || "this Drone id"}` : (peer.health?.failure_reason || peer.tailnet_pair_error || peer.tailnet_probe_error || ""))}</td>
+        <td class="small mono">${escapeHtml(peer.reachable_url || peer.tailnet_ip || peer.source_ip || "n/a")}</td>
         <td class="small text-nowrap">${escapeHtml(formatCompactLocalDate(peer.last_seen) || "n/a")}</td>
         <td class="small mono">${escapeHtml(String(peer.certificate_fingerprint || "").slice(0, 16) || "pending")}</td>
         <td class="text-nowrap">${actionCell}</td>
@@ -3825,6 +3833,7 @@ async function renderTransfersPage() {
 
 function renderSwarmDroneCard(drone) {
   const summary = drone.summary || {};
+  const droneToken = encodeURIComponent(String(drone.drone_id || "")).replace(/'/g, "%27");
   const counts = summary.counts || {};
   const systems = Array.isArray(summary.systems) ? summary.systems : [];
   const badge = drone.is_self
@@ -3857,7 +3866,8 @@ function renderSwarmDroneCard(drone) {
     ? ""
     : `<div class="d-flex flex-wrap gap-2 mt-3">
         ${drone.ui_url ? `<a class="btn btn-sm btn-outline-primary" href="${escapeHtml(drone.ui_url)}" target="_blank" rel="noopener noreferrer"><i class="bi bi-box-arrow-up-right me-1"></i>Open UI</a>` : ""}
-        <button class="btn btn-sm btn-outline-success" onclick="swarmBrowsePeerAssets('${escapeHtml(drone.drone_id)}')" ${drone.online ? "" : "disabled"}><i class="bi bi-cloud-arrow-down me-1"></i>Request Assets</button>
+        <button class="btn btn-sm btn-outline-success" onclick="swarmBrowsePeerAssets(decodeURIComponent('${droneToken}'))" ${drone.online ? "" : "disabled"}><i class="bi bi-cloud-arrow-down me-1"></i>Request Assets</button>
+        <button class="btn btn-sm btn-outline-danger" onclick="forgetLocalPeer(decodeURIComponent('${droneToken}'))"><i class="bi bi-x-circle me-1"></i>Forget</button>
       </div>`;
   return `
     <div class="col"><div class="card log-card h-100">
@@ -3876,28 +3886,6 @@ function renderSwarmDroneCard(drone) {
 function swarmBrowsePeerAssets(peerId) {
   localPeerAssetContext.peerId = String(peerId || "");
   setHash("#admin/transfers");
-}
-
-async function swarmPairByAddress() {
-  const addressInput = document.getElementById("swarmPairAddress");
-  const codeInput = document.getElementById("swarmPairCode");
-  const button = document.getElementById("swarmPairBtn");
-  const address = (addressInput.value || "").trim();
-  const code = (codeInput.value || "").trim();
-  if (!address || !code) {
-    showToast("Enter the other Drone's address and its current pairing code.", "warning");
-    return;
-  }
-  button.disabled = true;
-  try {
-    const result = await apiPost("/admin/local-network/pair-by-address", { address, pairing_code: code });
-    const peer = result.peer || {};
-    showToast(`Paired with ${escapeHtml(peer.name || peer.drone_id || "Drone")}.`, "success");
-    await renderSwarmPage();
-  } catch (err) {
-    showToast(`Pairing failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
-    button.disabled = false;
-  }
 }
 
 async function swarmEnableLocalNetwork() {
@@ -3972,7 +3960,7 @@ function renderSwarmTailnetCard(tailnet) {
       </div>`;
   }
   return `
-    <div class="card log-card mb-3">
+    <div class="card log-card h-100">
       <div class="card-header"><i class="bi bi-globe2 me-2" aria-hidden="true"></i>Tailnet (access from anywhere)</div>
       <div class="card-body">${body}</div>
     </div>`;
@@ -3985,10 +3973,12 @@ async function renderSwarmPage() {
   subtitleNode.textContent = "Every Drone in your federation -- local and across the tailnet";
   setLoading(true, "Loading swarm...");
   try {
-    const [overview, tailnet] = await Promise.all([
-      api("/admin/swarm/overview"),
-      api("/admin/tailnet/status").catch(() => ({ installed: false })),
-    ]);
+    const discovery = await apiPost("/admin/tailnet/discover", {}).catch(async () => ({
+      tailnet: await api("/admin/tailnet/status").catch(() => ({ installed: false })),
+      network: await api("/admin/local-network/status"),
+    }));
+    const tailnet = discovery.tailnet || { installed: false };
+    const overview = await api("/admin/swarm/overview");
     const drones = Array.isArray(overview.drones) ? overview.drones : [];
     const inactiveNote = overview.active
       ? ""
@@ -3998,48 +3988,40 @@ async function renderSwarmPage() {
           <button class="btn btn-sm btn-primary" onclick="swarmEnableLocalNetwork()">Enable</button>
         </div>`;
     content.innerHTML = `
-      <div class="mb-3 d-flex flex-wrap justify-content-end gap-2">
-        <button class="btn btn-outline-primary" onclick="renderSwarmPage()"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
-      </div>
       ${inactiveNote}
       <div class="row row-cols-1 row-cols-md-2 row-cols-xl-3 g-3 mb-3" id="swarmDroneGrid">
         ${drones.map(renderSwarmDroneCard).join("")}
       </div>
-      ${renderSwarmTailnetCard(tailnet)}
-      <div class="card log-card mb-3">
-        <div class="card-header d-flex justify-content-between align-items-center"><span><i class="bi bi-key me-2" aria-hidden="true"></i>Pairing</span><button class="btn btn-sm btn-outline-primary" id="localPairCodeRotateBtn">Rotate Code</button></div>
-        <div class="card-body" id="localPairingBody"><div class="text-muted">Loading pairing...</div></div>
+      <div class="row g-3 mb-3 align-items-stretch">
+        <div class="col-12 col-lg-6">${renderSwarmTailnetCard(tailnet)}</div>
+        <div class="col-12 col-lg-6"><div class="card log-card h-100">
+          <div class="card-header d-flex justify-content-between align-items-center"><span><i class="bi bi-key me-2" aria-hidden="true"></i>Pairing</span><button class="btn btn-sm btn-outline-primary" id="localPairCodeRotateBtn">Rotate Code</button></div>
+          <div class="card-body" id="localPairingBody"><div class="text-muted">Loading pairing...</div></div>
+        </div></div>
       </div>
       <div class="card log-card mb-3">
         <div class="card-header d-flex justify-content-between align-items-center"><span><i class="bi bi-radar me-2" aria-hidden="true"></i>Nearby Drones</span><div class="d-flex gap-2"><button class="btn btn-sm btn-outline-primary" id="localDiscoverBtn"><i class="bi bi-radar me-1"></i>Discover</button><button class="btn btn-sm btn-outline-secondary" id="localRefreshBtn"><i class="bi bi-arrow-repeat"></i></button></div></div>
         <div class="card-body" id="localPeersBody"><div class="text-muted">Loading peers...</div></div>
-      </div>
-      <div class="card log-card">
-        <div class="card-header"><i class="bi bi-plus-circle me-2" aria-hidden="true"></i>Add Drone by Address</div>
-        <div class="card-body">
-          <div class="small text-muted mb-3">Pair with a Drone that LAN discovery can't see -- for example one in another house reachable over your tailnet. Enter its address and the pairing code shown on that Drone's Swarm page.</div>
-          <div class="row g-2 align-items-end">
-            <div class="col-12 col-md-5"><label class="form-label small" for="swarmPairAddress">Drone address</label><input id="swarmPairAddress" class="form-control" placeholder="100.64.0.7 or https://host:port" autocomplete="off"></div>
-            <div class="col-8 col-md-4"><label class="form-label small" for="swarmPairCode">Pairing code</label><input id="swarmPairCode" class="form-control" placeholder="Code from the other Drone" autocomplete="off"></div>
-            <div class="col-4 col-md-3"><button id="swarmPairBtn" class="btn btn-primary w-100" onclick="swarmPairByAddress()"><i class="bi bi-link-45deg me-1"></i>Pair</button></div>
-          </div>
-        </div>
       </div>`;
 
-    async function refreshPairing() {
-      const status = await api("/admin/local-network/status");
+    async function refreshPairing(status = null, includeTailnet = false) {
+      if (!status) {
+        status = includeTailnet
+          ? (await apiPost("/admin/tailnet/discover", {})).network
+          : await api("/admin/local-network/status");
+      }
       document.getElementById("localPairingBody").innerHTML = status.active
-        ? `<div class="d-flex flex-wrap align-items-center gap-3"><div><div class="small text-muted">Pairing code</div><div class="display-6 mono">${escapeHtml(status.pairing?.code || "")}</div></div><div class="small text-muted">Expires ${escapeHtml(status.pairing?.expires_at || "")}. Enter this code on the other Drone to approve it.</div></div>`
+        ? `<div class="d-flex flex-wrap align-items-center gap-3"><div><div class="small text-muted">Pairing code</div><div class="display-6 mono">${escapeHtml(status.pairing?.code || "")}</div></div><div class="small text-muted">Expires ${escapeHtml(status.pairing?.expires_at || "")}.</div></div>`
         : '<div class="themed-empty">Local networking is disabled; enable it above to pair Drones.</div>';
       document.getElementById("localPeersBody").innerHTML = renderLocalPeerRows(status.peers || []);
       document.getElementById("localDiscoverBtn").disabled = !status.active;
       document.getElementById("localPairCodeRotateBtn").disabled = !status.active;
     }
     window.refreshLocalNetwork = refreshPairing;
-    document.getElementById("localDiscoverBtn").addEventListener("click", async () => { await apiPost("/admin/local-network/discover", {}); await refreshPairing(); });
-    document.getElementById("localRefreshBtn").addEventListener("click", refreshPairing);
-    document.getElementById("localPairCodeRotateBtn").addEventListener("click", async () => { await apiPost("/admin/local-network/pairing-code/rotate", {}); await refreshPairing(); });
-    await refreshPairing();
+    document.getElementById("localDiscoverBtn").addEventListener("click", async () => { await apiPost("/admin/local-network/discover", {}); await refreshPairing(null, true); });
+    document.getElementById("localRefreshBtn").addEventListener("click", () => refreshPairing(null, true));
+    document.getElementById("localPairCodeRotateBtn").addEventListener("click", async () => { await apiPost("/admin/local-network/pairing-code/rotate", {}); await refreshPairing(null, true); });
+    await refreshPairing(discovery.network || null);
   } catch (err) {
     showToast(`Failed to load swarm: ${escapeHtml(err.message || "unknown error")}`, "danger");
     content.innerHTML = '<div class="themed-empty">Swarm could not be loaded.</div>';
@@ -4304,9 +4286,19 @@ async function pairLocalPeer(peerId) {
   if (typeof window.refreshLocalNetworkAssets === "function") await window.refreshLocalNetworkAssets();
 }
 
+async function restoreTailnetPeer(peerId) {
+  await apiPost(`/admin/local-network/peers/${encodeURIComponent(peerId)}/restore-tailnet`, {});
+  showToast("Tailnet Drone paired.", "success");
+  await renderSwarmPage();
+}
+
 async function forgetLocalPeer(peerId) {
   if (!window.confirm("Forget this paired Drone? It will need to be paired again before browsing or syncing.")) return;
   await apiPost(`/admin/local-network/peers/${encodeURIComponent(peerId)}/forget`, {});
+  if (window.location.hash.startsWith("#admin/swarm")) {
+    await renderSwarmPage();
+    return;
+  }
   if (typeof window.refreshLocalNetwork === "function") await window.refreshLocalNetwork();
   if (typeof window.refreshLocalNetworkAssets === "function") await window.refreshLocalNetworkAssets();
 }

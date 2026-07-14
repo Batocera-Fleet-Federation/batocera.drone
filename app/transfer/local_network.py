@@ -1,4 +1,4 @@
-"""Local-network control plane for peer discovery and explicit trust."""
+"""Local/Tailnet control plane for peer discovery and certificate trust."""
 
 from __future__ import annotations
 
@@ -213,6 +213,21 @@ def get_paired_peer(settings: Any, peer_id: str) -> Optional[dict]:
     return _load_peer_map(settings, "local_paired_peers").get(str(peer_id or "").strip())
 
 
+def tailnet_forgotten_peer_ids(settings: Any) -> set[str]:
+    payload = load_payload(_db(settings), "tailnet_forgotten_peers", [])
+    return {str(peer_id) for peer_id in payload if str(peer_id).strip()} if isinstance(payload, list) else set()
+
+
+def is_tailnet_peer_forgotten(settings: Any, peer_id: str) -> bool:
+    return str(peer_id or "").strip() in tailnet_forgotten_peer_ids(settings)
+
+
+def _clear_tailnet_peer_forgotten(settings: Any, peer_id: str) -> None:
+    forgotten = tailnet_forgotten_peer_ids(settings)
+    forgotten.discard(str(peer_id or "").strip())
+    save_payload(_db(settings), "tailnet_forgotten_peers", sorted(forgotten))
+
+
 def record_discovered_peer(settings: Any, payload: dict, source_ip: Optional[str] = None) -> Optional[dict]:
     if not is_local_mode(settings) or str(payload.get("service") or "") != DISCOVERY_SERVICE:
         return None
@@ -252,6 +267,7 @@ def record_discovered_peer(settings: Any, payload: dict, source_ip: Optional[str
         # announce clears a stale address after the peer leaves the tailnet);
         # fall back to the stored one only for announces from older versions.
         "tailnet_ip": str((payload.get("tailnet_ip") if "tailnet_ip" in payload else existing.get("tailnet_ip")) or ""),
+        "source": str(payload.get("source") or "Local Network"),
         "source_ip": str(source_ip or existing.get("source_ip") or ""),
         "last_seen": _now_iso(),
         "paired": bool(trusted_peer),
@@ -293,6 +309,7 @@ def save_paired_peer(settings: Any, peer: dict) -> dict:
     }
     peers[peer_id] = stored
     _save_peer_map(settings, "local_paired_peers", peers)
+    _clear_tailnet_peer_forgotten(settings, peer_id)
     discovered = _load_peer_map(settings, "local_discovered_peers")
     if peer_id in discovered:
         discovered[peer_id]["paired"] = True
@@ -303,8 +320,16 @@ def save_paired_peer(settings: Any, peer: dict) -> dict:
 def forget_peer(settings: Any, peer_id: str) -> bool:
     normalized = str(peer_id or "").strip()
     peers = _load_peer_map(settings, "local_paired_peers")
-    removed = peers.pop(normalized, None) is not None
+    previous = peers.pop(normalized, None)
+    removed = previous is not None
     _save_peer_map(settings, "local_paired_peers", peers)
+    if removed and (
+        str(previous.get("pairing_source") or "") == "tailnet"
+        or bool(str(previous.get("tailnet_ip") or "").strip())
+    ):
+        forgotten = tailnet_forgotten_peer_ids(settings)
+        forgotten.add(normalized)
+        save_payload(_db(settings), "tailnet_forgotten_peers", sorted(forgotten))
     discovered = _load_peer_map(settings, "local_discovered_peers")
     if normalized in discovered:
         discovered[normalized]["paired"] = False

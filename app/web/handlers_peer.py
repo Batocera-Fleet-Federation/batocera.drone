@@ -17,6 +17,7 @@ from urllib.parse import unquote
 
 try:
     from ..common.auth import record_unauthorized_response
+    from ..device.tailnet_service import tailnet_peer_ips
     from ..overmind.overmind_game_logs import load_gameplay_history as _load_gameplay_history
     from ..overmind.overmind_reporting import (
         list_emulator_config_files as _list_emulator_config_files,
@@ -33,6 +34,7 @@ try:
     from ..transfer.upload_tracker import get_upload_tracker as _get_upload_tracker
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.auth import record_unauthorized_response  # type: ignore
+    from device.tailnet_service import tailnet_peer_ips  # type: ignore
     from overmind.overmind_game_logs import load_gameplay_history as _load_gameplay_history  # type: ignore
     from overmind.overmind_reporting import (  # type: ignore
         list_emulator_config_files as _list_emulator_config_files,
@@ -54,8 +56,9 @@ class HandlersPeerMixin:
         if not _local_network.is_local_mode(self.settings):
             self._send_json(409, {"error": "Drone is not in local network mode"})
             return
-        if not _local_network.validate_pairing_code(self.settings, str(payload.get("pairing_code") or "")):
-            client_ip = self.client_address[0] if self.client_address else "-"
+        client_ip = self.client_address[0] if self.client_address else "-"
+        tailnet_authorized = bool(payload.get("tailnet_auto_pair")) and client_ip in tailnet_peer_ips()
+        if not tailnet_authorized and not _local_network.validate_pairing_code(self.settings, str(payload.get("pairing_code") or "")):
             record_unauthorized_response(client_ip)
             self._send_json(403, {"error": "invalid or expired pairing code"})
             return
@@ -87,6 +90,7 @@ class HandlersPeerMixin:
                 "scheme": scheme,
                 "api_port": port,
                 "tailnet_ip": str(payload.get("tailnet_ip") or ""),
+                "pairing_source": "tailnet" if tailnet_authorized else "local_network",
                 "certificate_fingerprint": fingerprint,
                 "certificate_path": str(cert_path),
                 "source_ip": source_ip,

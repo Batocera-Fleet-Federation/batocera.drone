@@ -3,10 +3,10 @@
 The installer (scripts/batocera_install.sh) puts the static binaries under
 /userdata/system/tailscale and a DRONE_TAILNET service next to DRONE_SERVER;
 this module is the web UI's way to finish the job without touching a shell:
-report whether the mesh is installed/running/enrolled, and enroll with an
-auth key pasted into the Swarm page (instead of a TS_AUTHKEY env var at
-install time). Stdlib-only, shells out to the tailscale CLI like the other
-device controls shell out to batocera tools.
+report whether the mesh is installed/running/enrolled, list its online peers,
+and enroll with an auth key pasted into the Swarm page (instead of a TS_AUTHKEY
+env var at install time). Stdlib-only, shells out to the tailscale CLI like
+the other device controls shell out to batocera tools.
 
 The auth key is a secret: it is passed to the CLI and never logged or echoed
 back in any error message (tailscale's own stderr does not repeat it).
@@ -19,7 +19,7 @@ import socket
 import subprocess
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 try:
     from ..transport.tailnet import get_tailnet_ip
@@ -41,6 +41,49 @@ def _run_cli(args: list, timeout: float) -> "subprocess.CompletedProcess[str]":
     )
 
 
+def _first_address(addresses: Iterable[object], *, ipv4: bool = True) -> str:
+    for address in addresses:
+        text = str(address or "").strip()
+        if text and ((":" not in text) if ipv4 else (":" in text)):
+            return text
+    return ""
+
+
+def _tailnet_peers(payload: dict) -> list[dict]:
+    """Return online devices from ``tailscale status --json`` in UI-safe form."""
+    raw_peers = payload.get("Peer")
+    if isinstance(raw_peers, dict):
+        entries = raw_peers.items()
+    elif isinstance(raw_peers, list):
+        entries = ((str(index), peer) for index, peer in enumerate(raw_peers))
+    else:
+        entries = ()
+    peers = []
+    for peer_key, raw in entries:
+        if not isinstance(raw, dict) or raw.get("Online") is not True:
+            continue
+        addresses = raw.get("TailscaleIPs") or []
+        tailnet_ip = _first_address(addresses) or _first_address(addresses, ipv4=False)
+        if not tailnet_ip:
+            continue
+        dns_name = str(raw.get("DNSName") or "").strip().rstrip(".")
+        hostname = str(raw.get("HostName") or dns_name.split(".", 1)[0] or tailnet_ip).strip()
+        peers.append(
+            {
+                "tailnet_id": str(raw.get("ID") or peer_key or tailnet_ip),
+                "name": hostname,
+                "hostname": hostname,
+                "dns_name": dns_name,
+                "tailnet_ip": tailnet_ip,
+                "addresses": [str(value) for value in addresses if str(value or "").strip()],
+                "last_seen": str(raw.get("LastSeen") or ""),
+                "os": str(raw.get("OS") or ""),
+                "online": True,
+            }
+        )
+    return sorted(peers, key=lambda peer: (str(peer.get("name") or "").lower(), str(peer.get("tailnet_ip") or "")))
+
+
 def tailnet_status() -> dict:
     """Installed / running / enrolled / tailnet_ip, for the Swarm page card."""
     status = {
@@ -50,6 +93,7 @@ def tailnet_status() -> dict:
         "tailnet_ip": get_tailnet_ip() or "",
         "hostname": socket.gethostname().lower(),
         "backend_state": "",
+        "peers": [],
     }
     if not status["installed"]:
         return status
@@ -71,12 +115,25 @@ def tailnet_status() -> dict:
     # mean the device is enrolled; "NeedsLogin"/"NoState" mean it is not.
     status["enrolled"] = backend_state in {"Running", "Starting"}
     self_info = payload.get("Self") if isinstance(payload.get("Self"), dict) else {}
-    for address in self_info.get("TailscaleIPs") or []:
-        text = str(address or "").strip()
-        if text and ":" not in text:
-            status["tailnet_ip"] = text
-            break
+    own_address = _first_address(self_info.get("TailscaleIPs") or [])
+    if own_address:
+        status["tailnet_ip"] = own_address
+    status["peers"] = _tailnet_peers(payload)
     return status
+
+
+def tailnet_peer_ips() -> set[str]:
+    """Addresses currently authenticated as online peers by local tailscaled."""
+    status = tailnet_status()
+    if not status.get("enrolled"):
+        return set()
+    return {
+        str(address).strip()
+        for peer in status.get("peers") or []
+        if isinstance(peer, dict)
+        for address in peer.get("addresses") or [peer.get("tailnet_ip")]
+        if str(address or "").strip()
+    }
 
 
 def _start_daemon_if_needed() -> Optional[str]:

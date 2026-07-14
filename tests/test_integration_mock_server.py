@@ -303,9 +303,11 @@ class MockServerIntegrationTests(unittest.TestCase):
         self.assertTrue(status["active"])
         self.assertEqual(len(status["pairing"]["code"]), 8)
         self.assertIn("peers", status)
-        fake_peer = next(peer for peer in status["peers"] if peer["drone_id"] == "nearby-fake-drone")
-        self.assertTrue(fake_peer["paired"])
+        self.assertNotIn("nearby-fake-drone", {peer["drone_id"] for peer in status["peers"]})
         self.assertEqual(status["paired_count"], 1)
+        overview = self._get_json("/v1/api/admin/swarm/overview")
+        fake_peer = next(peer for peer in overview["drones"] if peer["drone_id"] == "nearby-fake-drone")
+        self.assertTrue(fake_peer["paired"])
 
         peer_roms = self._get_json(
             "/v1/api/admin/local-network/peers/nearby-fake-drone/assets?type=roms&system=snes&limit=5"
