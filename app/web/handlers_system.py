@@ -14,6 +14,8 @@ try:
         DRONE_SELF_UPDATE_EXIT_CODE,
         _download_latest_drone_app,
         _restart_drone_process_soon,
+        is_drone_auto_update_enabled,
+        set_drone_auto_update_enabled,
     )
     from ..device.automation import (
         _load_automation_config,
@@ -34,6 +36,8 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         DRONE_SELF_UPDATE_EXIT_CODE,
         _download_latest_drone_app,
         _restart_drone_process_soon,
+        is_drone_auto_update_enabled,
+        set_drone_auto_update_enabled,
     )
     from device.automation import (  # type: ignore
         _load_automation_config,
@@ -70,7 +74,23 @@ class HandlersSystemMixin:
             pass
         _restart_drone_process_soon()
 
-    def _handle_admin_pixen_update(self) -> None:
+    def _handle_admin_drone_auto_update_get(self) -> None:
+        self._send_json(200, {"enabled": is_drone_auto_update_enabled(self.settings)})
+
+    def _handle_admin_drone_auto_update_post(self, payload: dict) -> None:
+        payload = payload if isinstance(payload, dict) else {}
+        enabled = payload.get("enabled")
+        if not isinstance(enabled, bool):
+            self._send_json(400, {"error": "enabled must be true or false"})
+            return
+        try:
+            saved = set_drone_auto_update_enabled(self.settings, enabled)
+        except OSError as error:
+            self._send_json(500, {"error": f"Unable to save automatic update setting: {error}"})
+            return
+        self._send_json(200, {"enabled": saved})
+
+    def _handle_admin_pixn_update(self) -> None:
         result = run_pixen_upgrade(self.settings)
         self._send_json(200, result)
 

@@ -159,6 +159,17 @@ curl --cert client.crt --key client.key -k "https://<drone-host>/health"
 
 Keep private keys private. If a key is exposed, recreate or rotate the certificate.
 
+## Releases
+
+Every commit pushed to `main` creates a GitHub release and advances the latest `vMAJOR.MINOR.PATCH` tag. Normal commits advance the final component, such as `v0.1.50` to `v0.1.51`.
+
+Commit-message prefixes can select a larger version change:
+
+- `increment major version` advances the first component and resets the others, such as `v0.1.50` to `v1.0.0`.
+- `incremenet patch version` or `increment patch version` advances the middle component and resets the final component, such as `v1.3.10` to `v1.4.0`.
+
+The workflow builds and uploads `batocera_install.sh`, `batocera_uninstall.sh`, `run_now.sh`, and the version-stamped `drone-app.tar.gz`. Manual releases remain available through the Release workflow and `scripts/create-release.sh`.
+
 ## Docker
 
 Build the local image:

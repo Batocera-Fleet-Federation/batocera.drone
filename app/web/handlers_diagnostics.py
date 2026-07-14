@@ -212,7 +212,7 @@ class HandlersDiagnosticsMixin:
                 {"key": "Data partition available space", "value": "812 GiB"},
                 {"key": "Network IP address", "value": "192.168.1.123"},
                 {"key": "Router IP Address", "value": fake_router_ip_address},
-                {"key": "PixeN Installed", "value": "yes" if pixen_installed else "no"},
+                {"key": "PixN Installed", "value": "yes" if pixen_installed else "no"},
                 {"key": "Battery", "value": "N/A"},
             ]
             fields = {
@@ -321,7 +321,7 @@ class HandlersDiagnosticsMixin:
             overmind_integrated = "yes" if self._load_overmind_config().get("integration_enabled") else "no"
             entries.insert(0, {"key": "Integrated with Overmind", "value": overmind_integrated})
             entries.insert(0, {"key": "Machine ID", "value": self.settings.overmind_device_id})
-            entries.append({"key": "PixeN Installed", "value": "yes" if pixen_installed else "no"})
+            entries.append({"key": "PixN Installed", "value": "yes" if pixen_installed else "no"})
             if not fields.get("router_ip_address"):
                 router_entry = {"key": "Router IP Address", "value": router_ip_address}
                 network_index = next(
@@ -369,7 +369,7 @@ class HandlersDiagnosticsMixin:
                 {"key": "Machine ID", "value": self.settings.overmind_device_id},
                 {"key": "Integrated with Overmind", "value": overmind_integrated},
                 {"key": "Router IP Address", "value": router_ip_address},
-                {"key": "PixeN Installed", "value": "yes" if pixen_installed else "no"},
+                {"key": "PixN Installed", "value": "yes" if pixen_installed else "no"},
                 {"key": "System Info", "value": f"batocera-info unavailable: {str(error)}"},
             ]
             raw = "\n".join(f"{item['key']}: {item['value']}" for item in entries)

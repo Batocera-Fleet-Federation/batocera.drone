@@ -278,6 +278,20 @@ class PrivilegedEsCollectionsHelperTests(unittest.TestCase):
             self.assertIn('name="HiddenSystems" value="snes"', config.read_text(encoding="utf-8"))
             self.assertIn([set_es_collections.EMULATIONSTATION_SERVICE, "start"], calls)
 
+    def test_retries_when_start_returns_without_emulationstation(self) -> None:
+        from app import set_es_collections
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "es_settings.cfg"
+            with mock.patch("app.set_es_collections.subprocess.run", return_value=mock.Mock(returncode=0, stdout="")) as run, \
+                 mock.patch("app.set_es_collections._wait_for_emulationstation", side_effect=[False, True]) as wait, \
+                 mock.patch("app.set_es_collections.time.sleep"):
+                set_es_collections.apply_es_collections({"hidden_systems": "snes"}, config=config)
+
+            start_command = [set_es_collections.EMULATIONSTATION_SERVICE, "start"]
+            self.assertEqual([call.args[0] for call in run.call_args_list].count(start_command), 2)
+            self.assertEqual(wait.call_count, 2)
+
     def test_screensaver_writes_and_restarts_emulationstation(self) -> None:
         from app import set_es_collections
 

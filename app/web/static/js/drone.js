@@ -1847,16 +1847,31 @@ async function updateDroneApp() {
   }
 }
 
-async function runPixenUpdate() {
-  if (!window.confirm("Run the PixeN upgrade script on this Drone?")) return;
-  const toast = showToast('<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Starting PixeN update...', "info", null);
+async function setDroneAutoUpdate(checkbox) {
+  const requested = checkbox.checked;
+  checkbox.disabled = true;
   try {
-    const payload = await apiPost("/admin/system/run-pixen-update", {});
+    const result = await apiPost("/admin/system/auto-update", {enabled: requested});
+    checkbox.checked = result.enabled === true;
+    showToast(`Automatic Drone updates ${checkbox.checked ? "enabled" : "disabled"}.`, "success");
+  } catch (error) {
+    checkbox.checked = !requested;
+    showToast(`Could not save automatic update setting: ${escapeHtml(error.message || "unknown error")}`, "danger");
+  } finally {
+    if (checkbox.isConnected) checkbox.disabled = false;
+  }
+}
+
+async function runPixnUpdate() {
+  if (!window.confirm("Run the PixN upgrade script on this Drone?")) return;
+  const toast = showToast('<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Starting PixN update...', "info", null);
+  try {
+    const payload = await apiPost("/admin/system/run-pixn-update", {});
     dismissToast(toast);
-    showToast(`PixeN update started${payload.pid ? ` (pid ${payload.pid})` : ""}.`, "success", 8000);
+    showToast(`PixN update started${payload.pid ? ` (pid ${payload.pid})` : ""}.`, "success", 8000);
   } catch (error) {
     dismissToast(toast);
-    showToast(`PixeN update could not start: ${escapeHtml(error.message || "unknown error")}`, "danger", 10000);
+    showToast(`PixN update could not start: ${escapeHtml(error.message || "unknown error")}`, "danger", 10000);
   }
 }
 
@@ -5614,7 +5629,7 @@ async function renderAdminSystemInfoPage() {
     const disks = Array.isArray(metrics.disks) && metrics.disks.length ? metrics.disks : [disk];
     const process = metrics.process || {};
     const speed = payload.speed_sample || {};
-    const pixenInstalled = payload.pixen_installed === true || fields.pixen_installed === true || String(fields.pixen_installed || "").toLowerCase() === "yes";
+    const pixnInstalled = payload.pixen_installed === true || fields.pixen_installed === true || String(fields.pixen_installed || "").toLowerCase() === "yes";
     const detail = (label, value) => `<div class="asset-detail"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value || "n/a")}</strong></div>`;
     const pct = (value) => value === null || value === undefined || value === "" ? "n/a" : `${Number(value).toFixed(1)}%`;
     const numericPct = (value) => Math.max(0, Math.min(100, Number(value || 0)));
@@ -5641,8 +5656,6 @@ async function renderAdminSystemInfoPage() {
         <button class="btn btn-outline-secondary" onclick="setHash('#admin')">Back to Admin</button>
         <div class="d-flex flex-wrap gap-2">
           <button class="btn btn-outline-primary" onclick="setHash('#admin/system-info')"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
-          <button class="btn btn-outline-warning" onclick="updateDroneApp()"><i class="bi bi-cloud-download me-1"></i>Update Drone</button>
-          ${pixenInstalled ? `<button class="btn btn-outline-success" onclick="runPixenUpdate()"><i class="bi bi-play-circle me-1"></i>Run PixeN Update</button>` : ""}
         </div>
       </div>
       <div class="card log-card mb-3">
@@ -5683,7 +5696,7 @@ async function renderAdminSystemInfoPage() {
                 ${detail("Network IP", fields.network_ip_address)}
                 ${detail("Router IP", fields.router_ip_address)}
                 ${detail("Batocera", fields.batocera_version || fields.system)}
-                ${detail("PixeN", pixenInstalled ? "Installed" : "Not installed")}
+                ${detail("PixN", pixnInstalled ? "Installed" : "Not installed")}
               </div>
             </div>
             <div class="col-12 col-lg-6">
@@ -5721,8 +5734,12 @@ async function renderAdminControlsPage() {
   subtitleNode.textContent = "Screen mode, volume, screensaver, and EmulationStation configuration";
   setLoading(true, "Loading controls...");
   try {
-    const payload = await api("/admin/system-info");
+    const [payload, autoUpdate] = await Promise.all([
+      api("/admin/system-info"),
+      api("/admin/system/auto-update"),
+    ]);
     const fields = payload.fields || {};
+    const pixnInstalled = payload.pixen_installed === true || fields.pixen_installed === true || String(fields.pixen_installed || "").toLowerCase() === "yes";
     const rawVolume = payload.audio_volume ?? fields.audio_volume;
     const reportedVolume = Number(rawVolume);
     const volumeAvailable = rawVolume !== null && rawVolume !== undefined && Number.isFinite(reportedVolume);
@@ -5731,7 +5748,15 @@ async function renderAdminControlsPage() {
     content.innerHTML = `
       <div class="mb-3 d-flex flex-wrap justify-content-between gap-2">
         <button class="btn btn-outline-secondary" onclick="setHash('#admin')">Back to Admin</button>
-        <button class="btn btn-outline-primary" onclick="setHash('#admin/controls')"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
+        <div class="d-flex flex-wrap align-items-center gap-2">
+          <button class="btn btn-outline-primary" onclick="setHash('#admin/controls')"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
+          <div class="form-check mb-0 px-2">
+            <input class="form-check-input ms-0 me-2" type="checkbox" id="droneAutoUpdateCheckbox" ${autoUpdate.enabled ? "checked" : ""} onchange="setDroneAutoUpdate(this)">
+            <label class="form-check-label text-nowrap" for="droneAutoUpdateCheckbox" title="Check for the latest Drone release whenever the Drone service starts">Auto-update Drone</label>
+          </div>
+          <button class="btn btn-outline-warning" onclick="updateDroneApp()"><i class="bi bi-cloud-download me-1"></i>Update Drone</button>
+          ${pixnInstalled ? `<button class="btn btn-outline-success" onclick="runPixnUpdate()"><i class="bi bi-play-circle me-1"></i>Run PixN Update</button>` : ""}
+        </div>
       </div>
       <div class="row row-cols-1 row-cols-sm-2 row-cols-xl-4 g-3 mb-3">
         <div class="col">

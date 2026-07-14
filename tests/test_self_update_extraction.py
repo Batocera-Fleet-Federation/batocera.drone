@@ -118,6 +118,31 @@ class DownloadLatestDroneAppTests(unittest.TestCase):
         self.assertIn("empty", str(ctx.exception))
 
 
+class DroneAutoUpdateSettingTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.work_dir = self.root / "drone-app"
+        self.settings = types.SimpleNamespace(userdata_root=self.root / "userdata")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_defaults_to_enabled_when_setting_has_not_been_saved(self):
+        with mock.patch.dict("os.environ", {"DRONE_APP_WORK_DIR": str(self.work_dir)}):
+            self.assertTrue(self_update.is_drone_auto_update_enabled(self.settings))
+
+    def test_persists_disabled_and_enabled_choices(self):
+        with mock.patch.dict("os.environ", {"DRONE_APP_WORK_DIR": str(self.work_dir)}):
+            self.assertFalse(self_update.set_drone_auto_update_enabled(self.settings, False))
+            self.assertFalse(self_update.is_drone_auto_update_enabled(self.settings))
+            self.assertEqual((self.work_dir / self_update.DRONE_AUTO_UPDATE_FILE).read_text(), "0\n")
+
+            self.assertTrue(self_update.set_drone_auto_update_enabled(self.settings, True))
+            self.assertTrue(self_update.is_drone_auto_update_enabled(self.settings))
+            self.assertEqual((self.work_dir / self_update.DRONE_AUTO_UPDATE_FILE).read_text(), "1\n")
+
+
 class OverlayReleaseTreeTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

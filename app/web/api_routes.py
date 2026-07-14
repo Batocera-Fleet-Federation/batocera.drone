@@ -280,6 +280,10 @@ class ApiRoutesMixin:
                 self._handle_admin_automation_status()
                 return
 
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "system" and parts[2] == "auto-update":
+                self._handle_admin_drone_auto_update_get()
+                return
+
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "api" and parts[2] == "certificate":
                 self._handle_admin_api_certificate()
                 return
@@ -559,8 +563,13 @@ class ApiRoutesMixin:
                 self._handle_admin_drone_update()
                 return
 
-            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "system" and parts[2] == "run-pixen-update":
-                self._handle_admin_pixen_update()
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "system" and parts[2] == "auto-update":
+                payload = self._read_json_body()
+                self._handle_admin_drone_auto_update_post(payload)
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "system" and parts[2] in {"run-pixn-update", "run-pixen-update"}:
+                self._handle_admin_pixn_update()
                 return
 
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "asset-cache" and parts[2] == "purge":

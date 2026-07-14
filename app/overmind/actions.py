@@ -542,21 +542,21 @@ def _execute_overmind_action(
             "emulationstation_restarted": True,
         }
 
-    if action_name == "run_pixen_update":
+    if action_name in {"run_pixn_update", "run_pixen_update"}:
         try:
             result = run_pixen_upgrade(settings)
         except FileNotFoundError:
-            return "failed", "PixeN update script was not found on this Drone.", {
+            return "failed", "PixN update script was not found on this Drone.", {
                 "type": "pixen_update",
                 "status": "missing",
             }
         except (OSError, subprocess.SubprocessError, ValueError) as error:
-            return "failed", f"Unable to start PixeN update: {error}", {
+            return "failed", f"Unable to start PixN update: {error}", {
                 "type": "pixen_update",
                 "status": "failed",
                 "error": str(error),
             }
-        return "completed", "PixeN update script started.", result
+        return "completed", "PixN update script started.", result
 
     if action_name == "set_screen_mode":
         payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}

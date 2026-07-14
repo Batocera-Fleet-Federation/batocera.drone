@@ -740,7 +740,9 @@ def _schemas() -> Dict[str, Schema]:
         "OvermindClaimOwnershipRequest": _object({"overmind_url": _string(fmt="uri"), "email": _string(), "password": _string(), "drone_name": _string()}, ("overmind_url", "email", "password")),
         "CertificateRotateResponse": _object({"status": _enum(["rotated", "failed"]), "error": _string(), "certificate": _ref("CertificateMetadata")}, ("status", "certificate")),
         "DroneUpdateResponse": _object({"status": _string(), "version": _string(), "archive_url": _string(fmt="uri"), "elapsed_seconds": _number(), "restart": freeform}, description="Self-update result plus restart metadata."),
-        "PixenUpdateResponse": _object({"type": _string(), "status": _string(), "pid": _integer(nullable=True), "script": _string()}, ("type", "status", "script"), description="PixeN upgrade script launch result."),
+        "DroneAutoUpdateRequest": _object({"enabled": _boolean()}, ("enabled",)),
+        "DroneAutoUpdateResponse": _object({"enabled": _boolean()}, ("enabled",)),
+        "PixnUpdateResponse": _object({"type": _string(), "status": _string(), "pid": _integer(nullable=True), "script": _string()}, ("type", "status", "script"), description="PixN upgrade script launch result."),
         "CredentialsUpdateRequest": _object({"username": _string(), "password": _string()}, ("username", "password")),
         "CredentialsUpdateResponse": _object({"credentials": freeform, "message": _string()}, ("credentials", "message")),
         "NetworkModeResponse": _object(
@@ -1235,7 +1237,11 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             "/admin/automation/idle-game-exit": {"post": _operation("Update idle-game-exit automation", {"200": _json_response("IdleGameExitResponse")}, request_body=_json_request("IdleGameExitUpdateRequest"), tags=["admin"])},
             "/admin/automation/wifi-recovery": {"post": _operation("Update Wi-Fi recovery automation", {"200": _json_response("WifiRecoveryResponse")}, request_body=_json_request("WifiRecoveryUpdateRequest"), tags=["admin"])},
             "/admin/system/update-drone": {"post": _operation("Download and stage the latest Drone app release", {"200": _json_response("DroneUpdateResponse")}, tags=["admin"], error_codes=("400", "401", "403", "429", "500", "502"))},
-            "/admin/system/run-pixen-update": {"post": _operation("Run the installed PixeN upgrade script", {"200": _json_response("PixenUpdateResponse")}, tags=["admin"], error_codes=("400", "401", "403", "404", "429", "500"))},
+            "/admin/system/auto-update": {
+                "get": _operation("Get automatic Drone update setting", {"200": _json_response("DroneAutoUpdateResponse")}, tags=["admin"]),
+                "post": _operation("Enable or disable the startup Drone update check", {"200": _json_response("DroneAutoUpdateResponse")}, request_body=_json_request("DroneAutoUpdateRequest"), tags=["admin"]),
+            },
+            "/admin/system/run-pixn-update": {"post": _operation("Run the installed PixN upgrade script", {"200": _json_response("PixnUpdateResponse")}, tags=["admin"], error_codes=("400", "401", "403", "404", "429", "500"))},
             "/admin/artwork/missing": {
                 "get": _operation(
                     "List ROMs for the artwork and metadata hub",

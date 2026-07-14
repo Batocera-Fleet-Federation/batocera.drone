@@ -23,10 +23,35 @@ except ImportError:  # pragma: no cover - direct script execution fallback
 
 DRONE_LATEST_ARCHIVE_URL = "https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/drone-app.tar.gz"
 DRONE_SELF_UPDATE_EXIT_CODE = 75
+DRONE_AUTO_UPDATE_FILE = "auto-update.enabled"
 
 
 def _drone_work_dir(settings: Settings) -> Path:
     return Path(os.environ.get("DRONE_APP_WORK_DIR", str(settings.userdata_root / "system" / "drone-app"))).resolve()
+
+
+def _drone_auto_update_path(settings: Settings) -> Path:
+    return _drone_work_dir(settings) / DRONE_AUTO_UPDATE_FILE
+
+
+def is_drone_auto_update_enabled(settings: Settings) -> bool:
+    path = _drone_auto_update_path(settings)
+    try:
+        value = path.read_text(encoding="utf-8", errors="ignore").strip().lower()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return True
+    return value not in {"0", "false", "no", "off", "disabled"}
+
+
+def set_drone_auto_update_enabled(settings: Settings, enabled: bool) -> bool:
+    path = _drone_auto_update_path(settings)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(".tmp")
+    temp_path.write_text("1\n" if enabled else "0\n", encoding="utf-8")
+    temp_path.replace(path)
+    return bool(enabled)
 
 
 def _overlay_drone_release_tree(source: Path, target: Path) -> int:

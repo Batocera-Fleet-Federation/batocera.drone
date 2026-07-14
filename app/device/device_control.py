@@ -298,14 +298,88 @@ def _emulationstation_restart_command() -> Optional[List[str]]:
     return None
 
 
+def _request_emulationstation_restart_service_control() -> bool:
+    control_dir = Path(os.environ.get("DRONE_SERVICE_CONTROL_DIR", "/userdata/system/drone-app/control"))
+    request_path = control_dir / "restart-emulationstation.request"
+    result_path = control_dir / "restart-emulationstation.result"
+    try:
+        result_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+    if not _request_service_control("restart-emulationstation"):
+        return False
+    deadline = time.monotonic() + max(
+        3.0,
+        float(os.environ.get("DRONE_SERVICE_CONTROL_TIMEOUT_SECONDS", "60")),
+    )
+    while time.monotonic() < deadline:
+        if result_path.exists():
+            result = result_path.read_text(encoding="utf-8", errors="ignore").strip()
+            result_path.unlink(missing_ok=True)
+            if result == "ok":
+                return True
+            raise OSError(result or "Privileged EmulationStation restart failed")
+        time.sleep(0.25)
+    request_path.unlink(missing_ok=True)
+    raise OSError("Timed out waiting for the privileged EmulationStation restart")
+
+
+def _wait_for_emulationstation_process(timeout_seconds: float = 20.0) -> bool:
+    deadline = time.monotonic() + max(1.0, timeout_seconds)
+    while time.monotonic() < deadline:
+        try:
+            result = subprocess.run(
+                ["pidof", "emulationstation"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+            )
+            if result.returncode == 0:
+                return True
+        except (OSError, subprocess.SubprocessError):
+            pass
+        time.sleep(0.5)
+    return False
+
+
 def _restart_emulationstation() -> bool:
-    if _request_service_control("restart-emulationstation"):
-        return True
+    try:
+        if _request_emulationstation_restart_service_control():
+            return True
+    except OSError:
+        return False
     command = _emulationstation_restart_command()
     if not command:
         return False
-    subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return True
+    init_script = Path("/etc/init.d/S31emulationstation")
+    if command == [str(init_script), "restart"]:
+        try:
+            subprocess.run(
+                [str(init_script), "stop"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=60,
+            )
+            time.sleep(3)
+            for attempt in range(2):
+                subprocess.run(
+                    [str(init_script), "start"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=60,
+                )
+                if _wait_for_emulationstation_process():
+                    return True
+                if attempt == 0:
+                    time.sleep(3)
+            return False
+        except (OSError, subprocess.SubprocessError):
+            return False
+    try:
+        subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return _wait_for_emulationstation_process()
 
 
 def _emulator_kill_command() -> Optional[List[str]]:

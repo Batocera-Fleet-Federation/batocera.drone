@@ -490,7 +490,7 @@ class IdleVolumeOvermindActionTests(unittest.TestCase):
             self.assertEqual(result["idle_minutes"], 5)  # preserved
             self.assertEqual(result["target_volume"], 100)  # clamped
 
-    def test_pixen_update_action_runs_installed_script(self) -> None:
+    def test_pixn_update_action_runs_installed_script(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(Path(tmp))
             repo = RomRepository(Path(tmp) / "roms", Path(tmp) / "bios")
@@ -502,10 +502,10 @@ class IdleVolumeOvermindActionTests(unittest.TestCase):
                 status, message, result = _execute_overmind_action(
                     settings,
                     repo,
-                    {"action": "run_pixen_update"},
+                    {"action": "run_pixn_update"},
                 )
             self.assertEqual(status, "completed")
-            self.assertIn("PixeN", message)
+            self.assertIn("PixN", message)
             self.assertEqual(result["type"], "pixen_update")
             run_mock.assert_called_once_with(settings)
 

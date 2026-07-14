@@ -27,6 +27,7 @@ from typing import Optional
 
 CONFIG = Path("/userdata/system/configs/emulationstation/es_settings.cfg")
 EMULATIONSTATION_SERVICE = "/etc/init.d/S31emulationstation"
+EMULATIONSTATION_START_TIMEOUT_SECONDS = 20
 
 
 def _write_ui_mode(config: Path, target: str) -> None:
@@ -86,6 +87,24 @@ def _run_step(command: list, *, timeout: int = 120, capture_output: bool = True)
         return False
 
 
+def _wait_for_emulationstation(timeout: int = EMULATIONSTATION_START_TIMEOUT_SECONDS) -> bool:
+    deadline = time.monotonic() + max(1, timeout)
+    while time.monotonic() < deadline:
+        try:
+            result = subprocess.run(
+                ["pidof", "emulationstation"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+            )
+            if result.returncode == 0:
+                return True
+        except (OSError, subprocess.SubprocessError):
+            pass
+        time.sleep(0.5)
+    return False
+
+
 def set_screen_mode(mode: str, config: Optional[Path] = None) -> bool:
     """Set UIMode and (re)start EmulationStation.
 
@@ -106,7 +125,7 @@ def set_screen_mode(mode: str, config: Optional[Path] = None) -> bool:
     target = normalized_mode.title()
     print(f"[set_screen_mode] applying UIMode={target}")
     _run_step([EMULATIONSTATION_SERVICE, "stop"], timeout=60)
-    time.sleep(2)
+    time.sleep(3)
     _write_ui_mode(config, target)
     print(f"[set_screen_mode] wrote UIMode={target} to {config}")
     # Persist to the overlay so the change survives a reboot, but never let a slow or
@@ -114,10 +133,20 @@ def set_screen_mode(mode: str, config: Optional[Path] = None) -> bool:
     _run_step(["batocera-save-overlay"], timeout=30)
     print("[set_screen_mode] starting EmulationStation")
     started = _run_step([EMULATIONSTATION_SERVICE, "start"], timeout=60, capture_output=False)
+    if started:
+        started = _wait_for_emulationstation()
+    if not started:
+        print("[set_screen_mode] EmulationStation process did not return; retrying start")
+        time.sleep(3)
+        started = _run_step([EMULATIONSTATION_SERVICE, "start"], timeout=60, capture_output=False)
+        if started:
+            started = _wait_for_emulationstation()
     if not started:
         restart_tool = shutil.which("batocera-es-swissknife")
         if restart_tool:
-            started = _run_step([restart_tool, "--restart"], timeout=60)
+            started = _run_step([restart_tool, "--restart"], timeout=60, capture_output=False)
+            if started:
+                started = _wait_for_emulationstation()
     if not started:
         raise RuntimeError("EmulationStation did not restart after the screen mode change")
     print("[set_screen_mode] EmulationStation start completed")

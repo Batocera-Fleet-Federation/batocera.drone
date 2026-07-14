@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to release (e.g., v1.2.3). Must start with v.'
+        description: 'Version to release (for example, v1.2.3)'
         required: true
         type: string
       dry_run:
-        description: 'Dry run (create tag + release but skip publishing)'
+        description: 'Validate and build without creating a tag or release'
         required: false
         default: 'false'
         type: choice
@@ -16,11 +16,15 @@ on:
           - 'false'
           - 'true'
   push:
-    tags:
-      - 'v*'
+    branches:
+      - main
 
 permissions:
   contents: write
+
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
 
 jobs:
   release:
@@ -28,39 +32,142 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Determine version
+      - name: Fetch release tags
+        run: git fetch --force --tags origin
+
+      - name: Determine release version
         id: version
+        env:
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+          REQUESTED_DRY_RUN: ${{ inputs.dry_run }}
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "tag=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
-            echo "dry_run=${{ github.event.inputs.dry_run }}" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            tag="${REQUESTED_VERSION}"
+            dry_run="${REQUESTED_DRY_RUN:-false}"
+            create_tag=true
+            skip=false
           else
-            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-            echo "dry_run=false" >> "$GITHUB_OUTPUT"
+            subject="${COMMIT_MESSAGE%%$'\n'*}"
+            if [[ "$subject" == "Update changelog for v"* ]]; then
+              echo "Skipping the commit created by scripts/create-release.sh."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            existing_tag="$(
+              git tag --points-at HEAD --sort=-v:refname \
+                | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+                | head -n 1 \
+                || true
+            )"
+            if [[ -n "$existing_tag" ]]; then
+              tag="$existing_tag"
+              create_tag=false
+            else
+              latest_tag="$(
+                git tag --sort=-v:refname \
+                  | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+                  | head -n 1 \
+                  || true
+              )"
+              tag="$(scripts/next-release-version.sh "$latest_tag" "$subject")"
+              create_tag=true
+            fi
+            dry_run=false
+            skip=false
           fi
 
-      - name: Create tag (if workflow_dispatch)
-        if: github.event_name == 'workflow_dispatch'
-        run: |
-          git tag "${{ steps.version.outputs.tag }}"
-          git push origin "${{ steps.version.outputs.tag }}"
-
-      - name: Generate release notes
-        id: release_notes
-        run: |
-          if [ -f CHANGELOG.md ]; then
-            echo "changelog=CHANGELOG.md" >> "$GITHUB_OUTPUT"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Version must match vMAJOR.MINOR.PATCH: $tag" >&2
+            exit 1
+          fi
+          if [[ "$create_tag" == "true" ]] && git show-ref --tags --verify --quiet "refs/tags/$tag"; then
+            echo "Tag already exists: $tag" >&2
+            exit 1
           fi
 
-      - name: Create GitHub Release
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "dry_run=$dry_run" >> "$GITHUB_OUTPUT"
+          echo "create_tag=$create_tag" >> "$GITHUB_OUTPUT"
+          echo "skip=$skip" >> "$GITHUB_OUTPUT"
+          echo "Release version: $tag"
+
+      - name: Build release assets
+        if: steps.version.outputs.skip != 'true'
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          original_version="$(cat app/VERSION 2>/dev/null || true)"
+          restore_version() {
+            printf '%s\n' "$original_version" > app/VERSION
+          }
+          trap restore_version EXIT
+
+          printf '%s\n' "$RELEASE_VERSION" > app/VERSION
+          mkdir -p dist
+          tar \
+            --exclude='*/__pycache__' \
+            --exclude='*.pyc' \
+            -czf dist/drone-app.tar.gz \
+            app content
+
+          for asset in \
+            scripts/batocera_install.sh \
+            scripts/batocera_uninstall.sh \
+            scripts/run_now.sh \
+            dist/drone-app.tar.gz; do
+            test -s "$asset"
+          done
+
+      - name: Create version tag
+        if: >-
+          steps.version.outputs.skip != 'true' &&
+          steps.version.outputs.dry_run != 'true' &&
+          steps.version.outputs.create_tag == 'true'
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$RELEASE_VERSION" -m "Batocera Drone $RELEASE_VERSION"
+          git push origin "$RELEASE_VERSION"
+
+      - name: Create GitHub release
+        if: steps.version.outputs.skip != 'true' && steps.version.outputs.dry_run != 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
+          name: Batocera Drone ${{ steps.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           generate_release_notes: true
-          body_path: ${{ steps.release_notes.outputs.changelog || '' }}
           draft: false
           prerelease: false
-          fail_on_unmatched_files: false
+          fail_on_unmatched_files: true
+          files: |
+            scripts/batocera_install.sh
+            scripts/batocera_uninstall.sh
+            scripts/run_now.sh
+            dist/drone-app.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update latest tag
+        if: steps.version.outputs.skip != 'true' && steps.version.outputs.dry_run != 'true'
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -fa latest -m "Batocera Drone latest release: $RELEASE_VERSION" "${RELEASE_VERSION}^{commit}"
+          git push origin refs/tags/latest --force
+
+      - name: Dry-run summary
+        if: steps.version.outputs.skip != 'true' && steps.version.outputs.dry_run == 'true'
+        run: echo "Validated and built release ${{ steps.version.outputs.tag }} without publishing it."

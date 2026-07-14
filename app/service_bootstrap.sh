@@ -17,6 +17,7 @@ INPUT_MONITOR_PID_FILE="/tmp/drone-input-activity-monitor.pid"
 CONTROL_DIR="/userdata/system/drone-app/control"
 INPUT_ACTIVITY_FILE="/userdata/system/drone-app/control/last-input-activity"
 STARTUP_LOG="/userdata/system/logs/drone-app/startup.log"
+AUTO_UPDATE_FILE="$WORK_DIR/auto-update.enabled"
 STARTUP_UPDATE_ATTEMPTED=0
 
 ensure_rom_write_access_all() {
@@ -115,9 +116,14 @@ PY
 }
 
 stage_latest_app_once() {
-  if [ "${DRONE_UPDATE_ON_STARTUP:-1}" != "1" ]; then
-    return 0
+  auto_update_enabled="${DRONE_UPDATE_ON_STARTUP:-1}"
+  if [ -f "$AUTO_UPDATE_FILE" ]; then
+    auto_update_enabled="$(head -n 1 "$AUTO_UPDATE_FILE" 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
   fi
+  case "$auto_update_enabled" in
+    1|true|yes|on|enabled) ;;
+    *) echo "[drone-service] Automatic Drone update check disabled."; return 0 ;;
+  esac
   runner="/tmp/drone-startup-update.$$"
   echo "[drone-service] Checking for the latest Drone app bundle..."
   wait_for_network
@@ -195,14 +201,44 @@ request_host_reboot() {
 
 restart_emulationstation_as_root() {
   if [ -x /etc/init.d/S31emulationstation ]; then
-    /etc/init.d/S31emulationstation restart
-    return
+    # Batocera v43's "restart" action calls stop and start back-to-back. The
+    # old X/EmulationStation session can still be exiting when startx is
+    # launched, and the init script returns success even when ES never appears.
+    /etc/init.d/S31emulationstation stop || true
+    sleep 3
+    /etc/init.d/S31emulationstation start >/dev/null 2>&1 || true
+    elapsed=0
+    while [ "$elapsed" -lt 20 ]; do
+      if pidof emulationstation >/dev/null 2>&1; then
+        echo "[drone-service] EmulationStation restarted successfully."
+        return 0
+      fi
+      sleep 1
+      elapsed=$((elapsed + 1))
+    done
+    echo "[drone-service] EmulationStation did not start; retrying after a short delay."
+    sleep 3
+    /etc/init.d/S31emulationstation start >/dev/null 2>&1 || true
+    elapsed=0
+    while [ "$elapsed" -lt 20 ]; do
+      if pidof emulationstation >/dev/null 2>&1; then
+        echo "[drone-service] EmulationStation restarted successfully on retry."
+        return 0
+      fi
+      sleep 1
+      elapsed=$((elapsed + 1))
+    done
+    echo "[drone-service] EmulationStation failed to start after two attempts."
+    return 1
   fi
   if command -v batocera-es-swissknife >/dev/null 2>&1; then
-    batocera-es-swissknife --restart
-    return
+    batocera-es-swissknife --restart >/dev/null 2>&1 || return 1
+    sleep 3
+    pidof emulationstation >/dev/null 2>&1
+    return "$?"
   fi
   echo "[drone-service] Unable to restart EmulationStation: restart command was not found."
+  return 1
 }
 
 kill_emulator_as_root() {
@@ -292,9 +328,14 @@ service_control_worker() {
       exec sh "$WORK_DIR/app/service_bootstrap.sh" control-worker
     fi
     if [ -f "$CONTROL_DIR/restart-emulationstation.request" ]; then
-      rm -f "$CONTROL_DIR/restart-emulationstation.request"
+      restart_result="$CONTROL_DIR/restart-emulationstation.result"
+      rm -f "$CONTROL_DIR/restart-emulationstation.request" "$restart_result"
       echo "[drone-service] EmulationStation restart requested by Drone app."
-      restart_emulationstation_as_root
+      if restart_emulationstation_as_root; then
+        printf '%s\n' "ok" > "$restart_result"
+      else
+        printf '%s\n' "Privileged EmulationStation restart failed: process did not return" > "$restart_result"
+      fi
     fi
     if [ -f "$CONTROL_DIR/kill-emulator.request" ]; then
       kill_result="$CONTROL_DIR/kill-emulator.result"

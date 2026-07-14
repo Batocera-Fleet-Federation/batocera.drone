@@ -1,4 +1,4 @@
-"""PixeN script detection and manual trigger helpers."""
+"""PixN script detection and manual trigger helpers."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ PIXEN_UPGRADE_SCRIPT = "/userdata/roms/rgs/rgs_upgrade.sh"
 
 
 def pixen_script_path(settings: Any) -> Path:
-    """Return the PixeN upgrade script path, mapped through USERDATA_ROOT in tests."""
+    """Return the PixN upgrade script path, mapped through USERDATA_ROOT in tests."""
     configured = os.environ.get("DRONE_PIXEN_UPGRADE_SCRIPT", PIXEN_UPGRADE_SCRIPT)
     path = Path(configured)
     if str(path) == "/userdata" or str(path).startswith("/userdata/"):
@@ -27,7 +27,7 @@ def is_pixen_installed(settings: Any) -> bool:
 
 
 def run_pixen_upgrade(settings: Any) -> dict:
-    """Start the PixeN upgrade script and return lightweight launch metadata."""
+    """Start the PixN upgrade script and return lightweight launch metadata."""
     path = pixen_script_path(settings)
     if not path.exists() or not path.is_file():
         raise FileNotFoundError(str(path))

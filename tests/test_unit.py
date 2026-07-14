@@ -2598,11 +2598,27 @@ class SettingsTests(unittest.TestCase):
             self.assertIn('name="UIMode" value="Kid"', config.read_text(encoding="utf-8"))
             # Each invocation synchronously runs stop ES + save overlay + start ES so
             # success is not reported before the display service accepted the start.
-            self.assertEqual(run.call_count, 9)
             run_commands = [call.args[0] for call in run.call_args_list]
+            lifecycle_commands = [command for command in run_commands if command != ["pidof", "emulationstation"]]
+            self.assertEqual(len(lifecycle_commands), 9)
+            self.assertEqual(run_commands.count(["pidof", "emulationstation"]), 3)
             self.assertIn([set_screen_mode.EMULATIONSTATION_SERVICE, "stop"], run_commands)
             self.assertIn(["batocera-save-overlay"], run_commands)
             self.assertIn([set_screen_mode.EMULATIONSTATION_SERVICE, "start"], run_commands)
+
+    def test_screen_mode_retries_when_start_returns_without_emulationstation(self) -> None:
+        from app import set_screen_mode
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "es_settings.cfg"
+            with mock.patch("app.set_screen_mode.subprocess.run", return_value=mock.Mock(returncode=0, stdout="")) as run, \
+                 mock.patch("app.set_screen_mode._wait_for_emulationstation", side_effect=[False, True]) as wait, \
+                 mock.patch("app.set_screen_mode.time.sleep"):
+                set_screen_mode.set_screen_mode("kiosk", config=config)
+
+            start_command = [set_screen_mode.EMULATIONSTATION_SERVICE, "start"]
+            self.assertEqual([call.args[0] for call in run.call_args_list].count(start_command), 2)
+            self.assertEqual(wait.call_count, 2)
 
     def test_privileged_screen_mode_helper_skips_restart_when_mode_is_unchanged(self) -> None:
         from app import set_screen_mode
@@ -2907,15 +2923,75 @@ class SettingsTests(unittest.TestCase):
             ):
                 settings = Settings.from_env()
                 repo = RomRepository(root / "roms", root / "bios")
-                with mock.patch("app.drone_api.subprocess.Popen") as popen:
+                with mock.patch(
+                    "app.device.device_control._request_emulationstation_restart_service_control",
+                    return_value=True,
+                ) as restart_control, mock.patch("app.drone_api.subprocess.Popen") as popen:
                     status, message, result = _execute_overmind_action(settings, repo, {"action": "refresh_emulator_list"})
 
             self.assertEqual(status, "completed")
             self.assertIn("Emulator list refresh", message)
             self.assertEqual(result["type"], "emulator_list_refresh")
             self.assertTrue(result["emulationstation_restarted"])
-            self.assertTrue((control_dir / "restart-emulationstation.request").exists())
+            restart_control.assert_called_once_with()
             popen.assert_not_called()
+
+    def test_emulationstation_restart_waits_for_worker_success(self) -> None:
+        from app.device import device_control
+
+        with tempfile.TemporaryDirectory() as tmp:
+            control_dir = Path(tmp) / "control"
+
+            def dispatch(_command: str, body=None) -> bool:
+                control_dir.mkdir(parents=True, exist_ok=True)
+                (control_dir / "restart-emulationstation.result").write_text("ok\n", encoding="utf-8")
+                return True
+
+            with mock.patch.dict("os.environ", {"DRONE_SERVICE_CONTROL_DIR": str(control_dir)}, clear=True), \
+                 mock.patch("app.device.device_control._request_service_control", side_effect=dispatch) as request:
+                self.assertTrue(device_control._request_emulationstation_restart_service_control())
+
+            request.assert_called_once_with("restart-emulationstation")
+
+    def test_emulationstation_restart_surfaces_worker_failure(self) -> None:
+        from app.device import device_control
+
+        with tempfile.TemporaryDirectory() as tmp:
+            control_dir = Path(tmp) / "control"
+
+            def dispatch(_command: str, body=None) -> bool:
+                control_dir.mkdir(parents=True, exist_ok=True)
+                (control_dir / "restart-emulationstation.result").write_text("ES did not return\n", encoding="utf-8")
+                return True
+
+            with mock.patch.dict("os.environ", {"DRONE_SERVICE_CONTROL_DIR": str(control_dir)}, clear=True), \
+                 mock.patch("app.device.device_control._request_service_control", side_effect=dispatch):
+                with self.assertRaisesRegex(OSError, "ES did not return"):
+                    device_control._request_emulationstation_restart_service_control()
+
+    def test_direct_emulationstation_restart_uses_delayed_stop_and_start(self) -> None:
+        from app.device import device_control
+
+        init_script = "/etc/init.d/S31emulationstation"
+        with mock.patch(
+            "app.device.device_control._request_emulationstation_restart_service_control",
+            return_value=False,
+        ), mock.patch(
+            "app.device.device_control._emulationstation_restart_command",
+            return_value=[init_script, "restart"],
+        ), mock.patch(
+            "app.device.device_control.subprocess.run",
+            return_value=mock.Mock(returncode=0),
+        ) as run, mock.patch(
+            "app.device.device_control._wait_for_emulationstation_process",
+            return_value=True,
+        ), mock.patch("app.device.device_control.time.sleep") as sleep:
+            self.assertTrue(device_control._restart_emulationstation())
+
+        commands = [call.args[0] for call in run.call_args_list]
+        self.assertEqual(commands, [[init_script, "stop"], [init_script, "start"]])
+        self.assertNotIn([init_script, "restart"], commands)
+        sleep.assert_called_once_with(3)
 
     def test_remote_restart_action_is_deferred_to_root_supervisor(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3174,14 +3250,30 @@ class SettingsTests(unittest.TestCase):
         render_source = js[render_start:render_end]
         self.assertIn('"pending", "paused"', render_source)
 
-    def test_admin_ui_exposes_drone_self_update_action(self) -> None:
+    def test_admin_controls_expose_drone_update_actions_and_auto_update(self) -> None:
         api_routes = Path(__file__).resolve().parents[1].joinpath("app/web/api_routes.py").read_text(encoding="utf-8")
         js_source = Path(__file__).resolve().parents[1].joinpath("app/web/static/js/drone.js").read_text(encoding="utf-8")
         drone_source = Path(__file__).resolve().parents[1].joinpath("app/common/self_update.py").read_text(encoding="utf-8")
+        system_info_source = js_source[
+            js_source.index("async function renderAdminSystemInfoPage()"):
+            js_source.index("async function renderAdminControlsPage()")
+        ]
+        controls_source = js_source[
+            js_source.index("async function renderAdminControlsPage()"):
+            js_source.index("async function loadThemePage(")
+        ]
 
         self.assertIn('parts[1] == "system" and parts[2] == "update-drone"', api_routes)
+        self.assertIn('parts[2] == "auto-update"', api_routes)
+        self.assertIn('"run-pixn-update", "run-pixen-update"', api_routes)
         self.assertIn("async function updateDroneApp()", js_source)
         self.assertIn('apiPost("/admin/system/update-drone"', js_source)
+        self.assertIn('apiPost("/admin/system/auto-update"', js_source)
+        self.assertNotIn("Update Drone", system_info_source)
+        self.assertNotIn("Run PixN Update", system_info_source)
+        self.assertIn("Update Drone", controls_source)
+        self.assertIn("Run PixN Update", controls_source)
+        self.assertIn("droneAutoUpdateCheckbox", controls_source)
         self.assertIn("DRONE_LATEST_ARCHIVE_URL", drone_source)
         self.assertIn("os.execv(sys.executable, [sys.executable, *sys.argv])", drone_source)
         self.assertIn("os._exit(DRONE_SELF_UPDATE_EXIT_CODE)", drone_source)
@@ -3244,7 +3336,11 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("DRONE_REMOTE_REBOOT_EXIT_CODE", bootstrap)
         self.assertIn("request_host_reboot()", bootstrap)
         self.assertIn("service_control_worker()", bootstrap)
-        self.assertIn("/etc/init.d/S31emulationstation restart", bootstrap)
+        self.assertIn("/etc/init.d/S31emulationstation stop", bootstrap)
+        self.assertIn("/etc/init.d/S31emulationstation start", bootstrap)
+        self.assertIn("sleep 3", bootstrap)
+        self.assertIn("pidof emulationstation", bootstrap)
+        self.assertIn("restart-emulationstation.result", bootstrap)
         self.assertIn("set_screen_mode_as_root()", bootstrap)
         self.assertIn('python3 "$helper" "$mode"', bootstrap)
         self.assertIn("set-screen-mode-${mode}.request", bootstrap)
@@ -3253,6 +3349,8 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("set-volume.request", bootstrap)
         self.assertIn("stage_latest_app_once()", bootstrap)
         self.assertIn("DRONE_UPDATE_ON_STARTUP", bootstrap)
+        self.assertIn("auto-update.enabled", bootstrap)
+        self.assertIn('if [ -f "$AUTO_UPDATE_FILE" ]', bootstrap)
         self.assertIn("DRONE_APP_STAGE_ONLY=1", bootstrap)
         self.assertIn('kill_result="$CONTROL_DIR/kill-emulator.result"', bootstrap)
         self.assertIn("DRONE_SERVICE_CONTROL_DIR", root.joinpath("app/device/device_control.py").read_text(encoding="utf-8"))
@@ -3325,7 +3423,7 @@ class SettingsTests(unittest.TestCase):
         self.assertIn('event.stopPropagation();', js_source)
         self.assertNotIn("Browse BIOS inside the Systems file tree", js_source)
         self.assertNotIn('class="table table-hover align-middle themed-table bios-table bff-stack"', js_source)
-        self.assertIn("Run PixeN Update", js_source)
+        self.assertIn("Run PixN Update", js_source)
         self.assertIn("admin-config-content", js_source)
         self.assertIn("function buildEmulatorConfigTree", js_source)
         self.assertIn("function toggleEmulatorConfigFolder", js_source)
