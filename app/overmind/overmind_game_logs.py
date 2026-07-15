@@ -14,15 +14,16 @@ from pathlib import Path
 from typing import Any, Callable, List, Optional, Tuple
 
 try:
-    from ..storage.state_store import database_path, load_payload, save_payload
+    from ..storage.state_store import database_path, load_payload, open_database, save_payload
 except ImportError:
-    from storage.state_store import database_path, load_payload, save_payload  # type: ignore
+    from storage.state_store import database_path, load_payload, open_database, save_payload  # type: ignore
 
 
 LogCollector = Callable[[Any], dict]
 ErrorFormatter = Callable[[BaseException], str]
 _STATE_SCHEMA_VERSION = 2
 GAMEPLAY_HISTORY_NAMESPACE = "gameplay_history"
+GAMEPLAY_HISTORY_MIGRATION_NAMESPACE = "gameplay_history_relational_migration"
 
 
 def _state_path(settings: Any, filename: str) -> Path:
@@ -297,26 +298,148 @@ def _game_session_key(session: dict) -> tuple:
     )
 
 
+def _gameplay_session_key_text(session: dict) -> str:
+    return json.dumps(_game_session_key(session), ensure_ascii=False, separators=(",", ":"))
+
+
+def _gameplay_columns(session: dict) -> tuple[str, str, str, str]:
+    return (
+        str(session.get("played_at") or session.get("started_at") or ""),
+        str(session.get("system_name") or session.get("system") or ""),
+        str(session.get("game_name") or session.get("rom_name") or ""),
+        str(session.get("rom_path") or ""),
+    )
+
+
+def _upsert_gameplay_session(connection, session: dict) -> None:
+    session_key = _gameplay_session_key_text(session)
+    existing = connection.execute(
+        "SELECT payload FROM gameplay_history WHERE session_key = ?",
+        (session_key,),
+    ).fetchone()
+    if existing:
+        try:
+            previous = json.loads(existing[0])
+        except Exception:
+            previous = {}
+        if isinstance(previous, dict):
+            session = {**previous, **session}
+    played_at, system_name, game_name, rom_path = _gameplay_columns(session)
+    updated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    connection.execute(
+        "INSERT INTO gameplay_history "
+        "(session_key, played_at, system_name, game_name, rom_path, payload, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(session_key) DO UPDATE SET "
+        "played_at=excluded.played_at, system_name=excluded.system_name, game_name=excluded.game_name, "
+        "rom_path=excluded.rom_path, payload=excluded.payload, updated_at=excluded.updated_at",
+        (
+            session_key,
+            played_at,
+            system_name,
+            game_name,
+            rom_path,
+            json.dumps(session, sort_keys=True, default=str),
+            updated_at,
+        ),
+    )
+
+
+def _ensure_gameplay_history_migrated(settings: Any) -> None:
+    """Backfill the former app_state JSON list exactly once without deleting it."""
+    path = database_path(settings.userdata_root)
+    with open_database(path) as connection:
+        marker = connection.execute(
+            "SELECT 1 FROM app_state WHERE namespace = ? AND state_key = 'payload'",
+            (GAMEPLAY_HISTORY_MIGRATION_NAMESPACE,),
+        ).fetchone()
+        if marker:
+            return
+        legacy = connection.execute(
+            "SELECT payload FROM app_state WHERE namespace = ? AND state_key = 'payload'",
+            (GAMEPLAY_HISTORY_NAMESPACE,),
+        ).fetchone()
+        try:
+            rows = json.loads(legacy[0]) if legacy else []
+        except Exception:
+            rows = []
+        for row in rows if isinstance(rows, list) else []:
+            if isinstance(row, dict):
+                _upsert_gameplay_session(connection, row)
+        connection.execute(
+            "INSERT INTO app_state (namespace, state_key, payload, updated_at) VALUES (?, 'payload', 'true', ?) "
+            "ON CONFLICT(namespace, state_key) DO UPDATE SET payload='true', updated_at=excluded.updated_at",
+            (
+                GAMEPLAY_HISTORY_MIGRATION_NAMESPACE,
+                datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+            ),
+        )
+
+
 def load_gameplay_history(settings: Any) -> List[dict]:
     """Load the Drone's durable, deduplicated completed gameplay history."""
-    history = load_payload(database_path(settings.userdata_root), GAMEPLAY_HISTORY_NAMESPACE, [])
-    if not isinstance(history, list):
-        return []
-    return [row for row in history if isinstance(row, dict)]
+    _ensure_gameplay_history_migrated(settings)
+    with open_database(database_path(settings.userdata_root)) as connection:
+        rows = connection.execute(
+            "SELECT payload FROM gameplay_history ORDER BY played_at, session_key"
+        ).fetchall()
+    history = []
+    for row in rows:
+        try:
+            payload = json.loads(row[0])
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            history.append(payload)
+    return history
+
+
+def load_gameplay_history_page(
+    settings: Any,
+    *,
+    query: str = "",
+    limit: int = 500,
+    offset: int = 0,
+) -> dict:
+    """Return a gameplay-history page and total directly from SQLite."""
+    _ensure_gameplay_history_migrated(settings)
+    safe_limit = max(1, min(int(limit), 2000))
+    safe_offset = max(0, int(offset))
+    normalized_query = str(query or "").strip()
+    parameters: list = []
+    where = ""
+    if normalized_query:
+        escaped = normalized_query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pattern = f"%{escaped}%"
+        where = (
+            " WHERE system_name COLLATE NOCASE LIKE ? ESCAPE '\\' "
+            "OR game_name COLLATE NOCASE LIKE ? ESCAPE '\\' "
+            "OR rom_path COLLATE NOCASE LIKE ? ESCAPE '\\'"
+        )
+        parameters.extend([pattern, pattern, pattern])
+    with open_database(database_path(settings.userdata_root)) as connection:
+        total = int(connection.execute(f"SELECT COUNT(*) FROM gameplay_history{where}", parameters).fetchone()[0])
+        rows = connection.execute(
+            f"SELECT payload FROM gameplay_history{where} "
+            "ORDER BY played_at DESC, session_key LIMIT ? OFFSET ?",
+            [*parameters, safe_limit, safe_offset],
+        ).fetchall()
+    items = []
+    for row in rows:
+        try:
+            payload = json.loads(row[0])
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            items.append(payload)
+    return {"total": total, "limit": safe_limit, "offset": safe_offset, "items": items}
 
 
 def _store_gameplay_history(settings: Any, sessions: List[dict]) -> None:
-    history = load_gameplay_history(settings)
-    by_key = {_game_session_key(row): index for index, row in enumerate(history)}
-    for session in sessions:
-        key = _game_session_key(session)
-        existing_index = by_key.get(key)
-        if existing_index is None:
-            by_key[key] = len(history)
-            history.append(dict(session))
-        else:
-            history[existing_index] = {**history[existing_index], **session}
-    save_payload(database_path(settings.userdata_root), GAMEPLAY_HISTORY_NAMESPACE, history)
+    _ensure_gameplay_history_migrated(settings)
+    with open_database(database_path(settings.userdata_root)) as connection:
+        for session in sessions:
+            if isinstance(session, dict):
+                _upsert_gameplay_session(connection, dict(session))
 
 
 def pending_game_event_count(settings: Any) -> int:

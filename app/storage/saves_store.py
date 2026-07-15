@@ -125,6 +125,10 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
         "entry_key TEXT PRIMARY KEY, operation TEXT NOT NULL)"
     )
     connection.execute("CREATE INDEX IF NOT EXISTS idx_saves_cache_system ON saves_cache_entries(system)")
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_saves_cache_page "
+        "ON saves_cache_entries(system COLLATE NOCASE, file_path COLLATE NOCASE, entry_key)"
+    )
     connection.commit()
 
 
@@ -290,6 +294,61 @@ def list_saves(saves_root: Path, system: Optional[str] = None) -> list[dict]:
         ).to_payload()
         for row in rows
     ]
+
+
+def list_saves_page(
+    saves_root: Path,
+    *,
+    systems: Optional[Iterable[str]] = None,
+    query: str = "",
+    limit: int = 500,
+    offset: int = 0,
+) -> dict:
+    """Return a filtered save page and total directly from SQLite."""
+    safe_limit = max(1, min(int(limit), 2000))
+    safe_offset = max(0, int(offset))
+    selected_systems = sorted(
+        {str(value or "").strip().lower() for value in systems or [] if str(value or "").strip()}
+    )
+    normalized_query = str(query or "").strip()
+    where_parts: list[str] = []
+    parameters: list = []
+    if selected_systems:
+        placeholders = ",".join("?" for _ in selected_systems)
+        where_parts.append(f"system COLLATE NOCASE IN ({placeholders})")
+        parameters.extend(selected_systems)
+    if normalized_query:
+        escaped = normalized_query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pattern = f"%{escaped}%"
+        where_parts.append(
+            "(save_name COLLATE NOCASE LIKE ? ESCAPE '\\' "
+            "OR file_path COLLATE NOCASE LIKE ? ESCAPE '\\' "
+            "OR fingerprint COLLATE NOCASE LIKE ? ESCAPE '\\')"
+        )
+        parameters.extend([pattern, pattern, pattern])
+    where = f" WHERE {' AND '.join(where_parts)}" if where_parts else ""
+    columns = "system, file_path, save_name, absolute_path, file_size, modified_time, fingerprint"
+    with _open(saves_root) as connection:
+        total = int(connection.execute(f"SELECT COUNT(*) FROM saves_cache_entries{where}", parameters).fetchone()[0])
+        rows = connection.execute(
+            f"SELECT {columns} FROM saves_cache_entries{where} "
+            "ORDER BY system COLLATE NOCASE, file_path COLLATE NOCASE, entry_key LIMIT ? OFFSET ?",
+            [*parameters, safe_limit, safe_offset],
+        ).fetchall()
+    items = [
+        SaveEntry(
+            entry_key=_entry_key(row[0], row[1]),
+            system=row[0],
+            file_path=row[1],
+            save_name=row[2],
+            absolute_path=row[3] or "",
+            file_size=int(row[4] or 0),
+            modified_time=int(row[5] or 0),
+            fingerprint=row[6] or "",
+        ).to_payload()
+        for row in rows
+    ]
+    return {"total": total, "limit": safe_limit, "offset": safe_offset, "items": items}
 
 
 def read_pending_changes(saves_root: Path) -> dict:

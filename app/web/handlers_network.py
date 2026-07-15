@@ -19,6 +19,7 @@ try:
     from ..device.tailnet_service import tailnet_enroll, tailnet_rotate_auth_key, tailnet_status
     from ..overmind.overmind_config import build_overmind_status
     from ..roms.gamelist import ARTWORK_FIELDS, _normalize_gamelist_rom_path
+    from ..storage.rom_metadata_store import match_rom_cache_page
     from ..transfer import local_network as _local_network
     from ..transfer.drone_network import _network_mode
     from ..transfer.drone_tls import DroneCertificateManager
@@ -37,6 +38,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from device.tailnet_service import tailnet_enroll, tailnet_rotate_auth_key, tailnet_status  # type: ignore
     from overmind.overmind_config import build_overmind_status  # type: ignore
     from roms.gamelist import ARTWORK_FIELDS, _normalize_gamelist_rom_path  # type: ignore
+    from storage.rom_metadata_store import match_rom_cache_page  # type: ignore
     from transfer import local_network as _local_network  # type: ignore
     from transfer.drone_network import _network_mode  # type: ignore
     from transfer.drone_tls import DroneCertificateManager  # type: ignore
@@ -595,6 +597,12 @@ class HandlersNetworkMixin:
     def _annotate_roms_exist_locally(self, items: List[dict]) -> None:
         """Flag each peer ROM row with whether it already exists on this machine
         (by content thumbprint) so the UI can show it and skip re-downloading."""
+        matched_indexes = match_rom_cache_page(self.settings, items)
+        if matched_indexes is not None:
+            for index, item in enumerate(items):
+                if isinstance(item, dict):
+                    item["exists_locally"] = index in matched_indexes
+            return
         cache: dict = {}
         for item in items:
             if not isinstance(item, dict):

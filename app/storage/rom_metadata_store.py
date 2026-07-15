@@ -390,6 +390,30 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
     # Btree indexes that back ORDER BY and the LIKE fallback when FTS5 is unavailable.
     connection.execute("CREATE INDEX IF NOT EXISTS idx_rom_cache_name ON rom_cache_entries(rom_name)")
     connection.execute("CREATE INDEX IF NOT EXISTS idx_rom_cache_system_name ON rom_cache_entries(system, rom_name)")
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_rom_cache_page "
+        "ON rom_cache_entries(system COLLATE NOCASE, rom_name COLLATE NOCASE, file_path COLLATE NOCASE, entry_key)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_rom_cache_system_fingerprint "
+        "ON rom_cache_entries(system COLLATE NOCASE, fingerprint)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_rom_cache_system_file_path "
+        "ON rom_cache_entries(system COLLATE NOCASE, file_path COLLATE NOCASE)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_rom_cache_system_file_size "
+        "ON rom_cache_entries(system COLLATE NOCASE, file_size)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_bios_cache_page "
+        "ON bios_cache_entries(name COLLATE NOCASE, file_path COLLATE NOCASE, entry_key)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_artwork_cache_page "
+        "ON artwork_cache_entries(system COLLATE NOCASE, rom_path COLLATE NOCASE, entry_key)"
+    )
     _ensure_rom_search_index(connection)
     _migrate_blob_tables_if_needed(connection)
     _migrate_payload_change_queue_if_needed(connection)
@@ -1415,6 +1439,333 @@ def list_rom_rows_by_system(settings: Any, system: str, *, include_fingerprint: 
             item["fingerprint"] = row[8]
         result.append(item)
     return result
+
+
+def _cache_is_ready(connection: sqlite3.Connection) -> bool:
+    state = dict(
+        connection.execute(
+            "SELECT key, value FROM cache_state WHERE key IN ('last_full_scan_at', 'scan_in_progress')"
+        ).fetchall()
+    )
+    try:
+        last_full_scan = json.loads(state.get("last_full_scan_at") or "null")
+        scan_in_progress = json.loads(state.get("scan_in_progress") or "false")
+    except Exception:
+        return False
+    return bool(last_full_scan) and not bool(scan_in_progress)
+
+
+def _page_bounds(limit: int, offset: int, *, maximum: int = 5000) -> tuple[int, int]:
+    return max(1, min(int(limit), maximum)), max(0, int(offset))
+
+
+def _normalized_filters(values: Optional[Iterable[str]]) -> list[str]:
+    return sorted({str(value or "").strip().lower() for value in values or [] if str(value or "").strip()})
+
+
+def _rom_row_payload(values: tuple) -> dict:
+    return RomCacheRow(
+        entry_key=values[0],
+        system=values[1],
+        file_path=values[2],
+        rom_name=values[3],
+        unique_id=values[4] or "",
+        absolute_path="",
+        file_size=_int(values[5]),
+        modified_time=_int(values[6]),
+        entry_type=values[7] or "file",
+        fingerprint=values[8],
+        gamelist_path=values[9] or "",
+        gamelist_game_id=values[10] or values[2],
+        is_downloadable=bool(values[11]),
+        image_stem=values[12] or Path(values[2]).stem,
+        extra=_loads_dict(values[13]),
+    ).to_payload()
+
+
+def list_rom_cache_page(
+    settings: Any,
+    *,
+    systems: Optional[Iterable[str]] = None,
+    query: str = "",
+    limit: int = 500,
+    offset: int = 0,
+) -> Optional[dict]:
+    """Return a deterministic ROM page and total directly from SQLite.
+
+    Multiple-system results retain the UI's round-robin ordering using a SQL
+    window rank, but only the requested rows are decoded into Python objects.
+    ``None`` means the relational cache is not authoritative yet.
+    """
+    safe_limit, safe_offset = _page_bounds(limit, offset, maximum=5000)
+    selected_systems = _normalized_filters(systems)
+    normalized_query = str(query or "").strip()
+    where_parts: list[str] = []
+    parameters: list[Any] = []
+    if selected_systems:
+        placeholders = ",".join("?" for _ in selected_systems)
+        where_parts.append(f"system COLLATE NOCASE IN ({placeholders})")
+        parameters.extend(selected_systems)
+    if normalized_query:
+        pattern = f"%{_escape_like(normalized_query)}%"
+        where_parts.append(
+            "(rom_name COLLATE NOCASE LIKE ? ESCAPE '\\' "
+            "OR file_path COLLATE NOCASE LIKE ? ESCAPE '\\' "
+            "OR unique_id COLLATE NOCASE LIKE ? ESCAPE '\\' "
+            "OR fingerprint COLLATE NOCASE LIKE ? ESCAPE '\\')"
+        )
+        parameters.extend([pattern, pattern, pattern, pattern])
+    where = f" WHERE {' AND '.join(where_parts)}" if where_parts else ""
+    columns = (
+        "entry_key, system, file_path, rom_name, unique_id, file_size, modified_time, entry_type, "
+        "fingerprint, gamelist_path, gamelist_game_id, is_downloadable, image_stem, extra_json"
+    )
+    try:
+        with _open_rom_metadata_cache(settings) as connection:
+            if not _cache_is_ready(connection):
+                return None
+            total = int(connection.execute(f"SELECT COUNT(*) FROM rom_cache_entries{where}", parameters).fetchone()[0])
+            page_parameters = [*parameters, safe_limit, safe_offset]
+            if len(selected_systems) == 1:
+                rows = connection.execute(
+                    f"SELECT {columns} FROM rom_cache_entries{where} "
+                    "ORDER BY rom_name COLLATE NOCASE, file_path COLLATE NOCASE, entry_key LIMIT ? OFFSET ?",
+                    page_parameters,
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    f"WITH ranked AS (SELECT {columns}, "
+                    "ROW_NUMBER() OVER (PARTITION BY system COLLATE NOCASE "
+                    "ORDER BY rom_name COLLATE NOCASE, file_path COLLATE NOCASE, entry_key) AS system_position "
+                    f"FROM rom_cache_entries{where}) "
+                    f"SELECT {columns} FROM ranked "
+                    "ORDER BY system_position, system COLLATE NOCASE, rom_name COLLATE NOCASE, "
+                    "file_path COLLATE NOCASE, entry_key LIMIT ? OFFSET ?",
+                    page_parameters,
+                ).fetchall()
+    except sqlite3.Error as error:
+        print(f"ROM page query failed: {_format_store_error(error)}", file=sys.stderr, flush=True)
+        return None
+    return {
+        "total": total,
+        "limit": safe_limit,
+        "offset": safe_offset,
+        "items": [_rom_row_payload(row) for row in rows],
+    }
+
+
+def _bios_row_payload(values: tuple) -> dict:
+    return BiosCacheRow(
+        entry_key=values[0],
+        file_path=values[1],
+        name=values[2],
+        unique_id=values[3] or "",
+        absolute_path="",
+        file_size=_int(values[4]),
+        modified_time=_int(values[5]),
+        md5=values[6],
+        extra=_loads_dict(values[7]),
+    ).to_payload()
+
+
+def list_bios_cache_page(
+    settings: Any,
+    *,
+    query: str = "",
+    folder_systems: Optional[Iterable[str]] = None,
+    known_system: str = "",
+    unassigned: bool = False,
+    limit: int = 500,
+    offset: int = 0,
+) -> Optional[dict]:
+    """Return a filtered BIOS page from the relational metadata cache."""
+    safe_limit, safe_offset = _page_bounds(limit, offset, maximum=5000)
+    selected_folders = _normalized_filters(folder_systems)
+    normalized_query = str(query or "").strip()
+    normalized_known_system = str(known_system or "").strip().lower()
+    folder_expression = (
+        "CASE WHEN instr(file_path, '/') > 0 THEN lower(substr(file_path, 1, instr(file_path, '/') - 1)) "
+        "ELSE '_root' END"
+    )
+    where_parts: list[str] = []
+    parameters: list[Any] = []
+    if selected_folders:
+        placeholders = ",".join("?" for _ in selected_folders)
+        where_parts.append(f"{folder_expression} IN ({placeholders})")
+        parameters.extend(selected_folders)
+    if normalized_known_system:
+        where_parts.append("extra_json COLLATE NOCASE LIKE ? ESCAPE '\\'")
+        parameters.append(f'%"{_escape_like(normalized_known_system)}"%')
+    elif unassigned:
+        # The scanner writes the known-system list in canonical JSON. Zero or
+        # multiple assignments belong to the UI's Unassigned/Shared bucket.
+        where_parts.append(
+            "extra_json LIKE '%\"systems\": []%' OR extra_json LIKE '%\"systems\": [%,%]%'"
+        )
+    if normalized_query:
+        pattern = f"%{_escape_like(normalized_query)}%"
+        where_parts.append(
+            f"(name COLLATE NOCASE LIKE ? ESCAPE '\\' OR file_path COLLATE NOCASE LIKE ? ESCAPE '\\' "
+            f"OR md5 COLLATE NOCASE LIKE ? ESCAPE '\\' OR {folder_expression} LIKE ? ESCAPE '\\')"
+        )
+        parameters.extend([pattern, pattern, pattern, pattern])
+    where = f" WHERE {' AND '.join(f'({part})' for part in where_parts)}" if where_parts else ""
+    columns = "entry_key, file_path, name, unique_id, file_size, modified_time, md5, extra_json"
+    try:
+        with _open_rom_metadata_cache(settings) as connection:
+            if not _cache_is_ready(connection):
+                return None
+            total = int(connection.execute(f"SELECT COUNT(*) FROM bios_cache_entries{where}", parameters).fetchone()[0])
+            rows = connection.execute(
+                f"SELECT {columns} FROM bios_cache_entries{where} "
+                "ORDER BY name COLLATE NOCASE, file_path COLLATE NOCASE, entry_key LIMIT ? OFFSET ?",
+                [*parameters, safe_limit, safe_offset],
+            ).fetchall()
+            systems_all = [
+                row[0]
+                for row in connection.execute(
+                    f"SELECT DISTINCT {folder_expression} FROM bios_cache_entries ORDER BY 1"
+                ).fetchall()
+            ]
+            systems_filtered = [
+                row[0]
+                for row in connection.execute(
+                    f"SELECT DISTINCT {folder_expression} FROM bios_cache_entries{where} ORDER BY 1",
+                    parameters,
+                ).fetchall()
+            ]
+    except sqlite3.Error as error:
+        print(f"BIOS page query failed: {_format_store_error(error)}", file=sys.stderr, flush=True)
+        return None
+    return {
+        "total": total,
+        "limit": safe_limit,
+        "offset": safe_offset,
+        "systems": systems_all,
+        "systems_filtered": systems_filtered,
+        "items": [_bios_row_payload(row) for row in rows],
+    }
+
+
+def list_artwork_cache_page(
+    settings: Any,
+    *,
+    systems: Optional[Iterable[str]] = None,
+    query: str = "",
+    limit: int = 500,
+    offset: int = 0,
+) -> Optional[dict]:
+    """Return an artwork metadata page without parsing every gamelist."""
+    safe_limit, safe_offset = _page_bounds(limit, offset, maximum=2000)
+    selected_systems = _normalized_filters(systems)
+    normalized_query = str(query or "").strip()
+    where_parts: list[str] = []
+    parameters: list[Any] = []
+    if selected_systems:
+        placeholders = ",".join("?" for _ in selected_systems)
+        where_parts.append(f"system COLLATE NOCASE IN ({placeholders})")
+        parameters.extend(selected_systems)
+    if normalized_query:
+        pattern = f"%{_escape_like(normalized_query)}%"
+        where_parts.append(
+            "(title COLLATE NOCASE LIKE ? ESCAPE '\\' OR rom_path COLLATE NOCASE LIKE ? ESCAPE '\\' "
+            "OR artwork_types COLLATE NOCASE LIKE ? ESCAPE '\\')"
+        )
+        parameters.extend([pattern, pattern, pattern])
+    where = f" WHERE {' AND '.join(where_parts)}" if where_parts else ""
+    columns = (
+        "entry_key, system, rom_path, artwork_type, artwork_types, title, file_path, relative_path, "
+        "file_size, modified_time, fingerprint, extra_json"
+    )
+    try:
+        with _open_rom_metadata_cache(settings) as connection:
+            if not _cache_is_ready(connection):
+                return None
+            total = int(connection.execute(f"SELECT COUNT(*) FROM artwork_cache_entries{where}", parameters).fetchone()[0])
+            rows = connection.execute(
+                f"SELECT {columns} FROM artwork_cache_entries{where} "
+                "ORDER BY system COLLATE NOCASE, rom_path COLLATE NOCASE, entry_key LIMIT ? OFFSET ?",
+                [*parameters, safe_limit, safe_offset],
+            ).fetchall()
+    except sqlite3.Error as error:
+        print(f"Artwork page query failed: {_format_store_error(error)}", file=sys.stderr, flush=True)
+        return None
+    items = []
+    for values in rows:
+        artwork_types = _loads_list(values[4]) or ([values[3]] if values[3] else [])
+        items.append(
+            ArtworkCacheRow(
+                entry_key=values[0],
+                system=values[1],
+                rom_path=values[2],
+                artwork_types=tuple(str(value) for value in artwork_types if str(value or "").strip()),
+                title=values[5] or "",
+                file_path=values[6] or "",
+                relative_path=values[7] or "",
+                file_size=_int(values[8]),
+                modified_time=_int(values[9]),
+                fingerprint=values[10],
+                extra=_loads_dict(values[11]),
+            ).to_payload()
+        )
+    return {"total": total, "limit": safe_limit, "offset": safe_offset, "items": items}
+
+
+def match_rom_cache_page(settings: Any, items: Iterable[dict]) -> Optional[set[int]]:
+    """Return page-item indexes already present locally using indexed lookups.
+
+    This replaces building complete per-system Python indexes merely to annotate
+    a page of peer results. One connection is reused and at most three bounded
+    lookups are performed per item (fingerprint, path, then name+size).
+    """
+    page_items = list(items or [])
+    matches: set[int] = set()
+    try:
+        with _open_rom_metadata_cache(settings) as connection:
+            if not _cache_is_ready(connection):
+                return None
+            for index, item in enumerate(page_items):
+                if not isinstance(item, dict):
+                    continue
+                system = str(item.get("system") or "").strip()
+                if not system:
+                    continue
+                fingerprint = str(item.get("rom_fingerprint") or item.get("fingerprint") or "").strip().lower()
+                if fingerprint and connection.execute(
+                    "SELECT 1 FROM rom_cache_entries "
+                    "WHERE system = ? COLLATE NOCASE AND fingerprint = ? LIMIT 1",
+                    (system, fingerprint),
+                ).fetchone():
+                    matches.add(index)
+                    continue
+                relative_path = _normalize_path(
+                    item.get("relative_path") or item.get("rom_path") or item.get("file_path")
+                )
+                if relative_path and connection.execute(
+                    "SELECT 1 FROM rom_cache_entries "
+                    "WHERE system = ? COLLATE NOCASE AND file_path = ? COLLATE NOCASE LIMIT 1",
+                    (system, relative_path),
+                ).fetchone():
+                    matches.add(index)
+                    continue
+                size = item.get("byte_count") or item.get("file_size") or item.get("size")
+                try:
+                    file_size = int(size)
+                except (TypeError, ValueError):
+                    file_size = -1
+                if relative_path and file_size >= 0:
+                    file_name = Path(relative_path).name.lower()
+                    candidates = connection.execute(
+                        "SELECT file_path FROM rom_cache_entries "
+                        "WHERE system = ? COLLATE NOCASE AND file_size = ?",
+                        (system, file_size),
+                    ).fetchall()
+                    if any(Path(str(row[0] or "")).name.lower() == file_name for row in candidates):
+                        matches.add(index)
+    except sqlite3.Error as error:
+        print(f"ROM page match query failed: {_format_store_error(error)}", file=sys.stderr, flush=True)
+        return None
+    return matches
 
 
 def _load_rom_metadata_cache(settings: Any) -> Tuple[dict, bool]:

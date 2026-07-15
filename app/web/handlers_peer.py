@@ -18,13 +18,17 @@ from urllib.parse import unquote
 try:
     from ..common.auth import record_unauthorized_response
     from ..device.tailnet_service import tailnet_peer_ips
-    from ..overmind.overmind_game_logs import load_gameplay_history as _load_gameplay_history
+    from ..overmind.overmind_game_logs import (
+        load_gameplay_history as _load_gameplay_history,
+        load_gameplay_history_page as _load_gameplay_history_page,
+    )
     from ..overmind.overmind_reporting import (
         list_emulator_config_files as _list_emulator_config_files,
         read_emulator_config_file as _read_emulator_config_file,
     )
     from ..roms.rom_metadata_state import _rom_metadata_cache_status
     from ..storage import saves_store as _saves_store
+    from ..storage.rom_metadata_store import list_artwork_cache_page
     from ..transfer import local_network as _local_network
     from ..transfer.drone_network import _drone_advertised_api_port, _network_mode
     from ..transfer.drone_tls import DroneCertificateManager
@@ -35,13 +39,17 @@ try:
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.auth import record_unauthorized_response  # type: ignore
     from device.tailnet_service import tailnet_peer_ips  # type: ignore
-    from overmind.overmind_game_logs import load_gameplay_history as _load_gameplay_history  # type: ignore
+    from overmind.overmind_game_logs import (  # type: ignore
+        load_gameplay_history as _load_gameplay_history,
+        load_gameplay_history_page as _load_gameplay_history_page,
+    )
     from overmind.overmind_reporting import (  # type: ignore
         list_emulator_config_files as _list_emulator_config_files,
         read_emulator_config_file as _read_emulator_config_file,
     )
     from roms.rom_metadata_state import _rom_metadata_cache_status  # type: ignore
     from storage import saves_store as _saves_store  # type: ignore
+    from storage.rom_metadata_store import list_artwork_cache_page  # type: ignore
     from transfer import local_network as _local_network  # type: ignore
     from transfer.drone_network import _drone_advertised_api_port, _network_mode  # type: ignore
     from transfer.drone_tls import DroneCertificateManager  # type: ignore
@@ -189,6 +197,121 @@ class HandlersPeerMixin:
                 "counts": cache_status.get("counts") or {},
                 "updated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
             }
+        selected_systems = [system] if system else sorted(systems)
+
+        def paged_response(page: dict) -> dict:
+            return {
+                "drone_id": self.settings.overmind_device_id,
+                "asset_type": normalized,
+                "system": system or None,
+                "systems": sorted(systems),
+                "total": int(page.get("total") or 0),
+                "limit": int(page.get("limit") or limit),
+                "offset": int(page.get("offset") or 0),
+                "items": [
+                    {key: value for key, value in row.items() if key != "absolute_path"}
+                    for row in (page.get("items") or [])
+                    if isinstance(row, dict)
+                ],
+            }
+
+        # Normal operation reads authoritative relational caches. Filtering,
+        # counting, ordering, and pagination remain inside SQLite; the legacy
+        # filesystem/list fallbacks below are only for an initial cache build.
+        if normalized == "roms":
+            page = self.repository.list_rom_assets_page(
+                systems=selected_systems,
+                query=query,
+                limit=limit,
+                offset=offset,
+            )
+            if page is not None:
+                return paged_response(page)
+        elif normalized == "bios":
+            page = self.repository.list_bios_page(
+                query=query,
+                folder_systems=selected_systems,
+                limit=limit,
+                offset=offset,
+            )
+            if page is not None:
+                return paged_response(page)
+        elif normalized == "artwork":
+            page = list_artwork_cache_page(
+                self.settings,
+                systems=selected_systems,
+                query=query,
+                limit=limit,
+                offset=offset,
+            )
+            if page is not None:
+                return paged_response(page)
+        elif normalized == "saves":
+            if self.settings.use_fake_data:
+                _saves_store.sync_saves_cache(self.settings.saves_root)
+            return paged_response(
+                _saves_store.list_saves_page(
+                    self.settings.saves_root,
+                    systems=selected_systems,
+                    query=query,
+                    limit=limit,
+                    offset=offset,
+                )
+            )
+        elif normalized == "emulator_configs":
+            configs = _list_emulator_config_files(
+                self.settings,
+                max_configs=limit,
+                offset=offset,
+                query=query,
+            )
+            page_items = []
+            for row in configs.get("configs") or []:
+                if not isinstance(row, dict):
+                    continue
+                enriched = {
+                    "name": Path(str(row.get("relative_path") or "")).name,
+                    "root_name": row.get("root_name"),
+                    "relative_path": row.get("relative_path"),
+                    "size": row.get("size"),
+                    "modified_at": row.get("modified_at"),
+                    "error": row.get("error"),
+                    "is_downloadable": False,
+                }
+                try:
+                    detail = _read_emulator_config_file(
+                        self.settings,
+                        str(row.get("root_name") or ""),
+                        str(row.get("relative_path") or ""),
+                        max_bytes=65536,
+                    )
+                    if detail.get("content") is not None:
+                        enriched["content"] = detail.get("content")
+                        enriched["content_truncated"] = bool(detail.get("truncated"))
+                    if detail.get("fingerprint"):
+                        enriched["fingerprint"] = detail.get("fingerprint")
+                except Exception as error:
+                    enriched.setdefault("error", str(error))
+                page_items.append(enriched)
+            return paged_response(
+                {
+                    "total": configs.get("total") or 0,
+                    "limit": limit,
+                    "offset": offset,
+                    "items": page_items,
+                }
+            )
+        elif normalized == "gameplay":
+            page = _load_gameplay_history_page(
+                self.settings,
+                query=query,
+                limit=limit,
+                offset=offset,
+            )
+            for row in page.get("items") or []:
+                if isinstance(row, dict):
+                    row["is_downloadable"] = False
+            return paged_response(page)
         if normalized == "roms":
             # Scan only the requested systems. Scanning the WHOLE library and then
             # filtering (the old plural-`systems` path) is dramatically slower on a

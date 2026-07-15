@@ -1168,6 +1168,25 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(listing["count"], 250)
             self.assertEqual(listing["max_configs"], 250)
 
+    def test_emulator_config_list_applies_filter_and_page_before_stat(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            configs = root / "system" / "configs" / "retroarch"
+            configs.mkdir(parents=True)
+            for name in ("alpha.cfg", "beta.cfg", "gamma.cfg"):
+                (configs / name).write_text(name, encoding="utf-8")
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
+                settings = Settings.from_env()
+
+            listing = list_emulator_config_files(settings, max_configs=1, offset=1, query=".cfg")
+
+            self.assertEqual(listing["total"], 3)
+            self.assertEqual(listing["offset"], 1)
+            self.assertEqual(
+                [row["relative_path"] for row in listing["configs"]],
+                ["retroarch/beta.cfg"],
+            )
+
     def test_peer_trust_prefers_configured_ca_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ca_file = Path(tmp) / "ca.crt"
@@ -6015,6 +6034,7 @@ class LocalNetworkAssetCopyTests(unittest.TestCase):
                 "USERDATA_ROOT": str(root),
                 "ROMS_ROOT": str(root / "roms"),
                 "BIOS_ROOT": str(root / "bios"),
+                "SAVES_ROOT": str(root / "saves"),
                 "OVERMIND_DEVICE_ID": "target-a",
             },
             clear=True,
@@ -6068,6 +6088,242 @@ class LocalNetworkAssetCopyTests(unittest.TestCase):
             page2 = handler._collect_peer_inventory("roms", {"limit": ["1"], "offset": ["1"]})
             self.assertEqual(len(page2["items"]), 1)
             self.assertNotEqual(page["items"][0]["system"], page2["items"][0]["system"])
+
+    def test_collect_peer_inventory_roms_pages_in_sql_before_decoding(self):
+        from app.storage import rom_metadata_store
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            settings = self._settings(root)
+            entries = {
+                f"{system}:game-{index}.zip": {
+                    "system": system,
+                    "file_path": f"game-{index}.zip",
+                    "rom_name": f"{system} Game {index:03d}",
+                    "unique_id": f"{system}-{index}",
+                    "file_size": index + 1,
+                    "fingerprint": f"fp-{system}-{index}",
+                }
+                for system in ("snes", "gba", "genesis")
+                for index in range(100)
+            }
+            _persist_rom_metadata_cache(
+                settings,
+                {
+                    **_empty_rom_metadata_cache(),
+                    "entries": entries,
+                    "systems": [
+                        {"name": system, "rom_count": 100}
+                        for system in ("snes", "gba", "genesis")
+                    ],
+                    "last_full_scan_at": "2026-07-14T00:00:00Z",
+                    "scan_in_progress": False,
+                },
+                rom_updates=entries,
+            )
+            repo = drone_api.RomRepository(settings.roms_root, settings.bios_root, settings=settings)
+            handler = self._handler(settings, repo)
+            original_decoder = rom_metadata_store._rom_row_payload
+            with mock.patch.object(
+                repo,
+                "list_assets",
+                side_effect=AssertionError("paged inventory must not load complete systems"),
+            ), mock.patch.object(
+                rom_metadata_store,
+                "_rom_row_payload",
+                wraps=original_decoder,
+            ) as decoded:
+                payload = handler._collect_peer_inventory(
+                    "roms",
+                    {"limit": ["50"], "offset": ["0"]},
+                )
+
+            self.assertEqual(payload["total"], 300)
+            self.assertEqual(len(payload["items"]), 50)
+            self.assertEqual(decoded.call_count, 50)
+            self.assertEqual(
+                {item["system"] for item in payload["items"][:3]},
+                {"snes", "gba", "genesis"},
+            )
+            with open_database(database_path(root)) as connection:
+                plan = connection.execute(
+                    "EXPLAIN QUERY PLAN SELECT entry_key FROM rom_cache_entries "
+                    "WHERE system = ? COLLATE NOCASE "
+                    "ORDER BY rom_name COLLATE NOCASE, file_path COLLATE NOCASE, entry_key LIMIT ? OFFSET ?",
+                    ("snes", 50, 0),
+                ).fetchall()
+            self.assertTrue(any("idx_rom_cache_page" in str(row[3]) for row in plan))
+
+    def test_peer_bios_artwork_and_saves_inventories_page_in_sql(self):
+        from app.storage import saves_store
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            settings = self._settings(root)
+            bios = {
+                "bios:a": {"file_path": "ps2/a.bin", "name": "A BIOS", "md5": "a" * 32, "systems": ["ps2"]},
+                "bios:b": {"file_path": "root.bin", "name": "B BIOS", "md5": "b" * 32, "systems": []},
+            }
+            artwork = {
+                "art:snes:a": {"system": "snes", "rom_path": "a.zip", "title": "A", "artwork_types": ["image"]},
+                "art:gba:b": {"system": "gba", "rom_path": "b.zip", "title": "B", "artwork_types": ["marquee"]},
+            }
+            _persist_rom_metadata_cache(
+                settings,
+                {
+                    **_empty_rom_metadata_cache(),
+                    "bios_entries": bios,
+                    "artwork_entries": artwork,
+                    "last_full_scan_at": "2026-07-14T00:00:00Z",
+                    "scan_in_progress": False,
+                },
+                bios_updates=bios,
+                artwork_updates=artwork,
+            )
+            settings.saves_root.mkdir(parents=True, exist_ok=True)
+            with saves_store._open(settings.saves_root) as connection:
+                connection.executemany(
+                    "INSERT INTO saves_cache_entries "
+                    "(entry_key, system, file_path, save_name, absolute_path, file_size, modified_time, fingerprint) "
+                    "VALUES (?, ?, ?, ?, '', ?, ?, ?)",
+                    [
+                        ("save-a", "snes", "snes/a.srm", "a.srm", 10, 1, "save-fp-a"),
+                        ("save-b", "gba", "gba/b.sav", "b.sav", 20, 2, "save-fp-b"),
+                    ],
+                )
+            repo = drone_api.RomRepository(settings.roms_root, settings.bios_root, settings=settings)
+            handler = self._handler(settings, repo)
+            with mock.patch.object(repo, "list_bios_entries", side_effect=AssertionError("must use BIOS SQL page")), \
+                    mock.patch.object(repo, "list_artwork_metadata", side_effect=AssertionError("must use artwork SQL page")), \
+                    mock.patch.object(saves_store, "list_saves", side_effect=AssertionError("must use saves SQL page")):
+                bios_page = handler._collect_peer_inventory("bios", {"limit": ["1"], "offset": ["1"]})
+                artwork_page = handler._collect_peer_inventory(
+                    "artwork",
+                    {"systems": ["gba"], "limit": ["1"], "offset": ["0"]},
+                )
+                saves_page = handler._collect_peer_inventory("saves", {"limit": ["1"], "offset": ["0"]})
+
+            self.assertEqual((bios_page["total"], len(bios_page["items"])), (2, 1))
+            self.assertEqual(artwork_page["total"], 1)
+            self.assertEqual(artwork_page["items"][0]["system"], "gba")
+            self.assertEqual((saves_page["total"], len(saves_page["items"])), (2, 1))
+
+    def test_local_rom_and_bios_handlers_use_database_pages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            settings = self._settings(root)
+            roms = {
+                f"snes:game-{index}.zip": {
+                    "system": "snes",
+                    "file_path": f"game-{index}.zip",
+                    "rom_name": f"Game {index:03d}",
+                    "file_size": index + 1,
+                }
+                for index in range(10)
+            }
+            bios = {
+                "bios:assigned": {
+                    "file_path": "ps2/assigned.bin",
+                    "name": "Assigned",
+                    "systems": ["ps2"],
+                },
+                "bios:shared": {
+                    "file_path": "shared.bin",
+                    "name": "Shared",
+                    "systems": ["ps2", "ps3"],
+                },
+            }
+            _persist_rom_metadata_cache(
+                settings,
+                {
+                    **_empty_rom_metadata_cache(),
+                    "entries": roms,
+                    "bios_entries": bios,
+                    "last_full_scan_at": "2026-07-14T00:00:00Z",
+                    "scan_in_progress": False,
+                },
+                rom_updates=roms,
+                bios_updates=bios,
+            )
+            repo = drone_api.RomRepository(settings.roms_root, settings.bios_root, settings=settings)
+            handler = self._handler(settings, repo)
+            with mock.patch.object(repo, "list_assets", side_effect=AssertionError("must use ROM SQL page")), \
+                    mock.patch.object(repo, "list_bios_entries", side_effect=AssertionError("must use BIOS SQL page")), \
+                    mock.patch.object(handler, "_send_json") as send:
+                handler._handle_rom_list("snes", limit=3, offset=4)
+                rom_payload = send.call_args.args[1]
+                handler._handle_bios_list(limit=1, offset=0, unassigned=True)
+                bios_payload = send.call_args.args[1]
+
+            self.assertEqual((rom_payload["count"], rom_payload["returned"]), (10, 3))
+            self.assertEqual((bios_payload["count"], bios_payload["returned"]), (1, 1))
+            self.assertEqual(bios_payload["bios"][0]["name"], "Shared")
+
+    def test_peer_page_local_exists_annotation_uses_indexed_cache_lookups(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            settings = self._settings(root)
+            entries = {
+                "snes:local.zip": {
+                    "system": "snes",
+                    "file_path": "local.zip",
+                    "rom_name": "Local",
+                    "file_size": 10,
+                    "fingerprint": "same-fingerprint",
+                }
+            }
+            _persist_rom_metadata_cache(
+                settings,
+                {
+                    **_empty_rom_metadata_cache(),
+                    "entries": entries,
+                    "last_full_scan_at": "2026-07-14T00:00:00Z",
+                    "scan_in_progress": False,
+                },
+                rom_updates=entries,
+            )
+            repo = drone_api.RomRepository(settings.roms_root, settings.bios_root, settings=settings)
+            handler = self._handler(settings, repo)
+            items = [
+                {"system": "snes", "relative_path": "different-name.zip", "fingerprint": "same-fingerprint"},
+                {"system": "snes", "relative_path": "missing.zip", "fingerprint": "not-present"},
+            ]
+            with mock.patch.object(
+                handler,
+                "_local_rom_index",
+                side_effect=AssertionError("paged annotation must not build full local indexes"),
+            ):
+                handler._annotate_roms_exist_locally(items)
+            self.assertTrue(items[0]["exists_locally"])
+            self.assertFalse(items[1]["exists_locally"])
+
+    def test_gameplay_history_migrates_to_indexed_paged_rows(self):
+        from app.overmind.overmind_game_logs import (
+            GAMEPLAY_HISTORY_NAMESPACE,
+            load_gameplay_history_page,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            settings = self._settings(root)
+            history = [
+                {
+                    "played_at": f"2026-07-14T0{index}:00:00+00:00",
+                    "system_name": "snes",
+                    "game_name": f"Game {index}",
+                    "rom_path": f"/userdata/roms/snes/game-{index}.zip",
+                }
+                for index in range(3)
+            ]
+            save_payload(database_path(root), GAMEPLAY_HISTORY_NAMESPACE, history)
+            page = load_gameplay_history_page(settings, limit=1, offset=1)
+            self.assertEqual((page["total"], len(page["items"])), (3, 1))
+            self.assertEqual(page["items"][0]["game_name"], "Game 1")
+            with open_database(database_path(root)) as connection:
+                count = connection.execute("SELECT COUNT(*) FROM gameplay_history").fetchone()[0]
+                indexes = {row[1] for row in connection.execute("PRAGMA index_list(gameplay_history)")}
+            self.assertEqual(count, 3)
+            self.assertIn("idx_gameplay_history_played_at", indexes)
 
     def test_collect_peer_inventory_roms_with_system_filters(self):
         with tempfile.TemporaryDirectory() as tmp:

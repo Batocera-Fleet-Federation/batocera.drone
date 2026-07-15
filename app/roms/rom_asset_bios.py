@@ -13,11 +13,23 @@ from typing import List, Optional, Tuple
 
 try:
     from ..common.http_cache import valid_segment
-    from ..storage.rom_metadata_store import _load_rom_metadata_cache, list_rom_rows_by_system, rom_cache_ready
+    from ..storage.rom_metadata_store import (
+        _load_rom_metadata_cache,
+        list_bios_cache_page,
+        list_rom_cache_page,
+        list_rom_rows_by_system,
+        rom_cache_ready,
+    )
     from .rom_metadata_state import _build_rom_metadata_snapshot_from_cache
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.http_cache import valid_segment  # type: ignore
-    from storage.rom_metadata_store import _load_rom_metadata_cache, list_rom_rows_by_system, rom_cache_ready  # type: ignore
+    from storage.rom_metadata_store import (  # type: ignore
+        _load_rom_metadata_cache,
+        list_bios_cache_page,
+        list_rom_cache_page,
+        list_rom_rows_by_system,
+        rom_cache_ready,
+    )
     from roms.rom_metadata_state import _build_rom_metadata_snapshot_from_cache  # type: ignore
 
 
@@ -53,6 +65,67 @@ def bios_systems_for_md5(md5: Optional[str]) -> List[str]:
 
 
 class RomAssetBiosMixin:
+    def list_rom_assets_page(
+        self,
+        *,
+        systems=None,
+        query: str = "",
+        limit: int = 500,
+        offset: int = 0,
+        include_fingerprint: bool = True,
+    ) -> Optional[dict]:
+        """Return an SQLite-paged ROM inventory, enriched only for page rows."""
+        if self.settings is None:
+            return None
+        page = list_rom_cache_page(
+            self.settings,
+            systems=systems,
+            query=query,
+            limit=limit,
+            offset=offset,
+        )
+        if page is None:
+            return None
+        grouped: dict[str, list[dict]] = {}
+        for item in page.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            if not include_fingerprint:
+                item.pop("fingerprint", None)
+                item.pop("rom_fingerprint", None)
+            item.pop("absolute_path", None)
+            grouped.setdefault(str(item.get("system") or ""), []).append(item)
+        for system, items in grouped.items():
+            if not system:
+                continue
+            try:
+                self._attach_gamelist_to_rom_items(self.get_system_dir(system), items)
+            except Exception:
+                continue
+        return page
+
+    def list_bios_page(
+        self,
+        *,
+        query: str = "",
+        folder_systems=None,
+        known_system: str = "",
+        unassigned: bool = False,
+        limit: int = 500,
+        offset: int = 0,
+    ) -> Optional[dict]:
+        if self.settings is None:
+            return None
+        return list_bios_cache_page(
+            self.settings,
+            query=query,
+            folder_systems=folder_systems,
+            known_system=known_system,
+            unassigned=unassigned,
+            limit=limit,
+            offset=offset,
+        )
+
     def list_assets(self, system: str, asset_type: str, include_fingerprint: bool = True) -> Tuple[Path, List[dict]]:
         system_dir = self.get_system_dir(system)
 

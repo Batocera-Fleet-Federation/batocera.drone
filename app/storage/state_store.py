@@ -52,6 +52,19 @@ def open_database(path: Path) -> sqlite3.Connection:
         "peer_id TEXT PRIMARY KEY, address TEXT NOT NULL, route_kind TEXT NOT NULL, updated_at TEXT NOT NULL, "
         "CHECK (route_kind IN ('tailnet', 'host', 'ip')))"
     )
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS gameplay_history ("
+        "session_key TEXT PRIMARY KEY, played_at TEXT NOT NULL, system_name TEXT NOT NULL, "
+        "game_name TEXT NOT NULL, rom_path TEXT NOT NULL, payload TEXT NOT NULL, updated_at TEXT NOT NULL)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_gameplay_history_played_at "
+        "ON gameplay_history(played_at DESC, session_key)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_gameplay_history_system_played_at "
+        "ON gameplay_history(system_name COLLATE NOCASE, played_at DESC, session_key)"
+    )
     connection.commit()
     return connection
 

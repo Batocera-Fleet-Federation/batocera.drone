@@ -8,7 +8,7 @@ import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Tuple
+from typing import Any, Optional, Tuple
 
 try:
     from ..storage.state_store import database_path, load_payload, save_payload
@@ -378,12 +378,26 @@ def _iter_selected_config_files(settings: Any):
         yield row["root"], row["path"], row["relative_path"]
 
 
-def list_emulator_config_files(settings: Any, max_configs: int = 250) -> dict:
+def list_emulator_config_files(
+    settings: Any,
+    max_configs: int = 250,
+    *,
+    offset: int = 0,
+    query: Optional[str] = None,
+) -> dict:
     configs = []
     limit = max(0, int(max_configs or 0))
-    for row in _selected_config_file_rows(settings, use_cache=True):
-        if limit and len(configs) >= limit:
-            break
+    safe_offset = max(0, int(offset or 0))
+    normalized_query = str(query or "").strip().lower()
+    selected_rows = _selected_config_file_rows(settings, use_cache=True)
+    if normalized_query:
+        selected_rows = [
+            row for row in selected_rows
+            if normalized_query in f"{row.get('root_name') or ''}/{row.get('relative_path') or ''}".lower()
+        ]
+    total = len(selected_rows)
+    page_rows = selected_rows[safe_offset:safe_offset + limit] if limit else selected_rows[safe_offset:]
+    for row in page_rows:
         path = row["path"]
         item = {
             "root_name": row["root_name"],
@@ -402,7 +416,9 @@ def list_emulator_config_files(settings: Any, max_configs: int = 250) -> dict:
         "type": "emulator_configs",
         "configs": configs,
         "count": len(configs),
+        "total": total,
         "max_configs": limit,
+        "offset": safe_offset,
         "incremental": False,
     }
 

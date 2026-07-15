@@ -321,8 +321,38 @@ class HandlersContentMixin:
         offset: int = 0,
         query: Optional[str] = None,
     ) -> None:
-        _, roms = self.repository.list_assets(system, "roms", include_fingerprint=False)
         query_value = str(query or "").strip().lower()
+        if limit is not None:
+            safe_limit = max(1, min(int(limit), 5000))
+            safe_offset = max(0, int(offset))
+            page = self.repository.list_rom_assets_page(
+                systems=[system],
+                query=query_value,
+                limit=safe_limit,
+                offset=safe_offset,
+                include_fingerprint=False,
+            )
+            if page is not None:
+                roms = page.get("items") or []
+                if not self.settings.downloads_enabled:
+                    for item in roms:
+                        item["is_downloadable"] = False
+                total = int(page.get("total") or 0)
+                self._send_json(
+                    200,
+                    {
+                        "system": system,
+                        "roms": roms,
+                        "count": total,
+                        "offset": safe_offset,
+                        "limit": safe_limit,
+                        "returned": len(roms),
+                        "has_more": (safe_offset + len(roms)) < total,
+                    },
+                    cache_key=f"json:/systems/{system}?limit={safe_limit}&offset={safe_offset}&q={query_value}",
+                )
+                return
+        _, roms = self.repository.list_assets(system, "roms", include_fingerprint=False)
         if query_value:
             roms = [
                 item for item in roms
@@ -383,6 +413,46 @@ class HandlersContentMixin:
         system: Optional[str] = None,
         unassigned: bool = False,
     ) -> None:
+        safe_limit = max(1, min(int(limit), 5000))
+        safe_offset = max(0, int(offset))
+        query_value = (query or "").strip().lower()
+        selected_systems = set((s or "").strip().lower() for s in (system_filters or []) if (s or "").strip())
+        none_selected = "__none__" in selected_systems
+        selected_systems.discard("__none__")
+        clean_system = str(system or "").strip().lower()
+        page = self.repository.list_bios_page(
+            query=query_value,
+            folder_systems=selected_systems,
+            known_system=clean_system,
+            unassigned=unassigned,
+            limit=safe_limit,
+            offset=safe_offset,
+        )
+        if page is not None:
+            entries = [] if none_selected else list(page.get("items") or [])
+            for item in entries:
+                md5_value = str(item.get("bios_md5") or item.get("md5") or "").strip()
+                item["fingerprint"] = md5_value
+                item["is_downloadable"] = bool(self.settings.downloads_enabled)
+            total = 0 if none_selected else int(page.get("total") or 0)
+            self._send_json(
+                200,
+                {
+                    "bios": entries,
+                    "count": total,
+                    "offset": safe_offset,
+                    "limit": safe_limit,
+                    "returned": len(entries),
+                    "has_more": (safe_offset + len(entries)) < total,
+                    "systems": page.get("systems") or [],
+                    "systems_filtered": [] if none_selected else (page.get("systems_filtered") or []),
+                },
+                cache_key=(
+                    f"json:/bios?limit={safe_limit}&offset={safe_offset}&q={query_value}"
+                    f"&systems={','.join(sorted(selected_systems))}&system={clean_system}&unassigned={unassigned}"
+                ),
+            )
+            return
         cache, _ = _load_rom_metadata_cache(self.settings)
         cached_bios = cache.get("bios_entries") if isinstance(cache.get("bios_entries"), dict) else {}
         entries = []
@@ -404,11 +474,6 @@ class HandlersContentMixin:
             })
         if not entries:
             entries = self.repository.list_bios_entries()
-        query_value = (query or "").strip().lower()
-        selected_systems = set((s or "").strip().lower() for s in (system_filters or []) if (s or "").strip())
-        none_selected = "__none__" in selected_systems
-        selected_systems.discard("__none__")
-
         def _entry_system(item: dict) -> str:
             path = item.get("path") or item.get("name") or ""
             return (path.split("/")[0] if "/" in path else "_root").lower()
@@ -435,7 +500,6 @@ class HandlersContentMixin:
         # BIOS-md5 reference table -- distinct from the coarse folder-path heuristic above.
         # `system` files to one known system; `unassigned` is the fallback bucket for BIOS
         # with zero known systems (the common case) or more than one (legitimately shared).
-        clean_system = str(system or "").strip().lower()
         if unassigned:
             filtered = [item for item in filtered if len(item.get("systems") or []) != 1]
         elif clean_system:
