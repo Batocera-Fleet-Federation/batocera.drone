@@ -199,7 +199,7 @@ function showRemoteConnectGate(peer) {
     }
     modal.innerHTML = `
       <div class="modal-dialog modal-dialog-centered">
-        <div class="modal-content">
+        <div class="modal-content remote-connect-modal">
           <div class="modal-header">
             <h5 class="modal-title mb-0"><i class="bi bi-broadcast me-2"></i>Connect to ${escapeHtml(peer.name)}</h5>
           </div>
@@ -4040,7 +4040,6 @@ function renderSwarmDroneCard(drone) {
     ? ""
     : `<div class="d-flex flex-wrap gap-2 mt-3">
         <button class="btn btn-sm btn-outline-warning" onclick="swarmManagePeer(decodeURIComponent('${droneToken}'), ${jsAttr(drone.name || drone.drone_id || "")})" ${drone.online ? "" : "disabled"} title="Open a new tab that administers ${escapeHtml(drone.name || drone.drone_id || "this Drone")} directly, using its own login"><i class="bi bi-broadcast me-1"></i>Manage</button>
-        ${drone.ui_url ? `<a class="btn btn-sm btn-outline-primary" href="${escapeHtml(drone.ui_url)}" target="_blank" rel="noopener noreferrer"><i class="bi bi-box-arrow-up-right me-1"></i>Open UI</a>` : ""}
         <button class="btn btn-sm btn-outline-success" onclick="swarmBrowsePeerAssets(decodeURIComponent('${droneToken}'))" ${drone.online ? "" : "disabled"}><i class="bi bi-cloud-arrow-down me-1"></i>Request Assets</button>
         <button class="btn btn-sm btn-outline-danger" onclick="forgetLocalPeer(decodeURIComponent('${droneToken}'))"><i class="bi bi-x-circle me-1"></i>Forget</button>
       </div>`;

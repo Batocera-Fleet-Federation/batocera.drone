@@ -304,15 +304,59 @@ class RemoteAdminHandlerTests(unittest.TestCase):
 
     def test_proxy_without_a_session_is_401_not_connected(self) -> None:
         handler = _handler(self.settings)
-        handler._handle_admin_remote_proxy("peer-b", "system-info", "GET", "")
+        handler._handle_admin_remote_proxy("peer-b", "admin/system-info", "GET", "")
         status, payload = handler.response
         self.assertEqual(status, 401)
         self.assertEqual(payload["error"], "not_connected")
 
     def test_proxy_unknown_peer_is_404(self) -> None:
         handler = _handler(self.settings)
-        handler._handle_admin_remote_proxy("ghost", "system-info", "GET", "")
+        handler._handle_admin_remote_proxy("ghost", "admin/system-info", "GET", "")
         self.assertEqual(handler.response[0], 404)
+
+    def test_proxy_decodes_a_url_encoded_mac_style_peer_id(self) -> None:
+        # Regression: drone ids look like MAC addresses ("58:47:ca:7e:38:57").
+        # The frontend encodeURIComponent()s the peer_id into the URL path
+        # (`/remote/58%3A47%3Aca%3A7e%3A38%3A57/admin/system-info`); unlike
+        # query-string values, raw path segments are never auto-decoded by the
+        # api_routes.py dispatcher, so without unquoting here the paired-peer
+        # lookup never matches and *every* proxied call 404s as "not a paired
+        # Drone" -- even though connect (whose peer_id comes from the JSON
+        # body, never the path) worked fine moments earlier.
+        from urllib.parse import quote as urlquote
+
+        from app.transfer import local_network
+        from app.web import handlers_remote_admin
+
+        mac_peer_id = "58:47:ca:7e:38:57"
+        local_network.save_paired_peer(self.settings, {**PEER, "drone_id": mac_peer_id})
+        handlers_remote_admin._cache_remote_session(mac_peer_id, "Basic dGVzdA==", "0.1.40")
+        ok = self._proxy_response(200, b'{"fields": {"machine_id": "abc"}}')
+        encoded_peer_id = urlquote(mac_peer_id, safe="")
+        self.assertIn("%3A", encoded_peer_id)  # sanity: the colon really is encoded
+        with mock.patch.object(handlers_remote_admin, "_peer_proxy_request", return_value=ok) as proxy:
+            handler = _handler(self.settings)
+            # Exactly what api_routes.py hands the method: the still-encoded
+            # path segment, never decoded ahead of time.
+            handler._handle_admin_remote_proxy(encoded_peer_id, "admin/system-info", "GET", "")
+        self.assertEqual(handler.relayed["status"], 200)
+        self.assertEqual(proxy.call_args.args[2], "/v1/api/admin/system-info")
+
+    def test_proxy_rejects_a_sub_path_that_does_not_start_with_admin(self) -> None:
+        # Regression: sub_path is the caller's *original* url ("admin/system-info",
+        # since every page already calls api("/admin/...")) -- the handler must
+        # not re-prepend "admin/" on top of that (that produced
+        # "/v1/api/admin/admin/system-info", a 404 on the peer for every single
+        # action). Guarding on the prefix also keeps this Basic-Auth proxy from
+        # ever reaching the peer's separate mTLS-only /peer/* surface.
+        from app.web import handlers_remote_admin
+
+        handlers_remote_admin._cache_remote_session("peer-b", "Basic dGVzdA==", "0.1.40")
+        handler = _handler(self.settings)
+        handler._handle_admin_remote_proxy("peer-b", "peer/inventory/summary", "GET", "")
+        status, payload = handler.response
+        self.assertEqual(status, 400)
+        self.assertIn("/admin/*", payload["error"])
 
     def test_proxy_relays_a_successful_get_verbatim(self) -> None:
         from app.web import handlers_remote_admin
@@ -321,7 +365,7 @@ class RemoteAdminHandlerTests(unittest.TestCase):
         ok = self._proxy_response(200, b'{"fields": {"machine_id": "abc"}}')
         with mock.patch.object(handlers_remote_admin, "_peer_proxy_request", return_value=ok) as proxy:
             handler = _handler(self.settings)
-            handler._handle_admin_remote_proxy("peer-b", "system-info", "GET", "speed=1")
+            handler._handle_admin_remote_proxy("peer-b", "admin/system-info", "GET", "speed=1")
         self.assertEqual(handler.relayed["status"], 200)
         self.assertEqual(handler.relayed["headers"]["Content-Type"], "application/json")
         handler.wfile.write.assert_called_once_with(b'{"fields": {"machine_id": "abc"}}')
@@ -339,7 +383,7 @@ class RemoteAdminHandlerTests(unittest.TestCase):
                 headers={"Content-Length": "16", "Content-Type": "application/json"},
                 body=b'{"level": 55}\n  ',
             )
-            handler._handle_admin_remote_proxy("peer-b", "system-info/volume", "POST", "")
+            handler._handle_admin_remote_proxy("peer-b", "admin/system-info/volume", "POST", "")
         self.assertEqual(proxy.call_args.kwargs["body"], b'{"level": 55}\n  ')
         self.assertEqual(proxy.call_args.kwargs["content_type"], "application/json")
         self.assertEqual(proxy.call_args.args[1], "POST")
@@ -350,12 +394,12 @@ class RemoteAdminHandlerTests(unittest.TestCase):
         handlers_remote_admin._cache_remote_session("peer-b", "Basic dGVzdA==", "0.1.40")
         with mock.patch.object(handlers_remote_admin, "_peer_proxy_request", return_value=self._proxy_response(401)):
             handler = _handler(self.settings)
-            handler._handle_admin_remote_proxy("peer-b", "system-info", "GET", "")
+            handler._handle_admin_remote_proxy("peer-b", "admin/system-info", "GET", "")
         self.assertEqual(handler.response[0], 401)
         self.assertIsNone(handlers_remote_admin._get_remote_session("peer-b"))
         # A follow-up call now reports not_connected rather than a stale rejection.
         handler2 = _handler(self.settings)
-        handler2._handle_admin_remote_proxy("peer-b", "system-info", "GET", "")
+        handler2._handle_admin_remote_proxy("peer-b", "admin/system-info", "GET", "")
         self.assertEqual(handler2.response[1]["error"], "not_connected")
 
     def test_proxy_404_from_target_is_reported_as_version_mismatch(self) -> None:
@@ -365,7 +409,7 @@ class RemoteAdminHandlerTests(unittest.TestCase):
         with mock.patch.object(handlers_remote_admin, "_peer_proxy_request", return_value=self._proxy_response(404)), \
                 mock.patch.object(handlers_remote_admin, "_drone_app_version", return_value="0.1.53"):
             handler = _handler(self.settings)
-            handler._handle_admin_remote_proxy("peer-b", "some-new-route", "GET", "")
+            handler._handle_admin_remote_proxy("peer-b", "admin/some-new-route", "GET", "")
         status, payload = handler.response
         self.assertEqual(status, 404)
         self.assertIn("version mismatch", payload["error"])
@@ -378,7 +422,7 @@ class RemoteAdminHandlerTests(unittest.TestCase):
         handlers_remote_admin._cache_remote_session("peer-b", "Basic dGVzdA==", "0.1.40")
         with mock.patch.object(handlers_remote_admin, "_peer_proxy_request", side_effect=URLError("unreachable")):
             handler = _handler(self.settings)
-            handler._handle_admin_remote_proxy("peer-b", "system-info", "GET", "")
+            handler._handle_admin_remote_proxy("peer-b", "admin/system-info", "GET", "")
         self.assertEqual(handler.response[0], 502)
 
     def test_session_ttl_expiry_requires_reconnect(self) -> None:
@@ -387,7 +431,7 @@ class RemoteAdminHandlerTests(unittest.TestCase):
         handlers_remote_admin._cache_remote_session("peer-b", "Basic dGVzdA==", "0.1.40")
         handlers_remote_admin._REMOTE_SESSIONS["peer-b"]["cached_at"] -= handlers_remote_admin.REMOTE_SESSION_TTL_SECONDS + 1
         handler = _handler(self.settings)
-        handler._handle_admin_remote_proxy("peer-b", "system-info", "GET", "")
+        handler._handle_admin_remote_proxy("peer-b", "admin/system-info", "GET", "")
         self.assertEqual(handler.response[1]["error"], "not_connected")
 
 

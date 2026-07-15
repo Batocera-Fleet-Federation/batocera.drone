@@ -31,7 +31,7 @@ import sys
 import time
 from threading import Lock
 from typing import Optional
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 try:
     from ..app_version import drone_app_version as _drone_app_version
@@ -170,10 +170,27 @@ class HandlersRemoteAdminMixin:
         self._send_json(200, {"status": "disconnected", "peer_id": peer_id})
 
     def _handle_admin_remote_proxy(self, peer_id: str, sub_path: str, method: str, query_string: str) -> None:
-        peer_id = str(peer_id or "").strip()
+        # peer_id/sub_path arrive as raw URL path segments (api_routes.py splits
+        # self.path directly), which -- unlike query-string values -- are never
+        # auto-decoded; the frontend percent-encodes the peer_id (drone_ids look
+        # like MAC addresses, e.g. "58:47:ca:7e:38:57") so it survives as one path
+        # segment, and it must be decoded back before it can match a stored
+        # paired-peer key. Same pattern as _handle_admin_local_peer_pair/_forget.
+        peer_id = unquote(str(peer_id or "").strip())
+        sub_path = unquote(str(sub_path or "").strip()).lstrip("/")
         peer = _local_network.get_paired_peer(self.settings, peer_id)
         if not peer:
             self._send_json(404, {"error": "not a paired Drone"})
+            return
+        # sub_path is the caller's original url (e.g. "admin/system-info" --
+        # every page calls api()/apiPost() with an "/admin/..." path already),
+        # so it must not be re-prefixed with "admin/" below on top of that.
+        # Enforced here too, not just by convention: this proxy only ever
+        # forwards to the peer's Basic-Auth-gated /admin/* surface, never its
+        # separate mTLS-only /peer/* surface (a different trust model this
+        # cached session was never meant to reach).
+        if sub_path != "admin" and not sub_path.startswith("admin/"):
+            self._send_json(400, {"error": "only /admin/* routes can be proxied to a peer"})
             return
         session = _get_remote_session(peer_id)
         if session is None:
@@ -191,7 +208,7 @@ class HandlersRemoteAdminMixin:
                 return
             body = self.rfile.read(length) if length > 0 else b"{}"
             content_type = self.headers.get("Content-Type") or "application/json"
-        target_path = "/v1/api/admin/" + quote(sub_path.lstrip("/"), safe="/")
+        target_path = "/v1/api/" + quote(sub_path, safe="/")
         if query_string:
             target_path = f"{target_path}?{query_string}"
         peer_name = str(peer.get("name") or peer_id)

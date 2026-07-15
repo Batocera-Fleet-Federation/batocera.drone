@@ -7082,8 +7082,12 @@ class SwarmPageTests(unittest.TestCase):
 
         card_start = self.js.index("function renderSwarmDroneCard(")
         card_body = self.js[card_start:self.js.index("function swarmBrowsePeerAssets(", card_start)]
-        for expected in (">This Drone<", ">Online<", ">Offline<", "Request Assets", "Open UI", "escapeHtml(drone.ui_url)"):
+        for expected in (">This Drone<", ">Online<", ">Offline<", "Request Assets"):
             self.assertIn(expected, card_body)
+        # Managing a peer directly (Manage button) replaced navigating to its
+        # own separately-hosted UI in a new tab.
+        self.assertNotIn("Open UI", card_body)
+        self.assertNotIn("drone.ui_url", card_body)
 
     def test_manual_pair_by_address_ui_is_removed(self) -> None:
         page_start = self.js.index("async function renderSwarmPage()")
@@ -7189,6 +7193,26 @@ class RemoteAdminUiTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         cls.js = root.joinpath("app/web/static/js/drone.js").read_text(encoding="utf-8")
         cls.html = root.joinpath("app/web/templates/index.html").read_text(encoding="utf-8")
+        cls.css = root.joinpath("app/web/static/css/drone.css").read_text(encoding="utf-8")
+
+    def test_banner_uses_a_high_contrast_theme_not_stock_bootstrap_warning(self) -> None:
+        # Bootstrap's stock .alert-warning is pale yellow with dark text, but
+        # this app's global ".fw-semibold { color: var(--admin-text) }" rule
+        # (near-white) overrides that on the banner's bolded text, leaving
+        # illegible white-on-pale-yellow -- the CSS must set an explicit,
+        # high-contrast color for the banner text itself, not rely on
+        # bootstrap's alert-warning defaults surviving untouched.
+        self.assertIn("#managedPeerBanner.alert-warning", self.css)
+        self.assertIn("#managedPeerBanner .managed-peer-banner-text", self.css)
+        banner_rule = self.css[self.css.index("#managedPeerBanner.alert-warning"):]
+        self.assertIn("background:", banner_rule[: banner_rule.index("}")])
+
+    def test_connect_modal_is_dark_themed_like_the_rest_of_the_app(self) -> None:
+        # Without this, .text-muted's pale text (styled for a dark background
+        # everywhere else in this app) renders against bootstrap's stock white
+        # modal instead -- illegible and visually inconsistent.
+        self.assertIn("remote-connect-modal", self.css)
+        self.assertIn('class="modal-content remote-connect-modal"', self.js)
 
     def test_manage_button_opens_a_new_tab_with_the_query_string(self) -> None:
         card_start = self.js.index("function renderSwarmDroneCard(")

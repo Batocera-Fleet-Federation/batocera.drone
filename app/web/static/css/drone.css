@@ -1066,6 +1066,46 @@
     .toast-alert.alert-info { background: #2563eb; color: #fff; border: none; }
     .toast-alert.alert-loading { background: #334155; color: #fff; border: none; }
 
+    /* Remote-drone-management banner: bootstrap's stock .alert-warning is pale
+       yellow with dark text, but this app's global ".fw-semibold { color:
+       var(--admin-text) }" rule (near-white) overrides that on any bolded
+       inner text, leaving illegible white-on-pale-yellow. Same solid,
+       high-contrast treatment as .toast-alert.alert-warning above instead of
+       relying on bootstrap's alert-warning defaults at all. */
+    #managedPeerBanner.alert-warning {
+      background: #d97706;
+      border-color: #b45309;
+      color: #fff;
+    }
+    #managedPeerBanner .managed-peer-banner-text { color: #fff; }
+    #managedPeerBanner .btn-outline-dark {
+      color: #fff;
+      border-color: rgba(255, 255, 255, 0.6);
+    }
+    #managedPeerBanner .btn-outline-dark:hover,
+    #managedPeerBanner .btn-outline-dark:focus {
+      background: rgba(255, 255, 255, 0.16);
+      color: #fff;
+      border-color: #fff;
+    }
+
+    /* Remote-connect credential modal: match .local-asset-details-modal's dark
+       treatment below -- without it, .text-muted's pale text (styled for a
+       dark background everywhere else in this app) renders against
+       bootstrap's stock white modal instead, which is both illegible and
+       visually inconsistent with the rest of the app. */
+    .remote-connect-modal {
+      color: var(--admin-text);
+      background: rgba(15, 23, 42, 0.98);
+      border: 1px solid var(--admin-border);
+    }
+    .remote-connect-modal .modal-header,
+    .remote-connect-modal .modal-footer {
+      background: rgba(31, 42, 68, 0.94);
+      border-color: var(--admin-border);
+    }
+    .remote-connect-modal .modal-body { background: rgba(11, 16, 32, 0.92); }
+
     /* Image lightbox modal */
     .image-lightbox-overlay {
       position: fixed;
