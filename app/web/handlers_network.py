@@ -458,6 +458,11 @@ class HandlersNetworkMixin:
                     peer_id=entry["drone_id"],
                     config={"network_mode": "local_network"},
                     timeout=SWARM_PEER_TIMEOUT_SECONDS,
+                    # An overall cap across *every* candidate address, not just
+                    # each individual attempt -- without this, an offline peer
+                    # with several candidates (tailnet + LAN + advertised URL)
+                    # takes multiples of SWARM_PEER_TIMEOUT_SECONDS, not one.
+                    overall_deadline=started + SWARM_PEER_TIMEOUT_SECONDS,
                 )
                 entry["reachable_url"] = address
             entry["latency_ms"] = int((time.monotonic() - started) * 1000)

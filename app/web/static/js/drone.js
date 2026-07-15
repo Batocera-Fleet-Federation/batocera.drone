@@ -4203,12 +4203,18 @@ async function renderSwarmPage() {
   subtitleNode.textContent = "Every Drone in your federation -- local and across the tailnet";
   setLoading(true, "Loading swarm...");
   try {
-    const discovery = await apiPost("/admin/tailnet/discover", {}).catch(async () => ({
-      tailnet: await api("/admin/tailnet/status").catch(() => ({ installed: false })),
-      network: await api("/admin/local-network/status"),
-    }));
+    // Independent calls -- run concurrently rather than one after the other,
+    // since tailnet/discover (a tailscale CLI subprocess plus its own probe of
+    // newly-seen devices) and swarm/overview (a live probe of every paired
+    // peer) can each take real time on their own.
+    const [discovery, overview] = await Promise.all([
+      apiPost("/admin/tailnet/discover", {}).catch(async () => ({
+        tailnet: await api("/admin/tailnet/status").catch(() => ({ installed: false })),
+        network: await api("/admin/local-network/status"),
+      })),
+      api("/admin/swarm/overview"),
+    ]);
     const tailnet = discovery.tailnet || { installed: false };
-    const overview = await api("/admin/swarm/overview");
     const drones = Array.isArray(overview.drones) ? overview.drones : [];
     const inactiveNote = overview.active
       ? ""

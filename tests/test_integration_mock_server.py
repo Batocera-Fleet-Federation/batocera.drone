@@ -291,6 +291,36 @@ class MockServerIntegrationTests(unittest.TestCase):
         self.assertIsNone(offline["summary"])
         self.assertTrue(offline["error"])
 
+    def test_swarm_overview_probe_passes_an_overall_deadline(self) -> None:
+        # Regression: without an overall deadline, a peer with several
+        # candidate addresses (tailnet + LAN) that's fully offline took
+        # multiples of the per-peer timeout to fail, not one, since only the
+        # *last* candidate honored the caller's requested timeout. Verifies
+        # the wiring (handlers_network -> peer_connectivity), not the timeout
+        # arithmetic itself (covered directly in test_unit.py).
+        self._post_json("/v1/api/admin/network-mode", {"mode": "local_network"})
+        local_network.save_paired_peer(
+            self.settings,
+            {
+                "drone_id": "slow-drone",
+                "name": "Slow Cabinet",
+                "tailnet_ip": "100.64.0.9",
+                "reachable_url": "https://192.168.1.77",
+                "scheme": "https",
+                "api_port": 443,
+            },
+        )
+        with mock.patch("app.web.handlers_network._peer_get_json_for_peer", side_effect=urllib.error.URLError("timed out")) as probe:
+            overview = self._get_json("/v1/api/admin/swarm/overview")
+        drones = {drone["drone_id"]: drone for drone in overview["drones"]}
+        self.assertFalse(drones["slow-drone"]["online"])
+        # seed_mock_userdata pre-seeds another paired peer, so find the call
+        # for this test's own peer rather than assuming it's the only one.
+        calls = [call for call in probe.call_args_list if call.kwargs.get("peer_id") == "slow-drone"]
+        self.assertEqual(len(calls), 1)
+        self.assertIn("overall_deadline", calls[0].kwargs)
+        self.assertIsInstance(calls[0].kwargs["overall_deadline"], float)
+
     def test_network_mode_and_local_network_admin_endpoints(self) -> None:
         # Overmind is retired: fresh drones come up local-only, and the API
         # refuses to re-enable it.

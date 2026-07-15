@@ -659,6 +659,77 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(cached["address"], "https://192.168.0.180")
         self.assertEqual(cached["route_kind"], "ip")
 
+    def test_peer_json_overall_deadline_stops_trying_once_budget_is_spent(self) -> None:
+        # Regression: without an overall deadline, a fully-offline peer with N
+        # candidate addresses takes (N-1) * short_timeout + timeout, not
+        # timeout, since the per-candidate cap only bounds each *individual*
+        # attempt (this is exactly what made the Swarm/Transfers pages slow
+        # whenever any paired peer was offline). With a deadline, once the
+        # budget is spent, remaining candidates are skipped rather than tried
+        # with a token/near-zero timeout.
+        from app.transfer import peer_connectivity
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
+                settings = Settings.from_env()
+            peer = {
+                "tailnet_ip": "100.64.0.5",
+                "advertised_reachable_url": "https://drone-b.local",
+                "reachable_url": "https://192.168.1.50",
+                "scheme": "https",
+                "api_port": 443,
+            }
+            with mock.patch.object(
+                peer_connectivity, "_peer_get_json", side_effect=URLError("timed out")
+            ) as get_json, mock.patch.object(
+                peer_connectivity.time, "monotonic", side_effect=[1.0, 8.0, 11.0]
+            ):
+                with self.assertRaises(URLError):
+                    peer_connectivity._peer_get_json_for_peer(
+                        peer,
+                        "/v1/api/peer/inventory/summary",
+                        settings,
+                        peer_id="peer-id",
+                        config={"network_mode": "local_network"},
+                        timeout=4,
+                        overall_deadline=10.0,
+                    )
+        # Third candidate never attempted: the deadline check before it saw
+        # remaining <= 0 (11.0 > 10.0) and broke out instead of calling in.
+        self.assertEqual(get_json.call_count, 2)
+        self.assertEqual(get_json.call_args_list[0].args[0], "https://100.64.0.5/v1/api/peer/inventory/summary")
+        self.assertEqual(get_json.call_args_list[1].args[0], "https://drone-b.local/v1/api/peer/inventory/summary")
+
+    def test_peer_json_without_a_deadline_keeps_prior_behavior(self) -> None:
+        # No overall_deadline passed -> byte-for-byte the old behavior (every
+        # candidate tried, non-final ones capped at the short timeout). This
+        # guards that the new parameter is purely additive/opt-in.
+        from app.transfer import peer_connectivity
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
+                settings = Settings.from_env()
+            peer = {
+                "tailnet_ip": "100.64.0.5",
+                "reachable_url": "https://192.168.1.50",
+                "scheme": "https",
+                "api_port": 443,
+            }
+            with mock.patch.object(
+                peer_connectivity, "_peer_get_json", side_effect=[URLError("timed out"), {"ok": True}]
+            ) as get_json:
+                payload, address = peer_connectivity._peer_get_json_for_peer(
+                    peer, "/v1/api/peer/inventory/summary", settings, peer_id="peer-id",
+                    config={"network_mode": "local_network"}, timeout=120,
+                )
+        self.assertEqual(payload, {"ok": True})
+        self.assertEqual(address, "https://192.168.1.50")
+        self.assertEqual(get_json.call_count, 2)
+        self.assertEqual(get_json.call_args_list[0].kwargs["timeout"], 3)
+        self.assertEqual(get_json.call_args_list[1].kwargs["timeout"], 120)
+
     def test_cached_peer_route_is_preferred_when_still_authorized(self) -> None:
         from app.transfer.peer_connectivity import _peer_address_candidates
 
@@ -7079,6 +7150,23 @@ class SwarmPageTests(unittest.TestCase):
         body = self.js[page_start:page_end]
         self.assertIn('api("/admin/swarm/overview")', body)
         self.assertIn("renderSwarmDroneCard", body)
+
+    def test_swarm_page_fetches_discovery_and_overview_concurrently(self) -> None:
+        # Regression: these two calls are independent (tailnet/discover is a
+        # tailscale CLI subprocess + its own peer probing; swarm/overview is a
+        # live probe of every paired peer) but were being awaited one after
+        # the other, doubling the page's worst-case load time for no reason.
+        page_start = self.js.index("async function renderSwarmPage()")
+        page_end = self.js.index("async function renderIntegrationTransfersPanel", page_start)
+        body = self.js[page_start:page_end]
+        promise_all_index = body.index("Promise.all([")
+        discover_index = body.index('apiPost("/admin/tailnet/discover"')
+        overview_index = body.index('api("/admin/swarm/overview")')
+        # Both calls must be arguments to the same Promise.all(...), i.e. both
+        # indices fall between it and its closing "]);".
+        promise_all_close = body.index("]);", promise_all_index)
+        self.assertTrue(promise_all_index < discover_index < promise_all_close)
+        self.assertTrue(promise_all_index < overview_index < promise_all_close)
 
         card_start = self.js.index("function renderSwarmDroneCard(")
         card_body = self.js[card_start:self.js.index("function swarmBrowsePeerAssets(", card_start)]

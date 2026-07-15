@@ -511,6 +511,7 @@ def _peer_get_json_for_peer(
     config: Optional[dict] = None,
     refresh_cert: bool = False,
     timeout: float = PEER_CHECK_TIMEOUT_SECONDS,
+    overall_deadline: Optional[float] = None,
 ) -> tuple[dict, str]:
     """GET a peer endpoint using its cached route or Tailnet/host/IP order.
 
@@ -518,6 +519,18 @@ def _peer_get_json_for_peer(
     cannot hold an inventory request for its full (potentially two minute)
     transfer timeout. Every attempt uses the same pinned peer identity and mTLS
     client; this is address failover, never a TLS downgrade.
+
+    ``overall_deadline`` (a ``time.monotonic()`` cutoff) is an *additional*,
+    opt-in cap across every candidate address combined -- without it, a fully
+    unreachable peer with N candidates takes ``(N-1) * min(timeout,
+    PEER_CHECK_TIMEOUT_SECONDS) + timeout`` seconds, not ``timeout``, since the
+    per-candidate cap above only bounds each *individual* attempt. Callers that
+    genuinely want the fallback chain to run to completion regardless of total
+    wall-clock time (e.g. a large transfer, where address failover is more
+    valuable than a tight deadline) should leave this unset -- unaffected by
+    this parameter, matching prior behavior exactly. Callers with a real
+    "this must feel fast" requirement (e.g. a fleet-overview probe fanned out
+    across many peers) should pass it.
     """
     path = str(endpoint or "").strip()
     if not path.startswith("/"):
@@ -530,9 +543,18 @@ def _peer_get_json_for_peer(
         raise ValueError("no peer address available")
     last_error: Optional[Exception] = None
     for index, address in enumerate(addresses):
-        attempt_timeout = timeout
-        if index < len(addresses) - 1:
-            attempt_timeout = min(float(timeout), PEER_CHECK_TIMEOUT_SECONDS)
+        if overall_deadline is not None:
+            remaining = overall_deadline - time.monotonic()
+            if remaining <= 0:
+                # Budget already spent by earlier candidates; one more attempt
+                # (even a fast-failing one) would only make a slow peer probe
+                # slower for no benefit -- stop and report the last failure.
+                break
+            attempt_timeout = remaining if index == len(addresses) - 1 else min(remaining, PEER_CHECK_TIMEOUT_SECONDS)
+        else:
+            attempt_timeout = timeout
+            if index < len(addresses) - 1:
+                attempt_timeout = min(float(timeout), PEER_CHECK_TIMEOUT_SECONDS)
         try:
             payload = _peer_get_json(
                 f"{address}{path}",
