@@ -230,8 +230,16 @@ class ApiRoutesMixin:
                 self._handle_theme_asset(relative_path)
                 return
 
-            if parts and parts[0] == "admin" and not self.settings.admin_enabled:
+            if parts and parts[0] in ("admin", "remote") and not self.settings.admin_enabled:
                 self._send_json(403, {"error": "admin disabled"})
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "remote" and parts[2] == "status":
+                self._handle_admin_remote_status(query_params.get("peer_id", [""])[0])
+                return
+
+            if len(parts) >= 3 and parts[0] == "remote":
+                self._handle_admin_remote_proxy(parts[1], "/".join(parts[2:]), "GET", raw_query)
                 return
 
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "logs":
@@ -431,7 +439,7 @@ class ApiRoutesMixin:
         try:
             if self._reject_if_ip_blocked():
                 return
-            raw_path, _, _ = self.path.partition("?")
+            raw_path, _, raw_query = self.path.partition("?")
             if raw_path == API_PREFIX:
                 api_path = "/"
             elif raw_path.startswith(f"{API_PREFIX}/"):
@@ -457,8 +465,22 @@ class ApiRoutesMixin:
                 _bridge.proxy(self, "POST")
                 return
 
-            if parts and parts[0] == "admin" and not self.settings.admin_enabled:
+            if parts and parts[0] in ("admin", "remote") and not self.settings.admin_enabled:
                 self._send_json(403, {"error": "admin disabled"})
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "remote" and parts[2] == "connect":
+                payload = self._read_json_body()
+                self._handle_admin_remote_connect(payload)
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "remote" and parts[2] == "disconnect":
+                payload = self._read_json_body()
+                self._handle_admin_remote_disconnect(payload)
+                return
+
+            if len(parts) >= 3 and parts[0] == "remote":
+                self._handle_admin_remote_proxy(parts[1], "/".join(parts[2:]), "POST", raw_query)
                 return
 
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "credentials" and parts[2] == "update":

@@ -1486,7 +1486,15 @@ except ImportError:
     from web.handlers_es_collections import HandlersEsCollectionsMixin  # type: ignore
 
 
-class RomRequestHandler(HandlersSystemMixin, HandlersDownloadsMixin, HandlersDiagnosticsMixin, HandlersConfigMixin, HandlersOvermindMixin, HandlersNetworkMixin, HandlersArtworkMixin, HandlersContentMixin, ThemeMetaMixin, HandlersEsCollectionsMixin, HandlersPeerMixin, ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
+try:
+    from .web.handlers_remote_admin import HandlersRemoteAdminMixin
+except ImportError:
+    if __package__ not in (None, ""):
+        raise
+    from web.handlers_remote_admin import HandlersRemoteAdminMixin  # type: ignore
+
+
+class RomRequestHandler(HandlersSystemMixin, HandlersDownloadsMixin, HandlersDiagnosticsMixin, HandlersConfigMixin, HandlersOvermindMixin, HandlersNetworkMixin, HandlersArtworkMixin, HandlersContentMixin, ThemeMetaMixin, HandlersEsCollectionsMixin, HandlersPeerMixin, HandlersRemoteAdminMixin, ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
     server_version = "DroneApp/4.0"
     openapi_spec = OPENAPI_SPEC
     # Per-connection idle timeout (applied to the socket in BaseHTTPRequestHandler.setup).

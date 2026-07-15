@@ -852,6 +852,36 @@ def _schemas() -> Dict[str, Schema]:
             {"auth_key": _string(description="Tailscale auth key (tskey-auth-...) from https://login.tailscale.com/admin/settings/keys")},
             ("auth_key",),
         ),
+        "RemoteProxyResponse": _object(
+            description="Relayed verbatim from the proxied peer route -- its shape matches whatever that route's own documented response is; this generic passthrough has no fixed schema of its own."
+        ),
+        "RemoteStatusResponse": _object(
+            {
+                "connected": _boolean(description="true when a cached remote-admin session already exists for this peer"),
+                "peer_id": _string(),
+                "name": _string(),
+            },
+            ("connected", "peer_id", "name"),
+        ),
+        "RemoteConnectRequest": _object(
+            {
+                "peer_id": _string(description="A paired peer's drone_id"),
+                "username": _string(description="That peer's own Drone login username"),
+                "password": _string(description="That peer's own Drone login password"),
+            },
+            ("peer_id", "username", "password"),
+        ),
+        "RemoteConnectResponse": _object(
+            {
+                "status": _enum(["connected"]),
+                "peer_id": _string(),
+                "name": _string(),
+                "drone_app_version": _string(description="The peer's reported Drone app version, when available"),
+            },
+            ("status", "peer_id", "name"),
+        ),
+        "RemoteDisconnectRequest": _object({"peer_id": _string()}, ("peer_id",)),
+        "RemoteDisconnectResponse": _object({"status": _enum(["disconnected"]), "peer_id": _string()}, ("status", "peer_id")),
         "LocalPeerForgetResponse": _object({"status": _enum(["forgotten", "not_found"]), "peer_id": _string()}, ("status", "peer_id")),
         "LocalSyncRequest": _object(
             {
@@ -1330,6 +1360,68 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             "/admin/tailnet/status": {"get": _operation("Tailscale mesh status for the Swarm page onboarding card", {"200": _json_response("TailnetStatusResponse")}, tags=["admin", "local-network"])},
             "/admin/tailnet/enroll": {"post": _operation("Enroll this Drone in the tailnet with an auth key pasted in the UI", {"200": _json_response("TailnetStatusResponse")}, request_body=_json_request("TailnetEnrollRequest"), tags=["admin", "local-network"], error_codes=("400", "401", "403", "429", "500", "502"))},
             "/admin/tailnet/rotate-auth-key": {"post": _operation("Re-enroll this connected Drone with a replacement Tailscale auth key", {"200": _json_response("TailnetStatusResponse")}, request_body=_json_request("TailnetEnrollRequest"), tags=["admin", "local-network"], error_codes=("400", "401", "403", "429", "500", "502"))},
+            "/admin/remote/status": {
+                "get": _operation(
+                    "Check whether a remote-admin session is already cached for a peer",
+                    {"200": _json_response("RemoteStatusResponse")},
+                    description="Lets a newly opened impersonation tab skip the credential prompt when another tab already connected to the same peer within the session TTL.",
+                    parameters=[_query_param("peer_id", _string(), "A paired peer's drone_id")],
+                    tags=["admin", "remote"],
+                )
+            },
+            "/admin/remote/connect": {
+                "post": _operation(
+                    "Verify a paired peer's own Drone credentials and cache them for remote administration",
+                    {"200": _json_response("RemoteConnectResponse")},
+                    description="Credentials are held only in this Drone's process memory (never persisted, never returned to the browser) and are used solely to authenticate to that peer's own /admin/* surface -- the same login required to manage it directly.",
+                    request_body=_json_request("RemoteConnectRequest"),
+                    tags=["admin", "remote"],
+                    error_codes=("400", "401", "404", "409", "429", "500", "502"),
+                )
+            },
+            "/admin/remote/disconnect": {
+                "post": _operation(
+                    "Drop the cached remote-administration session for a peer",
+                    {"200": _json_response("RemoteDisconnectResponse")},
+                    request_body=_json_request("RemoteDisconnectRequest"),
+                    tags=["admin", "remote"],
+                    error_codes=("400", "401", "429", "500"),
+                )
+            },
+            "/remote/{peer_id}/admin/{admin_path}": {
+                "get": _operation(
+                    "Proxy an admin GET to a paired, connected peer's own /admin/* surface",
+                    {
+                        "200": {
+                            "description": "Whatever the proxied /admin/* route itself returns -- relayed verbatim",
+                            "content": {
+                                "application/json": {"schema": _ref("RemoteProxyResponse")},
+                                "text/plain": {"schema": {"type": "string"}},
+                            },
+                        }
+                    },
+                    description="Generic passthrough: forwards to https://<peer>/v1/api/admin/{admin_path} using the credentials cached by /admin/remote/connect. The peer authenticates and authorizes the request exactly as it would a direct browser call.",
+                    parameters=[_path_param("peer_id", "A paired peer's drone_id"), _path_param("admin_path", "Any existing /admin/* sub-path on the peer, e.g. system-info")],
+                    tags=["admin", "remote"],
+                    error_codes=("401", "403", "404", "429", "500", "502"),
+                ),
+                "post": _operation(
+                    "Proxy an admin POST to a paired, connected peer's own /admin/* surface",
+                    {
+                        "200": {
+                            "description": "Whatever the proxied /admin/* route itself returns -- relayed verbatim",
+                            "content": {
+                                "application/json": {"schema": _ref("RemoteProxyResponse")},
+                                "text/plain": {"schema": {"type": "string"}},
+                            },
+                        }
+                    },
+                    description="Same as the GET form, forwarding the request body and Content-Type unchanged.",
+                    parameters=[_path_param("peer_id", "A paired peer's drone_id"), _path_param("admin_path", "Any existing /admin/* sub-path on the peer")],
+                    tags=["admin", "remote"],
+                    error_codes=("400", "401", "403", "404", "429", "500", "502"),
+                ),
+            },
             "/admin/tailnet/discover": {"post": _operation("Fetch online Tailnet devices and automatically establish mTLS trust with Drones", {"200": _json_response("TailnetDiscoveryResponse")}, tags=["admin", "local-network"], error_codes=("401", "403", "429", "500", "502"))},
             "/admin/local-network/peers/{peer_id}/pair": {"post": _operation("Pair with a discovered Local Network peer", {"200": _json_response("LocalPeerPairResponse")}, parameters=[_path_param("peer_id")], request_body=_json_request("LocalPeerPairRequest"), tags=["admin", "local-network"], error_codes=("400", "401", "403", "404", "409", "429", "500"))},
             "/admin/local-network/peers/{peer_id}/forget": {"post": _operation("Forget a paired Local Network peer", {"200": _json_response("LocalPeerForgetResponse")}, parameters=[_path_param("peer_id")], tags=["admin", "local-network"])},

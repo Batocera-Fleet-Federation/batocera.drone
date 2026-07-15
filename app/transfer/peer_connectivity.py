@@ -559,6 +559,118 @@ def _peer_get_json_for_peer(
     raise ValueError("no peer address available")
 
 
+class PeerProxyResponse:
+    """A relayed peer HTTP response: status/content-type/body, never JSON-parsed.
+
+    Used for remote-admin proxying (see ``handlers_remote_admin.py``), where the
+    proxied route may return plain text (logs) or raw file content, not just
+    JSON -- the caller relays this verbatim rather than interpreting it.
+    """
+
+    __slots__ = ("status", "content_type", "body")
+
+    def __init__(self, status: int, content_type: str, body: bytes) -> None:
+        self.status = status
+        self.content_type = content_type
+        self.body = body
+
+
+def _peer_proxy_request(
+    peer: dict,
+    method: str,
+    endpoint: str,
+    settings: Settings,
+    *,
+    body: Optional[bytes] = None,
+    authorization: Optional[str] = None,
+    content_type: Optional[str] = None,
+    peer_id: Optional[str] = None,
+    config: Optional[dict] = None,
+    timeout: float = PEER_CHECK_TIMEOUT_SECONDS,
+) -> PeerProxyResponse:
+    """Forward one HTTP request to a paired peer's own admin surface and relay
+    its raw response, for remote-administration proxying.
+
+    Same address iteration (cached route -> Tailnet -> host -> IP) and pinned
+    mTLS trust as ``_peer_get_json_for_peer``, generalized to an arbitrary
+    method/body and an explicit ``Authorization`` header -- this is always the
+    *target's own* credentials, supplied by the caller, never this Drone's own
+    Overmind/local-network config. A non-2xx response from the peer (bad
+    credentials, unknown route, etc.) is relayed as a ``PeerProxyResponse``,
+    not raised -- the peer answered, so trying another address cannot change
+    the outcome (same reasoning as ``_peer_get_json_for_peer``'s HTTPError
+    handling); only connection-level failures fall through to the next
+    candidate address.
+
+    Multi-address fallback is restricted to safe-to-retry ``GET`` requests.
+    A mutating ``POST`` (many admin actions are not idempotent -- e.g.
+    restarting EmulationStation) uses only the single best candidate address
+    with the *full* timeout and never retries elsewhere: a timeout on that
+    address is ambiguous (still processing vs. truly unreachable), and
+    retrying via a second address could fire the same action twice on the
+    peer. A POST that only has one candidate address behaves the same either
+    way; this only changes behavior when there are several.
+    """
+    path = str(endpoint or "").strip()
+    if not path.startswith("/"):
+        raise ValueError("peer endpoint must start with /")
+    normalized_peer_id = str(
+        peer_id or peer.get("drone_id") or peer.get("device_id") or peer.get("id") or ""
+    ).strip()
+    addresses = _peer_address_candidates(peer, settings=settings, peer_id=normalized_peer_id)
+    if not addresses:
+        raise ValueError("no peer address available")
+    is_mutating = method.upper() != "GET"
+    if is_mutating:
+        addresses = addresses[:1]
+    headers = {"Accept": "application/json", "User-Agent": "batocera-drone-remote-admin/1.0"}
+    if authorization:
+        headers["Authorization"] = authorization
+    if body is not None and content_type:
+        headers["Content-Type"] = content_type
+    last_error: Optional[Exception] = None
+    for index, address in enumerate(addresses):
+        attempt_timeout = timeout
+        if not is_mutating and index < len(addresses) - 1:
+            attempt_timeout = min(float(timeout), PEER_CHECK_TIMEOUT_SECONDS)
+        url = f"{address}{path}"
+        cafile = _peer_trust_cafile(settings, peer_id=normalized_peer_id, config=config)
+        if url.startswith("https://") and normalized_peer_id and not cafile:
+            last_error = ssl.SSLError(f"no trusted certificate cached for peer {normalized_peer_id}")
+            continue
+        request = Request(url, data=body, method=method.upper(), headers=headers)
+        try:
+            with urlopen(
+                request,
+                timeout=attempt_timeout,
+                context=_drone_client_ssl_context(settings, url, verify=bool(cafile), cafile=cafile),
+            ) as response:
+                _remember_successful_peer_route(settings, normalized_peer_id, address)
+                return PeerProxyResponse(
+                    response.status,
+                    response.headers.get("Content-Type", "application/json"),
+                    response.read(),
+                )
+        except HTTPError as error:
+            # The peer answered (auth rejection, unknown route, ...); relay it
+            # as-is -- a different address cannot change an answered request.
+            return PeerProxyResponse(
+                error.code,
+                (error.headers.get("Content-Type") if error.headers else None) or "application/json",
+                error.read(),
+            )
+        except ssl.SSLError as error:
+            last_error = ssl.SSLError(_peer_ssl_diagnostic(url, cafile, error))
+        except URLError as error:
+            reason = getattr(error, "reason", None)
+            last_error = URLError(_peer_ssl_diagnostic(url, cafile, reason)) if isinstance(reason, ssl.SSLError) else error
+        except OSError as error:
+            last_error = error
+    if last_error is not None:
+        raise last_error
+    raise ValueError("no peer address available")
+
+
 def _check_peer(settings: Settings, peer: dict, config: Optional[dict] = None) -> dict:
     target_id = str(peer.get("drone_id") or peer.get("device_id") or peer.get("id") or "")
     peer_id = target_id

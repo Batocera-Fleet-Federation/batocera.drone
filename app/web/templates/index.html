@@ -13,6 +13,10 @@
 </head>
 <body>
 <div class="container-fluid layout-shell py-3 py-lg-4">
+  <div id="managedPeerBanner" class="alert alert-warning d-none d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3" role="alert">
+    <span><i class="bi bi-broadcast me-2"></i><span class="managed-peer-banner-text fw-semibold"></span></span>
+    <button type="button" class="btn btn-sm btn-outline-dark" onclick="exitRemoteManagement()"><i class="bi bi-x-circle me-1"></i>Disconnect</button>
+  </div>
   <div class="sidebar rounded-3 p-2 p-md-3 mb-3">
     <div class="d-flex flex-column flex-lg-row align-items-lg-center gap-2 gap-lg-3">
       <div class="d-flex align-items-center gap-2 me-lg-auto">
