@@ -14,10 +14,24 @@ from threading import Thread
 from typing import Any, Callable, Optional
 
 try:
-    from ..storage.state_store import append_event, database_path, load_events, load_payload, save_payload
+    from ..storage.state_store import (
+        append_event,
+        database_path,
+        delete_peer_route,
+        load_events,
+        load_payload,
+        save_payload,
+    )
     from ..transport.tailnet import get_tailnet_ip
 except ImportError:
-    from storage.state_store import append_event, database_path, load_events, load_payload, save_payload  # type: ignore
+    from storage.state_store import (  # type: ignore
+        append_event,
+        database_path,
+        delete_peer_route,
+        load_events,
+        load_payload,
+        save_payload,
+    )
     from transport.tailnet import get_tailnet_ip  # type: ignore
 
 
@@ -330,6 +344,7 @@ def forget_peer(settings: Any, peer_id: str) -> bool:
     previous = peers.pop(normalized, None)
     removed = previous is not None
     _save_peer_map(settings, "local_paired_peers", peers)
+    delete_peer_route(_db(settings), normalized)
     if removed and (
         str(previous.get("pairing_source") or "") == "tailnet"
         or bool(str(previous.get("tailnet_ip") or "").strip())

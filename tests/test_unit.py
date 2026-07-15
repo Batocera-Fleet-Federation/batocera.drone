@@ -18,7 +18,15 @@ from urllib.error import URLError
 import app.drone_api as drone_api
 from app.transfer import local_network
 from app.mock_data import seed_mock_userdata
-from app.storage.state_store import database_path, database_path_for_legacy_file, load_payload, open_database, save_payload
+from app.storage.state_store import (
+    database_path,
+    database_path_for_legacy_file,
+    load_payload,
+    load_peer_route,
+    open_database,
+    save_payload,
+    save_peer_route,
+)
 from app.overmind.overmind_reporting import (
     list_emulator_config_files,
     read_emulator_config_file,
@@ -293,7 +301,14 @@ class SettingsTests(unittest.TestCase):
                     settings,
                     {"drone_id": "local-b", "tailnet_ip": "100.64.0.9"},
                 )
+                save_peer_route(
+                    database_path(settings.userdata_root),
+                    "local-b",
+                    "https://100.64.0.9",
+                    "tailnet",
+                )
                 self.assertTrue(local_network.forget_peer(settings, "local-b"))
+                self.assertIsNone(load_peer_route(database_path(settings.userdata_root), "local-b"))
                 self.assertTrue(local_network.is_tailnet_peer_forgotten(settings, "local-b"))
                 local_network.save_paired_peer(
                     settings,
@@ -588,7 +603,7 @@ class SettingsTests(unittest.TestCase):
         }
         self.assertEqual(_peer_address(peer), "https://bff-drone-b:443")
 
-    def test_peer_address_candidates_keep_lan_first_then_tailnet(self) -> None:
+    def test_peer_address_candidates_default_to_tailnet_then_host_then_ip(self) -> None:
         from app.transfer.peer_connectivity import _peer_address_candidates
 
         peer = {
@@ -601,42 +616,98 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(
             _peer_address_candidates(peer),
             [
-                "https://192.168.0.180",
-                "https://BATOCERA-LAPTOP.local",
                 "https://100.91.173.37",
+                "https://BATOCERA-LAPTOP.local",
+                "https://192.168.0.180",
             ],
         )
 
-    def test_peer_json_falls_back_to_tailnet_with_short_lan_timeout(self) -> None:
+    def test_peer_json_falls_back_from_tailnet_to_ip_with_short_timeout(self) -> None:
         from app.transfer import peer_connectivity
 
-        peer = {
-            "reachable_url": "https://192.168.0.180",
-            "tailnet_ip": "100.91.173.37",
-            "scheme": "https",
-            "api_port": 443,
-        }
-        settings = mock.Mock()
-        with mock.patch.object(
-            peer_connectivity,
-            "_peer_get_json",
-            side_effect=[URLError("timed out"), {"systems": ["snes"]}],
-        ) as get_json:
-            payload, address = peer_connectivity._peer_get_json_for_peer(
-                peer,
-                "/v1/api/peer/inventory/summary",
-                settings,
-                peer_id="peer-id",
-                config={"network_mode": "local_network"},
-                timeout=120,
-            )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
+                settings = Settings.from_env()
+            peer = {
+                "reachable_url": "https://192.168.0.180",
+                "tailnet_ip": "100.91.173.37",
+                "scheme": "https",
+                "api_port": 443,
+            }
+            with mock.patch.object(
+                peer_connectivity,
+                "_peer_get_json",
+                side_effect=[URLError("timed out"), {"systems": ["snes"]}],
+            ) as get_json:
+                payload, address = peer_connectivity._peer_get_json_for_peer(
+                    peer,
+                    "/v1/api/peer/inventory/summary",
+                    settings,
+                    peer_id="peer-id",
+                    config={"network_mode": "local_network"},
+                    timeout=120,
+                )
+            cached = load_peer_route(database_path(settings.userdata_root), "peer-id")
 
         self.assertEqual(payload, {"systems": ["snes"]})
-        self.assertEqual(address, "https://100.91.173.37")
-        self.assertEqual(get_json.call_args_list[0].args[0], "https://192.168.0.180/v1/api/peer/inventory/summary")
+        self.assertEqual(address, "https://192.168.0.180")
+        self.assertEqual(get_json.call_args_list[0].args[0], "https://100.91.173.37/v1/api/peer/inventory/summary")
         self.assertEqual(get_json.call_args_list[0].kwargs["timeout"], 3)
-        self.assertEqual(get_json.call_args_list[1].args[0], "https://100.91.173.37/v1/api/peer/inventory/summary")
+        self.assertEqual(get_json.call_args_list[1].args[0], "https://192.168.0.180/v1/api/peer/inventory/summary")
         self.assertEqual(get_json.call_args_list[1].kwargs["timeout"], 120)
+        self.assertEqual(cached["address"], "https://192.168.0.180")
+        self.assertEqual(cached["route_kind"], "ip")
+
+    def test_cached_peer_route_is_preferred_when_still_authorized(self) -> None:
+        from app.transfer.peer_connectivity import _peer_address_candidates
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
+                settings = Settings.from_env()
+            save_peer_route(
+                database_path(settings.userdata_root),
+                "peer-id",
+                "https://BATOCERA-LAPTOP.local",
+                "host",
+            )
+            peer = {
+                "drone_id": "peer-id",
+                "reachable_url": "https://192.168.0.180",
+                "advertised_reachable_url": "https://BATOCERA-LAPTOP.local",
+                "tailnet_ip": "100.91.173.37",
+            }
+            self.assertEqual(
+                _peer_address_candidates(peer, settings=settings),
+                [
+                    "https://BATOCERA-LAPTOP.local",
+                    "https://100.91.173.37",
+                    "https://192.168.0.180",
+                ],
+            )
+
+    def test_peer_route_cache_upserts_single_indexed_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = database_path(Path(tmp) / "userdata")
+            save_peer_route(path, "peer-id", "https://100.91.173.37", "tailnet")
+            save_peer_route(path, "peer-id", "https://BATOCERA-LAPTOP.local", "host")
+
+            self.assertEqual(load_peer_route(path, "peer-id")["address"], "https://BATOCERA-LAPTOP.local")
+            with open_database(path) as connection:
+                count = connection.execute(
+                    "SELECT COUNT(*) FROM peer_route_cache WHERE peer_id = ?",
+                    ("peer-id",),
+                ).fetchone()[0]
+                plan = connection.execute(
+                    "EXPLAIN QUERY PLAN SELECT address FROM peer_route_cache WHERE peer_id = ?",
+                    ("peer-id",),
+                ).fetchall()
+            self.assertEqual(count, 1)
+            self.assertTrue(any("SEARCH peer_route_cache" in str(row[3]) for row in plan))
+
+            with self.assertRaisesRegex(ValueError, "unsupported peer route kind"):
+                save_peer_route(path, "peer-id", "https://example.test", "unknown")
 
     def test_peer_health_url_uses_public_health_endpoint(self) -> None:
         self.assertEqual(_peer_health_url("https://198.51.100.21"), "https://198.51.100.21/health")

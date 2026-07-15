@@ -11,6 +11,7 @@ from typing import Any, Optional
 
 
 DATABASE_FILENAME = "rom_metadata_cache.sqlite3"
+PEER_ROUTE_KINDS = frozenset({"tailnet", "host", "ip"})
 
 
 def database_path(userdata_root: Path) -> Path:
@@ -45,6 +46,11 @@ def open_database(path: Path) -> sqlite3.Connection:
         "CREATE TABLE IF NOT EXISTS app_events ("
         "sequence INTEGER PRIMARY KEY AUTOINCREMENT, namespace TEXT NOT NULL, payload TEXT NOT NULL, "
         "created_at TEXT NOT NULL)"
+    )
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS peer_route_cache ("
+        "peer_id TEXT PRIMARY KEY, address TEXT NOT NULL, route_kind TEXT NOT NULL, updated_at TEXT NOT NULL, "
+        "CHECK (route_kind IN ('tailnet', 'host', 'ip')))"
     )
     connection.commit()
     return connection
@@ -101,6 +107,59 @@ def save_payload(db_path: Path, namespace: str, payload: Any, *, state_key: str 
             "ON CONFLICT(namespace, state_key) DO UPDATE SET payload=excluded.payload, updated_at=excluded.updated_at",
             (namespace, state_key, json.dumps(payload, sort_keys=True, default=str), _now()),
         )
+
+
+def load_peer_route(db_path: Path, peer_id: str) -> Optional[dict]:
+    """Return the single cached successful route for a peer, if present."""
+    normalized = str(peer_id or "").strip()
+    if not normalized:
+        return None
+    with open_database(db_path) as connection:
+        row = connection.execute(
+            "SELECT address, route_kind, updated_at FROM peer_route_cache WHERE peer_id = ?",
+            (normalized,),
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "peer_id": normalized,
+        "address": str(row[0]),
+        "route_kind": str(row[1]),
+        "updated_at": str(row[2]),
+    }
+
+
+def save_peer_route(db_path: Path, peer_id: str, address: str, route_kind: str) -> dict:
+    """Insert or replace a peer's current route without retaining history."""
+    normalized_peer_id = str(peer_id or "").strip()
+    normalized_address = str(address or "").strip().rstrip("/")
+    normalized_kind = str(route_kind or "").strip().lower()
+    if not normalized_peer_id or not normalized_address:
+        raise ValueError("peer route requires peer_id and address")
+    if normalized_kind not in PEER_ROUTE_KINDS:
+        raise ValueError(f"unsupported peer route kind: {normalized_kind}")
+    updated_at = _now()
+    with open_database(db_path) as connection:
+        connection.execute(
+            "INSERT INTO peer_route_cache (peer_id, address, route_kind, updated_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(peer_id) DO UPDATE SET "
+            "address=excluded.address, route_kind=excluded.route_kind, updated_at=excluded.updated_at",
+            (normalized_peer_id, normalized_address, normalized_kind, updated_at),
+        )
+    return {
+        "peer_id": normalized_peer_id,
+        "address": normalized_address,
+        "route_kind": normalized_kind,
+        "updated_at": updated_at,
+    }
+
+
+def delete_peer_route(db_path: Path, peer_id: str) -> None:
+    normalized = str(peer_id or "").strip()
+    if not normalized:
+        return
+    with open_database(db_path) as connection:
+        connection.execute("DELETE FROM peer_route_cache WHERE peer_id = ?", (normalized,))
 
 
 def append_event(db_path: Path, namespace: str, payload: Any, *, max_events: Optional[int] = None) -> None:

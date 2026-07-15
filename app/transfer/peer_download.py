@@ -38,7 +38,7 @@ try:
     from .peer_connectivity import (
         PEER_CHECK_TIMEOUT_SECONDS,
         _is_ssl_url_error,
-        _peer_address,
+        _preferred_peer_address,
         _peer_get_json,
         _peer_ssl_diagnostic,
         _peer_trust_cafile,
@@ -69,7 +69,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from transfer.peer_connectivity import (  # type: ignore
         PEER_CHECK_TIMEOUT_SECONDS,
         _is_ssl_url_error,
-        _peer_address,
+        _preferred_peer_address,
         _peer_get_json,
         _peer_ssl_diagnostic,
         _peer_trust_cafile,
@@ -180,7 +180,7 @@ def _resolve_rom_by_gamelist_id_from_peer(
     ``{relative_path, entry_type, file_size?, rom_fingerprint?}`` or None.
     """
     peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
-    address = _peer_address(peer)
+    address = _preferred_peer_address(peer, settings=settings, peer_id=peer_id)
     gid = str(gamelist_id or "").strip()
     if not address or not gid:
         return None
@@ -287,7 +287,7 @@ def _download_rom_folder_from_peer(
     except ImportError:  # pragma: no cover - flat execution
         from drone_api import RomRepository  # type: ignore
     peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
-    address = _peer_address(peer)
+    address = _preferred_peer_address(peer, settings=settings, peer_id=peer_id)
     if not address:
         raise RuntimeError("selected peer has no address")
     rel = _safe_rom_relative_path(relative_path)
@@ -488,7 +488,7 @@ def _download_rom_from_peer(
     except ImportError:  # pragma: no cover - flat execution
         from drone_api import RomRepository  # type: ignore
     peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
-    address = _peer_address(peer)
+    address = _preferred_peer_address(peer, settings=settings, peer_id=peer_id)
     if not address:
         raise RuntimeError("selected peer has no address")
     rel = _safe_rom_relative_path(relative_path)
@@ -684,7 +684,7 @@ def _download_bios_from_peer(
     except ImportError:  # pragma: no cover - flat execution
         from drone_api import RomRepository  # type: ignore
     peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
-    address = _peer_address(peer)
+    address = _preferred_peer_address(peer, settings=settings, peer_id=peer_id)
     if not address:
         raise RuntimeError("selected peer has no address")
     rel = _safe_rom_relative_path(relative_path)
@@ -868,7 +868,7 @@ def _download_save_from_peer(
     except ImportError:  # pragma: no cover - flat execution
         from drone_api import RomRepository  # type: ignore
     peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
-    address = _peer_address(peer)
+    address = _preferred_peer_address(peer, settings=settings, peer_id=peer_id)
     if not address:
         raise RuntimeError("selected peer has no address")
     system_clean = _safe_rom_relative_path(system).strip("/")
@@ -965,7 +965,7 @@ def _download_artwork_from_peer(
     except ImportError:  # pragma: no cover - flat execution
         from drone_api import ARTWORK_FIELDS, RomRepository  # type: ignore
     peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
-    address = _peer_address(peer)
+    address = _preferred_peer_address(peer, settings=settings, peer_id=peer_id)
     if not address:
         raise RuntimeError("selected peer has no address")
     system = valid_segment(system)

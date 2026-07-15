@@ -31,11 +31,11 @@ try:
     from .drone_tls import DroneCertificateManager
     from .peer_connectivity import (
         _check_peer,
-        _peer_address,
         _peer_api_port,
         _peer_get_json,
         _peer_get_json_for_peer,
         _peer_health_url,
+        _preferred_peer_address,
     )
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.logging_setup import _overmind_log  # type: ignore
@@ -54,11 +54,11 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from transfer.drone_tls import DroneCertificateManager  # type: ignore
     from transfer.peer_connectivity import (  # type: ignore
         _check_peer,
-        _peer_address,
         _peer_api_port,
         _peer_get_json,
         _peer_get_json_for_peer,
         _peer_health_url,
+        _preferred_peer_address,
     )
 
 # Local copy of the health-check interval (drone_api keeps its own for the poller
@@ -206,7 +206,7 @@ def _start_local_network_workers(settings: Settings) -> None:
             checks = []
             for peer in _local_network.paired_peers(settings):
                 peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
-                address = _peer_address(peer)
+                address = _preferred_peer_address(peer, settings=settings, peer_id=peer_id)
                 checked_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
                 result = {
                     "source_drone_id": settings.overmind_device_id,

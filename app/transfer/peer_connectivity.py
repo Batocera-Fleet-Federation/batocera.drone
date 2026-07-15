@@ -28,7 +28,9 @@ try:
         _overmind_get_json,
     )
     from ..storage.state_store import database_path as _state_database_path
+    from ..storage.state_store import load_peer_route as _load_peer_route
     from ..storage.state_store import save_payload as _save_state_payload
+    from ..storage.state_store import save_peer_route as _save_peer_route
     from . import local_network as _local_network
     from ..transport.tailnet import get_tailnet_ip, is_tailnet_address
     from .drone_network import _certificate_pem_fingerprint, _drone_advertised_api_port
@@ -42,7 +44,9 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         _overmind_get_json,
     )
     from storage.state_store import database_path as _state_database_path  # type: ignore
+    from storage.state_store import load_peer_route as _load_peer_route  # type: ignore
     from storage.state_store import save_payload as _save_state_payload  # type: ignore
+    from storage.state_store import save_peer_route as _save_peer_route  # type: ignore
     from transfer import local_network as _local_network  # type: ignore
     from transport.tailnet import get_tailnet_ip, is_tailnet_address  # type: ignore
     from transfer.drone_network import _certificate_pem_fingerprint, _drone_advertised_api_port  # type: ignore
@@ -393,33 +397,109 @@ def _peer_address(peer: dict) -> Optional[str]:
     return None
 
 
-def _peer_address_candidates(peer: dict) -> list[str]:
-    """Return trusted peer routes in failover order.
+def _peer_route_kind(address: str) -> str:
+    host = str(urlparse(str(address or "")).hostname or "").strip().strip("[]")
+    if is_tailnet_address(host):
+        return "tailnet"
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return "host"
+    return "ip"
 
-    Keep the existing LAN/public route first so same-network traffic remains
-    fast, then try its advertised LAN hostname and stable tailnet address.
-    A paired peer can retain a stale LAN address after it moves networks; the
-    tailnet candidate is what lets callers recover without re-pairing and is
-    intentionally last so its failure remains the useful final diagnostic.
+
+def _peer_address_candidates(
+    peer: dict,
+    *,
+    settings: Optional[Settings] = None,
+    peer_id: Optional[str] = None,
+) -> list[str]:
+    """Return trusted peer routes with a persisted successful route first.
+
+    Without a cached success, stable Tailnet addressing wins, followed by the
+    peer's advertised hostname and finally literal IP routes. Tailscale keeps a
+    same-LAN Tailnet connection peer-to-peer, while this ordering avoids paying
+    stale LAN-IP and mDNS timeouts whenever a peer moves between networks.
     """
-    candidates: list[str] = []
+    discovered: list[str] = []
 
     def add(address: object) -> None:
         value = str(address or "").strip().rstrip("/")
-        if value and value not in candidates:
-            candidates.append(value)
+        if value and value not in discovered:
+            discovered.append(value)
 
-    add(_peer_address(peer))
-    add(peer.get("advertised_reachable_url"))
+    scheme = str(peer.get("scheme") or peer.get("protocol") or "https").strip() or "https"
+    port = _peer_api_port(peer)
+    port_suffix = "" if (scheme == "https" and port == 443) or (scheme == "http" and port == 80) else f":{port}"
+
+    def add_host(host_value: object) -> None:
+        host = str(host_value or "").strip()
+        if not host:
+            return
+        host = f"[{host}]" if ":" in host and not host.startswith("[") else host
+        add(f"{scheme}://{host}{port_suffix}")
+
     resolved = peer.get("resolved_network") if isinstance(peer.get("resolved_network"), dict) else {}
     tailnet_ip = str(peer.get("tailnet_ip") or resolved.get("tailnet_ip") or "").strip()
     if is_tailnet_address(tailnet_ip):
-        scheme = str(peer.get("scheme") or peer.get("protocol") or "https").strip() or "https"
-        port = _peer_api_port(peer)
-        host = f"[{tailnet_ip}]" if ":" in tailnet_ip and not tailnet_ip.startswith("[") else tailnet_ip
-        port_suffix = "" if (scheme == "https" and port == 443) or (scheme == "http" and port == 80) else f":{port}"
-        add(f"{scheme}://{host}{port_suffix}")
+        add_host(tailnet_ip)
+    for key in ("advertised_reachable_url", "public_reachable_url", "reachable_url"):
+        add(peer.get(key))
+    public_ip = str(peer.get("public_ip") or "").strip()
+    if public_ip and peer.get("public_resolvable") is True:
+        add_host(public_ip)
+    for key in ("ipv4", "ipv6"):
+        for value in resolved.get(key) or []:
+            add_host(value)
+    for key in ("local_ip", "private_ip"):
+        values = peer.get(key)
+        for value in values if isinstance(values, list) else [values]:
+            add_host(value)
+
+    route_order = {"tailnet": 0, "host": 1, "ip": 2}
+    candidates = sorted(discovered, key=lambda value: route_order[_peer_route_kind(value)])
+    normalized_peer_id = str(
+        peer_id or peer.get("drone_id") or peer.get("device_id") or peer.get("id") or ""
+    ).strip()
+    if settings is not None and normalized_peer_id:
+        try:
+            cached = _load_peer_route(_state_database_path(settings.userdata_root), normalized_peer_id)
+        except Exception:
+            cached = None
+        cached_address = str((cached or {}).get("address") or "").strip().rstrip("/")
+        # Only reuse a route still present in the authorized peer metadata. The
+        # cached result changes preference, never the set of trusted endpoints.
+        if cached_address in candidates:
+            candidates.remove(cached_address)
+            candidates.insert(0, cached_address)
     return candidates
+
+
+def _preferred_peer_address(
+    peer: dict,
+    *,
+    settings: Optional[Settings] = None,
+    peer_id: Optional[str] = None,
+) -> Optional[str]:
+    candidates = _peer_address_candidates(peer, settings=settings, peer_id=peer_id)
+    return candidates[0] if candidates else None
+
+
+def _remember_successful_peer_route(settings: Settings, peer_id: str, address: str) -> None:
+    normalized_peer_id = str(peer_id or "").strip()
+    if not normalized_peer_id:
+        return
+    try:
+        _save_peer_route(
+            _state_database_path(settings.userdata_root),
+            normalized_peer_id,
+            address,
+            _peer_route_kind(address),
+        )
+    except Exception:
+        # Route caching is an optimization; a successful authenticated peer
+        # request must not fail merely because SQLite is temporarily unavailable.
+        return
 
 
 def _peer_get_json_for_peer(
@@ -432,17 +512,20 @@ def _peer_get_json_for_peer(
     refresh_cert: bool = False,
     timeout: float = PEER_CHECK_TIMEOUT_SECONDS,
 ) -> tuple[dict, str]:
-    """GET a peer endpoint, failing over from LAN/public to tailnet.
+    """GET a peer endpoint using its cached route or Tailnet/host/IP order.
 
-    Non-final candidates use the short connectivity timeout so a stale LAN
-    route cannot hold an inventory request for its full (potentially two
-    minute) transfer timeout. Every attempt uses the same pinned peer identity
-    and mTLS client; this is address failover, never a TLS downgrade.
+    Non-final candidates use the short connectivity timeout so a stale route
+    cannot hold an inventory request for its full (potentially two minute)
+    transfer timeout. Every attempt uses the same pinned peer identity and mTLS
+    client; this is address failover, never a TLS downgrade.
     """
     path = str(endpoint or "").strip()
     if not path.startswith("/"):
         raise ValueError("peer endpoint must start with /")
-    addresses = _peer_address_candidates(peer)
+    normalized_peer_id = str(
+        peer_id or peer.get("drone_id") or peer.get("device_id") or peer.get("id") or ""
+    ).strip()
+    addresses = _peer_address_candidates(peer, settings=settings, peer_id=normalized_peer_id)
     if not addresses:
         raise ValueError("no peer address available")
     last_error: Optional[Exception] = None
@@ -459,6 +542,7 @@ def _peer_get_json_for_peer(
                 refresh_cert=refresh_cert,
                 timeout=attempt_timeout,
             )
+            _remember_successful_peer_route(settings, normalized_peer_id, address)
             return payload, address
         except HTTPError:
             # The peer answered and rejected the request; changing routes
@@ -478,7 +562,7 @@ def _peer_get_json_for_peer(
 def _check_peer(settings: Settings, peer: dict, config: Optional[dict] = None) -> dict:
     target_id = str(peer.get("drone_id") or peer.get("device_id") or peer.get("id") or "")
     peer_id = target_id
-    addresses = _peer_address_candidates(peer)
+    addresses = _peer_address_candidates(peer, settings=settings, peer_id=target_id)
     address = addresses[0] if addresses else None
     checked_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     result = {

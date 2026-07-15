@@ -659,12 +659,12 @@ class LanDirectTransportTests(unittest.TestCase):
         peer = {"resolved_network": {"tailnet_ip": "100.64.0.9"}, "api_port": 443}
         self.assertEqual(transport.lan_url(peer), "https://100.64.0.9")
 
-    def test_same_lan_match_preferred_over_tailnet(self):
-        # A genuine same-LAN peer keeps the real LAN address (no WireGuard hop)
-        # even when both sides are also on the tailnet.
+    def test_tailnet_preferred_over_same_lan_match(self):
+        # Tailnet addresses stay stable when the peer later changes networks;
+        # Tailscale still forms a direct peer-to-peer path on the same LAN.
         transport = self._transport("203.0.113.7", my_tailnet="100.64.0.2")
         peer = {"public_ip": "203.0.113.7", "local_ip": "192.168.1.50", "tailnet_ip": "100.64.0.9"}
-        self.assertEqual(transport.lan_url(peer), "https://192.168.1.50")
+        self.assertEqual(transport.lan_url(peer), "https://100.64.0.9")
 
     def test_no_tailnet_url_when_self_not_on_tailnet(self):
         transport = self._transport("203.0.113.7", my_tailnet=None)

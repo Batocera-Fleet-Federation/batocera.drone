@@ -7,15 +7,14 @@ port-forward. This reuses the existing direct mTLS ``/peer/*`` path (the drone
 cert's SANs already include its LAN IPs); only the address differs.
 
 A **tailnet** peer counts as LAN too: when both drones run a mesh-VPN daemon
-(see ``tailnet.py``), the peer's tailnet address is directly reachable across
-NATs, so it is tried as the second choice inside this tier -- after a genuine
-same-LAN match (no WireGuard hop when the real LAN will do), and ahead of the
-public-direct and relay tiers.
+(see ``tailnet.py``), the peer's stable Tailnet address is directly reachable
+across NATs and Tailscale keeps same-LAN traffic peer-to-peer. It is preferred
+ahead of hostname and literal-IP fallback routes so a stale LAN address cannot
+delay every request after a peer moves networks.
 
-It is registered ahead of the public-direct and relay tiers, so a same-LAN peer
-is served over the LAN first. A false positive (e.g. two homes sharing a CGNAT
-public IP, or a stale tailnet address) simply fails the LAN attempt and the
-selector falls back to the next transport.
+It is registered ahead of the public-direct and relay tiers. A false positive
+(e.g. two homes sharing a CGNAT public IP, or a stale tailnet address) simply
+fails the direct attempt and the selector falls back to the next transport.
 """
 
 from __future__ import annotations
@@ -43,7 +42,7 @@ class LanDirectTransport(PeerTransport):
 
     def lan_url(self, peer: dict) -> Optional[str]:
         """Return the peer's LAN (or tailnet) URL if directly reachable, else None."""
-        return self._same_network_url(peer) or self._tailnet_url(peer)
+        return self._tailnet_url(peer) or self._same_network_url(peer)
 
     def _same_network_url(self, peer: dict) -> Optional[str]:
         # Check the peer's cheap fields first so we only resolve our own network
