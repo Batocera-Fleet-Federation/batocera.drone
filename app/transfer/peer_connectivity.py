@@ -17,19 +17,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Tuple
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlparse
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 try:
     from ..common.settings import Settings
-    from ..overmind.overmind_client import (
-        _drone_client_ssl_context,
-        _format_overmind_error,
-        _overmind_get_json,
-    )
     from ..storage.state_store import database_path as _state_database_path
     from ..storage.state_store import load_peer_route as _load_peer_route
-    from ..storage.state_store import save_payload as _save_state_payload
     from ..storage.state_store import save_peer_route as _save_peer_route
     from . import local_network as _local_network
     from ..transport.tailnet import get_tailnet_ip, is_tailnet_address
@@ -38,14 +32,8 @@ try:
     from .network_identity import drone_scheme as _drone_scheme
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.settings import Settings  # type: ignore
-    from overmind.overmind_client import (  # type: ignore
-        _drone_client_ssl_context,
-        _format_overmind_error,
-        _overmind_get_json,
-    )
     from storage.state_store import database_path as _state_database_path  # type: ignore
     from storage.state_store import load_peer_route as _load_peer_route  # type: ignore
-    from storage.state_store import save_payload as _save_state_payload  # type: ignore
     from storage.state_store import save_peer_route as _save_peer_route  # type: ignore
     from transfer import local_network as _local_network  # type: ignore
     from transport.tailnet import get_tailnet_ip, is_tailnet_address  # type: ignore
@@ -56,6 +44,25 @@ except ImportError:  # pragma: no cover - direct script execution fallback
 # Local copy of the peer-request timeout (drone_api keeps its own for peer_download,
 # still resident there); both read the same env var, so the value is identical.
 PEER_CHECK_TIMEOUT_SECONDS = float(os.environ.get("DRONE_PEER_CHECK_TIMEOUT_SECONDS", "3"))
+
+
+def _drone_client_ssl_context(settings: Settings, url: str, verify: bool = False, cafile: Optional[Path] = None) -> Optional[ssl.SSLContext]:
+    """Build the client-side SSL context for an outbound peer/API call.
+
+    Cert-pinned mTLS when a peer certificate is configured, unverified otherwise --
+    callers decide ``verify``/``cafile`` based on what trust material (if any) they
+    have for the destination.
+    """
+    if not url.startswith("https://"):
+        return None
+    context = ssl.create_default_context(cafile=str(cafile) if cafile else None) if verify else ssl._create_unverified_context()
+    if verify and cafile:
+        # The pinned peer certificate was captured directly at pairing time; its
+        # routed NAT address need not appear in the SAN.
+        context.check_hostname = False
+    if (settings.drone_mtls_enabled or _local_network.is_local_mode(settings)) and settings.drone_cert_file.exists() and settings.drone_key_file.exists():
+        context.load_cert_chain(certfile=str(settings.drone_cert_file), keyfile=str(settings.drone_key_file))
+    return context
 
 
 def _public_local_peer(peer: dict) -> dict:
@@ -76,23 +83,9 @@ def _save_local_peer_certificate(settings: Settings, peer_id: str, certificate_p
     return cert_path, fingerprint
 
 
-def _peer_cert_cache_dir(settings: Settings) -> Path:
-    return (settings.userdata_root / "system" / "drone-app" / "peer-certs").resolve()
-
-
 def _local_peer_cert_cache_path(settings: Settings, peer_id: str) -> Path:
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", peer_id)
     return (settings.userdata_root / "system" / "drone-app" / "local-peer-certs" / f"{safe}.crt").resolve()
-
-
-def _peer_cert_cache_path(settings: Settings, peer_id: str) -> Path:
-    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", peer_id)
-    return _peer_cert_cache_dir(settings) / f"{safe}.crt"
-
-
-def _peer_cert_meta_path(settings: Settings, peer_id: str) -> Path:
-    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", peer_id)
-    return _peer_cert_cache_dir(settings) / f"{safe}.json"
 
 
 def _peer_trust_cafile(
@@ -101,29 +94,16 @@ def _peer_trust_cafile(
     config: Optional[dict] = None,
     refresh_cert: bool = False,
 ) -> Optional[Path]:
-    if (
-        _local_network.is_local_mode(settings)
-        and (
-            str((config or {}).get("network_mode") or "") == "local_network"
-            or not _local_network.is_overmind_mode(settings)
-        )
-    ):
-        if not peer_id:
-            return None
-        local_cached = _local_peer_cert_cache_path(settings, peer_id)
-        return local_cached if local_cached.exists() else None
-    if settings.drone_mtls_ca_file and settings.drone_mtls_ca_file.exists():
-        if peer_id and refresh_cert and config:
-            _fetch_peer_certificate(settings, config, peer_id)
-        return settings.drone_mtls_ca_file
+    """Resolve the CA/cert file to trust for a peer request.
+
+    Local-network pairing pins each peer's own certificate by fingerprint (captured
+    at pairing time -- see ``_local_pair_peer``); there is no re-fetch path since
+    there is no central authority to fetch a replacement from.
+    """
     if not peer_id:
         return None
-    if refresh_cert and config:
-        return _fetch_peer_certificate(settings, config, peer_id)
-    cached = _peer_cert_cache_path(settings, peer_id)
-    if cached.exists():
-        return cached
-    return _fetch_peer_certificate(settings, config or {}, peer_id) if config else None
+    local_cached = _local_peer_cert_cache_path(settings, peer_id)
+    return local_cached if local_cached.exists() else None
 
 
 def _peer_ssl_diagnostic(url: str, cafile: Optional[Path], error: BaseException) -> str:
@@ -148,55 +128,9 @@ def _is_ssl_url_error(error: URLError) -> bool:
     return isinstance(reason, ssl.SSLError)
 
 
-# Overmind HTTP client (_overmind_post/get/delete_json, _drone_client_ssl_context,
-# _format_overmind_error) now lives in overmind/overmind_client.py (re-exported above).
-
-
 # Drone self-update (_download_latest_drone_app, _overlay_drone_release_tree,
 # _restart_drone_process_soon, _drone_work_dir) now lives in common/self_update.py
 # (re-exported above).
-
-
-# _save_overmind_runtime_config now lives in overmind/overmind_config.py.
-
-
-# Overmind token register/claim/reclaim + action-completion reporting now live in
-# overmind/registration.py (re-exported above).
-
-
-def _fetch_peer_certificate(settings: Settings, config: dict, peer_id: str) -> Optional[Path]:
-    base_url = str(config.get("overmind_url") or "").strip().rstrip("/")
-    token = str(config.get("overmind_token") or "").strip()
-    if not base_url or not token or not peer_id:
-        return None
-    try:
-        payload = _overmind_get_json(
-            f"{base_url}/api/devices/{quote(settings.overmind_device_id, safe='')}/peer-certificate/{quote(peer_id, safe='')}",
-            token=token,
-            settings=settings,
-        )
-        pem = str(payload.get("certificate_pem") or "")
-        if "BEGIN CERTIFICATE" not in pem:
-            return None
-        cert_path = _peer_cert_cache_path(settings, peer_id)
-        cert_path.parent.mkdir(parents=True, exist_ok=True)
-        cert_path.write_text(pem, encoding="utf-8")
-        meta = dict(payload.get("metadata") or {})
-        meta["peer_drone_id"] = peer_id
-        meta["fetched_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-        meta["source_overmind_url"] = base_url
-        _save_state_payload(
-            _state_database_path(settings.userdata_root),
-            "peer_certificate_metadata",
-            meta,
-            state_key=peer_id,
-        )
-        _peer_cert_meta_path(settings, peer_id).unlink(missing_ok=True)
-        print(f"Fetched peer certificate for {peer_id}", file=sys.stdout, flush=True)
-        return cert_path
-    except Exception as error:
-        print(f"Failed to fetch peer certificate for {peer_id}: {_format_overmind_error(error)}", file=sys.stderr, flush=True)
-        return None
 
 
 def _peer_get_json(url: str, settings: Settings, peer_id: Optional[str] = None, config: Optional[dict] = None, refresh_cert: bool = False, timeout: float = PEER_CHECK_TIMEOUT_SECONDS) -> dict:
@@ -239,7 +173,7 @@ def _local_pair_peer(
     payload = {
         "pairing_code": str(pairing_code or "").strip(),
         "tailnet_auto_pair": bool(tailnet_auto_pair),
-        "drone_id": settings.overmind_device_id,
+        "drone_id": settings.device_id,
         "name": socket.gethostname(),
         "hostname": socket.gethostname(),
         "scheme": _drone_scheme(settings),
@@ -617,7 +551,7 @@ def _peer_proxy_request(
     mTLS trust as ``_peer_get_json_for_peer``, generalized to an arbitrary
     method/body and an explicit ``Authorization`` header -- this is always the
     *target's own* credentials, supplied by the caller, never this Drone's own
-    Overmind/local-network config. A non-2xx response from the peer (bad
+    local-network config. A non-2xx response from the peer (bad
     credentials, unknown route, etc.) is relayed as a ``PeerProxyResponse``,
     not raised -- the peer answered, so trying another address cannot change
     the outcome (same reasoning as ``_peer_get_json_for_peer``'s HTTPError
@@ -700,7 +634,7 @@ def _check_peer(settings: Settings, peer: dict, config: Optional[dict] = None) -
     address = addresses[0] if addresses else None
     checked_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     result = {
-        "source_drone_id": settings.overmind_device_id,
+        "source_drone_id": settings.device_id,
         "target_drone_id": target_id,
         "target_address": address,
         "status": "fail",

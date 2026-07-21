@@ -87,9 +87,9 @@ class RomCacheRow:
             for key in ("transfer_unit_path", "marker_relative_path")
             if str(payload.get(key) or "").strip()
         }
-        # rom_name is the gamelist <name> (the game's display name) -- that is the "name"
-        # reported to Overmind. (Previously this was overridden to the filename stem when a
-        # gamelist was present, discarding the real title.)
+        # rom_name is the gamelist <name> (the game's display name) -- that is the
+        # canonical "name" for this entry. (Previously this was overridden to the
+        # filename stem when a gamelist was present, discarding the real title.)
         return cls(
             entry_key=entry_key,
             system=system,
@@ -985,7 +985,7 @@ def _purge_asset_cache_keep_fingerprint(settings: Any, requested_at: Optional[st
     ``(entry_key, file_size, modified_time)`` into ``preserved_*`` tables. The
     next metadata poll rebuilds the entry set from disk and reuses those fingerprint
     values for unchanged files (see ``_read_preserved_asset_fingerprint``), so ROMs are
-    not re-hashed, then uploads a full ``replace_all`` inventory to Overmind.
+    not re-hashed on the next full local rebuild.
     """
     from datetime import datetime, timezone
 

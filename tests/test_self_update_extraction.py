@@ -1,7 +1,7 @@
 """Tests for drone self-update archive extraction (``common/self_update.py``).
 
-Self-update is the most sensitive path on the device: an Overmind action makes the
-drone download ``drone-app.tar.gz`` and overlay it onto the *running* app tree, then
+Self-update is the most sensitive path on the device: an admin-triggered action makes
+the drone download ``drone-app.tar.gz`` and overlay it onto the *running* app tree, then
 re-exec. ``_download_latest_drone_app`` therefore hand-rolls a tar-slip barrier —
 each member is resolved and rejected if it escapes the staging dir — plus a
 leading-release-dir re-home and an ``{app, content}`` root allow-list. None of it was

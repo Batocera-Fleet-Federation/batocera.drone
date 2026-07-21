@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 import app.device.es_collections as es_collections
-from app.drone_api import RomRepository, Settings, _execute_overmind_action
+from app.drone_api import Settings
 
 ES_SYSTEMS_XML = """<?xml version="1.0"?>
 <systemList>
@@ -394,88 +394,11 @@ class PrivilegedEsCollectionsHelperTests(unittest.TestCase):
             self.assertIn('name="MusicVolume" value="42"', config.read_text(encoding="utf-8"))
 
 
-class EsCollectionsOvermindActionTests(unittest.TestCase):
-    def test_get_state_action_returns_current_state(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            settings = _build_settings(Path(tmp))
-            repo = RomRepository(settings.roms_root, settings.bios_root)
-            status, message, result = _execute_overmind_action(
-                settings, repo, {"action": "get_es_collections_state", "payload": {}}
-            )
-            self.assertEqual(status, "completed")
-            self.assertEqual(result["music_volume"], 80)
-
-    def test_set_music_volume_action_applies_and_restarts(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            settings = _build_settings(Path(tmp))
-            repo = RomRepository(settings.roms_root, settings.bios_root)
-            with mock.patch("app.drone_api.os.geteuid", return_value=0), \
-                 mock.patch("app.device.es_collections._apply_es_collections_helper") as helper:
-                status, message, result = _execute_overmind_action(
-                    settings, repo, {"action": "set_music_volume", "payload": {"level": 60}}
-                )
-            self.assertEqual(status, "completed")
-            helper.assert_called_once()
-            self.assertEqual(helper.call_args[0][0], {"music_volume": 60})
-            self.assertIn("EmulationStation restarted", message)
-
-    def test_set_es_collections_action_message_notes_screensaver_restart(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            settings = _build_settings(Path(tmp))
-            repo = RomRepository(settings.roms_root, settings.bios_root)
-            with mock.patch("app.drone_api.os.geteuid", return_value=0), \
-                 mock.patch("app.device.es_collections._apply_es_collections_helper"):
-                _, screensaver_message, _ = _execute_overmind_action(
-                    settings, repo,
-                    {"action": "set_es_collections", "payload": {"screensaver_minutes": 5}},
-                )
-                _, restart_message, _ = _execute_overmind_action(
-                    settings, repo,
-                    {"action": "set_es_collections", "payload": {"auto_collections": ["all"]}},
-                )
-            self.assertIn("EmulationStation restarted", screensaver_message)
-            self.assertIn("EmulationStation restarted", restart_message)
-
-    def test_set_music_volume_action_rejects_invalid_level(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            settings = _build_settings(Path(tmp))
-            repo = RomRepository(settings.roms_root, settings.bios_root)
-            status, message, result = _execute_overmind_action(
-                settings, repo, {"action": "set_music_volume", "payload": {"level": "banana"}}
-            )
-            self.assertEqual(status, "failed")
-
-    def test_set_es_collections_action_applies_partial_update(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            settings = _build_settings(Path(tmp))
-            repo = RomRepository(settings.roms_root, settings.bios_root)
-            with mock.patch("app.drone_api.os.geteuid", return_value=0), \
-                 mock.patch("app.device.es_collections._apply_es_collections_helper") as helper:
-                status, message, result = _execute_overmind_action(
-                    settings, repo,
-                    {"action": "set_es_collections", "payload": {"auto_collections": ["all", "recent"]}},
-                )
-            self.assertEqual(status, "completed")
-            self.assertEqual(helper.call_args[0][0], {"auto_collections": "all,recent"})
-
-    def test_set_es_collections_action_reports_failure_on_worker_error(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            settings = _build_settings(Path(tmp))
-            repo = RomRepository(settings.roms_root, settings.bios_root)
-            with mock.patch("app.drone_api.os.geteuid", return_value=999), \
-                 mock.patch("app.device.es_collections._request_es_collections_service_control", return_value=False):
-                status, message, result = _execute_overmind_action(
-                    settings, repo,
-                    {"action": "set_es_collections", "payload": {"music_volume": 50}},
-                )
-            self.assertEqual(status, "failed")
-
-
 class ScreenModeAdminHandlerTests(unittest.TestCase):
     """The drone's own System Info page reuses the exact same _get_screen_mode /
-    _apply_screen_mode functions the Overmind set_screen_mode action already
-    calls -- these tests cover the new local admin handlers, not that shared
-    logic (already covered by the existing screen-mode action tests)."""
+    _apply_screen_mode functions the screen-mode action tests in test_unit.py
+    already exercise -- these tests cover the new local admin handlers, not that
+    shared logic."""
 
     class _FakeHandler:
         def __init__(self, settings) -> None:
@@ -758,33 +681,6 @@ class AdminControlsPageSplitTests(unittest.TestCase):
         self.assertIn('document.getElementById("systemInfoAssetCacheRefreshBtn")?.addEventListener', body)
 
 
-class HeartbeatEsCollectionsTests(unittest.TestCase):
-    """The Drone proactively reports ES-collections state in its heartbeat so
-    Overmind can store it, without touching the existing live remote-control
-    (get_es_collections_state/set_es_collections) actions."""
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        root = Path(__file__).resolve().parents[1]
-        cls.source = root.joinpath("app/overmind/action_poller.py").read_text(encoding="utf-8")
-
-    def test_heartbeat_builder_imports_and_calls_get_es_collections_state(self) -> None:
-        self.assertIn("from ..device.es_collections import (\n        get_es_collections_state,", self.source)
-        self.assertIn("from device.es_collections import (\n        get_es_collections_state,", self.source)
-        self.assertIn(
-            'system_info_payload["es_collections"] = get_es_collections_state(settings)',
-            self.source,
-        )
-
-    def test_es_collections_assigned_alongside_screen_mode_and_audio_volume(self) -> None:
-        # Same per-tick refresh cadence as the other "current device configuration"
-        # fields it's conceptually grouped with (not the rarer full system_info
-        # refresh), so it has the same staleness characteristics users already see
-        # for screen_mode/audio_volume today.
-        screen_mode_pos = self.source.index('system_info_payload["screen_mode"]')
-        audio_volume_pos = self.source.index('system_info_payload["audio_volume"]')
-        es_collections_pos = self.source.index('system_info_payload["es_collections"]')
-        self.assertTrue(screen_mode_pos < audio_volume_pos < es_collections_pos)
 
 
 class ControlsDashboardLayoutTests(unittest.TestCase):

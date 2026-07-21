@@ -1,6 +1,6 @@
 """Stable per-device machine identity for the Drone.
 
-Extracted from ``drone_api.py``. The Overmind device id is derived from the first
+Extracted from ``drone_api.py``. This Drone's own device id is derived from the first
 physical NIC MAC (virtual interfaces such as docker/veth/wg are skipped and
 locally-administered MACs de-prioritised), then persisted under ``USERDATA_ROOT``
 so it stays stable across reboots and NIC enumeration order; if no physical NIC is

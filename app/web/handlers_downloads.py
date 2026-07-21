@@ -38,7 +38,7 @@ class HandlersDownloadsMixin:
     def _handle_admin_downloads(self) -> None:
         manager = _get_download_manager()
         if manager is None:
-            self._send_json(200, {"target_drone_id": self.settings.overmind_device_id, "downloads": [], "active": [], "queued": [], "recent": []})
+            self._send_json(200, {"target_drone_id": self.settings.device_id, "downloads": [], "active": [], "queued": [], "recent": []})
             return
         self._send_json(200, manager.snapshot())
 
@@ -60,7 +60,7 @@ class HandlersDownloadsMixin:
             "message": (
                 f"Asset cache cleared ({roms} ROMs, {int(cleared.get('bios') or 0)} BIOS, "
                 f"{int(cleared.get('artwork') or 0)} artwork). Kept {kept} fingerprint hashes — "
-                "rebuilding now without re-hashing, then uploading a full inventory."
+                "rebuilding now without re-hashing."
             ),
         })
 
@@ -115,7 +115,7 @@ class HandlersDownloadsMixin:
         self._send_json(status_code, result)
 
     def _handle_admin_uploads(self) -> None:
-        self._send_json(200, {"target_drone_id": self.settings.overmind_device_id, **_get_upload_tracker().snapshot()})
+        self._send_json(200, {"target_drone_id": self.settings.device_id, **_get_upload_tracker().snapshot()})
 
     def _handle_admin_downloads_pause(self) -> None:
         manager = _get_download_manager()

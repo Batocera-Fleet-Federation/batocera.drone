@@ -1,4 +1,11 @@
-"""Gameplay session parsing and payload assembly for Overmind reporting."""
+"""Gameplay session detection and durable history tracking.
+
+Moved from the retired Overmind reporting package (formerly ``overmind_game_logs.py``) --
+none of this is hub-specific. ``find_running_emulatorlauncher`` backs idle-game-exit
+automation and the local admin/peer "is a game running" checks; the gameplay-history
+functions back the local admin gameplay-history viewer and the peer-browsable
+``type=gameplay`` inventory.
+"""
 
 from __future__ import annotations
 
@@ -33,7 +40,7 @@ def _state_path(settings: Any, filename: str) -> Path:
 def load_game_log_cursors(settings: Any) -> dict:
     state = load_payload(
         database_path(settings.userdata_root),
-        "overmind_game_log_cursors.json",
+        "game_log_cursors.json",
         {},
         legacy_path=_state_path(settings, "overmind_game_log_cursors.json"),
     )
@@ -46,7 +53,7 @@ def load_game_log_cursors(settings: Any) -> dict:
 def commit_game_log_cursors(settings: Any, cursors: dict) -> None:
     save_payload(
         database_path(settings.userdata_root),
-        "overmind_game_log_cursors.json",
+        "game_log_cursors.json",
         {"schema_version": _STATE_SCHEMA_VERSION, "cursors": dict(cursors or {})},
     )
 
@@ -536,7 +543,7 @@ def collect_game_event_sessions(
 
 
 def delete_game_event_spool(files: Optional[List[Path]]) -> None:
-    """Remove spool files that have been successfully reported to Overmind."""
+    """Remove spool files that have already been folded into gameplay history."""
     for path in files or []:
         try:
             Path(path).unlink()

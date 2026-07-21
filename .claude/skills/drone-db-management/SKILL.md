@@ -11,7 +11,7 @@ Ensure the Drone application uses SQLite in a lean, relational, performant, and 
 
 The Drone database should be treated as the local system of record for durable Batocera-side state. Application code should avoid holding large data sets in memory, avoid unnecessary blob storage, and rely on efficient relational queries, indexes, constraints, and pagination.
 
-The Drone runs on Batocera hardware, which may have limited CPU, memory, and storage compared to the Overmind service. Database design should keep the local application responsive and avoid expensive work during UI/API requests.
+The Drone runs on Batocera hardware, which may have limited CPU, memory, and storage. Database design should keep the local application responsive and avoid expensive work during UI/API requests.
 
 ## Project Context
 
@@ -23,7 +23,7 @@ The Drone database may store or track data related to:
 
 - Drone identity
 - registration state
-- Overmind connection state
+- peer pairing/connection state
 - system information
 - ROM metadata
 - ROM hash cache
@@ -457,7 +457,7 @@ The Drone should survive:
 - application restart,
 - Batocera reboot,
 - network outage,
-- Overmind outage,
+- peer/network outage,
 - local service restart.
 
 ## Save and Config Tracking Rules
@@ -508,7 +508,7 @@ CREATE TABLE IF NOT EXISTS sync_jobs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   job_type TEXT NOT NULL,
   status TEXT NOT NULL,
-  overmind_job_id TEXT,
+  peer_job_id TEXT,
   started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   completed_at TEXT,
   error_message TEXT
@@ -599,7 +599,7 @@ Consider relational modeling for:
 
 - drone identity,
 - registration state,
-- Overmind pairing state,
+- peer pairing state,
 - connection state,
 - system info snapshots,
 - ROM systems,

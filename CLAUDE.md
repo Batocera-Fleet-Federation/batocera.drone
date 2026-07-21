@@ -2,34 +2,34 @@
 
 Guidance for Claude Code when working in **this repo** (the device agent that runs
 on each Batocera machine). One of three repos in the Batocera Fleet Federation;
-the hub (`batocera.overmind/`) and shared infra (`.github/`) are siblings. A
-networking change often spans this repo **and** the Overmind repo
-(`src/overmind/edge/`) — cross-reference both.
+shared infra (`.github/`) is a sibling. The former hub repo (`batocera.overmind/`)
+has been **retired** — the fleet is peer-to-peer only now, so a networking change
+is generally self-contained to this repo.
 
 ## What this is
 
 A **stdlib-only** (`http.server`) web app + SQLite cache. Source in `app/`. Runs on
 locked-down Batocera Python — **no third-party deps may be assumed** (no pydantic,
 no QUIC, no `cryptography`); everything new must work on the stdlib. Drones make
-**outbound connections only**: a persistent mux to the Overmind **Edge**, plus
-cert-pinned mTLS to peers for direct transfers. Nothing here exposes a public
-inbound API.
+**outbound connections only**: cert-pinned mTLS to paired peers for direct transfers
+(LAN, a shared Tailscale tailnet, or direct-WAN if port-forwarded). Nothing here
+exposes a public inbound API.
 
 ## Commands
 
 ```bash
 python -m pytest tests/               # unittest-style tests run under pytest
 python -m pytest tests/test_unit.py -k <expr>
-python -m pytest tests/test_transport.py tests/test_mux_client.py tests/test_relay_transfer.py \
-                 tests/test_holepunch.py tests/test_reliable_udp.py    # transport/networking
+python -m pytest tests/test_transport.py    # transport/networking (transport selector, LAN/tailnet)
 python app/main.py                    # run the drone locally
 ```
 
 Tests build `Settings` via `Settings.from_env()` with
 `mock.patch.dict("os.environ", {...}, clear=True)`; set `USERDATA_ROOT`,
 `ROMS_ROOT`, `BIOS_ROOT`, `SAVES_ROOT`, `DRONE_STATE_DATABASE_FILE`,
-`OVERMIND_DEVICE_ID` to temp dirs. `test_download_manager_pushes_terminal_sync_activity`
-is order-flaky — re-run or run isolated. Tests use `unittest.TestCase`.
+`DRONE_DEVICE_ID` to temp dirs (`OVERMIND_DEVICE_ID`/`OVERMIND_LOG_FILE` still work as
+back-compat fallback names for `DRONE_DEVICE_ID`/`ACTIVITY_LOG_FILE`, but new tests
+should use the current names). Tests use `unittest.TestCase`.
 
 ## Architecture
 
@@ -42,37 +42,38 @@ working. Layout:
 
 - `common/` — settings, device_identity, logging_setup, http_cache, fingerprint, auth,
   runtime_state (shared mutable Event/Lock singletons: `_ROM_METADATA_ACTIVE/_WAKE/_LOCK`,
-  `_ASSET_/_SAVES_PUSH_REQUESTED`, `_GAMELIST_WRITE_LOCK` — imported by every module that
-  needs one; reassigned `*_STARTED` flags/singletons stay in drone_api)
+  `_GAMELIST_WRITE_LOCK`, `_ES_LIFECYCLE_LOCK` — imported by every module that needs
+  one; reassigned `*_STARTED` flags/singletons stay in drone_api), http_errors
+  (stdlib HTTPError/URLError formatting), self_update
 - `storage/` — state_store, rom_metadata_store, saves_store (SQLite)
-- `overmind/` — contract/reporting/game_logs/filesystem/collectors + overmind_client,
-  overmind_config, registration (token register/claim + action reporting), actions
-  (`_execute_overmind_action` dispatcher), heartbeat_sync (heartbeat-drift → resync
-  request + local thumbprint readers), saves_sync (`_sync_saves_to_overmind`),
-  rom_sync (the ROM-metadata→Overmind poll/upload pipeline: `_poll_rom_metadata_once`,
-  `_sync_rom_metadata_to_overmind(_locked)`, `_complete`/`_defer` — param-based on
-  `RomRepository`), action_poller (`_start_overmind_action_poller` — the heartbeat +
-  action-poll background loop)
-- `device/` — device_control, system_metrics, automation
+- `device/` — device_control, system_metrics, automation, system_info
+  (`_collect_system_info_payload`), game_activity (gameplay-session detection: ES-log
+  parsing, `GameProcessMonitor`, gameplay history), emulator_configs (local admin
+  config-file browser: `list_emulator_config_files`/`read_emulator_config_file`),
+  tailnet_service, pixen
 - `roms/` — scrapers, rom_fs_watcher, gamelist, rom_inventory, rom_metadata_state
   (cache snapshot build + upload-clean marking + status + poll-activity guard),
   rom_scanner (`_poll_rom_metadata_cache` filesystem scan + `_hash_rom_metadata_batches`
-  sampled-fingerprint hashing; takes `RomRepository` as a param), and the `RomRepository`
-  **mixins** — rom_artwork_apply, rom_artwork_gamelist, rom_scan, rom_systems,
-  rom_asset_bios (the class is now a slim `__init__` + static delegators composed from
-  these; see the god-class-split note below)
-- `transfer/` — peer_selection, peer_connectivity (cert trust/pinning + peer HTTP
-  client + health/pairing), peer_workers (public-IP probe + health-check/local-net
-  worker threads), peer_download (`_download_*_from_peer` direct tier + state helpers),
-  edge_relay (Edge mux client + relay/hole-punch tiers), download_manager
+  sampled-fingerprint hashing + `_poll_rom_metadata_once`/`_complete_local_rom_metadata_cache`
+  — the whole local scan+hash+cache-clean cycle now that there's nowhere to upload to;
+  takes `RomRepository` as a param), and the `RomRepository` **mixins** — rom_artwork_apply,
+  rom_artwork_gamelist, rom_scan, rom_systems, rom_asset_bios (the class is now a slim
+  `__init__` + static delegators composed from these; see the god-class-split note below)
+- `transfer/` — peer_connectivity (cert trust/pinning + peer HTTP client + health/pairing),
+  peer_workers (public-IP probe + health-check/local-net worker threads), peer_download
+  (`_download_*_from_peer` direct tier + state helpers), download_manager
   (`DownloadManager` queue + tier dispatch + `_directpublic_fetch`), download_errors
   (`DownloadCancelled`), transfer_files, local_network, network_identity,
   drone_network, drone_tls (`DroneCertificateManager`)
 - `web/` — api_routes/ui_routes (handler mixins), route_config, api_models, the FastAPI
-  bridge (api_app/api_bridge/openapi_spec), the `RomRequestHandler` `_handle_*` **mixins**
-  (handlers_peer/content/artwork/network/overmind/config), **plus `static/` + `templates/`**
-- `transport/` — the outbound P2P stack (unchanged; also imported cross-repo as
-  `app.transport` by `.github` tests, so it stays at `app/`)
+  bridge (api_app/api_bridge/openapi_spec), server_tls, the `RomRequestHandler` `_handle_*`
+  **mixins** (handlers_peer/content/artwork/network/config/system/downloads/diagnostics/
+  es_collections/remote_admin/theme), **plus `static/` + `templates/`**
+- `transport/` — the outbound P2P stack: `base` (PeerTransport ABC), `selector`
+  (`TransportSelector`), `lan` (`LanDirectTransport`), `direct_public`
+  (`DirectPublicTransport`), `tailnet` (tailnet address detection). Also imported
+  cross-repo as `app.transport` by a `.github` integration test, so it stays at `app/`
+  — see the note on that test in the `drone-edge-networking` skill.
 
 **Still in `drone_api.py`** (not yet extracted): `RomRequestHandler` (most `_handle_*`
 methods — being split into `web/handlers_*.py` **mixins**; `HandlersPeerMixin` done), the
@@ -117,91 +118,72 @@ import check are a post-deploy sanity gate, not the staging mechanism.
 scanned asset metadata in the shared state DB (`storage/state_store.py`). Files are
 fingerprinted with a sampled hash (`RomRepository.build_fingerprint`, a delegating
 static method whose impl now lives in `common/fingerprint.py` — `sample-fp-v1`,
-head/middle/tail windows, constant cost; BIOS uses full-file MD5). A `cache_changes`/pending-changes
-queue tracks created/updated/deleted so uploads send deltas; whole-set thumbprints
-are echoed in the heartbeat. Schema is created inline with `CREATE TABLE IF NOT
-EXISTS` + `_ensure_column`; **never bump applied schema in place** — add
+head/middle/tail windows, constant cost; BIOS uses full-file MD5). A `cache_changes`/
+pending-changes queue tracks created/updated/deleted so the admin UI's pending-changes
+view reflects exactly what changed since the last clean point; whole-set thumbprints
+let a peer tell when a re-sync is needed. Schema is created inline with `CREATE TABLE
+IF NOT EXISTS` + `_ensure_column`; **never bump applied schema in place** — add
 tables/columns idempotently. See `drone-db-management` skill.
 
 **Poll loop:** `_start_rom_metadata_poller` + `RomFilesystemWatcher` (inotify,
-debounced) wake on file changes; `_poll_rom_metadata_once` syncs ROM metadata then
-game saves to Overmind. Heartbeat thumbprint mismatch
-(`_maybe_request_*_push_from_heartbeat`) queues a resync push.
+debounced) wake on file changes; `_poll_rom_metadata_once` scans ROM/BIOS metadata,
+hashes changed files, then syncs game saves — all purely local (there is no hub to
+sync to; a completed local pass just marks the cache clean, see
+`_complete_local_rom_metadata_cache`).
 
 **P2P transfer (direct tier):** peers serve assets at
 `GET /peer/{roms,bios,saves}/...` (mTLS-gated, path-traversal-safe via
 `transfer/transfer_files.py`) and fetch with `_download_*_from_peer` (now in
 `transfer/peer_download.py`; cert pinning + peer client in
-`transfer/peer_connectivity.py` via `_peer_trust_cafile`/`_fetch_peer_certificate`,
-SSL-retry; the mTLS identity itself is `DroneCertificateManager` in
-`transfer/drone_tls.py`; the Edge mux client + relay/hole-punch tiers are
-`transfer/edge_relay.py`). Peer selection in `transfer/peer_selection.py`. See
+`transfer/peer_connectivity.py` via `_peer_trust_cafile`, SSL-retry; the mTLS
+identity itself is `DroneCertificateManager` in `transfer/drone_tls.py`). See
 `drone-p2p-transfer-security` skill.
 
 ## Transport layer (`app/transport/`) — the outbound-only networking
 
 This is **single-source P2P, not torrent-style swarming**: each transfer pulls the
-whole asset from **one** best peer (`peer_selection.select_best_peer` → one peer;
-`DownloadManager` keeps one active download) — no piece-level multi-peer fetch.
+whole asset from **one** paired peer (`DownloadManager` keeps one active download)
+— no piece-level multi-peer fetch, no ranking of multiple candidate sources (the
+user picks the peer explicitly on the Swarm/Transfers page).
 
 The download path is **transport-agnostic**. `DownloadManager._run_job` calls
 `TransportSelector.fetch` (`selector.py`), which tries `PeerTransport`s best-first
 and falls through to the next on failure:
 
-1. `LanDirectTransport` (`lan.py`) — same-NAT peer, reuses the local mTLS `/peer/*` path.
-2. `DirectPublicTransport` (`direct_public.py`) — wraps the existing
-   `_download_*_from_peer` (the legacy public-IP path, kept as a tier).
-3. `RelayReceiverTransport` (`relay_transfer.py`) — pull via the Edge relay (no
-   port-forward). v1 relays ROM files; other asset types fall back to other tiers.
+1. `LanDirectTransport` (`lan.py`) — same-NAT peer, or a peer reachable over a
+   shared Tailscale tailnet; reuses the local mTLS `/peer/*` path.
+2. `DirectPublicTransport` (`direct_public.py`) — the peer is port-forwarded/public;
+   wraps the existing `_download_*_from_peer` direct-WAN path.
 
 All implement the `PeerTransport` ABC (`base.py`: `usable`/`fetch`,
-`DownloadRequest`, `TransferContext`). Supporting modules:
-
-- `mux_client.py` — the persistent outbound Edge connection. `MuxClient` (threaded
-  runner, reconnect/backoff, ping) + `MuxSession` (pure protocol core, no I/O) +
-  `RelayChannel` (a reliable ordered byte stream for one transfer, tunneled over
-  the mux). `connect_tls(url, verify=...)` + `TlsMuxLink`. Wired in
-  `drone_api._start_edge_mux_client` from `DRONE_EDGE_*` settings.
-- `mux.py` — frame codec (1-byte kind + uint32-BE length + payload; `CONTROL`
-  JSON, `DATA` binary). **Byte-identical** to Overmind's `edge/protocol.py`.
-- `assetfetch.py` — `FETCH/CHUNK/DONE` request/response over a channel; resumable
-  (offset), cancellable, hash-verified. `relay_transfer.serve_asset` (sender) /
-  `open_receiver_channel` (receiver) drive it over the mux.
-- `holepunch.py` + `reliable_udp.py` — STUN candidate gather + mutual-confirm punch,
-  then a **hand-rolled windowed-ARQ** reliable byte stream over the punched UDP
-  socket (no QUIC — stdlib only). `DRONE_HOLEPUNCH_ENABLED` gates it.
+`DownloadRequest`, `TransferContext`). `tailnet.py` (address detection, no settings
+gate — presence of a route is the gate) backs the tailnet half of tier 1.
 
 **Preserved invariants:** the one-active-download queue, progress, cancel, resume,
-hash verify, and cached-MD5 behavior are all unchanged — only *how the socket is
-obtained* moved behind the selector. See `drone-edge-networking` skill.
+hash verify, and cached-MD5 behavior are unchanged across both tiers. See the
+`drone-edge-networking` skill (covers this transport layer despite the name —
+kept for continuity with the retired Edge-networking work it replaced) for the
+full selection rules and the note on a sibling-repo test that still imports the
+now-deleted Edge relay modules from this repo.
 
 ## How the networking fits together
 
-The Drone holds one outbound mux to the Edge. To pull an asset: ask the control
-plane to authorize → get a short-lived token → `send_transfer_request` over the
-mux → the Edge offers it to the sender → both sides try transports best-first
-(`LAN → direct-public → hole-punch → relay`). Direct/LAN/hole-punch reuse
-cert-pinned mTLS `/peer/*`; relay runs `assetfetch` over the mux and the bytes are
-relayed Drone↔Drone (the Edge never sees plaintext on the other tiers; relay legs
-are TLS to the Edge). Bytes never touch the control plane.
-
-**Without the Edge (`DRONE_EDGE_ENABLED` off / `enable_edge=false`):** the relay
-tier is dropped and the selector is `[LAN-direct, direct-public]`. **Same-LAN P2P
-still works** — LAN-direct compares the peer's public IP (Overmind metadata)
-against this drone's own (`_build_local_ip_addresses`, not the Edge) and connects
-over the local mTLS path. **Cross-network P2P does not** unless the peer is
-port-forwarded *and* Overmind's reachability probe is on (which auto-defaults on
-when there's no Edge). So: one-LAN fleet → no Edge needed; multi-site fleet → run
-the Edge (or self-host it) or go back to port-forwarding. Hole-punch + relay both
-require the Edge.
+To pull an asset: the user picks a paired peer (or the swarm/transfers page picks
+one implicitly for a single known source) → `DownloadManager` enqueues the job →
+`TransportSelector` tries LAN/tailnet-direct, then direct-public, reusing
+cert-pinned mTLS `/peer/*` on both tiers. There is no relay of any kind — if a peer
+is neither on the same LAN/tailnet nor port-forwarded, it is simply unreachable.
+**Same-LAN P2P** works out of the box (same-public-IP detection, no config).
+**Cross-network P2P** needs either a shared Tailscale tailnet (recommended, zero
+router config) or the peer port-forwarded for the direct-WAN fallback.
 
 ## Conventions
 
 - **stdlib only** — no new third-party imports; if you reach for one, find a
-  stdlib equivalent (this is why hole-punch uses hand-rolled ARQ, not QUIC).
+  stdlib equivalent.
 - **UI:** Bootstrap 5.3 dark theme; `table table-sm align-middle` in
-  `table-responsive`; always `escapeHtml` user data. Mirror Overmind's
-  branding/paging. See `bff-ui-theme-functionality` skill.
+  `table-responsive`; always `escapeHtml` user data. Match the existing Drone
+  UI's branding/paging conventions. See `bff-ui-theme-functionality` skill.
 - `drone_api.py` is being **actively decomposed** into the `app/` subpackages above
   (via the re-export shim). Land new code in the fitting subpackage, not the shim;
   when you touch a cohesive cluster still in `drone_api.py`, prefer extracting it

@@ -12,28 +12,28 @@ from pathlib import Path
 
 try:
     from ..app_version import drone_app_version as _drone_app_version
+    from ..common.http_errors import _format_http_error
     from ..common.logtail import _tail_lines
     from ..device.tailnet_service import tailnet_status
     from ..device.pixen import is_pixen_installed as _is_pixen_installed
     from ..device.pixen import pixen_script_path as _pixen_script_path
     from ..device.device_control import _apply_audio_volume, _apply_screen_mode, _get_audio_volume, _get_screen_mode
     from ..device.system_metrics import _collect_gpu_info, _collect_performance_metrics, _sample_speed
-    from ..overmind.overmind_client import _format_overmind_error
-    from ..overmind.overmind_game_logs import (
+    from ..device.game_activity import (
         load_gameplay_history as _load_gameplay_history,
         pending_game_event_count as _pending_game_event_count,
     )
     from ..transfer.drone_network import _get_router_ip_address
 except ImportError:  # pragma: no cover - direct script execution fallback
     from app_version import drone_app_version as _drone_app_version  # type: ignore
+    from common.http_errors import _format_http_error  # type: ignore
     from common.logtail import _tail_lines  # type: ignore
     from device.tailnet_service import tailnet_status  # type: ignore
     from device.pixen import is_pixen_installed as _is_pixen_installed  # type: ignore
     from device.pixen import pixen_script_path as _pixen_script_path  # type: ignore
     from device.device_control import _apply_audio_volume, _apply_screen_mode, _get_audio_volume, _get_screen_mode  # type: ignore
     from device.system_metrics import _collect_gpu_info, _collect_performance_metrics, _sample_speed  # type: ignore
-    from overmind.overmind_client import _format_overmind_error  # type: ignore
-    from overmind.overmind_game_logs import (  # type: ignore
+    from device.game_activity import (  # type: ignore
         load_gameplay_history as _load_gameplay_history,
         pending_game_event_count as _pending_game_event_count,
     )
@@ -57,7 +57,7 @@ class HandlersDiagnosticsMixin:
             "tailscaled": ["/userdata/system/logs/tailscaled.log"],
             "drone_stdout": [str((self.settings.log_dir / self.settings.stdout_log_file).resolve())],
             "drone_stderr": [str((self.settings.log_dir / self.settings.stderr_log_file).resolve())],
-            "drone_overmind": [str((self.settings.log_dir / self.settings.overmind_log_file).resolve())],
+            "drone_activity": [str((self.settings.log_dir / self.settings.activity_log_file).resolve())],
         }
 
         def _resolve_userdata_path(candidate: str) -> str:
@@ -171,7 +171,7 @@ class HandlersDiagnosticsMixin:
                 },
             )
         except Exception as error:
-            self._send_json(500, {"error": _format_overmind_error(error)})
+            self._send_json(500, {"error": _format_http_error(error)})
 
     def _handle_admin_system_info(self, include_speed: bool = False) -> None:
         router_ip_address = _get_router_ip_address() or "Unavailable"
@@ -244,8 +244,7 @@ class HandlersDiagnosticsMixin:
         if self.settings.use_fake_data:
             fake_router_ip_address = router_ip_address if router_ip_address != "Unavailable" else "192.168.1.1"
             entries = [
-                {"key": "Machine ID", "value": self.settings.overmind_device_id},
-                {"key": "Integrated with Overmind", "value": "yes" if self._load_overmind_config().get("integration_enabled") else "no"},
+                {"key": "Machine ID", "value": self.settings.device_id},
                 {"key": "Batocera Version", "value": "v43-dev (Fake)"},
                 {"key": "Model", "value": "Batocera DevBox (Fake)"},
                 {"key": "System", "value": "Linux 6.6.0-fake"},
@@ -279,8 +278,7 @@ class HandlersDiagnosticsMixin:
                 "network_ip_address": "192.168.1.123",
                 "router_ip_address": fake_router_ip_address,
                 "battery": "N/A",
-                "machine_id": self.settings.overmind_device_id,
-                "overmind_integrated": "yes" if self._load_overmind_config().get("integration_enabled") else "no",
+                "machine_id": self.settings.device_id,
                 "drone_app_version": _drone_app_version(),
                 "pixen_installed": pixen_installed,
                 "pixen_script_path": pixen_script,
@@ -367,9 +365,7 @@ class HandlersDiagnosticsMixin:
                 elif key_lower == "battery":
                     fields["battery"] = value
 
-            overmind_integrated = "yes" if self._load_overmind_config().get("integration_enabled") else "no"
-            entries.insert(0, {"key": "Integrated with Overmind", "value": overmind_integrated})
-            entries.insert(0, {"key": "Machine ID", "value": self.settings.overmind_device_id})
+            entries.insert(0, {"key": "Machine ID", "value": self.settings.device_id})
             entries.append({"key": "PixN Installed", "value": "yes" if pixen_installed else "no"})
             if not fields.get("router_ip_address"):
                 router_entry = {"key": "Router IP Address", "value": router_ip_address}
@@ -386,8 +382,7 @@ class HandlersDiagnosticsMixin:
                 else:
                     entries.insert(network_index + 1, router_entry)
                 fields["router_ip_address"] = router_ip_address
-            fields["machine_id"] = self.settings.overmind_device_id
-            fields["overmind_integrated"] = overmind_integrated
+            fields["machine_id"] = self.settings.device_id
             fields["drone_app_version"] = _drone_app_version()
             fields["pixen_installed"] = pixen_installed
             fields["pixen_script_path"] = pixen_script
@@ -414,10 +409,8 @@ class HandlersDiagnosticsMixin:
                 },
             )
         except Exception as error:
-            overmind_integrated = "yes" if self._load_overmind_config().get("integration_enabled") else "no"
             entries = [
-                {"key": "Machine ID", "value": self.settings.overmind_device_id},
-                {"key": "Integrated with Overmind", "value": overmind_integrated},
+                {"key": "Machine ID", "value": self.settings.device_id},
                 {"key": "Router IP Address", "value": router_ip_address},
                 {"key": "PixN Installed", "value": "yes" if pixen_installed else "no"},
                 {"key": "System Info", "value": f"batocera-info unavailable: {str(error)}"},
@@ -430,8 +423,7 @@ class HandlersDiagnosticsMixin:
                     "lines": raw.splitlines(),
                     "entries": entries,
                     "fields": {
-                        "machine_id": self.settings.overmind_device_id,
-                        "overmind_integrated": overmind_integrated,
+                        "machine_id": self.settings.device_id,
                         "router_ip_address": router_ip_address,
                         "drone_app_version": _drone_app_version(),
                         "pixen_installed": pixen_installed,
@@ -487,7 +479,5 @@ class HandlersDiagnosticsMixin:
         self._send_json(200, {"screen_mode": mode, "emulationstation_restarted": restarted})
 
     # HandlersNetworkMixin methods now live in web/handlers_network.py (composed onto RomRequestHandler).
-
-    # HandlersOvermindMixin methods now live in web/handlers_overmind.py (composed onto RomRequestHandler).
 
     # HandlersConfigMixin methods now live in web/handlers_config.py (composed onto RomRequestHandler).

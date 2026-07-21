@@ -55,15 +55,8 @@ def _resolve_tls_material(settings: Settings) -> Tuple[Path, Path]:
     return cert_file, key_file
 
 
-# DroneCertificateManager (local self-signed cert lifecycle + rotation CSR)
+# DroneCertificateManager (local self-signed cert lifecycle + rotation)
 # now lives in transfer/drone_tls.py (re-exported below).
-
-
-# Overmind config internals (_load_overmind_config_for_settings, link-state, onboarding)
-# now live in overmind/overmind_config.py (re-exported above).
-
-
-# _record_processed_overmind_action now lives in overmind/registration.py (re-exported).
 
 
 # drone<->peer connectivity (cert trust/pinning, peer HTTP client, health, pairing)

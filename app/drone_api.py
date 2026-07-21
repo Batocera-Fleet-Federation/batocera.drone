@@ -52,26 +52,17 @@ try:
         is_ip_literal as _is_ip_literal,
     )
     from .transfer import local_network as _local_network
-    from .overmind.overmind_filesystem import (
-        filesystem_events as _build_filesystem_events,
-        filesystem_snapshot as _filesystem_snapshot,
-    )
-    from .overmind.overmind_game_logs import commit_game_log_cursors as _commit_game_log_cursors
-    from .overmind.overmind_game_logs import collect_game_logs as _build_game_log_payload
-    from .overmind.overmind_game_logs import collect_game_event_sessions as _collect_game_event_sessions
-    from .overmind.overmind_game_logs import delete_game_event_spool as _delete_game_event_spool
-    from .overmind.overmind_game_logs import GameProcessMonitor
-    from .overmind.overmind_game_logs import load_gameplay_history as _load_gameplay_history
-    from .overmind.overmind_game_logs import pending_game_event_count as _pending_game_event_count
-    from .overmind.overmind_reporting import (
-        collect_emulator_configs as _collect_emulator_configs,
-        collect_log_sources as _collect_log_sources,
-        commit_emulator_config_fingerprints as _commit_emulator_config_fingerprints,
-        commit_log_cursors as _commit_log_cursors,
+    from .device.game_activity import commit_game_log_cursors as _commit_game_log_cursors
+    from .device.game_activity import collect_game_logs as _build_game_log_payload
+    from .device.game_activity import collect_game_event_sessions as _collect_game_event_sessions
+    from .device.game_activity import delete_game_event_spool as _delete_game_event_spool
+    from .device.game_activity import GameProcessMonitor
+    from .device.game_activity import load_gameplay_history as _load_gameplay_history
+    from .device.game_activity import pending_game_event_count as _pending_game_event_count
+    from .device.emulator_configs import (
         list_emulator_config_files as _list_emulator_config_files,
         read_emulator_config_file as _read_emulator_config_file,
     )
-    from .transfer.peer_selection import select_best_peer as _select_best_peer
     from .web.openapi_spec import build_openapi_spec
     from .web.route_config import API_PREFIX, api_url
     from .storage.rom_metadata_store import (
@@ -100,7 +91,6 @@ try:
         append_event as _append_state_event,
         database_path as _state_database_path,
         database_path_for_legacy_file as _state_database_path_for_legacy_file,
-        load_events as _load_state_events,
         load_payload as _load_state_payload,
         save_payload as _save_state_payload,
     )
@@ -117,10 +107,6 @@ try:
         TransferContext,
         TransportSelector,
     )
-    from .transport.mux_client import MuxClient, MuxSession, connect_tls, parse_edge_endpoint
-    from .transport import assetfetch as _assetfetch
-    from .transport import relay_transfer as _relay_transfer
-    from .transport import holepunch as _holepunch
     from .transport.lan import LanDirectTransport
     from .web.ui_routes import UiRoutesMixin
 except ImportError:
@@ -142,26 +128,17 @@ except ImportError:
         is_ip_literal as _is_ip_literal,
     )
     from transfer import local_network as _local_network  # type: ignore
-    from overmind.overmind_filesystem import (  # type: ignore
-        filesystem_events as _build_filesystem_events,
-        filesystem_snapshot as _filesystem_snapshot,
-    )
-    from overmind.overmind_game_logs import commit_game_log_cursors as _commit_game_log_cursors  # type: ignore
-    from overmind.overmind_game_logs import collect_game_logs as _build_game_log_payload  # type: ignore
-    from overmind.overmind_game_logs import collect_game_event_sessions as _collect_game_event_sessions  # type: ignore
-    from overmind.overmind_game_logs import delete_game_event_spool as _delete_game_event_spool  # type: ignore
-    from overmind.overmind_game_logs import GameProcessMonitor  # type: ignore
-    from overmind.overmind_game_logs import load_gameplay_history as _load_gameplay_history  # type: ignore
-    from overmind.overmind_game_logs import pending_game_event_count as _pending_game_event_count  # type: ignore
-    from overmind.overmind_reporting import (  # type: ignore
-        collect_emulator_configs as _collect_emulator_configs,
-        collect_log_sources as _collect_log_sources,
-        commit_emulator_config_fingerprints as _commit_emulator_config_fingerprints,
-        commit_log_cursors as _commit_log_cursors,
+    from device.game_activity import commit_game_log_cursors as _commit_game_log_cursors  # type: ignore
+    from device.game_activity import collect_game_logs as _build_game_log_payload  # type: ignore
+    from device.game_activity import collect_game_event_sessions as _collect_game_event_sessions  # type: ignore
+    from device.game_activity import delete_game_event_spool as _delete_game_event_spool  # type: ignore
+    from device.game_activity import GameProcessMonitor  # type: ignore
+    from device.game_activity import load_gameplay_history as _load_gameplay_history  # type: ignore
+    from device.game_activity import pending_game_event_count as _pending_game_event_count  # type: ignore
+    from device.emulator_configs import (  # type: ignore
         list_emulator_config_files as _list_emulator_config_files,
         read_emulator_config_file as _read_emulator_config_file,
     )
-    from transfer.peer_selection import select_best_peer as _select_best_peer  # type: ignore
     from web.openapi_spec import build_openapi_spec  # type: ignore
     from web.route_config import API_PREFIX, api_url  # type: ignore
     from storage.rom_metadata_store import (  # type: ignore
@@ -190,7 +167,6 @@ except ImportError:
         append_event as _append_state_event,
         database_path as _state_database_path,
         database_path_for_legacy_file as _state_database_path_for_legacy_file,
-        load_events as _load_state_events,
         load_payload as _load_state_payload,
         save_payload as _save_state_payload,
     )
@@ -207,10 +183,6 @@ except ImportError:
         TransferContext,
         TransportSelector,
     )
-    from transport.mux_client import MuxClient, MuxSession, connect_tls, parse_edge_endpoint  # type: ignore
-    from transport import assetfetch as _assetfetch  # type: ignore
-    from transport import relay_transfer as _relay_transfer  # type: ignore
-    from transport import holepunch as _holepunch  # type: ignore
     from transport.lan import LanDirectTransport  # type: ignore
     from web.ui_routes import UiRoutesMixin  # type: ignore
 
@@ -251,7 +223,7 @@ try:
         _TeeRotatingStream,
         _TimestampFormatter,
         _configure_rotating_logs,
-        _overmind_log,
+        _drone_log,
     )
 except ImportError:
     if __package__ not in (None, ""):
@@ -269,7 +241,7 @@ except ImportError:
         _TeeRotatingStream,
         _TimestampFormatter,
         _configure_rotating_logs,
-        _overmind_log,
+        _drone_log,
     )
 
 try:
@@ -457,25 +429,11 @@ except ImportError:
 
 
 try:
-    from .overmind.overmind_client import (
-        _drone_client_ssl_context,
-        _format_overmind_error,
-        _overmind_delete_json,
-        _overmind_get_json,
-        _overmind_post_json,
-        _overmind_post_json_with_status,
-    )
+    from .common.http_errors import _format_http_error
 except ImportError:
     if __package__ not in (None, ""):
         raise
-    from overmind.overmind_client import (  # type: ignore
-        _drone_client_ssl_context,
-        _format_overmind_error,
-        _overmind_delete_json,
-        _overmind_get_json,
-        _overmind_post_json,
-        _overmind_post_json_with_status,
-    )
+    from common.http_errors import _format_http_error  # type: ignore
 
 
 try:
@@ -593,28 +551,6 @@ except ImportError:
 
 
 try:
-    from .roms.rom_inventory import (
-        ROM_METADATA_UPLOAD_CHUNK_SIZE,
-        _chunk_rom_metadata_delta,
-        _chunk_rom_metadata_inventory,
-        _json_payload_size_bytes,
-        _rom_metadata_inventory_id,
-        _wire_asset_rows,
-    )
-except ImportError:
-    if __package__ not in (None, ""):
-        raise
-    from roms.rom_inventory import (  # type: ignore
-        ROM_METADATA_UPLOAD_CHUNK_SIZE,
-        _chunk_rom_metadata_delta,
-        _chunk_rom_metadata_inventory,
-        _json_payload_size_bytes,
-        _rom_metadata_inventory_id,
-        _wire_asset_rows,
-    )
-
-
-try:
     from .transfer.drone_network import (
         _drone_advertised_api_port,
         _drone_network_payload,
@@ -655,22 +591,6 @@ except ImportError:
 
 
 try:
-    from .overmind.collectors import (
-        OVERMIND_EVENT_TYPES,
-        _collect_game_logs,
-        _filesystem_events,
-    )
-except ImportError:
-    if __package__ not in (None, ""):
-        raise
-    from overmind.collectors import (  # type: ignore
-        OVERMIND_EVENT_TYPES,
-        _collect_game_logs,
-        _filesystem_events,
-    )
-
-
-try:
     from .transfer.drone_network import (
         _certificate_pem_fingerprint,
         _network_mode,
@@ -685,79 +605,6 @@ except ImportError:
 
 
 try:
-    from .overmind.overmind_config import (
-        FAKE_OVERMIND_EMAIL,
-        FAKE_OVERMIND_PASSWORD,
-        FAKE_OVERMIND_TOKEN,
-        build_overmind_status,
-        mask_secret,
-        overmind_config_path,
-        overmind_load_config,
-        overmind_load_json_file,
-        overmind_peer_results_path,
-        overmind_public_payload,
-        overmind_save_config,
-        overmind_swarm_path,
-        _load_overmind_config_for_settings,
-        _log_overmind_onboarding,
-        _mark_overmind_auth_failed,
-        _normalize_overmind_link_state,
-        _overmind_actions_path_for_settings,
-        _overmind_config_path_for_settings,
-        _overmind_onboarding_context,
-        _overmind_peer_results_path_for_settings,
-        _overmind_swarm_path_for_settings,
-        _read_json_file,
-        _safe_token_fingerprint,
-        _save_overmind_runtime_config,
-        _strip_fake_overmind_values,
-    )
-except ImportError:
-    if __package__ not in (None, ""):
-        raise
-    from overmind.overmind_config import (  # type: ignore
-        FAKE_OVERMIND_EMAIL,
-        FAKE_OVERMIND_PASSWORD,
-        FAKE_OVERMIND_TOKEN,
-        build_overmind_status,
-        mask_secret,
-        overmind_config_path,
-        overmind_load_config,
-        overmind_load_json_file,
-        overmind_peer_results_path,
-        overmind_public_payload,
-        overmind_save_config,
-        overmind_swarm_path,
-        _load_overmind_config_for_settings,
-        _log_overmind_onboarding,
-        _mark_overmind_auth_failed,
-        _normalize_overmind_link_state,
-        _overmind_actions_path_for_settings,
-        _overmind_config_path_for_settings,
-        _overmind_onboarding_context,
-        _overmind_peer_results_path_for_settings,
-        _overmind_swarm_path_for_settings,
-        _read_json_file,
-        _safe_token_fingerprint,
-        _save_overmind_runtime_config,
-        _strip_fake_overmind_values,
-    )
-
-
-# FAKE_OVERMIND_* moved to overmind/overmind_config.py (re-exported above).
-try:
-    from .overmind.action_poller import (
-        _start_overmind_action_poller,
-    )
-except ImportError:
-    if __package__ not in (None, ""):
-        raise
-    from overmind.action_poller import (  # type: ignore
-        _start_overmind_action_poller,
-    )
-
-
-try:
     from .device.system_info import (
         _collect_system_info_payload,
     )
@@ -766,18 +613,6 @@ except ImportError:
         raise
     from device.system_info import (  # type: ignore
         _collect_system_info_payload,
-    )
-
-
-try:
-    from .roms.rom_collect import (
-        _collect_rom_metadata,
-    )
-except ImportError:
-    if __package__ not in (None, ""):
-        raise
-    from roms.rom_collect import (  # type: ignore
-        _collect_rom_metadata,
     )
 
 
@@ -796,45 +631,21 @@ except ImportError:
 
 
 try:
-    from .overmind.rom_sync import (
-        _complete_local_rom_metadata_cache,
-        _defer_rom_metadata_upload,
-        _poll_rom_metadata_once,
-        _sync_rom_metadata_to_overmind,
-        _sync_rom_metadata_to_overmind_locked,
-    )
-except ImportError:
-    if __package__ not in (None, ""):
-        raise
-    from overmind.rom_sync import (  # type: ignore
-        _complete_local_rom_metadata_cache,
-        _defer_rom_metadata_upload,
-        _poll_rom_metadata_once,
-        _sync_rom_metadata_to_overmind,
-        _sync_rom_metadata_to_overmind_locked,
-    )
-
-
-try:
     from .roms.rom_scanner import (
+        _complete_local_rom_metadata_cache,
         _hash_rom_metadata_batches,
         _poll_rom_metadata_cache,
+        _poll_rom_metadata_once,
     )
 except ImportError:
     if __package__ not in (None, ""):
         raise
     from roms.rom_scanner import (  # type: ignore
+        _complete_local_rom_metadata_cache,
         _hash_rom_metadata_batches,
         _poll_rom_metadata_cache,
+        _poll_rom_metadata_once,
     )
-
-
-try:
-    from .overmind.saves_sync import _sync_saves_to_overmind
-except ImportError:
-    if __package__ not in (None, ""):
-        raise
-    from overmind.saves_sync import _sync_saves_to_overmind  # type: ignore
 
 
 try:
@@ -858,47 +669,11 @@ except ImportError:
 
 
 try:
-    from .overmind.heartbeat_sync import (
-        _local_asset_thumbprints,
-        _local_saves_thumbprint,
-        _maybe_request_asset_push_from_heartbeat,
-        _maybe_request_saves_push_from_heartbeat,
-        _snapshot_asset_thumbprints,
-    )
+    from .transfer.peer_workers import _start_local_network_workers
 except ImportError:
     if __package__ not in (None, ""):
         raise
-    from overmind.heartbeat_sync import (  # type: ignore
-        _local_asset_thumbprints,
-        _local_saves_thumbprint,
-        _maybe_request_asset_push_from_heartbeat,
-        _maybe_request_saves_push_from_heartbeat,
-        _snapshot_asset_thumbprints,
-    )
-
-
-try:
-    from .transfer.peer_workers import (
-        _probe_peer_public_ip,
-        _start_local_network_workers,
-        _start_peer_health_check_thread,
-    )
-except ImportError:
-    if __package__ not in (None, ""):
-        raise
-    from transfer.peer_workers import (  # type: ignore
-        _probe_peer_public_ip,
-        _start_local_network_workers,
-        _start_peer_health_check_thread,
-    )
-
-
-try:
-    from .overmind.actions import _execute_overmind_action
-except ImportError:
-    if __package__ not in (None, ""):
-        raise
-    from overmind.actions import _execute_overmind_action  # type: ignore
+    from transfer.peer_workers import _start_local_network_workers  # type: ignore
 
 
 try:
@@ -916,64 +691,24 @@ except ImportError:
 
 
 try:
-    from .transfer.edge_relay import (
-        _edge_mux_available,
-        _edge_stun_addr,
-        _edge_token_for,
-        _handle_transfer_offer,
-        _local_network_snapshot,
-        _maybe_holepunch,
-        _relay_download_rom,
-        _relay_fetch,
-        _request_transfer_session,
-        _serve_transfer_offer,
-        _start_edge_mux_client,
-    )
-except ImportError:
-    if __package__ not in (None, ""):
-        raise
-    from transfer.edge_relay import (  # type: ignore
-        _edge_mux_available,
-        _edge_stun_addr,
-        _edge_token_for,
-        _handle_transfer_offer,
-        _local_network_snapshot,
-        _maybe_holepunch,
-        _relay_download_rom,
-        _relay_fetch,
-        _request_transfer_session,
-        _serve_transfer_offer,
-        _start_edge_mux_client,
-    )
-
-
-try:
     from .transfer.peer_download import (
-        _best_peer_for_bios,
-        _best_peer_for_rom,
         _cached_rom_fingerprint_exists,
         _download_artwork_from_peer,
         _download_bios_from_peer,
         _download_rom_folder_from_peer,
         _download_rom_from_peer,
         _download_save_from_peer,
-        _post_download_state,
-        _post_rom_sync_activity,
     )
 except ImportError:
     if __package__ not in (None, ""):
         raise
     from transfer.peer_download import (  # type: ignore
-        _best_peer_for_bios,
-        _best_peer_for_rom,
         _cached_rom_fingerprint_exists,
         _download_artwork_from_peer,
         _download_bios_from_peer,
         _download_rom_folder_from_peer,
         _download_rom_from_peer,
         _download_save_from_peer,
-        _post_download_state,
-        _post_rom_sync_activity,
     )
 
 
@@ -996,15 +731,12 @@ except ImportError:
 try:
     from .transfer.peer_connectivity import (
         _check_peer,
-        _fetch_peer_certificate,
+        _drone_client_ssl_context,
         _is_ssl_url_error,
         _local_pair_peer,
         _local_peer_cert_cache_path,
         _peer_address,
         _peer_api_port,
-        _peer_cert_cache_dir,
-        _peer_cert_cache_path,
-        _peer_cert_meta_path,
         _peer_get_json,
         _peer_health_url,
         _peer_ssl_diagnostic,
@@ -1017,41 +749,18 @@ except ImportError:
         raise
     from transfer.peer_connectivity import (  # type: ignore
         _check_peer,
-        _fetch_peer_certificate,
+        _drone_client_ssl_context,
         _is_ssl_url_error,
         _local_pair_peer,
         _local_peer_cert_cache_path,
         _peer_address,
         _peer_api_port,
-        _peer_cert_cache_dir,
-        _peer_cert_cache_path,
-        _peer_cert_meta_path,
         _peer_get_json,
         _peer_health_url,
         _peer_ssl_diagnostic,
         _peer_trust_cafile,
         _public_local_peer,
         _save_local_peer_certificate,
-    )
-
-
-try:
-    from .overmind.registration import (
-        _record_processed_overmind_action,
-        _reclaim_overmind_token_after_unauthorized,
-        _register_or_claim_overmind_token,
-        _report_overmind_action_completion,
-        _summarize_overmind_result,
-    )
-except ImportError:
-    if __package__ not in (None, ""):
-        raise
-    from overmind.registration import (  # type: ignore
-        _record_processed_overmind_action,
-        _reclaim_overmind_token_after_unauthorized,
-        _register_or_claim_overmind_token,
-        _report_overmind_action_completion,
-        _summarize_overmind_result,
     )
 
 
@@ -1081,7 +790,6 @@ try:
         _load_automation_config,
         _normalize_idle_game_exit_config,
         _normalize_idle_volume_config,
-        _push_automation_config_to_overmind,
         _read_last_input_activity,
         _reset_idle_game_exit_armed_state,
         _reset_idle_volume_armed_state,
@@ -1107,7 +815,6 @@ except ImportError:
         _load_automation_config,
         _normalize_idle_game_exit_config,
         _normalize_idle_volume_config,
-        _push_automation_config_to_overmind,
         _read_last_input_activity,
         _reset_idle_game_exit_armed_state,
         _reset_idle_volume_armed_state,
@@ -1121,17 +828,13 @@ except ImportError:
     )
 
 
-_OVERMIND_POLLER_STARTED = False
 _ROM_METADATA_POLLER_STARTED = False
 _ROM_METADATA_WATCHER_STARTED = False
 _ROM_METADATA_WATCHER = None
 _SAVES_METADATA_WATCHER = None
-# File-only rotating stream for Overmind-related logs; configured in _configure_rotating_logs.
-# _OVERMIND_LOG_STREAM now lives in logging_setup.py
-_PEER_HEALTH_CHECK_THREAD_STARTED = False
+# File-only rotating stream for the Drone's own narration log; configured in
+# _configure_rotating_logs. _DRONE_ACTIVITY_LOG_STREAM now lives in logging_setup.py
 _LOCAL_NETWORK_WORKERS_STARTED = False
-_EDGE_MUX_STARTED = False
-# _EDGE_MUX_CLIENT (the persistent Edge connection) now lives in transfer/edge_relay.py.
 _GAME_PROCESS_MONITOR_STARTED = False
 _GAME_PROCESS_MONITOR = None
 _AUTOMATION_POLLER_STARTED = False
@@ -1142,23 +845,19 @@ _AUTOMATION_POLLER_STARTED = False
 # Shared mutable runtime singletons now live in common/runtime_state.py (re-exported):
 try:
     from .common.runtime_state import (
-        _ASSET_PUSH_REQUESTED,
         _GAMELIST_WRITE_LOCK,
         _ROM_METADATA_ACTIVE,
         _ROM_METADATA_LOCK,
         _ROM_METADATA_WAKE,
-        _SAVES_PUSH_REQUESTED,
     )
 except ImportError:
     if __package__ not in (None, ""):
         raise
     from common.runtime_state import (  # type: ignore
-        _ASSET_PUSH_REQUESTED,
         _GAMELIST_WRITE_LOCK,
         _ROM_METADATA_ACTIVE,
         _ROM_METADATA_LOCK,
         _ROM_METADATA_WAKE,
-        _SAVES_PUSH_REQUESTED,
     )
 _DOWNLOAD_MANAGER = None
 # _PERFORMANCE_METRICS_LAST_SAMPLE moved to device/system_metrics.py.
@@ -1176,27 +875,19 @@ except ImportError:
     if __package__ not in (None, ""):
         raise
     from roms.gamelist import ARTWORK_DUPLICATE_FILTER  # type: ignore
-# OVERMIND_EVENT_TYPES moved to overmind/collectors.py (re-exported).
 # DOWNLOAD_TERMINAL_STATUSES now lives in transfer/download_manager.py (its only user).
-PERSISTENT_OVERMIND_LOG_SOURCES = ("drone_stderr", "es_launch_stdout", "es_launch_stderr")
 # DOWNLOAD_PROGRESS_PUSH_SECONDS now lives in transfer/download_manager.py (its only user).
 PEER_CHECK_TIMEOUT_SECONDS = float(os.environ.get("DRONE_PEER_CHECK_TIMEOUT_SECONDS", "3"))
 # Browsing/copying a peer's inventory can scan a large library to build a page,
 # which far exceeds the quick health-check timeout. Give inventory reads a much
 # longer budget so big libraries don't surface as "read operation timed out".
 PEER_INVENTORY_TIMEOUT_SECONDS = float(os.environ.get("DRONE_PEER_INVENTORY_TIMEOUT_SECONDS", "120"))
-PEER_CHECK_INTERVAL_SECONDS = int(os.environ.get("DRONE_PEER_CHECK_INTERVAL_SECONDS", "300"))
-OVERMIND_SPEED_SAMPLE_SECONDS = int(os.environ.get("OVERMIND_SPEED_SAMPLE_SECONDS", "600"))
 # SPEED_TEST_DEFAULT_BASE_URL moved to device/system_metrics.py (re-exported above).
-OVERMIND_HEARTBEAT_SECONDS = int(os.environ.get("OVERMIND_POLL_SECONDS", "30"))
-OVERMIND_HEARTBEAT_TIMEOUT_SECONDS = max(10, int(os.environ.get("OVERMIND_HEARTBEAT_TIMEOUT_SECONDS", "20")))
-OVERMIND_CONFIG_REPORT_SECONDS = int(os.environ.get("OVERMIND_CONFIG_REPORT_SECONDS", "300"))
 ROM_METADATA_POLL_SECONDS = int(os.environ.get("ROM_METADATA_POLL_SECONDS", "300"))
 ROM_METADATA_INITIAL_DELAY_SECONDS = int(os.environ.get("ROM_METADATA_INITIAL_DELAY_SECONDS", "60"))
 ROM_METADATA_PROGRESS_SECONDS = float(os.environ.get("ROM_METADATA_PROGRESS_SECONDS", "30"))
 ROM_METADATA_PROGRESS_FILES = int(os.environ.get("ROM_METADATA_PROGRESS_FILES", "250"))
 ROM_METADATA_FINGERPRINT_BATCH_SIZE = max(1, int(os.environ.get("ROM_METADATA_FINGERPRINT_BATCH_SIZE", "250")))
-# ROM_METADATA_UPLOAD_CHUNK_SIZE moved to roms/rom_inventory.py (re-exported).
 # Cross-drone fingerprint constants + build_* helpers now live in fingerprint.py
 # (FINGERPRINT_ALGORITHM / *_SAMPLE_BYTES / *_SMALL_FILE_BYTES, re-exported above).
 # Wall-clock budget for fingerprinting within a single poll. Fingerprinting is cheap
@@ -1214,7 +905,6 @@ ROM_METADATA_WATCH_MAX_DELAY_SECONDS = max(
 )
 # Auth + rate-limit constants (DRONE_AUTH_BLOCK_* / DRONE_UNAUTH_RATE_LIMIT_* /
 # DRONE_LOG_UNAUTHORIZED_REQUESTS) now live in auth.py (re-exported above).
-OVERMIND_UPLOAD_TIMEOUT_SECONDS = max(10, int(os.environ.get("OVERMIND_UPLOAD_TIMEOUT_SECONDS", "60")))
 # LAUNCHBOX_PLATFORM_ALIASES + LAUNCHBOX_FIELD_TYPES moved to scrapers.py.
 
 # Env-parsing helpers (_require_env/_require_any_env/_env_bool/_parse_port_list)
@@ -1243,7 +933,7 @@ OVERMIND_UPLOAD_TIMEOUT_SECONDS = max(10, int(os.environ.get("OVERMIND_UPLOAD_TI
 
 
 # Logging primitives (_TimestampFormatter, _TeeRotatingStream,
-# _configure_rotating_logs, _overmind_log) and the _OVERMIND_LOG_STREAM global
+# _configure_rotating_logs, _drone_log) and the _DRONE_ACTIVITY_LOG_STREAM global
 # now live in logging_setup.py (re-exported near the top of this module).
 
 
@@ -1394,10 +1084,6 @@ OPENAPI_SPEC = build_openapi_spec(_drone_app_version(), API_PREFIX)
 # backs both the legacy stdlib handler methods and the FastAPI routes (app/api_app.py). Kept in
 # this module to reuse the existing helpers without an import cycle.
 
-# Overmind config public API (overmind_load_config/save/status, mask_secret, ...)
-# now lives in overmind/overmind_config.py (re-exported above).
-
-
 try:
     from .web.handlers_peer import HandlersPeerMixin
 except ImportError:
@@ -1428,14 +1114,6 @@ except ImportError:
     if __package__ not in (None, ""):
         raise
     from web.handlers_network import HandlersNetworkMixin  # type: ignore
-
-
-try:
-    from .web.handlers_overmind import HandlersOvermindMixin
-except ImportError:
-    if __package__ not in (None, ""):
-        raise
-    from web.handlers_overmind import HandlersOvermindMixin  # type: ignore
 
 
 try:
@@ -1494,7 +1172,7 @@ except ImportError:
     from web.handlers_remote_admin import HandlersRemoteAdminMixin  # type: ignore
 
 
-class RomRequestHandler(HandlersSystemMixin, HandlersDownloadsMixin, HandlersDiagnosticsMixin, HandlersConfigMixin, HandlersOvermindMixin, HandlersNetworkMixin, HandlersArtworkMixin, HandlersContentMixin, ThemeMetaMixin, HandlersEsCollectionsMixin, HandlersPeerMixin, HandlersRemoteAdminMixin, ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
+class RomRequestHandler(HandlersSystemMixin, HandlersDownloadsMixin, HandlersDiagnosticsMixin, HandlersConfigMixin, HandlersNetworkMixin, HandlersArtworkMixin, HandlersContentMixin, ThemeMetaMixin, HandlersEsCollectionsMixin, HandlersPeerMixin, HandlersRemoteAdminMixin, ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
     server_version = "DroneApp/4.0"
     openapi_spec = OPENAPI_SPEC
     # Per-connection idle timeout (applied to the socket in BaseHTTPRequestHandler.setup).
@@ -1742,32 +1420,8 @@ class RomRequestHandler(HandlersSystemMixin, HandlersDownloadsMixin, HandlersDia
     def _now_iso(self) -> str:
         return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
-    def _overmind_config_path(self) -> Path:
-        return overmind_config_path(self.settings)
-
-    def _overmind_actions_path(self) -> Path:
-        return Path(os.environ.get(
-            "OVERMIND_ACTION_LOG_FILE",
-            str(self.settings.userdata_root / "system" / "drone-app" / "overmind_actions.log"),
-        )).resolve()
-
-    def _overmind_swarm_path(self) -> Path:
-        return overmind_swarm_path(self.settings)
-
-    def _overmind_peer_results_path(self) -> Path:
-        return overmind_peer_results_path(self.settings)
-
     def _rom_fingerprint_cache_path(self) -> Path:
         return (self.settings.userdata_root / "system" / "drone-app" / "rom_fingerprint_cache.json").resolve()
-
-    def _mask_secret(self, value: str) -> str:
-        return mask_secret(value)
-
-    def _load_overmind_config(self) -> dict:
-        return overmind_load_config(self.settings)
-
-    def _save_overmind_config(self, payload: dict) -> None:
-        overmind_save_config(self.settings, payload)
 
     def _load_json_file(self, path: Path, fallback):
         return _load_state_payload(
@@ -1785,16 +1439,6 @@ class RomRequestHandler(HandlersSystemMixin, HandlersDownloadsMixin, HandlersDia
         )
         path.unlink(missing_ok=True)
 
-    def _overmind_public_payload(self, config: dict) -> dict:
-        return overmind_public_payload(self.settings, config)
-
-    def _load_processed_overmind_actions(self) -> List[dict]:
-        return _load_state_events(
-            _state_database_path(self.settings.userdata_root),
-            "overmind_actions",
-            legacy_path=self._overmind_actions_path(),
-        )
-
     # HandlersSystemMixin methods now live in web/handlers_system.py (composed onto RomRequestHandler).
 
     def _handle_public_health(self) -> None:
@@ -1802,7 +1446,7 @@ class RomRequestHandler(HandlersSystemMixin, HandlersDownloadsMixin, HandlersDia
             200,
             {
                 "status": "ok",
-                "drone_id": self.settings.overmind_device_id,
+                "drone_id": self.settings.device_id,
                 "checked_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
             },
         )
@@ -1826,58 +1470,24 @@ class RomRequestHandler(HandlersSystemMixin, HandlersDownloadsMixin, HandlersDia
         self._send_json(200, {"system": system, "unique_id": unique_id, "fingerprint": fingerprint_value, "cached": bool(cache.get(key))})
 
     def _peer_request_authorized(self) -> bool:
-        if _local_network.is_local_mode(self.settings):
-            if self.settings.http_only:
-                if _env_bool(False, "DRONE_LOCAL_ALLOW_INSECURE_HTTP"):
-                    return True
-                self._send_json(403, {"error": "local-network peer API requires HTTPS and a paired client certificate"})
-                return False
-            try:
-                der = self.connection.getpeercert(binary_form=True) if hasattr(self.connection, "getpeercert") else None
-            except Exception:
-                der = None
-            fingerprint = hashlib.sha256(der).hexdigest() if der else ""
-            trusted = {
-                str(peer.get("certificate_fingerprint") or "").strip().lower()
-                for peer in _local_network.paired_peers(self.settings)
-            }
-            if fingerprint and fingerprint.lower() in trusted:
+        if self.settings.http_only:
+            if _env_bool(False, "DRONE_LOCAL_ALLOW_INSECURE_HTTP"):
                 return True
-            if not _local_network.is_overmind_mode(self.settings):
-                self._send_json(403, {"error": "paired client certificate required"})
-                return False
-        if self.settings.drone_mtls_enabled:
-            cert = self.connection.getpeercert() if hasattr(self.connection, "getpeercert") else None
-            if not cert:
-                self._send_json(403, {"error": "client certificate required"})
-                return False
-            try:
-                der = self.connection.getpeercert(binary_form=True)
-            except Exception:
-                der = None
-            fingerprint = hashlib.sha256(der).hexdigest().lower() if der else ""
-            local_match = next(
-                (
-                    peer
-                    for peer in _local_network.paired_peers(self.settings)
-                    if str(peer.get("certificate_fingerprint") or "").strip().lower() == fingerprint
-                ),
-                None,
-            )
-            if local_match:
-                peer_id = str(local_match.get("drone_id") or "")
-                approved_path = _peer_cert_cache_path(self.settings, peer_id)
-                try:
-                    independently_approved = (
-                        approved_path.exists()
-                        and _certificate_pem_fingerprint(approved_path.read_text(encoding="utf-8", errors="ignore")).lower() == fingerprint
-                    )
-                except Exception:
-                    independently_approved = False
-                if not independently_approved:
-                    self._send_json(403, {"error": "Local Network pairing trust is inactive in Overmind mode"})
-                    return False
-        return True
+            self._send_json(403, {"error": "local-network peer API requires HTTPS and a paired client certificate"})
+            return False
+        try:
+            der = self.connection.getpeercert(binary_form=True) if hasattr(self.connection, "getpeercert") else None
+        except Exception:
+            der = None
+        fingerprint = hashlib.sha256(der).hexdigest() if der else ""
+        trusted = {
+            str(peer.get("certificate_fingerprint") or "").strip().lower()
+            for peer in _local_network.paired_peers(self.settings)
+        }
+        if fingerprint and fingerprint.lower() in trusted:
+            return True
+        self._send_json(403, {"error": "paired client certificate required"})
+        return False
 
     # peer-serving handlers (/peer/* mTLS endpoints) now live in the HandlersPeerMixin
     # (web/handlers_peer.py), composed onto RomRequestHandler.
@@ -1942,30 +1552,10 @@ def _resolve_userdata_path(settings: Settings, candidate: str) -> Path:
     return Path(candidate).resolve()
 
 
-# _collect_rom_metadata now live in roms/rom_collect.py (re-exported below).
-
-
 def _kick_asset_metadata_sync_after_download(settings: Settings, repository: "RomRepository", config: dict, reason: str) -> None:
-    if not _local_network.is_overmind_mode(settings):
-        _ROM_METADATA_WAKE.set()
-        return
-    base_url = str(config.get("overmind_url") or "").strip().rstrip("/")
-    token = str(config.get("overmind_token") or "").strip()
-    if not base_url or not token:
-        return
-
-    def run() -> None:
-        try:
-            result = _sync_rom_metadata_to_overmind(settings, repository, config, base_url, token)
-            _overmind_log(
-                f"Asset metadata follow-up sync completed: reason={reason} status={result.get('status')} changed={result.get('changed')}"
-            )
-        except Exception as error:
-            _overmind_log(
-                f"Asset metadata follow-up sync failed: reason={reason} error={_format_overmind_error(error)}"
-            )
-
-    Thread(target=run, name="asset-metadata-follow-up-sync", daemon=True).start()
+    """Wake the local ROM-metadata poller so a just-downloaded asset is picked up
+    without waiting out the full poll interval."""
+    _ROM_METADATA_WAKE.set()
 
 
 # DownloadManager (queue + transport-tier dispatch) + _directpublic_fetch now live
@@ -1989,18 +1579,8 @@ def _resolve_asset_root(settings: Settings, kind: str) -> Optional[Path]:
     return None
 
 
-# Edge mux client + relay/hole-punch transfer tiers now live in
-# transfer/edge_relay.py (re-exported below).
-
-
-# Direct-peer asset downloads (state helpers + best-peer ranking + _download_*_from_peer)
-# now live in transfer/peer_download.py (re-exported below).
-
-
-# _execute_overmind_action (Overmind action dispatcher) now lives in overmind/actions.py (re-exported below).
-
-
-# _start_overmind_action_poller now live in overmind/action_poller.py (re-exported below).
+# Direct-peer asset downloads (_download_*_from_peer) now live in
+# transfer/peer_download.py (re-exported below).
 
 
 def _start_rom_metadata_poller(settings: Settings, repository: "RomRepository") -> None:
@@ -2031,13 +1611,13 @@ def _start_rom_metadata_poller(settings: Settings, repository: "RomRepository") 
             except (HTTPError, URLError) as error:
                 status_part = f" status={error.code}" if isinstance(error, HTTPError) else ""
                 print(
-                    f"ROM metadata sync failed:{status_part} error={_format_overmind_error(error)} duration_ms={int((time.monotonic() - poll_started) * 1000)}",
+                    f"ROM metadata sync failed:{status_part} error={_format_http_error(error)} duration_ms={int((time.monotonic() - poll_started) * 1000)}",
                     file=sys.stderr,
                     flush=True,
                 )
             except Exception as error:
                 print(
-                    f"ROM metadata sync failed: error={_format_overmind_error(error)} duration_ms={int((time.monotonic() - poll_started) * 1000)}",
+                    f"ROM metadata sync failed: error={_format_http_error(error)} duration_ms={int((time.monotonic() - poll_started) * 1000)}",
                     file=sys.stderr,
                     flush=True,
                 )
@@ -2090,7 +1670,7 @@ def _ensure_game_event_spool(settings: Settings) -> None:
             target.unlink()
             print(f"Legacy gameplay event hook removed: {target}", file=sys.stdout, flush=True)
     except OSError as error:
-        print(f"Gameplay event spool setup skipped: {_format_overmind_error(error)}", file=sys.stderr, flush=True)
+        print(f"Gameplay event spool setup skipped: {_format_http_error(error)}", file=sys.stderr, flush=True)
 
 
 class DroneThreadingHTTPServer(ThreadingHTTPServer):
@@ -2188,7 +1768,7 @@ def _apply_server_tls(settings: Settings, server: ThreadingHTTPServer) -> None:
 
 
 def create_server(settings: Settings) -> ThreadingHTTPServer:
-    global _OVERMIND_POLLER_STARTED, _ROM_METADATA_POLLER_STARTED, _ROM_METADATA_WATCHER_STARTED, _PEER_HEALTH_CHECK_THREAD_STARTED, _LOCAL_NETWORK_WORKERS_STARTED, _GAME_PROCESS_MONITOR_STARTED, _GAME_PROCESS_MONITOR, _DOWNLOAD_MANAGER, _AUTOMATION_POLLER_STARTED, _EDGE_MUX_STARTED
+    global _ROM_METADATA_POLLER_STARTED, _ROM_METADATA_WATCHER_STARTED, _LOCAL_NETWORK_WORKERS_STARTED, _GAME_PROCESS_MONITOR_STARTED, _GAME_PROCESS_MONITOR, _DOWNLOAD_MANAGER, _AUTOMATION_POLLER_STARTED
     roms_root, bios_root = _real_data_roots(settings)
     repository = RomRepository(
         roms_root,
@@ -2268,21 +1848,12 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
         print(f"Serving Drone compatibility listener on {scheme}://0.0.0.0:{compatibility_port}", flush=True)
     server.compatibility_servers = compatibility_servers  # type: ignore[attr-defined]
 
-    if not _OVERMIND_POLLER_STARTED:
-        _start_overmind_action_poller(settings, repository)
-        _OVERMIND_POLLER_STARTED = True
-    if not _PEER_HEALTH_CHECK_THREAD_STARTED:
-        _start_peer_health_check_thread(settings)
-        _PEER_HEALTH_CHECK_THREAD_STARTED = True
     if not _LOCAL_NETWORK_WORKERS_STARTED:
         _start_local_network_workers(settings)
         _LOCAL_NETWORK_WORKERS_STARTED = True
     if not _AUTOMATION_POLLER_STARTED:
         _start_automation_poller(settings)
         _AUTOMATION_POLLER_STARTED = True
-    if settings.edge_enabled and not _EDGE_MUX_STARTED:
-        _start_edge_mux_client(settings)
-        _EDGE_MUX_STARTED = True
     if settings.rom_metadata_poll_seconds == 0:
         print("Asset metadata poller disabled: ROM_METADATA_POLL_SECONDS=0", file=sys.stdout, flush=True)
     elif not _ROM_METADATA_POLLER_STARTED:

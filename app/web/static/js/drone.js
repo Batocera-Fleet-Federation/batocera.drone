@@ -2406,9 +2406,9 @@ async function clearDroneDownloads() {
 
 async function purgeAssetCache() {
   if (!window.confirm(
-    "Purge the asset cache and force a full re-scan and Overmind re-upload?\n\n" +
+    "Purge the asset cache and force a full re-scan?\n\n" +
     "Cached fingerprint values are kept, so ROMs are not re-fingerprinted. This clears stale or " +
-    "duplicate entries and rebuilds Overmind's ROM list from a fresh full inventory."
+    "duplicate entries and rebuilds the ROM list from a fresh full inventory."
   )) {
     return;
   }
@@ -2427,9 +2427,9 @@ async function purgeAssetCache() {
 
 async function clearPendingAssetChanges() {
   if (!window.confirm(
-    "Clear all pending asset changes waiting to upload to Overmind?\n\n" +
-    "This keeps the local asset cache and files, but discards the unsent upload queue. " +
-    "Discarded changes will not reach Overmind unless a later scan detects them again."
+    "Clear all pending asset changes waiting to be cached?\n\n" +
+    "This keeps the local asset cache and files, but discards the unprocessed change queue. " +
+    "Discarded changes will reappear only if a later scan detects them again."
   )) {
     return;
   }
@@ -2452,7 +2452,7 @@ function renderAssetCachePanel(payload, includeActions = true) {
   const dateText = (value) => value ? new Date(value).toLocaleString() : "Not yet";
   const pendingTotal = Number(pending.total || 0);
   const statusClass = payload.active ? "text-bg-primary" : payload.needs_upload ? "text-bg-warning" : payload.uploaded ? "text-bg-success" : "text-bg-secondary";
-  const statusText = payload.active ? "Scanning" : payload.needs_upload ? "Upload Pending" : payload.uploaded ? "Synced" : "Waiting";
+  const statusText = payload.active ? "Scanning" : payload.needs_upload ? "Processing Pending" : payload.uploaded ? "Current" : "Waiting";
   const stage = payload.active ? 1 : payload.needs_upload ? 2 : payload.uploaded ? 3 : 0;
   const metric = (label, value, icon, tone = "") => `<div class="asset-metric ${tone}"><i class="bi ${icon}"></i><div><strong>${Number(value || 0).toLocaleString()}</strong><span>${escapeHtml(label)}</span></div></div>`;
   const detail = (label, value) => `<div class="asset-detail"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value || "n/a")}</strong></div>`;
@@ -2461,7 +2461,7 @@ function renderAssetCachePanel(payload, includeActions = true) {
     <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
       <div class="asset-cache-status-line">
         <span class="badge ${statusClass}">${escapeHtml(statusText)}</span>
-        <span class="small text-muted">${pendingTotal.toLocaleString()} pending change${pendingTotal === 1 ? "" : "s"} waiting for Overmind upload</span>
+        <span class="small text-muted">${pendingTotal.toLocaleString()} pending change${pendingTotal === 1 ? "" : "s"} waiting to be cached</span>
       </div>
       ${includeActions ? `<div class="d-flex flex-wrap gap-2">
         <button class="btn btn-sm btn-outline-primary" onclick="renderAssetCachePage()"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
@@ -2469,11 +2469,11 @@ function renderAssetCachePanel(payload, includeActions = true) {
         <button class="btn btn-sm btn-outline-danger" onclick="purgeAssetCache()">Purge Cache &amp; Resync</button>
       </div>` : ""}
     </div>
-    ${pendingTotal ? `<div class="asset-cache-help mb-3"><strong>What this means:</strong> Drone has local asset changes queued for Overmind. If Overmind is connected, refresh after the next upload cycle. If these are stale or duplicated queue entries, use <strong>Clear Pending</strong> to discard the unsent queue without deleting local cache data.</div>` : ""}
+    ${pendingTotal ? `<div class="asset-cache-help mb-3"><strong>What this means:</strong> Drone has local asset changes queued for the next cache pass. Refresh after the next scan completes. If these are stale or duplicated queue entries, use <strong>Clear Pending</strong> to discard the unsent queue without deleting local cache data.</div>` : ""}
     <div class="asset-flow mb-3">
       ${step(1, "Scan", payload.active ? "Reading local assets now" : `Last scan: ${dateText(payload.last_full_scan_at)}`)}
       ${step(2, "Queue", pendingTotal ? `${pendingTotal.toLocaleString()} changes waiting` : "No changes waiting")}
-      ${step(3, "Sync", payload.uploaded && !payload.needs_upload ? "Overmind is current" : `Last upload: ${dateText(payload.last_successful_upload_at)}`)}
+      ${step(3, "Sync", payload.uploaded && !payload.needs_upload ? "Cache is current" : `Last synced: ${dateText(payload.last_successful_upload_at)}`)}
     </div>
     <div class="asset-metric-grid mb-3">
       ${metric("Systems", counts.systems, "bi-grid")}
@@ -2511,7 +2511,7 @@ async function renderAssetCachePage() {
   currentSystemContext = null;
   clearSystemTheme();
   titleNode.textContent = "Asset Cache";
-  subtitleNode.textContent = "ROM, BIOS, artwork cache and Overmind upload state";
+  subtitleNode.textContent = "ROM, BIOS, artwork cache and scan state";
   setLoading(true, "Loading asset cache...");
   try {
     const payload = await api("/admin/asset-cache");
@@ -4072,16 +4072,6 @@ function swarmManagePeer(peerId, peerName) {
   window.open(url.toString(), "_blank", "noopener");
 }
 
-async function swarmEnableLocalNetwork() {
-  try {
-    await apiPost("/admin/network-mode", { mode: "local_network" });
-    showToast("Local networking enabled.", "success");
-    await renderSwarmPage();
-  } catch (err) {
-    showToast(`Failed to enable local networking: ${escapeHtml(err.message || "unknown error")}`, "danger");
-  }
-}
-
 async function swarmEnrollTailnet() {
   const input = document.getElementById("swarmTailnetKey");
   const button = document.getElementById("swarmTailnetEnrollBtn");
@@ -4216,15 +4206,7 @@ async function renderSwarmPage() {
     ]);
     const tailnet = discovery.tailnet || { installed: false };
     const drones = Array.isArray(overview.drones) ? overview.drones : [];
-    const inactiveNote = overview.active
-      ? ""
-      : `<div class="alert alert-info d-flex flex-wrap align-items-center gap-2" role="alert">
-          <i class="bi bi-info-circle" aria-hidden="true"></i>
-          <span>Local networking is disabled on this Drone, so pairing and paired Drones are hidden.</span>
-          <button class="btn btn-sm btn-primary" onclick="swarmEnableLocalNetwork()">Enable</button>
-        </div>`;
     content.innerHTML = `
-      ${inactiveNote}
       <div class="row row-cols-1 row-cols-md-2 row-cols-xl-3 g-3 mb-3" id="swarmDroneGrid">
         ${drones.map(renderSwarmDroneCard).join("")}
       </div>
@@ -4895,7 +4877,7 @@ async function renderApiAdminPage() {
       </div>
     `;
     document.getElementById("rotateDroneCertBtn")?.addEventListener("click", async () => {
-      if (!window.confirm("Rotate this Drone mTLS certificate through Overmind signing?")) return;
+      if (!window.confirm("Generate a fresh self-signed Drone certificate now? Paired peers will need to re-pair afterward.")) return;
       setLoading(true, "Rotating Drone certificate...");
       try {
         await apiPost("/admin/api/certificate/rotate", {});
@@ -4918,7 +4900,7 @@ async function renderLogsPage(selectedSource = null, selectedLines = 200) {
   const logSources = [
     ["drone_stdout", "Drone Stdout", "bi-file-text"],
     ["drone_stderr", "Drone Stderr", "bi-bug"],
-    ["drone_overmind", "Overmind", "bi-broadcast"],
+    ["drone_activity", "Drone Activity", "bi-broadcast"],
     ["tailscaled", "Tailscale", "bi-diagram-3"],
     ["es_launch_stdout", "ES Launch Stdout", "bi-terminal"],
     ["es_launch_stderr", "ES Launch Stderr", "bi-exclamation-triangle"],
@@ -5098,7 +5080,7 @@ async function refreshCurrentLog() {
 }
 async function renderEmulatorsPage() {
   titleNode.textContent = "Emulators";
-  subtitleNode.textContent = "Emulator config files mirrored to Overmind";
+  subtitleNode.textContent = "Emulator config files tracked on this Drone";
   clearSystemTheme();
   setLoading(true, "Loading emulator configs...");
   try {
@@ -5131,7 +5113,7 @@ async function renderEmulatorsPage() {
         <div class="col-md-3 mb-3">
           <div class="card log-card">
             <div class="card-header d-flex justify-content-between align-items-center">
-              <span>Overmind Config Set</span>
+              <span>Tracked Configs</span>
               <span class="badge">${emulatorConfigRows.length}</span>
             </div>
             <div class="emulator-config-filter-wrap p-2">
@@ -5141,7 +5123,7 @@ async function renderEmulatorsPage() {
               ${renderEmulatorConfigTree()}
             </div>
             <div id="emulatorConfigFilterEmpty" class="small text-muted px-3 py-2" style="display:none;">No configs match.</div>
-            <div class="small text-muted px-3 py-2 border-top" style="border-color:var(--admin-border)!important;">Only configuration files selected for Overmind synchronization are shown${payload.max_configs ? `, up to ${payload.max_configs}` : ""}.</div>
+            <div class="small text-muted px-3 py-2 border-top" style="border-color:var(--admin-border)!important;">Only recognized emulator/Batocera configuration files are shown${payload.max_configs ? `, up to ${payload.max_configs}` : ""}.</div>
           </div>
         </div>
         <div class="col-md-9">
@@ -5168,7 +5150,7 @@ async function renderEmulatorsPage() {
       </div>
     `;
     if (!emulatorConfigRows.length) {
-      document.getElementById("emulatorConfigContent").textContent = "No emulator config files were found in the Overmind reporting set.";
+      document.getElementById("emulatorConfigContent").textContent = "No emulator config files were found.";
     } else {
       expandEmulatorConfigAncestors(selectedEmulatorConfigIndex);
       renderEmulatorConfigTreeIntoContainer();
@@ -5774,7 +5756,6 @@ async function renderAdminSystemInfoPage() {
               <div class="asset-detail-panel h-100">
                 <h6>Identity &amp; Network</h6>
                 ${detail("Machine ID", fields.machine_id)}
-                ${detail("Overmind", fields.overmind_integrated === "yes" ? "Linked" : "Disconnected")}
                 ${detail("Network IP", fields.network_ip_address)}
                 ${detail("Router IP", fields.router_ip_address)}
                 ${detail("Batocera", fields.batocera_version || fields.system)}

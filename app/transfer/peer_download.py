@@ -1,9 +1,8 @@
 """Direct-peer asset downloads (the direct-public P2P tier).
 
-Extracted from ``drone_api.py``. Given an Overmind-selected peer, pulls a ROM, ROM
-folder, BIOS, save, or artwork over cert-pinned mTLS ``GET /peer/*`` (SSL-retry via the
-peer cert cache), writes it collision-safely with a sampled-hash guard, and posts
-download/sync state back to Overmind. ``_best_peer_for_*`` rank peers for an asset.
+Extracted from ``drone_api.py``. Given a selected paired peer, pulls a ROM, ROM
+folder, BIOS, save, or artwork over cert-pinned mTLS ``GET /peer/*`` (SSL-retry via
+the peer cert cache), writes it collision-safely with a sampled-hash guard.
 """
 
 import ssl
@@ -21,29 +20,17 @@ try:
     from ..common.http_cache import valid_segment
     from ..common.settings import Settings
     from ..device.device_control import _ensure_rom_write_access
-    from ..overmind.overmind_client import (
-        _drone_client_ssl_context,
-        _format_overmind_error,
-        _overmind_post_json,
-    )
-    from ..overmind.overmind_config import (
-        _overmind_peer_results_path_for_settings,
-        _overmind_swarm_path_for_settings,
-    )
     from ..storage.rom_metadata_store import _load_rom_metadata_cache
-    from ..storage.state_store import database_path as _state_database_path
-    from ..storage.state_store import load_payload as _load_state_payload
-    from . import local_network as _local_network
     from .download_errors import DownloadCancelled
     from .peer_connectivity import (
         PEER_CHECK_TIMEOUT_SECONDS,
+        _drone_client_ssl_context,
         _is_ssl_url_error,
         _preferred_peer_address,
         _peer_get_json,
         _peer_ssl_diagnostic,
         _peer_trust_cafile,
     )
-    from .peer_selection import select_best_peer as _select_best_peer
     from .transfer_files import (
         collision_safe_target as _collision_safe_target,
         safe_rom_relative_path as _safe_rom_relative_path,
@@ -52,29 +39,17 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from common.http_cache import valid_segment  # type: ignore
     from common.settings import Settings  # type: ignore
     from device.device_control import _ensure_rom_write_access  # type: ignore
-    from overmind.overmind_client import (  # type: ignore
-        _drone_client_ssl_context,
-        _format_overmind_error,
-        _overmind_post_json,
-    )
-    from overmind.overmind_config import (  # type: ignore
-        _overmind_peer_results_path_for_settings,
-        _overmind_swarm_path_for_settings,
-    )
     from storage.rom_metadata_store import _load_rom_metadata_cache  # type: ignore
-    from storage.state_store import database_path as _state_database_path  # type: ignore
-    from storage.state_store import load_payload as _load_state_payload  # type: ignore
-    from transfer import local_network as _local_network  # type: ignore
     from transfer.download_errors import DownloadCancelled  # type: ignore
     from transfer.peer_connectivity import (  # type: ignore
         PEER_CHECK_TIMEOUT_SECONDS,
+        _drone_client_ssl_context,
         _is_ssl_url_error,
         _preferred_peer_address,
         _peer_get_json,
         _peer_ssl_diagnostic,
         _peer_trust_cafile,
     )
-    from transfer.peer_selection import select_best_peer as _select_best_peer  # type: ignore
     from transfer.transfer_files import (  # type: ignore
         collision_safe_target as _collision_safe_target,
         safe_rom_relative_path as _safe_rom_relative_path,
@@ -97,152 +72,6 @@ def _cached_rom_fingerprint_exists(settings: Settings, expected_fingerprint: Opt
         if fingerprint_value == expected:
             return True
     return False
-
-
-def _post_download_state(settings: Settings, config: dict, snapshot: dict, reason: str = "progress") -> None:
-    if not _local_network.is_overmind_mode(settings):
-        return
-    base_url = str(config.get("overmind_url") or "").strip().rstrip("/")
-    token = str(config.get("overmind_token") or "").strip()
-    if not base_url or not token:
-        return
-    device_id = quote(settings.overmind_device_id, safe="")
-    endpoint = f"{base_url}/api/devices/{device_id}/downloads"
-    try:
-        active_count = len(snapshot.get("active") or [])
-        queued_count = len(snapshot.get("queued") or [])
-        recent_count = len(snapshot.get("recent") or [])
-        print(
-            f"Download state push started: endpoint={endpoint} reason={reason} active={active_count} queued={queued_count} recent={recent_count}",
-            file=sys.stdout,
-            flush=True,
-        )
-        _overmind_post_json(endpoint, snapshot, token=token, settings=settings)
-        print(
-            f"Download state push succeeded: reason={reason} active={active_count} queued={queued_count} recent={recent_count}",
-            file=sys.stdout,
-            flush=True,
-        )
-    except Exception as error:
-        print(
-            f"Download state push failed: reason={reason} error={_format_overmind_error(error)}",
-            file=sys.stderr,
-            flush=True,
-        )
-
-
-def _post_rom_sync_activity(settings: Settings, config: dict, activity: dict) -> None:
-    if not _local_network.is_overmind_mode(settings):
-        return
-    base_url = str(config.get("overmind_url") or "").strip().rstrip("/")
-    token = str(config.get("overmind_token") or "").strip()
-    if not base_url or not token:
-        print(
-            f"ROM sync activity push skipped: overmind not configured status={activity.get('status')} rom={activity.get('system')}/{activity.get('relative_path') or activity.get('rom_name')}",
-            file=sys.stdout,
-            flush=True,
-        )
-        return
-    device_id = quote(settings.overmind_device_id, safe="")
-    endpoint = f"{base_url}/api/devices/{device_id}/sync-activity"
-    try:
-        print(
-            f"ROM sync activity push started: endpoint={endpoint} status={activity.get('status')} rom={activity.get('system')}/{activity.get('relative_path') or activity.get('rom_name')}",
-            file=sys.stdout,
-            flush=True,
-        )
-        _overmind_post_json(endpoint, activity, token=token, settings=settings)
-        print(
-            f"ROM sync activity push succeeded: status={activity.get('status')} bytes={activity.get('bytes_transferred')} rom={activity.get('system')}/{activity.get('relative_path') or activity.get('rom_name')}",
-            file=sys.stdout,
-            flush=True,
-        )
-    except Exception as error:
-        print(
-            f"ROM sync activity push failed: status={activity.get('status')} error={_format_overmind_error(error)} rom={activity.get('system')}/{activity.get('relative_path') or activity.get('rom_name')}",
-            file=sys.stderr,
-            flush=True,
-        )
-
-
-def _resolve_rom_by_gamelist_id_from_peer(
-    settings: Settings,
-    config: dict,
-    peer: dict,
-    system: str,
-    gamelist_id: str,
-) -> Optional[dict]:
-    """Ask a source peer to map ``(system, gamelist_id)`` -> its local ROM path.
-
-    Overmind identifies ROMs by the gamelist ``<game id>`` (no path), so the receiver
-    resolves the id against the sender's gamelist.xml before pulling bytes over the
-    normal path-based ``/peer/roms`` tier. Returns the peer JSON
-    ``{relative_path, entry_type, file_size?, rom_fingerprint?}`` or None.
-    """
-    peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
-    address = _preferred_peer_address(peer, settings=settings, peer_id=peer_id)
-    gid = str(gamelist_id or "").strip()
-    if not address or not gid:
-        return None
-    url = f"{address}/v1/api/peer/roms-by-id/{quote(system, safe='')}/{quote(gid, safe='')}"
-    try:
-        data = _peer_get_json(url, settings, peer_id=peer_id, config=config)
-    except Exception:
-        return None
-    rel = str(data.get("relative_path") or "").strip()
-    if not rel:
-        return None
-    return data
-
-
-def _best_peer_for_rom(
-    settings: Settings,
-    repository: "RomRepository",
-    config: dict,
-    system: str,
-    relative_path: str,
-    source_device_ids: Optional[set] = None,
-) -> Optional[dict]:
-    swarm = _load_state_payload(
-        _state_database_path(settings.userdata_root),
-        "overmind_swarm.json",
-        [],
-        legacy_path=_overmind_swarm_path_for_settings(settings),
-    )
-    peer_checks = _load_state_payload(
-        _state_database_path(settings.userdata_root),
-        "peer_checks.json",
-        [],
-        legacy_path=_overmind_peer_results_path_for_settings(settings),
-    )
-    return _select_best_peer(
-        swarm,
-        peer_checks,
-        settings.overmind_device_id,
-        source_device_ids=source_device_ids,
-        required_system=system,
-    )
-
-
-def _best_peer_for_bios(
-    settings: Settings,
-    config: dict,
-    relative_path: str,
-    source_device_ids: Optional[set] = None,
-) -> Optional[dict]:
-    swarm = _load_state_payload(
-        _state_database_path(settings.userdata_root),
-        "overmind_swarm.json",
-        [],
-        legacy_path=_overmind_swarm_path_for_settings(settings),
-    )
-    peer_checks = _load_state_payload(
-        _state_database_path(settings.userdata_root),
-        "peer_checks.json",
-        [],
-        legacy_path=_overmind_peer_results_path_for_settings(settings),
-    )
-    return _select_best_peer(swarm, peer_checks, settings.overmind_device_id, source_device_ids=source_device_ids)
 
 
 def _folder_rom_marker_state(
@@ -321,7 +150,7 @@ def _download_rom_folder_from_peer(
                 return {
                     "entry_type": "folder",
                     "source_drone_id": peer_id,
-                    "target_drone_id": settings.overmind_device_id,
+                    "target_drone_id": settings.device_id,
                     "system": system,
                     "rom_name": rel,
                     "relative_path": rel,
@@ -446,7 +275,7 @@ def _download_rom_folder_from_peer(
     activity = {
         "entry_type": "folder",
         "source_drone_id": peer_id,
-        "target_drone_id": settings.overmind_device_id,
+        "target_drone_id": settings.device_id,
         "system": system,
         "rom_name": rel,
         "relative_path": target_dir.relative_to(system_dir).as_posix(),
@@ -519,7 +348,7 @@ def _download_rom_from_peer(
             fingerprint = expected_fingerprint_clean
         return {
             "source_drone_id": peer_id,
-            "target_drone_id": settings.overmind_device_id,
+            "target_drone_id": settings.device_id,
             "system": system,
             "rom_name": rel,
             "relative_path": existing.relative_to(system_dir).as_posix(),
@@ -647,7 +476,7 @@ def _download_rom_from_peer(
     duration_ms = int((time.monotonic() - started_mono) * 1000)
     return {
         "source_drone_id": peer_id,
-        "target_drone_id": settings.overmind_device_id,
+        "target_drone_id": settings.device_id,
         "system": system,
         "rom_name": rel,
         "relative_path": target.relative_to(system_dir).as_posix(),
@@ -704,7 +533,7 @@ def _download_bios_from_peer(
         duration_ms = int((time.monotonic() - started_mono) * 1000)
         return {
             "asset_type": "bios", "file_type": "BIOS", "source_drone_id": peer_id,
-            "target_drone_id": settings.overmind_device_id, "system": "bios",
+            "target_drone_id": settings.device_id, "system": "bios",
             "bios_name": rel, "rom_name": rel,
             "relative_path": existing.relative_to(bios_root).as_posix(),
             "action": "download", "status": "skipped", "skip_reason": reason,
@@ -824,7 +653,7 @@ def _download_bios_from_peer(
         "asset_type": "bios",
         "file_type": "BIOS",
         "source_drone_id": peer_id,
-        "target_drone_id": settings.overmind_device_id,
+        "target_drone_id": settings.device_id,
         "system": "bios",
         "bios_name": rel,
         "rom_name": rel,
@@ -841,7 +670,7 @@ def _download_bios_from_peer(
         "completed_at": completed_dt.isoformat(),
         "duration_ms": duration_ms,
         "duration_seconds": round(duration_ms / 1000, 3),
-        "selected_peer_reason": "healthy peer from Overmind BIOS source list with best sampled score",
+        "selected_peer_reason": "healthy peer with requested BIOS and best sampled score",
     }
 
 
@@ -881,7 +710,7 @@ def _download_save_from_peer(
     if target.is_file() and not overwrite:
         return {
             "asset_type": "saves", "file_type": "Save", "source_drone_id": peer_id,
-            "target_drone_id": settings.overmind_device_id, "system": system_clean,
+            "target_drone_id": settings.device_id, "system": system_clean,
             "save_name": rel, "relative_path": f"{system_clean}/{rel}",
             "action": "download", "status": "skipped",
             "skip_reason": "target path already exists", "failure_reason": "target path already exists",
@@ -932,7 +761,7 @@ def _download_save_from_peer(
         "asset_type": "saves",
         "file_type": "Save",
         "source_drone_id": peer_id,
-        "target_drone_id": settings.overmind_device_id,
+        "target_drone_id": settings.device_id,
         "system": system_clean,
         "save_name": rel,
         "relative_path": f"{system_clean}/{rel}",
@@ -1084,7 +913,7 @@ def _download_artwork_from_peer(
         "asset_type": "artwork",
         "file_type": "ARTWORK",
         "source_drone_id": peer_id,
-        "target_drone_id": settings.overmind_device_id,
+        "target_drone_id": settings.device_id,
         "system": system,
         "rom_name": local_rom_rel,
         "rom_path": local_rom_rel,
@@ -1101,10 +930,8 @@ def _download_artwork_from_peer(
         "completed_at": completed_dt.isoformat(),
         "duration_ms": duration_ms,
         "duration_seconds": round(duration_ms / 1000, 3),
-        "selected_peer_reason": "healthy peer from Overmind artwork source list with best sampled score",
+        "selected_peer_reason": "healthy peer with requested artwork and best sampled score",
         "gamelist_update_status": gamelist_update_status,
         "gamelist_update": gamelist_update,
     }
 
-
-# _summarize_overmind_result now lives in overmind/registration.py (re-exported).

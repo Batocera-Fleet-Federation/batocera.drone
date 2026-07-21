@@ -1,14 +1,15 @@
 ---
 name: drone-live-debugging
-description: Use this when debugging a real, running Drone device — on your local network via SSH, or a Drone you can't directly reach because it's on a different network/behind NAT, in which case identify and inspect it through Overmind and through another Drone's own cached view of it. Covers log locations, the local SQLite state DB, peer-cert/trust inspection, and live-reproducing swallowed-exception peer calls.
+description: Use this when debugging a real, running Drone device — on your local network via SSH, or a Drone you can't directly reach because it's on a different network/behind NAT, in which case identify and inspect it through another Drone's own cached view of it. Covers log locations, the local SQLite state DB, peer-cert/trust inspection, and live-reproducing swallowed-exception peer calls.
 ---
 
 # Debugging a Live Drone
 
-For the cross-repo methodology this plugs into (CloudWatch, migrations, the
-in-memory-dict-vs-Lambda bug class), see the `bff-live-debugging` skill in
-`.github`. This skill is the Drone-specific depth: what's on the device, how to
-read it, and how to investigate a Drone you can't SSH into directly.
+For the top-level methodology this plugs into (when to reach for live debugging,
+credentials/identity gotchas, the anchor-first approach), see the
+`bff-live-debugging` skill in `.github`. This skill is the Drone-specific depth:
+what's on the device, how to read it, and how to investigate a Drone you can't SSH
+into directly.
 
 ## Goal
 
@@ -39,22 +40,42 @@ common and transient.
 ### Log files — start here, always
 
 ```text
-/userdata/system/logs/drone-app/overmind.log   # Overmind sync/heartbeat/action narration
+/userdata/system/logs/drone-app/drone.log      # narration -- pairing/tailnet/automation/
+                                                #  transfer lines from every subsystem
 /userdata/system/logs/drone-app/startup.log    # full daemon output incl. HTTP access log
-/userdata/system/logs/drone-app/stdout.log     # same content as overmind.log + HTTP access log
+/userdata/system/logs/drone-app/stdout.log     # same content as drone.log + HTTP access log
 /userdata/system/logs/drone-app/stderr.log     # tracebacks / uncaught errors
 ```
 
-`overmind.log`/`stdout.log` narrate the Drone's own decisions with timestamps —
-this is almost always the fastest way to find out what really happened, because
-each step prints a line: `Claimed N Overmind action(s) for <device_id>: <action>`,
-`Executing Overmind action <name> (<id>) payload={...}`, `Processed Overmind action
-<name> (<id>): <status> - <message>`, `ROM sync activity push started/succeeded:
-... status=... rom=...`, `Failed to report Overmind action completion <id>:
-HTTPError status=... url=...`.
+A Drone that hasn't been redeployed since the Overmind package was retired may still
+be writing to the old filename, `overmind.log` (the default only changed name; an
+already-running process keeps whatever it opened at startup) — check both if
+`drone.log` is missing or empty.
+
+`drone.log`/`stdout.log` narrate the Drone's own decisions with timestamps — this is
+almost always the fastest way to find out what really happened, because each step
+prints a line. The shared logging helper (`_drone_log` in `common/logging_setup.py`)
+is used by every subsystem, not just one. Expect lines like:
+
+- `Peer health check: source=<id> target=<id> status=pass|fail address=<addr> latency=<ms>ms`
+  (the background paired-peer health loop, `peer_workers.py`).
+- `Idle-volume automation set volume to <n>% after <s>s idle`,
+  `Idle-game-exit automation exited the running game after <s>s idle` /
+  `Idle-game-exit automation could not exit the game: <reason>`,
+  `Automation poller thread started: poll_seconds=<n>` (`device/automation.py`).
+- Pairing/tailnet lines from `transfer/local_network.py` and `device/tailnet_service.py`.
+- HTTP access lines for every `/v1/api/admin/*` and `/v1/api/peer/*` request.
+
+Older log history (from before the Overmind package was retired) may still contain
+`Claimed N Overmind action(s) for <device_id>: <action>` / `Executing Overmind action
+<name> (<id>) payload={...}` / `Processed Overmind action <name> (<id>): <status> -
+<message>` lines. That action-dispatch code no longer exists — local-network P2P is
+always on now (no mode/toggle at all), so no current build can print these
+regardless of env vars; treat any occurrence as historical, from a log file that
+predates the update to the current app version.
 
 ```bash
-# grep for a game name, action id, or system — whatever anchor you have
+# grep for a game name, peer/device id, or config key — whatever anchor you have
 sshpass -p linux ssh -o StrictHostKeyChecking=no root@<host>.local \
   'grep -ai "dark souls" /userdata/system/logs/drone-app/*.log'
 
@@ -80,7 +101,7 @@ tables. Always open it read-only (`?mode=ro`) so you can't corrupt live state:
 sshpass -p linux ssh -o StrictHostKeyChecking=no root@<host>.local 'python3 -c "
 import sqlite3, json
 db = sqlite3.connect(\"file:/userdata/system/drone-app/rom_metadata_cache.sqlite3?mode=ro\", uri=True)
-for ns in (\"overmind_swarm.json\", \"peer_checks.json\"):
+for ns in (\"local_paired_peers\", \"local_peer_checks\", \"automation_config.json\"):
     row = db.execute(\"SELECT payload FROM app_state WHERE namespace=? AND state_key=?\", (ns, \"payload\")).fetchone()
     print(\"===\", ns, \"===\")
     print(json.dumps(json.loads(row[0]), indent=2) if row else \"MISSING\")
@@ -89,44 +110,40 @@ for ns in (\"overmind_swarm.json\", \"peer_checks.json\"):
 
 Useful namespaces — **and, critically, who writes each and when** (the store only
 holds the latest snapshot; knowing the writer + cadence is how you reason about
-what the state was at a *past* failure instant):
+what the state was at a *past* failure instant). The fleet is peer-to-peer (no
+central hub), so these are all populated locally by this Drone's own workers:
 
-- `overmind_swarm.json` — this Drone's **cached copy of OVERMIND's view** of every
-  other Drone: `drone_id`, self-reported `name`, `online`, `public_ip`,
-  `public_resolvable`, `reachable_url`, `public_reachable_url`, `edge_online`,
-  `last_speed_sample`. **Writer: the heartbeat loop (`action_poller.py`) wholesale
-  overwrites it with the server's response every poll (~60s).** Two consequences:
-  (a) whatever you read now tells you nothing about what it contained one heartbeat
-  ago — a server-side flap self-heals before you can observe it; (b) if this cache
-  flaps while the Drone's own probes are steady, the bug is in how *Overmind builds
-  the heartbeat response*, not on the Drone (that was exactly the "No healthy
-  source peer" root cause: the server graded reachability from per-Lambda-container
-  in-memory state).
-- `peer_checks.json` — **this Drone's own ground-truth probe results** against its
-  peers: `target_drone_id`, `status` (`pass`/`fail`), `latency_ms`, `target_address`
-  actually probed, `failure_reason` (verbose — includes the actual SSL/network
-  error text and which local cert file was used). **Writer: the peer-health worker
-  (`peer_workers.py`), every `DRONE_PEER_CHECK_INTERVAL_SECONDS` (default 300s),
-  overwriting the whole list after probing all peers.** Its history is
-  reconstructible: each run logs one `Peer health check: source=... target=...
-  status=... latency=...` line per peer to `overmind.log`, so you can line up "what
-  did the checks say at time T" from the log even though the store only keeps the
-  latest run. A `Failed to report peer health checks to Overmind: ... gaierror`
-  line alongside means the *Drone's own* DNS/network was flapping at that moment —
-  useful independent evidence of device-side connectivity trouble.
-  **This is also the fastest way to catch a stale/bad peer certificate** — a
-  `failure_reason` like `missing or incorrect trusted CA bundle ... self-signed
-  certificate` means the cached cert for that peer no longer matches what the peer
-  presents (common after a peer reinstall that kept the same `device_id`).
-
+- `local_paired_peers` — this Drone's own paired-peer map: `drone_id`, self-reported
+  `name`, `local_ip`, `tailnet_ip`, `public_ip`, advertised port, and the pinned
+  certificate fingerprint captured at pairing time. **Writer: whatever pairing flow
+  ran** (LAN pairing-code accept, or tailnet code-free pairing) — updated only when
+  peers are paired/forgotten, not on a timer.
+- `local_peer_checks` — **this Drone's own ground-truth probe results** against its
+  paired peers: `target_drone_id`, `status` (`pass`/`fail`), `latency_ms`,
+  `target_address` actually probed, `failure_reason` (verbose — includes the actual
+  SSL/network error text). **Writer: the local-network health loop
+  (`transfer/peer_workers.py:_start_local_network_workers`'s `health_loop`), every
+  `DRONE_LOCAL_HEALTH_INTERVAL_SECONDS` (default 30s), overwriting the whole list
+  after probing every paired peer.** Its history is reconstructible: each run logs
+  one `Peer health check: source=... target=... status=... latency=...` line per
+  peer, so you can line up "what did the checks say at time T" from the log even
+  though the store only keeps the latest run. **This is also the fastest way to
+  catch a stale/bad peer certificate** — a `failure_reason` like `missing or
+  incorrect trusted CA bundle ... self-signed certificate` means the cached cert for
+  that peer no longer matches what the peer presents (common after a peer reinstall
+  that kept the same `device_id`).
+- `automation_config.json` — idle-volume/idle-game-exit/wifi-recovery config
+  (`device/automation.py`); read live by the automation poller thread every
+  `AUTOMATION_POLL_SECONDS` (default 15s), not cached/stale in the way the peer
+  caches are.
 When a namespace's provenance matters, find **every** writer before reasoning:
-`grep -rn "overmind_swarm.json" app/` — a cache with a scheduled wholesale
-overwriter means "state at failure time" must come from the writer's logs, never
-from the current store contents.
+`grep -rn "local_peer_checks" app/` (or whichever namespace) — a cache with a
+scheduled wholesale overwriter means "state at failure time" must come from the
+writer's logs, never from the current store contents.
 
 Also read-only and useful: the ROM/BIOS cache tables (`rom_cache_entries`,
 `bios_cache_entries`, `cache_state`) if you need to confirm what the Drone
-currently believes is on disk, independent of what the Overmind UI shows.
+currently believes is on disk, independent of what its own admin UI shows.
 
 ### Peer certificate trust — files, not just the check result
 
@@ -139,40 +156,39 @@ File names are `<device_id with colons replaced by underscores>.crt`. Compare
 `mtime` across peers — a cert cached far more recently than its siblings suggests
 that peer's identity/cert was recently re-fetched (e.g. after a rotation), while
 one that's stale relative to a peer's *actual* current cert is exactly the
-`peer_checks.json` failure pattern above.
+`local_peer_checks` failure pattern above.
 
 ### Reproducing a swallowed-exception peer call live
 
-Several Drone peer functions (e.g. `_resolve_rom_by_gamelist_id_from_peer` in
-`app/transfer/peer_download.py`) do `try: ... except Exception: return None` around
-an HTTP call to another Drone — safe for the app, but it throws away the real
-error. To see it, write a tiny script that imports the app's own modules and calls
-the underlying primitive **without** the swallowing except, then run it *on the
-Drone itself* so it uses the same cached certs and config as production:
+`_check_peer` (`app/transfer/peer_connectivity.py`) catches every exception from its
+HTTP call and reduces it to a `failure_reason: str(error)` string — informative, but
+it loses the exception's class and traceback. To see the real error, write a tiny
+script that imports the app's own modules and calls the underlying primitive
+**without** that reduction, then run it *on the Drone itself* so it uses the same
+cached certs and config as production:
 
 ```python
 # probe.py
-import sys, os, json, traceback
+import sys, os, traceback
 sys.path.insert(0, ".")
 os.environ.setdefault("USERDATA_ROOT", "/userdata")
-from transfer.peer_download import _resolve_rom_by_gamelist_id_from_peer, _peer_get_json, _peer_address
+from transfer.peer_connectivity import _check_peer, _peer_get_json_for_peer
 from common.settings import Settings
 
 settings = Settings.from_env()
-peer = {  # copy real values from overmind_swarm.json above
+peer = {  # copy real values from local_paired_peers above
     "drone_id": "58:47:ca:7e:38:57",
-    "public_reachable_url": "https://72.176.228.250",
-    "reachable_url": "https://192.168.0.207",
-    "public_resolvable": True,
+    "local_ip": "192.168.0.207",
+    "tailnet_ip": "100.94.12.3",
+    "public_ip": "72.176.228.250",
     "scheme": "https", "api_port": 443,
 }
-print(_resolve_rom_by_gamelist_id_from_peer(settings, {}, peer, "ps3", "24645"))
+print(_check_peer(settings, peer, config={}))  # the reduced failure_reason, if any
 
-address = _peer_address(peer)
 try:
-    print(_peer_get_json(f"{address}/v1/api/peer/roms-by-id/ps3/24645", settings, peer_id=peer["drone_id"], config={}))
+    print(_peer_get_json_for_peer(peer, "/health", settings, peer_id=peer["drone_id"], config={}))
 except Exception:
-    traceback.print_exc()  # the real error, not swallowed
+    traceback.print_exc()  # the real error, not reduced to a string
 ```
 
 ```bash
@@ -190,25 +206,19 @@ same cause — note that explicitly if you can't pin the exact historical moment
 
 The same on-device technique works for **pure decision functions**, not just
 network calls — and it's the decisive move when a failure looks impossible from
-the current state. Example: reproduce peer selection with the app's own loaders
-and the real state DB, exactly as `sync_rom` would run it:
+the current state. Example: reproduce the actual address/connectivity check the
+current default (explicit-request) transfer flow makes for one paired peer:
 
 ```python
-# probe_select.py — run from /userdata/system/drone-app/app
+# probe_peer.py — run from /userdata/system/drone-app/app
 from common.settings import Settings
-from transfer.peer_download import _best_peer_for_rom
-from transfer.peer_selection import select_best_peer
-from storage.state_store import database_path, load_payload
-from overmind.overmind_config import _load_overmind_config_for_settings
+from transfer import local_network as _local_network
+from transfer.peer_connectivity import _check_peer, _preferred_peer_address
 
 settings = Settings.from_env()
-db = database_path(settings.userdata_root)
-swarm = load_payload(db, "overmind_swarm.json", [])
-checks = load_payload(db, "peer_checks.json", [])
-print(select_best_peer(swarm, checks, settings.overmind_device_id,
-                       source_device_ids={"<source device_id>"}, required_system="ps3"))
-print(_best_peer_for_rom(settings, None, _load_overmind_config_for_settings(settings),
-                         "ps3", "", source_device_ids={"<source device_id>"}))
+peer = next(p for p in _local_network.paired_peers(settings) if p.get("drone_id") == "58:47:ca:7e:38:57")
+print("preferred address:", _preferred_peer_address(peer, settings=settings, peer_id=peer["drone_id"]))
+print("live check:", _check_peer(settings, peer, config={"network_mode": "local_network"}))
 ```
 
 If this returns the right peer *now* but the same call failed minutes ago, the code
@@ -246,24 +256,23 @@ you can reach every Drone the same way — check first:
 ping -c 1 -W 2 <name>.local   # only resolves if you're on the same LAN/mDNS segment
 ```
 
-If that fails, you have two indirect options, in order of how much they tell you:
+If that fails, and there is no central hub to query instead, your one indirect
+option is:
 
-1. **Ask a Drone you *can* reach for its cached view of the target.** Every Drone
-   maintains `overmind_swarm.json`/`peer_checks.json` about every other Drone it
-   knows about (Case 1 above) — SSH into any reachable Drone and read its cache for
-   the `drone_id` you actually care about. This gives you the target's
-   self-reported `online`/`public_ip`/`reachable_url`/`edge_online` state and the
-   *reaching* Drone's live connectivity probe result against it — genuinely useful
-   even though it's secondhand, and it doesn't require reaching the target at all.
-2. **Query Overmind directly for its device record.** Overmind is reachable from
-   anywhere and holds the authoritative registration state (`last_seen`, IP/port,
-   edge presence) for every Drone regardless of network topology — see the
-   `overmind-live-debugging` skill (`batocera.overmind`) for how to pull this via
-   CloudWatch/RDS instead of guessing from a Drone's possibly-stale local cache.
+1. **Ask a Drone you *can* reach for its cached view of the target.** Any Drone that
+   has the target paired maintains `local_paired_peers`/`local_peer_checks` about it
+   (Case 1 above) — SSH into that reachable Drone and read its cache for the
+   `drone_id` you actually care about. This gives you the target's last-known
+   `local_ip`/`tailnet_ip`/`public_ip` and the *reaching* Drone's live connectivity
+   probe result against it — genuinely useful even though it's secondhand, and it
+   doesn't require reaching the target at all. If the reaching Drone is also on a
+   shared tailnet with the target, `tailscale status` on it (via
+   `device/tailnet_service.py:tailnet_status`) is another independent secondhand
+   reachability signal.
 
-If the target Drone's `public_reachable_url` is populated and you need to check
-whether it's *currently* live from the outside, a plain unauthenticated probe is
-safe and read-only:
+If the target Drone's `public_ip` is populated and you need to check whether it's
+*currently* live from the outside, a plain unauthenticated probe is safe and
+read-only:
 
 ```bash
 curl -sk -o /dev/null -w "http_code=%{http_code} time=%{time_total}\n" https://<public_ip>/health
@@ -282,18 +291,18 @@ already there — this fleet is intentionally outbound-only.
   verify with `hostname`/`uname -a` every time before drawing conclusions.
 - Don't try to make a NAT'd/unreachable Drone reachable (port-forwarding, opening
   ports) as a debugging shortcut — that's a network change, not a diagnosis.
-- Treat `peer_checks.json`/`overmind_swarm.json` as a **cache**, not live truth —
-  it reflects the last time this Drone happened to probe, which may be minutes
-  stale.
+- Treat `local_peer_checks`/`local_paired_peers` as a **cache**, not live truth —
+  it reflects the last time this Drone happened to probe, which may be up to
+  `DRONE_LOCAL_HEALTH_INTERVAL_SECONDS` stale.
 
 ## Expected output format
 
 ```text
 Device(s) inspected:
-... (hostname/IP used, hostname/uname confirmation, device_id from Overmind if known)
+... (hostname/IP used, hostname/uname confirmation, drone_id if known)
 
 Reachability:
-... (direct SSH, or indirect via which other Drone's cache / Overmind record)
+... (direct SSH, or indirect via another paired Drone's cache)
 
 Evidence:
 ... (exact log lines, cache contents, or probe reproduction output)

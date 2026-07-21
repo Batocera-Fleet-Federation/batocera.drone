@@ -18,11 +18,11 @@ from urllib.parse import unquote
 try:
     from ..common.auth import record_unauthorized_response
     from ..device.tailnet_service import tailnet_peer_ips
-    from ..overmind.overmind_game_logs import (
+    from ..device.game_activity import (
         load_gameplay_history as _load_gameplay_history,
         load_gameplay_history_page as _load_gameplay_history_page,
     )
-    from ..overmind.overmind_reporting import (
+    from ..device.emulator_configs import (
         list_emulator_config_files as _list_emulator_config_files,
         read_emulator_config_file as _read_emulator_config_file,
     )
@@ -39,11 +39,11 @@ try:
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.auth import record_unauthorized_response  # type: ignore
     from device.tailnet_service import tailnet_peer_ips  # type: ignore
-    from overmind.overmind_game_logs import (  # type: ignore
+    from device.game_activity import (  # type: ignore
         load_gameplay_history as _load_gameplay_history,
         load_gameplay_history_page as _load_gameplay_history_page,
     )
-    from overmind.overmind_reporting import (  # type: ignore
+    from device.emulator_configs import (  # type: ignore
         list_emulator_config_files as _list_emulator_config_files,
         read_emulator_config_file as _read_emulator_config_file,
     )
@@ -72,7 +72,7 @@ class HandlersPeerMixin:
             return
         peer_id = str(payload.get("drone_id") or "").strip()
         certificate_pem = str(payload.get("certificate_pem") or "")
-        if not peer_id or peer_id == self.settings.overmind_device_id:
+        if not peer_id or peer_id == self.settings.device_id:
             raise ValueError("invalid peer id")
         cert_path, fingerprint = _save_local_peer_certificate(self.settings, peer_id, certificate_pem)
         expected = str(payload.get("certificate_fingerprint") or "").strip().lower()
@@ -121,7 +121,7 @@ class HandlersPeerMixin:
             {
                 "status": "paired",
                 "peer": _public_local_peer(peer),
-                "drone_id": self.settings.overmind_device_id,
+                "drone_id": self.settings.device_id,
                 "name": socket.gethostname(),
                 "scheme": _drone_scheme(self.settings),
                 "api_port": _drone_advertised_api_port(self.settings),
@@ -154,7 +154,7 @@ class HandlersPeerMixin:
             200,
             {
                 "status": "ok",
-                "drone_id": self.settings.overmind_device_id,
+                "drone_id": self.settings.device_id,
                 "checked_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
                 "mtls": bool(self.settings.drone_mtls_enabled or _local_network.is_local_mode(self.settings)),
                 "network_mode": _network_mode(self.settings),
@@ -190,7 +190,7 @@ class HandlersPeerMixin:
             }
             system_names = sorted(set(self.repository.list_system_names()) | set(system_counts.keys()), key=str.lower)
             return {
-                "drone_id": self.settings.overmind_device_id,
+                "drone_id": self.settings.device_id,
                 "name": socket.gethostname(),
                 "systems": system_names,
                 "system_counts": system_counts,
@@ -201,7 +201,7 @@ class HandlersPeerMixin:
 
         def paged_response(page: dict) -> dict:
             return {
-                "drone_id": self.settings.overmind_device_id,
+                "drone_id": self.settings.device_id,
                 "asset_type": normalized,
                 "system": system or None,
                 "systems": sorted(systems),
@@ -418,7 +418,7 @@ class HandlersPeerMixin:
                 enriched_page.append(enriched)
             page = enriched_page
         return {
-            "drone_id": self.settings.overmind_device_id,
+            "drone_id": self.settings.device_id,
             "asset_type": normalized,
             "system": system or None,
             "systems": sorted(systems),
@@ -450,7 +450,7 @@ class HandlersPeerMixin:
     def _handle_peer_rom_resolve_by_id(self, system: str, gamelist_id: str) -> None:
         """Resolve a ROM by its gamelist ``<game id>`` to the sender's local path.
 
-        The receiver was told only ``(system, gamelist_id)`` by Overmind (no path),
+        The receiver was told only ``(system, gamelist_id)`` (no path),
         so it asks the source drone to map the id -> ``<path>`` from that drone's own
         gamelist.xml. It then pulls the bytes over the normal path-based ``/peer/roms``
         (or ``/peer/rom-manifest`` for folders) endpoint and places the file at the

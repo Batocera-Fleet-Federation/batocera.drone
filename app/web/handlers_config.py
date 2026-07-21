@@ -14,14 +14,14 @@ from typing import Optional
 try:
     from ..common.logtail import _read_file_tail
     from ..device.device_control import _resolve_es_systems_effective
-    from ..overmind.overmind_reporting import (
+    from ..device.emulator_configs import (
         list_emulator_config_files as _list_emulator_config_files,
         read_emulator_config_file as _read_emulator_config_file,
     )
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.logtail import _read_file_tail  # type: ignore
     from device.device_control import _resolve_es_systems_effective  # type: ignore
-    from overmind.overmind_reporting import (  # type: ignore
+    from device.emulator_configs import (  # type: ignore
         list_emulator_config_files as _list_emulator_config_files,
         read_emulator_config_file as _read_emulator_config_file,
     )

@@ -129,7 +129,7 @@ class RomArtworkGamelistMixin:
 
         The sender maps the gamelist id to the game's ``<path>`` in its own
         gamelist.xml (mirroring ``resolve_artwork_file``) so a receiver can pull the
-        ROM without Overmind ever carrying a filesystem path. Folder-unit ROMs (a
+        ROM without a peer ever carrying a filesystem path. Folder-unit ROMs (a
         marker/index file in a per-game folder, per ``rom_transfer_unit``) resolve to
         the FOLDER as the transfer unit with the gamelist path kept as
         ``marker_relative_path``; for everything else ``marker_relative_path`` equals

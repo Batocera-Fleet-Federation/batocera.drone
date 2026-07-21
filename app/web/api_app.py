@@ -9,22 +9,22 @@ proxy, which has already enforced auth + front-door rate limiting. Imports FastA
 it is loaded only behind the DRONE_API_FASTAPI_BRIDGE flag (vendored deps) or in tests.
 """
 
-from fastapi import Depends, FastAPI
+from fastapi import FastAPI
 from fastapi.openapi.utils import get_openapi
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import RedirectResponse
 
 try:  # package vs. flat-module execution (mirrors app/main.py)
     from .route_config import API_PREFIX, api_url
-    from .api_models import ApiInfoResponse, OvermindStatusResponse
+    from .api_models import ApiInfoResponse
     from ..app_version import drone_app_version
 except ImportError:  # pragma: no cover - flat execution path
     from web.route_config import API_PREFIX, api_url  # type: ignore
-    from web.api_models import ApiInfoResponse, OvermindStatusResponse  # type: ignore
+    from web.api_models import ApiInfoResponse  # type: ignore
     from app_version import drone_app_version  # type: ignore
 
 
 # Paths (prefix-stripped, as api_routes.py sees them) the stdlib dispatch should proxy here.
-OWNED_EXACT = {"/openapi.json", "/api-info", "/swagger", "/admin/integrations/overmind/status"}
+OWNED_EXACT = {"/openapi.json", "/api-info", "/swagger"}
 OWNED_PREFIXES = ("/docs",)
 
 
@@ -70,18 +70,6 @@ def api_info() -> ApiInfoResponse:
 @app.get(api_url("/swagger"), include_in_schema=False)
 def swagger_redirect() -> RedirectResponse:
     return RedirectResponse(api_url("/docs"))
-
-
-@app.get(api_url("/admin/integrations/overmind/status"), response_model=OvermindStatusResponse, tags=["admin"])
-def admin_overmind_status(settings=Depends(get_settings)):
-    # Matches the legacy admin gate (api_routes.py:205) since the proxy bypasses it.
-    if not settings.admin_enabled:
-        return JSONResponse(status_code=403, content={"error": "admin disabled"})
-    try:
-        from ..drone_api import build_overmind_status
-    except ImportError:  # pragma: no cover - flat execution
-        from drone_api import build_overmind_status  # type: ignore
-    return build_overmind_status(settings)
 
 
 def _merged_openapi() -> dict:

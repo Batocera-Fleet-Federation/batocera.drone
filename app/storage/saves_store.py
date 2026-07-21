@@ -7,12 +7,13 @@ saves under ``/userdata/saves``:
   ``sample-fp-v1`` hash ROMs use, so identical files share an identity across drones),
 * persist one row per save in SQLite, detecting created/updated/deleted files by
   comparing size + modified-time and re-fingerprinting only when those change,
-* queue every change so the next upload sends just the delta, and
-* compute a whole-set "thumbprint" the heartbeat echoes so the Drone can decide when a
-  re-sync is needed (identical contract to the ROM/BIOS thumbprints).
+* queue every change so the pending-changes view reflects exactly what changed since
+  the last clean point, and
+* compute a whole-set "thumbprint" so a peer can tell when a re-sync is needed
+  (identical contract to the ROM/BIOS thumbprints).
 
 Save conflicts resolve newest-modified-time-wins, so ``modified_time`` is part of every
-row and is what Overmind/peers compare when deciding which copy propagates.
+row and is what peers compare when deciding which copy propagates.
 
 The module is deliberately self-contained (its own table in the shared state DB) so it
 can be unit-tested and wired into the Drone poller without disturbing the ROM cache.

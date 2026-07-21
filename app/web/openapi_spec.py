@@ -256,7 +256,7 @@ def _schemas() -> Dict[str, Schema]:
             "bytes_downloaded": _integer(),
             "error": _string(),
         },
-        description="Local Network or Overmind download job.",
+        description="Local Network peer-to-peer download job.",
     )
 
     upload_job = _object(
@@ -318,43 +318,6 @@ def _schemas() -> Dict[str, Schema]:
             "health": freeform,
         },
         description="Local Network peer metadata safe to expose in the admin UI.",
-    )
-
-    overmind_integration_status = _object(
-        {
-            "configured": _boolean(),
-            "integration_enabled": _boolean(),
-            "integration_state": _string(),
-            "swarm_connection_status": _string(),
-            "requested_at": _string(fmt="date-time", nullable=True),
-            "last_started_at": _string(fmt="date-time", nullable=True),
-            "last_error": nullable_string,
-            "last_onboarding_attempt": freeform,
-            "notes": nullable_string,
-        },
-        description="Overmind connection state.",
-    )
-
-    overmind_public = _object(
-        {
-            "overmind_url": _string(),
-            "overmind_email": _string(),
-            "drone_name": _string(),
-            "machine_id": _string(),
-            "password_configured": _boolean(),
-            "password_masked": _string(),
-            "auth_token_configured": _boolean(),
-            "auth_token_masked": _string(),
-            "token_configured": _boolean(),
-            "token_masked": _string(),
-            "status": overmind_integration_status,
-            "swarm": _array(freeform),
-            "peer_checks": _array(freeform),
-            "certificate": certificate_metadata,
-            "network_mode": _string(),
-            "overmind_active": _boolean(),
-        },
-        description="Public Overmind integration details with secrets masked.",
     )
 
     return {
@@ -724,23 +687,6 @@ def _schemas() -> Dict[str, Schema]:
             {"status": _string(), "removed": _integer(), "updated": _integer(), "matched_count": _integer(), "entry": freeform, "entries": _array(freeform)},
             description="Gamelist mutation result.",
         ),
-        "OvermindIntegrationStatus": overmind_integration_status,
-        "OvermindPublicResponse": overmind_public,
-        "OvermindStatusResponse": overmind_public,
-        "OvermindActionsResponse": _object({"actions": _array(freeform)}, ("actions",)),
-        "OvermindConfigRequest": _object(
-            {
-                "overmind_url": _string(fmt="uri"),
-                "overmind_email": _string(),
-                "drone_name": _string(),
-                "overmind_password": _string(),
-                "overmind_auth_token": _string(),
-                "overmind_token": _string(),
-            },
-            ("overmind_url",),
-        ),
-        "OvermindStartRequest": _object({"overmind_password": _string(), "overmind_auth_token": _string(), "overmind_token": _string()}),
-        "OvermindClaimOwnershipRequest": _object({"overmind_url": _string(fmt="uri"), "email": _string(), "password": _string(), "drone_name": _string()}, ("overmind_url", "email", "password")),
         "CertificateRotateResponse": _object({"status": _enum(["rotated", "failed"]), "error": _string(), "certificate": _ref("CertificateMetadata")}, ("status", "certificate")),
         "DroneUpdateResponse": _object({"status": _string(), "version": _string(), "archive_url": _string(fmt="uri"), "elapsed_seconds": _number(), "restart": freeform}, description="Self-update result plus restart metadata."),
         "DroneAutoUpdateRequest": _object({"enabled": _boolean()}, ("enabled",)),
@@ -750,16 +696,14 @@ def _schemas() -> Dict[str, Schema]:
         "CredentialsUpdateResponse": _object({"credentials": freeform, "message": _string()}, ("credentials", "message")),
         "NetworkModeResponse": _object(
             {
-                "mode": _enum(["overmind", "local_network", "both", "disabled"]),
-                "overmind_active": _boolean(),
+                "mode": _enum(["local_network"]),
                 "local_network_active": _boolean(),
-                "overmind_enabled": _boolean(),
                 "local_network_enabled": _boolean(),
                 "modes": _array(_string()),
             },
-            ("mode", "overmind_active", "local_network_active", "overmind_enabled", "local_network_enabled", "modes"),
+            ("mode", "local_network_active", "local_network_enabled", "modes"),
         ),
-        "NetworkModeUpdateRequest": _object({"mode": _enum(["overmind", "local_network", "both", "disabled"]), "overmind_enabled": _boolean(), "local_network_enabled": _boolean()}),
+        "NetworkModeUpdateRequest": _object({"mode": _enum(["local_network"]), "local_network_enabled": _boolean()}),
         "LocalPeer": local_peer,
         "PairingInfo": _object({"code": _string(), "expires_at": _string(fmt="date-time"), "ttl_seconds": _integer()}),
         "LocalNetworkStatusResponse": _object(
@@ -1018,7 +962,7 @@ def _schemas() -> Dict[str, Schema]:
         ),
         "ConfigSourcesResponse": _object({"sources": _array(_string()), "versions": _object(additional_properties={"type": "string", "nullable": True}), "scan_root": _string()}, ("sources", "versions", "scan_root")),
         "EmulatorConfigFile": _object({"name": _string(), "root_name": _string(), "relative_path": _string(), "size": _integer(), "modified_at": _string(fmt="date-time"), "fingerprint": _string(), "error": _string()}),
-        "EmulatorsResponse": _object({"type": _enum(["emulator_configs"]), "configs": _array(_ref("EmulatorConfigFile")), "count": _integer(), "max_configs": _integer(), "incremental": _boolean()}, description="Detected emulator config files selected for Overmind reporting."),
+        "EmulatorsResponse": _object({"type": _enum(["emulator_configs"]), "configs": _array(_ref("EmulatorConfigFile")), "count": _integer(), "max_configs": _integer(), "incremental": _boolean()}, description="Detected emulator config files exposed to the admin UI and paired peers."),
         "EmulatorFileResponse": _object({"root_name": _string(), "relative_path": _string(), "path": _string(), "size": _integer(), "truncated": _boolean(), "content": _string(), "fingerprint": _string()}, description="One emulator config file content."),
     }
 
@@ -1305,7 +1249,7 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             "/admin/asset-cache/clear-pending": {"post": _operation("Clear pending asset metadata upload changes", {"200": _json_response("AssetCacheClearPendingResponse")}, tags=["admin"])},
             "/admin/api/status": {"get": _operation("API access, Swagger, and mTLS certificate guidance", {"200": _json_response("ApiAdminStatusResponse")}, tags=["admin", "meta"])},
             "/admin/api/certificate": {"get": _operation("Download Drone public certificate", {"200": _media_response("Public certificate PEM", ["application/x-pem-file", "application/x-x509-ca-cert", "text/plain"])}, description="Downloads the public certificate only. Private key material is not exposed.", tags=["admin", "meta"])},
-            "/admin/api/certificate/rotate": {"post": _operation("Rotate the Drone certificate through Overmind", {"200": _json_response("CertificateRotateResponse"), "502": _json_response("CertificateRotateResponse", "Certificate rotation failed")}, tags=["admin", "meta"], error_codes=("400", "401", "403", "404", "429", "500"))},
+            "/admin/api/certificate/rotate": {"post": _operation("Rotate the Drone's self-signed mTLS certificate", {"200": _json_response("CertificateRotateResponse"), "502": _json_response("CertificateRotateResponse", "Certificate rotation failed")}, tags=["admin", "meta"], error_codes=("400", "401", "403", "404", "429", "500"))},
             "/admin/automation": {"get": _operation("Get device automation settings and input-idle status", {"200": _json_response("AutomationStatusResponse")}, tags=["admin"])},
             "/admin/automation/idle-volume": {"post": _operation("Update idle-volume automation", {"200": _json_response("IdleVolumeResponse")}, request_body=_json_request("IdleVolumeUpdateRequest"), tags=["admin"])},
             "/admin/automation/idle-game-exit": {"post": _operation("Update idle-game-exit automation", {"200": _json_response("IdleGameExitResponse")}, request_body=_json_request("IdleGameExitUpdateRequest"), tags=["admin"])},
@@ -1341,13 +1285,6 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             "/admin/artwork/gamelist/remove": {"post": _operation("Remove one gamelist entry", {"200": _json_response("GamelistMutationResponse")}, request_body=_json_request("GamelistRemoveRequest"), tags=["admin", "artwork"])},
             "/admin/artwork/gamelist/update": {"post": _operation("Update one gamelist entry", {"200": _json_response("GamelistMutationResponse")}, request_body=_json_request("GamelistUpdateRequest"), tags=["admin", "artwork"])},
             "/admin/artwork/gamelist/remove-missing": {"post": _operation("Remove gamelist entries whose ROM files are missing", {"200": _json_response("GamelistMutationResponse")}, request_body=_json_request("GamelistRemoveMissingRequest"), tags=["admin", "artwork"])},
-            "/admin/integrations/overmind/status": {"get": _operation("Get Overmind integration status", {"200": _json_response("OvermindStatusResponse")}, tags=["admin", "overmind"])},
-            "/admin/integrations/overmind/actions": {"get": _operation("List processed Overmind actions", {"200": _json_response("OvermindActionsResponse")}, tags=["admin", "overmind"])},
-            "/admin/integrations/overmind/config": {"post": _operation("Save Overmind integration configuration", {"200": _json_response("OvermindPublicResponse")}, request_body=_json_request("OvermindConfigRequest"), tags=["admin", "overmind"], error_codes=("400", "401", "403", "429", "500", "502"))},
-            "/admin/integrations/overmind/start": {"post": _operation("Start Overmind polling", {"200": _json_response("OvermindPublicResponse")}, request_body=_json_request("OvermindStartRequest"), tags=["admin", "overmind"], error_codes=("400", "401", "403", "409", "429", "500"))},
-            "/admin/integrations/overmind/claim-ownership": {"post": _operation("Claim this Drone in Overmind", {"200": _json_response("OvermindPublicResponse")}, request_body=_json_request("OvermindClaimOwnershipRequest"), tags=["admin", "overmind"], error_codes=("400", "401", "403", "409", "429", "500", "502"))},
-            "/admin/integrations/overmind/swarm/connect": {"post": _operation("Request Overmind swarm connection", {"200": _json_response("OvermindPublicResponse")}, tags=["admin", "overmind"], error_codes=("400", "401", "403", "409", "429", "500", "502"))},
-            "/admin/integrations/overmind/swarm/disconnect": {"post": _operation("Disconnect this Drone from its Overmind swarm", {"200": _json_response("OvermindPublicResponse"), "502": _json_response("OvermindPublicResponse", "Disconnect failed after upstream call")}, tags=["admin", "overmind"], error_codes=("400", "401", "403", "409", "429", "500"))},
             "/admin/network-mode": {
                 "get": _operation("Get active integration network mode", {"200": _json_response("NetworkModeResponse")}, tags=["admin", "local-network"]),
                 "post": _operation("Update integration network mode", {"200": _json_response("NetworkModeResponse")}, request_body=_json_request("NetworkModeUpdateRequest"), tags=["admin", "local-network"]),
@@ -1439,10 +1376,10 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
                 )
             },
             "/admin/configs/sources": {"get": _operation("List config source keys available on this host", {"200": _json_response("ConfigSourcesResponse")}, tags=["admin", "configs"])},
-            "/admin/emulators": {"get": _operation("List emulator config files selected for Overmind reporting", {"200": _json_response("EmulatorsResponse")}, tags=["admin", "configs"])},
+            "/admin/emulators": {"get": _operation("List emulator config files exposed to the admin UI", {"200": _json_response("EmulatorsResponse")}, tags=["admin", "configs"])},
             "/admin/emulators/file": {
                 "get": _operation(
-                    "Read one emulator config file selected for Overmind reporting",
+                    "Read one emulator config file",
                     {"200": _json_response("EmulatorFileResponse")},
                     parameters=[_query_param("root", _string(), "Root name from /admin/emulators"), _query_param("relative_path", _string(), "Config path relative to the root"), _query_param("max_bytes", _integer(default=131072, minimum=1024, maximum=1048576))],
                     tags=["admin", "configs"],

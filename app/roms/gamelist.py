@@ -2,7 +2,7 @@
 
 Extracted from ``drone_api.py``. Pure helpers for reading Batocera ``gamelist.xml``
 entries (title/desc/genre/rating/image paths + a stable per-game id), building the
-ROM-metadata dict the cache and Overmind consume, writing entries back, and small
+ROM-metadata dict the cache consumes, writing entries back, and small
 artwork/placeholder-image utilities. Pure stdlib (``xml.etree`` + ``hashlib``); holds
 no Drone state.
 """

@@ -1,6 +1,6 @@
 ---
 name: drone-admin-features
-description: Use this when designing, reviewing, debugging, or modifying the Drone admin panel — System Logs, System Info, Emulators, Artwork & Metadata (scraping/gamelist), Integration (Overmind + Local Network panels), Automation, the ROMs/BIOS TreeGrid browser, per-system BIOS association, credentials/network-mode/certificate rotation, self-update buttons, or the admin route dispatch in app/web/api_routes.py and web/handlers_*.py.
+description: Use this when designing, reviewing, debugging, or modifying the Drone admin panel — System Info, System Logs, Emulators, Artwork & Metadata (scraping/gamelist), Automation, Theme, the Swarm page (pairing, tailnet, remote peer management), the ROMs/BIOS TreeGrid browser, per-system BIOS association, credentials/network-mode/certificate rotation, self-update buttons, or the admin route dispatch in app/web/api_routes.py and web/handlers_*.py.
 ---
 
 # Drone Admin Features Skill
@@ -31,8 +31,9 @@ app/web/
   handlers_content.py     # 483 lines — ROM/BIOS listing (also used by the tree UI)
   handlers_diagnostics.py # 376 lines — logs, system-info, gameplay-logs
   handlers_downloads.py   # 116 lines — download queue pause/resume/cancel/retry
-  handlers_network.py     # 667 lines — Local Network peer discovery/pairing/sync
-  handlers_overmind.py    # 374 lines — Overmind integration status/config/actions
+  handlers_network.py     # 667 lines — pairing, LAN discovery, tailnet, swarm overview
+  handlers_remote_admin.py # credential-gated proxy: drive a paired peer's own
+                          # /admin/* surface from this Drone's Swarm page
   handlers_peer.py        # 503 lines — inbound P2P asset serving (mTLS)
   handlers_system.py      # 128 lines — network-mode, self-update, certificate rotate
   handlers_theme.py       # 139 lines — theme/branding assets
@@ -43,29 +44,32 @@ Any change touching an `admin/*` route must update **both** the dispatch entry i
 `api_routes.py` and the owning `handlers_*.py` method — they're two halves of one
 change, not independently useful.
 
-## Admin menu (5 tiles)
+## Admin menu (6 tiles)
 
-`renderAdminMenu()` (`drone.js`, currently line 1864) renders exactly 5 tiles —
-**System Logs, Emulators, Artwork & Metadata, Integration, Automation**. The old
-doc documents only the first.
+`renderAdminMenu()` (`drone.js`, currently line 1948) renders exactly 6 tiles —
+**System Info, System Logs, Emulators, Artwork & Metadata, Automation, Theme**. The
+old doc documents only System Logs. There is no "Integration" tile — pairing, tailnet,
+and fleet management live on the **Swarm** page, which is a top-level nav item
+(`#admin/swarm`, alongside Systems/Controls/Transfers/Admin in `index.html`'s
+sidebar), not one of these 6 admin tiles. See "The Swarm page" below.
+
+### System Info
+
+`renderAdminSystemInfoPage` (`drone.js` ~line 5653, `GET /admin/system-info?speed=1`):
+runtime/CPU/memory/disk health, network fields, and the **Drone/PixeN self-update
+buttons** (`updateDroneApp()`/`runPixenUpdate()`, routes `/admin/system/update-drone`
+and `/admin/system/run-pixen-update`). Backend: `handlers_diagnostics.py`. Also hosts
+an **Asset Cache** card: `renderAssetCachePanel(payload, false)` fed by
+`GET /admin/asset-cache`, refreshed via `window.refreshSystemInfoAssetCache`.
+`purgeAssetCache()`/`clearPendingAssetChanges()` check
+`window.location.hash === "#admin/system-info"` before calling that refresh hook
+(falling back to the standalone orphaned `#admin/asset-cache` route otherwise).
 
 ### System Logs
 
 `GET /admin/logs/{source}?lines=200` (~60 supported emulator/EmulationStation/
 Drone log sources), sidebar + main viewer UI. Gameplay logs (`/admin/gameplay-logs`)
-were folded into this tile's scope rather than getting their own. **System Info**
-is a sibling page reached from within this area (`renderAdminSystemInfoPage`,
-`drone.js` ~line 5289, `GET /admin/system-info?speed=1`): runtime/CPU/memory/disk
-health, network fields, and the **Drone/PixeN self-update buttons**
-(`updateDroneApp()`/`runPixenUpdate()`, `drone.js` ~lines 1913-1941, routes
-`/admin/system/update-drone` and `/admin/system/run-pixen-update`) — these live
-on the System Info page, not a separate tile. Backend: `handlers_diagnostics.py`.
-System Info also now hosts an **Asset Cache** card (moved off the Integration
-page's Overmind tab): `renderAssetCachePanel(payload, false)` fed by
-`GET /admin/asset-cache`, refreshed via `window.refreshSystemInfoAssetCache`.
-`purgeAssetCache()`/`clearPendingAssetChanges()` check
-`window.location.hash === "#admin/system-info"` before calling that refresh hook
-(falling back to the standalone orphaned `#admin/asset-cache` route otherwise).
+were folded into this tile's scope rather than getting their own.
 
 ### Emulators
 
@@ -81,85 +85,81 @@ mobygames}/{search,apply}`; gamelist maintenance: `/admin/artwork/gamelist/
 `/admin/artwork/upload`. Backend: `handlers_artwork.py` (all in
 `api_routes.py` ~lines 271-571 alongside other admin routes).
 
-### Integration
-
-**Consolidated onto one page** (`renderIntegrationPage()`, `drone.js` ~line 3800):
-a `btn-group bff-segmented` tab switcher ("Overmind" / "Local Network", state
-kept in `#admin/integration?tab=overmind|local_network` via `setIntegrationTab()`
-+ `history.replaceState` — no full re-render on tab switch), and a single
-**Transfers** card below the tabs shared by both. The old separate
-`#admin/overmind` / `#admin/overmind/actions` / `#admin/local-network` pages are
-gone; the router redirects those hashes to `#admin/integration?tab=...` for
-old-link compatibility. Each tab's panel is **lazy-loaded** — only the tab shown
-on entry fetches its status/peers on page load; switching tabs fetches the other
-one for the first time via `setIntegrationTab()` (`integrationOvermindLoaded`/
-`integrationLocalLoaded` gate booleans) — this matters because Local Network's
-panel eagerly requests the first paired peer's assets, which you don't want
-firing just because someone opened the Overmind tab.
-
-**Both integrations are always on — no enable/disable toggle.** The old
-"Integration Enablement" card (two `form-switch` checkboxes posting to
-`/admin/network-mode`) is gone entirely, along with `setIntegrationEnabled()`.
-`renderIntegrationPage()` instead calls `GET /admin/network-mode` on every load
-and, if either flag is false, silently `POST`s `{overmind_enabled: true,
-local_network_enabled: true}` — a self-heal for any Drone still carrying an old
-exclusive/disabled mode from before this was toggleable (the backend's
-`local_network.py` mode model already supported `both` simultaneously; only the
-UI ever exposed a way to turn one off). Whether Overmind is actually *working*
-is now judged purely by the existing status pills (`Overmind: enabled/disabled`,
-`Overmind: linked/disconnected`, `Connected to Swarm: connected/pending/
-disconnected`), not a manual switch — a valid token + successful registration is
-what makes it "connected."
-
-- **Overmind tab** — `renderOvermindIntegrationPanel()` (`drone.js` ~line 4190):
-  Configuration card, then a collapsed-by-default **Processed Overmind Actions**
-  card (Bootstrap `.collapse`, `.collapse-caret` rotates via CSS on
-  `aria-expanded`, table given `.small-mono-table` so it reads at the same
-  font/size as System Logs/Emulators content — `.mono` + `0.72rem` — instead of
-  default table text). Routes: `/admin/integrations/overmind/{status,actions,
-  config,start,claim-ownership,swarm/connect,swarm/disconnect}`. Backend:
-  `handlers_overmind.py`. Downloads and Asset Cache cards that used to live here
-  were removed — Downloads merged into the shared Transfers card below the tabs;
-  Asset Cache moved to the System Info page (see below). `renderStatus()` now
-  renders **only the 3 status pills** — the old verbose field dump (Configured,
-  Integration Enabled, Machine ID, Action Polling, State, Drone Name,
-  Authorization Token, Requested At, Last Started At, Last Error, Certificate,
-  Swarm Drones, Notes, the "Last Swarm Snapshot" P2P-health block, and the
-  "Overmind communication is disabled" alert) was deleted outright — users only
-  want connected/pending/disconnected via the pills, not a raw field dump
-  (Machine ID etc. are already shown elsewhere: navbar chips, System Info page).
-  **Regression to watch for**: commit `68f7283` ("Overmind integration page was
-  being closed prematurely") fixed this panel deleting its own Configuration
-  card on open — a `panel.querySelector(".card.log-card").remove()` call that
-  fired unconditionally during render instead of only on a genuine close. Any
-  future change to this panel's render/refresh lifecycle should re-check that
-  opening it doesn't tear down its own DOM.
-- **Local Network tab** — `renderLocalNetworkIntegrationPanel()` (`drone.js`
-  ~line 3878): Pairing, Nearby Drones, and Request Assets from Connected Drone
-  cards — peer discovery, pairing-code rotation, per-peer pair/forget, browsing a
-  peer's ROM/BIOS/save/config/gameplay-history assets, and bulk sync. Routes:
-  `/admin/local-network/{status,discover,pairing-code/rotate,peers/{id}/
-  {pair,forget,assets},sync,sync-bulk}`. Backend: `handlers_network.py`. The
-  "Local Transfers" card that used to live here was removed (merged into the
-  shared Transfers card).
-- **Transfers card** (shared, not tab-scoped) — Active/Queued/Recent for **all**
-  drone-to-drone asset transfers to this machine, regardless of whether Overmind
-  or Local Network queued them (both write into the same backend
-  `DownloadManager` singleton, `/admin/downloads` — confirmed the old "Downloads"
-  card and "Local Transfers" card were rendering the exact same
-  `manager.snapshot()` data twice, just embedded via two different endpoints).
-  Renderer functions were renamed from `renderLocalTransferGroup`/
-  `renderLocalTransfersPanel`/etc. to the generic `renderTransferGroup`/
-  `renderTransfersPanel`/etc. since they're no longer Local-Network-specific.
-  Auto-refreshes every 3s while on `#admin/integration` via
-  `startTransfersAutoRefresh()`/`stopTransfersAutoRefresh()`.
-
 ### Automation
 
-`renderAutomationPage()` (`drone.js` line 4569) — idle-volume behavior
-(`/admin/automation`, `/admin/automation/idle-volume`): lowers volume after a
-period of no controller input, but active gameplay via emulatorlauncher
-suppresses this even without controller input seen.
+`renderAutomationPage()` (`drone.js` line 4685) — two independent idle automations,
+each with its own enable/idle-minutes config: **idle-volume**
+(`/admin/automation/idle-volume`) sets the volume to a configured target after a
+period of no controller input (raises or lowers, whichever the target requires —
+active gameplay via emulatorlauncher suppresses it even without input seen), and
+**idle-game-exit** (`/admin/automation/idle-game-exit`) exits the running game via
+`batocera-es-swissknife --emukill` after its own configured idle period, but only
+while a game is actually running. Both poll `last-input-activity` (written by the
+privileged input-activity monitor) every `AUTOMATION_POLL_SECONDS`. Backend:
+`app/device/automation.py`.
+
+### Theme
+
+`renderThemeGalleryPage()` — browse and preview installed EmulationStation theme
+artwork (`#theme`, outside the admin route tree).
+
+## The Swarm page (top-level nav, not an admin tile)
+
+Fleet management lives on its own top-level nav item, `#admin/swarm`
+(`swarmMenuBtn` in `index.html`, alongside Systems/Controls/Transfers/Admin) —
+**not** inside the 6-tile Admin menu. `renderSwarmPage()` (`drone.js` ~line 4199)
+replaced the old Integration page entirely; `#admin/integration` redirects here for
+old-link compatibility (the redirect comment literally says "Overmind integration is
+disabled (the fleet is Overmind-free) and the Local Network configuration moved to
+the Swarm page"). There is no central hub anymore — every Drone pairs directly with
+its peers.
+
+- **Fleet overview** — a card grid (`renderSwarmDroneCard`) of this machine plus
+  every paired peer, built from `GET /admin/swarm/overview`
+  (`handlers_network.py:_handle_admin_swarm_overview`): each peer is probed live, in
+  parallel with a short per-peer timeout budget, so one offline Drone degrades to
+  `online: false` instead of hanging the whole page — this is a live probe on every
+  page load, not a periodic-cache read. Each paired peer's card has a **Manage**
+  button (see "Remote peer management" below).
+- **Tailnet card** — `GET /admin/tailnet/status` + `POST /admin/tailnet/discover`
+  (`device/tailnet_service.py` backs this): enrollment status, one-click setup
+  (paste a Tailscale auth key), auth-key rotation, and code-free pairing with any
+  other online tailnet device.
+- **Pairing card** — the rotating local pairing code
+  (`POST /admin/local-network/pairing-code/rotate`) used for same-LAN pairing.
+- **Nearby Drones card** — LAN-discovered candidates (`POST /admin/local-network/discover`)
+  with per-peer pair/forget actions. Routes:
+  `/admin/local-network/{status,discover,pairing-code/rotate,peers/{id}/{pair,forget,assets}}`.
+  Backend: `handlers_network.py`.
+- If local networking is disabled on this Drone, the page shows an inline
+  "Enable" alert instead of hiding pairing entirely (`swarmEnableLocalNetwork()`).
+
+### Remote peer management (the "Manage" button)
+
+Opens a **separate browser tab** at `?manage=<peer_id>` that proxies every admin
+call for its whole lifetime to that one paired peer — the originating tab is
+untouched, so there's no mixed local/remote state to track. Backend:
+`handlers_remote_admin.py` (`HandlersRemoteAdminMixin`). Key properties:
+
+- **Credential-gated, not a new role system** — the peer's own existing admin login
+  is the real authorization check, verified once via `/admin/remote/connect` and
+  cached **server-side only, in memory, never on disk, never returned to the
+  browser**. The target's own `BasicAuth.check()` runs independently on every single
+  proxied call, exactly as if the browser had connected to it directly — whatever
+  that login can do locally is exactly what it can do remotely, nothing more.
+- A persistent top-of-page banner (`managedPeerBanner` in `index.html`) names the
+  peer whenever a tab is impersonating one; its absence is the "local" default.
+- Only lightweight admin JSON/text crosses this proxy — ROM/BIOS/save/artwork
+  *bytes* keep moving through the normal P2P transport directly between whichever
+  two Drones are actually transferring; this feature never sits in that data path.
+- Edge cases are classified, not pre-checked: unknown/forgotten peer → 404,
+  offline/unreachable → 502, wrong/revoked credentials → 401 (session cleared),
+  admin disabled on target → 409, an unsupported route → reported as a version
+  mismatch.
+- `peer_id` arrives as a URL path segment and must be `unquote()`d explicitly (unlike
+  query-string values, Python's stdlib server does not auto-decode path segments) —
+  a past regression here made every proxied call 404 even though `/admin/remote/connect`
+  worked (its `peer_id` comes from the JSON body, not the path).
 
 ## ROMs/BIOS TreeGrid browser (new — absent from the old doc)
 
@@ -176,8 +176,8 @@ bucket. Backend listing: `handlers_content.py` (`_handle_bios_list`,
 BIOS files are filed under each system's own "BIOS" category instead of one
 flat bucket, resolved by the **Drone** at scan time against a vendored
 MD5→system_name reference table (`app/roms/data/bios_system_map.json`,
-sourced from `Abdess/retrobios`). The system list travels to Overmind in the
-`systems` field on each BIOS asset and is stored in a join table
+sourced from `Abdess/retrobios`). The resolved system list is exposed as the
+`systems` field on each BIOS asset and stored locally in a join table
 (`drone_bios_systems`, migration `0002.bios_system_association.sql`). A BIOS
 matching **exactly one** system files under that system's BIOS category; a
 BIOS matching **zero or two-plus** systems falls to the top-level
@@ -202,13 +202,9 @@ cancel/retry/clear (`/admin/downloads/{pause,resume,clear}`,
   `api_routes.py`, logic is `handlers_*.py` mixins; a route change usually
   touches both files.
 - Forgetting the `admin_enabled` gate check when adding a new `admin/*` route.
-- Reintroducing the premature Overmind-integration-panel-close bug class when
-  touching that panel's render/refresh lifecycle.
-- Eagerly loading both Integration tabs on page entry instead of lazily loading
-  the inactive one on first switch — Local Network's panel auto-requests the
-  first paired peer's assets, so loading it unconditionally fires an unwanted
-  (and, against an unreachable/offline peer, failing) network request every time
-  someone just wants the Overmind tab.
+- Assuming the Swarm page's fleet overview reads from a periodic cache — it
+  live-probes every paired peer on each page load; don't add an expensive
+  unconditional per-peer fetch elsewhere that duplicates that cost.
 - Filing a BIOS file under one system when it actually matches zero or
   multiple systems (must land in the shared/unassigned bucket instead).
 - Adding a log/config/emulator-file viewer route without validating the
@@ -229,9 +225,9 @@ Backend route + handler changes (api_routes.py + handlers_*.py):
 ...
 BIOS/tree changes (if applicable):
 ...
-Overmind-integration changes (if applicable):
+Swarm/pairing changes (if applicable):
 ...
-Local-network changes (if applicable):
+Remote peer management changes (if applicable):
 ...
 Tests:
 ...
@@ -248,8 +244,6 @@ Do not:
 - add an `admin/*` route unguarded by the `admin_enabled` check,
 - serve raw file paths from the log/config/emulator viewers without validating
   they resolve inside the expected directory,
-- reintroduce the premature-panel-close regression in the Overmind Integration
-  panel,
 - duplicate BIOS-association logic outside the `drone_bios_systems` join table
   and its vendored MD5 map,
 - add a destructive action (purge, clear, rotate cert, remove-missing) without
@@ -258,6 +252,6 @@ Do not:
 ## Default bias
 
 When unsure, keep new admin functionality inside the fitting existing tile
-(only add a 6th tile for a genuinely new category), keep frontend route names
+(only add a 7th tile for a genuinely new category), keep frontend route names
 symmetric with their backend route + handler, and keep destructive actions
 behind an explicit confirm step like the existing ones.

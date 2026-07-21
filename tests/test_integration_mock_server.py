@@ -171,28 +171,12 @@ class MockServerIntegrationTests(unittest.TestCase):
         self.assertIn("tailnet.backend_state", js)
         self.assertIn("#admin/logs/tailscaled?lines=200", js)
 
-    def test_overmind_configuration_ui_is_gone(self) -> None:
-        # The Overmind config panel (URL/token inputs, claim flow) left with the
-        # retired Integration page.
-        js = self._get_bytes("/static/js/drone.js")
-        self.assertNotIn(b"Authorization Token", js)
-        self.assertNotIn(b"Claim Ownership", js)
-        self.assertNotIn(b"Integration Password", js)
-        self.assertNotIn(b"overmindUrlInput", js)
-
     def _get_json_unauthenticated(self, path: str) -> dict:
         url = f"http://127.0.0.1:{self.port}{path}"
         with urllib.request.urlopen(urllib.request.Request(url), timeout=5) as resp:
             return json.loads(resp.read().decode("utf-8"))
 
     def test_peer_info_and_pair_by_address_endpoints(self) -> None:
-        # With local networking explicitly disabled the bootstrap endpoint refuses.
-        self._post_json("/v1/api/admin/network-mode", {"mode": "disabled"})
-        with self.assertRaises(urllib.error.HTTPError) as error:
-            self._get_json_unauthenticated("/v1/api/peer/info")
-        self.assertEqual(error.exception.code, 409)
-
-        self._post_json("/v1/api/admin/network-mode", {"mode": "local_network"})
         fake_manager = mock.MagicMock()
         fake_manager.return_value.ensure_certificate.return_value = {"fingerprint": "ff:ee"}
         with mock.patch("app.web.handlers_peer.DroneCertificateManager", fake_manager), \
@@ -201,7 +185,7 @@ class MockServerIntegrationTests(unittest.TestCase):
             # before any trust exists, exactly like POST /peer/pair.
             info = self._get_json_unauthenticated("/v1/api/peer/info")
         self.assertEqual(info["service"], local_network.DISCOVERY_SERVICE)
-        self.assertEqual(info["drone_id"], self.settings.overmind_device_id)
+        self.assertEqual(info["drone_id"], self.settings.device_id)
         self.assertEqual(info["tailnet_ip"], "100.64.0.5")
         self.assertEqual(info["certificate_fingerprint"], "ff:ee")
 
@@ -232,19 +216,16 @@ class MockServerIntegrationTests(unittest.TestCase):
         self.assertEqual(error.exception.code, 400)
 
     def test_swarm_overview_endpoint(self) -> None:
-        # With local networking explicitly disabled: still answers, self only.
-        self._post_json("/v1/api/admin/network-mode", {"mode": "disabled"})
         overview = self._get_json("/v1/api/admin/swarm/overview")
-        self.assertFalse(overview["active"])
-        self.assertEqual(len(overview["drones"]), 1)
-        me = overview["drones"][0]
-        self.assertTrue(me["is_self"])
+        self.assertTrue(overview["active"])
+        # seed_mock_userdata always pre-pairs fake-local-peer-01, so self plus
+        # that one peer -- assert on self specifically rather than an exact count.
+        me = next(drone for drone in overview["drones"] if drone["is_self"])
         self.assertTrue(me["online"])
-        self.assertEqual(me["drone_id"], self.settings.overmind_device_id)
+        self.assertEqual(me["drone_id"], self.settings.device_id)
         self.assertIn("counts", me["summary"])
         self.assertIn("systems", me["summary"])
 
-        self._post_json("/v1/api/admin/network-mode", {"mode": "local_network"})
         object.__setattr__(self.settings, "use_fake_data", True)
         # A fake paired peer (answered locally, like the assets browse endpoint)...
         local_network.save_paired_peer(
@@ -274,7 +255,7 @@ class MockServerIntegrationTests(unittest.TestCase):
         drones = {drone["drone_id"]: drone for drone in overview["drones"]}
         # seed_mock_userdata pre-seeds fake-local-peer-01 in fake mode, so
         # assert on the drones this test placed rather than an exact count.
-        self.assertIn(self.settings.overmind_device_id, drones)
+        self.assertIn(self.settings.device_id, drones)
         self.assertIn("nearby-fake-drone", drones)
         self.assertIn("unreachable-drone", drones)
 
@@ -322,20 +303,12 @@ class MockServerIntegrationTests(unittest.TestCase):
         self.assertIsInstance(calls[0].kwargs["overall_deadline"], float)
 
     def test_network_mode_and_local_network_admin_endpoints(self) -> None:
-        # Overmind is retired: fresh drones come up local-only, and the API
-        # refuses to re-enable it.
+        # Fresh drones come up local-only; there is no other mode to fall back to.
         initial = self._get_json("/v1/api/admin/network-mode")
         self.assertEqual(initial["mode"], "local_network")
-        self.assertFalse(initial["overmind_enabled"])
 
         with self.assertRaises(urllib.error.HTTPError) as error:
             self._post_json("/v1/api/admin/network-mode", {"mode": "both"})
-        self.assertEqual(error.exception.code, 400)
-        with self.assertRaises(urllib.error.HTTPError) as error:
-            self._post_json(
-                "/v1/api/admin/network-mode",
-                {"overmind_enabled": True, "local_network_enabled": True},
-            )
         self.assertEqual(error.exception.code, 400)
 
         updated = self._post_json("/v1/api/admin/network-mode", {"mode": "local_network"})
@@ -392,10 +365,7 @@ class MockServerIntegrationTests(unittest.TestCase):
         self.assertTrue(peer_gameplay["items"])
 
         js = self._get_bytes("/static/js/drone.js")
-        # The Integration page and its Overmind panels are retired; the Swarm
-        # page owns pairing/peers/tailnet and Transfers owns asset requests.
-        self.assertNotIn(b"renderIntegrationPage", js)
-        self.assertNotIn(b"renderOvermindIntegrationPanel", js)
+        # The Swarm page owns pairing/peers/tailnet and Transfers owns asset requests.
         self.assertIn(b"renderTransfersPage", js)
         self.assertIn(b"renderSwarmPage", js)
         self.assertIn(b"requestLocalPeerAssets", js)
@@ -469,7 +439,7 @@ class MockServerIntegrationTests(unittest.TestCase):
         self.assertEqual(payload["type"], "file")
         self.assertTrue(any("menu_driver" in line for line in payload["content"]))
 
-    def test_admin_emulators_endpoint_uses_overmind_config_set(self) -> None:
+    def test_admin_emulators_endpoint_lists_tracked_configs(self) -> None:
         payload = self._get_json("/v1/api/admin/emulators")
         self.assertEqual(payload["type"], "emulator_configs")
         rows = {row["relative_path"]: row for row in payload["configs"]}

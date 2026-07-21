@@ -15,31 +15,43 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 try:
-    from ..common.logging_setup import _overmind_log
+    from ..common.logging_setup import _drone_log
     from ..common.settings import Settings
-    from ..overmind.overmind_client import _format_overmind_error
+    from ..common.http_errors import _format_http_error
     from ..storage.rom_metadata_store import (
         _load_rom_metadata_cache,
         _persist_rom_metadata_cache,
         _read_preserved_asset_fingerprint,
     )
+    from ..storage import saves_store as _saves_store
     from .gamelist import _database_rom_metadata_fields
     from .rom_asset_bios import bios_systems_for_md5
     from .rom_inventory import _bios_cache_entry_key, _rom_cache_entry_key, _wire_rom_rows
-    from .rom_metadata_state import _build_rom_metadata_snapshot_from_cache
+    from .rom_metadata_state import (
+        _begin_rom_metadata_activity,
+        _build_rom_metadata_snapshot_from_cache,
+        _end_rom_metadata_activity,
+        _mark_rom_metadata_upload_clean,
+    )
 except ImportError:  # pragma: no cover - direct script execution fallback
-    from common.logging_setup import _overmind_log  # type: ignore
+    from common.logging_setup import _drone_log  # type: ignore
     from common.settings import Settings  # type: ignore
-    from overmind.overmind_client import _format_overmind_error  # type: ignore
+    from common.http_errors import _format_http_error  # type: ignore
     from storage.rom_metadata_store import (  # type: ignore
         _load_rom_metadata_cache,
         _persist_rom_metadata_cache,
         _read_preserved_asset_fingerprint,
     )
+    from storage import saves_store as _saves_store  # type: ignore
     from roms.gamelist import _database_rom_metadata_fields  # type: ignore
     from roms.rom_asset_bios import bios_systems_for_md5  # type: ignore
     from roms.rom_inventory import _bios_cache_entry_key, _rom_cache_entry_key, _wire_rom_rows  # type: ignore
-    from roms.rom_metadata_state import _build_rom_metadata_snapshot_from_cache  # type: ignore
+    from roms.rom_metadata_state import (  # type: ignore
+        _begin_rom_metadata_activity,
+        _build_rom_metadata_snapshot_from_cache,
+        _end_rom_metadata_activity,
+        _mark_rom_metadata_upload_clean,
+    )
 
 # Local copies of the scan/hash tuning knobs (drone_api keeps its own copies for the
 # poller bootstrap + rom_metadata_state still resident/using them); all read the same env.
@@ -65,7 +77,7 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
     except ImportError:  # pragma: no cover - flat execution
         from drone_api import ROM_METADATA_PROGRESS_FILES, RomRepository  # type: ignore
     started = time.monotonic()
-    _overmind_log("Asset metadata poll started: phase=cache_load")
+    _drone_log("Asset metadata poll started: phase=cache_load")
     cache_load_started = time.monotonic()
     cache, rebuilt = _load_rom_metadata_cache(settings)
     was_dirty = bool(cache.get("dirty"))
@@ -142,7 +154,7 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
         )
         last_checkpoint = now
 
-    _overmind_log("Asset metadata poll phase=scan")
+    _drone_log("Asset metadata poll phase=scan")
     # A classification-rule change must re-index every system once, even when no
     # gamelist.xml changed (the MD5 gate below would otherwise carry stale rows
     # forward forever). The stored version is only stamped after a COMPLETE pass, so
@@ -182,7 +194,7 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
         try:
             system_dir = repository.get_system_dir(system_name)
         except Exception as error:
-            print(f"ROM metadata scan warning: system={system_name} error={_format_overmind_error(error)}", file=sys.stderr, flush=True)
+            print(f"ROM metadata scan warning: system={system_name} error={_format_http_error(error)}", file=sys.stderr, flush=True)
             continue
         gamelist_file = system_dir / "gamelist.xml"
         try:
@@ -210,7 +222,7 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
             try:
                 _, roms = repository.list_gamelist_rom_metadata(system_name, system_dir)
             except Exception as error:
-                print(f"ROM metadata scan warning: system={system_name} error={_format_overmind_error(error)}", file=sys.stderr, flush=True)
+                print(f"ROM metadata scan warning: system={system_name} error={_format_http_error(error)}", file=sys.stderr, flush=True)
                 continue
             for rom in roms:
                 file_path = str(rom.get("file_path") or rom.get("relative_path") or rom.get("rom_path") or rom.get("rom_file") or "").strip()
@@ -315,13 +327,13 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
     except FileNotFoundError:
         pass
     except Exception as error:
-        print(f"BIOS metadata scan warning: error={_format_overmind_error(error)}", file=sys.stderr, flush=True)
+        print(f"BIOS metadata scan warning: error={_format_http_error(error)}", file=sys.stderr, flush=True)
     checkpoint_scan("bios_scan_complete", force=bool(bios_discovered))
     bios_deleted = previous_bios_keys - set(next_bios_entries.keys()) - {key for key, _, _ in bios_new_or_changed}
-    # Artwork is no longer collected or uploaded to Overmind. Artwork is resolved live from
-    # gamelist.xml only at peer-to-peer transfer time (see rom_artwork_gamelist), so the poll
-    # never scans it. Leaving next_artwork_entries empty purges any previously-cached artwork
-    # rows through the normal delete path below.
+    # Artwork is no longer collected into the metadata cache. Artwork is resolved live
+    # from gamelist.xml only at peer-to-peer transfer time (see rom_artwork_gamelist), so
+    # the poll never scans it. Leaving next_artwork_entries empty purges any previously-
+    # cached artwork rows through the normal delete path below.
     artwork_deleted = previous_artwork_keys - set(next_artwork_entries.keys())
     artwork_changed = next_artwork_entries != existing_artwork_entries
     print(
@@ -379,7 +391,7 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
     cache["scan_in_progress"] = False
     # Stamp the classifier version only on a completed pass (see classifier_stale above).
     cache["rom_classifier_version"] = ROM_CLASSIFIER_VERSION
-    _overmind_log("Asset metadata poll phase=cache_write")
+    _drone_log("Asset metadata poll phase=cache_write")
     cache_write_started = time.monotonic()
     rom_updates = {
         key: value for key, value in next_entries.items()
@@ -470,8 +482,8 @@ def _hash_rom_metadata_batches(settings: Settings, repository: "RomRepository", 
             updated = {**entry, "fingerprint": fingerprint_value, "rom_fingerprint": fingerprint_value}
             entries[key] = updated
             pending_updates[key] = updated
-            # Slim wire shape: Overmind's rom_hash_patch updates rom_fingerprint by
-            # (system, gamelist_id), so only those slim fields are sent.
+            # Slim wire shape: a rom_hash_patch update only carries the fingerprint
+            # fields keyed by (system, gamelist_id), not the full ROM record.
             patch.append(_wire_rom_rows([updated])[0])
             hashed += 1
         now = time.monotonic()
@@ -520,7 +532,7 @@ def _hash_rom_metadata_batches(settings: Settings, repository: "RomRepository", 
             "collected_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
             "roms": patch,
             # complete only when we exhausted the pending list, not on a budget break,
-            # so Overmind does not mark the inventory fingerprint clean prematurely.
+            # so a caller does not treat the inventory fingerprint as clean prematurely.
             "hash_progress": {"processed": hashed, "total": total, "complete": not budget_exhausted},
         }
         patch = []
@@ -540,7 +552,54 @@ def _hash_rom_metadata_batches(settings: Settings, repository: "RomRepository", 
         )
 
 
-# _filesystem_events + _collect_game_logs now live in overmind/collectors.py (re-exported above).
+def _complete_local_rom_metadata_cache(settings: Settings, repository: "RomRepository", reason: str) -> dict:
+    # ROM_METADATA_FINGERPRINT_BATCH_SIZE stays single-source in drone_api (tests patch it); lazy-import.
+    try:
+        from ..drone_api import ROM_METADATA_FINGERPRINT_BATCH_SIZE
+    except ImportError:  # pragma: no cover - flat execution
+        from drone_api import ROM_METADATA_FINGERPRINT_BATCH_SIZE  # type: ignore
+    hash_batches = 0
+    hashed_roms = 0
+    for patch in _hash_rom_metadata_batches(settings, repository, batch_size=ROM_METADATA_FINGERPRINT_BATCH_SIZE):
+        hash_batches += 1
+        hashed_roms += len(patch.get("roms") or [])
+    print(
+        f"Asset metadata cached locally: reason={reason} hash_batches={hash_batches} hashed_roms={hashed_roms}",
+        file=sys.stdout,
+        flush=True,
+    )
+    # There is no upload destination anymore -- a completed local scan+hash pass is
+    # the whole lifecycle, so mark the cache clean here (was previously only marked
+    # clean after a successful Overmind upload).
+    cache, _ = _load_rom_metadata_cache(settings)
+    snapshot = _build_rom_metadata_snapshot_from_cache(settings, cache)
+    _mark_rom_metadata_upload_clean(
+        settings,
+        fingerprint=snapshot.get("rom_inventory_fingerprint"),
+        bios_thumbprint=snapshot.get("bios_files_thumbprint"),
+    )
+    return {
+        "status": "cached",
+        "reason": reason,
+        "hash_batches": hash_batches,
+        "hashed_roms": hashed_roms,
+    }
 
 
-# DownloadCancelled now lives in transfer/download_errors.py (re-exported below).
+def _poll_rom_metadata_once(settings: Settings, repository: "RomRepository") -> dict:
+    """One scan+hash+local-cache cycle: filesystem scan, then saves cache scan.
+
+    This fleet has no central hub to upload to -- ROM/BIOS metadata is scanned and
+    cached locally, then served to paired peers on request (see transfer/peer_download.py).
+    """
+    if not _begin_rom_metadata_activity("poll"):
+        return {"status": "skipped", "reason": "metadata_already_running", "changed": False}
+    try:
+        _poll_rom_metadata_cache(settings, repository)
+        try:
+            _saves_store.sync_saves_cache(settings.saves_root)
+        except Exception as error:
+            print(f"Local saves cache scan failed: {_format_http_error(error)}", file=sys.stderr, flush=True)
+        return _complete_local_rom_metadata_cache(settings, repository, "scan_complete")
+    finally:
+        _end_rom_metadata_activity()

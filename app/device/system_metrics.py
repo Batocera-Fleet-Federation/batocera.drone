@@ -1,6 +1,6 @@
 """System / device telemetry collection for the Drone.
 
-Extracted from ``drone_api.py``. Gathers the metrics reported to Overmind: a
+Extracted from ``drone_api.py``. Gathers the metrics shown on the admin UI: a
 bandwidth speed sample, GPU info, live performance metrics (CPU/memory/temp),
 mounted-disk usage, and the combined system-info payload. Read-only probes of
 /proc, /sys and standard CLI tools. Lives beside ``device_control`` because the
@@ -23,9 +23,9 @@ from typing import List, Optional
 from urllib.request import Request, urlopen
 
 try:
-    from ..overmind.overmind_client import _format_overmind_error
+    from ..common.http_errors import _format_http_error
 except ImportError:  # pragma: no cover - direct script execution fallback
-    from overmind.overmind_client import _format_overmind_error  # type: ignore
+    from common.http_errors import _format_http_error  # type: ignore
 
 SPEED_TEST_DEFAULT_BASE_URL = "https://speed.cloudflare.com"
 # Previous CPU-time sample; module-global so the next call computes a delta.
@@ -82,7 +82,7 @@ def _sample_speed() -> dict:
         sample["upload_mbps"] = round((len(payload) * 8) / elapsed / 1_000_000, 3)
     except Exception as error:
         sample["source"] = f"{source}-failed"
-        sample["error"] = _format_overmind_error(error)
+        sample["error"] = _format_http_error(error)
     print(f"Speed sample created: source={sample['source']} down={sample['download_mbps']} up={sample['upload_mbps']}", file=sys.stdout, flush=True)
     return sample
 

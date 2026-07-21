@@ -2,9 +2,7 @@
 displayed/grouped-systems and music volume, as a mixin.
 
 Composed onto ``RomRequestHandler``; delegates all real work to
-``device/es_collections.py`` (shared with the Overmind remote-control actions
-in ``overmind/actions.py`` so the local admin UI and Overmind apply changes
-through the exact same code path).
+``device/es_collections.py``.
 """
 
 try:

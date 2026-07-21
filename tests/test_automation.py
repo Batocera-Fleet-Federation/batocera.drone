@@ -7,15 +7,11 @@ from unittest import mock
 import app.drone_api as drone_api
 import app.device.automation as automation
 import app.device.device_control as device_control
-import app.overmind.actions as overmind_actions
 from app.drone_api import (
-    RomRepository,
     Settings,
-    _execute_overmind_action,
     _load_automation_config,
     _normalize_idle_game_exit_config,
     _normalize_idle_volume_config,
-    _push_automation_config_to_overmind,
     _read_last_input_activity,
     _run_idle_game_exit_automation_once,
     _run_idle_volume_automation_once,
@@ -178,20 +174,6 @@ class WifiRecoveryAutomationTests(unittest.TestCase):
             ],
         )
         sleep_mock.assert_called_once_with(3)
-
-    def test_overmind_action_saves_wifi_recovery(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            settings = _build_settings(Path(tmp))
-            repo = RomRepository(Path(tmp) / "roms", Path(tmp) / "bios")
-            status, message, result = _execute_overmind_action(
-                settings,
-                repo,
-                {"action": "set_wifi_recovery_automation", "payload": {"enabled": True}},
-            )
-            self.assertEqual(status, "completed")
-            self.assertIn("enabled", message)
-            self.assertEqual(result, {"type": "wifi_recovery_automation", "enabled": True})
-            self.assertEqual(_load_automation_config(settings)["wifi_recovery"], {"enabled": True})
 
 
 class InputActivityFileTests(unittest.TestCase):
@@ -449,124 +431,7 @@ class IdleGameExitAutomationRunnerTests(unittest.TestCase):
                 self.assertEqual(kill_mock.call_count, 2)
 
 
-class IdleVolumeOvermindActionTests(unittest.TestCase):
-    def setUp(self) -> None:
-        drone_api._IDLE_VOLUME_LAST_ARMED_ACTIVITY = None
-
-    def test_action_saves_config_and_reports_it(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            settings = _build_settings(Path(tmp))
-            repo = RomRepository(Path(tmp) / "roms", Path(tmp) / "bios")
-            status, message, result = _execute_overmind_action(
-                settings,
-                repo,
-                {
-                    "action": "set_idle_volume_automation",
-                    "payload": {"enabled": True, "idle_minutes": 12, "target_volume": 10},
-                },
-            )
-            self.assertEqual(status, "completed")
-            self.assertEqual(result["type"], "idle_volume_automation")
-            self.assertEqual(result["enabled"], True)
-            self.assertEqual(result["idle_minutes"], 12)
-            self.assertEqual(result["target_volume"], 10)
-            self.assertIn("enabled", message)
-            stored = _load_automation_config(settings)["idle_volume"]
-            self.assertEqual(stored, {"enabled": True, "idle_minutes": 12, "target_volume": 10})
-
-    def test_action_partial_payload_merges_and_clamps(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            settings = _build_settings(Path(tmp))
-            repo = RomRepository(Path(tmp) / "roms", Path(tmp) / "bios")
-            _save_automation_config(
-                settings,
-                {"idle_volume": {"enabled": True, "idle_minutes": 5, "target_volume": 25}},
-            )
-            status, _message, result = _execute_overmind_action(
-                settings, repo, {"action": "set_idle_volume_automation", "payload": {"target_volume": 999}}
-            )
-            self.assertEqual(status, "completed")
-            self.assertEqual(result["enabled"], True)  # preserved
-            self.assertEqual(result["idle_minutes"], 5)  # preserved
-            self.assertEqual(result["target_volume"], 100)  # clamped
-
-    def test_pixn_update_action_runs_installed_script(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            settings = _build_settings(Path(tmp))
-            repo = RomRepository(Path(tmp) / "roms", Path(tmp) / "bios")
-            with mock.patch.object(
-                overmind_actions,
-                "run_pixen_upgrade",
-                return_value={"type": "pixen_update", "status": "started", "pid": 123},
-            ) as run_mock:
-                status, message, result = _execute_overmind_action(
-                    settings,
-                    repo,
-                    {"action": "run_pixn_update"},
-                )
-            self.assertEqual(status, "completed")
-            self.assertIn("PixN", message)
-            self.assertEqual(result["type"], "pixen_update")
-            run_mock.assert_called_once_with(settings)
-
-
-class IdleGameExitOvermindActionTests(unittest.TestCase):
-    def setUp(self) -> None:
-        drone_api._IDLE_GAME_EXIT_LAST_ARMED_ACTIVITY = None
-
-    def test_action_saves_config_and_reports_it(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            settings = _build_settings(Path(tmp))
-            repo = RomRepository(Path(tmp) / "roms", Path(tmp) / "bios")
-            status, message, result = _execute_overmind_action(
-                settings,
-                repo,
-                {
-                    "action": "set_idle_game_exit_automation",
-                    "payload": {"enabled": True, "idle_minutes": 20},
-                },
-            )
-            self.assertEqual(status, "completed")
-            self.assertEqual(result["type"], "idle_game_exit_automation")
-            self.assertEqual(result["enabled"], True)
-            self.assertEqual(result["idle_minutes"], 20)
-            self.assertIn("enabled", message)
-            stored = _load_automation_config(settings)["idle_game_exit"]
-            self.assertEqual(stored, {"enabled": True, "idle_minutes": 20})
-
-    def test_action_partial_payload_merges_and_clamps(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            settings = _build_settings(Path(tmp))
-            repo = RomRepository(Path(tmp) / "roms", Path(tmp) / "bios")
-            _save_automation_config(
-                settings,
-                {"idle_game_exit": {"enabled": True, "idle_minutes": 15}},
-            )
-            status, _message, result = _execute_overmind_action(
-                settings, repo, {"action": "set_idle_game_exit_automation", "payload": {"idle_minutes": 9999}}
-            )
-            self.assertEqual(status, "completed")
-            self.assertEqual(result["enabled"], True)  # preserved
-            self.assertEqual(result["idle_minutes"], 1440)  # clamped
-
-    def test_action_does_not_disturb_idle_volume_config(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            settings = _build_settings(Path(tmp))
-            repo = RomRepository(Path(tmp) / "roms", Path(tmp) / "bios")
-            _save_automation_config(
-                settings,
-                {"idle_volume": {"enabled": True, "idle_minutes": 5, "target_volume": 25}},
-            )
-            _execute_overmind_action(
-                settings,
-                repo,
-                {"action": "set_idle_game_exit_automation", "payload": {"enabled": True, "idle_minutes": 20}},
-            )
-            stored = _load_automation_config(settings)["idle_volume"]
-            self.assertEqual(stored, {"enabled": True, "idle_minutes": 5, "target_volume": 25})
-
-
-class IdleVolumeOvermindPushTests(unittest.TestCase):
+class SystemInfoPayloadAutomationTests(unittest.TestCase):
     def test_collect_system_info_includes_idle_volume_automation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(Path(tmp))
@@ -602,53 +467,6 @@ class IdleVolumeOvermindPushTests(unittest.TestCase):
             payload = drone_api._collect_system_info_payload(settings)
             self.assertTrue(payload["pixen_installed"])
             self.assertEqual(payload["pixen_script_path"], str(script.resolve()))
-
-    def test_push_sends_full_heartbeat_with_current_config(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            settings = _build_settings(Path(tmp))
-            _save_automation_config(
-                settings,
-                {"idle_volume": {"enabled": False, "idle_minutes": 8, "target_volume": 0}},
-            )
-            with mock.patch.object(drone_api._local_network, "is_overmind_mode", return_value=True), \
-                 mock.patch.object(
-                     automation,
-                     "_load_overmind_config_for_settings",
-                     return_value={"overmind_url": "https://overmind.local/", "overmind_token": "tok"},
-                 ), \
-                 mock.patch.object(automation, "_overmind_post_json", return_value={}) as post_mock:
-                ok = _push_automation_config_to_overmind(settings)
-            self.assertTrue(ok)
-            post_mock.assert_called_once()
-            url = post_mock.call_args.args[0]
-            body = post_mock.call_args.args[1]
-            self.assertTrue(url.endswith("/heartbeat"))
-            # A full system_info snapshot (not a partial one) is sent.
-            self.assertIn("hostname", body["system_info"])
-            self.assertEqual(
-                body["system_info"]["idle_volume_automation"],
-                {"enabled": False, "idle_minutes": 8, "target_volume": 0},
-            )
-
-    def test_push_no_op_when_overmind_disabled(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            settings = _build_settings(Path(tmp))
-            with mock.patch.object(drone_api._local_network, "is_overmind_mode", return_value=False), \
-                 mock.patch.object(automation, "_overmind_post_json") as post_mock:
-                self.assertFalse(_push_automation_config_to_overmind(settings))
-                post_mock.assert_not_called()
-
-    def test_push_swallows_errors(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            settings = _build_settings(Path(tmp))
-            with mock.patch.object(drone_api._local_network, "is_overmind_mode", return_value=True), \
-                 mock.patch.object(
-                     automation,
-                     "_load_overmind_config_for_settings",
-                     return_value={"overmind_url": "https://overmind.local", "overmind_token": "tok"},
-                 ), \
-                 mock.patch.object(automation, "_overmind_post_json", side_effect=OSError("boom")):
-                self.assertFalse(_push_automation_config_to_overmind(settings))
 
 
 if __name__ == "__main__":

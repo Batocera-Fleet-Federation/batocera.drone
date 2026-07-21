@@ -1,95 +1,100 @@
 ---
 name: drone-p2p-transfer-security
-description: Use this when designing, reviewing, debugging, or modifying Drone peer-to-peer file transfer, drone-to-drone connectivity checks, TCP ping/port probing, swarm peer selection, download source selection, mTLS certificates, secure file transfer, or Overmind-provided peer metadata.
+description: Use this when designing, reviewing, debugging, or modifying Drone peer-to-peer file transfer, drone-to-drone connectivity checks, TCP ping/port probing, swarm peer selection, download source selection, mTLS certificates, secure file transfer, or paired-peer metadata.
 ---
 
 # Drone Peer-to-Peer Transfer and Security Skill
 
 ## Goal
 
-Ensure Drone peer-to-peer file transfer is secure, observable, efficient, and based on current swarm connectivity data.
+Ensure Drone peer-to-peer file transfer is secure, observable, efficient, and based on current connectivity data.
 
-Drones should not blindly download from any available peer. They should periodically test connectivity to other drones in the swarm, store those results locally, and use that data when deciding which peer is the best download source.
+Drones should not blindly download from any paired peer. They should periodically test connectivity to other paired drones, store those results locally, and use that data when deciding which peer is the best download source.
 
-All Drone-to-Drone downloads must use application-created mTLS certificates.
+All Drone-to-Drone downloads must use application-created, cert-pinned mTLS.
 
 ## Project Context
 
-The Batocera Fleet Federation system has:
+The Batocera Fleet Federation is a **peer-to-peer Drone swarm — there is no central
+coordination service.** Two Drones become peers by **pairing directly**: LAN discovery
++ a rotating pairing code, or code-free pairing over a shared **Tailscale tailnet**
+(accepted only from an already-online tailnet source IP). Pairing exchanges each
+Drone's self-signed mTLS certificate and pins its fingerprint — there is no shared CA
+and no third party granting authorization; a peer is authorized because it is in
+*this Drone's own* paired-peer list, nothing else.
 
-- **Overmind**: central coordination service that knows about users, drones, swarm membership, approvals, peer metadata, and sync state.
-- **Drone**: Batocera-side application that can participate in peer-to-peer file transfer with other approved drones in the swarm.
+Each Drone stores, per paired peer, locally:
 
-Overmind may return information about other drones that are eligible peers, including:
+- drone id, self-reported name/hostname,
+- LAN IP, tailnet IP, WAN/public IP, advertised API port,
+- pinned certificate fingerprint,
+- connectivity/health check results (status, latency, failure reason, which address
+  type succeeded),
+- available files/sync metadata (fetched live from the peer, not cached long-term).
 
-- drone ID,
-- hostname,
-- LAN IP,
-- WAN IP,
-- advertised port,
-- NAT/port-forwarding status,
-- owner or swarm relationship,
-- connection status,
-- last seen time,
-- capabilities,
-- available files,
-- sync metadata,
-- certificate or certificate identity metadata.
-
-Drone should use this information to periodically test peer reachability and store results locally.
+Drone should use this information to periodically test peer reachability and store
+results locally.
 
 ## Core Rules
 
 When working on Drone peer-to-peer transfer logic, follow these rules:
 
-1. Never assume a peer is reachable just because Overmind says it exists.
-2. Periodically perform TCP connectivity checks against candidate drones returned by Overmind.
+1. Never assume a peer is reachable just because it's in the paired-peer list.
+2. Periodically perform connectivity checks against every paired peer.
 3. Store peer connectivity results locally.
 4. Use stored peer connectivity results before choosing a download source.
 5. Prefer recently reachable peers over stale or unknown peers.
-6. Prefer LAN/local peers over WAN peers when both are available and authorized.
-7. Do not download from drones that are unauthorized, untrusted, stale, unreachable, or missing valid mTLS identity.
+6. Prefer LAN/tailnet peers over legacy WAN peers when both are available.
+7. Do not download from drones that are unpaired, untrusted, stale, unreachable, or missing a valid pinned certificate.
 8. All Drone-to-Drone downloads must use mTLS.
-9. mTLS certificates must be created and managed by the application.
+9. mTLS certificates must be created and managed by the application (self-signed, pinned at pairing).
 10. Do not fall back to plaintext HTTP for Drone-to-Drone downloads.
-11. Do not disable TLS verification to “make it work.”
-12. Do not trust user-provided peer addresses without Overmind authorization.
+11. Do not disable TLS verification to "make it work."
+12. Do not trust an address for a peer that isn't already in this Drone's own paired-peer list.
 13. Avoid exposing file transfer endpoints without authentication and authorization.
 14. Avoid loading large file manifests into memory without pagination or streaming.
 15. Log enough transfer and connectivity data to debug issues without exposing secrets.
 
-## Peer Discovery Rules
+## Peer Discovery and Pairing Rules
 
-Drone should obtain peer candidates from Overmind.
+Peer candidates come from **direct pairing**, not a third-party directory:
 
-Peer candidate data from Overmind should be treated as authorization and discovery input, not proof of live connectivity.
+- **LAN discovery**: a lightweight multicast/broadcast announce (`transfer/local_network.py`)
+  lets Drones on the same network find each other and pair with a short-lived rotating
+  code.
+- **Tailnet pairing**: once a Drone is enrolled in a tailnet (`device/tailnet_service.py`),
+  other online tailnet devices can pair code-free — accepted only when the pairing
+  request's source IP is itself an online tailnet address, never from an arbitrary IP.
+- A drone appearing through both LAN and tailnet discovery **deduplicates to one
+  paired-peer entry**; local discovery wins when both agree on the same peer.
+- Forgetting a peer (`forget_peer`) is sticky — an explicitly forgotten tailnet peer
+  stays forgotten until the user restores it, even if tailnet discovery keeps seeing it.
 
-Drone should periodically refresh peer metadata from Overmind and store relevant peer information locally.
-
-Peer records should be associated with the local swarm/user context to prevent cross-swarm leakage.
+Peer metadata should be refreshed periodically and stored locally; never treat a
+cached address as proof of live connectivity — that's what connectivity checks are for.
 
 ## TCP Ping / Connectivity Check Rules
 
-Drones should periodically perform TCP ping checks against other drones in the swarm using information returned by Overmind.
+Drones should periodically perform connectivity checks against every paired peer.
 
-A TCP ping means opening a TCP socket to the peer host and port with a short timeout. It should confirm basic port reachability, not full file authorization.
+A connectivity check means opening a connection to the peer (over its preferred
+address) with a short timeout, hitting its own `/v1/api/peer/health`. It should
+confirm basic reachability, not full file authorization.
 
 Connectivity checks should:
 
-1. Use peer IP/host and port from Overmind-provided metadata.
-2. Test LAN IP first when available.
-3. Test WAN IP only when LAN is unavailable or failed.
-4. Use short timeouts.
-5. Avoid excessive retry storms.
-6. Run periodically in the background.
-7. Store success/failure results locally.
-8. Track latency where possible.
-9. Track which address type succeeded: LAN or WAN.
-10. Never block UI/API page loads.
-11. Never block core Drone startup for a long peer scan.
-12. Be rate-limited and jittered to avoid synchronized swarm spikes.
+1. Use address candidates in preference order: tailnet, then same-LAN, then legacy WAN.
+2. Use short timeouts.
+3. Avoid excessive retry storms.
+4. Run periodically in the background (`DRONE_LOCAL_HEALTH_INTERVAL_SECONDS`, default 30s).
+5. Store success/failure results locally.
+6. Track latency where possible.
+7. Track which address actually succeeded.
+8. Never block UI/API page loads.
+9. Never block core Drone startup for a long peer scan.
+10. Be rate-limited and jittered to avoid synchronized spikes when many peers are paired.
 
-Recommended TCP check behavior:
+Recommended check behavior:
 
 ```text
 timeout: 1-3 seconds
@@ -99,9 +104,9 @@ jitter: enabled
 result storage: required
 ```
 
-Example Python TCP check pattern:
-
-Do not treat TCP reachability as file authorization. Authorization must still be enforced during mTLS/API/file transfer.
+Do not treat address reachability as file authorization. Authorization is still
+enforced during mTLS/API/file transfer (the peer must be in the paired-peer list and
+present its pinned certificate).
 
 ## Peer Connectivity Storage Rules
 
@@ -109,51 +114,49 @@ Connectivity check results must be stored locally before peer selection.
 
 Do not keep peer reachability only in process memory.
 
-If the project already has peer tables, update the existing schema rather than creating duplicate tables.
+If the project already has peer tables/state-store namespaces, update the existing
+ones rather than creating duplicates.
 
 ## Peer Selection Rules
 
-Before downloading a file, Drone must choose a source peer using stored peer connectivity results.
+Before downloading a file, Drone must choose a source peer using stored peer
+connectivity results.
 
 Peer selection should consider:
 
-1. Overmind authorization.
-2. Peer swarm membership.
-3. File availability.
-4. Recent successful TCP connectivity.
-5. Recent successful mTLS verification.
-6. LAN reachability.
-7. WAN reachability.
-8. Latency.
-9. Transfer history.
-10. Peer freshness.
-11. Failure count.
-12. Backoff status.
+1. Peer is in this Drone's own paired-peer list.
+2. File availability.
+3. Recent successful connectivity check.
+4. Recent successful mTLS verification.
+5. LAN/tailnet reachability.
+6. Legacy WAN reachability.
+7. Latency.
+8. Transfer history.
+9. Peer freshness.
+10. Failure count.
+11. Backoff status.
 
 Preferred order:
 
 ```text
-1. Authorized LAN peer with recent TCP success and valid mTLS.
-2. Authorized WAN peer with recent TCP success and valid mTLS.
-3. Recently reachable peer with lowest latency and valid mTLS.
-4. Defer transfer or ask Overmind for alternate source.
+1. Paired LAN/tailnet peer with recent check success and valid mTLS.
+2. Paired legacy-WAN peer with recent check success and valid mTLS.
+3. Recently reachable paired peer with lowest latency and valid mTLS.
+4. Defer the transfer -- there is no third party to ask for an alternate source.
 ```
 
 Do not select peers where:
 
 ```text
-supports_p2p = false
-supports_mtls = false
+peer is not in this Drone's paired-peer list
 last_seen_at is stale
-latest TCP check failed
-latest TCP check is too old
-mTLS identity is invalid
-peer is not authorized by Overmind
-peer is from another swarm
+latest connectivity check failed
+latest connectivity check is too old
+mTLS identity is invalid or unpinned
 peer is in backoff due to repeated failures
 ```
 
-Adjust the freshness window based on the project’s expected network volatility.
+Adjust the freshness window based on the project's expected network volatility.
 
 ## mTLS Requirements
 
@@ -164,27 +167,30 @@ Rules:
 1. Use TLS for every Drone-to-Drone file transfer.
 2. Require client certificate authentication.
 3. Require server certificate verification.
-4. Certificates must be created, stored, rotated, and managed by the application.
-5. Do not use self-signed certificates without an application trust model.
+4. Certificates are self-signed by each Drone (`DroneCertificateManager`), exchanged
+   and pinned by fingerprint at pairing time.
+5. Do not trust a peer certificate that wasn't pinned during pairing.
 6. Do not disable hostname or certificate verification.
 7. Do not fall back to plaintext transfer.
 8. Do not allow file download endpoints without mTLS.
-9. Bind certificate identity to the Drone identity.
-10. Validate that the certificate presented by a peer matches the expected peer Drone identity.
+9. Bind certificate identity to the paired Drone's id.
+10. Validate that the certificate presented by a peer matches the pinned fingerprint for that Drone id.
 11. Store only non-secret certificate metadata such as fingerprint, subject, issuer, serial, and expiration.
 12. Never log private keys.
 
-The application-created certificate system should define:
+The application-created certificate system defines:
 
 ```text
-local Drone certificate
+local Drone certificate (self-signed)
 local Drone private key
-trusted CA or trust bundle
-peer certificate identity mapping
+per-peer pinned certificate fingerprint (captured at pairing, not a shared CA)
 certificate rotation process
 certificate expiration handling
-certificate revocation or invalidation strategy
 ```
+
+A legacy "managed" mTLS mode (certificate signed by the retired central hub) still
+exists in `DroneCertificateManager` for backward compatibility — new pairing flows use
+self-signed + pinning, not a signing authority.
 
 ## Certificate Storage Rules
 
@@ -194,7 +200,6 @@ Do not:
 
 - commit certificates or private keys,
 - log private keys,
-- send private keys to Overmind unless explicitly part of a secure designed flow,
 - store private keys in world-readable paths,
 - copy private keys into prompts or issue logs,
 - expose certificates in API responses unless they are public certificate material and intended to be exposed.
@@ -202,23 +207,22 @@ Do not:
 Recommended persistent path pattern:
 
 ```text
-/userdata/system/bff/certs/
+/userdata/system/drone-app/certs/
 ```
 
 Recommended files:
 
 ```text
-/userdata/system/bff/certs/drone.crt
-/userdata/system/bff/certs/drone.key
-/userdata/system/bff/certs/ca.crt
+/userdata/system/drone-app/certs/drone.crt
+/userdata/system/drone-app/certs/drone.key
+/userdata/system/drone-app/certs/ca.crt
 ```
 
 Private key permissions should be restrictive where supported:
 
 ```bash
-chmod 600 /userdata/system/bff/certs/drone.key
-chmod 644 /userdata/system/bff/certs/drone.crt
-chmod 644 /userdata/system/bff/certs/ca.crt
+chmod 600 /userdata/system/drone-app/certs/drone.key
+chmod 644 /userdata/system/drone-app/certs/drone.crt
 ```
 
 If Batocera filesystem constraints affect permissions, document the limitation and use the safest available approach.
@@ -228,13 +232,12 @@ If Batocera filesystem constraints affect permissions, document the limitation a
 During transfer, validate:
 
 1. The peer presents a certificate.
-2. The certificate chains to the application-trusted CA or trust bundle.
+2. The certificate's fingerprint matches what was pinned for that Drone id at pairing time.
 3. The certificate is not expired.
-4. The certificate identity maps to the expected peer Drone ID.
-5. The peer is authorized by Overmind.
-6. The peer belongs to the same swarm.
-7. The requested file is allowed to be served.
-8. The local Drone is authorized to request that file.
+4. The certificate identity maps to the expected peer Drone id.
+5. The peer is in this Drone's own paired-peer list.
+6. The requested file is allowed to be served.
+7. The local Drone is authorized to request that file.
 
 mTLS proves peer identity. It does not replace application-level authorization.
 
@@ -243,7 +246,7 @@ Both are required:
 ```text
 mTLS identity validation
 +
-application authorization
+application authorization (peer is paired)
 ```
 
 ## Transfer Endpoint Rules
@@ -272,10 +275,10 @@ return FileResponse(request.query_params["path"])
 Better:
 
 ```text
-request file by file_id or sync_item_id
-resolve file_id to approved local path
+request file by file_id or relative path within a known root
+resolve to an approved local path
 verify path is inside approved root
-verify requester is authorized
+verify requester is a paired, mTLS-authenticated peer
 stream file
 ```
 
@@ -288,35 +291,35 @@ Before serving any local file:
 3. Confirm it is inside an allowed root.
 4. Reject `..` traversal.
 5. Reject symlink escapes where possible.
-6. Reject files not indexed or authorized for sync.
-7. Prefer file IDs over raw paths in APIs.
+6. Prefer file IDs / known-root-relative paths over raw paths in APIs.
 
 Approved roots may include:
 
 ```text
 /userdata/roms
+/userdata/bios
 /userdata/saves
 /userdata/system/configs
 ```
 
-Use the project’s actual Batocera paths when known.
+Use the project's actual Batocera paths when known.
 
 ## Transfer Source Decision Rules
 
 Before initiating a download:
 
-1. Ask local database for eligible peers.
-2. Filter to Overmind-authorized peers.
-3. Filter to peers with recent successful TCP check.
-4. Filter to peers with valid mTLS verification.
-5. Filter to peers known to have the requested file.
-6. Prefer LAN over WAN.
-7. Prefer lower latency.
-8. Avoid peers with recent transfer failures.
-9. Start transfer using mTLS.
-10. Record transfer result locally.
+1. Ask local paired-peer storage for eligible peers.
+2. Filter to peers with recent successful connectivity check.
+3. Filter to peers with valid pinned mTLS.
+4. Filter to peers known to have the requested file.
+5. Prefer LAN/tailnet over legacy WAN.
+6. Prefer lower latency.
+7. Avoid peers with recent transfer failures.
+8. Start transfer using mTLS.
+9. Record transfer result locally.
 
-Do not perform expensive peer discovery inline during a user-facing request unless required. Prefer background refresh plus cached peer selection.
+Do not perform expensive peer discovery inline during a user-facing request unless
+required. Prefer background refresh plus cached peer selection.
 
 ## Failure Handling Rules
 
@@ -335,10 +338,10 @@ When a peer download fails:
 
 Log:
 
-- peer metadata refresh start/end,
-- number of peers returned by Overmind,
+- peer/pairing state refresh start/end,
+- number of paired peers,
 - number of peers checked,
-- TCP check success/failure counts,
+- connectivity check success/failure counts,
 - latency summary,
 - selected peer for transfer,
 - transfer start/end,
@@ -365,17 +368,17 @@ If adding transfer tracking, prefer relational tables.
 
 When reviewing P2P transfer code, verify:
 
-- Does peer discovery come from Overmind?
+- Does peer discovery come from direct pairing (LAN or tailnet), not an untrusted address?
 - Is peer connectivity tested periodically?
-- Are TCP check results stored locally?
+- Are connectivity check results stored locally?
 - Is stored connectivity used before download source selection?
 - Are stale connectivity records avoided?
-- Is LAN preferred over WAN where appropriate?
+- Is LAN/tailnet preferred over legacy WAN where appropriate?
 - Is every Drone-to-Drone download protected by mTLS?
 - Does the client verify the server certificate?
 - Does the server verify the client certificate?
-- Is the certificate identity mapped to Drone identity?
-- Is Overmind authorization still checked?
+- Is the certificate fingerprint pinned to the paired Drone's id?
+- Is the peer still present in this Drone's own paired-peer list (not just cached)?
 - Are private keys protected and never logged?
 - Are file paths validated against approved roots?
 - Are file transfers streamed?
@@ -387,20 +390,20 @@ When reviewing P2P transfer code, verify:
 
 Look for these first:
 
-- Drone downloads from the first peer returned by Overmind without checking reachability.
-- TCP checks run but results are not stored.
-- TCP check results are stored but not used for peer selection.
+- Drone downloads from the first paired peer without checking reachability.
+- Connectivity checks run but results are not stored.
+- Connectivity check results are stored but not used for peer selection.
 - Peer checks block UI/API requests.
 - Peer connectivity is stored only in memory.
 - Drone falls back to non-TLS download after TLS failure.
 - TLS verification is disabled.
 - Client certificate is optional instead of required.
-- Certificate identity is not mapped to Drone ID.
+- Certificate fingerprint is not checked against the pinned value for that Drone id.
 - File endpoint accepts raw paths without validation.
 - Drone serves files outside approved Batocera roots.
 - Peer failure causes infinite retry loop.
-- WAN peer is selected even though LAN peer is reachable.
-- Overmind peer metadata is treated as proof of reachability.
+- Legacy WAN peer is selected even though a LAN/tailnet peer is reachable.
+- An address is trusted for a peer that isn't in the local paired-peer list.
 
 ## Expected Output Format
 
@@ -410,10 +413,10 @@ When completing P2P transfer or security work, respond using this format:
 Root cause / objective:
 ...
 
-Peer discovery changes:
+Peer discovery/pairing changes:
 ...
 
-TCP connectivity check changes:
+Connectivity check changes:
 ...
 
 Peer connectivity storage changes:
@@ -456,8 +459,8 @@ Do not:
 - add plaintext fallback for file transfer,
 - log private keys,
 - commit generated certificates or private keys,
-- trust arbitrary peer addresses,
-- trust peer reachability without TCP checks,
+- trust an address for a peer that isn't in the local paired-peer list,
+- trust peer reachability without connectivity checks,
 - choose download peers without using stored connectivity results,
 - use in-memory-only peer connectivity state,
 - expose file transfer endpoints without authorization,
@@ -470,13 +473,13 @@ Do not:
 
 When unsure, choose the option that keeps:
 
-- peer discovery authorized by Overmind,
+- peer discovery limited to directly paired peers (LAN or tailnet),
 - connectivity periodically checked,
 - connectivity results stored locally,
 - peer selection based on recent reachability,
-- LAN preferred when safe and available,
+- LAN/tailnet preferred when safe and available,
 - downloads protected by mTLS,
-- certificate identity tied to Drone identity,
+- certificate fingerprint pinned to the paired Drone's id,
 - file paths validated,
 - transfers streamed,
 - retries bounded,

@@ -6,36 +6,27 @@ download dispatch: the selector returns the single DirectPublic transport, and
 the arguments ``DownloadManager._run_job`` used before the refactor.
 """
 
-import io
-import json
-import socket
-import tempfile
 import threading
 import unittest
-from pathlib import Path
 from unittest import mock
 
 import app.drone_api as drone_api
-from app.transfer import download_manager, edge_relay
+from app.transfer import download_manager
 from app.transport import (
     DirectPublicTransport,
     DownloadRequest,
     TransferContext,
     TransportSelector,
-    assetfetch,
-    mux,
 )
-from app.transfer.peer_selection import select_best_peer
 from app.transport.base import PeerTransport
 from app.transport.lan import LanDirectTransport
-from app.transport.mux_client import RelayChannel, TlsMuxLink
 
 
 def _ctx(**overrides) -> TransferContext:
     base = dict(
         settings=mock.sentinel.settings,
         repository=mock.sentinel.repository,
-        config={"overmind_url": "https://o", "overmind_token": "t"},
+        config={"config_url": "https://o", "config_token": "t"},
         peer={"drone_id": "peer-1", "public_reachable_url": "https://peer"},
         progress_callback=mock.sentinel.progress,
         cancellation_event=mock.sentinel.cancel,
@@ -177,44 +168,7 @@ class DirectPublicDispatchTests(unittest.TestCase):
         )
 
 
-class EdgeTokenTests(unittest.TestCase):
-    """_edge_token_for must read the live (post-claim) token, falling back to env."""
-
-    def _settings(self, token_env=None):
-        env = {"OVERMIND_DEVICE_ID": "dev1"}
-        if token_env is not None:
-            env["OVERMIND_DRONE_TOKEN"] = token_env
-        with mock.patch.dict("os.environ", env, clear=True):
-            return drone_api.Settings.from_env()
-
-    def test_prefers_live_config_token(self):
-        settings = self._settings(token_env="env-token")
-        with mock.patch.object(
-            edge_relay, "overmind_load_config", return_value={"overmind_token": "live-token"}
-        ):
-            self.assertEqual(drone_api._edge_token_for(settings), "live-token")
-
-    def test_falls_back_to_env_token_when_config_empty(self):
-        settings = self._settings(token_env="env-token")
-        with mock.patch.object(edge_relay, "overmind_load_config", return_value={}):
-            self.assertEqual(drone_api._edge_token_for(settings), "env-token")
-
-    def test_empty_when_no_token_anywhere(self):
-        settings = self._settings()
-        with mock.patch.object(edge_relay, "overmind_load_config", return_value={}):
-            self.assertEqual(drone_api._edge_token_for(settings), "")
-
-    def test_handles_config_error(self):
-        settings = self._settings(token_env="env-token")
-        with mock.patch.object(
-            edge_relay, "overmind_load_config", side_effect=RuntimeError("boom")
-        ):
-            self.assertEqual(drone_api._edge_token_for(settings), "env-token")
-
-
-class TransferOfferServeTests(unittest.TestCase):
-    """Sender side: a TRANSFER_OFFER serves the local asset over a relay leg."""
-
+class AssetRootTests(unittest.TestCase):
     def _settings(self, **roots):
         env = {"OVERMIND_DEVICE_ID": "dev1"}
         env.update(roots)
@@ -228,156 +182,6 @@ class TransferOfferServeTests(unittest.TestCase):
         self.assertEqual(str(drone_api._resolve_asset_root(settings, "saves")), "/sv")
         self.assertEqual(str(drone_api._resolve_asset_root(settings, "save")), "/sv")
         self.assertIsNone(drone_api._resolve_asset_root(settings, "artwork"))
-
-    def test_serve_transfer_offer_streams_local_rom(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / "snes").mkdir()
-            (root / "snes" / "g.sfc").write_bytes(b"X" * 5000)
-            settings = self._settings(ROMS_ROOT=str(root))
-
-            sender_sock, receiver_sock = socket.socketpair()
-
-            class FakeMux:
-                def open_relay_session(self, session_id, role, ready_timeout=20.0):
-                    assert role == "sender"
-                    return TlsMuxLink(sender_sock)
-
-            offer = {
-                "session_id": "a" * 32,
-                "asset": {"kind": "rom", "relative_path": "snes/g.sfc"},
-            }
-            result = {}
-
-            def run():
-                result.update(drone_api._serve_transfer_offer(settings, FakeMux(), offer))
-
-            thread = threading.Thread(target=run, daemon=True)
-            thread.start()
-            try:
-                received = bytearray()
-                assetfetch.download(
-                    TlsMuxLink(receiver_sock),
-                    {"kind": "rom", "relative_path": "snes/g.sfc"},
-                    received.extend,
-                )
-                # The sender serves a session (folder ROMs fetch many assets over
-                # one channel); closing the receiver leg is what ends it.
-                try:
-                    receiver_sock.shutdown(socket.SHUT_RDWR)
-                except OSError:
-                    pass
-                receiver_sock.close()
-                thread.join(5.0)
-                self.assertEqual(bytes(received), b"X" * 5000)
-                self.assertEqual(result.get("status"), "completed")
-            finally:
-                for sock in (sender_sock, receiver_sock):
-                    try:
-                        sock.close()
-                    except OSError:
-                        pass
-
-    def _serve_offer(self, settings, offer):
-        """Run _serve_transfer_offer against a socketpair; return (link, thread, result, socks)."""
-        sender_sock, receiver_sock = socket.socketpair()
-
-        class FakeMux:
-            def open_relay_session(self, session_id, role, ready_timeout=20.0):
-                assert role == "sender"
-                return TlsMuxLink(sender_sock)
-
-        result = {}
-
-        def run():
-            result.update(drone_api._serve_transfer_offer(settings, FakeMux(), offer))
-
-        thread = threading.Thread(target=run, daemon=True)
-        thread.start()
-        return TlsMuxLink(receiver_sock), thread, result, (sender_sock, receiver_sock)
-
-    @staticmethod
-    def _end_session(receiver_sock, thread):
-        try:
-            receiver_sock.shutdown(socket.SHUT_RDWR)
-        except OSError:
-            pass
-        receiver_sock.close()
-        thread.join(5.0)
-
-    def test_single_file_offer_refuses_other_paths(self):
-        # The resolver is scoped to the offer: a session minted for one file must
-        # not serve a sibling.
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / "snes").mkdir()
-            (root / "snes" / "g.sfc").write_bytes(b"G" * 100)
-            (root / "snes" / "other.sfc").write_bytes(b"O" * 100)
-            settings = self._settings(ROMS_ROOT=str(root))
-            offer = {"session_id": "a" * 32, "asset": {"kind": "rom", "relative_path": "snes/g.sfc"}}
-            link, thread, _, socks = self._serve_offer(settings, offer)
-            try:
-                with self.assertRaises(assetfetch.AssetFetchError):
-                    assetfetch.download(
-                        link, {"kind": "rom", "relative_path": "snes/other.sfc"}, lambda c: None
-                    )
-                received = bytearray()
-                assetfetch.download(link, {"kind": "rom", "relative_path": "snes/g.sfc"}, received.extend)
-                self.assertEqual(bytes(received), b"G" * 100)
-            finally:
-                self._end_session(socks[1], thread)
-                for sock in socks:
-                    try:
-                        sock.close()
-                    except OSError:
-                        pass
-
-    def test_folder_offer_serves_manifest_and_files(self):
-        # A folder ROM offer (detected from disk) serves the manifest + files inside
-        # the folder, and nothing outside it.
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            game = root / "dreamcast" / "Game"
-            game.mkdir(parents=True)
-            (game / "Game.gdi").write_bytes(b"gdi index")
-            (game / "track01.bin").write_bytes(b"T" * 500)
-            (root / "dreamcast" / "outside.bin").write_bytes(b"NO")
-            settings = self._settings(ROMS_ROOT=str(root))
-            offer = {
-                "session_id": "b" * 32,
-                "asset": {"kind": "rom", "relative_path": "dreamcast/Game", "entry_type": "folder"},
-            }
-            link, thread, result, socks = self._serve_offer(settings, offer)
-            try:
-                manifest_bytes = bytearray()
-                assetfetch.download(
-                    link, {"kind": "rom-manifest", "relative_path": "dreamcast/Game"}, manifest_bytes.extend
-                )
-                manifest = json.loads(bytes(manifest_bytes).decode("utf-8"))
-                self.assertEqual(manifest["entry_type"], "folder")
-                self.assertEqual(manifest["file_count"], 2)
-                names = {item["relative_path"] for item in manifest["files"]}
-                self.assertEqual(names, {"Game.gdi", "track01.bin"})
-                for name in names:
-                    received = bytearray()
-                    assetfetch.download(
-                        link, {"kind": "rom", "relative_path": f"dreamcast/Game/{name}"}, received.extend
-                    )
-                    self.assertEqual(bytes(received), (game / name).read_bytes())
-                with self.assertRaises(assetfetch.AssetFetchError):
-                    assetfetch.download(
-                        link, {"kind": "rom", "relative_path": "dreamcast/outside.bin"}, lambda c: None
-                    )
-                self._end_session(socks[1], thread)
-                self.assertEqual(result.get("status"), "completed")
-                # manifest + 2 files + the refused outside.bin fetch
-                self.assertEqual(result.get("fetches"), 4)
-            finally:
-                for sock in socks:
-                    try:
-                        sock.close()
-                    except OSError:
-                        pass
 
 
 class SelectorFetchTests(unittest.TestCase):
@@ -430,133 +234,6 @@ class SelectorFetchTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             selector.fetch(DownloadRequest(asset_type="rom"), _ctx(cancellation_event=cancel))
         self.assertEqual(nope.called, [])  # never retried after cancel
-
-
-class _FakeRelayMux:
-    """Stands in for the Edge+sender: marks the receiver channel ready on request
-    and, when the receiver sends an AssetFetch FETCH, feeds back CHUNK + DONE."""
-
-    def __init__(self, content: bytes):
-        self._content = content
-        self.channel = None
-
-    def start_relay_session(self, session_id, role):
-        self.channel = RelayChannel(session_id, self._on_send)
-        return self.channel
-
-    def send_transfer_request(self, session_id, token, source_device, asset):
-        self.channel.mark_ready()
-
-    def close_relay_session(self, session_id):
-        if self.channel is not None:
-            self.channel.close()
-
-    def _on_send(self, frame_bytes):
-        kind, payload = mux.read_frame(mux.reader_from_fileobj(io.BytesIO(frame_bytes)))
-        if kind != mux.FRAME_DATA:
-            return
-        _, asset_frame = mux.parse_relay_data(payload)
-        message_type, _ = assetfetch.read_message(mux.reader_from_fileobj(io.BytesIO(asset_frame)))
-        if message_type == assetfetch.AF_FETCH:
-            self.channel.feed(assetfetch.encode_chunk(self._content))
-            self.channel.feed(assetfetch.encode_done(len(self._content)))
-
-
-class RelayDownloadEndToEndTests(unittest.TestCase):
-    def _settings(self, roms_root):
-        with mock.patch.dict(
-            "os.environ", {"OVERMIND_DEVICE_ID": "rx", "ROMS_ROOT": str(roms_root)}, clear=True
-        ):
-            return drone_api.Settings.from_env()
-
-    def test_relay_download_rom_writes_and_verifies(self):
-        with tempfile.TemporaryDirectory() as directory:
-            settings = self._settings(directory)
-            content = b"ROM!" * 1000
-            fake = _FakeRelayMux(content)
-            config = {"overmind_url": "https://o", "overmind_token": "t"}
-            with mock.patch.object(edge_relay, "_EDGE_MUX_CLIENT", fake), mock.patch.object(
-                edge_relay, "_request_transfer_session", return_value=("s" * 32, "tok")
-            ):
-                activity = drone_api._relay_download_rom(
-                    settings,
-                    config,
-                    {"drone_id": "TX"},
-                    "snes",
-                    "g.sfc",
-                    expected_size=len(content),
-                    expected_fingerprint=None,
-                )
-            self.assertEqual(activity["status"], "completed")
-            self.assertEqual(activity["transport"], "relay")
-            self.assertEqual(activity["bytes_transferred"], len(content))
-            self.assertEqual(activity["source_drone_id"], "TX")
-            self.assertEqual((Path(directory) / "snes" / "g.sfc").read_bytes(), content)
-
-    def test_relay_download_rom_skips_existing_target(self):
-        with tempfile.TemporaryDirectory() as directory:
-            settings = self._settings(directory)
-            (Path(directory) / "snes").mkdir()
-            (Path(directory) / "snes" / "g.sfc").write_bytes(b"already here")
-            with mock.patch.object(edge_relay, "_EDGE_MUX_CLIENT", _FakeRelayMux(b"x")):
-                activity = drone_api._relay_download_rom(
-                    settings, {}, {"drone_id": "TX"}, "snes", "g.sfc"
-                )
-            self.assertEqual(activity["status"], "skipped")
-
-    def test_tags_holepunch_when_direct(self):
-        with tempfile.TemporaryDirectory() as directory:
-            settings = self._settings(directory)
-            content = b"ROM!" * 1000
-            fake = _FakeRelayMux(content)
-            config = {"overmind_url": "https://o", "overmind_token": "t"}
-            with mock.patch.object(edge_relay, "_EDGE_MUX_CLIENT", fake), mock.patch.object(
-                edge_relay, "_request_transfer_session", return_value=("s" * 32, "tok")
-            ), mock.patch.object(edge_relay, "_maybe_holepunch", side_effect=lambda s, ch: (ch, True)):
-                activity = drone_api._relay_download_rom(
-                    settings, config, {"drone_id": "TX"}, "snes", "g.sfc", expected_size=len(content)
-                )
-            self.assertEqual(activity["transport"], "holepunch")
-            self.assertEqual((Path(directory) / "snes" / "g.sfc").read_bytes(), content)
-
-
-class HolepunchWiringTests(unittest.TestCase):
-    def _settings(self, **env):
-        base = {"OVERMIND_DEVICE_ID": "dev1"}
-        base.update(env)
-        with mock.patch.dict("os.environ", base, clear=True):
-            return drone_api.Settings.from_env()
-
-    def test_edge_stun_addr(self):
-        settings = self._settings(DRONE_EDGE_URL="tls://edge.example:9443", DRONE_EDGE_STUN_PORT="9444")
-        self.assertEqual(drone_api._edge_stun_addr(settings), ("edge.example", 9444))
-
-    def test_edge_stun_addr_none_without_url(self):
-        self.assertIsNone(drone_api._edge_stun_addr(self._settings()))
-
-    def test_maybe_holepunch_disabled_or_no_stun(self):
-        channel = object()
-        disabled = self._settings(DRONE_HOLEPUNCH_ENABLED="0", DRONE_EDGE_URL="tls://e:9443")
-        self.assertEqual(drone_api._maybe_holepunch(disabled, channel), (channel, False))
-        self.assertEqual(drone_api._maybe_holepunch(self._settings(), channel), (channel, False))
-
-    def test_maybe_holepunch_delegates_with_stun_addr(self):
-        settings = self._settings(DRONE_EDGE_URL="tls://edge.example:9443")
-        channel, udp = object(), object()
-        with mock.patch.object(
-            drone_api._holepunch, "negotiate_direct_channel", return_value=(udp, True)
-        ) as negotiate:
-            self.assertEqual(drone_api._maybe_holepunch(settings, channel), (udp, True))
-        self.assertEqual(negotiate.call_args[0][0], channel)
-        self.assertEqual(negotiate.call_args[0][1], ("edge.example", 9444))
-
-    def test_maybe_holepunch_swallows_errors(self):
-        settings = self._settings(DRONE_EDGE_URL="tls://edge.example:9443")
-        channel = object()
-        with mock.patch.object(
-            drone_api._holepunch, "negotiate_direct_channel", side_effect=RuntimeError("boom")
-        ):
-            self.assertEqual(drone_api._maybe_holepunch(settings, channel), (channel, False))
 
 
 class TailnetHelperTests(unittest.TestCase):
@@ -694,69 +371,6 @@ class LanDirectTransportTests(unittest.TestCase):
     @staticmethod
     def _ctx(peer):
         return TransferContext(settings=None, repository=None, config={}, peer=peer)
-
-
-class PeerSelectionRelayTests(unittest.TestCase):
-    DIRECT = {
-        "device_id": "direct",
-        "online": True,
-        "public_resolvable": True,
-        "public_reachable_url": "https://198.51.100.5:443",
-    }
-    RELAY = {"device_id": "relay-src", "online": True, "edge_online": True}
-
-    def test_edge_online_peer_selected_when_no_direct(self):
-        peer = select_best_peer([self.RELAY], [], "me")
-        self.assertEqual(peer["device_id"], "relay-src")
-
-    def test_direct_preferred_over_relay_even_if_slower(self):
-        fast_relay = {**self.RELAY, "last_speed_sample": {"upload_mbps": 999}}
-        slow_direct = {**self.DIRECT, "last_speed_sample": {"upload_mbps": 1}}
-        peer = select_best_peer([fast_relay, slow_direct], [], "me")
-        self.assertEqual(peer["device_id"], "direct")
-
-    def test_unreachable_peer_skipped(self):
-        self.assertIsNone(select_best_peer([{"device_id": "nope", "online": True}], [], "me"))
-
-    def test_allow_relay_false_excludes_edge_only(self):
-        self.assertIsNone(select_best_peer([self.RELAY], [], "me", allow_relay=False))
-
-    def test_failed_direct_check_falls_back_to_relay(self):
-        peer_both = {**self.DIRECT, "device_id": "p", "edge_online": True}
-        checks = [{"target_drone_id": "p", "status": "fail"}]
-        self.assertEqual(select_best_peer([peer_both], checks, "me")["device_id"], "p")
-
-    def test_failed_direct_check_without_relay_is_skipped(self):
-        peer_direct = {**self.DIRECT, "device_id": "p"}
-        checks = [{"target_drone_id": "p", "status": "fail"}]
-        self.assertIsNone(select_best_peer([peer_direct], checks, "me"))
-
-    def test_own_passing_probe_overrides_unresolvable_swarm_flag(self):
-        # Regression: Overmind's swarm payload graded a genuinely-reachable peer
-        # public_resolvable=false (its heartbeat was served by a Lambda container
-        # whose in-memory peer-check state was empty), so cross-network syncs
-        # intermittently failed with "No healthy source peer" even though this
-        # drone's OWN probe of the peer had just passed. The drone's own passing
-        # probe is ground truth for its connectivity: the peer must be selected,
-        # enriched with the address the probe actually reached.
-        peer = {"device_id": "p", "online": True, "public_resolvable": False, "public_reachable_url": None}
-        checks = [{"target_drone_id": "p", "status": "pass", "target_address": "https://198.51.100.9"}]
-        selected = select_best_peer([peer], checks, "me")
-        self.assertIsNotNone(selected)
-        self.assertEqual(selected["device_id"], "p")
-        self.assertTrue(selected["public_resolvable"])
-        self.assertEqual(selected["public_reachable_url"], "https://198.51.100.9")
-
-    def test_own_passing_probe_does_not_clobber_existing_url(self):
-        peer = {**self.DIRECT, "device_id": "p"}
-        checks = [{"target_drone_id": "p", "status": "pass", "target_address": "https://203.0.113.99"}]
-        selected = select_best_peer([peer], checks, "me")
-        self.assertEqual(selected["public_reachable_url"], "https://198.51.100.5:443")
-
-    def test_unresolvable_peer_with_failed_own_probe_still_skipped(self):
-        peer = {"device_id": "p", "online": True, "public_resolvable": False}
-        checks = [{"target_drone_id": "p", "status": "fail", "target_address": "https://198.51.100.9"}]
-        self.assertIsNone(select_best_peer([peer], checks, "me"))
 
 
 if __name__ == "__main__":

@@ -1,8 +1,8 @@
 """Download manager: the single-active-download queue + transport-tier dispatch.
 
 Extracted from ``drone_api.py``. ``DownloadManager`` owns the queue/worker, progress,
-cancel/resume, and drives ``TransportSelector`` over the tiers (LAN-direct →
-direct-public → relay). ``_directpublic_fetch`` is the direct-public tier callback
+cancel/resume, and drives ``TransportSelector`` over the tiers (LAN/tailnet-direct →
+legacy direct-public). ``_directpublic_fetch`` is the direct-public tier callback
 (wraps ``peer_download``'s ``_download_*_from_peer``). The running singleton itself
 (``_DOWNLOAD_MANAGER`` / ``_get_download_manager``) stays in ``drone_api``.
 """
@@ -24,22 +24,16 @@ try:
     from ..storage.state_store import load_payload as _load_state_payload
     from ..storage.state_store import save_payload as _save_state_payload
     from ..transport import DirectPublicTransport, DownloadRequest, TransferContext, TransportSelector
-    from ..transport import relay_transfer as _relay_transfer
     from ..transport.lan import LanDirectTransport
     from . import local_network as _local_network
     from .download_errors import DownloadCancelled
-    from .edge_relay import _edge_mux_available, _local_network_snapshot, _relay_fetch
+    from .network_identity import local_network_snapshot as _local_network_snapshot
     from .peer_download import (
-        _best_peer_for_bios,
-        _best_peer_for_rom,
         _download_artwork_from_peer,
         _download_bios_from_peer,
         _download_rom_folder_from_peer,
         _download_rom_from_peer,
         _download_save_from_peer,
-        _post_download_state,
-        _post_rom_sync_activity,
-        _resolve_rom_by_gamelist_id_from_peer,
     )
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.settings import Settings  # type: ignore
@@ -48,22 +42,16 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from storage.state_store import load_payload as _load_state_payload  # type: ignore
     from storage.state_store import save_payload as _save_state_payload  # type: ignore
     from transport import DirectPublicTransport, DownloadRequest, TransferContext, TransportSelector  # type: ignore
-    from transport import relay_transfer as _relay_transfer  # type: ignore
     from transport.lan import LanDirectTransport  # type: ignore
     from transfer import local_network as _local_network  # type: ignore
     from transfer.download_errors import DownloadCancelled  # type: ignore
-    from transfer.edge_relay import _edge_mux_available, _local_network_snapshot, _relay_fetch  # type: ignore
+    from transfer.network_identity import local_network_snapshot as _local_network_snapshot  # type: ignore
     from transfer.peer_download import (  # type: ignore
-        _best_peer_for_bios,
-        _best_peer_for_rom,
         _download_artwork_from_peer,
         _download_bios_from_peer,
         _download_rom_folder_from_peer,
         _download_rom_from_peer,
         _download_save_from_peer,
-        _post_download_state,
-        _post_rom_sync_activity,
-        _resolve_rom_by_gamelist_id_from_peer,
     )
 
 DOWNLOAD_PROGRESS_PUSH_SECONDS = float(os.environ.get("DOWNLOAD_PROGRESS_PUSH_SECONDS", "5"))
@@ -75,7 +63,7 @@ DOWNLOAD_PERSISTED_RECENT_LIMIT = 25
 
 
 def _kick_asset_metadata_sync_after_download(*args, **kwargs):
-    """Delegate to the drone_api impl (overmind sync orchestration stays there)."""
+    """Delegate to the drone_api impl (asset-metadata poll wake-up stays there)."""
     try:
         from ..drone_api import _kick_asset_metadata_sync_after_download as _impl
     except ImportError:  # pragma: no cover - flat execution
@@ -179,18 +167,14 @@ class DownloadManager:
     def __init__(self, settings: Settings, repository: "RomRepository") -> None:
         self.settings = settings
         self.repository = repository
-        # Transport seam, in priority order: LAN-direct (same-network peers) ->
-        # public-direct (the legacy _download_*_from_peer path) -> relay (when the
-        # Edge mux is enabled). The selector tries each usable tier and falls back
-        # to the next on failure.
+        # Transport seam, in priority order: LAN/tailnet-direct (same-network or
+        # shared-tailnet peers) -> legacy direct-public (_download_*_from_peer, for
+        # a port-forwarded peer). The selector tries each usable tier and falls
+        # back to the next on failure.
         transports = [
             LanDirectTransport(_directpublic_fetch, local_network=_local_network_snapshot),
             DirectPublicTransport(_directpublic_fetch),
         ]
-        if settings.edge_enabled:
-            transports.append(
-                _relay_transfer.RelayReceiverTransport(_relay_fetch, is_available=_edge_mux_available)
-            )
         self._selector = TransportSelector(transports)
         self._lock = Lock()
         self._jobs: OrderedDict[str, dict] = OrderedDict()
@@ -328,38 +312,13 @@ class DownloadManager:
         return min(maximum, initial * (2 ** exponent))
 
     def _refresh_connection_metadata_locked(self, job: dict) -> None:
-        try:
-            from ..overmind.overmind_config import _load_overmind_config_for_settings
-        except ImportError:  # pragma: no cover - flat execution
-            from overmind.overmind_config import _load_overmind_config_for_settings  # type: ignore
-
-        stored_config = job.get("_config") if isinstance(job.get("_config"), dict) else {}
-        overmind_job = bool(stored_config.get("overmind_url") or stored_config.get("overmind_token"))
-        use_overmind = overmind_job and _local_network.is_overmind_mode(self.settings)
-        if use_overmind:
-            current_config = _load_overmind_config_for_settings(self.settings)
-            if isinstance(current_config, dict):
-                job["_config"] = {**stored_config, **current_config}
+        """Re-read the source peer's latest paired-peer record before running a job,
+        so a route learned since the job was queued (e.g. a successful pairing
+        re-check) is used rather than a stale snapshot."""
         source_id = str(job.get("source_drone_id") or "").strip()
         if not source_id:
             return
-        current_peer = None if use_overmind else _local_network.get_paired_peer(self.settings, source_id)
-        if use_overmind:
-            swarm = _load_state_payload(
-                _state_database_path(self.settings.userdata_root),
-                "overmind_swarm.json",
-                [],
-            )
-            if isinstance(swarm, list):
-                current_peer = next(
-                    (
-                        row
-                        for row in swarm
-                        if isinstance(row, dict)
-                        and str(row.get("drone_id") or row.get("device_id") or "").strip() == source_id
-                    ),
-                    None,
-                )
+        current_peer = _local_network.get_paired_peer(self.settings, source_id)
         if isinstance(current_peer, dict):
             job["_peer"] = {**(job.get("_peer") or {}), **current_peer}
 
@@ -381,7 +340,7 @@ class DownloadManager:
             "sync_id": sync_id or job_id,
             "source_action_id": source_action_id,
             "source_drone_id": peer_id,
-            "target_drone_id": self.settings.overmind_device_id,
+            "target_drone_id": self.settings.device_id,
             "file_path": relative_path,
             "file_name": Path(relative_path).name,
             "file_type": "ROM",
@@ -432,7 +391,7 @@ class DownloadManager:
             "sync_id": job_id,
             "source_action_id": source_action_id,
             "source_drone_id": peer_id,
-            "target_drone_id": self.settings.overmind_device_id,
+            "target_drone_id": self.settings.device_id,
             "asset_type": "bios",
             "file_path": relative_path,
             "file_name": Path(relative_path).name,
@@ -473,141 +432,6 @@ class DownloadManager:
         self._wake.set()
         return snapshot
 
-    def enqueue_pending_rom(
-        self,
-        config: dict,
-        system: str,
-        gamelist_id: str = "",
-        relative_path: str = "",
-        expected_size=None,
-        expected_fingerprint=None,
-        source_action_id: Optional[str] = None,
-        entry_type: str = "file",
-        sync_id: Optional[str] = None,
-        source_device_ids: Optional[set] = None,
-    ) -> dict:
-        """Queue a ROM sync with no source peer resolved yet.
-
-        Used when Overmind named candidate Drones for this ROM but none is
-        currently peer-resolvable. The job sits in 'pending' -- invisible to the
-        normal queued-job scan -- while the worker periodically retries peer (and,
-        if only a gamelist_id was given, path) resolution against
-        ``source_device_ids`` and promotes it to 'queued' once a source answers.
-        """
-        job_id = str(uuid.uuid4())
-        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-        job = {
-            "id": job_id,
-            "job_id": job_id,
-            "sync_id": sync_id or job_id,
-            "source_action_id": source_action_id,
-            "source_drone_id": None,
-            "target_drone_id": self.settings.overmind_device_id,
-            "file_path": relative_path or gamelist_id,
-            "file_name": Path(relative_path).name if relative_path else gamelist_id,
-            "file_type": "ROM",
-            "entry_type": entry_type,
-            "system": system,
-            "rom_name": relative_path or gamelist_id,
-            "relative_path": relative_path,
-            "total_bytes": expected_size,
-            "file_size": expected_size,
-            "downloaded_bytes": 0,
-            "bytes_transferred": 0,
-            "percentage": 0,
-            "transfer_speed_bps": 0,
-            "status": "pending",
-            "queue_position": None,
-            "started_at": None,
-            "download_started_at": None,
-            "completed_at": None,
-            "download_completed_at": None,
-            "error_message": None,
-            "failure_reason": "Waiting for a source Drone with this ROM to become reachable",
-            "cancellation_requested": False,
-            "created_at": now,
-            "reconnect_after_epoch": None,
-            "pending_attempts": 0,
-            "_resolving": False,
-            "_config": config,
-            "_gamelist_id": gamelist_id,
-            "_expected_fingerprint": expected_fingerprint,
-            "_entry_type": entry_type,
-            "_pending_kind": "rom",
-            "_source_device_ids": sorted(str(v) for v in (source_device_ids or set()) if str(v).strip()),
-        }
-        with self._lock:
-            self._jobs[job_id] = job
-            self._cancel_events[job_id] = Event()
-            self._update_queue_positions_locked()
-            self._persist_state_locked()
-            snapshot = self._public_job_locked(job)
-        self._wake.set()
-        return snapshot
-
-    def enqueue_pending_bios(
-        self,
-        config: dict,
-        relative_path: str,
-        expected_size=None,
-        expected_md5=None,
-        source_action_id: Optional[str] = None,
-        sync_id: Optional[str] = None,
-        source_device_ids: Optional[set] = None,
-    ) -> dict:
-        """BIOS counterpart to :meth:`enqueue_pending_rom` -- see its docstring."""
-        job_id = str(uuid.uuid4())
-        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-        job = {
-            "id": job_id,
-            "job_id": job_id,
-            "sync_id": sync_id or job_id,
-            "source_action_id": source_action_id,
-            "source_drone_id": None,
-            "target_drone_id": self.settings.overmind_device_id,
-            "asset_type": "bios",
-            "file_path": relative_path,
-            "file_name": Path(relative_path).name,
-            "file_type": "BIOS",
-            "system": "bios",
-            "bios_name": relative_path,
-            "rom_name": relative_path,
-            "relative_path": relative_path,
-            "total_bytes": expected_size,
-            "file_size": expected_size,
-            "downloaded_bytes": 0,
-            "bytes_transferred": 0,
-            "percentage": 0,
-            "transfer_speed_bps": 0,
-            "status": "pending",
-            "queue_position": None,
-            "started_at": None,
-            "download_started_at": None,
-            "completed_at": None,
-            "download_completed_at": None,
-            "error_message": None,
-            "failure_reason": "Waiting for a source Drone with this BIOS to become reachable",
-            "cancellation_requested": False,
-            "created_at": now,
-            "bios_md5": expected_md5,
-            "reconnect_after_epoch": None,
-            "pending_attempts": 0,
-            "_resolving": False,
-            "_asset_type": "bios",
-            "_config": config,
-            "_expected_fingerprint": expected_md5,
-            "_pending_kind": "bios",
-            "_source_device_ids": sorted(str(v) for v in (source_device_ids or set()) if str(v).strip()),
-        }
-        with self._lock:
-            self._jobs[job_id] = job
-            self._cancel_events[job_id] = Event()
-            self._update_queue_positions_locked()
-            self._persist_state_locked()
-            snapshot = self._public_job_locked(job)
-        self._wake.set()
-        return snapshot
-
     def enqueue_artwork(self, config: dict, peer: dict, system: str, rom_path: str, artwork_type: str, source_action_id: Optional[str] = None, overwrite: bool = False, local_rom_path: Optional[str] = None) -> dict:
         job_id = str(uuid.uuid4())
         peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
@@ -619,7 +443,7 @@ class DownloadManager:
             "sync_id": job_id,
             "source_action_id": source_action_id,
             "source_drone_id": peer_id,
-            "target_drone_id": self.settings.overmind_device_id,
+            "target_drone_id": self.settings.device_id,
             "asset_type": "artwork",
             "file_path": label,
             "file_name": Path(rom_path).name,
@@ -669,7 +493,7 @@ class DownloadManager:
             "job_id": job_id,
             "sync_id": job_id,
             "source_drone_id": peer_id,
-            "target_drone_id": self.settings.overmind_device_id,
+            "target_drone_id": self.settings.device_id,
             "asset_type": "saves",
             "file_path": relative_path,
             "file_name": Path(relative_path).name,
@@ -874,7 +698,7 @@ class DownloadManager:
         recent = [job for job in jobs if job.get("status") in DOWNLOAD_TERMINAL_STATUSES][-25:]
         estimate = self._queue_estimate(active, queued, recent, paused, self._concurrency)
         return {
-            "target_drone_id": self.settings.overmind_device_id,
+            "target_drone_id": self.settings.device_id,
             "concurrency": {"scope": "target_drone", "active_limit": self._concurrency},
             "paused": paused,
             "active": active,
@@ -1014,7 +838,6 @@ class DownloadManager:
     def _worker(self) -> None:
         while True:
             job_id = None
-            pending_id = None
             with self._lock:
                 if not self._paused:
                     for candidate_id, candidate in self._jobs.items():
@@ -1022,21 +845,6 @@ class DownloadManager:
                         if candidate.get("status") == "queued" and reconnect_after <= time.time():
                             job_id = candidate_id
                             break
-                    if job_id is None:
-                        # No real download ready to run -- use the spare capacity to
-                        # retry peer resolution for a 'pending' (no source yet) job.
-                        # _resolving guards against two worker threads claiming the
-                        # same pending job.
-                        for candidate_id, candidate in self._jobs.items():
-                            reconnect_after = float(candidate.get("reconnect_after_epoch") or 0)
-                            if (
-                                candidate.get("status") == "pending"
-                                and not candidate.get("_resolving")
-                                and reconnect_after <= time.time()
-                            ):
-                                pending_id = candidate_id
-                                candidate["_resolving"] = True
-                                break
                 if job_id:
                     job = self._jobs[job_id]
                     now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -1054,91 +862,8 @@ class DownloadManager:
             if job_id:
                 self._run_job(job_id)
                 continue
-            if pending_id:
-                self._retry_pending_job(pending_id)
-                continue
             self._wake.wait(1)
             self._wake.clear()
-
-    def _retry_pending_job(self, job_id: str) -> None:
-        """Attempt to resolve a source peer (and, for a gamelist-id-only ROM, its
-        path) for one 'pending' job. Promotes it to 'queued' on success, or bumps
-        its backoff and leaves it 'pending' on failure. Peer selection reads only
-        locally-cached state (no network I/O); gamelist-id resolution makes one
-        HTTP call to the chosen peer -- both run unlocked, matching _run_job."""
-        with self._lock:
-            job = self._jobs.get(job_id)
-            if not job or job.get("status") != "pending":
-                if job is not None:
-                    job["_resolving"] = False
-                return
-            kind = str(job.get("_pending_kind") or "rom")
-            system = str(job.get("system") or "")
-            gamelist_id = str(job.get("_gamelist_id") or "")
-            rel = str(job.get("relative_path") or "")
-            config = job.get("_config") or {}
-            source_device_ids = set(job.get("_source_device_ids") or [])
-            expected_fingerprint = job.get("_expected_fingerprint")
-            attempt = int(job.get("pending_attempts") or 0) + 1
-
-        def _back_off() -> None:
-            with self._lock:
-                current = self._jobs.get(job_id)
-                if current and current.get("status") == "pending":
-                    current["pending_attempts"] = attempt
-                    current["reconnect_after_epoch"] = time.time() + self._reconnect_delay(attempt)
-                if current is not None:
-                    current["_resolving"] = False
-                self._persist_state_locked()
-
-        try:
-            peer = (
-                _best_peer_for_bios(self.settings, config, rel, source_device_ids=source_device_ids)
-                if kind == "bios"
-                else _best_peer_for_rom(self.settings, self.repository, config, system, rel, source_device_ids=source_device_ids)
-            )
-            if not peer:
-                _back_off()
-                return
-            marker_relative_path = None
-            artwork_types: list = []
-            if kind == "rom" and not rel and gamelist_id:
-                resolved = _resolve_rom_by_gamelist_id_from_peer(self.settings, config, peer, system, gamelist_id)
-                if not resolved or not resolved.get("relative_path"):
-                    _back_off()
-                    return
-                rel = str(resolved.get("relative_path") or "").strip()
-                marker_relative_path = str(resolved.get("marker_relative_path") or "").strip() or None
-                if not expected_fingerprint:
-                    expected_fingerprint = resolved.get("rom_fingerprint")
-                artwork_types = resolved.get("artwork_types") if isinstance(resolved.get("artwork_types"), list) else []
-            with self._lock:
-                job = self._jobs.get(job_id)
-                if not job or job.get("status") != "pending":
-                    if job is not None:
-                        job["_resolving"] = False
-                    return
-                peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
-                job["status"] = "queued"
-                job["source_drone_id"] = peer_id
-                job["relative_path"] = rel
-                job["file_path"] = rel or job.get("file_path")
-                job["file_name"] = Path(rel).name if rel else job.get("file_name")
-                job["rom_name"] = rel or job.get("rom_name")
-                job["_peer"] = peer
-                job["_expected_fingerprint"] = expected_fingerprint
-                if kind == "rom":
-                    job["_marker_relative_path"] = marker_relative_path
-                    job["_artwork_types"] = [str(v).strip() for v in (artwork_types or []) if str(v).strip()]
-                job["reconnect_after_epoch"] = None
-                job["failure_reason"] = None
-                job["resume_reason"] = "A source Drone became reachable"
-                job["_resolving"] = False
-                self._update_queue_positions_locked()
-                self._persist_state_locked()
-            self._wake.set()
-        except Exception:
-            _back_off()
 
     def _run_job(self, job_id: str) -> None:
         with self._lock:
@@ -1160,10 +885,9 @@ class DownloadManager:
             asset_type = str(job.get("_asset_type") or "rom").lower()
             overwrite = bool(job.get("_overwrite")) if "_overwrite" in job else asset_type == "saves"
             rom_artwork_types = list(job.get("_artwork_types") or [])
-        self._push_download_state(config, "started", force=True)
 
         def progress(downloaded: int, total: Optional[int]) -> None:
-            should_push = False
+            should_persist = False
             with self._lock:
                 current = self._jobs.get(job_id)
                 if not current:
@@ -1179,11 +903,10 @@ class DownloadManager:
                 now = time.monotonic()
                 if now - self._last_download_state_push_at >= DOWNLOAD_PROGRESS_PUSH_SECONDS:
                     self._last_download_state_push_at = now
-                    should_push = True
-            if should_push:
+                    should_persist = True
+            if should_persist:
                 with self._lock:
                     self._persist_state_locked()
-                self._push_download_state(config, "progress", force=True)
 
         try:
             request = DownloadRequest(
@@ -1279,20 +1002,15 @@ class DownloadManager:
                     terminal_activity = self._public_job_locked(current)
                 self._update_queue_positions_locked()
                 self._persist_state_locked()
-                reconnecting = bool(current and current.get("status") == "queued" and current.get("reconnect_attempts"))
-                paused = bool(current and current.get("status") == "paused")
-            push_reason = "paused" if paused else ("reconnecting" if reconnecting else "completed")
-            self._push_download_state(config, push_reason, force=True)
             if terminal_activity:
                 if _local_network.is_local_mode(self.settings):
                     _local_network.record_activity(self.settings, terminal_activity)
-                _post_rom_sync_activity(self.settings, config, terminal_activity)
                 if asset_type == "rom" and terminal_activity.get("status") == "completed":
                     _kick_asset_metadata_sync_after_download(self.settings, self.repository, config, "rom_download_completed")
                     # Receiver-driven artwork: pull the game's artwork from the same
-                    # peer (Overmind no longer carries artwork to queue sync_artwork).
-                    # Artwork is keyed by the gamelist <path>, so folder-unit ROMs
-                    # look it up by the marker file, not the transferred folder.
+                    # peer that just supplied the ROM. Artwork is keyed by the
+                    # gamelist <path>, so folder-unit ROMs look it up by the marker
+                    # file, not the transferred folder.
                     completed_rel = str(marker_relative_path or terminal_activity.get("relative_path") or rel or "")
                     if completed_rel and rom_artwork_types:
                         for field in rom_artwork_types:
@@ -1305,12 +1023,3 @@ class DownloadManager:
                             except Exception:
                                 # Best-effort: artwork is a nice-to-have on top of the ROM.
                                 pass
-
-    def _push_download_state(self, config: dict, reason: str, force: bool = False) -> None:
-        if not force:
-            now = time.monotonic()
-            with self._lock:
-                if now - self._last_download_state_push_at < DOWNLOAD_PROGRESS_PUSH_SECONDS:
-                    return
-                self._last_download_state_push_at = now
-        _post_download_state(self.settings, config, self.snapshot(), reason=reason)

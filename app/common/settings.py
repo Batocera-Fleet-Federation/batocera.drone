@@ -90,7 +90,7 @@ class Settings:
     log_dir: Path
     stdout_log_file: str
     stderr_log_file: str
-    overmind_log_file: str
+    activity_log_file: str
     log_max_bytes: int
     log_backup_count: int
     rom_search_cache_ttl_seconds: int
@@ -104,13 +104,7 @@ class Settings:
     http_only: bool
     use_fake_data: bool
     fake_image_base_url: Optional[str]
-    overmind_url: Optional[str]
-    overmind_email: Optional[str]
-    overmind_password: Optional[str]
-    overmind_auth_token: Optional[str]
-    overmind_token: Optional[str]
-    overmind_device_id: str
-    overmind_poll_seconds: int
+    device_id: str
     rom_metadata_poll_seconds: int
     hostname_override: Optional[str]
     public_ip_override: Optional[str]
@@ -120,13 +114,6 @@ class Settings:
     drone_mtls_enabled: bool
     drone_mtls_mode: str
     drone_mtls_ca_file: Optional[Path]
-    # Persistent outbound connection to the Overmind Edge (opt-in during rollout).
-    edge_enabled: bool
-    edge_url: Optional[str]
-    edge_ping_seconds: int
-    edge_verify_tls: bool
-    edge_stun_port: int
-    holepunch_enabled: bool
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -144,8 +131,8 @@ class Settings:
         default_drone_cert = userdata_root / "system" / "drone-app" / "certs" / "drone.crt"
         default_drone_key = userdata_root / "system" / "drone-app" / "certs" / "drone.key"
 
-        configured_overmind_device_id = _normalize_device_id(
-            os.environ.get("OVERMIND_DEVICE_ID") or os.environ.get("DRONE_DEVICE_ID")
+        configured_device_id = _normalize_device_id(
+            os.environ.get("DRONE_DEVICE_ID") or os.environ.get("OVERMIND_DEVICE_ID")
         )
 
         return cls(
@@ -173,7 +160,7 @@ class Settings:
             log_dir=Path(os.environ.get("LOG_DIR", "./logs")),
             stdout_log_file=os.environ.get("STDOUT_LOG_FILE", "stdout.log"),
             stderr_log_file=os.environ.get("STDERR_LOG_FILE", "stderr.log"),
-            overmind_log_file=os.environ.get("OVERMIND_LOG_FILE", "overmind.log"),
+            activity_log_file=os.environ.get("ACTIVITY_LOG_FILE", os.environ.get("OVERMIND_LOG_FILE", "drone.log")),
             log_max_bytes=int(os.environ.get("LOG_MAX_BYTES", str(5 * 1024 * 1024))),
             log_backup_count=int(os.environ.get("LOG_BACKUP_COUNT", "5")),
             rom_search_cache_ttl_seconds=int(os.environ.get("ROM_SEARCH_CACHE_TTL_SECONDS", "300")),
@@ -191,13 +178,7 @@ class Settings:
             http_only=_env_bool(False, "HTTP_ONLY", "DRONE_APP_HTTP_ONLY"),
             use_fake_data=use_fake_data,
             fake_image_base_url=os.environ.get("FAKE_IMAGE_BASE_URL"),
-            overmind_url=os.environ.get("OVERMIND_URL", "https://www.batocera-swarm.com"),
-            overmind_email=os.environ.get("OVERMIND_EMAIL"),
-            overmind_password=os.environ.get("OVERMIND_PASSWORD"),
-            overmind_auth_token=os.environ.get("OVERMIND_AUTH_TOKEN") or os.environ.get("OVERMIND_AUTHORIZATION_TOKEN"),
-            overmind_token=os.environ.get("OVERMIND_DRONE_TOKEN"),
-            overmind_device_id=configured_overmind_device_id or (_fake_machine_id() if use_fake_data else _machine_id(userdata_root)),
-            overmind_poll_seconds=int(os.environ.get("OVERMIND_POLL_SECONDS", "30")),
+            device_id=configured_device_id or (_fake_machine_id() if use_fake_data else _machine_id(userdata_root)),
             rom_metadata_poll_seconds=max(0, int(os.environ.get("ROM_METADATA_POLL_SECONDS", "300"))),
             hostname_override=(os.environ.get("HOSTNAME_OVERRIDE") or "").strip() or None,
             public_ip_override=(os.environ.get("DRONE_PUBLIC_IP_OVERRIDE") or "").strip() or None,
@@ -207,10 +188,4 @@ class Settings:
             drone_mtls_enabled=_env_bool(False, "DRONE_MTLS_ENABLED", "DRONE_TO_DRONE_MTLS_ENABLED"),
             drone_mtls_mode=(os.environ.get("DRONE_MTLS_MODE") or "self-signed").strip().lower(),
             drone_mtls_ca_file=Path(os.environ["DRONE_MTLS_CA_FILE"]) if os.environ.get("DRONE_MTLS_CA_FILE") else None,
-            edge_enabled=_env_bool(False, "DRONE_EDGE_ENABLED"),
-            edge_url=(os.environ.get("DRONE_EDGE_URL") or "").strip() or None,
-            edge_ping_seconds=int(os.environ.get("DRONE_EDGE_PING_SECONDS", "20")),
-            edge_verify_tls=_env_bool(True, "DRONE_EDGE_VERIFY_TLS"),
-            edge_stun_port=int(os.environ.get("DRONE_EDGE_STUN_PORT", "9444")),
-            holepunch_enabled=_env_bool(True, "DRONE_HOLEPUNCH_ENABLED"),
         )

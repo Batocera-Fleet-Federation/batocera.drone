@@ -470,8 +470,8 @@ def _apply_screen_mode(settings: Settings, mode: str) -> tuple[Path, bool]:
         return settings.es_settings_file, restarted
     # Non-root (production): the privileged service worker runs set_screen_mode.py for us.
     # _request_screen_mode_service_control returns True only after the worker reports "ok"
-    # and raises on failure/timeout, so the result we report back to Overmind reflects
-    # what actually happened instead of falsely claiming an EmulationStation restart.
+    # and raises on failure/timeout, so the result we report back reflects what
+    # actually happened instead of falsely claiming an EmulationStation restart.
     if _get_screen_mode(settings) == normalized_mode:
         return settings.es_settings_file, False
     if not _request_screen_mode_service_control(normalized_mode):

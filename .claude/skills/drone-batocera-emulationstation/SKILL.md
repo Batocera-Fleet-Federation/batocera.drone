@@ -55,7 +55,7 @@ Known keys the Drone reads/writes today (`app/device/device_control.py` +
 
 | Key | Type | Notes |
 |---|---|---|
-| `UIMode` | string | `Full` / `Kiosk` / `Kid` (title-cased in the file; the Drone/Overmind API surfaces lowercase `full`/`kiosk`/`kid`) |
+| `UIMode` | string | `Full` / `Kiosk` / `Kid` (title-cased in the file; the Drone API surfaces lowercase `full`/`kiosk`/`kid`) |
 | `MusicVolume` | int | 0-100. **Not** the same subsystem as system/game audio volume — see below |
 | `ScreenSaverTime` | int | **Milliseconds**, 0 = disabled. ES's own settings UI shows/edits this in whole minutes (`value / 60000`) — always convert |
 | `HiddenSystems` | string | **Semicolon**-separated system names to hide from the carousel. Absence = nothing hidden |
@@ -179,24 +179,22 @@ next field:
    units, emit the low-level field `set_es_collections.py` understands.
 4. **Privileged script** (`set_es_collections.py`, `_write_updates`): handle
    the new low-level field key, write it to the XML tree.
-5. **Sync the three recognized-keys allowlists** — easy to miss one:
-   `app/web/handlers_es_collections.py` (`_handle_admin_es_collections_post`),
-   `app/overmind/actions.py` (`set_es_collections` handler), and Overmind's
-   `src/overmind/main.py` (`set_es_collections` payload-normalization block,
-   which also does its own validation/clamping since it's the admin-facing
-   surface where a 400 is more useful than a drone-side failure later).
+5. **Sync the recognized-keys allowlist**:
+   `app/web/handlers_es_collections.py` (`_handle_admin_es_collections_post`) — the
+   only allowlist now; the old central-hub action-dispatcher copy was removed with
+   the rest of the retired Overmind package.
 6. **OpenAPI schema** (`app/web/openapi_spec.py`): add the field to
    `EsCollectionsState` and `EsCollectionsUpdateRequest`, and to
    `tests/test_openapi_contract.py` if you added a new path (not needed for a
    field on an existing path).
-7. **UI, both sides**: `app/web/static/js/drone.js` (a control on the System
-   Info page, POSTing to `/admin/es-collections` with just the one changed
-   field — the endpoint accepts partial updates) and
-   `src/overmind/static/js/overmind.js` (mirrors the same control, via
-   `queueDeviceAction('set_es_collections', {payload: {...}})`).
+7. **UI**: `app/web/static/js/drone.js` (a control on the System Info page,
+   POSTing to `/admin/es-collections` with just the one changed field — the
+   endpoint accepts partial updates). No second UI to keep in sync — a paired
+   peer's System Info page is reached through the Swarm page's remote-management
+   proxy (`handlers_remote_admin.py`, see the `drone-admin-features` skill), which
+   drives this exact same route rather than a separate remote-control surface.
 8. **Tests**: `tests/test_es_collections.py` in this repo (state-read,
-   apply/clamp/validate, the privileged-script XML write) and
-   `tests/test_api.py` in `batocera.overmind` (action payload normalization).
+   apply/clamp/validate, the privileged-script XML write).
 
 ## Finding ground truth: the upstream batocera-emulationstation source
 
@@ -249,8 +247,8 @@ treat absence as "use the default," not as an error).
 - **`.ungroup` semantics are inverted from the checkbox label.** `ungroup=true`
   means "show this system standalone" (i.e. the "Grouped Systems" checkbox for
   it should render *unchecked*). `ungroup=false` or absent means "stays folded
-  into the group" (checkbox *checked*). Both `drone.js` and `overmind.js`
-  render "grouped" checkboxes checked-by-default and, on save, compute the new
+  into the group" (checkbox *checked*). `drone.js`
+  renders "grouped" checkboxes checked-by-default and, on save, computes the new
   `ungrouped_systems` list from whichever boxes are **unchecked** — and it's
   **full-replace semantics**: the caller must send the complete desired
   ungrouped set, not a diff, because `_build_low_level_updates` recomputes
@@ -312,21 +310,11 @@ treat absence as "use the default," not as an error).
   music-volume/screensaver/collections family
   (`_handle_admin_es_collections_get`/`_post`,
   `_handle_admin_music_volume_post`).
-- `app/overmind/actions.py` — the Overmind-remote-control action handlers
-  (`set_screen_mode`, `set_volume`, `set_music_volume`,
-  `get_es_collections_state`, `set_es_collections`). These call the **exact
-  same** underlying functions as the local admin handlers above — a change
-  made from the Drone's own System Info page and a change made remotely from
-  Overmind can never drift apart in behavior, because there is only ever one
-  implementation of "how to apply this setting."
 - `app/web/static/js/drone.js` — the System Info page controls (Screen Mode,
-  Volume, Music Volume, Screensaver, Game Collections & Systems cards).
-- `src/overmind/static/js/overmind.js` (in `batocera.overmind`) — the mirrored
-  device-admin-panel controls, using `queueDeviceAction()` +
-  `pollDeviceActionResult()` (a short-interval poll of
-  `GET /api/devices/{id}/actions` for the queued action's `result`, since
-  reading ES collections state is itself a fetch that has to round-trip
-  through the Drone, not a locally-known value).
+  Volume, Music Volume, Screensaver, Game Collections & Systems cards). A paired
+  peer's System Info page is reached and driven through the Swarm page's
+  credential-gated remote-management proxy (`handlers_remote_admin.py`) rather
+  than a separate mirrored UI — see the `drone-admin-features` skill.
 
 ## Testing pattern
 

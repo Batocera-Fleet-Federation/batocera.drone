@@ -1,8 +1,8 @@
 """Tests for resolving a ROM by its gamelist ``<game id>`` (the P2P identity).
 
-Overmind identifies ROMs only by ``(system, gamelist_id)`` after the gamelist-source
+Peers identify ROMs only by ``(system, gamelist_id)`` after the gamelist-source
 refactor; the sender maps that id back to its own ``<path>`` so a receiver can pull the
-file without Overmind ever carrying a filesystem path.
+file without either peer ever carrying the other's filesystem path.
 """
 
 import tempfile

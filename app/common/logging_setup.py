@@ -3,9 +3,9 @@
 Extracted from ``drone_api.py``. ``_configure_rotating_logs`` swaps ``sys.stdout``
 / ``sys.stderr`` for ``_TeeRotatingStream`` wrappers that echo to the console and
 also append timestamped, rotating log files, and stands up a dedicated file-only
-stream for Overmind chatter. ``_overmind_log`` routes Overmind-related events to
-that ``overmind.log`` (surfaced as the ``drone_overmind`` Log Source), optionally
-also echoing a high-level line to stdout.
+stream for detailed narration. ``_drone_log`` routes those events to that
+``drone.log`` (surfaced as the ``drone_activity`` Log Source), optionally also
+echoing a high-level line to stdout.
 
 Pure stdlib; takes a ``Settings``-like object (only attribute access) so it does
 not import ``drone_api`` and create a cycle.
@@ -16,10 +16,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 
-# Dedicated, file-only stream for Overmind-related chatter (heartbeat, asset/saves
-# sync details, speed samples, peer checks, token reclaim). Configured by
-# _configure_rotating_logs; None until then (and in unit tests).
-_OVERMIND_LOG_STREAM = None
+# Dedicated, file-only stream for detailed narration (pairing/tailnet, automation,
+# peer health, ROM-metadata sync). Configured by _configure_rotating_logs; None
+# until then (and in unit tests).
+_DRONE_ACTIVITY_LOG_STREAM = None
 
 
 class _TimestampFormatter:
@@ -90,7 +90,7 @@ class _TeeRotatingStream:
                     self._file.write(ts_line)
                     self._file.flush()
                 self._rollover_if_needed()
-            # original_stream is None for file-only streams (e.g. the Overmind log),
+            # original_stream is None for file-only streams (e.g. the activity log),
             # which must NOT also echo to the console/stdout.
             if self._original_stream is not None:
                 self._original_stream.write(data)
@@ -123,28 +123,28 @@ def _configure_rotating_logs(settings) -> None:
         max_bytes=settings.log_max_bytes,
         backup_count=settings.log_backup_count,
     )
-    # Dedicated, file-only stream for Overmind-related chatter (heartbeat, asset/saves
-    # sync details, speed samples, peer checks, token reclaim). Keeps stdout to high-level
-    # lifecycle events. Surfaced in Log Sources as "drone_overmind".
-    global _OVERMIND_LOG_STREAM
-    _OVERMIND_LOG_STREAM = _TeeRotatingStream(
+    # Dedicated, file-only stream for detailed narration (pairing/tailnet, automation,
+    # peer health, ROM-metadata sync). Keeps stdout to high-level lifecycle events.
+    # Surfaced in Log Sources as "drone_activity".
+    global _DRONE_ACTIVITY_LOG_STREAM
+    _DRONE_ACTIVITY_LOG_STREAM = _TeeRotatingStream(
         original_stream=None,
-        log_path=settings.log_dir / settings.overmind_log_file,
+        log_path=settings.log_dir / settings.activity_log_file,
         max_bytes=settings.log_max_bytes,
         backup_count=settings.log_backup_count,
     )
 
 
-def _overmind_log(message: str, *, also_stdout: bool = False) -> None:
-    """Record an Overmind-related event to the dedicated overmind.log.
+def _drone_log(message: str, *, also_stdout: bool = False) -> None:
+    """Record a detailed narration event to the dedicated drone.log.
 
-    Detailed events (heartbeat, per-chunk uploads, sync triggers, speed/peer telemetry)
-    go to overmind.log only. High-level lifecycle events pass ``also_stdout=True`` so a
+    Detailed events (pairing/tailnet, automation, peer health, ROM-metadata sync)
+    go to drone.log only. High-level lifecycle events pass ``also_stdout=True`` so a
     concise summary still appears in stdout.log. If the dedicated stream is not configured
     yet (e.g. unit tests, early startup), fall back to stdout so nothing is lost.
     """
     line = message if message.endswith("\n") else message + "\n"
-    stream = _OVERMIND_LOG_STREAM
+    stream = _DRONE_ACTIVITY_LOG_STREAM
     if stream is None:
         sys.stdout.write(line)
         sys.stdout.flush()

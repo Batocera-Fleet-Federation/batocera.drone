@@ -3,8 +3,7 @@
 A small counterpart to DownloadManager, kept separate because serving is purely
 reactive -- there is no queue, retry, or worker pool here, just a record of
 in-flight and recently-finished sends. Instrumented into the mTLS ``/peer/*``
-handlers (direct/LAN tier, ``web/handlers_peer.py``) and the Edge relay's serve
-path (``edge_relay.py``). Lazily-created process-wide singleton via
+handlers (``web/handlers_peer.py``). Lazily-created process-wide singleton via
 :func:`get_upload_tracker` -- unlike DownloadManager it needs no settings or
 repository, so it doesn't need bootstrap wiring in ``drone_api.py``.
 """

@@ -27,13 +27,11 @@ from app.storage.state_store import (
     save_payload,
     save_peer_route,
 )
-from app.overmind.overmind_reporting import (
+from app.device.emulator_configs import (
     list_emulator_config_files,
     read_emulator_config_file,
 )
 from app.drone_api import (
-    FAKE_OVERMIND_EMAIL,
-    FAKE_OVERMIND_TOKEN,
     BasicAuth,
     DownloadCancelled,
     DownloadManager,
@@ -49,17 +47,10 @@ from app.drone_api import (
     _peer_address,
     _peer_api_port,
     _peer_health_url,
-    _probe_peer_public_ip,
     _get_local_ip_addresses,
     _get_router_ip_address,
     _collect_gpu_info,
-    _format_overmind_error,
     _launchbox_platform_for_system,
-    _load_overmind_config_for_settings,
-    _normalize_overmind_link_state,
-    _collect_rom_metadata,
-    _chunk_rom_metadata_delta,
-    _chunk_rom_metadata_inventory,
     _hash_rom_metadata_batches,
     _rom_inventory_fingerprint,
     _empty_rom_metadata_cache,
@@ -73,7 +64,6 @@ from app.drone_api import (
     _rom_metadata_cache_status,
     _rom_metadata_cache_path,
     _read_pending_rom_metadata_changes,
-    _sync_rom_metadata_to_overmind,
     _sample_speed,
     _real_data_roots,
     _peer_ssl_diagnostic,
@@ -82,16 +72,6 @@ from app.drone_api import (
     _download_rom_folder_from_peer,
     _collision_safe_target,
     _rom_fingerprint_exists,
-    _best_peer_for_rom,
-    _execute_overmind_action,
-    _report_overmind_action_completion,
-    _register_or_claim_overmind_token,
-    _reclaim_overmind_token_after_unauthorized,
-    _collect_emulator_configs,
-    _commit_emulator_config_fingerprints,
-    _collect_log_sources,
-    _commit_log_cursors,
-    _collect_game_logs,
     _collect_mounted_disk_metrics,
     _collect_system_info_payload,
     _is_external_client_ip,
@@ -157,47 +137,21 @@ class SettingsTests(unittest.TestCase):
         )
         (system / "gamelist.xml").write_text(f"<gameList>{games}</gameList>\n", encoding="utf-8")
 
-    def test_overmind_error_format_includes_class_when_message_is_blank(self) -> None:
-        self.assertEqual(_format_overmind_error(TimeoutError()), "TimeoutError()")
-        self.assertIn("URLError reason=", _format_overmind_error(URLError(TimeoutError())))
-
-    def test_network_mode_defaults_to_local_and_overmind_is_retired(self) -> None:
+    def test_local_network_mode_cannot_be_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
             with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root), "DRONE_DEVICE_ID": "local-a"}, clear=True):
                 settings = Settings.from_env()
-                # Overmind-free architecture: fresh drones come up local-only.
-                self.assertEqual(local_network.get_mode(settings), local_network.MODE_LOCAL_NETWORK)
-                self.assertFalse(local_network.is_overmind_mode(settings))
-                # Attempting to re-enable Overmind via the API surface is rejected.
-                with self.assertRaisesRegex(ValueError, "retired"):
-                    local_network.set_mode(settings, local_network.MODE_OVERMIND)
-                with self.assertRaisesRegex(ValueError, "retired"):
-                    local_network.set_integrations(settings, overmind_enabled=True, local_network_enabled=True)
-                # local_network <-> disabled still persists.
-                local_network.set_mode(settings, local_network.MODE_DISABLED)
-                self.assertEqual(local_network.get_mode(settings), local_network.MODE_DISABLED)
-                local_network.set_mode(settings, local_network.MODE_LOCAL_NETWORK)
-                self.assertEqual(local_network.get_mode(settings), local_network.MODE_LOCAL_NETWORK)
-                # A drone that stored an Overmind-era mode flips to local-only on
-                # update, without a migration.
-                save_payload(database_path(root), "integration_enablement", {"overmind_enabled": True, "local_network_enabled": False})
-                self.assertFalse(local_network.is_overmind_mode(settings))
-                # Overmind client calls stay hard-gated off.
-                with mock.patch("app.drone_api.urlopen") as opened:
-                    with self.assertRaisesRegex(RuntimeError, "Overmind integration is disabled"):
-                        drone_api._overmind_post_json("https://overmind.example/api/test", {}, settings=settings)
-                    opened.assert_not_called()
-            # The env escape hatch (docker swarm / integration tests) still works.
-            with mock.patch.dict(
-                "os.environ",
-                {"USERDATA_ROOT": str(root), "DRONE_DEVICE_ID": "local-a", "DRONE_NETWORK_MODE": "both"},
-                clear=True,
-            ):
-                self.assertTrue(local_network.is_overmind_mode(settings))
-                self.assertTrue(local_network.is_local_mode(settings))
+            self.assertTrue(local_network.is_local_mode(settings))
+            self.assertEqual(local_network.get_mode(settings), local_network.MODE_LOCAL_NETWORK)
+            with self.assertRaises(ValueError):
+                local_network.set_mode(settings, "disabled")
+            with self.assertRaises(ValueError):
+                local_network.set_integrations(settings, local_network_enabled=False)
+            # Still on after the rejected attempts.
+            self.assertTrue(local_network.is_local_mode(settings))
 
-    def test_discovery_requires_local_mode_and_pairing_is_explicit(self) -> None:
+    def test_discovery_and_pairing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
             with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root), "DRONE_DEVICE_ID": "local-a"}, clear=True):
@@ -209,11 +163,6 @@ class SettingsTests(unittest.TestCase):
                     "scheme": "https",
                     "api_port": 443,
                 }
-                # Local networking is on by default now; only an explicit
-                # "disabled" mode refuses discovery.
-                local_network.set_mode(settings, local_network.MODE_DISABLED)
-                self.assertIsNone(local_network.record_discovered_peer(settings, announcement, "192.168.1.22"))
-                local_network.set_mode(settings, local_network.MODE_LOCAL_NETWORK)
                 discovered = local_network.record_discovered_peer(settings, announcement, "192.168.1.22")
                 self.assertEqual(discovered["drone_id"], "local-b")
                 self.assertFalse(discovered["paired"])
@@ -472,7 +421,7 @@ class SettingsTests(unittest.TestCase):
             settings = Settings.from_env()
         self.assertEqual(settings.compatibility_https_ports, (8443, 9443))
 
-    def test_overmind_device_id_persists_after_first_physical_mac_selection(self) -> None:
+    def test_device_id_persists_after_first_physical_mac_selection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
             device_id_file = root / "system" / "drone-app" / "device-id"
@@ -483,7 +432,7 @@ class SettingsTests(unittest.TestCase):
             ), mock.patch("app.common.device_identity._runtime_machine_id", return_value="2c:cf:67:97:8c:8f"):
                 first = Settings.from_env()
 
-            self.assertEqual(first.overmind_device_id, "58:47:ca:7e:38:57")
+            self.assertEqual(first.device_id, "58:47:ca:7e:38:57")
             self.assertEqual(device_id_file.read_text(encoding="utf-8").strip(), "58:47:ca:7e:38:57")
 
             with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True), mock.patch(
@@ -492,9 +441,9 @@ class SettingsTests(unittest.TestCase):
             ), mock.patch("app.common.device_identity._runtime_machine_id", return_value="aa:bb:cc:dd:ee:ff"):
                 restarted = Settings.from_env()
 
-            self.assertEqual(restarted.overmind_device_id, "58:47:ca:7e:38:57")
+            self.assertEqual(restarted.device_id, "58:47:ca:7e:38:57")
 
-    def test_configured_overmind_device_id_wins_without_rewriting_persisted_id(self) -> None:
+    def test_configured_device_id_wins_without_rewriting_persisted_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
             device_id_file = root / "system" / "drone-app" / "device-id"
@@ -508,7 +457,7 @@ class SettingsTests(unittest.TestCase):
             ):
                 settings = Settings.from_env()
 
-            self.assertEqual(settings.overmind_device_id, "bff-drone-a")
+            self.assertEqual(settings.device_id, "bff-drone-a")
             self.assertEqual(device_id_file.read_text(encoding="utf-8").strip(), "58:47:ca:7e:38:57")
 
     def test_host_preference_order_is_override_ipv4_ipv6(self) -> None:
@@ -784,117 +733,9 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(_peer_health_url("https://198.51.100.21"), "https://198.51.100.21/health")
         self.assertEqual(_peer_health_url("https://bff-drone-b:443/"), "https://bff-drone-b:443/health")
 
-    def test_public_ip_peer_probe_checks_health_endpoint_through_peer_client(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(Path(tmp) / "userdata")}, clear=True):
-                settings = Settings.from_env()
-
-            calls = []
-
-            def fake_peer_get_json(url, settings_arg, peer_id=None, config=None, refresh_cert=False):
-                calls.append((url, settings_arg, peer_id, config, refresh_cert))
-                return {"status": "ok"}
-
-            peer = {"drone_id": "bff-drone-b", "public_ip": "bff-drone-b", "api_port": 8444}
-            config = {"overmind_url": "https://overmind.example", "overmind_token": "token"}
-            with mock.patch("app.transfer.peer_workers._peer_get_json", side_effect=fake_peer_get_json):
-                result = _probe_peer_public_ip(settings, peer, config=config)
-
-            self.assertEqual(result["status"], "pass")
-            self.assertEqual(result["target_address"], "https://bff-drone-b:8444")
-            self.assertEqual(result["public_ip"], "bff-drone-b")
-            self.assertEqual(result["api_port"], 8444)
-            self.assertEqual(calls[0][0], "https://bff-drone-b:8444/health")
-            self.assertEqual(calls[0][2], "bff-drone-b")
-            self.assertIs(calls[0][3], config)
-            self.assertFalse(calls[0][4])
-
-    def test_log_source_collection_sends_only_new_log_bytes(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "userdata"
-            log_dir = Path(tmp) / "logs"
-            log_dir.mkdir(parents=True)
-            stdout_log = log_dir / "stdout.log"
-            stdout_log.write_text("first\nsecond\n", encoding="utf-8")
-            with mock.patch.dict(
-                "os.environ",
-                {"USERDATA_ROOT": str(root), "LOG_DIR": str(log_dir)},
-                clear=True,
-            ):
-                settings = Settings.from_env()
-
-            first = _collect_log_sources(settings)
-            stdout_entry = next(row for row in first["logs"] if row["source"] == "drone_stdout")
-            self.assertEqual(stdout_entry["files"][0]["content"], "first\nsecond\n")
-
-            unacknowledged = _collect_log_sources(settings)
-            stdout_entry = next(row for row in unacknowledged["logs"] if row["source"] == "drone_stdout")
-            self.assertEqual(stdout_entry["files"][0]["content"], "first\nsecond\n")
-
-            _commit_log_cursors(settings, first["_cursors"])
-            with stdout_log.open("a", encoding="utf-8") as handle:
-                handle.write("third\n")
-
-            second = _collect_log_sources(settings)
-            stdout_entry = next(row for row in second["logs"] if row["source"] == "drone_stdout")
-            self.assertEqual(stdout_entry["files"][0]["content"], "third\n")
-            _commit_log_cursors(settings, second["_cursors"])
-            self.assertEqual(_collect_log_sources(settings)["logs"], [])
-
-            stdout_log.write_text("rewritten\n", encoding="utf-8")
-            rewritten = _collect_log_sources(settings)
-            stdout_entry = next(row for row in rewritten["logs"] if row["source"] == "drone_stdout")
-            self.assertEqual(stdout_entry["files"][0]["content"], "rewritten\n")
-
-    def test_log_source_collection_can_filter_persistent_overmind_sources(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "userdata"
-            log_dir = Path(tmp) / "logs"
-            log_dir.mkdir(parents=True)
-            (log_dir / "stderr.log").write_text("drone error\n", encoding="utf-8")
-            es_logs = root / "system" / "logs"
-            es_logs.mkdir(parents=True)
-            (es_logs / "es_launch_stdout.log").write_text("es stdout\n", encoding="utf-8")
-            (es_logs / "es_launch_stderr.log").write_text("es stderr\n", encoding="utf-8")
-            with mock.patch.dict(
-                "os.environ",
-                {"USERDATA_ROOT": str(root), "LOG_DIR": str(log_dir)},
-                clear=True,
-            ):
-                settings = Settings.from_env()
-
-            payload = _collect_log_sources(
-                settings,
-                sources=("drone_stderr", "es_launch_stdout", "es_launch_stderr"),
-            )
-            self.assertEqual(
-                {row["source"] for row in payload["logs"]},
-                {"drone_stderr", "es_launch_stdout", "es_launch_stderr"},
-            )
-
-    def test_log_source_collection_skips_old_bytes_when_backlog_is_large(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "userdata"
-            log_dir = Path(tmp) / "logs"
-            log_dir.mkdir(parents=True)
-            stdout_log = log_dir / "stdout.log"
-            stdout_log.write_text("old-line\n" * 40000 + "latest-checkpoint\n", encoding="utf-8")
-            with mock.patch.dict(
-                "os.environ",
-                {"USERDATA_ROOT": str(root), "LOG_DIR": str(log_dir)},
-                clear=True,
-            ):
-                settings = Settings.from_env()
-
-            payload = _collect_log_sources(settings)
-            file_info = next(row for row in payload["logs"] if row["source"] == "drone_stdout")["files"][0]
-
-            self.assertGreater(file_info["skipped_bytes"], 0)
-            self.assertIn("older buffered bytes to show current output", file_info["content"])
-            self.assertIn("latest-checkpoint", file_info["content"])
-            self.assertEqual(payload["_cursors"][str(stdout_log.resolve())]["size"], stdout_log.stat().st_size)
-
     def test_game_log_collection_detects_launch_with_fingerprint(self) -> None:
+        from app.device.game_activity import collect_game_logs
+
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
             roms_root = root / "roms"
@@ -914,7 +755,7 @@ class SettingsTests(unittest.TestCase):
             ):
                 settings = Settings.from_env()
 
-            result = _collect_game_logs(settings, RomRepository(roms_root, root / "bios"))
+            result = collect_game_logs(settings, RomRepository(roms_root, root / "bios"))
             self.assertEqual(len(result["sessions"]), 1)
             session = result["sessions"][0]
             self.assertEqual(session["system_name"], "snes")
@@ -924,6 +765,8 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(session["played_at"], "2026-05-26T10:15:00+00:00")
 
     def test_game_log_collection_detects_batocera_v43_launch(self) -> None:
+        from app.device.game_activity import collect_game_logs
+
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
             roms_root = root / "roms"
@@ -948,7 +791,7 @@ class SettingsTests(unittest.TestCase):
             ):
                 settings = Settings.from_env()
 
-            result = _collect_game_logs(settings, RomRepository(roms_root, root / "bios"))
+            result = collect_game_logs(settings, RomRepository(roms_root, root / "bios"))
             self.assertEqual(len(result["sessions"]), 1)
             session = result["sessions"][0]
             self.assertEqual(session["system_name"], "steam")
@@ -956,30 +799,8 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(session["rom_path"], rom.resolve().as_posix())
             self.assertEqual(session["played_at"], "2026-06-08T23:25:36+00:00")
 
-    def test_collect_emulator_configs_includes_batocera_conf(self) -> None:
-        from app.overmind.overmind_reporting import collect_emulator_configs
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "userdata"
-            (root / "system").mkdir(parents=True)
-            (root / "system" / "batocera.conf").write_text("system.power.switch=PIN\n", encoding="utf-8")
-            retroarch = root / "system" / "configs" / "retroarch"
-            retroarch.mkdir(parents=True)
-            (retroarch / "retroarchcustom.cfg").write_text("video_driver = vulkan\n", encoding="utf-8")
-            with mock.patch.dict(
-                "os.environ",
-                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
-                clear=True,
-            ):
-                settings = Settings.from_env()
-
-            payload = collect_emulator_configs(settings, include_unchanged=True)
-            rel_paths = {config["relative_path"] for config in payload["configs"]}
-            self.assertIn("batocera.conf", rel_paths)
-            self.assertIn("retroarch/retroarchcustom.cfg", rel_paths)
-
     def test_game_event_spool_produces_session_with_duration(self) -> None:
-        from app.overmind.overmind_game_logs import collect_game_event_sessions, delete_game_event_spool, load_gameplay_history
+        from app.device.game_activity import collect_game_event_sessions, delete_game_event_spool, load_gameplay_history
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
@@ -1022,7 +843,7 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(load_gameplay_history(settings), [session])
 
     def test_game_process_monitor_emits_start_and_stop_events(self) -> None:
-        from app.overmind.overmind_game_logs import GameProcessMonitor, collect_game_event_sessions, find_running_emulatorlauncher
+        from app.device.game_activity import GameProcessMonitor, collect_game_event_sessions, find_running_emulatorlauncher
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
@@ -1066,12 +887,12 @@ class SettingsTests(unittest.TestCase):
             self.assertIn("duration_seconds", sessions[0])
 
     def test_game_process_monitor_retries_failed_spool_write(self) -> None:
-        from app.overmind.overmind_game_logs import GameProcessMonitor
+        from app.device.game_activity import GameProcessMonitor
 
         monitor = GameProcessMonitor(mock.Mock())
         running = {"system_name": "snes", "rom_path": "/userdata/roms/snes/Game.sfc"}
-        with mock.patch("app.overmind.overmind_game_logs.find_running_emulatorlauncher", return_value=running):
-            with mock.patch("app.overmind.overmind_game_logs.write_game_process_event", side_effect=[None, Path("/tmp/start.json")]) as write_event:
+        with mock.patch("app.device.game_activity.find_running_emulatorlauncher", return_value=running):
+            with mock.patch("app.device.game_activity.write_game_process_event", side_effect=[None, Path("/tmp/start.json")]) as write_event:
                 monitor.poll_once()
                 self.assertIsNone(monitor.active_game)
                 monitor.poll_once()
@@ -1079,53 +900,7 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(write_event.call_count, 2)
         self.assertEqual(monitor.active_game["rom_path"], running["rom_path"])
 
-    def test_emulator_config_collection_sends_changed_configs_and_skips_bak(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "userdata"
-            configs_root = root / "system" / "configs" / "retroarch"
-            configs_root.mkdir(parents=True)
-            config = configs_root / "retroarch.cfg"
-            backup = configs_root / "retroarch.cfg.bak"
-            config.write_text("video_driver = gl", encoding="utf-8")
-            backup.write_text("old", encoding="utf-8")
-            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
-                settings = Settings.from_env()
-
-            first = _collect_emulator_configs(settings)
-            self.assertEqual([row["relative_path"] for row in first["configs"]], ["retroarch/retroarch.cfg"])
-
-            unacknowledged = _collect_emulator_configs(settings)
-            self.assertEqual([row["relative_path"] for row in unacknowledged["configs"]], ["retroarch/retroarch.cfg"])
-
-            _commit_emulator_config_fingerprints(settings, first["_fingerprints"])
-            second = _collect_emulator_configs(settings)
-            self.assertEqual(second["configs"], [])
-            requested_snapshot = _collect_emulator_configs(settings, include_unchanged=True)
-            self.assertEqual([row["relative_path"] for row in requested_snapshot["configs"]], ["retroarch/retroarch.cfg"])
-            self.assertFalse(requested_snapshot["incremental"])
-            self.assertEqual(requested_snapshot["configs"][0]["md5"], hashlib.md5(b"video_driver = gl").hexdigest())
-
-            legacy_state = root / "system" / "drone-app" / "overmind_config_fingerprints.json"
-            legacy_state.write_text(
-                json.dumps({"schema_version": 2, "fingerprints": first["_fingerprints"]}),
-                encoding="utf-8",
-            )
-            with open_database(database_path(root)) as connection:
-                connection.execute(
-                    "DELETE FROM app_state WHERE namespace = ?",
-                    ("overmind_config_fingerprints.json",),
-                )
-            legacy_retry = _collect_emulator_configs(settings)
-            self.assertEqual(legacy_retry["configs"], [])
-            self.assertFalse(legacy_state.exists())
-            _commit_emulator_config_fingerprints(settings, legacy_retry["_fingerprints"])
-
-            config.write_text("video_driver = vulkan", encoding="utf-8")
-            third = _collect_emulator_configs(settings)
-            self.assertEqual([row["relative_path"] for row in third["configs"]], ["retroarch/retroarch.cfg"])
-            self.assertIn("vulkan", third["configs"][0]["content"])
-
-    def test_emulator_config_collection_uses_allowed_batocera_paths(self) -> None:
+    def test_emulator_config_listing_uses_allowed_batocera_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
             configs = root / "system" / "configs"
@@ -1157,7 +932,7 @@ class SettingsTests(unittest.TestCase):
             with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
                 settings = Settings.from_env()
 
-            result = _collect_emulator_configs(settings)
+            result = list_emulator_config_files(settings)
             rows = {row["relative_path"] for row in result["configs"]}
 
             self.assertEqual(rows, {
@@ -1169,7 +944,7 @@ class SettingsTests(unittest.TestCase):
             })
             self.assertFalse(any(path.name in str(rows) for path in excluded))
 
-    def test_emulator_config_collection_retries_changed_rows_after_batch_limit(self) -> None:
+    def test_emulator_config_listing_can_return_full_snapshot_for_local_ui(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
             configs = root / "system" / "configs" / "retroarch"
@@ -1179,24 +954,7 @@ class SettingsTests(unittest.TestCase):
             with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
                 settings = Settings.from_env()
 
-            first = _collect_emulator_configs(settings)
-            self.assertEqual(len(first["configs"]), 250)
-            _commit_emulator_config_fingerprints(settings, first["_fingerprints"])
-            second = _collect_emulator_configs(settings)
-
-            self.assertEqual([row["relative_path"] for row in second["configs"]], ["retroarch/250.cfg"])
-
-    def test_emulator_config_collection_can_return_full_snapshot_for_local_ui(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "userdata"
-            configs = root / "system" / "configs" / "retroarch"
-            configs.mkdir(parents=True)
-            for index in range(251):
-                (configs / f"{index:03}.cfg").write_text(str(index), encoding="utf-8")
-            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
-                settings = Settings.from_env()
-
-            snapshot = _collect_emulator_configs(settings, include_unchanged=True, max_configs=0)
+            snapshot = list_emulator_config_files(settings, max_configs=0)
 
             self.assertEqual(len(snapshot["configs"]), 251)
             self.assertFalse(snapshot["incremental"])
@@ -1224,7 +982,7 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(detail["content"], "Renderer = Vulkan")
             self.assertEqual(detail["md5"], hashlib.md5(b"Renderer = Vulkan").hexdigest())
 
-    def test_emulator_config_list_matches_overmind_default_limit(self) -> None:
+    def test_emulator_config_list_default_limit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
             configs = root / "system" / "configs" / "retroarch"
@@ -1258,41 +1016,20 @@ class SettingsTests(unittest.TestCase):
                 ["retroarch/beta.cfg"],
             )
 
-    def test_peer_trust_prefers_configured_ca_bundle(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            ca_file = Path(tmp) / "ca.crt"
-            ca_file.write_text("test-ca", encoding="utf-8")
-            with mock.patch.dict(
-                "os.environ",
-                {"USERDATA_ROOT": str(Path(tmp) / "userdata"), "DRONE_MTLS_CA_FILE": str(ca_file)},
-                clear=True,
-            ):
-                settings = Settings.from_env()
-
-            # The configured-CA branch is the Overmind-swarm trust path, only
-            # reachable via the env escape hatch now.
-            with mock.patch.dict("os.environ", {"DRONE_NETWORK_MODE": "overmind"}), \
-                    mock.patch("app.transfer.peer_connectivity._fetch_peer_certificate") as fetch:
-                self.assertEqual(_peer_trust_cafile(settings, peer_id="bff-drone-b", config={}), ca_file)
-                fetch.assert_not_called()
-
-    def test_local_peer_trust_uses_separate_pinned_certificate_store(self) -> None:
+    def test_peer_trust_cafile_uses_local_pinned_certificate_store(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
             with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root), "DRONE_DEVICE_ID": "local-a"}, clear=True):
                 settings = Settings.from_env()
-            local_network.set_mode(settings, local_network.MODE_LOCAL_NETWORK)
             local_cert = drone_api._local_peer_cert_cache_path(settings, "local-b")
             local_cert.parent.mkdir(parents=True)
             local_cert.write_text("local-peer-cert", encoding="utf-8")
-            overmind_cert = drone_api._peer_cert_cache_path(settings, "local-b")
-            overmind_cert.parent.mkdir(parents=True)
-            overmind_cert.write_text("overmind-peer-cert", encoding="utf-8")
 
             self.assertEqual(_peer_trust_cafile(settings, peer_id="local-b", config={}), local_cert)
-            # Overmind mode is only reachable via the env escape hatch now.
-            with mock.patch.dict("os.environ", {"DRONE_NETWORK_MODE": "overmind"}):
-                self.assertEqual(_peer_trust_cafile(settings, peer_id="local-b", config={}), overmind_cert)
+            # No pinned cert cached yet for this peer -> nothing to trust.
+            self.assertIsNone(_peer_trust_cafile(settings, peer_id="unknown-peer", config={}))
+            # No peer id at all -> nothing to trust.
+            self.assertIsNone(_peer_trust_cafile(settings, peer_id=None, config={}))
 
     def test_drone_client_ssl_context_loads_client_cert_for_mtls_peer_checks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1341,23 +1078,22 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("hostname=bff-drone-b", diagnostic)
         self.assertIn("cafile=/tmp/local-ca.crt", diagnostic)
 
-    def test_download_rom_from_peer_uses_configured_ca_bundle_and_reachable_url(self) -> None:
+    def test_download_rom_from_peer_uses_pinned_peer_cert_and_reachable_url(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
-            ca_file = Path(tmp) / "ca.crt"
-            ca_file.write_text("test-ca", encoding="utf-8")
             with mock.patch.dict(
                 "os.environ",
                 {
-                    "DRONE_NETWORK_MODE": "overmind",
                     "USERDATA_ROOT": str(root),
                     "ROMS_ROOT": str(root / "roms"),
                     "BIOS_ROOT": str(root / "bios"),
-                    "DRONE_MTLS_CA_FILE": str(ca_file),
                 },
                 clear=True,
             ):
                 settings = Settings.from_env()
+            pinned_cert = drone_api._local_peer_cert_cache_path(settings, "bff-drone-b")
+            pinned_cert.parent.mkdir(parents=True)
+            pinned_cert.write_text("peer-cert", encoding="utf-8")
 
             class FakeResponse:
                 def __init__(self):
@@ -1388,19 +1124,18 @@ class SettingsTests(unittest.TestCase):
                 "reachable_url": "https://bff-drone-b:443",
                 "resolved_network": {"ipv4": ["172.20.0.4"]},
             }
-            with mock.patch.dict("os.environ", {"DRONE_NETWORK_MODE": "overmind"}), mock.patch(
+            with mock.patch(
                 "app.transfer.peer_download._drone_client_ssl_context", side_effect=fake_context
             ), mock.patch(
                 "app.transfer.peer_download.urlopen", side_effect=fake_urlopen
-            ), mock.patch("app.transfer.peer_connectivity._fetch_peer_certificate") as fetch:
+            ):
                 result = _download_rom_from_peer(settings, {}, peer, "atari7800", "Asteroids (USA).zip", expected_size=7)
 
             self.assertEqual(result["source_drone_id"], "bff-drone-b")
             self.assertEqual(requests[0][0], "https://bff-drone-b:443/v1/api/peer/roms/atari7800/Asteroids%20%28USA%29.zip")
             self.assertEqual(contexts[0][1], True)
-            self.assertEqual(contexts[0][2], ca_file)
+            self.assertEqual(contexts[0][2], pinned_cert)
             self.assertEqual((root / "roms" / "atari7800" / "Asteroids (USA).zip").read_bytes(), b"ROMDATA")
-            fetch.assert_not_called()
 
     def test_download_rom_from_peer_skips_existing_target_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1741,7 +1476,7 @@ class SettingsTests(unittest.TestCase):
             with mock.patch("app.drone_api.Thread.start"):
                 manager = DownloadManager(settings, repo)
 
-            queued = manager.enqueue_rom({"overmind_url": "https://overmind.local"}, {"drone_id": "source-a"}, "fbneo", "1943.zip", expected_size=123)
+            queued = manager.enqueue_rom({}, {"drone_id": "source-a"}, "fbneo", "1943.zip", expected_size=123)
             manager.cancel(queued["job_id"])
             retry = manager.retry(queued["job_id"])
 
@@ -1772,7 +1507,7 @@ class SettingsTests(unittest.TestCase):
             with mock.patch("app.transfer.download_manager.Thread.start"):
                 first_manager = DownloadManager(settings, repo)
                 queued = first_manager.enqueue_rom(
-                    {"overmind_url": "https://overmind.local", "overmind_token": "token"},
+                    {},
                     {"drone_id": "source-a", "reachable_url": "https://source-a.local"},
                     "snes",
                     "Game.zip",
@@ -1832,90 +1567,6 @@ class SettingsTests(unittest.TestCase):
         with mock.patch("app.transfer.download_manager.Thread.start"):
             return DownloadManager(settings, repo)
 
-    def test_download_manager_pending_job_visible_in_queued_bucket(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            manager = self._make_download_manager(Path(tmp) / "userdata")
-            pending = manager.enqueue_pending_rom(
-                {}, "snes", relative_path="Game.zip", sync_id="sync-1", source_device_ids={"source-a"},
-            )
-            self.assertEqual(pending["status"], "pending")
-            snapshot = manager.snapshot()
-            self.assertEqual([job["job_id"] for job in snapshot["queued"]], [pending["job_id"]])
-            self.assertEqual(snapshot["queued"][0]["sync_id"], "sync-1")
-            self.assertEqual(snapshot["active"], [])
-            self.assertEqual(snapshot["recent"], [])
-
-    def test_download_manager_retry_pending_job_promotes_to_queued_when_peer_found(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            manager = self._make_download_manager(Path(tmp) / "userdata")
-            pending = manager.enqueue_pending_rom(
-                {}, "snes", relative_path="Game.zip", expected_size=100, source_device_ids={"source-a"},
-            )
-            peer = {"drone_id": "source-a", "reachable_url": "https://source-a.local"}
-            with mock.patch("app.transfer.download_manager._best_peer_for_rom", return_value=peer):
-                manager._retry_pending_job(pending["job_id"])
-            job = manager.snapshot()["queued"][0]
-            self.assertEqual(job["status"], "queued")
-            self.assertEqual(job["source_drone_id"], "source-a")
-            self.assertEqual(job["relative_path"], "Game.zip")
-            self.assertIn("reachable", job["resume_reason"])
-
-    def test_download_manager_retry_pending_job_resolves_gamelist_id_once_peer_found(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            manager = self._make_download_manager(Path(tmp) / "userdata")
-            pending = manager.enqueue_pending_rom(
-                {}, "snes", gamelist_id="game-42", source_device_ids={"source-a"},
-            )
-            peer = {"drone_id": "source-a", "reachable_url": "https://source-a.local"}
-            resolved = {"relative_path": "Resolved/Game.zip", "marker_relative_path": None, "rom_fingerprint": "abc123", "artwork_types": ["screenshot"]}
-            with mock.patch("app.transfer.download_manager._best_peer_for_rom", return_value=peer), \
-                 mock.patch("app.transfer.download_manager._resolve_rom_by_gamelist_id_from_peer", return_value=resolved):
-                manager._retry_pending_job(pending["job_id"])
-            job = manager.snapshot()["queued"][0]
-            self.assertEqual(job["status"], "queued")
-            self.assertEqual(job["relative_path"], "Resolved/Game.zip")
-            with manager._lock:
-                stored = manager._jobs[pending["job_id"]]
-                self.assertEqual(stored["_expected_fingerprint"], "abc123")
-                self.assertEqual(stored["_artwork_types"], ["screenshot"])
-
-    def test_download_manager_retry_pending_job_backs_off_when_still_no_peer(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            manager = self._make_download_manager(Path(tmp) / "userdata")
-            pending = manager.enqueue_pending_rom({}, "snes", relative_path="Game.zip")
-            with mock.patch("app.transfer.download_manager._best_peer_for_rom", return_value=None):
-                manager._retry_pending_job(pending["job_id"])
-            snapshot = manager.snapshot()
-            self.assertEqual(len(snapshot["queued"]), 1)
-            job = snapshot["queued"][0]
-            self.assertEqual(job["status"], "pending")
-            self.assertEqual(job["pending_attempts"], 1)
-            self.assertGreater(job["reconnect_after_epoch"], time.time())
-            with manager._lock:
-                self.assertFalse(manager._jobs[pending["job_id"]]["_resolving"])
-
-    def test_download_manager_pending_bios_job_resolves(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            manager = self._make_download_manager(Path(tmp) / "userdata")
-            pending = manager.enqueue_pending_bios({}, "bios.bin", expected_md5="deadbeef", source_device_ids={"source-a"})
-            self.assertEqual(pending["status"], "pending")
-            peer = {"drone_id": "source-a"}
-            with mock.patch("app.transfer.download_manager._best_peer_for_bios", return_value=peer):
-                manager._retry_pending_job(pending["job_id"])
-            job = manager.snapshot()["queued"][0]
-            self.assertEqual(job["status"], "queued")
-            self.assertEqual(job["source_drone_id"], "source-a")
-
-    def test_download_manager_cancel_pending_job_lands_immediately(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            manager = self._make_download_manager(Path(tmp) / "userdata")
-            pending = manager.enqueue_pending_rom({}, "snes", relative_path="Game.zip")
-            result = manager.cancel(pending["job_id"])
-            self.assertEqual(result["status"], "cancelled")
-            snapshot = manager.snapshot()
-            self.assertEqual(snapshot["queued"], [])
-            self.assertEqual(snapshot["recent"][0]["status"], "cancelled")
-
     def test_download_manager_pause_and_resume_queued_job(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             manager = self._make_download_manager(Path(tmp) / "userdata")
@@ -1953,16 +1604,13 @@ class SettingsTests(unittest.TestCase):
             # Simulate the in-flight fetch observing the cancellation event and
             # raising, as the real transports do -- _run_job must land it
             # 'paused' (not 'cancelled'/'failed') because pause_requested is set.
-            with mock.patch.object(manager._selector, "fetch", side_effect=DownloadCancelled("stopped for pause")), \
-                 mock.patch("app.transfer.download_manager._post_download_state"), \
-                 mock.patch("app.transfer.download_manager._post_rom_sync_activity") as post_activity:
+            with mock.patch.object(manager._selector, "fetch", side_effect=DownloadCancelled("stopped for pause")):
                 manager._run_job(job_id)
 
             snapshot = manager.snapshot()
             self.assertEqual(len(snapshot["queued"]), 1)
             self.assertEqual(snapshot["queued"][0]["status"], "paused")
             self.assertEqual(snapshot["queued"][0]["downloaded_bytes"], 0)
-            post_activity.assert_not_called()  # pausing is not a terminal sync-activity event
 
             resumed = manager.resume_job(job_id)
             self.assertEqual(resumed["status"], "queued")
@@ -1975,11 +1623,10 @@ class SettingsTests(unittest.TestCase):
             result = manager.pause_job(queued["job_id"])
             self.assertEqual(result["status"], "not_pausable")
 
-    def test_download_manager_restart_preserves_pending_and_paused_status(self) -> None:
+    def test_download_manager_restart_preserves_per_job_paused_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
             first_manager = self._make_download_manager(root)
-            pending = first_manager.enqueue_pending_rom({}, "snes", relative_path="Pending.zip", source_device_ids={"source-a"})
             queued = first_manager.enqueue_rom({}, {"drone_id": "source-a"}, "snes", "Paused.zip")
             first_manager.pause_job(queued["job_id"])
 
@@ -1987,12 +1634,7 @@ class SettingsTests(unittest.TestCase):
                 restored_manager = DownloadManager(first_manager.settings, first_manager.repository)
             snapshot = restored_manager.snapshot()
             statuses = {job["job_id"]: job["status"] for job in snapshot["queued"]}
-            self.assertEqual(statuses[pending["job_id"]], "pending")
             self.assertEqual(statuses[queued["job_id"]], "paused")
-            with restored_manager._lock:
-                # A restored pending job should retry resolution promptly, not
-                # wait out a stale pre-restart backoff timer.
-                self.assertEqual(restored_manager._jobs[pending["job_id"]]["reconnect_after_epoch"], 0)
 
     def test_download_manager_requeues_transient_transport_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2014,9 +1656,7 @@ class SettingsTests(unittest.TestCase):
             with mock.patch("app.transfer.download_manager.Thread.start"):
                 manager = DownloadManager(settings, repo)
             queued = manager.enqueue_rom({}, {"drone_id": "source-a"}, "snes", "Game.zip")
-            with mock.patch.object(manager._selector, "fetch", side_effect=OSError("connection refused")), \
-                 mock.patch("app.transfer.download_manager._post_download_state"), \
-                 mock.patch("app.transfer.download_manager._post_rom_sync_activity"):
+            with mock.patch.object(manager._selector, "fetch", side_effect=OSError("connection refused")):
                 manager._run_job(queued["job_id"])
             restored = manager.snapshot()["queued"][0]
             self.assertEqual(restored["status"], "queued")
@@ -2024,7 +1664,7 @@ class SettingsTests(unittest.TestCase):
             self.assertGreater(restored["reconnect_after_epoch"], time.time())
             self.assertIn("reconnecting", restored["resume_reason"])
 
-    def test_download_manager_refreshes_overmind_peer_when_both_integrations_are_enabled(self) -> None:
+    def test_download_manager_refreshes_paired_peer_route_before_running_job(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
             with mock.patch.dict(
@@ -2034,7 +1674,6 @@ class SettingsTests(unittest.TestCase):
                     "ROMS_ROOT": str(root / "roms"),
                     "BIOS_ROOT": str(root / "bios"),
                     "OVERMIND_DEVICE_ID": "target-a",
-                    "DRONE_NETWORK_MODE": "both",
                 },
                 clear=True,
             ):
@@ -2043,27 +1682,18 @@ class SettingsTests(unittest.TestCase):
                 with mock.patch("app.transfer.download_manager.Thread.start"):
                     manager = DownloadManager(settings, repo)
                 queued = manager.enqueue_rom(
-                    {"overmind_url": "https://overmind.local", "overmind_token": "old-token"},
-                    {"drone_id": "source-a", "reachable_url": "https://old-address"},
-                    "snes",
-                    "Game.zip",
+                    {}, {"drone_id": "source-a", "reachable_url": "https://old-address"}, "snes", "Game.zip",
                 )
-                save_payload(
-                    database_path(settings.userdata_root),
-                    "overmind_swarm.json",
-                    [{"device_id": "source-a", "reachable_url": "https://new-address"}],
+                # A route learned since the job was queued (e.g. a successful
+                # pairing re-check) must be picked up, not a stale snapshot.
+                local_network.save_paired_peer(
+                    settings, {"drone_id": "source-a", "reachable_url": "https://new-address"},
                 )
-                with mock.patch(
-                    "app.overmind.overmind_config._load_overmind_config_for_settings",
-                    return_value={"overmind_url": "https://overmind.local", "overmind_token": "new-token"},
-                ):
-                    with manager._lock:
-                        job = manager._jobs[queued["job_id"]]
-                        manager._refresh_connection_metadata_locked(job)
-                        refreshed_peer = dict(job["_peer"])
-                        refreshed_config = dict(job["_config"])
+                with manager._lock:
+                    job = manager._jobs[queued["job_id"]]
+                    manager._refresh_connection_metadata_locked(job)
+                    refreshed_peer = dict(job["_peer"])
             self.assertEqual(refreshed_peer["reachable_url"], "https://new-address")
-            self.assertEqual(refreshed_config["overmind_token"], "new-token")
 
     def test_download_manager_keeps_permanent_validation_failure_terminal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2083,9 +1713,7 @@ class SettingsTests(unittest.TestCase):
             with mock.patch("app.transfer.download_manager.Thread.start"):
                 manager = DownloadManager(settings, repo)
             queued = manager.enqueue_rom({}, {"drone_id": "source-a"}, "snes", "../unsafe.zip")
-            with mock.patch.object(manager._selector, "fetch", side_effect=ValueError("invalid target path")), \
-                 mock.patch("app.transfer.download_manager._post_download_state"), \
-                 mock.patch("app.transfer.download_manager._post_rom_sync_activity"):
+            with mock.patch.object(manager._selector, "fetch", side_effect=ValueError("invalid target path")):
                 manager._run_job(queued["job_id"])
             self.assertEqual(manager.snapshot()["recent"][0]["status"], "failed")
 
@@ -2150,289 +1778,6 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(est["queue_estimate_speed_bps"], 12_000_000)
         self.assertEqual(est["queue_eta_seconds"], 7)
 
-    def test_download_manager_pushes_terminal_sync_activity(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "userdata"
-            with mock.patch.dict(
-                "os.environ",
-                {
-                    "USERDATA_ROOT": str(root),
-                    "ROMS_ROOT": str(root / "roms"),
-                    "BIOS_ROOT": str(root / "bios"),
-                    "OVERMIND_DEVICE_ID": "target-a",
-                },
-                clear=True,
-            ):
-                settings = Settings.from_env()
-            repo = RomRepository(root / "roms", root / "bios")
-            with mock.patch("app.drone_api.Thread.start"):
-                manager = DownloadManager(settings, repo)
-
-            config = {"overmind_url": "https://overmind.local", "overmind_token": "drone-token"}
-            queued = manager.enqueue_rom(config, {"drone_id": "source-a"}, "snes", "Game.zip", expected_size=8, expected_fingerprint="abc")
-            completed = {
-                "source_drone_id": "source-a",
-                "target_drone_id": "target-a",
-                "system": "snes",
-                "rom_name": "Game.zip",
-                "relative_path": "Game.zip",
-                "action": "download",
-                "status": "completed",
-                "bytes_transferred": 8,
-                "file_size": 8,
-                "rom_fingerprint": "abc",
-                "download_started_at": "2026-01-01T00:00:00+00:00",
-                "download_completed_at": "2026-01-01T00:00:01+00:00",
-                "duration_ms": 1000,
-            }
-            def fake_download(*args, **kwargs):
-                progress = kwargs.get("progress_callback")
-                if progress:
-                    progress(4, 8)
-                    progress(8, 8)
-                return dict(completed)
-
-            with mock.patch("app.transfer.download_manager.DOWNLOAD_PROGRESS_PUSH_SECONDS", 0), mock.patch(
-                "app.transfer.download_manager._download_rom_from_peer", side_effect=fake_download
-            ), mock.patch.object(repo, "list_assets", return_value=(root / "roms" / "snes", [])), mock.patch(
-                "app.transfer.download_manager._post_download_state"
-            ) as post_download_state, mock.patch("app.transfer.download_manager._post_rom_sync_activity") as post_activity:
-                manager._run_job(queued["job_id"])
-
-            push_reasons = [call.kwargs.get("reason") for call in post_download_state.call_args_list]
-            self.assertEqual(push_reasons[0], "started")
-            self.assertIn("progress", push_reasons)
-            self.assertEqual(push_reasons[-1], "completed")
-            post_activity.assert_called_once()
-            pushed = post_activity.call_args.args[2]
-            self.assertEqual(pushed["status"], "completed")
-            self.assertEqual(pushed["sync_id"], queued["job_id"])
-            self.assertEqual(pushed["rom_fingerprint"], "abc")
-
-    def test_best_peer_for_rom_respects_source_device_inventory(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "userdata"
-            with mock.patch.dict(
-                "os.environ",
-                {
-                    "USERDATA_ROOT": str(root),
-                    "ROMS_ROOT": str(root / "roms"),
-                    "BIOS_ROOT": str(root / "bios"),
-                    "OVERMIND_DEVICE_ID": "target-a",
-                },
-                clear=True,
-            ):
-                settings = Settings.from_env()
-            swarm_path = root / "system" / "drone-app" / "overmind_swarm.json"
-            swarm_path.parent.mkdir(parents=True)
-            swarm_path.write_text(
-                json.dumps(
-                    [
-                        {
-                            "device_id": "source-without-rom",
-                            "online": True,
-                            "public_resolvable": True,
-                            "public_reachable_url": "https://198.51.100.19:443",
-                            "rom_systems": ["snes"],
-                            "last_speed_sample": {"upload_mbps": 500},
-                        },
-                        {
-                            "device_id": "source-with-rom",
-                            "online": True,
-                            "public_resolvable": True,
-                            "public_reachable_url": "https://198.51.100.20:443",
-                            "rom_systems": ["snes"],
-                            "last_speed_sample": {"upload_mbps": 10},
-                        },
-                    ]
-                ),
-                encoding="utf-8",
-            )
-            peer = _best_peer_for_rom(
-                settings,
-                RomRepository(settings.roms_root, settings.bios_root),
-                {},
-                "snes",
-                "Game.zip",
-                source_device_ids={"source-with-rom"},
-            )
-            self.assertIsNotNone(peer)
-            self.assertEqual(peer["device_id"], "source-with-rom")
-
-    def test_best_peer_for_rom_rejects_unresolvable_source_device(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "userdata"
-            with mock.patch.dict(
-                "os.environ",
-                {
-                    "USERDATA_ROOT": str(root),
-                    "ROMS_ROOT": str(root / "roms"),
-                    "BIOS_ROOT": str(root / "bios"),
-                    "OVERMIND_DEVICE_ID": "target-a",
-                },
-                clear=True,
-            ):
-                settings = Settings.from_env()
-            swarm_path = root / "system" / "drone-app" / "overmind_swarm.json"
-            swarm_path.parent.mkdir(parents=True)
-            swarm_path.write_text(
-                json.dumps([{
-                    "device_id": "unreachable-source",
-                    "online": True,
-                    "public_resolvable": False,
-                    "rom_systems": ["snes"],
-                    "last_speed_sample": {"upload_mbps": 500},
-                }]),
-                encoding="utf-8",
-            )
-
-            peer = _best_peer_for_rom(
-                settings,
-                RomRepository(settings.roms_root, settings.bios_root),
-                {},
-                "snes",
-                "Game.zip",
-                source_device_ids={"unreachable-source"},
-            )
-
-            self.assertIsNone(peer)
-
-    def test_sync_system_posts_failed_activity_with_payload_sync_id(self) -> None:
-        # An EMPTY devices list means Overmind itself never named a known source for
-        # this ROM -- genuinely nothing to wait for, so this must still fail outright
-        # (as opposed to a non-empty-but-unreachable list, which now goes 'pending';
-        # see test_sync_system_holds_pending_when_named_source_is_unreachable).
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "userdata"
-            with mock.patch.dict(
-                "os.environ",
-                {
-                    "USERDATA_ROOT": str(root),
-                    "ROMS_ROOT": str(root / "roms"),
-                    "BIOS_ROOT": str(root / "bios"),
-                    "OVERMIND_DEVICE_ID": "target-a",
-                },
-                clear=True,
-            ):
-                settings = Settings.from_env()
-            repo = RomRepository(root / "roms", root / "bios")
-            action = {
-                "id": "action-1",
-                "action": "sync_system",
-                "payload": {
-                    "system_name": "fbneo",
-                    "roms": [{
-                        "sync_id": "sync-row-1",
-                        "system_name": "fbneo",
-                        "file_path": "1943.zip",
-                        "devices": [],
-                    }],
-                },
-            }
-            config = {"overmind_url": "https://overmind.local", "overmind_token": "drone-token"}
-
-            with mock.patch("app.drone_api._get_download_manager") as manager, mock.patch(
-                "app.drone_api._best_peer_for_rom", return_value=None
-            ), mock.patch("app.overmind.actions._post_rom_sync_activity") as post_activity:
-                manager.return_value = object()
-                status, message, result = _execute_overmind_action(settings, repo, action, config, "https://overmind.local", "drone-token")
-
-            self.assertEqual(status, "failed")
-            self.assertIn("ROM sync failed", message)
-            pushed = post_activity.call_args.args[2]
-            self.assertEqual(pushed["sync_id"], "sync-row-1")
-            self.assertEqual(pushed["status"], "failed")
-
-    def test_pause_download_and_resume_download_actions_dispatch_to_manager(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "userdata"
-            with mock.patch.dict(
-                "os.environ",
-                {
-                    "USERDATA_ROOT": str(root),
-                    "ROMS_ROOT": str(root / "roms"),
-                    "BIOS_ROOT": str(root / "bios"),
-                    "OVERMIND_DEVICE_ID": "target-a",
-                },
-                clear=True,
-            ):
-                settings = Settings.from_env()
-            repo = RomRepository(root / "roms", root / "bios")
-            with mock.patch("app.transfer.download_manager.Thread.start"):
-                manager = DownloadManager(settings, repo)
-            queued = manager.enqueue_rom({}, {"drone_id": "source-a"}, "snes", "Game.zip")
-            config = {"overmind_url": "https://overmind.local", "overmind_token": "drone-token"}
-
-            with mock.patch("app.drone_api._get_download_manager", return_value=manager):
-                pause_action = {"id": "action-pause", "action": "pause_download", "payload": {"job_id": queued["job_id"]}}
-                status_value, message, result = _execute_overmind_action(settings, repo, pause_action, config, "https://overmind.local", "drone-token")
-                self.assertEqual(status_value, "completed")
-                self.assertIn("paused", message)
-                self.assertEqual(manager.snapshot()["queued"][0]["status"], "paused")
-
-                resume_action = {"id": "action-resume", "action": "resume_download", "payload": {"job_id": queued["job_id"]}}
-                status_value, message, result = _execute_overmind_action(settings, repo, resume_action, config, "https://overmind.local", "drone-token")
-                self.assertEqual(status_value, "completed")
-                self.assertIn("queued", message)
-                self.assertEqual(manager.snapshot()["queued"][0]["status"], "queued")
-
-                missing_action = {"id": "action-missing", "action": "pause_download", "payload": {"job_id": "does-not-exist"}}
-                status_value, message, result = _execute_overmind_action(settings, repo, missing_action, config, "https://overmind.local", "drone-token")
-                self.assertEqual(status_value, "failed")
-
-    def test_sync_system_holds_pending_when_named_source_is_unreachable(self) -> None:
-        # A non-empty devices list means Overmind named a Drone that has this ROM,
-        # just not currently peer-resolvable -- this must go 'pending' (queued on
-        # the download manager, retried later) rather than failing outright.
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "userdata"
-            with mock.patch.dict(
-                "os.environ",
-                {
-                    "USERDATA_ROOT": str(root),
-                    "ROMS_ROOT": str(root / "roms"),
-                    "BIOS_ROOT": str(root / "bios"),
-                    "OVERMIND_DEVICE_ID": "target-a",
-                },
-                clear=True,
-            ):
-                settings = Settings.from_env()
-            repo = RomRepository(root / "roms", root / "bios")
-            with mock.patch("app.transfer.download_manager.Thread.start"):
-                manager = DownloadManager(settings, repo)
-            action = {
-                "id": "action-1",
-                "action": "sync_system",
-                "payload": {
-                    "system_name": "fbneo",
-                    "roms": [{
-                        "sync_id": "sync-row-1",
-                        "system_name": "fbneo",
-                        "file_path": "1943.zip",
-                        "file_size": 555,
-                        "devices": [{"device_id": "source-a"}],
-                    }],
-                },
-            }
-            config = {"overmind_url": "https://overmind.local", "overmind_token": "drone-token"}
-
-            with mock.patch("app.drone_api._get_download_manager", return_value=manager), mock.patch(
-                "app.drone_api._best_peer_for_rom", return_value=None
-            ), mock.patch("app.overmind.actions._post_rom_sync_activity") as post_activity:
-                status, message, result = _execute_overmind_action(settings, repo, action, config, "https://overmind.local", "drone-token")
-
-            self.assertEqual(status, "completed")
-            self.assertEqual(len(result["activity"]), 1)
-            pending_activity = result["activity"][0]
-            self.assertEqual(pending_activity["sync_id"], "sync-row-1")
-            self.assertEqual(pending_activity["status"], "pending")
-            post_activity.assert_not_called()
-            queued = manager.snapshot()["queued"]
-            self.assertEqual(len(queued), 1)
-            self.assertEqual(queued[0]["status"], "pending")
-            self.assertEqual(queued[0]["sync_id"], "sync-row-1")
-            self.assertEqual(result["activity"][0]["sync_id"], "sync-row-1")
-
     def test_cached_rom_fingerprint_exists_uses_metadata_cache_without_scanning_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
@@ -2471,67 +1816,6 @@ class SettingsTests(unittest.TestCase):
 
         self.assertEqual(left, right)
 
-    def test_rom_metadata_inventory_payloads_include_final_fingerprint(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "userdata"
-            with mock.patch.dict(
-                "os.environ",
-                {
-                    "USERDATA_ROOT": str(root),
-                    "ROMS_ROOT": str(root / "roms"),
-                    "BIOS_ROOT": str(root / "bios"),
-                    "OVERMIND_DEVICE_ID": "drone-a",
-                },
-                clear=True,
-            ):
-                settings = Settings.from_env()
-            snapshot = {
-                "type": "asset_metadata",
-                "collected_at": "2026-06-04T12:00:00+00:00",
-                "systems": [{"name": "snes", "rom_count": 2}],
-                "roms": [
-                    {"system": "snes", "file_path": "A.zip", "rom_fingerprint": "aaa", "file_size": 1},
-                    {"system": "snes", "file_path": "B.zip", "rom_fingerprint": "bbb", "file_size": 2},
-                ],
-            }
-            expected = _rom_inventory_fingerprint(snapshot["roms"])
-
-            payloads = _chunk_rom_metadata_inventory(settings, snapshot, chunk_size=1, replace_all=True)
-
-            self.assertEqual(len(payloads), 2)
-            self.assertFalse(payloads[0]["inventory_complete"])
-            self.assertTrue(payloads[-1]["inventory_complete"])
-            self.assertEqual(payloads[-1]["rom_inventory_fingerprint"], expected)
-            self.assertEqual(payloads[-1]["rom_inventory_fingerprint_algorithm"], ROM_INVENTORY_FINGERPRINT_ALGORITHM)
-
-    def test_rom_metadata_delta_payloads_include_fingerprint(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "userdata"
-            with mock.patch.dict(
-                "os.environ",
-                {
-                    "USERDATA_ROOT": str(root),
-                    "ROMS_ROOT": str(root / "roms"),
-                    "BIOS_ROOT": str(root / "bios"),
-                    "OVERMIND_DEVICE_ID": "drone-a",
-                },
-                clear=True,
-            ):
-                settings = Settings.from_env()
-            snapshot = {
-                "type": "asset_metadata",
-                "collected_at": "2026-06-04T12:00:00+00:00",
-                "systems": [{"name": "snes", "rom_count": 1}],
-                "roms": [{"system": "snes", "file_path": "A.zip", "rom_fingerprint": "aaa", "file_size": 1}],
-            }
-            changes = {"roms": snapshot["roms"], "deleted": {"roms": []}}
-
-            payloads = _chunk_rom_metadata_delta(settings, snapshot, changes, chunk_size=10)
-
-            self.assertEqual(len(payloads), 1)
-            self.assertTrue(payloads[0]["inventory_complete"])
-            self.assertEqual(payloads[0]["rom_inventory_fingerprint"], _rom_inventory_fingerprint(snapshot["roms"]))
-
     def test_mark_rom_metadata_upload_clean_persists_fingerprint_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
@@ -2566,88 +1850,6 @@ class SettingsTests(unittest.TestCase):
         self.assertNotEqual(left, drone_api._bios_inventory_fingerprint([
             {"relative_path": "snes/bios.bin", "bios_md5": "abc", "file_size": 99},
         ]))
-
-    def test_inventory_payloads_include_romset_and_bios_thumbprints(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "userdata"
-            with mock.patch.dict(
-                "os.environ",
-                {
-                    "USERDATA_ROOT": str(root),
-                    "ROMS_ROOT": str(root / "roms"),
-                    "BIOS_ROOT": str(root / "bios"),
-                    "OVERMIND_DEVICE_ID": "drone-a",
-                },
-                clear=True,
-            ):
-                settings = Settings.from_env()
-            snapshot = {
-                "type": "asset_metadata",
-                "collected_at": "2026-06-04T12:00:00+00:00",
-                "systems": [{"name": "snes", "rom_count": 1}],
-                "roms": [{"system": "snes", "file_path": "A.zip", "rom_fingerprint": "aaa", "file_size": 1}],
-                "bios": [{"relative_path": "snes/bios.bin", "bios_md5": "deadbeef", "file_size": 2}],
-            }
-            payloads = _chunk_rom_metadata_inventory(settings, snapshot, replace_all=True)
-            self.assertEqual(payloads[-1]["romset_files_thumbprint"], _rom_inventory_fingerprint(snapshot["roms"]))
-            self.assertEqual(payloads[-1]["bios_files_thumbprint"], drone_api._bios_inventory_fingerprint(snapshot["bios"]))
-
-    def test_mark_rom_metadata_upload_clean_persists_bios_thumbprint(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "userdata"
-            with mock.patch.dict(
-                "os.environ",
-                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
-                clear=True,
-            ):
-                settings = Settings.from_env()
-            drone_api._ASSET_PUSH_REQUESTED.set()
-            _mark_rom_metadata_upload_clean(settings, "romset-xyz", "bios-xyz")
-            romset, bios = drone_api._local_asset_thumbprints(settings)
-            self.assertEqual(romset, "romset-xyz")
-            self.assertEqual(bios, "bios-xyz")
-            # Marking clean satisfies any pending heartbeat-driven push request.
-            self.assertFalse(drone_api._ASSET_PUSH_REQUESTED.is_set())
-
-    def test_heartbeat_thumbprint_mismatch_requests_push(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "userdata"
-            with mock.patch.dict(
-                "os.environ",
-                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
-                clear=True,
-            ):
-                settings = Settings.from_env()
-            # Establish the Drone's local synced thumbprints.
-            _mark_rom_metadata_upload_clean(settings, "local-romset", "local-bios")
-            drone_api._ASSET_PUSH_REQUESTED.clear()
-
-            # Matching thumbprints: no push.
-            drone_api._maybe_request_asset_push_from_heartbeat(
-                settings,
-                {"romset_files_thumbprint": "local-romset", "bios_files_thumbprint": "local-bios"},
-            )
-            self.assertFalse(drone_api._ASSET_PUSH_REQUESTED.is_set())
-
-            # A differing romset thumbprint (Overmind drifted) requests a push.
-            drone_api._maybe_request_asset_push_from_heartbeat(
-                settings,
-                {"romset_files_thumbprint": "overmind-stale", "bios_files_thumbprint": "local-bios"},
-            )
-            self.assertTrue(drone_api._ASSET_PUSH_REQUESTED.is_set())
-            drone_api._ASSET_PUSH_REQUESTED.clear()
-
-            # A differing BIOS thumbprint alone also requests a push.
-            drone_api._maybe_request_asset_push_from_heartbeat(
-                settings,
-                {"romset_files_thumbprint": "local-romset", "bios_files_thumbprint": "overmind-stale-bios"},
-            )
-            self.assertTrue(drone_api._ASSET_PUSH_REQUESTED.is_set())
-            drone_api._ASSET_PUSH_REQUESTED.clear()
-
-            # An Overmind that reports no thumbprints (older build) never triggers a push.
-            drone_api._maybe_request_asset_push_from_heartbeat(settings, {})
-            self.assertFalse(drone_api._ASSET_PUSH_REQUESTED.is_set())
 
     def test_disk_rom_without_gamelist_is_listed_with_fingerprint(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2824,64 +2026,6 @@ class SettingsTests(unittest.TestCase):
             # (size identical, samples identical) -> same fingerprint by design.
             self.assertEqual(RomRepository.build_fingerprint(big), RomRepository.build_fingerprint(mid_changed))
 
-    def test_legacy_shutdown_action_is_rejected_without_execution(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
-                settings = Settings.from_env()
-            repo = RomRepository(root / "roms", root / "bios")
-            with mock.patch("app.drone_api.subprocess.Popen") as popen:
-                status, message, result = _execute_overmind_action(settings, repo, {"action": "shutdown"})
-            self.assertEqual(status, "failed")
-            self.assertIn("disabled", message)
-            self.assertIsNone(result)
-            popen.assert_not_called()
-
-    def test_screen_mode_action_updates_es_settings_and_restarts_emulationstation(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            es_settings = root / "system" / "configs" / "emulationstation" / "es_settings.cfg"
-            control_dir = root / "system" / "drone-app" / "control"
-            es_settings.parent.mkdir(parents=True)
-            es_settings.write_text('<?xml version="1.0"?><map><string name="ThemeSet" value="carbon"/></map>', encoding="utf-8")
-            with mock.patch.dict(
-                "os.environ",
-                {
-                    "USERDATA_ROOT": str(root),
-                    "ES_SETTINGS_FILE": str(es_settings),
-                    "DRONE_SERVICE_CONTROL_DIR": str(control_dir),
-                },
-                clear=True,
-            ):
-                settings = Settings.from_env()
-                repo = RomRepository(root / "roms", root / "bios")
-
-                with mock.patch("app.drone_api.os.geteuid", return_value=999):
-                    with mock.patch("app.device.device_control._request_screen_mode_service_control", return_value=True) as screen_control:
-                        with mock.patch("app.drone_api.subprocess.Popen") as popen:
-                            kiosk_status, kiosk_message, kiosk_result = _execute_overmind_action(
-                                settings, repo, {"action": "set_screen_mode", "payload": {"mode": "kiosk"}}
-                            )
-                            full_status, full_message, full_result = _execute_overmind_action(
-                                settings, repo, {"action": "set_screen_mode", "payload": {"mode": "full"}}
-                            )
-                            kid_status, kid_message, kid_result = _execute_overmind_action(
-                                settings, repo, {"action": "set_screen_mode", "payload": {"mode": "kid"}}
-                            )
-
-            self.assertEqual(kiosk_status, "completed")
-            self.assertIn("Screen mode set to kiosk", kiosk_message)
-            self.assertEqual(kiosk_result["mode"], "kiosk")
-            self.assertEqual(full_status, "completed")
-            self.assertIn("Screen mode set to full", full_message)
-            self.assertEqual(full_result["mode"], "full")
-            self.assertEqual(kid_status, "completed")
-            self.assertIn("Screen mode set to kid", kid_message)
-            self.assertEqual(kid_result["mode"], "kid")
-            self.assertIn('name="ThemeSet" value="carbon"', es_settings.read_text(encoding="utf-8"))
-            screen_control.assert_has_calls([mock.call("kiosk"), mock.call("full"), mock.call("kid")])
-            popen.assert_not_called()
-
     def test_privileged_screen_mode_helper_updates_xml_and_restarts_emulationstation(self) -> None:
         from app import set_screen_mode
 
@@ -3029,102 +2173,19 @@ class SettingsTests(unittest.TestCase):
             commands = [call.args[0] for call in run.call_args_list]
             self.assertIn(["/usr/bin/batocera-es-swissknife", "--restart"], commands)
 
-    def test_screen_mode_action_reports_failure_when_worker_unavailable(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
-                settings = Settings.from_env()
-            repo = RomRepository(root / "roms", root / "bios")
-            with mock.patch("app.drone_api.os.geteuid", return_value=999):
-                # Worker cannot be dispatched at all (control dir not writable).
-                with mock.patch("app.device.device_control._request_screen_mode_service_control", return_value=False):
-                    status, message, result = _execute_overmind_action(
-                        settings, repo, {"action": "set_screen_mode", "payload": {"mode": "kiosk"}}
-                    )
-            self.assertEqual(status, "failed")
-            self.assertIn("Unable to update screen mode settings", message)
-            self.assertIsNone(result)
+    def test_apply_audio_volume_clamps_and_dispatches_to_privileged_worker(self) -> None:
+        from app.device import device_control
 
-    def test_screen_mode_action_reports_failure_when_worker_times_out(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
                 settings = Settings.from_env()
-            repo = RomRepository(root / "roms", root / "bios")
-            with mock.patch("app.drone_api.os.geteuid", return_value=999):
-                with mock.patch(
-                    "app.device.device_control._request_screen_mode_service_control",
-                    side_effect=OSError("Timed out waiting for the privileged screen mode service operation"),
-                ):
-                    status, message, result = _execute_overmind_action(
-                        settings, repo, {"action": "set_screen_mode", "payload": {"mode": "full"}}
-                    )
-            self.assertEqual(status, "failed")
-            self.assertIn("Timed out", message)
-            self.assertIsNone(result)
-
-    def test_screen_mode_action_rejects_invalid_mode(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
-                settings = Settings.from_env()
-            repo = RomRepository(root / "roms", root / "bios")
-            status, message, result = _execute_overmind_action(
-                settings, repo, {"action": "set_screen_mode", "payload": {"mode": "arcade"}}
-            )
-            self.assertEqual(status, "failed")
-            self.assertIn("full, kiosk, or kid", message)
-            self.assertIsNone(result)
-
-    def test_set_volume_action_dispatches_to_privileged_worker(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
-                settings = Settings.from_env()
-            repo = RomRepository(root / "roms", root / "bios")
-            with mock.patch("app.drone_api.os.geteuid", return_value=999):
-                with mock.patch("app.device.device_control._request_volume_service_control", return_value=True) as volume_control:
-                    status, message, result = _execute_overmind_action(
-                        settings, repo, {"action": "set_volume", "payload": {"level": 60}}
-                    )
-            self.assertEqual(status, "completed")
-            self.assertIn("Volume set to 60%", message)
-            self.assertEqual(result["type"], "audio_volume")
-            self.assertEqual(result["level"], 60)
-            self.assertFalse(result["muted"])
-            volume_control.assert_called_once_with(60)
-
-    def test_set_volume_action_clamps_and_mutes(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
-                settings = Settings.from_env()
-            repo = RomRepository(root / "roms", root / "bios")
-            with mock.patch("app.drone_api.os.geteuid", return_value=999):
-                with mock.patch("app.device.device_control._request_volume_service_control", return_value=True) as volume_control:
-                    high_status, high_message, high_result = _execute_overmind_action(
-                        settings, repo, {"action": "set_volume", "payload": {"level": 150}}
-                    )
-                    mute_status, mute_message, mute_result = _execute_overmind_action(
-                        settings, repo, {"action": "set_volume", "payload": {"level": 0}}
-                    )
-            self.assertEqual(high_status, "completed")
-            self.assertEqual(high_result["level"], 100)
-            self.assertEqual(mute_status, "completed")
-            self.assertIn("muted", mute_message)
-            self.assertTrue(mute_result["muted"])
-            volume_control.assert_has_calls([mock.call(100), mock.call(0)])
-
-    def test_set_volume_action_rejects_missing_level(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
-                settings = Settings.from_env()
-            repo = RomRepository(root / "roms", root / "bios")
-            status, message, result = _execute_overmind_action(settings, repo, {"action": "set_volume", "payload": {}})
-            self.assertEqual(status, "failed")
-            self.assertIn("numeric volume level", message)
-            self.assertIsNone(result)
+            with mock.patch.object(device_control.os, "geteuid", return_value=999), \
+                 mock.patch.object(device_control, "_request_volume_service_control", return_value=True) as volume_control:
+                self.assertEqual(device_control._apply_audio_volume(settings, 150), 100)
+                self.assertEqual(device_control._apply_audio_volume(settings, -10), 0)
+                self.assertEqual(device_control._apply_audio_volume(settings, 60), 60)
+            volume_control.assert_has_calls([mock.call(100), mock.call(0), mock.call(60)])
 
     def test_privileged_volume_helper_uses_batocera_audio(self) -> None:
         from app import set_volume
@@ -3169,74 +2230,12 @@ class SettingsTests(unittest.TestCase):
                     set_volume.set_audio_volume(40)
         self.assertIn("no default sink", str(ctx.exception))
 
-    def test_action_completion_reclaims_token_and_retries_on_401(self) -> None:
-        used_tokens = []
-
-        def fake_post(url, payload, token=None, settings=None):
-            used_tokens.append(token)
-            if len(used_tokens) == 1:
-                raise HTTPError(url, 401, "Unauthorized", {}, io.BytesIO(b'{"detail":"Invalid Drone token"}'))
-            return {}
-
-        with mock.patch.dict("os.environ", {"DRONE_NETWORK_MODE": "overmind"}), \
-                mock.patch("app.overmind.registration._overmind_post_json", side_effect=fake_post):
-            with mock.patch(
-                "app.overmind.registration._reclaim_overmind_token_after_unauthorized", return_value="new-token"
-            ) as reclaim:
-                new_token = _report_overmind_action_completion(
-                    mock.Mock(), mock.Mock(), {"integration_enabled": True}, "https://overmind.local",
-                    "old-token", "dev", {"id": "a1", "action": "set_screen_mode"}, "completed", "ok",
-                    {"type": "screen_mode"}, True,
-                )
-        # Reclaimed once and retried the completion with the fresh token.
-        self.assertEqual(new_token, "new-token")
-        self.assertEqual(reclaim.call_count, 1)
-        self.assertEqual(used_tokens, ["old-token", "new-token"])
-
-    def test_action_completion_does_not_reclaim_on_non_401(self) -> None:
-        def fake_post(url, payload, token=None, settings=None):
-            raise HTTPError(url, 500, "Server Error", {}, io.BytesIO(b"boom"))
-
-        with mock.patch("app.drone_api._overmind_post_json", side_effect=fake_post):
-            with mock.patch("app.drone_api._reclaim_overmind_token_after_unauthorized") as reclaim:
-                new_token = _report_overmind_action_completion(
-                    mock.Mock(), mock.Mock(), {"integration_enabled": True}, "https://overmind.local",
-                    "old-token", "dev", {"id": "a1", "action": "restart"}, "completed", "ok", None, True,
-                )
-        # A non-auth failure is logged but does not trigger a token reclaim; token unchanged.
-        self.assertEqual(new_token, "old-token")
-        reclaim.assert_not_called()
-
     def test_privileged_volume_helper_requires_a_tool(self) -> None:
         from app import set_volume
 
         with mock.patch("app.set_volume.shutil.which", return_value=None):
             with self.assertRaises(OSError):
                 set_volume.set_audio_volume(50)
-
-    def test_refresh_emulator_list_restarts_emulationstation(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            control_dir = root / "system" / "drone-app" / "control"
-            with mock.patch.dict(
-                "os.environ",
-                {"USERDATA_ROOT": str(root), "DRONE_SERVICE_CONTROL_DIR": str(control_dir)},
-                clear=True,
-            ):
-                settings = Settings.from_env()
-                repo = RomRepository(root / "roms", root / "bios")
-                with mock.patch(
-                    "app.device.device_control._request_emulationstation_restart_service_control",
-                    return_value=True,
-                ) as restart_control, mock.patch("app.drone_api.subprocess.Popen") as popen:
-                    status, message, result = _execute_overmind_action(settings, repo, {"action": "refresh_emulator_list"})
-
-            self.assertEqual(status, "completed")
-            self.assertIn("Emulator list refresh", message)
-            self.assertEqual(result["type"], "emulator_list_refresh")
-            self.assertTrue(result["emulationstation_restarted"])
-            restart_control.assert_called_once_with()
-            popen.assert_not_called()
 
     def test_emulationstation_restart_waits_for_worker_success(self) -> None:
         from app.device import device_control
@@ -3295,23 +2294,9 @@ class SettingsTests(unittest.TestCase):
         self.assertNotIn([init_script, "restart"], commands)
         sleep.assert_called_once_with(3)
 
-    def test_remote_restart_action_is_deferred_to_root_supervisor(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
-                settings = Settings.from_env()
-            repo = RomRepository(root / "roms", root / "bios")
-            with mock.patch("app.drone_api.subprocess.Popen") as popen:
-                status, message, result = _execute_overmind_action(settings, repo, {"action": "restart"})
+    def test_purge_asset_cache_keep_fingerprint_clears_entries_but_preserves_fingerprint(self) -> None:
+        from app.storage.rom_metadata_store import _purge_asset_cache_keep_fingerprint
 
-            self.assertEqual(status, "completed")
-            self.assertIn("service supervisor", message)
-            self.assertEqual(result["type"], "system_restart")
-            self.assertTrue(result["reboot_requested"])
-            self.assertEqual(result["exit_code"], 76)
-            popen.assert_not_called()
-
-    def test_rebuild_asset_metadata_action_queues_without_blocking_heartbeat(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
             with mock.patch.dict(
@@ -3320,69 +2305,6 @@ class SettingsTests(unittest.TestCase):
                 clear=True,
             ):
                 settings = Settings.from_env()
-            repo = RomRepository(settings.roms_root, settings.bios_root)
-            _persist_rom_metadata_cache(
-                settings,
-                {
-                    **_empty_rom_metadata_cache(),
-                    "entries": {
-                        "snes/chrono.zip": {
-                            "system": "snes",
-                            "file_path": "chrono.zip",
-                            "rom_name": "Chrono",
-                            "file_size": 12,
-                        }
-                    },
-                    "systems": [{"name": "snes", "rom_count": 1}],
-                    "dirty": False,
-                    "full_refresh_pending": False,
-                },
-                rom_updates={
-                    "snes/chrono.zip": {
-                        "system": "snes",
-                        "file_path": "chrono.zip",
-                        "rom_name": "Chrono",
-                        "file_size": 12,
-                    }
-                },
-            )
-            state_db = database_path(settings.userdata_root)
-            save_payload(state_db, "overmind", {"overmind_token": "keep-me"})
-            drone_api._ROM_METADATA_WAKE.clear()
-
-            with mock.patch("app.drone_api._sync_rom_metadata_to_overmind", side_effect=AssertionError("heartbeat thread must not rebuild inline")):
-                status, message, result = _execute_overmind_action(
-                    settings,
-                    repo,
-                    {"action": "rebuild_asset_metadata", "id": "rebuild-1"},
-                    {},
-                    "https://overmind.local",
-                    "drone-token",
-                )
-
-            cache, _ = _load_rom_metadata_cache(settings)
-            self.assertEqual(load_payload(state_db, "overmind", {}), {"overmind_token": "keep-me"})
-            self.assertEqual(status, "completed")
-            self.assertIn("local asset cache was cleared", message)
-            self.assertEqual(result["status"], "queued")
-            self.assertEqual(result["reason"], "local_asset_cache_cleared")
-            self.assertTrue(result["poller_wake_requested"])
-            self.assertTrue(drone_api._ROM_METADATA_WAKE.is_set())
-            self.assertTrue(cache["dirty"])
-            self.assertTrue(cache["full_refresh_pending"])
-            self.assertEqual(cache["entries"], {})
-            self.assertEqual(cache["systems"], [])
-
-    def test_purge_asset_cache_action_clears_entries_but_preserves_fingerprint(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "userdata"
-            with mock.patch.dict(
-                "os.environ",
-                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
-                clear=True,
-            ):
-                settings = Settings.from_env()
-            repo = RomRepository(settings.roms_root, settings.bios_root)
             seeded_entry = {
                 "system": "snes",
                 "file_path": "chrono.zip",
@@ -3402,24 +2324,13 @@ class SettingsTests(unittest.TestCase):
                 },
                 rom_updates={"snes:chrono.zip": seeded_entry},
             )
-            drone_api._ROM_METADATA_WAKE.clear()
 
-            with mock.patch("app.drone_api._sync_rom_metadata_to_overmind", side_effect=AssertionError("heartbeat thread must not resync inline")):
-                status, message, result = _execute_overmind_action(
-                    settings,
-                    repo,
-                    {"action": "purge_asset_cache", "id": "purge-1"},
-                    {},
-                    "https://overmind.local",
-                    "drone-token",
-                )
+            result = _purge_asset_cache_keep_fingerprint(settings)
 
             cache, _ = _load_rom_metadata_cache(settings)
-            self.assertEqual(status, "completed")
-            self.assertIn("fingerprint values were kept", message)
-            self.assertEqual(result["reason"], "full_refresh_kept_fingerprint")
-            self.assertTrue(result["poller_wake_requested"])
-            self.assertTrue(drone_api._ROM_METADATA_WAKE.is_set())
+            self.assertEqual(result["status"], "queued")
+            self.assertEqual(result["cleared"]["roms"], 1)
+            self.assertEqual(result["cleared"]["preserved_fingerprint"], 1)
             # Resync is queued ...
             self.assertTrue(cache["dirty"])
             self.assertTrue(cache["full_refresh_pending"])
@@ -3460,56 +2371,6 @@ class SettingsTests(unittest.TestCase):
             self.assertTrue(snapshot["roms"][0]["has_gamelist_entry"])
             self.assertEqual(snapshot["roms"][0]["metadata_source"], "gamelist.xml")
 
-    def test_reclaim_overmind_token_after_heartbeat_unauthorized_uses_bound_auth_token(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root), "DRONE_DEVICE_ID": "bff-drone-a"}, clear=True):
-                settings = Settings.from_env()
-            config = {
-                "overmind_url": "https://bff-overmind:8000",
-                "overmind_auth_token": "onboarding-token",
-                "overmind_token": "stale-drone-token",
-            }
-            error = HTTPError(
-                "https://bff-overmind:8000/api/devices/bff-drone-a/heartbeat",
-                401,
-                "Unauthorized",
-                {},
-                io.BytesIO(b'{"detail":"Invalid Drone token"}'),
-            )
-            with mock.patch("app.overmind.registration._register_or_claim_overmind_token", return_value="onboarding-token") as register:
-                token = _reclaim_overmind_token_after_unauthorized(
-                    settings,
-                    RomRepository(root / "roms", root / "bios"),
-                    config,
-                    "https://bff-overmind:8000",
-                    error,
-                )
-
-            self.assertEqual(token, "onboarding-token")
-            self.assertNotIn("overmind_token", config)
-            self.assertEqual(config["integration_state"], "credential_reclaim")
-            register.assert_called_once()
-
-    def test_drone_overmind_client_uses_typed_overmind_endpoints(self) -> None:
-        source = Path(__file__).resolve().parents[1].joinpath("app/drone_api.py").read_text(encoding="utf-8") + Path(__file__).resolve().parents[1].joinpath("app/overmind/registration.py").read_text(encoding="utf-8") + Path(__file__).resolve().parents[1].joinpath("app/transfer/peer_download.py").read_text(encoding="utf-8") + Path(__file__).resolve().parents[1].joinpath("app/transfer/peer_workers.py").read_text(encoding="utf-8") + Path(__file__).resolve().parents[1].joinpath("app/overmind/rom_sync.py").read_text(encoding="utf-8") + Path(__file__).resolve().parents[1].joinpath("app/roms/rom_collect.py").read_text(encoding="utf-8") + Path(__file__).resolve().parents[1].joinpath("app/overmind/action_poller.py").read_text(encoding="utf-8")
-        game_log_source = Path(__file__).resolve().parents[1].joinpath("app/overmind/overmind_game_logs.py").read_text(encoding="utf-8")
-
-        # Logs (/log-sources) and emulator configs (/emulator-configs) are intentionally
-        # NOT in this list -- the drone no longer reports either to Overmind.
-        for endpoint in [
-            "/api/devices/{device_id}/heartbeat",
-            "/api/devices/{device_id}/rom-metadata",
-            "/api/devices/{device_id}/downloads",
-            "/api/devices/{device_id}/speed",
-            "/api/devices/{device_id}/events",
-            "/api/devices/{device_id}/peer-checks",
-            "/api/devices/{device_id}/game-logs",
-            "/api/devices/{device_id}/actions/{action_id}/complete",
-        ]:
-            self.assertIn(endpoint, source)
-        self.assertIn('"type": "asset_metadata"', source)
-        self.assertIn('"type": "game_logs"', game_log_source)
 
     def test_bios_files_are_folded_into_systems_tree(self) -> None:
         source = Path(__file__).resolve().parents[1].joinpath("app/web/static/js/drone.js").read_text(encoding="utf-8")
@@ -3643,7 +2504,7 @@ class SettingsTests(unittest.TestCase):
         installer = root.joinpath("scripts/batocera_install.sh").read_text(encoding="utf-8")
         uninstaller = root.joinpath("scripts/batocera_uninstall.sh").read_text(encoding="utf-8")
         run_now = root.joinpath("scripts/run_now.sh").read_text(encoding="utf-8")
-        drone_source = root.joinpath("app/drone_api.py").read_text(encoding="utf-8") + root.joinpath("app/overmind/action_poller.py").read_text(encoding="utf-8")
+        drone_source = root.joinpath("app/drone_api.py").read_text(encoding="utf-8") + root.joinpath("app/device/system_info.py").read_text(encoding="utf-8")
         # Service-side logic lives in the versioned bundle (app/service_bootstrap.sh) so new
         # Drone releases apply it automatically; the installed DRONE_SERVER is a thin shim.
         bootstrap = root.joinpath("app/service_bootstrap.sh").read_text(encoding="utf-8")
@@ -3693,8 +2554,8 @@ class SettingsTests(unittest.TestCase):
         self.assertNotIn('if [ "$exit_code" -eq 0 ]; then\n      exit 0', bootstrap)
         self.assertIn('kill_result="$CONTROL_DIR/kill-emulator.result"', bootstrap)
         self.assertIn("DRONE_SERVICE_CONTROL_DIR", root.joinpath("app/device/device_control.py").read_text(encoding="utf-8"))
-        self.assertIn('system_info_payload["screen_mode"] = _get_screen_mode(settings)', drone_source)
-        self.assertIn('system_info_payload["audio_volume"] = _get_audio_volume(settings)', drone_source)
+        self.assertIn('"screen_mode": _get_screen_mode(settings)', drone_source)
+        self.assertIn('"audio_volume": _get_audio_volume(settings)', drone_source)
         self.assertIn("ensure_dns_fallback()", bootstrap)
         self.assertIn("nameserver 1.1.1.1", bootstrap)
         self.assertNotIn("ensure_drone_user", bootstrap)
@@ -3769,110 +2630,12 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("emulator-config-tree", js_source)
         self.assertIn(".tree-grid-row.emulator-tree-row", css_source)
         self.assertIn("var(--tree-depth, 0) * 1.35rem", css_source)
-        self.assertNotIn("Overmind Configuration", js_source)
-        self.assertNotIn("integrationOvermindConfiguration", js_source)
         self.assertIn('const selected = themeFilterInitialized && !(themeFilterSelectedSystems || []).length ? ["__none__"]', js_source)
         self.assertIn('class="system-health-row"', js_source)
         self.assertIn("emulatorConfigSelectionRequestId", js_source)
         self.assertIn("document.activeElement !== versionSelect", js_source)
         self.assertIn('apiPost("/admin/asset-cache/clear-pending"', js_source)
         self.assertIn("What this means:", js_source)
-
-    def test_pending_overmind_approval_keeps_integration_enabled(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root), "DRONE_DEVICE_ID": "bff-drone-a"}, clear=True):
-                settings = Settings.from_env()
-            config = {
-                "overmind_url": "https://bff-overmind:8000",
-                "overmind_email": "overlord@example.com",
-                "overmind_auth_token": "onboarding-token",
-                "integration_enabled": True,
-            }
-            with mock.patch(
-                "app.overmind.registration._overmind_post_json",
-                return_value={
-                    "status": "pending",
-                    "message": "Psionic connection detected. Awaiting Overlord approval.",
-                },
-            ):
-                token = _register_or_claim_overmind_token(
-                    settings,
-                    RomRepository(root / "roms", root / "bios"),
-                    config,
-                    "https://bff-overmind:8000",
-                )
-
-            self.assertIsNone(token)
-            saved = _load_overmind_config_for_settings(settings)
-            self.assertTrue(saved.get("integration_enabled"))
-            self.assertEqual(saved.get("integration_state"), "pending_approval")
-            self.assertEqual(saved.get("overmind_auth_token"), "onboarding-token")
-
-    def test_approved_overmind_token_clears_stale_pending_swarm_status(self) -> None:
-        config = {
-            "overmind_token": "approved-drone-token",
-            "integration_enabled": True,
-            "integration_state": "pending_approval",
-            "swarm_connection_status": "pending approval",
-            "notes": "Psionic connection detected. Awaiting Overlord approval.",
-        }
-
-        changed = _normalize_overmind_link_state(config)
-
-        self.assertTrue(changed)
-        self.assertEqual(config.get("integration_state"), "polling")
-        self.assertEqual(config.get("swarm_connection_status"), "connected")
-        self.assertEqual(config.get("notes"), "Drone approved by Overmind and polling is active.")
-
-    def test_rejected_overmind_authorization_token_clears_connected_swarm_state(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root), "DRONE_DEVICE_ID": "bff-drone-b"}, clear=True):
-                settings = Settings.from_env()
-            config = {
-                "overmind_url": "https://bff-overmind:8000",
-                "overmind_auth_token": "shared-token",
-                "overmind_token": "old-drone-token",
-                "integration_enabled": True,
-                "integration_state": "polling",
-                "swarm_connection_status": "connected",
-            }
-            swarm_path = root / "system" / "drone-app" / "overmind_swarm.json"
-            swarm_path.parent.mkdir(parents=True)
-            swarm_path.write_text(json.dumps([{"device_id": "peer-a"}]), encoding="utf-8")
-
-            error = HTTPError(
-                "https://bff-overmind:8000/api/devices/register",
-                401,
-                "Unauthorized",
-                hdrs=None,
-                fp=None,
-            )
-            error.url = "https://bff-overmind:8000/api/devices/register"
-            with mock.patch("app.overmind.registration._overmind_post_json", side_effect=error):
-                token = _register_or_claim_overmind_token(
-                    settings,
-                    RomRepository(root / "roms", root / "bios"),
-                    config,
-                    "https://bff-overmind:8000",
-                )
-
-            self.assertIsNone(token)
-            saved = _load_overmind_config_for_settings(settings)
-            self.assertFalse(saved.get("overmind_token"))
-            self.assertFalse(saved.get("integration_enabled"))
-            self.assertEqual(saved.get("integration_state"), "pending_failed")
-            self.assertEqual(saved.get("swarm_connection_status"), "disconnected")
-            self.assertIn("HTTPError status=401", saved.get("last_error") or "")
-            attempt = saved.get("last_onboarding_attempt") or {}
-            self.assertEqual(attempt.get("endpoint"), "https://bff-overmind:8000/api/devices/register")
-            self.assertEqual(attempt.get("device_id"), "bff-drone-b")
-            self.assertTrue(attempt.get("auth_token_present"))
-            self.assertEqual(attempt.get("auth_token_fingerprint"), hashlib.sha256(b"shared-token").hexdigest()[:12])
-            self.assertTrue(attempt.get("payload_authorization_token_present"))
-            self.assertFalse(swarm_path.exists())
-            self.assertEqual(load_payload(database_path(root), "overmind_swarm.json", None), [])
 
     def test_gpu_info_tolerates_unavailable_detection(self) -> None:
         with mock.patch("app.drone_api.subprocess.run", side_effect=FileNotFoundError()):
@@ -3934,28 +2697,6 @@ class SettingsTests(unittest.TestCase):
             self.assertTrue(rows[1]["is_external"])
             self.assertEqual(rows[1]["source"], "/dev/sdb1")
 
-    def test_fake_overmind_config_is_ignored_when_fake_data_disabled(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "userdata"
-            config_path = root / "system" / "drone-app" / "overmind_integration.json"
-            config_path.parent.mkdir(parents=True)
-            config_path.write_text(
-                '{"overmind_url":"https://overmind.local:9443","overmind_email":"%s","overmind_token":"%s","integration_enabled":true}'
-                % (FAKE_OVERMIND_EMAIL, FAKE_OVERMIND_TOKEN),
-                encoding="utf-8",
-            )
-            with mock.patch.dict(
-                "os.environ",
-                {"USERDATA_ROOT": str(root), "USE_FAKE_DATA": "false"},
-                clear=True,
-            ):
-                settings = Settings.from_env()
-
-            loaded = _load_overmind_config_for_settings(settings)
-            self.assertEqual(loaded.get("overmind_email"), "")
-            self.assertFalse(loaded.get("overmind_token"))
-            self.assertFalse(loaded.get("integration_enabled"))
-
     def test_seeded_mock_userdata_is_not_used_as_real_data(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
@@ -3999,7 +2740,7 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(roms_root, root / "roms")
             self.assertEqual(bios_root, root / "bios")
 
-    def test_collect_rom_metadata_tolerates_missing_rom_root(self) -> None:
+    def test_poll_rom_metadata_cache_tolerates_missing_rom_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
             with mock.patch.dict(
@@ -4013,50 +2754,13 @@ class SettingsTests(unittest.TestCase):
                 clear=True,
             ):
                 settings = Settings.from_env()
+            repo = RomRepository(settings.roms_root, settings.bios_root)
 
-            result = _collect_rom_metadata(settings, RomRepository(settings.roms_root, settings.bios_root))
-            self.assertEqual(result["systems"], [])
-            self.assertEqual(result["roms"], [])
+            snapshot, _changed, _stats = _poll_rom_metadata_cache(settings, repo)
+            self.assertEqual(snapshot["systems"], [])
+            self.assertEqual(snapshot["roms"], [])
 
-    def test_collect_rom_metadata_includes_bios_md5(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "userdata"
-            bios = root / "bios" / "dc" / "flash.bin"
-            bios.parent.mkdir(parents=True)
-            bios.write_bytes(b"bios-data")
-            with mock.patch.dict(
-                "os.environ",
-                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
-                clear=True,
-            ):
-                settings = Settings.from_env()
-
-            result = _collect_rom_metadata(settings, RomRepository(settings.roms_root, settings.bios_root))
-            self.assertEqual(len(result["bios"]), 1)
-            self.assertEqual(result["bios"][0]["path"], "dc/flash.bin")
-            self.assertTrue(result["bios"][0]["bios_md5"])
-
-    def test_collect_rom_metadata_attaches_known_bios_system(self) -> None:
-        import app.roms.rom_asset_bios as rom_asset_bios
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "userdata"
-            bios = root / "bios" / "known.bin"
-            bios.parent.mkdir(parents=True)
-            bios.write_bytes(b"known-bios-data")
-            known_md5 = hashlib.md5(b"known-bios-data").hexdigest()
-            with mock.patch.dict(
-                "os.environ",
-                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
-                clear=True,
-            ):
-                settings = Settings.from_env()
-
-            with mock.patch.object(rom_asset_bios, "_BIOS_SYSTEM_MAP", {known_md5: ["psx"]}):
-                result = _collect_rom_metadata(settings, RomRepository(settings.roms_root, settings.bios_root))
-            self.assertEqual(result["bios"][0]["systems"], ["psx"])
-
-    def test_collect_rom_metadata_unknown_bios_has_no_systems(self) -> None:
+    def test_poll_rom_metadata_cache_unknown_bios_has_no_systems(self) -> None:
         import app.roms.rom_asset_bios as rom_asset_bios
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -4070,10 +2774,11 @@ class SettingsTests(unittest.TestCase):
                 clear=True,
             ):
                 settings = Settings.from_env()
+            repo = RomRepository(settings.roms_root, settings.bios_root)
 
             with mock.patch.object(rom_asset_bios, "_BIOS_SYSTEM_MAP", {}):
-                result = _collect_rom_metadata(settings, RomRepository(settings.roms_root, settings.bios_root))
-            self.assertEqual(result["bios"][0]["systems"], [])
+                snapshot, _changed, _stats = _poll_rom_metadata_cache(settings, repo)
+            self.assertEqual(snapshot["bios"][0]["systems"], [])
 
     def test_poll_rom_metadata_cache_attaches_bios_systems_fresh_and_reused(self) -> None:
         import app.roms.rom_asset_bios as rom_asset_bios
@@ -4110,33 +2815,6 @@ class SettingsTests(unittest.TestCase):
                 self.assertFalse(changed)
                 self.assertEqual(snapshot["bios"][0]["systems"], ["psx"])
 
-    def test_collect_asset_metadata_includes_artwork_types_from_gamelist(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "userdata"
-            system = root / "roms" / "snes"
-            system.mkdir(parents=True)
-            (system / "Game.zip").write_bytes(b"rom-data")
-            (system / "gamelist.xml").write_text(
-                "<gameList><game><path>./Game.zip</path><name>Game</name>"
-                "<image>./images/game.png</image><marquee>./images/game-marquee.png</marquee>"
-                "</game></gameList>\n",
-                encoding="utf-8",
-            )
-            with mock.patch.dict(
-                "os.environ",
-                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
-                clear=True,
-            ):
-                settings = Settings.from_env()
-
-            result = _collect_rom_metadata(settings, RomRepository(settings.roms_root, settings.bios_root))
-
-            self.assertEqual(len(result["artwork"]), 1)
-            self.assertEqual(result["artwork"][0]["asset_type"], "artwork")
-            self.assertEqual(result["artwork"][0]["system"], "snes")
-            self.assertEqual(result["artwork"][0]["rom_path"], "Game.zip")
-            self.assertEqual(result["artwork"][0]["artwork_types"], ["image", "marquee"])
-            self.assertNotIn("artwork_paths", result["artwork"][0])
 
     def test_rom_metadata_cache_reuses_fingerprint_and_detects_deletes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4651,178 +3329,6 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(len(patches), 1)
             self.assertEqual(patches[0]["roms"][0]["gamelist_game_id"], "B.zip")
 
-    @mock.patch.dict("os.environ", {"DRONE_NETWORK_MODE": "overmind"})
-    def test_rom_metadata_sync_skips_unchanged_cache_without_rehashing(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "userdata"
-            rom = root / "roms" / "snes" / "Game.zip"
-            rom.parent.mkdir(parents=True)
-            rom.write_bytes(b"first")
-            self._write_gamelist(rom.parent, "Game.zip")
-            with mock.patch.dict(
-                "os.environ",
-                {
-                    "DRONE_NETWORK_MODE": "overmind",
-                    "USERDATA_ROOT": str(root),
-                    "ROMS_ROOT": str(root / "roms"),
-                    "BIOS_ROOT": str(root / "bios"),
-                    "OVERMIND_DEVICE_ID": "drone-a",
-                },
-                clear=True,
-            ):
-                settings = Settings.from_env()
-            repo = RomRepository(settings.roms_root, settings.bios_root)
-            _poll_rom_metadata_cache(settings, repo)
-            with mock.patch("app.drone_api.ROM_METADATA_HASH_ROMS_ENABLED", True):
-                list(_hash_rom_metadata_batches(settings, repo, batch_size=1))
-            _mark_rom_metadata_upload_clean(settings)
-
-            uploads = []
-
-            def fake_post(url, payload, token=None, settings=None, timeout_seconds=10):
-                uploads.append((url, payload, token))
-                return 200, {
-                    "rom_count": len(payload.get("roms") or []),
-                    "bios_count": len(payload.get("bios") or []),
-                    "artwork_count": len(payload.get("artwork") or []),
-                }
-
-            with mock.patch.object(RomRepository, "build_fingerprint", side_effect=AssertionError("unchanged ROM should not hash")), mock.patch(
-                "app.overmind.rom_sync._overmind_post_json_with_status", side_effect=fake_post
-            ):
-                result = _sync_rom_metadata_to_overmind(
-                    settings,
-                    repo,
-                    {"overmind_token": "drone-token"},
-                    "https://overmind.local",
-                    "drone-token",
-                )
-
-            self.assertEqual(result["status"], "skipped")
-            self.assertEqual(result["reason"], "no_changes")
-            self.assertFalse(result["changed"])
-            self.assertEqual(result["rom_count"], 1)
-            self.assertEqual(result["bios_count"], 0)
-            self.assertEqual(result["artwork_count"], 0)
-            self.assertEqual(len(uploads), 0)
-            cache_after, _ = _load_rom_metadata_cache(settings)
-            self.assertFalse(cache_after["dirty"])
-            self.assertTrue(cache_after["last_successful_upload_at"])
-
-    @mock.patch.dict("os.environ", {"DRONE_NETWORK_MODE": "overmind"})
-    def test_rom_metadata_sync_force_uploads_clean_database_cache(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "userdata"
-            system = root / "roms" / "snes"
-            system.mkdir(parents=True)
-            (system / "Game.zip").write_bytes(b"rom")
-            self._write_gamelist(system, "Game.zip")
-            with mock.patch.dict(
-                "os.environ",
-                {
-                    "DRONE_NETWORK_MODE": "overmind",
-                    "USERDATA_ROOT": str(root),
-                    "ROMS_ROOT": str(root / "roms"),
-                    "BIOS_ROOT": str(root / "bios"),
-                    "OVERMIND_DEVICE_ID": "drone-a",
-                },
-                clear=True,
-            ):
-                settings = Settings.from_env()
-            repo = RomRepository(settings.roms_root, settings.bios_root)
-            _poll_rom_metadata_cache(settings, repo)
-            with mock.patch("app.drone_api.ROM_METADATA_HASH_ROMS_ENABLED", True):
-                list(_hash_rom_metadata_batches(settings, repo, batch_size=1))
-            cache_data, _ = _load_rom_metadata_cache(settings)
-            cache_data["dirty"] = False
-            _persist_rom_metadata_cache(settings, cache_data)
-            uploads = []
-
-            def fake_post(url, payload, token=None, settings=None, timeout_seconds=10):
-                uploads.append(payload)
-                return 200, {
-                    "rom_count": len(payload.get("roms") or []),
-                    "bios_count": len(payload.get("bios") or []),
-                    "artwork_count": len(payload.get("artwork") or []),
-                }
-
-            with mock.patch.object(RomRepository, "build_fingerprint", side_effect=AssertionError("force inventory should not rehash clean ROM")), mock.patch(
-                "app.overmind.rom_sync._overmind_post_json_with_status", side_effect=fake_post
-            ):
-                result = _sync_rom_metadata_to_overmind(
-                    settings,
-                    repo,
-                    {"overmind_token": "drone-token"},
-                    "https://overmind.local",
-                    "drone-token",
-                    force_upload=True,
-                )
-
-            self.assertEqual(result["status"], "uploaded")
-            self.assertTrue(result["forced"])
-            self.assertEqual(len(uploads), 1)
-            self.assertEqual(uploads[0]["update_mode"], "inventory")
-            self.assertTrue(uploads[0]["replace_all"])
-            self.assertEqual(len(uploads[0]["roms"]), 1)
-
-    @mock.patch.dict("os.environ", {"DRONE_NETWORK_MODE": "overmind"})
-    def test_rom_metadata_sync_full_refreshes_clean_cache_without_successful_upload(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "userdata"
-            system = root / "roms" / "snes"
-            system.mkdir(parents=True)
-            (system / "Game.zip").write_bytes(b"rom")
-            self._write_gamelist(system, "Game.zip")
-            with mock.patch.dict(
-                "os.environ",
-                {
-                    "DRONE_NETWORK_MODE": "overmind",
-                    "USERDATA_ROOT": str(root),
-                    "ROMS_ROOT": str(root / "roms"),
-                    "BIOS_ROOT": str(root / "bios"),
-                    "OVERMIND_DEVICE_ID": "drone-a",
-                },
-                clear=True,
-            ):
-                settings = Settings.from_env()
-            repo = RomRepository(settings.roms_root, settings.bios_root)
-            _poll_rom_metadata_cache(settings, repo)
-            with mock.patch("app.drone_api.ROM_METADATA_HASH_ROMS_ENABLED", True):
-                list(_hash_rom_metadata_batches(settings, repo, batch_size=1))
-            cache_data, _ = _load_rom_metadata_cache(settings)
-            cache_data["dirty"] = False
-            cache_data["last_successful_upload_at"] = None
-            _persist_rom_metadata_cache(settings, cache_data)
-            uploads = []
-
-            def fake_post(url, payload, token=None, settings=None, timeout_seconds=10):
-                uploads.append(payload)
-                return 200, {
-                    "rom_count": len(payload.get("roms") or []),
-                    "bios_count": len(payload.get("bios") or []),
-                    "artwork_count": len(payload.get("artwork") or []),
-                }
-
-            with mock.patch.object(RomRepository, "build_fingerprint", side_effect=AssertionError("clean cache should not rehash")), mock.patch(
-                "app.overmind.rom_sync._overmind_post_json_with_status", side_effect=fake_post
-            ):
-                result = _sync_rom_metadata_to_overmind(
-                    settings,
-                    repo,
-                    {"overmind_token": "drone-token"},
-                    "https://overmind.local",
-                    "drone-token",
-                )
-
-            self.assertEqual(result["status"], "uploaded")
-            self.assertFalse(result["forced"])
-            self.assertEqual(len(uploads), 1)
-            self.assertEqual(uploads[0]["update_mode"], "inventory")
-            self.assertTrue(uploads[0]["replace_all"])
-            self.assertEqual(len(uploads[0]["roms"]), 1)
-            cache_after, _ = _load_rom_metadata_cache(settings)
-            self.assertTrue(cache_after["last_successful_upload_at"])
-
     def test_rom_metadata_cache_status_reports_progress_and_pending_upload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
@@ -4862,7 +3368,9 @@ class SettingsTests(unittest.TestCase):
             self.assertFalse(cleared_status["needs_upload"])
             self.assertEqual(cleared_status["counts"]["roms"], 1)
 
-    def test_collect_rom_metadata_uses_database_cache_with_current_gamelist_metadata(self) -> None:
+    def test_build_rom_metadata_snapshot_rehydrates_current_gamelist_metadata(self) -> None:
+        from app.roms.rom_metadata_state import _build_rom_metadata_snapshot_from_cache
+
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
             system = root / "roms" / "snes"
@@ -4890,8 +3398,11 @@ class SettingsTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with mock.patch.object(repo, "list_assets", side_effect=AssertionError("collect should use local database cache")):
-                result = _collect_rom_metadata(settings, repo)
+            # The snapshot is built entirely from the already-scanned cache, re-reading
+            # only the gamelist.xml (not a filesystem re-scan), so it reflects the
+            # file's current title even though the cache itself was not re-polled.
+            cache, _ = _load_rom_metadata_cache(settings)
+            result = _build_rom_metadata_snapshot_from_cache(settings, cache, rehydrate_gamelist=True)
 
             self.assertEqual(result["type"], "asset_metadata")
             self.assertEqual(result["roms"][0]["rom_name"], "Stale XML Title")
@@ -4899,342 +3410,6 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(result["roms"][0]["gamelist_game_id"], "Game.zip")
             self.assertEqual(result["gamelists"][0]["rom_count"], 1)
 
-    @mock.patch.dict("os.environ", {"DRONE_NETWORK_MODE": "overmind"})
-    def test_rom_metadata_sync_uploads_inventory_then_batched_fingerprint_patches(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "userdata"
-            system = root / "roms" / "snes"
-            system.mkdir(parents=True)
-            (system / "Game One.zip").write_bytes(b"one")
-            (system / "Game Two.zip").write_bytes(b"two")
-            self._write_gamelist(system, "Game One.zip", "Game Two.zip")
-            with mock.patch.dict(
-                "os.environ",
-                {
-                    "DRONE_NETWORK_MODE": "overmind",
-                    "USERDATA_ROOT": str(root),
-                    "ROMS_ROOT": str(root / "roms"),
-                    "BIOS_ROOT": str(root / "bios"),
-                    "OVERMIND_DEVICE_ID": "drone-a",
-                },
-                clear=True,
-            ):
-                settings = Settings.from_env()
-            repo = RomRepository(settings.roms_root, settings.bios_root)
-            uploads = []
-
-            def fake_post(url, payload, token=None, settings=None, timeout_seconds=10):
-                uploads.append(payload)
-                return 200, {
-                    "rom_count": len(payload.get("roms") or []),
-                    "bios_count": len(payload.get("bios") or []),
-                    "artwork_count": len(payload.get("artwork") or []),
-                }
-
-            with mock.patch("app.drone_api.ROM_METADATA_FINGERPRINT_BATCH_SIZE", 1), mock.patch(
-                "app.drone_api.ROM_METADATA_HASH_ROMS_ENABLED", True
-            ), mock.patch(
-                "app.overmind.rom_sync._overmind_post_json_with_status", side_effect=fake_post
-            ):
-                result = _sync_rom_metadata_to_overmind(
-                    settings,
-                    repo,
-                    {"overmind_token": "drone-token"},
-                    "https://overmind.local",
-                    "drone-token",
-                )
-
-            self.assertEqual(result["hash_batches"], 2)
-            self.assertEqual(result["hashed_roms"], 2)
-            self.assertEqual([payload["update_mode"] for payload in uploads], ["inventory", "rom_hash_patch", "rom_hash_patch"])
-            self.assertEqual(len(uploads[0]["roms"]), 2)
-            self.assertTrue(uploads[0]["replace_all"])
-            self.assertTrue(all("rom_fingerprint" not in row for row in uploads[0]["roms"]))
-            self.assertTrue(all(len(payload["roms"]) == 1 and payload["roms"][0].get("rom_fingerprint") for payload in uploads[1:]))
-
-    @mock.patch.dict("os.environ", {"DRONE_NETWORK_MODE": "overmind"})
-    def test_rom_metadata_delta_upload_clears_pending_so_next_poll_skips(self) -> None:
-        from app.storage.rom_metadata_store import _read_pending_rom_metadata_changes
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "userdata"
-            system = root / "roms" / "snes"
-            system.mkdir(parents=True)
-            (system / "Game One.zip").write_bytes(b"one")
-            self._write_gamelist(system, "Game One.zip")
-            with mock.patch.dict(
-                "os.environ",
-                {
-                    "DRONE_NETWORK_MODE": "overmind",
-                    "USERDATA_ROOT": str(root),
-                    "ROMS_ROOT": str(root / "roms"),
-                    "BIOS_ROOT": str(root / "bios"),
-                    "OVERMIND_DEVICE_ID": "drone-a",
-                },
-                clear=True,
-            ):
-                settings = Settings.from_env()
-            repo = RomRepository(settings.roms_root, settings.bios_root)
-
-            def fake_post(url, payload, token=None, settings=None, timeout_seconds=10):
-                return 200, {
-                    "rom_count": len(payload.get("roms") or []),
-                    "bios_count": len(payload.get("bios") or []),
-                    "artwork_count": len(payload.get("artwork") or []),
-                }
-
-            with mock.patch("app.drone_api.ROM_METADATA_HASH_ROMS_ENABLED", False), mock.patch(
-                "app.overmind.rom_sync._overmind_post_json_with_status", side_effect=fake_post
-            ):
-                # First sync establishes a clean, uploaded cache (full refresh).
-                _sync_rom_metadata_to_overmind(settings, repo, {"overmind_token": "t"}, "https://overmind.local", "t")
-                # A new ROM appears -> the next sync is a delta carrying it.
-                (system / "Game Two.zip").write_bytes(b"two")
-                self._write_gamelist(system, "Game One.zip", "Game Two.zip")
-                delta = _sync_rom_metadata_to_overmind(settings, repo, {"overmind_token": "t"}, "https://overmind.local", "t")
-                # The pending-change queue must be empty after a successful delta upload...
-                pending = _read_pending_rom_metadata_changes(settings)
-                self.assertEqual(pending.get("roms"), [])
-                self.assertEqual(delta["status"], "uploaded")
-                # ...so a follow-up poll with no filesystem change uploads nothing
-                # (regression: it used to re-upload the same delta every poll forever).
-                again = _sync_rom_metadata_to_overmind(settings, repo, {"overmind_token": "t"}, "https://overmind.local", "t")
-                self.assertEqual(again["status"], "skipped")
-
-    @mock.patch.dict("os.environ", {"DRONE_NETWORK_MODE": "overmind"})
-    def test_rom_metadata_sync_flags_full_refresh_when_hash_patch_upload_fails(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "userdata"
-            system = root / "roms" / "snes"
-            system.mkdir(parents=True)
-            (system / "Game One.zip").write_bytes(b"one")
-            self._write_gamelist(system, "Game One.zip")
-            with mock.patch.dict(
-                "os.environ",
-                {
-                    "DRONE_NETWORK_MODE": "overmind",
-                    "USERDATA_ROOT": str(root),
-                    "ROMS_ROOT": str(root / "roms"),
-                    "BIOS_ROOT": str(root / "bios"),
-                    "OVERMIND_DEVICE_ID": "drone-a",
-                },
-                clear=True,
-            ):
-                settings = Settings.from_env()
-            repo = RomRepository(settings.roms_root, settings.bios_root)
-
-            def fake_post(url, payload, token=None, settings=None, timeout_seconds=10):
-                if payload.get("update_mode") == "rom_hash_patch":
-                    raise RuntimeError("overmind unavailable")
-                return 200, {
-                    "rom_count": len(payload.get("roms") or []),
-                    "bios_count": len(payload.get("bios") or []),
-                    "artwork_count": len(payload.get("artwork") or []),
-                }
-
-            with mock.patch("app.drone_api.ROM_METADATA_FINGERPRINT_BATCH_SIZE", 1), mock.patch(
-                "app.drone_api.ROM_METADATA_HASH_ROMS_ENABLED", True
-            ), mock.patch(
-                "app.overmind.rom_sync._overmind_post_json_with_status", side_effect=fake_post
-            ):
-                # The failed hash patch must not abort the poll; it should flag a
-                # full refresh so the next poll resends md5 instead of losing it.
-                _sync_rom_metadata_to_overmind(
-                    settings,
-                    repo,
-                    {"overmind_token": "drone-token"},
-                    "https://overmind.local",
-                    "drone-token",
-                )
-
-            state = drone_api._read_rom_metadata_cache_state(
-                settings, "full_refresh_pending", "dirty"
-            )
-            self.assertTrue(state.get("full_refresh_pending"))
-            self.assertTrue(state.get("dirty"))
-
-    @mock.patch.dict("os.environ", {"DRONE_NETWORK_MODE": "overmind"})
-    def test_rom_metadata_sync_readvertises_true_fingerprint_when_state_is_stale(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "userdata"
-            system = root / "roms" / "snes"
-            system.mkdir(parents=True)
-            (system / "Game One.zip").write_bytes(b"one")
-            self._write_gamelist(system, "Game One.zip")
-            with mock.patch.dict(
-                "os.environ",
-                {
-                    "DRONE_NETWORK_MODE": "overmind",
-                    "USERDATA_ROOT": str(root),
-                    "ROMS_ROOT": str(root / "roms"),
-                    "BIOS_ROOT": str(root / "bios"),
-                    "OVERMIND_DEVICE_ID": "drone-a",
-                },
-                clear=True,
-            ):
-                settings = Settings.from_env()
-            repo = RomRepository(settings.roms_root, settings.bios_root)
-
-            def fake_post(url, payload, token=None, settings=None, timeout_seconds=10):
-                return 200, {
-                    "rom_count": len(payload.get("roms") or []),
-                    "bios_count": len(payload.get("bios") or []),
-                    "artwork_count": len(payload.get("artwork") or []),
-                }
-
-            with mock.patch("app.drone_api.ROM_METADATA_HASH_ROMS_ENABLED", True), mock.patch(
-                "app.overmind.rom_sync._overmind_post_json_with_status", side_effect=fake_post
-            ):
-                # First sync hashes md5 and records the true fingerprint.
-                _sync_rom_metadata_to_overmind(
-                    settings, repo, {}, "https://overmind.local", "drone-token"
-                )
-                # Simulate a drone whose md5 never reached Overmind: its stored
-                # fingerprint still reflects the md5-less inventory.
-                drone_api._update_rom_metadata_cache_state(
-                    settings, rom_inventory_fingerprint="stale-md5-less"
-                )
-                # Nothing changed on disk -> the poll takes the no-changes path,
-                # which must re-advertise the real (md5-bearing) fingerprint so
-                # Overmind detects the drift and resyncs on its own.
-                result = _sync_rom_metadata_to_overmind(
-                    settings, repo, {}, "https://overmind.local", "drone-token"
-                )
-
-            self.assertEqual(result["status"], "skipped")
-            fingerprint = drone_api._read_rom_metadata_cache_state(
-                settings, "rom_inventory_fingerprint"
-            ).get("rom_inventory_fingerprint")
-            self.assertTrue(fingerprint)
-            self.assertNotEqual(fingerprint, "stale-md5-less")
-
-    @mock.patch.dict("os.environ", {"DRONE_NETWORK_MODE": "overmind"})
-    def test_rom_metadata_sync_persists_and_uploads_added_and_deleted_roms(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "userdata"
-            system = root / "roms" / "snes"
-            system.mkdir(parents=True)
-            first = system / "First Game.zip"
-            second = system / "Second Game.zip"
-            first.write_bytes(b"one")
-            self._write_gamelist(system, "First Game.zip")
-            with mock.patch.dict(
-                "os.environ",
-                {
-                    "DRONE_NETWORK_MODE": "overmind",
-                    "USERDATA_ROOT": str(root),
-                    "ROMS_ROOT": str(root / "roms"),
-                    "BIOS_ROOT": str(root / "bios"),
-                    "OVERMIND_DEVICE_ID": "drone-a",
-                },
-                clear=True,
-            ):
-                settings = Settings.from_env()
-            repo = RomRepository(settings.roms_root, settings.bios_root)
-            uploads = []
-
-            def fake_post(url, payload, token=None, settings=None, timeout_seconds=10):
-                uploads.append(payload)
-                return 200, {
-                    "rom_count": len(payload.get("roms") or []),
-                    "bios_count": len(payload.get("bios") or []),
-                    "artwork_count": len(payload.get("artwork") or []),
-                }
-
-            with mock.patch("app.overmind.rom_sync._overmind_post_json_with_status", side_effect=fake_post):
-                _sync_rom_metadata_to_overmind(settings, repo, {}, "https://overmind.local", "drone-token")
-                second.write_bytes(b"two")
-                self._write_gamelist(system, "First Game.zip", "Second Game.zip")
-                added = _sync_rom_metadata_to_overmind(settings, repo, {}, "https://overmind.local", "drone-token")
-                first.unlink()
-                self._write_gamelist(system, "Second Game.zip")
-                deleted = _sync_rom_metadata_to_overmind(settings, repo, {}, "https://overmind.local", "drone-token")
-
-            inventories = [payload for payload in uploads if payload.get("update_mode") == "inventory_delta"]
-            full_refreshes = [payload for payload in uploads if payload.get("update_mode") == "inventory"]
-            self.assertEqual(len(full_refreshes), 1)
-            self.assertTrue(full_refreshes[0]["replace_all"])
-            self.assertEqual([len(payload["roms"]) for payload in inventories], [1, 0])
-            # Deleted rows are identified by gamelist id on the wire (the slim upload no
-            # longer carries the ROM path); an unscraped game's id is its relative path.
-            self.assertEqual(inventories[-1]["deleted"]["roms"][0]["gamelist_game_id"], "First Game.zip")
-            self.assertEqual(added["stats"]["new_or_changed"], 1)
-            self.assertEqual(deleted["stats"]["deleted"], 1)
-            cache, _ = _load_rom_metadata_cache(settings)
-            self.assertEqual(len(cache["entries"]), 1)
-            self.assertEqual(next(iter(cache["entries"].values()))["file_path"], "Second Game.zip")
-            self.assertFalse(cache["dirty"])
-
-    @mock.patch.dict("os.environ", {"DRONE_NETWORK_MODE": "overmind"})
-    def test_rom_metadata_delta_upload_chunks_and_retries_until_confirmed(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "userdata"
-            system = root / "roms" / "snes"
-            system.mkdir(parents=True)
-            (system / "Game One.zip").write_bytes(b"one")
-            (system / "Game Two.zip").write_bytes(b"two")
-            self._write_gamelist(system, "Game One.zip", "Game Two.zip")
-            with mock.patch.dict(
-                "os.environ",
-                {
-                    "DRONE_NETWORK_MODE": "overmind",
-                    "USERDATA_ROOT": str(root),
-                    "ROMS_ROOT": str(root / "roms"),
-                    "BIOS_ROOT": str(root / "bios"),
-                    "OVERMIND_DEVICE_ID": "drone-a",
-                },
-                clear=True,
-            ):
-                settings = Settings.from_env()
-            repo = RomRepository(settings.roms_root, settings.bios_root)
-            _poll_rom_metadata_cache(settings, repo)
-            cache, _ = _load_rom_metadata_cache(settings)
-            cache["last_successful_upload_at"] = "2026-05-30T00:00:00+00:00"
-            _persist_rom_metadata_cache(settings, cache)
-            uploads = []
-
-            def failing_post(url, payload, token=None, settings=None, timeout_seconds=10):
-                uploads.append(payload)
-                if payload.get("update_mode") == "inventory_delta" and payload.get("delta_index") == 1:
-                    raise URLError("temporary outage")
-                return 200, {
-                    "rom_count": len(payload.get("roms") or []),
-                    "bios_count": len(payload.get("bios") or []),
-                    "artwork_count": len(payload.get("artwork") or []),
-                }
-
-            with mock.patch("app.roms.rom_inventory.ROM_METADATA_UPLOAD_CHUNK_SIZE", 1), mock.patch(
-                "app.overmind.rom_sync._overmind_post_json_with_status", side_effect=failing_post
-            ):
-                with self.assertRaises(URLError):
-                    _sync_rom_metadata_to_overmind(settings, repo, {}, "https://overmind.local", "drone-token")
-
-            cache, _ = _load_rom_metadata_cache(settings)
-            self.assertTrue(cache["dirty"])
-            self.assertEqual([payload.get("delta_index") for payload in uploads if payload.get("update_mode") == "inventory_delta"], [0, 1])
-
-            uploads.clear()
-
-            def successful_post(url, payload, token=None, settings=None, timeout_seconds=10):
-                uploads.append(payload)
-                return 200, {
-                    "rom_count": len(payload.get("roms") or []),
-                    "bios_count": len(payload.get("bios") or []),
-                    "artwork_count": len(payload.get("artwork") or []),
-                }
-
-            with mock.patch("app.roms.rom_inventory.ROM_METADATA_UPLOAD_CHUNK_SIZE", 1), mock.patch(
-                "app.overmind.rom_sync._overmind_post_json_with_status", side_effect=successful_post
-            ):
-                result = _sync_rom_metadata_to_overmind(settings, repo, {}, "https://overmind.local", "drone-token")
-
-            cache, _ = _load_rom_metadata_cache(settings)
-            self.assertFalse(cache["dirty"])
-            self.assertEqual(result["status"], "uploaded")
-            self.assertEqual([payload.get("delta_index") for payload in uploads if payload.get("update_mode") == "inventory_delta"], [0, 1])
-            self.assertTrue(all(item.get("payload_bytes", 0) > 0 for item in result["uploads"]))
-
-    @mock.patch.dict("os.environ", {"DRONE_NETWORK_MODE": "overmind"})
     def test_rom_metadata_poll_hashes_roms_by_default_when_cached_locally(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
@@ -5245,11 +3420,9 @@ class SettingsTests(unittest.TestCase):
             with mock.patch.dict(
                 "os.environ",
                 {
-                    "DRONE_NETWORK_MODE": "overmind",
                     "USERDATA_ROOT": str(root),
                     "ROMS_ROOT": str(root / "roms"),
                     "BIOS_ROOT": str(root / "bios"),
-                    "OVERMIND_URL": "",
                     "OVERMIND_DEVICE_ID": "drone-a",
                 },
                 clear=True,
@@ -5259,85 +3432,11 @@ class SettingsTests(unittest.TestCase):
             result = _poll_rom_metadata_once(settings, RomRepository(settings.roms_root, settings.bios_root))
 
             self.assertEqual(result["status"], "cached")
-            self.assertEqual(result["reason"], "overmind_not_configured")
+            self.assertEqual(result["reason"], "scan_complete")
             self.assertEqual(result["hashed_roms"], 1)
             cache, _ = _load_rom_metadata_cache(settings)
-            self.assertTrue(cache["dirty"])
+            self.assertFalse(cache["dirty"])  # completing the local pass marks the cache clean
             self.assertIn("rom_fingerprint", next(iter(cache["entries"].values())))
-
-    @mock.patch.dict("os.environ", {"DRONE_NETWORK_MODE": "overmind"})
-    def test_rom_metadata_poll_does_not_register_without_auth_token(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "userdata"
-            rom = root / "roms" / "snes" / "Game.zip"
-            rom.parent.mkdir(parents=True)
-            rom.write_bytes(b"offline-rom")
-            self._write_gamelist(rom.parent, "Game.zip")
-            with mock.patch.dict(
-                "os.environ",
-                {
-                    "DRONE_NETWORK_MODE": "overmind",
-                    "USERDATA_ROOT": str(root),
-                    "ROMS_ROOT": str(root / "roms"),
-                    "BIOS_ROOT": str(root / "bios"),
-                    "OVERMIND_URL": "https://overmind.local",
-                    "OVERMIND_DEVICE_ID": "drone-a",
-                },
-                clear=True,
-            ):
-                settings = Settings.from_env()
-
-            config = {
-                "overmind_url": "https://overmind.local",
-                "overmind_token": "",
-                "overmind_auth_token": "",
-                "integration_enabled": False,
-            }
-            with mock.patch("app.drone_api._load_overmind_config_for_settings", return_value=config):
-                with mock.patch(
-                    "app.drone_api._register_or_claim_overmind_token",
-                    side_effect=AssertionError("must not register without approved auth token"),
-                ):
-                    result = _poll_rom_metadata_once(settings, RomRepository(settings.roms_root, settings.bios_root))
-
-            self.assertEqual(result["status"], "cached")
-            self.assertEqual(result["reason"], "overmind_not_connected")
-            cache, _ = _load_rom_metadata_cache(settings)
-            self.assertTrue(cache["dirty"])
-
-    @mock.patch.dict("os.environ", {"DRONE_NETWORK_MODE": "overmind"})
-    def test_rom_metadata_poll_defers_hashing_when_overmind_upload_fails(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "userdata"
-            rom = root / "roms" / "snes" / "Game.zip"
-            rom.parent.mkdir(parents=True)
-            rom.write_bytes(b"offline-rom")
-            self._write_gamelist(rom.parent, "Game.zip")
-            with mock.patch.dict(
-                "os.environ",
-                {
-                    "DRONE_NETWORK_MODE": "overmind",
-                    "USERDATA_ROOT": str(root),
-                    "ROMS_ROOT": str(root / "roms"),
-                    "BIOS_ROOT": str(root / "bios"),
-                    "OVERMIND_URL": "https://overmind.local",
-                    "OVERMIND_DRONE_TOKEN": "drone-token",
-                    "OVERMIND_DEVICE_ID": "drone-a",
-                },
-                clear=True,
-            ):
-                settings = Settings.from_env()
-
-            with mock.patch(
-                "app.overmind.rom_sync._overmind_post_json_with_status",
-                side_effect=URLError("offline"),
-            ):
-                with self.assertRaises(URLError):
-                    _poll_rom_metadata_once(settings, RomRepository(settings.roms_root, settings.bios_root))
-
-            cache, _ = _load_rom_metadata_cache(settings)
-            self.assertTrue(cache["dirty"])
-            self.assertNotIn("rom_fingerprint", next(iter(cache["entries"].values())))
 
     def test_sample_speed_uses_cloudflare_speed_test_endpoints(self) -> None:
             calls = []
@@ -5977,15 +4076,17 @@ class DroneTlsHandshakeTests(unittest.TestCase):
         from unittest import mock as _mock
         import app.drone_api as da
 
-        # The fixture settings are Mocks; keep the integration check on the env
-        # path (checked first) so local-mode cert loading is not attempted.
-        self._env = _mock.patch.dict("os.environ", {"DRONE_NETWORK_MODE": "overmind"})
-        self._env.start()
-        self.addCleanup(self._env.stop)
+        # The fixture settings are otherwise Mocks, but local-network cert
+        # loading is unconditional now, so userdata_root must be a real
+        # (empty) directory for paired_peers()/local cert cache lookups.
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
         settings = _mock.Mock()
+        settings.userdata_root = Path(self._tmp.name)
         settings.http_only = False
         settings.drone_mtls_mode = "self-signed"
         settings.drone_mtls_enabled = False
+        settings.drone_mtls_ca_file = None
         cert = _mock.Mock(); cert.exists.return_value = True
         key = _mock.Mock(); key.exists.return_value = True
         settings.drone_cert_file = cert
@@ -6369,7 +4470,7 @@ class LocalNetworkAssetCopyTests(unittest.TestCase):
             self.assertFalse(items[1]["exists_locally"])
 
     def test_gameplay_history_migrates_to_indexed_paged_rows(self):
-        from app.overmind.overmind_game_logs import (
+        from app.device.game_activity import (
             GAMEPLAY_HISTORY_NAMESPACE,
             load_gameplay_history_page,
         )
@@ -6988,7 +5089,7 @@ class TailnetDiscoveryMergeTests(unittest.TestCase):
         from app.web import handlers_peer
 
         handler = handlers_peer.HandlersPeerMixin()
-        handler.settings = mock.MagicMock(overmind_device_id="local-b")
+        handler.settings = mock.MagicMock(device_id="local-b")
         handler.client_address = ("100.64.0.5", 12345)
         handler.server = mock.MagicMock()
         handler._send_json = mock.MagicMock()
@@ -7055,7 +5156,7 @@ class TailnetDiscoveryMergeTests(unittest.TestCase):
         from app.web import handlers_network
 
         handler = handlers_network.HandlersNetworkMixin()
-        handler.settings = mock.MagicMock(overmind_device_id="local-a")
+        handler.settings = mock.MagicMock(device_id="local-a")
         existing = {
             "drone_id": "local-b",
             "reachable_url": "https://192.168.1.22",
@@ -7097,7 +5198,7 @@ class TailnetDiscoveryMergeTests(unittest.TestCase):
         from app.web import handlers_network
 
         handler = handlers_network.HandlersNetworkMixin()
-        handler.settings = mock.MagicMock(overmind_device_id="local-a")
+        handler.settings = mock.MagicMock(device_id="local-a")
         existing = {
             "drone_id": "local-b",
             "tailnet_ip": "",
@@ -7186,7 +5287,7 @@ class SwarmPageTests(unittest.TestCase):
 
     def test_request_assets_deep_links_into_the_transfers_picker(self) -> None:
         browse_start = self.js.index("function swarmBrowsePeerAssets(")
-        browse_body = self.js[browse_start:self.js.index("async function swarmEnableLocalNetwork()", browse_start)]
+        browse_body = self.js[browse_start:self.js.index("function swarmManagePeer(", browse_start)]
         self.assertIn("localPeerAssetContext.peerId", browse_body)
         self.assertIn('setHash("#admin/transfers")', browse_body)
 
@@ -7230,15 +5331,10 @@ class SwarmPageTests(unittest.TestCase):
         self.assertNotIn("setHash('#admin/swarm')", menu_body)
         self.assertNotIn(">Swarm<", menu_body)
 
-    def test_system_info_bar_shows_connected_count_not_overmind_or_swarm_badges(self) -> None:
+    def test_system_info_bar_shows_connected_count(self) -> None:
         bar_start = self.js.index("async function loadSystemInfoBar()")
         bar_end = self.js.index("async function router()", bar_start)
         body = self.js[bar_start:bar_end]
-        self.assertNotIn("Overmind: linked", body)
-        self.assertNotIn("Overmind: disconnected", body)
-        self.assertNotIn("Swarm: Connected", body)
-        self.assertNotIn("Swarm: Disconnected", body)
-        self.assertNotIn("integrations/overmind/status", body)
         self.assertIn('api("/admin/swarm/overview")', body)
         self.assertIn("Connected: ${connectedCount}", body)
         self.assertIn("filter(drone => drone.online)", body)
@@ -7672,16 +5768,6 @@ class NavRestructureTests(unittest.TestCase):
 
         integration_route = self.js.index('hash.startsWith("#admin/integration")')
         self.assertIn('setHash("#admin/swarm");', self.js[integration_route:integration_route + 500])
-
-    def test_integration_page_and_overmind_panels_are_retired(self) -> None:
-        # Overmind is retired and the Integration page with it: no renderers
-        # remain, and the Swarm page owns pairing/peers/tailnet instead.
-        self.assertNotIn("async function renderIntegrationPage", self.js)
-        self.assertNotIn("renderIntegrationConfigurationPanel", self.js)
-        self.assertNotIn("renderOvermindIntegrationPanel", self.js)
-        self.assertNotIn("renderLocalNetworkIntegrationPanel", self.js)
-        # The Admin menu card points at Swarm now.
-        self.assertNotIn("setHash('#admin/integration')", self.js)
 
     def test_transfers_page_renders_transfers_panel_and_auto_refreshes(self) -> None:
         page_start = self.js.index("async function renderTransfersPage()")

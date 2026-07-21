@@ -8,6 +8,7 @@ import re
 import socket
 import subprocess
 import sys
+import time
 from typing import Any, Callable, List, Optional
 from urllib.request import Request, urlopen
 
@@ -15,6 +16,10 @@ try:
     from ..transport.tailnet import get_tailnet_ip, is_tailnet_address
 except ImportError:  # pragma: no cover - direct script execution fallback
     from transport.tailnet import get_tailnet_ip, is_tailnet_address  # type: ignore
+
+
+_LOCAL_NETWORK_CACHE: dict = {"at": 0.0, "value": {}}
+_LOCAL_NETWORK_SNAPSHOT_TTL_SECONDS = 120.0
 
 
 def drone_scheme(settings: Any) -> str:
@@ -131,7 +136,7 @@ def get_local_ip_addresses(
     open_url: Optional[Callable[..., Any]] = None,
     request_factory: Optional[Callable[..., Any]] = None,
 ) -> dict:
-    """Resolve local IPv4/IPv6 addresses for Overmind heartbeat pings."""
+    """Resolve this Drone's own local IPv4/IPv6 addresses (self-report + pairing payloads)."""
     ipv4: List[str] = []
     ipv6: List[str] = []
 
@@ -149,14 +154,14 @@ def get_local_ip_addresses(
         for info in socket_api.getaddrinfo(hostname, None):
             add(info[4][0])
     except OSError as error:
-        print(f"Overmind network resolution failed for hostname: {error}", file=sys.stderr, flush=True)
+        print(f"Drone network resolution failed for hostname: {error}", file=sys.stderr, flush=True)
 
     try:
         with socket_api.socket(socket_api.AF_INET, socket_api.SOCK_DGRAM) as probe:
             probe.connect(("8.8.8.8", 80))
             add(probe.getsockname()[0])
     except OSError as error:
-        print(f"Overmind IPv4 route resolution failed: {error}", file=sys.stderr, flush=True)
+        print(f"Drone IPv4 route resolution failed: {error}", file=sys.stderr, flush=True)
 
     try:
         with socket_api.socket(socket_api.AF_INET6, socket_api.SOCK_DGRAM) as probe6:
@@ -164,7 +169,7 @@ def get_local_ip_addresses(
             add(probe6.getsockname()[0])
     except OSError as error:
         if os.environ.get("DRONE_DEBUG_NETWORK", "").strip().lower() in {"1", "true", "yes", "on"}:
-            print(f"Overmind IPv6 route unavailable; skipping IPv6 detection: {error}", file=sys.stderr, flush=True)
+            print(f"Drone IPv6 route unavailable; skipping IPv6 detection: {error}", file=sys.stderr, flush=True)
 
     if "127.0.0.1" not in ipv4:
         ipv4.append("127.0.0.1")
@@ -179,8 +184,29 @@ def get_local_ip_addresses(
             public_ip = response.read().decode("utf-8", errors="replace").strip() or None
     except Exception:
         public_ip = None
-    print(f"Overmind network resolved ipv4={ipv4} ipv6={ipv6} gateway={gateway_ip} public={public_ip} tailnet={tailnet_ip}", file=sys.stdout, flush=True)
+    print(f"Drone network resolved ipv4={ipv4} ipv6={ipv6} gateway={gateway_ip} public={public_ip} tailnet={tailnet_ip}", file=sys.stdout, flush=True)
     return {"ipv4": ipv4, "ipv6": ipv6, "gateway_ip": gateway_ip, "public_ip": public_ip, "tailnet_ip": tailnet_ip}
+
+
+def local_network_snapshot() -> dict:
+    """This drone's network info (public_ip + LAN ipv4), cached briefly.
+
+    Used by the LAN-direct transport to detect same-LAN peers (peers behind the
+    same NAT report the same public IP). Cached because resolving the public IP
+    makes a network call; brief staleness is harmless -- a wrong guess just fails
+    the LAN attempt and the selector falls back to the next transport.
+    """
+    now = time.monotonic()
+    cache = _LOCAL_NETWORK_CACHE
+    if cache["value"] and now - cache["at"] < _LOCAL_NETWORK_SNAPSHOT_TTL_SECONDS:
+        return cache["value"]
+    try:
+        value = get_local_ip_addresses()
+    except Exception:
+        value = {}
+    cache["at"] = now
+    cache["value"] = value
+    return value
 
 
 def get_local_certificate_ips(*, socket_module: Any = None) -> List[str]:
@@ -203,7 +229,7 @@ def get_local_certificate_ips(*, socket_module: Any = None) -> List[str]:
     except OSError:
         pass
     # Include the tailnet address so certs generated while on a tailnet carry
-    # it as a SAN (only the Overmind-CA verify mode checks hostnames; pinned
+    # it as a SAN (only a managed/CA-bundle trust mode checks hostnames; pinned
     # local pairing sets check_hostname=False and doesn't need it).
     tailnet_ip = get_tailnet_ip(socket_module=socket_api)
     if tailnet_ip and tailnet_ip not in ips:

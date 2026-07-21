@@ -1,8 +1,8 @@
 """System-info aggregator: hostname/CPU/GPU/perf/disk/network/screen/volume snapshot.
 
 Extracted from ``drone_api.py``. ``_collect_system_info_payload`` assembles the device
-status payload the Drone reports to Overmind (and the admin UI). Pulls from system_metrics
-(GPU/perf), device_control (screen/volume), network identity, automation, and the ROM cache.
+status payload shown on the admin UI. Pulls from system_metrics (GPU/perf), device_control
+(screen/volume), network identity, automation, and the ROM cache.
 """
 
 import os
@@ -15,7 +15,7 @@ from pathlib import Path
 try:
     from ..app_version import drone_app_version as _drone_app_version
     from ..common.settings import Settings
-    from ..overmind.overmind_client import _format_overmind_error
+    from ..common.http_errors import _format_http_error
     from ..roms.rom_metadata_state import _rom_metadata_cache_status
     from ..transfer.drone_network import _get_local_ip_addresses
     from .automation import _load_automation_config
@@ -25,7 +25,7 @@ try:
 except ImportError:  # pragma: no cover - direct script execution fallback
     from app_version import drone_app_version as _drone_app_version  # type: ignore
     from common.settings import Settings  # type: ignore
-    from overmind.overmind_client import _format_overmind_error  # type: ignore
+    from common.http_errors import _format_http_error  # type: ignore
     from roms.rom_metadata_state import _rom_metadata_cache_status  # type: ignore
     from transfer.drone_network import _get_local_ip_addresses  # type: ignore
     from device.automation import _load_automation_config  # type: ignore
@@ -90,7 +90,7 @@ def _collect_system_info_payload(settings: Settings) -> dict:
             "needs_upload": bool(cache_status.get("needs_upload")),
         }
     except Exception as error:
-        asset_cache = {"health": "red", "error": _format_overmind_error(error)}
+        asset_cache = {"health": "red", "error": _format_http_error(error)}
     automation_config = _load_automation_config(settings)
     return {
         "hostname": hostname,

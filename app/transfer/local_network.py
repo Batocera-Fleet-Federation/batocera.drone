@@ -35,11 +35,7 @@ except ImportError:
     from transport.tailnet import get_tailnet_ip  # type: ignore
 
 
-MODE_OVERMIND = "overmind"
 MODE_LOCAL_NETWORK = "local_network"
-MODE_BOTH = "both"
-MODE_DISABLED = "disabled"
-VALID_MODES = {MODE_OVERMIND, MODE_LOCAL_NETWORK, MODE_BOTH, MODE_DISABLED}
 
 DISCOVERY_SERVICE = "batocera-drone-local-v1"
 DISCOVERY_GROUP = os.environ.get("DRONE_LOCAL_DISCOVERY_GROUP", "239.255.42.99")
@@ -67,87 +63,31 @@ def _db(settings: Any) -> Path:
 
 
 def get_integrations(settings: Any) -> dict:
-    """Which integrations are on. Overmind is **retired**: the fleet is moving to
-    an Overmind-free (local-network + tailnet) architecture, so Overmind is
-    forced off no matter what older stored state says -- existing drones flip on
-    update without a migration. The one escape hatch is the DRONE_NETWORK_MODE
-    env var (used by the .github docker swarm and integration tests, which still
-    exercise the Overmind stack), which is honored verbatim."""
-    configured = str(os.environ.get("DRONE_NETWORK_MODE") or "").strip().lower()
-    if configured in VALID_MODES:
-        return {
-            "overmind_enabled": configured in {MODE_OVERMIND, MODE_BOTH},
-            "local_network_enabled": configured in {MODE_LOCAL_NETWORK, MODE_BOTH},
-        }
-    try:
-        db_path = _db(settings)
-        if not db_path.exists():
-            return {"overmind_enabled": False, "local_network_enabled": True}
-        integrations = load_payload(db_path, "integration_enablement", {})
-        if isinstance(integrations, dict) and (
-            "overmind_enabled" in integrations or "local_network_enabled" in integrations
-        ):
-            return {
-                "overmind_enabled": False,
-                "local_network_enabled": bool(integrations.get("local_network_enabled")),
-            }
-        payload = load_payload(db_path, "network_mode", {"mode": MODE_LOCAL_NETWORK})
-    except (AttributeError, TypeError, ValueError, OSError):
-        return {"overmind_enabled": False, "local_network_enabled": True}
-    mode = str(payload.get("mode") if isinstance(payload, dict) else payload or "").strip().lower()
-    if mode not in VALID_MODES:
-        return {"overmind_enabled": False, "local_network_enabled": True}
-    return {
-        "overmind_enabled": False,
-        # A drone that stored an Overmind-only mode has never turned local
-        # networking off on purpose -- flip it on rather than leaving the
-        # device with no integration at all.
-        "local_network_enabled": mode in {MODE_LOCAL_NETWORK, MODE_BOTH, MODE_OVERMIND},
-    }
+    """Local-network (LAN + tailnet) P2P is always on. There is no central hub in
+    this fleet to fall back to, so unlike an optional integration this is a fixed
+    property of the architecture, not a toggle -- there is no way to disable it."""
+    return {"local_network_enabled": True}
 
 
 def get_mode(settings: Any) -> str:
-    integrations = get_integrations(settings)
-    if integrations["overmind_enabled"] and integrations["local_network_enabled"]:
-        return MODE_BOTH
-    if integrations["local_network_enabled"]:
-        return MODE_LOCAL_NETWORK
-    if integrations["overmind_enabled"]:
-        return MODE_OVERMIND
-    return MODE_DISABLED
+    return MODE_LOCAL_NETWORK
 
 
-def set_integrations(settings: Any, *, overmind_enabled: bool, local_network_enabled: bool) -> dict:
-    if overmind_enabled:
-        raise ValueError(
-            "Overmind integration is retired on this Drone; only local_network or disabled are available"
-        )
-    payload = {
-        "overmind_enabled": False,
-        "local_network_enabled": bool(local_network_enabled),
-        "updated_at": _now_iso(),
-    }
-    save_payload(_db(settings), "integration_enablement", payload)
-    return {**payload, "mode": get_mode(settings)}
+def set_integrations(settings: Any, *, local_network_enabled: bool) -> dict:
+    if not local_network_enabled:
+        raise ValueError("local networking cannot be disabled")
+    return {"local_network_enabled": True, "updated_at": _now_iso(), "mode": MODE_LOCAL_NETWORK}
 
 
 def set_mode(settings: Any, mode: str) -> dict:
     normalized = str(mode or "").strip().lower()
-    if normalized not in VALID_MODES:
-        raise ValueError("mode must be local_network or disabled")
-    return set_integrations(
-        settings,
-        overmind_enabled=normalized in {MODE_OVERMIND, MODE_BOTH},
-        local_network_enabled=normalized in {MODE_LOCAL_NETWORK, MODE_BOTH},
-    )
+    if normalized != MODE_LOCAL_NETWORK:
+        raise ValueError("mode must be local_network")
+    return set_integrations(settings, local_network_enabled=True)
 
 
 def is_local_mode(settings: Any) -> bool:
-    return get_integrations(settings)["local_network_enabled"]
-
-
-def is_overmind_mode(settings: Any) -> bool:
-    return get_integrations(settings)["overmind_enabled"]
+    return True
 
 
 def _load_peer_map(settings: Any, namespace: str) -> dict[str, dict]:
@@ -246,7 +186,7 @@ def record_discovered_peer(settings: Any, payload: dict, source_ip: Optional[str
     if not is_local_mode(settings) or str(payload.get("service") or "") != DISCOVERY_SERVICE:
         return None
     peer_id = str(payload.get("drone_id") or "").strip()
-    own_id = str(settings.overmind_device_id)
+    own_id = str(settings.device_id)
     if not peer_id:
         return None
     self_source = _is_self_source_ip(source_ip) if peer_id == own_id else False
@@ -316,7 +256,7 @@ def record_discovered_peer(settings: Any, payload: dict, source_ip: Optional[str
 
 def save_paired_peer(settings: Any, peer: dict) -> dict:
     peer_id = str(peer.get("drone_id") or peer.get("device_id") or "").strip()
-    if not peer_id or peer_id == str(settings.overmind_device_id):
+    if not peer_id or peer_id == str(settings.device_id):
         raise ValueError("invalid peer id")
     peers = _load_peer_map(settings, "local_paired_peers")
     stored = {
@@ -408,7 +348,7 @@ def discovery_payload(settings: Any, certificate_fingerprint: str = "") -> dict:
     return {
         "service": DISCOVERY_SERVICE,
         "kind": "announce",
-        "drone_id": str(settings.overmind_device_id),
+        "drone_id": str(settings.device_id),
         "name": hostname,
         "hostname": hostname,
         "scheme": scheme,

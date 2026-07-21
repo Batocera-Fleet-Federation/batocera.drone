@@ -1,4 +1,12 @@
-"""Change-only payload collection for Drone-to-Overmind reporting."""
+"""Local emulator/Batocera config-file listing and reading.
+
+Extracted from the retired Overmind reporting package (formerly
+``overmind_reporting.py``) -- this half of that file was never hub-specific: it
+backs the local admin "Emulators" config-file browser (``handlers_config.py``) and
+the peer-served emulator-config listing (``handlers_peer.py``). The delta-upload
+half of that file (change-only payloads with fingerprint cursors for the retired
+heartbeat) was Overmind-only and was not carried forward.
+"""
 
 from __future__ import annotations
 
@@ -8,15 +16,8 @@ import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional, Tuple
+from typing import Any, Optional
 
-try:
-    from ..storage.state_store import database_path, load_payload, save_payload
-except ImportError:
-    from storage.state_store import database_path, load_payload, save_payload  # type: ignore
-
-
-_STATE_SCHEMA_VERSION = 2
 _CONFIG_COLLECTION_SPECS = (
     (
         "main_config",
@@ -122,55 +123,6 @@ _CONFIG_FILE_LIST_CACHE_TTL_SECONDS = 30.0
 _CONFIG_FILE_LIST_CACHE: dict = {}
 
 
-def _state_path(settings: Any, filename: str) -> Path:
-    return (settings.userdata_root / "system" / "drone-app" / filename).resolve()
-
-
-def _read_delivery_state(settings: Any, filename: str, key: str) -> dict:
-    state = load_payload(
-        database_path(settings.userdata_root),
-        filename,
-        {},
-        legacy_path=_state_path(settings, filename),
-    )
-    if not isinstance(state, dict) or state.get("schema_version") != _STATE_SCHEMA_VERSION:
-        return {}
-    values = state.get(key)
-    return values if isinstance(values, dict) else {}
-
-
-def _commit_delivery_state(settings: Any, filename: str, key: str, values: dict) -> None:
-    save_payload(
-        database_path(settings.userdata_root),
-        filename,
-        {"schema_version": _STATE_SCHEMA_VERSION, key: dict(values or {})},
-    )
-
-
-def load_uploaded_log_cursors(settings: Any) -> dict:
-    return _read_delivery_state(settings, "overmind_log_cursors.json", "cursors")
-
-
-def commit_log_cursors(settings: Any, cursors: dict) -> None:
-    _commit_delivery_state(settings, "overmind_log_cursors.json", "cursors", cursors)
-
-
-def load_uploaded_emulator_config_fingerprints(settings: Any) -> dict:
-    return _read_delivery_state(settings, "overmind_config_fingerprints.json", "fingerprints")
-
-
-def commit_emulator_config_fingerprints(settings: Any, fingerprints: dict) -> None:
-    _commit_delivery_state(settings, "overmind_config_fingerprints.json", "fingerprints", fingerprints)
-
-
-def _resolve_userdata_path(settings: Any, candidate: str) -> Path:
-    if candidate == "/userdata":
-        return settings.userdata_root.resolve()
-    if candidate.startswith("/userdata/"):
-        return (settings.userdata_root / candidate[len("/userdata/") :]).resolve()
-    return Path(candidate).resolve()
-
-
 def _read_text_file(path: Path, max_bytes: int) -> dict:
     try:
         raw = path.read_bytes()[: max_bytes + 1]
@@ -185,84 +137,6 @@ def _read_text_file(path: Path, max_bytes: int) -> dict:
         }
     except Exception as error:
         return {"path": str(path), "error": str(error)}
-
-
-def _read_text_file_delta(path: Path, cursor: dict, max_bytes: int) -> Tuple[dict, dict]:
-    try:
-        stat = path.stat()
-        key = str(path.resolve())
-        previous = cursor.get(key) if isinstance(cursor.get(key), dict) else {}
-        previous_size = int(previous.get("size") or 0)
-        size = int(stat.st_size)
-        previous_mtime_ns = int(previous.get("mtime_ns") or 0)
-        mtime_ns = int(stat.st_mtime_ns)
-        skipped_bytes = 0
-        if size > previous_size >= 0:
-            start = previous_size
-            if size - start > max_bytes:
-                skipped_bytes = size - start - max_bytes
-                start = size - max_bytes
-        elif size == previous_size and mtime_ns == previous_mtime_ns:
-            start = size
-        else:
-            start = max(0, size - max_bytes)
-        with path.open("rb") as handle:
-            handle.seek(start)
-            raw = handle.read(max_bytes + 1)
-        truncated = len(raw) > max_bytes
-        if truncated:
-            raw = raw[:max_bytes]
-        content = raw.decode("utf-8", errors="replace")
-        if skipped_bytes:
-            content = f"[Log delivery skipped {skipped_bytes} older buffered bytes to show current output]\n{content}"
-        next_cursor = {"size": start + len(raw), "mtime_ns": mtime_ns}
-        return {
-            "path": str(path),
-            "size": size,
-            "offset": start,
-            "truncated": truncated,
-            "content": content,
-            "skipped_bytes": skipped_bytes,
-            "delta": True,
-        }, next_cursor
-    except Exception as error:
-        return {"path": str(path), "error": str(error), "delta": True}, {}
-
-
-def collect_log_sources(settings: Any, include_unchanged: bool = False, sources: Any = None) -> dict:
-    """Build changed log source payloads and deferred delivery cursors."""
-    candidates = {
-        "es_launch_stdout": ["/userdata/system/logs/es_launch_stdout.log"],
-        "es_launch_stderr": ["/userdata/system/logs/es_launch_stderr.log"],
-        "drone_stdout": [str((settings.log_dir / settings.stdout_log_file).resolve())],
-        "drone_stderr": [str((settings.log_dir / settings.stderr_log_file).resolve())],
-        "drone_overmind": [str((settings.log_dir / settings.overmind_log_file).resolve())],
-    }
-    if sources is not None:
-        selected = {str(source) for source in sources}
-        candidates = {source: paths for source, paths in candidates.items() if source in selected}
-    cursor = {} if include_unchanged else load_uploaded_log_cursors(settings)
-    next_cursor = dict(cursor)
-    logs = []
-    for source, paths in candidates.items():
-        entry = {"source": source, "files": []}
-        for raw_path in paths:
-            path = _resolve_userdata_path(settings, raw_path)
-            if path.exists() and path.is_file():
-                file_info, file_cursor = _read_text_file_delta(path, cursor, max_bytes=262144)
-                if file_cursor:
-                    next_cursor[str(path.resolve())] = file_cursor
-                if str(file_info.get("content") or "") or file_info.get("error"):
-                    entry["files"].append(file_info)
-        if entry["files"]:
-            logs.append(entry)
-    return {
-        "type": "log_sources",
-        "collected_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
-        "logs": logs,
-        "append": True,
-        "_cursors": next_cursor,
-    }
 
 
 def _is_excluded_config_path(relative_path: str) -> bool:
@@ -373,11 +247,6 @@ def _selected_config_file_rows(settings: Any, use_cache: bool = True) -> list:
     return rows
 
 
-def _iter_selected_config_files(settings: Any):
-    for row in _selected_config_file_rows(settings, use_cache=False):
-        yield row["root"], row["path"], row["relative_path"]
-
-
 def list_emulator_config_files(
     settings: Any,
     max_configs: int = 250,
@@ -453,38 +322,3 @@ def read_emulator_config_file(settings: Any, root_name: str, relative_path: str,
     item["md5"] = fingerprint
     item["fingerprint"] = fingerprint
     return item
-    raise FileNotFoundError(f"Emulator config not found: {requested_root}:{requested_relative}")
-
-
-def collect_emulator_configs(settings: Any, include_unchanged: bool = False, max_configs: int = 250) -> dict:
-    """Build changed emulator config payloads and deferred md5 fingerprints."""
-    previous_fingerprints = load_uploaded_emulator_config_fingerprints(settings)
-    next_fingerprints = {}
-    configs = []
-    limit = max(0, int(max_configs or 0))
-    for root, path, relative_path in _iter_selected_config_files(settings):
-        item = _read_text_file(path, max_bytes=131072)
-        item["relative_path"] = relative_path
-        item["root"] = str(root)
-        key = f"{item['root']}:{item['relative_path']}"
-        try:
-            fingerprint = hashlib.md5(path.read_bytes()).hexdigest()
-        except Exception:
-            fingerprint = hashlib.md5(str(item.get("content") or "").encode("utf-8", errors="replace")).hexdigest()
-        changed = include_unchanged or previous_fingerprints.get(key) != fingerprint
-        if changed and (limit == 0 or len(configs) < limit):
-            item["md5"] = fingerprint
-            item["fingerprint"] = fingerprint
-            configs.append(item)
-            next_fingerprints[key] = fingerprint
-        elif changed:
-            if key in previous_fingerprints:
-                next_fingerprints[key] = previous_fingerprints[key]
-        else:
-            next_fingerprints[key] = fingerprint
-    return {
-        "type": "emulator_configs",
-        "configs": configs,
-        "incremental": not include_unchanged,
-        "_fingerprints": next_fingerprints,
-    }

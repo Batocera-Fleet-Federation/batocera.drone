@@ -358,14 +358,6 @@ class ApiRoutesMixin:
                 )
                 return
 
-            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "integrations" and parts[2] == "overmind" and parts[3] == "status":
-                self._handle_admin_overmind_status()
-                return
-
-            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "integrations" and parts[2] == "overmind" and parts[3] == "actions":
-                self._handle_admin_overmind_actions()
-                return
-
             if len(parts) == 2 and parts[0] == "admin" and parts[1] == "network-mode":
                 self._handle_admin_network_mode()
                 return
@@ -488,11 +480,6 @@ class ApiRoutesMixin:
                 self._handle_admin_credentials_update(payload)
                 return
 
-            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "integrations" and parts[2] == "overmind" and parts[3] == "config":
-                payload = self._read_json_body()
-                self._handle_admin_overmind_config(payload)
-                return
-
             if len(parts) == 2 and parts[0] == "admin" and parts[1] == "network-mode":
                 payload = self._read_json_body()
                 self._handle_admin_network_mode_update(payload)
@@ -546,24 +533,6 @@ class ApiRoutesMixin:
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "local-network" and parts[2] == "sync-bulk":
                 payload = self._read_json_body()
                 self._handle_admin_local_sync_bulk(payload)
-                return
-
-            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "integrations" and parts[2] == "overmind" and parts[3] == "start":
-                payload = self._read_json_body()
-                self._handle_admin_overmind_start(payload)
-                return
-
-            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "integrations" and parts[2] == "overmind" and parts[3] == "claim-ownership":
-                payload = self._read_json_body()
-                self._handle_admin_overmind_claim_ownership(payload)
-                return
-
-            if len(parts) == 5 and parts[0] == "admin" and parts[1] == "integrations" and parts[2] == "overmind" and parts[3] == "swarm" and parts[4] == "connect":
-                self._handle_admin_overmind_swarm_connect()
-                return
-
-            if len(parts) == 5 and parts[0] == "admin" and parts[1] == "integrations" and parts[2] == "overmind" and parts[3] == "swarm" and parts[4] == "disconnect":
-                self._handle_admin_overmind_swarm_disconnect()
                 return
 
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "api" and parts[2] == "certificate" and parts[3] == "rotate":

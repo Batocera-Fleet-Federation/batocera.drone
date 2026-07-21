@@ -2,43 +2,33 @@
 
 Extracted from ``drone_api.py``. Polls the last-input-activity timestamp (written by
 the privileged input monitor) and, after an idle threshold, sets the volume to the
-configured target (raising or lowering it, whichever the target requires); also
-reports the idle-volume config to Overmind. Config persists in the state DB.
+configured target (raising or lowering it, whichever the target requires). Config
+persists in the state DB.
 """
 
 import os
 import shutil
-import socket
 import subprocess
 import sys
 import time
 from pathlib import Path
 from threading import Thread
 from typing import Any, Optional
-from urllib.parse import quote
 
 try:
     from ..common.settings import Settings
-    from ..common.logging_setup import _overmind_log
-    from ..overmind.overmind_client import _format_overmind_error, _overmind_post_json
-    from ..overmind.overmind_config import _load_overmind_config_for_settings
     from ..storage.state_store import database_path as _state_database_path
     from ..storage.state_store import load_payload as _load_state_payload
     from ..storage.state_store import save_payload as _save_state_payload
-    from ..transfer import local_network as _local_network
     from .device_control import _apply_audio_volume, _get_audio_volume, _kill_running_emulator
-    from ..overmind.overmind_game_logs import find_running_emulatorlauncher as _find_running_emulatorlauncher
+    from .game_activity import find_running_emulatorlauncher as _find_running_emulatorlauncher
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.settings import Settings  # type: ignore
-    from common.logging_setup import _overmind_log  # type: ignore
-    from overmind.overmind_client import _format_overmind_error, _overmind_post_json  # type: ignore
-    from overmind.overmind_config import _load_overmind_config_for_settings  # type: ignore
     from storage.state_store import database_path as _state_database_path  # type: ignore
     from storage.state_store import load_payload as _load_state_payload  # type: ignore
     from storage.state_store import save_payload as _save_state_payload  # type: ignore
-    from transfer import local_network as _local_network  # type: ignore
     from device.device_control import _apply_audio_volume, _get_audio_volume, _kill_running_emulator  # type: ignore
-    from overmind.overmind_game_logs import find_running_emulatorlauncher as _find_running_emulatorlauncher  # type: ignore
+    from device.game_activity import find_running_emulatorlauncher as _find_running_emulatorlauncher  # type: ignore
 
 
 AUTOMATION_STATE_NAMESPACE = "automation_config.json"
@@ -440,45 +430,6 @@ def _start_automation_poller(settings: Settings) -> None:
     thread = Thread(target=loop, name="drone-automation-poller", daemon=True)
     thread.start()
     print(f"Automation poller thread started: poll_seconds={poll_seconds}", file=sys.stdout, flush=True)
-
-
-def _push_automation_config_to_overmind(settings: Settings) -> bool:
-    # _collect_system_info_payload aggregates status from drone_api; lazy-import to avoid a cycle.
-    try:
-        from .system_info import _collect_system_info_payload
-    except ImportError:  # pragma: no cover - flat execution
-        from device.system_info import _collect_system_info_payload  # type: ignore
-    """Best-effort immediate push of the automation config
-    to Overmind.
-
-    Heartbeats only rebuild the full system_info hourly, so a local change made on
-    the Drone would otherwise take up to an hour to appear in Overmind. This sends a
-    heartbeat now carrying a full system_info snapshot (which includes the automation
-    config). A full snapshot — rather than a partial one — avoids clobbering other
-    system_info columns on Overmind's full-state mirror path. Returns True only on a
-    successful post. Never raises.
-    """
-    if settings.use_fake_data or not _local_network.is_overmind_mode(settings):
-        return False
-    try:
-        config = _load_overmind_config_for_settings(settings)
-        base_url = str(config.get("overmind_url") or "").strip().rstrip("/")
-        token = str(config.get("overmind_token") or "").strip() or str(config.get("overmind_auth_token") or "").strip()
-        if not base_url or not token:
-            return False
-        device_id = quote(settings.overmind_device_id, safe="")
-        url = f"{base_url}/api/devices/{device_id}/heartbeat"
-        payload = {
-            "device_id": settings.overmind_device_id,
-            "device_name": str(config.get("drone_name") or "").strip() or socket.gethostname(),
-            "system_info": _collect_system_info_payload(settings),
-        }
-        _overmind_post_json(url, payload, token=token, settings=settings)
-        _overmind_log(f"Automation config pushed to Overmind for {settings.overmind_device_id}")
-        return True
-    except Exception as error:
-        _overmind_log(f"Automation Overmind push failed; heartbeat will reconcile: {_format_overmind_error(error)}")
-        return False
 
 
 # Device-control helpers (ES restart / screen mode / es_systems / theme group 2)

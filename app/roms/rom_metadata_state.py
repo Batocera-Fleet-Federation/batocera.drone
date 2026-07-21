@@ -10,8 +10,8 @@ from datetime import datetime, timezone
 from typing import Optional
 
 try:
-    from ..common.logging_setup import _overmind_log
-    from ..common.runtime_state import _ASSET_PUSH_REQUESTED, _ROM_METADATA_ACTIVE, _ROM_METADATA_LOCK
+    from ..common.logging_setup import _drone_log
+    from ..common.runtime_state import _ROM_METADATA_ACTIVE, _ROM_METADATA_LOCK
     from ..common.settings import Settings
     from ..storage.rom_metadata_store import (
         ROM_METADATA_CACHE_VERSION,
@@ -24,8 +24,8 @@ try:
     from .gamelist import _gamelist_metadata_for_reference
     from .rom_inventory import BIOS_INVENTORY_FINGERPRINT_ALGORITHM, ROM_INVENTORY_FINGERPRINT_ALGORITHM, _bios_inventory_fingerprint, _rom_inventory_fingerprint
 except ImportError:  # pragma: no cover - direct script execution fallback
-    from common.logging_setup import _overmind_log  # type: ignore
-    from common.runtime_state import _ASSET_PUSH_REQUESTED, _ROM_METADATA_ACTIVE, _ROM_METADATA_LOCK  # type: ignore
+    from common.logging_setup import _drone_log  # type: ignore
+    from common.runtime_state import _ROM_METADATA_ACTIVE, _ROM_METADATA_LOCK  # type: ignore
     from common.settings import Settings  # type: ignore
     from storage.rom_metadata_store import (  # type: ignore
         ROM_METADATA_CACHE_VERSION,
@@ -105,10 +105,6 @@ def _build_rom_metadata_snapshot_from_cache(settings: Settings, cache: dict, reh
     }
 
 
-# Inventory chunking helpers (_chunk_rom_metadata_inventory/_delta, _wire_asset_rows,
-# _rom_metadata_inventory_id, _json_payload_size_bytes) now live in roms/rom_inventory.py.
-
-
 def _mark_rom_metadata_upload_clean(
     settings: Settings,
     fingerprint: Optional[str] = None,
@@ -128,9 +124,6 @@ def _mark_rom_metadata_upload_clean(
         state["bios_inventory_fingerprint_algorithm"] = BIOS_INVENTORY_FINGERPRINT_ALGORITHM
     _clear_pending_rom_metadata_changes(settings)
     _update_rom_metadata_cache_state(settings, **state)
-    # The Drone has now told Overmind its current thumbprints; any pending
-    # heartbeat-driven resync request is satisfied.
-    _ASSET_PUSH_REQUESTED.clear()
 
 
 def _rom_metadata_cache_status(settings: Settings) -> dict:
@@ -200,7 +193,7 @@ def _rom_metadata_cache_status(settings: Settings) -> dict:
 
 def _begin_rom_metadata_activity(reason: str) -> bool:
     if not _ROM_METADATA_LOCK.acquire(blocking=False):
-        _overmind_log(f"Asset metadata {reason} skipped: metadata work already running")
+        _drone_log(f"Asset metadata {reason} skipped: metadata work already running")
         return False
     _ROM_METADATA_ACTIVE.set()
     return True

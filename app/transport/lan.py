@@ -1,10 +1,11 @@
 """LAN-direct transport: same-network drones transfer over the local network.
 
-When two drones sit behind the same router they report the **same public IP** to
-Overmind. That is a reliable "same LAN" signal: the drone can then reach the peer
-directly at its ``local_ip`` -- far faster than relaying and with no WAN hop or
-port-forward. This reuses the existing direct mTLS ``/peer/*`` path (the drone
-cert's SANs already include its LAN IPs); only the address differs.
+When two drones sit behind the same router they each self-report the **same
+public IP** (exchanged directly peer-to-peer at pairing/discovery time, not via
+any central service). That is a reliable "same LAN" signal: the drone can then
+reach the peer directly at its ``local_ip`` -- far faster than a legacy WAN hop
+and with no port-forward. This reuses the existing direct mTLS ``/peer/*`` path
+(the drone cert's SANs already include its LAN IPs); only the address differs.
 
 A **tailnet** peer counts as LAN too: when both drones run a mesh-VPN daemon
 (see ``tailnet.py``), the peer's stable Tailnet address is directly reachable
@@ -12,7 +13,7 @@ across NATs and Tailscale keeps same-LAN traffic peer-to-peer. It is preferred
 ahead of hostname and literal-IP fallback routes so a stale LAN address cannot
 delay every request after a peer moves networks.
 
-It is registered ahead of the public-direct and relay tiers. A false positive
+It is registered ahead of the legacy direct-public tier. A false positive
 (e.g. two homes sharing a CGNAT public IP, or a stale tailnet address) simply
 fails the direct attempt and the selector falls back to the next transport.
 """

@@ -1,12 +1,11 @@
 """RomRequestHandler system/automation admin handlers, as a mixin.
 
-Extracted from ``drone_api.py``. Overmind processed-actions view, drone self-update
-trigger, API status, idle-volume automation status/config, and the API certificate view.
-Composed onto ``RomRequestHandler``.
+Extracted from ``drone_api.py``. Drone self-update trigger, API status, idle-volume
+automation status/config, the API certificate view/rotate, and admin credentials
+update. Composed onto ``RomRequestHandler``.
 """
 
 import time
-from threading import Thread
 
 try:
     from .route_config import api_url
@@ -19,7 +18,6 @@ try:
     )
     from ..device.automation import (
         _load_automation_config,
-        _push_automation_config_to_overmind,
         _read_last_input_activity,
         _reset_idle_game_exit_armed_state,
         _reset_idle_volume_armed_state,
@@ -29,7 +27,7 @@ try:
     )
     from ..device.device_control import _get_audio_volume
     from ..device.pixen import run_pixen_upgrade
-    from ..overmind.overmind_game_logs import find_running_emulatorlauncher as _find_running_emulatorlauncher
+    from ..device.game_activity import find_running_emulatorlauncher as _find_running_emulatorlauncher
     from ..transfer.drone_tls import DroneCertificateManager
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.self_update import (  # type: ignore
@@ -41,7 +39,6 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     )
     from device.automation import (  # type: ignore
         _load_automation_config,
-        _push_automation_config_to_overmind,
         _read_last_input_activity,
         _reset_idle_game_exit_armed_state,
         _reset_idle_volume_armed_state,
@@ -51,15 +48,12 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     )
     from device.device_control import _get_audio_volume  # type: ignore
     from device.pixen import run_pixen_upgrade  # type: ignore
-    from overmind.overmind_game_logs import find_running_emulatorlauncher as _find_running_emulatorlauncher  # type: ignore
+    from device.game_activity import find_running_emulatorlauncher as _find_running_emulatorlauncher  # type: ignore
     from transfer.drone_tls import DroneCertificateManager  # type: ignore
     from web.route_config import api_url  # type: ignore
 
 
 class HandlersSystemMixin:
-    def _handle_admin_overmind_actions(self) -> None:
-        self._send_json(200, {"actions": self._load_processed_overmind_actions()})
-
     def _handle_admin_drone_update(self) -> None:
         result = _download_latest_drone_app(self.settings)
         result["restart"] = {
@@ -144,16 +138,6 @@ class HandlersSystemMixin:
         saved = _save_automation_config(self.settings, {"idle_volume": merged})
         # Re-evaluate from scratch against the new settings on the next poll tick.
         _reset_idle_volume_armed_state()
-        # Push the change to Overmind immediately so the per-Drone admin view reflects
-        # it without waiting for the next hourly system_info refresh. Best-effort and
-        # off-thread so the UI save isn't blocked on Overmind latency; the heartbeat
-        # reconciles it regardless.
-        Thread(
-            target=_push_automation_config_to_overmind,
-            args=(self.settings,),
-            name="idle-volume-overmind-push",
-            daemon=True,
-        ).start()
         self._send_json(200, {"idle_volume": saved["idle_volume"]})
 
     def _handle_admin_automation_idle_game_exit(self, payload: dict) -> None:
@@ -163,13 +147,6 @@ class HandlersSystemMixin:
         saved = _save_automation_config(self.settings, {"idle_game_exit": merged})
         # Re-evaluate from scratch against the new settings on the next poll tick.
         _reset_idle_game_exit_armed_state()
-        # Same best-effort immediate Overmind push as idle-volume (see above).
-        Thread(
-            target=_push_automation_config_to_overmind,
-            args=(self.settings,),
-            name="idle-game-exit-overmind-push",
-            daemon=True,
-        ).start()
         self._send_json(200, {"idle_game_exit": saved["idle_game_exit"]})
 
     def _handle_admin_automation_wifi_recovery(self, payload: dict) -> None:
@@ -178,12 +155,6 @@ class HandlersSystemMixin:
         merged = {**config["wifi_recovery"], **payload}
         saved = _save_automation_config(self.settings, {"wifi_recovery": merged})
         _reset_wifi_recovery_check_state()
-        Thread(
-            target=_push_automation_config_to_overmind,
-            args=(self.settings,),
-            name="wifi-recovery-overmind-push",
-            daemon=True,
-        ).start()
         self._send_json(200, {"wifi_recovery": saved["wifi_recovery"]})
 
     def _handle_admin_api_certificate(self) -> None:
@@ -192,3 +163,19 @@ class HandlersSystemMixin:
         if metadata.get("status") != "loaded" or not cert_file.exists():
             raise FileNotFoundError()
         self._stream_file(cert_file, "application/x-pem-file", as_attachment=True)
+
+    def _handle_admin_api_certificate_rotate(self) -> None:
+        manager = DroneCertificateManager(self.settings)
+        try:
+            metadata = manager.regenerate_self_signed_certificate()
+            self._send_json(200, {"status": "rotated", "certificate": metadata})
+        except Exception as error:
+            self._send_json(502, {"status": "failed", "error": str(error), "certificate": manager.metadata()})
+
+    def _handle_admin_credentials_update(self, payload: dict) -> None:
+        username = str(payload.get("username") or "").strip()
+        password = str(payload.get("password") or "")
+        if not getattr(self.auth, "credential_store", None):
+            raise ValueError("credential storage is not available")
+        result = self.auth.credential_store.update(username, password)
+        self._send_json(200, {"credentials": result, "message": "Drone credentials updated."})

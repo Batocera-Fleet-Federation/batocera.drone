@@ -1,7 +1,7 @@
 """RomRequestHandler network + local-network admin handlers, as a mixin.
 
-Extracted from ``drone_api.py``. Overmind status, network-mode get/update, and the
-local-network (LAN P2P) endpoints: status/discover, pairing-code rotate, peer
+Extracted from ``drone_api.py``. Network-mode get/update, and the local-network
+(LAN + tailnet P2P) endpoints: status/discover, pairing-code rotate, peer
 pair/forget/assets, and local sync (single + bulk). Composed onto ``RomRequestHandler``.
 """
 
@@ -17,7 +17,6 @@ from urllib.parse import quote, unquote
 try:
     from ..device.device_control import _ensure_rom_write_access
     from ..device.tailnet_service import tailnet_enroll, tailnet_rotate_auth_key, tailnet_status
-    from ..overmind.overmind_config import build_overmind_status
     from ..roms.gamelist import ARTWORK_FIELDS, _normalize_gamelist_rom_path
     from ..storage.rom_metadata_store import match_rom_cache_page
     from ..transfer import local_network as _local_network
@@ -36,7 +35,6 @@ try:
 except ImportError:  # pragma: no cover - direct script execution fallback
     from device.device_control import _ensure_rom_write_access  # type: ignore
     from device.tailnet_service import tailnet_enroll, tailnet_rotate_auth_key, tailnet_status  # type: ignore
-    from overmind.overmind_config import build_overmind_status  # type: ignore
     from roms.gamelist import ARTWORK_FIELDS, _normalize_gamelist_rom_path  # type: ignore
     from storage.rom_metadata_store import match_rom_cache_page  # type: ignore
     from transfer import local_network as _local_network  # type: ignore
@@ -72,15 +70,6 @@ def _get_download_manager():
 
 
 class HandlersNetworkMixin:
-    def _handle_admin_overmind_status(self) -> None:
-        self._send_json(200, build_overmind_status(self.settings))
-
-    def _require_overmind_mode(self) -> bool:
-        if _local_network.is_overmind_mode(self.settings):
-            return True
-        self._send_json(409, {"error": "Overmind integration is disabled"})
-        return False
-
     def _handle_admin_network_mode(self) -> None:
         mode = _network_mode(self.settings)
         integrations = _local_network.get_integrations(self.settings)
@@ -88,41 +77,34 @@ class HandlersNetworkMixin:
             200,
             {
                 "mode": mode,
-                "overmind_active": integrations["overmind_enabled"],
                 "local_network_active": integrations["local_network_enabled"],
-                "overmind_enabled": integrations["overmind_enabled"],
                 "local_network_enabled": integrations["local_network_enabled"],
-                "modes": [
-                    _local_network.MODE_OVERMIND,
-                    _local_network.MODE_LOCAL_NETWORK,
-                    _local_network.MODE_BOTH,
-                    _local_network.MODE_DISABLED,
-                ],
+                "modes": [_local_network.MODE_LOCAL_NETWORK],
             },
         )
 
     def _handle_admin_network_mode_update(self, payload: dict) -> None:
         current = _local_network.get_integrations(self.settings)
-        if "overmind_enabled" in payload or "local_network_enabled" in payload:
-            result = _local_network.set_integrations(
+        if "local_network_enabled" in payload:
+            _local_network.set_integrations(
                 self.settings,
-                overmind_enabled=bool(payload.get("overmind_enabled", current["overmind_enabled"])),
                 local_network_enabled=bool(payload.get("local_network_enabled", current["local_network_enabled"])),
             )
         else:
-            result = _local_network.set_mode(self.settings, str(payload.get("mode") or ""))
-        if result["local_network_enabled"]:
-            ssl_context = getattr(self.server, "ssl_context", None)
-            if ssl_context is not None:
-                ssl_context.verify_mode = ssl.CERT_OPTIONAL
-                for peer in _local_network.paired_peers(self.settings):
-                    cert_path = Path(str(peer.get("certificate_path") or ""))
-                    if cert_path.exists():
-                        try:
-                            ssl_context.load_verify_locations(cafile=str(cert_path))
-                        except ssl.SSLError:
-                            continue
-            _local_network.announce(self.settings, str(DroneCertificateManager(self.settings).metadata().get("fingerprint") or ""))
+            _local_network.set_mode(self.settings, str(payload.get("mode") or ""))
+        # Local networking is always on, so this always applies (raises above,
+        # before reaching here, if the request tried to disable it).
+        ssl_context = getattr(self.server, "ssl_context", None)
+        if ssl_context is not None:
+            ssl_context.verify_mode = ssl.CERT_OPTIONAL
+            for peer in _local_network.paired_peers(self.settings):
+                cert_path = Path(str(peer.get("certificate_path") or ""))
+                if cert_path.exists():
+                    try:
+                        ssl_context.load_verify_locations(cafile=str(cert_path))
+                    except ssl.SSLError:
+                        continue
+        _local_network.announce(self.settings, str(DroneCertificateManager(self.settings).metadata().get("fingerprint") or ""))
         self._handle_admin_network_mode()
 
     def _activate_local_peer_certificate(self, peer: dict) -> None:
@@ -178,7 +160,7 @@ class HandlersNetworkMixin:
         if info is None:
             return {**row, "tailnet_probe_error": probe_error}
         peer_id = str(info.get("drone_id") or "").strip()
-        if not peer_id or peer_id == str(self.settings.overmind_device_id):
+        if not peer_id or peer_id == str(self.settings.device_id):
             return None
         tailnet_peer = {
             **info,
@@ -385,7 +367,7 @@ class HandlersNetworkMixin:
         if not peer_id:
             self._send_json(502, {"error": "peer did not report a drone id"})
             return
-        if peer_id == self.settings.overmind_device_id:
+        if peer_id == self.settings.device_id:
             self._send_json(409, {"error": "that address answered as this Drone itself"})
             return
         peer = {
@@ -534,7 +516,7 @@ class HandlersNetworkMixin:
         self_summary = self._collect_peer_inventory("summary", {})
         drones = [
             {
-                "drone_id": str(self.settings.overmind_device_id),
+                "drone_id": str(self.settings.device_id),
                 "name": str(self_summary.get("name") or own.get("name") or ""),
                 "hostname": str(own.get("hostname") or ""),
                 "is_self": True,

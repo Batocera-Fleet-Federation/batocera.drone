@@ -4,12 +4,11 @@ the route-ownership routing, and the safe-by-default (flag off) behaviour.
 
 import os
 import unittest
-from types import SimpleNamespace
 from unittest import mock
 
 from fastapi.testclient import TestClient
 
-from app.web import api_app, api_bridge
+from app.web import api_bridge
 from app.web.api_app import OWNED_EXACT, OWNED_PREFIXES, app
 from app.web.route_config import API_PREFIX, api_url
 
@@ -45,48 +44,18 @@ class ApiAppTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 307)
         self.assertEqual(resp.headers["location"], api_url("/docs"))
 
-    def test_overmind_status_route_serves_service_payload(self):
-        payload = {
-            "overmind_url": "https://overmind.example",
-            "machine_id": "drone-xyz",
-            "status": {"integration_state": "polling", "integration_enabled": True},
-            "swarm": [],
-            "overmind_active": True,
-        }
-        self.addCleanup(api_app.set_settings, None)
-        api_app.set_settings(SimpleNamespace(admin_enabled=True))
-        with mock.patch("app.drone_api.build_overmind_status", return_value=payload):
-            body = self.client.get(api_url("/admin/integrations/overmind/status")).json()
-        self.assertEqual(body["machine_id"], "drone-xyz")
-        self.assertEqual(body["status"]["integration_state"], "polling")
-
-    def test_overmind_status_respects_admin_disabled(self):
-        self.addCleanup(api_app.set_settings, None)
-        api_app.set_settings(SimpleNamespace(admin_enabled=False))
-        resp = self.client.get(api_url("/admin/integrations/overmind/status"))
-        self.assertEqual(resp.status_code, 403)
-        self.assertEqual(resp.json(), {"error": "admin disabled"})
-
-    def test_openapi_documents_overmind_status(self):
-        spec = self.client.get(api_url("/openapi.json")).json()
-        op = spec["paths"][api_url("/admin/integrations/overmind/status")]["get"]
-        ref = op["responses"]["200"]["content"]["application/json"]["schema"]["$ref"]
-        self.assertEqual(ref.rsplit("/", 1)[-1], "OvermindStatusResponse")
-
-
 class BridgeRoutingTest(unittest.TestCase):
     def _bridge(self):
         return api_bridge._Bridge(port=0, owned_exact=set(OWNED_EXACT), owned_prefixes=OWNED_PREFIXES)
 
     def test_owns_migrated_paths(self):
         bridge = self._bridge()
-        for path in ("/openapi.json", "/api-info", "/swagger", "/docs", "/docs/oauth2-redirect",
-                     "/admin/integrations/overmind/status"):
+        for path in ("/openapi.json", "/api-info", "/swagger", "/docs", "/docs/oauth2-redirect"):
             self.assertTrue(bridge.owns(path), path)
 
     def test_does_not_own_legacy_or_peer_paths(self):
         bridge = self._bridge()
-        for path in ("/systems", "/admin/overmind/status", "/peer/health", "/peer/roms/x/y"):
+        for path in ("/systems", "/admin/legacy/example", "/peer/health", "/peer/roms/x/y"):
             self.assertFalse(bridge.owns(path), path)
 
     def test_bridge_is_inactive_by_default(self):

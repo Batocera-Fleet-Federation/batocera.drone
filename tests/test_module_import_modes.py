@@ -28,9 +28,8 @@ APP_DIR = Path(__file__).resolve().parents[1] / "app"
 PUBLIC_SURFACE = (
     "main", "create_server", "RomRepository", "RomRequestHandler",
     "Settings", "ARTWORK_FIELDS", "ARTWORK_DUPLICATE_FILTER",
-    "_collect_system_info_payload", "_collect_rom_metadata", "_resolve_tls_material",
-    "_start_overmind_action_poller", "DownloadManager", "_download_rom_from_peer",
-    "_execute_overmind_action", "_sync_rom_metadata_to_overmind",
+    "_collect_system_info_payload", "_resolve_tls_material",
+    "DownloadManager", "_download_rom_from_peer",
     "_poll_rom_metadata_cache", "_hash_rom_metadata_batches", "DroneCertificateManager",
 )
 
@@ -86,16 +85,10 @@ class ModuleImportModeTests(unittest.TestCase):
         """
         runtime_state = importlib.import_module("app.common.runtime_state")
         drone_api = importlib.import_module("app.drone_api")
-        heartbeat_sync = importlib.import_module("app.overmind.heartbeat_sync")
-        rom_metadata_state = importlib.import_module("app.roms.rom_metadata_state")
-        for attr in ("_ROM_METADATA_ACTIVE", "_ROM_METADATA_WAKE", "_ASSET_PUSH_REQUESTED",
-                     "_SAVES_PUSH_REQUESTED", "_ROM_METADATA_LOCK", "_GAMELIST_WRITE_LOCK"):
+        for attr in ("_ROM_METADATA_ACTIVE", "_ROM_METADATA_WAKE",
+                     "_ROM_METADATA_LOCK", "_GAMELIST_WRITE_LOCK"):
             canonical = getattr(runtime_state, attr)
             self.assertIs(getattr(drone_api, attr), canonical, f"drone_api.{attr} is a copy")
-        # consumers reference the same push-request Events they set
-        self.assertIs(heartbeat_sync._ASSET_PUSH_REQUESTED, runtime_state._ASSET_PUSH_REQUESTED)
-        self.assertIs(heartbeat_sync._SAVES_PUSH_REQUESTED, runtime_state._SAVES_PUSH_REQUESTED)
-        self.assertIs(rom_metadata_state._ASSET_PUSH_REQUESTED, runtime_state._ASSET_PUSH_REQUESTED)
 
     def test_key_reexports_are_identity_not_redefinitions(self):
         """drone_api must *re-export* moved symbols (same object), not redefine them.
@@ -107,15 +100,11 @@ class ModuleImportModeTests(unittest.TestCase):
         drone_api = importlib.import_module("app.drone_api")
         homes = {
             "_collect_system_info_payload": "app.device.system_info",
-            "_start_overmind_action_poller": "app.overmind.action_poller",
-            "_execute_overmind_action": "app.overmind.actions",
-            "_sync_rom_metadata_to_overmind": "app.overmind.rom_sync",
             "_poll_rom_metadata_cache": "app.roms.rom_scanner",
             "_download_rom_from_peer": "app.transfer.peer_download",
             "DownloadManager": "app.transfer.download_manager",
             "DroneCertificateManager": "app.transfer.drone_tls",
             "ARTWORK_FIELDS": "app.roms.gamelist",
-            "_collect_rom_metadata": "app.roms.rom_collect",
             "_resolve_tls_material": "app.web.server_tls",
         }
         mismatched = []
@@ -134,7 +123,7 @@ class ModuleImportModeTests(unittest.TestCase):
         }
         handler_mixins = {
             "HandlersPeerMixin", "HandlersContentMixin", "HandlersArtworkMixin",
-            "HandlersNetworkMixin", "HandlersOvermindMixin", "HandlersConfigMixin",
+            "HandlersNetworkMixin", "HandlersConfigMixin",
             "HandlersDiagnosticsMixin", "HandlersDownloadsMixin", "HandlersSystemMixin",
         }
         repo_mro = {c.__name__ for c in drone_api.RomRepository.__mro__}
