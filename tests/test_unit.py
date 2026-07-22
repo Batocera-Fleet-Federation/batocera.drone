@@ -3686,6 +3686,37 @@ class RepositoryTests(unittest.TestCase):
             self.assertIn("marquee", chrono["missing"])
             self.assertEqual(chrono["rom_name"], "Chrono Trigger (USA).zip")
 
+    def test_resolve_artwork_file_resolves_video_reference(self) -> None:
+        # Video files land in either images/ or videos/ depending on how they
+        # arrived (manual upload vs. P2P peer sync -- see
+        # test_artwork_video_lands_in_videos_subdir); resolve_artwork_file must
+        # follow the actual gamelist reference rather than assuming a folder.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            seed_mock_userdata(root)
+            system_dir = root / "roms" / "snes"
+            video_path = system_dir / "videos" / "Chrono Trigger (USA)-video.mp4"
+            video_path.parent.mkdir(parents=True, exist_ok=True)
+            video_path.write_bytes(b"FAKE-MP4")
+            (system_dir / "gamelist.xml").write_text(
+                "<gameList><game><path>./Chrono Trigger (USA).zip</path><name>Chrono Trigger</name>"
+                "<video>./videos/Chrono Trigger (USA)-video.mp4</video></game></gameList>\n",
+                encoding="utf-8",
+            )
+            repo = RomRepository(root / "roms", root / "bios")
+            target, relative_path, artwork_ref = repo.resolve_artwork_file("snes", "Chrono Trigger (USA).zip", "video")
+            self.assertEqual(target, video_path.resolve())
+            self.assertEqual(relative_path, "videos/Chrono Trigger (USA)-video.mp4")
+            self.assertEqual(artwork_ref, "videos/Chrono Trigger (USA)-video.mp4")
+
+    def test_resolve_artwork_file_raises_when_no_video_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            seed_mock_userdata(root)
+            repo = RomRepository(root / "roms", root / "bios")
+            with self.assertRaises(FileNotFoundError):
+                repo.resolve_artwork_file("snes", "Chrono Trigger (USA).zip", "video")
+
     def test_apply_launchbox_artwork_only_missing_fields(self) -> None:
         class FakeLaunchBoxClient:
             def details(self, game_key: str) -> dict:
@@ -6012,3 +6043,91 @@ class NavRestructureTests(unittest.TestCase):
         refresh_start = self.js.index("async function refreshDownloadsView()")
         refresh_end = self.js.index("\nasync function ", refresh_start + 1)
         self.assertIn('window.location.hash === "#admin/transfers"', self.js[refresh_start:refresh_end])
+
+
+class RomMediaVideoAndMetadataTests(unittest.TestCase):
+    """The ROM details page (#system/{system}/rom/{id}) grew a full gamelist
+    metadata CRUD form and a video player wired to the gamelist <video>
+    reference, shared with the Artwork admin page's upload widgets."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        root = Path(__file__).resolve().parents[1]
+        cls.js = root.joinpath("app/web/static/js/drone.js").read_text(encoding="utf-8")
+
+    def test_render_rom_media_page_includes_video_player_and_metadata_form(self) -> None:
+        fn_start = self.js.index("async function renderRomMediaPage(")
+        fn_end = self.js.index("\nfunction renderThemeGallery(")
+        body = self.js[fn_start:fn_end]
+        self.assertIn('id="romMediaVideoPlayer"', body)
+        self.assertIn("romVideoUrl(rom)", body)
+        self.assertIn("romMetadataEditFormHtml(rom)", body)
+        self.assertIn('document.getElementById("romMediaVideoBody")', body)
+
+    def test_video_upload_row_accepts_video_files_and_resolves_a_video_url(self) -> None:
+        fn_start = self.js.index("function artworkImageUploadHtml(")
+        fn_end = self.js.index("\nfunction artworkExistingImageUrl(")
+        body = self.js[fn_start:fn_end]
+        self.assertIn('isVideo ? "video/*" : "image/*"', body)
+        self.assertIn("artworkExistingAssetUrl(rom, field, existingValue)", body)
+        self.assertIn('data-is-video="${isVideo ? "1" : "0"}"', body)
+
+    def test_existing_video_url_uses_the_public_video_route_not_the_image_route(self) -> None:
+        fn_start = self.js.index("function artworkExistingVideoUrl(")
+        fn_end = self.js.index("\nfunction artworkExistingAssetUrl(")
+        body = self.js[fn_start:fn_end]
+        self.assertIn("/public/systems/", body)
+        self.assertIn("/video/", body)
+
+    def test_view_button_opens_video_lightbox_for_video_field(self) -> None:
+        fn_start = self.js.index("function bindArtworkEditButtons(")
+        fn_end = self.js.index("\nasync function uploadArtworkImage(")
+        body = self.js[fn_start:fn_end]
+        self.assertIn('data-is-video") === "1"', body)
+        self.assertIn("showVideoLightbox(url, title)", body)
+
+    def test_video_lightbox_stops_playback_on_close(self) -> None:
+        fn_start = self.js.index("function showVideoLightbox(")
+        fn_end = self.js.index("\nfunction appendCacheBust(")
+        body = self.js[fn_start:fn_end]
+        self.assertIn("video.pause();", body)
+
+    def test_upload_refresh_is_page_aware_instead_of_assuming_artwork_admin_page(self) -> None:
+        # uploadArtworkImage is shared by the Artwork admin page and the ROM
+        # Details page; unconditionally calling the admin page's own
+        # selectArtworkRom() used to crash with a null #selectedArtworkRom
+        # lookup whenever an upload happened from the ROM Details page.
+        fn_start = self.js.index("async function uploadArtworkImage(")
+        fn_end = self.js.index("\nfunction openMarqueeCropper(")
+        body = self.js[fn_start:fn_end]
+        self.assertIn('document.getElementById("selectedArtworkRom")', body)
+        self.assertIn("renderRomMediaPage(rom.system, rom.unique_id)", body)
+
+    def test_save_rom_media_metadata_posts_gamelist_update(self) -> None:
+        fn_start = self.js.index("async function saveRomMediaMetadata(")
+        fn_end = self.js.index("\nasync function removeRomMediaGamelistEntry(")
+        body = self.js[fn_start:fn_end]
+        self.assertIn('apiPost("/admin/artwork/gamelist/update"', body)
+
+    def test_remove_rom_media_gamelist_entry_confirms_before_posting(self) -> None:
+        fn_start = self.js.index("async function removeRomMediaGamelistEntry(")
+        fn_end = self.js.index("\nfunction artworkPayloadUrl(")
+        body = self.js[fn_start:fn_end]
+        self.assertIn("window.confirm(", body)
+        self.assertIn('apiPost("/admin/artwork/gamelist/remove"', body)
+
+    def test_metadata_form_excludes_artwork_and_video_fields(self) -> None:
+        fn_start = self.js.index("function romMetadataEditFormHtml(")
+        fn_end = self.js.index("\nasync function saveRomMediaMetadata(")
+        body = self.js[fn_start:fn_end]
+        self.assertIn("ROM_MEDIA_ARTWORK_FIELDS", body)
+
+
+class GuessContentTypeVideoTests(unittest.TestCase):
+    def test_guess_content_type_recognizes_common_video_containers(self) -> None:
+        handler = object.__new__(drone_api.RomRequestHandler)
+        self.assertEqual(handler._guess_content_type(Path("clip.mp4")), "video/mp4")
+        self.assertEqual(handler._guess_content_type(Path("clip.webm")), "video/webm")
+        self.assertEqual(handler._guess_content_type(Path("clip.mkv")), "video/x-matroska")
+        self.assertEqual(handler._guess_content_type(Path("clip.mov")), "video/quicktime")
+        self.assertEqual(handler._guess_content_type(Path("clip.avi")), "video/x-msvideo")

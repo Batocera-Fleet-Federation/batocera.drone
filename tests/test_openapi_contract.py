@@ -95,6 +95,7 @@ class DroneOpenApiContractTest(unittest.TestCase):
             "/systems/{system}/images",
             "/systems/{system}/images/{image_ref}",
             "/public/systems/{system}/images/{image_file}",
+            "/public/systems/{system}/video/{rom_path}",
             "/systems/{system}/videos",
             "/systems/{system}/videos/{unique_id}",
             "/bios",

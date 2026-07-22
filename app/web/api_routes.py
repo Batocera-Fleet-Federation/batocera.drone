@@ -49,6 +49,13 @@ class ApiRoutesMixin:
                 self._handle_public_image(parts[2], parts[4])
                 return
 
+            if len(public_parts) >= 5 and public_parts[0] == "public" and public_parts[1] == "systems" and public_parts[3] == "video":
+                self._handle_public_video(public_parts[2], "/".join(public_parts[4:]))
+                return
+            if len(parts) >= 5 and parts[0] == "public" and parts[1] == "systems" and parts[3] == "video":
+                self._handle_public_video(parts[2], "/".join(parts[4:]))
+                return
+
             if len(parts) == 2 and parts[0] == "peer" and parts[1] == "info":
                 self._handle_peer_info()
                 return

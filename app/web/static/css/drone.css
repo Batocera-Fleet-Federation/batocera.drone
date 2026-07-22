@@ -1117,7 +1117,8 @@
       justify-content: center;
       cursor: pointer;
     }
-    .image-lightbox-overlay img {
+    .image-lightbox-overlay img,
+    .image-lightbox-overlay .lightbox-video {
       max-width: 90vw;
       max-height: 90vh;
       object-fit: contain;
@@ -1316,6 +1317,15 @@
       background: #050814;
       border: 1px solid var(--admin-border);
       border-radius: 0.45rem;
+    }
+    .rom-media-video {
+      width: 100%;
+      max-height: 480px;
+      aspect-ratio: 16 / 9;
+      background: #050814;
+      border: 1px solid var(--admin-border);
+      border-radius: 0.45rem;
+      display: block;
     }
     .rom-media-grid {
       display: grid;

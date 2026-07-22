@@ -606,6 +606,23 @@ class HandlersArtworkMixin:
 
         raise FileNotFoundError()
 
+    def _handle_public_video(self, system: str, rom_path: str) -> None:
+        """Serve the ``<video>`` gamelist.xml reference for one specific ROM.
+
+        Unlike ``_handle_public_image`` (which guesses a filename inside the
+        system's ``images/`` folder), video files land in ``images/`` (manual
+        upload) or ``videos/`` (P2P peer sync) depending on how they arrived --
+        see ``test_artwork_video_lands_in_videos_subdir``. Resolving by the
+        actual gamelist ``<video>`` reference via ``resolve_artwork_file``
+        sidesteps that split instead of guessing both folders. Streamed via
+        ``_stream_file`` (not ``_stream_cached_image``): videos are large
+        enough that reading the whole file into the in-process image cache on
+        every request would be wasteful on this device's limited memory.
+        """
+        system = valid_segment(unquote(system))
+        target, _relative_path, _artwork_ref = self.repository.resolve_artwork_file(system, unquote(rom_path or ""), "video")
+        self._stream_file(target, self._guess_content_type(target))
+
     def _handle_download(self, system: str, asset_type: str, unique_id: str) -> None:
         if not self.settings.downloads_enabled:
             raise ValueError("downloads are disabled")

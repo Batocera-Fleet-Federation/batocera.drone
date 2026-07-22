@@ -1238,6 +1238,14 @@ class RomRequestHandler(HandlersSystemMixin, HandlersDownloadsMixin, HandlersDia
             return "font/otf"
         if suffix == ".mp4":
             return "video/mp4"
+        if suffix == ".webm":
+            return "video/webm"
+        if suffix == ".mkv":
+            return "video/x-matroska"
+        if suffix in (".mov", ".qt"):
+            return "video/quicktime"
+        if suffix == ".avi":
+            return "video/x-msvideo"
         return "application/octet-stream"
 
     def _send_unauthorized(self) -> None:

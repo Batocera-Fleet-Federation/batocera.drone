@@ -310,6 +310,28 @@ function showImageLightbox(url, title = "") {
   document.addEventListener("keydown", function escHandler(ev) { if (ev.key === "Escape") { overlay.remove(); document.removeEventListener("keydown", escHandler); } });
   document.body.appendChild(overlay);
 }
+function showVideoLightbox(url, title = "") {
+  const videoUrl = appendCacheBust(url);
+  const overlay = document.createElement("div");
+  overlay.className = "image-lightbox-overlay";
+  overlay.innerHTML = `<button class="image-lightbox-close">&times;</button><video src="${escapeHtml(videoUrl)}" class="lightbox-video" controls autoplay aria-label="${escapeHtml(title)}"></video>`;
+  const video = overlay.querySelector("video");
+  video.addEventListener("error", () => {
+    video.replaceWith(Object.assign(document.createElement("div"), { className: "text-light p-4", textContent: "Video could not be loaded" }));
+  });
+  const close = () => {
+    video.pause();
+    video.removeAttribute("src");
+    video.load();
+    overlay.remove();
+    document.removeEventListener("keydown", escHandler);
+  };
+  function escHandler(ev) { if (ev.key === "Escape") close(); }
+  overlay.querySelector(".image-lightbox-close").addEventListener("click", close);
+  overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+  document.addEventListener("keydown", escHandler);
+  document.body.appendChild(overlay);
+}
 function appendCacheBust(url) {
   const value = String(url || "");
   if (!value || value.startsWith("data:")) return value;
@@ -1527,6 +1549,7 @@ async function renderRomMediaPage(system, uniqueId, page = 1) {
     rom.system = system;
     const media = romMediaItems(system, rom);
     const primary = media.find((item) => item.field === "image") || media[0];
+    const videoUrl = romVideoUrl(rom);
     titleNode.textContent = rom.title || rom.name || "ROM Media";
     subtitleNode.textContent = `${system} artwork and gamelist.xml metadata`;
     content.innerHTML = `
@@ -1560,6 +1583,15 @@ async function renderRomMediaPage(system, uniqueId, page = 1) {
           </div>
         </div>
       </div>
+      <div class="card log-card mb-3">
+        <div class="card-header">Preview Video</div>
+        <div class="card-body" id="romMediaVideoBody">
+          ${videoUrl
+            ? `<video class="rom-media-video" id="romMediaVideoPlayer" src="${escapeHtml(videoUrl)}" controls preload="metadata"></video>`
+            : `<div class="text-muted">No preview video set for this ROM. Add one below under Metadata &amp; Artwork Tools → Manual Upload.</div>`
+          }
+        </div>
+      </div>
       <div class="mb-3">
         <h3 class="h5 mb-2">Gamelist Artwork</h3>
         <div class="rom-media-grid">
@@ -1580,11 +1612,15 @@ async function renderRomMediaPage(system, uniqueId, page = 1) {
         </div>
       </div>
       <div class="card log-card mb-3">
-        <div class="card-header">Artwork Tools</div>
+        <div class="card-header">Metadata &amp; Artwork Tools</div>
         <div class="card-body">
+          <div class="mb-3">
+            <div class="fw-semibold mb-2">Metadata</div>
+            ${romMetadataEditFormHtml(rom)}
+          </div>
           <div class="mb-3">${artworkExternalLinksHtml(rom)}</div>
           <div class="mb-3">
-            <div class="fw-semibold mb-2">Manual Upload</div>
+            <div class="fw-semibold mb-2">Manual Upload (images &amp; video)</div>
             ${artworkEditableImageFields(rom)}
           </div>
           <div>
@@ -1597,6 +1633,13 @@ async function renderRomMediaPage(system, uniqueId, page = 1) {
     window.missingArtworkRoms = [rom];
     window.selectedArtworkRomIndex = 0;
     bindArtworkEditButtons(rom, 0);
+    const videoPlayer = document.getElementById("romMediaVideoPlayer");
+    if (videoPlayer) {
+      videoPlayer.addEventListener("error", () => {
+        const body = document.getElementById("romMediaVideoBody");
+        if (body) body.innerHTML = `<div class="text-muted">Video could not be loaded.</div>`;
+      });
+    }
     api(`/systems/${encodeURIComponent(system)}/roms/${encodeURIComponent(rom.unique_id)}/fingerprint`)
       .then((data) => {
         const node = document.getElementById("romFingerprint");
@@ -2682,6 +2725,65 @@ function artworkGamelistEditFormHtml(rom) {
     </form>
   `;
 }
+// Metadata-only field names (GAMELIST_EDIT_FIELDS minus the artwork/video fields,
+// which get their own upload widgets in artworkEditableImageFields instead).
+const ROM_MEDIA_ARTWORK_FIELDS = new Set(["image", "thumbnail", "marquee", "fanart", "boxart", "video"]);
+function romMetadataEditFormHtml(rom) {
+  const details = rom && rom.gamelist ? rom.gamelist : {};
+  const knownMetadataFields = GAMELIST_EDIT_FIELDS.filter((field) => !ROM_MEDIA_ARTWORK_FIELDS.has(field));
+  const editableFields = Array.from(new Set(
+    knownMetadataFields.concat(Object.keys(details).filter((key) => key !== "path" && !ROM_MEDIA_ARTWORK_FIELDS.has(key)))
+  ));
+  const removeBtn = rom.has_gamelist_entry
+    ? `<button class="btn btn-sm btn-outline-danger" type="button" onclick="removeRomMediaGamelistEntry()"><i class="bi bi-trash me-1"></i>Remove gamelist entry</button>`
+    : "";
+  return `
+    <form id="romMediaGamelistForm" class="compact-edit">
+      <div class="gamelist-edit-grid">
+        ${editableFields.map((field) => artworkGamelistFieldControl(field, details[field])).join("")}
+      </div>
+      <div class="d-flex gap-2 mt-2">
+        <button class="btn btn-sm btn-primary" type="button" onclick="saveRomMediaMetadata()">Save Metadata</button>
+        ${removeBtn}
+      </div>
+    </form>
+  `;
+}
+async function saveRomMediaMetadata() {
+  const rom = (window.missingArtworkRoms || [])[0];
+  if (!rom) return;
+  const fields = {};
+  document.querySelectorAll("#romMediaGamelistForm .gamelist-edit-field").forEach((node) => {
+    const field = node.getAttribute("data-gamelist-field");
+    if (field) fields[field] = node.value || "";
+  });
+  setLoading(true, "Saving metadata...");
+  try {
+    await apiPost("/admin/artwork/gamelist/update", { system: rom.system, rom_path: rom.rom_path, fields });
+    showToast(`Saved metadata for ${escapeHtml(rom.title || rom.name || "ROM")}.`, "success");
+    await renderRomMediaPage(rom.system, rom.unique_id);
+  } catch (err) {
+    showToast(`Metadata update failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  } finally {
+    setLoading(false);
+  }
+}
+async function removeRomMediaGamelistEntry() {
+  const rom = (window.missingArtworkRoms || [])[0];
+  if (!rom) return;
+  const label = rom.title || rom.name || rom.rom_path || "this ROM";
+  if (!window.confirm(`Remove "${label}" from gamelist.xml? The ROM file itself will not be deleted, but all of its metadata and artwork references (including any video) will be cleared.`)) return;
+  setLoading(true, "Removing gamelist entry...");
+  try {
+    await apiPost("/admin/artwork/gamelist/remove", { system: rom.system, rom_path: rom.rom_path });
+    showToast(`Removed ${escapeHtml(label)} from gamelist.xml.`, "success");
+    await renderRomMediaPage(rom.system, rom.unique_id);
+  } catch (err) {
+    showToast(`Remove failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  } finally {
+    setLoading(false);
+  }
+}
 function artworkPayloadUrl(forceRefresh = false) {
   const fieldsParam = encodeURIComponent((artworkSelectedFields || []).join(","));
   const systemsParam = encodeURIComponent((artworkSelectedSystems || []).join(","));
@@ -2965,16 +3067,17 @@ const LAUNCHBOX_METADATA_FIELDS = [
   "platform", "esrb", "overview", "playmode", "regional", "favorites"
 ];
 function artworkImageUploadHtml(rom, field) {
+  const isVideo = field === "video";
   const existingValue = rom.existing && rom.existing[field] ? rom.existing[field] : null;
-  const existingUrl = artworkExistingImageUrl(rom, existingValue);
+  const existingUrl = artworkExistingAssetUrl(rom, field, existingValue);
   const existingDisplay = existingValue ? `<span class="text-muted small artwork-upload-status">has ${escapeHtml(field)}</span>` : `<span class="text-muted small artwork-upload-status">no ${escapeHtml(field)}</span>`;
   const viewBtn = existingUrl
-    ? `<button class="btn btn-sm btn-outline-secondary btn-icon artwork-view-btn" type="button" data-image-url="${escapeHtml(existingUrl)}" data-image-title="${escapeHtml(field)}" title="View existing ${escapeHtml(field)}"><i class="bi bi-eye"></i></button>`
+    ? `<button class="btn btn-sm btn-outline-secondary btn-icon artwork-view-btn" type="button" data-image-url="${escapeHtml(existingUrl)}" data-image-title="${escapeHtml(field)}" data-is-video="${isVideo ? "1" : "0"}" title="View existing ${escapeHtml(field)}"><i class="bi bi-eye"></i></button>`
     : `<button class="btn btn-sm btn-outline-secondary btn-icon" type="button" disabled title="No ${escapeHtml(field)} to view"><i class="bi bi-eye-slash"></i></button>`;
   return `
     <div class="artwork-upload-item">
       <span class="artwork-upload-label" title="${escapeHtml(field)}">${escapeHtml(field)}</span>
-      <input type="file" class="form-control form-control-sm artwork-upload-file" accept="image/*" data-field="${escapeHtml(field)}">
+      <input type="file" class="form-control form-control-sm artwork-upload-file" accept="${isVideo ? "video/*" : "image/*"}" data-field="${escapeHtml(field)}">
       <button class="btn btn-sm btn-primary btn-icon artwork-upload-btn" type="button" data-field="${escapeHtml(field)}" title="Upload"><i class="bi bi-upload"></i></button>
       ${viewBtn}
       ${existingDisplay}
@@ -2993,6 +3096,23 @@ function artworkExistingImageUrl(rom, value) {
     : normalized.split("/").pop();
   if (!imageFile) return raw;
   return `${API_BASE}/public/systems/${encodeURIComponent(rom.system || "")}/images/${encodeURIComponent(imageFile)}`;
+}
+// Unlike images (looked up by guessed filename -- see artworkExistingImageUrl),
+// video files land in either images/ or videos/ depending on how they arrived
+// (manual upload vs. P2P peer sync), so the backend resolves the real gamelist
+// <video> reference by rom_path instead of a guessed filename.
+function artworkExistingVideoUrl(rom, value) {
+  if (!String(value || "").trim()) return "";
+  const system = rom.system || "";
+  const romPath = rom.rom_path || "";
+  if (!system || !romPath) return "";
+  return `${API_BASE}/public/systems/${encodeURIComponent(system)}/video/${encodeURIComponent(romPath)}`;
+}
+function artworkExistingAssetUrl(rom, field, value) {
+  return field === "video" ? artworkExistingVideoUrl(rom, value) : artworkExistingImageUrl(rom, value);
+}
+function romVideoUrl(rom) {
+  return artworkExistingVideoUrl(rom, rom && rom.existing && rom.existing.video);
 }
 function artworkEditableImageFields(rom) {
   const fieldSet = new Set(rom.missing || []);
@@ -3077,7 +3197,13 @@ function bindArtworkEditButtons(rom, index) {
   });
   document.querySelectorAll(".artwork-view-btn").forEach((button) => {
     button.addEventListener("click", () => {
-      showImageLightbox(button.getAttribute("data-image-url") || "", button.getAttribute("data-image-title") || "");
+      const url = button.getAttribute("data-image-url") || "";
+      const title = button.getAttribute("data-image-title") || "";
+      if (button.getAttribute("data-is-video") === "1") {
+        showVideoLightbox(url, title);
+      } else {
+        showImageLightbox(url, title);
+      }
     });
   });
   document.querySelectorAll(".marquee-crop-source-btn").forEach((button) => {
@@ -3089,7 +3215,7 @@ function bindArtworkEditButtons(rom, index) {
 async function uploadArtworkImage(rom, field, btnEl) {
   const fileInput = btnEl.closest(".artwork-upload-item").querySelector(".artwork-upload-file");
   const file = fileInput && fileInput.files[0];
-  if (!file) { showToast("Please select an image file first.", "warning"); return; }
+  if (!file) { showToast(`Please select a ${field === "video" ? "video" : "image"} file first.`, "warning"); return; }
   const system = rom.system || "";
   btnEl.disabled = true;
   btnEl.innerHTML = `<span class="spinner-border spinner-border-sm"></span>`;
@@ -3122,8 +3248,13 @@ async function uploadArtworkImage(rom, field, btnEl) {
     if (result.has_gamelist_entry !== undefined) rom.has_gamelist_entry = !!result.has_gamelist_entry;
     refreshArtworkTableRows();
     showToast(`Uploaded ${escapeHtml(field)} for ${escapeHtml(result.rom_name || "ROM")}.`, "success");
-    // Refresh the selected rom view
-    await selectArtworkRom(window.selectedArtworkRomIndex, "edit");
+    // This same upload flow is shared by the Artwork admin page and the ROM
+    // Details page -- refresh whichever one is actually showing this rom.
+    if (document.getElementById("selectedArtworkRom")) {
+      await selectArtworkRom(window.selectedArtworkRomIndex, "edit");
+    } else if (rom.system && rom.unique_id) {
+      await renderRomMediaPage(rom.system, rom.unique_id);
+    }
   } catch (err) {
     showToast(`Upload failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
   } finally {

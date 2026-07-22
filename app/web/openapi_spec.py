@@ -1095,6 +1095,18 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
                     error_codes=("400", "404", "429", "500"),
                 )
             },
+            "/public/systems/{system}/video/{rom_path}": {
+                "get": _operation(
+                    "Public per-ROM gamelist video endpoint",
+                    {
+                        "200": _media_response("Video bytes", ["video/mp4", "video/webm", "video/x-matroska", "video/quicktime", "video/x-msvideo"]),
+                    },
+                    parameters=[_path_param("system"), _path_param("rom_path", "ROM path used to resolve this game's gamelist <video> entry. URL-encode slash-separated paths.")],
+                    tags=["public"],
+                    security=[],
+                    error_codes=("400", "404", "429", "500"),
+                )
+            },
             "/systems/{system}/videos": {
                 "get": _operation("List videos for a system", {"200": _json_response("VideoListResponse", "Video list")}, parameters=[_path_param("system")], tags=["library"])
             },

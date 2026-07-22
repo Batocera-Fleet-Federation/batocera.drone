@@ -5,6 +5,7 @@ import tempfile
 import threading
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from unittest import mock
@@ -520,6 +521,36 @@ class MockServerIntegrationTests(unittest.TestCase):
         text = (self._root / "roms" / "snes" / "gamelist.xml").read_text(encoding="utf-8")
         self.assertIn("Chrono Trigger Admin Edit", text)
         self.assertIn("Updated from artwork admin.", text)
+
+    def test_public_video_endpoint_serves_the_gamelist_video_reference(self) -> None:
+        # Video files land in either images/ or videos/ depending on how they
+        # arrived (manual upload vs. P2P peer sync) -- use videos/ here to prove
+        # the endpoint follows the actual gamelist reference rather than
+        # assuming images/ the way the sibling /public/.../images/ route does.
+        system_dir = self._root / "roms" / "snes"
+        video_path = system_dir / "videos" / "Chrono Trigger (USA)-video.mp4"
+        video_path.parent.mkdir(parents=True, exist_ok=True)
+        video_path.write_bytes(b"FAKE-MP4-BYTES")
+        gamelist = system_dir / "gamelist.xml"
+        gamelist.write_text(
+            "<gameList><game><path>./Chrono Trigger (USA).zip</path><name>Chrono Trigger</name>"
+            "<video>./videos/Chrono Trigger (USA)-video.mp4</video></game></gameList>\n",
+            encoding="utf-8",
+        )
+        rom_path = urllib.parse.quote("Chrono Trigger (USA).zip", safe="")
+        url = f"http://127.0.0.1:{self.port}/v1/api/public/systems/snes/video/{rom_path}"
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            data = resp.read()
+            content_type = resp.headers.get("Content-Type")
+        self.assertEqual(data, b"FAKE-MP4-BYTES")
+        self.assertEqual(content_type, "video/mp4")
+
+    def test_public_video_endpoint_404s_without_a_video_reference(self) -> None:
+        rom_path = urllib.parse.quote("Chrono Trigger (USA).zip", safe="")
+        url = f"http://127.0.0.1:{self.port}/v1/api/public/systems/snes/video/{rom_path}"
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            urllib.request.urlopen(url, timeout=5)
+        self.assertEqual(error.exception.code, 404)
 
     def test_admin_remove_missing_gamelist_entries_endpoint(self) -> None:
         gamelist = self._root / "roms" / "snes" / "gamelist.xml"
