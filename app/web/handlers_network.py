@@ -488,7 +488,7 @@ class HandlersNetworkMixin:
         logged or included in any response/error text.
         """
         try:
-            status = tailnet_enroll(str(payload.get("auth_key") or ""))
+            status = tailnet_enroll(str(payload.get("auth_key") or ""), self.settings)
         except ValueError:
             raise
         except RuntimeError as error:
@@ -499,7 +499,7 @@ class HandlersNetworkMixin:
     def _handle_admin_tailnet_rotate_auth_key(self, payload: dict) -> None:
         """Re-enroll this Drone with a replacement key without retaining it."""
         try:
-            status = tailnet_rotate_auth_key(str(payload.get("auth_key") or ""))
+            status = tailnet_rotate_auth_key(str(payload.get("auth_key") or ""), self.settings)
         except ValueError:
             raise
         except RuntimeError as error:

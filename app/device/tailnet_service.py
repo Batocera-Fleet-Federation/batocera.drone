@@ -10,6 +10,14 @@ the other device controls shell out to batocera tools.
 
 The auth key is a secret: it is passed to the CLI and never logged or echoed
 back in any error message (tailscale's own stderr does not repeat it).
+
+Drones are often deployed unattended (no one able to paste a fresh key when a
+node's Tailscale key eventually expires), so enroll/rotate/startup also make a
+best-effort, opt-in call to Tailscale's own admin API to disable key expiry
+for this device -- see disable_key_expiry() and _maybe_disable_key_expiry().
+That call needs an OAuth client (settings.tailscale_oauth_client_id/_secret);
+without one configured, this is a silent no-op and nothing changes from
+before -- a human still has to paste a key, and it can still expire.
 """
 
 from __future__ import annotations
@@ -17,19 +25,31 @@ from __future__ import annotations
 import json
 import socket
 import subprocess
+import sys
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Any, Iterable, Optional
 
 try:
+    from ..common.http_errors import _format_http_error
     from ..transport.tailnet import get_tailnet_ip
 except ImportError:  # pragma: no cover - direct script execution fallback
+    from common.http_errors import _format_http_error  # type: ignore
     from transport.tailnet import get_tailnet_ip  # type: ignore
 
 TAILSCALE_DIR = Path("/userdata/system/tailscale")
 TAILSCALE_CLI = TAILSCALE_DIR / "bin" / "tailscale"
 TAILNET_SERVICE = Path("/userdata/system/services/DRONE_TAILNET")
 TAILSCALE_SOCKET = "/var/run/tailscale/tailscaled.sock"
+
+# Tailscale's admin API, used only to disable key expiry for this device (see
+# disable_key_expiry() below) -- never for anything else, and only when an
+# OAuth client is configured (opt-in).
+TAILSCALE_API_BASE = "https://api.tailscale.com/api/v2"
+TAILSCALE_API_TIMEOUT_SECONDS = 15.0
 
 
 def _run_cli(args: list, timeout: float) -> "subprocess.CompletedProcess[str]":
@@ -100,6 +120,10 @@ def tailnet_status() -> dict:
         "relay": "",
         "health": [],
         "peers": [],
+        # This device's own Tailscale node ID (Self.ID), needed to target the
+        # admin API's per-device endpoints (see disable_key_expiry()) -- not to
+        # be confused with the Drone's own peer-identity device_id elsewhere.
+        "tailscale_device_id": "",
     }
     if not status["installed"]:
         return status
@@ -127,6 +151,7 @@ def tailnet_status() -> dict:
         status["tailnet_ip"] = own_address
     status["dns_name"] = str(self_info.get("DNSName") or "").strip().rstrip(".")
     status["relay"] = str(self_info.get("Relay") or "").strip()
+    status["tailscale_device_id"] = str(self_info.get("ID") or "")
     current_tailnet = payload.get("CurrentTailnet") if isinstance(payload.get("CurrentTailnet"), dict) else {}
     status["tailnet_name"] = str(current_tailnet.get("Name") or "").strip()
     status["magic_dns_suffix"] = str(
@@ -153,7 +178,7 @@ def tailnet_peer_ips() -> set[str]:
     }
 
 
-def ensure_tailnet_networking() -> None:
+def ensure_tailnet_networking(settings: Optional[Any] = None) -> None:
     """Apply the Batocera-compatible netfilter preference, best effort.
 
     Batocera's kernel omits the iptables filter modules expected by Tailscale.
@@ -162,6 +187,11 @@ def ensure_tailnet_networking() -> None:
     bundled daemon first when it is installed but no longer running; its
     service is a launcher rather than a long-lived supervisor, so a stale PID
     must not leave Tailnet recovery dependent on a reboot.
+
+    Also (opt-in, see _maybe_disable_key_expiry) makes sure an already-enrolled
+    node -- e.g. one hands-free-enrolled by the installer's TS_AUTHKEY before
+    this Python process ever ran -- has key expiry disabled, so it doesn't
+    strand itself at NeedsLogin months later with no one able to fix it.
     """
     if not TAILSCALE_CLI.exists():
         return
@@ -171,6 +201,7 @@ def ensure_tailnet_networking() -> None:
         _run_cli(["set", "--netfilter-mode=off"], timeout=10)
     except (OSError, subprocess.SubprocessError):
         return
+    _maybe_disable_key_expiry(settings)
 
 
 def _start_daemon_if_needed() -> Optional[str]:
@@ -205,7 +236,97 @@ def _start_daemon_if_needed() -> Optional[str]:
     return "The tailnet daemon did not come up; check /userdata/system/logs/tailscaled.log."
 
 
-def tailnet_enroll(auth_key: str) -> dict:
+def _tailscale_api_request(
+    url: str,
+    *,
+    method: str = "GET",
+    data: Optional[bytes] = None,
+    headers: Optional[dict] = None,
+    timeout: float = TAILSCALE_API_TIMEOUT_SECONDS,
+) -> dict:
+    """Minimal stdlib JSON client for Tailscale's admin API. Only ever used for
+    the OAuth token exchange and the device key-expiry update below."""
+    request = urllib.request.Request(url, data=data, method=method, headers=headers or {})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        raw = response.read()
+    return json.loads(raw.decode("utf-8")) if raw else {}
+
+
+def _tailscale_oauth_access_token(client_id: str, client_secret: str) -> str:
+    body = urllib.parse.urlencode(
+        {"client_id": client_id, "client_secret": client_secret, "grant_type": "client_credentials"}
+    ).encode("utf-8")
+    payload = _tailscale_api_request(
+        f"{TAILSCALE_API_BASE}/oauth/token",
+        method="POST",
+        data=body,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    token = str(payload.get("access_token") or "")
+    if not token:
+        raise RuntimeError("Tailscale OAuth token exchange did not return an access token")
+    return token
+
+
+def disable_key_expiry(client_id: str, client_secret: str) -> dict:
+    """Ask the Tailscale admin API to disable key expiry for this device.
+
+    This is Tailscale's own documented approach for servers/headless nodes
+    that can't do an interactive re-login when their node key eventually
+    expires (see https://tailscale.com/kb/1028/key-expiry) -- it makes this
+    device's tailnet session permanent until someone manually re-enables
+    expiry or removes the device from the admin console, rather than an
+    unattended Drone silently falling back to NeedsLogin with no one able to
+    paste a fresh auth key.
+
+    ``client_id``/``client_secret`` are an OAuth client from the Tailscale
+    admin console (Settings -> OAuth clients). Unlike the enrollment auth key
+    (single-use, spent immediately by `tailscale up`), this credential is held
+    long-term by every Drone it's configured on -- scope it to just the
+    `devices:core:write` permission and tag it to this fleet's devices so a
+    compromised Drone can't use it to touch anything outside that scope.
+
+    Raises RuntimeError (never containing the secret) on failure; callers
+    decide whether that's fatal -- see _maybe_disable_key_expiry, which treats
+    it as best-effort and retries on the next enroll/rotate/restart.
+    """
+    device_id = tailnet_status().get("tailscale_device_id") or ""
+    if not device_id:
+        raise RuntimeError("could not determine this device's Tailscale ID (is it enrolled?)")
+    token = _tailscale_oauth_access_token(client_id, client_secret)
+    _tailscale_api_request(
+        f"{TAILSCALE_API_BASE}/device/{urllib.parse.quote(device_id, safe='')}/key",
+        method="POST",
+        data=json.dumps({"keyExpiryDisabled": True}).encode("utf-8"),
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+    )
+    return {"device_id": device_id, "key_expiry_disabled": True}
+
+
+def _maybe_disable_key_expiry(settings: Optional[Any]) -> None:
+    """Best-effort, silent no-op unless a Tailscale OAuth client is configured
+    (opt-in) and this device is actually enrolled. Never raises -- a failure
+    here must never break enrollment/rotation/startup, which already
+    succeeded on the tailnet side by the time this runs."""
+    if settings is None:
+        return
+    client_id = getattr(settings, "tailscale_oauth_client_id", None)
+    client_secret = getattr(settings, "tailscale_oauth_client_secret", None)
+    if not client_id or not client_secret:
+        return
+    if not tailnet_status().get("enrolled"):
+        return
+    try:
+        disable_key_expiry(client_id, client_secret)
+    except Exception as error:  # noqa: BLE001 - best-effort, log and move on
+        print(
+            f"Tailnet key-expiry auto-disable failed (will retry next enroll/restart): {_format_http_error(error)}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+
+def tailnet_enroll(auth_key: str, settings: Optional[Any] = None) -> dict:
     """Enroll this device in the tailnet with an auth key from the admin console.
 
     Raises ValueError for bad input and RuntimeError with a user-facing message
@@ -250,10 +371,11 @@ def tailnet_enroll(auth_key: str) -> dict:
         raise RuntimeError(
             "Tailnet enrollment failed: " + (detail[-1] if detail else f"exit code {proc.returncode}")
         )
+    _maybe_disable_key_expiry(settings)
     return tailnet_status()
 
 
-def tailnet_rotate_auth_key(auth_key: str) -> dict:
+def tailnet_rotate_auth_key(auth_key: str, settings: Optional[Any] = None) -> dict:
     """Re-authenticate this Drone with a replacement Tailscale auth key.
 
     Tailscale auth keys are enrollment credentials rather than durable session
@@ -283,7 +405,7 @@ def tailnet_rotate_auth_key(auth_key: str) -> dict:
         message = detail[-1] if detail else f"exit code {proc.returncode}"
         raise RuntimeError(f"Tailnet auth token rotation could not disconnect: {message.replace(key, '[redacted]')}")
     try:
-        return tailnet_enroll(key)
+        return tailnet_enroll(key, settings)
     except RuntimeError as error:
         raise RuntimeError(
             "Tailnet auth token rotation disconnected this Drone but re-enrollment failed: " + str(error).replace(key, "[redacted]")

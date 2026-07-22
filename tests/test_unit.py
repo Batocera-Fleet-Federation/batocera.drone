@@ -5670,6 +5670,182 @@ class TailnetServiceTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "not connected"):
                 tailnet_service.tailnet_rotate_auth_key("tskey-auth-test")
 
+    def test_status_reports_own_tailscale_device_id(self) -> None:
+        from app.device import tailnet_service
+
+        payload = {"BackendState": "Running", "Self": {"TailscaleIPs": ["100.64.0.5"], "ID": "n123456CNTRL"}}
+        proc = mock.Mock(returncode=0, stdout=json.dumps(payload), stderr="")
+        with tempfile.NamedTemporaryFile() as fake_cli, \
+                mock.patch.object(tailnet_service, "TAILSCALE_CLI", Path(fake_cli.name)), \
+                mock.patch.object(tailnet_service.subprocess, "run", return_value=proc):
+            status = tailnet_service.tailnet_status()
+        self.assertEqual(status["tailscale_device_id"], "n123456CNTRL")
+
+
+class TailnetKeyExpiryTests(unittest.TestCase):
+    """Opt-in, best-effort auto-disable of Tailscale key expiry so an
+    unattended Drone never strands itself at NeedsLogin (see
+    device/tailnet_service.py's module docstring)."""
+
+    class _FakeHttpResponse:
+        def __init__(self, payload: dict):
+            self._body = json.dumps(payload).encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return self._body
+
+    def _fake_urlopen(self, token: str = "test-access-token", key_response: dict = None):
+        calls = []
+
+        def handler(request, timeout=None):
+            calls.append(request)
+            if request.full_url.endswith("/oauth/token"):
+                return self._FakeHttpResponse({"access_token": token})
+            return self._FakeHttpResponse(key_response if key_response is not None else {"keyExpiryDisabled": True})
+
+        return calls, handler
+
+    def test_disable_key_expiry_exchanges_oauth_token_and_updates_device(self) -> None:
+        from app.device import tailnet_service
+
+        calls, handler = self._fake_urlopen()
+        status_payload = {"BackendState": "Running", "Self": {"TailscaleIPs": ["100.64.0.5"], "ID": "n123456CNTRL"}}
+        proc = mock.Mock(returncode=0, stdout=json.dumps(status_payload), stderr="")
+        with tempfile.NamedTemporaryFile() as fake_cli, \
+                mock.patch.object(tailnet_service, "TAILSCALE_CLI", Path(fake_cli.name)), \
+                mock.patch.object(tailnet_service.subprocess, "run", return_value=proc), \
+                mock.patch.object(tailnet_service.urllib.request, "urlopen", side_effect=handler):
+            result = tailnet_service.disable_key_expiry("client-id", "client-SECRET")
+
+        self.assertEqual(result, {"device_id": "n123456CNTRL", "key_expiry_disabled": True})
+        self.assertEqual(len(calls), 2)
+        token_request, key_request = calls
+        self.assertTrue(token_request.full_url.endswith("/oauth/token"))
+        self.assertIn(b"client_id=client-id", token_request.data)
+        self.assertIn(b"client_secret=client-SECRET", token_request.data)
+        self.assertTrue(key_request.full_url.endswith("/device/n123456CNTRL/key"))
+        self.assertEqual(key_request.get_header("Authorization"), "Bearer test-access-token")
+        self.assertEqual(json.loads(key_request.data.decode("utf-8")), {"keyExpiryDisabled": True})
+
+    def test_disable_key_expiry_requires_enrolled_device(self) -> None:
+        from app.device import tailnet_service
+
+        proc = mock.Mock(returncode=0, stdout=json.dumps({"BackendState": "NeedsLogin"}), stderr="")
+        with tempfile.NamedTemporaryFile() as fake_cli, \
+                mock.patch.object(tailnet_service, "TAILSCALE_CLI", Path(fake_cli.name)), \
+                mock.patch.object(tailnet_service.subprocess, "run", return_value=proc):
+            with self.assertRaisesRegex(RuntimeError, "Tailscale ID"):
+                tailnet_service.disable_key_expiry("client-id", "client-secret")
+
+    def test_disable_key_expiry_surfaces_oauth_failure(self) -> None:
+        from app.device import tailnet_service
+
+        def handler(request, timeout=None):
+            return self._FakeHttpResponse({})  # no access_token
+
+        status_payload = {"BackendState": "Running", "Self": {"ID": "n1"}}
+        proc = mock.Mock(returncode=0, stdout=json.dumps(status_payload), stderr="")
+        with tempfile.NamedTemporaryFile() as fake_cli, \
+                mock.patch.object(tailnet_service, "TAILSCALE_CLI", Path(fake_cli.name)), \
+                mock.patch.object(tailnet_service.subprocess, "run", return_value=proc), \
+                mock.patch.object(tailnet_service.urllib.request, "urlopen", side_effect=handler):
+            with self.assertRaisesRegex(RuntimeError, "access token"):
+                tailnet_service.disable_key_expiry("client-id", "client-secret")
+
+    def test_maybe_disable_key_expiry_noop_without_settings(self) -> None:
+        from app.device import tailnet_service
+
+        with mock.patch.object(tailnet_service, "disable_key_expiry") as disable:
+            tailnet_service._maybe_disable_key_expiry(None)
+        disable.assert_not_called()
+
+    def test_maybe_disable_key_expiry_noop_without_oauth_credentials(self) -> None:
+        from app.device import tailnet_service
+
+        settings = mock.Mock(tailscale_oauth_client_id=None, tailscale_oauth_client_secret=None)
+        with mock.patch.object(tailnet_service, "disable_key_expiry") as disable:
+            tailnet_service._maybe_disable_key_expiry(settings)
+        disable.assert_not_called()
+
+    def test_maybe_disable_key_expiry_noop_when_not_enrolled(self) -> None:
+        from app.device import tailnet_service
+
+        settings = mock.Mock(tailscale_oauth_client_id="id", tailscale_oauth_client_secret="secret")
+        with mock.patch.object(tailnet_service, "tailnet_status", return_value={"enrolled": False}), \
+                mock.patch.object(tailnet_service, "disable_key_expiry") as disable:
+            tailnet_service._maybe_disable_key_expiry(settings)
+        disable.assert_not_called()
+
+    def test_maybe_disable_key_expiry_calls_through_when_configured_and_enrolled(self) -> None:
+        from app.device import tailnet_service
+
+        settings = mock.Mock(tailscale_oauth_client_id="id", tailscale_oauth_client_secret="secret")
+        with mock.patch.object(tailnet_service, "tailnet_status", return_value={"enrolled": True}), \
+                mock.patch.object(tailnet_service, "disable_key_expiry") as disable:
+            tailnet_service._maybe_disable_key_expiry(settings)
+        disable.assert_called_once_with("id", "secret")
+
+    def test_maybe_disable_key_expiry_swallows_failures(self) -> None:
+        from app.device import tailnet_service
+
+        settings = mock.Mock(tailscale_oauth_client_id="id", tailscale_oauth_client_secret="secret")
+        with mock.patch.object(tailnet_service, "tailnet_status", return_value={"enrolled": True}), \
+                mock.patch.object(tailnet_service, "disable_key_expiry", side_effect=RuntimeError("boom")):
+            tailnet_service._maybe_disable_key_expiry(settings)  # must not raise
+
+    def test_enroll_triggers_key_expiry_disable_when_configured(self) -> None:
+        from app.device import tailnet_service
+
+        def fake_run(command, **kwargs):
+            if "up" in command:
+                return mock.Mock(returncode=0, stdout="", stderr="")
+            payload = {"BackendState": "Running", "Self": {"TailscaleIPs": ["100.64.0.7"], "ID": "n7"}}
+            return mock.Mock(returncode=0, stdout=json.dumps(payload), stderr="")
+
+        settings = mock.Mock(tailscale_oauth_client_id="id", tailscale_oauth_client_secret="secret")
+        with tempfile.NamedTemporaryFile() as fake_cli, \
+                mock.patch.object(tailnet_service, "TAILSCALE_CLI", Path(fake_cli.name)), \
+                mock.patch.object(tailnet_service.subprocess, "run", side_effect=fake_run), \
+                mock.patch.object(tailnet_service, "disable_key_expiry") as disable:
+            tailnet_service.tailnet_enroll("tskey-auth-test", settings)
+        disable.assert_called_once_with("id", "secret")
+
+    def test_enroll_without_settings_does_not_attempt_key_expiry_disable(self) -> None:
+        from app.device import tailnet_service
+
+        def fake_run(command, **kwargs):
+            if "up" in command:
+                return mock.Mock(returncode=0, stdout="", stderr="")
+            payload = {"BackendState": "Running", "Self": {"TailscaleIPs": ["100.64.0.7"], "ID": "n7"}}
+            return mock.Mock(returncode=0, stdout=json.dumps(payload), stderr="")
+
+        with tempfile.NamedTemporaryFile() as fake_cli, \
+                mock.patch.object(tailnet_service, "TAILSCALE_CLI", Path(fake_cli.name)), \
+                mock.patch.object(tailnet_service.subprocess, "run", side_effect=fake_run), \
+                mock.patch.object(tailnet_service, "disable_key_expiry") as disable:
+            tailnet_service.tailnet_enroll("tskey-auth-test")
+        disable.assert_not_called()
+
+    def test_ensure_tailnet_networking_attempts_key_expiry_disable(self) -> None:
+        from app.device import tailnet_service
+
+        proc = mock.Mock(returncode=0, stdout="", stderr="")
+        settings = mock.Mock(tailscale_oauth_client_id="id", tailscale_oauth_client_secret="secret")
+        with tempfile.NamedTemporaryFile() as fake_cli, \
+                mock.patch.object(tailnet_service, "TAILSCALE_CLI", Path(fake_cli.name)), \
+                mock.patch.object(tailnet_service, "_start_daemon_if_needed", return_value=None), \
+                mock.patch.object(tailnet_service.subprocess, "run", return_value=proc), \
+                mock.patch.object(tailnet_service, "tailnet_status", return_value={"enrolled": True}), \
+                mock.patch.object(tailnet_service, "disable_key_expiry") as disable:
+            tailnet_service.ensure_tailnet_networking(settings)
+        disable.assert_called_once_with("id", "secret")
+
 
 class InstallerTailscaleTests(unittest.TestCase):
     """batocera_install.sh sets up the Tailscale mesh (binaries under /userdata,

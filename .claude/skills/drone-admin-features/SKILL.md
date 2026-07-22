@@ -124,15 +124,21 @@ its peers.
 - **Tailnet card** — `GET /admin/tailnet/status` + `POST /admin/tailnet/discover`
   (`device/tailnet_service.py` backs this): enrollment status, one-click setup
   (paste a Tailscale auth key), auth-key rotation, and code-free pairing with any
-  other online tailnet device.
+  other online tailnet device. Enroll/rotate (and drone startup, for a node
+  hands-free-enrolled by the installer's `TS_AUTHKEY`) also make a best-effort,
+  opt-in call to Tailscale's own admin API to disable key expiry for this
+  device (`disable_key_expiry`/`_maybe_disable_key_expiry`) — so an unattended
+  Drone never strands itself needing a human to paste a fresh key when the
+  node key would otherwise expire. Opt-in via `DRONE_TAILSCALE_OAUTH_CLIENT_ID`/
+  `DRONE_TAILSCALE_OAUTH_CLIENT_SECRET` (a Tailscale OAuth client, ideally
+  scoped to just `devices:core:write` and tagged to this fleet); silent no-op
+  without them configured, same as before this existed.
 - **Pairing card** — the rotating local pairing code
   (`POST /admin/local-network/pairing-code/rotate`) used for same-LAN pairing.
 - **Nearby Drones card** — LAN-discovered candidates (`POST /admin/local-network/discover`)
   with per-peer pair/forget actions. Routes:
   `/admin/local-network/{status,discover,pairing-code/rotate,peers/{id}/{pair,forget,assets}}`.
   Backend: `handlers_network.py`.
-- If local networking is disabled on this Drone, the page shows an inline
-  "Enable" alert instead of hiding pairing entirely (`swarmEnableLocalNetwork()`).
 
 ### Remote peer management (the "Manage" button)
 

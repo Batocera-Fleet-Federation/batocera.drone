@@ -25,14 +25,14 @@ except ImportError:  # pragma: no cover - direct script execution fallback
 
 
 def _start_local_network_workers(settings: Settings) -> None:
-    Thread(target=ensure_tailnet_networking, name="drone-tailnet-networking", daemon=True).start()
+    Thread(target=ensure_tailnet_networking, args=(settings,), name="drone-tailnet-networking", daemon=True).start()
 
     def tailnet_watchdog() -> None:
         interval = max(30, int(os.environ.get("DRONE_TAILNET_WATCHDOG_INTERVAL_SECONDS", "60")))
         while True:
             time.sleep(interval)
             if not tailnet_status().get("running"):
-                ensure_tailnet_networking()
+                ensure_tailnet_networking(settings)
 
     Thread(target=tailnet_watchdog, name="drone-tailnet-watchdog", daemon=True).start()
 

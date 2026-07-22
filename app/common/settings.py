@@ -114,6 +114,8 @@ class Settings:
     drone_mtls_enabled: bool
     drone_mtls_mode: str
     drone_mtls_ca_file: Optional[Path]
+    tailscale_oauth_client_id: Optional[str]
+    tailscale_oauth_client_secret: Optional[str]
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -188,4 +190,11 @@ class Settings:
             drone_mtls_enabled=_env_bool(False, "DRONE_MTLS_ENABLED", "DRONE_TO_DRONE_MTLS_ENABLED"),
             drone_mtls_mode=(os.environ.get("DRONE_MTLS_MODE") or "self-signed").strip().lower(),
             drone_mtls_ca_file=Path(os.environ["DRONE_MTLS_CA_FILE"]) if os.environ.get("DRONE_MTLS_CA_FILE") else None,
+            # Optional: a Tailscale OAuth client (admin console -> Settings -> OAuth
+            # clients), ideally scoped to just `devices:core:write` and tagged to this
+            # fleet, so an unattended Drone can disable its own tailnet key expiry
+            # after enrolling instead of eventually stranding at NeedsLogin with no
+            # one able to paste a fresh auth key. See device/tailnet_service.py.
+            tailscale_oauth_client_id=(os.environ.get("DRONE_TAILSCALE_OAUTH_CLIENT_ID") or "").strip() or None,
+            tailscale_oauth_client_secret=(os.environ.get("DRONE_TAILSCALE_OAUTH_CLIENT_SECRET") or "").strip() or None,
         )
