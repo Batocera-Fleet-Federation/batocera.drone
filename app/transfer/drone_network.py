@@ -69,6 +69,10 @@ def _drone_advertised_api_port(settings: Settings) -> int:
     return int(settings.advertised_api_port or settings.https_port)
 
 
+def _drone_advertised_peer_mtls_port(settings: Settings) -> int:
+    return int(settings.advertised_peer_mtls_port or settings.peer_mtls_port)
+
+
 def _network_mode(settings: Settings) -> str:
     return _local_network.get_mode(settings)
 

@@ -99,7 +99,10 @@ class HandlersSystemMixin:
                 "mtls_enabled": self.settings.drone_mtls_enabled,
                 "certificate": metadata,
                 "guidance": {
-                    "curl": "curl --cert /path/to/client.crt --key /path/to/client.key -k https://drone-host/health",
+                    "curl": (
+                        "curl --cert /path/to/client.crt --key /path/to/client.key -k "
+                        f"https://drone-host:{self.settings.peer_mtls_port}/health"
+                    ),
                     "warning": "Do not share Drone private key material. The download endpoint provides the public certificate only.",
                     "lifecycle": f"Drone creates or reuses a local certificate on startup. Default lifetime is {self.settings.drone_cert_days} days; expired certificates are recreated on restart.",
                 },

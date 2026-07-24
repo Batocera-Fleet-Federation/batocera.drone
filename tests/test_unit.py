@@ -220,6 +220,51 @@ class SettingsTests(unittest.TestCase):
                 )
                 self.assertEqual(preserved["tailnet_ip"], "100.64.0.9")
 
+    def test_discovery_payload_advertises_a_distinct_peer_mtls_port(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "USERDATA_ROOT": str(root),
+                    "DRONE_DEVICE_ID": "local-a",
+                    "HTTPS_PORT": "8443",
+                    "DRONE_PEER_MTLS_PORT": "8543",
+                },
+                clear=True,
+            ):
+                settings = Settings.from_env()
+                payload = local_network.discovery_payload(settings, "aa:bb")
+        self.assertEqual(payload["api_port"], 8443)
+        self.assertEqual(payload["peer_mtls_port"], 8543)
+
+    def test_record_discovered_peer_propagates_peer_mtls_port(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root), "DRONE_DEVICE_ID": "local-a"}, clear=True):
+                settings = Settings.from_env()
+                announcement = {
+                    "service": local_network.DISCOVERY_SERVICE,
+                    "drone_id": "local-b",
+                    "name": "Cabinet B",
+                    "scheme": "https",
+                    "api_port": 8443,
+                    "peer_mtls_port": 8543,
+                }
+                discovered = local_network.record_discovered_peer(settings, announcement, "192.168.1.22")
+                self.assertEqual(discovered["api_port"], 8443)
+                self.assertEqual(discovered["peer_mtls_port"], 8543)
+                # A pre-split peer's announce (no key at all) falls back to api_port.
+                legacy = {key: value for key, value in announcement.items() if key != "peer_mtls_port"}
+                legacy_discovered = local_network.record_discovered_peer(settings, legacy, "192.168.1.22")
+                self.assertEqual(legacy_discovered["peer_mtls_port"], 8443)
+                # An already-paired peer's re-announce also refreshes the stored
+                # paired record's peer_mtls_port, not just the discovered-peer cache.
+                paired = local_network.save_paired_peer(settings, {**discovered, "certificate_fingerprint": "abc"})
+                self.assertEqual(paired["peer_mtls_port"], 8543)
+                local_network.record_discovered_peer(settings, {**announcement, "peer_mtls_port": 9000}, "192.168.1.22")
+                self.assertEqual(local_network.get_paired_peer(settings, "local-b")["peer_mtls_port"], 9000)
+
     def test_tailnet_announce_refreshes_paired_peer_record(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
@@ -570,6 +615,81 @@ class SettingsTests(unittest.TestCase):
                 "https://192.168.0.180",
             ],
         )
+
+    def test_peer_api_port_prefers_peer_mtls_port_by_default_but_not_for_admin_kind(self) -> None:
+        peer = {"api_port": 8443, "peer_mtls_port": 8543}
+        self.assertEqual(_peer_api_port(peer), 8543)
+        self.assertEqual(_peer_api_port(peer, port_kind="peer_mtls"), 8543)
+        self.assertEqual(_peer_api_port(peer, port_kind="admin"), 8443)
+
+    def test_peer_api_port_falls_back_to_api_port_when_peer_mtls_port_absent(self) -> None:
+        # Old, already-paired records (pre-listener-split) have no
+        # peer_mtls_port key at all -- this fallback is what makes rollout
+        # across an already-paired fleet safe.
+        peer = {"api_port": 8443}
+        self.assertEqual(_peer_api_port(peer), 8443)
+
+    def test_peer_address_rebuilds_reachable_url_host_when_peer_mtls_port_diverges(self) -> None:
+        # The real bug this fixes: reachable_url is a pre-baked string built
+        # (and kept refreshed by the LAN beacon) using api_port, never
+        # peer_mtls_port -- once the two genuinely differ, peer-mTLS traffic
+        # must not keep dialing the stale embedded port.
+        peer = {
+            "reachable_url": "https://bff-drone-b:8443",
+            "scheme": "https",
+            "api_port": 8443,
+            "peer_mtls_port": 8543,
+        }
+        self.assertEqual(_peer_address(peer), "https://bff-drone-b:8543")
+
+    def test_peer_address_admin_port_kind_ignores_peer_mtls_port_and_trusts_reachable_url(self) -> None:
+        peer = {
+            "reachable_url": "https://bff-drone-b:8443",
+            "scheme": "https",
+            "api_port": 8443,
+            "peer_mtls_port": 8543,
+        }
+        self.assertEqual(_peer_address(peer, port_kind="admin"), "https://bff-drone-b:8443")
+
+    def test_peer_address_trusts_reachable_url_verbatim_when_ports_match(self) -> None:
+        # No need to rebuild anything when peer_mtls_port isn't set (falls
+        # back to api_port, so the two "resolved" ports are equal) -- exact
+        # old behavior for every peer record that predates the listener split.
+        peer = {"reachable_url": "https://bff-drone-b:443", "scheme": "https", "api_port": 443}
+        self.assertEqual(_peer_address(peer), "https://bff-drone-b:443")
+
+    def test_peer_address_candidates_prefer_peer_mtls_port_when_it_diverges(self) -> None:
+        from app.transfer.peer_connectivity import _peer_address_candidates
+
+        peer = {
+            "reachable_url": "https://192.168.0.180:8443",
+            "advertised_reachable_url": "https://BATOCERA-LAPTOP.local:8443",
+            "tailnet_ip": "100.91.173.37",
+            "scheme": "https",
+            "api_port": 8443,
+            "peer_mtls_port": 8543,
+        }
+        # Hostnames come back lowercased -- rebuilt via urlparse().hostname
+        # (case-insensitive by RFC) rather than the original verbatim string.
+        self.assertEqual(
+            _peer_address_candidates(peer),
+            [
+                "https://100.91.173.37:8543",
+                "https://batocera-laptop.local:8543",
+                "https://192.168.0.180:8543",
+            ],
+        )
+
+    def test_peer_address_candidates_admin_kind_keeps_api_port_verbatim(self) -> None:
+        from app.transfer.peer_connectivity import _peer_address_candidates
+
+        peer = {
+            "reachable_url": "https://192.168.0.180:8443",
+            "scheme": "https",
+            "api_port": 8443,
+            "peer_mtls_port": 8543,
+        }
+        self.assertEqual(_peer_address_candidates(peer, port_kind="admin"), ["https://192.168.0.180:8443"])
 
     def test_peer_json_falls_back_from_tailnet_to_ip_with_short_timeout(self) -> None:
         from app.transfer import peer_connectivity
@@ -4107,16 +4227,41 @@ class DroneTlsHandshakeTests(unittest.TestCase):
         from unittest import mock as _mock
         import app.drone_api as da
 
-        # The fixture settings are otherwise Mocks, but local-network cert
-        # loading is unconditional now, so userdata_root must be a real
-        # (empty) directory for paired_peers()/local cert cache lookups.
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
         settings = _mock.Mock()
-        settings.userdata_root = Path(self._tmp.name)
         settings.http_only = False
         settings.drone_mtls_mode = "self-signed"
-        settings.drone_mtls_enabled = False
+        settings.drone_mtls_ca_file = None
+        cert = _mock.Mock(); cert.exists.return_value = True
+        key = _mock.Mock(); key.exists.return_value = True
+        settings.drone_cert_file = cert
+        settings.drone_key_file = key
+
+        ctx = _mock.Mock()
+        ctx.wrap_socket.return_value = "wrapped"
+        server = _mock.Mock()
+        server.socket = "raw"
+        # peer_mtls=False (a browser/admin listener) -- do_handshake_on_connect
+        # deferral must hold regardless of which TLS policy the listener got.
+        with _mock.patch("app.drone_api.ssl.SSLContext", return_value=ctx):
+            da._apply_server_tls(settings, server, peer_mtls=False)
+
+        # The listening socket must be wrapped with do_handshake_on_connect=False so the
+        # TLS handshake never runs on the single accept thread.
+        _, kwargs = ctx.wrap_socket.call_args
+        self.assertFalse(kwargs.get("do_handshake_on_connect"))
+        self.assertTrue(kwargs.get("server_side"))
+        self.assertEqual(server.socket, "wrapped")
+
+    def test_apply_server_tls_peer_mtls_false_never_requests_a_client_cert(self) -> None:
+        # The browser/admin listener(s) must never send a TLS CertificateRequest --
+        # that's what was popping a "select a certificate" prompt on every browser,
+        # including phones, before the peer-mTLS surface was split onto its own port.
+        from unittest import mock as _mock
+        import app.drone_api as da
+
+        settings = _mock.Mock()
+        settings.http_only = False
+        settings.drone_mtls_mode = "self-signed"
         settings.drone_mtls_ca_file = None
         cert = _mock.Mock(); cert.exists.return_value = True
         key = _mock.Mock(); key.exists.return_value = True
@@ -4128,14 +4273,10 @@ class DroneTlsHandshakeTests(unittest.TestCase):
         server = _mock.Mock()
         server.socket = "raw"
         with _mock.patch("app.drone_api.ssl.SSLContext", return_value=ctx):
-            da._apply_server_tls(settings, server)
+            da._apply_server_tls(settings, server, peer_mtls=False)
 
-        # The listening socket must be wrapped with do_handshake_on_connect=False so the
-        # TLS handshake never runs on the single accept thread.
-        _, kwargs = ctx.wrap_socket.call_args
-        self.assertFalse(kwargs.get("do_handshake_on_connect"))
-        self.assertTrue(kwargs.get("server_side"))
-        self.assertEqual(server.socket, "wrapped")
+        self.assertEqual(ctx.verify_mode, da.ssl.CERT_NONE)
+        self.assertEqual(ctx.load_verify_locations.call_count, 0)
 
     def test_apply_server_tls_skips_empty_peer_certificate_path(self) -> None:
         # Regression: a paired peer whose certificate_path is empty/blank/"." must be
@@ -4143,13 +4284,13 @@ class DroneTlsHandshakeTests(unittest.TestCase):
         # check let such an entry reach load_verify_locations(cafile="."), which raises
         # IsADirectoryError -- an OSError the ssl.SSLError handler did NOT catch, so it
         # crashed drone startup. The empty-string + is_file() guards must skip these.
+        # Only the peer_mtls=True (dedicated peer-to-peer) listener loads peer certs at all.
         from unittest import mock as _mock
         import app.drone_api as da
 
         settings = _mock.Mock()
         settings.http_only = False
         settings.drone_mtls_mode = "self-signed"
-        settings.drone_mtls_enabled = True
         settings.drone_mtls_ca_file = None
         cert = _mock.Mock(); cert.exists.return_value = True
         key = _mock.Mock(); key.exists.return_value = True
@@ -4170,12 +4311,11 @@ class DroneTlsHandshakeTests(unittest.TestCase):
         ]
         with tempfile.TemporaryDirectory() as tmp, \
                 _mock.patch("app.drone_api.ssl.SSLContext", return_value=ctx), \
-                _mock.patch.object(da._local_network, "is_local_mode", return_value=False), \
                 _mock.patch.object(da._local_network, "paired_peers", return_value=bogus_peers), \
                 _mock.patch("app.drone_api._local_peer_cert_cache_path",
                             return_value=Path(tmp) / "nope" / "x"):
             # Must not raise (previously IsADirectoryError on cafile=".").
-            da._apply_server_tls(settings, server)
+            da._apply_server_tls(settings, server, peer_mtls=True)
 
         # No bogus path may reach load_verify_locations -- the "." case is the crash.
         loaded = [c.kwargs.get("cafile") for c in ctx.load_verify_locations.call_args_list]
@@ -4195,7 +4335,6 @@ class DroneTlsHandshakeTests(unittest.TestCase):
         settings = _mock.Mock()
         settings.http_only = False
         settings.drone_mtls_mode = "self-signed"
-        settings.drone_mtls_enabled = True
         settings.drone_mtls_ca_file = None
         cert = _mock.Mock(); cert.exists.return_value = True
         key = _mock.Mock(); key.exists.return_value = True
@@ -4212,18 +4351,186 @@ class DroneTlsHandshakeTests(unittest.TestCase):
             peer_cert = Path(tmp) / "peer.crt"
             peer_cert.write_text("not-a-real-cert")
             with _mock.patch("app.drone_api.ssl.SSLContext", return_value=ctx), \
-                    _mock.patch.object(da._local_network, "is_local_mode", return_value=False), \
                     _mock.patch.object(da._local_network, "paired_peers",
                                        return_value=[{"certificate_path": str(peer_cert)}]), \
                     _mock.patch("app.drone_api._local_peer_cert_cache_path",
                                 return_value=Path(tmp) / "nope" / "x"):
                 # Must not raise even though load_verify_locations raises OSError.
-                da._apply_server_tls(settings, server)
+                da._apply_server_tls(settings, server, peer_mtls=True)
 
         # The real file passed is_file() so a load was attempted, but the OSError was
         # swallowed rather than propagated.
         self.assertGreaterEqual(ctx.load_verify_locations.call_count, 1)
         self.assertEqual(server.socket, "wrapped")
+
+
+class ListenerSurfaceRoutingTests(unittest.TestCase):
+    """The dedicated peer-mTLS listener only serves /peer/* + bare /health;
+    every other listener (browser/admin, including compatibility ports)
+    serves everything except /peer/* (with /peer/info staying reachable
+    everywhere, since a Drone dials it before it knows a candidate peer's
+    dedicated port at all). A no-op when no listener is marked as the
+    peer-mTLS one (bind failure fallback)."""
+
+    def _handler(self, server) -> "drone_api.RomRequestHandler":
+        handler = object.__new__(drone_api.RomRequestHandler)
+        handler.server = server
+        handler._send_json = mock.Mock()
+        return handler
+
+    def test_peer_only_listener_allows_peer_routes_and_bare_health(self) -> None:
+        server = mock.Mock()
+        server.is_peer_mtls_listener = True
+        server.all_tls_servers = [server]
+        handler = self._handler(server)
+        self.assertFalse(handler._reject_if_wrong_listener_surface(["peer", "info"], "/v1/api/peer/info"))
+        self.assertFalse(handler._reject_if_wrong_listener_surface(["peer", "pair"], "/v1/api/peer/pair"))
+        self.assertFalse(handler._reject_if_wrong_listener_surface(["peer", "roms", "snes", "x.zip"], "/v1/api/peer/roms/snes/x.zip"))
+        self.assertFalse(handler._reject_if_wrong_listener_surface([], "/health"))
+        handler._send_json.assert_not_called()
+
+    def test_peer_only_listener_rejects_browser_and_admin_routes(self) -> None:
+        server = mock.Mock()
+        server.is_peer_mtls_listener = True
+        server.all_tls_servers = [server]
+        handler = self._handler(server)
+        self.assertTrue(handler._reject_if_wrong_listener_surface(["admin", "system-info"], "/v1/api/admin/system-info"))
+        handler._send_json.assert_called_once_with(404, {"error": "not found"})
+
+    def test_main_listener_rejects_peer_routes_except_peer_info(self) -> None:
+        main_server = mock.Mock()
+        main_server.is_peer_mtls_listener = False
+        peer_server = mock.Mock()
+        peer_server.is_peer_mtls_listener = True
+        main_server.all_tls_servers = [main_server, peer_server]
+        handler = self._handler(main_server)
+        self.assertFalse(handler._reject_if_wrong_listener_surface(["peer", "info"], "/v1/api/peer/info"))
+        self.assertFalse(handler._reject_if_wrong_listener_surface(["admin", "system-info"], "/v1/api/admin/system-info"))
+        self.assertFalse(handler._reject_if_wrong_listener_surface([], "/health"))
+        handler._send_json.assert_not_called()
+        self.assertTrue(handler._reject_if_wrong_listener_surface(["peer", "pair"], "/v1/api/peer/pair"))
+        handler._send_json.assert_called_once_with(404, {"error": "not found"})
+
+    def test_noop_when_no_peer_mtls_listener_is_registered(self) -> None:
+        # The bind-failure safety valve: create_server never marks any listener
+        # is_peer_mtls_listener=True if the dedicated port failed to bind, so
+        # /peer/* must keep working on the main listener rather than the
+        # fleet silently losing P2P connectivity.
+        server = mock.Mock()
+        server.is_peer_mtls_listener = False
+        server.all_tls_servers = [server]
+        handler = self._handler(server)
+        self.assertFalse(handler._reject_if_wrong_listener_surface(["peer", "pair"], "/v1/api/peer/pair"))
+        handler._send_json.assert_not_called()
+
+    def test_noop_when_server_has_no_all_tls_servers_attribute(self) -> None:
+        # Existing tests build bare handler-like objects with no such
+        # attribute at all -- must not raise, must not reject.
+        server = mock.Mock(spec=[])
+        handler = self._handler(server)
+        self.assertFalse(handler._reject_if_wrong_listener_surface(["peer", "pair"], "/v1/api/peer/pair"))
+        handler._send_json.assert_not_called()
+
+
+class CrossListenerTrustRefreshTests(unittest.TestCase):
+    """A pairing/cert-trust event handled by one listener must load the new
+    peer certificate into every live listener's ssl_context, not just
+    whichever one happened to receive that specific HTTP request -- otherwise
+    a peer paired via the browser-facing listener would never be trusted on
+    the dedicated peer-mTLS listener."""
+
+    def test_load_peer_cert_everywhere_loads_into_every_listener(self) -> None:
+        from app.web.server_tls import load_peer_cert_everywhere
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cert_path = Path(tmp) / "peer.crt"
+            cert_path.write_text("not-a-real-cert")
+            main_ctx = mock.Mock()
+            peer_ctx = mock.Mock()
+            main_server = mock.Mock()
+            main_server.ssl_context = main_ctx
+            peer_server = mock.Mock()
+            peer_server.ssl_context = peer_ctx
+            main_server.all_tls_servers = [main_server, peer_server]
+
+            load_peer_cert_everywhere(main_server, cert_path)
+
+        main_ctx.load_verify_locations.assert_called_once_with(cafile=str(cert_path))
+        peer_ctx.load_verify_locations.assert_called_once_with(cafile=str(cert_path))
+
+    def test_load_peer_cert_everywhere_survives_a_broken_listener_context(self) -> None:
+        from app.web.server_tls import load_peer_cert_everywhere
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cert_path = Path(tmp) / "peer.crt"
+            cert_path.write_text("not-a-real-cert")
+            good_ctx = mock.Mock()
+            bad_ctx = mock.Mock()
+            bad_ctx.load_verify_locations.side_effect = OSError("unreadable")
+            good_server = mock.Mock()
+            good_server.ssl_context = good_ctx
+            bad_server = mock.Mock()
+            bad_server.ssl_context = bad_ctx
+            good_server.all_tls_servers = [bad_server, good_server]
+
+            # Must not raise even though the first listener's load fails.
+            load_peer_cert_everywhere(good_server, cert_path)
+
+        good_ctx.load_verify_locations.assert_called_once_with(cafile=str(cert_path))
+
+    def test_load_peer_cert_everywhere_falls_back_to_bare_server_without_all_tls_servers(self) -> None:
+        from app.web.server_tls import load_peer_cert_everywhere
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cert_path = Path(tmp) / "peer.crt"
+            cert_path.write_text("not-a-real-cert")
+            ctx = mock.Mock()
+            server = mock.Mock(spec=["ssl_context"])
+            server.ssl_context = ctx
+
+            load_peer_cert_everywhere(server, cert_path)
+
+        ctx.load_verify_locations.assert_called_once_with(cafile=str(cert_path))
+
+    def test_network_mode_update_no_longer_reassigns_verify_mode(self) -> None:
+        # Regression: verify_mode is fixed per-listener at construction time
+        # (_apply_server_tls's peer_mtls flag) now. Reassigning CERT_OPTIONAL
+        # here would silently undo the browser-facing listeners' CERT_NONE
+        # policy -- the whole point of the listener split -- the next time
+        # these settings are saved. A Mock can't observe a plain attribute
+        # assignment (it only records method calls), so use a real object
+        # with a sentinel verify_mode and confirm it's untouched afterward.
+        import app.drone_api as da
+        from app.transfer import local_network as _local_network
+
+        class FakeSslContext:
+            def __init__(self) -> None:
+                self.verify_mode = "SENTINEL-UNTOUCHED"
+                self.load_verify_locations_calls = []
+
+            def load_verify_locations(self, cafile: str) -> None:
+                self.load_verify_locations_calls.append(cafile)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root)}, clear=True):
+                settings = da.Settings.from_env()
+            handler = object.__new__(da.RomRequestHandler)
+            handler.settings = settings
+            server = mock.Mock()
+            ssl_context = FakeSslContext()
+            server.ssl_context = ssl_context
+            server.all_tls_servers = [server]
+            handler.server = server
+            handler._send_json = mock.Mock()
+            peer_cert = Path(tmp) / "peer.crt"
+            peer_cert.write_text("not-a-real-cert")
+            with mock.patch.object(_local_network, "announce", return_value=True), \
+                    mock.patch.object(_local_network, "paired_peers", return_value=[{"certificate_path": str(peer_cert)}]):
+                handler._handle_admin_network_mode_update({"mode": "local_network"})
+
+        self.assertEqual(ssl_context.verify_mode, "SENTINEL-UNTOUCHED")
+        self.assertEqual(ssl_context.load_verify_locations_calls, [str(peer_cert)])
 
 
 class LocalNetworkAssetCopyTests(unittest.TestCase):
@@ -5148,6 +5455,49 @@ class TailnetDiscoveryMergeTests(unittest.TestCase):
         validate.assert_not_called()
         self.assertEqual(saved.call_args[0][1]["pairing_source"], "tailnet")
         self.assertEqual(handler._send_json.call_args[0][0], 200)
+
+    def test_peer_pair_stores_and_advertises_a_distinct_peer_mtls_port(self) -> None:
+        from app.web import handlers_peer
+
+        handler = handlers_peer.HandlersPeerMixin()
+        settings = mock.MagicMock(device_id="local-b", http_only=False)
+        settings.advertised_api_port = 8443
+        settings.peer_mtls_port = 8543
+        settings.advertised_peer_mtls_port = 8543
+        handler.settings = settings
+        handler.client_address = ("192.168.1.5", 12345)
+        handler.server = mock.MagicMock()
+        handler._send_json = mock.MagicMock()
+        payload = {
+            "pairing_code": "123456",
+            "drone_id": "local-a",
+            "name": "Cabinet A",
+            "api_port": 8443,
+            "peer_mtls_port": 8544,
+            "certificate_pem": "-----BEGIN CERTIFICATE-----fake",
+        }
+        certificate = {"public_certificate": "-----BEGIN CERTIFICATE-----own", "fingerprint": "cc:dd"}
+        manager = mock.MagicMock()
+        manager.return_value.ensure_certificate.return_value = certificate
+        with tempfile.TemporaryDirectory() as tmp:
+            cert_path = Path(tmp) / "local-a.crt"
+            cert_path.write_text("certificate", encoding="utf-8")
+            with mock.patch.object(handlers_peer._local_network, "is_local_mode", return_value=True), \
+                    mock.patch.object(handlers_peer._local_network, "validate_pairing_code", return_value=True), \
+                    mock.patch.object(handlers_peer, "_save_local_peer_certificate", return_value=(cert_path, "aa:bb")), \
+                    mock.patch.object(handlers_peer._local_network, "save_paired_peer", side_effect=lambda settings, peer: {**peer, "paired": True}) as saved, \
+                    mock.patch.object(handlers_peer._local_network, "pairing_code"), \
+                    mock.patch.object(handlers_peer, "DroneCertificateManager", manager), \
+                    mock.patch.object(handlers_peer._local_network, "discovery_payload", return_value={"reachable_url": "https://cabinet-b.local"}):
+                handler._handle_peer_pair(payload)
+        # The initiator's self-reported peer_mtls_port (8544) is stored, distinct
+        # from its api_port (8443) -- api_port is never repointed at it.
+        self.assertEqual(saved.call_args[0][1]["api_port"], 8443)
+        self.assertEqual(saved.call_args[0][1]["peer_mtls_port"], 8544)
+        # This Drone's own response advertises its own distinct peer_mtls_port.
+        response = handler._send_json.call_args[0][1]
+        self.assertEqual(response["api_port"], 8443)
+        self.assertEqual(response["peer_mtls_port"], 8543)
 
     def test_nearby_excludes_paired_and_prefers_local_duplicate(self) -> None:
         from app.web import handlers_network

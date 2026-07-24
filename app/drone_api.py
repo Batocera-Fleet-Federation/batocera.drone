@@ -1722,7 +1722,18 @@ class DroneThreadingHTTPServer(ThreadingHTTPServer):
         super().handle_error(request, client_address)
 
 
-def _apply_server_tls(settings: Settings, server: ThreadingHTTPServer) -> None:
+def _apply_server_tls(settings: Settings, server: ThreadingHTTPServer, *, peer_mtls: bool = False) -> None:
+    """Build and attach this listener's TLS context.
+
+    ``peer_mtls=True`` is for the one dedicated peer-to-peer listener: it asks
+    for (``CERT_OPTIONAL``) and trusts paired-peer client certificates, same as
+    this whole server used to do on every listener. Every other listener
+    (browser/admin-facing, including the compatibility ports) uses
+    ``peer_mtls=False``: ``CERT_NONE``, so browsers are never sent a
+    ``CertificateRequest`` and never see a client-certificate picker. Splitting
+    this by listener (rather than by request path) is required because the TLS
+    handshake completes before any HTTP path is visible.
+    """
     if settings.http_only:
         return
     if settings.drone_mtls_mode == "managed" and not (settings.drone_cert_file.exists() and settings.drone_key_file.exists()):
@@ -1733,7 +1744,7 @@ def _apply_server_tls(settings: Settings, server: ThreadingHTTPServer) -> None:
         cert_file, key_file = _resolve_tls_material(settings)
     ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ssl_context.load_cert_chain(certfile=str(cert_file), keyfile=str(key_file))
-    if settings.drone_mtls_enabled or _local_network.is_local_mode(settings):
+    if peer_mtls:
         ssl_context.verify_mode = ssl.CERT_OPTIONAL
         if settings.drone_mtls_ca_file and settings.drone_mtls_ca_file.is_file():
             ssl_context.load_verify_locations(cafile=str(settings.drone_mtls_ca_file))
@@ -1765,6 +1776,8 @@ def _apply_server_tls(settings: Settings, server: ThreadingHTTPServer) -> None:
                     ssl_context.load_verify_locations(cafile=str(cert_file_path))
                 except (ssl.SSLError, OSError):
                     continue
+    else:
+        ssl_context.verify_mode = ssl.CERT_NONE
     server.ssl_context = ssl_context  # type: ignore[attr-defined]
     # do_handshake_on_connect=False is critical: wrapping the LISTENING socket otherwise
     # makes accept() perform the TLS handshake on the single serve_forever thread, so one
@@ -1829,14 +1842,14 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
 
     server = DroneThreadingHTTPServer(("0.0.0.0", settings.https_port), handler_factory)
     server.auth = auth  # type: ignore[attr-defined]
-    _apply_server_tls(settings, server)
+    _apply_server_tls(settings, server, peer_mtls=False)
 
     compatibility_servers = []
     for compatibility_port in settings.compatibility_https_ports:
         try:
             compatibility_server = DroneThreadingHTTPServer(("0.0.0.0", compatibility_port), handler_factory)
             compatibility_server.auth = auth  # type: ignore[attr-defined]
-            _apply_server_tls(settings, compatibility_server)
+            _apply_server_tls(settings, compatibility_server, peer_mtls=False)
         except OSError as error:
             print(
                 f"Drone compatibility listener skipped on port {compatibility_port}: {error}",
@@ -1855,6 +1868,43 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
         scheme = "http" if settings.http_only else "https"
         print(f"Serving Drone compatibility listener on {scheme}://0.0.0.0:{compatibility_port}", flush=True)
     server.compatibility_servers = compatibility_servers  # type: ignore[attr-defined]
+
+    # The one dedicated peer-to-peer mTLS listener: CERT_OPTIONAL + paired-peer
+    # trust lives here only, so browsers on the ports above never get asked for
+    # a client certificate. api_routes.py's routing guard restricts this
+    # listener to /peer/* + bare /health; if the bind itself fails, fall back
+    # to the pre-split behavior (peer traffic allowed on the main listener too)
+    # rather than silently going P2P-dark behind a healthy-looking browser UI.
+    peer_mtls_server = None
+    try:
+        peer_mtls_server = DroneThreadingHTTPServer(("0.0.0.0", settings.peer_mtls_port), handler_factory)
+        peer_mtls_server.auth = auth  # type: ignore[attr-defined]
+        _apply_server_tls(settings, peer_mtls_server, peer_mtls=True)
+    except OSError as error:
+        print(
+            f"Drone peer-mTLS listener skipped on port {settings.peer_mtls_port} (falling back to "
+            f"serving /peer/* on the main listener): {error}",
+            file=sys.stderr,
+            flush=True,
+        )
+        peer_mtls_server = None
+    else:
+        peer_mtls_thread = Thread(
+            target=peer_mtls_server.serve_forever,
+            name="drone-peer-mtls-listener",
+            daemon=True,
+        )
+        peer_mtls_thread.start()
+        peer_mtls_server.thread = peer_mtls_thread  # type: ignore[attr-defined]
+        scheme = "http" if settings.http_only else "https"
+        print(f"Serving Drone peer-mTLS listener on {scheme}://0.0.0.0:{settings.peer_mtls_port}", flush=True)
+
+    all_tls_servers = [server, *compatibility_servers] + ([peer_mtls_server] if peer_mtls_server else [])
+    for tls_server in all_tls_servers:
+        tls_server.all_tls_servers = all_tls_servers  # type: ignore[attr-defined]
+        tls_server.is_peer_mtls_listener = False  # type: ignore[attr-defined]
+    if peer_mtls_server is not None:
+        peer_mtls_server.is_peer_mtls_listener = True  # type: ignore[attr-defined]
 
     if not _LOCAL_NETWORK_WORKERS_STARTED:
         _start_local_network_workers(settings)

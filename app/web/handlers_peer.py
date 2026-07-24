@@ -9,7 +9,6 @@ helpers + ``self.repository``/``self.settings``). See the ``drone-p2p-transfer-s
 import hashlib
 import json
 import socket
-import ssl
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -30,12 +29,17 @@ try:
     from ..storage import saves_store as _saves_store
     from ..storage.rom_metadata_store import list_artwork_cache_page
     from ..transfer import local_network as _local_network
-    from ..transfer.drone_network import _drone_advertised_api_port, _network_mode
+    from ..transfer.drone_network import (
+        _drone_advertised_api_port,
+        _drone_advertised_peer_mtls_port,
+        _network_mode,
+    )
     from ..transfer.drone_tls import DroneCertificateManager
     from ..transfer.network_identity import drone_scheme as _drone_scheme
     from ..transfer.peer_connectivity import _public_local_peer, _save_local_peer_certificate
     from ..transfer.transfer_files import build_folder_manifest as _build_folder_manifest
     from ..transfer.upload_tracker import get_upload_tracker as _get_upload_tracker
+    from .server_tls import load_peer_cert_everywhere
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.auth import record_unauthorized_response  # type: ignore
     from device.tailnet_service import tailnet_peer_ips  # type: ignore
@@ -51,12 +55,17 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from storage import saves_store as _saves_store  # type: ignore
     from storage.rom_metadata_store import list_artwork_cache_page  # type: ignore
     from transfer import local_network as _local_network  # type: ignore
-    from transfer.drone_network import _drone_advertised_api_port, _network_mode  # type: ignore
+    from transfer.drone_network import (  # type: ignore
+        _drone_advertised_api_port,
+        _drone_advertised_peer_mtls_port,
+        _network_mode,
+    )
     from transfer.drone_tls import DroneCertificateManager  # type: ignore
     from transfer.network_identity import drone_scheme as _drone_scheme  # type: ignore
     from transfer.peer_connectivity import _public_local_peer, _save_local_peer_certificate  # type: ignore
     from transfer.transfer_files import build_folder_manifest as _build_folder_manifest  # type: ignore
     from transfer.upload_tracker import get_upload_tracker as _get_upload_tracker  # type: ignore
+    from web.server_tls import load_peer_cert_everywhere  # type: ignore
 
 
 class HandlersPeerMixin:
@@ -82,6 +91,7 @@ class HandlersPeerMixin:
         source_ip = self.client_address[0] if self.client_address else ""
         scheme = str(payload.get("scheme") or ("http" if self.settings.http_only else "https"))
         port = int(payload.get("api_port") or 443)
+        peer_mtls_port = int(payload.get("peer_mtls_port") or port)
         advertised_reachable_url = str(payload.get("reachable_url") or "").strip()
         reachable_url = advertised_reachable_url
         if source_ip:
@@ -97,6 +107,7 @@ class HandlersPeerMixin:
                 "advertised_reachable_url": advertised_reachable_url,
                 "scheme": scheme,
                 "api_port": port,
+                "peer_mtls_port": peer_mtls_port,
                 "tailnet_ip": str(payload.get("tailnet_ip") or ""),
                 "pairing_source": "tailnet" if tailnet_authorized else "local_network",
                 "certificate_fingerprint": fingerprint,
@@ -104,12 +115,7 @@ class HandlersPeerMixin:
                 "source_ip": source_ip,
             },
         )
-        ssl_context = getattr(self.server, "ssl_context", None)
-        if ssl_context is not None:
-            try:
-                ssl_context.load_verify_locations(cafile=str(cert_path))
-            except ssl.SSLError:
-                pass
+        load_peer_cert_everywhere(self.server, cert_path)
         _local_network.pairing_code(self.settings, rotate=True)
         own_certificate = DroneCertificateManager(self.settings).ensure_certificate()
         own_discovery = _local_network.discovery_payload(
@@ -125,6 +131,7 @@ class HandlersPeerMixin:
                 "name": socket.gethostname(),
                 "scheme": _drone_scheme(self.settings),
                 "api_port": _drone_advertised_api_port(self.settings),
+                "peer_mtls_port": _drone_advertised_peer_mtls_port(self.settings),
                 "reachable_url": own_discovery.get("reachable_url"),
                 "tailnet_ip": str(own_discovery.get("tailnet_ip") or ""),
                 "certificate_pem": str(own_certificate.get("public_certificate") or ""),

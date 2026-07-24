@@ -198,6 +198,7 @@ def record_discovered_peer(settings: Any, payload: dict, source_ip: Optional[str
     existing = dict(peers.get(storage_id) or {})
     scheme = str(payload.get("scheme") or "https")
     api_port = int(payload.get("api_port") or 443)
+    peer_mtls_port = int(payload.get("peer_mtls_port") or api_port)
     advertised_url = str(payload.get("reachable_url") or "")
     reachable_url = advertised_url
     if source_ip:
@@ -226,6 +227,7 @@ def record_discovered_peer(settings: Any, payload: dict, source_ip: Optional[str
         "advertised_reachable_url": advertised_url,
         "scheme": scheme,
         "api_port": api_port,
+        "peer_mtls_port": peer_mtls_port,
         "certificate_fingerprint": str(payload.get("certificate_fingerprint") or ""),
         "tailnet_ip": tailnet_ip,
         "source": str(payload.get("source") or "Local Network"),
@@ -246,6 +248,7 @@ def record_discovered_peer(settings: Any, payload: dict, source_ip: Optional[str
                 "advertised_reachable_url": peer["advertised_reachable_url"],
                 "scheme": peer["scheme"],
                 "api_port": peer["api_port"],
+                "peer_mtls_port": peer["peer_mtls_port"],
                 "tailnet_ip": peer["tailnet_ip"],
                 "source_ip": peer["source_ip"],
                 "last_seen": peer["last_seen"],
@@ -342,6 +345,13 @@ def validate_pairing_code(settings: Any, value: str) -> bool:
 def discovery_payload(settings: Any, certificate_fingerprint: str = "") -> dict:
     scheme = "http" if settings.http_only else "https"
     port = int(settings.advertised_api_port or settings.https_port or 443)
+    # peer_mtls_port is a distinct, additional field -- api_port keeps meaning
+    # "this Drone's browser/admin port" (used by the Swarm page's "open peer's
+    # UI" link and the remote-admin proxy) and must never be repointed at the
+    # dedicated peer-to-peer mTLS listener. Computed inline (not imported from
+    # drone_network.py) to avoid a circular import -- drone_network already
+    # imports this module.
+    peer_mtls_port = int(settings.advertised_peer_mtls_port or settings.peer_mtls_port or 8543)
     hostname = socket.gethostname()
     local_hostname = hostname if hostname.lower().endswith(".local") else f"{hostname}.local"
     suffix = "" if scheme == "https" and port == 443 else f":{port}"
@@ -353,6 +363,7 @@ def discovery_payload(settings: Any, certificate_fingerprint: str = "") -> dict:
         "hostname": hostname,
         "scheme": scheme,
         "api_port": port,
+        "peer_mtls_port": peer_mtls_port,
         "reachable_url": f"{scheme}://{local_hostname}{suffix}",
         "tailnet_ip": get_tailnet_ip() or "",
         "certificate_fingerprint": certificate_fingerprint,

@@ -306,7 +306,8 @@ def _schemas() -> Dict[str, Schema]:
             "reachable_url": _string("Peer API base URL", fmt="uri"),
             "advertised_reachable_url": _string("Peer-advertised API base URL", fmt="uri"),
             "scheme": _enum(["http", "https"]),
-            "api_port": _integer(),
+            "api_port": _integer("Peer's browser/admin port"),
+            "peer_mtls_port": _integer("Peer's dedicated peer-to-peer mTLS port, used for actual /peer/* traffic"),
             "tailnet_ip": _string("Peer mesh-VPN (tailnet) address, empty when not on a tailnet"),
             "source": _enum(["Tailnet", "Local Network"]),
             "tailnet_device": _boolean("Connected Tailnet device that did not answer as a Drone"),
@@ -868,7 +869,8 @@ def _schemas() -> Dict[str, Schema]:
                 "name": _string(),
                 "hostname": _string(),
                 "scheme": _enum(["http", "https"]),
-                "api_port": _integer(),
+                "api_port": _integer("Initiator's browser/admin port"),
+                "peer_mtls_port": _integer("Initiator's dedicated peer-to-peer mTLS port"),
                 "reachable_url": _string(fmt="uri"),
                 "tailnet_ip": _string(description="Initiator's mesh-VPN (tailnet) address, empty when not on a tailnet"),
                 "certificate_pem": _string(),
@@ -883,7 +885,8 @@ def _schemas() -> Dict[str, Schema]:
                 "drone_id": _string(),
                 "name": _string(),
                 "scheme": _enum(["http", "https"]),
-                "api_port": _integer(),
+                "api_port": _integer("Responder's browser/admin port"),
+                "peer_mtls_port": _integer("Responder's dedicated peer-to-peer mTLS port"),
                 "reachable_url": _string(fmt="uri"),
                 "tailnet_ip": _string(description="Responder's mesh-VPN (tailnet) address, empty when not on a tailnet"),
                 "certificate_pem": _string(),
@@ -899,7 +902,8 @@ def _schemas() -> Dict[str, Schema]:
                 "name": _string(),
                 "hostname": _string(),
                 "scheme": _enum(["http", "https"]),
-                "api_port": _integer(),
+                "api_port": _integer("Browser/admin port"),
+                "peer_mtls_port": _integer("Dedicated peer-to-peer mTLS port"),
                 "reachable_url": _string(fmt="uri"),
                 "tailnet_ip": _string(description="Mesh-VPN (tailnet) address, empty when not on a tailnet"),
                 "certificate_fingerprint": _string(),
@@ -992,9 +996,11 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             "description": (
                 "Browse and download ROM, image, video, BIOS, save, artwork, and admin assets. "
                 "JSON routes are documented with named response schemas. Peer API file-transfer routes "
-                "remain binary streams and can require mTLS or paired Local Network certificates. "
-                "For manual health testing use a client certificate/key with curl, for example: "
-                "curl --cert client.crt --key client.key -k https://drone-host/health. The admin API "
+                "remain binary streams and can require mTLS or paired Local Network certificates -- only "
+                "the dedicated peer-mTLS listener (default port 8543, DRONE_PEER_MTLS_PORT) requests a "
+                "client certificate at all; the main browser/admin port never does. For manual health "
+                "testing use a client certificate/key with curl against that port, for example: "
+                "curl --cert client.crt --key client.key -k https://drone-host:8543/health. The admin API "
                 "page exposes certificate metadata and the public certificate only; private key material "
                 "must stay on the Drone."
             ),

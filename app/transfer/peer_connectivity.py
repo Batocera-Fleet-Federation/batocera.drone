@@ -27,7 +27,11 @@ try:
     from ..storage.state_store import save_peer_route as _save_peer_route
     from . import local_network as _local_network
     from ..transport.tailnet import get_tailnet_ip, is_tailnet_address
-    from .drone_network import _certificate_pem_fingerprint, _drone_advertised_api_port
+    from .drone_network import (
+        _certificate_pem_fingerprint,
+        _drone_advertised_api_port,
+        _drone_advertised_peer_mtls_port,
+    )
     from .drone_tls import DroneCertificateManager
     from .network_identity import drone_scheme as _drone_scheme
 except ImportError:  # pragma: no cover - direct script execution fallback
@@ -37,7 +41,11 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from storage.state_store import save_peer_route as _save_peer_route  # type: ignore
     from transfer import local_network as _local_network  # type: ignore
     from transport.tailnet import get_tailnet_ip, is_tailnet_address  # type: ignore
-    from transfer.drone_network import _certificate_pem_fingerprint, _drone_advertised_api_port  # type: ignore
+    from transfer.drone_network import (  # type: ignore
+        _certificate_pem_fingerprint,
+        _drone_advertised_api_port,
+        _drone_advertised_peer_mtls_port,
+    )
     from transfer.drone_tls import DroneCertificateManager  # type: ignore
     from transfer.network_identity import drone_scheme as _drone_scheme  # type: ignore
 
@@ -178,6 +186,7 @@ def _local_pair_peer(
         "hostname": socket.gethostname(),
         "scheme": _drone_scheme(settings),
         "api_port": _drone_advertised_api_port(settings),
+        "peer_mtls_port": _drone_advertised_peer_mtls_port(settings),
         "reachable_url": own_discovery.get("reachable_url"),
         "tailnet_ip": str(own_discovery.get("tailnet_ip") or ""),
         "certificate_pem": certificate_pem,
@@ -214,6 +223,13 @@ def _local_pair_peer(
             "advertised_reachable_url": str(result.get("reachable_url") or peer.get("advertised_reachable_url") or ""),
             "scheme": str(result.get("scheme") or peer.get("scheme") or "https"),
             "api_port": int(result.get("api_port") or peer.get("api_port") or 443),
+            "peer_mtls_port": int(
+                result.get("peer_mtls_port")
+                or peer.get("peer_mtls_port")
+                or result.get("api_port")
+                or peer.get("api_port")
+                or 443
+            ),
             "tailnet_ip": str(result.get("tailnet_ip") or peer.get("tailnet_ip") or ""),
             "certificate_fingerprint": fingerprint,
             "certificate_path": str(cert_path),
@@ -286,22 +302,57 @@ def _peer_health_url(address: str) -> str:
     return f"{str(address or '').strip().rstrip('/')}/health"
 
 
-def _peer_api_port(peer: dict) -> int:
+def _peer_api_port(peer: dict, *, port_kind: str = "peer_mtls") -> int:
+    """Resolve which port to dial for a peer.
+
+    ``port_kind="peer_mtls"`` (the default -- every actual peer-to-peer /peer/*
+    call) prefers the dedicated ``peer_mtls_port`` field, falling back to
+    ``api_port`` for peer records that predate the listener split (old cached
+    records with no ``peer_mtls_port`` key keep working exactly as before,
+    which is what makes rollout across an already-paired fleet safe).
+    ``port_kind="admin"`` (only ``_peer_proxy_request``, which forwards to a
+    peer's own ``/v1/api/admin/*`` surface) always means the browser/admin
+    port and must never consider ``peer_mtls_port`` -- that port only serves
+    ``/peer/*`` and would 404 anything else.
+    """
     try:
-        return int(peer.get("api_port") or peer.get("port") or 443)
+        if port_kind == "admin":
+            return int(peer.get("api_port") or peer.get("port") or 443)
+        return int(peer.get("peer_mtls_port") or peer.get("api_port") or peer.get("port") or 443)
     except (TypeError, ValueError):
         return 443
 
 
-def _peer_address(peer: dict) -> Optional[str]:
-    public_reachable_url = str(peer.get("public_reachable_url") or "").strip().rstrip("/")
-    if public_reachable_url:
-        return public_reachable_url
+def _url_host(value: object) -> str:
+    return str(urlparse(str(value or "").strip()).hostname or "").strip()
+
+
+def _peer_address(peer: dict, *, port_kind: str = "peer_mtls") -> Optional[str]:
     scheme = str(peer.get("scheme") or peer.get("protocol") or "https").strip() or "https"
-    port = _peer_api_port(peer)
-    reachable_url = str(peer.get("reachable_url") or "").strip().rstrip("/")
-    if reachable_url:
-        return reachable_url
+    port = _peer_api_port(peer, port_kind=port_kind)
+    # reachable_url/public_reachable_url are pre-baked strings built (and kept
+    # refreshed by the LAN discovery beacon) using the admin/browser api_port.
+    # Trusting them verbatim is correct whenever that's also what this call
+    # wants (port_kind="admin", or a peer_mtls peer whose resolved port
+    # happens to equal its admin port -- true for every peer record that
+    # predates the listener split, since peer_mtls_port then just falls back
+    # to api_port). Only bypass them -- extracting the host and rebuilding
+    # with the resolved port -- once the two genuinely diverge.
+    if port_kind == "admin" or port == _peer_api_port(peer, port_kind="admin"):
+        public_reachable_url = str(peer.get("public_reachable_url") or "").strip().rstrip("/")
+        if public_reachable_url:
+            return public_reachable_url
+        reachable_url = str(peer.get("reachable_url") or "").strip().rstrip("/")
+        if reachable_url:
+            return reachable_url
+    else:
+        for key in ("public_reachable_url", "reachable_url"):
+            host = _url_host(peer.get(key))
+            if host:
+                if ":" in host and not host.startswith("["):
+                    host = f"[{host}]"
+                port_suffix = "" if port == 443 and scheme == "https" else f":{port}"
+                return f"{scheme}://{host}{port_suffix}"
     public_ip = str(peer.get("public_ip") or "").strip()
     if public_ip and peer.get("public_resolvable") is True:
         if ":" in public_ip and not public_ip.startswith("["):
@@ -347,6 +398,7 @@ def _peer_address_candidates(
     *,
     settings: Optional[Settings] = None,
     peer_id: Optional[str] = None,
+    port_kind: str = "peer_mtls",
 ) -> list[str]:
     """Return trusted peer routes with a persisted successful route first.
 
@@ -354,6 +406,10 @@ def _peer_address_candidates(
     peer's advertised hostname and finally literal IP routes. Tailscale keeps a
     same-LAN Tailnet connection peer-to-peer, while this ordering avoids paying
     stale LAN-IP and mDNS timeouts whenever a peer moves between networks.
+
+    ``port_kind`` -- see ``_peer_api_port``: ``"peer_mtls"`` (default, every
+    real peer-to-peer call) vs. ``"admin"`` (only ``_peer_proxy_request``,
+    which must keep resolving the peer's browser/admin port).
     """
     discovered: list[str] = []
 
@@ -363,7 +419,7 @@ def _peer_address_candidates(
             discovered.append(value)
 
     scheme = str(peer.get("scheme") or peer.get("protocol") or "https").strip() or "https"
-    port = _peer_api_port(peer)
+    port = _peer_api_port(peer, port_kind=port_kind)
     port_suffix = "" if (scheme == "https" and port == 443) or (scheme == "http" and port == 80) else f":{port}"
 
     def add_host(host_value: object) -> None:
@@ -377,8 +433,14 @@ def _peer_address_candidates(
     tailnet_ip = str(peer.get("tailnet_ip") or resolved.get("tailnet_ip") or "").strip()
     if is_tailnet_address(tailnet_ip):
         add_host(tailnet_ip)
-    for key in ("advertised_reachable_url", "public_reachable_url", "reachable_url"):
-        add(peer.get(key))
+    # See _peer_address for why this only bypasses the pre-baked URL fields
+    # once port_kind's resolved port actually diverges from the admin port.
+    if port_kind == "admin" or port == _peer_api_port(peer, port_kind="admin"):
+        for key in ("advertised_reachable_url", "public_reachable_url", "reachable_url"):
+            add(peer.get(key))
+    else:
+        for key in ("advertised_reachable_url", "public_reachable_url", "reachable_url"):
+            add_host(_url_host(peer.get(key)))
     public_ip = str(peer.get("public_ip") or "").strip()
     if public_ip and peer.get("public_resolvable") is True:
         add_host(public_ip)
@@ -414,8 +476,9 @@ def _preferred_peer_address(
     *,
     settings: Optional[Settings] = None,
     peer_id: Optional[str] = None,
+    port_kind: str = "peer_mtls",
 ) -> Optional[str]:
-    candidates = _peer_address_candidates(peer, settings=settings, peer_id=peer_id)
+    candidates = _peer_address_candidates(peer, settings=settings, peer_id=peer_id, port_kind=port_kind)
     return candidates[0] if candidates else None
 
 
@@ -573,7 +636,10 @@ def _peer_proxy_request(
     normalized_peer_id = str(
         peer_id or peer.get("drone_id") or peer.get("device_id") or peer.get("id") or ""
     ).strip()
-    addresses = _peer_address_candidates(peer, settings=settings, peer_id=normalized_peer_id)
+    # This proxies to the peer's own /v1/api/admin/* surface, never /peer/*,
+    # so it must always resolve the peer's browser/admin port -- the peer-mTLS
+    # listener rejects everything except /peer/* + /health.
+    addresses = _peer_address_candidates(peer, settings=settings, peer_id=normalized_peer_id, port_kind="admin")
     if not addresses:
         raise ValueError("no peer address available")
     is_mutating = method.upper() != "GET"

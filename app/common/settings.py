@@ -73,6 +73,8 @@ class Settings:
     https_port: int
     compatibility_https_ports: Tuple[int, ...]
     advertised_api_port: int
+    peer_mtls_port: int
+    advertised_peer_mtls_port: int
 
     image_cache_ttl_seconds: int
     image_miss_cache_ttl_seconds: int
@@ -126,6 +128,11 @@ class Settings:
             or https_port_value
         )
         compatibility_https_ports = _parse_port_list(os.environ.get("DRONE_COMPAT_HTTPS_PORTS", "8443"))
+        peer_mtls_port_value = os.environ.get("DRONE_PEER_MTLS_PORT", "8543")
+        advertised_peer_mtls_port_value = (
+            os.environ.get("DRONE_ADVERTISED_PEER_MTLS_PORT")
+            or peer_mtls_port_value
+        )
         cert_value = os.environ.get("TLS_CERT_FILE")
         key_value = os.environ.get("TLS_KEY_FILE")
         use_fake_data = _env_bool(False, "USE_FAKE_DATA")
@@ -148,6 +155,8 @@ class Settings:
             https_port=int(https_port_value),
             compatibility_https_ports=tuple(port for port in compatibility_https_ports if port != int(https_port_value)),
             advertised_api_port=int(advertised_api_port_value),
+            peer_mtls_port=int(peer_mtls_port_value),
+            advertised_peer_mtls_port=int(advertised_peer_mtls_port_value),
             image_cache_ttl_seconds=int(os.environ.get("IMAGE_CACHE_TTL_SECONDS", "3600")),
             image_miss_cache_ttl_seconds=int(os.environ.get("IMAGE_MISS_CACHE_TTL_SECONDS", "300")),
             image_cache_max_items=int(os.environ.get("IMAGE_CACHE_MAX_ITEMS", "1000")),

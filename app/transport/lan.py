@@ -75,7 +75,11 @@ class LanDirectTransport(PeerTransport):
     def _peer_url(peer: dict, host_ip: str) -> str:
         scheme = str(peer.get("scheme") or "https")
         try:
-            port = int(peer.get("api_port") or 443)
+            # Prefer the dedicated peer-mTLS port (falls back to api_port for
+            # peer records that predate the browser/peer-mTLS listener split --
+            # see peer_connectivity._peer_api_port, which this mirrors). This
+            # is always real peer-to-peer /peer/* traffic, never admin/browser.
+            port = int(peer.get("peer_mtls_port") or peer.get("api_port") or 443)
         except (TypeError, ValueError):
             port = 443
         host = f"[{host_ip}]" if ":" in host_ip and not host_ip.startswith("[") else host_ip

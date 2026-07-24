@@ -13,6 +13,34 @@ except ImportError:  # pragma: no cover - flat execution
 
 
 class ApiRoutesMixin:
+    def _reject_if_wrong_listener_surface(self, parts: list, raw_path: str) -> bool:
+        """Enforce the browser/admin vs. peer-to-peer mTLS listener split.
+
+        The dedicated peer-mTLS listener (``server.is_peer_mtls_listener``)
+        serves only ``/peer/*`` plus the bare, unauthenticated ``/health``
+        probe used to check reachability. Every other listener (the main
+        browser/admin port and any compatibility ports) keeps serving
+        everything it always has, except ``/peer/*`` -- with one exception,
+        ``/peer/info``, which a Drone dials before it can know a candidate
+        peer's dedicated port at all, so it must stay reachable everywhere.
+        A no-op when the peer-mTLS listener failed to bind at startup (no
+        listener in ``all_tls_servers`` is marked as one), so ``/peer/*``
+        keeps working on the main listener rather than the fleet silently
+        losing P2P connectivity behind a healthy-looking browser UI.
+        """
+        all_tls_servers = getattr(self.server, "all_tls_servers", None) or ()
+        if not any(getattr(candidate, "is_peer_mtls_listener", False) for candidate in all_tls_servers):
+            return False
+        is_peer_route = bool(parts) and parts[0] == "peer"
+        if getattr(self.server, "is_peer_mtls_listener", False):
+            if is_peer_route or raw_path == "/health":
+                return False
+        else:
+            if not is_peer_route or (len(parts) == 2 and parts[1] == "info"):
+                return False
+        self._send_json(404, {"error": "not found"})
+        return True
+
     def do_GET(self) -> None:
         try:
             if self._reject_if_ip_blocked():
@@ -29,6 +57,8 @@ class ApiRoutesMixin:
 
             public_parts = [part for part in raw_path.split("/") if part]
             if self._rate_limit_unauthenticated_external_request():
+                return
+            if self._reject_if_wrong_listener_surface(parts, raw_path):
                 return
             if len(public_parts) >= 2 and public_parts[0] == "static":
                 self._handle_static_file("/".join(public_parts[1:]))
@@ -448,6 +478,8 @@ class ApiRoutesMixin:
             parts = [part for part in api_path.split("/") if part]
 
             if self._rate_limit_unauthenticated_external_request():
+                return
+            if self._reject_if_wrong_listener_surface(parts, raw_path):
                 return
 
             if len(parts) == 2 and parts[0] == "peer" and parts[1] == "pair":

@@ -6,7 +6,6 @@ pair/forget/assets, and local sync (single + bulk). Composed onto ``RomRequestHa
 """
 
 import os
-import ssl
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -32,6 +31,7 @@ try:
         _peer_get_json_for_peer,
         _public_local_peer,
     )
+    from .server_tls import load_peer_cert_everywhere
 except ImportError:  # pragma: no cover - direct script execution fallback
     from device.device_control import _ensure_rom_write_access  # type: ignore
     from device.tailnet_service import tailnet_enroll, tailnet_rotate_auth_key, tailnet_status  # type: ignore
@@ -50,6 +50,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         _peer_get_json_for_peer,
         _public_local_peer,
     )
+    from web.server_tls import load_peer_cert_everywhere  # type: ignore
 
 # Local copy (drone_api keeps its own; same env). Not test-patched.
 PEER_INVENTORY_TIMEOUT_SECONDS = float(os.environ.get("DRONE_PEER_INVENTORY_TIMEOUT_SECONDS", "120"))
@@ -93,32 +94,27 @@ class HandlersNetworkMixin:
         else:
             _local_network.set_mode(self.settings, str(payload.get("mode") or ""))
         # Local networking is always on, so this always applies (raises above,
-        # before reaching here, if the request tried to disable it).
-        ssl_context = getattr(self.server, "ssl_context", None)
-        if ssl_context is not None:
-            ssl_context.verify_mode = ssl.CERT_OPTIONAL
-            for peer in _local_network.paired_peers(self.settings):
-                cert_path = Path(str(peer.get("certificate_path") or ""))
-                if cert_path.exists():
-                    try:
-                        ssl_context.load_verify_locations(cafile=str(cert_path))
-                    except ssl.SSLError:
-                        continue
+        # before reaching here, if the request tried to disable it). Note:
+        # verify_mode itself is fixed per-listener at construction time (see
+        # _apply_server_tls's peer_mtls flag) and must never be reassigned
+        # here -- doing so would silently undo the browser-facing listeners'
+        # CERT_NONE policy (and the mobile client-cert-prompt fix it exists
+        # for) the next time these settings are saved.
+        for peer in _local_network.paired_peers(self.settings):
+            cert_path = Path(str(peer.get("certificate_path") or ""))
+            if cert_path.exists():
+                load_peer_cert_everywhere(self.server, cert_path)
         _local_network.announce(self.settings, str(DroneCertificateManager(self.settings).metadata().get("fingerprint") or ""))
         self._handle_admin_network_mode()
 
     def _activate_local_peer_certificate(self, peer: dict) -> None:
-        ssl_context = getattr(self.server, "ssl_context", None)
         raw_path = str(peer.get("certificate_path") or "").strip()
-        if ssl_context is None or not raw_path:
+        if not raw_path:
             return
         cert_path = Path(raw_path)
         if not cert_path.is_file():
             return
-        try:
-            ssl_context.load_verify_locations(cafile=str(cert_path))
-        except (ssl.SSLError, OSError):
-            pass
+        load_peer_cert_everywhere(self.server, cert_path)
 
     @staticmethod
     def _tailnet_device_row(device: dict) -> dict:
@@ -334,13 +330,9 @@ class HandlersNetworkMixin:
             self._send_json(404, {"error": "discovered peer not found"})
             return
         paired = _local_pair_peer(self.settings, peer, str(payload.get("pairing_code") or ""))
-        ssl_context = getattr(self.server, "ssl_context", None)
         cert_path = Path(str(paired.get("certificate_path") or ""))
-        if ssl_context is not None and cert_path.exists():
-            try:
-                ssl_context.load_verify_locations(cafile=str(cert_path))
-            except ssl.SSLError:
-                pass
+        if cert_path.exists():
+            load_peer_cert_everywhere(self.server, cert_path)
         self._send_json(200, {"status": "paired", "peer": _public_local_peer(paired)})
 
     def _handle_admin_local_peer_pair_by_address(self, payload: dict) -> None:
@@ -376,6 +368,7 @@ class HandlersNetworkMixin:
             "hostname": str(info.get("hostname") or ""),
             "scheme": str(info.get("scheme") or ("http" if dialed.startswith("http://") else "https")),
             "api_port": int(info.get("api_port") or 443),
+            "peer_mtls_port": int(info.get("peer_mtls_port") or info.get("api_port") or 443),
             # The dialed address demonstrably routes from here (e.g. over the
             # tailnet); the peer's advertised .local URL may not.
             "reachable_url": dialed,
@@ -384,13 +377,9 @@ class HandlersNetworkMixin:
             "certificate_fingerprint": str(info.get("certificate_fingerprint") or ""),
         }
         paired = _local_pair_peer(self.settings, peer, str(payload.get("pairing_code") or ""))
-        ssl_context = getattr(self.server, "ssl_context", None)
         cert_path = Path(str(paired.get("certificate_path") or ""))
-        if ssl_context is not None and cert_path.exists():
-            try:
-                ssl_context.load_verify_locations(cafile=str(cert_path))
-            except ssl.SSLError:
-                pass
+        if cert_path.exists():
+            load_peer_cert_everywhere(self.server, cert_path)
         self._send_json(200, {"status": "paired", "peer": _public_local_peer(paired)})
 
     @staticmethod
