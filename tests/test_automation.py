@@ -331,8 +331,9 @@ class EmulatorKillControlTests(unittest.TestCase):
 
 class IdleGameExitAutomationRunnerTests(unittest.TestCase):
     def setUp(self) -> None:
-        # The runner uses module-level arming state; reset it per test.
+        # The runner uses module-level arming/failure-count state; reset per test.
         drone_api._IDLE_GAME_EXIT_LAST_ARMED_ACTIVITY = None
+        automation._IDLE_GAME_EXIT_FAILURE_COUNT = 0
 
     def _enable(self, settings: Settings, *, idle_minutes: int = 15) -> None:
         _save_automation_config(
@@ -406,7 +407,12 @@ class IdleGameExitAutomationRunnerTests(unittest.TestCase):
                     _run_idle_game_exit_automation_once(settings)
                 self.assertEqual(kill_mock.call_count, 2)
 
-    def test_kill_failure_does_not_arm(self) -> None:
+    def test_kill_failure_retries_then_gives_up(self) -> None:
+        # Regression: a failing exit command used to be retried every poll
+        # forever (no backoff) -- observed to hammer batocera-es-swissknife
+        # --emukill against a stuck emulator until the whole ES/X session
+        # went down. It must retry a bounded number of times (attempts 1 and
+        # 2 within IDLE_GAME_EXIT_MAX_ATTEMPTS), then stop until re-armed.
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(Path(tmp))
             self._enable(settings, idle_minutes=5)
@@ -416,9 +422,12 @@ class IdleGameExitAutomationRunnerTests(unittest.TestCase):
                  mock.patch.object(automation, "_kill_running_emulator", side_effect=OSError("boom")) as kill_mock:
                 _run_idle_game_exit_automation_once(settings)
                 _run_idle_game_exit_automation_once(settings)
-                self.assertEqual(kill_mock.call_count, 2)
+                self.assertEqual(kill_mock.call_count, automation.IDLE_GAME_EXIT_MAX_ATTEMPTS)
+                # A third poll (still idle, same activity stamp) must NOT retry again.
+                _run_idle_game_exit_automation_once(settings)
+                self.assertEqual(kill_mock.call_count, automation.IDLE_GAME_EXIT_MAX_ATTEMPTS)
 
-    def test_unavailable_kill_command_does_not_arm(self) -> None:
+    def test_unavailable_kill_command_retries_then_gives_up(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(Path(tmp))
             self._enable(settings, idle_minutes=5)
@@ -426,9 +435,58 @@ class IdleGameExitAutomationRunnerTests(unittest.TestCase):
             with mock.patch.object(automation, "_find_running_emulatorlauncher", return_value=_RUNNING_GAME), \
                  mock.patch.object(automation, "_read_last_input_activity", return_value=idle), \
                  mock.patch.object(automation, "_kill_running_emulator", return_value=False) as kill_mock:
+                for _ in range(automation.IDLE_GAME_EXIT_MAX_ATTEMPTS):
+                    _run_idle_game_exit_automation_once(settings)
+                self.assertEqual(kill_mock.call_count, automation.IDLE_GAME_EXIT_MAX_ATTEMPTS)
                 _run_idle_game_exit_automation_once(settings)
+                self.assertEqual(kill_mock.call_count, automation.IDLE_GAME_EXIT_MAX_ATTEMPTS)
+
+    def test_new_input_after_giving_up_allows_retrying_again(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            self._enable(settings, idle_minutes=5)
+            first_idle = time.time() - 600
+            with mock.patch.object(automation, "_find_running_emulatorlauncher", return_value=_RUNNING_GAME), \
+                 mock.patch.object(automation, "_kill_running_emulator", side_effect=OSError("boom")) as kill_mock:
+                with mock.patch.object(automation, "_read_last_input_activity", return_value=first_idle):
+                    for _ in range(automation.IDLE_GAME_EXIT_MAX_ATTEMPTS + 2):
+                        _run_idle_game_exit_automation_once(settings)
+                    self.assertEqual(kill_mock.call_count, automation.IDLE_GAME_EXIT_MAX_ATTEMPTS)
+                # New input arrives, then the (same, still-misbehaving) game goes idle again.
+                second_idle = time.time() - 600 + 1
+                with mock.patch.object(automation, "_read_last_input_activity", return_value=second_idle):
+                    _run_idle_game_exit_automation_once(settings)
+                self.assertEqual(kill_mock.call_count, automation.IDLE_GAME_EXIT_MAX_ATTEMPTS + 1)
+
+    def test_success_after_a_prior_failure_arms_and_resets_failure_count(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            self._enable(settings, idle_minutes=5)
+            idle = time.time() - 600
+            with mock.patch.object(automation, "_find_running_emulatorlauncher", return_value=_RUNNING_GAME), \
+                 mock.patch.object(automation, "_read_last_input_activity", return_value=idle), \
+                 mock.patch.object(automation, "_kill_running_emulator", side_effect=[OSError("boom"), True]) as kill_mock:
+                _run_idle_game_exit_automation_once(settings)  # attempt 1: fails
+                _run_idle_game_exit_automation_once(settings)  # attempt 2: succeeds
+                self.assertEqual(kill_mock.call_count, 2)
+                self.assertEqual(automation._IDLE_GAME_EXIT_FAILURE_COUNT, 0)
+                # Still idle at the same activity stamp -- must not exit a third time.
                 _run_idle_game_exit_automation_once(settings)
                 self.assertEqual(kill_mock.call_count, 2)
+
+    def test_reset_armed_state_clears_the_failure_count_too(self) -> None:
+        # The admin handler for POST /admin/automation/idle-game-exit calls this on
+        # every save (enable, disable, or just re-saving idle_minutes) -- it must
+        # reset both halves of the arming state, not just the activity stamp,
+        # otherwise a stale failure count could carry over into a fresh idle period.
+        # (Note: automation.py owns both globals; drone_api's re-export is a
+        # separate binding from `from .device.automation import X`, not an alias,
+        # so assertions here must go through the automation module directly.)
+        automation._IDLE_GAME_EXIT_FAILURE_COUNT = automation.IDLE_GAME_EXIT_MAX_ATTEMPTS
+        automation._IDLE_GAME_EXIT_LAST_ARMED_ACTIVITY = time.time()
+        automation._reset_idle_game_exit_armed_state()
+        self.assertIsNone(automation._IDLE_GAME_EXIT_LAST_ARMED_ACTIVITY)
+        self.assertEqual(automation._IDLE_GAME_EXIT_FAILURE_COUNT, 0)
 
 
 class SystemInfoPayloadAutomationTests(unittest.TestCase):

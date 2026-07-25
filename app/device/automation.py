@@ -45,6 +45,15 @@ INPUT_ACTIVITY_FILENAME = "last-input-activity"
 # state; drone_api clears these on config changes via the matching _reset_*_armed_state()).
 _IDLE_VOLUME_LAST_ARMED_ACTIVITY: Optional[float] = None
 _IDLE_GAME_EXIT_LAST_ARMED_ACTIVITY: Optional[float] = None
+# Consecutive failed exit attempts for the *current* idle period. Reset whenever
+# _IDLE_GAME_EXIT_LAST_ARMED_ACTIVITY resets (new input, no game running, disabled,
+# or an explicit config-change reset) -- i.e. wherever a fresh idle period begins.
+_IDLE_GAME_EXIT_FAILURE_COUNT = 0
+# Stop retrying a failing exit command after this many consecutive attempts within
+# one idle period, rather than hammering batocera-es-swissknife --emukill every
+# AUTOMATION_POLL_SECONDS indefinitely -- a stuck/misbehaving emulator repeatedly
+# force-killed like that has been observed to take the whole ES/X session down.
+IDLE_GAME_EXIT_MAX_ATTEMPTS = 2
 _WIFI_RECOVERY_LAST_CHECK_MONOTONIC: Optional[float] = None
 _WIFI_RECOVERY_RUNTIME = {
     "last_check_epoch": None,
@@ -62,8 +71,9 @@ def _reset_idle_volume_armed_state() -> None:
 
 
 def _reset_idle_game_exit_armed_state() -> None:
-    global _IDLE_GAME_EXIT_LAST_ARMED_ACTIVITY
+    global _IDLE_GAME_EXIT_LAST_ARMED_ACTIVITY, _IDLE_GAME_EXIT_FAILURE_COUNT
     _IDLE_GAME_EXIT_LAST_ARMED_ACTIVITY = None
+    _IDLE_GAME_EXIT_FAILURE_COUNT = 0
 
 
 def _reset_wifi_recovery_check_state() -> None:
@@ -360,13 +370,21 @@ def _run_idle_game_exit_automation_once(settings: Settings) -> None:
     Unlike idle-volume (which backs off while a game is active), this automation only
     fires while a game *is* running — it is the mechanism that ends that idle period,
     via ``batocera-es-swissknife --emukill``.
+
+    A failing exit command is retried on the next poll (the emulator may just need a
+    moment), but only up to ``IDLE_GAME_EXIT_MAX_ATTEMPTS`` times per idle period --
+    a stuck/misbehaving emulator must not get force-killed every
+    ``AUTOMATION_POLL_SECONDS`` indefinitely, since that repeated hammering has been
+    observed to take down the whole ES/X session (the actual bug this guards against:
+    a black screen after "the drone" was blamed, traced to this exact retry loop).
     """
-    global _IDLE_GAME_EXIT_LAST_ARMED_ACTIVITY
+    global _IDLE_GAME_EXIT_LAST_ARMED_ACTIVITY, _IDLE_GAME_EXIT_FAILURE_COUNT
     if settings.use_fake_data:
         return
     config = _load_automation_config(settings)["idle_game_exit"]
     if not config.get("enabled"):
         _IDLE_GAME_EXIT_LAST_ARMED_ACTIVITY = None
+        _IDLE_GAME_EXIT_FAILURE_COUNT = 0
         return
     try:
         running = _find_running_emulatorlauncher()
@@ -375,37 +393,51 @@ def _run_idle_game_exit_automation_once(settings: Settings) -> None:
     if not running:
         # No game running; re-arm so the next idle period (in a future game) is fresh.
         _IDLE_GAME_EXIT_LAST_ARMED_ACTIVITY = None
+        _IDLE_GAME_EXIT_FAILURE_COUNT = 0
         return
     last_activity = _read_last_input_activity()
     if last_activity is None:
         # No monitor data yet; never exit a game we cannot confirm is idle.
         return
-    # Any input since we last exited re-arms the automation for the next idle period.
+    # Any input since we last exited (or gave up) re-arms the automation for the next idle period.
     if _IDLE_GAME_EXIT_LAST_ARMED_ACTIVITY is not None and last_activity != _IDLE_GAME_EXIT_LAST_ARMED_ACTIVITY:
         _IDLE_GAME_EXIT_LAST_ARMED_ACTIVITY = None
+        _IDLE_GAME_EXIT_FAILURE_COUNT = 0
     if _IDLE_GAME_EXIT_LAST_ARMED_ACTIVITY is not None:
-        return  # already exited for this idle period
+        return  # already exited (or gave up retrying) for this idle period
     idle_seconds = time.time() - last_activity
     if idle_seconds < config["idle_minutes"] * 60:
         return
     try:
         killed = _kill_running_emulator()
+        failure_reason = None if killed else "no supported emulator exit command is available"
     except (OSError, subprocess.SubprocessError) as error:
-        print(f"Idle-game-exit automation could not exit the game: {error}", file=sys.stderr, flush=True)
-        return
-    if not killed:
+        killed = False
+        failure_reason = str(error)
+    if killed:
+        _IDLE_GAME_EXIT_LAST_ARMED_ACTIVITY = last_activity
+        _IDLE_GAME_EXIT_FAILURE_COUNT = 0
         print(
-            "Idle-game-exit automation could not exit the game: no supported emulator exit command is available",
-            file=sys.stderr,
+            f"Idle-game-exit automation exited the running game after {int(idle_seconds)}s idle",
+            file=sys.stdout,
             flush=True,
         )
         return
-    _IDLE_GAME_EXIT_LAST_ARMED_ACTIVITY = last_activity
+    _IDLE_GAME_EXIT_FAILURE_COUNT += 1
     print(
-        f"Idle-game-exit automation exited the running game after {int(idle_seconds)}s idle",
-        file=sys.stdout,
+        f"Idle-game-exit automation could not exit the game (attempt {_IDLE_GAME_EXIT_FAILURE_COUNT}/{IDLE_GAME_EXIT_MAX_ATTEMPTS}): {failure_reason}",
+        file=sys.stderr,
         flush=True,
     )
+    if _IDLE_GAME_EXIT_FAILURE_COUNT >= IDLE_GAME_EXIT_MAX_ATTEMPTS:
+        # Stop hammering a stuck/misbehaving emulator -- wait for the next real
+        # idle period (new input, then idle again, or the process disappearing).
+        _IDLE_GAME_EXIT_LAST_ARMED_ACTIVITY = last_activity
+        print(
+            f"Idle-game-exit automation giving up until the next idle period after {_IDLE_GAME_EXIT_FAILURE_COUNT} failed attempts",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 def _start_automation_poller(settings: Settings) -> None:
