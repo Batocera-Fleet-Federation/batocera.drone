@@ -691,6 +691,14 @@ except ImportError:
 
 
 try:
+    from .transfer.torrent_manager import TorrentManager
+except ImportError:
+    if __package__ not in (None, ""):
+        raise
+    from transfer.torrent_manager import TorrentManager  # type: ignore
+
+
+try:
     from .transfer.peer_download import (
         _cached_rom_fingerprint_exists,
         _download_artwork_from_peer,
@@ -860,6 +868,7 @@ except ImportError:
         _ROM_METADATA_WAKE,
     )
 _DOWNLOAD_MANAGER = None
+_TORRENT_MANAGER = None
 # _PERFORMANCE_METRICS_LAST_SAMPLE moved to device/system_metrics.py.
 # LAUNCHBOX_API_BASE / LAUNCHBOX_IMAGE_BASE / SCRAPER_USER_AGENT moved to scrapers.py.
 try:  # ARTWORK_FIELDS now lives in roms/gamelist.py (re-exported for back-compat)
@@ -1141,6 +1150,14 @@ except ImportError:
 
 
 try:
+    from .web.handlers_torrents import HandlersTorrentsMixin
+except ImportError:
+    if __package__ not in (None, ""):
+        raise
+    from web.handlers_torrents import HandlersTorrentsMixin  # type: ignore
+
+
+try:
     from .web.handlers_system import HandlersSystemMixin
 except ImportError:
     if __package__ not in (None, ""):
@@ -1172,7 +1189,7 @@ except ImportError:
     from web.handlers_remote_admin import HandlersRemoteAdminMixin  # type: ignore
 
 
-class RomRequestHandler(HandlersSystemMixin, HandlersDownloadsMixin, HandlersDiagnosticsMixin, HandlersConfigMixin, HandlersNetworkMixin, HandlersArtworkMixin, HandlersContentMixin, ThemeMetaMixin, HandlersEsCollectionsMixin, HandlersPeerMixin, HandlersRemoteAdminMixin, ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
+class RomRequestHandler(HandlersSystemMixin, HandlersDownloadsMixin, HandlersTorrentsMixin, HandlersDiagnosticsMixin, HandlersConfigMixin, HandlersNetworkMixin, HandlersArtworkMixin, HandlersContentMixin, ThemeMetaMixin, HandlersEsCollectionsMixin, HandlersPeerMixin, HandlersRemoteAdminMixin, ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
     server_version = "DroneApp/4.0"
     openapi_spec = OPENAPI_SPEC
     # Per-connection idle timeout (applied to the socket in BaseHTTPRequestHandler.setup).
@@ -1575,6 +1592,10 @@ def _get_download_manager() -> Optional["DownloadManager"]:
     return _DOWNLOAD_MANAGER
 
 
+def _get_torrent_manager() -> Optional["TorrentManager"]:
+    return _TORRENT_MANAGER
+
+
 def _resolve_asset_root(settings: Settings, kind: str) -> Optional[Path]:
     """Map an asset kind to the local root directory it lives under."""
     kind = str(kind or "").strip().lower()
@@ -1789,7 +1810,7 @@ def _apply_server_tls(settings: Settings, server: ThreadingHTTPServer, *, peer_m
 
 
 def create_server(settings: Settings) -> ThreadingHTTPServer:
-    global _ROM_METADATA_POLLER_STARTED, _ROM_METADATA_WATCHER_STARTED, _LOCAL_NETWORK_WORKERS_STARTED, _GAME_PROCESS_MONITOR_STARTED, _GAME_PROCESS_MONITOR, _DOWNLOAD_MANAGER, _AUTOMATION_POLLER_STARTED
+    global _ROM_METADATA_POLLER_STARTED, _ROM_METADATA_WATCHER_STARTED, _LOCAL_NETWORK_WORKERS_STARTED, _GAME_PROCESS_MONITOR_STARTED, _GAME_PROCESS_MONITOR, _DOWNLOAD_MANAGER, _TORRENT_MANAGER, _AUTOMATION_POLLER_STARTED
     roms_root, bios_root = _real_data_roots(settings)
     repository = RomRepository(
         roms_root,
@@ -1824,6 +1845,8 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
     )
     if _DOWNLOAD_MANAGER is None:
         _DOWNLOAD_MANAGER = DownloadManager(settings, repository)
+    if _TORRENT_MANAGER is None:
+        _TORRENT_MANAGER = TorrentManager(settings)
     _ensure_game_event_spool(settings)
     if not _GAME_PROCESS_MONITOR_STARTED:
         poll_seconds = max(0.25, float(os.environ.get("GAME_PROCESS_POLL_SECONDS", "2")))

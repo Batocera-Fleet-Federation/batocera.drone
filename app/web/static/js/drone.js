@@ -87,6 +87,8 @@ let logRefreshTimer = null;
 let logRefreshInFlight = false;
 let transfersTimer = null;
 let transfersInFlight = false;
+let torrentsTimer = null;
+let torrentsInFlight = false;
 let currentConfigSource = null;
 let emulatorConfigRows = [];
 let selectedEmulatorConfigIndex = 0;
@@ -793,6 +795,40 @@ function stopTransfersAutoRefresh() {
     transfersTimer = null;
   }
   transfersInFlight = false;
+}
+function stopTorrentsAutoRefresh() {
+  if (torrentsTimer) {
+    clearInterval(torrentsTimer);
+    torrentsTimer = null;
+  }
+  torrentsInFlight = false;
+}
+function startTorrentsAutoRefresh() {
+  // Live-update only the torrent list/status region -- never the settings
+  // form above it, so in-progress edits and the folder picker are untouched.
+  stopTorrentsAutoRefresh();
+  torrentsTimer = setInterval(async () => {
+    if (document.hidden || torrentsInFlight) return;
+    if (window.location.hash !== "#admin/torrents") return;
+    const liveNode = document.getElementById("torrentsLive");
+    if (!liveNode) return;
+    torrentsInFlight = true;
+    try {
+      const payload = await api("/admin/torrents");
+      if (
+        window.location.hash === "#admin/torrents" &&
+        liveNode.isConnected &&
+        document.getElementById("torrentsLive") === liveNode &&
+        !liveNode.contains(document.activeElement)
+      ) {
+        liveNode.innerHTML = renderTorrentsLive(payload);
+      }
+    } catch (err) {
+      // Transient poll failure: leave the last good data in place silently.
+    } finally {
+      torrentsInFlight = false;
+    }
+  }, 3000);
 }
 function startTransfersAutoRefresh() {
   // Live-update only the Transfers data while a copy is in progress -- never
@@ -2034,6 +2070,14 @@ async function renderAdminMenu() {
         </div>
       </div>
       <div class="col-md-4 mb-3">
+        <div class="card admin-tile pointer h-100" onclick="setHash('#admin/torrents')">
+          <div class="card-body">
+            <h5 class="card-title"><i class="bi bi-magnet me-2"></i>Torrents</h5>
+            <p class="card-text">Watch a folder for .torrent files and download them on this machine with aria2c.</p>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-4 mb-3">
         <div class="card admin-tile pointer h-100" onclick="setHash('#theme')">
           <div class="card-body">
             <h5 class="card-title"><i class="bi bi-brush me-2"></i>Theme</h5>
@@ -2445,6 +2489,406 @@ async function clearDroneDownloads() {
   } catch (err) {
     showToast(`Failed to clear queue: ${escapeHtml(err.message || "unknown error")}`, "danger");
   }
+}
+
+// -------------------------------------------------------------- Torrents
+
+function torrentStatusBadge(row) {
+  const status = String(row.status || "queued");
+  const cls = status === "error" ? "danger" : status === "complete" ? "success" : status === "downloading" ? "info" : "primary";
+  const seedNote = status === "complete" && row.seeding ? ' <span class="badge text-bg-secondary">seeding</span>' : "";
+  return `<span class="badge text-bg-${cls}" title="${escapeHtml(row.message || "")}">${escapeHtml(status)}</span>${seedNote}`;
+}
+
+function renderTorrentRows(rows, watchedDir) {
+  if (!rows.length) {
+    return `<div class="themed-empty">No torrents yet. Drop .torrent files into <code>${escapeHtml(watchedDir || "")}</code> or use Upload above -- they start automatically.</div>`;
+  }
+  return `<div class="table-responsive"><table class="table table-sm table-hover align-middle themed-table download-table bff-stack">
+    <thead><tr><th>Torrent</th><th>Status</th><th>Progress</th><th>Speed</th><th>SD</th><th>CN</th><th>ETA</th><th class="download-actions">Actions</th></tr></thead>
+    <tbody>${rows.map(row => {
+      const id = escapeHtml(row.id || "");
+      const status = String(row.status || "queued");
+      const pct = Number(row.progress_percent || 0);
+      const canForceStart = ["queued", "error"].includes(status);
+      const canCancel = ["queued", "downloading"].includes(status) || (status === "complete" && row.seeding);
+      const progressText = row.total_bytes
+        ? `${pct.toFixed(1)}% (${formatBytes(row.completed_bytes)} / ${formatBytes(row.total_bytes)})`
+        : (status === "complete" ? "100%" : "0%");
+      const etaSeconds = Number(row.eta_seconds);
+      const etaText = status === "downloading" ? (Number.isFinite(etaSeconds) && etaSeconds > 0 ? formatDuration(etaSeconds) : "--") : "";
+      const actions = [
+        canForceStart ? `<button class="btn btn-sm btn-outline-success" title="Force start" aria-label="Force start" onclick="forceStartTorrent('${id}')"><i class="bi bi-lightning-charge"></i></button>` : "",
+        canCancel ? `<button class="btn btn-sm btn-outline-warning" title="Cancel" aria-label="Cancel" onclick="cancelTorrent('${id}')"><i class="bi bi-x-circle"></i></button>` : "",
+        `<button class="btn btn-sm btn-outline-danger" title="Delete torrent" aria-label="Delete torrent" onclick="deleteTorrent('${id}')"><i class="bi bi-trash"></i></button>`,
+      ].filter(Boolean).join(" ");
+      return `<tr>
+        <td class="small mono download-file" title="${escapeHtml(row.torrent_file || "")}">${escapeHtml(row.name || "")}</td>
+        <td>${torrentStatusBadge(row)}</td>
+        <td class="small text-nowrap">${progressText}</td>
+        <td class="small">${row.download_speed_bps ? `${formatBytes(row.download_speed_bps)}/s` : ""}</td>
+        <td class="small">${Number(row.num_seeders || 0)}</td>
+        <td class="small">${Number(row.connections || 0)}</td>
+        <td class="small text-nowrap">${etaText}</td>
+        <td class="download-actions">${actions}</td>
+      </tr>`;
+    }).join("")}</tbody></table></div>`;
+}
+
+function renderTorrentsLive(payload) {
+  const torrents = payload.torrents || [];
+  const counts = payload.counts || {};
+  const aria2 = payload.aria2 || {};
+  const dir = (payload.settings || {}).directory || "";
+  const summary = [
+    ["Queued", counts.queued || 0, "bi-hourglass-split", "warning"],
+    ["Downloading", counts.downloading || 0, "bi-cloud-arrow-down", "info"],
+    ["Complete", counts.complete || 0, "bi-check-circle", "success"],
+    ["Error", counts.error || 0, "bi-exclamation-octagon", "danger"],
+  ];
+  const daemonBadge = aria2.installed
+    ? (aria2.running
+      ? '<span class="badge text-bg-success"><i class="bi bi-magnet me-1"></i>aria2c running</span>'
+      : '<span class="badge text-bg-secondary"><i class="bi bi-magnet me-1"></i>aria2c idle</span>')
+    : '<span class="badge text-bg-warning"><i class="bi bi-exclamation-triangle me-1"></i>aria2c not installed</span>';
+  const daemonError = aria2.installed && !aria2.running && aria2.daemon_error
+    ? `<div class="alert alert-danger py-2 mb-3">aria2c problem: ${escapeHtml(aria2.daemon_error)}</div>` : "";
+  const dirWarning = payload.directory_exists === false
+    ? `<div class="alert alert-warning py-2 mb-3">The torrent folder <code>${escapeHtml(dir)}</code> does not exist yet. Save the settings to create it.</div>` : "";
+  return `
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+      <div>${daemonBadge} <span class="small text-muted ms-1">Watching <code>${escapeHtml(dir)}</code> for .torrent files${aria2.version ? ` &middot; aria2 ${escapeHtml(aria2.version)}` : ""}</span></div>
+      <div class="d-flex flex-wrap gap-2">
+        <button class="btn btn-sm btn-outline-primary" onclick="openTorrentUploadPicker()"><i class="bi bi-upload me-1"></i>Upload</button>
+        <button class="btn btn-sm btn-outline-primary" title="Refresh torrents" aria-label="Refresh torrents" onclick="refreshTorrentsLive()"><i class="bi bi-arrow-repeat"></i></button>
+      </div>
+    </div>
+    ${daemonError}
+    ${dirWarning}
+    <div class="download-summary-grid mb-3">
+      ${summary.map(([label, count, icon, tone]) => `<div class="download-summary-card tone-${tone}"><i class="bi ${icon}"></i><div><strong>${count}</strong><span>${label}</span></div></div>`).join("")}
+    </div>
+    ${renderTorrentRows(torrents, dir)}
+  `;
+}
+
+async function renderTorrentsPage() {
+  currentSystemContext = null;
+  clearSystemTheme();
+  titleNode.textContent = "Torrents";
+  subtitleNode.textContent = "Watched-folder torrent downloads via aria2c";
+  setLoading(true, "Loading torrents...");
+  let payload;
+  try {
+    payload = await api("/admin/torrents");
+  } catch (err) {
+    setLoading(false);
+    content.innerHTML = `<div class="alert alert-danger">Failed to load torrents: ${escapeHtml(err.message || "unknown error")}</div>`;
+    return;
+  } finally {
+    setLoading(false);
+  }
+  const settings = payload.settings || {};
+  const aria2 = payload.aria2 || {};
+  const installCard = aria2.installed ? "" : `
+    <div class="card mb-3"><div class="card-body">
+      <div class="d-flex flex-wrap align-items-center justify-content-between gap-2">
+        <div>
+          <h6 class="mb-1"><i class="bi bi-exclamation-triangle text-warning me-2"></i>aria2c is not installed</h6>
+          <div class="small text-muted">Torrents are queued but cannot download until aria2c is installed -- a ~6 MB static binary stored inside the Drone app folder.</div>
+        </div>
+        <button class="btn btn-primary" id="installAria2Btn" onclick="installAria2()"><i class="bi bi-download me-1"></i>Download aria2c</button>
+      </div>
+    </div></div>`;
+  content.innerHTML = `
+    ${installCard}
+    <div class="card mb-3">
+      <div class="card-header"><i class="bi bi-gear me-2"></i>Torrent Settings</div>
+      <div class="card-body">
+        <div class="row g-3 mb-3">
+          <div class="col-12">
+            <label class="form-label" for="torrentDir">Torrent folder</label>
+            <div class="input-group">
+              <input class="form-control" type="text" id="torrentDir" value="${escapeHtml(settings.directory || "")}">
+              <button class="btn btn-outline-secondary" type="button" onclick="openTorrentDirBrowser()"><i class="bi bi-folder2-open me-1"></i>Browse</button>
+            </div>
+            <div class="form-text">.torrent files dropped here are picked up automatically and downloaded into this folder. Changing it only changes which folder is watched -- torrents already added keep downloading where they started.</div>
+          </div>
+          <div class="col-sm-6 col-lg-4">
+            <label class="form-label" for="torrentSeedTime">Seed time (minutes)</label>
+            <input class="form-control" type="number" id="torrentSeedTime" min="0" step="1" value="${escapeHtml(String(settings.seed_time ?? 60))}">
+            <div class="form-text">0 = stop seeding as soon as the download completes.</div>
+          </div>
+          <div class="col-sm-6 col-lg-4">
+            <label class="form-label" for="torrentSeedRatio">Seed ratio</label>
+            <input class="form-control" type="number" id="torrentSeedRatio" min="0" step="0.1" value="${escapeHtml(String(settings.seed_ratio ?? 1.0))}">
+            <div class="form-text">Stop seeding at this upload/download ratio. 0 = no ratio limit.</div>
+          </div>
+          <div class="col-sm-6 col-lg-4">
+            <label class="form-label" for="torrentBtStopTimeout">Stall timeout (seconds)</label>
+            <input class="form-control" type="number" id="torrentBtStopTimeout" min="0" step="1" value="${escapeHtml(String(settings.bt_stop_timeout ?? 0))}">
+            <div class="form-text">Stop a torrent stuck at 0 B/s for this long (aria2 bt-stop-timeout). 0 = disabled.</div>
+          </div>
+          <div class="col-sm-6 col-lg-4">
+            <label class="form-label" for="torrentFileAllocation">File allocation</label>
+            <input class="form-control" type="text" id="torrentFileAllocation" value="${escapeHtml(settings.file_allocation || "prealloc")}">
+            <div class="form-text">One of: none, prealloc, trunc, falloc.</div>
+          </div>
+          <div class="col-sm-6 col-lg-4">
+            <label class="form-label" for="torrentMaxConcurrent">Concurrent downloads</label>
+            <input class="form-control" type="number" id="torrentMaxConcurrent" min="1" max="16" step="1" value="${escapeHtml(String(settings.max_concurrent_downloads ?? 3))}">
+            <div class="form-text">Force Start bypasses this limit.</div>
+          </div>
+        </div>
+        <div class="small text-muted mb-3">Seed and allocation settings apply to torrents added after saving.</div>
+        <button class="btn btn-primary" id="torrentSettingsSaveBtn" onclick="saveTorrentSettings()"><i class="bi bi-save me-1"></i>Save</button>
+      </div>
+    </div>
+    <div class="card log-card"><div class="card-body">
+      <div id="torrentsLive">${renderTorrentsLive(payload)}</div>
+    </div></div>
+  `;
+  startTorrentsAutoRefresh();
+}
+
+async function refreshTorrentsLive() {
+  try {
+    const payload = await api("/admin/torrents");
+    const node = document.getElementById("torrentsLive");
+    if (node) node.innerHTML = renderTorrentsLive(payload);
+  } catch (err) {
+    showToast(`Failed to refresh torrents: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  }
+}
+
+async function saveTorrentSettings() {
+  const dir = (document.getElementById("torrentDir").value || "").trim();
+  const seedTime = parseInt(document.getElementById("torrentSeedTime").value, 10);
+  const seedRatio = parseFloat(document.getElementById("torrentSeedRatio").value);
+  const stallTimeout = parseInt(document.getElementById("torrentBtStopTimeout").value, 10);
+  const fileAllocation = (document.getElementById("torrentFileAllocation").value || "").trim().toLowerCase();
+  const maxConcurrent = parseInt(document.getElementById("torrentMaxConcurrent").value, 10);
+  if (!dir) { showToast("Torrent folder is required.", "warning"); return; }
+  if (!Number.isFinite(seedTime) || seedTime < 0) { showToast("Seed time must be 0 or more minutes.", "warning"); return; }
+  if (!Number.isFinite(seedRatio) || seedRatio < 0) { showToast("Seed ratio must be 0 or more.", "warning"); return; }
+  if (!Number.isFinite(stallTimeout) || stallTimeout < 0) { showToast("Stall timeout must be 0 or more seconds.", "warning"); return; }
+  if (!["none", "prealloc", "trunc", "falloc"].includes(fileAllocation)) { showToast("File allocation must be one of: none, prealloc, trunc, falloc.", "warning"); return; }
+  if (!Number.isFinite(maxConcurrent) || maxConcurrent < 1 || maxConcurrent > 16) { showToast("Concurrent downloads must be between 1 and 16.", "warning"); return; }
+  setLoading(true, "Saving torrent settings...");
+  try {
+    await apiPost("/admin/torrents/settings", {
+      directory: dir,
+      seed_time: seedTime,
+      seed_ratio: seedRatio,
+      bt_stop_timeout: stallTimeout,
+      file_allocation: fileAllocation,
+      max_concurrent_downloads: maxConcurrent,
+    });
+    showToast("Torrent settings saved.", "success");
+    await renderTorrentsPage();
+  } catch (err) {
+    showToast(`Failed to save torrent settings: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  } finally {
+    setLoading(false);
+  }
+}
+
+async function installAria2() {
+  const button = document.getElementById("installAria2Btn");
+  if (button) {
+    button.disabled = true;
+    button.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Downloading...';
+  }
+  const toast = showToast('<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Downloading aria2c...', "info", null);
+  try {
+    const result = await apiPost("/admin/torrents/aria2/install", {});
+    dismissToast(toast);
+    showToast(`aria2c ${escapeHtml(result.version || "")} installed.`, "success");
+    await renderTorrentsPage();
+  } catch (err) {
+    dismissToast(toast);
+    showToast(`aria2c install failed: ${escapeHtml(err.message || "unknown error")}`, "danger", 10000);
+    if (button && button.isConnected) {
+      button.disabled = false;
+      button.innerHTML = '<i class="bi bi-download me-1"></i>Download aria2c';
+    }
+  }
+}
+
+async function forceStartTorrent(torrentId) {
+  if (!torrentId) return;
+  try {
+    await apiPost(`/admin/torrents/${encodeURIComponent(torrentId)}/force-start`, {});
+    await refreshTorrentsLive();
+  } catch (err) {
+    showToast(`Force start failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  }
+}
+
+async function cancelTorrent(torrentId) {
+  if (!torrentId || !window.confirm("Cancel this torrent? Partially downloaded files are kept, and Force Start can resume it later.")) return;
+  try {
+    await apiPost(`/admin/torrents/${encodeURIComponent(torrentId)}/cancel`, {});
+    await refreshTorrentsLive();
+  } catch (err) {
+    showToast(`Cancel failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  }
+}
+
+async function deleteTorrent(torrentId) {
+  if (!torrentId || !window.confirm("Delete this torrent? It is removed from the list and its .torrent file is deleted so it is not picked up again. Downloaded files are kept.")) return;
+  try {
+    await apiPost(`/admin/torrents/${encodeURIComponent(torrentId)}/delete`, {});
+    await refreshTorrentsLive();
+  } catch (err) {
+    showToast(`Delete failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  }
+}
+
+function openTorrentDirBrowser() {
+  const modalId = "torrentDirBrowserModal";
+  let modal = document.getElementById(modalId);
+  if (!modal) {
+    modal = document.createElement("div");
+    modal.id = modalId;
+    modal.className = "modal fade";
+    modal.tabIndex = -1;
+    modal.setAttribute("aria-hidden", "true");
+    document.body.appendChild(modal);
+  }
+  modal.innerHTML = `
+    <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
+      <div class="modal-content">
+        <div class="modal-header">
+          <div>
+            <h5 class="modal-title mb-0"><i class="bi bi-folder2-open me-2"></i>Choose torrent folder</h5>
+            <div class="small text-muted" id="torrentDirBrowserPath"></div>
+          </div>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body p-0"><div class="list-group list-group-flush" id="torrentDirBrowserBody"></div></div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="button" class="btn btn-primary" id="torrentDirChooseBtn" onclick="chooseTorrentDir()" disabled>Use this folder</button>
+        </div>
+      </div>
+    </div>`;
+  modal.querySelector("#torrentDirBrowserBody").addEventListener("click", (event) => {
+    const entry = event.target.closest(".torrent-dir-entry");
+    if (entry) loadTorrentDirBrowser(entry.dataset.path || "");
+  });
+  if (window.bootstrap?.Modal) {
+    window.bootstrap.Modal.getOrCreateInstance(modal).show();
+  } else {
+    modal.classList.add("show");
+    modal.style.display = "block";
+  }
+  const startPath = (document.getElementById("torrentDir")?.value || "").trim();
+  loadTorrentDirBrowser(startPath);
+}
+
+async function loadTorrentDirBrowser(path) {
+  const body = document.getElementById("torrentDirBrowserBody");
+  if (!body) return;
+  body.innerHTML = '<div class="text-center py-3"><span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span></div>';
+  let payload;
+  try {
+    payload = await api(`/admin/torrents/browse?path=${encodeURIComponent(path || "")}`);
+  } catch (err) {
+    if (path) {
+      // The requested folder (e.g. a not-yet-created default) is not
+      // browsable; fall back to the storage roots instead of a dead end.
+      loadTorrentDirBrowser("");
+      return;
+    }
+    body.innerHTML = `<div class="p-3 small text-danger">Failed to browse folders: ${escapeHtml(err.message || "unknown error")}</div>`;
+    return;
+  }
+  const target = document.getElementById("torrentDirBrowserBody");
+  if (!target) return;
+  const chooseBtn = document.getElementById("torrentDirChooseBtn");
+  if (chooseBtn) {
+    chooseBtn.disabled = !payload.path;
+    chooseBtn.dataset.path = payload.path || "";
+  }
+  const pathLabel = document.getElementById("torrentDirBrowserPath");
+  if (pathLabel) pathLabel.textContent = payload.path || "Storage roots";
+  const rows = [];
+  if (payload.path) {
+    rows.push(`<button type="button" class="list-group-item list-group-item-action torrent-dir-entry" data-path="${escapeHtml(payload.parent || "")}"><i class="bi bi-arrow-90deg-up me-2"></i>..</button>`);
+  }
+  (payload.dirs || []).forEach((dir) => {
+    rows.push(`<button type="button" class="list-group-item list-group-item-action torrent-dir-entry" data-path="${escapeHtml(dir.path)}"><i class="bi bi-folder me-2"></i>${escapeHtml(dir.name)}</button>`);
+  });
+  if (!rows.length) rows.push('<div class="p-3 small text-muted">No subfolders.</div>');
+  target.innerHTML = rows.join("");
+}
+
+function openTorrentUploadPicker() {
+  let input = document.getElementById("torrentUploadInput");
+  if (!input) {
+    input = document.createElement("input");
+    input.type = "file";
+    input.id = "torrentUploadInput";
+    input.accept = ".torrent,application/x-bittorrent";
+    input.multiple = true;
+    input.className = "d-none";
+    document.body.appendChild(input);
+    input.addEventListener("change", async () => {
+      const files = Array.from(input.files || []);
+      input.value = "";
+      if (files.length) await uploadTorrentFiles(files);
+    });
+  }
+  input.click();
+}
+
+async function uploadTorrentFiles(files) {
+  const formData = new FormData();
+  files.forEach((file) => formData.append("torrents", file, file.name));
+  const toast = showToast(`<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Uploading ${files.length} torrent file${files.length === 1 ? "" : "s"}...`, "info", null);
+  try {
+    const res = await fetch(_apiRequestUrl("/admin/torrents/upload"), {
+      method: "POST",
+      credentials: "include",
+      body: formData,
+    });
+    let payload = {};
+    try { payload = await res.json(); } catch (_) {}
+    dismissToast(toast);
+    if (!res.ok && !(payload.errors || []).length) {
+      throw new Error(payload.error || `Upload failed: ${res.status}`);
+    }
+    const saved = payload.saved || [];
+    const errors = payload.errors || [];
+    if (saved.length) {
+      showToast(`Uploaded ${saved.length} torrent file${saved.length === 1 ? "" : "s"}.`, errors.length ? "warning" : "success");
+    }
+    errors.forEach((entry) => {
+      showToast(`${escapeHtml(entry.file || "file")}: ${escapeHtml(entry.error || "rejected")}`, "danger", 8000);
+    });
+    setTimeout(refreshTorrentsLive, 700);
+  } catch (err) {
+    dismissToast(toast);
+    showToast(`Torrent upload failed: ${escapeHtml(err.message || "unknown error")}`, "danger", 8000);
+  }
+}
+
+function chooseTorrentDir() {
+  const chooseBtn = document.getElementById("torrentDirChooseBtn");
+  const input = document.getElementById("torrentDir");
+  const path = chooseBtn ? chooseBtn.dataset.path || "" : "";
+  if (input && path) input.value = path;
+  const modal = document.getElementById("torrentDirBrowserModal");
+  if (modal) {
+    if (window.bootstrap?.Modal) {
+      window.bootstrap.Modal.getOrCreateInstance(modal).hide();
+    } else {
+      modal.classList.remove("show");
+      modal.style.display = "none";
+    }
+  }
+  if (path) showToast("Folder selected. Click Save to apply it.", "info");
 }
 
 async function purgeAssetCache() {
@@ -6223,6 +6667,9 @@ async function router() {
     if (hash !== "#admin/transfers") {
       stopTransfersAutoRefresh();
     }
+    if (hash !== "#admin/torrents") {
+      stopTorrentsAutoRefresh();
+    }
     document.body.classList.toggle("artwork-page", hash.startsWith("#admin/artwork"));
     if (hash === "#bios") {
       setHash(systemsTreeHash("", BIOS_TREE_ROOT));
@@ -6341,6 +6788,12 @@ async function router() {
         return;
       }
       await renderAutomationPage();
+    } else if (hash === "#admin/torrents") {
+      if (!adminEnabled) {
+        setHash("");
+        return;
+      }
+      await renderTorrentsPage();
     } else if (parseSystemRomHash(hash)) {
       const parsed = parseSystemRomHash(hash);
       await renderRomMediaPage(parsed.system, parsed.uniqueId, parsed.page);

@@ -309,6 +309,14 @@ class ApiRoutesMixin:
                 self._handle_admin_uploads()
                 return
 
+            if len(parts) == 2 and parts[0] == "admin" and parts[1] == "torrents":
+                self._handle_admin_torrents()
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "torrents" and parts[2] == "browse":
+                self._handle_admin_torrents_browse(query_params.get("path", [""])[0])
+                return
+
             if len(parts) == 2 and parts[0] == "admin" and parts[1] == "es-collections":
                 self._handle_admin_es_collections_get()
                 return
@@ -658,6 +666,31 @@ class ApiRoutesMixin:
 
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "downloads" and parts[2] == "clear":
                 self._handle_admin_downloads_clear()
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "torrents" and parts[2] == "settings":
+                payload = self._read_json_body()
+                self._handle_admin_torrents_settings_update(payload)
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "torrents" and parts[2] == "upload":
+                self._handle_admin_torrents_upload()
+                return
+
+            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "torrents" and parts[2] == "aria2" and parts[3] == "install":
+                self._handle_admin_torrents_aria2_install()
+                return
+
+            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "torrents" and parts[3] == "force-start":
+                self._handle_admin_torrent_force_start(parts[2])
+                return
+
+            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "torrents" and parts[3] == "cancel":
+                self._handle_admin_torrent_cancel(parts[2])
+                return
+
+            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "torrents" and parts[3] == "delete":
+                self._handle_admin_torrent_delete(parts[2])
                 return
 
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "artwork" and parts[2] == "launchbox" and parts[3] == "apply":

@@ -1,0 +1,559 @@
+import io
+import tempfile
+import unittest
+import zipfile
+from pathlib import Path
+from unittest import mock
+
+import app.transfer.aria2_runtime as aria2_runtime
+import app.transfer.torrent_manager as torrent_manager
+from app.common.settings import Settings
+from app.transfer.aria2_runtime import Aria2RpcError, _asset_for_machine, _extract_aria2c_from_zip, install_aria2
+from app.transfer.torrent_manager import (
+    TorrentManager,
+    _normalize_torrent_settings,
+    default_torrent_directory,
+)
+
+
+def _build_settings(root: Path) -> Settings:
+    env = {
+        "USERDATA_ROOT": str(root),
+        "ROMS_ROOT": str(root / "roms"),
+        "BIOS_ROOT": str(root / "bios"),
+        "SAVES_ROOT": str(root / "saves"),
+        "DRONE_STATE_DATABASE_FILE": str(root / "state.sqlite3"),
+        "DRONE_DEVICE_ID": "local-test",
+        "LOG_DIR": str(root / "logs"),
+    }
+    with mock.patch.dict("os.environ", env, clear=True):
+        return Settings.from_env()
+
+
+class FakeRpc:
+    def __init__(self):
+        self.calls = []
+        self._gid_counter = 0
+        self.statuses = {}
+
+    def call(self, method, params=None, timeout=None):
+        params = params or []
+        self.calls.append((method, params))
+        if method == "aria2.addTorrent":
+            self._gid_counter += 1
+            gid = f"gid{self._gid_counter}"
+            paused = params[2].get("pause") == "true"
+            self.statuses[gid] = {
+                "gid": gid,
+                "status": "paused" if paused else "active",
+                "totalLength": "0",
+                "completedLength": "0",
+                "downloadSpeed": "0",
+            }
+            return gid
+        if method == "aria2.tellStatus":
+            gid = params[0]
+            if gid not in self.statuses:
+                raise Aria2RpcError(f"GID {gid} is not found")
+            return self.statuses[gid]
+        if method == "aria2.unpause":
+            gid = params[0]
+            if gid in self.statuses:
+                self.statuses[gid]["status"] = "active"
+            return gid
+        return "OK"
+
+    def method_calls(self, name):
+        return [params for method, params in self.calls if method == name]
+
+
+class FakeDaemon:
+    def __init__(self, rpc):
+        self.rpc = rpc
+        self.binary_path = "/fake/aria2c"
+        self.last_error = ""
+
+    @property
+    def running(self):
+        return True
+
+
+def _write_torrent(directory: Path, name: str) -> Path:
+    path = directory / f"{name}.torrent"
+    path.write_bytes(b"d8:announce0:e")
+    return path
+
+
+class TorrentSettingsTests(unittest.TestCase):
+    def test_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            config = _normalize_torrent_settings({}, settings)
+            self.assertEqual(config["directory"], str(default_torrent_directory(settings)))
+            # The default lives where the Drone app is physically installed
+            # (<install root>/torrents), not under the userdata root.
+            install_root = Path(torrent_manager.__file__).resolve().parents[2]
+            self.assertEqual(config["directory"], str(install_root / "torrents"))
+            self.assertEqual(config["seed_time"], 60)
+            self.assertEqual(config["seed_ratio"], 1.0)
+            self.assertEqual(config["bt_stop_timeout"], 0)
+            self.assertEqual(config["file_allocation"], "prealloc")
+            self.assertEqual(config["max_concurrent_downloads"], 3)
+
+    def test_clamps_and_garbage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            config = _normalize_torrent_settings(
+                {
+                    "directory": "  ",
+                    "seed_time": -5,
+                    "seed_ratio": -1,
+                    "bt_stop_timeout": "abc",
+                    "file_allocation": "bogus",
+                    "max_concurrent_downloads": 99,
+                },
+                settings,
+            )
+            self.assertEqual(config["directory"], str(default_torrent_directory(settings)))
+            self.assertEqual(config["seed_time"], 0)
+            self.assertEqual(config["seed_ratio"], 0.0)
+            self.assertEqual(config["bt_stop_timeout"], 0)
+            self.assertEqual(config["file_allocation"], "prealloc")
+            self.assertEqual(config["max_concurrent_downloads"], 16)
+
+    def test_update_settings_merges_partial_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = TorrentManager(_build_settings(root), start_worker=False)
+            watch = root / "watch"
+            manager.update_settings({"directory": str(watch)})
+            config = manager.update_settings({"max_concurrent_downloads": 1})
+            self.assertEqual(config["directory"], str(watch))
+            self.assertEqual(config["max_concurrent_downloads"], 1)
+            self.assertTrue(watch.is_dir())
+
+
+class TorrentWatchScanTests(unittest.TestCase):
+    def test_new_torrent_files_are_registered_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = TorrentManager(_build_settings(root), start_worker=False)
+            watch = root / "watch"
+            manager.update_settings({"directory": str(watch)})
+            _write_torrent(watch, "game")
+            (watch / "notes.txt").write_text("ignored", encoding="utf-8")
+            with mock.patch.object(torrent_manager, "find_aria2c", return_value=None):
+                manager._tick()
+                manager._tick()
+            snapshot_entries = manager.snapshot()["torrents"]
+            self.assertEqual(len(snapshot_entries), 1)
+            self.assertEqual(snapshot_entries[0]["status"], "queued")
+            self.assertEqual(snapshot_entries[0]["message"], "aria2c is not installed")
+
+    def test_directory_change_keeps_old_entries_but_stops_scanning_old_folder(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = TorrentManager(_build_settings(root), start_worker=False)
+            old_watch = root / "old"
+            new_watch = root / "new"
+            manager.update_settings({"directory": str(old_watch)})
+            _write_torrent(old_watch, "before")
+            with mock.patch.object(torrent_manager, "find_aria2c", return_value=None):
+                manager._tick()
+                manager.update_settings({"directory": str(new_watch)})
+                _write_torrent(old_watch, "left-behind")
+                _write_torrent(new_watch, "after")
+                manager._tick()
+            names = sorted(entry["name"] for entry in manager.snapshot()["torrents"])
+            self.assertEqual(names, ["after", "before"])
+            before = next(e for e in manager.snapshot()["torrents"] if e["name"] == "before")
+            self.assertEqual(before["download_dir"], str(old_watch))
+
+
+class TorrentLifecycleTests(unittest.TestCase):
+    def _manager(self, root: Path, rpc: FakeRpc) -> TorrentManager:
+        manager = TorrentManager(_build_settings(root), start_worker=False)
+        manager._daemon = FakeDaemon(rpc)
+        return manager
+
+    def test_adds_paused_and_schedules_up_to_concurrency_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            watch = root / "watch"
+            manager.update_settings({"directory": str(watch), "max_concurrent_downloads": 2})
+            for name in ("a", "b", "c"):
+                _write_torrent(watch, name)
+            manager._tick()
+            adds = rpc.method_calls("aria2.addTorrent")
+            self.assertEqual(len(adds), 3)
+            self.assertTrue(all(params[2]["pause"] == "true" for params in adds))
+            self.assertEqual(adds[0][2]["seed-time"], "60")
+            self.assertEqual(adds[0][2]["file-allocation"], "prealloc")
+            self.assertEqual(len(rpc.method_calls("aria2.unpause")), 2)
+            statuses = [entry["status"] for entry in manager.snapshot()["torrents"]]
+            self.assertEqual(statuses.count("downloading"), 2)
+            self.assertEqual(statuses.count("queued"), 1)
+
+    def test_status_mapping_progress_complete_and_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            watch = root / "watch"
+            manager.update_settings({"directory": str(watch), "max_concurrent_downloads": 3})
+            for name in ("a", "b", "c"):
+                _write_torrent(watch, name)
+            manager._tick()
+            entries = manager.snapshot()["torrents"]
+            gid_by_name = {}
+            with manager._lock:
+                for entry in manager._torrents.values():
+                    gid_by_name[entry["name"]] = entry["gid"]
+            rpc.statuses[gid_by_name["a"]] = {
+                "gid": gid_by_name["a"],
+                "status": "active",
+                "totalLength": "1000",
+                "completedLength": "250",
+                "downloadSpeed": "50",
+                "uploadSpeed": "5",
+                "connections": "4",
+                "numSeeders": "3",
+                "bittorrent": {"info": {"name": "Game A (USA)"}},
+            }
+            rpc.statuses[gid_by_name["b"]] = {
+                "gid": gid_by_name["b"],
+                "status": "active",
+                "totalLength": "1000",
+                "completedLength": "1000",
+                "downloadSpeed": "0",
+                "uploadSpeed": "9",
+            }
+            rpc.statuses[gid_by_name["c"]] = {
+                "gid": gid_by_name["c"],
+                "status": "error",
+                "totalLength": "0",
+                "completedLength": "0",
+                "downloadSpeed": "0",
+                "errorMessage": "tracker exploded",
+            }
+            manager._tick()
+            by_name = {entry["name"]: entry for entry in manager.snapshot()["torrents"]}
+            game_a = by_name["Game A (USA)"]
+            self.assertEqual(game_a["status"], "downloading")
+            self.assertEqual(game_a["progress_percent"], 25.0)
+            self.assertEqual(game_a["download_speed_bps"], 50)
+            self.assertEqual(game_a["num_seeders"], 3)
+            self.assertEqual(game_a["connections"], 4)
+            self.assertEqual(game_a["eta_seconds"], 15)
+            self.assertEqual(by_name["b"]["status"], "complete")
+            self.assertTrue(by_name["b"]["seeding"])
+            self.assertIsNotNone(by_name["b"]["completed_at"])
+            self.assertEqual(by_name["c"]["status"], "error")
+            self.assertEqual(by_name["c"]["message"], "tracker exploded")
+
+    def test_force_start_bypasses_concurrency(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            watch = root / "watch"
+            manager.update_settings({"directory": str(watch), "max_concurrent_downloads": 1})
+            for name in ("a", "b"):
+                _write_torrent(watch, name)
+            manager._tick()
+            queued = [entry for entry in manager.snapshot()["torrents"] if entry["status"] == "queued"]
+            self.assertEqual(len(queued), 1)
+            result = manager.force_start(queued[0]["id"])
+            self.assertEqual(result["status"], "ok")
+            statuses = [entry["status"] for entry in manager.snapshot()["torrents"]]
+            self.assertEqual(statuses.count("downloading"), 2)
+            self.assertEqual(len(rpc.method_calls("aria2.unpause")), 2)
+
+    def test_force_start_readds_errored_torrent_unpaused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            watch = root / "watch"
+            manager.update_settings({"directory": str(watch), "max_concurrent_downloads": 1})
+            _write_torrent(watch, "a")
+            manager._tick()
+            entry = manager.snapshot()["torrents"][0]
+            manager.cancel(entry["id"])
+            self.assertEqual(manager.snapshot()["torrents"][0]["status"], "error")
+            result = manager.force_start(entry["id"])
+            self.assertEqual(result["status"], "ok")
+            manager._tick()
+            adds = rpc.method_calls("aria2.addTorrent")
+            self.assertEqual(len(adds), 2)
+            self.assertEqual(adds[-1][2]["pause"], "false")
+            self.assertEqual(manager.snapshot()["torrents"][0]["status"], "downloading")
+
+    def test_cancel_active_marks_error_and_removes_from_aria2(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            watch = root / "watch"
+            manager.update_settings({"directory": str(watch)})
+            _write_torrent(watch, "a")
+            manager._tick()
+            entry = manager.snapshot()["torrents"][0]
+            self.assertEqual(entry["status"], "downloading")
+            result = manager.cancel(entry["id"])
+            self.assertEqual(result["status"], "cancelled")
+            self.assertEqual(len(rpc.method_calls("aria2.forceRemove")), 1)
+            self.assertEqual(len(rpc.method_calls("aria2.removeDownloadResult")), 1)
+            refreshed = manager.snapshot()["torrents"][0]
+            self.assertEqual(refreshed["status"], "error")
+            self.assertEqual(refreshed["message"], "Canceled")
+
+    def test_cancel_seeding_torrent_stays_complete(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            watch = root / "watch"
+            manager.update_settings({"directory": str(watch)})
+            _write_torrent(watch, "a")
+            manager._tick()
+            gid = rpc.method_calls("aria2.tellStatus") and None
+            with manager._lock:
+                entry = next(iter(manager._torrents.values()))
+                gid = entry["gid"]
+            rpc.statuses[gid] = {
+                "gid": gid,
+                "status": "active",
+                "totalLength": "10",
+                "completedLength": "10",
+                "downloadSpeed": "0",
+            }
+            manager._tick()
+            entry = manager.snapshot()["torrents"][0]
+            self.assertEqual(entry["status"], "complete")
+            self.assertTrue(entry["seeding"])
+            result = manager.cancel(entry["id"])
+            self.assertEqual(result["status"], "cancelled")
+            refreshed = manager.snapshot()["torrents"][0]
+            self.assertEqual(refreshed["status"], "complete")
+            self.assertFalse(refreshed["seeding"])
+            self.assertEqual(refreshed["message"], "Seeding stopped")
+
+    def test_delete_removes_entry_and_torrent_file_keeps_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            watch = root / "watch"
+            manager.update_settings({"directory": str(watch)})
+            torrent_path = _write_torrent(watch, "a")
+            payload_file = watch / "a.bin"
+            payload_file.write_bytes(b"payload")
+            manager._tick()
+            entry = manager.snapshot()["torrents"][0]
+            result = manager.delete(entry["id"])
+            self.assertEqual(result["status"], "deleted")
+            self.assertFalse(torrent_path.exists())
+            self.assertTrue(payload_file.exists())
+            self.assertEqual(manager.snapshot()["torrents"], [])
+            self.assertEqual(len(rpc.method_calls("aria2.forceRemove")), 1)
+            with mock.patch.object(torrent_manager, "find_aria2c", return_value=None):
+                manager._tick()
+            self.assertEqual(manager.snapshot()["torrents"], [])
+
+    def test_restart_restores_registry_and_requeues_inflight_downloads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            watch = root / "watch"
+            manager.update_settings({"directory": str(watch)})
+            _write_torrent(watch, "a")
+            manager._tick()
+            self.assertEqual(manager.snapshot()["torrents"][0]["status"], "downloading")
+            restarted = TorrentManager(_build_settings(root), start_worker=False)
+            entries = restarted.snapshot()["torrents"]
+            self.assertEqual(len(entries), 1)
+            self.assertEqual(entries[0]["status"], "queued")
+            self.assertEqual(restarted.snapshot()["settings"]["directory"], str(watch))
+            with restarted._lock:
+                self.assertIsNone(next(iter(restarted._torrents.values()))["gid"])
+
+    def test_stale_gid_after_daemon_restart_requeues(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            watch = root / "watch"
+            manager.update_settings({"directory": str(watch)})
+            _write_torrent(watch, "a")
+            manager._tick()
+            with manager._lock:
+                entry = next(iter(manager._torrents.values()))
+                stale_gid = entry["gid"]
+            del rpc.statuses[stale_gid]
+            manager._tick()
+            # The stale GID is dropped and the torrent re-added on the same or
+            # next tick rather than being stuck downloading forever.
+            with manager._lock:
+                entry = next(iter(manager._torrents.values()))
+                self.assertIn(entry["status"], ("queued", "downloading"))
+                if entry["status"] == "downloading":
+                    self.assertNotEqual(entry["gid"], stale_gid)
+
+
+class TorrentUploadTests(unittest.TestCase):
+    def _manager_with_watch(self, root: Path):
+        manager = TorrentManager(_build_settings(root), start_worker=False)
+        watch = root / "watch"
+        manager.update_settings({"directory": str(watch)})
+        return manager, watch
+
+    def test_upload_saves_multiple_files_and_scanner_registers_them(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager, watch = self._manager_with_watch(root)
+            result = manager.save_uploaded_torrents(
+                [("one.torrent", b"d1:ae"), ("two.torrent", b"d1:be")]
+            )
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(sorted(result["saved"]), ["one.torrent", "two.torrent"])
+            self.assertEqual(result["errors"], [])
+            self.assertTrue((watch / "one.torrent").is_file())
+            with mock.patch.object(torrent_manager, "find_aria2c", return_value=None):
+                manager._tick()
+            names = sorted(entry["name"] for entry in manager.snapshot()["torrents"])
+            self.assertEqual(names, ["one", "two"])
+
+    def test_upload_sanitizes_traversal_and_rejects_bad_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager, watch = self._manager_with_watch(root)
+            result = manager.save_uploaded_torrents(
+                [
+                    ("../../evil.torrent", b"data"),
+                    ("notes.txt", b"data"),
+                    ("empty.torrent", b""),
+                    (".torrent", b"data"),
+                ]
+            )
+            self.assertEqual(result["saved"], ["evil.torrent"])
+            self.assertTrue((watch / "evil.torrent").is_file())
+            self.assertFalse((root / "evil.torrent").exists())
+            self.assertEqual(len(result["errors"]), 3)
+
+    def test_upload_collision_gets_numbered_suffix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager, watch = self._manager_with_watch(root)
+            (watch / "game.torrent").write_bytes(b"existing")
+            result = manager.save_uploaded_torrents([("game.torrent", b"new")])
+            self.assertEqual(result["saved"], ["game (2).torrent"])
+            self.assertEqual((watch / "game.torrent").read_bytes(), b"existing")
+            self.assertEqual((watch / "game (2).torrent").read_bytes(), b"new")
+
+
+class MultipartParserTests(unittest.TestCase):
+    def test_parses_multiple_binary_file_parts_exactly(self) -> None:
+        from app.web.handlers_torrents import _parse_multipart_files
+
+        boundary = "----WebKitFormBoundaryabc123"
+        first = b"d1:a3:\r\ne"  # embedded CRLF must survive byte-exact
+        second = b"binary\r\n"  # trailing CRLF inside the file must survive
+        body = (
+            f"--{boundary}\r\n".encode()
+            + b'Content-Disposition: form-data; name="torrents"; filename="one.torrent"\r\n'
+            + b"Content-Type: application/x-bittorrent\r\n\r\n"
+            + first
+            + f"\r\n--{boundary}\r\n".encode()
+            + b'Content-Disposition: form-data; name="torrents"; filename="two.torrent"\r\n\r\n'
+            + second
+            + f"\r\n--{boundary}\r\n".encode()
+            + b'Content-Disposition: form-data; name="not_a_file"\r\n\r\n'
+            + b"just a field"
+            + f"\r\n--{boundary}--\r\n".encode()
+        )
+        files = _parse_multipart_files(body, boundary)
+        self.assertEqual([(name, data) for name, data in files], [("one.torrent", first), ("two.torrent", second)])
+
+
+class TorrentBrowseTests(unittest.TestCase):
+    def test_browse_roots_and_subdirectories(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = TorrentManager(_build_settings(root), start_worker=False)
+            (root / "roms" / "nes").mkdir(parents=True)
+            (root / ".hidden").mkdir()
+            (root / "file.txt").write_text("x", encoding="utf-8")
+            listing = manager.browse_directories("")
+            self.assertEqual(listing["path"], "")
+            self.assertIn(str(root.resolve()), [d["path"] for d in listing["dirs"]])
+            listing = manager.browse_directories(str(root))
+            names = [d["name"] for d in listing["dirs"]]
+            self.assertIn("roms", names)
+            self.assertNotIn(".hidden", names)
+            self.assertNotIn("file.txt", names)
+            sub = manager.browse_directories(str(root / "roms"))
+            self.assertEqual([d["name"] for d in sub["dirs"]], ["nes"])
+            self.assertEqual(sub["parent"], str(root.resolve()))
+
+    def test_browse_rejects_paths_outside_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = TorrentManager(_build_settings(Path(tmp)), start_worker=False)
+            with self.assertRaises(ValueError):
+                manager.browse_directories("/etc")
+            with self.assertRaises(ValueError):
+                manager.browse_directories(str(Path(tmp) / "missing"))
+
+
+class Aria2RuntimeTests(unittest.TestCase):
+    def test_asset_mapping(self) -> None:
+        self.assertIn("x86_64", _asset_for_machine("x86_64"))
+        self.assertIn("aarch64", _asset_for_machine("aarch64"))
+        self.assertIn("armv7", _asset_for_machine("armv7l"))
+        self.assertIn("musleabi_static", _asset_for_machine("armv6l"))
+        with self.assertRaises(ValueError):
+            _asset_for_machine("riscv64")
+
+    def test_extract_requires_aria2c_member(self) -> None:
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("README.md", "nope")
+        with self.assertRaises(ValueError):
+            _extract_aria2c_from_zip(buffer.getvalue())
+
+    def test_install_downloads_extracts_and_verifies(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, "w") as archive:
+                archive.writestr("aria2-x86_64-linux-musl_static/aria2c", b"#!/bin/sh\necho aria2 version 1.37.0\n")
+            with mock.patch.object(aria2_runtime, "_download_bytes", return_value=buffer.getvalue()) as download, \
+                    mock.patch.object(aria2_runtime, "aria2c_version", return_value="1.37.0"), \
+                    mock.patch.object(aria2_runtime.platform, "machine", return_value="x86_64"):
+                result = install_aria2(settings)
+            self.assertEqual(result["status"], "installed")
+            self.assertEqual(result["version"], "1.37.0")
+            installed = Path(result["path"])
+            self.assertTrue(installed.is_file())
+            self.assertTrue(installed.stat().st_mode & 0o111)
+            self.assertIn("x86_64-linux-musl_static.zip", download.call_args[0][0])
+
+    def test_install_rejects_binary_that_fails_verification(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, "w") as archive:
+                archive.writestr("aria2c", b"not a real binary")
+            with mock.patch.object(aria2_runtime, "_download_bytes", return_value=buffer.getvalue()), \
+                    mock.patch.object(aria2_runtime, "aria2c_version", return_value=None), \
+                    mock.patch.object(aria2_runtime.platform, "machine", return_value="x86_64"):
+                with self.assertRaises(ValueError):
+                    install_aria2(settings)
+            self.assertFalse(aria2_runtime.managed_aria2c_path(settings).exists())
+
+
+if __name__ == "__main__":
+    unittest.main()

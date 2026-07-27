@@ -528,6 +528,117 @@ def _schemas() -> Dict[str, Schema]:
             },
             description="Upload activity snapshot: assets currently being served to peers, plus recently finished sends.",
         ),
+        "TorrentSettings": _object(
+            {
+                "directory": _string("Watched folder for .torrent files; downloads land here too"),
+                "seed_time": _integer("Seed time in minutes; 0 stops seeding as soon as the download completes", minimum=0),
+                "seed_ratio": _number("Stop seeding at this share ratio; 0 disables the ratio limit"),
+                "bt_stop_timeout": _integer("Stop a torrent stalled at 0 B/s for this many seconds; 0 disables", minimum=0),
+                "file_allocation": _enum(("none", "prealloc", "trunc", "falloc"), "aria2 file allocation mode"),
+                "max_concurrent_downloads": _integer("Torrents downloading at once; Force Start bypasses this", minimum=1, maximum=16),
+            },
+            ("directory",),
+            description="Watched-folder torrent settings.",
+        ),
+        "TorrentAria2Status": _object(
+            {
+                "installed": _boolean(),
+                "path": _string(nullable=True),
+                "source": _enum(("system", "managed"), "PATH install vs. Drone-managed binary"),
+                "version": _string(nullable=True),
+                "running": _boolean("Whether the aria2c daemon is currently running"),
+                "daemon_error": _string("Last daemon start failure, if any"),
+            },
+        ),
+        "TorrentEntry": _object(
+            {
+                "id": _string(),
+                "name": _string(),
+                "status": _enum(("queued", "downloading", "complete", "error")),
+                "message": _string(),
+                "seeding": _boolean("Complete but still uploading to peers"),
+                "progress_percent": _number(),
+                "total_bytes": _integer(),
+                "completed_bytes": _integer(),
+                "download_speed_bps": _integer(),
+                "upload_speed_bps": _integer(),
+                "num_seeders": _integer(),
+                "connections": _integer(),
+                "eta_seconds": _integer(nullable=True),
+                "torrent_file": _string(),
+                "download_dir": _string(),
+                "added_at": _string(fmt="date-time", nullable=True),
+                "completed_at": _string(fmt="date-time", nullable=True),
+            },
+        ),
+        "AdminTorrentsResponse": _object(
+            {
+                "target_drone_id": _string(),
+                "settings": _ref("TorrentSettings"),
+                "directory_exists": _boolean(),
+                "aria2": _ref("TorrentAria2Status"),
+                "counts": _object({status: _integer() for status in ("queued", "downloading", "complete", "error")}),
+                "torrents": _array(_ref("TorrentEntry")),
+            },
+            description="Torrent queue snapshot: settings, aria2c status, and per-torrent progress.",
+        ),
+        "TorrentSettingsUpdateRequest": _object(
+            {
+                "directory": _string(),
+                "seed_time": _integer(minimum=0),
+                "seed_ratio": _number(),
+                "bt_stop_timeout": _integer(minimum=0),
+                "file_allocation": _enum(("none", "prealloc", "trunc", "falloc")),
+                "max_concurrent_downloads": _integer(minimum=1, maximum=16),
+            },
+            description="Partial torrent settings update; omitted fields keep their current values.",
+        ),
+        "TorrentSettingsUpdateResponse": _object({"settings": _ref("TorrentSettings")}, ("settings",)),
+        "TorrentActionResponse": _object(
+            {
+                "status": _string(),
+                "message": _string(),
+                "torrent_file_removed": _boolean(),
+                "downloaded_files_kept": _boolean(),
+            },
+            ("status",),
+            description="Torrent mutation result.",
+        ),
+        "Aria2InstallResponse": _object(
+            {
+                "status": _string(),
+                "path": _string(),
+                "version": _string(),
+                "source_url": _string(),
+                "duration_ms": _integer(),
+            },
+            description="Result of installing the static aria2c binary.",
+        ),
+        "TorrentUploadRequest": _object(
+            {"torrents": _array({"type": "string", "format": "binary"})},
+            description="One or more .torrent files as multipart file parts (any field names).",
+        ),
+        "TorrentUploadError": _object({"file": _string(), "error": _string()}, ("file", "error")),
+        "TorrentUploadResponse": _object(
+            {
+                "status": _string(),
+                "saved": _array(_string("Stored filename, suffixed on collision")),
+                "errors": _array(_ref("TorrentUploadError")),
+                "directory": _string("Watched folder the files were saved into"),
+            },
+            ("status", "saved", "errors"),
+            description="Result of uploading .torrent files into the watched folder.",
+        ),
+        "TorrentBrowseEntry": _object({"name": _string(), "path": _string()}, ("name", "path")),
+        "TorrentBrowseResponse": _object(
+            {
+                "path": _string("Listed folder; empty when showing the storage roots"),
+                "parent": _string(nullable=True),
+                "roots": _array(_string()),
+                "dirs": _array(_ref("TorrentBrowseEntry")),
+            },
+            description="Directory-picker listing, restricted to the Batocera storage roots.",
+        ),
         "AssetCacheResponse": _object(
             {
                 "path": _string(),
@@ -1262,6 +1373,28 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             "/admin/downloads/resume": {"post": _operation("Resume download processing", {"200": _json_response("DownloadActionResponse")}, tags=["admin", "downloads"], error_codes=("401", "403", "429", "500", "503"))},
             "/admin/downloads/clear": {"post": _operation("Clear completed and failed downloads", {"200": _json_response("DownloadActionResponse")}, tags=["admin", "downloads"], error_codes=("401", "403", "429", "500", "503"))},
             "/admin/uploads": {"get": _operation("Get upload activity snapshot", {"200": _json_response("AdminUploadsResponse", "Assets currently being served to peers")}, tags=["admin", "downloads"])},
+            "/admin/torrents": {"get": _operation("Get torrent queue snapshot", {"200": _json_response("AdminTorrentsResponse", "Torrent settings, aria2c status, and per-torrent progress")}, tags=["admin", "torrents"], error_codes=("401", "403", "429", "500", "503"))},
+            "/admin/torrents/browse": {
+                "get": _operation("Browse folders for the torrent directory picker", {"200": _json_response("TorrentBrowseResponse")}, parameters=[_query_param("path", _string(), "Folder to list; empty lists the storage roots")], tags=["admin", "torrents"], error_codes=("400", "401", "403", "429", "500", "503"))
+            },
+            "/admin/torrents/settings": {
+                "post": _operation("Update torrent settings", {"200": _json_response("TorrentSettingsUpdateResponse")}, request_body=_json_request("TorrentSettingsUpdateRequest"), tags=["admin", "torrents"], error_codes=("400", "401", "403", "429", "500", "503"))
+            },
+            "/admin/torrents/upload": {
+                "post": _operation("Upload one or more .torrent files into the watched folder", {"200": _json_response("TorrentUploadResponse"), "400": _json_response("TorrentUploadResponse", "No file could be saved")}, request_body=_multipart_request("TorrentUploadRequest"), tags=["admin", "torrents"], error_codes=("401", "403", "429", "500", "503"))
+            },
+            "/admin/torrents/aria2/install": {
+                "post": _operation("Download and install the static aria2c binary", {"200": _json_response("Aria2InstallResponse")}, tags=["admin", "torrents"], error_codes=("400", "401", "403", "429", "500", "503"))
+            },
+            "/admin/torrents/{torrent_id}/force-start": {
+                "post": _operation("Force-start a torrent, bypassing the concurrency limit", {"200": _json_response("TorrentActionResponse"), "404": _json_response("TorrentActionResponse", "Torrent not found"), "409": _json_response("TorrentActionResponse", "Torrent already completed")}, parameters=[_path_param("torrent_id")], tags=["admin", "torrents"], error_codes=("400", "401", "403", "429", "500", "503"))
+            },
+            "/admin/torrents/{torrent_id}/cancel": {
+                "post": _operation("Cancel a torrent (keeps partial files; Force Start can resume it)", {"200": _json_response("TorrentActionResponse"), "404": _json_response("TorrentActionResponse", "Torrent not found"), "409": _json_response("TorrentActionResponse", "Torrent is not cancelable")}, parameters=[_path_param("torrent_id")], tags=["admin", "torrents"], error_codes=("400", "401", "403", "429", "500", "503"))
+            },
+            "/admin/torrents/{torrent_id}/delete": {
+                "post": _operation("Delete a torrent: remove it from the list and delete its .torrent file (downloaded files are kept)", {"200": _json_response("TorrentActionResponse"), "404": _json_response("TorrentActionResponse", "Torrent not found")}, parameters=[_path_param("torrent_id")], tags=["admin", "torrents"], error_codes=("400", "401", "403", "429", "500", "503"))
+            },
             "/admin/asset-cache": {"get": _operation("Get ROM, BIOS, and artwork asset cache progress", {"200": _json_response("AssetCacheResponse")}, tags=["admin"])},
             "/admin/asset-cache/purge": {"post": _operation("Purge cached asset metadata while keeping fingerprints", {"200": _json_response("AssetCachePurgeResponse")}, tags=["admin"])},
             "/admin/asset-cache/clear-pending": {"post": _operation("Clear pending asset metadata upload changes", {"200": _json_response("AssetCacheClearPendingResponse")}, tags=["admin"])},
