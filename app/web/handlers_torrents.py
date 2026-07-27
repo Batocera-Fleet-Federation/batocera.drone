@@ -6,39 +6,14 @@ force-start/cancel/delete a torrent, and the directory-picker listing.
 Composed onto ``RomRequestHandler``.
 """
 
+try:
+    from ..common.multipart import boundary_from_content_type as _boundary_from_content_type
+    from ..common.multipart import parse_multipart_files as _parse_multipart_files
+except ImportError:  # pragma: no cover - direct script execution fallback
+    from common.multipart import boundary_from_content_type as _boundary_from_content_type  # type: ignore
+    from common.multipart import parse_multipart_files as _parse_multipart_files  # type: ignore
+
 TORRENT_UPLOAD_MAX_BODY_BYTES = 64 * 1024 * 1024
-
-
-def _parse_multipart_files(raw_body: bytes, boundary: str) -> list:
-    """Extract every file part from a multipart/form-data body as (name, bytes).
-
-    Byte-exact for binary payloads: only the single CRLF that belongs to the
-    multipart framing is removed, never trailing bytes of the file itself.
-    """
-    delimiter = b"--" + boundary.encode("utf-8", errors="replace")
-    files = []
-    for chunk in raw_body.split(delimiter)[1:]:
-        if chunk.startswith(b"--"):
-            break  # closing delimiter
-        if chunk.startswith(b"\r\n"):
-            chunk = chunk[2:]
-        header_end = chunk.find(b"\r\n\r\n")
-        if header_end < 0:
-            continue
-        headers = chunk[:header_end].decode("utf-8", errors="replace")
-        body = chunk[header_end + 4 :]
-        if body.endswith(b"\r\n"):
-            body = body[:-2]
-        disposition = next(
-            (line for line in headers.split("\r\n") if line.lower().startswith("content-disposition")),
-            "",
-        )
-        if ' filename="' not in disposition:
-            continue
-        filename = disposition.split(' filename="')[1].split('"')[0]
-        if filename:
-            files.append((filename, body))
-    return files
 
 
 def _get_torrent_manager():
@@ -83,10 +58,7 @@ class HandlersTorrentsMixin:
         content_length = int(self.headers.get("Content-Length", 0) or 0)
         if content_length <= 0 or content_length > TORRENT_UPLOAD_MAX_BODY_BYTES:
             raise ValueError("invalid content size")
-        boundary = content_type.split("boundary=")[1].strip() if "boundary=" in content_type else None
-        if not boundary:
-            raise ValueError("boundary not found in content-type")
-        boundary = boundary.strip('"').strip("'")
+        boundary = _boundary_from_content_type(content_type)
         files = _parse_multipart_files(self.rfile.read(content_length), boundary)
         if not files:
             raise ValueError("no torrent files in upload")

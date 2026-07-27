@@ -89,6 +89,8 @@ let transfersTimer = null;
 let transfersInFlight = false;
 let torrentsTimer = null;
 let torrentsInFlight = false;
+let vpnTimer = null;
+let vpnInFlight = false;
 let currentConfigSource = null;
 let emulatorConfigRows = [];
 let selectedEmulatorConfigIndex = 0;
@@ -2079,6 +2081,14 @@ async function renderAdminMenu() {
         </div>
       </div>
       <div class="col-md-4 mb-3">
+        <div class="card admin-tile pointer h-100" onclick="setHash('#admin/vpn')">
+          <div class="card-body">
+            <h5 class="card-title"><i class="bi bi-shield-lock me-2"></i>VPN</h5>
+            <p class="card-text">Configure and connect an OpenVPN provider (Proton VPN, NordVPN, and others).</p>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-4 mb-3">
         <div class="card admin-tile pointer h-100" onclick="setHash('#theme')">
           <div class="card-body">
             <h5 class="card-title"><i class="bi bi-brush me-2"></i>Theme</h5>
@@ -2928,6 +2938,318 @@ function chooseTorrentDir() {
     }
   }
   if (path) showToast("Folder selected. Click Save to apply it.", "info");
+}
+
+// ------------------------------------------------------------------- VPN
+
+function stopVpnAutoRefresh() {
+  if (vpnTimer) {
+    clearInterval(vpnTimer);
+    vpnTimer = null;
+  }
+  vpnInFlight = false;
+}
+function startVpnAutoRefresh() {
+  // Live-update only the status/log region -- never the upload or
+  // credentials forms above it, so in-progress edits are untouched.
+  stopVpnAutoRefresh();
+  vpnTimer = setInterval(async () => {
+    if (document.hidden || vpnInFlight) return;
+    if (window.location.hash !== "#admin/vpn") return;
+    const liveNode = document.getElementById("vpnLive");
+    if (!liveNode) return;
+    vpnInFlight = true;
+    try {
+      const payload = await api("/admin/vpn");
+      if (
+        window.location.hash === "#admin/vpn" &&
+        liveNode.isConnected &&
+        document.getElementById("vpnLive") === liveNode &&
+        !liveNode.contains(document.activeElement)
+      ) {
+        patchVpnLive(payload);
+      }
+    } catch (err) {
+      // Transient poll failure: leave the last good data in place silently.
+    } finally {
+      vpnInFlight = false;
+    }
+  }, 3000);
+}
+
+function vpnStatusBadge(payload) {
+  const status = String(payload.status || "disconnected");
+  const cls = status === "connected" ? "success" : status === "connecting" ? "info" : status === "error" ? "danger" : "secondary";
+  const label = status.charAt(0).toUpperCase() + status.slice(1);
+  return `<span class="badge text-bg-${cls}" title="${escapeHtml(payload.message || "")}">${escapeHtml(label)}</span>`;
+}
+
+function renderVpnStatusCards(payload) {
+  const status = String(payload.status || "disconnected");
+  const duration = status === "connected" ? formatDuration(payload.connected_duration_seconds || 0) : "--";
+  const server = (payload.remotes || [])[0] || "--";
+  const cards = [
+    ["Status", "", "bi-broadcast", ""],
+    ["Connected Since", duration, "bi-clock-history", ""],
+    ["VPN Server", server, "bi-hdd-network", "mono"],
+    ["Tunnel (tun0)", payload.tunnel_ip || "--", "bi-diagram-2", "mono"],
+  ];
+  return cards.map(([label, value, icon, valueClass]) => `
+    <div class="col-6 col-lg-3">
+      <div class="asset-detail-panel h-100">
+        <h6><i class="bi ${icon} me-1"></i>${escapeHtml(label)}</h6>
+        <div class="${valueClass}">${label === "Status" ? vpnStatusBadge(payload) : escapeHtml(value)}</div>
+      </div>
+    </div>
+  `).join("");
+}
+
+function renderVpnValidationErrors(payload) {
+  const errors = payload.validation_errors || [];
+  if (!errors.length) return "";
+  return `<div class="alert alert-warning py-2 mb-3">
+    <strong>Not ready to connect:</strong>
+    <ul class="mb-0">${errors.map(error => `<li>${escapeHtml(error)}</li>`).join("")}</ul>
+  </div>`;
+}
+
+function renderVpnLog(payload) {
+  const lines = payload.log_tail || [];
+  const text = lines.length ? lines.join("\n") : "No log output yet.";
+  return `<pre class="local-asset-native-content" style="max-height:280px;overflow:auto;">${escapeHtml(text)}</pre>`;
+}
+
+function renderVpnActions(payload) {
+  const status = String(payload.status || "disconnected");
+  const canConnect = (status === "disconnected" || status === "error") && !(payload.validation_errors || []).length;
+  const canDisconnect = status === "connecting" || status === "connected";
+  return `<div class="d-flex flex-wrap gap-2 mb-3">
+    <button class="btn btn-success" type="button" id="vpnConnectBtn" ${canConnect ? "" : "disabled"} onclick="connectVpn()"><i class="bi bi-play-fill me-1"></i>Connect</button>
+    <button class="btn btn-outline-danger" type="button" id="vpnDisconnectBtn" ${canDisconnect ? "" : "disabled"} onclick="disconnectVpn()"><i class="bi bi-stop-fill me-1"></i>Disconnect</button>
+    <button class="btn btn-outline-primary" type="button" onclick="verifyVpnPublicIp()"><i class="bi bi-globe me-1"></i>Verify Public IP</button>
+    <button class="btn btn-outline-secondary" type="button" onclick="refreshVpnLive()"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
+    <a class="btn btn-outline-secondary ${payload.log_available ? "" : "disabled"}" href="${API_BASE}/admin/vpn/log/download" target="_blank" rel="noopener noreferrer"><i class="bi bi-download me-1"></i>Download Log</a>
+  </div>`;
+}
+
+// First mount only: builds the stable skeleton. Later updates go through
+// patchVpnLive, which never recreates these container nodes -- the same
+// flash-free pattern as the Torrents grid's 3s auto-refresh.
+function renderVpnLive(payload) {
+  return `
+    <div id="vpnValidationErrors">${renderVpnValidationErrors(payload)}</div>
+    <div id="vpnActions">${renderVpnActions(payload)}</div>
+    <div id="vpnStatusCards" class="row g-3 mb-3">${renderVpnStatusCards(payload)}</div>
+    <div id="vpnPublicIp" class="small text-muted mb-3">${vpnPublicIpText(payload)}</div>
+    <h6>Log</h6>
+    <div id="vpnLogBody">${renderVpnLog(payload)}</div>
+  `;
+}
+
+function patchVpnLive(payload) {
+  const errorsNode = document.getElementById("vpnValidationErrors");
+  if (errorsNode) errorsNode.innerHTML = renderVpnValidationErrors(payload);
+  const actionsNode = document.getElementById("vpnActions");
+  if (actionsNode) actionsNode.innerHTML = renderVpnActions(payload);
+  const cardsNode = document.getElementById("vpnStatusCards");
+  if (cardsNode) cardsNode.innerHTML = renderVpnStatusCards(payload);
+  const logNode = document.getElementById("vpnLogBody");
+  if (logNode) logNode.innerHTML = renderVpnLog(payload);
+}
+
+let vpnLastPublicIp = null;
+function vpnPublicIpText(payload) {
+  if (!vpnLastPublicIp) return "";
+  if (vpnLastPublicIp.error) return `<i class="bi bi-exclamation-triangle me-1"></i>${escapeHtml(vpnLastPublicIp.error)}`;
+  return `<i class="bi bi-check-circle text-success me-1"></i>Public IP as of last check: <strong class="mono">${escapeHtml(vpnLastPublicIp.ip)}</strong> (${escapeHtml(formatCompactLocalDate(vpnLastPublicIp.checked_at))})`;
+}
+
+async function renderVpnPage() {
+  currentSystemContext = null;
+  clearSystemTheme();
+  titleNode.textContent = "VPN";
+  subtitleNode.textContent = "OpenVPN configuration and connection status";
+  setLoading(true, "Loading VPN status...");
+  let payload;
+  try {
+    payload = await api("/admin/vpn");
+  } catch (err) {
+    setLoading(false);
+    content.innerHTML = `<div class="alert alert-danger">Failed to load VPN status: ${escapeHtml(err.message || "unknown error")}</div>`;
+    return;
+  } finally {
+    setLoading(false);
+  }
+  vpnLastPublicIp = null;
+  content.innerHTML = `
+    <div class="card mb-3">
+      <div class="card-header"><i class="bi bi-file-earmark-arrow-up me-2"></i>OpenVPN Configuration</div>
+      <div class="card-body">
+        <p class="text-muted small">Upload the .ovpn file from your VPN provider (Proton VPN, NordVPN, Private Internet Access, or any other OpenVPN provider). It is automatically adjusted to use the credentials saved below.</p>
+        <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
+          <button class="btn btn-outline-primary" type="button" onclick="openVpnConfigPicker()"><i class="bi bi-upload me-1"></i>Upload .ovpn File</button>
+          <span class="small ${payload.has_config ? "text-success" : "text-muted"}">${payload.has_config ? `<i class="bi bi-check-circle me-1"></i>${escapeHtml(payload.config_filename)}` : "No configuration uploaded yet."}</span>
+        </div>
+      </div>
+    </div>
+    <div class="card mb-3">
+      <div class="card-header"><i class="bi bi-key me-2"></i>VPN Credentials</div>
+      <div class="card-body">
+        <p class="text-muted small">Use the credentials your provider issues for OpenVPN connections (Proton VPN calls these your "OpenVPN / IKEv2 username and password" -- a token, not your account login). Stored in a 600-permission file that openvpn reads directly; this is required by OpenVPN's own <code>auth-user-pass</code> mechanism.</p>
+        <div class="row g-2 mb-2">
+          <div class="col-sm-6 col-lg-4">
+            <label class="form-label mb-1" for="vpnUsername">Username</label>
+            <input class="form-control form-control-sm" type="text" id="vpnUsername" autocomplete="off" value="${escapeHtml(payload.username || "")}">
+          </div>
+          <div class="col-sm-6 col-lg-4">
+            <label class="form-label mb-1" for="vpnPassword">Password</label>
+            <input class="form-control form-control-sm" type="password" id="vpnPassword" autocomplete="off" placeholder="${payload.has_credentials ? "Saved (leave blank to keep)" : ""}">
+          </div>
+        </div>
+        <button class="btn btn-primary btn-sm" type="button" id="vpnCredentialsSaveBtn" onclick="saveVpnCredentials()"><i class="bi bi-save me-1"></i>Save</button>
+      </div>
+    </div>
+    <div class="card mb-3">
+      <div class="card-body">
+        <div class="form-check form-switch">
+          <input class="form-check-input" type="checkbox" role="switch" id="vpnAutoStart" ${payload.auto_start ? "checked" : ""} onchange="setVpnAutoStart(this.checked)">
+          <label class="form-check-label" for="vpnAutoStart">Start VPN automatically when the Drone starts</label>
+        </div>
+      </div>
+    </div>
+    <div class="card log-card"><div class="card-body">
+      <div id="vpnLive">${renderVpnLive(payload)}</div>
+    </div></div>
+  `;
+  startVpnAutoRefresh();
+}
+
+async function refreshVpnLive() {
+  try {
+    const payload = await api("/admin/vpn");
+    if (document.getElementById("vpnLive")) patchVpnLive(payload);
+  } catch (err) {
+    showToast(`Failed to refresh VPN status: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  }
+}
+
+function openVpnConfigPicker() {
+  let input = document.getElementById("vpnConfigUploadInput");
+  if (!input) {
+    input = document.createElement("input");
+    input.type = "file";
+    input.id = "vpnConfigUploadInput";
+    input.accept = ".ovpn";
+    input.className = "d-none";
+    document.body.appendChild(input);
+    input.addEventListener("change", async () => {
+      const file = input.files && input.files[0];
+      input.value = "";
+      if (file) await uploadVpnConfig(file);
+    });
+  }
+  input.click();
+}
+
+async function uploadVpnConfig(file) {
+  const formData = new FormData();
+  formData.append("config", file, file.name);
+  setLoading(true, "Uploading OpenVPN configuration...");
+  try {
+    const res = await fetch(_apiRequestUrl("/admin/vpn/upload"), { method: "POST", credentials: "include", body: formData });
+    let responsePayload = {};
+    try { responsePayload = await res.json(); } catch (_) {}
+    if (!res.ok) throw new Error(responsePayload.error || `Upload failed: ${res.status}`);
+    showToast(`Uploaded ${escapeHtml(responsePayload.config_filename || file.name)}.`, "success");
+    await renderVpnPage();
+  } catch (err) {
+    showToast(`OpenVPN config upload failed: ${escapeHtml(err.message || "unknown error")}`, "danger", 8000);
+  } finally {
+    setLoading(false);
+  }
+}
+
+async function saveVpnCredentials() {
+  const username = (document.getElementById("vpnUsername").value || "").trim();
+  const password = document.getElementById("vpnPassword").value || "";
+  if (!username) { showToast("Username is required.", "warning"); return; }
+  if (!password) { showToast("Enter the VPN password to save it.", "warning"); return; }
+  const button = document.getElementById("vpnCredentialsSaveBtn");
+  button.disabled = true;
+  try {
+    await apiPost("/admin/vpn/credentials", { username, password });
+    showToast("VPN credentials saved.", "success");
+    document.getElementById("vpnPassword").value = "";
+    await refreshVpnLive();
+    document.getElementById("vpnPassword").placeholder = "Saved (leave blank to keep)";
+  } catch (err) {
+    showToast(`Failed to save VPN credentials: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function connectVpn() {
+  const button = document.getElementById("vpnConnectBtn");
+  if (button) { button.disabled = true; button.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Connecting...'; }
+  try {
+    const result = await apiPost("/admin/vpn/connect", {});
+    if (result.status === "error") {
+      showToast(`Could not connect: ${escapeHtml((result.errors || []).join(" "))}`, "danger", 8000);
+    } else {
+      showToast("Connecting to VPN...", "info");
+    }
+  } catch (err) {
+    showToast(`Failed to connect: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  } finally {
+    await refreshVpnLive();
+  }
+}
+
+async function disconnectVpn() {
+  const button = document.getElementById("vpnDisconnectBtn");
+  if (button) button.disabled = true;
+  try {
+    await apiPost("/admin/vpn/disconnect", {});
+    showToast("VPN disconnected.", "success");
+  } catch (err) {
+    showToast(`Failed to disconnect: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  } finally {
+    await refreshVpnLive();
+  }
+}
+
+async function verifyVpnPublicIp() {
+  const toast = showToast('<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Checking public IP...', "info", null);
+  try {
+    const res = await fetch(_apiRequestUrl("/admin/vpn/verify-ip"), { method: "POST", credentials: "include" });
+    const payload = await res.json();
+    vpnLastPublicIp = payload;
+    dismissToast(toast);
+    if (payload.ip) {
+      showToast(`Public IP: ${escapeHtml(payload.ip)}`, "success");
+    } else {
+      showToast(payload.error || "Could not determine the public IP.", "warning");
+    }
+  } catch (err) {
+    dismissToast(toast);
+    vpnLastPublicIp = { error: err.message || "Could not determine the public IP." };
+    showToast("Failed to check public IP.", "danger");
+  } finally {
+    const node = document.getElementById("vpnPublicIp");
+    if (node) node.innerHTML = vpnPublicIpText(vpnLastPublicIp);
+  }
+}
+
+async function setVpnAutoStart(enabled) {
+  const checkbox = document.getElementById("vpnAutoStart");
+  try {
+    await apiPost("/admin/vpn/auto-start", { enabled });
+    showToast(`VPN auto-start on boot ${enabled ? "enabled" : "disabled"}.`, "success");
+  } catch (err) {
+    if (checkbox) checkbox.checked = !enabled;
+    showToast(`Failed to save auto-start setting: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  }
 }
 
 async function purgeAssetCache() {
@@ -6709,6 +7031,9 @@ async function router() {
     if (hash !== "#admin/torrents") {
       stopTorrentsAutoRefresh();
     }
+    if (hash !== "#admin/vpn") {
+      stopVpnAutoRefresh();
+    }
     document.body.classList.toggle("artwork-page", hash.startsWith("#admin/artwork"));
     if (hash === "#bios") {
       setHash(systemsTreeHash("", BIOS_TREE_ROOT));
@@ -6833,6 +7158,12 @@ async function router() {
         return;
       }
       await renderTorrentsPage();
+    } else if (hash === "#admin/vpn") {
+      if (!adminEnabled) {
+        setHash("");
+        return;
+      }
+      await renderVpnPage();
     } else if (parseSystemRomHash(hash)) {
       const parsed = parseSystemRomHash(hash);
       await renderRomMediaPage(parsed.system, parsed.uniqueId, parsed.page);

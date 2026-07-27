@@ -29,6 +29,7 @@ from threading import Event, Lock, Thread
 from typing import Dict, List, Optional
 
 try:
+    from ..common.install_paths import drone_install_root as _drone_install_root
     from ..common.settings import Settings
     from ..storage.state_store import database_path as _state_database_path
     from ..storage.state_store import load_payload as _load_state_payload
@@ -41,6 +42,7 @@ try:
         install_aria2,
     )
 except ImportError:  # pragma: no cover - direct script execution fallback
+    from common.install_paths import drone_install_root as _drone_install_root  # type: ignore
     from common.settings import Settings  # type: ignore
     from storage.state_store import database_path as _state_database_path  # type: ignore
     from storage.state_store import load_payload as _load_state_payload  # type: ignore
@@ -73,13 +75,6 @@ _TELL_STATUS_KEYS = [
     "bittorrent",
     "files",
 ]
-
-
-def _drone_install_root() -> Path:
-    # <install root>/app/transfer/torrent_manager.py -> the folder the Drone
-    # app is physically deployed in (/userdata/system/drone-app on a device,
-    # the repo checkout in development).
-    return Path(__file__).resolve().parents[2]
 
 
 def default_torrent_directory(settings: Settings) -> Path:

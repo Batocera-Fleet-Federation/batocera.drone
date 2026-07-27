@@ -647,6 +647,59 @@ def _schemas() -> Dict[str, Schema]:
             },
             description="Directory-picker listing, restricted to the Batocera storage roots.",
         ),
+        "VpnStatusResponse": _object(
+            {
+                "status": _enum(("disconnected", "connecting", "connected", "error")),
+                "message": _string("Detail for the 'error' status, e.g. an auth failure parsed from the log"),
+                "installed": _boolean("Whether an openvpn binary was found on PATH"),
+                "binary_path": _string(nullable=True),
+                "pid": _integer(nullable=True),
+                "has_config": _boolean(),
+                "config_filename": _string("Original uploaded filename, for display"),
+                "remotes": _array(_string()),
+                "has_credentials": _boolean(),
+                "username": _string("VPN username, for display -- the password is never returned"),
+                "auto_start": _boolean(),
+                "connected_at": _string(fmt="date-time", nullable=True),
+                "connected_duration_seconds": _integer(nullable=True),
+                "tunnel_ip": _string(nullable=True),
+                "tunnel_interface": _string(),
+                "validation_errors": _array(_string()),
+                "log_available": _boolean(),
+                "log_tail": _array(_string()),
+            },
+            ("status", "installed", "has_config", "has_credentials", "auto_start", "validation_errors"),
+            description="OpenVPN configuration + live connection status snapshot.",
+        ),
+        "VpnUploadResponse": _object(
+            {
+                "status": _string(),
+                "config_filename": _string(),
+                "remotes": _array(_string()),
+            },
+            ("status", "config_filename"),
+            description="Result of uploading and rewriting a provider .ovpn file.",
+        ),
+        "VpnCredentialsRequest": _object({"username": _string(), "password": _string()}, ("username", "password")),
+        "VpnCredentialsResponse": _object({"status": _string(), "username": _string()}, ("status", "username")),
+        "VpnActionResponse": _object(
+            {
+                "status": _enum(("connecting", "connected", "disconnected", "not_running", "already_running", "error")),
+                "errors": _array(_string()),
+            },
+            ("status",),
+            description="Result of a connect/disconnect action.",
+        ),
+        "VpnAutoStartRequest": _object({"enabled": _boolean()}, ("enabled",)),
+        "VpnAutoStartResponse": _object({"auto_start": _boolean()}, ("auto_start",)),
+        "VpnVerifyIpResponse": _object(
+            {
+                "ip": _string(nullable=True),
+                "checked_at": _string(fmt="date-time", nullable=True),
+                "error": _string(nullable=True),
+            },
+            description="On-demand public-IP check (e.g. via ipinfo.io) to confirm traffic is routing through the tunnel.",
+        ),
         "AssetCacheResponse": _object(
             {
                 "path": _string(),
@@ -1436,6 +1489,28 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             },
             "/admin/torrents/{torrent_id}/delete": {
                 "post": _operation("Delete a torrent: remove it from the list and delete its .torrent file (downloaded files are kept)", {"200": _json_response("TorrentActionResponse"), "404": _json_response("TorrentActionResponse", "Torrent not found")}, parameters=[_path_param("torrent_id")], tags=["admin", "torrents"], error_codes=("400", "401", "403", "429", "500", "503"))
+            },
+            "/admin/vpn": {"get": _operation("Get OpenVPN configuration and live connection status", {"200": _json_response("VpnStatusResponse")}, tags=["admin", "vpn"], error_codes=("401", "403", "429", "500", "503"))},
+            "/admin/vpn/upload": {
+                "post": _operation("Upload a provider .ovpn file (rewritten to use the managed credentials file)", {"200": _json_response("VpnUploadResponse"), "400": _json_response("ErrorResponse", "Not a valid OpenVPN config")}, request_body=_multipart_request("TorrentUploadRequest"), tags=["admin", "vpn"], error_codes=("401", "403", "429", "500", "503"))
+            },
+            "/admin/vpn/credentials": {
+                "post": _operation("Save VPN username/password (written to a 600-permission auth file)", {"200": _json_response("VpnCredentialsResponse")}, request_body=_json_request("VpnCredentialsRequest"), tags=["admin", "vpn"], error_codes=("400", "401", "403", "429", "500", "503"))
+            },
+            "/admin/vpn/connect": {
+                "post": _operation("Connect the VPN", {"200": _json_response("VpnActionResponse"), "400": _json_response("VpnActionResponse", "Not ready to connect (see errors)")}, tags=["admin", "vpn"], error_codes=("401", "403", "429", "500", "503"))
+            },
+            "/admin/vpn/disconnect": {
+                "post": _operation("Disconnect the VPN", {"200": _json_response("VpnActionResponse")}, tags=["admin", "vpn"], error_codes=("401", "403", "429", "500", "503"))
+            },
+            "/admin/vpn/verify-ip": {
+                "post": _operation("On-demand public-IP check to confirm the tunnel is actually routing traffic", {"200": _json_response("VpnVerifyIpResponse"), "502": _json_response("VpnVerifyIpResponse", "Could not determine the public IP")}, tags=["admin", "vpn"], error_codes=("401", "403", "429", "500", "503"))
+            },
+            "/admin/vpn/auto-start": {
+                "post": _operation("Toggle connecting automatically when the Drone starts", {"200": _json_response("VpnAutoStartResponse")}, request_body=_json_request("VpnAutoStartRequest"), tags=["admin", "vpn"], error_codes=("400", "401", "403", "429", "500", "503"))
+            },
+            "/admin/vpn/log/download": {
+                "get": _operation("Download the raw openvpn log", {"200": _media_response("Log file", ["text/plain"])}, tags=["admin", "vpn"], error_codes=("401", "403", "404", "429", "500"))
             },
             "/admin/asset-cache": {"get": _operation("Get ROM, BIOS, and artwork asset cache progress", {"200": _json_response("AssetCacheResponse")}, tags=["admin"])},
             "/admin/asset-cache/purge": {"post": _operation("Purge cached asset metadata while keeping fingerprints", {"200": _json_response("AssetCachePurgeResponse")}, tags=["admin"])},

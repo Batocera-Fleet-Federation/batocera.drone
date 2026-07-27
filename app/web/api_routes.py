@@ -328,6 +328,14 @@ class ApiRoutesMixin:
                 self._handle_admin_torrents_browse(query_params.get("path", [""])[0])
                 return
 
+            if len(parts) == 2 and parts[0] == "admin" and parts[1] == "vpn":
+                self._handle_admin_vpn_status()
+                return
+
+            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "vpn" and parts[2] == "log" and parts[3] == "download":
+                self._handle_admin_vpn_log_download()
+                return
+
             if len(parts) == 2 and parts[0] == "admin" and parts[1] == "es-collections":
                 self._handle_admin_es_collections_get()
                 return
@@ -716,6 +724,32 @@ class ApiRoutesMixin:
 
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "torrents" and parts[3] == "delete":
                 self._handle_admin_torrent_delete(parts[2])
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "vpn" and parts[2] == "upload":
+                self._handle_admin_vpn_upload()
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "vpn" and parts[2] == "credentials":
+                payload = self._read_json_body()
+                self._handle_admin_vpn_credentials(payload)
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "vpn" and parts[2] == "connect":
+                self._handle_admin_vpn_connect()
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "vpn" and parts[2] == "disconnect":
+                self._handle_admin_vpn_disconnect()
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "vpn" and parts[2] == "verify-ip":
+                self._handle_admin_vpn_verify_ip()
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "vpn" and parts[2] == "auto-start":
+                payload = self._read_json_body()
+                self._handle_admin_vpn_auto_start(payload)
                 return
 
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "artwork" and parts[2] == "launchbox" and parts[3] == "apply":
