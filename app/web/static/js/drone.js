@@ -2724,7 +2724,7 @@ async function renderTorrentsPage() {
               <input class="form-control" type="text" id="torrentDownloadDir" placeholder="${escapeHtml(payload.effective_download_directory || settings.directory || "")}" value="${escapeHtml(settings.download_directory || "")}">
               <button class="btn btn-outline-secondary" type="button" onclick="openTorrentDirBrowser('torrentDownloadDir', 'Choose download location')"><i class="bi bi-folder2-open me-1"></i>Browse</button>
             </div>
-            <div class="form-text">Where downloaded files actually land -- can be a different disk than the Drone itself (e.g. an external drive, or /userdata/roms). Leave blank to use the torrent folder above.</div>
+            <div class="form-text">Where downloaded files actually land -- can be a different disk than the Drone itself (e.g. an external drive, or /userdata/roms). Leave blank to use the torrent folder above. Applies to anything that hasn't started downloading yet (including torrents already queued); a torrent already in progress keeps its original location.</div>
           </div>
         </div>
         <div class="row g-2 mb-2">

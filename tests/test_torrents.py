@@ -151,7 +151,7 @@ class TorrentWatchScanTests(unittest.TestCase):
             self.assertEqual(snapshot_entries[0]["status"], "queued")
             self.assertEqual(snapshot_entries[0]["message"], "aria2c is not installed")
 
-    def test_directory_change_keeps_old_entries_but_stops_scanning_old_folder(self) -> None:
+    def test_directory_change_keeps_torrent_file_but_download_dir_follows_until_started(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             manager = TorrentManager(_build_settings(root), start_worker=False)
@@ -168,7 +168,13 @@ class TorrentWatchScanTests(unittest.TestCase):
             names = sorted(entry["name"] for entry in manager.snapshot()["torrents"])
             self.assertEqual(names, ["after", "before"])
             before = next(e for e in manager.snapshot()["torrents"] if e["name"] == "before")
-            self.assertEqual(before["download_dir"], str(old_watch))
+            # The .torrent file itself never moves...
+            self.assertTrue(Path(before["torrent_file"]).is_relative_to(old_watch.resolve()))
+            # ...but since aria2c was never installed it never actually
+            # started downloading, so its (un-overridden) download location
+            # keeps tracking the current watch directory rather than being
+            # stuck on a stale snapshot from scan time.
+            self.assertEqual(before["download_dir"], str(new_watch))
 
 
 class TorrentDownloadLocationTests(unittest.TestCase):
@@ -255,6 +261,118 @@ class TorrentDownloadLocationTests(unittest.TestCase):
             adds = rpc.method_calls("aria2.addTorrent")
             self.assertEqual(len(adds), 1)
             self.assertEqual(adds[0][2]["dir"], str(downloads))
+
+    def test_changing_location_retargets_queued_not_yet_started_but_not_the_active_one(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = TorrentManager(_build_settings(root), start_worker=False)
+            manager._daemon = FakeDaemon(rpc)
+            watch = root / "watch"
+            old_downloads = root / "old-downloads"
+            manager.update_settings({"directory": str(watch), "download_directory": str(old_downloads), "max_concurrent_downloads": 1})
+            _write_torrent(watch, "a")
+            _write_torrent(watch, "b")
+            manager._tick()
+            entries = manager.snapshot()["torrents"]
+            # Which of the two ties for the single slot isn't deterministic
+            # (added_at has 1s resolution, so a same-tick scan can tiebreak
+            # on entry id) -- only the shape (one active, one waiting) matters.
+            active = next(e for e in entries if e["status"] == "downloading")
+            waiting = next(e for e in entries if e["status"] == "queued")
+            self.assertEqual(active["download_dir"], str(old_downloads))
+            self.assertEqual(waiting["download_dir"], str(old_downloads))
+
+            with manager._lock:
+                waiting_old_gid = manager._torrents[waiting["id"]]["gid"]
+
+            new_downloads = root / "new-downloads"
+            manager.update_settings({"download_directory": str(new_downloads)})
+            manager._tick()
+
+            entries = manager.snapshot()["torrents"]
+            active_after = next(e for e in entries if e["id"] == active["id"])
+            waiting_after = next(e for e in entries if e["id"] == waiting["id"])
+            # The already-downloading torrent keeps its original location...
+            self.assertEqual(active_after["download_dir"], str(old_downloads))
+            # ...but the one that hasn't started yet follows the new setting:
+            # aria2 does not honor a `dir` change via aria2.changeOption for
+            # an already-added BitTorrent download (confirmed live against a
+            # real aria2c), so its stale GID is dropped and it's re-added
+            # fresh at the new location instead.
+            self.assertEqual(waiting_after["download_dir"], str(new_downloads))
+            self.assertIn(waiting_old_gid, [params[0] for params in rpc.method_calls("aria2.forceRemove")])
+            adds = rpc.method_calls("aria2.addTorrent")
+            self.assertEqual(adds[-1][2]["dir"], str(new_downloads))
+
+    def test_changing_location_does_not_retarget_a_paused_torrent_with_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = TorrentManager(_build_settings(root), start_worker=False)
+            manager._daemon = FakeDaemon(rpc)
+            watch = root / "watch"
+            old_downloads = root / "old-downloads"
+            manager.update_settings({"directory": str(watch), "download_directory": str(old_downloads)})
+            _write_torrent(watch, "a")
+            manager._tick()
+            entry = manager.snapshot()["torrents"][0]
+            self.assertEqual(entry["status"], "downloading")
+            with manager._lock:
+                gid = manager._torrents[entry["id"]]["gid"]
+            # Simulate real progress, then a global pause -- aria2 reports
+            # "paused" with bytes already on disk, which maps to our
+            # "queued" status but must not be treated as "not started yet".
+            rpc.statuses[gid].update({"completedLength": "500", "totalLength": "1000", "status": "paused"})
+            manager.pause()
+            manager._tick()
+            paused_entry = manager.snapshot()["torrents"][0]
+            self.assertEqual(paused_entry["status"], "queued")
+            self.assertEqual(paused_entry["completed_bytes"], 500)
+
+            new_downloads = root / "new-downloads"
+            manager.update_settings({"download_directory": str(new_downloads)})
+            manager._tick()
+
+            refreshed = manager.snapshot()["torrents"][0]
+            self.assertEqual(refreshed["status"], "queued")
+            self.assertEqual(refreshed["download_dir"], str(old_downloads))
+            self.assertEqual(rpc.method_calls("aria2.forceRemove"), [])
+
+    def test_force_start_retargets_a_not_yet_started_queued_torrent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = TorrentManager(_build_settings(root), start_worker=False)
+            manager._daemon = FakeDaemon(rpc)
+            watch = root / "watch"
+            old_downloads = root / "old-downloads"
+            manager.update_settings({"directory": str(watch), "download_directory": str(old_downloads), "max_concurrent_downloads": 1})
+            _write_torrent(watch, "a")
+            _write_torrent(watch, "b")
+            manager._tick()
+            queued = next(e for e in manager.snapshot()["torrents"] if e["status"] == "queued")
+            with manager._lock:
+                old_gid = manager._torrents[queued["id"]]["gid"]
+
+            new_downloads = root / "new-downloads"
+            manager.update_settings({"download_directory": str(new_downloads)})
+            result = manager.force_start(queued["id"])
+            self.assertEqual(result["status"], "ok")
+            # The stale GID (pointed at the old directory) is torn down
+            # immediately, rather than left running against the old location.
+            self.assertIn(old_gid, [params[0] for params in rpc.method_calls("aria2.forceRemove")])
+            with manager._lock:
+                self.assertIsNone(manager._torrents[queued["id"]]["gid"])
+
+            # The next tick re-adds it fresh, unpaused, at the new location.
+            manager._tick()
+            refreshed = next(e for e in manager.snapshot()["torrents"] if e["id"] == queued["id"])
+            self.assertEqual(refreshed["download_dir"], str(new_downloads))
+            self.assertEqual(refreshed["status"], "downloading")
+            adds = rpc.method_calls("aria2.addTorrent")
+            self.assertEqual(adds[-1][2]["dir"], str(new_downloads))
+            self.assertEqual(adds[-1][2]["pause"], "false")
 
 
 class TorrentLifecycleTests(unittest.TestCase):

@@ -27,7 +27,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Event, Lock, Thread
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 try:
     from ..common.install_paths import drone_install_root as _drone_install_root
@@ -368,12 +368,61 @@ class TorrentManager:
             return daemon.rpc
         return None
 
+    def _refresh_pending_download_dirs_locked(self, config: dict) -> List[str]:
+        """Keep not-yet-started torrents tracking the current download
+        location, so changing the setting and saving takes effect for
+        anything that hasn't actually begun receiving bytes yet -- without
+        disturbing a torrent that already has data on disk at its original
+        location. Zero ``completed_bytes`` is used as "hasn't started":
+        covers a freshly-scanned torrent, one still waiting for a
+        concurrency slot, one globally paused with nothing downloaded yet,
+        and an errored/canceled entry that never got anywhere. A ``queued``
+        or ``error`` entry that already has bytes on disk (globally paused
+        mid-download, or requeued after a stale GID with prior progress) is
+        left alone.
+
+        Entries with no GID yet simply pick up the refreshed
+        ``download_dir`` when they're (re-)added this same tick. For a
+        ``queued`` entry that was already added to aria2 (paused, waiting
+        for a slot), the GID is torn down here and its ``gid`` cleared --
+        confirmed against a real aria2c that ``aria2.changeOption``'s ``dir``
+        change is *not* honored for an already-added BitTorrent download (the
+        payload still landed at the original directory after changeOption +
+        unpause), so the only way to actually retarget it is to drop it and
+        let the normal ``to_add`` pass in this same tick re-add it fresh at
+        the new location. Returned GIDs still need `_remove_from_aria2`
+        called on them (outside the lock).
+        """
+        current = effective_download_directory(config)
+        stale_gids: List[str] = []
+        for entry in self._torrents.values():
+            if entry.get("status") not in ("queued", "error"):
+                continue
+            if int(entry.get("completed_bytes") or 0) != 0:
+                continue
+            if entry.get("download_dir") == current:
+                continue
+            entry["download_dir"] = current
+            if entry.get("status") == "queued":
+                gid = entry.get("gid")
+                if gid:
+                    stale_gids.append(gid)
+                    entry["gid"] = None
+        return stale_gids
+
     def _tick(self) -> None:
         # Phase A (locked): scan the watched folder, register new .torrent
         # files, and collect the RPC work to do outside the lock.
         with self._lock:
             config = dict(self._config)
             dirty = self._scan_watch_directory_locked(config)
+            # Clears `gid` on any queued-but-not-yet-started entry whose
+            # download location just changed -- to_add (below) then picks it
+            # right back up in this same tick, re-adding it fresh at the new
+            # location.
+            stale_gids = self._refresh_pending_download_dirs_locked(config)
+            if stale_gids:
+                dirty = True
             to_add = [
                 dict(entry)
                 for entry in self._sorted_entries_locked()
@@ -386,7 +435,9 @@ class TorrentManager:
             ]
 
         # Phase B (unlocked): talk to aria2.
-        rpc = self._ensure_rpc(bool(to_add or to_query), config["directory"])
+        rpc = self._ensure_rpc(bool(to_add or to_query or stale_gids), config["directory"])
+        for gid in stale_gids:
+            self._remove_from_aria2(gid)
         add_results: Dict[str, dict] = {}
         status_results: Dict[str, dict] = {}
         if rpc is not None:
@@ -607,6 +658,20 @@ class TorrentManager:
             if status == "downloading":
                 return {"status": "already_active"}
             gid = entry.get("gid")
+            stale_gid = None
+            if status == "queued" and gid and int(entry.get("completed_bytes") or 0) == 0:
+                current_dir = effective_download_directory(self._config)
+                if entry.get("download_dir") != current_dir:
+                    # aria2 does not honor a `dir` change via
+                    # aria2.changeOption for an already-added BitTorrent
+                    # download (confirmed against a real aria2c -- the
+                    # payload still landed at the original directory). Drop
+                    # the GID and clear it so the code below re-adds fresh at
+                    # the new location instead of unpausing the stale one.
+                    entry["download_dir"] = current_dir
+                    stale_gid = gid
+                    gid = None
+                    entry["gid"] = None
             if status == "error":
                 entry["status"] = "queued"
                 entry["message"] = ""
@@ -616,18 +681,21 @@ class TorrentManager:
                 entry["status"] = "downloading"
                 entry["force_started"] = False
             self._persist_locked()
-        rpc = self._rpc_if_running()
-        if rpc is not None:
-            if status == "queued" and gid:
-                try:
-                    rpc.call("aria2.unpause", [gid])
-                except Aria2RpcError as error:
-                    print(f"Torrent force-start unpause failed: {error}", file=sys.stderr, flush=True)
-            elif status == "error" and gid:
-                try:
-                    rpc.call("aria2.removeDownloadResult", [gid])
-                except Aria2RpcError:
-                    pass
+        if stale_gid is not None:
+            self._remove_from_aria2(stale_gid)
+        else:
+            rpc = self._rpc_if_running()
+            if rpc is not None:
+                if status == "queued" and gid:
+                    try:
+                        rpc.call("aria2.unpause", [gid])
+                    except Aria2RpcError as error:
+                        print(f"Torrent force-start unpause failed: {error}", file=sys.stderr, flush=True)
+                elif status == "error" and gid:
+                    try:
+                        rpc.call("aria2.removeDownloadResult", [gid])
+                    except Aria2RpcError:
+                        pass
         self.wake()
         return {"status": "ok"}
 

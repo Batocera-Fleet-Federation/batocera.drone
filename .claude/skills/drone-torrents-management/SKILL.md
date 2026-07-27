@@ -76,19 +76,49 @@ as a parameter (module-level `torrentDirBrowserTargetInputId` tracks it for
 the modal's own "Use this folder" button) rather than duplicating the whole
 browser modal per field.
 
-Changing either setting only affects **future** scans/additions — an
-already-registered torrent keeps its original `torrent_file` and
-`download_dir` exactly as recorded at scan time (`_ENTRY_PERSISTED_FIELDS`),
-even if the settings change later. `update_settings()` creates both
-directories on disk (`mkdir(parents=True, exist_ok=True)`) if they don't
-already exist, but only bothers with `download_directory` when it actually
-differs from `directory` (avoids a redundant mkdir call).
+`update_settings()` creates both directories on disk
+(`mkdir(parents=True, exist_ok=True)`) if they don't already exist, but only
+bothers with `download_directory` when it actually differs from `directory`
+(avoids a redundant mkdir call).
 
 The snapshot (`GET /admin/torrents`) exposes `effective_download_directory`
 and `download_directory_exists` (in addition to the pre-existing `directory`/
 `directory_exists`) precisely so the UI can show the *resolved* default in a
 placeholder without recomputing the fallback logic client-side, and warn about
 a not-yet-created download folder independently of the watch folder.
+
+### `download_dir` keeps following the setting until a torrent actually starts
+
+The `.torrent` file itself never moves once scanned (`torrent_file` is fixed
+at scan time, permanently). `download_dir` used to be equally fixed at scan
+time, but that surprised users: changing the download location and saving had
+no effect on torrents that were already registered, even ones still sitting
+in the queue with zero bytes downloaded. It now instead keeps tracking
+whatever `effective_download_directory(config)` currently resolves to, for as
+long as the torrent has never actually received data
+(`_refresh_pending_download_dirs_locked`, called every tick and from
+`force_start()`): status `queued` or `error` **and** `completed_bytes == 0`.
+The instant a torrent has any real progress (including a torrent that's
+`queued` only because it's globally paused mid-download,
+[[drone-torrent-vpn-ui-polish-and-bootstrap-collision]]'s pause feature), it
+is frozen at wherever it already is and never retargeted again.
+
+**The gotcha that actually bit here**: the obvious-looking fix —
+`aria2.changeOption(gid, {"dir": new_dir})` on an already-added (paused,
+0-byte) BitTorrent download — silently "succeeds" (no RPC error) but **does
+not actually relocate anything**. Confirmed against a real aria2c: after
+`changeOption` + `unpause`, the payload still landed in the *original*
+directory. FakeRpc-based unit tests can't catch this (the fake just no-ops
+unrecognized methods) — this was only caught by live-driving a real drone
+server + aria2c through the HTTP API and checking the filesystem. The actual
+fix: when a `queued` entry with a GID needs retargeting,
+`_refresh_pending_download_dirs_locked` clears its `gid` (after noting the
+old one for `_remove_from_aria2`), so the very same tick's normal `to_add`
+pass re-adds it from scratch with the fresh `download_dir` — reusing the
+exact recovery path that already exists for a stale post-restart GID, rather
+than inventing new machinery. `force_start()` does the equivalent inline
+(drop the stale GID, let the immediate re-add carry `force_started` through
+to an unpaused fresh add) since it doesn't go through `_tick()` at all.
 
 ## aria2c install
 
@@ -264,8 +294,15 @@ re-`innerHTML` the whole tile, on every 3s poll tick.
 - Using `killall openvpn`-style broad process signals against aria2c --
   there's one shared daemon for the whole manager; use RPC calls against a
   specific GID instead.
-- Assuming a torrent's `download_dir` updates retroactively when settings
-  change -- it's fixed at scan/add time, by design.
+- Assuming a torrent's `download_dir` is permanently fixed at scan/add time --
+  it isn't anymore; it follows the current setting until the torrent actually
+  has bytes on disk (`_refresh_pending_download_dirs_locked`). Conversely,
+  don't assume it's *always* live-updated either -- once `completed_bytes > 0`
+  it's frozen, by design (a torrent already downloading must not move).
+- Trying to retarget an already-added BitTorrent download's directory via
+  `aria2.changeOption`'s `dir` option -- confirmed against a real aria2c that
+  this silently does nothing (no RPC error, but the file still lands at the
+  original directory). Drop the GID and let it re-add fresh instead.
 - Adding a new folder-picker field without reusing
   `openTorrentDirBrowser(targetInputId, title)` -- don't duplicate the modal.
 - Writing a test that touches the real, unconfigured default directory
