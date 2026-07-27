@@ -234,6 +234,11 @@
       padding-bottom: 0.65rem;
     }
     .text-muted { color: var(--admin-muted) !important; }
+    /* Bootstrap's own .form-text color assumes a light page background (this
+       app never sets data-bs-theme="dark"), so it renders near-invisible
+       against the dark cards here -- same class of bug .text-muted above
+       already had to correct for. */
+    .form-text { color: var(--admin-text); font-size: 0.78rem; }
     .card-title, .fw-semibold, h1, h2, h3 { color: var(--admin-text); }
     .form-control::placeholder { color: #73849e; }
     .btn-outline-secondary, .btn-outline-primary {
@@ -1141,6 +1146,109 @@
     .themed-modal .form-select:focus {
       background: rgba(11, 16, 32, 0.95);
       color: var(--admin-text);
+    }
+
+    /* Compact hierarchical tree used by any filesystem-browsing UI (the
+       folder picker, the Move Files file list) -- small font on purpose so a
+       deep path doesn't eat the whole modal. Shared structure for both
+       "dir-tree" (lazy-loaded folder picker) and "file-tree" (pre-fetched
+       file list): a row (toggle + icon + label[+size/checkbox]) per node,
+       nested <ul> children indented per level, collapsed unless
+       .expanded. */
+    .dir-tree, .file-tree {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      font-size: 0.78rem;
+      max-height: 320px;
+      overflow-y: auto;
+    }
+    .dir-tree ul, .file-tree ul {
+      list-style: none;
+      margin: 0;
+      padding-left: 1.05rem;
+    }
+    .dir-tree-children, .file-tree-children {
+      display: none;
+    }
+    .dir-tree-node.expanded > .dir-tree-children,
+    .file-tree-node.expanded > .file-tree-children {
+      display: block;
+    }
+    .dir-tree-row, .file-tree-row {
+      display: flex;
+      align-items: center;
+      gap: 0.3rem;
+      padding: 0.2rem 0.4rem;
+      border-radius: 4px;
+      cursor: pointer;
+      color: var(--admin-text);
+      user-select: none;
+      margin: 0;
+    }
+    .dir-tree-row:hover, .file-tree-row:hover {
+      background: rgba(59, 130, 246, 0.16);
+    }
+    .dir-tree-row.selected {
+      background: rgba(59, 130, 246, 0.3);
+    }
+    .dir-tree-toggle, .file-tree-toggle {
+      flex: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 0.9rem;
+      height: 0.9rem;
+      color: var(--admin-muted);
+    }
+    .dir-tree-toggle i, .file-tree-toggle i {
+      font-size: 0.65rem;
+      transition: transform 0.12s ease;
+    }
+    .dir-tree-node.expanded > .dir-tree-row .dir-tree-toggle i,
+    .file-tree-node.expanded > .file-tree-row .file-tree-toggle i {
+      transform: rotate(90deg);
+    }
+    .dir-tree-icon, .file-tree-icon {
+      flex: none;
+      font-size: 0.8rem;
+      color: var(--admin-muted);
+    }
+    .dir-tree-label, .file-tree-label {
+      flex: 1 1 auto;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .file-tree-checkbox {
+      flex: none;
+      margin: 0;
+    }
+    .file-tree-size {
+      flex: none;
+      font-size: 0.7rem;
+      color: var(--admin-muted);
+    }
+    /* Breadcrumb trail above the folder tree -- click any ancestor segment
+       to jump selection back up to it (the "go back a directory" affordance
+       a pure expand/collapse tree doesn't give you on its own). */
+    .dir-tree-crumb {
+      background: none;
+      border: none;
+      padding: 0 0.15rem;
+      color: var(--admin-text);
+      font-size: 0.75rem;
+      text-decoration: underline;
+      text-decoration-color: transparent;
+      cursor: pointer;
+    }
+    .dir-tree-crumb:hover {
+      text-decoration-color: currentColor;
+    }
+    .dir-tree-crumb-sep {
+      color: var(--admin-muted);
+      font-size: 0.75rem;
     }
 
     /* Image lightbox modal */

@@ -2716,7 +2716,7 @@ async function renderTorrentsPage() {
               <input class="form-control" type="text" id="torrentDir" value="${escapeHtml(settings.directory || "")}">
               <button class="btn btn-outline-secondary" type="button" onclick="openTorrentDirBrowser('torrentDir', 'Choose torrent folder')"><i class="bi bi-folder2-open me-1"></i>Browse</button>
             </div>
-            <div class="form-text">.torrent files dropped here are picked up automatically. Changing this only changes which folder is watched -- existing torrents keep downloading where they started.</div>
+            <div class="form-text">Dropped .torrent files here start automatically; changing this later won't move torrents already in progress.</div>
           </div>
           <div class="col-12 col-lg-6">
             <label class="form-label mb-1" for="torrentDownloadDir">Download location</label>
@@ -2724,7 +2724,7 @@ async function renderTorrentsPage() {
               <input class="form-control" type="text" id="torrentDownloadDir" placeholder="${escapeHtml(payload.effective_download_directory || settings.directory || "")}" value="${escapeHtml(settings.download_directory || "")}">
               <button class="btn btn-outline-secondary" type="button" onclick="openTorrentDirBrowser('torrentDownloadDir', 'Choose download location')"><i class="bi bi-folder2-open me-1"></i>Browse</button>
             </div>
-            <div class="form-text">Where downloaded files actually land -- can be a different disk than the Drone itself (e.g. an external drive, or /userdata/roms). Leave blank to use the torrent folder above. Applies to anything that hasn't started downloading yet (including torrents already queued); a torrent already in progress keeps its original location.</div>
+            <div class="form-text">Where downloads land (can differ from the torrent folder above, e.g. an external drive) -- leave blank to match it; applies until a torrent starts, not to ones already in progress.</div>
           </div>
         </div>
         <div class="row g-2 mb-2">
@@ -2998,17 +2998,78 @@ function setMoveFilesDestination(path) {
   if (input) input.value = path;
 }
 
+// Groups the flat file list (each with a `/`-joined relative_path) into a
+// folder hierarchy so it can render as a real tree instead of a flat list --
+// mirrors the folder-picker's tree so both filesystem-browsing UIs in this
+// app look and behave the same way.
+function buildFileTree(files) {
+  const root = { dirs: new Map(), files: [] };
+  files.forEach((file) => {
+    const parts = String(file.relative_path || file.name || "").split("/").filter(Boolean);
+    let node = root;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const part = parts[i];
+      if (!node.dirs.has(part)) node.dirs.set(part, { dirs: new Map(), files: [] });
+      node = node.dirs.get(part);
+    }
+    node.files.push(file);
+  });
+  return root;
+}
+
+function renderFileTreeNode(node) {
+  const dirItems = Array.from(node.dirs.entries()).map(([name, child]) => `
+    <li class="file-tree-node expanded" data-kind="dir">
+      <div class="file-tree-row">
+        <span class="file-tree-toggle"><i class="bi bi-chevron-right"></i></span>
+        <input type="checkbox" class="form-check-input file-tree-checkbox file-tree-folder-checkbox" checked title="Select all files in this folder">
+        <i class="bi bi-folder2 file-tree-icon"></i>
+        <span class="file-tree-label" title="${escapeHtml(name)}">${escapeHtml(name)}</span>
+      </div>
+      <ul class="file-tree-children">${renderFileTreeNode(child)}</ul>
+    </li>
+  `).join("");
+  const fileItems = node.files.map((file) => `
+    <li class="file-tree-node" data-kind="file">
+      <label class="file-tree-row">
+        <span class="file-tree-toggle"></span>
+        <input type="checkbox" class="form-check-input file-tree-checkbox move-file-checkbox" value="${escapeHtml(file.path)}" ${file.exists ? "checked" : "disabled"}>
+        <i class="bi bi-file-earmark file-tree-icon"></i>
+        <span class="file-tree-label" title="${escapeHtml(file.relative_path || file.name || "")}">${escapeHtml(file.name || file.relative_path || "")}</span>
+        <span class="file-tree-size">${file.size != null ? formatBytes(file.size) : "missing"}</span>
+      </label>
+    </li>
+  `).join("");
+  return dirItems + fileItems;
+}
+
 function renderMoveFilesList(files) {
   if (!files.length) {
-    return '<div class="text-muted small">No files found for this torrent.</div>';
+    return '<div class="text-muted small px-2 py-1">No files found for this torrent.</div>';
   }
-  return `<div class="list-group list-group-flush">${files.map((file) => `
-    <label class="list-group-item d-flex align-items-center gap-2">
-      <input type="checkbox" class="form-check-input move-file-checkbox mt-0" value="${escapeHtml(file.path)}" ${file.exists ? "checked" : "disabled"}>
-      <span class="flex-grow-1 text-truncate" title="${escapeHtml(file.relative_path || file.name || "")}">${escapeHtml(file.relative_path || file.name || "")}</span>
-      <span class="small text-muted text-nowrap">${file.size != null ? formatBytes(file.size) : "missing"}</span>
-    </label>
-  `).join("")}</div>`;
+  const tree = buildFileTree(files);
+  return `<ul class="file-tree">${renderFileTreeNode(tree)}</ul>`;
+}
+
+// Delegated on #moveFilesBody (a stable container -- only its innerHTML is
+// replaced once the file list loads, so attaching this once at modal-open
+// time survives that swap). A folder's checkbox bulk-toggles its own
+// descendant file checkboxes; clicking the rest of a folder's row expands or
+// collapses it; file rows are plain <label>s so clicking anywhere on one
+// already toggles its own checkbox natively, no extra handling needed.
+function handleMoveFilesTreeClick(event) {
+  const folderCheckbox = event.target.closest(".file-tree-folder-checkbox");
+  if (folderCheckbox) {
+    const node = folderCheckbox.closest(".file-tree-node");
+    const checked = folderCheckbox.checked;
+    node?.querySelectorAll(".move-file-checkbox:not(:disabled)").forEach((cb) => { cb.checked = checked; });
+    return;
+  }
+  const row = event.target.closest(".file-tree-row");
+  const node = row ? row.closest(".file-tree-node") : null;
+  if (node && node.dataset.kind === "dir") {
+    node.classList.toggle("expanded");
+  }
 }
 
 async function openMoveFilesModal(torrentId) {
@@ -3049,6 +3110,7 @@ async function openMoveFilesModal(torrentId) {
         </div>
       </div>
     </div>`;
+  modal.querySelector("#moveFilesBody").addEventListener("click", handleMoveFilesTreeClick);
   if (window.bootstrap?.Modal) {
     window.bootstrap.Modal.getOrCreateInstance(modal).show();
   } else {
@@ -3098,15 +3160,45 @@ async function confirmMoveFiles(torrentId) {
   }
 }
 
-// Shared by both the watch-folder and download-location fields (and reused
-// as-is by anything else that wants a storage-root-scoped folder picker) --
-// which input gets the chosen path is tracked in this module-level var since
-// the modal's own "Use this folder" button calls chooseTorrentDir() with no
-// arguments.
+// Raises a modal (and its freshly-created backdrop) above any other modal
+// already open -- Bootstrap doesn't officially support stacked modals, so
+// without this a modal opened from within another modal (e.g. Move Files'
+// destination Browse button) paints *behind* it at the same default z-index,
+// making it unreachable. Call this from a `shown.bs.modal` handler so the
+// backdrop this modal just created already exists in the DOM.
+function bringModalToFront(modalEl) {
+  const openModals = Array.from(document.querySelectorAll(".modal.show"));
+  if (openModals.length <= 1) return;
+  const z = 1055 + openModals.length * 20;
+  modalEl.style.zIndex = String(z);
+  const backdrops = document.querySelectorAll(".modal-backdrop");
+  const lastBackdrop = backdrops[backdrops.length - 1];
+  if (lastBackdrop) lastBackdrop.style.zIndex = String(z - 5);
+}
+
+// Shared by both the watch-folder and download-location fields, and the Move
+// Files destination picker -- which input gets the chosen path is tracked in
+// this module-level var since the modal's own "Use this folder" button calls
+// chooseTorrentDir() with no arguments. A lazy-loaded tree (not a drill-down
+// list) so the folder hierarchy stays visible while browsing -- each node
+// fetches its own children on first expand and caches them (dataset.loaded).
 let torrentDirBrowserTargetInputId = "torrentDir";
+let torrentDirBrowserSelectedPath = "";
+
+function renderTorrentDirNode(path, label) {
+  return `<li class="dir-tree-node" data-path="${escapeHtml(path)}">
+    <div class="dir-tree-row">
+      <span class="dir-tree-toggle"><i class="bi bi-chevron-right"></i></span>
+      <i class="bi bi-folder2 dir-tree-icon"></i>
+      <span class="dir-tree-label" title="${escapeHtml(label)}">${escapeHtml(label)}</span>
+    </div>
+    <ul class="dir-tree-children"></ul>
+  </li>`;
+}
 
 function openTorrentDirBrowser(targetInputId = "torrentDir", title = "Choose torrent folder") {
   torrentDirBrowserTargetInputId = targetInputId;
+  torrentDirBrowserSelectedPath = "";
   const modalId = "torrentDirBrowserModal";
   let modal = document.getElementById(modalId);
   if (!modal) {
@@ -3121,68 +3213,195 @@ function openTorrentDirBrowser(targetInputId = "torrentDir", title = "Choose tor
     <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
       <div class="modal-content themed-modal">
         <div class="modal-header">
-          <div>
+          <div class="text-truncate flex-grow-1">
             <h5 class="modal-title mb-0"><i class="bi bi-folder2-open me-2"></i>${escapeHtml(title)}</h5>
-            <div class="small text-muted" id="torrentDirBrowserPath"></div>
+            <div class="d-flex align-items-center gap-1 mt-1">
+              <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-1" id="torrentDirUpBtn" title="Go up one level" disabled onclick="goUpTorrentDirLevel()"><i class="bi bi-arrow-90deg-up"></i></button>
+              <div class="small text-muted text-truncate" id="torrentDirBrowserPath">No folder selected</div>
+            </div>
           </div>
           <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
         </div>
-        <div class="modal-body p-0"><div class="list-group list-group-flush" id="torrentDirBrowserBody"></div></div>
+        <div class="modal-body p-2"><ul class="dir-tree" id="torrentDirBrowserTree"><li class="text-center py-3"><span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span></li></ul></div>
         <div class="modal-footer">
           <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
           <button type="button" class="btn btn-primary" id="torrentDirChooseBtn" onclick="chooseTorrentDir()" disabled>Use this folder</button>
         </div>
       </div>
     </div>`;
-  modal.querySelector("#torrentDirBrowserBody").addEventListener("click", (event) => {
-    const entry = event.target.closest(".torrent-dir-entry");
-    if (entry) loadTorrentDirBrowser(entry.dataset.path || "");
-  });
+  modal.querySelector("#torrentDirBrowserTree").addEventListener("click", handleTorrentDirTreeClick);
+  modal.querySelector("#torrentDirBrowserPath").addEventListener("click", handleTorrentDirBreadcrumbClick);
   if (window.bootstrap?.Modal) {
+    modal.addEventListener("shown.bs.modal", () => bringModalToFront(modal), { once: true });
     window.bootstrap.Modal.getOrCreateInstance(modal).show();
   } else {
     modal.classList.add("show");
     modal.style.display = "block";
   }
   const startPath = (document.getElementById(targetInputId)?.value || "").trim();
-  loadTorrentDirBrowser(startPath);
+  loadTorrentDirRoots(startPath);
 }
 
-async function loadTorrentDirBrowser(path) {
-  const body = document.getElementById("torrentDirBrowserBody");
-  if (!body) return;
-  body.innerHTML = '<div class="text-center py-3"><span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span></div>';
+async function loadTorrentDirRoots(startPath) {
+  const tree = document.getElementById("torrentDirBrowserTree");
+  if (!tree) return;
+  tree.innerHTML = '<li class="text-center py-3"><span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span></li>';
   let payload;
   try {
-    payload = await api(`/admin/torrents/browse?path=${encodeURIComponent(path || "")}`);
+    payload = await api("/admin/torrents/browse?path=");
   } catch (err) {
-    if (path) {
-      // The requested folder (e.g. a not-yet-created default) is not
-      // browsable; fall back to the storage roots instead of a dead end.
-      loadTorrentDirBrowser("");
-      return;
-    }
-    body.innerHTML = `<div class="p-3 small text-danger">Failed to browse folders: ${escapeHtml(err.message || "unknown error")}</div>`;
+    tree.innerHTML = `<li class="p-2 small text-danger">Failed to browse folders: ${escapeHtml(err.message || "unknown error")}</li>`;
     return;
   }
-  const target = document.getElementById("torrentDirBrowserBody");
+  const target = document.getElementById("torrentDirBrowserTree");
   if (!target) return;
-  const chooseBtn = document.getElementById("torrentDirChooseBtn");
-  if (chooseBtn) {
-    chooseBtn.disabled = !payload.path;
-    chooseBtn.dataset.path = payload.path || "";
+  target.innerHTML = (payload.dirs || []).map((dir) => renderTorrentDirNode(dir.path, dir.name)).join("")
+    || '<li class="p-2 small text-muted">No storage roots available.</li>';
+  if (startPath) await expandTorrentDirTreeToPath(startPath);
+}
+
+async function loadTorrentDirChildren(node) {
+  const childrenUl = node.querySelector(":scope > .dir-tree-children");
+  if (!childrenUl) return;
+  childrenUl.innerHTML = '<li class="text-center py-2"><span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span></li>';
+  try {
+    const payload = await api(`/admin/torrents/browse?path=${encodeURIComponent(node.dataset.path || "")}`);
+    const dirs = payload.dirs || [];
+    childrenUl.innerHTML = dirs.length
+      ? dirs.map((dir) => renderTorrentDirNode(dir.path, dir.name)).join("")
+      : '<li class="px-2 py-1 small text-muted">No subfolders</li>';
+    node.dataset.loaded = "1";
+  } catch (err) {
+    childrenUl.innerHTML = `<li class="px-2 py-1 small text-danger">${escapeHtml(err.message || "failed to load")}</li>`;
   }
+}
+
+async function expandTorrentDirNode(node) {
+  if (node.dataset.loaded !== "1") await loadTorrentDirChildren(node);
+  node.classList.add("expanded");
+}
+
+async function toggleTorrentDirNode(node) {
+  if (node.classList.contains("expanded")) {
+    node.classList.remove("expanded");
+    return;
+  }
+  await expandTorrentDirNode(node);
+}
+
+// The tree shows the whole hierarchy at once (not a drill-down list), so
+// "going back a directory" means jumping selection to an already-expanded
+// ancestor -- walked straight from the DOM (node -> its <ul> -> that ul's
+// owning <li>) rather than by re-parsing the path string, so it can't drift
+// out of sync with what's actually rendered.
+function torrentDirParentNode(node) {
+  const parentUl = node.parentElement;
+  return parentUl && parentUl.classList.contains("dir-tree-children") ? parentUl.closest(".dir-tree-node") : null;
+}
+
+function selectTorrentDirNode(node) {
+  const tree = document.getElementById("torrentDirBrowserTree");
+  tree?.querySelectorAll(".dir-tree-row.selected").forEach((el) => el.classList.remove("selected"));
+  node.querySelector(":scope > .dir-tree-row")?.classList.add("selected");
+  torrentDirBrowserSelectedPath = node.dataset.path || "";
   const pathLabel = document.getElementById("torrentDirBrowserPath");
-  if (pathLabel) pathLabel.textContent = payload.path || "Storage roots";
-  const rows = [];
-  if (payload.path) {
-    rows.push(`<button type="button" class="list-group-item list-group-item-action torrent-dir-entry" data-path="${escapeHtml(payload.parent || "")}"><i class="bi bi-arrow-90deg-up me-2"></i>..</button>`);
+  if (pathLabel) pathLabel.innerHTML = renderTorrentDirBreadcrumb(node);
+  const chooseBtn = document.getElementById("torrentDirChooseBtn");
+  if (chooseBtn) chooseBtn.disabled = !torrentDirBrowserSelectedPath;
+  const upBtn = document.getElementById("torrentDirUpBtn");
+  if (upBtn) upBtn.disabled = !torrentDirParentNode(node);
+}
+
+// A storage root's own label is its full absolute path (there's no shorter
+// name to give it), which would otherwise eat the whole breadcrumb's width
+// on its own -- show just its last segment there and keep the full path as
+// a tooltip. A no-op for every other (already-short) segment.
+function shortenBreadcrumbLabel(label) {
+  if (!label.includes("/")) return label;
+  const parts = label.split("/").filter(Boolean);
+  return parts[parts.length - 1] || label;
+}
+
+function renderTorrentDirBreadcrumb(node) {
+  const chain = [];
+  for (let current = node; current; current = torrentDirParentNode(current)) {
+    const label = current.querySelector(":scope > .dir-tree-row .dir-tree-label")?.textContent || current.dataset.path || "";
+    chain.unshift({ path: current.dataset.path || "", label });
   }
-  (payload.dirs || []).forEach((dir) => {
-    rows.push(`<button type="button" class="list-group-item list-group-item-action torrent-dir-entry" data-path="${escapeHtml(dir.path)}"><i class="bi bi-folder me-2"></i>${escapeHtml(dir.name)}</button>`);
+  if (!chain.length) return "No folder selected";
+  return chain
+    .map((seg, i) => {
+      const btn = `<button type="button" class="dir-tree-crumb" data-path="${escapeHtml(seg.path)}" title="${escapeHtml(seg.label)}">${escapeHtml(shortenBreadcrumbLabel(seg.label))}</button>`;
+      return i > 0 ? `<span class="dir-tree-crumb-sep">/</span>${btn}` : btn;
+    })
+    .join("");
+}
+
+function findTorrentDirNodeByPath(path) {
+  const tree = document.getElementById("torrentDirBrowserTree");
+  if (!tree || !path) return null;
+  return Array.from(tree.querySelectorAll(".dir-tree-node")).find((li) => li.dataset.path === path) || null;
+}
+
+function handleTorrentDirBreadcrumbClick(event) {
+  const crumb = event.target.closest(".dir-tree-crumb");
+  if (!crumb) return;
+  const node = findTorrentDirNodeByPath(crumb.dataset.path || "");
+  if (!node) return;
+  selectTorrentDirNode(node);
+  node.scrollIntoView({ block: "center" });
+}
+
+function goUpTorrentDirLevel() {
+  const selectedRow = document.querySelector("#torrentDirBrowserTree .dir-tree-row.selected");
+  const selectedNode = selectedRow?.closest(".dir-tree-node");
+  const parentNode = selectedNode ? torrentDirParentNode(selectedNode) : null;
+  if (!parentNode) return;
+  selectTorrentDirNode(parentNode);
+  parentNode.scrollIntoView({ block: "center" });
+}
+
+async function handleTorrentDirTreeClick(event) {
+  const row = event.target.closest(".dir-tree-row");
+  if (!row) return;
+  const node = row.closest(".dir-tree-node");
+  if (!node) return;
+  if (event.target.closest(".dir-tree-toggle")) {
+    await toggleTorrentDirNode(node);
+    return;
+  }
+  selectTorrentDirNode(node);
+  await expandTorrentDirNode(node);
+}
+
+// Best-effort: walks the tree down to a previously-saved path, fetching and
+// expanding each ancestor level so the user immediately sees where they are
+// instead of starting back at the storage roots every time. Silently stops
+// (leaving whatever was already expanded) if a segment no longer exists.
+async function expandTorrentDirTreeToPath(targetPath) {
+  const tree = document.getElementById("torrentDirBrowserTree");
+  if (!tree) return;
+  const normalizedTarget = targetPath.replace(/\/+$/, "");
+  let current = Array.from(tree.children).find((li) => {
+    const p = (li.dataset.path || "").replace(/\/+$/, "");
+    return p && (normalizedTarget === p || normalizedTarget.startsWith(`${p}/`));
   });
-  if (!rows.length) rows.push('<div class="p-3 small text-muted">No subfolders.</div>');
-  target.innerHTML = rows.join("");
+  if (!current) return;
+  while (current) {
+    await expandTorrentDirNode(current);
+    const currentPath = (current.dataset.path || "").replace(/\/+$/, "");
+    if (currentPath === normalizedTarget) {
+      selectTorrentDirNode(current);
+      current.scrollIntoView({ block: "center" });
+      return;
+    }
+    const childrenUl = current.querySelector(":scope > .dir-tree-children");
+    const remainder = normalizedTarget.slice(currentPath.length).replace(/^\/+/, "");
+    const nextSegment = remainder.split("/")[0];
+    if (!nextSegment || !childrenUl) return;
+    const nextPath = `${currentPath}/${nextSegment}`;
+    current = Array.from(childrenUl.children).find((li) => (li.dataset.path || "") === nextPath);
+  }
 }
 
 function openTorrentUploadPicker() {
@@ -3236,9 +3455,8 @@ async function uploadTorrentFiles(files) {
 }
 
 function chooseTorrentDir() {
-  const chooseBtn = document.getElementById("torrentDirChooseBtn");
   const input = document.getElementById(torrentDirBrowserTargetInputId);
-  const path = chooseBtn ? chooseBtn.dataset.path || "" : "";
+  const path = torrentDirBrowserSelectedPath;
   if (input && path) input.value = path;
   const modal = document.getElementById("torrentDirBrowserModal");
   if (modal) {

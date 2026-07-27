@@ -174,18 +174,28 @@ def _resolve_known_files(entry: dict) -> List[Path]:
     """Filesystem paths known to belong to this torrent, best-effort.
 
     Prefers the exact file list aria2 reported (captured at scan/completion
-    time); falls back to a single-file name guess for entries that predate
-    this field or where aria2 never reported one.
+    time). Falls back to a name guess for entries that predate this field or
+    where aria2 never reported one: single-file torrents guess a file
+    directly; multi-file torrents land in a same-named subfolder under
+    ``download_dir``, so that guess is walked recursively for the real files
+    inside it rather than surfaced as-is (a directory is not a "file" a
+    caller can move).
     """
     paths = [Path(p) for p in (entry.get("files") or []) if p]
     if paths:
         return paths
     download_dir = entry.get("download_dir")
     name = entry.get("name")
-    if download_dir and name:
-        guess = Path(download_dir) / name
-        if guess.exists():
-            return [guess]
+    if not download_dir or not name:
+        return []
+    guess = Path(download_dir) / name
+    if guess.is_file():
+        return [guess]
+    if guess.is_dir():
+        try:
+            return sorted(p for p in guess.rglob("*") if p.is_file())
+        except OSError:
+            return []
     return []
 
 

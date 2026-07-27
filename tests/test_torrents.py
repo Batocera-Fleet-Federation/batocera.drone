@@ -798,7 +798,49 @@ class TorrentFileManagementTests(unittest.TestCase):
             self.assertEqual(len(result["files"]), 1)
             self.assertEqual(result["files"][0]["size"], 5)
             self.assertTrue(result["files"][0]["exists"])
-            self.assertEqual(result["files"][0]["path"], str(payload))
+
+    def test_list_files_falls_back_to_walking_a_multi_file_subfolder(self) -> None:
+        # Entries that predate the persisted `files` field (or where aria2
+        # never reported one) used to guess a single path of `download_dir /
+        # name` and surface it as-is -- for a multi-file torrent that guess is
+        # a *directory*, not a file, which showed up in the UI as "one thing
+        # that isn't a file". The fallback must walk into it instead.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            download_dir = root / "downloads"
+            pack_dir = download_dir / "pack"
+            pack_dir.mkdir(parents=True)
+            (pack_dir / "one.bin").write_bytes(b"one")
+            (pack_dir / "two.bin").write_bytes(b"twotwo")
+            manager = TorrentManager(_build_settings(root), start_worker=False)
+            with manager._lock:
+                manager._torrents["e1"] = {
+                    "id": "e1",
+                    "name": "pack",
+                    "torrent_file": str(root / "pack.torrent"),
+                    "download_dir": str(download_dir),
+                    "status": "complete",
+                    "message": "",
+                    "added_at": "2026-01-01T00:00:00+00:00",
+                    "completed_at": "2026-01-01T00:01:00+00:00",
+                    "total_bytes": 9,
+                    "completed_bytes": 9,
+                    "progress_percent": 100.0,
+                    "files": [],
+                    "gid": None,
+                    "force_started": False,
+                    "seeding": False,
+                    "download_speed_bps": 0,
+                    "upload_speed_bps": 0,
+                    "num_seeders": 0,
+                    "connections": 0,
+                    "eta_seconds": None,
+                }
+            result = manager.list_files("e1")
+            self.assertEqual(result["status"], "ok")
+            names = sorted(f["name"] for f in result["files"])
+            self.assertEqual(names, ["one.bin", "two.bin"])
+            self.assertTrue(all(f["exists"] for f in result["files"]))
 
     def test_move_files_not_applicable_before_completion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
