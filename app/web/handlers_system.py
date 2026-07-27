@@ -181,4 +181,9 @@ class HandlersSystemMixin:
         if not getattr(self.auth, "credential_store", None):
             raise ValueError("credential storage is not available")
         result = self.auth.credential_store.update(username, password)
-        self._send_json(200, {"credentials": result, "message": "Drone credentials updated."})
+        # The username/password changed, so every OTHER session was authenticated
+        # against credentials that no longer exist -- sign them all out. The
+        # caller's own session (which just made this authenticated change) is
+        # deliberately kept so they aren't immediately booted by their own edit.
+        revoked = self.auth.session_store.revoke_all(except_token=getattr(self, "session_token", None))
+        self._send_json(200, {"credentials": result, "message": "Drone credentials updated.", "other_sessions_revoked": revoked})

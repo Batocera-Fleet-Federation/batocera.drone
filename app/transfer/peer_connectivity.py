@@ -584,14 +584,17 @@ class PeerProxyResponse:
     Used for remote-admin proxying (see ``handlers_remote_admin.py``), where the
     proxied route may return plain text (logs) or raw file content, not just
     JSON -- the caller relays this verbatim rather than interpreting it.
+    ``set_cookie`` carries the peer's raw ``Set-Cookie`` response header
+    (only populated for the ``/auth/login`` call itself; None otherwise).
     """
 
-    __slots__ = ("status", "content_type", "body")
+    __slots__ = ("status", "content_type", "body", "set_cookie")
 
-    def __init__(self, status: int, content_type: str, body: bytes) -> None:
+    def __init__(self, status: int, content_type: str, body: bytes, set_cookie: Optional[str] = None) -> None:
         self.status = status
         self.content_type = content_type
         self.body = body
+        self.set_cookie = set_cookie
 
 
 def _peer_proxy_request(
@@ -601,7 +604,7 @@ def _peer_proxy_request(
     settings: Settings,
     *,
     body: Optional[bytes] = None,
-    authorization: Optional[str] = None,
+    cookie: Optional[str] = None,
     content_type: Optional[str] = None,
     peer_id: Optional[str] = None,
     config: Optional[dict] = None,
@@ -612,14 +615,14 @@ def _peer_proxy_request(
 
     Same address iteration (cached route -> Tailnet -> host -> IP) and pinned
     mTLS trust as ``_peer_get_json_for_peer``, generalized to an arbitrary
-    method/body and an explicit ``Authorization`` header -- this is always the
-    *target's own* credentials, supplied by the caller, never this Drone's own
-    local-network config. A non-2xx response from the peer (bad
-    credentials, unknown route, etc.) is relayed as a ``PeerProxyResponse``,
-    not raised -- the peer answered, so trying another address cannot change
-    the outcome (same reasoning as ``_peer_get_json_for_peer``'s HTTPError
-    handling); only connection-level failures fall through to the next
-    candidate address.
+    method/body and an explicit ``Cookie`` header -- this is always the
+    *target's own* session (obtained by logging into the peer with credentials
+    supplied by the caller), never this Drone's own local-network config. A
+    non-2xx response from the peer (bad credentials, unknown route, etc.) is
+    relayed as a ``PeerProxyResponse``, not raised -- the peer answered, so
+    trying another address cannot change the outcome (same reasoning as
+    ``_peer_get_json_for_peer``'s HTTPError handling); only connection-level
+    failures fall through to the next candidate address.
 
     Multi-address fallback is restricted to safe-to-retry ``GET`` requests.
     A mutating ``POST`` (many admin actions are not idempotent -- e.g.
@@ -646,8 +649,8 @@ def _peer_proxy_request(
     if is_mutating:
         addresses = addresses[:1]
     headers = {"Accept": "application/json", "User-Agent": "batocera-drone-remote-admin/1.0"}
-    if authorization:
-        headers["Authorization"] = authorization
+    if cookie:
+        headers["Cookie"] = cookie
     if body is not None and content_type:
         headers["Content-Type"] = content_type
     last_error: Optional[Exception] = None
@@ -672,6 +675,7 @@ def _peer_proxy_request(
                     response.status,
                     response.headers.get("Content-Type", "application/json"),
                     response.read(),
+                    set_cookie=response.headers.get("Set-Cookie"),
                 )
         except HTTPError as error:
             # The peer answered (auth rejection, unknown route, ...); relay it
@@ -680,6 +684,7 @@ def _peer_proxy_request(
                 error.code,
                 (error.headers.get("Content-Type") if error.headers else None) or "application/json",
                 error.read(),
+                set_cookie=(error.headers.get("Set-Cookie") if error.headers else None),
             )
         except ssl.SSLError as error:
             last_error = ssl.SSLError(_peer_ssl_diagnostic(url, cafile, error))

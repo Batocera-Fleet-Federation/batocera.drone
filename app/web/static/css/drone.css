@@ -97,6 +97,7 @@
     .resource-icon-link {
       width: 2.35rem;
       height: 2.35rem;
+      padding: 0;
       display: inline-flex;
       align-items: center;
       justify-content: center;
@@ -105,6 +106,7 @@
       border: 1px solid rgba(255, 255, 255, 0.14);
       border-radius: 0.45rem;
       text-decoration: none;
+      cursor: pointer;
       transition: color .2s ease, background .2s ease, border-color .2s ease;
     }
     .resource-links {

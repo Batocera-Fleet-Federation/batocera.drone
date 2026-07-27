@@ -385,14 +385,15 @@ function _apiRequestUrl(url) {
   return `${API_BASE}${url}`;
 }
 async function _handleApiUnauthorized(res, retry) {
-  // A gateway-level auth challenge (this Drone's own login expired) always
-  // carries WWW-Authenticate; the remote-admin proxy's 401s (session
-  // expired/lost, or the peer rejected its credentials) never do. This whole
-  // tab is scoped to the impersonated peer, so recovery means reconnecting to
-  // that *same* peer -- then transparently retrying the exact call that
-  // failed, so the original caller's own success path runs normally instead
-  // of racing a separate re-render against its own stale error handling.
-  if (!managedPeer || res.headers.get("WWW-Authenticate")) {
+  // A gateway-level auth challenge (this Drone's own session cookie expired
+  // or was never set) always carries X-Drone-Auth-Required; the remote-admin
+  // proxy's 401s (session expired/lost, or the peer rejected its credentials)
+  // never do. This whole tab is scoped to the impersonated peer, so recovery
+  // means reconnecting to that *same* peer -- then transparently retrying the
+  // exact call that failed, so the original caller's own success path runs
+  // normally instead of racing a separate re-render against its own stale
+  // error handling.
+  if (!managedPeer || res.headers.get("X-Drone-Auth-Required")) {
     window.location.reload();
     throw new Error("Authentication required");
   }
@@ -821,7 +822,7 @@ function startTorrentsAutoRefresh() {
         document.getElementById("torrentsLive") === liveNode &&
         !liveNode.contains(document.activeElement)
       ) {
-        liveNode.innerHTML = renderTorrentsLive(payload);
+        patchTorrentsLive(payload);
       }
     } catch (err) {
       // Transient poll failure: leave the last good data in place silently.
@@ -2500,76 +2501,110 @@ function torrentStatusBadge(row) {
   return `<span class="badge text-bg-${cls}" title="${escapeHtml(row.message || "")}">${escapeHtml(status)}</span>${seedNote}`;
 }
 
-function renderTorrentRows(rows, watchedDir) {
-  if (!rows.length) {
-    return `<div class="themed-empty">No torrents yet. Drop .torrent files into <code>${escapeHtml(watchedDir || "")}</code> or use Upload above -- they start automatically.</div>`;
-  }
-  return `<div class="table-responsive"><table class="table table-sm table-hover align-middle themed-table download-table bff-stack">
-    <thead><tr><th>Torrent</th><th>Status</th><th>Progress</th><th>Speed</th><th>SD</th><th>CN</th><th>ETA</th><th class="download-actions">Actions</th></tr></thead>
-    <tbody>${rows.map(row => {
-      const id = escapeHtml(row.id || "");
-      const status = String(row.status || "queued");
-      const pct = Number(row.progress_percent || 0);
-      const canForceStart = ["queued", "error"].includes(status);
-      const canCancel = ["queued", "downloading"].includes(status) || (status === "complete" && row.seeding);
-      const progressText = row.total_bytes
-        ? `${pct.toFixed(1)}% (${formatBytes(row.completed_bytes)} / ${formatBytes(row.total_bytes)})`
-        : (status === "complete" ? "100%" : "0%");
-      const etaSeconds = Number(row.eta_seconds);
-      const etaText = status === "downloading" ? (Number.isFinite(etaSeconds) && etaSeconds > 0 ? formatDuration(etaSeconds) : "--") : "";
-      const actions = [
-        canForceStart ? `<button class="btn btn-sm btn-outline-success" title="Force start" aria-label="Force start" onclick="forceStartTorrent('${id}')"><i class="bi bi-lightning-charge"></i></button>` : "",
-        canCancel ? `<button class="btn btn-sm btn-outline-warning" title="Cancel" aria-label="Cancel" onclick="cancelTorrent('${id}')"><i class="bi bi-x-circle"></i></button>` : "",
-        `<button class="btn btn-sm btn-outline-danger" title="Delete torrent" aria-label="Delete torrent" onclick="deleteTorrent('${id}')"><i class="bi bi-trash"></i></button>`,
-      ].filter(Boolean).join(" ");
-      return `<tr>
-        <td class="small mono download-file" title="${escapeHtml(row.torrent_file || "")}">${escapeHtml(row.name || "")}</td>
-        <td>${torrentStatusBadge(row)}</td>
-        <td class="small text-nowrap">${progressText}</td>
-        <td class="small">${row.download_speed_bps ? `${formatBytes(row.download_speed_bps)}/s` : ""}</td>
-        <td class="small">${Number(row.num_seeders || 0)}</td>
-        <td class="small">${Number(row.connections || 0)}</td>
-        <td class="small text-nowrap">${etaText}</td>
-        <td class="download-actions">${actions}</td>
-      </tr>`;
-    }).join("")}</tbody></table></div>`;
+function renderTorrentRowMarkup(row) {
+  const id = escapeHtml(row.id || "");
+  const status = String(row.status || "queued");
+  const pct = Number(row.progress_percent || 0);
+  const canForceStart = ["queued", "error"].includes(status);
+  const canCancel = ["queued", "downloading"].includes(status) || (status === "complete" && row.seeding);
+  const progressText = row.total_bytes
+    ? `${pct.toFixed(1)}% (${formatBytes(row.completed_bytes)} / ${formatBytes(row.total_bytes)})`
+    : (status === "complete" ? "100%" : "0%");
+  const etaSeconds = Number(row.eta_seconds);
+  const etaText = status === "downloading" ? (Number.isFinite(etaSeconds) && etaSeconds > 0 ? formatDuration(etaSeconds) : "--") : "";
+  const actions = [
+    canForceStart ? `<button class="btn btn-sm btn-outline-success" title="Force start" aria-label="Force start" onclick="forceStartTorrent('${id}')"><i class="bi bi-lightning-charge"></i></button>` : "",
+    canCancel ? `<button class="btn btn-sm btn-outline-warning" title="Cancel" aria-label="Cancel" onclick="cancelTorrent('${id}')"><i class="bi bi-x-circle"></i></button>` : "",
+    `<button class="btn btn-sm btn-outline-danger" title="Delete torrent" aria-label="Delete torrent" onclick="deleteTorrent('${id}')"><i class="bi bi-trash"></i></button>`,
+  ].filter(Boolean).join(" ");
+  return `<tr>
+    <td class="small mono download-file" title="${escapeHtml(row.torrent_file || "")}">${escapeHtml(row.name || "")}</td>
+    <td>${torrentStatusBadge(row)}</td>
+    <td class="small text-nowrap">${progressText}</td>
+    <td class="small">${row.download_speed_bps ? `${formatBytes(row.download_speed_bps)}/s` : ""}</td>
+    <td class="small">${Number(row.num_seeders || 0)}</td>
+    <td class="small">${Number(row.connections || 0)}</td>
+    <td class="small text-nowrap">${etaText}</td>
+    <td class="download-actions">${actions}</td>
+  </tr>`;
 }
 
-function renderTorrentsLive(payload) {
-  const torrents = payload.torrents || [];
-  const counts = payload.counts || {};
+function renderTorrentTableBody(rows) {
+  if (!rows.length) {
+    return `<tr><td colspan="8" class="text-center text-muted small py-3">No torrents yet. Drop .torrent files into the watched folder or use Upload Torrents above -- they start automatically.</td></tr>`;
+  }
+  return rows.map(renderTorrentRowMarkup).join("");
+}
+
+// The table/thead is mounted once (renderTorrentsLive) and never replaced;
+// only <tbody id="torrentsTableBody"> is patched by patchTorrentsLive, so the
+// 3s auto-refresh never flashes the grid.
+function renderTorrentTableShell(rows) {
+  return `<div class="table-responsive"><table class="table table-sm table-hover align-middle themed-table download-table bff-stack">
+    <thead><tr><th>Torrent</th><th>Status</th><th>Progress</th><th>Speed</th><th>SD</th><th>CN</th><th>ETA</th><th class="download-actions">Actions</th></tr></thead>
+    <tbody id="torrentsTableBody">${renderTorrentTableBody(rows)}</tbody>
+  </table></div>`;
+}
+
+function renderTorrentDaemonNote(payload) {
   const aria2 = payload.aria2 || {};
   const dir = (payload.settings || {}).directory || "";
+  const daemonBadge = aria2.installed
+    ? (aria2.running
+      ? '<span class="badge text-bg-success"><i class="bi bi-magnet me-1"></i>aria2c running</span>'
+      : '<span class="badge text-bg-secondary"><i class="bi bi-magnet me-1"></i>aria2c idle</span>')
+    : '<span class="badge text-bg-warning"><i class="bi bi-exclamation-triangle me-1"></i>aria2c not installed</span>';
+  return `${daemonBadge} <span class="small text-muted ms-1">Watching <code>${escapeHtml(dir)}</code> for .torrent files${aria2.version ? ` &middot; aria2 ${escapeHtml(aria2.version)}` : ""}</span>`;
+}
+
+function renderTorrentAlerts(payload) {
+  const aria2 = payload.aria2 || {};
+  const dir = (payload.settings || {}).directory || "";
+  const daemonError = aria2.installed && !aria2.running && aria2.daemon_error
+    ? `<div class="alert alert-danger py-2 mb-3">aria2c problem: ${escapeHtml(aria2.daemon_error)}</div>` : "";
+  const dirWarning = payload.directory_exists === false
+    ? `<div class="alert alert-warning py-2 mb-3">The torrent folder <code>${escapeHtml(dir)}</code> does not exist yet. Save the settings to create it.</div>` : "";
+  return `${daemonError}${dirWarning}`;
+}
+
+function renderTorrentSummaryCards(counts) {
+  counts = counts || {};
   const summary = [
     ["Queued", counts.queued || 0, "bi-hourglass-split", "warning"],
     ["Downloading", counts.downloading || 0, "bi-cloud-arrow-down", "info"],
     ["Complete", counts.complete || 0, "bi-check-circle", "success"],
     ["Error", counts.error || 0, "bi-exclamation-octagon", "danger"],
   ];
-  const daemonBadge = aria2.installed
-    ? (aria2.running
-      ? '<span class="badge text-bg-success"><i class="bi bi-magnet me-1"></i>aria2c running</span>'
-      : '<span class="badge text-bg-secondary"><i class="bi bi-magnet me-1"></i>aria2c idle</span>')
-    : '<span class="badge text-bg-warning"><i class="bi bi-exclamation-triangle me-1"></i>aria2c not installed</span>';
-  const daemonError = aria2.installed && !aria2.running && aria2.daemon_error
-    ? `<div class="alert alert-danger py-2 mb-3">aria2c problem: ${escapeHtml(aria2.daemon_error)}</div>` : "";
-  const dirWarning = payload.directory_exists === false
-    ? `<div class="alert alert-warning py-2 mb-3">The torrent folder <code>${escapeHtml(dir)}</code> does not exist yet. Save the settings to create it.</div>` : "";
+  return summary.map(([label, count, icon, tone]) => `<div class="download-summary-card tone-${tone}"><i class="bi ${icon}"></i><div><strong>${count}</strong><span>${label}</span></div></div>`).join("");
+}
+
+// First mount only: builds the stable skeleton (card chrome, table + thead).
+// Later updates go through patchTorrentsLive, which never recreates any of
+// these container nodes -- that's what keeps the 3s auto-refresh flash-free.
+function renderTorrentsLive(payload) {
   return `
     <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
-      <div>${daemonBadge} <span class="small text-muted ms-1">Watching <code>${escapeHtml(dir)}</code> for .torrent files${aria2.version ? ` &middot; aria2 ${escapeHtml(aria2.version)}` : ""}</span></div>
-      <div class="d-flex flex-wrap gap-2">
-        <button class="btn btn-sm btn-outline-primary" onclick="openTorrentUploadPicker()"><i class="bi bi-upload me-1"></i>Upload</button>
-        <button class="btn btn-sm btn-outline-primary" title="Refresh torrents" aria-label="Refresh torrents" onclick="refreshTorrentsLive()"><i class="bi bi-arrow-repeat"></i></button>
-      </div>
+      <div id="torrentsDaemonNote">${renderTorrentDaemonNote(payload)}</div>
+      <button class="btn btn-sm btn-outline-primary" title="Refresh torrents" aria-label="Refresh torrents" onclick="refreshTorrentsLive()"><i class="bi bi-arrow-repeat"></i></button>
     </div>
-    ${daemonError}
-    ${dirWarning}
-    <div class="download-summary-grid mb-3">
-      ${summary.map(([label, count, icon, tone]) => `<div class="download-summary-card tone-${tone}"><i class="bi ${icon}"></i><div><strong>${count}</strong><span>${label}</span></div></div>`).join("")}
-    </div>
-    ${renderTorrentRows(torrents, dir)}
+    <div id="torrentsAlerts">${renderTorrentAlerts(payload)}</div>
+    <div id="torrentsSummaryGrid" class="download-summary-grid mb-3">${renderTorrentSummaryCards(payload.counts)}</div>
+    ${renderTorrentTableShell(payload.torrents || [])}
   `;
+}
+
+// Live-refresh path (3s poll + manual Refresh + post-action reload): patches
+// only the leaf content of each region above by id. The card, the table
+// element, and its <thead> are never touched, so nothing visibly flashes.
+function patchTorrentsLive(payload) {
+  const noteNode = document.getElementById("torrentsDaemonNote");
+  if (noteNode) noteNode.innerHTML = renderTorrentDaemonNote(payload);
+  const alertsNode = document.getElementById("torrentsAlerts");
+  if (alertsNode) alertsNode.innerHTML = renderTorrentAlerts(payload);
+  const summaryNode = document.getElementById("torrentsSummaryGrid");
+  if (summaryNode) summaryNode.innerHTML = renderTorrentSummaryCards(payload.counts);
+  const bodyNode = document.getElementById("torrentsTableBody");
+  if (bodyNode) bodyNode.innerHTML = renderTorrentTableBody(payload.torrents || []);
 }
 
 async function renderTorrentsPage() {
@@ -2603,45 +2638,47 @@ async function renderTorrentsPage() {
   content.innerHTML = `
     ${installCard}
     <div class="card mb-3">
-      <div class="card-header"><i class="bi bi-gear me-2"></i>Torrent Settings</div>
+      <div class="card-header d-flex justify-content-between align-items-center gap-2">
+        <span><i class="bi bi-gear me-2"></i>Torrent Settings</span>
+        <button class="btn btn-sm btn-outline-primary" onclick="openTorrentUploadPicker()"><i class="bi bi-upload me-1"></i>Upload Torrents</button>
+      </div>
       <div class="card-body">
-        <div class="row g-3 mb-3">
+        <div class="row g-2 mb-2">
           <div class="col-12">
-            <label class="form-label" for="torrentDir">Torrent folder</label>
-            <div class="input-group">
+            <label class="form-label mb-1" for="torrentDir">Torrent folder</label>
+            <div class="input-group input-group-sm">
               <input class="form-control" type="text" id="torrentDir" value="${escapeHtml(settings.directory || "")}">
               <button class="btn btn-outline-secondary" type="button" onclick="openTorrentDirBrowser()"><i class="bi bi-folder2-open me-1"></i>Browse</button>
             </div>
-            <div class="form-text">.torrent files dropped here are picked up automatically and downloaded into this folder. Changing it only changes which folder is watched -- torrents already added keep downloading where they started.</div>
-          </div>
-          <div class="col-sm-6 col-lg-4">
-            <label class="form-label" for="torrentSeedTime">Seed time (minutes)</label>
-            <input class="form-control" type="number" id="torrentSeedTime" min="0" step="1" value="${escapeHtml(String(settings.seed_time ?? 60))}">
-            <div class="form-text">0 = stop seeding as soon as the download completes.</div>
-          </div>
-          <div class="col-sm-6 col-lg-4">
-            <label class="form-label" for="torrentSeedRatio">Seed ratio</label>
-            <input class="form-control" type="number" id="torrentSeedRatio" min="0" step="0.1" value="${escapeHtml(String(settings.seed_ratio ?? 1.0))}">
-            <div class="form-text">Stop seeding at this upload/download ratio. 0 = no ratio limit.</div>
-          </div>
-          <div class="col-sm-6 col-lg-4">
-            <label class="form-label" for="torrentBtStopTimeout">Stall timeout (seconds)</label>
-            <input class="form-control" type="number" id="torrentBtStopTimeout" min="0" step="1" value="${escapeHtml(String(settings.bt_stop_timeout ?? 0))}">
-            <div class="form-text">Stop a torrent stuck at 0 B/s for this long (aria2 bt-stop-timeout). 0 = disabled.</div>
-          </div>
-          <div class="col-sm-6 col-lg-4">
-            <label class="form-label" for="torrentFileAllocation">File allocation</label>
-            <input class="form-control" type="text" id="torrentFileAllocation" value="${escapeHtml(settings.file_allocation || "prealloc")}">
-            <div class="form-text">One of: none, prealloc, trunc, falloc.</div>
-          </div>
-          <div class="col-sm-6 col-lg-4">
-            <label class="form-label" for="torrentMaxConcurrent">Concurrent downloads</label>
-            <input class="form-control" type="number" id="torrentMaxConcurrent" min="1" max="16" step="1" value="${escapeHtml(String(settings.max_concurrent_downloads ?? 3))}">
-            <div class="form-text">Force Start bypasses this limit.</div>
+            <div class="form-text">.torrent files dropped here download automatically. Changing this only changes which folder is watched -- existing torrents keep downloading where they started.</div>
           </div>
         </div>
-        <div class="small text-muted mb-3">Seed and allocation settings apply to torrents added after saving.</div>
-        <button class="btn btn-primary" id="torrentSettingsSaveBtn" onclick="saveTorrentSettings()"><i class="bi bi-save me-1"></i>Save</button>
+        <div class="row g-2 mb-2">
+          <div class="col-6 col-sm-4 col-xl-2">
+            <label class="form-label mb-1" for="torrentSeedTime" title="Minutes to keep seeding after a download completes. 0 = stop immediately.">Seed time (min)</label>
+            <input class="form-control form-control-sm" type="number" id="torrentSeedTime" min="0" step="1" value="${escapeHtml(String(settings.seed_time ?? 60))}">
+          </div>
+          <div class="col-6 col-sm-4 col-xl-2">
+            <label class="form-label mb-1" for="torrentSeedRatio" title="Stop seeding at this upload/download ratio. 0 = no limit.">Seed ratio</label>
+            <input class="form-control form-control-sm" type="number" id="torrentSeedRatio" min="0" step="0.1" value="${escapeHtml(String(settings.seed_ratio ?? 1.0))}">
+          </div>
+          <div class="col-6 col-sm-4 col-xl-2">
+            <label class="form-label mb-1" for="torrentBtStopTimeout" title="Stop a torrent stalled at 0 B/s for this long. 0 = disabled.">Stall timeout (s)</label>
+            <input class="form-control form-control-sm" type="number" id="torrentBtStopTimeout" min="0" step="1" value="${escapeHtml(String(settings.bt_stop_timeout ?? 0))}">
+          </div>
+          <div class="col-6 col-sm-4 col-xl-2">
+            <label class="form-label mb-1" for="torrentMaxConcurrent" title="Torrents downloading at once. Force Start bypasses this limit.">Concurrent</label>
+            <input class="form-control form-control-sm" type="number" id="torrentMaxConcurrent" min="1" max="16" step="1" value="${escapeHtml(String(settings.max_concurrent_downloads ?? 3))}">
+          </div>
+          <div class="col-6 col-sm-4 col-xl-2 d-flex align-items-end">
+            <div class="form-check form-switch mb-0">
+              <input class="form-check-input" type="checkbox" role="switch" id="torrentFileAllocation" ${(settings.file_allocation || "prealloc") !== "none" ? "checked" : ""}>
+              <label class="form-check-label" for="torrentFileAllocation" title="On pre-allocates file space up front (steadier writes, slower start). Off (file-allocation=none) allocates as data arrives.">File allocation</label>
+            </div>
+          </div>
+        </div>
+        <div class="small text-muted mb-2">Seed and allocation settings apply to torrents added after saving.</div>
+        <button class="btn btn-primary btn-sm" id="torrentSettingsSaveBtn" onclick="saveTorrentSettings()"><i class="bi bi-save me-1"></i>Save</button>
       </div>
     </div>
     <div class="card log-card"><div class="card-body">
@@ -2654,8 +2691,7 @@ async function renderTorrentsPage() {
 async function refreshTorrentsLive() {
   try {
     const payload = await api("/admin/torrents");
-    const node = document.getElementById("torrentsLive");
-    if (node) node.innerHTML = renderTorrentsLive(payload);
+    if (document.getElementById("torrentsLive")) patchTorrentsLive(payload);
   } catch (err) {
     showToast(`Failed to refresh torrents: ${escapeHtml(err.message || "unknown error")}`, "danger");
   }
@@ -2666,13 +2702,12 @@ async function saveTorrentSettings() {
   const seedTime = parseInt(document.getElementById("torrentSeedTime").value, 10);
   const seedRatio = parseFloat(document.getElementById("torrentSeedRatio").value);
   const stallTimeout = parseInt(document.getElementById("torrentBtStopTimeout").value, 10);
-  const fileAllocation = (document.getElementById("torrentFileAllocation").value || "").trim().toLowerCase();
+  const fileAllocation = document.getElementById("torrentFileAllocation").checked ? "prealloc" : "none";
   const maxConcurrent = parseInt(document.getElementById("torrentMaxConcurrent").value, 10);
   if (!dir) { showToast("Torrent folder is required.", "warning"); return; }
   if (!Number.isFinite(seedTime) || seedTime < 0) { showToast("Seed time must be 0 or more minutes.", "warning"); return; }
   if (!Number.isFinite(seedRatio) || seedRatio < 0) { showToast("Seed ratio must be 0 or more.", "warning"); return; }
   if (!Number.isFinite(stallTimeout) || stallTimeout < 0) { showToast("Stall timeout must be 0 or more seconds.", "warning"); return; }
-  if (!["none", "prealloc", "trunc", "falloc"].includes(fileAllocation)) { showToast("File allocation must be one of: none, prealloc, trunc, falloc.", "warning"); return; }
   if (!Number.isFinite(maxConcurrent) || maxConcurrent < 1 || maxConcurrent > 16) { showToast("Concurrent downloads must be between 1 and 16.", "warning"); return; }
   setLoading(true, "Saving torrent settings...");
   try {
@@ -6842,7 +6877,9 @@ adminMenuBtn.addEventListener("click", (event) => {
   setHash("#admin");
 });
 window.addEventListener("hashchange", router);
-async function bootstrap() {
+async function startApp() {
+  document.querySelector(".nav-actions")?.classList.remove("d-none");
+  document.getElementById("logoutBtn")?.classList.remove("d-none");
   try {
     // managedPeer is not set yet at this point in startup, so this always
     // checks *this* Drone's own admin-enabled flag, never a peer's --
@@ -6871,4 +6908,129 @@ async function bootstrap() {
   // Re-render after theme init so branding/background can apply.
   await router();
 }
+
+async function submitLogin() {
+  const usernameInput = document.getElementById("loginUsername");
+  const passwordInput = document.getElementById("loginPassword");
+  const errorNode = document.getElementById("loginError");
+  const button = document.getElementById("loginSubmitBtn");
+  const username = (usernameInput.value || "").trim();
+  const password = passwordInput.value || "";
+  errorNode.classList.add("d-none");
+  if (!username || !password) {
+    errorNode.textContent = "Username and password are required.";
+    errorNode.classList.remove("d-none");
+    return;
+  }
+  button.disabled = true;
+  button.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Signing in...';
+  try {
+    // Always the local gateway's own login, never proxied to a managed peer
+    // (there is no managed peer yet at this point in the boot sequence).
+    const res = await fetch(`${API_BASE}/auth/login`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    });
+    if (!res.ok) {
+      let message = "Invalid username or password.";
+      try {
+        const data = await res.json();
+        if (data.error) message = data.error;
+      } catch (_) {}
+      errorNode.textContent = message;
+      errorNode.classList.remove("d-none");
+      button.disabled = false;
+      button.innerHTML = '<i class="bi bi-box-arrow-in-right me-1"></i>Sign in';
+      passwordInput.value = "";
+      passwordInput.focus();
+      return;
+    }
+    // A full reload re-runs bootstrap() from scratch with the new session
+    // cookie already set by the browser -- simpler and more robust than
+    // reconstructing all the nav/theme/router state this login view skipped.
+    window.location.reload();
+  } catch (err) {
+    errorNode.textContent = "Could not reach the Drone. Check the connection and try again.";
+    errorNode.classList.remove("d-none");
+    button.disabled = false;
+    button.innerHTML = '<i class="bi bi-box-arrow-in-right me-1"></i>Sign in';
+  }
+}
+
+async function logout() {
+  try {
+    await fetch(`${API_BASE}/auth/logout`, { method: "POST", credentials: "include" });
+  } catch (_) {
+    // Best-effort -- reload either way so a stale/unreachable session cannot
+    // leave the UI stuck in a half-logged-in state.
+  }
+  window.location.reload();
+}
+
+function renderLoginPage() {
+  document.querySelector(".nav-actions")?.classList.add("d-none");
+  document.getElementById("logoutBtn")?.classList.add("d-none");
+  const systemInfoBar = document.getElementById("systemInfoBar");
+  if (systemInfoBar) systemInfoBar.innerHTML = "";
+  titleNode.textContent = "";
+  subtitleNode.textContent = "";
+  content.innerHTML = `
+    <div class="row justify-content-center">
+      <div class="col-12 col-sm-8 col-md-5 col-lg-4">
+        <div class="card mt-5">
+          <div class="card-body p-4">
+            <div class="text-center mb-4">
+              <img src="/content/batocera-swarm-mascot.jpg" alt="" style="width:56px;height:56px;border-radius:50%;">
+              <h4 class="mt-3 mb-0">Batocera Drone</h4>
+              <div class="small text-muted">Sign in to continue</div>
+            </div>
+            <div id="loginError" class="alert alert-danger py-2 d-none"></div>
+            <div class="mb-3">
+              <label class="form-label" for="loginUsername">Username</label>
+              <input class="form-control" type="text" id="loginUsername" autocomplete="username">
+            </div>
+            <div class="mb-3">
+              <label class="form-label" for="loginPassword">Password</label>
+              <input class="form-control" type="password" id="loginPassword" autocomplete="current-password">
+            </div>
+            <button class="btn btn-primary w-100" id="loginSubmitBtn" type="button"><i class="bi bi-box-arrow-in-right me-1"></i>Sign in</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+  const usernameInput = document.getElementById("loginUsername");
+  const passwordInput = document.getElementById("loginPassword");
+  const onEnter = (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      submitLogin();
+    }
+  };
+  usernameInput.addEventListener("keydown", onEnter);
+  passwordInput.addEventListener("keydown", onEnter);
+  document.getElementById("loginSubmitBtn").addEventListener("click", submitLogin);
+  usernameInput.focus();
+}
+
+async function bootstrap() {
+  let authenticated = false;
+  try {
+    const session = await api("/auth/session");
+    authenticated = !!session.authenticated;
+  } catch (_) {
+    authenticated = false;
+  }
+  if (!authenticated) {
+    renderLoginPage();
+    return;
+  }
+  await startApp();
+}
+document.getElementById("logoutBtn")?.addEventListener("click", (event) => {
+  event.preventDefault();
+  logout();
+});
 bootstrap();

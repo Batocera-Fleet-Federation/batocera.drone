@@ -75,14 +75,14 @@ class PeerProxyRequestTests(unittest.TestCase):
         with mock.patch.object(peer_connectivity, "urlopen", return_value=response) as opened:
             result = peer_connectivity._peer_proxy_request(
                 PEER, "GET", "/v1/api/admin/system-info", self.settings,
-                authorization="Basic dGVzdA==", peer_id="peer-b",
+                cookie="drone_session=abc123", peer_id="peer-b",
             )
         self.assertEqual(result.status, 200)
         self.assertEqual(result.content_type, "application/json")
         self.assertEqual(result.body, b'{"ok": true}')
         request = opened.call_args[0][0]
         self.assertEqual(request.full_url, "https://192.168.1.50/v1/api/admin/system-info")
-        self.assertEqual(request.get_header("Authorization"), "Basic dGVzdA==")
+        self.assertEqual(request.get_header("Cookie"), "drone_session=abc123")
         self.assertEqual(request.get_method(), "GET")
 
     def test_post_uppercases_method_and_sets_content_type_only_with_a_body(self) -> None:
@@ -97,7 +97,7 @@ class PeerProxyRequestTests(unittest.TestCase):
         with mock.patch.object(peer_connectivity, "urlopen", return_value=response) as opened:
             peer_connectivity._peer_proxy_request(
                 PEER, "post", "/v1/api/admin/controls", self.settings,
-                body=b'{"level": 50}', authorization="Basic dGVzdA==",
+                body=b'{"level": 50}', cookie="drone_session=abc123",
                 content_type="application/json", peer_id="peer-b",
             )
         request = opened.call_args[0][0]
@@ -113,7 +113,7 @@ class PeerProxyRequestTests(unittest.TestCase):
         with mock.patch.object(peer_connectivity, "urlopen", side_effect=error):
             result = peer_connectivity._peer_proxy_request(
                 PEER, "GET", "/v1/api/admin/system-info", self.settings,
-                authorization="Basic bad", peer_id="peer-b",
+                cookie="drone_session=bad", peer_id="peer-b",
             )
         self.assertEqual(result.status, 401)
         self.assertEqual(result.body, b'{"error": "unauthorized"}')
@@ -131,7 +131,7 @@ class PeerProxyRequestTests(unittest.TestCase):
         with mock.patch.object(peer_connectivity, "urlopen", side_effect=[URLError("unreachable"), good_response]) as opened:
             result = peer_connectivity._peer_proxy_request(
                 peer, "GET", "/v1/api/admin/system-info", self.settings,
-                authorization="Basic dGVzdA==", peer_id="peer-b",
+                cookie="drone_session=abc123", peer_id="peer-b",
             )
         self.assertEqual(result.status, 200)
         self.assertEqual(opened.call_count, 2)
@@ -148,7 +148,7 @@ class PeerProxyRequestTests(unittest.TestCase):
             with self.assertRaises(URLError):
                 peer_connectivity._peer_proxy_request(
                     peer, "POST", "/v1/api/admin/controls", self.settings,
-                    body=b"{}", authorization="Basic dGVzdA==", peer_id="peer-b",
+                    body=b"{}", cookie="drone_session=abc123", peer_id="peer-b",
                 )
         self.assertEqual(opened.call_count, 1)
 
@@ -213,10 +213,13 @@ class RemoteAdminHandlerTests(unittest.TestCase):
         self._sessions_patch.stop()
         self._tmp.cleanup()
 
-    def _proxy_response(self, status: int, body: bytes = b"{}", content_type: str = "application/json"):
+    def _proxy_response(self, status: int, body: bytes = b"{}", content_type: str = "application/json", set_cookie: str = None):
         from app.transfer.peer_connectivity import PeerProxyResponse
 
-        return PeerProxyResponse(status, content_type, body)
+        return PeerProxyResponse(status, content_type, body, set_cookie=set_cookie)
+
+    def _login_ok(self, cookie_pair: str = "drone_session=abc123"):
+        return self._proxy_response(200, b"{}", set_cookie=f"{cookie_pair}; Path=/; HttpOnly; SameSite=Lax")
 
     # -- status --------------------------------------------------------
 
@@ -250,18 +253,21 @@ class RemoteAdminHandlerTests(unittest.TestCase):
     def test_connect_success_caches_session_and_returns_version(self) -> None:
         from app.web import handlers_remote_admin
 
-        ok = self._proxy_response(200, json.dumps({"fields": {"drone_app_version": "0.1.40"}}).encode())
-        with mock.patch.object(handlers_remote_admin, "_peer_proxy_request", return_value=ok) as proxy:
+        info_ok = self._proxy_response(200, json.dumps({"fields": {"drone_app_version": "0.1.40"}}).encode())
+        with mock.patch.object(handlers_remote_admin, "_peer_proxy_request", side_effect=[self._login_ok(), info_ok]) as proxy:
             handler = _handler(self.settings)
             handler._handle_admin_remote_connect({"peer_id": "peer-b", "username": "batocera", "password": "linux"})
         status, payload = handler.response
         self.assertEqual(status, 200)
         self.assertEqual(payload["status"], "connected")
         self.assertEqual(payload["drone_app_version"], "0.1.40")
-        # The verification call must hit system-info with Basic-auth for the
-        # credentials just submitted, not this gateway's own.
-        self.assertEqual(proxy.call_args.args[2], "/v1/api/admin/system-info")
-        self.assertTrue(proxy.call_args.kwargs["authorization"].startswith("Basic "))
+        # First call logs in with the credentials just submitted (never this
+        # gateway's own); second call fetches system-info using the resulting
+        # session cookie.
+        self.assertEqual(proxy.call_args_list[0].args[2], "/v1/api/auth/login")
+        self.assertIn(b'"batocera"', proxy.call_args_list[0].kwargs["body"])
+        self.assertEqual(proxy.call_args_list[1].args[2], "/v1/api/admin/system-info")
+        self.assertEqual(proxy.call_args_list[1].kwargs["cookie"], "drone_session=abc123")
         self.assertIsNotNone(handlers_remote_admin._get_remote_session("peer-b"))
 
     def test_connect_wrong_credentials_is_401_and_not_cached(self) -> None:
@@ -273,10 +279,34 @@ class RemoteAdminHandlerTests(unittest.TestCase):
         self.assertEqual(handler.response[0], 401)
         self.assertIsNone(handlers_remote_admin._get_remote_session("peer-b"))
 
+    def test_connect_peer_missing_login_endpoint_reports_version_hint(self) -> None:
+        # An older, not-yet-upgraded peer in the fleet won't have /auth/login
+        # at all -- this must read as a clear upgrade hint, not a generic 502.
+        from app.web import handlers_remote_admin
+
+        with mock.patch.object(handlers_remote_admin, "_peer_proxy_request", return_value=self._proxy_response(404)):
+            handler = _handler(self.settings)
+            handler._handle_admin_remote_connect({"peer_id": "peer-b", "username": "batocera", "password": "linux"})
+        status, payload = handler.response
+        self.assertEqual(status, 502)
+        self.assertIn("older Drone version", payload["error"])
+        self.assertIsNone(handlers_remote_admin._get_remote_session("peer-b"))
+
+    def test_connect_login_without_set_cookie_is_502(self) -> None:
+        from app.web import handlers_remote_admin
+
+        with mock.patch.object(handlers_remote_admin, "_peer_proxy_request", return_value=self._proxy_response(200, b"{}")):
+            handler = _handler(self.settings)
+            handler._handle_admin_remote_connect({"peer_id": "peer-b", "username": "batocera", "password": "linux"})
+        status, payload = handler.response
+        self.assertEqual(status, 502)
+        self.assertIn("did not start a session", payload["error"])
+        self.assertIsNone(handlers_remote_admin._get_remote_session("peer-b"))
+
     def test_connect_admin_disabled_on_target_is_409(self) -> None:
         from app.web import handlers_remote_admin
 
-        with mock.patch.object(handlers_remote_admin, "_peer_proxy_request", return_value=self._proxy_response(403)):
+        with mock.patch.object(handlers_remote_admin, "_peer_proxy_request", side_effect=[self._login_ok(), self._proxy_response(403)]):
             handler = _handler(self.settings)
             handler._handle_admin_remote_connect({"peer_id": "peer-b", "username": "batocera", "password": "linux"})
         self.assertEqual(handler.response[0], 409)
@@ -294,7 +324,7 @@ class RemoteAdminHandlerTests(unittest.TestCase):
     def test_disconnect_clears_the_cached_session(self) -> None:
         from app.web import handlers_remote_admin
 
-        handlers_remote_admin._cache_remote_session("peer-b", "Basic dGVzdA==", "0.1.40")
+        handlers_remote_admin._cache_remote_session("peer-b", "drone_session=abc123", "0.1.40")
         handler = _handler(self.settings)
         handler._handle_admin_remote_disconnect({"peer_id": "peer-b"})
         self.assertEqual(handler.response[0], 200)
@@ -330,7 +360,7 @@ class RemoteAdminHandlerTests(unittest.TestCase):
 
         mac_peer_id = "58:47:ca:7e:38:57"
         local_network.save_paired_peer(self.settings, {**PEER, "drone_id": mac_peer_id})
-        handlers_remote_admin._cache_remote_session(mac_peer_id, "Basic dGVzdA==", "0.1.40")
+        handlers_remote_admin._cache_remote_session(mac_peer_id, "drone_session=abc123", "0.1.40")
         ok = self._proxy_response(200, b'{"fields": {"machine_id": "abc"}}')
         encoded_peer_id = urlquote(mac_peer_id, safe="")
         self.assertIn("%3A", encoded_peer_id)  # sanity: the colon really is encoded
@@ -347,11 +377,11 @@ class RemoteAdminHandlerTests(unittest.TestCase):
         # since every page already calls api("/admin/...")) -- the handler must
         # not re-prepend "admin/" on top of that (that produced
         # "/v1/api/admin/admin/system-info", a 404 on the peer for every single
-        # action). Guarding on the prefix also keeps this Basic-Auth proxy from
+        # action). Guarding on the prefix also keeps this session-cookie proxy from
         # ever reaching the peer's separate mTLS-only /peer/* surface.
         from app.web import handlers_remote_admin
 
-        handlers_remote_admin._cache_remote_session("peer-b", "Basic dGVzdA==", "0.1.40")
+        handlers_remote_admin._cache_remote_session("peer-b", "drone_session=abc123", "0.1.40")
         handler = _handler(self.settings)
         handler._handle_admin_remote_proxy("peer-b", "peer/inventory/summary", "GET", "")
         status, payload = handler.response
@@ -361,7 +391,7 @@ class RemoteAdminHandlerTests(unittest.TestCase):
     def test_proxy_relays_a_successful_get_verbatim(self) -> None:
         from app.web import handlers_remote_admin
 
-        handlers_remote_admin._cache_remote_session("peer-b", "Basic dGVzdA==", "0.1.40")
+        handlers_remote_admin._cache_remote_session("peer-b", "drone_session=abc123", "0.1.40")
         ok = self._proxy_response(200, b'{"fields": {"machine_id": "abc"}}')
         with mock.patch.object(handlers_remote_admin, "_peer_proxy_request", return_value=ok) as proxy:
             handler = _handler(self.settings)
@@ -370,12 +400,12 @@ class RemoteAdminHandlerTests(unittest.TestCase):
         self.assertEqual(handler.relayed["headers"]["Content-Type"], "application/json")
         handler.wfile.write.assert_called_once_with(b'{"fields": {"machine_id": "abc"}}')
         self.assertEqual(proxy.call_args.args[2], "/v1/api/admin/system-info?speed=1")
-        self.assertEqual(proxy.call_args.kwargs["authorization"], "Basic dGVzdA==")
+        self.assertEqual(proxy.call_args.kwargs["cookie"], "drone_session=abc123")
 
     def test_proxy_forwards_the_post_body_and_content_type(self) -> None:
         from app.web import handlers_remote_admin
 
-        handlers_remote_admin._cache_remote_session("peer-b", "Basic dGVzdA==", "0.1.40")
+        handlers_remote_admin._cache_remote_session("peer-b", "drone_session=abc123", "0.1.40")
         ok = self._proxy_response(200, b'{"status": "queued"}')
         with mock.patch.object(handlers_remote_admin, "_peer_proxy_request", return_value=ok) as proxy:
             handler = _handler(
@@ -391,7 +421,7 @@ class RemoteAdminHandlerTests(unittest.TestCase):
     def test_proxy_401_from_target_clears_session_and_reports_clearly(self) -> None:
         from app.web import handlers_remote_admin
 
-        handlers_remote_admin._cache_remote_session("peer-b", "Basic dGVzdA==", "0.1.40")
+        handlers_remote_admin._cache_remote_session("peer-b", "drone_session=abc123", "0.1.40")
         with mock.patch.object(handlers_remote_admin, "_peer_proxy_request", return_value=self._proxy_response(401)):
             handler = _handler(self.settings)
             handler._handle_admin_remote_proxy("peer-b", "admin/system-info", "GET", "")
@@ -405,7 +435,7 @@ class RemoteAdminHandlerTests(unittest.TestCase):
     def test_proxy_404_from_target_is_reported_as_version_mismatch(self) -> None:
         from app.web import handlers_remote_admin
 
-        handlers_remote_admin._cache_remote_session("peer-b", "Basic dGVzdA==", "0.1.10")
+        handlers_remote_admin._cache_remote_session("peer-b", "drone_session=abc123", "0.1.10")
         with mock.patch.object(handlers_remote_admin, "_peer_proxy_request", return_value=self._proxy_response(404)), \
                 mock.patch.object(handlers_remote_admin, "_drone_app_version", return_value="0.1.53"):
             handler = _handler(self.settings)
@@ -419,7 +449,7 @@ class RemoteAdminHandlerTests(unittest.TestCase):
     def test_proxy_connection_failure_is_502(self) -> None:
         from app.web import handlers_remote_admin
 
-        handlers_remote_admin._cache_remote_session("peer-b", "Basic dGVzdA==", "0.1.40")
+        handlers_remote_admin._cache_remote_session("peer-b", "drone_session=abc123", "0.1.40")
         with mock.patch.object(handlers_remote_admin, "_peer_proxy_request", side_effect=URLError("unreachable")):
             handler = _handler(self.settings)
             handler._handle_admin_remote_proxy("peer-b", "admin/system-info", "GET", "")
@@ -428,7 +458,7 @@ class RemoteAdminHandlerTests(unittest.TestCase):
     def test_session_ttl_expiry_requires_reconnect(self) -> None:
         from app.web import handlers_remote_admin
 
-        handlers_remote_admin._cache_remote_session("peer-b", "Basic dGVzdA==", "0.1.40")
+        handlers_remote_admin._cache_remote_session("peer-b", "drone_session=abc123", "0.1.40")
         handlers_remote_admin._REMOTE_SESSIONS["peer-b"]["cached_at"] -= handlers_remote_admin.REMOTE_SESSION_TTL_SECONDS + 1
         handler = _handler(self.settings)
         handler._handle_admin_remote_proxy("peer-b", "admin/system-info", "GET", "")

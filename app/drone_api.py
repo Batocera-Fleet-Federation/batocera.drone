@@ -254,8 +254,9 @@ try:
         DRONE_UNAUTH_RATE_LIMIT_ENABLED,
         DRONE_UNAUTH_RATE_LIMIT_REQUESTS,
         DRONE_UNAUTH_RATE_LIMIT_WINDOW_SECONDS,
-        BasicAuth,
         DroneCredentialStore,
+        SessionAuth,
+        SessionStore,
         is_ip_blocked,
         record_unauthorized_response,
         _AUTH_401_BUCKETS,
@@ -279,8 +280,9 @@ except ImportError:
         DRONE_UNAUTH_RATE_LIMIT_ENABLED,
         DRONE_UNAUTH_RATE_LIMIT_REQUESTS,
         DRONE_UNAUTH_RATE_LIMIT_WINDOW_SECONDS,
-        BasicAuth,
         DroneCredentialStore,
+        SessionAuth,
+        SessionStore,
         is_ip_blocked,
         record_unauthorized_response,
         _AUTH_401_BUCKETS,
@@ -946,9 +948,9 @@ ROM_METADATA_WATCH_MAX_DELAY_SECONDS = max(
 # now live in logging_setup.py (re-exported near the top of this module).
 
 
-# DroneCredentialStore, BasicAuth, the 401 brute-force blocker and the
-# unauthenticated-request rate limiter now live in auth.py (re-exported near
-# the top of this module).
+# DroneCredentialStore, SessionAuth/SessionStore, the 401 brute-force blocker
+# and the unauthenticated-request rate limiter now live in auth.py (re-exported
+# near the top of this module).
 
 
 # ExpiringLRUCache / ExpiringKeyCache / json_bytes / html_bytes / valid_segment
@@ -1189,7 +1191,15 @@ except ImportError:
     from web.handlers_remote_admin import HandlersRemoteAdminMixin  # type: ignore
 
 
-class RomRequestHandler(HandlersSystemMixin, HandlersDownloadsMixin, HandlersTorrentsMixin, HandlersDiagnosticsMixin, HandlersConfigMixin, HandlersNetworkMixin, HandlersArtworkMixin, HandlersContentMixin, ThemeMetaMixin, HandlersEsCollectionsMixin, HandlersPeerMixin, HandlersRemoteAdminMixin, ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
+try:
+    from .web.handlers_auth import HandlersAuthMixin
+except ImportError:
+    if __package__ not in (None, ""):
+        raise
+    from web.handlers_auth import HandlersAuthMixin  # type: ignore
+
+
+class RomRequestHandler(HandlersAuthMixin, HandlersSystemMixin, HandlersDownloadsMixin, HandlersTorrentsMixin, HandlersDiagnosticsMixin, HandlersConfigMixin, HandlersNetworkMixin, HandlersArtworkMixin, HandlersContentMixin, ThemeMetaMixin, HandlersEsCollectionsMixin, HandlersPeerMixin, HandlersRemoteAdminMixin, ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
     server_version = "DroneApp/4.0"
     openapi_spec = OPENAPI_SPEC
     # Per-connection idle timeout (applied to the socket in BaseHTTPRequestHandler.setup).
@@ -1204,7 +1214,7 @@ class RomRequestHandler(HandlersSystemMixin, HandlersDownloadsMixin, HandlersTor
         self,
         *args,
         settings: Settings,
-        auth: BasicAuth,
+        auth: SessionAuth,
         repository: RomRepository,
         image_cache: ExpiringLRUCache,
         image_miss_cache: ExpiringKeyCache,
@@ -1266,15 +1276,21 @@ class RomRequestHandler(HandlersSystemMixin, HandlersDownloadsMixin, HandlersTor
         return "application/octet-stream"
 
     def _send_unauthorized(self) -> None:
-        has_auth_header = bool(self.headers.get("Authorization"))
-        if DRONE_LOG_UNAUTHORIZED_REQUESTS or has_auth_header:
+        has_cookie = bool(self.headers.get("Cookie"))
+        if DRONE_LOG_UNAUTHORIZED_REQUESTS or has_cookie:
             self.log_error(
-                '401 unauthorized "%s" auth_header_present=%s',
+                '401 unauthorized "%s" cookie_present=%s',
                 self.path.split("?", 1)[0],
-                "yes" if has_auth_header else "no",
+                "yes" if has_cookie else "no",
             )
         self.send_response(401)
-        self.send_header("WWW-Authenticate", 'Basic realm="Drone App"')
+        # Deliberately NOT "WWW-Authenticate: Basic" -- that header is what makes
+        # a browser pop its own native credential dialog, exactly the invasive
+        # UX this session-cookie login replaces. X-Drone-Auth-Required is a
+        # same-origin-only marker so the SPA's own fetch() handling can tell
+        # "this gateway's session is gone" apart from a remote-admin proxy 401
+        # (which never sets it) -- see drone.js's _handleApiUnauthorized.
+        self.send_header("X-Drone-Auth-Required", "1")
         self.send_header("Content-Type", "application/json")
         self._send_security_headers()
         self.end_headers()
@@ -1313,7 +1329,7 @@ class RomRequestHandler(HandlersSystemMixin, HandlersDownloadsMixin, HandlersTor
         self.wfile.write(json_bytes({"error": "rate_limited"}))
 
     def _rate_limit_unauthenticated_external_request(self) -> bool:
-        if self.auth.check(self.headers.get("Authorization")):
+        if self.auth.authenticate_request(self.headers) is not None:
             return False
         try:
             cert = self.connection.getpeercert() if hasattr(self.connection, "getpeercert") else None
@@ -1376,7 +1392,7 @@ class RomRequestHandler(HandlersSystemMixin, HandlersDownloadsMixin, HandlersTor
             return self._build_fake_image_url(seed=f"theme-{relative_path}", width=800, height=450)
         return api_url(f"/theme/assets/{quote(relative_path, safe='/')}")
 
-    def _send_json(self, status_code: int, payload: dict, cache_key: Optional[str] = None) -> None:
+    def _send_json(self, status_code: int, payload: dict, cache_key: Optional[str] = None, extra_headers: Optional[Dict[str, str]] = None) -> None:
         if status_code == 200 and cache_key:
             cached = self.json_cache.get(cache_key)
             if cached is None:
@@ -1393,6 +1409,8 @@ class RomRequestHandler(HandlersSystemMixin, HandlersDownloadsMixin, HandlersTor
         self._send_security_headers()
         if status_code == 200 and cache_key:
             self.send_header("Cache-Control", "private, max-age=3600")
+        for header_name, header_value in (extra_headers or {}).items():
+            self.send_header(header_name, header_value)
         self.end_headers()
         self.wfile.write(body)
 
@@ -1542,7 +1560,7 @@ class RomRequestHandler(HandlersSystemMixin, HandlersDownloadsMixin, HandlersTor
 
 def _build_handler(
     settings: Settings,
-    auth: BasicAuth,
+    auth: SessionAuth,
     repository: RomRepository,
     image_cache: ExpiringLRUCache,
     image_miss_cache: ExpiringKeyCache,
@@ -1824,7 +1842,8 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
         settings.password,
         state_database_file=_state_database_path(settings.userdata_root),
     )
-    auth = BasicAuth(settings.username, settings.password, credential_store=credential_store)
+    session_store = SessionStore(_state_database_path(settings.userdata_root))
+    auth = SessionAuth(credential_store=credential_store, session_store=session_store)
     cert_state = DroneCertificateManager(settings).ensure_certificate()
     if cert_state.get("error"):
         message = f"Drone certificate setup: {cert_state.get('error')}"

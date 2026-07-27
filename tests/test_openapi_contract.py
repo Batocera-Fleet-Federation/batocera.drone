@@ -88,6 +88,9 @@ class DroneOpenApiContractTest(unittest.TestCase):
     def test_expected_dispatched_routes_are_documented(self):
         expected_paths = {
             "/health",
+            "/auth/session",
+            "/auth/login",
+            "/auth/logout",
             "/systems",
             "/systems/{system}",
             "/systems/{system}/roms/{unique_id}",

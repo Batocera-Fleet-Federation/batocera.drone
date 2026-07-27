@@ -122,17 +122,28 @@ class ApiRoutesMixin:
                 self._handle_peer_artwork_download(parts[2], parts[3], "/".join(parts[4:]))
                 return
 
-            if not self.auth.check(self.headers.get("Authorization")):
+            # Public: the SPA shell and its own "am I logged in" probe must be
+            # reachable with no session cookie yet, or a browser could never
+            # load the login form in the first place. Everything else below
+            # still requires a valid session.
+            if api_path == "/":
+                self._handle_root_html()
+                return
+
+            if api_path == "/auth/session":
+                self._handle_auth_session()
+                return
+
+            self.session_token = None
+            session = self.auth.authenticate_request(self.headers)
+            if session is None:
                 self._send_unauthorized()
                 return
+            self.session_token = session["token"]
 
             _bridge = _api_bridge_active()
             if _bridge is not None and _bridge.owns(api_path):
                 _bridge.proxy(self, "GET")
-                return
-
-            if api_path == "/":
-                self._handle_root_html()
                 return
 
             if api_path == "/swagger":
@@ -495,9 +506,23 @@ class ApiRoutesMixin:
                 self._handle_peer_pair(payload)
                 return
 
-            if not self.auth.check(self.headers.get("Authorization")):
+            # Public: must be reachable with no (or an already-invalid) session
+            # cookie -- that's the whole point of a login endpoint.
+            if api_path == "/auth/login":
+                payload = self._read_json_body()
+                self._handle_auth_login(payload)
+                return
+
+            if api_path == "/auth/logout":
+                self._handle_auth_logout()
+                return
+
+            self.session_token = None
+            session = self.auth.authenticate_request(self.headers)
+            if session is None:
                 self._send_unauthorized()
                 return
+            self.session_token = session["token"]
 
             _bridge = _api_bridge_active()
             if _bridge is not None and _bridge.owns(api_path):

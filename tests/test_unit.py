@@ -1,4 +1,3 @@
-import base64
 import hashlib
 import importlib
 import io
@@ -32,11 +31,12 @@ from app.device.emulator_configs import (
     read_emulator_config_file,
 )
 from app.drone_api import (
-    BasicAuth,
     DownloadCancelled,
     DownloadManager,
     DroneCredentialStore,
     DroneThreadingHTTPServer,
+    SessionAuth,
+    SessionStore,
     LaunchBoxClient,
     RomRepository,
     Settings,
@@ -80,26 +80,38 @@ from app.drone_api import (
 from urllib.error import HTTPError, URLError
 
 
-class BasicAuthTests(unittest.TestCase):
-    def test_check_valid_header(self) -> None:
-        auth = BasicAuth("admin", "changeme")
-        token = base64.b64encode(b"admin:changeme").decode("ascii")
-        self.assertTrue(auth.check(f"Basic {token}"))
+class SessionAuthTests(unittest.TestCase):
+    def _auth(self, tmp: str) -> SessionAuth:
+        credentials_path = Path(tmp) / "credentials.json"
+        store = DroneCredentialStore(credentials_path)
+        db_path = database_path_for_legacy_file(credentials_path)
+        return SessionAuth(credential_store=store, session_store=SessionStore(db_path))
 
-    def test_check_invalid_header(self) -> None:
-        auth = BasicAuth("admin", "changeme")
-        token = base64.b64encode(b"admin:wrong").decode("ascii")
-        self.assertFalse(auth.check(f"Basic {token}"))
-        self.assertFalse(auth.check(None))
+    def test_login_success_then_cookie_header_authenticates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            auth = self._auth(tmp)
+            token = auth.login("batocera", "linux")
+            self.assertIsNotNone(token)
+            session = auth.authenticate_request({"Cookie": f"drone_session={token}"})
+            self.assertIsNotNone(session)
+            self.assertEqual(session["username"], "batocera")
+
+    def test_login_rejects_wrong_password(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(self._auth(tmp).login("batocera", "wrong"))
+
+    def test_authenticate_request_rejects_missing_or_bogus_cookie(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            auth = self._auth(tmp)
+            self.assertIsNone(auth.authenticate_request({}))
+            self.assertIsNone(auth.authenticate_request({"Cookie": "drone_session=not-a-real-token"}))
 
     def test_default_drone_credentials_and_hashed_update(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            store = DroneCredentialStore(Path(tmp) / "credentials.json")
-            auth = BasicAuth(None, None, credential_store=store)
-            default_token = base64.b64encode(b"batocera:linux").decode("ascii")
-            self.assertTrue(auth.check(f"Basic {default_token}"))
+            auth = self._auth(tmp)
+            self.assertIsNotNone(auth.login("batocera", "linux"))
 
-            result = store.update("arcade-admin", "BetterPass123")
+            result = auth.credential_store.update("arcade-admin", "BetterPass123")
             self.assertTrue(result["stored"])
             saved = load_payload(
                 database_path_for_legacy_file(Path(tmp) / "credentials.json"),
@@ -109,9 +121,8 @@ class BasicAuthTests(unittest.TestCase):
             self.assertIn("password_hash", saved)
             self.assertNotIn("BetterPass123", json.dumps(saved))
             self.assertFalse((Path(tmp) / "credentials.json").exists())
-            self.assertFalse(auth.check(f"Basic {default_token}"))
-            updated_token = base64.b64encode(b"arcade-admin:BetterPass123").decode("ascii")
-            self.assertTrue(auth.check(f"Basic {updated_token}"))
+            self.assertIsNone(auth.login("batocera", "linux"))
+            self.assertIsNotNone(auth.login("arcade-admin", "BetterPass123"))
 
     def test_external_unauthenticated_rate_limit_exempts_private_ips(self) -> None:
         drone_api._UNAUTH_RATE_LIMIT_BUCKETS.clear()
@@ -5811,7 +5822,7 @@ class RemoteAdminUiTests(unittest.TestCase):
     def test_unauthorized_handler_distinguishes_gateway_from_proxy_401s(self) -> None:
         fn_start = self.js.index("async function _handleApiUnauthorized(")
         fn_body = self.js[fn_start:self.js.index("\nasync function api(", fn_start)]
-        self.assertIn('res.headers.get("WWW-Authenticate")', fn_body)
+        self.assertIn('res.headers.get("X-Drone-Auth-Required")', fn_body)
         self.assertIn("window.location.reload()", fn_body)
         # On a lost/rejected proxy session it reconnects then retries the
         # *same* call, rather than separately re-rendering and still
@@ -5828,9 +5839,12 @@ class RemoteAdminUiTests(unittest.TestCase):
         post_body = self.js[post_start:self.js.index("\nasync function ", post_start + 1)]
         self.assertIn("_handleApiUnauthorized(res, () => apiPost(url, payload))", post_body)
 
-    def test_bootstrap_checks_local_admin_before_impersonating(self) -> None:
-        fn_start = self.js.index("async function bootstrap()")
-        fn_body = self.js[fn_start:self.js.index("\nbootstrap();", fn_start)]
+    def test_start_app_checks_local_admin_before_impersonating(self) -> None:
+        # Session-login split bootstrap() into a thin session-check gate (see
+        # test_bootstrap_shows_login_when_session_check_fails) plus this
+        # function, which runs only once a valid session is confirmed.
+        fn_start = self.js.index("async function startApp()")
+        fn_body = self.js[fn_start:self.js.index("\nasync function submitLogin(", fn_start)]
         probe_index = fn_body.index('api("/admin/configs/sources")')
         ready_index = fn_body.index("await ensureRemoteManagementReady();")
         info_bar_index = fn_body.index("loadSystemInfoBar();")
@@ -5839,6 +5853,19 @@ class RemoteAdminUiTests(unittest.TestCase):
         # managedPeer can be set, and the status bar/router must run after,
         # so they proxy once a peer is being impersonated.
         self.assertTrue(probe_index < ready_index < info_bar_index < router_index)
+
+    def test_bootstrap_shows_login_when_session_check_fails(self) -> None:
+        fn_start = self.js.index("async function bootstrap()")
+        fn_body = self.js[fn_start:self.js.index("\ndocument.getElementById(\"logoutBtn\")", fn_start)]
+        self.assertIn('api("/auth/session")', fn_body)
+        self.assertIn("renderLoginPage()", fn_body)
+        self.assertIn("await startApp()", fn_body)
+        # The login page must render (and bootstrap must bail out) before
+        # startApp() ever runs -- an unauthenticated visitor must never reach
+        # the admin-probe/router logic startApp() drives.
+        login_index = fn_body.index("renderLoginPage()")
+        start_app_index = fn_body.index("await startApp()")
+        self.assertTrue(login_index < start_app_index)
 
     def test_ensure_remote_management_ready_checks_status_before_prompting(self) -> None:
         fn_start = self.js.index("async function ensureRemoteManagementReady()")

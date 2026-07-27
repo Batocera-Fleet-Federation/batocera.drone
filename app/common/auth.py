@@ -3,18 +3,30 @@
 Extracted from ``drone_api.py``. Holds:
 
 * ``DroneCredentialStore`` — PBKDF2-hashed local credentials persisted in the
-  shared state DB (with an env/default fallback), and ``BasicAuth`` which checks
-  an ``Authorization: Basic`` header against it.
+  shared state DB (with an env/default fallback).
+* ``SessionStore`` + ``SessionAuth`` — cookie-based login, replacing the old
+  ``BasicAuth``/``Authorization: Basic`` scheme. A browser's native Basic-auth
+  prompt is invasive for humans and awkward for automation (every call needs
+  the credential re-attached); a real login form plus a session cookie the
+  browser carries automatically is friendlier for both. Sessions are rows in
+  the shared state DB (``storage/state_store.py``'s ``sessions`` table, TTL
+  ``DRONE_SESSION_TTL_SECONDS`` default 30 days, sliding: ``SessionStore.validate``
+  extends ``expires_at`` on use, throttled to at most once per
+  ``DRONE_SESSION_TOUCH_THROTTLE_SECONDS`` so an active session doesn't write
+  the DB on every request). CSRF mitigation is the cookie's ``SameSite=Lax``
+  attribute plus every mutating endpoint requiring a JSON body a cross-site
+  HTML form cannot produce -- proportionate for a LAN-local admin tool, not a
+  reason to add a separate CSRF-token scheme.
 * the brute-force 401 blocker (``record_unauthorized_response`` / ``is_ip_blocked``)
   and the unauthenticated-request rate limiter (``_unauthenticated_request_allowed``),
-  with their tuneable env constants and in-memory per-IP state.
+  with their tuneable env constants and in-memory per-IP state. Failed logins
+  feed the same blocker as failed session checks.
 
 Loopback/self traffic is always exempt so on-device tooling can't lock itself out.
 ``drone_api`` re-exports these names, and the request handler reads the constants
 through that re-export, so existing call sites and tests keep working.
 """
 
-import base64
 import hashlib
 import hmac
 import ipaddress
@@ -24,19 +36,37 @@ import secrets
 import sys
 import time
 from collections import defaultdict, deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from http.cookies import SimpleCookie
 from pathlib import Path
 from threading import Lock
 from typing import Optional
 
 try:
     from ..storage.state_store import database_path_for_legacy_file as _state_database_path_for_legacy_file
+    from ..storage.state_store import create_session as _create_session
+    from ..storage.state_store import delete_all_sessions as _delete_all_sessions
+    from ..storage.state_store import delete_expired_sessions as _delete_expired_sessions
+    from ..storage.state_store import delete_session as _delete_session
+    from ..storage.state_store import get_session as _get_session
     from ..storage.state_store import load_payload as _load_state_payload
     from ..storage.state_store import save_payload as _save_state_payload
+    from ..storage.state_store import touch_session as _touch_session
 except ImportError:  # pragma: no cover - direct script execution fallback
     from storage.state_store import database_path_for_legacy_file as _state_database_path_for_legacy_file  # type: ignore
+    from storage.state_store import create_session as _create_session  # type: ignore
+    from storage.state_store import delete_all_sessions as _delete_all_sessions  # type: ignore
+    from storage.state_store import delete_expired_sessions as _delete_expired_sessions  # type: ignore
+    from storage.state_store import delete_session as _delete_session  # type: ignore
+    from storage.state_store import get_session as _get_session  # type: ignore
     from storage.state_store import load_payload as _load_state_payload  # type: ignore
     from storage.state_store import save_payload as _save_state_payload  # type: ignore
+    from storage.state_store import touch_session as _touch_session  # type: ignore
+
+
+SESSION_COOKIE_NAME = os.environ.get("DRONE_SESSION_COOKIE_NAME", "drone_session")
+DRONE_SESSION_TTL_SECONDS = max(60.0, float(os.environ.get("DRONE_SESSION_TTL_SECONDS", str(60 * 60 * 24 * 30))))
+DRONE_SESSION_TOUCH_THROTTLE_SECONDS = max(0.0, float(os.environ.get("DRONE_SESSION_TOUCH_THROTTLE_SECONDS", str(6 * 60 * 60))))
 
 
 DRONE_LOG_UNAUTHORIZED_REQUESTS = os.environ.get("DRONE_LOG_UNAUTHORIZED_REQUESTS", "0").strip().lower() in {"1", "true", "yes", "on"}
@@ -128,27 +158,118 @@ class DroneCredentialStore:
             return {"username": username, "updated_at": data["updated_at"], "stored": True}
 
 
-class BasicAuth:
-    def __init__(self, username: Optional[str], password: Optional[str], credential_store: Optional[DroneCredentialStore] = None):
-        self.username = username
-        self.password = password
-        self.credential_store = credential_store
+def _iso_now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
-    def check(self, header_value: Optional[str]) -> bool:
-        if not header_value or not header_value.startswith("Basic "):
-            return False
 
-        try:
-            encoded = header_value.split(" ", 1)[1].strip()
-            decoded = base64.b64decode(encoded).decode("utf-8")
-            user, pw = decoded.split(":", 1)
-            if self.credential_store:
-                return self.credential_store.check(user, pw)
-            if not self.username or not self.password:
-                return True
-            return user == self.username and pw == self.password
+def build_session_cookie(token: str, *, secure: bool, max_age: Optional[int] = None) -> str:
+    """A ``Set-Cookie`` header value for a fresh (or refreshed) session.
+
+    ``HttpOnly`` keeps it out of reach of any injected/XSS'd JS; ``SameSite=Lax``
+    is the CSRF mitigation described in this module's docstring; ``Secure`` is
+    added whenever the connection is TLS (the caller decides based on
+    ``settings.http_only``) so the cookie is never sent in the clear.
+    """
+    parts = [f"{SESSION_COOKIE_NAME}={token}", "Path=/", "HttpOnly", "SameSite=Lax"]
+    if secure:
+        parts.append("Secure")
+    if max_age is not None:
+        parts.append(f"Max-Age={int(max_age)}")
+    return "; ".join(parts)
+
+
+def clear_session_cookie(*, secure: bool) -> str:
+    return build_session_cookie("", secure=secure, max_age=0)
+
+
+class SessionStore:
+    """Cookie-session persistence + sliding-expiry validation.
+
+    Sessions are rows in the shared state DB (see ``storage/state_store.py``),
+    so they survive a Drone restart -- important here since self-updates and
+    the service-bootstrap restart path already happen fairly often; forcing a
+    fresh login every time would be exactly the "invasive" friction this
+    feature replaces.
+    """
+
+    def __init__(self, state_database_file: Path, *, ttl_seconds: float = DRONE_SESSION_TTL_SECONDS):
+        self.state_database_file = state_database_file
+        self.ttl_seconds = ttl_seconds
+
+    def _expiry_from_now(self) -> str:
+        return (datetime.now(timezone.utc) + timedelta(seconds=self.ttl_seconds)).replace(microsecond=0).isoformat()
+
+    def create(self, username: str) -> str:
+        token = secrets.token_urlsafe(32)
+        _create_session(self.state_database_file, token, username, self._expiry_from_now())
+        try:  # opportunistic sweep so abandoned (never-logged-out) sessions don't accumulate forever
+            _delete_expired_sessions(self.state_database_file, _iso_now())
         except Exception:
-            return False
+            pass
+        return token
+
+    def validate(self, token: Optional[str]) -> Optional[str]:
+        """Return the session's username if ``token`` is live and unexpired, else None."""
+        token = str(token or "").strip()
+        if not token:
+            return None
+        session = _get_session(self.state_database_file, token)
+        if session is None:
+            return None
+        if str(session["expires_at"]) <= _iso_now():
+            _delete_session(self.state_database_file, token)
+            return None
+        try:
+            last_seen = datetime.fromisoformat(str(session["last_seen_at"]))
+            if (datetime.now(timezone.utc) - last_seen).total_seconds() >= DRONE_SESSION_TOUCH_THROTTLE_SECONDS:
+                _touch_session(self.state_database_file, token, self._expiry_from_now())
+        except Exception:
+            pass
+        return str(session["username"])
+
+    def revoke(self, token: Optional[str]) -> None:
+        if token:
+            _delete_session(self.state_database_file, token)
+
+    def revoke_all(self, *, except_token: Optional[str] = None) -> int:
+        return _delete_all_sessions(self.state_database_file, except_token=except_token)
+
+
+class SessionAuth:
+    """Cookie-session gate for the admin/browser HTTP surface (replaces BasicAuth)."""
+
+    def __init__(self, credential_store: DroneCredentialStore, session_store: SessionStore):
+        self.credential_store = credential_store
+        self.session_store = session_store
+
+    def token_from_headers(self, headers) -> Optional[str]:
+        raw_cookie = headers.get("Cookie") if headers is not None else None
+        if not raw_cookie:
+            return None
+        jar: SimpleCookie = SimpleCookie()
+        try:
+            jar.load(raw_cookie)
+        except Exception:
+            return None
+        morsel = jar.get(SESSION_COOKIE_NAME)
+        return morsel.value if morsel else None
+
+    def authenticate_request(self, headers) -> Optional[dict]:
+        """Return ``{"token", "username"}`` if ``headers`` carries a live session cookie."""
+        token = self.token_from_headers(headers)
+        if token is None:
+            return None
+        username = self.session_store.validate(token)
+        if username is None:
+            return None
+        return {"token": token, "username": username}
+
+    def login(self, username: str, password: str) -> Optional[str]:
+        """Verify credentials against the credential store; on success, start and
+        return a new session token."""
+        if not self.credential_store.check(username, password):
+            return None
+        return self.session_store.create(username)
 
 
 _UNAUTH_RATE_LIMIT_BUCKETS: "defaultdict[str, deque]" = defaultdict(deque)

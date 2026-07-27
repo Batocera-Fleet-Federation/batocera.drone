@@ -10,11 +10,12 @@ every action exactly as if the browser had connected to it directly. No new
 role/permission model: whatever that login can do locally is exactly what it
 can do remotely, nothing more.
 
-Credentials for a peer are cached **only in this process's memory**, never on
-disk and never returned to the browser -- entering them once (verified against
-the peer's own ``/admin/system-info``) is enough for the rest of that session.
-A service restart drops the cache, which is a deliberate, safer default: it
-just means re-entering that peer's credentials next time.
+The peer's credentials are used exactly once, to call the peer's own
+``POST /auth/login`` (the same session-cookie login the peer's own browser UI
+uses -- see ``handlers_auth.py``); only the resulting session-cookie value is
+cached, **only in this process's memory**, never on disk and never returned to
+the browser. A service restart drops the cache, which is a deliberate, safer
+default: it just means reconnecting to that peer next time.
 
 Only lightweight admin JSON/text crosses this proxy. ROM/BIOS/save/artwork
 *bytes* keep moving through the existing P2P transport (``app/transport/``)
@@ -24,11 +25,11 @@ feature never sits in that data path.
 
 from __future__ import annotations
 
-import base64
 import json
 import os
 import sys
 import time
+from http.cookies import SimpleCookie
 from threading import Lock
 from typing import Optional
 from urllib.parse import quote, unquote
@@ -44,7 +45,8 @@ except ImportError:  # pragma: no cover - direct script execution fallback
 
 # How long a verified peer session stays cached before requiring re-entry of
 # that peer's credentials. Deliberately not persisted anywhere -- see module
-# docstring.
+# docstring. This is *this Drone's own* cache lifetime, independent of (and
+# generally shorter than) the peer's own session cookie TTL.
 REMOTE_SESSION_TTL_SECONDS = max(60.0, float(os.environ.get("DRONE_REMOTE_SESSION_TTL_SECONDS", "1800")))
 
 # Local copy of the peer-request timeout (peer_connectivity keeps its own default);
@@ -56,15 +58,29 @@ _REMOTE_SESSIONS: "dict[str, dict]" = {}
 _REMOTE_SESSIONS_LOCK = Lock()
 
 
-def _basic_auth_header(username: str, password: str) -> str:
-    token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
-    return f"Basic {token}"
+def _cookie_pair_from_set_cookie(set_cookie_header: Optional[str]) -> Optional[str]:
+    """Extract just the ``name=value`` pair from a peer's raw Set-Cookie header.
+
+    A ``Cookie:`` request header carries only name=value pairs, never the
+    Path/HttpOnly/SameSite attributes a Set-Cookie response includes --
+    ``SimpleCookie`` already knows how to tell those apart while parsing.
+    """
+    if not set_cookie_header:
+        return None
+    jar: SimpleCookie = SimpleCookie()
+    try:
+        jar.load(set_cookie_header)
+    except Exception:
+        return None
+    for morsel in jar.values():
+        return f"{morsel.key}={morsel.value}"
+    return None
 
 
-def _cache_remote_session(peer_id: str, authorization: str, drone_app_version_value: str) -> None:
+def _cache_remote_session(peer_id: str, cookie: str, drone_app_version_value: str) -> None:
     with _REMOTE_SESSIONS_LOCK:
         _REMOTE_SESSIONS[peer_id] = {
-            "authorization": authorization,
+            "cookie": cookie,
             "drone_app_version": drone_app_version_value,
             "cached_at": time.monotonic(),
         }
@@ -118,36 +134,68 @@ class HandlersRemoteAdminMixin:
         if not peer:
             self._send_json(404, {"error": "not a paired Drone"})
             return
-        authorization = _basic_auth_header(username, password)
+        peer_name = str(peer.get("name") or peer_id)
+        login_body = json.dumps({"username": username, "password": password}).encode("utf-8")
         try:
-            response = _peer_proxy_request(
+            login_response = _peer_proxy_request(
                 peer,
-                "GET",
-                "/v1/api/admin/system-info",
+                "POST",
+                "/v1/api/auth/login",
                 self.settings,
-                authorization=authorization,
+                body=login_body,
+                content_type="application/json",
                 peer_id=peer_id,
                 config={"network_mode": "local_network"},
                 timeout=REMOTE_PROXY_TIMEOUT_SECONDS,
             )
         except Exception as error:
-            self._send_json(502, {"error": f"{peer.get('name') or peer_id} is offline or unreachable: {error}"})
+            self._send_json(502, {"error": f"{peer_name} is offline or unreachable: {error}"})
             return
-        if response.status == 401:
-            self._send_json(401, {"error": f"invalid credentials for {peer.get('name') or peer_id}"})
+        if login_response.status == 401:
+            self._send_json(401, {"error": f"invalid credentials for {peer_name}"})
             return
-        if response.status == 403:
-            self._send_json(409, {"error": f"admin is disabled on {peer.get('name') or peer_id}"})
+        if login_response.status == 404:
+            # The fleet is peer-independently-versioned: a paired Drone may not
+            # have been updated to the session-login endpoint yet.
+            self._send_json(502, {"error": f"{peer_name} does not support login -- it may be running an older Drone version"})
             return
-        if response.status != 200:
-            self._send_json(502, {"error": f"could not connect to {peer.get('name') or peer_id} (status {response.status})"})
+        if login_response.status != 200:
+            self._send_json(502, {"error": f"could not connect to {peer_name} (status {login_response.status})"})
+            return
+        cookie = _cookie_pair_from_set_cookie(login_response.set_cookie)
+        if not cookie:
+            self._send_json(502, {"error": f"{peer_name} accepted the login but did not start a session"})
+            return
+        # A second, now-authenticated call: doubles as end-to-end verification
+        # that the session actually works before caching it, and is how the
+        # admin-enabled state and app version are learned (login itself
+        # deliberately knows nothing about either).
+        try:
+            info_response = _peer_proxy_request(
+                peer,
+                "GET",
+                "/v1/api/admin/system-info",
+                self.settings,
+                cookie=cookie,
+                peer_id=peer_id,
+                config={"network_mode": "local_network"},
+                timeout=REMOTE_PROXY_TIMEOUT_SECONDS,
+            )
+        except Exception as error:
+            self._send_json(502, {"error": f"{peer_name} is offline or unreachable: {error}"})
+            return
+        if info_response.status == 403:
+            self._send_json(409, {"error": f"admin is disabled on {peer_name}"})
+            return
+        if info_response.status != 200:
+            self._send_json(502, {"error": f"could not connect to {peer_name} (status {info_response.status})"})
             return
         remote_version = ""
         try:
-            remote_version = str((json.loads(response.body or b"{}").get("fields") or {}).get("drone_app_version") or "")
+            remote_version = str((json.loads(info_response.body or b"{}").get("fields") or {}).get("drone_app_version") or "")
         except Exception:
             remote_version = ""
-        _cache_remote_session(peer_id, authorization, remote_version)
+        _cache_remote_session(peer_id, cookie, remote_version)
         print(
             f"Remote-admin session started for peer {peer_id} ({peer.get('name') or 'unnamed'})",
             file=sys.stdout,
@@ -158,7 +206,7 @@ class HandlersRemoteAdminMixin:
             {
                 "status": "connected",
                 "peer_id": peer_id,
-                "name": str(peer.get("name") or peer_id),
+                "name": peer_name,
                 "drone_app_version": remote_version,
             },
         )
@@ -186,7 +234,7 @@ class HandlersRemoteAdminMixin:
         # every page calls api()/apiPost() with an "/admin/..." path already),
         # so it must not be re-prefixed with "admin/" below on top of that.
         # Enforced here too, not just by convention: this proxy only ever
-        # forwards to the peer's Basic-Auth-gated /admin/* surface, never its
+        # forwards to the peer's session-gated /admin/* surface, never its
         # separate mTLS-only /peer/* surface (a different trust model this
         # cached session was never meant to reach).
         if sub_path != "admin" and not sub_path.startswith("admin/"):
@@ -219,7 +267,7 @@ class HandlersRemoteAdminMixin:
                 target_path,
                 self.settings,
                 body=body,
-                authorization=session["authorization"],
+                cookie=session["cookie"],
                 content_type=content_type,
                 peer_id=peer_id,
                 config={"network_mode": "local_network"},

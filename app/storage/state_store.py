@@ -65,6 +65,14 @@ def open_database(path: Path) -> sqlite3.Connection:
         "CREATE INDEX IF NOT EXISTS idx_gameplay_history_system_played_at "
         "ON gameplay_history(system_name COLLATE NOCASE, played_at DESC, session_key)"
     )
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS sessions ("
+        "token TEXT PRIMARY KEY, username TEXT NOT NULL, created_at TEXT NOT NULL, "
+        "last_seen_at TEXT NOT NULL, expires_at TEXT NOT NULL)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at)"
+    )
     connection.commit()
     return connection
 
@@ -173,6 +181,63 @@ def delete_peer_route(db_path: Path, peer_id: str) -> None:
         return
     with open_database(db_path) as connection:
         connection.execute("DELETE FROM peer_route_cache WHERE peer_id = ?", (normalized,))
+
+
+def create_session(db_path: Path, token: str, username: str, expires_at: str) -> dict:
+    created_at = _now()
+    with open_database(db_path) as connection:
+        connection.execute(
+            "INSERT INTO sessions (token, username, created_at, last_seen_at, expires_at) VALUES (?, ?, ?, ?, ?)",
+            (token, username, created_at, created_at, expires_at),
+        )
+    return {"token": token, "username": username, "created_at": created_at, "last_seen_at": created_at, "expires_at": expires_at}
+
+
+def get_session(db_path: Path, token: str) -> Optional[dict]:
+    normalized = str(token or "").strip()
+    if not normalized:
+        return None
+    with open_database(db_path) as connection:
+        row = connection.execute(
+            "SELECT token, username, created_at, last_seen_at, expires_at FROM sessions WHERE token = ?",
+            (normalized,),
+        ).fetchone()
+    if not row:
+        return None
+    return {"token": row[0], "username": row[1], "created_at": row[2], "last_seen_at": row[3], "expires_at": row[4]}
+
+
+def touch_session(db_path: Path, token: str, expires_at: str) -> None:
+    """Slide a session's expiry forward; a no-op if the token no longer exists."""
+    with open_database(db_path) as connection:
+        connection.execute(
+            "UPDATE sessions SET last_seen_at = ?, expires_at = ? WHERE token = ?",
+            (_now(), expires_at, token),
+        )
+
+
+def delete_session(db_path: Path, token: str) -> None:
+    normalized = str(token or "").strip()
+    if not normalized:
+        return
+    with open_database(db_path) as connection:
+        connection.execute("DELETE FROM sessions WHERE token = ?", (normalized,))
+
+
+def delete_all_sessions(db_path: Path, *, except_token: Optional[str] = None) -> int:
+    """Revoke every session (e.g. after a credentials change), optionally keeping one."""
+    with open_database(db_path) as connection:
+        if except_token:
+            cursor = connection.execute("DELETE FROM sessions WHERE token != ?", (except_token,))
+        else:
+            cursor = connection.execute("DELETE FROM sessions")
+        return cursor.rowcount if cursor.rowcount is not None and cursor.rowcount > 0 else 0
+
+
+def delete_expired_sessions(db_path: Path, now_iso: str) -> int:
+    with open_database(db_path) as connection:
+        cursor = connection.execute("DELETE FROM sessions WHERE expires_at <= ?", (now_iso,))
+        return cursor.rowcount if cursor.rowcount is not None and cursor.rowcount > 0 else 0
 
 
 def append_event(db_path: Path, namespace: str, payload: Any, *, max_events: Optional[int] = None) -> None:

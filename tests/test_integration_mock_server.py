@@ -1,4 +1,3 @@
-import base64
 import json
 import os
 import tempfile
@@ -7,17 +6,13 @@ import unittest
 import urllib.error
 import urllib.parse
 import urllib.request
+from http.cookies import SimpleCookie
 from pathlib import Path
 from unittest import mock
 
 from app.transfer import local_network
 from app.mock_data import seed_mock_userdata
 from app.drone_api import Settings, create_server
-
-
-def _auth_header(username: str, password: str) -> str:
-    token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
-    return f"Basic {token}"
 
 
 class MockServerIntegrationTests(unittest.TestCase):
@@ -60,6 +55,18 @@ class MockServerIntegrationTests(unittest.TestCase):
         self.port = int(self.server.server_address[1])
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
+        self._cookie = self._login("admin", "changeme")
+
+    def _login(self, username: str, password: str) -> str:
+        url = f"http://127.0.0.1:{self.port}/v1/api/auth/login"
+        body = json.dumps({"username": username, "password": password}).encode("utf-8")
+        req = urllib.request.Request(url, data=body, method="POST", headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            set_cookie = resp.headers.get("Set-Cookie")
+        jar: SimpleCookie = SimpleCookie()
+        jar.load(set_cookie)
+        morsel = next(iter(jar.values()))
+        return f"{morsel.key}={morsel.value}"
 
     def tearDown(self) -> None:
         self.server.shutdown()
@@ -72,7 +79,7 @@ class MockServerIntegrationTests(unittest.TestCase):
     def _get_json(self, path: str) -> dict:
         url = f"http://127.0.0.1:{self.port}{path}"
         req = urllib.request.Request(url)
-        req.add_header("Authorization", _auth_header("admin", "changeme"))
+        req.add_header("Cookie", self._cookie)
         with urllib.request.urlopen(req, timeout=5) as resp:
             body = resp.read().decode("utf-8")
         return json.loads(body)
@@ -80,7 +87,7 @@ class MockServerIntegrationTests(unittest.TestCase):
     def _get_bytes(self, path: str) -> bytes:
         url = f"http://127.0.0.1:{self.port}{path}"
         req = urllib.request.Request(url)
-        req.add_header("Authorization", _auth_header("admin", "changeme"))
+        req.add_header("Cookie", self._cookie)
         with urllib.request.urlopen(req, timeout=5) as resp:
             return resp.read()
 
@@ -88,7 +95,7 @@ class MockServerIntegrationTests(unittest.TestCase):
         url = f"http://127.0.0.1:{self.port}{path}"
         body = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(url, data=body, method="POST")
-        req.add_header("Authorization", _auth_header("admin", "changeme"))
+        req.add_header("Cookie", self._cookie)
         req.add_header("Content-Type", "application/json")
         with urllib.request.urlopen(req, timeout=5) as resp:
             response_body = resp.read().decode("utf-8")

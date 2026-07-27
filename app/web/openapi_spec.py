@@ -324,6 +324,14 @@ def _schemas() -> Dict[str, Schema]:
     return {
         "ErrorResponse": _object({"error": _string("Human-readable error message")}, ("error",), description="Error response returned by API routes."),
         "OpenApiDocument": _object(description="OpenAPI 3 document."),
+        "AuthSessionResponse": _object(
+            {"authenticated": _boolean(), "username": _string(nullable=True)},
+            ("authenticated",),
+            description="Whether the caller's session cookie (if any) is currently valid.",
+        ),
+        "AuthLoginRequest": _object({"username": _string(), "password": _string()}, ("username", "password")),
+        "AuthLoginResponse": _object({"status": _enum(["ok"]), "username": _string()}, ("status", "username"), description="Login succeeded; the session cookie is set via Set-Cookie."),
+        "AuthLogoutResponse": _object({"status": _enum(["logged_out"])}, ("status",)),
         "HealthResponse": _object(
             {
                 "status": _enum(["ok"]),
@@ -1119,7 +1127,12 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
         "servers": [{"url": api_prefix}],
         "components": {
             "securitySchemes": {
-                "basicAuth": {"type": "http", "scheme": "basic"},
+                "sessionCookie": {
+                    "type": "apiKey",
+                    "in": "cookie",
+                    "name": "drone_session",
+                    "description": "Session cookie issued by POST /auth/login. Log in once; the browser (or a cookie-jar-capable script) attaches this automatically afterward.",
+                },
                 "mutualTLS": {
                     "type": "mutualTLS",
                     "description": "Used by peer routes when Drone mTLS or Local Network certificate pairing is enabled.",
@@ -1127,14 +1140,43 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             },
             "schemas": _schemas(),
         },
-        "security": [{"basicAuth": []}],
+        "security": [{"sessionCookie": []}],
         "paths": {
             "/": {
                 "get": _operation(
                     "Root UI",
                     {"200": _media_response("HTML UI", ["text/html"], {"type": "string"})},
                     tags=["ui"],
-                    error_codes=("401", "403", "429", "500"),
+                    security=[],
+                    error_codes=("429", "500"),
+                )
+            },
+            "/auth/session": {
+                "get": _operation(
+                    "Check whether the caller has a live session",
+                    {"200": _json_response("AuthSessionResponse", "Session status")},
+                    tags=["auth"],
+                    security=[],
+                    error_codes=("429", "500"),
+                )
+            },
+            "/auth/login": {
+                "post": _operation(
+                    "Log in and start a session",
+                    {"200": _json_response("AuthLoginResponse", "Session started"), "401": _json_response("ErrorResponse", "Invalid username or password")},
+                    request_body=_json_request("AuthLoginRequest"),
+                    tags=["auth"],
+                    security=[],
+                    error_codes=("400", "429", "500"),
+                )
+            },
+            "/auth/logout": {
+                "post": _operation(
+                    "Log out (ends the caller's own session, if any)",
+                    {"200": _json_response("AuthLogoutResponse", "Logged out")},
+                    tags=["auth"],
+                    security=[],
+                    error_codes=("429", "500"),
                 )
             },
             "/health": {
