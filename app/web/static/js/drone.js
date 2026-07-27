@@ -2518,7 +2518,7 @@ function renderTorrentRowMarkup(row) {
     `<button class="btn btn-sm btn-outline-danger" title="Delete torrent" aria-label="Delete torrent" onclick="deleteTorrent('${id}')"><i class="bi bi-trash"></i></button>`,
   ].filter(Boolean).join(" ");
   return `<tr>
-    <td class="small mono download-file" title="${escapeHtml(row.torrent_file || "")}">${escapeHtml(row.name || "")}</td>
+    <td class="download-file" title="${escapeHtml(row.torrent_file || "")}">${escapeHtml(row.name || "")}</td>
     <td>${torrentStatusBadge(row)}</td>
     <td class="small text-nowrap">${progressText}</td>
     <td class="small">${row.download_speed_bps ? `${formatBytes(row.download_speed_bps)}/s` : ""}</td>
@@ -2540,7 +2540,11 @@ function renderTorrentTableBody(rows) {
 // only <tbody id="torrentsTableBody"> is patched by patchTorrentsLive, so the
 // 3s auto-refresh never flashes the grid.
 function renderTorrentTableShell(rows) {
-  return `<div class="table-responsive"><table class="table table-sm table-hover align-middle themed-table download-table bff-stack">
+  // local-assets-table carries the same compact font-size/line-height/cell
+  // padding as the Swarm page's "Nearby Drones" table (#localPeersBody
+  // .themed-table) -- reused here as a general-purpose class rather than
+  // duplicating that rule under a second selector.
+  return `<div class="table-responsive"><table class="table table-sm table-hover align-middle themed-table download-table local-assets-table bff-stack">
     <thead><tr><th>Torrent</th><th>Status</th><th>Progress</th><th>Speed</th><th>SD</th><th>CN</th><th>ETA</th><th class="download-actions">Actions</th></tr></thead>
     <tbody id="torrentsTableBody">${renderTorrentTableBody(rows)}</tbody>
   </table></div>`;
