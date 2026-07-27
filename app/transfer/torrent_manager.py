@@ -102,9 +102,20 @@ def _normalize_torrent_settings(raw, settings: Settings) -> dict:
         file_allocation = "prealloc"
 
     directory = str(raw.get("directory") or "").strip() or str(default_torrent_directory(settings))
+    # Empty/unset means "same as directory" -- resolved lazily via
+    # effective_download_directory() rather than baked in here, so a later
+    # change to `directory` keeps steering un-overridden downloads too.
+    download_directory = str(raw.get("download_directory") or "").strip()
 
     return {
         "directory": directory,
+        # Where aria2 actually writes downloaded file payloads. Defaults to
+        # `directory` (today's behavior: files land next to the .torrent),
+        # but can point anywhere -- including a different disk/mount than
+        # wherever the Drone app itself is installed (e.g. /media/<usb-drive>
+        # or /userdata/roms/<system>) -- since a downloaded ROM/ISO often
+        # belongs somewhere else entirely, not next to the watched folder.
+        "download_directory": download_directory,
         # aria2 --seed-time, in minutes; 0 stops seeding as soon as the
         # download completes.
         "seed_time": _int_value("seed_time", 60, 0, 60 * 24 * 30),
@@ -114,6 +125,12 @@ def _normalize_torrent_settings(raw, settings: Settings) -> dict:
         "file_allocation": file_allocation,
         "max_concurrent_downloads": _int_value("max_concurrent_downloads", 3, 1, 16),
     }
+
+
+def effective_download_directory(config: dict) -> str:
+    """Where new torrents should actually download to: the explicit override
+    if set, else the watched folder itself (today's behavior)."""
+    return config.get("download_directory") or config["directory"]
 
 
 def _now_iso() -> str:
@@ -194,7 +211,7 @@ class TorrentManager:
             entry["progress_percent"] = float(entry.get("progress_percent") or 0.0)
             entry["message"] = str(entry.get("message") or "")
             entry["name"] = str(entry.get("name") or Path(torrent_file).stem)
-            entry["download_dir"] = str(entry.get("download_dir") or self._config["directory"])
+            entry["download_dir"] = str(entry.get("download_dir") or effective_download_directory(self._config))
             self._torrents[entry_id] = entry
 
     def _persist_locked(self) -> None:
@@ -348,7 +365,7 @@ class TorrentManager:
                 "id": entry_id,
                 "name": candidate.stem,
                 "torrent_file": resolved,
-                "download_dir": config["directory"],
+                "download_dir": effective_download_directory(config),
                 "status": "queued",
                 "message": "",
                 "added_at": _now_iso(),
@@ -368,7 +385,7 @@ class TorrentManager:
             return {"error": f"torrent file unreadable: {error}"}
         force = bool(entry.get("force_started"))
         options = {
-            "dir": str(entry.get("download_dir") or config["directory"]),
+            "dir": str(entry.get("download_dir") or effective_download_directory(config)),
             "pause": "false" if force else "true",
             "seed-time": str(config["seed_time"]),
             "seed-ratio": str(config["seed_ratio"]),
@@ -588,6 +605,12 @@ class TorrentManager:
             Path(config["directory"]).mkdir(parents=True, exist_ok=True)
         except OSError as error:
             print(f"Torrent directory create failed: {error}", file=sys.stderr, flush=True)
+        download_dir = effective_download_directory(config)
+        if download_dir != config["directory"]:
+            try:
+                Path(download_dir).mkdir(parents=True, exist_ok=True)
+            except OSError as error:
+                print(f"Torrent download directory create failed: {error}", file=sys.stderr, flush=True)
         self.wake()
         return config
 
@@ -735,10 +758,13 @@ class TorrentManager:
                     "completed_at": entry.get("completed_at"),
                 }
             )
+        download_dir = effective_download_directory(config)
         return {
             "target_drone_id": self.settings.device_id,
             "settings": config,
             "directory_exists": Path(config["directory"]).is_dir(),
+            "download_directory_exists": Path(download_dir).is_dir(),
+            "effective_download_directory": download_dir,
             "aria2": aria2,
             "counts": counts,
             "torrents": torrents,

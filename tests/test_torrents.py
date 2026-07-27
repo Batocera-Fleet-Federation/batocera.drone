@@ -13,6 +13,7 @@ from app.transfer.torrent_manager import (
     TorrentManager,
     _normalize_torrent_settings,
     default_torrent_directory,
+    effective_download_directory,
 )
 
 
@@ -168,6 +169,92 @@ class TorrentWatchScanTests(unittest.TestCase):
             self.assertEqual(names, ["after", "before"])
             before = next(e for e in manager.snapshot()["torrents"] if e["name"] == "before")
             self.assertEqual(before["download_dir"], str(old_watch))
+
+
+class TorrentDownloadLocationTests(unittest.TestCase):
+    def test_defaults_to_the_watch_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            config = _normalize_torrent_settings({}, settings)
+            self.assertEqual(config["download_directory"], "")
+            self.assertEqual(effective_download_directory(config), config["directory"])
+
+    def test_override_is_used_for_newly_scanned_torrents(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = TorrentManager(_build_settings(root), start_worker=False)
+            watch = root / "watch"
+            downloads = root / "external-drive" / "roms"
+            manager.update_settings({"directory": str(watch), "download_directory": str(downloads)})
+            _write_torrent(watch, "game")
+            with mock.patch.object(torrent_manager, "find_aria2c", return_value=None):
+                manager._tick()
+            entry = manager.snapshot()["torrents"][0]
+            self.assertEqual(entry["download_dir"], str(downloads))
+            # The .torrent file itself still lives in the watched folder --
+            # only the downloaded payload goes elsewhere.
+            self.assertTrue(Path(entry["torrent_file"]).is_relative_to(watch.resolve()))
+
+    def test_override_create_directory_on_save(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = TorrentManager(_build_settings(root), start_worker=False)
+            downloads = root / "external-drive" / "roms"
+            self.assertFalse(downloads.exists())
+            manager.update_settings({"download_directory": str(downloads)})
+            self.assertTrue(downloads.is_dir())
+
+    def test_clearing_override_reverts_to_watch_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = TorrentManager(_build_settings(root), start_worker=False)
+            watch = root / "watch"
+            downloads = root / "downloads"
+            manager.update_settings({"directory": str(watch), "download_directory": str(downloads)})
+            config = manager.update_settings({"download_directory": ""})
+            self.assertEqual(config["download_directory"], "")
+            self.assertEqual(effective_download_directory(config), str(watch))
+
+    def test_changing_watch_directory_also_moves_the_unoverridden_default(self) -> None:
+        # No explicit download_directory set -- the effective default must
+        # track wherever `directory` currently points, not a value baked in
+        # at some earlier time.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = TorrentManager(_build_settings(root), start_worker=False)
+            first_watch = root / "first"
+            second_watch = root / "second"
+            manager.update_settings({"directory": str(first_watch)})
+            config = manager.update_settings({"directory": str(second_watch)})
+            self.assertEqual(effective_download_directory(config), str(second_watch))
+
+    def test_snapshot_reports_effective_directory_and_existence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = TorrentManager(_build_settings(root), start_worker=False)
+            watch = root / "watch"
+            downloads = root / "not-created-yet"
+            manager.update_settings({"directory": str(watch)})
+            with manager._lock:
+                manager._config["download_directory"] = str(downloads)
+            snapshot = manager.snapshot()
+            self.assertEqual(snapshot["effective_download_directory"], str(downloads))
+            self.assertFalse(snapshot["download_directory_exists"])
+
+    def test_aria2_add_uses_effective_download_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = TorrentManager(_build_settings(root), start_worker=False)
+            manager._daemon = FakeDaemon(rpc)
+            watch = root / "watch"
+            downloads = root / "external-drive" / "roms"
+            manager.update_settings({"directory": str(watch), "download_directory": str(downloads)})
+            _write_torrent(watch, "game")
+            manager._tick()
+            adds = rpc.method_calls("aria2.addTorrent")
+            self.assertEqual(len(adds), 1)
+            self.assertEqual(adds[0][2]["dir"], str(downloads))
 
 
 class TorrentLifecycleTests(unittest.TestCase):

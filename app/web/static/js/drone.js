@@ -2574,11 +2574,16 @@ function renderTorrentDaemonNote(payload) {
 function renderTorrentAlerts(payload) {
   const aria2 = payload.aria2 || {};
   const dir = (payload.settings || {}).directory || "";
+  const downloadDir = payload.effective_download_directory || dir;
   const daemonError = aria2.installed && !aria2.running && aria2.daemon_error
     ? `<div class="alert alert-danger py-2 mb-3">aria2c problem: ${escapeHtml(aria2.daemon_error)}</div>` : "";
   const dirWarning = payload.directory_exists === false
     ? `<div class="alert alert-warning py-2 mb-3">The torrent folder <code>${escapeHtml(dir)}</code> does not exist yet. Save the settings to create it.</div>` : "";
-  return `${daemonError}${dirWarning}`;
+  // Only a distinct warning when the download location differs from the
+  // watch folder -- otherwise the one above already covers it.
+  const downloadDirWarning = payload.download_directory_exists === false && downloadDir !== dir
+    ? `<div class="alert alert-warning py-2 mb-3">The download location <code>${escapeHtml(downloadDir)}</code> does not exist yet. Save the settings to create it.</div>` : "";
+  return `${daemonError}${dirWarning}${downloadDirWarning}`;
 }
 
 function renderTorrentSummaryCards(counts) {
@@ -2658,13 +2663,21 @@ async function renderTorrentsPage() {
       </div>
       <div class="card-body">
         <div class="row g-2 mb-2">
-          <div class="col-12">
+          <div class="col-12 col-lg-6">
             <label class="form-label mb-1" for="torrentDir">Torrent folder</label>
             <div class="input-group input-group-sm">
               <input class="form-control" type="text" id="torrentDir" value="${escapeHtml(settings.directory || "")}">
-              <button class="btn btn-outline-secondary" type="button" onclick="openTorrentDirBrowser()"><i class="bi bi-folder2-open me-1"></i>Browse</button>
+              <button class="btn btn-outline-secondary" type="button" onclick="openTorrentDirBrowser('torrentDir', 'Choose torrent folder')"><i class="bi bi-folder2-open me-1"></i>Browse</button>
             </div>
-            <div class="form-text">.torrent files dropped here download automatically. Changing this only changes which folder is watched -- existing torrents keep downloading where they started.</div>
+            <div class="form-text">.torrent files dropped here are picked up automatically. Changing this only changes which folder is watched -- existing torrents keep downloading where they started.</div>
+          </div>
+          <div class="col-12 col-lg-6">
+            <label class="form-label mb-1" for="torrentDownloadDir">Download location</label>
+            <div class="input-group input-group-sm">
+              <input class="form-control" type="text" id="torrentDownloadDir" placeholder="${escapeHtml(payload.effective_download_directory || settings.directory || "")}" value="${escapeHtml(settings.download_directory || "")}">
+              <button class="btn btn-outline-secondary" type="button" onclick="openTorrentDirBrowser('torrentDownloadDir', 'Choose download location')"><i class="bi bi-folder2-open me-1"></i>Browse</button>
+            </div>
+            <div class="form-text">Where downloaded files actually land -- can be a different disk than the Drone itself (e.g. an external drive, or /userdata/roms). Leave blank to use the torrent folder above.</div>
           </div>
         </div>
         <div class="row g-2 mb-2">
@@ -2713,6 +2726,7 @@ async function refreshTorrentsLive() {
 
 async function saveTorrentSettings() {
   const dir = (document.getElementById("torrentDir").value || "").trim();
+  const downloadDir = (document.getElementById("torrentDownloadDir").value || "").trim();
   const seedTime = parseInt(document.getElementById("torrentSeedTime").value, 10);
   const seedRatio = parseFloat(document.getElementById("torrentSeedRatio").value);
   const stallTimeout = parseInt(document.getElementById("torrentBtStopTimeout").value, 10);
@@ -2727,6 +2741,7 @@ async function saveTorrentSettings() {
   try {
     await apiPost("/admin/torrents/settings", {
       directory: dir,
+      download_directory: downloadDir,
       seed_time: seedTime,
       seed_ratio: seedRatio,
       bt_stop_timeout: stallTimeout,
@@ -2794,7 +2809,15 @@ async function deleteTorrent(torrentId) {
   }
 }
 
-function openTorrentDirBrowser() {
+// Shared by both the watch-folder and download-location fields (and reused
+// as-is by anything else that wants a storage-root-scoped folder picker) --
+// which input gets the chosen path is tracked in this module-level var since
+// the modal's own "Use this folder" button calls chooseTorrentDir() with no
+// arguments.
+let torrentDirBrowserTargetInputId = "torrentDir";
+
+function openTorrentDirBrowser(targetInputId = "torrentDir", title = "Choose torrent folder") {
+  torrentDirBrowserTargetInputId = targetInputId;
   const modalId = "torrentDirBrowserModal";
   let modal = document.getElementById(modalId);
   if (!modal) {
@@ -2810,7 +2833,7 @@ function openTorrentDirBrowser() {
       <div class="modal-content">
         <div class="modal-header">
           <div>
-            <h5 class="modal-title mb-0"><i class="bi bi-folder2-open me-2"></i>Choose torrent folder</h5>
+            <h5 class="modal-title mb-0"><i class="bi bi-folder2-open me-2"></i>${escapeHtml(title)}</h5>
             <div class="small text-muted" id="torrentDirBrowserPath"></div>
           </div>
           <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
@@ -2832,7 +2855,7 @@ function openTorrentDirBrowser() {
     modal.classList.add("show");
     modal.style.display = "block";
   }
-  const startPath = (document.getElementById("torrentDir")?.value || "").trim();
+  const startPath = (document.getElementById(targetInputId)?.value || "").trim();
   loadTorrentDirBrowser(startPath);
 }
 
@@ -2925,7 +2948,7 @@ async function uploadTorrentFiles(files) {
 
 function chooseTorrentDir() {
   const chooseBtn = document.getElementById("torrentDirChooseBtn");
-  const input = document.getElementById("torrentDir");
+  const input = document.getElementById(torrentDirBrowserTargetInputId);
   const path = chooseBtn ? chooseBtn.dataset.path || "" : "";
   if (input && path) input.value = path;
   const modal = document.getElementById("torrentDirBrowserModal");

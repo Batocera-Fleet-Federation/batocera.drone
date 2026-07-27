@@ -1,13 +1,13 @@
 ---
 name: drone-admin-features
-description: Use this when designing, reviewing, debugging, or modifying the Drone admin panel — System Info, System Logs, Emulators, Artwork & Metadata (scraping/gamelist), Automation, Theme, the Swarm page (pairing, tailnet, remote peer management), the ROMs/BIOS TreeGrid browser, per-system BIOS association, credentials/network-mode/certificate rotation, self-update buttons, or the admin route dispatch in app/web/api_routes.py and web/handlers_*.py.
+description: Use this when designing, reviewing, debugging, or modifying the Drone admin panel — System Info, System Logs, Emulators, Artwork & Metadata (scraping/gamelist), Automation, Torrents, VPN, Theme, the Swarm page (pairing, tailnet, remote peer management), the ROMs/BIOS TreeGrid browser, per-system BIOS association, credentials/network-mode/certificate rotation, self-update buttons, the session-cookie login gate, or the admin route dispatch in app/web/api_routes.py and web/handlers_*.py. For deep Torrents/aria2 or VPN/OpenVPN implementation detail, see the dedicated drone-torrents-management and drone-vpn-management skills instead.
 ---
 
 # Drone Admin Features Skill
 
 ## Goal
 
-Keep the admin-features picture matching the actual 5-tile admin panel, not the
+Keep the admin-features picture matching the actual 8-tile admin panel, not the
 frozen single-feature doc. `ADMIN_FEATURES.md` at the repo root is titled "Admin
 Features - Logs Viewer" and has never been updated since it was written — it
 documents only the very first admin tile, misattributes the frontend to
@@ -17,41 +17,76 @@ skill supersedes it.
 ## Project context
 
 Frontend for **all** admin panels lives in one file:
-`app/web/static/js/drone.js` (~5,700 lines) — **not** `index.html`. Backend
-routing dispatch is `app/web/api_routes.py` (~585 lines,
-`if parts[0] == "admin" and not self.settings.admin_enabled: reject` gates the
+`app/web/static/js/drone.js` (~7,200 lines) — **not** `index.html`. Backend
+routing dispatch is `app/web/api_routes.py`
+(`if parts[0] == "admin" and not self.settings.admin_enabled: reject` gates the
 whole tree), with actual handler logic split across `web/handlers_*.py` mixins
 per the god-class-decomposition refactor (see the repo's own `CLAUDE.md`):
 
 ```text
 app/web/
-  api_routes.py           # ~585 lines — admin/* route dispatch table (ApiRoutesMixin)
+  api_routes.py           # admin/* route dispatch table (ApiRoutesMixin)
   handlers_artwork.py     # 710 lines — scraping providers, gamelist edit, uploads
+  handlers_auth.py        # login/logout/session-status (HandlersAuthMixin) --
+                          # the ONLY routes dispatched before the session-cookie gate
   handlers_config.py      # 618 lines — emulator config viewer/editor
   handlers_content.py     # 483 lines — ROM/BIOS listing (also used by the tree UI)
   handlers_diagnostics.py # 376 lines — logs, system-info, gameplay-logs
   handlers_downloads.py   # 116 lines — download queue pause/resume/cancel/retry
   handlers_network.py     # 667 lines — pairing, LAN discovery, tailnet, swarm overview
-  handlers_remote_admin.py # credential-gated proxy: drive a paired peer's own
+  handlers_remote_admin.py # session-cookie-gated proxy: drive a paired peer's own
                           # /admin/* surface from this Drone's Swarm page
   handlers_peer.py        # 503 lines — inbound P2P asset serving (mTLS)
   handlers_system.py      # 128 lines — network-mode, self-update, certificate rotate
   handlers_theme.py       # 139 lines — theme/branding assets
-  static/js/drone.js      # ~5,700 lines — every admin panel's frontend
+  handlers_torrents.py    # watched-folder torrent queue admin routes (see
+                          # drone-torrents-management skill; backs onto
+                          # transfer/torrent_manager.py + transfer/aria2_runtime.py)
+  handlers_vpn.py         # OpenVPN admin routes (see drone-vpn-management skill;
+                          # backs onto device/vpn_manager.py)
+  static/js/drone.js      # ~7,200 lines — every admin panel's frontend
+common/
+  auth.py                 # DroneCredentialStore + SessionAuth/SessionStore (see
+                          # "Login and sessions" below) + the 401 brute-force blocker
+  multipart.py            # shared multipart/form-data parser (file uploads --
+                          # Torrents .torrent upload and VPN .ovpn upload both use it)
+  install_paths.py        # drone_install_root() -- where the Drone app is physically
+                          # deployed; Torrents' and VPN's default/fixed directories
+                          # are relative to this, not to userdata_root
 ```
 
 Any change touching an `admin/*` route must update **both** the dispatch entry in
 `api_routes.py` and the owning `handlers_*.py` method — they're two halves of one
 change, not independently useful.
 
-## Admin menu (6 tiles)
+## Login and sessions (replaces the old Basic Auth)
 
-`renderAdminMenu()` (`drone.js`, currently line 1948) renders exactly 6 tiles —
-**System Info, System Logs, Emulators, Artwork & Metadata, Automation, Theme**. The
-old doc documents only System Logs. There is no "Integration" tile — pairing, tailnet,
-and fleet management live on the **Swarm** page, which is a top-level nav item
-(`#admin/swarm`, alongside Systems/Controls/Transfers/Admin in `index.html`'s
-sidebar), not one of these 6 admin tiles. See "The Swarm page" below.
+The whole admin/browser surface (not just `/admin/*`) sits behind a session
+cookie now, not HTTP Basic Auth — `WWW-Authenticate: Basic` was what made
+browsers pop their own native credential dialog, which is both bad UX and
+**unscriptable by browser automation** (outside the DOM, invisible to
+claude-in-chrome or any CDP-based tool). `/` (root HTML), `GET /auth/session`,
+`POST /auth/login`, and `POST /auth/logout` are the only routes reachable
+without a valid session cookie (`handlers_auth.py`); everything else —
+including every `admin/*` route — requires one, checked via
+`SessionAuth.authenticate_request()` (`common/auth.py`) rather than the old
+`BasicAuth.check()`. Sessions are SQLite-backed (`storage/state_store.py`'s
+`sessions` table), 30-day sliding expiry. A `401` from the gateway itself
+carries a custom `X-Drone-Auth-Required` marker header (not
+`WWW-Authenticate`) so `drone.js`'s `_handleApiUnauthorized` can tell "this
+gateway's own session expired" apart from a remote-admin-proxy 401. See
+`_handle_admin_credentials_update` for the one place a plain-text password is
+handled server-side (never returned to the browser); changing credentials
+revokes every other session's cookie except the caller's own.
+
+## Admin menu (8 tiles)
+
+`renderAdminMenu()` (`drone.js`) renders exactly 8 tiles — **System Info,
+System Logs, Emulators, Artwork & Metadata, Automation, Torrents, VPN, Theme**.
+The old doc documents only System Logs. There is no "Integration" tile — pairing,
+tailnet, and fleet management live on the **Swarm** page, which is a top-level nav
+item (`#admin/swarm`, alongside Systems/Controls/Transfers/Admin in `index.html`'s
+sidebar), not one of these 8 admin tiles. See "The Swarm page" below.
 
 ### System Info
 
@@ -87,16 +122,42 @@ mobygames}/{search,apply}`; gamelist maintenance: `/admin/artwork/gamelist/
 
 ### Automation
 
-`renderAutomationPage()` (`drone.js` line 4685) — two independent idle automations,
-each with its own enable/idle-minutes config: **idle-volume**
-(`/admin/automation/idle-volume`) sets the volume to a configured target after a
-period of no controller input (raises or lowers, whichever the target requires —
-active gameplay via emulatorlauncher suppresses it even without input seen), and
-**idle-game-exit** (`/admin/automation/idle-game-exit`) exits the running game via
+`renderAutomationPage()` (`drone.js`) — three independent automations, each with
+its own enable config: **idle-volume** (`/admin/automation/idle-volume`) sets the
+volume to a configured target after a period of no controller input (raises or
+lowers, whichever the target requires — active gameplay via emulatorlauncher
+suppresses it even without input seen); **idle-game-exit**
+(`/admin/automation/idle-game-exit`) exits the running game via
 `batocera-es-swissknife --emukill` after its own configured idle period, but only
-while a game is actually running. Both poll `last-input-activity` (written by the
-privileged input-activity monitor) every `AUTOMATION_POLL_SECONDS`. Backend:
+while a game is actually running; **wifi-recovery**
+(`/admin/automation/wifi-recovery`) checks the wireless connection every 60s and
+power-cycles it (`batocera-wifi disable` then `enable`) when it's down. The two
+idle automations poll `last-input-activity` (written by the privileged
+input-activity monitor) every `AUTOMATION_POLL_SECONDS`. Backend:
 `app/device/automation.py`.
+
+### Torrents
+
+Watched-folder torrent downloads via a locally-spawned aria2c daemon —
+provider-agnostic (any `.torrent` file, single-source, no swarm-style
+multi-peer logic). Own force-start scheduler (aria2 is only ever told to add
+paused; the manager itself picks who gets to run, which is what makes Force
+Start able to bypass the concurrency limit). Two independent, both-optional,
+both-storage-root-scoped folders: where `.torrent` files are watched, and where
+aria2 actually writes downloaded payloads (can be a different disk/mount
+entirely, e.g. `/media/<external-drive>` — defaults to the watch folder if
+unset). See the dedicated **drone-torrents-management** skill for the aria2
+RPC lifecycle, restart/PID-recovery behavior, and upload mechanics.
+
+### VPN
+
+Provider-agnostic OpenVPN client management (Proton VPN, NordVPN, PIA, ...) —
+upload a `.ovpn`, save credentials, Connect/Disconnect, live status, auto-start
+on Drone boot, log viewer/download. Unlike Torrents, there's no background
+worker: status is recomputed fresh on every request (`/proc` scan for the
+running PID, tail the log, query `tun0`) since a VPN connection is exactly one
+process. See the dedicated **drone-vpn-management** skill for the config
+rewrite rules, credential storage, and process-management design.
 
 ### Theme
 
@@ -107,7 +168,7 @@ artwork (`#theme`, outside the admin route tree).
 
 Fleet management lives on its own top-level nav item, `#admin/swarm`
 (`swarmMenuBtn` in `index.html`, alongside Systems/Controls/Transfers/Admin) —
-**not** inside the 6-tile Admin menu. `renderSwarmPage()` (`drone.js` ~line 4199)
+**not** inside the 8-tile Admin menu. `renderSwarmPage()` (`drone.js` ~line 4199)
 replaced the old Integration page entirely; `#admin/integration` redirects here for
 old-link compatibility (the redirect comment literally says "Overmind integration is
 disabled (the fleet is Overmind-free) and the Local Network configuration moved to
@@ -148,11 +209,15 @@ untouched, so there's no mixed local/remote state to track. Backend:
 `handlers_remote_admin.py` (`HandlersRemoteAdminMixin`). Key properties:
 
 - **Credential-gated, not a new role system** — the peer's own existing admin login
-  is the real authorization check, verified once via `/admin/remote/connect` and
-  cached **server-side only, in memory, never on disk, never returned to the
-  browser**. The target's own `BasicAuth.check()` runs independently on every single
-  proxied call, exactly as if the browser had connected to it directly — whatever
-  that login can do locally is exactly what it can do remotely, nothing more.
+  is the real authorization check: `/admin/remote/connect` logs into the peer's own
+  `POST /auth/login` with the submitted credentials and caches **only the resulting
+  session cookie, server-side only, in memory, never on disk, never returned to the
+  browser**. That cookie is resent as a `Cookie` header on every proxied call, so the
+  target's own `SessionAuth.authenticate_request()` runs independently each time,
+  exactly as if the browser had connected to it directly — whatever that login can
+  do locally is exactly what it can do remotely, nothing more. (`PeerProxyResponse`
+  carries the peer's `Set-Cookie` back from the login call; see
+  `_cookie_pair_from_set_cookie` in `handlers_remote_admin.py`.)
 - A persistent top-of-page banner (`managedPeerBanner` in `index.html`) names the
   peer whenever a tab is impersonating one; its absence is the "local" default.
 - Only lightweight admin JSON/text crosses this proxy — ROM/BIOS/save/artwork
@@ -215,6 +280,24 @@ cancel/retry/clear (`/admin/downloads/{pause,resume,clear}`,
   multiple systems (must land in the shared/unassigned bucket instead).
 - Adding a log/config/emulator-file viewer route without validating the
   requested path stays inside its expected directory.
+- Sending a `WWW-Authenticate: Basic` header on any 401 -- that is exactly
+  what triggers a browser's own native credential dialog, which is both bad
+  UX and invisible/unscriptable to browser automation. Use the
+  `X-Drone-Auth-Required` marker instead (see "Login and sessions" above).
+
+## Live-refreshing tile pattern (Torrents, VPN)
+
+Any tile that polls its own status every few seconds should patch specific
+already-mounted DOM nodes by id, never re-render (`.innerHTML =`) the whole
+tile on every poll tick — replacing the whole subtree on a 3s timer visibly
+flashes and clobbers in-progress edits in any form on the same page (e.g. an
+unsaved settings field). The established shape, followed by both
+`renderTorrentsLive`/`patchTorrentsLive` and `renderVpnLive`/`patchVpnLive` in
+`drone.js`: a `render*Live(payload)` builds the full skeleton once on page
+mount (stable container ids for each region that changes), and a separate
+`patch*Live(payload)` — called by both the `setInterval` poll and the manual
+Refresh button — only ever sets `.innerHTML` on those specific already-mounted
+leaf nodes.
 
 ## Expected output format
 
@@ -258,6 +341,7 @@ Do not:
 ## Default bias
 
 When unsure, keep new admin functionality inside the fitting existing tile
-(only add a 7th tile for a genuinely new category), keep frontend route names
-symmetric with their backend route + handler, and keep destructive actions
-behind an explicit confirm step like the existing ones.
+(only add a new tile for a genuinely new category, as Torrents and VPN were),
+keep frontend route names symmetric with their backend route + handler, follow
+the live-refreshing tile pattern above for anything that polls, and keep
+destructive actions behind an explicit confirm step like the existing ones.

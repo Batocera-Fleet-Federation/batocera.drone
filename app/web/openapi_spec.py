@@ -538,7 +538,8 @@ def _schemas() -> Dict[str, Schema]:
         ),
         "TorrentSettings": _object(
             {
-                "directory": _string("Watched folder for .torrent files; downloads land here too"),
+                "directory": _string("Watched folder for .torrent files"),
+                "download_directory": _string("Where aria2 writes downloaded files; empty means 'same as directory'. Can be a different disk/mount than the Drone's own install location (e.g. an external drive under /media, or /userdata/roms)."),
                 "seed_time": _integer("Seed time in minutes; 0 stops seeding as soon as the download completes", minimum=0),
                 "seed_ratio": _number("Stop seeding at this share ratio; 0 disables the ratio limit"),
                 "bt_stop_timeout": _integer("Stop a torrent stalled at 0 B/s for this many seconds; 0 disables", minimum=0),
@@ -584,6 +585,8 @@ def _schemas() -> Dict[str, Schema]:
                 "target_drone_id": _string(),
                 "settings": _ref("TorrentSettings"),
                 "directory_exists": _boolean(),
+                "download_directory_exists": _boolean(),
+                "effective_download_directory": _string("Resolved download location: the override if set, else 'directory'"),
                 "aria2": _ref("TorrentAria2Status"),
                 "counts": _object({status: _integer() for status in ("queued", "downloading", "complete", "error")}),
                 "torrents": _array(_ref("TorrentEntry")),
@@ -593,6 +596,7 @@ def _schemas() -> Dict[str, Schema]:
         "TorrentSettingsUpdateRequest": _object(
             {
                 "directory": _string(),
+                "download_directory": _string("Empty clears the override (falls back to 'directory')"),
                 "seed_time": _integer(minimum=0),
                 "seed_ratio": _number(),
                 "bt_stop_timeout": _integer(minimum=0),
