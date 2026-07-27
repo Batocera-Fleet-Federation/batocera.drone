@@ -5840,8 +5840,8 @@ class RemoteAdminUiTests(unittest.TestCase):
         self.assertIn("_handleApiUnauthorized(res, () => apiPost(url, payload))", post_body)
 
     def test_start_app_checks_local_admin_before_impersonating(self) -> None:
-        # Session-login split bootstrap() into a thin session-check gate (see
-        # test_bootstrap_shows_login_when_session_check_fails) plus this
+        # Session-login split bootstrapApp() into a thin session-check gate
+        # (see test_bootstrap_shows_login_when_session_check_fails) plus this
         # function, which runs only once a valid session is confirmed.
         fn_start = self.js.index("async function startApp()")
         fn_body = self.js[fn_start:self.js.index("\nasync function submitLogin(", fn_start)]
@@ -5855,7 +5855,10 @@ class RemoteAdminUiTests(unittest.TestCase):
         self.assertTrue(probe_index < ready_index < info_bar_index < router_index)
 
     def test_bootstrap_shows_login_when_session_check_fails(self) -> None:
-        fn_start = self.js.index("async function bootstrap()")
+        # Named bootstrapApp(), not bootstrap() -- a top-level `function
+        # bootstrap` declaration would shadow window.bootstrap (the Bootstrap
+        # UI library global), breaking every data-bs-dismiss="modal" button.
+        fn_start = self.js.index("async function bootstrapApp()")
         fn_body = self.js[fn_start:self.js.index("\ndocument.getElementById(\"logoutBtn\")", fn_start)]
         self.assertIn('api("/auth/session")', fn_body)
         self.assertIn("renderLoginPage()", fn_body)

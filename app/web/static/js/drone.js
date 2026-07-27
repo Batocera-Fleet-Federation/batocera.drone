@@ -89,6 +89,7 @@ let transfersTimer = null;
 let transfersInFlight = false;
 let torrentsTimer = null;
 let torrentsInFlight = false;
+let torrentsLastPayload = null;
 let vpnTimer = null;
 let vpnInFlight = false;
 let currentConfigSource = null;
@@ -1855,7 +1856,7 @@ async function renderHelpPage() {
       </div>
 
       <div class="row g-3 mb-4">
-        <div class="col-12 col-md-6 col-xl-3">
+        <div class="col-12 col-md-6 col-xl-4">
           <div class="help-metric h-100">
             <i class="bi bi-phone"></i>
             <div>
@@ -1864,7 +1865,7 @@ async function renderHelpPage() {
             </div>
           </div>
         </div>
-        <div class="col-12 col-md-6 col-xl-3">
+        <div class="col-12 col-md-6 col-xl-4">
           <div class="help-metric h-100">
             <i class="bi bi-arrow-left-right"></i>
             <div>
@@ -1873,7 +1874,16 @@ async function renderHelpPage() {
             </div>
           </div>
         </div>
-        <div class="col-12 col-md-6 col-xl-3">
+        <div class="col-12 col-md-6 col-xl-4">
+          <div class="help-metric h-100">
+            <i class="bi bi-magnet"></i>
+            <div>
+              <div class="help-metric-title">Build your library</div>
+              <div class="text-muted small">Pull new content in with the built-in Torrents downloader, then share it across the fleet without downloading it twice.</div>
+            </div>
+          </div>
+        </div>
+        <div class="col-12 col-md-6 col-xl-4">
           <div class="help-metric h-100">
             <i class="bi bi-sliders"></i>
             <div>
@@ -1882,7 +1892,16 @@ async function renderHelpPage() {
             </div>
           </div>
         </div>
-        <div class="col-12 col-md-6 col-xl-3">
+        <div class="col-12 col-md-6 col-xl-4">
+          <div class="help-metric h-100">
+            <i class="bi bi-incognito"></i>
+            <div>
+              <div class="help-metric-title">Private networking</div>
+              <div class="text-muted small">Route this machine through your own VPN provider — upload a config, add credentials, connect. No CLI required.</div>
+            </div>
+          </div>
+        </div>
+        <div class="col-12 col-md-6 col-xl-4">
           <div class="help-metric h-100">
             <i class="bi bi-shield-lock"></i>
             <div>
@@ -1926,6 +1945,14 @@ async function renderHelpPage() {
                 {
                   q: "What does the Downloads page track?",
                   a: "Active, queued, and recent transfers heading to this machine, with progress, queue position, and cancellation controls for long file operations."
+                },
+                {
+                  q: "Can Drone fetch content on its own, not just sync between my machines?",
+                  a: "Yes — the Torrents page runs a small built-in torrent client on this Drone. Drop in a .torrent file, point it at a folder (including an external drive), and once it finishes, move the downloaded files anywhere on disk or let the rest of your fleet pull them peer-to-peer instead of downloading the same thing twice."
+                },
+                {
+                  q: "Can I run this Drone through a VPN?",
+                  a: "Yes — the VPN page manages an OpenVPN connection for this machine end to end: upload your provider's .ovpn file, add your credentials, and connect. Drone verifies the tunnel is actually up (interface, IP, and log output), so you're not left guessing whether it's working."
                 },
                 {
                   q: "What is the Asset Cache?",
@@ -1978,6 +2005,8 @@ async function renderHelpPage() {
               <button class="help-link-row" type="button" onclick="setHash('#admin/artwork')"><i class="bi bi-images"></i><span><strong>Polish your library</strong><small>Fix titles, descriptions, box art, and marquees so everything looks complete.</small></span></button>
               <button class="help-link-row" type="button" onclick="setHash('#admin/logs/gameplay?lines=200')"><i class="bi bi-clock-history"></i><span><strong>See what's been played</strong><small>Review detected game launches and recent play sessions.</small></span></button>
               <button class="help-link-row" type="button" onclick="setHash('#admin/system-info')"><i class="bi bi-pc-display"></i><span><strong>Check machine health</strong><small>CPU, memory, storage, network, and connection speed at a glance.</small></span></button>
+              <button class="help-link-row" type="button" onclick="setHash('#admin/torrents')"><i class="bi bi-magnet"></i><span><strong>Fetch new content</strong><small>Download via the built-in torrent client, then share it across your fleet.</small></span></button>
+              <button class="help-link-row" type="button" onclick="setHash('#admin/vpn')"><i class="bi bi-incognito"></i><span><strong>Go private</strong><small>Connect this machine to your VPN provider and confirm the tunnel is live.</small></span></button>
             </div>
             <div class="mt-2 small">
               <button class="btn btn-link p-0 align-baseline" type="button" onclick="setHash('#admin/swarm')">Manage your whole fleet on the Swarm page <i class="bi bi-arrow-right ms-1"></i></button>
@@ -2517,6 +2546,7 @@ function renderTorrentRowMarkup(row) {
   const pct = Number(row.progress_percent || 0);
   const canForceStart = ["queued", "error"].includes(status);
   const canCancel = ["queued", "downloading"].includes(status) || (status === "complete" && row.seeding);
+  const canMoveFiles = status === "complete";
   const progressText = row.total_bytes
     ? `${pct.toFixed(1)}% (${formatBytes(row.completed_bytes)} / ${formatBytes(row.total_bytes)})`
     : (status === "complete" ? "100%" : "0%");
@@ -2525,6 +2555,7 @@ function renderTorrentRowMarkup(row) {
   const actions = [
     canForceStart ? `<button class="btn btn-sm btn-outline-success" title="Force start" aria-label="Force start" onclick="forceStartTorrent('${id}')"><i class="bi bi-lightning-charge"></i></button>` : "",
     canCancel ? `<button class="btn btn-sm btn-outline-warning" title="Cancel" aria-label="Cancel" onclick="cancelTorrent('${id}')"><i class="bi bi-x-circle"></i></button>` : "",
+    canMoveFiles ? `<button class="btn btn-sm btn-outline-info" title="Move files" aria-label="Move files" onclick="openMoveFilesModal('${id}')"><i class="bi bi-folder-symlink"></i></button>` : "",
     `<button class="btn btn-sm btn-outline-danger" title="Delete torrent" aria-label="Delete torrent" onclick="deleteTorrent('${id}')"><i class="bi bi-trash"></i></button>`,
   ].filter(Boolean).join(" ");
   return `<tr>
@@ -2600,11 +2631,24 @@ function renderTorrentSummaryCards(counts) {
 // First mount only: builds the stable skeleton (card chrome, table + thead).
 // Later updates go through patchTorrentsLive, which never recreates any of
 // these container nodes -- that's what keeps the 3s auto-refresh flash-free.
+function renderTorrentQueueActions(payload) {
+  const paused = Boolean(payload.paused);
+  const toggleBtn = paused
+    ? `<button class="btn btn-sm btn-outline-success" title="Resume downloads" aria-label="Resume downloads" onclick="resumeTorrentDownloads()"><i class="bi bi-play-fill me-1"></i>Resume Downloads</button>`
+    : `<button class="btn btn-sm btn-outline-secondary" title="Pause downloads" aria-label="Pause downloads" onclick="pauseTorrentDownloads()"><i class="bi bi-pause-fill me-1"></i>Pause Downloads</button>`;
+  const clearBtn = `<button class="btn btn-sm btn-outline-danger" title="Clear torrents" aria-label="Clear torrents" onclick="openTorrentClearModal()"><i class="bi bi-trash3 me-1"></i>Clear</button>`;
+  return `${toggleBtn}${clearBtn}`;
+}
+
 function renderTorrentsLive(payload) {
+  torrentsLastPayload = payload;
   return `
     <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
       <div id="torrentsDaemonNote">${renderTorrentDaemonNote(payload)}</div>
-      <button class="btn btn-sm btn-outline-primary" title="Refresh torrents" aria-label="Refresh torrents" onclick="refreshTorrentsLive()"><i class="bi bi-arrow-repeat"></i></button>
+      <div class="d-flex flex-wrap align-items-center gap-2">
+        <div id="torrentsQueueActions" class="d-flex flex-wrap align-items-center gap-2">${renderTorrentQueueActions(payload)}</div>
+        <button class="btn btn-sm btn-outline-primary" title="Refresh torrents" aria-label="Refresh torrents" onclick="refreshTorrentsLive()"><i class="bi bi-arrow-repeat"></i></button>
+      </div>
     </div>
     <div id="torrentsAlerts">${renderTorrentAlerts(payload)}</div>
     <div id="torrentsSummaryGrid" class="download-summary-grid mb-3">${renderTorrentSummaryCards(payload.counts)}</div>
@@ -2616,8 +2660,11 @@ function renderTorrentsLive(payload) {
 // only the leaf content of each region above by id. The card, the table
 // element, and its <thead> are never touched, so nothing visibly flashes.
 function patchTorrentsLive(payload) {
+  torrentsLastPayload = payload;
   const noteNode = document.getElementById("torrentsDaemonNote");
   if (noteNode) noteNode.innerHTML = renderTorrentDaemonNote(payload);
+  const actionsNode = document.getElementById("torrentsQueueActions");
+  if (actionsNode) actionsNode.innerHTML = renderTorrentQueueActions(payload);
   const alertsNode = document.getElementById("torrentsAlerts");
   if (alertsNode) alertsNode.innerHTML = renderTorrentAlerts(payload);
   const summaryNode = document.getElementById("torrentsSummaryGrid");
@@ -2800,12 +2847,254 @@ async function cancelTorrent(torrentId) {
 }
 
 async function deleteTorrent(torrentId) {
-  if (!torrentId || !window.confirm("Delete this torrent? It is removed from the list and its .torrent file is deleted so it is not picked up again. Downloaded files are kept.")) return;
+  if (!torrentId || !window.confirm("Delete this torrent? It is removed from the list, its .torrent file is deleted, and its downloaded files are deleted too. This cannot be undone.")) return;
   try {
     await apiPost(`/admin/torrents/${encodeURIComponent(torrentId)}/delete`, {});
     await refreshTorrentsLive();
   } catch (err) {
     showToast(`Delete failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  }
+}
+
+async function pauseTorrentDownloads() {
+  try {
+    await apiPost("/admin/torrents/pause", {});
+    showToast("Torrent downloads paused.", "success");
+    await refreshTorrentsLive();
+  } catch (err) {
+    showToast(`Failed to pause downloads: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  }
+}
+
+async function resumeTorrentDownloads() {
+  try {
+    await apiPost("/admin/torrents/resume", {});
+    showToast("Torrent downloads resumed.", "success");
+    await refreshTorrentsLive();
+  } catch (err) {
+    showToast(`Failed to resume downloads: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  }
+}
+
+function openTorrentClearModal() {
+  const modalId = "torrentClearModal";
+  let modal = document.getElementById(modalId);
+  if (!modal) {
+    modal = document.createElement("div");
+    modal.id = modalId;
+    modal.className = "modal fade";
+    modal.tabIndex = -1;
+    modal.setAttribute("aria-hidden", "true");
+    document.body.appendChild(modal);
+  }
+  modal.innerHTML = `
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content themed-modal">
+        <div class="modal-header">
+          <h5 class="modal-title mb-0"><i class="bi bi-trash3 me-2"></i>Clear Torrents</h5>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <div class="mb-3">
+            <div class="form-label mb-1">Which torrents?</div>
+            <div class="form-check">
+              <input class="form-check-input" type="radio" name="torrentClearScope" id="torrentClearScopeCompleted" value="completed" checked>
+              <label class="form-check-label" for="torrentClearScopeCompleted">Completed only</label>
+            </div>
+            <div class="form-check">
+              <input class="form-check-input" type="radio" name="torrentClearScope" id="torrentClearScopeAll" value="all">
+              <label class="form-check-label" for="torrentClearScopeAll">All (including downloading / pending / error)</label>
+            </div>
+          </div>
+          <div class="mb-1">What should be deleted?</div>
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="torrentClearFromUi" checked>
+            <label class="form-check-label" for="torrentClearFromUi">Remove from this list</label>
+          </div>
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="torrentClearTorrentFile" checked>
+            <label class="form-check-label" for="torrentClearTorrentFile">Delete the .torrent file</label>
+          </div>
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="torrentClearDownloadedFiles">
+            <label class="form-check-label" for="torrentClearDownloadedFiles">Delete the downloaded files</label>
+          </div>
+          <div class="alert alert-warning py-2 mt-3 mb-0 small">This cannot be undone.</div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="button" class="btn btn-danger" id="torrentClearConfirmBtn" onclick="confirmTorrentClear()"><i class="bi bi-trash3 me-1"></i>Clear</button>
+        </div>
+      </div>
+    </div>`;
+  if (window.bootstrap?.Modal) {
+    window.bootstrap.Modal.getOrCreateInstance(modal).show();
+  } else {
+    modal.classList.add("show");
+    modal.style.display = "block";
+  }
+}
+
+async function confirmTorrentClear() {
+  const scope = document.querySelector('input[name="torrentClearScope"]:checked')?.value || "completed";
+  const deleteFromUi = Boolean(document.getElementById("torrentClearFromUi")?.checked);
+  const deleteTorrentFile = Boolean(document.getElementById("torrentClearTorrentFile")?.checked);
+  const deleteDownloadedFiles = Boolean(document.getElementById("torrentClearDownloadedFiles")?.checked);
+  if (!deleteFromUi && !deleteTorrentFile && !deleteDownloadedFiles) {
+    showToast("Choose at least one action.", "warning");
+    return;
+  }
+  const btn = document.getElementById("torrentClearConfirmBtn");
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Clearing...';
+  }
+  try {
+    const result = await apiPost("/admin/torrents/clear", {
+      scope,
+      delete_from_ui: deleteFromUi,
+      delete_torrent_file: deleteTorrentFile,
+      delete_downloaded_files: deleteDownloadedFiles,
+    });
+    const cleared = Number(result.cleared) || 0;
+    showToast(`Cleared ${cleared} torrent${cleared === 1 ? "" : "s"}.`, "success");
+    const modal = document.getElementById("torrentClearModal");
+    if (modal && window.bootstrap?.Modal) window.bootstrap.Modal.getOrCreateInstance(modal).hide();
+    await refreshTorrentsLive();
+  } catch (err) {
+    showToast(`Clear failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  } finally {
+    if (btn && btn.isConnected) {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="bi bi-trash3 me-1"></i>Clear';
+    }
+  }
+}
+
+// ------------------------------------------------------ Torrents: move files
+
+function renderMoveFilesLocationChips(recent) {
+  const defaults = ["/userdata/roms", "/userdata/bios", "/userdata/saves", "/userdata/movies"];
+  const seen = new Set();
+  const chips = [];
+  (recent || []).forEach((path) => {
+    if (path && !seen.has(path)) {
+      seen.add(path);
+      chips.push({ path, recent: true });
+    }
+  });
+  defaults.forEach((path) => {
+    if (!seen.has(path)) {
+      seen.add(path);
+      chips.push({ path, recent: false });
+    }
+  });
+  if (!chips.length) return "";
+  return chips.map((chip) => `<button type="button" class="btn btn-sm btn-outline-secondary" onclick="setMoveFilesDestination('${escapeHtml(chip.path)}')"><i class="bi ${chip.recent ? "bi-clock-history" : "bi-star"} me-1"></i>${escapeHtml(chip.path)}</button>`).join(" ");
+}
+
+function setMoveFilesDestination(path) {
+  const input = document.getElementById("moveFilesDestination");
+  if (input) input.value = path;
+}
+
+function renderMoveFilesList(files) {
+  if (!files.length) {
+    return '<div class="text-muted small">No files found for this torrent.</div>';
+  }
+  return `<div class="list-group list-group-flush">${files.map((file) => `
+    <label class="list-group-item d-flex align-items-center gap-2">
+      <input type="checkbox" class="form-check-input move-file-checkbox mt-0" value="${escapeHtml(file.path)}" ${file.exists ? "checked" : "disabled"}>
+      <span class="flex-grow-1 text-truncate" title="${escapeHtml(file.relative_path || file.name || "")}">${escapeHtml(file.relative_path || file.name || "")}</span>
+      <span class="small text-muted text-nowrap">${file.size != null ? formatBytes(file.size) : "missing"}</span>
+    </label>
+  `).join("")}</div>`;
+}
+
+async function openMoveFilesModal(torrentId) {
+  if (!torrentId) return;
+  const modalId = "moveFilesModal";
+  let modal = document.getElementById(modalId);
+  if (!modal) {
+    modal = document.createElement("div");
+    modal.id = modalId;
+    modal.className = "modal fade";
+    modal.tabIndex = -1;
+    modal.setAttribute("aria-hidden", "true");
+    document.body.appendChild(modal);
+  }
+  modal.innerHTML = `
+    <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable modal-lg">
+      <div class="modal-content themed-modal">
+        <div class="modal-header">
+          <h5 class="modal-title mb-0"><i class="bi bi-folder-symlink me-2"></i>Move Downloaded Files</h5>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <div id="moveFilesBody" class="mb-3"><div class="text-center py-3"><span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span></div></div>
+          <label class="form-label mb-1" for="moveFilesDestination">Move to</label>
+          <div class="input-group input-group-sm mb-2">
+            <input class="form-control" type="text" id="moveFilesDestination" placeholder="/userdata/roms">
+            <button class="btn btn-outline-secondary" type="button" onclick="openTorrentDirBrowser('moveFilesDestination', 'Choose destination')"><i class="bi bi-folder2-open me-1"></i>Browse</button>
+          </div>
+          <div id="moveFilesSuggestions" class="d-flex flex-wrap gap-2 mb-3">${renderMoveFilesLocationChips((torrentsLastPayload || {}).recent_move_locations)}</div>
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="moveFilesCleanup">
+            <label class="form-check-label small" for="moveFilesCleanup">Delete the remaining downloaded files after moving (only if the move succeeds)</label>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="button" class="btn btn-primary" id="moveFilesConfirmBtn" onclick="confirmMoveFiles('${escapeHtml(torrentId)}')"><i class="bi bi-arrow-right-circle me-1"></i>Move</button>
+        </div>
+      </div>
+    </div>`;
+  if (window.bootstrap?.Modal) {
+    window.bootstrap.Modal.getOrCreateInstance(modal).show();
+  } else {
+    modal.classList.add("show");
+    modal.style.display = "block";
+  }
+  const body = document.getElementById("moveFilesBody");
+  try {
+    const result = await api(`/admin/torrents/${encodeURIComponent(torrentId)}/files`);
+    if (body) body.innerHTML = renderMoveFilesList(result.files || []);
+  } catch (err) {
+    if (body) body.innerHTML = `<div class="small text-danger">Failed to list files: ${escapeHtml(err.message || "unknown error")}</div>`;
+  }
+}
+
+async function confirmMoveFiles(torrentId) {
+  if (!torrentId) return;
+  const checked = Array.from(document.querySelectorAll(".move-file-checkbox:checked")).map((el) => el.value);
+  const destination = (document.getElementById("moveFilesDestination")?.value || "").trim();
+  const cleanup = Boolean(document.getElementById("moveFilesCleanup")?.checked);
+  if (!checked.length) { showToast("Select at least one file to move.", "warning"); return; }
+  if (!destination) { showToast("Choose a destination folder.", "warning"); return; }
+  const btn = document.getElementById("moveFilesConfirmBtn");
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Moving...';
+  }
+  try {
+    const result = await apiPost(`/admin/torrents/${encodeURIComponent(torrentId)}/move`, { files: checked, destination, cleanup });
+    const moved = (result.moved || []).length;
+    const errors = (result.errors || []).length;
+    if (result.status === "ok") {
+      showToast(`Moved ${moved} file${moved === 1 ? "" : "s"}${result.cleanup_performed ? " and cleaned up the download folder." : "."}`, "success");
+      const modal = document.getElementById("moveFilesModal");
+      if (modal && window.bootstrap?.Modal) window.bootstrap.Modal.getOrCreateInstance(modal).hide();
+    } else {
+      showToast(`Moved ${moved} of ${checked.length} file(s); ${errors} failed.`, "warning", 8000);
+    }
+    await refreshTorrentsLive();
+  } catch (err) {
+    showToast(`Move failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  } finally {
+    if (btn && btn.isConnected) {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="bi bi-arrow-right-circle me-1"></i>Move';
+    }
   }
 }
 
@@ -2830,7 +3119,7 @@ function openTorrentDirBrowser(targetInputId = "torrentDir", title = "Choose tor
   }
   modal.innerHTML = `
     <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
-      <div class="modal-content">
+      <div class="modal-content themed-modal">
         <div class="modal-header">
           <div>
             <h5 class="modal-title mb-0"><i class="bi bi-folder2-open me-2"></i>${escapeHtml(title)}</h5>
@@ -7305,7 +7594,7 @@ async function submitLogin() {
       passwordInput.focus();
       return;
     }
-    // A full reload re-runs bootstrap() from scratch with the new session
+    // A full reload re-runs bootstrapApp() from scratch with the new session
     // cookie already set by the browser -- simpler and more robust than
     // reconstructing all the nav/theme/router state this login view skipped.
     window.location.reload();
@@ -7373,7 +7662,14 @@ function renderLoginPage() {
   usernameInput.focus();
 }
 
-async function bootstrap() {
+// Named bootstrapApp(), not bootstrap() -- a top-level `function bootstrap`
+// declaration is hoisted onto `window.bootstrap`, silently shadowing the
+// Bootstrap UI library's own global of the same name (loaded first in
+// index.html). That collision broke every data-bs-dismiss="modal" button on
+// any modal shown via window.bootstrap.Modal, since window.bootstrap.Modal
+// resolved to undefined and callers fell back to a manual show() path that
+// Bootstrap's own dismiss handling doesn't know how to hide.
+async function bootstrapApp() {
   let authenticated = false;
   try {
     const session = await api("/auth/session");
@@ -7391,4 +7687,4 @@ document.getElementById("logoutBtn")?.addEventListener("click", (event) => {
   event.preventDefault();
   logout();
 });
-bootstrap();
+bootstrapApp();

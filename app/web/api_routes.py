@@ -328,6 +328,10 @@ class ApiRoutesMixin:
                 self._handle_admin_torrents_browse(query_params.get("path", [""])[0])
                 return
 
+            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "torrents" and parts[3] == "files":
+                self._handle_admin_torrent_files(parts[2])
+                return
+
             if len(parts) == 2 and parts[0] == "admin" and parts[1] == "vpn":
                 self._handle_admin_vpn_status()
                 return
@@ -724,6 +728,24 @@ class ApiRoutesMixin:
 
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "torrents" and parts[3] == "delete":
                 self._handle_admin_torrent_delete(parts[2])
+                return
+
+            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "torrents" and parts[3] == "move":
+                payload = self._read_json_body()
+                self._handle_admin_torrent_move(parts[2], payload)
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "torrents" and parts[2] == "pause":
+                self._handle_admin_torrents_pause()
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "torrents" and parts[2] == "resume":
+                self._handle_admin_torrents_resume()
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "torrents" and parts[2] == "clear":
+                payload = self._read_json_body()
+                self._handle_admin_torrents_clear(payload)
                 return
 
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "vpn" and parts[2] == "upload":

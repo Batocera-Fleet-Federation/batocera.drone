@@ -1,6 +1,6 @@
 ---
 name: drone-torrents-management
-description: Use this when designing, reviewing, debugging, or modifying the Drone's Torrents admin tile — watched-folder .torrent downloads, the local aria2c daemon/RPC lifecycle, the watched folder vs. download-location distinction, aria2c install, .torrent upload, force-start/cancel/delete, or app/transfer/torrent_manager.py, aria2_runtime.py, web/handlers_torrents.py.
+description: Use this when designing, reviewing, debugging, or modifying the Drone's Torrents admin tile — watched-folder .torrent downloads, the local aria2c daemon/RPC lifecycle, the watched folder vs. download-location distinction, aria2c install, .torrent upload, force-start/cancel/delete, moving downloaded files out of a completed torrent, global pause/resume/bulk-clear, or app/transfer/torrent_manager.py, aria2_runtime.py, web/handlers_torrents.py.
 ---
 
 # Drone Torrents Management Skill
@@ -133,6 +133,108 @@ except implicitly via `Aria2Daemon.stop()` at Drone shutdown
 (`--stop-with-process=<drone-pid>` ties its lifetime to the Drone process so
 nothing is ever orphaned).
 
+## Moving downloaded files out (`list_files`/`move_files`)
+
+A completed torrent's row grows a "Move files" button (`status === "complete"`
+only). The backend never trusts a client-supplied path directly -- it only
+moves files that are in the torrent's own **known files** set, computed by
+`_resolve_known_files(entry)`:
+
+1. Preferred source: `entry["files"]`, a list of absolute paths captured from
+   aria2's own `aria2.tellStatus` response (`_TELL_STATUS_KEYS` includes
+   `"files"`; `_apply_aria2_status_locked` copies `result["files"][*]["path"]`
+   into the entry on every successful status poll, not just at completion, so
+   it's populated well before the torrent finishes). This field is added to
+   `_ENTRY_PERSISTED_FIELDS`, so it survives a Drone restart even after aria2's
+   own GID/history does not.
+2. Fallback (pre-upgrade entries, or aria2 not reporting `files` for some
+   reason): a single-file guess, `Path(download_dir) / name`.
+
+`move_files(entry_id, requested_paths, destination, cleanup=...)` intersects
+`requested_paths` against the known-files set (anything not in it is silently
+dropped, not moved) and validates `destination` against `_browse_roots()`
+exactly like the folder browser -- the same security boundary, reused. Moved
+files are individually `shutil.move`d with a `name (2).ext` collision suffix
+(same pattern as `save_uploaded_torrents`).
+
+**Cleanup semantics (`cleanup=True`), verbiage: "Delete the remaining
+downloaded files after moving (only if the move succeeds)"** -- cleanup only
+fires when *every* requested file moved without error
+(`all_succeeded = not errors and len(moved) == len(selected)`); a partial
+failure never deletes anything. What "cleanup" deletes is computed by
+`_torrent_root_dir(entry, known_files)`: if all known files share one first
+path segment under `download_dir` (aria2 made a dedicated per-torrent
+subfolder -- the common case for multi-file torrents), that whole subfolder is
+`shutil.rmtree`'d, which correctly sweeps up files the user did *not* select
+too. If the known files sit directly in `download_dir` (single-file torrents,
+or a `download_dir` shared by multiple torrents), there is no dedicated
+subfolder to remove -- cleanup only unlinks the specific known files, **never**
+`download_dir` itself, since that folder may hold other torrents' payloads.
+This same `_remove_downloaded_payload` helper backs `delete()` and `clear()`
+below.
+
+A destination the user picks is remembered in `self._recent_move_locations`
+(module constant `MOVE_RECENT_LOCATIONS_MAX = 8`, most-recent-first, deduped,
+persisted as a top-level `recent_move_locations` snapshot field) -- the
+frontend merges this with a small hardcoded suggestion list
+(`/userdata/roms`, `/userdata/bios`, `/userdata/saves`, `/userdata/movies`) as
+quick-pick chips, recent locations first.
+
+## Delete now removes downloaded files too
+
+`delete()` used to explicitly keep payload files (`downloaded_files_kept:
+true`). It now calls `_remove_downloaded_payload(entry)` after removing the
+`.torrent` file and registry entry, and reports
+`downloaded_files_removed: bool` instead -- **this is a breaking response-field
+rename**, not additive; anything reading the old field name needs updating.
+Applies regardless of the torrent's status (queued/downloading/error/complete)
+-- an in-flight download's partial files are removed too. The frontend's
+confirm dialog text was updated to say so explicitly; don't silently soften it
+back to "keeps files."
+
+## Global pause / resume / bulk clear
+
+Mirrors `download_manager.py`'s `pause()`/`resume()`/`clear_queue()` pattern,
+adapted for aria2: `pause()` sets `self._paused` (persisted) and calls the real
+aria2 RPC method `aria2.pauseAll` (pauses every active/waiting download in one
+call); `resume()` clears the flag and calls `aria2.unpauseAll`. `_tick()`'s
+Phase C skips `_pick_startable_gids_locked()` entirely while `self._paused` --
+newly-scanned `.torrent` files still get registered and added to aria2 (still
+paused, harmless), they just never get unpaused until resume. Force Start is
+**not** blocked by the global pause (deliberate -- "force" means override
+everything, consistent with it already bypassing the concurrency limit).
+
+One real side effect worth knowing: pausing a **seeding** (`complete` +
+`seeding: true`) torrent also pauses its upload via `aria2.pauseAll`, and
+`_apply_aria2_status_locked` maps aria2's `"paused"` status to our `"queued"`
+UI status (there's no separate "seeding-paused" state in the 4-value enum) --
+so a paused, still-registered seeding torrent will display as `queued` until
+resumed. This is a pre-existing status-mapping simplification, not a new bug;
+don't "fix" it by adding a 5th status without deliberately deciding to expand
+the enum everywhere it's checked.
+
+`clear(payload)` bulk-processes torrents matching `scope` (`"completed"` =
+only `status == "complete"`, `"all"` = every entry) against three independent
+boolean flags: `delete_from_ui`, `delete_torrent_file`, `delete_downloaded_files`
+(at least one required, else `{"status": "no_action_selected"}`). Any entry
+touched by `delete_downloaded_files` **or** `delete_from_ui` gets
+`_remove_from_aria2(gid)` called first (even if staying registered) --
+otherwise a live aria2 download would keep writing into a folder `clear()` is
+about to delete out from under it. If files are deleted but the entry is
+**not** removed from the UI, the live entry is patched with `files: []` and
+`message: "Downloaded files removed"` so the row doesn't lie about having
+content.
+
+## Display sort: actively-downloading first
+
+`snapshot()` re-sorts the **already-built** `torrents` response list by
+`_STATUS_DISPLAY_PRIORITY` (`downloading=0, queued=1, error=2, complete=3`,
+tiebreak by `added_at`) right before returning. This is deliberately a
+presentation-only pass over the final list -- `_sorted_entries_locked()`
+(FIFO by `added_at`, used internally for scheduling fairness and restore
+order) is **untouched**, so reordering the API response never changes which
+queued torrent gets the next free slot.
+
 ## File allocation is a checkbox, not aria2's 4-way enum
 
 aria2 supports `none`/`prealloc`/`trunc`/`falloc` for `--file-allocation`, but
@@ -171,6 +273,20 @@ re-`innerHTML` the whole tile, on every 3s poll tick.
   first with a tmp path -- see the `DRONE_VPN_DIR`-equivalent gotcha in
   `drone-vpn-management` for why this class of bug is easy to introduce for
   any install-root-relative path.
+- Trusting a client-supplied file path in `move_files()` instead of
+  intersecting against `_resolve_known_files(entry)` -- would let a caller
+  move arbitrary files the torrent never downloaded.
+- Computing `_torrent_root_dir()` cleanup against a shared `download_dir` and
+  `rmtree`-ing it directly -- only remove the dedicated per-torrent subfolder
+  when one genuinely exists; a shared download dir holding other torrents'
+  files must never be wholesale-deleted.
+- Assuming `delete()` still keeps downloaded files -- that changed; it now
+  calls `_remove_downloaded_payload()` too, and the response field is
+  `downloaded_files_removed`, not the old `downloaded_files_kept`.
+- Declaring a top-level `function bootstrap()`/`async function bootstrap()` in
+  `drone.js` -- see the "window.bootstrap collision" note in
+  `drone-admin-features`'s modal section; it silently breaks every
+  `data-bs-dismiss="modal"` button app-wide, including any new Torrents modal.
 
 ## Expected output format
 
@@ -205,12 +321,16 @@ Do not:
   `Aria2Daemon`'s launch args without re-running a live smoke test against a
   real aria2c binary (mocked-RPC tests cannot catch this class of bug),
 - use `killall`/process-name-based signals against aria2c,
-- delete a torrent's downloaded payload files (`delete()` removes the
-  `.torrent` file and registry entry only; downloaded files are always kept),
 - bake a resolved default path into persisted settings where the source
   value should keep tracking a different, live setting,
 - add a folder-picker without scoping it to the existing storage roots
-  (`_browse_roots()`).
+  (`_browse_roots()`),
+- move or delete a file in `move_files()`/`clear()` without first checking it
+  against `_resolve_known_files(entry)` -- never trust a client-supplied path
+  directly,
+- `rmtree` a torrent's `download_dir` itself in cleanup logic -- only remove a
+  genuine dedicated per-torrent subfolder (`_torrent_root_dir()`), since the
+  dir can be shared across torrents.
 
 ## Default bias
 

@@ -146,8 +146,13 @@ Start able to bypass the concurrency limit). Two independent, both-optional,
 both-storage-root-scoped folders: where `.torrent` files are watched, and where
 aria2 actually writes downloaded payloads (can be a different disk/mount
 entirely, e.g. `/media/<external-drive>` — defaults to the watch folder if
-unset). See the dedicated **drone-torrents-management** skill for the aria2
-RPC lifecycle, restart/PID-recovery behavior, and upload mechanics.
+unset). A completed torrent can have its downloaded files moved elsewhere on
+disk (with an optional cleanup of what's left behind); Delete removes
+downloaded files too now; a global Pause/Resume toggle and a scoped bulk Clear
+sit left of the Refresh button; the table always surfaces actively-downloading
+torrents first. See the dedicated **drone-torrents-management** skill for the
+aria2 RPC lifecycle, restart/PID-recovery behavior, upload mechanics, and all
+of the above in depth.
 
 ### VPN
 
@@ -284,6 +289,11 @@ cancel/retry/clear (`/admin/downloads/{pause,resume,clear}`,
   what triggers a browser's own native credential dialog, which is both bad
   UX and invisible/unscriptable to browser automation. Use the
   `X-Drone-Auth-Required` marker instead (see "Login and sessions" above).
+- Declaring a top-level `function bootstrap()` (or `async function bootstrap()`)
+  anywhere in `drone.js` -- silently clobbers `window.bootstrap` (the real
+  Bootstrap UI library), breaking every `data-bs-dismiss="modal"` button
+  app-wide in a way that looks like a per-modal bug. See "The window.bootstrap
+  collision gotcha" above.
 
 ## Live-refreshing tile pattern (Torrents, VPN)
 
@@ -298,6 +308,54 @@ mount (stable container ids for each region that changes), and a separate
 `patch*Live(payload)` — called by both the `setInterval` poll and the manual
 Refresh button — only ever sets `.innerHTML` on those specific already-mounted
 leaf nodes.
+
+## Modal dismiss buttons: the `window.bootstrap` collision gotcha
+
+`drone.js` has its own app-init entry point, which **must never be named
+`bootstrap`** (as a top-level `function`/`async function` declaration). A
+top-level function declaration is hoisted and becomes a property of the global
+object as soon as the script's global scope evaluates — since `index.html`
+loads `bootstrap.bundle.min.js` (which sets `window.bootstrap` to the real
+Bootstrap UI library) *before* `drone.js`, a same-named function declaration in
+`drone.js` silently **overwrites `window.bootstrap` with the app's own
+function**, discarding the library reference entirely. This actually happened
+(the login-page/session-bootstrap entry point was originally named
+`bootstrap()`) and the app's init function is now `bootstrapApp()` instead —
+don't reintroduce the collision under a different name that still happens to
+be `bootstrap`.
+
+**Symptom, if this regresses:** every `window.bootstrap?.Modal` check in
+`drone.js` (the standard way this app opens a Bootstrap modal — see any
+`openXModal()` function) silently evaluates false and falls back to a manual
+`modal.classList.add("show"); modal.style.display = "block"` path. That path
+displays the modal fine (CSS doesn't care how the classes got there), so
+**the bug is invisible until someone clicks a dismiss control** — no
+`.modal-backdrop` element is ever created, and any button using Bootstrap's
+own `data-bs-dismiss="modal"` markup silently does nothing: the global
+delegated dismiss handler (registered once, at `bootstrap.bundle.min.js` load
+time) calls `Modal.getOrCreateInstance(modalEl).hide()`, which lazily
+constructs a *fresh* instance that was never told it's shown
+(`_isShown` false), so `.hide()` no-ops. This exact bug was reported as "the
+Cancel button doesn't work" on the Torrents folder-browser modal and traced
+back to this collision, not to anything torrent-specific — check
+`typeof window.bootstrap` (`"object"`, not `"function"`) and
+`!!window.bootstrap.Modal` first whenever a `data-bs-dismiss`/Bootstrap-API
+modal in this app won't close, before assuming the bug is in the modal's own
+markup or its custom open/close functions.
+
+## Browser-automation note: `window.confirm()` blocks the tab
+
+Every destructive admin action in this app (Delete, Cancel, Clear, purge,
+remove-missing, ...) guards itself with a plain `window.confirm("...")` before
+calling the API — a real, intentional safety pattern (see the Safety rules
+below), not a bug. It also means clicking one of those buttons under
+claude-in-chrome/CDP-based automation triggers a native, **unscriptable**
+browser dialog that freezes the tab (screenshots/JS eval start timing out)
+until a human clicks a button in it — there is no CDP-level way to accept or
+dismiss it programmatically in this app (no `Page.javascriptDialogOpening`
+auto-handler is wired up). If you need to browser-test a confirm-gated action,
+warn the user first and expect to ask them to click through it, rather than
+assuming a `key`/`click` retry will ever unblock the tab on its own.
 
 ## Expected output format
 

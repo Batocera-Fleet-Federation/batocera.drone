@@ -20,6 +20,7 @@ Pure stdlib.
 
 import base64
 import os
+import shutil
 import sys
 import time
 import uuid
@@ -149,6 +150,7 @@ _ENTRY_PERSISTED_FIELDS = (
     "total_bytes",
     "completed_bytes",
     "progress_percent",
+    "files",
 )
 
 _ENTRY_LIVE_DEFAULTS = {
@@ -162,6 +164,96 @@ _ENTRY_LIVE_DEFAULTS = {
     "eta_seconds": None,
 }
 
+_STATUS_DISPLAY_PRIORITY = {"downloading": 0, "queued": 1, "error": 2, "complete": 3}
+
+MOVE_RECENT_LOCATIONS_MAX = 8
+CLEAR_SCOPES = ("completed", "all")
+
+
+def _resolve_known_files(entry: dict) -> List[Path]:
+    """Filesystem paths known to belong to this torrent, best-effort.
+
+    Prefers the exact file list aria2 reported (captured at scan/completion
+    time); falls back to a single-file name guess for entries that predate
+    this field or where aria2 never reported one.
+    """
+    paths = [Path(p) for p in (entry.get("files") or []) if p]
+    if paths:
+        return paths
+    download_dir = entry.get("download_dir")
+    name = entry.get("name")
+    if download_dir and name:
+        guess = Path(download_dir) / name
+        if guess.exists():
+            return [guess]
+    return []
+
+
+def _torrent_root_dir(entry: dict, known_files: List[Path]) -> Optional[Path]:
+    """The dedicated per-torrent subfolder under ``download_dir``, if aria2
+    created one (typical for multi-file torrents) -- removing it cleans up
+    every file belonging to the torrent (selected for move or not) plus any
+    stray control files in one safe step. Returns ``None`` for single-file
+    torrents that sit directly inside the (possibly shared) ``download_dir``,
+    where only the specific known files should ever be touched.
+    """
+    download_dir = entry.get("download_dir")
+    if not download_dir or not known_files:
+        return None
+    try:
+        download_dir_resolved = Path(download_dir).resolve()
+    except OSError:
+        return None
+    roots = set()
+    for candidate in known_files:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            resolved = candidate
+        try:
+            relative = resolved.relative_to(download_dir_resolved)
+        except ValueError:
+            continue
+        roots.add(relative.parts[0] if len(relative.parts) > 1 else None)
+    if len(roots) == 1:
+        (only,) = roots
+        if only is not None:
+            return download_dir_resolved / only
+    return None
+
+
+def _remove_downloaded_payload(entry: dict) -> bool:
+    """Best-effort removal of everything this torrent downloaded. Returns
+    True when we're confident nothing belonging to the torrent is left."""
+    known_files = _resolve_known_files(entry)
+    torrent_root = _torrent_root_dir(entry, known_files)
+    removed_ok = True
+    if torrent_root is not None:
+        try:
+            shutil.rmtree(torrent_root)
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            print(f"Torrent payload cleanup failed for {torrent_root}: {error}", file=sys.stderr, flush=True)
+            removed_ok = False
+    else:
+        for candidate in known_files:
+            try:
+                candidate.unlink(missing_ok=True)
+            except OSError as error:
+                print(f"Torrent payload file delete failed for {candidate}: {error}", file=sys.stderr, flush=True)
+                removed_ok = False
+    download_dir = entry.get("download_dir")
+    name = entry.get("name")
+    if download_dir and name:
+        try:
+            control = Path(download_dir) / f"{name}.aria2"
+            if control.is_file():
+                control.unlink()
+        except OSError:
+            pass
+    return removed_ok
+
 
 class TorrentManager:
     """Watched-folder torrent queue backed by a local aria2c daemon."""
@@ -173,6 +265,8 @@ class TorrentManager:
         self._daemon: Optional[Aria2Daemon] = None
         self._config: dict = _normalize_torrent_settings({}, settings)
         self._torrents: Dict[str, dict] = {}
+        self._paused: bool = False
+        self._recent_move_locations: List[str] = []
         self._restore_state()
         if start_worker:
             thread = Thread(target=self._worker, name="drone-torrent-manager", daemon=True)
@@ -189,6 +283,9 @@ class TorrentManager:
         if not isinstance(stored, dict):
             return
         self._config = _normalize_torrent_settings(stored.get("settings"), self.settings)
+        self._paused = bool(stored.get("paused"))
+        recent = stored.get("recent_move_locations")
+        self._recent_move_locations = [str(p) for p in recent][:MOVE_RECENT_LOCATIONS_MAX] if isinstance(recent, list) else []
         entries = stored.get("torrents") if isinstance(stored.get("torrents"), list) else []
         for raw in entries:
             if not isinstance(raw, dict):
@@ -212,6 +309,8 @@ class TorrentManager:
             entry["message"] = str(entry.get("message") or "")
             entry["name"] = str(entry.get("name") or Path(torrent_file).stem)
             entry["download_dir"] = str(entry.get("download_dir") or effective_download_directory(self._config))
+            files_list = entry.get("files")
+            entry["files"] = [str(p) for p in files_list] if isinstance(files_list, list) else []
             self._torrents[entry_id] = entry
 
     def _persist_locked(self) -> None:
@@ -221,6 +320,8 @@ class TorrentManager:
             {
                 "version": 1,
                 "settings": dict(self._config),
+                "paused": bool(self._paused),
+                "recent_move_locations": list(self._recent_move_locations),
                 "torrents": [
                     {field: entry.get(field) for field in _ENTRY_PERSISTED_FIELDS}
                     for entry in self._sorted_entries_locked()
@@ -330,7 +431,7 @@ class TorrentManager:
                         if entry.get("message") != "aria2c is not installed":
                             entry["message"] = "aria2c is not installed"
                             dirty = True
-            else:
+            elif not self._paused:
                 unpause_gids = self._pick_startable_gids_locked(config)
             if dirty:
                 self._persist_locked()
@@ -373,6 +474,7 @@ class TorrentManager:
                 "total_bytes": 0,
                 "completed_bytes": 0,
                 "progress_percent": 0.0,
+                "files": [],
                 **dict(_ENTRY_LIVE_DEFAULTS),
             }
             dirty = True
@@ -426,6 +528,11 @@ class TorrentManager:
         entry["upload_speed_bps"] = int(result.get("uploadSpeed") or 0)
         entry["num_seeders"] = int(result.get("numSeeders") or 0)
         entry["connections"] = int(result.get("connections") or 0)
+        files_field = result.get("files")
+        if isinstance(files_field, list):
+            paths = [str(f["path"]) for f in files_field if isinstance(f, dict) and f.get("path")]
+            if paths:
+                entry["files"] = paths
         bittorrent = result.get("bittorrent") if isinstance(result.get("bittorrent"), dict) else {}
         info = bittorrent.get("info") if isinstance(bittorrent.get("info"), dict) else {}
         if info.get("name"):
@@ -562,20 +669,198 @@ class TorrentManager:
             torrent_file_removed = True
         except OSError as error:
             print(f"Torrent file delete failed: {error}", file=sys.stderr, flush=True)
-        # Best-effort .aria2 control-file cleanup; downloaded payload files are
-        # deliberately kept.
-        try:
-            control = Path(entry.get("download_dir") or "") / f"{entry.get('name') or ''}.aria2"
-            if entry.get("name") and control.is_file():
-                control.unlink()
-        except OSError:
-            pass
+        downloaded_files_removed = _remove_downloaded_payload(entry)
         self.wake()
         return {
             "status": "deleted",
             "torrent_file_removed": torrent_file_removed,
-            "downloaded_files_kept": True,
+            "downloaded_files_removed": downloaded_files_removed,
         }
+
+    def pause(self) -> dict:
+        with self._lock:
+            self._paused = True
+            self._persist_locked()
+        rpc = self._rpc_if_running()
+        if rpc is not None:
+            try:
+                rpc.call("aria2.pauseAll")
+            except Aria2RpcError as error:
+                print(f"Torrent pauseAll failed: {error}", file=sys.stderr, flush=True)
+        return self.snapshot()
+
+    def resume(self) -> dict:
+        with self._lock:
+            self._paused = False
+            self._persist_locked()
+        rpc = self._rpc_if_running()
+        if rpc is not None:
+            try:
+                rpc.call("aria2.unpauseAll")
+            except Aria2RpcError as error:
+                print(f"Torrent unpauseAll failed: {error}", file=sys.stderr, flush=True)
+        self.wake()
+        return self.snapshot()
+
+    def clear(self, payload) -> dict:
+        payload = payload if isinstance(payload, dict) else {}
+        delete_from_ui = bool(payload.get("delete_from_ui"))
+        delete_torrent_file = bool(payload.get("delete_torrent_file"))
+        delete_downloaded_files = bool(payload.get("delete_downloaded_files"))
+        scope = str(payload.get("scope") or "completed").strip().lower()
+        if scope not in CLEAR_SCOPES:
+            scope = "completed"
+        if not (delete_from_ui or delete_torrent_file or delete_downloaded_files):
+            return {"status": "no_action_selected"}
+
+        with self._lock:
+            if scope == "completed":
+                targets = [dict(entry) for entry in self._torrents.values() if entry.get("status") == "complete"]
+            else:
+                targets = [dict(entry) for entry in self._torrents.values()]
+            if delete_from_ui:
+                for entry in targets:
+                    self._torrents.pop(entry["id"], None)
+                self._persist_locked()
+
+        for entry in targets:
+            if delete_torrent_file:
+                try:
+                    Path(entry["torrent_file"]).unlink(missing_ok=True)
+                except OSError as error:
+                    print(f"Torrent clear: file delete failed: {error}", file=sys.stderr, flush=True)
+            if delete_downloaded_files or delete_from_ui:
+                self._remove_from_aria2(entry.get("gid"))
+            if delete_downloaded_files:
+                _remove_downloaded_payload(entry)
+
+        if delete_downloaded_files and not delete_from_ui:
+            with self._lock:
+                for entry in targets:
+                    live = self._torrents.get(entry["id"])
+                    if live is not None:
+                        live["files"] = []
+                        live["message"] = "Downloaded files removed"
+                self._persist_locked()
+
+        self.wake()
+        return {"status": "ok", "cleared": len(targets), "scope": scope}
+
+    def list_files(self, entry_id: str) -> dict:
+        with self._lock:
+            entry = self._torrents.get(entry_id)
+            if entry is None:
+                return {"status": "not_found"}
+            if entry.get("status") != "complete":
+                return {"status": "not_applicable", "message": "torrent has not completed yet"}
+            entry_copy = dict(entry)
+        known_files = _resolve_known_files(entry_copy)
+        download_dir = entry_copy.get("download_dir") or ""
+        try:
+            download_dir_resolved = Path(download_dir).resolve() if download_dir else None
+        except OSError:
+            download_dir_resolved = None
+        files = []
+        for candidate in known_files:
+            try:
+                exists = candidate.is_file()
+            except OSError:
+                exists = False
+            try:
+                size = candidate.stat().st_size if exists else None
+            except OSError:
+                size = None
+            relative = candidate.name
+            if download_dir_resolved is not None:
+                try:
+                    relative = str(candidate.resolve().relative_to(download_dir_resolved))
+                except (ValueError, OSError):
+                    pass
+            files.append(
+                {
+                    "path": str(candidate),
+                    "relative_path": relative,
+                    "name": candidate.name,
+                    "size": size,
+                    "exists": exists,
+                }
+            )
+        return {"status": "ok", "files": files, "download_dir": download_dir}
+
+    def move_files(self, entry_id: str, requested_paths, destination: str, *, cleanup: bool) -> dict:
+        with self._lock:
+            entry = self._torrents.get(entry_id)
+            if entry is None:
+                return {"status": "not_found"}
+            if entry.get("status") != "complete":
+                return {"status": "not_applicable", "message": "torrent has not completed yet"}
+            entry_copy = dict(entry)
+
+        known_by_str = {str(candidate): candidate for candidate in _resolve_known_files(entry_copy)}
+        selected: List[Path] = []
+        for raw in requested_paths or []:
+            candidate = known_by_str.get(str(raw))
+            if candidate is not None and candidate not in selected:
+                selected.append(candidate)
+        if not selected:
+            return {"status": "no_files_selected"}
+
+        roots = self._browse_roots()
+        try:
+            destination_path = Path(destination).resolve()
+        except OSError:
+            return {"status": "invalid_destination", "message": "destination path is invalid"}
+        if not any(destination_path == root or root in destination_path.parents for root in roots):
+            return {"status": "invalid_destination", "message": "destination is outside the allowed storage roots"}
+        try:
+            destination_path.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            return {"status": "invalid_destination", "message": f"destination is not writable: {error}"}
+
+        moved: List[str] = []
+        moved_sources: List[Path] = []
+        errors: List[dict] = []
+        for source in selected:
+            target = destination_path / source.name
+            counter = 1
+            while target.exists():
+                counter += 1
+                target = destination_path / f"{source.stem} ({counter}){source.suffix}"
+            try:
+                shutil.move(str(source), str(target))
+                moved.append(str(target))
+                moved_sources.append(source)
+            except OSError as error:
+                errors.append({"file": str(source), "error": str(error)})
+
+        all_succeeded = not errors and len(moved) == len(selected)
+        cleanup_performed = False
+        if cleanup and all_succeeded:
+            cleanup_performed = _remove_downloaded_payload(entry_copy)
+
+        with self._lock:
+            live_entry = self._torrents.get(entry_id)
+            if live_entry is not None:
+                if cleanup_performed:
+                    live_entry["files"] = []
+                elif moved_sources:
+                    moved_set = {str(source) for source in moved_sources}
+                    live_entry["files"] = [p for p in (live_entry.get("files") or []) if p not in moved_set]
+                if all_succeeded:
+                    self._remember_recent_location_locked(str(destination_path))
+            self._persist_locked()
+
+        return {
+            "status": "ok" if all_succeeded else "partial",
+            "moved": moved,
+            "errors": errors,
+            "cleanup_performed": cleanup_performed,
+        }
+
+    def _remember_recent_location_locked(self, path: str) -> None:
+        recent = [p for p in self._recent_move_locations if p != path]
+        recent.insert(0, path)
+        self._recent_move_locations = recent[:MOVE_RECENT_LOCATIONS_MAX]
 
     def _remove_from_aria2(self, gid: Optional[str]) -> None:
         if not gid:
@@ -728,6 +1013,8 @@ class TorrentManager:
         with self._lock:
             config = dict(self._config)
             entries = [dict(entry) for entry in self._sorted_entries_locked()]
+            paused = bool(self._paused)
+            recent_move_locations = list(self._recent_move_locations)
         daemon = self._daemon
         aria2 = aria2_install_state(self.settings)
         aria2["running"] = bool(daemon is not None and daemon.running)
@@ -758,6 +1045,11 @@ class TorrentManager:
                     "completed_at": entry.get("completed_at"),
                 }
             )
+        # Display order only: actively-downloading torrents surface first,
+        # then queued, then error, then complete. Internal scheduling
+        # (_sorted_entries_locked) stays FIFO by added_at for fair slot
+        # allocation -- this re-sort touches only the response payload.
+        torrents.sort(key=lambda t: (_STATUS_DISPLAY_PRIORITY.get(t["status"], 9), t.get("added_at") or "", t.get("id") or ""))
         download_dir = effective_download_directory(config)
         return {
             "target_drone_id": self.settings.device_id,
@@ -768,4 +1060,6 @@ class TorrentManager:
             "aria2": aria2,
             "counts": counts,
             "torrents": torrents,
+            "paused": paused,
+            "recent_move_locations": recent_move_locations,
         }

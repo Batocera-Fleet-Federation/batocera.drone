@@ -1108,6 +1108,41 @@
     }
     .remote-connect-modal .modal-body { background: rgba(11, 16, 32, 0.92); }
 
+    /* Generic dark-themed modal, same treatment as .remote-connect-modal --
+       use this for any new modal instead of copy-pasting the block above. */
+    .themed-modal {
+      color: var(--admin-text);
+      background: rgba(15, 23, 42, 0.98);
+      border: 1px solid var(--admin-border);
+    }
+    .themed-modal .modal-header,
+    .themed-modal .modal-footer {
+      background: rgba(31, 42, 68, 0.94);
+      border-color: var(--admin-border);
+    }
+    .themed-modal .modal-body { background: rgba(11, 16, 32, 0.92); }
+    .themed-modal .list-group-item {
+      background: transparent;
+      color: var(--admin-text);
+      border-color: var(--admin-border);
+    }
+    .themed-modal .list-group-item-action:hover,
+    .themed-modal .list-group-item-action:focus {
+      background: rgba(59, 130, 246, 0.16);
+      color: var(--admin-text);
+    }
+    .themed-modal .form-control,
+    .themed-modal .form-select {
+      background: rgba(11, 16, 32, 0.85);
+      color: var(--admin-text);
+      border-color: var(--admin-border);
+    }
+    .themed-modal .form-control:focus,
+    .themed-modal .form-select:focus {
+      background: rgba(11, 16, 32, 0.95);
+      color: var(--admin-text);
+    }
+
     /* Image lightbox modal */
     .image-lightbox-overlay {
       position: fixed;

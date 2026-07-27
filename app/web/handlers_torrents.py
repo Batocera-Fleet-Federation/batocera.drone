@@ -98,3 +98,55 @@ class HandlersTorrentsMixin:
         result = manager.delete(torrent_id)
         status_code = 404 if result.get("status") == "not_found" else 200
         self._send_json(status_code, result)
+
+    def _handle_admin_torrent_files(self, torrent_id: str) -> None:
+        manager = _get_torrent_manager()
+        if manager is None:
+            self._send_json(503, {"error": "torrent manager unavailable"})
+            return
+        result = manager.list_files(torrent_id)
+        status_code = 404 if result.get("status") == "not_found" else 409 if result.get("status") == "not_applicable" else 200
+        self._send_json(status_code, result)
+
+    def _handle_admin_torrent_move(self, torrent_id: str, payload: dict) -> None:
+        manager = _get_torrent_manager()
+        if manager is None:
+            self._send_json(503, {"error": "torrent manager unavailable"})
+            return
+        payload = payload if isinstance(payload, dict) else {}
+        result = manager.move_files(
+            torrent_id,
+            payload.get("files"),
+            str(payload.get("destination") or ""),
+            cleanup=bool(payload.get("cleanup")),
+        )
+        status_map = {
+            "not_found": 404,
+            "not_applicable": 409,
+            "no_files_selected": 400,
+            "invalid_destination": 400,
+        }
+        self._send_json(status_map.get(result.get("status"), 200), result)
+
+    def _handle_admin_torrents_pause(self) -> None:
+        manager = _get_torrent_manager()
+        if manager is None:
+            self._send_json(503, {"error": "torrent manager unavailable"})
+            return
+        self._send_json(200, manager.pause())
+
+    def _handle_admin_torrents_resume(self) -> None:
+        manager = _get_torrent_manager()
+        if manager is None:
+            self._send_json(503, {"error": "torrent manager unavailable"})
+            return
+        self._send_json(200, manager.resume())
+
+    def _handle_admin_torrents_clear(self, payload: dict) -> None:
+        manager = _get_torrent_manager()
+        if manager is None:
+            self._send_json(503, {"error": "torrent manager unavailable"})
+            return
+        result = manager.clear(payload)
+        status_code = 400 if result.get("status") == "no_action_selected" else 200
+        self._send_json(status_code, result)

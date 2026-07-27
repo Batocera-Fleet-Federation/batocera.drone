@@ -590,6 +590,8 @@ def _schemas() -> Dict[str, Schema]:
                 "aria2": _ref("TorrentAria2Status"),
                 "counts": _object({status: _integer() for status in ("queued", "downloading", "complete", "error")}),
                 "torrents": _array(_ref("TorrentEntry")),
+                "paused": _boolean("Whether the global torrent queue is paused (aria2.pauseAll)"),
+                "recent_move_locations": _array(_string("Recently-used Move Files destination")),
             },
             description="Torrent queue snapshot: settings, aria2c status, and per-torrent progress.",
         ),
@@ -611,7 +613,7 @@ def _schemas() -> Dict[str, Schema]:
                 "status": _string(),
                 "message": _string(),
                 "torrent_file_removed": _boolean(),
-                "downloaded_files_kept": _boolean(),
+                "downloaded_files_removed": _boolean("Whether the downloaded payload was fully removed"),
             },
             ("status",),
             description="Torrent mutation result.",
@@ -650,6 +652,64 @@ def _schemas() -> Dict[str, Schema]:
                 "dirs": _array(_ref("TorrentBrowseEntry")),
             },
             description="Directory-picker listing, restricted to the Batocera storage roots.",
+        ),
+        "TorrentFile": _object(
+            {
+                "path": _string("Absolute path on the drone's filesystem"),
+                "relative_path": _string("Path relative to the torrent's download directory"),
+                "name": _string(),
+                "size": _integer(nullable=True),
+                "exists": _boolean("Whether the file is still present on disk"),
+            },
+            ("path", "relative_path", "name", "exists"),
+        ),
+        "TorrentFilesResponse": _object(
+            {
+                "status": _string(),
+                "message": _string(),
+                "files": _array(_ref("TorrentFile")),
+                "download_dir": _string(),
+            },
+            ("status",),
+            description="Files known to belong to a completed torrent's download.",
+        ),
+        "TorrentMoveRequest": _object(
+            {
+                "files": _array(_string("Absolute path, as returned by TorrentFilesResponse")),
+                "destination": _string("Target folder; must be inside the browsable storage roots"),
+                "cleanup": _boolean("Delete the torrent's remaining downloaded files afterward, only if every selected file moved successfully"),
+            },
+            ("files", "destination"),
+        ),
+        "TorrentMoveError": _object({"file": _string(), "error": _string()}, ("file", "error")),
+        "TorrentMoveResponse": _object(
+            {
+                "status": _string(),
+                "message": _string(),
+                "moved": _array(_string("New path of a successfully moved file")),
+                "errors": _array(_ref("TorrentMoveError")),
+                "cleanup_performed": _boolean(),
+            },
+            ("status",),
+            description="Result of moving selected files out of a completed torrent's download folder.",
+        ),
+        "TorrentClearRequest": _object(
+            {
+                "delete_from_ui": _boolean("Remove matching torrents from the list"),
+                "delete_torrent_file": _boolean("Delete each matching torrent's .torrent file"),
+                "delete_downloaded_files": _boolean("Delete each matching torrent's downloaded payload"),
+                "scope": _enum(("completed", "all"), "Which torrents to match; 'all' includes downloading/queued/error", default="completed"),
+            },
+            description="Bulk cleanup request; at least one delete_* flag must be set.",
+        ),
+        "TorrentClearResponse": _object(
+            {
+                "status": _string(),
+                "cleared": _integer("Number of torrents matched and processed"),
+                "scope": _string(),
+            },
+            ("status",),
+            description="Result of a bulk torrent cleanup.",
         ),
         "VpnStatusResponse": _object(
             {
@@ -1492,7 +1552,18 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
                 "post": _operation("Cancel a torrent (keeps partial files; Force Start can resume it)", {"200": _json_response("TorrentActionResponse"), "404": _json_response("TorrentActionResponse", "Torrent not found"), "409": _json_response("TorrentActionResponse", "Torrent is not cancelable")}, parameters=[_path_param("torrent_id")], tags=["admin", "torrents"], error_codes=("400", "401", "403", "429", "500", "503"))
             },
             "/admin/torrents/{torrent_id}/delete": {
-                "post": _operation("Delete a torrent: remove it from the list and delete its .torrent file (downloaded files are kept)", {"200": _json_response("TorrentActionResponse"), "404": _json_response("TorrentActionResponse", "Torrent not found")}, parameters=[_path_param("torrent_id")], tags=["admin", "torrents"], error_codes=("400", "401", "403", "429", "500", "503"))
+                "post": _operation("Delete a torrent: remove it from the list, delete its .torrent file, and delete its downloaded files", {"200": _json_response("TorrentActionResponse"), "404": _json_response("TorrentActionResponse", "Torrent not found")}, parameters=[_path_param("torrent_id")], tags=["admin", "torrents"], error_codes=("400", "401", "403", "429", "500", "503"))
+            },
+            "/admin/torrents/{torrent_id}/files": {
+                "get": _operation("List the files a completed torrent downloaded", {"200": _json_response("TorrentFilesResponse"), "404": _json_response("TorrentFilesResponse", "Torrent not found"), "409": _json_response("TorrentFilesResponse", "Torrent has not completed yet")}, parameters=[_path_param("torrent_id")], tags=["admin", "torrents"], error_codes=("400", "401", "403", "429", "500", "503"))
+            },
+            "/admin/torrents/{torrent_id}/move": {
+                "post": _operation("Move selected files out of a completed torrent's download folder, optionally cleaning up afterward", {"200": _json_response("TorrentMoveResponse"), "400": _json_response("TorrentMoveResponse", "No files selected or destination invalid"), "404": _json_response("TorrentMoveResponse", "Torrent not found"), "409": _json_response("TorrentMoveResponse", "Torrent has not completed yet")}, parameters=[_path_param("torrent_id")], request_body=_json_request("TorrentMoveRequest"), tags=["admin", "torrents"], error_codes=("400", "401", "403", "429", "500", "503"))
+            },
+            "/admin/torrents/pause": {"post": _operation("Pause the torrent queue (aria2.pauseAll; new torrents stop starting)", {"200": _json_response("AdminTorrentsResponse")}, tags=["admin", "torrents"], error_codes=("401", "403", "429", "500", "503"))},
+            "/admin/torrents/resume": {"post": _operation("Resume the torrent queue", {"200": _json_response("AdminTorrentsResponse")}, tags=["admin", "torrents"], error_codes=("401", "403", "429", "500", "503"))},
+            "/admin/torrents/clear": {
+                "post": _operation("Bulk-clean up torrents matching a scope", {"200": _json_response("TorrentClearResponse"), "400": _json_response("TorrentClearResponse", "No delete_* action selected")}, request_body=_json_request("TorrentClearRequest"), tags=["admin", "torrents"], error_codes=("401", "403", "429", "500", "503"))
             },
             "/admin/vpn": {"get": _operation("Get OpenVPN configuration and live connection status", {"200": _json_response("VpnStatusResponse")}, tags=["admin", "vpn"], error_codes=("401", "403", "429", "500", "503"))},
             "/admin/vpn/upload": {
