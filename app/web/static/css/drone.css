@@ -540,6 +540,16 @@
     .tree-root + .tree-root {
       border-top: 1px solid var(--admin-border);
     }
+    /* Shared/Unassigned BIOS is not a system -- its own grid box (dashed
+       border, small caption above) keeps it from reading as just one more
+       entry in the systems list above it. */
+    .tree-grid-bios-caption {
+      margin-top: 0.75rem;
+      margin-bottom: 0.35rem;
+    }
+    .tree-grid-bios-section {
+      border-style: dashed;
+    }
     .tree-grid-row {
       align-items: center;
       background: transparent;

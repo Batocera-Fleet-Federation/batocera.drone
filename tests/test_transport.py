@@ -139,6 +139,21 @@ class DirectPublicDispatchTests(unittest.TestCase):
             overwrite=False,
         )
 
+    def test_movies(self):
+        with mock.patch.object(download_manager, "_download_movie_from_peer", return_value={}) as m:
+            req = DownloadRequest(
+                asset_type="movies", relative_path="clips/vacation.mp4",
+                expected_size=2048, expected_fingerprint="fpmovie",
+            )
+            ctx = _ctx()
+            drone_api._directpublic_fetch(req, ctx)
+        m.assert_called_once_with(
+            ctx.settings, ctx.config, ctx.peer, "clips/vacation.mp4",
+            expected_size=2048, expected_fingerprint="fpmovie",
+            progress_callback=ctx.progress_callback, cancellation_event=ctx.cancellation_event,
+            overwrite=False,
+        )
+
     def test_saves(self):
         with mock.patch.object(download_manager, "_download_save_from_peer", return_value={}) as m:
             req = DownloadRequest(

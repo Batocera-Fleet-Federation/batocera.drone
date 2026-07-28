@@ -1,14 +1,15 @@
 ---
 name: drone-admin-features
-description: Use this when designing, reviewing, debugging, or modifying the Drone admin panel — System Info, System Logs, Emulators, Artwork & Metadata (scraping/gamelist), Automation, Torrents, VPN, Theme, the Swarm page (pairing, tailnet, remote peer management), the ROMs/BIOS TreeGrid browser, per-system BIOS association, credentials/network-mode/certificate rotation, self-update buttons, the session-cookie login gate, or the admin route dispatch in app/web/api_routes.py and web/handlers_*.py. For deep Torrents/aria2 or VPN/OpenVPN implementation detail, see the dedicated drone-torrents-management and drone-vpn-management skills instead.
+description: Use this when designing, reviewing, debugging, or modifying the Drone admin panel — the Debug tile (System Info/System Logs/Emulators tabs), the Artwork tile (Artwork & Metadata/Theme Gallery tabs), Torrents, VPN, the top-level Automation nav tab, the Swarm page (Swarm/Transfers tabs — pairing, tailnet, remote peer management, ROMs/BIOS/saves/movies P2P sync), the ROMs/BIOS TreeGrid browser, per-system BIOS association, credentials/network-mode/certificate rotation, self-update buttons, the session-cookie login gate, or the admin route dispatch in app/web/api_routes.py and web/handlers_*.py. For deep Torrents/aria2 or VPN/OpenVPN implementation detail, see the dedicated drone-torrents-management and drone-vpn-management skills instead.
 ---
 
 # Drone Admin Features Skill
 
 ## Goal
 
-Keep the admin-features picture matching the actual 8-tile admin panel, not the
-frozen single-feature doc. `ADMIN_FEATURES.md` at the repo root is titled "Admin
+Keep the admin-features picture matching the actual 4-tile admin panel (each tile
+now a tabbed panel bundling what used to be separate tiles), not the frozen
+single-feature doc. `ADMIN_FEATURES.md` at the repo root is titled "Admin
 Features - Logs Viewer" and has never been updated since it was written — it
 documents only the very first admin tile, misattributes the frontend to
 `index.html`, and misattributes the backend to a monolithic `drone_api.py`. This
@@ -79,62 +80,62 @@ gateway's own session expired" apart from a remote-admin-proxy 401. See
 handled server-side (never returned to the browser); changing credentials
 revokes every other session's cookie except the caller's own.
 
-## Admin menu (8 tiles)
+## Admin menu (4 tiles, two of them tabbed)
 
-`renderAdminMenu()` (`drone.js`) renders exactly 8 tiles — **System Info,
-System Logs, Emulators, Artwork & Metadata, Automation, Torrents, VPN, Theme**.
-The old doc documents only System Logs. There is no "Integration" tile — pairing,
-tailnet, and fleet management live on the **Swarm** page, which is a top-level nav
-item (`#admin/swarm`, alongside Systems/Controls/Transfers/Admin in `index.html`'s
-sidebar), not one of these 8 admin tiles. See "The Swarm page" below.
+`renderAdminMenu()` (`drone.js`) renders exactly 4 tiles — **Debug, Artwork,
+Torrents, VPN**. Debug and Artwork are each a tabbed panel bundling what used to
+be separate tiles; the shared `renderAdminPanelTabs(active, tabs)` helper builds
+the tab bar for both (and for the Swarm page's Swarm/Transfers tabs — see below),
+prepended via string concatenation onto each underlying page's existing
+`content.innerHTML` template, so none of the underlying render functions needed
+restructuring. There is no "Integration" tile — pairing, tailnet, and fleet
+management live on the **Swarm** page, which is a top-level nav item (`#admin/swarm`,
+alongside Systems/Controls/Automation/Swarm/Admin in `index.html`'s sidebar), not
+one of these 4 admin tiles. See "The Swarm page" below. **Automation** is also not
+one of these 4 tiles — it was moved out to its own top-level navbar link
+(`automationMenuBtn`, `#admin/automation`).
 
-### System Info
+### Debug (System Info / System Logs / Emulators tabs)
 
-`renderAdminSystemInfoPage` (`drone.js` ~line 5653, `GET /admin/system-info?speed=1`):
-runtime/CPU/memory/disk health, network fields, and the **Drone/PixeN self-update
-buttons** (`updateDroneApp()`/`runPixenUpdate()`, routes `/admin/system/update-drone`
-and `/admin/system/run-pixen-update`). Backend: `handlers_diagnostics.py`. Also hosts
-an **Asset Cache** card: `renderAssetCachePanel(payload, false)` fed by
-`GET /admin/asset-cache`, refreshed via `window.refreshSystemInfoAssetCache`.
-`purgeAssetCache()`/`clearPendingAssetChanges()` check
-`window.location.hash === "#admin/system-info"` before calling that refresh hook
-(falling back to the standalone orphaned `#admin/asset-cache` route otherwise).
+`renderDebugTabBar(active)` puts these three former standalone tiles behind one
+entry point (`#admin/system-info`, icon `bi-bug`), tab-switching via
+`renderAdminPanelTabs`; each underlying page function is otherwise unchanged.
 
-### System Logs
+- **System Info** — `renderAdminSystemInfoPage` (`drone.js`, `GET
+  /admin/system-info?speed=1`): runtime/CPU/memory/disk health, network fields,
+  the **Drone/PixeN self-update buttons** (`updateDroneApp()`/`runPixenUpdate()`,
+  routes `/admin/system/update-drone` and `/admin/system/run-pixen-update`), and
+  the **Restart EmulationStation** button (`restartEmulationStation()`, `POST
+  /admin/system/restart-emulationstation` → `batocera-es-swissknife --restart`,
+  backed by `device/device_control.py`'s `_restart_emulationstation()`). Backend:
+  `handlers_diagnostics.py` (+ `handlers_system.py` for the restart route). Also
+  hosts an **Asset Cache** card: `renderAssetCachePanel(payload, false)` fed by
+  `GET /admin/asset-cache`, refreshed via `window.refreshSystemInfoAssetCache`.
+  `purgeAssetCache()`/`clearPendingAssetChanges()` check
+  `window.location.hash === "#admin/system-info"` before calling that refresh hook
+  (falling back to the standalone orphaned `#admin/asset-cache` route otherwise).
+- **System Logs** — `GET /admin/logs/{source}?lines=200` (~60 supported
+  emulator/EmulationStation/Drone log sources), sidebar + main viewer UI. Gameplay
+  logs (`/admin/gameplay-logs`) were folded into this tab's scope rather than
+  getting their own.
+- **Emulators** — `renderEmulatorsPage()` (`drone.js`) — a tree-style
+  config-file browser (`GET /admin/emulators`, `GET /admin/emulators/file`) for
+  viewing/editing emulator config files on the machine. Backend:
+  `handlers_config.py`.
 
-`GET /admin/logs/{source}?lines=200` (~60 supported emulator/EmulationStation/
-Drone log sources), sidebar + main viewer UI. Gameplay logs (`/admin/gameplay-logs`)
-were folded into this tile's scope rather than getting their own.
+### Artwork (Artwork & Metadata / Theme Gallery tabs)
 
-### Emulators
+`renderArtworkTabBar(active)` collapses the former standalone Artwork & Metadata
+and Theme tiles into one entry point (`#admin/artwork`, icon `bi-images`).
 
-`renderEmulatorsPage()` (`drone.js` line 4911) — a tree-style config-file browser
-(`GET /admin/emulators`, `GET /admin/emulators/file`) for viewing/editing emulator
-config files on the machine. Backend: `handlers_config.py`.
-
-### Artwork & Metadata
-
-Scraping (LaunchBox/TheGamesDB/MobyGames): `/admin/artwork/{launchbox,thegamesdb,
-mobygames}/{search,apply}`; gamelist maintenance: `/admin/artwork/gamelist/
-{update,remove,remove-missing}`; plus `/admin/artwork/missing`, marquee crop, and
-`/admin/artwork/upload`. Backend: `handlers_artwork.py` (all in
-`api_routes.py` ~lines 271-571 alongside other admin routes).
-
-### Automation
-
-`renderAutomationPage()` (`drone.js`) — three independent automations, each with
-its own enable config: **idle-volume** (`/admin/automation/idle-volume`) sets the
-volume to a configured target after a period of no controller input (raises or
-lowers, whichever the target requires — active gameplay via emulatorlauncher
-suppresses it even without input seen); **idle-game-exit**
-(`/admin/automation/idle-game-exit`) exits the running game via
-`batocera-es-swissknife --emukill` after its own configured idle period, but only
-while a game is actually running; **wifi-recovery**
-(`/admin/automation/wifi-recovery`) checks the wireless connection every 60s and
-power-cycles it (`batocera-wifi disable` then `enable`) when it's down. The two
-idle automations poll `last-input-activity` (written by the privileged
-input-activity monitor) every `AUTOMATION_POLL_SECONDS`. Backend:
-`app/device/automation.py`.
+- **Artwork & Metadata** — scraping (LaunchBox/TheGamesDB/MobyGames):
+  `/admin/artwork/{launchbox,thegamesdb,mobygames}/{search,apply}`; gamelist
+  maintenance: `/admin/artwork/gamelist/{update,remove,remove-missing}`; plus
+  `/admin/artwork/missing`, marquee crop, and `/admin/artwork/upload`. Backend:
+  `handlers_artwork.py`.
+- **Theme Gallery** — `renderThemeGalleryPage()` — browse and preview installed
+  EmulationStation theme artwork (`#theme`, outside the admin route tree; reached
+  via this tab, not a standalone tile anymore).
 
 ### Torrents
 
@@ -164,21 +165,42 @@ running PID, tail the log, query `tun0`) since a VPN connection is exactly one
 process. See the dedicated **drone-vpn-management** skill for the config
 rewrite rules, credential storage, and process-management design.
 
-### Theme
+### Automation (top-level navbar tab, not an admin tile)
 
-`renderThemeGalleryPage()` — browse and preview installed EmulationStation theme
-artwork (`#theme`, outside the admin route tree).
+`renderAutomationPage()` (`drone.js`) — three independent automations, each with
+its own enable config: **idle-volume** (`/admin/automation/idle-volume`) sets the
+volume to a configured target after a period of no controller input (raises or
+lowers, whichever the target requires — active gameplay via emulatorlauncher
+suppresses it even without input seen); **idle-game-exit**
+(`/admin/automation/idle-game-exit`) exits the running game via
+`batocera-es-swissknife --emukill` after its own configured idle period, but only
+while a game is actually running; **wifi-recovery**
+(`/admin/automation/wifi-recovery`) checks the wireless connection every 60s and
+power-cycles it (`batocera-wifi disable` then `enable`) when it's down. The two
+idle automations poll `last-input-activity` (written by the privileged
+input-activity monitor) every `AUTOMATION_POLL_SECONDS`. Backend:
+`app/device/automation.py`. Reached via `automationMenuBtn` in `index.html`
+(`#admin/automation`) — it used to be an admin tile, but moved out to the
+top-level navbar alongside Systems/Controls/Swarm/Admin.
 
 ## The Swarm page (top-level nav, not an admin tile)
 
 Fleet management lives on its own top-level nav item, `#admin/swarm`
-(`swarmMenuBtn` in `index.html`, alongside Systems/Controls/Transfers/Admin) —
-**not** inside the 8-tile Admin menu. `renderSwarmPage()` (`drone.js` ~line 4199)
-replaced the old Integration page entirely; `#admin/integration` redirects here for
+(`swarmMenuBtn` in `index.html`, alongside Systems/Controls/Automation/Swarm/Admin)
+— **not** inside the 4-tile Admin menu. `renderSwarmPage()` (`drone.js`) replaced
+the old Integration page entirely; `#admin/integration` redirects here for
 old-link compatibility (the redirect comment literally says "Overmind integration is
 disabled (the fleet is Overmind-free) and the Local Network configuration moved to
 the Swarm page"). There is no central hub anymore — every Drone pairs directly with
 its peers.
+
+The page itself is now two tabs via `renderSwarmTabBar(active)` (shared
+`renderAdminPanelTabs` helper, same pattern as Debug/Artwork above), defaulting to
+**Swarm**: the fleet-overview/tailnet/pairing content below lives under the
+**Swarm** tab; the download/upload queue (formerly its own top-level `Transfers`
+navbar link, `transfersMenuBtn`) lives under the **Transfers** tab
+(`renderTransfersPage()` → `#admin/transfers`, still its own route/page, just
+reached via this tab bar instead of a separate navbar item now).
 
 - **Fleet overview** — a card grid (`renderSwarmDroneCard`) of this machine plus
   every paired peer, built from `GET /admin/swarm/overview`
@@ -258,7 +280,11 @@ sourced from `Abdess/retrobios`). The resolved system list is exposed as the
 matching **exactly one** system files under that system's BIOS category; a
 BIOS matching **zero or two-plus** systems falls to the top-level
 "Shared / Unassigned BIOS" bucket instead (intentional — a genuinely shared
-BIOS appears in both places, not a bug).
+BIOS appears in both places, not a bug). On the **Systems** page tree
+(`renderSystems()`), this bucket renders as its own bottom leaf node in a
+separate `.tree-grid-bios-section` (dashed-border caption "Not part of any
+single system", `bi-cpu` icon) below the regular per-system `.tree-grid`, so it
+doesn't read as just another system sharing the systems' own root level.
 
 ## Other admin surfaces present in code but absent from the old doc
 

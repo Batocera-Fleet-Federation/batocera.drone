@@ -1024,11 +1024,23 @@ class TorrentManager:
         if cleanup and all_succeeded:
             cleanup_performed = _remove_downloaded_payload(entry_copy)
 
+        removed_from_list = False
+        removed_gid = None
+        removed_torrent_file = None
         with self._lock:
             live_entry = self._torrents.get(entry_id)
             if live_entry is not None:
                 if cleanup_performed:
-                    live_entry["files"] = []
+                    # Move + cleanup succeeded and swept up everything left
+                    # behind -- nothing remains to track, so drop the
+                    # torrent from the list too (matching Delete's
+                    # full-removal semantics) rather than leaving a
+                    # "complete" entry with an empty file list whose
+                    # .torrent file would just get rescanned as new.
+                    removed_gid = live_entry.get("gid")
+                    removed_torrent_file = live_entry.get("torrent_file")
+                    self._torrents.pop(entry_id, None)
+                    removed_from_list = True
                 elif moved_sources:
                     moved_set = {str(source) for source in moved_sources}
                     live_entry["files"] = [p for p in (live_entry.get("files") or []) if p not in moved_set]
@@ -1036,11 +1048,21 @@ class TorrentManager:
                     self._remember_recent_location_locked(str(destination_path))
             self._persist_locked()
 
+        if removed_from_list:
+            self._remove_from_aria2(removed_gid)
+            if removed_torrent_file:
+                try:
+                    Path(removed_torrent_file).unlink(missing_ok=True)
+                except OSError as error:
+                    print(f"Torrent file delete failed after move+cleanup: {error}", file=sys.stderr, flush=True)
+            self.wake()
+
         return {
             "status": "ok" if all_succeeded else "partial",
             "moved": moved,
             "errors": errors,
             "cleanup_performed": cleanup_performed,
+            "removed_from_list": removed_from_list,
         }
 
     def _remember_recent_location_locked(self, path: str) -> None:

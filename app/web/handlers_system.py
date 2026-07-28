@@ -25,7 +25,7 @@ try:
         _save_automation_config,
         _wifi_recovery_status,
     )
-    from ..device.device_control import _get_audio_volume
+    from ..device.device_control import _get_audio_volume, _restart_emulationstation
     from ..device.pixen import run_pixen_upgrade
     from ..device.game_activity import find_running_emulatorlauncher as _find_running_emulatorlauncher
     from ..transfer.drone_tls import DroneCertificateManager
@@ -46,7 +46,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         _save_automation_config,
         _wifi_recovery_status,
     )
-    from device.device_control import _get_audio_volume  # type: ignore
+    from device.device_control import _get_audio_volume, _restart_emulationstation  # type: ignore
     from device.pixen import run_pixen_upgrade  # type: ignore
     from device.game_activity import find_running_emulatorlauncher as _find_running_emulatorlauncher  # type: ignore
     from transfer.drone_tls import DroneCertificateManager  # type: ignore
@@ -87,6 +87,13 @@ class HandlersSystemMixin:
     def _handle_admin_pixn_update(self) -> None:
         result = run_pixen_upgrade(self.settings)
         self._send_json(200, result)
+
+    def _handle_admin_restart_emulationstation(self) -> None:
+        # Blocking (stop, wait, start, wait -- up to ~60s worst case): unlike
+        # the Drone self-update button, this never kills the Drone process
+        # itself, so there is no reason to background it behind a polling job.
+        ok = _restart_emulationstation()
+        self._send_json(200 if ok else 502, {"status": "restarted" if ok else "failed"})
 
     def _handle_admin_api_status(self) -> None:
         metadata = DroneCertificateManager(self.settings).ensure_certificate()

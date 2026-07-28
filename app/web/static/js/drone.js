@@ -6,7 +6,7 @@ const backBtn = document.getElementById("backBtn") || {
 const systemsMenuBtn = document.getElementById("systemsMenuBtn");
 const brandHomeBtn = document.getElementById("brandHomeBtn");
 const controlsMenuBtn = document.getElementById("controlsMenuBtn");
-const transfersMenuBtn = document.getElementById("transfersMenuBtn");
+const automationMenuBtn = document.getElementById("automationMenuBtn");
 const swarmMenuBtn = document.getElementById("swarmMenuBtn");
 const adminMenuBtn = document.getElementById("adminMenuBtn");
 const apiAccessBtn = document.getElementById("apiAccessBtn");
@@ -356,7 +356,7 @@ function setLoading(isLoading, text = "Loading...") {
   }
 }
 function applyAdminVisibility() {
-  const adminLinks = [adminMenuBtn, controlsMenuBtn, transfersMenuBtn, swarmMenuBtn, apiAccessBtn].filter(Boolean);
+  const adminLinks = [adminMenuBtn, controlsMenuBtn, automationMenuBtn, swarmMenuBtn, apiAccessBtn].filter(Boolean);
   if (adminEnabled) {
     adminLinks.forEach((link) => link.classList.remove("d-none"));
   } else {
@@ -1057,10 +1057,11 @@ function renderSystems(data) {
     </div>
     ${
       systems.length || showBiosRoot
-        ? `<div class="tree-grid">
-          ${systems.map((system) => renderSystemTreeRoot(system)).join("")}
-          ${showBiosRoot ? renderBiosTreeRoot(biosTotal) : ""}
-        </div>`
+        ? `${systems.length ? `<div class="tree-grid">${systems.map((system) => renderSystemTreeRoot(system)).join("")}</div>` : ""}
+          ${showBiosRoot ? `
+            <div class="tree-grid-bios-caption small text-muted">Not part of any single system</div>
+            <div class="tree-grid tree-grid-bios-section">${renderBiosTreeRoot(biosTotal)}</div>
+          ` : ""}`
         : `<div class="text-muted">No systems, games, or BIOS files matched your filter.</div>`
     }
   `;
@@ -1116,7 +1117,7 @@ function renderBiosTreeRoot(total) {
       <button type="button" class="tree-grid-row tree-root-row ${active ? "is-active" : ""}" onclick="selectBiosTreeRoot()">
         <div class="tree-grid-main">
           <i class="bi ${active ? "bi-chevron-down" : "bi-chevron-right"} tree-grid-caret"></i>
-          <i class="bi bi-folder2${active ? "-open" : ""} tree-grid-icon"></i>
+          <i class="bi bi-cpu tree-grid-icon"></i>
           <div class="tree-grid-label"><span class="fw-semibold">Shared / Unassigned BIOS</span></div>
         </div>
         <div class="tree-grid-meta">${Number(total || 0).toLocaleString()} files</div>
@@ -1713,6 +1714,7 @@ function renderThemeGallery(data) {
   const totalPages = Math.max(1, Math.ceil(total / limit));
 
   content.innerHTML = `
+    ${renderArtworkTabBar("theme")}
     <div class="mb-3">
       <h2 class="h4 mb-1"><i class="bi bi-image me-2"></i>Theme Gallery</h2>
       <div class="text-muted">Theme: ${escapeHtml((data && data.theme_name) || "unknown")} · Images: ${total} · Page: ${page}/${totalPages}</div>
@@ -2056,6 +2058,44 @@ async function renderAdminPage() {
   setLoading(false);
   refreshRandomThemeLogo().catch(() => {});
 }
+// Shared tab-bar renderer for any admin panel that folds multiple former
+// tiles/routes into one: each underlying page still owns its full
+// route/render function independently (avoids refactoring several large,
+// established pages to share one container), this just prepends the same
+// tab bar to each so they present as one tabbed panel instead of separate
+// destinations. `tabs` is `[key, label, icon, hash]` tuples.
+function renderAdminPanelTabs(active, tabs) {
+  return `<ul class="nav nav-tabs admin-panel-tabs mb-3">
+    ${tabs.map(([key, label, icon, hash]) => `
+      <li class="nav-item">
+        <button type="button" class="nav-link ${active === key ? "active" : ""}" onclick="setHash('${hash}')"><i class="bi ${icon} me-1"></i>${label}</button>
+      </li>
+    `).join("")}
+  </ul>`;
+}
+
+function renderDebugTabBar(active) {
+  return renderAdminPanelTabs(active, [
+    ["system-info", "System Info", "bi-pc-display", "#admin/system-info"],
+    ["logs", "System Logs", "bi-journal-text", "#admin/logs/es_launch_stdout?lines=200"],
+    ["emulators", "Emulators", "bi-file-earmark-code", "#admin/emulators"],
+  ]);
+}
+
+function renderArtworkTabBar(active) {
+  return renderAdminPanelTabs(active, [
+    ["metadata", "Artwork & Metadata", "bi-images", "#admin/artwork"],
+    ["theme", "Theme Gallery", "bi-brush", "#theme"],
+  ]);
+}
+
+function renderSwarmTabBar(active) {
+  return renderAdminPanelTabs(active, [
+    ["swarm", "Swarm", "bi-diagram-3", "#admin/swarm"],
+    ["transfers", "Transfers", "bi-arrow-left-right", "#admin/transfers"],
+  ]);
+}
+
 async function renderAdminMenu() {
   titleNode.textContent = "Admin Panel";
   subtitleNode.textContent = "System administration";
@@ -2064,40 +2104,16 @@ async function renderAdminMenu() {
       <div class="col-md-4 mb-3">
         <div class="card admin-tile pointer h-100" onclick="setHash('#admin/system-info')">
           <div class="card-body">
-            <h5 class="card-title"><i class="bi bi-pc-display me-2"></i>System Info</h5>
-            <p class="card-text">View runtime health, storage, network, and Batocera details.</p>
-          </div>
-        </div>
-      </div>
-      <div class="col-md-4 mb-3">
-        <div class="card admin-tile pointer h-100" onclick="setHash('#admin/logs/es_launch_stdout?lines=200')">
-          <div class="card-body">
-            <h5 class="card-title"><i class="bi bi-journal-text me-2"></i>System Logs</h5>
-            <p class="card-text">View Drone, EmulationStation, emulator launch, and gameplay logs.</p>
-          </div>
-        </div>
-      </div>
-      <div class="col-md-4 mb-3">
-        <div class="card admin-tile pointer h-100" onclick="setHash('#admin/emulators')">
-          <div class="card-body">
-            <h5 class="card-title"><i class="bi bi-file-earmark-code me-2"></i>Emulators</h5>
-            <p class="card-text">View emulator config files on this machine.</p>
+            <h5 class="card-title"><i class="bi bi-bug me-2"></i>Debug</h5>
+            <p class="card-text">System info, logs, and emulator config files -- runtime health, storage, network, Batocera details, and every tracked log source in one tabbed panel.</p>
           </div>
         </div>
       </div>
       <div class="col-md-4 mb-3">
         <div class="card admin-tile pointer h-100" onclick="setHash('#admin/artwork')">
           <div class="card-body">
-            <h5 class="card-title"><i class="bi bi-images me-2"></i>Artwork & Metadata</h5>
-            <p class="card-text">Manage gamelist artwork, metadata, imports, uploads, and marquee crops.</p>
-          </div>
-        </div>
-      </div>
-      <div class="col-md-4 mb-3">
-        <div class="card admin-tile pointer h-100" onclick="setHash('#admin/automation')">
-          <div class="card-body">
-            <h5 class="card-title"><i class="bi bi-robot me-2"></i>Automation</h5>
-            <p class="card-text">Configure hands-off device behaviors, like setting the volume or exiting a game after a period of no input.</p>
+            <h5 class="card-title"><i class="bi bi-images me-2"></i>Artwork</h5>
+            <p class="card-text">Manage gamelist artwork, metadata, imports, uploads, marquee crops, and browse installed EmulationStation themes.</p>
           </div>
         </div>
       </div>
@@ -2114,14 +2130,6 @@ async function renderAdminMenu() {
           <div class="card-body">
             <h5 class="card-title"><i class="bi bi-shield-lock me-2"></i>VPN</h5>
             <p class="card-text">Configure and connect an OpenVPN provider (Proton VPN, NordVPN, and others).</p>
-          </div>
-        </div>
-      </div>
-      <div class="col-md-4 mb-3">
-        <div class="card admin-tile pointer h-100" onclick="setHash('#theme')">
-          <div class="card-body">
-            <h5 class="card-title"><i class="bi bi-brush me-2"></i>Theme</h5>
-            <p class="card-text">Browse and preview installed EmulationStation theme artwork.</p>
           </div>
         </div>
       </div>
@@ -2158,6 +2166,26 @@ async function setDroneAutoUpdate(checkbox) {
     showToast(`Could not save automatic update setting: ${escapeHtml(error.message || "unknown error")}`, "danger");
   } finally {
     if (checkbox.isConnected) checkbox.disabled = false;
+  }
+}
+
+async function restartEmulationStation() {
+  if (!window.confirm("Restart EmulationStation on this Drone? Any game currently running will be interrupted.")) return;
+  const btn = document.getElementById("restartEsBtn");
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Restarting...';
+  }
+  try {
+    await apiPost("/admin/system/restart-emulationstation", {});
+    showToast("EmulationStation restarted.", "success");
+  } catch (error) {
+    showToast(`EmulationStation restart failed: ${escapeHtml(error.message || "unknown error")}`, "danger", 10000);
+  } finally {
+    if (btn && btn.isConnected) {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="bi bi-arrow-clockwise me-1"></i>Restart EmulationStation';
+    }
   }
 }
 
@@ -3143,7 +3171,7 @@ async function confirmMoveFiles(torrentId) {
     const moved = (result.moved || []).length;
     const errors = (result.errors || []).length;
     if (result.status === "ok") {
-      showToast(`Moved ${moved} file${moved === 1 ? "" : "s"}${result.cleanup_performed ? " and cleaned up the download folder." : "."}`, "success");
+      showToast(`Moved ${moved} file${moved === 1 ? "" : "s"}${result.removed_from_list ? " and removed the torrent from the list." : result.cleanup_performed ? " and cleaned up the download folder." : "."}`, "success");
       const modal = document.getElementById("moveFilesModal");
       if (modal && window.bootstrap?.Modal) window.bootstrap.Modal.getOrCreateInstance(modal).hide();
     } else {
@@ -4232,6 +4260,7 @@ async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh 
     const firstItem = total ? pageOffset + 1 : 0;
     const lastItem = pageOffset + roms.length;
     content.innerHTML = `
+      ${renderArtworkTabBar("metadata")}
       <div class="mb-3 d-flex flex-wrap gap-2">
         <button class="btn btn-outline-primary" onclick="renderMissingArtworkPage(false, true, 0, artworkSelectedFields, artworkSelectedSystems, artworkFilterQuery, artworkRomStatus)">Refresh</button>
         <button id="removeMissingGamelistBtn" class="btn btn-outline-danger" type="button">Remove Missing ROM Entries</button>
@@ -5298,7 +5327,11 @@ function localAssetDetail(item) {
   return date ? formatCompactLocalDate(date) : (item.duration || item.emulator || "");
 }
 
-const LOCAL_TRANSFERABLE_TYPES = new Set(["roms", "bios", "saves"]);
+const LOCAL_TRANSFERABLE_TYPES = new Set(["roms", "bios", "saves", "movies"]);
+// Movies have no system or artwork association at all (unlike ROMs/BIOS/saves),
+// so the Systems filter is meaningless for them and gets grayed out instead of
+// just staying populated-but-inert like it does for the other flat types.
+const LOCAL_SYSTEMLESS_TYPES = new Set(["movies"]);
 
 function localAssetNativeLabel(key) {
   return String(key || "")
@@ -5457,6 +5490,7 @@ async function renderTransfersPage() {
   setLoading(true, "Loading transfers...");
   try {
     content.innerHTML = `
+      ${renderSwarmTabBar("transfers")}
       <div class="mb-3 d-flex flex-wrap justify-content-end gap-2">
         <button class="btn btn-outline-primary" onclick="setHash('#admin/transfers')"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
       </div>
@@ -5673,6 +5707,7 @@ async function renderSwarmPage() {
     const tailnet = discovery.tailnet || { installed: false };
     const drones = Array.isArray(overview.drones) ? overview.drones : [];
     content.innerHTML = `
+      ${renderSwarmTabBar("swarm")}
       <div class="row row-cols-1 row-cols-md-2 row-cols-xl-3 g-3 mb-3" id="swarmDroneGrid">
         ${drones.map(renderSwarmDroneCard).join("")}
       </div>
@@ -5751,11 +5786,11 @@ async function renderLocalTransferRequestPanel(target) {
   target.innerHTML = `
     <div class="card log-card mb-3" id="localAssetsCard"><div class="card-header"><span id="localAssetsTitle">Request Assets from Connected Drone</span></div>
       <div class="card-body">
-        <div class="small text-muted mb-3">Request inventories from a paired Drone, then download what you need. ROMs, BIOS, and saves can be copied here; emulator configs and gameplay history are available for inspection.</div>
+        <div class="small text-muted mb-3">Request inventories from a paired Drone, then download what you need. ROMs, BIOS, saves, and movies can be copied here; emulator configs and gameplay history are available for inspection.</div>
         <div class="row g-2 mb-2">
           <div class="col-12 col-lg-3"><label class="form-label small" for="localAssetPeer">Connected Drone</label><select id="localAssetPeer" class="form-select"></select></div>
-          <div class="col-6 col-lg-2"><label class="form-label small" for="localAssetType">Asset Type</label><select id="localAssetType" class="form-select"><option value="roms">ROMs</option><option value="bios">BIOS</option><option value="saves">Saves</option><option value="emulator_configs">Emulator Configs</option><option value="gameplay">Gameplay History</option></select></div>
-          <div class="col-6 col-lg-2"><label class="form-label small">Systems</label><div class="dropdown"><button id="localAssetSystemsToggle" class="btn btn-outline-secondary dropdown-toggle w-100 text-start" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside">All systems</button><div id="localAssetSystemsMenu" class="dropdown-menu p-2 w-100"><div class="small text-muted">Request assets to load systems.</div></div></div></div>
+          <div class="col-6 col-lg-2"><label class="form-label small" for="localAssetType">Asset Type</label><select id="localAssetType" class="form-select"><option value="roms">ROMs</option><option value="bios">BIOS</option><option value="saves">Saves</option><option value="movies">Movies</option><option value="emulator_configs">Emulator Configs</option><option value="gameplay">Gameplay History</option></select></div>
+          <div class="col-6 col-lg-2" id="localAssetSystemsWrap"><label class="form-label small">Systems</label><div class="dropdown"><button id="localAssetSystemsToggle" class="btn btn-outline-secondary dropdown-toggle w-100 text-start" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside">All systems</button><div id="localAssetSystemsMenu" class="dropdown-menu p-2 w-100"><div class="small text-muted">Request assets to load systems.</div></div></div></div>
           <div class="col-8 col-lg-3"><label class="form-label small" for="localAssetQuery">Search</label><input id="localAssetQuery" class="form-control" placeholder="Search assets"></div>
           <div class="col-4 col-lg-2"><label class="form-label small" for="localAssetPageSize">Per Page</label><select id="localAssetPageSize" class="form-select"><option value="50">50</option><option value="100">100</option><option value="200">200</option></select></div>
         </div>
@@ -5874,9 +5909,13 @@ function updateLocalAssetTypeUi() {
   const type = (document.getElementById("localAssetType") || {}).value || "roms";
   const isRoms = type === "roms";
   const transferable = LOCAL_TRANSFERABLE_TYPES.has(type);
+  const hasSystems = !LOCAL_SYSTEMLESS_TYPES.has(type);
   document.getElementById("localAssetIncludeArtworkWrap")?.classList.toggle("d-none", !isRoms);
   document.getElementById("localAssetIncludeRomsWrap")?.classList.toggle("d-none", !isRoms);
   document.getElementById("localAssetOverwriteFilesWrap")?.classList.toggle("d-none", !transferable);
+  document.getElementById("localAssetSystemsWrap")?.classList.toggle("opacity-50", !hasSystems);
+  const systemsToggle = document.getElementById("localAssetSystemsToggle");
+  if (systemsToggle) systemsToggle.disabled = !hasSystems;
 }
 
 function selectedLocalAssetSystems() {
@@ -6064,7 +6103,7 @@ async function copyAllLocalAssets() {
   const systems = selectedLocalAssetSystems();
   const q = document.getElementById("localAssetQuery").value.trim();
   if (!peerId) { showToast("Pair a Drone before copying assets.", "warning"); return; }
-  if (!LOCAL_TRANSFERABLE_TYPES.has(type)) { showToast("Bulk download supports ROMs, BIOS, and saves.", "warning"); return; }
+  if (!LOCAL_TRANSFERABLE_TYPES.has(type)) { showToast("Bulk download supports ROMs, BIOS, saves, and movies.", "warning"); return; }
   const includeRoms = type !== "roms" || localAssetIncludeRoms();
   if (type === "roms" && !includeRoms && !localAssetIncludeArtwork()) {
     showToast("Select Include Artwork or Include ROMs before downloading.", "warning");
@@ -6379,6 +6418,7 @@ async function renderLogsPage(selectedSource = null, selectedLines = 200) {
   titleNode.textContent = "System Logs";
   subtitleNode.textContent = "View Drone, Tailscale, EmulationStation launch, emulator, and gameplay logs";
   content.innerHTML = `
+    ${renderDebugTabBar("logs")}
     <div class="row">
       <div class="col-md-3 col-xl-2">
         <div class="card log-card">
@@ -6575,6 +6615,7 @@ async function renderEmulatorsPage() {
     });
     selectedEmulatorConfigIndex = Math.min(selectedEmulatorConfigIndex || 0, Math.max(0, emulatorConfigRows.length - 1));
     content.innerHTML = `
+      ${renderDebugTabBar("emulators")}
       <div class="row">
         <div class="col-md-3 mb-3">
           <div class="card log-card">
@@ -7026,32 +7067,66 @@ function renderEsCollectionsCard(state) {
   const customCollections = state.custom_collections || [];
   const groupsHtml = groups.length
     ? groups.map((group) => `
-      <div class="mb-2">
+      <div class="mb-2 es-collections-group">
         <div class="small fw-semibold text-muted text-uppercase">${escapeHtml(group.group)}</div>
         ${renderEsCheckboxGrid((group.children || []).map((c) => ({name: c.name, label: c.full_name || c.name, checked: c.grouped})), "grouped")}
       </div>
     `).join("")
     : '<div class="small text-muted">No groupable systems found.</div>';
   return `
-    <div class="mb-3">
+    <div class="mb-3 es-collections-section">
       <div class="fw-semibold mb-1">Systems Displayed</div>
       ${renderEsCheckboxGrid(systems.map((s) => ({name: s.name, label: s.full_name || s.name, checked: s.displayed})), "displayed")}
     </div>
-    <div class="mb-3">
+    <div class="mb-3 es-collections-section">
       <div class="fw-semibold mb-1">Grouped Systems</div>
       <div class="small text-muted mb-2">Checked systems stay folded into their group's shared entry; uncheck to show a system standalone.</div>
       ${groupsHtml}
     </div>
-    <div class="mb-3">
+    <div class="mb-3 es-collections-section">
       <div class="fw-semibold mb-1">Automatic Game Collections</div>
       ${renderEsCheckboxGrid(autoCollections.map((a) => ({name: a.name, label: a.label || a.name, checked: a.enabled})), "auto")}
     </div>
-    <div class="mb-0">
+    <div class="mb-0 es-collections-section">
       <div class="fw-semibold mb-1">Custom Game Collections</div>
       ${renderEsCheckboxGrid(customCollections.map((c) => ({name: c.name, label: c.name, checked: c.enabled})), "custom")}
     </div>
     <button class="btn btn-primary mt-3" id="esCollectionsSaveBtn"><i class="bi bi-save me-1"></i>Save</button>
   `;
+}
+
+// Client-side, filters what's already loaded (no re-fetch) -- toggles
+// visibility per checkbox item, folds up now-empty groups/sections, and
+// re-runs automatically after any re-render (Save/Refresh) so an active
+// search stays applied instead of silently resetting to unfiltered.
+function filterEsCollections(rawQuery) {
+  const body = document.getElementById("esCollectionsBody");
+  if (!body) return;
+  const query = String(rawQuery || "").trim().toLowerCase();
+  let anyVisible = false;
+  body.querySelectorAll(".es-collections-section").forEach((section) => {
+    let sectionHasVisible = false;
+    section.querySelectorAll(".form-check").forEach((check) => {
+      const text = (check.querySelector("label")?.textContent || "").toLowerCase();
+      const match = !query || text.includes(query);
+      check.closest(".col")?.classList.toggle("d-none", !match);
+      if (match) sectionHasVisible = true;
+    });
+    section.querySelectorAll(".es-collections-group").forEach((group) => {
+      const groupHasVisible = Array.from(group.querySelectorAll(".col")).some((col) => !col.classList.contains("d-none"));
+      group.classList.toggle("d-none", !groupHasVisible);
+    });
+    section.classList.toggle("d-none", Boolean(query) && !sectionHasVisible);
+    if (sectionHasVisible) anyVisible = true;
+  });
+  document.getElementById("esCollectionsNoMatches")?.classList.toggle("d-none", !query || anyVisible);
+}
+
+function wireEsCollectionsSearch() {
+  const input = document.getElementById("esCollectionsSearchInput");
+  if (!input || input.dataset.wired === "1") return;
+  input.dataset.wired = "1";
+  input.addEventListener("input", () => filterEsCollections(input.value));
 }
 
 function collectEsCollectionsPayload() {
@@ -7092,6 +7167,8 @@ function renderEsCollectionsBody(state) {
   wireEsCollectionsSaveButton();
   syncMusicVolumeControls(state.music_volume);
   syncScreensaverControls(state.screensaver_minutes);
+  wireEsCollectionsSearch();
+  filterEsCollections(document.getElementById("esCollectionsSearchInput")?.value || "");
 }
 
 async function loadEsCollections() {
@@ -7150,6 +7227,7 @@ async function renderAdminSystemInfoPage() {
     }).join("");
 
     content.innerHTML = `
+      ${renderDebugTabBar("system-info")}
       <div class="mb-3 d-flex flex-wrap justify-content-end gap-2">
         <button class="btn btn-outline-primary" onclick="setHash('#admin/system-info')"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
       </div>
@@ -7274,11 +7352,12 @@ async function renderAdminControlsPage() {
     content.innerHTML = `
       <div class="mb-3 d-flex flex-wrap justify-content-end gap-2">
           <button class="btn btn-outline-primary" onclick="setHash('#admin/controls')"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
-          <div class="form-check mb-0 px-2">
-            <input class="form-check-input ms-0 me-2" type="checkbox" id="droneAutoUpdateCheckbox" ${autoUpdate.enabled ? "checked" : ""} onchange="setDroneAutoUpdate(this)">
+          <div class="form-check form-switch mb-0 px-2 d-flex align-items-center">
+            <input class="form-check-input ms-0 me-2" type="checkbox" role="switch" id="droneAutoUpdateCheckbox" ${autoUpdate.enabled ? "checked" : ""} onchange="setDroneAutoUpdate(this)">
             <label class="form-check-label text-nowrap" for="droneAutoUpdateCheckbox" title="Check for a newer Drone release every 60 seconds and update in the background">Auto-update Drone</label>
           </div>
           <button class="btn btn-outline-warning" onclick="updateDroneApp()"><i class="bi bi-cloud-download me-1"></i>Update Drone</button>
+          <button class="btn btn-outline-danger" id="restartEsBtn" onclick="restartEmulationStation()"><i class="bi bi-arrow-clockwise me-1"></i>Restart EmulationStation</button>
           ${pixnInstalled ? `<button class="btn btn-outline-success" onclick="runPixnUpdate()"><i class="bi bi-play-circle me-1"></i>Run PixN Update</button>` : ""}
       </div>
       <div class="row row-cols-1 row-cols-sm-2 row-cols-xl-4 g-3 mb-3">
@@ -7352,6 +7431,10 @@ async function renderAdminControlsPage() {
           <button id="esCollectionsRefreshBtn" class="btn btn-sm btn-outline-primary" type="button"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
         </div>
         <div class="small text-muted px-3 pt-3">Which systems appear, which are grouped together, and which automatic/custom collections are enabled. Saving restarts EmulationStation.</div>
+        <div class="px-3 pt-2">
+          <input type="search" class="form-control form-control-sm" id="esCollectionsSearchInput" placeholder="Filter systems and collections...">
+          <div class="small text-muted mt-2 d-none" id="esCollectionsNoMatches">No systems or collections match that search.</div>
+        </div>
         <div class="card-body" id="esCollectionsBody"><div class="text-muted">Loading...</div></div>
       </div>
       <div class="card log-card">
@@ -7533,6 +7616,16 @@ async function loadSystemInfoBar() {
       chips.push(`<span class="badge" style="background:rgba(52,211,153,0.15);color:#34d399;border-color:rgba(52,211,153,0.4)">Connected: ${connectedCount}</span>`);
     } catch (_) {
       // Swarm overview is best-effort context, not core system info.
+    }
+    try {
+      const vpn = await api("/admin/vpn");
+      const vpnConnected = vpn.status === "connected";
+      const vpnStyle = vpnConnected
+        ? "background:rgba(52,211,153,0.15);color:#34d399;border-color:rgba(52,211,153,0.4)"
+        : "background:rgba(148,163,184,0.15);color:#94a3b8;border-color:rgba(148,163,184,0.4)";
+      chips.push(`<span class="badge" style="${vpnStyle}"><i class="bi bi-shield-lock me-1"></i>VPN: ${vpnConnected ? "Connected" : "Disconnected"}</span>`);
+    } catch (_) {
+      // VPN status is best-effort context, not core system info.
     }
     if (machineNav && machineId) machineNav.textContent = `Machine ID: ${machineId}`;
     if (!chips.length && lines.length) {
@@ -7726,10 +7819,10 @@ controlsMenuBtn.addEventListener("click", (event) => {
   if (!adminEnabled) return;
   setHash("#admin/controls");
 });
-transfersMenuBtn.addEventListener("click", (event) => {
+automationMenuBtn.addEventListener("click", (event) => {
   event.preventDefault();
   if (!adminEnabled) return;
-  setHash("#admin/transfers");
+  setHash("#admin/automation");
 });
 swarmMenuBtn.addEventListener("click", (event) => {
   event.preventDefault();

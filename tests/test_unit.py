@@ -2572,19 +2572,43 @@ class SettingsTests(unittest.TestCase):
         self.assertIn('parts[1] == "system" and parts[2] == "update-drone"', api_routes)
         self.assertIn('parts[2] == "auto-update"', api_routes)
         self.assertIn('"run-pixn-update", "run-pixen-update"', api_routes)
+        self.assertIn('parts[2] == "restart-emulationstation"', api_routes)
         self.assertIn("async function updateDroneApp()", js_source)
         self.assertIn('apiPost("/admin/system/update-drone"', js_source)
         self.assertIn('apiPost("/admin/system/auto-update"', js_source)
+        self.assertIn('apiPost("/admin/system/restart-emulationstation"', js_source)
         self.assertNotIn("Update Drone", system_info_source)
         self.assertNotIn("Run PixN Update", system_info_source)
         self.assertIn("Update Drone", controls_source)
         self.assertIn("Run PixN Update", controls_source)
+        self.assertIn("Restart EmulationStation", controls_source)
         self.assertIn("droneAutoUpdateCheckbox", controls_source)
+        self.assertIn('role="switch" id="droneAutoUpdateCheckbox"', controls_source)
         self.assertIn("DRONE_LATEST_ARCHIVE_URL", drone_source)
         self.assertIn("_schedule_supervised_service_restart", drone_source)
         self.assertIn("start_new_session=True", drone_source)
         self.assertIn("os.execv(sys.executable, [sys.executable, *sys.argv])", drone_source)
         self.assertIn("os._exit(DRONE_SELF_UPDATE_EXIT_CODE)", drone_source)
+
+    def test_es_collections_search_box_filters_and_reapplies_on_rerender(self) -> None:
+        js_source = Path(__file__).resolve().parents[1].joinpath("app/web/static/js/drone.js").read_text(encoding="utf-8")
+        controls_source = js_source[
+            js_source.index("async function renderAdminControlsPage()"):
+            js_source.index("async function loadThemePage(")
+        ]
+        self.assertIn('id="esCollectionsSearchInput"', controls_source)
+        self.assertIn('id="esCollectionsNoMatches"', controls_source)
+        self.assertIn("function filterEsCollections(", js_source)
+        self.assertIn("function wireEsCollectionsSearch(", js_source)
+        # Every place that (re)builds the collections body must reapply the
+        # active search, or a Save/Refresh would silently reset the filter
+        # view back to unfiltered while the search box still shows the query.
+        render_body_fn = js_source[
+            js_source.index("function renderEsCollectionsBody("):
+            js_source.index("async function loadEsCollections(")
+        ]
+        self.assertIn("wireEsCollectionsSearch()", render_body_fn)
+        self.assertIn("filterEsCollections(", render_body_fn)
 
     def test_drone_self_update_schedules_detached_service_restart_when_supervised(self) -> None:
         from app.common import self_update
@@ -6319,35 +6343,61 @@ class NavRestructureTests(unittest.TestCase):
         self.assertNotIn('const themeMenuBtn = document.getElementById("themeMenuBtn");', self.js)
         self.assertNotIn("themeMenuBtn.addEventListener", self.js)
 
-    def test_theme_is_an_admin_menu_card(self) -> None:
+    def test_theme_is_reachable_via_the_artwork_panel_tabs(self) -> None:
+        # Theme was folded into the "Artwork" admin panel as a second tab
+        # (alongside Artwork & Metadata) rather than getting its own
+        # admin-menu card.
         menu_start = self.js.index("async function renderAdminMenu()")
         menu_end = self.js.index("async function updateDroneApp()")
-        body = self.js[menu_start:menu_end]
-        self.assertIn("setHash('#theme')", body)
-        self.assertIn(">Theme<", body)
+        menu = self.js[menu_start:menu_end]
+        self.assertIn("setHash('#admin/artwork')", menu)
+        self.assertIn(">Artwork<", menu)
+        self.assertNotIn(">Theme<", menu)
+
+        tabs_start = self.js.index("function renderArtworkTabBar(")
+        tabs_end = self.js.index("\n}", tabs_start)
+        tabs_body = self.js[tabs_start:tabs_end]
+        self.assertIn('"#theme"', tabs_body)
+        self.assertIn("Theme Gallery", tabs_body)
 
     def test_theme_page_route_is_unchanged(self) -> None:
         # Moving the entry point doesn't gate or rename the page itself.
         self.assertIn('hash === "#theme"', self.js)
         self.assertIn("await renderThemeGalleryPage();", self.js)
 
-    def test_transfers_is_an_admin_gated_navbar_link(self) -> None:
-        self.assertIn('id="transfersMenuBtn" href="#admin/transfers"', self.html)
-        controls_pos = self.html.index('id="controlsMenuBtn"')
-        transfers_pos = self.html.index('id="transfersMenuBtn"')
-        admin_pos = self.html.index('id="adminMenuBtn"')
-        self.assertTrue(controls_pos < transfers_pos < admin_pos)
+    def test_transfers_is_reachable_via_the_swarm_panel_tabs(self) -> None:
+        # Transfers was folded into the Swarm navbar destination as a second
+        # tab (alongside Swarm, which stays the default) rather than getting
+        # its own navbar link.
+        self.assertNotIn('id="transfersMenuBtn"', self.html)
+        self.assertNotIn("const transfersMenuBtn =", self.js)
+        self.assertNotIn("transfersMenuBtn.addEventListener", self.js)
 
-        self.assertIn('const transfersMenuBtn = document.getElementById("transfersMenuBtn");', self.js)
+        tabs_start = self.js.index("function renderSwarmTabBar(")
+        tabs_end = self.js.index("\n}", tabs_start)
+        tabs_body = self.js[tabs_start:tabs_end]
+        self.assertIn('"#admin/transfers"', tabs_body)
+        self.assertIn("Transfers", tabs_body)
+
+    def test_automation_is_an_admin_gated_navbar_link(self) -> None:
+        # Automation moved out of the admin-tile grid and into a top-level
+        # navbar destination, the same treatment Controls/Swarm already get.
+        self.assertIn('id="automationMenuBtn" href="#admin/automation"', self.html)
+        controls_pos = self.html.index('id="controlsMenuBtn"')
+        automation_pos = self.html.index('id="automationMenuBtn"')
+        admin_pos = self.html.index('id="adminMenuBtn"')
+        self.assertTrue(controls_pos < automation_pos < admin_pos)
+
+        self.assertIn('const automationMenuBtn = document.getElementById("automationMenuBtn");', self.js)
         self.assertIn(
-            "const adminLinks = [adminMenuBtn, controlsMenuBtn, transfersMenuBtn, swarmMenuBtn, apiAccessBtn]",
+            "const adminLinks = [adminMenuBtn, controlsMenuBtn, automationMenuBtn, swarmMenuBtn, apiAccessBtn]",
             self.js,
         )
-        click_start = self.js.index('transfersMenuBtn.addEventListener("click"')
+        click_start = self.js.index('automationMenuBtn.addEventListener("click"')
         click_end = self.js.index("});", click_start)
         click_body = self.js[click_start:click_end]
         self.assertIn("if (!adminEnabled) return;", click_body)
-        self.assertIn('setHash("#admin/transfers");', click_body)
+        self.assertIn('setHash("#admin/automation");', click_body)
 
     def test_router_dispatches_transfers_and_redirects_integration_to_swarm(self) -> None:
         transfers_route = self.js.index('} else if (hash === "#admin/transfers")')

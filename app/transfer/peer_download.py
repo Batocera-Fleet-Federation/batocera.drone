@@ -674,6 +674,177 @@ def _download_bios_from_peer(
     }
 
 
+def _download_movie_from_peer(
+    settings: Settings,
+    config: dict,
+    peer: dict,
+    relative_path: str,
+    expected_size=None,
+    expected_fingerprint=None,
+    progress_callback=None,
+    cancellation_event: Optional[Event] = None,
+    overwrite: bool = False,
+) -> dict:
+    """Pull one movie file from a peer. Same shape as ``_download_bios_from_peer``
+    (flat namespace, no system) except integrity uses the sampled fingerprint
+    (``movies_store.build_movie_fingerprint``) rather than a full-file MD5 --
+    movie files can be large media files where a full hash is wasteful, unlike
+    small BIOS files where exact-identity MD5 matters to emulators."""
+    try:
+        from ..storage.movies_store import build_movie_fingerprint
+    except ImportError:  # pragma: no cover - flat execution
+        from storage.movies_store import build_movie_fingerprint  # type: ignore
+    peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
+    address = _preferred_peer_address(peer, settings=settings, peer_id=peer_id)
+    if not address:
+        raise RuntimeError("selected peer has no address")
+    rel = _safe_rom_relative_path(relative_path)
+    url = f"{address}/v1/api/peer/movies/{quote(rel, safe='/')}"
+    movies_root = settings.movies_root.resolve()
+    target = (movies_root / rel).resolve()
+    if target == movies_root or movies_root not in target.parents:
+        raise ValueError("invalid target path")
+    partial_target = target.with_name(f"{target.name}.part")
+    started_dt = datetime.now(timezone.utc).replace(microsecond=0)
+    started = started_dt.isoformat()
+    started_mono = time.monotonic()
+    expected_fingerprint_clean = str(expected_fingerprint or "").strip().lower()
+
+    def skipped_activity(existing: Path, reason: str) -> dict:
+        completed_dt = datetime.now(timezone.utc).replace(microsecond=0)
+        duration_ms = int((time.monotonic() - started_mono) * 1000)
+        return {
+            "asset_type": "movies", "file_type": "Movie", "source_drone_id": peer_id,
+            "target_drone_id": settings.device_id, "system": "movies",
+            "movie_name": rel, "rom_name": rel,
+            "relative_path": existing.relative_to(movies_root).as_posix(),
+            "action": "download", "status": "skipped", "skip_reason": reason,
+            "failure_reason": reason, "bytes_transferred": 0,
+            "file_size": existing.stat().st_size, "fingerprint": expected_fingerprint_clean,
+            "download_started_at": started, "download_completed_at": completed_dt.isoformat(),
+            "started_at": started, "completed_at": completed_dt.isoformat(),
+            "duration_ms": duration_ms, "duration_seconds": round(duration_ms / 1000, 3),
+        }
+
+    if not overwrite and target.is_file():
+        return skipped_activity(target, "target path already exists")
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    cafile = _peer_trust_cafile(settings, peer_id=peer_id, config=config)
+    if address.startswith("https://") and not cafile:
+        raise ssl.SSLError(f"no trusted certificate cached for peer {peer_id}")
+    context = _drone_client_ssl_context(settings, url, verify=bool(cafile), cafile=cafile)
+    bytes_written = 0
+    request = Request(url, headers={"User-Agent": "batocera-drone-movies-sync/1.0"})
+
+    def ensure_not_cancelled() -> None:
+        if cancellation_event is not None and cancellation_event.is_set():
+            if partial_target.exists():
+                partial_target.unlink()
+            raise DownloadCancelled("download cancelled")
+
+    def response_total(response) -> Optional[int]:
+        if expected_size not in (None, ""):
+            try:
+                return int(expected_size)
+            except Exception:
+                pass
+        try:
+            return int(response.headers.get("Content-Length") or 0) or None
+        except Exception:
+            return None
+
+    try:
+        with urlopen(request, timeout=max(10, PEER_CHECK_TIMEOUT_SECONDS * 4), context=context) as response, partial_target.open("wb") as handle:
+            total_bytes = response_total(response)
+            while True:
+                ensure_not_cancelled()
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                handle.write(chunk)
+                bytes_written += len(chunk)
+                if progress_callback:
+                    progress_callback(bytes_written, total_bytes)
+    except (ssl.SSLError, URLError) as error:
+        if isinstance(error, URLError) and not _is_ssl_url_error(error):
+            raise
+        ssl_error = getattr(error, "reason", error)
+        print(f"Movie sync SSL validation failed: {_peer_ssl_diagnostic(url, cafile, ssl_error)}", file=sys.stderr, flush=True)
+        if partial_target.exists():
+            partial_target.unlink()
+        cafile = _peer_trust_cafile(settings, peer_id=peer_id, config=config, refresh_cert=True)
+        if address.startswith("https://") and not cafile:
+            raise ssl.SSLError(f"no trusted certificate cached for peer {peer_id}") from error
+        context = _drone_client_ssl_context(settings, url, verify=bool(cafile), cafile=cafile)
+        bytes_written = 0
+        try:
+            with urlopen(request, timeout=max(10, PEER_CHECK_TIMEOUT_SECONDS * 4), context=context) as response, partial_target.open("wb") as handle:
+                total_bytes = response_total(response)
+                while True:
+                    ensure_not_cancelled()
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    handle.write(chunk)
+                    bytes_written += len(chunk)
+                    if progress_callback:
+                        progress_callback(bytes_written, total_bytes)
+        except (ssl.SSLError, URLError) as retry_error:
+            if isinstance(retry_error, URLError) and not _is_ssl_url_error(retry_error):
+                raise
+            retry_ssl_error = getattr(retry_error, "reason", retry_error)
+            print(f"Movie sync SSL validation retry failed: {_peer_ssl_diagnostic(url, cafile, retry_ssl_error)}", file=sys.stderr, flush=True)
+            if partial_target.exists():
+                partial_target.unlink()
+            raise ssl.SSLError(_peer_ssl_diagnostic(url, cafile, retry_ssl_error)) from retry_error
+    except DownloadCancelled:
+        if partial_target.exists():
+            partial_target.unlink()
+        raise
+    except Exception:
+        if partial_target.exists():
+            partial_target.unlink()
+        raise
+    if expected_size not in (None, ""):
+        try:
+            if int(expected_size) != bytes_written:
+                raise RuntimeError(f"size mismatch expected={expected_size} actual={bytes_written}")
+        except ValueError:
+            pass
+    actual_fingerprint = build_movie_fingerprint(partial_target)
+    if expected_fingerprint_clean and actual_fingerprint.lower() != expected_fingerprint_clean:
+        if partial_target.exists():
+            partial_target.unlink()
+        raise RuntimeError(f"fingerprint mismatch expected={expected_fingerprint_clean} actual={actual_fingerprint}")
+    partial_target.replace(target)
+    completed_dt = datetime.now(timezone.utc).replace(microsecond=0)
+    duration_ms = int((time.monotonic() - started_mono) * 1000)
+    return {
+        "asset_type": "movies",
+        "file_type": "Movie",
+        "source_drone_id": peer_id,
+        "target_drone_id": settings.device_id,
+        "system": "movies",
+        "movie_name": rel,
+        "rom_name": rel,
+        "relative_path": target.relative_to(movies_root).as_posix(),
+        "action": "download",
+        "status": "completed",
+        "bytes_transferred": bytes_written,
+        "file_size": expected_size or bytes_written,
+        "fingerprint": actual_fingerprint,
+        "movies_fingerprint": expected_fingerprint_clean or actual_fingerprint,
+        "download_started_at": started,
+        "download_completed_at": completed_dt.isoformat(),
+        "started_at": started,
+        "completed_at": completed_dt.isoformat(),
+        "duration_ms": duration_ms,
+        "duration_seconds": round(duration_ms / 1000, 3),
+        "selected_peer_reason": "healthy peer with requested movie and best sampled score",
+    }
+
+
 def _download_save_from_peer(
     settings: Settings,
     config: dict,

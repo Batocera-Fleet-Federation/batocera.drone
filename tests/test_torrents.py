@@ -1016,6 +1016,51 @@ class TorrentFileManagementTests(unittest.TestCase):
             self.assertTrue((dest / "two.bin").exists())
             self.assertFalse(subfolder.exists())
 
+    def test_move_files_cleanup_success_removes_torrent_from_list(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            watch = root / "watch"
+            subfolder = watch / "pack"
+            subfolder.mkdir(parents=True)
+            file1 = subfolder / "one.bin"
+            file1.write_bytes(b"one")
+            manager, _ = self._completed_manager(root, rpc, {"pack": [file1]})
+            entry = manager.snapshot()["torrents"][0]
+            with manager._lock:
+                gid = manager._torrents[entry["id"]]["gid"]
+            torrent_file = Path(entry["torrent_file"])
+            self.assertTrue(torrent_file.exists())
+            dest = root / "moved"
+            result = manager.move_files(entry["id"], [str(file1)], str(dest), cleanup=True)
+            self.assertEqual(result["status"], "ok")
+            self.assertTrue(result["cleanup_performed"])
+            self.assertTrue(result["removed_from_list"])
+            self.assertEqual(manager.snapshot()["torrents"], [])
+            self.assertFalse(torrent_file.exists())
+            self.assertIn(gid, [params[0] for params in rpc.method_calls("aria2.forceRemove")])
+
+    def test_move_files_cleanup_failure_keeps_torrent_in_list(self) -> None:
+        # cleanup only fires on a fully-successful move; a partial failure
+        # must never remove the torrent out from under files that are still
+        # sitting where they started.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            watch = root / "watch"
+            subfolder = watch / "pack"
+            subfolder.mkdir(parents=True)
+            file1 = subfolder / "one.bin"
+            file1.write_bytes(b"one")
+            missing = subfolder / "missing.bin"
+            manager, _ = self._completed_manager(root, FakeRpc(), {"pack": [file1, missing]})
+            entry = manager.snapshot()["torrents"][0]
+            dest = root / "moved"
+            result = manager.move_files(entry["id"], [str(file1), str(missing)], str(dest), cleanup=True)
+            self.assertEqual(result["status"], "partial")
+            self.assertFalse(result["cleanup_performed"])
+            self.assertFalse(result["removed_from_list"])
+            self.assertEqual(len(manager.snapshot()["torrents"]), 1)
+
     def test_move_files_partial_failure_skips_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

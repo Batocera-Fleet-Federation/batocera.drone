@@ -67,6 +67,7 @@ class Settings:
     roms_root: Path
     bios_root: Path
     saves_root: Path
+    movies_root: Path
     username: Optional[str]
     password: Optional[str]
     credentials_file: Path
@@ -149,6 +150,7 @@ class Settings:
             roms_root=Path(os.environ.get("ROMS_ROOT", "/userdata/roms")),
             bios_root=Path(os.environ.get("BIOS_ROOT", "/userdata/bios")),
             saves_root=Path(os.environ.get("SAVES_ROOT", "/userdata/saves")),
+            movies_root=Path(os.environ.get("MOVIES_ROOT", "/userdata/movies")),
             username=os.environ.get("DRONE_APP_USERNAME") or None,
             password=os.environ.get("DRONE_APP_PASSWORD") or None,
             credentials_file=Path(os.environ.get("DRONE_CREDENTIALS_FILE", str(userdata_root / "system" / "drone-app" / "credentials.json"))),

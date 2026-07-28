@@ -19,6 +19,7 @@ from urllib.error import HTTPError
 
 try:
     from ..common.settings import Settings
+    from ..storage import movies_store as _movies_store
     from ..storage import saves_store as _saves_store
     from ..storage.state_store import database_path as _state_database_path
     from ..storage.state_store import load_payload as _load_state_payload
@@ -31,12 +32,14 @@ try:
     from .peer_download import (
         _download_artwork_from_peer,
         _download_bios_from_peer,
+        _download_movie_from_peer,
         _download_rom_folder_from_peer,
         _download_rom_from_peer,
         _download_save_from_peer,
     )
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.settings import Settings  # type: ignore
+    from storage import movies_store as _movies_store  # type: ignore
     from storage import saves_store as _saves_store  # type: ignore
     from storage.state_store import database_path as _state_database_path  # type: ignore
     from storage.state_store import load_payload as _load_state_payload  # type: ignore
@@ -49,6 +52,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from transfer.peer_download import (  # type: ignore
         _download_artwork_from_peer,
         _download_bios_from_peer,
+        _download_movie_from_peer,
         _download_rom_folder_from_peer,
         _download_rom_from_peer,
         _download_save_from_peer,
@@ -124,6 +128,18 @@ def _directpublic_fetch(request: "DownloadRequest", context: "TransferContext") 
             rel,
             expected_size=expected_size,
             expected_md5=expected_fingerprint,
+            progress_callback=progress,
+            cancellation_event=cancel_event,
+            overwrite=request.overwrite,
+        )
+    if asset_type == "movies":
+        return _download_movie_from_peer(
+            settings,
+            config,
+            peer,
+            rel,
+            expected_size=expected_size,
+            expected_fingerprint=expected_fingerprint,
             progress_callback=progress,
             cancellation_event=cancel_event,
             overwrite=request.overwrite,
@@ -517,6 +533,56 @@ class DownloadManager:
             "cancellation_requested": False,
             "created_at": now,
             "_asset_type": "saves",
+            "_config": config,
+            "_peer": peer,
+            "_expected_fingerprint": expected_fingerprint,
+            "_overwrite": bool(overwrite),
+        }
+        with self._lock:
+            self._jobs[job_id] = job
+            self._cancel_events[job_id] = Event()
+            self._update_queue_positions_locked()
+            self._persist_state_locked()
+            snapshot = self._public_job_locked(job)
+        self._wake.set()
+        return snapshot
+
+    def enqueue_movie(self, config: dict, peer: dict, relative_path: str, expected_size=None, expected_fingerprint=None, source_action_id: Optional[str] = None, overwrite: bool = False) -> dict:
+        job_id = str(uuid.uuid4())
+        peer_id = str(peer.get("drone_id") or peer.get("device_id") or "")
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        job = {
+            "id": job_id,
+            "job_id": job_id,
+            "sync_id": job_id,
+            "source_action_id": source_action_id,
+            "source_drone_id": peer_id,
+            "target_drone_id": self.settings.device_id,
+            "asset_type": "movies",
+            "file_path": relative_path,
+            "file_name": Path(relative_path).name,
+            "file_type": "Movie",
+            "system": "movies",
+            "movie_name": relative_path,
+            "rom_name": relative_path,
+            "relative_path": relative_path,
+            "total_bytes": expected_size,
+            "file_size": expected_size,
+            "downloaded_bytes": 0,
+            "bytes_transferred": 0,
+            "percentage": 0,
+            "transfer_speed_bps": 0,
+            "status": "queued",
+            "queue_position": None,
+            "started_at": None,
+            "download_started_at": None,
+            "completed_at": None,
+            "download_completed_at": None,
+            "error_message": None,
+            "failure_reason": None,
+            "cancellation_requested": False,
+            "created_at": now,
+            "_asset_type": "movies",
             "_config": config,
             "_peer": peer,
             "_expected_fingerprint": expected_fingerprint,
@@ -939,7 +1005,11 @@ class DownloadManager:
                     else (
                         self.repository.list_bios_entries()
                         if asset_type == "bios"
-                        else (_saves_store.list_saves(self.settings.saves_root, system=system or None) if asset_type == "saves" else self.repository.list_assets(system, "roms")[1])
+                        else (
+                            _movies_store.list_movies(self.settings.movies_root)
+                            if asset_type == "movies"
+                            else (_saves_store.list_saves(self.settings.saves_root, system=system or None) if asset_type == "saves" else self.repository.list_assets(system, "roms")[1])
+                        )
                     )
                 )
                 activity["inventory_refresh_status"] = "succeeded"

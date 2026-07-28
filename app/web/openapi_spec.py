@@ -689,6 +689,7 @@ def _schemas() -> Dict[str, Schema]:
                 "moved": _array(_string("New path of a successfully moved file")),
                 "errors": _array(_ref("TorrentMoveError")),
                 "cleanup_performed": _boolean(),
+                "removed_from_list": _boolean("Whether the torrent was fully removed (cleanup succeeded, so nothing was left to track)"),
             },
             ("status",),
             description="Result of moving selected files out of a completed torrent's download folder.",
@@ -929,6 +930,7 @@ def _schemas() -> Dict[str, Schema]:
         "DroneAutoUpdateRequest": _object({"enabled": _boolean()}, ("enabled",)),
         "DroneAutoUpdateResponse": _object({"enabled": _boolean()}, ("enabled",)),
         "PixnUpdateResponse": _object({"type": _string(), "status": _string(), "pid": _integer(nullable=True), "script": _string()}, ("type", "status", "script"), description="PixN upgrade script launch result."),
+        "RestartEmulationStationResponse": _object({"status": _string()}, ("status",), description="Result of restarting EmulationStation (batocera-es-swissknife --restart or the init.d script)."),
         "CredentialsUpdateRequest": _object({"username": _string(), "password": _string()}, ("username", "password")),
         "CredentialsUpdateResponse": _object({"credentials": freeform, "message": _string()}, ("credentials", "message")),
         "NetworkModeResponse": _object(
@@ -1067,7 +1069,7 @@ def _schemas() -> Dict[str, Schema]:
         "LocalSyncRequest": _object(
             {
                 "peer_id": _string(),
-                "asset_type": _enum(["roms", "bios", "artwork", "saves"]),
+                "asset_type": _enum(["roms", "bios", "artwork", "saves", "movies"]),
                 "system": _string(),
                 "item": _ref("AssetEntry"),
                 "include_artwork": _boolean(default=True),
@@ -1083,7 +1085,7 @@ def _schemas() -> Dict[str, Schema]:
         "LocalBulkSyncRequest": _object(
             {
                 "peer_id": _string(),
-                "asset_type": _enum(["roms", "bios", "artwork", "saves"]),
+                "asset_type": _enum(["roms", "bios", "artwork", "saves", "movies"]),
                 "system": _string(),
                 "systems": _array(_string()),
                 "q": _string(),
@@ -1158,7 +1160,7 @@ def _schemas() -> Dict[str, Schema]:
         "PeerInventoryResponse": _object(
             {
                 "drone_id": _string(),
-                "asset_type": _enum(["roms", "bios", "artwork", "saves", "emulator_configs", "gameplay"]),
+                "asset_type": _enum(["roms", "bios", "artwork", "saves", "movies", "emulator_configs", "gameplay"]),
                 "system": _string(nullable=True),
                 "systems": _array(_string()),
                 "total": _integer(),
@@ -1218,7 +1220,7 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
         _query_param("systems", _string(), "Comma-separated list of system filters, for example snes,ps2,_root"),
     ]
     peer_inventory_params = [
-        _query_param("type", _enum(["summary", "roms", "bios", "artwork", "saves", "emulator_configs", "gameplay"], default="summary"), "Peer asset type"),
+        _query_param("type", _enum(["summary", "roms", "bios", "artwork", "saves", "movies", "emulator_configs", "gameplay"], default="summary"), "Peer asset type"),
         *common_paging,
         *system_filter_params,
     ]
@@ -1603,6 +1605,7 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
                 "post": _operation("Enable or disable the startup Drone update check", {"200": _json_response("DroneAutoUpdateResponse")}, request_body=_json_request("DroneAutoUpdateRequest"), tags=["admin"]),
             },
             "/admin/system/run-pixn-update": {"post": _operation("Run the installed PixN upgrade script", {"200": _json_response("PixnUpdateResponse")}, tags=["admin"], error_codes=("400", "401", "403", "404", "429", "500"))},
+            "/admin/system/restart-emulationstation": {"post": _operation("Restart EmulationStation", {"200": _json_response("RestartEmulationStationResponse"), "502": _json_response("RestartEmulationStationResponse", "Restart failed")}, tags=["admin"], error_codes=("400", "401", "403", "429", "500"))},
             "/admin/artwork/missing": {
                 "get": _operation(
                     "List ROMs for the artwork and metadata hub",

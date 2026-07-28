@@ -299,10 +299,18 @@ Approved roots may include:
 /userdata/roms
 /userdata/bios
 /userdata/saves
+/userdata/movies
 /userdata/system/configs
 ```
 
-Use the project's actual Batocera paths when known.
+Use the project's actual Batocera paths when known. `movies` is a **flat** asset
+type (no system or artwork association, unlike roms/bios/saves) — its peer-serve
+handler (`_handle_peer_movie_download`) and download function
+(`_download_movie_from_peer`, both in `transfer/peer_download.py`) mirror BIOS's
+flat (no-system) shape, but verify integrity with the sampled fingerprint
+(`movies_store.build_movie_fingerprint`, same `sample-fp-v1` algorithm as
+ROMs/saves) instead of BIOS's full-file MD5, since movie files are typically much
+larger media files where a full hash would be wasteful.
 
 ## Transfer Source Decision Rules
 

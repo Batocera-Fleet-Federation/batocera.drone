@@ -114,6 +114,10 @@ class ApiRoutesMixin:
                 self._handle_peer_bios_download("/".join(parts[2:]))
                 return
 
+            if len(parts) >= 3 and parts[0] == "peer" and parts[1] == "movies":
+                self._handle_peer_movie_download("/".join(parts[2:]))
+                return
+
             if len(parts) >= 4 and parts[0] == "peer" and parts[1] == "saves":
                 self._handle_peer_save_download(parts[2], "/".join(parts[3:]))
                 return
@@ -667,6 +671,10 @@ class ApiRoutesMixin:
 
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "system" and parts[2] in {"run-pixn-update", "run-pixen-update"}:
                 self._handle_admin_pixn_update()
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "system" and parts[2] == "restart-emulationstation":
+                self._handle_admin_restart_emulationstation()
                 return
 
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "asset-cache" and parts[2] == "purge":

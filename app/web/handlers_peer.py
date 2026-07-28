@@ -26,6 +26,7 @@ try:
         read_emulator_config_file as _read_emulator_config_file,
     )
     from ..roms.rom_metadata_state import _rom_metadata_cache_status
+    from ..storage import movies_store as _movies_store
     from ..storage import saves_store as _saves_store
     from ..storage.rom_metadata_store import list_artwork_cache_page
     from ..transfer import local_network as _local_network
@@ -52,6 +53,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         read_emulator_config_file as _read_emulator_config_file,
     )
     from roms.rom_metadata_state import _rom_metadata_cache_status  # type: ignore
+    from storage import movies_store as _movies_store  # type: ignore
     from storage import saves_store as _saves_store  # type: ignore
     from storage.rom_metadata_store import list_artwork_cache_page  # type: ignore
     from transfer import local_network as _local_network  # type: ignore
@@ -260,6 +262,19 @@ class HandlersPeerMixin:
                 _saves_store.list_saves_page(
                     self.settings.saves_root,
                     systems=selected_systems,
+                    query=query,
+                    limit=limit,
+                    offset=offset,
+                )
+            )
+        elif normalized == "movies":
+            # No system dimension at all -- selected_systems/system are
+            # accepted for a uniform request shape but ignored.
+            if self.settings.use_fake_data:
+                _movies_store.sync_movies_cache(self.settings.movies_root)
+            return paged_response(
+                _movies_store.list_movies_page(
+                    self.settings.movies_root,
                     query=query,
                     limit=limit,
                     offset=offset,
@@ -557,6 +572,31 @@ class HandlersPeerMixin:
         self._stream_file(
             target, "application/octet-stream", as_attachment=True,
             upload_meta={"asset_type": "bios", "relative_path": rel},
+        )
+
+    def _handle_peer_movie_download(self, relative_path: str) -> None:
+        """Serve a single movie file to an authenticated peer (mTLS when enabled).
+
+        Movies have no system/artwork association (unlike ROMs/BIOS/saves),
+        so this is a flat lookup under ``movies_root`` -- same shape as BIOS,
+        minus any system dimension.
+        """
+        if not self._peer_request_authorized():
+            return
+        movies_root = Path(self.settings.movies_root).resolve()
+        rel = unquote(relative_path or "").replace("\\", "/").lstrip("/")
+        if not rel or ".." in Path(rel).parts:
+            self._send_json(400, {"error": "invalid movie path"})
+            return
+        target = (movies_root / rel).resolve()
+        if not target.exists() or not target.is_file() or (target != movies_root and movies_root not in target.parents):
+            self.log_error("peer movie download failed movie=%s resolved=%s reason=not_found", rel, str(target))
+            self._send_json(404, {"error": "not found"})
+            return
+        self.log_message("peer movie download movie=%s bytes=%s", rel, target.stat().st_size)
+        self._stream_file(
+            target, "application/octet-stream", as_attachment=True,
+            upload_meta={"asset_type": "movies", "relative_path": rel},
         )
 
     def _handle_peer_save_download(self, system: str, relative_path: str) -> None:
