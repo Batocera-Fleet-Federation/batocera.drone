@@ -1,6 +1,6 @@
 ---
 name: drone-vpn-management
-description: Use this when designing, reviewing, debugging, or modifying the Drone's VPN admin tile — OpenVPN client configuration/connection management, .ovpn upload and rewriting, VPN credential storage, connect/disconnect process control, VPN status detection, auto-start-on-boot, or app/device/vpn_manager.py, web/handlers_vpn.py.
+description: Use this when designing, reviewing, debugging, or modifying the Drone's VPN admin tile — OpenVPN client configuration/connection management, .ovpn upload and rewriting, VPN credential storage, connect/disconnect process control, VPN status detection, auto-start-on-boot, peer-to-peer VPN config/credential sharing between paired drones (single-hop-only provenance, share-revocation auto-disconnect/wipe), or app/device/vpn_manager.py, web/handlers_vpn.py, web/handlers_peer.py's _handle_peer_vpn_config.
 ---
 
 # Drone VPN Management Skill
@@ -26,7 +26,11 @@ app/device/
                     # functions, no class, no background thread
 app/web/
   handlers_vpn.py   # admin route handlers (HandlersVpnMixin); delegates all
-                     # real logic to vpn_manager.py
+                     # real logic to vpn_manager.py -- including the sharing
+                     # toggle and the pull-from-peer admin action
+  handlers_peer.py  # _handle_peer_vpn_config: the mTLS GET /peer/vpn/config
+                     # peer-serving endpoint (HandlersPeerMixin), delegates to
+                     # vpn_manager.export_payload()
 app/common/
   multipart.py        # shared multipart/form-data parser (also used by
                        # handlers_torrents.py's .torrent upload)
@@ -163,8 +167,136 @@ log-wording differences across openvpn versions.
 this is not a design choice to relax, it's a hard requirement of OpenVPN's
 own `auth-user-pass <file>` mechanism, which expects exactly that format.
 Only the **username** is persisted in the JSON state (for display); the
-password is never stored anywhere except that one file, and never returned to
-the browser by any endpoint.
+password is never stored anywhere except that one file, and **never returned
+to the browser by any `/admin/*` endpoint** -- this rule is unchanged. The one
+new exception is deliberate and lives entirely on a different channel: see
+"Peer-to-peer sharing" below, which is a Drone-to-Drone mTLS payload, never a
+browser response.
+
+## Peer-to-peer sharing (`export_payload` / `import_from_peer`)
+
+A paired peer can pull this drone's VPN config **and credentials** over the
+same cert-pinned mTLS `/peer/*` channel used for ROM/BIOS/save/movie/artwork
+transfers -- see the `drone-p2p-transfer-security` skill for that channel's
+base guarantees (paired-only, mTLS required, no plaintext fallback). This
+lets an owner who legitimately controls every drone in the swarm (and the one
+VPN subscription behind it) avoid re-typing the same OpenVPN token on every
+machine.
+
+**This is opt-in per drone, on top of the base pairing check** — a deliberate
+deviation from the ROM/BIOS/saves/movies default (there, pairing itself is
+the only authorization check; see the P2P skill's "a peer is authorized
+because it is in this Drone's own paired-peer list, nothing else"). VPN
+credentials are more sensitive than a ROM file, so a second, explicit gate
+exists: `vpn_manager.set_sharing_enabled()` / the `sharing_enabled` state
+field, surfaced as an **off-by-default** "Allow paired drones to pull this
+VPN configuration" switch on the VPN tile. Do not remove this gate or default
+it to on "for consistency with ROMs" -- that consistency was deliberately
+rejected for this feature.
+
+- **Serving side**: `GET /peer/vpn/config` (`handlers_peer.py`'s
+  `_handle_peer_vpn_config`, dispatched in `api_routes.py`) checks
+  `_peer_request_authorized()` (the standard pinned-cert/paired check) *and*
+  `vpn_manager.export_payload(settings)`, which itself returns `None` (→ 404)
+  unless `sharing_enabled` is on *and* a config has been uploaded. When
+  present, credentials are read straight from `auth.txt` and included in the
+  JSON payload alongside the config text and remotes.
+- **Pulling side**: the admin action `POST /admin/vpn/pull-from-peer`
+  (`handlers_vpn.py`'s `_handle_admin_vpn_pull_from_peer`) resolves the
+  chosen peer via `transfer/local_network.get_paired_peer`, fetches
+  `/v1/api/peer/vpn/config` with `transfer/peer_connectivity._peer_get_json_for_peer`
+  (the same small one-shot cert-pinned JSON client the remote-admin proxy
+  uses -- **not** the big-file `DownloadManager` queue; a VPN config is a few
+  KB of text, so progress/resume/cancel machinery would be pure overhead),
+  and hands the result to `vpn_manager.import_from_peer(settings, payload)`.
+- **`import_from_peer` deliberately does not write files itself** — it calls
+  the *existing*, already-tested `save_uploaded_config()` /
+  `save_credentials()` unchanged, treating the peer's exported bytes exactly
+  like a fresh browser upload. This matters for correctness, not just code
+  reuse: `save_uploaded_config()` re-runs `rewrite_ovpn_config()` against
+  *this* drone's own `auth_path()`, so the peer's `auth-user-pass` line
+  (which pointed at *their* install-root path) gets correctly re-pointed at
+  ours — this holds even if the two drones' install roots differ, with no
+  separate "peer import" rewrite path to keep in sync with the upload one.
+- The frontend (`drone.js`: `renderVpnPage`'s "Share with Swarm" card,
+  `setVpnSharing`, `loadVpnPullPeerOptions`, `pullVpnConfigFromPeer`) sources
+  the peer picker from `GET /admin/swarm/overview` filtered to
+  `!drone.is_self && drone.online`, the same pattern the Transfers page's
+  "Connected Drone" dropdown already uses (`renderLocalTransferRequestPanel`).
+
+### Single-hop only: an imported config can never be re-shared
+
+**Only the drone whose owner originally uploaded/typed a config can ever
+share it.** A drone that pulled a config from a peer is a *consumer*, not a
+new source — it cannot re-share what it imported, at any distance. This is
+tracked as **provenance**, not inferred from `sharing_enabled` alone:
+
+- `_load_state()` carries `source_peer_id` / `source_peer_name` — empty for a
+  self-uploaded config, set to the peer's drone id/name for an imported one.
+- `save_uploaded_config()` — a **direct**, real upload — always resets
+  provenance to empty as part of its "fresh write" semantics: this is the
+  *only* way a drone goes from "imported" back to "self-owned, can share."
+- `import_from_peer(settings, payload, *, source_peer_id, source_peer_name="")`
+  takes the peer identity as **caller-supplied keyword arguments, never from
+  the wire payload** (the pulling drone already authenticated that peer via
+  mTLS+pairing before calling this — trust what *we* dialed, not a
+  self-reported field). It calls `save_uploaded_config()` first (which clears
+  provenance, see above), then immediately re-applies the real provenance in
+  a follow-up `_save_state()` call. Get this ordering backwards and every
+  import would silently look self-owned.
+- **Enforcement is two-layered, both required:** `set_sharing_enabled(settings,
+  True)` raises `ValueError` outright if `source_peer_id` is set (surfaces as
+  a 400 to the admin UI, which also hides the toggle entirely in this state —
+  see `renderVpnPage`'s conditional in `drone.js`); `export_payload()`
+  *independently* re-checks `source_peer_id` and returns `None` even if
+  `sharing_enabled` were somehow set anyway. Don't remove either check on the
+  assumption the other one covers it — `export_payload`'s check is the one
+  that actually matters, since it's the point data would leave the drone.
+
+### Revocation: turning sharing off strips it from everyone who pulled it
+
+When the source drone's owner turns `sharing_enabled` off (or removes their
+config), every drone that had pulled it must lose it: disconnect, remove the
+credentials, and show why. Drones are **outbound-only with no push channel**,
+so the only way a pulling drone can learn this is to periodically ask —
+this is the one deliberate exception to this module's "no background thread"
+bias (see "Design" above), because unlike status, an on-demand recompute
+cannot detect a revocation nobody is actively looking for.
+
+- `run_sharing_revocation_poller(settings)` is a forever-loop (sleep, then
+  `check_sharing_revocation`), started as its own daemon thread from
+  `create_server()` **exactly like `maybe_auto_connect`** — a
+  `_VPN_SHARING_POLLER_STARTED` guard flag, threading owned by the caller, the
+  function itself threading-agnostic. Interval: `DRONE_VPN_SHARING_CHECK_INTERVAL_SECONDS`
+  (default 300s, floored at 30s) — an ops/test-only env var, not a UI setting,
+  matching `DRONE_VPN_DIR`'s precedent.
+- `check_sharing_revocation(settings)` is a no-op unless `source_peer_id` is
+  set *and* `has_credentials` is true (nothing to revoke otherwise). It
+  resolves the source peer via `local_network.get_paired_peer` and re-calls
+  the *same* `GET /peer/vpn/config` endpoint the original pull used.
+- **Only two outcomes count as revocation**: the peer is no longer in this
+  drone's paired-peer list at all, or it answers with `404` (sharing off, or
+  it no longer has a config — `_handle_peer_vpn_config` returns 404 for both,
+  and both mean "stop relying on this"). **Every other outcome — unreachable,
+  timeout, any other HTTP status, an unexpected exception — changes nothing.**
+  `check_sharing_revocation` never raises and never revokes on a guess; a
+  flaky or briefly-offline peer must not strip a working VPN setup. Do not
+  loosen this to "any error revokes" — that turns ordinary network flakiness
+  into data loss.
+- **What revocation actually does** (`_revoke_local_credentials`): calls the
+  existing `disconnect()`, deletes `auth.txt`, clears `has_credentials`/
+  `username`, and sets `revoked_reason` + `revoked_at`. It deliberately
+  **leaves the `.ovpn` config file and `source_peer_id` in place** — wiping
+  provenance here would reopen the single-hop-only hole (see above): a
+  credential-less imported config with no recorded origin would look
+  indistinguishable from a fresh self-upload and could pass the sharing
+  gate. Provenance is only ever cleared by a genuine new
+  `save_uploaded_config()` call.
+- The revoked-reason notice must render in the **live-polled** region
+  (`renderVpnLive`/`patchVpnLive`'s `vpnRevokedNotice` node, via
+  `renderVpnRevokedNotice`), not the static once-per-page-load template —
+  revocation can happen while the owner is already sitting on the VPN page,
+  and the existing 3s poll is what surfaces it without a manual refresh.
 
 ## Status detection
 
@@ -218,13 +350,40 @@ the existing one.
   process on the same box.
 - Adding a background polling thread for VPN status "for consistency with
   Torrents" — not needed; a VPN connection has no scheduling work, only
-  Torrents' queue does.
+  Torrents' queue does. (The sharing-revocation poller is a *different*,
+  narrowly-scoped background thread with its own concrete justification —
+  see "Revocation" above — not a precedent for adding others.)
 - Storing the plaintext password anywhere other than `auth.txt` (including
   logs, the JSON state, or an API response).
 - Making `vpn_dir()`/the config path user-configurable in the UI — the
   feature spec is explicit that this is fixed, unlike Torrents' watch folder.
 - Polling `check_public_ip()` automatically instead of leaving it a
   user-triggered button.
+- Defaulting `sharing_enabled` to on, or removing the check, "for consistency
+  with how ROMs/BIOS/saves already sync" — that consistency was deliberately
+  rejected for VPN credentials; see "Peer-to-peer sharing" above.
+- Writing peer-imported config/credential bytes to disk directly instead of
+  routing them through `save_uploaded_config()`/`save_credentials()` — skips
+  the local `auth-user-pass` rewrite and the `.ovpn`/size/encoding validation,
+  and risks silently reusing the *peer's* install-root path.
+- Adding the big-file `DownloadManager`/`TransportSelector` machinery to the
+  pull path — a VPN config is a few KB of text fetched with one synchronous
+  `_peer_get_json_for_peer` call, not a queued/resumable transfer.
+- Trusting a `source_peer_id`/self-reported identity field from the *wire
+  payload* when importing — it's a caller-supplied argument (the peer id the
+  pulling drone itself dialed and authenticated), never something the peer's
+  response gets to claim about itself.
+- Clearing `source_peer_id` anywhere in the revocation path
+  (`_revoke_local_credentials`) — that would let a now-credential-less
+  imported config pass the "is this self-owned" check and become shareable.
+  Only a genuine new `save_uploaded_config()` call may clear provenance.
+- Treating any non-200 response (timeouts, 5xx, unrelated errors) from the
+  revocation check as "revoked" — only an explicit 404 (not sharing / no
+  config) or the peer no longer being paired counts; anything else is
+  transient and must leave the local credentials untouched.
+- Rendering the revoked-reason notice only in `renderVpnPage`'s static
+  one-time template instead of the live-polled `vpnRevokedNotice` node —
+  revocation can happen while the page is already open.
 
 ## Expected output format
 
@@ -257,14 +416,24 @@ Do not:
 
 - relax `auth.txt`'s `0o600` permissions or store the password anywhere else,
 - use `killall`/process-name-only matching for disconnect,
-- return the VPN password in any API response,
+- return the VPN password in any **`/admin/*`** (browser-facing) API response
+  — the peer-to-peer `/peer/vpn/config` payload is the one intentional,
+  narrowly-scoped exception, gated by pairing + `sharing_enabled`,
 - make the install-root-relative storage location user-configurable,
 - add a background thread/cached state machine without a concrete reason a
   stateless recompute can't handle,
 - poll the public-IP check automatically,
 - extend the non-root "control worker" IPC to VPN without first confirming a
   real non-root deployment need (today's assumption is root-always, matching
-  the rest of the device-control code).
+  the rest of the device-control code),
+- default `sharing_enabled` to on, or let any endpoint other than
+  `/peer/vpn/config` (mTLS, paired, sharing-gated) return credentials,
+- let an imported config be re-shared — enforce single-hop-only in both
+  `set_sharing_enabled` (reject) and `export_payload` (independently refuse),
+- clear `source_peer_id` anywhere except a genuine fresh `save_uploaded_config()`
+  call, especially not during revocation cleanup,
+- treat a network error, timeout, or non-404 status as revocation — only an
+  explicit 404 or "peer no longer paired" may disconnect and wipe credentials.
 
 ## Default bias
 
@@ -272,4 +441,14 @@ When unsure, keep VPN management stateless (recompute on request) rather than
 introducing cached state, prefer precise `/proc`-based PID matching over
 broad process signals, and treat the fixed `<install root>/vpn/` location and
 its `DRONE_VPN_DIR` test-only override as settled unless the user explicitly
-asks to make storage configurable.
+asks to make storage configurable. For peer sharing, keep the extra
+`sharing_enabled` opt-in gate on top of pairing (don't quietly relax it to
+match ROM/BIOS's pairing-only trust), and keep `import_from_peer` a thin
+wrapper over the existing `save_uploaded_config`/`save_credentials` rather
+than a parallel write path. For provenance/revocation specifically: treat
+"only the original creator can share" as a hard invariant enforced at two
+independent points (`set_sharing_enabled` + `export_payload`), never at just
+one; when a revocation check's outcome is ambiguous (an error type not
+explicitly seen before), default to **not** revoking — a false negative
+(stale access lingers a bit longer) is recoverable next poll, a false
+positive (a legitimate user's VPN breaks from a network blip) is not.

@@ -3590,11 +3590,23 @@ function renderVpnActions(payload) {
   </div>`;
 }
 
+// Revocation happens on a background poller (see check_sharing_revocation in
+// vpn_manager.py), possibly while the user is already sitting on this page --
+// so this notice must live in the live-polled region, not the static
+// first-mount template, or a revoke that happens mid-visit would go unseen
+// until the next manual page load.
+function renderVpnRevokedNotice(payload) {
+  if (!payload.revoked_reason) return "";
+  const when = payload.revoked_at ? ` (${escapeHtml(formatCompactLocalDate(payload.revoked_at))})` : "";
+  return `<div class="alert alert-warning py-2 mb-3"><i class="bi bi-shield-exclamation me-1"></i><strong>VPN credentials removed${when}:</strong> ${escapeHtml(payload.revoked_reason)}</div>`;
+}
+
 // First mount only: builds the stable skeleton. Later updates go through
 // patchVpnLive, which never recreates these container nodes -- the same
 // flash-free pattern as the Torrents grid's 3s auto-refresh.
 function renderVpnLive(payload) {
   return `
+    <div id="vpnRevokedNotice">${renderVpnRevokedNotice(payload)}</div>
     <div id="vpnValidationErrors">${renderVpnValidationErrors(payload)}</div>
     <div id="vpnActions">${renderVpnActions(payload)}</div>
     <div id="vpnStatusCards" class="row g-3 mb-3">${renderVpnStatusCards(payload)}</div>
@@ -3605,6 +3617,8 @@ function renderVpnLive(payload) {
 }
 
 function patchVpnLive(payload) {
+  const revokedNode = document.getElementById("vpnRevokedNotice");
+  if (revokedNode) revokedNode.innerHTML = renderVpnRevokedNotice(payload);
   const errorsNode = document.getElementById("vpnValidationErrors");
   if (errorsNode) errorsNode.innerHTML = renderVpnValidationErrors(payload);
   const actionsNode = document.getElementById("vpnActions");
@@ -3675,11 +3689,35 @@ async function renderVpnPage() {
         </div>
       </div>
     </div>
+    <div class="card mb-3">
+      <div class="card-header"><i class="bi bi-people me-2"></i>Share with Swarm</div>
+      <div class="card-body">
+        ${payload.source_peer_id ? `
+        <p class="text-muted small mb-0"><i class="bi bi-info-circle me-1"></i>This configuration was imported from <strong>${escapeHtml(payload.source_peer_name || payload.source_peer_id)}</strong> and cannot be re-shared &mdash; only the drone that originally uploaded a configuration can share it with the swarm.</p>
+        ` : `
+        <p class="text-muted small">Share this configuration and credentials with drones paired to this one, over the same cert-pinned peer link used for ROM/BIOS transfers -- never through the browser. Only paired drones can pull it, and only while this is turned on.</p>
+        <div class="form-check form-switch mb-3">
+          <input class="form-check-input" type="checkbox" role="switch" id="vpnSharingEnabled" ${payload.sharing_enabled ? "checked" : ""} onchange="setVpnSharing(this.checked)">
+          <label class="form-check-label" for="vpnSharingEnabled">Allow paired drones to pull this VPN configuration</label>
+        </div>
+        `}
+        <hr>
+        <p class="text-muted small mb-2">Already sharing on another drone in your swarm? Pull its configuration here instead of uploading your own.</p>
+        <div class="d-flex flex-wrap align-items-end gap-2">
+          <div>
+            <label class="form-label mb-1" for="vpnPullPeer">Paired Drone</label>
+            <select id="vpnPullPeer" class="form-select form-select-sm" style="min-width:220px"><option value="">Loading...</option></select>
+          </div>
+          <button class="btn btn-outline-primary btn-sm" type="button" id="vpnPullBtn" disabled onclick="pullVpnConfigFromPeer()"><i class="bi bi-cloud-arrow-down me-1"></i>Pull Configuration</button>
+        </div>
+      </div>
+    </div>
     <div class="card log-card"><div class="card-body">
       <div id="vpnLive">${renderVpnLive(payload)}</div>
     </div></div>
   `;
   startVpnAutoRefresh();
+  loadVpnPullPeerOptions();
 }
 
 async function refreshVpnLive() {
@@ -3807,6 +3845,53 @@ async function setVpnAutoStart(enabled) {
   } catch (err) {
     if (checkbox) checkbox.checked = !enabled;
     showToast(`Failed to save auto-start setting: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  }
+}
+
+async function setVpnSharing(enabled) {
+  const checkbox = document.getElementById("vpnSharingEnabled");
+  try {
+    await apiPost("/admin/vpn/sharing", { enabled });
+    showToast(`VPN sharing with paired drones ${enabled ? "enabled" : "disabled"}.`, "success");
+  } catch (err) {
+    if (checkbox) checkbox.checked = !enabled;
+    showToast(`Failed to save sharing setting: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  }
+}
+
+async function loadVpnPullPeerOptions() {
+  const select = document.getElementById("vpnPullPeer");
+  const button = document.getElementById("vpnPullBtn");
+  if (!select) return;
+  try {
+    const overview = await api("/admin/swarm/overview");
+    const onlinePeers = (overview.drones || []).filter(drone => !drone.is_self && drone.online);
+    select.innerHTML = onlinePeers.length
+      ? onlinePeers.map(drone => `<option value="${escapeHtml(drone.drone_id || "")}">${escapeHtml(drone.name || drone.hostname || drone.drone_id || "Drone")}</option>`).join("")
+      : '<option value="">No paired drones online</option>';
+    if (button) button.disabled = !onlinePeers.length;
+  } catch (err) {
+    select.innerHTML = '<option value="">Failed to load drones</option>';
+    if (button) button.disabled = true;
+  }
+}
+
+async function pullVpnConfigFromPeer() {
+  const select = document.getElementById("vpnPullPeer");
+  const peerId = select ? select.value : "";
+  if (!peerId) return;
+  const button = document.getElementById("vpnPullBtn");
+  if (button) { button.disabled = true; button.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Pulling...'; }
+  try {
+    const result = await apiPost("/admin/vpn/pull-from-peer", { peer_id: peerId });
+    showToast(
+      result.credentials_imported ? "Pulled VPN configuration and credentials from peer." : "Pulled VPN configuration from peer (no credentials were shared).",
+      "success",
+    );
+    await renderVpnPage();
+  } catch (err) {
+    showToast(`Failed to pull VPN configuration: ${escapeHtml(err.message || "unknown error")}`, "danger", 8000);
+    if (button) { button.disabled = false; button.innerHTML = '<i class="bi bi-cloud-arrow-down me-1"></i>Pull Configuration'; }
   }
 }
 

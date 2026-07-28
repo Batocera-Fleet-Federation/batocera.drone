@@ -7,16 +7,23 @@ the auto-start-on-boot toggle, and the log (view + download). Composed onto
 process/config management this delegates to.
 """
 
+from urllib.error import HTTPError
+
 try:
     from ..common.multipart import boundary_from_content_type as _boundary_from_content_type
     from ..common.multipart import parse_multipart_files as _parse_multipart_files
     from ..device import vpn_manager as _vpn
+    from ..transfer import local_network as _local_network
+    from ..transfer.peer_connectivity import _peer_get_json_for_peer
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.multipart import boundary_from_content_type as _boundary_from_content_type  # type: ignore
     from common.multipart import parse_multipart_files as _parse_multipart_files  # type: ignore
     from device import vpn_manager as _vpn  # type: ignore
+    from transfer import local_network as _local_network  # type: ignore
+    from transfer.peer_connectivity import _peer_get_json_for_peer  # type: ignore
 
 VPN_UPLOAD_MAX_BODY_BYTES = 6 * 1024 * 1024
+VPN_PEER_PULL_ENDPOINT = "/v1/api/peer/vpn/config"
 
 
 class HandlersVpnMixin:
@@ -60,6 +67,43 @@ class HandlersVpnMixin:
     def _handle_admin_vpn_auto_start(self, payload: dict) -> None:
         payload = payload if isinstance(payload, dict) else {}
         result = _vpn.set_auto_start(self.settings, bool(payload.get("enabled")))
+        self._send_json(200, result)
+
+    def _handle_admin_vpn_sharing(self, payload: dict) -> None:
+        payload = payload if isinstance(payload, dict) else {}
+        result = _vpn.set_sharing_enabled(self.settings, bool(payload.get("enabled")))
+        self._send_json(200, result)
+
+    def _handle_admin_vpn_pull_from_peer(self, payload: dict) -> None:
+        """Pull VPN config (+ credentials) from a paired peer and adopt it locally.
+
+        Reuses the same cert-pinned mTLS client (_peer_get_json_for_peer) that
+        backs every other peer request -- this is a small one-shot JSON call
+        against a peer this drone already trusts, not the big-file download
+        queue used for ROM/BIOS/saves/movies, so no progress/resume machinery
+        is needed here.
+        """
+        payload = payload if isinstance(payload, dict) else {}
+        peer_id = str(payload.get("peer_id") or "").strip()
+        if not peer_id:
+            raise ValueError("peer_id is required")
+        peer = _local_network.get_paired_peer(self.settings, peer_id)
+        if not peer:
+            self._send_json(404, {"error": "That drone is not a paired peer."})
+            return
+        try:
+            remote_payload, _address = _peer_get_json_for_peer(peer, VPN_PEER_PULL_ENDPOINT, self.settings, peer_id=peer_id)
+        except HTTPError as error:
+            if error.code == 404:
+                self._send_json(404, {"error": "That drone has VPN sharing turned off, or has no configuration uploaded yet."})
+            else:
+                self._send_json(502, {"error": f"That drone rejected the request (HTTP {error.code})."})
+            return
+        except Exception as error:
+            self._send_json(502, {"error": f"Could not reach that drone: {error}"})
+            return
+        peer_name = str(peer.get("name") or peer.get("hostname") or peer_id)
+        result = _vpn.import_from_peer(self.settings, remote_payload, source_peer_id=peer_id, source_peer_name=peer_name)
         self._send_json(200, result)
 
     def _handle_admin_vpn_log_download(self) -> None:

@@ -162,8 +162,13 @@ upload a `.ovpn`, save credentials, Connect/Disconnect, live status, auto-start
 on Drone boot, log viewer/download. Unlike Torrents, there's no background
 worker: status is recomputed fresh on every request (`/proc` scan for the
 running PID, tail the log, query `tun0`) since a VPN connection is exactly one
-process. See the dedicated **drone-vpn-management** skill for the config
-rewrite rules, credential storage, and process-management design.
+process. A "Share with Swarm" card adds P2P sharing to a paired peer: an
+off-by-default toggle (`sharing_enabled`) plus a "Pull Configuration" picker
+that fetches another paired drone's config+credentials over the same
+mTLS `/peer/*` channel ROM/BIOS transfers use. See the dedicated
+**drone-vpn-management** skill for the config rewrite rules, credential
+storage, process-management design, and the peer-sharing design (including
+why it's gated on top of plain pairing, unlike every other asset type).
 
 ### Automation (top-level navbar tab, not an admin tile)
 

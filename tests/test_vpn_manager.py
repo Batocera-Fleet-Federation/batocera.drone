@@ -12,6 +12,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+from urllib.error import HTTPError
 
 import app.device.vpn_manager as vpn_manager
 from app.drone_api import Settings
@@ -441,6 +442,277 @@ class StatusTests(unittest.TestCase):
                 result = vpn_manager.status(settings)
             self.assertTrue(result["validation_errors"])
             self.assertFalse(result["installed"])
+
+
+class SharingEnabledTests(unittest.TestCase):
+    def test_defaults_to_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            self.assertFalse(vpn_manager.status(settings)["sharing_enabled"])
+
+    def test_set_sharing_enabled_persists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            result = vpn_manager.set_sharing_enabled(settings, True)
+            self.assertTrue(result["sharing_enabled"])
+            self.assertTrue(vpn_manager.status(settings)["sharing_enabled"])
+            self.assertTrue(vpn_manager._load_state(settings)["sharing_enabled"])
+
+
+class ExportPayloadTests(unittest.TestCase):
+    def test_none_when_sharing_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            vpn_manager.save_uploaded_config(settings, "client.ovpn", SAMPLE_OVPN.encode())
+            vpn_manager.save_credentials(settings, "user", "pass")
+            self.assertIsNone(vpn_manager.export_payload(settings))
+
+    def test_none_when_no_config_even_if_sharing_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            vpn_manager.set_sharing_enabled(settings, True)
+            self.assertIsNone(vpn_manager.export_payload(settings))
+
+    def test_returns_config_and_credentials_when_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            vpn_manager.save_uploaded_config(settings, "ProtonVPN-US.ovpn", SAMPLE_OVPN.encode())
+            vpn_manager.save_credentials(settings, "tokenuser", "tokenpass123")
+            vpn_manager.set_sharing_enabled(settings, True)
+            payload = vpn_manager.export_payload(settings)
+            self.assertIsNotNone(payload)
+            self.assertEqual(payload["config_filename"], "ProtonVPN-US.ovpn")
+            self.assertEqual(payload["remotes"], ["vpn.example.net 1194"])
+            self.assertIn(f"auth-user-pass {vpn_manager.auth_path(settings)}", payload["config_text"])
+            self.assertTrue(payload["has_credentials"])
+            self.assertEqual(payload["username"], "tokenuser")
+            self.assertEqual(payload["password"], "tokenpass123")
+
+    def test_credentials_excluded_when_not_saved(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            vpn_manager.save_uploaded_config(settings, "client.ovpn", SAMPLE_OVPN.encode())
+            vpn_manager.set_sharing_enabled(settings, True)
+            payload = vpn_manager.export_payload(settings)
+            self.assertIsNotNone(payload)
+            self.assertFalse(payload["has_credentials"])
+            self.assertNotIn("username", payload)
+            self.assertNotIn("password", payload)
+
+
+class ImportFromPeerTests(unittest.TestCase):
+    def test_rejects_missing_config_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            with self.assertRaises(ValueError):
+                vpn_manager.import_from_peer(settings, {"config_filename": "client.ovpn"}, source_peer_id="peer-1")
+
+    def test_rejects_missing_source_peer_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            with self.assertRaises(ValueError):
+                vpn_manager.import_from_peer(settings, {"config_text": SAMPLE_OVPN}, source_peer_id="")
+
+    def test_reimports_auth_user_pass_to_local_auth_path_not_peers(self) -> None:
+        # The peer's own exported config_text already points auth-user-pass at
+        # *their* install-root auth.txt -- importing must re-rewrite it to point
+        # at *our* local auth_path(), the same way a fresh upload would, since
+        # save_uploaded_config (which import_from_peer delegates to) re-runs
+        # rewrite_ovpn_config unconditionally.
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            foreign_text = SAMPLE_OVPN.replace("auth-user-pass\n", "auth-user-pass /some/other/drone/vpn/auth.txt\n")
+            peer_payload = {
+                "config_filename": "PeerShared.ovpn",
+                "config_text": foreign_text,
+                "remotes": ["vpn.example.net 1194"],
+                "has_credentials": False,
+            }
+            vpn_manager.import_from_peer(settings, peer_payload, source_peer_id="peer-1", source_peer_name="Peer One")
+            written = vpn_manager.config_path(settings).read_text()
+            self.assertIn(f"auth-user-pass {vpn_manager.auth_path(settings)}", written)
+            self.assertNotIn("/some/other/drone/vpn/auth.txt", written)
+
+    def test_imports_credentials_when_included(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            peer_payload = {
+                "config_filename": "client.ovpn",
+                "config_text": SAMPLE_OVPN,
+                "has_credentials": True,
+                "username": "peeruser",
+                "password": "peerpass123",
+            }
+            result = vpn_manager.import_from_peer(settings, peer_payload, source_peer_id="peer-1", source_peer_name="Peer One")
+            self.assertTrue(result["credentials_imported"])
+            state = vpn_manager._load_state(settings)
+            self.assertTrue(state["has_credentials"])
+            self.assertEqual(state["username"], "peeruser")
+            self.assertEqual(vpn_manager.auth_path(settings).read_text(), "peeruser\npeerpass123\n")
+
+    def test_skips_credentials_when_not_included(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            peer_payload = {
+                "config_filename": "client.ovpn",
+                "config_text": SAMPLE_OVPN,
+                "has_credentials": False,
+            }
+            result = vpn_manager.import_from_peer(settings, peer_payload, source_peer_id="peer-1")
+            self.assertFalse(result["credentials_imported"])
+            self.assertFalse(vpn_manager._load_state(settings)["has_credentials"])
+
+    def test_records_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            peer_payload = {"config_filename": "client.ovpn", "config_text": SAMPLE_OVPN, "has_credentials": False}
+            vpn_manager.import_from_peer(settings, peer_payload, source_peer_id="peer-1", source_peer_name="Peer One")
+            state = vpn_manager._load_state(settings)
+            self.assertEqual(state["source_peer_id"], "peer-1")
+            self.assertEqual(state["source_peer_name"], "Peer One")
+
+    def test_manual_upload_after_import_clears_provenance(self) -> None:
+        # A genuine fresh manual upload always resets provenance to
+        # "self-owned" -- this is how a drone can go from "imported, can't
+        # share" back to being a real source of its own.
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            peer_payload = {"config_filename": "client.ovpn", "config_text": SAMPLE_OVPN, "has_credentials": False}
+            vpn_manager.import_from_peer(settings, peer_payload, source_peer_id="peer-1", source_peer_name="Peer One")
+            self.assertEqual(vpn_manager._load_state(settings)["source_peer_id"], "peer-1")
+            vpn_manager.save_uploaded_config(settings, "MyOwn.ovpn", SAMPLE_OVPN.encode())
+            self.assertEqual(vpn_manager._load_state(settings)["source_peer_id"], "")
+
+
+class SharingProvenanceGateTests(unittest.TestCase):
+    def test_set_sharing_enabled_rejected_for_imported_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            peer_payload = {"config_filename": "client.ovpn", "config_text": SAMPLE_OVPN, "has_credentials": False}
+            vpn_manager.import_from_peer(settings, peer_payload, source_peer_id="peer-1", source_peer_name="Peer One")
+            with self.assertRaises(ValueError):
+                vpn_manager.set_sharing_enabled(settings, True)
+            self.assertFalse(vpn_manager._load_state(settings)["sharing_enabled"])
+
+    def test_disabling_sharing_is_always_allowed_even_for_imported_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            peer_payload = {"config_filename": "client.ovpn", "config_text": SAMPLE_OVPN, "has_credentials": False}
+            vpn_manager.import_from_peer(settings, peer_payload, source_peer_id="peer-1", source_peer_name="Peer One")
+            result = vpn_manager.set_sharing_enabled(settings, False)
+            self.assertFalse(result["sharing_enabled"])
+
+    def test_export_payload_none_for_imported_config_even_if_sharing_somehow_enabled(self) -> None:
+        # Defense in depth: export_payload re-checks provenance itself rather
+        # than trusting the sharing_enabled flag alone.
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            peer_payload = {"config_filename": "client.ovpn", "config_text": SAMPLE_OVPN, "has_credentials": False}
+            vpn_manager.import_from_peer(settings, peer_payload, source_peer_id="peer-1", source_peer_name="Peer One")
+            vpn_manager._save_state(settings, sharing_enabled=True)  # bypass the normal setter on purpose
+            self.assertIsNone(vpn_manager.export_payload(settings))
+
+    def test_self_uploaded_config_can_be_shared(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            vpn_manager.save_uploaded_config(settings, "client.ovpn", SAMPLE_OVPN.encode())
+            result = vpn_manager.set_sharing_enabled(settings, True)
+            self.assertTrue(result["sharing_enabled"])
+
+
+class CheckSharingRevocationTests(unittest.TestCase):
+    def _imported_settings(self, tmp: str, *, with_credentials: bool = True):
+        settings = _build_settings(self, Path(tmp))
+        peer_payload = {
+            "config_filename": "client.ovpn",
+            "config_text": SAMPLE_OVPN,
+            "has_credentials": with_credentials,
+            "username": "peeruser",
+            "password": "peerpass123",
+        }
+        vpn_manager.import_from_peer(settings, peer_payload, source_peer_id="peer-1", source_peer_name="Peer One")
+        return settings
+
+    def test_noop_when_config_is_self_owned(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            vpn_manager.save_uploaded_config(settings, "client.ovpn", SAMPLE_OVPN.encode())
+            vpn_manager.save_credentials(settings, "me", "mypass")
+            with mock.patch("app.transfer.local_network.get_paired_peer") as get_peer:
+                self.assertFalse(vpn_manager.check_sharing_revocation(settings))
+                get_peer.assert_not_called()
+
+    def test_noop_when_no_credentials_to_revoke(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._imported_settings(tmp, with_credentials=False)
+            with mock.patch("app.transfer.local_network.get_paired_peer") as get_peer:
+                self.assertFalse(vpn_manager.check_sharing_revocation(settings))
+                get_peer.assert_not_called()
+
+    def test_revokes_when_source_peer_no_longer_paired(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._imported_settings(tmp)
+            with mock.patch("app.transfer.local_network.get_paired_peer", return_value=None):
+                self.assertTrue(vpn_manager.check_sharing_revocation(settings))
+            state = vpn_manager._load_state(settings)
+            self.assertFalse(state["has_credentials"])
+            self.assertIn("no longer paired", state["revoked_reason"])
+            self.assertEqual(state["source_peer_id"], "peer-1")  # provenance persists
+
+    def test_revokes_when_peer_returns_404(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._imported_settings(tmp)
+            peer = {"drone_id": "peer-1", "name": "Peer One"}
+            error = HTTPError("https://peer/v1/api/peer/vpn/config", 404, "not found", None, None)
+            with mock.patch("app.transfer.local_network.get_paired_peer", return_value=peer), \
+                    mock.patch("app.transfer.peer_connectivity._peer_get_json_for_peer", side_effect=error):
+                self.assertTrue(vpn_manager.check_sharing_revocation(settings))
+            state = vpn_manager._load_state(settings)
+            self.assertFalse(state["has_credentials"])
+            self.assertEqual(state["username"], "")
+            self.assertFalse(vpn_manager.auth_path(settings).exists())
+            self.assertIn("turned off sharing", state["revoked_reason"])
+            self.assertIsNotNone(state["revoked_at"])
+            # The config file + provenance survive so it can never become shareable.
+            self.assertTrue(vpn_manager.config_path(settings).is_file())
+            self.assertEqual(state["source_peer_id"], "peer-1")
+
+    def test_does_not_revoke_on_transient_network_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._imported_settings(tmp)
+            peer = {"drone_id": "peer-1", "name": "Peer One"}
+            with mock.patch("app.transfer.local_network.get_paired_peer", return_value=peer), \
+                    mock.patch("app.transfer.peer_connectivity._peer_get_json_for_peer", side_effect=OSError("unreachable")):
+                self.assertFalse(vpn_manager.check_sharing_revocation(settings))
+            state = vpn_manager._load_state(settings)
+            self.assertTrue(state["has_credentials"])
+            self.assertEqual(state["revoked_reason"], "")
+
+    def test_does_not_revoke_on_non_404_http_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._imported_settings(tmp)
+            peer = {"drone_id": "peer-1", "name": "Peer One"}
+            error = HTTPError("https://peer/v1/api/peer/vpn/config", 500, "server error", None, None)
+            with mock.patch("app.transfer.local_network.get_paired_peer", return_value=peer), \
+                    mock.patch("app.transfer.peer_connectivity._peer_get_json_for_peer", side_effect=error):
+                self.assertFalse(vpn_manager.check_sharing_revocation(settings))
+            self.assertTrue(vpn_manager._load_state(settings)["has_credentials"])
+
+    def test_noop_when_still_shared(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._imported_settings(tmp)
+            peer = {"drone_id": "peer-1", "name": "Peer One"}
+            still_shared_payload = {"config_filename": "client.ovpn", "config_text": SAMPLE_OVPN, "has_credentials": True, "username": "peeruser", "password": "peerpass123"}
+            with mock.patch("app.transfer.local_network.get_paired_peer", return_value=peer), \
+                    mock.patch("app.transfer.peer_connectivity._peer_get_json_for_peer", return_value=(still_shared_payload, "https://peer")):
+                self.assertFalse(vpn_manager.check_sharing_revocation(settings))
+            self.assertTrue(vpn_manager._load_state(settings)["has_credentials"])
+
+    def test_never_raises_on_unexpected_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._imported_settings(tmp)
+            with mock.patch("app.transfer.local_network.get_paired_peer", side_effect=RuntimeError("boom")):
+                self.assertFalse(vpn_manager.check_sharing_revocation(settings))
 
 
 if __name__ == "__main__":

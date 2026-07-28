@@ -312,6 +312,44 @@ flat (no-system) shape, but verify integrity with the sampled fingerprint
 ROMs/saves) instead of BIOS's full-file MD5, since movie files are typically much
 larger media files where a full hash would be wasteful.
 
+**A real bug found here, worth checking for in any future asset type:**
+`_collect_peer_inventory`'s movies branch (`handlers_peer.py`) only ever called
+`movies_store.sync_movies_cache()` inside an `if self.settings.use_fake_data:`
+guard — so on every real device (`use_fake_data=False`, always) the
+`movies_cache_entries` table was never populated, and every peer inventory
+request for movies correctly-but-uselessly reported zero results regardless of
+how many real files were on disk (found live on a real drone: 580 files on
+disk, 0 rows in the cache). The bug shipped because the only test
+(`test_movies_inventory_pages_flat_with_no_system_field`) called
+`sync_movies_cache()` manually before asserting on the inventory response,
+which proves the *read* path but never exercises how the cache is supposed to
+get populated in production. Fixed by syncing movies inside
+`roms/rom_scanner.py`'s `_poll_rom_metadata_once` — the same always-on,
+already-scheduled poll cycle that keeps the **saves** cache warm
+(`_saves_store.sync_saves_cache`, same function, called two lines above) —
+rather than adding a second poller. **When adding a new flat/cached asset
+type, verify its `sync_*_cache()` is wired into a real, always-running poll
+path, and add a regression test that calls the actual poll/scan entry point
+(not the sync function directly) with `use_fake_data` unset/false** — a test
+that manually primes the cache before asserting on it will pass even if
+production never populates that cache at all.
+
+**The VPN config endpoint (`GET /peer/vpn/config`) is the one deliberate
+exception to "pairing alone is authorization."** It still requires
+`_peer_request_authorized()` like every endpoint above, but adds a **second,
+feature-owned gate** on top: the source drone's own `sharing_enabled` flag
+(`device/vpn_manager.py`), off by default and only ever flipped on by that
+drone's owner. Every other asset type here (roms/bios/saves/movies/artwork)
+is available to any paired peer with no further check, by design (see "Core
+Rules" above) — VPN credentials are the one payload sensitive enough to
+warrant an explicit opt-in on top of pairing. Don't use this as precedent to
+add gates to the other asset types, and don't remove this one from VPN "for
+consistency" — see the `drone-vpn-management` skill for the full rationale.
+It is also the one peer endpoint whose payload carries a plaintext secret
+(the OpenVPN credential) by design; that is still within the rules above,
+since mTLS + pairing was always the confidentiality boundary, not merely a
+convention that happened to apply only to non-secret files.
+
 ## Transfer Source Decision Rules
 
 Before initiating a download:

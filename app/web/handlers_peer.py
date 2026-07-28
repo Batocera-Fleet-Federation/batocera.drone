@@ -25,6 +25,7 @@ try:
         list_emulator_config_files as _list_emulator_config_files,
         read_emulator_config_file as _read_emulator_config_file,
     )
+    from ..device import vpn_manager as _vpn
     from ..roms.rom_metadata_state import _rom_metadata_cache_status
     from ..storage import movies_store as _movies_store
     from ..storage import saves_store as _saves_store
@@ -52,6 +53,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         list_emulator_config_files as _list_emulator_config_files,
         read_emulator_config_file as _read_emulator_config_file,
     )
+    from device import vpn_manager as _vpn  # type: ignore
     from roms.rom_metadata_state import _rom_metadata_cache_status  # type: ignore
     from storage import movies_store as _movies_store  # type: ignore
     from storage import saves_store as _saves_store  # type: ignore
@@ -639,6 +641,25 @@ class HandlersPeerMixin:
             extra_headers={"X-Asset-Relative-Path": relative_path, "X-Gamelist-Reference": gamelist_ref},
             upload_meta={"asset_type": "artwork", "system": system, "relative_path": relative_path},
         )
+
+    def _handle_peer_vpn_config(self) -> None:
+        """Serve this drone's VPN config (+ credentials, if saved) to a paired peer.
+
+        Gated by _peer_request_authorized() (same mTLS pairing check as every
+        other /peer/* endpoint above) *plus* vpn_manager's own sharing_enabled
+        flag -- VPN credentials are more sensitive than the ROM/BIOS/save/movie/
+        artwork bytes served above, so pairing alone is not treated as implicit
+        consent here; the source drone's owner must explicitly opt in. See the
+        drone-vpn-management skill.
+        """
+        if not self._peer_request_authorized():
+            return
+        payload = _vpn.export_payload(self.settings)
+        if payload is None:
+            self._send_json(404, {"error": "VPN sharing is not enabled on this drone, or no configuration has been uploaded yet"})
+            return
+        self.log_message("peer vpn config served has_credentials=%s", payload.get("has_credentials"))
+        self._send_json(200, payload)
 
     def _peer_requester_device_id(self) -> Optional[str]:
         """Best-effort identity of the peer on the other end of this mTLS

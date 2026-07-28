@@ -12,6 +12,8 @@ from pathlib import Path
 from unittest import mock
 
 from app.common.settings import Settings
+from app.drone_api import RomRepository
+from app.roms.rom_scanner import _poll_rom_metadata_once
 from app.storage import movies_store
 from app.transfer.download_manager import DownloadManager
 from app.transfer.peer_download import _download_movie_from_peer
@@ -263,6 +265,58 @@ class EnqueueLocalMovieAssetTests(unittest.TestCase):
                 overwrite=False,
             )
             self.assertEqual(jobs, [{"id": "job-1", "asset_type": "movies"}])
+
+
+class MoviesCacheSyncedByRealPollCycleTests(unittest.TestCase):
+    """Regression test for a real bug: on a real device (use_fake_data=False),
+    sync_movies_cache() was only ever called from _collect_peer_inventory's
+    use_fake_data branch -- never in production -- so movies_cache_entries
+    stayed empty forever regardless of how many real files were on disk, and
+    every peer inventory request correctly-but-uselessly reported zero movies.
+    Fixed by syncing movies in _poll_rom_metadata_once, the same always-on
+    poll cycle that already keeps the saves cache warm.
+    """
+
+    def test_poll_cycle_populates_movies_cache_without_fake_data(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            (root / "roms").mkdir(parents=True)
+            (root / "bios").mkdir(parents=True)
+            movie = root / "movies" / "Alien.mp4"
+            movie.parent.mkdir(parents=True)
+            movie.write_bytes(b"movie-bytes")
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "USERDATA_ROOT": str(root),
+                    "ROMS_ROOT": str(root / "roms"),
+                    "BIOS_ROOT": str(root / "bios"),
+                    "SAVES_ROOT": str(root / "saves"),
+                    "MOVIES_ROOT": str(root / "movies"),
+                    "DRONE_STATE_DATABASE_FILE": str(root / "state.sqlite3"),
+                    "DRONE_DEVICE_ID": "movies-poll-test",
+                },
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            self.assertFalse(settings.use_fake_data)
+
+            # Before the fix this stays {"total": 0, "items": []} forever, no
+            # matter how many real files are on disk, because nothing ever
+            # calls sync_movies_cache() outside of use_fake_data.
+            self.assertEqual(movies_store.list_movies_page(settings.movies_root)["total"], 0)
+
+            _poll_rom_metadata_once(settings, RomRepository(settings.roms_root, settings.bios_root))
+
+            page = movies_store.list_movies_page(settings.movies_root)
+            self.assertEqual(page["total"], 1)
+            self.assertEqual(page["items"][0]["movie_name"], "Alien.mp4")
+
+            # And the exact path the user hit -- a paired peer's inventory
+            # request -- now sees it too.
+            handler = _peer_handler(settings)
+            payload = handler._collect_peer_inventory("movies", {})
+            self.assertEqual(payload["total"], 1)
 
 
 if __name__ == "__main__":

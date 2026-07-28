@@ -9,9 +9,11 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+from urllib.error import HTTPError
 
 import app.device.vpn_manager as vpn_manager
 from app.drone_api import Settings
+from app.web import handlers_vpn
 
 
 def _build_settings(test_case: unittest.TestCase, root: Path) -> Settings:
@@ -227,6 +229,163 @@ class VpnLogDownloadHandlerTests(unittest.TestCase):
             handler._handle_admin_vpn_log_download()
             self.assertTrue(handler.streamed["as_attachment"])
             self.assertEqual(handler.streamed["content_type"], "text/plain")
+
+
+class VpnSharingHandlerTests(unittest.TestCase):
+    def test_enables_sharing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            handler = _handler(settings)
+            handler._handle_admin_vpn_sharing({"enabled": True})
+            status, payload = handler.response
+            self.assertEqual(status, 200)
+            self.assertTrue(payload["sharing_enabled"])
+            self.assertTrue(vpn_manager._load_state(settings)["sharing_enabled"])
+
+    def test_rejects_sharing_for_imported_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            vpn_manager.import_from_peer(
+                settings,
+                {"config_filename": "client.ovpn", "config_text": SAMPLE_OVPN.decode("utf-8"), "has_credentials": False},
+                source_peer_id="peer-1",
+                source_peer_name="Peer One",
+            )
+            handler = _handler(settings)
+            with self.assertRaises(ValueError):
+                handler._handle_admin_vpn_sharing({"enabled": True})
+
+
+class VpnPullFromPeerHandlerTests(unittest.TestCase):
+    def test_requires_peer_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            handler = _handler(settings)
+            with self.assertRaises(ValueError):
+                handler._handle_admin_vpn_pull_from_peer({})
+
+    def test_unknown_peer_is_404(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            handler = _handler(settings)
+            with mock.patch.object(handlers_vpn._local_network, "get_paired_peer", return_value=None):
+                handler._handle_admin_vpn_pull_from_peer({"peer_id": "ghost"})
+            status, _payload = handler.response
+            self.assertEqual(status, 404)
+
+    def test_peer_sharing_disabled_maps_404_to_friendly_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            handler = _handler(settings)
+            peer = {"drone_id": "peer-1", "name": "Peer One"}
+            error = HTTPError("https://peer/v1/api/peer/vpn/config", 404, "not found", None, None)
+            with mock.patch.object(handlers_vpn._local_network, "get_paired_peer", return_value=peer), \
+                    mock.patch.object(handlers_vpn, "_peer_get_json_for_peer", side_effect=error):
+                handler._handle_admin_vpn_pull_from_peer({"peer_id": "peer-1"})
+            status, payload = handler.response
+            self.assertEqual(status, 404)
+            self.assertIn("sharing", payload["error"].lower())
+
+    def test_unreachable_peer_is_502(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            handler = _handler(settings)
+            peer = {"drone_id": "peer-1", "name": "Peer One"}
+            with mock.patch.object(handlers_vpn._local_network, "get_paired_peer", return_value=peer), \
+                    mock.patch.object(handlers_vpn, "_peer_get_json_for_peer", side_effect=OSError("unreachable")):
+                handler._handle_admin_vpn_pull_from_peer({"peer_id": "peer-1"})
+            status, _payload = handler.response
+            self.assertEqual(status, 502)
+
+    def test_successful_pull_imports_config_and_credentials(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            handler = _handler(settings)
+            peer = {"drone_id": "peer-1", "name": "Peer One"}
+            remote_payload = {
+                "config_filename": "PeerShared.ovpn",
+                "config_text": SAMPLE_OVPN.decode("utf-8"),
+                "remotes": ["vpn.example.net 1194"],
+                "has_credentials": True,
+                "username": "peeruser",
+                "password": "peerpass123",
+            }
+            with mock.patch.object(handlers_vpn._local_network, "get_paired_peer", return_value=peer), \
+                    mock.patch.object(handlers_vpn, "_peer_get_json_for_peer", return_value=(remote_payload, "https://peer")):
+                handler._handle_admin_vpn_pull_from_peer({"peer_id": "peer-1"})
+            status, payload = handler.response
+            self.assertEqual(status, 200)
+            self.assertTrue(payload["credentials_imported"])
+            self.assertTrue(vpn_manager.config_path(settings).is_file())
+            self.assertEqual(vpn_manager.auth_path(settings).read_text(), "peeruser\npeerpass123\n")
+
+
+class _FakePeerHandler:
+    """Minimal stand-in for RomRequestHandler's peer-serving surface, mirroring
+    the _FakePeerHandler pattern in test_movies_transfer.py."""
+
+    def __init__(self, settings: Settings, *, authorized: bool = True) -> None:
+        self.settings = settings
+        self._authorized = authorized
+        self.response = None
+
+    def _peer_request_authorized(self) -> bool:
+        return self._authorized
+
+    def _send_json(self, status_code: int, payload: dict, cache_key=None, extra_headers=None) -> None:
+        self.response = (status_code, payload)
+
+    def log_message(self, *args, **kwargs) -> None:
+        pass
+
+
+def _peer_handler(settings: Settings, **kwargs) -> _FakePeerHandler:
+    from app.web import handlers_peer
+
+    class Handler(_FakePeerHandler, handlers_peer.HandlersPeerMixin):
+        pass
+
+    return Handler(settings, **kwargs)
+
+
+class VpnPeerConfigHandlerTests(unittest.TestCase):
+    def test_rejects_unauthorized_request(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            handler = _peer_handler(settings, authorized=False)
+            handler._handle_peer_vpn_config()
+            self.assertIsNone(handler.response)
+
+    def test_404_when_sharing_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            vpn_manager.save_uploaded_config(settings, "client.ovpn", SAMPLE_OVPN)
+            vpn_manager.save_credentials(settings, "user", "pass")
+            handler = _peer_handler(settings)
+            handler._handle_peer_vpn_config()
+            self.assertEqual(handler.response[0], 404)
+
+    def test_404_when_no_config_even_if_sharing_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            vpn_manager.set_sharing_enabled(settings, True)
+            handler = _peer_handler(settings)
+            handler._handle_peer_vpn_config()
+            self.assertEqual(handler.response[0], 404)
+
+    def test_200_with_config_and_credentials_when_sharing_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            vpn_manager.save_uploaded_config(settings, "client.ovpn", SAMPLE_OVPN)
+            vpn_manager.save_credentials(settings, "tokenuser", "tokenpass123")
+            vpn_manager.set_sharing_enabled(settings, True)
+            handler = _peer_handler(settings)
+            handler._handle_peer_vpn_config()
+            status, payload = handler.response
+            self.assertEqual(status, 200)
+            self.assertTrue(payload["has_credentials"])
+            self.assertEqual(payload["username"], "tokenuser")
+            self.assertEqual(payload["password"], "tokenpass123")
 
 
 if __name__ == "__main__":

@@ -126,6 +126,10 @@ class ApiRoutesMixin:
                 self._handle_peer_artwork_download(parts[2], parts[3], "/".join(parts[4:]))
                 return
 
+            if len(parts) == 3 and parts[0] == "peer" and parts[1] == "vpn" and parts[2] == "config":
+                self._handle_peer_vpn_config()
+                return
+
             # Public: the SPA shell and its own "am I logged in" probe must be
             # reachable with no session cookie yet, or a browser could never
             # load the login form in the first place. Everything else below
@@ -780,6 +784,16 @@ class ApiRoutesMixin:
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "vpn" and parts[2] == "auto-start":
                 payload = self._read_json_body()
                 self._handle_admin_vpn_auto_start(payload)
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "vpn" and parts[2] == "sharing":
+                payload = self._read_json_body()
+                self._handle_admin_vpn_sharing(payload)
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "vpn" and parts[2] == "pull-from-peer":
+                payload = self._read_json_body()
+                self._handle_admin_vpn_pull_from_peer(payload)
                 return
 
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "artwork" and parts[2] == "launchbox" and parts[3] == "apply":

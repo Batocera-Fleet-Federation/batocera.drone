@@ -24,6 +24,7 @@ try:
         _read_preserved_asset_fingerprint,
     )
     from ..storage import saves_store as _saves_store
+    from ..storage import movies_store as _movies_store
     from .gamelist import _database_rom_metadata_fields
     from .rom_asset_bios import bios_systems_for_md5
     from .rom_inventory import _bios_cache_entry_key, _rom_cache_entry_key, _wire_rom_rows
@@ -43,6 +44,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         _read_preserved_asset_fingerprint,
     )
     from storage import saves_store as _saves_store  # type: ignore
+    from storage import movies_store as _movies_store  # type: ignore
     from roms.gamelist import _database_rom_metadata_fields  # type: ignore
     from roms.rom_asset_bios import bios_systems_for_md5  # type: ignore
     from roms.rom_inventory import _bios_cache_entry_key, _rom_cache_entry_key, _wire_rom_rows  # type: ignore
@@ -587,10 +589,18 @@ def _complete_local_rom_metadata_cache(settings: Settings, repository: "RomRepos
 
 
 def _poll_rom_metadata_once(settings: Settings, repository: "RomRepository") -> dict:
-    """One scan+hash+local-cache cycle: filesystem scan, then saves cache scan.
+    """One scan+hash+local-cache cycle: filesystem scan, then saves + movies cache scan.
 
     This fleet has no central hub to upload to -- ROM/BIOS metadata is scanned and
     cached locally, then served to paired peers on request (see transfer/peer_download.py).
+
+    Movies were previously only synced when ``use_fake_data`` was set (see
+    ``handlers_peer.py``'s peer-inventory handler), which meant the movies cache
+    (unlike ROMs/BIOS/saves, which all flow through this same poll cycle) was never
+    populated on a real device -- every movies inventory request correctly read an
+    eternally-empty SQLite table regardless of how many real files were on disk.
+    Syncing it here, on the same cadence as saves, is the fix: reuse the one
+    already-scheduled/debounced poll loop rather than adding a second one.
     """
     if not _begin_rom_metadata_activity("poll"):
         return {"status": "skipped", "reason": "metadata_already_running", "changed": False}
@@ -600,6 +610,10 @@ def _poll_rom_metadata_once(settings: Settings, repository: "RomRepository") -> 
             _saves_store.sync_saves_cache(settings.saves_root)
         except Exception as error:
             print(f"Local saves cache scan failed: {_format_http_error(error)}", file=sys.stderr, flush=True)
+        try:
+            _movies_store.sync_movies_cache(settings.movies_root)
+        except Exception as error:
+            print(f"Local movies cache scan failed: {_format_http_error(error)}", file=sys.stderr, flush=True)
         return _complete_local_rom_metadata_cache(settings, repository, "scan_complete")
     finally:
         _end_rom_metadata_activity()
