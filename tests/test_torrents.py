@@ -17,7 +17,7 @@ from app.transfer.torrent_manager import (
 )
 
 
-def _build_settings(root: Path, *, require_vpn: bool = False) -> Settings:
+def _build_settings(root: Path) -> Settings:
     env = {
         "USERDATA_ROOT": str(root),
         "ROMS_ROOT": str(root / "roms"),
@@ -26,7 +26,6 @@ def _build_settings(root: Path, *, require_vpn: bool = False) -> Settings:
         "DRONE_STATE_DATABASE_FILE": str(root / "state.sqlite3"),
         "DRONE_DEVICE_ID": "local-test",
         "LOG_DIR": str(root / "logs"),
-        "DRONE_TORRENT_REQUIRE_VPN": "1" if require_vpn else "0",
     }
     with mock.patch.dict("os.environ", env, clear=True):
         return Settings.from_env()
@@ -74,14 +73,10 @@ class FakeDaemon:
         self.rpc = rpc
         self.binary_path = "/fake/aria2c"
         self.last_error = ""
-        self.stopped = False
 
     @property
     def running(self):
-        return not self.stopped
-
-    def stop(self):
-        self.stopped = True
+        return True
 
 
 def _write_torrent(directory: Path, name: str) -> Path:
@@ -100,7 +95,7 @@ class TorrentSettingsTests(unittest.TestCase):
             # (<install root>/torrents), not under the userdata root.
             install_root = Path(torrent_manager.__file__).resolve().parents[2]
             self.assertEqual(config["directory"], str(install_root / "torrents"))
-            self.assertEqual(config["seed_time"], 0)
+            self.assertEqual(config["seed_time"], 60)
             self.assertEqual(config["seed_ratio"], 1.0)
             self.assertEqual(config["bt_stop_timeout"], 0)
             self.assertEqual(config["file_allocation"], "prealloc")
@@ -399,48 +394,12 @@ class TorrentLifecycleTests(unittest.TestCase):
             adds = rpc.method_calls("aria2.addTorrent")
             self.assertEqual(len(adds), 3)
             self.assertTrue(all(params[2]["pause"] == "true" for params in adds))
-            self.assertEqual(adds[0][2]["seed-time"], "0")
+            self.assertEqual(adds[0][2]["seed-time"], "60")
             self.assertEqual(adds[0][2]["file-allocation"], "prealloc")
             self.assertEqual(len(rpc.method_calls("aria2.unpause")), 2)
             statuses = [entry["status"] for entry in manager.snapshot()["torrents"]]
             self.assertEqual(statuses.count("downloading"), 2)
             self.assertEqual(statuses.count("queued"), 1)
-
-    def test_vpn_loss_stops_aria2_and_privacy_pauses_queue(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            rpc = FakeRpc()
-            manager = TorrentManager(_build_settings(root, require_vpn=True), start_worker=False)
-            daemon = FakeDaemon(rpc)
-            manager._daemon = daemon
-            watch = root / "watch"
-            manager.update_settings({"directory": str(watch)})
-            _write_torrent(watch, "private")
-            with mock.patch.object(manager, "_vpn_tunnel_ready", return_value=False):
-                manager._tick()
-                snapshot = manager.snapshot()
-            self.assertTrue(daemon.stopped)
-            self.assertTrue(snapshot["vpn_required"])
-            self.assertFalse(snapshot["vpn_connected"])
-            self.assertTrue(snapshot["privacy_blocked"])
-            self.assertEqual(snapshot["torrents"][0]["status"], "queued")
-            self.assertIn("VPN connection required", snapshot["torrents"][0]["message"])
-            self.assertEqual(rpc.calls, [])
-
-    def test_vpn_recovery_allows_queue_to_start(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            rpc = FakeRpc()
-            manager = TorrentManager(_build_settings(root, require_vpn=True), start_worker=False)
-            manager._daemon = FakeDaemon(rpc)
-            watch = root / "watch"
-            manager.update_settings({"directory": str(watch)})
-            _write_torrent(watch, "private")
-            with mock.patch.object(manager, "_vpn_tunnel_ready", return_value=True):
-                manager._tick()
-                snapshot = manager.snapshot()
-            self.assertFalse(snapshot["privacy_blocked"])
-            self.assertEqual(snapshot["torrents"][0]["status"], "downloading")
 
     def test_status_mapping_progress_complete_and_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -168,15 +168,7 @@ Commit-message prefixes can select a larger version change:
 - `increment major version` advances the first component and resets the others, such as `v0.1.50` to `v1.0.0`.
 - `incremenet patch version` or `increment patch version` advances the middle component and resets the final component, such as `v1.3.10` to `v1.4.0`.
 
-The workflow builds those assets plus a signed release manifest. Installers and
-self-updates reject archives or bootstrap scripts that do not match that
-manifest. Configure the GitHub Actions secret
-`DRONE_UPDATE_SIGNING_PRIVATE_KEY` with the PEM private key matching
-`app/update-signing-public.pem`; keep that private key outside the repository.
-
-Manual releases remain available through the Release workflow and
-`scripts/create-release.sh`. For the local script, point
-`DRONE_UPDATE_SIGNING_PRIVATE_KEY_FILE` at the protected PEM private-key file.
+The workflow builds and uploads `batocera_install.sh`, `batocera_uninstall.sh`, `run_now.sh`, and the version-stamped `drone-app.tar.gz`. Manual releases remain available through the Release workflow and `scripts/create-release.sh`.
 
 ## Docker
 
@@ -285,8 +277,11 @@ Then open:
 http://127.0.0.1:8080
 ```
 
-The mock launcher prints its loopback-only development credentials at startup.
-Override `DRONE_APP_USERNAME` and `DRONE_APP_PASSWORD` when needed.
+Default mock login:
+
+```text
+admin / changeme
+```
 
 ## Uninstall
 

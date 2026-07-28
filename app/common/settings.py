@@ -119,7 +119,6 @@ class Settings:
     drone_mtls_ca_file: Optional[Path]
     tailscale_oauth_client_id: Optional[str]
     tailscale_oauth_client_secret: Optional[str]
-    torrent_require_vpn: bool
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -209,5 +208,4 @@ class Settings:
             # one able to paste a fresh auth key. See device/tailnet_service.py.
             tailscale_oauth_client_id=(os.environ.get("DRONE_TAILSCALE_OAUTH_CLIENT_ID") or "").strip() or None,
             tailscale_oauth_client_secret=(os.environ.get("DRONE_TAILSCALE_OAUTH_CLIENT_SECRET") or "").strip() or None,
-            torrent_require_vpn=_env_bool(True, "DRONE_TORRENT_REQUIRE_VPN"),
         )

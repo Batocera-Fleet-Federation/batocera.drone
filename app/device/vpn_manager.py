@@ -36,12 +36,10 @@ from __future__ import annotations
 
 import os
 import re
-import shlex
 import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -53,7 +51,6 @@ try:
     from ..common.install_paths import drone_install_root as _drone_install_root
     from ..common.logtail import _tail_lines
     from ..common.settings import Settings
-    from . import vpn_dns as _vpn_dns
     from ..storage.state_store import database_path as _state_database_path
     from ..storage.state_store import load_payload as _load_state_payload
     from ..storage.state_store import save_payload as _save_state_payload
@@ -61,7 +58,6 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from common.install_paths import drone_install_root as _drone_install_root  # type: ignore
     from common.logtail import _tail_lines  # type: ignore
     from common.settings import Settings  # type: ignore
-    from device import vpn_dns as _vpn_dns  # type: ignore
     from storage.state_store import database_path as _state_database_path  # type: ignore
     from storage.state_store import load_payload as _load_state_payload  # type: ignore
     from storage.state_store import save_payload as _save_state_payload  # type: ignore
@@ -91,12 +87,6 @@ VPN_SELF_HEAL_CHECK_INTERVAL_SECONDS = float(os.environ.get("DRONE_VPN_SELF_HEAL
 VPN_SELF_HEAL_MIN_INTERVAL_SECONDS = float(os.environ.get("DRONE_VPN_SELF_HEAL_MIN_INTERVAL_SECONDS", "120"))
 VPN_SELF_HEAL_MAX_ATTEMPTS_PER_WINDOW = int(os.environ.get("DRONE_VPN_SELF_HEAL_MAX_ATTEMPTS_PER_WINDOW", "5"))
 VPN_SELF_HEAL_WINDOW_SECONDS = float(os.environ.get("DRONE_VPN_SELF_HEAL_WINDOW_SECONDS", "1800"))
-VPN_PRIVACY_GUARD_INTERVAL_SECONDS = max(
-    1.0, float(os.environ.get("DRONE_VPN_PRIVACY_GUARD_INTERVAL_SECONDS", "2"))
-)
-VPN_DNS_BOOTSTRAP_SECONDS = max(
-    5.0, float(os.environ.get("DRONE_VPN_DNS_BOOTSTRAP_SECONDS", "30"))
-)
 
 # A healthy, already-connected tunnel logs almost nothing -- openvpn only
 # writes on events. So if the *most recent* log lines are dominated by this
@@ -108,137 +98,6 @@ _UNHEALTHY_LOG_WINDOW_LINES = 40
 _UNHEALTHY_LOG_MIN_MATCHES = 10
 
 _CONNECT_LOCK = Lock()
-
-# Only declarative client/network/crypto options belong in a provider profile.
-# Process-control, scripting, plugin, management, and filesystem directives are
-# owned by Drone and are never accepted from an upload or paired peer.
-_SAFE_OPENVPN_DIRECTIVES = frozenset(
-    {
-        "allow-compression",
-        "auth",
-        "auth-nocache",
-        "auth-retry",
-        "auth-user-pass",
-        "block-ipv6",
-        "ca",
-        "cert",
-        "cipher",
-        "client",
-        "connect-retry",
-        "connect-retry-max",
-        "connect-timeout",
-        "data-ciphers",
-        "data-ciphers-fallback",
-        "dhcp-option",
-        "dev",
-        "dev-type",
-        "disable-occ",
-        "explicit-exit-notify",
-        "extra-certs",
-        "fast-io",
-        "fragment",
-        "hand-window",
-        "inactive",
-        "key",
-        "key-direction",
-        "keepalive",
-        "link-mtu",
-        "local",
-        "lport",
-        "mssfix",
-        "mute",
-        "mute-replay-warnings",
-        "nobind",
-        "ns-cert-type",
-        "passtos",
-        "persist-key",
-        "persist-local-ip",
-        "persist-remote-ip",
-        "persist-tun",
-        "ping",
-        "ping-exit",
-        "ping-restart",
-        "ping-timer-rem",
-        "pkcs12",
-        "port",
-        "proto",
-        "pull",
-        "pull-filter",
-        "rcvbuf",
-        "redirect-gateway",
-        "remote",
-        "remote-cert-ku",
-        "remote-cert-tls",
-        "remote-random",
-        "remote-random-hostname",
-        "reneg-bytes",
-        "reneg-pkts",
-        "reneg-sec",
-        "resolv-retry",
-        "route",
-        "route-delay",
-        "route-gateway",
-        "route-ipv6",
-        "route-metric",
-        "server-poll-timeout",
-        "setenv",
-        "sndbuf",
-        "socket-flags",
-        "tls-auth",
-        "tls-cipher",
-        "tls-ciphersuites",
-        "tls-client",
-        "tls-crypt",
-        "tls-crypt-v2",
-        "tls-timeout",
-        "tls-version-max",
-        "tls-version-min",
-        "topology",
-        "tran-window",
-        "tun-mtu",
-        "tun-mtu-extra",
-        "verb",
-        "verify-x509-name",
-    }
-)
-_INLINE_OPENVPN_BLOCKS = frozenset({"ca", "cert", "key", "tls-auth", "tls-crypt", "tls-crypt-v2", "extra-certs", "pkcs12"})
-_UNSAFE_OPENVPN_DIRECTIVES = frozenset(
-    {
-        "auth-user-pass-verify",
-        "cd",
-        "chroot",
-        "client-connect",
-        "client-disconnect",
-        "config",
-        "daemon",
-        "down",
-        "down-pre",
-        "group",
-        "ifconfig-noexec",
-        "ipchange",
-        "iproute",
-        "learn-address",
-        "log",
-        "log-append",
-        "management",
-        "management-client-auth",
-        "plugin",
-        "route-noexec",
-        "route-pre-down",
-        "route-up",
-        "script-security",
-        "status",
-        "syslog",
-        "tls-verify",
-        "tmp-dir",
-        "up",
-        "up-delay",
-        "up-restart",
-        "user",
-        "writepid",
-    }
-)
-_EXTERNAL_FILE_DIRECTIVES = frozenset({"ca", "cert", "key", "extra-certs", "pkcs12", "tls-auth", "tls-crypt", "tls-crypt-v2"})
 
 # Substrings openvpn's own log uses; matched independent of version/provider
 # wording differences beyond these fairly stable phrases.
@@ -281,32 +140,6 @@ def log_path(settings: Settings) -> Path:
     return vpn_dir(settings) / OPENVPN_LOG_FILENAME
 
 
-def _write_private_vpn_file(path: Path, text: str) -> None:
-    directory = path.parent
-    directory.mkdir(parents=True, exist_ok=True)
-    try:
-        directory.chmod(0o700)
-    except OSError:
-        pass
-    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(directory))
-    temporary = Path(temporary_name)
-    try:
-        os.fchmod(descriptor, 0o600)
-        output = os.fdopen(descriptor, "w", encoding="utf-8")
-        descriptor = -1
-        with output:
-            output.write(text)
-        os.replace(temporary, path)
-        try:
-            path.chmod(0o600)
-        except OSError:
-            pass
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-        temporary.unlink(missing_ok=True)
-
-
 def _load_state(settings: Settings) -> dict:
     stored = _load_state_payload(_state_database_path(settings.userdata_root), VPN_STATE_NAMESPACE, {})
     stored = stored if isinstance(stored, dict) else {}
@@ -327,11 +160,6 @@ def _load_state(settings: Settings) -> dict:
         "self_heal_last_at": stored.get("self_heal_last_at"),
         "self_heal_last_reason": str(stored.get("self_heal_last_reason") or ""),
         "self_heal_attempts": [str(item) for item in (stored.get("self_heal_attempts") or []) if str(item or "").strip()],
-        "privacy_expected": bool(stored.get("privacy_expected", False)),
-        "dns_protected": bool(stored.get("dns_protected", False)),
-        "dns_servers": [str(item) for item in (stored.get("dns_servers") or []) if str(item or "").strip()],
-        "dns_error": str(stored.get("dns_error") or ""),
-        "dns_bootstrap_until": float(stored.get("dns_bootstrap_until") or 0.0),
     }
 
 
@@ -358,94 +186,40 @@ def parsed_remotes(config_text: str) -> List[str]:
 
 
 def rewrite_ovpn_config(raw_text: str, auth_file_path: Path) -> str:
-    """Validate and regenerate an uploaded provider profile.
+    """Apply the Drone-managed rewrites to an uploaded provider .ovpn:
 
-    Uploaded text is data, never an OpenVPN program: scripting/plugin/process
-    directives and external file references are rejected, while supported
-    provider-neutral networking/crypto directives and inline key material are
-    retained. Drone owns credentials, interface selection, logging, process
-    control, and script policy.
+    - ``auth-user-pass`` (with or without its own path argument) is pointed
+      at our managed credentials file, so any embedded/relative reference a
+      provider ships is overridden.
+    - ``up``/``down update-resolv-conf`` hooks are dropped -- Batocera has no
+      such script, and a missing hook binary would otherwise fail the tunnel.
+    - ``auth-nocache`` is appended if not already present, so a rejected
+      credential is never silently retried from a stale cache.
+
+    Raises ``ValueError`` if the file does not look like an OpenVPN client
+    config at all (no ``remote`` directive), so an unrelated upload is
+    rejected before it ever reaches openvpn.
     """
-    if "\x00" in raw_text:
-        raise ValueError("OpenVPN profile contains a NUL byte")
     lines = raw_text.splitlines()
     rewritten = []
     has_auth_nocache = False
     saw_remote = False
-    inline_block: Optional[str] = None
-    for line_number, line in enumerate(lines, start=1):
+    for line in lines:
         stripped = line.strip()
-        if inline_block is not None:
-            rewritten.append(line)
-            if stripped.lower() == f"</{inline_block}>":
-                inline_block = None
-            continue
-        if not stripped or stripped.startswith(("#", ";")):
-            rewritten.append(line)
-            continue
-        opening = re.fullmatch(r"<([A-Za-z0-9-]+)>", stripped)
-        if opening:
-            block_name = opening.group(1).lower()
-            if block_name not in _INLINE_OPENVPN_BLOCKS:
-                raise ValueError(f"unsupported OpenVPN inline block <{block_name}> on line {line_number}")
-            inline_block = block_name
-            rewritten.append(f"<{block_name}>")
-            continue
-        if stripped.startswith("</"):
-            raise ValueError(f"unexpected OpenVPN inline block terminator on line {line_number}")
-        if stripped.endswith("\\"):
-            raise ValueError(f"OpenVPN line continuations are not accepted (line {line_number})")
-        try:
-            fields = shlex.split(stripped, comments=True, posix=True)
-        except ValueError as error:
-            raise ValueError(f"invalid OpenVPN syntax on line {line_number}: {error}") from error
-        if not fields:
-            continue
-        directive = fields[0].lower().lstrip("-")
-        if directive in {"compress", "comp-lzo"}:
-            raise ValueError(f"OpenVPN compression directive '{directive}' is not accepted (line {line_number})")
-        if directive in _UNSAFE_OPENVPN_DIRECTIVES:
-            if directive in {"up", "down"} and "update-resolv-conf" in stripped:
-                continue
-            raise ValueError(f"unsafe OpenVPN directive '{directive}' is not accepted (line {line_number})")
-        if directive not in _SAFE_OPENVPN_DIRECTIVES:
-            raise ValueError(f"unsupported OpenVPN directive '{directive}' on line {line_number}")
-        if directive in _EXTERNAL_FILE_DIRECTIVES:
-            reference = fields[1] if len(fields) > 1 else ""
-            if reference and reference != "[inline]":
-                raise ValueError(
-                    f"external file reference for OpenVPN directive '{directive}' is not accepted "
-                    f"(line {line_number}); use an inline profile"
-                )
-        if directive == "auth-user-pass":
+        if stripped.startswith("auth-user-pass"):
             rewritten.append(f"auth-user-pass {auth_file_path}")
             continue
-        if directive == "auth-nocache":
-            has_auth_nocache = True
-        if directive == "dev":
-            if len(fields) < 2 or not fields[1].startswith("tun"):
-                raise ValueError(f"only a tun OpenVPN device is accepted (line {line_number})")
-            rewritten.append("dev tun0")
+        if re.match(r"^(up|down)\s+.*update-resolv-conf", stripped):
             continue
-        if directive == "remote":
-            if len(fields) < 2 or fields[1].startswith("-") or not re.fullmatch(r"[A-Za-z0-9._:[\]-]+", fields[1]):
-                raise ValueError(f"invalid OpenVPN remote host on line {line_number}")
-            if len(fields) >= 3:
-                try:
-                    port = int(fields[2])
-                except ValueError as error:
-                    raise ValueError(f"invalid OpenVPN remote port on line {line_number}") from error
-                if not 1 <= port <= 65535:
-                    raise ValueError(f"invalid OpenVPN remote port on line {line_number}")
+        if stripped == "auth-nocache":
+            has_auth_nocache = True
+        if stripped.startswith("remote ") or stripped == "remote":
             saw_remote = True
         rewritten.append(line)
-    if inline_block is not None:
-        raise ValueError(f"unterminated OpenVPN inline block <{inline_block}>")
     if not saw_remote:
         raise ValueError("This doesn't look like a valid OpenVPN client config -- no 'remote' directive found.")
     if not has_auth_nocache:
         rewritten.append("auth-nocache")
-    rewritten.append("script-security 1")
     return "\n".join(rewritten) + "\n"
 
 
@@ -461,8 +235,10 @@ def save_uploaded_config(settings: Settings, filename: str, raw_bytes: bytes) ->
         raw_text = raw_bytes.decode("utf-8")
     except UnicodeDecodeError:
         raise ValueError("uploaded file is not a valid text (.ovpn) config")
+    directory = vpn_dir(settings)
+    directory.mkdir(parents=True, exist_ok=True)
     rewritten = rewrite_ovpn_config(raw_text, auth_path(settings))
-    _write_private_vpn_file(config_path(settings), rewritten)
+    config_path(settings).write_text(rewritten, encoding="utf-8")
     remotes = parsed_remotes(rewritten)
     # A fresh config write is always "self-owned, clean slate" -- any prior
     # peer-import provenance and any stale revocation notice no longer apply.
@@ -482,8 +258,14 @@ def save_credentials(settings: Settings, username: str, password: str) -> dict:
         raise ValueError("username is required")
     if not password:
         raise ValueError("password is required")
+    directory = vpn_dir(settings)
+    directory.mkdir(parents=True, exist_ok=True)
     path = auth_path(settings)
-    _write_private_vpn_file(path, f"{username}\n{password}\n")
+    path.write_text(f"{username}\n{password}\n", encoding="utf-8")
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
     state = _save_state(settings, has_credentials=True, username=username)
     return {"status": "ok", "username": state["username"]}
 
@@ -554,18 +336,6 @@ def connect(settings: Settings) -> dict:
         except OSError:
             pass
         try:
-            _vpn_dns.prepare(vpn_dir(settings))
-            _vpn_dns.allow_bootstrap_dns(vpn_dir(settings))
-        except OSError as error:
-            return {"status": "error", "errors": [f"Unable to prepare fail-closed VPN DNS: {error}"]}
-        _save_state(
-            settings,
-            privacy_expected=True,
-            dns_protected=False,
-            dns_error="",
-            dns_bootstrap_until=time.time() + VPN_DNS_BOOTSTRAP_SECONDS,
-        )
-        try:
             result = subprocess.run(
                 [binary, "--config", str(cfg), "--daemon", "--log", str(vpn_log)],
                 capture_output=True,
@@ -583,43 +353,17 @@ def connect(settings: Settings) -> dict:
         return {"status": "connecting"}
 
 
-def disconnect(settings: Settings, *, restore_dns: bool = True) -> dict:
+def disconnect(settings: Settings) -> dict:
     with _CONNECT_LOCK:
         cfg = config_path(settings)
         pid = _find_running_openvpn_pid(cfg)
         if pid is None:
-            if restore_dns:
-                try:
-                    _vpn_dns.restore(vpn_dir(settings))
-                except OSError:
-                    pass
-            _save_state(
-                settings,
-                connected_at=None,
-                privacy_expected=not restore_dns,
-                dns_protected=False,
-                dns_servers=[],
-                dns_error="",
-                dns_bootstrap_until=0.0,
-            )
+            _save_state(settings, connected_at=None)
             return {"status": "not_running"}
         try:
             os.kill(pid, signal.SIGTERM)
         except ProcessLookupError:
-            if restore_dns:
-                try:
-                    _vpn_dns.restore(vpn_dir(settings))
-                except OSError:
-                    pass
-            _save_state(
-                settings,
-                connected_at=None,
-                privacy_expected=not restore_dns,
-                dns_protected=False,
-                dns_servers=[],
-                dns_error="",
-                dns_bootstrap_until=0.0,
-            )
+            _save_state(settings, connected_at=None)
             return {"status": "not_running"}
         except OSError as error:
             return {"status": "error", "errors": [f"Failed to stop openvpn (pid {pid}): {error}"]}
@@ -633,25 +377,7 @@ def disconnect(settings: Settings, *, restore_dns: bool = True) -> dict:
                 os.kill(pid, signal.SIGKILL)
             except OSError:
                 pass
-        if restore_dns:
-            try:
-                _vpn_dns.restore(vpn_dir(settings))
-            except OSError:
-                pass
-        else:
-            try:
-                _vpn_dns.sinkhole()
-            except OSError:
-                pass
-        _save_state(
-            settings,
-            connected_at=None,
-            privacy_expected=not restore_dns,
-            dns_protected=False,
-            dns_servers=[],
-            dns_error="",
-            dns_bootstrap_until=0.0,
-        )
+        _save_state(settings, connected_at=None)
         return {"status": "disconnected"}
 
 
@@ -869,10 +595,6 @@ def status(settings: Settings) -> dict:
         "self_heal_last_at": state["self_heal_last_at"],
         "self_heal_last_reason": state["self_heal_last_reason"],
         "self_heal_recent_count": len(_prune_self_heal_attempts(state["self_heal_attempts"], datetime.now(timezone.utc))),
-        "privacy_expected": state["privacy_expected"],
-        "dns_protected": state["dns_protected"],
-        "dns_servers": state["dns_servers"],
-        "dns_error": state["dns_error"],
         "connected_at": connected_at,
         "connected_duration_seconds": connected_duration_seconds,
         "tunnel_ip": tunnel_ip,
@@ -881,74 +603,6 @@ def status(settings: Settings) -> dict:
         "log_available": log_path(settings).is_file(),
         "log_tail": _log_lines(settings, VPN_LOG_TAIL_LINES_FOR_DISPLAY),
     }
-
-
-# ------------------------------------------------------------ privacy guard
-
-
-def enforce_dns_privacy(settings: Settings) -> dict:
-    """Keep resolver state aligned with the expected OpenVPN lifecycle.
-
-    The brief bootstrap window deliberately keeps pre-VPN DNS available only
-    while OpenVPN resolves its own endpoint. Once the tunnel is up, only
-    provider-supplied/configured DNS is accepted. After an unexpected loss,
-    the resolver fails closed until reconnect or an intentional disconnect.
-    """
-    state = _load_state(settings)
-    snapshot = status(settings)
-    connection_state = snapshot["status"]
-    if connection_state == "connected" and snapshot.get("tunnel_ip"):
-        try:
-            config_text = config_path(settings).read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            config_text = ""
-        log_text = "\n".join(_log_lines(settings, VPN_LOG_TAIL_LINES_FOR_DETECTION))
-        servers = _vpn_dns.provider_dns_servers(config_text, log_text)
-        try:
-            applied = _vpn_dns.apply(servers)
-        except (OSError, ValueError) as error:
-            try:
-                _vpn_dns.sinkhole()
-            except OSError:
-                pass
-            message = str(error)
-            if state["dns_protected"] or state["dns_error"] != message or state["dns_servers"]:
-                _save_state(settings, dns_protected=False, dns_servers=[], dns_error=message)
-            return {"status": "blocked", "error": message, "servers": []}
-        if not state["dns_protected"] or state["dns_servers"] != applied or state["dns_error"]:
-            _save_state(settings, dns_protected=True, dns_servers=applied, dns_error="", dns_bootstrap_until=0.0)
-        return {"status": "protected", "servers": applied}
-
-    if not state["privacy_expected"]:
-        try:
-            restored = _vpn_dns.restore(vpn_dir(settings))
-        except OSError:
-            restored = False
-        if state["dns_protected"] or state["dns_servers"] or state["dns_error"]:
-            _save_state(settings, dns_protected=False, dns_servers=[], dns_error="")
-        return {"status": "restored" if restored else "unchanged", "servers": []}
-
-    if connection_state == "connecting" and time.time() < state["dns_bootstrap_until"]:
-        return {"status": "bootstrap", "servers": []}
-
-    try:
-        _vpn_dns.sinkhole()
-        error = "VPN DNS is blocked until the tunnel is connected"
-    except OSError as write_error:
-        error = f"Unable to enforce fail-closed VPN DNS: {write_error}"
-    if state["dns_protected"] or state["dns_servers"] or state["dns_error"] != error:
-        _save_state(settings, dns_protected=False, dns_servers=[], dns_error=error)
-    return {"status": "blocked", "error": error, "servers": []}
-
-
-def run_privacy_guard_poller(settings: Settings) -> None:
-    """Continuously enforce DNS fail-closed state; never let the loop die."""
-    while True:
-        try:
-            enforce_dns_privacy(settings)
-        except Exception as error:
-            print(f"VPN privacy guard failed: {error.__class__.__name__}: {error}", file=sys.stderr, flush=True)
-        time.sleep(VPN_PRIVACY_GUARD_INTERVAL_SECONDS)
 
 
 # ------------------------------------------------------------ peer sharing
@@ -1132,7 +786,7 @@ def reconnect(settings: Settings) -> dict:
     individually -- ``_CONNECT_LOCK`` is a plain, non-reentrant ``Lock``, so
     wrapping both calls in it too would deadlock.
     """
-    disconnect(settings, restore_dns=False)
+    disconnect(settings)
     return connect(settings)
 
 

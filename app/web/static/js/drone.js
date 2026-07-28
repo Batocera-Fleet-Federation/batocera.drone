@@ -15,174 +15,6 @@ const titleNode = document.querySelector(".h3.mb-1");
 const subtitleNode = document.getElementById("pageSubtitle");
 const API_BASE = "/v1/api";
 
-// Dynamic page fragments use inert data attributes plus this deliberately
-// small command interpreter. This keeps all behavior in this trusted script,
-// so a strict CSP can reject inline JavaScript without breaking the UI.
-const UI_ACTION_NAMES = new Set([
-  "applyDroneScreenMode", "cancelDroneDownload", "cancelTorrent", "chooseTorrentDir",
-  "clearDroneDownloads", "clearPendingAssetChanges", "confirmMoveFiles", "confirmTorrentClear",
-  "connectVpn", "copyAllRomsForSystem", "copyLocalPeerAsset", "deleteTorrent",
-  "disconnectVpn", "exitRemoteManagement", "filterEmulatorConfigs", "forceStartTorrent",
-  "forgetLocalPeer", "goUpTorrentDirLevel", "installAria2", "loadBiosTreeFiles",
-  "loadConfig", "loadLog", "loadSystemBiosTreeFiles", "loadSystemTreeFiles",
-  "openMoveFilesModal", "openTorrentClearModal", "openTorrentDirBrowser",
-  "openTorrentUploadPicker", "openVpnConfigPicker", "pairLocalPeer", "pauseDroneDownload",
-  "pauseDroneDownloads", "pauseTorrentDownloads", "pullVpnConfigFromPeer",
-  "purgeAssetCache", "refreshCurrentConfig", "refreshCurrentLog", "refreshTorrentsLive",
-  "refreshVpnLive", "removeArtworkGamelistEntry", "removeRomMediaGamelistEntry",
-  "renderAssetCachePage", "renderDownloadsPage", "renderEmulatorsPage",
-  "renderMissingArtworkPage", "restartEmulationStation", "restoreTailnetPeer",
-  "resumeDroneDownload", "resumeDroneDownloads", "resumeTorrentDownloads",
-  "retryDroneDownload", "runPixnUpdate", "saveRomMediaMetadata",
-  "saveSelectedArtworkGamelist", "saveTorrentSettings", "saveVpnCredentials",
-  "selectArtworkRom", "selectBiosTreeRoot", "selectEmulatorConfig",
-  "selectEmulatorConfigVersion", "selectSystemTreeCategory", "selectSystemTreeRoot",
-  "setDroneAutoUpdate", "setHash", "setLocalAssetPage", "setMoveFilesDestination",
-  "setTransferLimit", "setTransferPage", "setTransferSearch", "setVpnSelfHeal",
-  "setVpnSharing", "showImageLightbox", "showLocalAssetDetails", "swarmBrowsePeerAssets",
-  "swarmEnrollTailnet", "swarmManagePeer", "swarmRotateTailnetAuthKey",
-  "swarmToggleTailnetAuthRotation", "toggleEmulatorConfigFolder", "updateDroneApp",
-  "verifyVpnPublicIp",
-]);
-
-function splitUiActionArguments(source) {
-  const parts = [];
-  let start = 0;
-  let quote = "";
-  let escaped = false;
-  let depth = 0;
-  for (let index = 0; index < source.length; index += 1) {
-    const char = source[index];
-    if (quote) {
-      if (escaped) escaped = false;
-      else if (char === "\\") escaped = true;
-      else if (char === quote) quote = "";
-      continue;
-    }
-    if (char === "'" || char === '"') quote = char;
-    else if (char === "(" || char === "{" || char === "[") depth += 1;
-    else if (char === ")" || char === "}" || char === "]") depth -= 1;
-    else if (char === "," && depth === 0) {
-      parts.push(source.slice(start, index).trim());
-      start = index + 1;
-    }
-  }
-  const tail = source.slice(start).trim();
-  if (tail) parts.push(tail);
-  return parts;
-}
-
-function parseUiQuotedString(source) {
-  const quote = source[0];
-  if (source[source.length - 1] !== quote) throw new Error("unterminated action string");
-  let result = "";
-  for (let index = 1; index < source.length - 1; index += 1) {
-    const char = source[index];
-    if (char !== "\\") {
-      result += char;
-      continue;
-    }
-    index += 1;
-    if (index >= source.length - 1) throw new Error("invalid action escape");
-    const escaped = source[index];
-    const replacements = { n: "\n", r: "\r", t: "\t", b: "\b", f: "\f", v: "\v" };
-    result += Object.prototype.hasOwnProperty.call(replacements, escaped) ? replacements[escaped] : escaped;
-  }
-  return result;
-}
-
-function parseUiActionValue(source, element, event) {
-  const value = source.trim();
-  if (!value) return undefined;
-  if ((value[0] === "'" || value[0] === '"') && value[value.length - 1] === value[0]) {
-    return parseUiQuotedString(value);
-  }
-  if (/^-?(?:\d+|\d*\.\d+)$/.test(value)) return Number(value);
-  if (value === "true") return true;
-  if (value === "false") return false;
-  if (value === "null") return null;
-  if (value === "this") return element;
-  if (value === "this.value") return element.value;
-  if (value === "this.checked") return element.checked;
-  if (value === "event") return event;
-  const closest = value.match(/^this\.closest\(("[^"]*"|'[^']*')\)\.dataset\.([A-Za-z][A-Za-z0-9]*)$/);
-  if (closest) {
-    const owner = element.closest(parseUiQuotedString(closest[1]));
-    return owner ? owner.dataset[closest[2]] : undefined;
-  }
-  const decoded = value.match(/^decodeURIComponent\((.*)\)$/s);
-  if (decoded) return decodeURIComponent(parseUiActionValue(decoded[1], element, event));
-  if (value.startsWith("{") && value.endsWith("}")) {
-    const objectValue = {};
-    const body = value.slice(1, -1).trim();
-    for (const field of splitUiActionArguments(body)) {
-      const match = field.match(/^([A-Za-z][A-Za-z0-9_]*)\s*:\s*(.*)$/s);
-      if (!match) throw new Error("invalid action object");
-      objectValue[match[1]] = parseUiActionValue(match[2], element, event);
-    }
-    return objectValue;
-  }
-  const safeVariables = {
-    artworkSelectedFields,
-    artworkSelectedSystems,
-    artworkFilterQuery,
-    artworkRomStatus,
-  };
-  if (Object.prototype.hasOwnProperty.call(safeVariables, value)) return safeVariables[value];
-  throw new Error(`unsupported action value: ${value}`);
-}
-
-function runUiAction(command, element, event) {
-  const source = String(command || "").trim();
-  if (!source) return;
-  if (source === "event.stopPropagation()") {
-    event.stopPropagation();
-    return;
-  }
-  if (source === "this.parentElement.remove()") {
-    element.parentElement?.remove();
-    return;
-  }
-  const enter = source.match(/^if\(event\.key==='Enter'\)\{event\.preventDefault\(\);(.*)\}$/s);
-  if (enter) {
-    if (event.key !== "Enter") return;
-    event.preventDefault();
-    runUiAction(enter[1], element, event);
-    return;
-  }
-  const call = source.match(/^([A-Za-z][A-Za-z0-9_]*)\((.*)\)$/s);
-  if (!call || !UI_ACTION_NAMES.has(call[1])) throw new Error("unsupported UI action");
-  const action = globalThis[call[1]];
-  if (typeof action !== "function") throw new Error(`UI action is unavailable: ${call[1]}`);
-  const args = splitUiActionArguments(call[2]).map((arg) => parseUiActionValue(arg, element, event));
-  const result = action(...args);
-  if (result && typeof result.catch === "function") {
-    result.catch((error) => showError(error?.message || "The requested action failed."));
-  }
-}
-
-function installUiActionDelegates() {
-  const bindings = [
-    ["click", "data-ui-click"],
-    ["change", "data-ui-change"],
-    ["input", "data-ui-input"],
-    ["keydown", "data-ui-keydown"],
-  ];
-  for (const [eventName, attribute] of bindings) {
-    document.addEventListener(eventName, (event) => {
-      const target = event.target instanceof Element ? event.target.closest(`[${attribute}]`) : null;
-      if (!target || (target.disabled && eventName === "click")) return;
-      try {
-        runUiAction(target.getAttribute(attribute), target, event);
-      } catch (error) {
-        console.error("Rejected UI action", error);
-        showError("This control could not be used safely.");
-      }
-    });
-  }
-}
-installUiActionDelegates();
-
 // Stamp each `table.bff-stack` cell with its column header so the CSS can render a
 // label:value stacked card per row on phone widths (see drone.css .bff-stack).
 function decorateStackTables(root) {
@@ -478,12 +310,7 @@ function showImageLightbox(url, title = "") {
   const imageUrl = appendCacheBust(url);
   const overlay = document.createElement("div");
   overlay.className = "image-lightbox-overlay";
-  overlay.innerHTML = `<button class="image-lightbox-close" type="button">&times;</button><img src="${escapeHtml(imageUrl)}" alt="${escapeHtml(title)}">`;
-  overlay.querySelector(".image-lightbox-close").addEventListener("click", () => overlay.remove());
-  const image = overlay.querySelector("img");
-  image.addEventListener("error", () => {
-    image.replaceWith(Object.assign(document.createElement("div"), { className: "text-light p-4", textContent: "Image could not be loaded" }));
-  });
+  overlay.innerHTML = `<button class="image-lightbox-close" onclick="this.parentElement.remove()">&times;</button><img src="${escapeHtml(imageUrl)}" alt="${escapeHtml(title)}" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'text-light p-4',textContent:'Image could not be loaded'}))">`;
   overlay.addEventListener("click", (e) => { if (e.target === overlay) overlay.remove(); });
   document.addEventListener("keydown", function escHandler(ev) { if (ev.key === "Escape") { overlay.remove(); document.removeEventListener("keydown", escHandler); } });
   document.body.appendChild(overlay);
@@ -1253,7 +1080,7 @@ function renderSystemTreeRoot(system) {
   const romCount = Number(system.rom_count || 0);
   return `
     <div class="tree-root ${active ? "is-expanded" : ""}">
-      <button type="button" class="tree-grid-row tree-root-row ${active ? "is-active" : ""}" data-ui-click="selectSystemTreeRoot(${jsAttr(name)})">
+      <button type="button" class="tree-grid-row tree-root-row ${active ? "is-active" : ""}" onclick="selectSystemTreeRoot(${jsAttr(name)})">
         <div class="tree-grid-main">
           <i class="bi ${active ? "bi-chevron-down" : "bi-chevron-right"} tree-grid-caret"></i>
           <i class="bi bi-folder2${active ? "-open" : ""} tree-grid-icon"></i>
@@ -1263,7 +1090,7 @@ function renderSystemTreeRoot(system) {
       </button>
       ${active ? `
         <div class="tree-branch">
-          <button type="button" class="tree-grid-row tree-category-row ${selectedSystemsTreeCategory === "games" ? "is-active" : ""}" data-ui-click="selectSystemTreeCategory(${jsAttr(name)}, 'games')">
+          <button type="button" class="tree-grid-row tree-category-row ${selectedSystemsTreeCategory === "games" ? "is-active" : ""}" onclick="selectSystemTreeCategory(${jsAttr(name)}, 'games')">
             <div class="tree-grid-main">
               <i class="bi bi-controller tree-grid-icon"></i>
               <div class="tree-grid-label"><span class="fw-semibold">Games</span></div>
@@ -1271,7 +1098,7 @@ function renderSystemTreeRoot(system) {
             <div class="tree-grid-meta">${romCount.toLocaleString()} files</div>
           </button>
           ${selectedSystemsTreeCategory === "games" ? `<div id="tree-files-${cssSafeId(name)}" class="tree-files"></div>` : ""}
-          <button type="button" class="tree-grid-row tree-category-row ${selectedSystemsTreeCategory === "bios" ? "is-active" : ""}" data-ui-click="selectSystemTreeCategory(${jsAttr(name)}, 'bios')">
+          <button type="button" class="tree-grid-row tree-category-row ${selectedSystemsTreeCategory === "bios" ? "is-active" : ""}" onclick="selectSystemTreeCategory(${jsAttr(name)}, 'bios')">
             <div class="tree-grid-main">
               <i class="bi bi-cpu tree-grid-icon"></i>
               <div class="tree-grid-label"><span class="fw-semibold">BIOS</span></div>
@@ -1287,7 +1114,7 @@ function renderBiosTreeRoot(total) {
   const active = selectedSystemsTreeRoot === BIOS_TREE_ROOT;
   return `
     <div class="tree-root ${active ? "is-expanded" : ""}">
-      <button type="button" class="tree-grid-row tree-root-row ${active ? "is-active" : ""}" data-ui-click="selectBiosTreeRoot()">
+      <button type="button" class="tree-grid-row tree-root-row ${active ? "is-active" : ""}" onclick="selectBiosTreeRoot()">
         <div class="tree-grid-main">
           <i class="bi ${active ? "bi-chevron-down" : "bi-chevron-right"} tree-grid-caret"></i>
           <i class="bi bi-cpu tree-grid-icon"></i>
@@ -1297,7 +1124,7 @@ function renderBiosTreeRoot(total) {
       </button>
       ${active ? `
         <div class="tree-branch">
-          <button type="button" class="tree-grid-row tree-category-row ${selectedSystemsTreeCategory === "bios" ? "is-active" : ""}" data-ui-click="selectSystemTreeCategory(${jsAttr(BIOS_TREE_ROOT)}, 'bios')">
+          <button type="button" class="tree-grid-row tree-category-row ${selectedSystemsTreeCategory === "bios" ? "is-active" : ""}" onclick="selectSystemTreeCategory(${jsAttr(BIOS_TREE_ROOT)}, 'bios')">
             <div class="tree-grid-main">
               <i class="bi bi-cpu tree-grid-icon"></i>
               <div class="tree-grid-label"><span class="fw-semibold">BIOS files</span></div>
@@ -1522,7 +1349,7 @@ function renderSystemTreeFiles(system) {
               </div>
               <div class="tree-grid-meta">${escapeHtml(size)}</div>
               <div class="tree-grid-action">
-                <button class="btn btn-outline-primary btn-sm" type="button" title="View" data-ui-click="setHash('${romMediaHash(system, item.unique_id, 1)}')"><i class="bi bi-eye"></i></button>
+                <button class="btn btn-outline-primary btn-sm" type="button" title="View" onclick="setHash('${romMediaHash(system, item.unique_id, 1)}')"><i class="bi bi-eye"></i></button>
                 ${
                   item.is_downloadable === false
                     ? `<button class="btn btn-secondary btn-sm" type="button" title="Folder ROM (not downloadable)" disabled><i class="bi bi-folder2-open"></i></button>`
@@ -1535,7 +1362,7 @@ function renderSystemTreeFiles(system) {
       </div>
       <div class="tree-grid-more">
         <span class="small text-muted">${total ? `Showing ${loaded.toLocaleString()} of ${total.toLocaleString()}` : "No games reported"}</span>
-        <button class="btn btn-outline-primary btn-sm" type="button" ${!hasMore || payload.loading ? "disabled" : ""} data-ui-click="loadSystemTreeFiles(${jsAttr(system)}, { reset: false })">
+        <button class="btn btn-outline-primary btn-sm" type="button" ${!hasMore || payload.loading ? "disabled" : ""} onclick="loadSystemTreeFiles(${jsAttr(system)}, { reset: false })">
           ${payload.loading && loaded ? '<span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>' : '<i class="bi bi-plus-circle me-1"></i>'}
           Show more
         </button>
@@ -1584,7 +1411,7 @@ function renderBiosTreeFiles() {
       </div>
       <div class="tree-grid-more">
         <span class="small text-muted">${total ? `Showing ${loaded.toLocaleString()} of ${total.toLocaleString()}` : "No BIOS files reported"}</span>
-        <button class="btn btn-outline-primary btn-sm" type="button" ${!hasMore || payload.loading ? "disabled" : ""} data-ui-click="loadBiosTreeFiles({ reset: false })">
+        <button class="btn btn-outline-primary btn-sm" type="button" ${!hasMore || payload.loading ? "disabled" : ""} onclick="loadBiosTreeFiles({ reset: false })">
           ${payload.loading && loaded ? '<span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>' : '<i class="bi bi-plus-circle me-1"></i>'}
           Show more
         </button>
@@ -1675,7 +1502,7 @@ function renderSystemBiosTreeFiles(system) {
       </div>
       <div class="tree-grid-more">
         <span class="small text-muted">${total ? `Showing ${loaded.toLocaleString()} of ${total.toLocaleString()}` : "No BIOS files reported"}</span>
-        <button class="btn btn-outline-primary btn-sm" type="button" ${!hasMore || payload.loading ? "disabled" : ""} data-ui-click="loadSystemBiosTreeFiles(${jsAttr(system)}, { reset: false })">
+        <button class="btn btn-outline-primary btn-sm" type="button" ${!hasMore || payload.loading ? "disabled" : ""} onclick="loadSystemBiosTreeFiles(${jsAttr(system)}, { reset: false })">
           ${payload.loading && loaded ? '<span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>' : '<i class="bi bi-plus-circle me-1"></i>'}
           Show more
         </button>
@@ -1768,7 +1595,7 @@ async function renderRomMediaPage(system, uniqueId, page = 1) {
     subtitleNode.textContent = `${system} artwork and gamelist.xml metadata`;
     content.innerHTML = `
       <div class="mb-3 d-flex flex-wrap gap-2">
-        <button class="btn btn-outline-secondary" data-ui-click="setHash('${systemsTreeHash("", system)}')">← Back to ${escapeHtml(system)}</button>
+        <button class="btn btn-outline-secondary" onclick="setHash('${systemsTreeHash("", system)}')">← Back to ${escapeHtml(system)}</button>
         ${
           rom.is_downloadable === false
             ? `<button class="btn btn-outline-secondary" type="button" disabled><i class="bi bi-folder2-open me-1"></i>Folder ROM</button>`
@@ -1779,7 +1606,7 @@ async function renderRomMediaPage(system, uniqueId, page = 1) {
         <div class="card-body">
           <div class="rom-media-hero">
             <div>
-              ${primary ? `<button type="button" class="border-0 p-0 bg-transparent w-100" data-ui-click="showImageLightbox('${escapeHtml(primary.url)}', '${escapeHtml(primary.label)}')"><img class="rom-media-primary" src="${escapeHtml(primary.url)}" alt="${escapeHtml(primary.label)}"></button>` : `<div class="rom-media-primary d-flex align-items-center justify-content-center text-muted">No artwork in gamelist.xml</div>`}
+              ${primary ? `<button type="button" class="border-0 p-0 bg-transparent w-100" onclick="showImageLightbox('${escapeHtml(primary.url)}', '${escapeHtml(primary.label)}')"><img class="rom-media-primary" src="${escapeHtml(primary.url)}" alt="${escapeHtml(primary.label)}"></button>` : `<div class="rom-media-primary d-flex align-items-center justify-content-center text-muted">No artwork in gamelist.xml</div>`}
             </div>
             <div>
               <div class="d-flex justify-content-between gap-2 align-items-start mb-2">
@@ -1811,7 +1638,7 @@ async function renderRomMediaPage(system, uniqueId, page = 1) {
         <div class="rom-media-grid">
           ${media.map((item) => `
             <div class="rom-media-tile">
-              <button type="button" class="border-0 p-0 bg-transparent w-100" data-ui-click="showImageLightbox('${escapeHtml(item.url)}', '${escapeHtml(item.label)}')">
+              <button type="button" class="border-0 p-0 bg-transparent w-100" onclick="showImageLightbox('${escapeHtml(item.url)}', '${escapeHtml(item.label)}')">
                 <img src="${escapeHtml(item.url)}" alt="${escapeHtml(item.label)}">
               </button>
               <div class="rom-media-label">
@@ -1819,7 +1646,7 @@ async function renderRomMediaPage(system, uniqueId, page = 1) {
                   <div class="fw-semibold">${escapeHtml(item.label)}</div>
                   <div class="text-muted small text-truncate" title="${escapeHtml(item.value)}">${escapeHtml(item.value)}</div>
                 </div>
-                <a class="btn btn-sm btn-outline-primary" href="${escapeHtml(item.url)}" target="_blank" rel="noopener noreferrer" data-ui-click="event.stopPropagation()"><i class="bi bi-box-arrow-up-right"></i></a>
+                <a class="btn btn-sm btn-outline-primary" href="${escapeHtml(item.url)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()"><i class="bi bi-box-arrow-up-right"></i></a>
               </div>
             </div>
           `).join("") || `<div class="text-muted">No image fields are set in gamelist.xml for this ROM.</div>`}
@@ -2176,15 +2003,15 @@ async function renderHelpPage() {
           <div class="help-section mb-4">
             <h3 class="h5 mb-3"><i class="bi bi-stars me-2"></i>What Drone does for you</h3>
             <div class="help-link-list">
-              <button class="help-link-row" type="button" data-ui-click="setHash('#admin/transfers')"><i class="bi bi-arrow-left-right"></i><span><strong>Share across cabinets</strong><small>Copy games, saves, BIOS, and artwork peer-to-peer instead of downloading them everywhere.</small></span></button>
-              <button class="help-link-row" type="button" data-ui-click="setHash('#admin/artwork')"><i class="bi bi-images"></i><span><strong>Polish your library</strong><small>Fix titles, descriptions, box art, and marquees so everything looks complete.</small></span></button>
-              <button class="help-link-row" type="button" data-ui-click="setHash('#admin/logs/gameplay?lines=200')"><i class="bi bi-clock-history"></i><span><strong>See what's been played</strong><small>Review detected game launches and recent play sessions.</small></span></button>
-              <button class="help-link-row" type="button" data-ui-click="setHash('#admin/system-info')"><i class="bi bi-pc-display"></i><span><strong>Check machine health</strong><small>CPU, memory, storage, network, and connection speed at a glance.</small></span></button>
-              <button class="help-link-row" type="button" data-ui-click="setHash('#admin/torrents')"><i class="bi bi-magnet"></i><span><strong>Fetch new content</strong><small>Download via the built-in torrent client, then share it across your fleet.</small></span></button>
-              <button class="help-link-row" type="button" data-ui-click="setHash('#admin/vpn')"><i class="bi bi-incognito"></i><span><strong>Go private</strong><small>Connect this machine to your VPN provider and confirm the tunnel is live.</small></span></button>
+              <button class="help-link-row" type="button" onclick="setHash('#admin/transfers')"><i class="bi bi-arrow-left-right"></i><span><strong>Share across cabinets</strong><small>Copy games, saves, BIOS, and artwork peer-to-peer instead of downloading them everywhere.</small></span></button>
+              <button class="help-link-row" type="button" onclick="setHash('#admin/artwork')"><i class="bi bi-images"></i><span><strong>Polish your library</strong><small>Fix titles, descriptions, box art, and marquees so everything looks complete.</small></span></button>
+              <button class="help-link-row" type="button" onclick="setHash('#admin/logs/gameplay?lines=200')"><i class="bi bi-clock-history"></i><span><strong>See what's been played</strong><small>Review detected game launches and recent play sessions.</small></span></button>
+              <button class="help-link-row" type="button" onclick="setHash('#admin/system-info')"><i class="bi bi-pc-display"></i><span><strong>Check machine health</strong><small>CPU, memory, storage, network, and connection speed at a glance.</small></span></button>
+              <button class="help-link-row" type="button" onclick="setHash('#admin/torrents')"><i class="bi bi-magnet"></i><span><strong>Fetch new content</strong><small>Download via the built-in torrent client, then share it across your fleet.</small></span></button>
+              <button class="help-link-row" type="button" onclick="setHash('#admin/vpn')"><i class="bi bi-incognito"></i><span><strong>Go private</strong><small>Connect this machine to your VPN provider and confirm the tunnel is live.</small></span></button>
             </div>
             <div class="mt-2 small">
-              <button class="btn btn-link p-0 align-baseline" type="button" data-ui-click="setHash('#admin/swarm')">Manage your whole fleet on the Swarm page <i class="bi bi-arrow-right ms-1"></i></button>
+              <button class="btn btn-link p-0 align-baseline" type="button" onclick="setHash('#admin/swarm')">Manage your whole fleet on the Swarm page <i class="bi bi-arrow-right ms-1"></i></button>
             </div>
           </div>
 
@@ -2241,7 +2068,7 @@ function renderAdminPanelTabs(active, tabs) {
   return `<ul class="nav nav-tabs admin-panel-tabs mb-3">
     ${tabs.map(([key, label, icon, hash]) => `
       <li class="nav-item">
-        <button type="button" class="nav-link ${active === key ? "active" : ""}" data-ui-click="setHash('${hash}')"><i class="bi ${icon} me-1"></i>${label}</button>
+        <button type="button" class="nav-link ${active === key ? "active" : ""}" onclick="setHash('${hash}')"><i class="bi ${icon} me-1"></i>${label}</button>
       </li>
     `).join("")}
   </ul>`;
@@ -2275,7 +2102,7 @@ async function renderAdminMenu() {
   content.innerHTML = `
     <div class="row">
       <div class="col-md-4 mb-3">
-        <div class="card admin-tile pointer h-100" data-ui-click="setHash('#admin/system-info')">
+        <div class="card admin-tile pointer h-100" onclick="setHash('#admin/system-info')">
           <div class="card-body">
             <h5 class="card-title"><i class="bi bi-bug me-2"></i>Debug</h5>
             <p class="card-text">System info, logs, and emulator config files -- runtime health, storage, network, Batocera details, and every tracked log source in one tabbed panel.</p>
@@ -2283,7 +2110,7 @@ async function renderAdminMenu() {
         </div>
       </div>
       <div class="col-md-4 mb-3">
-        <div class="card admin-tile pointer h-100" data-ui-click="setHash('#admin/artwork')">
+        <div class="card admin-tile pointer h-100" onclick="setHash('#admin/artwork')">
           <div class="card-body">
             <h5 class="card-title"><i class="bi bi-images me-2"></i>Artwork</h5>
             <p class="card-text">Manage gamelist artwork, metadata, imports, uploads, marquee crops, and browse installed EmulationStation themes.</p>
@@ -2291,7 +2118,7 @@ async function renderAdminMenu() {
         </div>
       </div>
       <div class="col-md-4 mb-3">
-        <div class="card admin-tile pointer h-100" data-ui-click="setHash('#admin/torrents')">
+        <div class="card admin-tile pointer h-100" onclick="setHash('#admin/torrents')">
           <div class="card-body">
             <h5 class="card-title"><i class="bi bi-magnet me-2"></i>Torrents</h5>
             <p class="card-text">Watch a folder for .torrent files and download them on this machine with aria2c.</p>
@@ -2299,7 +2126,7 @@ async function renderAdminMenu() {
         </div>
       </div>
       <div class="col-md-4 mb-3">
-        <div class="card admin-tile pointer h-100" data-ui-click="setHash('#admin/vpn')">
+        <div class="card admin-tile pointer h-100" onclick="setHash('#admin/vpn')">
           <div class="card-body">
             <h5 class="card-title"><i class="bi bi-shield-lock me-2"></i>VPN</h5>
             <p class="card-text">Configure and connect an OpenVPN provider (Proton VPN, NordVPN, and others).</p>
@@ -2452,10 +2279,10 @@ function renderDownloadRows(rows, allowCancel = true, options = {}) {
         ? ` <span class="badge text-bg-warning" title="${escapeHtml(`Artwork copied but not linked: ${gamelistError}`)}"><i class="bi bi-exclamation-triangle me-1"></i>gamelist not linked</span>`
         : "";
       const actions = [
-        allowCancel && cancelable && jobId ? `<button class="btn btn-sm btn-outline-danger" title="Cancel download" aria-label="Cancel download" data-ui-click="cancelDroneDownload('${jobId}')"><i class="bi bi-x-circle"></i></button>` : "",
-        pausable && jobId ? `<button class="btn btn-sm btn-outline-warning" title="Pause download" aria-label="Pause download" data-ui-click="pauseDroneDownload('${jobId}')"><i class="bi bi-pause-fill"></i></button>` : "",
-        resumable && jobId ? `<button class="btn btn-sm btn-outline-success" title="Resume download" aria-label="Resume download" data-ui-click="resumeDroneDownload('${jobId}')"><i class="bi bi-play-fill"></i></button>` : "",
-        retryable && jobId ? `<button class="btn btn-sm btn-outline-primary" title="Retry download" aria-label="Retry download" data-ui-click="retryDroneDownload('${jobId}')"><i class="bi bi-arrow-clockwise"></i></button>` : "",
+        allowCancel && cancelable && jobId ? `<button class="btn btn-sm btn-outline-danger" title="Cancel download" aria-label="Cancel download" onclick="cancelDroneDownload('${jobId}')"><i class="bi bi-x-circle"></i></button>` : "",
+        pausable && jobId ? `<button class="btn btn-sm btn-outline-warning" title="Pause download" aria-label="Pause download" onclick="pauseDroneDownload('${jobId}')"><i class="bi bi-pause-fill"></i></button>` : "",
+        resumable && jobId ? `<button class="btn btn-sm btn-outline-success" title="Resume download" aria-label="Resume download" onclick="resumeDroneDownload('${jobId}')"><i class="bi bi-play-fill"></i></button>` : "",
+        retryable && jobId ? `<button class="btn btn-sm btn-outline-primary" title="Retry download" aria-label="Retry download" onclick="retryDroneDownload('${jobId}')"><i class="bi bi-arrow-clockwise"></i></button>` : "",
       ].filter(Boolean).join(" ");
       return `<tr>
         <td><span class="badge text-bg-${statusClass}" title="${escapeHtml(errorText)}">${escapeHtml(displayStatus)}${row.queue_position ? ` #${row.queue_position}` : ""}</span>${gamelistWarning}</td>
@@ -2507,10 +2334,10 @@ function renderTransferRows(rows, options = {}) {
         const resumable = status === "paused";
         const retryable = ["failed", "cancelled"].includes(status);
         actions = [
-          cancelable && jobId ? `<button class="btn btn-sm btn-outline-danger" title="Cancel download" aria-label="Cancel download" data-ui-click="cancelDroneDownload('${jobId}')"><i class="bi bi-x-circle"></i></button>` : "",
-          pausable && jobId ? `<button class="btn btn-sm btn-outline-warning" title="Pause download" aria-label="Pause download" data-ui-click="pauseDroneDownload('${jobId}')"><i class="bi bi-pause-fill"></i></button>` : "",
-          resumable && jobId ? `<button class="btn btn-sm btn-outline-success" title="Resume download" aria-label="Resume download" data-ui-click="resumeDroneDownload('${jobId}')"><i class="bi bi-play-fill"></i></button>` : "",
-          retryable && jobId ? `<button class="btn btn-sm btn-outline-primary" title="Retry download" aria-label="Retry download" data-ui-click="retryDroneDownload('${jobId}')"><i class="bi bi-arrow-clockwise"></i></button>` : "",
+          cancelable && jobId ? `<button class="btn btn-sm btn-outline-danger" title="Cancel download" aria-label="Cancel download" onclick="cancelDroneDownload('${jobId}')"><i class="bi bi-x-circle"></i></button>` : "",
+          pausable && jobId ? `<button class="btn btn-sm btn-outline-warning" title="Pause download" aria-label="Pause download" onclick="pauseDroneDownload('${jobId}')"><i class="bi bi-pause-fill"></i></button>` : "",
+          resumable && jobId ? `<button class="btn btn-sm btn-outline-success" title="Resume download" aria-label="Resume download" onclick="resumeDroneDownload('${jobId}')"><i class="bi bi-play-fill"></i></button>` : "",
+          retryable && jobId ? `<button class="btn btn-sm btn-outline-primary" title="Retry download" aria-label="Retry download" onclick="retryDroneDownload('${jobId}')"><i class="bi bi-arrow-clockwise"></i></button>` : "",
         ].filter(Boolean).join(" ");
       }
       return `<tr>
@@ -2543,13 +2370,13 @@ function renderDownloadsPanel(payload, includeHeader = true) {
   return `
     ${includeHeader ? `<div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
       <div><strong>${escapeHtml(payload.target_drone_id || "This Drone")}</strong><div class="small text-muted">${(() => { const n = Number(payload.concurrency && payload.concurrency.active_limit) || 1; return n > 1 ? `Up to ${n} transfers run at a time on this Drone.` : "Transfers run one at a time on this Drone."; })()}</div></div>
-      <button class="btn btn-sm btn-outline-primary" title="Refresh downloads" aria-label="Refresh downloads" data-ui-click="renderDownloadsPage()"><i class="bi bi-arrow-repeat"></i></button>
+      <button class="btn btn-sm btn-outline-primary" title="Refresh downloads" aria-label="Refresh downloads" onclick="renderDownloadsPage()"><i class="bi bi-arrow-repeat"></i></button>
     </div>` : ""}
     <div class="d-flex flex-wrap align-items-center gap-2 mb-3">
       ${payload.paused
-        ? `<span class="badge text-bg-warning"><i class="bi bi-pause-circle me-1"></i>Queue paused</span><button class="btn btn-sm btn-success" type="button" data-ui-click="resumeDroneDownloads()"><i class="bi bi-play-fill me-1"></i>Resume</button>`
-        : `<button class="btn btn-sm btn-outline-warning" type="button" ${(active.length || queued.length) ? "" : "disabled"} data-ui-click="pauseDroneDownloads()"><i class="bi bi-pause-fill me-1"></i>Pause</button>`}
-      <button class="btn btn-sm btn-outline-danger" type="button" ${queued.length ? "" : "disabled"} data-ui-click="clearDroneDownloads()"><i class="bi bi-x-circle me-1"></i>Clear Queue</button>
+        ? `<span class="badge text-bg-warning"><i class="bi bi-pause-circle me-1"></i>Queue paused</span><button class="btn btn-sm btn-success" type="button" onclick="resumeDroneDownloads()"><i class="bi bi-play-fill me-1"></i>Resume</button>`
+        : `<button class="btn btn-sm btn-outline-warning" type="button" ${(active.length || queued.length) ? "" : "disabled"} onclick="pauseDroneDownloads()"><i class="bi bi-pause-fill me-1"></i>Pause</button>`}
+      <button class="btn btn-sm btn-outline-danger" type="button" ${queued.length ? "" : "disabled"} onclick="clearDroneDownloads()"><i class="bi bi-x-circle me-1"></i>Clear Queue</button>
     </div>
     <div class="download-summary-grid mb-3">
       ${summary.map(([label, count, icon, tone]) => `<div class="download-summary-card tone-${tone}"><i class="bi ${icon}"></i><div><strong>${count}</strong><span>${label}</span></div></div>`).join("")}
@@ -2591,20 +2418,20 @@ function renderTransferPager(kind, label, rows) {
   const page = transferPage(kind, rows);
   const view = transferViews[kind];
   return { page, html: `<div class="d-flex flex-wrap gap-2 mb-2">
-      <input class="form-control form-control-sm" style="max-width:260px" placeholder="Search ${label.toLowerCase()}" value="${escapeHtml(view.query)}" data-ui-change="setTransferSearch('${kind}', this.value)" data-ui-keydown="if(event.key==='Enter'){event.preventDefault();setTransferSearch('${kind}',this.value)}">
-      <select class="form-select form-select-sm" style="width:auto" data-ui-change="setTransferLimit('${kind}', this.value)">${[10, 50, 100, 200].map(size => `<option value="${size}" ${view.limit === size ? "selected" : ""}>${size}</option>`).join("")}</select>
-      <button class="btn btn-sm btn-outline-secondary" ${view.page <= 1 ? "disabled" : ""} data-ui-click="setTransferPage('${kind}', ${view.page - 1})">Previous</button>
+      <input class="form-control form-control-sm" style="max-width:260px" placeholder="Search ${label.toLowerCase()}" value="${escapeHtml(view.query)}" onchange="setTransferSearch('${kind}', this.value)" onkeydown="if(event.key==='Enter'){event.preventDefault();setTransferSearch('${kind}',this.value)}">
+      <select class="form-select form-select-sm" style="width:auto" onchange="setTransferLimit('${kind}', this.value)">${[10, 50, 100, 200].map(size => `<option value="${size}" ${view.limit === size ? "selected" : ""}>${size}</option>`).join("")}</select>
+      <button class="btn btn-sm btn-outline-secondary" ${view.page <= 1 ? "disabled" : ""} onclick="setTransferPage('${kind}', ${view.page - 1})">Previous</button>
       <span class="small text-muted align-self-center">Page ${view.page} of ${page.pages}</span>
-      <button class="btn btn-sm btn-outline-secondary" ${view.page >= page.pages ? "disabled" : ""} data-ui-click="setTransferPage('${kind}', ${view.page + 1})">Next</button>
+      <button class="btn btn-sm btn-outline-secondary" ${view.page >= page.pages ? "disabled" : ""} onclick="setTransferPage('${kind}', ${view.page + 1})">Next</button>
     </div>` };
 }
 
 function renderTransferControls(payload, active, queued) {
   return `<div class="d-flex flex-wrap align-items-center gap-2 mb-3">
     ${payload.paused
-      ? `<span class="badge text-bg-warning"><i class="bi bi-pause-circle me-1"></i>Queue paused</span><button class="btn btn-sm btn-success" type="button" data-ui-click="resumeDroneDownloads()"><i class="bi bi-play-fill me-1"></i>Resume</button>`
-      : `<button class="btn btn-sm btn-outline-warning" type="button" ${(active.length || queued.length) ? "" : "disabled"} data-ui-click="pauseDroneDownloads()"><i class="bi bi-pause-fill me-1"></i>Pause</button>`}
-    <button class="btn btn-sm btn-outline-danger" type="button" ${queued.length ? "" : "disabled"} data-ui-click="clearDroneDownloads()"><i class="bi bi-x-circle me-1"></i>Clear Queue</button>
+      ? `<span class="badge text-bg-warning"><i class="bi bi-pause-circle me-1"></i>Queue paused</span><button class="btn btn-sm btn-success" type="button" onclick="resumeDroneDownloads()"><i class="bi bi-play-fill me-1"></i>Resume</button>`
+      : `<button class="btn btn-sm btn-outline-warning" type="button" ${(active.length || queued.length) ? "" : "disabled"} onclick="pauseDroneDownloads()"><i class="bi bi-pause-fill me-1"></i>Pause</button>`}
+    <button class="btn btn-sm btn-outline-danger" type="button" ${queued.length ? "" : "disabled"} onclick="clearDroneDownloads()"><i class="bi bi-x-circle me-1"></i>Clear Queue</button>
     <span class="small text-muted ms-auto">${Number((payload.concurrency && payload.concurrency.active_limit) || 1) > 1 ? `Up to ${Number(payload.concurrency.active_limit)} at a time` : "One at a time"}</span>
   </div>`;
 }
@@ -2658,7 +2485,7 @@ async function renderDownloadsPage() {
   try {
     const payload = await api("/admin/downloads");
     content.innerHTML = `
-      <div class="mb-3"><button class="btn btn-outline-secondary" data-ui-click="setHash('#admin/transfers')">Back to Transfers</button></div>
+      <div class="mb-3"><button class="btn btn-outline-secondary" onclick="setHash('#admin/transfers')">Back to Transfers</button></div>
       <div class="card log-card mb-3"><div class="card-body py-3">
         ${renderDownloadsPanel(payload)}
       </div></div>`;
@@ -2754,10 +2581,10 @@ function renderTorrentRowMarkup(row) {
   const etaSeconds = Number(row.eta_seconds);
   const etaText = status === "downloading" ? (Number.isFinite(etaSeconds) && etaSeconds > 0 ? formatDuration(etaSeconds) : "--") : "";
   const actions = [
-    canForceStart ? `<button class="btn btn-sm btn-outline-success" title="Force start" aria-label="Force start" data-ui-click="forceStartTorrent('${id}')"><i class="bi bi-lightning-charge"></i></button>` : "",
-    canCancel ? `<button class="btn btn-sm btn-outline-warning" title="Cancel" aria-label="Cancel" data-ui-click="cancelTorrent('${id}')"><i class="bi bi-x-circle"></i></button>` : "",
-    canMoveFiles ? `<button class="btn btn-sm btn-outline-info" title="Move files" aria-label="Move files" data-ui-click="openMoveFilesModal('${id}')"><i class="bi bi-folder-symlink"></i></button>` : "",
-    `<button class="btn btn-sm btn-outline-danger" title="Delete torrent" aria-label="Delete torrent" data-ui-click="deleteTorrent('${id}')"><i class="bi bi-trash"></i></button>`,
+    canForceStart ? `<button class="btn btn-sm btn-outline-success" title="Force start" aria-label="Force start" onclick="forceStartTorrent('${id}')"><i class="bi bi-lightning-charge"></i></button>` : "",
+    canCancel ? `<button class="btn btn-sm btn-outline-warning" title="Cancel" aria-label="Cancel" onclick="cancelTorrent('${id}')"><i class="bi bi-x-circle"></i></button>` : "",
+    canMoveFiles ? `<button class="btn btn-sm btn-outline-info" title="Move files" aria-label="Move files" onclick="openMoveFilesModal('${id}')"><i class="bi bi-folder-symlink"></i></button>` : "",
+    `<button class="btn btn-sm btn-outline-danger" title="Delete torrent" aria-label="Delete torrent" onclick="deleteTorrent('${id}')"><i class="bi bi-trash"></i></button>`,
   ].filter(Boolean).join(" ");
   return `<tr>
     <td class="download-file" title="${escapeHtml(row.torrent_file || "")}">${escapeHtml(row.name || "")}</td>
@@ -2807,8 +2634,6 @@ function renderTorrentAlerts(payload) {
   const aria2 = payload.aria2 || {};
   const dir = (payload.settings || {}).directory || "";
   const downloadDir = payload.effective_download_directory || dir;
-  const vpnWarning = payload.vpn_required && payload.privacy_blocked
-    ? '<div class="alert alert-warning py-2 mb-3"><i class="bi bi-shield-lock me-1"></i><strong>Torrents are privacy-paused.</strong> Connect the managed VPN before downloading or seeding. aria2c remains stopped until <code>tun0</code> is available.</div>' : "";
   const daemonError = aria2.installed && !aria2.running && aria2.daemon_error
     ? `<div class="alert alert-danger py-2 mb-3">aria2c problem: ${escapeHtml(aria2.daemon_error)}</div>` : "";
   const dirWarning = payload.directory_exists === false
@@ -2817,7 +2642,7 @@ function renderTorrentAlerts(payload) {
   // watch folder -- otherwise the one above already covers it.
   const downloadDirWarning = payload.download_directory_exists === false && downloadDir !== dir
     ? `<div class="alert alert-warning py-2 mb-3">The download location <code>${escapeHtml(downloadDir)}</code> does not exist yet. Save the settings to create it.</div>` : "";
-  return `${vpnWarning}${daemonError}${dirWarning}${downloadDirWarning}`;
+  return `${daemonError}${dirWarning}${downloadDirWarning}`;
 }
 
 function renderTorrentSummaryCards(counts) {
@@ -2837,9 +2662,9 @@ function renderTorrentSummaryCards(counts) {
 function renderTorrentQueueActions(payload) {
   const paused = Boolean(payload.paused);
   const toggleBtn = paused
-    ? `<button class="btn btn-sm btn-outline-success" title="Resume downloads" aria-label="Resume downloads" data-ui-click="resumeTorrentDownloads()"><i class="bi bi-play-fill me-1"></i>Resume Downloads</button>`
-    : `<button class="btn btn-sm btn-outline-secondary" title="Pause downloads" aria-label="Pause downloads" data-ui-click="pauseTorrentDownloads()"><i class="bi bi-pause-fill me-1"></i>Pause Downloads</button>`;
-  const clearBtn = `<button class="btn btn-sm btn-outline-danger" title="Clear torrents" aria-label="Clear torrents" data-ui-click="openTorrentClearModal()"><i class="bi bi-trash3 me-1"></i>Clear</button>`;
+    ? `<button class="btn btn-sm btn-outline-success" title="Resume downloads" aria-label="Resume downloads" onclick="resumeTorrentDownloads()"><i class="bi bi-play-fill me-1"></i>Resume Downloads</button>`
+    : `<button class="btn btn-sm btn-outline-secondary" title="Pause downloads" aria-label="Pause downloads" onclick="pauseTorrentDownloads()"><i class="bi bi-pause-fill me-1"></i>Pause Downloads</button>`;
+  const clearBtn = `<button class="btn btn-sm btn-outline-danger" title="Clear torrents" aria-label="Clear torrents" onclick="openTorrentClearModal()"><i class="bi bi-trash3 me-1"></i>Clear</button>`;
   return `${toggleBtn}${clearBtn}`;
 }
 
@@ -2850,7 +2675,7 @@ function renderTorrentsLive(payload) {
       <div id="torrentsDaemonNote">${renderTorrentDaemonNote(payload)}</div>
       <div class="d-flex flex-wrap align-items-center gap-2">
         <div id="torrentsQueueActions" class="d-flex flex-wrap align-items-center gap-2">${renderTorrentQueueActions(payload)}</div>
-        <button class="btn btn-sm btn-outline-primary" title="Refresh torrents" aria-label="Refresh torrents" data-ui-click="refreshTorrentsLive()"><i class="bi bi-arrow-repeat"></i></button>
+        <button class="btn btn-sm btn-outline-primary" title="Refresh torrents" aria-label="Refresh torrents" onclick="refreshTorrentsLive()"><i class="bi bi-arrow-repeat"></i></button>
       </div>
     </div>
     <div id="torrentsAlerts">${renderTorrentAlerts(payload)}</div>
@@ -2901,7 +2726,7 @@ async function renderTorrentsPage() {
           <h6 class="mb-1"><i class="bi bi-exclamation-triangle text-warning me-2"></i>aria2c is not installed</h6>
           <div class="small text-muted">Torrents are queued but cannot download until aria2c is installed -- a ~6 MB static binary stored inside the Drone app folder.</div>
         </div>
-        <button class="btn btn-primary" id="installAria2Btn" data-ui-click="installAria2()"><i class="bi bi-download me-1"></i>Download aria2c</button>
+        <button class="btn btn-primary" id="installAria2Btn" onclick="installAria2()"><i class="bi bi-download me-1"></i>Download aria2c</button>
       </div>
     </div></div>`;
   content.innerHTML = `
@@ -2909,7 +2734,7 @@ async function renderTorrentsPage() {
     <div class="card mb-3">
       <div class="card-header d-flex justify-content-between align-items-center gap-2">
         <span><i class="bi bi-gear me-2"></i>Torrent Settings</span>
-        <button class="btn btn-sm btn-outline-primary" data-ui-click="openTorrentUploadPicker()"><i class="bi bi-upload me-1"></i>Upload Torrents</button>
+        <button class="btn btn-sm btn-outline-primary" onclick="openTorrentUploadPicker()"><i class="bi bi-upload me-1"></i>Upload Torrents</button>
       </div>
       <div class="card-body">
         <div class="row g-2 mb-2">
@@ -2917,7 +2742,7 @@ async function renderTorrentsPage() {
             <label class="form-label mb-1" for="torrentDir">Torrent folder</label>
             <div class="input-group input-group-sm">
               <input class="form-control" type="text" id="torrentDir" value="${escapeHtml(settings.directory || "")}">
-              <button class="btn btn-outline-secondary" type="button" data-ui-click="openTorrentDirBrowser('torrentDir', 'Choose torrent folder')"><i class="bi bi-folder2-open me-1"></i>Browse</button>
+              <button class="btn btn-outline-secondary" type="button" onclick="openTorrentDirBrowser('torrentDir', 'Choose torrent folder')"><i class="bi bi-folder2-open me-1"></i>Browse</button>
             </div>
             <div class="form-text">Dropped .torrent files here start automatically; changing this later won't move torrents already in progress.</div>
           </div>
@@ -2925,7 +2750,7 @@ async function renderTorrentsPage() {
             <label class="form-label mb-1" for="torrentDownloadDir">Download location</label>
             <div class="input-group input-group-sm">
               <input class="form-control" type="text" id="torrentDownloadDir" placeholder="${escapeHtml(payload.effective_download_directory || settings.directory || "")}" value="${escapeHtml(settings.download_directory || "")}">
-              <button class="btn btn-outline-secondary" type="button" data-ui-click="openTorrentDirBrowser('torrentDownloadDir', 'Choose download location')"><i class="bi bi-folder2-open me-1"></i>Browse</button>
+              <button class="btn btn-outline-secondary" type="button" onclick="openTorrentDirBrowser('torrentDownloadDir', 'Choose download location')"><i class="bi bi-folder2-open me-1"></i>Browse</button>
             </div>
             <div class="form-text">Where downloads land (can differ from the torrent folder above, e.g. an external drive) -- leave blank to match it; applies until a torrent starts, not to ones already in progress.</div>
           </div>
@@ -2933,7 +2758,7 @@ async function renderTorrentsPage() {
         <div class="row g-2 mb-2">
           <div class="col-6 col-sm-4 col-xl-2">
             <label class="form-label mb-1" for="torrentSeedTime" title="Minutes to keep seeding after a download completes. 0 = stop immediately.">Seed time (min)</label>
-            <input class="form-control form-control-sm" type="number" id="torrentSeedTime" min="0" step="1" value="${escapeHtml(String(settings.seed_time ?? 0))}">
+            <input class="form-control form-control-sm" type="number" id="torrentSeedTime" min="0" step="1" value="${escapeHtml(String(settings.seed_time ?? 60))}">
           </div>
           <div class="col-6 col-sm-4 col-xl-2">
             <label class="form-label mb-1" for="torrentSeedRatio" title="Stop seeding at this upload/download ratio. 0 = no limit.">Seed ratio</label>
@@ -2955,7 +2780,7 @@ async function renderTorrentsPage() {
           </div>
         </div>
         <div class="small text-muted mb-2">Seed and allocation settings apply to torrents added after saving.</div>
-        <button class="btn btn-primary btn-sm" id="torrentSettingsSaveBtn" data-ui-click="saveTorrentSettings()"><i class="bi bi-save me-1"></i>Save</button>
+        <button class="btn btn-primary btn-sm" id="torrentSettingsSaveBtn" onclick="saveTorrentSettings()"><i class="bi bi-save me-1"></i>Save</button>
       </div>
     </div>
     <div class="card log-card"><div class="card-body">
@@ -3126,7 +2951,7 @@ function openTorrentClearModal() {
         </div>
         <div class="modal-footer">
           <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
-          <button type="button" class="btn btn-danger" id="torrentClearConfirmBtn" data-ui-click="confirmTorrentClear()"><i class="bi bi-trash3 me-1"></i>Clear</button>
+          <button type="button" class="btn btn-danger" id="torrentClearConfirmBtn" onclick="confirmTorrentClear()"><i class="bi bi-trash3 me-1"></i>Clear</button>
         </div>
       </div>
     </div>`;
@@ -3193,7 +3018,7 @@ function renderMoveFilesLocationChips(recent) {
     }
   });
   if (!chips.length) return "";
-  return chips.map((chip) => `<button type="button" class="btn btn-sm btn-outline-secondary" data-ui-click="setMoveFilesDestination('${escapeHtml(chip.path)}')"><i class="bi ${chip.recent ? "bi-clock-history" : "bi-star"} me-1"></i>${escapeHtml(chip.path)}</button>`).join(" ");
+  return chips.map((chip) => `<button type="button" class="btn btn-sm btn-outline-secondary" onclick="setMoveFilesDestination('${escapeHtml(chip.path)}')"><i class="bi ${chip.recent ? "bi-clock-history" : "bi-star"} me-1"></i>${escapeHtml(chip.path)}</button>`).join(" ");
 }
 
 function setMoveFilesDestination(path) {
@@ -3299,7 +3124,7 @@ async function openMoveFilesModal(torrentId) {
           <label class="form-label mb-1" for="moveFilesDestination">Move to</label>
           <div class="input-group input-group-sm mb-2">
             <input class="form-control" type="text" id="moveFilesDestination" placeholder="/userdata/roms">
-            <button class="btn btn-outline-secondary" type="button" data-ui-click="openTorrentDirBrowser('moveFilesDestination', 'Choose destination')"><i class="bi bi-folder2-open me-1"></i>Browse</button>
+            <button class="btn btn-outline-secondary" type="button" onclick="openTorrentDirBrowser('moveFilesDestination', 'Choose destination')"><i class="bi bi-folder2-open me-1"></i>Browse</button>
           </div>
           <div id="moveFilesSuggestions" class="d-flex flex-wrap gap-2 mb-3">${renderMoveFilesLocationChips((torrentsLastPayload || {}).recent_move_locations)}</div>
           <div class="form-check">
@@ -3309,7 +3134,7 @@ async function openMoveFilesModal(torrentId) {
         </div>
         <div class="modal-footer">
           <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
-          <button type="button" class="btn btn-primary" id="moveFilesConfirmBtn" data-ui-click="confirmMoveFiles('${escapeHtml(torrentId)}')"><i class="bi bi-arrow-right-circle me-1"></i>Move</button>
+          <button type="button" class="btn btn-primary" id="moveFilesConfirmBtn" onclick="confirmMoveFiles('${escapeHtml(torrentId)}')"><i class="bi bi-arrow-right-circle me-1"></i>Move</button>
         </div>
       </div>
     </div>`;
@@ -3419,7 +3244,7 @@ function openTorrentDirBrowser(targetInputId = "torrentDir", title = "Choose tor
           <div class="text-truncate flex-grow-1">
             <h5 class="modal-title mb-0"><i class="bi bi-folder2-open me-2"></i>${escapeHtml(title)}</h5>
             <div class="d-flex align-items-center gap-1 mt-1">
-              <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-1" id="torrentDirUpBtn" title="Go up one level" disabled data-ui-click="goUpTorrentDirLevel()"><i class="bi bi-arrow-90deg-up"></i></button>
+              <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-1" id="torrentDirUpBtn" title="Go up one level" disabled onclick="goUpTorrentDirLevel()"><i class="bi bi-arrow-90deg-up"></i></button>
               <div class="small text-muted text-truncate" id="torrentDirBrowserPath">No folder selected</div>
             </div>
           </div>
@@ -3428,7 +3253,7 @@ function openTorrentDirBrowser(targetInputId = "torrentDir", title = "Choose tor
         <div class="modal-body p-2"><ul class="dir-tree" id="torrentDirBrowserTree"><li class="text-center py-3"><span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span></li></ul></div>
         <div class="modal-footer">
           <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
-          <button type="button" class="btn btn-primary" id="torrentDirChooseBtn" data-ui-click="chooseTorrentDir()" disabled>Use this folder</button>
+          <button type="button" class="btn btn-primary" id="torrentDirChooseBtn" onclick="chooseTorrentDir()" disabled>Use this folder</button>
         </div>
       </div>
     </div>`;
@@ -3757,10 +3582,10 @@ function renderVpnActions(payload) {
   const canConnect = (status === "disconnected" || status === "error") && !(payload.validation_errors || []).length;
   const canDisconnect = status === "connecting" || status === "connected";
   return `<div class="d-flex flex-wrap gap-2 mb-3">
-    <button class="btn btn-success" type="button" id="vpnConnectBtn" ${canConnect ? "" : "disabled"} data-ui-click="connectVpn()"><i class="bi bi-play-fill me-1"></i>Connect</button>
-    <button class="btn btn-outline-danger" type="button" id="vpnDisconnectBtn" ${canDisconnect ? "" : "disabled"} data-ui-click="disconnectVpn()"><i class="bi bi-stop-fill me-1"></i>Disconnect</button>
-    <button class="btn btn-outline-primary" type="button" data-ui-click="verifyVpnPublicIp()"><i class="bi bi-globe me-1"></i>Verify Public IP</button>
-    <button class="btn btn-outline-secondary" type="button" data-ui-click="refreshVpnLive()"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
+    <button class="btn btn-success" type="button" id="vpnConnectBtn" ${canConnect ? "" : "disabled"} onclick="connectVpn()"><i class="bi bi-play-fill me-1"></i>Connect</button>
+    <button class="btn btn-outline-danger" type="button" id="vpnDisconnectBtn" ${canDisconnect ? "" : "disabled"} onclick="disconnectVpn()"><i class="bi bi-stop-fill me-1"></i>Disconnect</button>
+    <button class="btn btn-outline-primary" type="button" onclick="verifyVpnPublicIp()"><i class="bi bi-globe me-1"></i>Verify Public IP</button>
+    <button class="btn btn-outline-secondary" type="button" onclick="refreshVpnLive()"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
     <a class="btn btn-outline-secondary ${payload.log_available ? "" : "disabled"}" href="${API_BASE}/admin/vpn/log/download" target="_blank" rel="noopener noreferrer"><i class="bi bi-download me-1"></i>Download Log</a>
   </div>`;
 }
@@ -3790,18 +3615,6 @@ function renderVpnSelfHealNote(payload) {
   return `<div class="small text-muted mb-3"><i class="bi bi-arrow-repeat me-1"></i>Auto-reconnected ${when} after: ${reason}.${recentNote}</div>`;
 }
 
-function renderVpnDnsNotice(payload) {
-  if (payload.dns_protected) {
-    const servers = (payload.dns_servers || []).map(escapeHtml).join(", ") || "provider DNS";
-    return `<div class="alert alert-success py-2 mb-3"><i class="bi bi-shield-check me-1"></i><strong>DNS protected:</strong> resolver traffic is restricted to ${servers} through the VPN.</div>`;
-  }
-  if (payload.privacy_expected) {
-    const detail = payload.dns_error ? ` ${escapeHtml(payload.dns_error)}` : "";
-    return `<div class="alert alert-warning py-2 mb-3"><i class="bi bi-shield-lock me-1"></i><strong>DNS is fail-closed.</strong> Name resolution stays blocked until the VPN is protected.${detail}</div>`;
-  }
-  return "";
-}
-
 // First mount only: builds the stable skeleton. Later updates go through
 // patchVpnLive, which never recreates these container nodes -- the same
 // flash-free pattern as the Torrents grid's 3s auto-refresh.
@@ -3809,7 +3622,6 @@ function renderVpnLive(payload) {
   return `
     <div id="vpnRevokedNotice">${renderVpnRevokedNotice(payload)}</div>
     <div id="vpnSelfHealNote">${renderVpnSelfHealNote(payload)}</div>
-    <div id="vpnDnsNotice">${renderVpnDnsNotice(payload)}</div>
     <div id="vpnValidationErrors">${renderVpnValidationErrors(payload)}</div>
     <div id="vpnActions">${renderVpnActions(payload)}</div>
     <div id="vpnStatusCards" class="row g-3 mb-3">${renderVpnStatusCards(payload)}</div>
@@ -3824,8 +3636,6 @@ function patchVpnLive(payload) {
   if (revokedNode) revokedNode.innerHTML = renderVpnRevokedNotice(payload);
   const selfHealNode = document.getElementById("vpnSelfHealNote");
   if (selfHealNode) selfHealNode.innerHTML = renderVpnSelfHealNote(payload);
-  const dnsNode = document.getElementById("vpnDnsNotice");
-  if (dnsNode) dnsNode.innerHTML = renderVpnDnsNotice(payload);
   const errorsNode = document.getElementById("vpnValidationErrors");
   if (errorsNode) errorsNode.innerHTML = renderVpnValidationErrors(payload);
   const actionsNode = document.getElementById("vpnActions");
@@ -3866,7 +3676,7 @@ async function renderVpnPage() {
       <div class="card-body">
         <p class="text-muted small">Upload the .ovpn file from your VPN provider (Proton VPN, NordVPN, Private Internet Access, or any other OpenVPN provider). It is automatically adjusted to use the credentials saved below.</p>
         <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
-          <button class="btn btn-outline-primary" type="button" data-ui-click="openVpnConfigPicker()"><i class="bi bi-upload me-1"></i>Upload .ovpn File</button>
+          <button class="btn btn-outline-primary" type="button" onclick="openVpnConfigPicker()"><i class="bi bi-upload me-1"></i>Upload .ovpn File</button>
           <span class="small ${payload.has_config ? "text-success" : "text-muted"}">${payload.has_config ? `<i class="bi bi-check-circle me-1"></i>${escapeHtml(payload.config_filename)}` : "No configuration uploaded yet."}</span>
         </div>
       </div>
@@ -3885,13 +3695,13 @@ async function renderVpnPage() {
             <input class="form-control form-control-sm" type="password" id="vpnPassword" autocomplete="off" placeholder="${payload.has_credentials ? "Saved (leave blank to keep)" : ""}">
           </div>
         </div>
-        <button class="btn btn-primary btn-sm" type="button" id="vpnCredentialsSaveBtn" data-ui-click="saveVpnCredentials()"><i class="bi bi-save me-1"></i>Save</button>
+        <button class="btn btn-primary btn-sm" type="button" id="vpnCredentialsSaveBtn" onclick="saveVpnCredentials()"><i class="bi bi-save me-1"></i>Save</button>
       </div>
     </div>
     <div class="card mb-3">
       <div class="card-body">
         <div class="form-check form-switch">
-          <input class="form-check-input" type="checkbox" role="switch" id="vpnSelfHeal" ${payload.self_heal_enabled ? "checked" : ""} data-ui-change="setVpnSelfHeal(this.checked)">
+          <input class="form-check-input" type="checkbox" role="switch" id="vpnSelfHeal" ${payload.self_heal_enabled ? "checked" : ""} onchange="setVpnSelfHeal(this.checked)">
           <label class="form-check-label" for="vpnSelfHeal">Automatically reconnect if the VPN connection fails</label>
         </div>
         <p class="text-muted small mb-0 mt-1">Watches for connection errors and decrypt/replay-error floods and reconnects on its own, rate-limited so a persistent problem can't loop forever. On by default.</p>
@@ -3905,7 +3715,7 @@ async function renderVpnPage() {
         ` : `
         <p class="text-muted small">Share this configuration and credentials with drones paired to this one, over the same cert-pinned peer link used for ROM/BIOS transfers -- never through the browser. Only paired drones can pull it, and only while this is turned on.</p>
         <div class="form-check form-switch mb-3">
-          <input class="form-check-input" type="checkbox" role="switch" id="vpnSharingEnabled" ${payload.sharing_enabled ? "checked" : ""} data-ui-change="setVpnSharing(this.checked)">
+          <input class="form-check-input" type="checkbox" role="switch" id="vpnSharingEnabled" ${payload.sharing_enabled ? "checked" : ""} onchange="setVpnSharing(this.checked)">
           <label class="form-check-label" for="vpnSharingEnabled">Allow paired drones to pull this VPN configuration</label>
         </div>
         `}
@@ -3916,7 +3726,7 @@ async function renderVpnPage() {
             <label class="form-label mb-1" for="vpnPullPeer">Paired Drone</label>
             <select id="vpnPullPeer" class="form-select form-select-sm" style="min-width:220px"><option value="">Loading...</option></select>
           </div>
-          <button class="btn btn-outline-primary btn-sm" type="button" id="vpnPullBtn" disabled data-ui-click="pullVpnConfigFromPeer()"><i class="bi bi-cloud-arrow-down me-1"></i>Pull Configuration</button>
+          <button class="btn btn-outline-primary btn-sm" type="button" id="vpnPullBtn" disabled onclick="pullVpnConfigFromPeer()"><i class="bi bi-cloud-arrow-down me-1"></i>Pull Configuration</button>
         </div>
       </div>
     </div>
@@ -4163,9 +3973,9 @@ function renderAssetCachePanel(payload, includeActions = true) {
         <span class="small text-muted">${pendingTotal.toLocaleString()} pending change${pendingTotal === 1 ? "" : "s"} waiting to be cached</span>
       </div>
       ${includeActions ? `<div class="d-flex flex-wrap gap-2">
-        <button class="btn btn-sm btn-outline-primary" data-ui-click="renderAssetCachePage()"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
-        <button class="btn btn-sm btn-outline-warning" data-ui-click="clearPendingAssetChanges()" ${pendingTotal ? "" : "disabled"}><i class="bi bi-x-circle me-1"></i>Clear Pending</button>
-        <button class="btn btn-sm btn-outline-danger" data-ui-click="purgeAssetCache()">Purge Cache &amp; Resync</button>
+        <button class="btn btn-sm btn-outline-primary" onclick="renderAssetCachePage()"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
+        <button class="btn btn-sm btn-outline-warning" onclick="clearPendingAssetChanges()" ${pendingTotal ? "" : "disabled"}><i class="bi bi-x-circle me-1"></i>Clear Pending</button>
+        <button class="btn btn-sm btn-outline-danger" onclick="purgeAssetCache()">Purge Cache &amp; Resync</button>
       </div>` : ""}
     </div>
     ${pendingTotal ? `<div class="asset-cache-help mb-3"><strong>What this means:</strong> Drone has local asset changes queued for the next cache pass. Refresh after the next scan completes. If these are stale or duplicated queue entries, use <strong>Clear Pending</strong> to discard the unsent queue without deleting local cache data.</div>` : ""}
@@ -4265,7 +4075,7 @@ function selectedArtworkCheckboxValues(selector) {
 }
 function artworkMissingRowsHtml(roms) {
   return (roms || []).map((rom, idx) => `
-    <tr id="artwork-row-${idx}" data-filter="${escapeHtml(`${rom.system} ${rom.name} ${(rom.missing || []).join(" ")}`.toLowerCase())}" data-ui-click="selectArtworkRom(${idx})" style="cursor: pointer;">
+    <tr id="artwork-row-${idx}" data-filter="${escapeHtml(`${rom.system} ${rom.name} ${(rom.missing || []).join(" ")}`.toLowerCase())}" onclick="selectArtworkRom(${idx})" style="cursor: pointer;">
       <td class="mono small">${escapeHtml(rom.system || "")}</td>
       <td>
         <div class="fw-semibold">${escapeHtml(rom.title || rom.name || "")}</div>
@@ -4365,7 +4175,7 @@ function artworkGamelistEditFormHtml(rom) {
           ${artworkGamelistFieldControl("desc", "")}
         </div>
         <div class="d-flex gap-2 mt-2">
-          <button class="btn btn-sm btn-primary" type="button" data-ui-click="saveSelectedArtworkGamelist()">Save Gamelist Data</button>
+          <button class="btn btn-sm btn-primary" type="button" onclick="saveSelectedArtworkGamelist()">Save Gamelist Data</button>
         </div>
       </form>
     `;
@@ -4376,7 +4186,7 @@ function artworkGamelistEditFormHtml(rom) {
         ${editableFields.map((field) => artworkGamelistFieldControl(field, details[field])).join("")}
       </div>
       <div class="d-flex gap-2 mt-2">
-        <button class="btn btn-sm btn-primary" type="button" data-ui-click="saveSelectedArtworkGamelist()">Save Metadata</button>
+        <button class="btn btn-sm btn-primary" type="button" onclick="saveSelectedArtworkGamelist()">Save Metadata</button>
       </div>
     </form>
   `;
@@ -4391,7 +4201,7 @@ function romMetadataEditFormHtml(rom) {
     knownMetadataFields.concat(Object.keys(details).filter((key) => key !== "path" && !ROM_MEDIA_ARTWORK_FIELDS.has(key)))
   ));
   const removeBtn = rom.has_gamelist_entry
-    ? `<button class="btn btn-sm btn-outline-danger" type="button" data-ui-click="removeRomMediaGamelistEntry()"><i class="bi bi-trash me-1"></i>Remove gamelist entry</button>`
+    ? `<button class="btn btn-sm btn-outline-danger" type="button" onclick="removeRomMediaGamelistEntry()"><i class="bi bi-trash me-1"></i>Remove gamelist entry</button>`
     : "";
   return `
     <form id="romMediaGamelistForm" class="compact-edit">
@@ -4399,7 +4209,7 @@ function romMetadataEditFormHtml(rom) {
         ${editableFields.map((field) => artworkGamelistFieldControl(field, details[field])).join("")}
       </div>
       <div class="d-flex gap-2 mt-2">
-        <button class="btn btn-sm btn-primary" type="button" data-ui-click="saveRomMediaMetadata()">Save Metadata</button>
+        <button class="btn btn-sm btn-primary" type="button" onclick="saveRomMediaMetadata()">Save Metadata</button>
         ${removeBtn}
       </div>
     </form>
@@ -4555,7 +4365,7 @@ async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh 
     content.innerHTML = `
       ${renderArtworkTabBar("metadata")}
       <div class="mb-3 d-flex flex-wrap gap-2">
-        <button class="btn btn-outline-primary" data-ui-click="renderMissingArtworkPage(false, true, 0, artworkSelectedFields, artworkSelectedSystems, artworkFilterQuery, artworkRomStatus)">Refresh</button>
+        <button class="btn btn-outline-primary" onclick="renderMissingArtworkPage(false, true, 0, artworkSelectedFields, artworkSelectedSystems, artworkFilterQuery, artworkRomStatus)">Refresh</button>
         <button id="removeMissingGamelistBtn" class="btn btn-outline-danger" type="button">Remove Missing ROM Entries</button>
       </div>
       <div id="artworkSummary" class="mb-3 d-flex flex-wrap gap-2">
@@ -5161,7 +4971,7 @@ async function selectArtworkRom(index, activeTab = "matches") {
       <div class="tab-pane fade compact-edit" id="edit-panel" role="tabpanel" aria-labelledby="edit-tab">
         <div class="mb-2">
           <div><span class="fw-semibold">${escapeHtml(rom.title || rom.name || "")}</span> <span class="text-muted small">${escapeHtml(rom.system || "")}</span></div>
-          ${rom.has_gamelist_entry ? `<button class="btn btn-sm btn-outline-danger mt-2" type="button" data-ui-click="removeArtworkGamelistEntry(${index})"><i class="bi bi-trash me-1"></i>Remove from gamelist</button>` : ""}
+          ${rom.has_gamelist_entry ? `<button class="btn btn-sm btn-outline-danger mt-2" type="button" onclick="removeArtworkGamelistEntry(${index})"><i class="bi bi-trash me-1"></i>Remove from gamelist</button>` : ""}
         </div>
         <div class="mb-2">
           <div class="compact-edit-section-title">Metadata</div>
@@ -5583,15 +5393,15 @@ function renderLocalPeerRows(peers) {
       if (peer.identity_conflict) {
         actionCell = `<button class="btn btn-sm btn-outline-secondary" disabled title="This Drone advertises the same machine id as this device. Reset the Drone id on one machine before pairing.">Resolve ID</button>`;
       } else if (peer.paired) {
-        actionCell = `<div class="d-flex gap-2 justify-content-end"><button class="btn btn-sm btn-outline-primary" data-ui-click="swarmBrowsePeerAssets(decodeURIComponent('${peerToken}'))">Browse</button><button class="btn btn-sm btn-outline-danger" data-ui-click="forgetLocalPeer(decodeURIComponent('${peerToken}'))">Forget</button></div>`;
+        actionCell = `<div class="d-flex gap-2 justify-content-end"><button class="btn btn-sm btn-outline-primary" onclick="swarmBrowsePeerAssets(decodeURIComponent('${peerToken}'))">Browse</button><button class="btn btn-sm btn-outline-danger" onclick="forgetLocalPeer(decodeURIComponent('${peerToken}'))">Forget</button></div>`;
       } else if (peer.tailnet_forgotten || peer.tailnet_pair_error) {
-        actionCell = `<button class="btn btn-sm btn-outline-primary" data-ui-click="restoreTailnetPeer(decodeURIComponent('${peerToken}'))">${peer.tailnet_forgotten ? "Restore" : "Retry"}</button>`;
+        actionCell = `<button class="btn btn-sm btn-outline-primary" onclick="restoreTailnetPeer(decodeURIComponent('${peerToken}'))">${peer.tailnet_forgotten ? "Restore" : "Retry"}</button>`;
       } else if (peer.tailnet_device) {
         actionCell = '<span class="small text-muted">Not a Drone</span>';
       } else if (insecure) {
         actionCell = `<button class="btn btn-sm btn-outline-secondary" disabled title="This Drone is advertising ${escapeHtml(url)} (not HTTPS), so it can't be paired for secure transfers. Update/repair the Drone on that machine.">Not secure</button>`;
       } else {
-        actionCell = `<button class="btn btn-sm btn-outline-primary" data-ui-click="pairLocalPeer(decodeURIComponent('${peerToken}'))">Pair</button>`;
+        actionCell = `<button class="btn btn-sm btn-outline-primary" onclick="pairLocalPeer(decodeURIComponent('${peerToken}'))">Pair</button>`;
       }
       return `<tr>
         <td><strong>${escapeHtml(peer.name || peer.hostname || peerId)}</strong>${insecure ? '<span class="badge text-bg-danger ms-2" title="Not running HTTPS — cannot pair">Not secure</span>' : ""}${peer.identity_conflict ? '<span class="badge text-bg-danger ms-2" title="This peer is advertising the same Drone id as this machine">Same ID</span>' : ""}</td>
@@ -5713,7 +5523,7 @@ function renderLocalAssetRows(payload) {
     if (systems.length) {
       systemBar = `<div class="d-flex flex-wrap align-items-center gap-2 mb-2">
         <span class="small text-muted">Download all ROMs for a system:</span>
-        ${systems.map(system => `<button class="btn btn-sm btn-outline-success" type="button" data-ui-click="copyAllRomsForSystem('${encodeURIComponent(system).replace(/'/g, "%27")}')"><i class="bi bi-cloud-arrow-down me-1"></i>${escapeHtml(system)}</button>`).join("")}
+        ${systems.map(system => `<button class="btn btn-sm btn-outline-success" type="button" onclick="copyAllRomsForSystem('${encodeURIComponent(system).replace(/'/g, "%27")}')"><i class="bi bi-cloud-arrow-down me-1"></i>${escapeHtml(system)}</button>`).join("")}
       </div>`;
     }
   }
@@ -5728,9 +5538,9 @@ function renderLocalAssetRows(payload) {
         : "";
       // ROM rows use a compact icon-only button to keep the table tight; an
       // existing ROM is not re-downloaded but the button still copies its artwork.
-      const romBtn = `<button class="btn btn-sm ${exists ? "btn-outline-primary" : "btn-primary"}" title="${exists ? "On this machine — copy its artwork" : "Download"}" aria-label="${exists ? "Copy artwork" : "Download"}" data-ui-click="copyLocalPeerAsset(${index})"><i class="bi ${exists ? "bi-images" : "bi-cloud-arrow-down"}"></i></button>`;
-      const otherBtn = `<button class="btn btn-sm btn-primary" title="Copy here" aria-label="Copy here" data-ui-click="copyLocalPeerAsset(${index})"><i class="bi bi-cloud-arrow-down"></i></button>`;
-      const detailsBtn = `<button class="btn btn-sm btn-outline-primary" title="View details" aria-label="View details" data-ui-click="showLocalAssetDetails(${index})"><i class="bi bi-eye"></i></button>`;
+      const romBtn = `<button class="btn btn-sm ${exists ? "btn-outline-primary" : "btn-primary"}" title="${exists ? "On this machine — copy its artwork" : "Download"}" aria-label="${exists ? "Copy artwork" : "Download"}" onclick="copyLocalPeerAsset(${index})"><i class="bi ${exists ? "bi-images" : "bi-cloud-arrow-down"}"></i></button>`;
+      const otherBtn = `<button class="btn btn-sm btn-primary" title="Copy here" aria-label="Copy here" onclick="copyLocalPeerAsset(${index})"><i class="bi bi-cloud-arrow-down"></i></button>`;
+      const detailsBtn = `<button class="btn btn-sm btn-outline-primary" title="View details" aria-label="View details" onclick="showLocalAssetDetails(${index})"><i class="bi bi-eye"></i></button>`;
       return `<tr>
       <td><strong>${escapeHtml(localAssetDisplayName(item))}</strong>${statusBadge}</td>
       <td class="small mono">${escapeHtml(localAssetPath(item))}</td>
@@ -5762,11 +5572,11 @@ function renderLocalAssetsPagination() {
   node.innerHTML = `<div class="d-flex flex-wrap justify-content-between align-items-center gap-2">
       <div class="text-muted small">Showing ${showingFrom}-${showingTo} of ${total}</div>
       <div class="btn-group flex-wrap" role="group" aria-label="Asset pages">
-        <button class="btn btn-sm btn-outline-primary" type="button" ${page <= 1 ? "disabled" : ""} data-ui-click="setLocalAssetPage(${page - 1})">Previous</button>
-        ${start > 1 ? `<button class="btn btn-sm btn-outline-primary" type="button" data-ui-click="setLocalAssetPage(1)">1</button>` : ""}
-        ${pages.map(item => `<button class="btn btn-sm ${item === page ? "btn-primary" : "btn-outline-primary"}" type="button" data-ui-click="setLocalAssetPage(${item})">${item}</button>`).join("")}
-        ${end < totalPages ? `<button class="btn btn-sm btn-outline-primary" type="button" data-ui-click="setLocalAssetPage(${totalPages})">${totalPages}</button>` : ""}
-        <button class="btn btn-sm btn-outline-primary" type="button" ${page >= totalPages ? "disabled" : ""} data-ui-click="setLocalAssetPage(${page + 1})">Next</button>
+        <button class="btn btn-sm btn-outline-primary" type="button" ${page <= 1 ? "disabled" : ""} onclick="setLocalAssetPage(${page - 1})">Previous</button>
+        ${start > 1 ? `<button class="btn btn-sm btn-outline-primary" type="button" onclick="setLocalAssetPage(1)">1</button>` : ""}
+        ${pages.map(item => `<button class="btn btn-sm ${item === page ? "btn-primary" : "btn-outline-primary"}" type="button" onclick="setLocalAssetPage(${item})">${item}</button>`).join("")}
+        ${end < totalPages ? `<button class="btn btn-sm btn-outline-primary" type="button" onclick="setLocalAssetPage(${totalPages})">${totalPages}</button>` : ""}
+        <button class="btn btn-sm btn-outline-primary" type="button" ${page >= totalPages ? "disabled" : ""} onclick="setLocalAssetPage(${page + 1})">Next</button>
       </div>
     </div>`;
 }
@@ -5785,7 +5595,7 @@ async function renderTransfersPage() {
     content.innerHTML = `
       ${renderSwarmTabBar("transfers")}
       <div class="mb-3 d-flex flex-wrap justify-content-end gap-2">
-        <button class="btn btn-outline-primary" data-ui-click="setHash('#admin/transfers')"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
+        <button class="btn btn-outline-primary" onclick="setHash('#admin/transfers')"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
       </div>
       <div id="integrationTransfersPanel"></div>`;
     await renderIntegrationTransfersPanel(document.getElementById("integrationTransfersPanel"));
@@ -5832,9 +5642,9 @@ function renderSwarmDroneCard(drone) {
   const actions = drone.is_self
     ? ""
     : `<div class="d-flex flex-wrap gap-2 mt-3">
-        <button class="btn btn-sm btn-outline-warning" data-ui-click="swarmManagePeer(decodeURIComponent('${droneToken}'), ${jsAttr(drone.name || drone.drone_id || "")})" ${drone.online ? "" : "disabled"} title="Open a new tab that administers ${escapeHtml(drone.name || drone.drone_id || "this Drone")} directly, using its own login"><i class="bi bi-broadcast me-1"></i>Manage</button>
-        <button class="btn btn-sm btn-outline-success" data-ui-click="swarmBrowsePeerAssets(decodeURIComponent('${droneToken}'))" ${drone.online ? "" : "disabled"}><i class="bi bi-cloud-arrow-down me-1"></i>Request Assets</button>
-        <button class="btn btn-sm btn-outline-danger" data-ui-click="forgetLocalPeer(decodeURIComponent('${droneToken}'))"><i class="bi bi-x-circle me-1"></i>Forget</button>
+        <button class="btn btn-sm btn-outline-warning" onclick="swarmManagePeer(decodeURIComponent('${droneToken}'), ${jsAttr(drone.name || drone.drone_id || "")})" ${drone.online ? "" : "disabled"} title="Open a new tab that administers ${escapeHtml(drone.name || drone.drone_id || "this Drone")} directly, using its own login"><i class="bi bi-broadcast me-1"></i>Manage</button>
+        <button class="btn btn-sm btn-outline-success" onclick="swarmBrowsePeerAssets(decodeURIComponent('${droneToken}'))" ${drone.online ? "" : "disabled"}><i class="bi bi-cloud-arrow-down me-1"></i>Request Assets</button>
+        <button class="btn btn-sm btn-outline-danger" onclick="forgetLocalPeer(decodeURIComponent('${droneToken}'))"><i class="bi bi-x-circle me-1"></i>Forget</button>
       </div>`;
   return `
     <div class="col"><div class="card log-card h-100">
@@ -5941,8 +5751,8 @@ function renderSwarmTailnetCard(tailnet) {
         <label class="form-label small" for="swarmTailnetRotateKey">Replacement auth key</label>
         <div class="d-flex flex-column flex-sm-row gap-2">
           <input id="swarmTailnetRotateKey" class="form-control" type="password" placeholder="tskey-auth-..." autocomplete="new-password">
-          <button id="swarmTailnetRotateSubmitBtn" class="btn btn-primary text-nowrap" type="button" data-ui-click="swarmRotateTailnetAuthKey()"><i class="bi bi-arrow-repeat me-1"></i>Rotate</button>
-          <button class="btn btn-outline-secondary" type="button" data-ui-click="swarmToggleTailnetAuthRotation(false)">Cancel</button>
+          <button id="swarmTailnetRotateSubmitBtn" class="btn btn-primary text-nowrap" type="button" onclick="swarmRotateTailnetAuthKey()"><i class="bi bi-arrow-repeat me-1"></i>Rotate</button>
+          <button class="btn btn-outline-secondary" type="button" onclick="swarmToggleTailnetAuthRotation(false)">Cancel</button>
         </div>
       </div>`;
   } else if (!state.installed) {
@@ -5966,14 +5776,14 @@ function renderSwarmTailnetCard(tailnet) {
       </ol>
       <div class="row g-2 align-items-end">
         <div class="col-12 col-md-8"><label class="form-label small" for="swarmTailnetKey">Auth key</label><input id="swarmTailnetKey" class="form-control" type="password" placeholder="tskey-auth-..." autocomplete="off"></div>
-        <div class="col-12 col-md-4"><button id="swarmTailnetEnrollBtn" class="btn btn-primary w-100" data-ui-click="swarmEnrollTailnet()"><i class="bi bi-link-45deg me-1"></i>Connect</button></div>
+        <div class="col-12 col-md-4"><button id="swarmTailnetEnrollBtn" class="btn btn-primary w-100" onclick="swarmEnrollTailnet()"><i class="bi bi-link-45deg me-1"></i>Connect</button></div>
       </div>`;
   }
   return `
     <div class="card log-card h-100">
       <div class="card-header d-flex justify-content-between align-items-center gap-2">
         <span><i class="bi bi-globe2 me-2" aria-hidden="true"></i>Tailnet (access from anywhere)</span>
-        ${state.enrolled ? '<button class="btn btn-sm btn-outline-primary text-nowrap" type="button" data-ui-click="swarmToggleTailnetAuthRotation(true)"><i class="bi bi-arrow-repeat me-1"></i>Rotate Auth Token</button>' : ""}
+        ${state.enrolled ? '<button class="btn btn-sm btn-outline-primary text-nowrap" type="button" onclick="swarmToggleTailnetAuthRotation(true)"><i class="bi bi-arrow-repeat me-1"></i>Rotate Auth Token</button>' : ""}
       </div>
       <div class="card-body">${body}</div>
     </div>`;
@@ -6718,7 +6528,7 @@ async function renderLogsPage(selectedSource = null, selectedLines = 200) {
           <div class="card-header">Log Sources</div>
           <div class="list-group list-group-flush log-source-list" id="logSources">
             ${logSources.map(([source, label, icon]) => `
-              <button type="button" class="list-group-item list-group-item-action text-start" data-log-source="${source}" data-ui-click="loadLog('${source}', this)">
+              <button type="button" class="list-group-item list-group-item-action text-start" data-log-source="${source}" onclick="loadLog('${source}', this)">
                 <i class="bi ${icon} me-2"></i>${label}
               </button>
             `).join("")}
@@ -6739,7 +6549,7 @@ async function renderLogsPage(selectedSource = null, selectedLines = 200) {
                 <option value="2000">2000</option>
                 <option value="5000">5000</option>
               </select>
-              <button class="btn btn-sm btn-outline-primary" data-ui-click="refreshCurrentLog()">Refresh</button>
+              <button class="btn btn-sm btn-outline-primary" onclick="refreshCurrentLog()">Refresh</button>
             </div>
           </div>
           <div class="card-body" id="logBody">
@@ -6917,7 +6727,7 @@ async function renderEmulatorsPage() {
               <span class="badge">${emulatorConfigRows.length}</span>
             </div>
             <div class="emulator-config-filter-wrap p-2">
-              <input id="emulatorConfigFilter" class="form-control form-control-sm" type="search" placeholder="Filter configs" autocomplete="off" data-ui-input="filterEmulatorConfigs(this.value)">
+              <input id="emulatorConfigFilter" class="form-control form-control-sm" type="search" placeholder="Filter configs" autocomplete="off" oninput="filterEmulatorConfigs(this.value)">
             </div>
             <div class="emulator-config-source-scroll" id="emulatorConfigSources">
               ${renderEmulatorConfigTree()}
@@ -6933,9 +6743,9 @@ async function renderEmulatorsPage() {
               <div class="d-flex flex-wrap align-items-end gap-2">
                 <div>
                   <label class="form-label small mb-1" for="emulatorConfigVersion">Version</label>
-                  <select id="emulatorConfigVersion" class="form-select form-select-sm" data-ui-change="selectEmulatorConfigVersion(this.value)"></select>
+                  <select id="emulatorConfigVersion" class="form-select form-select-sm" onchange="selectEmulatorConfigVersion(this.value)"></select>
                 </div>
-                <button class="btn btn-sm btn-outline-primary" data-ui-click="renderEmulatorsPage()">Refresh</button>
+                <button class="btn btn-sm btn-outline-primary" onclick="renderEmulatorsPage()">Refresh</button>
               </div>
             </div>
             <div class="card-body">
@@ -7026,7 +6836,7 @@ function renderEmulatorConfigTreeNode(node, depth, query) {
   const files = sortEmulatorConfigTreeEntries(emulatorConfigVisibleFiles(node.files || [], query)).map(file => {
     const row = file.row || {};
     const meta = row.size ? `${Number(row.size).toLocaleString()} bytes` : (row.fingerprint ? String(row.fingerprint).slice(0, 8) : "");
-    return `<button type="button" class="tree-grid-row tree-leaf-row emulator-tree-row text-start" style="--tree-depth:${depth + 1}" data-config-index="${file.index}" data-ui-click="selectEmulatorConfig(${file.index})">
+    return `<button type="button" class="tree-grid-row tree-leaf-row emulator-tree-row text-start" style="--tree-depth:${depth + 1}" data-config-index="${file.index}" onclick="selectEmulatorConfig(${file.index})">
       <span class="tree-grid-main"><i class="bi bi-file-earmark-code tree-grid-icon"></i><span class="tree-grid-label text-truncate" title="${escapeHtml(row.label || file.name)}">${escapeHtml(file.name)}</span></span>
       <span class="tree-grid-meta">${escapeHtml(meta)}</span>
       <span class="tree-grid-action"></span>
@@ -7035,7 +6845,7 @@ function renderEmulatorConfigTreeNode(node, depth, query) {
   const expanded = query || emulatorConfigTreeExpanded.has(node.key);
   const descendantCount = countEmulatorConfigFiles(node);
   return `<div class="emulator-tree-node" data-folder-key="${escapeHtml(node.key)}">
-    <button type="button" class="tree-grid-row tree-category-row emulator-tree-row text-start" style="--tree-depth:${depth}" data-ui-click="toggleEmulatorConfigFolder(this.closest('.emulator-tree-node').dataset.folderKey)">
+    <button type="button" class="tree-grid-row tree-category-row emulator-tree-row text-start" style="--tree-depth:${depth}" onclick="toggleEmulatorConfigFolder(this.closest('.emulator-tree-node').dataset.folderKey)">
       <span class="tree-grid-main"><i class="bi ${expanded ? "bi-chevron-down" : "bi-chevron-right"} tree-grid-caret"></i><i class="bi ${expanded ? "bi-folder2-open" : "bi-folder"} tree-grid-icon"></i><span class="tree-grid-label text-truncate" title="${escapeHtml(node.key)}">${escapeHtml(node.name)}</span></span>
       <span class="tree-grid-meta">${descendantCount} file${descendantCount === 1 ? "" : "s"}</span>
       <span class="tree-grid-action"></span>
@@ -7056,7 +6866,7 @@ function renderEmulatorConfigTree(queryValue = null) {
   const tree = buildEmulatorConfigTree(emulatorConfigRows);
   const roots = sortEmulatorConfigTreeEntries(Array.from(tree.dirs.values())).map(node => renderEmulatorConfigTreeNode(node, 0, query)).join("");
   const rootFiles = sortEmulatorConfigTreeEntries(emulatorConfigVisibleFiles(tree.files, query)).map(file => `
-    <button type="button" class="tree-grid-row tree-leaf-row emulator-tree-row text-start" style="--tree-depth:0" data-config-index="${file.index}" data-ui-click="selectEmulatorConfig(${file.index})">
+    <button type="button" class="tree-grid-row tree-leaf-row emulator-tree-row text-start" style="--tree-depth:0" data-config-index="${file.index}" onclick="selectEmulatorConfig(${file.index})">
       <span class="tree-grid-main"><i class="bi bi-file-earmark-code tree-grid-icon"></i><span class="tree-grid-label text-truncate" title="${escapeHtml(file.row?.label || file.name)}">${escapeHtml(file.name)}</span></span>
       <span class="tree-grid-meta">${file.row?.size ? `${Number(file.row.size).toLocaleString()} bytes` : ""}</span>
       <span class="tree-grid-action"></span>
@@ -7215,7 +7025,7 @@ async function renderConfigsPage(selectedSource = null, selectedMaxBytes = 13107
           <div class="card-header">Emulators</div>
           <div class="list-group list-group-flush" id="configSources">
             ${configSources.map(([source, label, icon]) => `
-              <button type="button" class="list-group-item list-group-item-action text-start" data-config-source="${source}" data-ui-click="loadConfig('${source}', this)">
+              <button type="button" class="list-group-item list-group-item-action text-start" data-config-source="${source}" onclick="loadConfig('${source}', this)">
                 <i class="bi ${icon} me-2"></i>${label}
               </button>
             `).join("")}
@@ -7236,7 +7046,7 @@ async function renderConfigsPage(selectedSource = null, selectedMaxBytes = 13107
                 <option value="524288">512 KB</option>
                 <option value="1048576">1 MB</option>
               </select>
-              <button class="btn btn-sm btn-outline-primary ms-2" data-ui-click="refreshCurrentConfig()">Refresh</button>
+              <button class="btn btn-sm btn-outline-primary ms-2" onclick="refreshCurrentConfig()">Refresh</button>
             </div>
           </div>
           <div class="card-body">
@@ -7522,7 +7332,7 @@ async function renderAdminSystemInfoPage() {
     content.innerHTML = `
       ${renderDebugTabBar("system-info")}
       <div class="mb-3 d-flex flex-wrap justify-content-end gap-2">
-        <button class="btn btn-outline-primary" data-ui-click="setHash('#admin/system-info')"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
+        <button class="btn btn-outline-primary" onclick="setHash('#admin/system-info')"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
       </div>
       <div class="card log-card mb-3">
         <div class="card-header">System Health</div>
@@ -7555,7 +7365,7 @@ async function renderAdminSystemInfoPage() {
           <span><i class="bi bi-diagram-3 me-2"></i>Tailnet / Tailscale</span>
           <div class="d-flex align-items-center gap-2">
             <span class="badge text-bg-${tailnetTone}">${escapeHtml(tailnetState)}</span>
-            <button class="btn btn-sm btn-outline-primary" type="button" data-ui-click="setHash('#admin/logs/tailscaled?lines=200')"><i class="bi bi-journal-text me-1"></i>View Logs</button>
+            <button class="btn btn-sm btn-outline-primary" type="button" onclick="setHash('#admin/logs/tailscaled?lines=200')"><i class="bi bi-journal-text me-1"></i>View Logs</button>
           </div>
         </div>
         <div class="card-body">
@@ -7644,14 +7454,14 @@ async function renderAdminControlsPage() {
 
     content.innerHTML = `
       <div class="mb-3 d-flex flex-wrap justify-content-end gap-2">
-          <button class="btn btn-outline-primary" data-ui-click="setHash('#admin/controls')"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
+          <button class="btn btn-outline-primary" onclick="setHash('#admin/controls')"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
           <div class="form-check form-switch mb-0 px-2 d-flex align-items-center">
-            <input class="form-check-input ms-0 me-2" type="checkbox" role="switch" id="droneAutoUpdateCheckbox" ${autoUpdate.enabled ? "checked" : ""} data-ui-change="setDroneAutoUpdate(this)">
+            <input class="form-check-input ms-0 me-2" type="checkbox" role="switch" id="droneAutoUpdateCheckbox" ${autoUpdate.enabled ? "checked" : ""} onchange="setDroneAutoUpdate(this)">
             <label class="form-check-label text-nowrap" for="droneAutoUpdateCheckbox" title="Check for a newer Drone release every 60 seconds and update in the background">Auto-update Drone</label>
           </div>
-          <button class="btn btn-outline-warning" data-ui-click="updateDroneApp()"><i class="bi bi-cloud-download me-1"></i>Update Drone</button>
-          <button class="btn btn-outline-danger" id="restartEsBtn" data-ui-click="restartEmulationStation()"><i class="bi bi-arrow-clockwise me-1"></i>Restart EmulationStation</button>
-          ${pixnInstalled ? `<button class="btn btn-outline-success" data-ui-click="runPixnUpdate()"><i class="bi bi-play-circle me-1"></i>Run PixN Update</button>` : ""}
+          <button class="btn btn-outline-warning" onclick="updateDroneApp()"><i class="bi bi-cloud-download me-1"></i>Update Drone</button>
+          <button class="btn btn-outline-danger" id="restartEsBtn" onclick="restartEmulationStation()"><i class="bi bi-arrow-clockwise me-1"></i>Restart EmulationStation</button>
+          ${pixnInstalled ? `<button class="btn btn-outline-success" onclick="runPixnUpdate()"><i class="bi bi-play-circle me-1"></i>Run PixN Update</button>` : ""}
       </div>
       <div class="row row-cols-1 row-cols-sm-2 row-cols-xl-4 g-3 mb-3">
         <div class="col">
@@ -7662,9 +7472,9 @@ async function renderAdminControlsPage() {
             </div>
             <div class="card-body">
               <div class="btn-group bff-segmented w-100" role="group" aria-label="Screen mode" id="screenModeButtons">
-                <button class="btn btn-outline-primary btn-sm" type="button" data-screen-mode="full" data-ui-click="applyDroneScreenMode('full')"><i class="bi bi-unlock me-1"></i>Full</button>
-                <button class="btn btn-outline-primary btn-sm" type="button" data-screen-mode="kiosk" data-ui-click="applyDroneScreenMode('kiosk')"><i class="bi bi-lock me-1"></i>Kiosk</button>
-                <button class="btn btn-outline-primary btn-sm" type="button" data-screen-mode="kid" data-ui-click="applyDroneScreenMode('kid')"><i class="bi bi-person me-1"></i>Kid</button>
+                <button class="btn btn-outline-primary btn-sm" type="button" data-screen-mode="full" onclick="applyDroneScreenMode('full')"><i class="bi bi-unlock me-1"></i>Full</button>
+                <button class="btn btn-outline-primary btn-sm" type="button" data-screen-mode="kiosk" onclick="applyDroneScreenMode('kiosk')"><i class="bi bi-lock me-1"></i>Kiosk</button>
+                <button class="btn btn-outline-primary btn-sm" type="button" data-screen-mode="kid" onclick="applyDroneScreenMode('kid')"><i class="bi bi-person me-1"></i>Kid</button>
               </div>
               <div class="small text-muted mt-2">Restarts EmulationStation.</div>
             </div>
@@ -7735,8 +7545,8 @@ async function renderAdminControlsPage() {
           <span><i class="bi bi-database-check me-2"></i>Asset Cache</span>
           <div class="d-flex gap-2">
             <button id="systemInfoAssetCacheRefreshBtn" class="btn btn-sm btn-outline-primary" type="button"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
-            <button class="btn btn-sm btn-outline-warning" type="button" data-ui-click="clearPendingAssetChanges()"><i class="bi bi-x-circle me-1"></i>Clear Pending</button>
-            <button class="btn btn-sm btn-outline-danger" type="button" data-ui-click="purgeAssetCache()">Purge &amp; Resync</button>
+            <button class="btn btn-sm btn-outline-warning" type="button" onclick="clearPendingAssetChanges()"><i class="bi bi-x-circle me-1"></i>Clear Pending</button>
+            <button class="btn btn-sm btn-outline-danger" type="button" onclick="purgeAssetCache()">Purge &amp; Resync</button>
           </div>
         </div>
         <div class="card-body" id="systemInfoAssetCacheBody"><div class="text-muted">Loading asset cache...</div></div>
@@ -8210,67 +8020,6 @@ async function submitLogin() {
   }
 }
 
-async function submitFirstBootSetup() {
-  const usernameInput = document.getElementById("setupUsername");
-  const passwordInput = document.getElementById("setupPassword");
-  const confirmationInput = document.getElementById("setupPasswordConfirmation");
-  const errorNode = document.getElementById("setupError");
-  const button = document.getElementById("setupSubmitBtn");
-  const username = (usernameInput.value || "").trim();
-  const password = passwordInput.value || "";
-  const passwordConfirmation = confirmationInput.value || "";
-  errorNode.classList.add("d-none");
-  if (!username || !password || !passwordConfirmation) {
-    errorNode.textContent = "Username and both password fields are required.";
-    errorNode.classList.remove("d-none");
-    return;
-  }
-  if (password.length < 12) {
-    errorNode.textContent = "Password must be at least 12 characters.";
-    errorNode.classList.remove("d-none");
-    return;
-  }
-  if (password !== passwordConfirmation) {
-    errorNode.textContent = "Password confirmation does not match.";
-    errorNode.classList.remove("d-none");
-    return;
-  }
-  button.disabled = true;
-  button.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Securing Drone...';
-  try {
-    const res = await fetch(`${API_BASE}/auth/setup`, {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        username,
-        password,
-        password_confirmation: passwordConfirmation,
-      }),
-    });
-    if (!res.ok) {
-      let message = "First-boot setup failed.";
-      try {
-        const data = await res.json();
-        if (data.error) message = data.error;
-      } catch (_) {}
-      errorNode.textContent = message;
-      errorNode.classList.remove("d-none");
-      button.disabled = false;
-      button.innerHTML = '<i class="bi bi-shield-lock me-1"></i>Secure this Drone';
-      passwordInput.value = "";
-      confirmationInput.value = "";
-      return;
-    }
-    window.location.reload();
-  } catch (_) {
-    errorNode.textContent = "Could not reach the Drone. Check the connection and try again.";
-    errorNode.classList.remove("d-none");
-    button.disabled = false;
-    button.innerHTML = '<i class="bi bi-shield-lock me-1"></i>Secure this Drone';
-  }
-}
-
 async function logout() {
   try {
     await fetch(`${API_BASE}/auth/logout`, { method: "POST", credentials: "include" });
@@ -8279,56 +8028,6 @@ async function logout() {
     // leave the UI stuck in a half-logged-in state.
   }
   window.location.reload();
-}
-
-function renderFirstBootSetupPage() {
-  document.querySelector(".nav-actions")?.classList.add("d-none");
-  document.getElementById("logoutBtn")?.classList.add("d-none");
-  const systemInfoBar = document.getElementById("systemInfoBar");
-  if (systemInfoBar) systemInfoBar.innerHTML = "";
-  titleNode.textContent = "";
-  subtitleNode.textContent = "";
-  content.innerHTML = `
-    <div class="row justify-content-center">
-      <div class="col-12 col-sm-10 col-md-7 col-lg-5">
-        <div class="card mt-5">
-          <div class="card-body p-4">
-            <div class="text-center mb-4">
-              <img src="/content/batocera-swarm-mascot.jpg" alt="" class="setup-brand-image">
-              <h4 class="mt-3 mb-1">Secure this Drone</h4>
-              <div class="small text-muted">Create the first administrator account before the Drone can be used.</div>
-            </div>
-            <div id="setupError" class="alert alert-danger py-2 d-none"></div>
-            <div class="mb-3">
-              <label class="form-label" for="setupUsername">Administrator username</label>
-              <input class="form-control" type="text" id="setupUsername" autocomplete="username">
-            </div>
-            <div class="mb-3">
-              <label class="form-label" for="setupPassword">Password</label>
-              <input class="form-control" type="password" id="setupPassword" minlength="12" autocomplete="new-password">
-              <div class="form-text">Use at least 12 characters.</div>
-            </div>
-            <div class="mb-3">
-              <label class="form-label" for="setupPasswordConfirmation">Confirm password</label>
-              <input class="form-control" type="password" id="setupPasswordConfirmation" minlength="12" autocomplete="new-password">
-            </div>
-            <button class="btn btn-primary w-100" id="setupSubmitBtn" type="button"><i class="bi bi-shield-lock me-1"></i>Secure this Drone</button>
-          </div>
-        </div>
-      </div>
-    </div>
-  `;
-  const submit = () => submitFirstBootSetup();
-  for (const inputId of ["setupUsername", "setupPassword", "setupPasswordConfirmation"]) {
-    document.getElementById(inputId).addEventListener("keydown", (event) => {
-      if (event.key === "Enter") {
-        event.preventDefault();
-        submit();
-      }
-    });
-  }
-  document.getElementById("setupSubmitBtn").addEventListener("click", submit);
-  document.getElementById("setupUsername").focus();
 }
 
 function renderLoginPage() {
@@ -8344,7 +8043,7 @@ function renderLoginPage() {
         <div class="card mt-5">
           <div class="card-body p-4">
             <div class="text-center mb-4">
-              <img src="/content/batocera-swarm-mascot.jpg" alt="" class="setup-brand-image">
+              <img src="/content/batocera-swarm-mascot.jpg" alt="" style="width:56px;height:56px;border-radius:50%;">
               <h4 class="mt-3 mb-0">Batocera Drone</h4>
               <div class="small text-muted">Sign in to continue</div>
             </div>
@@ -8386,17 +8085,11 @@ function renderLoginPage() {
 // Bootstrap's own dismiss handling doesn't know how to hide.
 async function bootstrapApp() {
   let authenticated = false;
-  let setupRequired = false;
   try {
     const session = await api("/auth/session");
     authenticated = !!session.authenticated;
-    setupRequired = !!session.setup_required;
   } catch (_) {
     authenticated = false;
-  }
-  if (setupRequired) {
-    renderFirstBootSetupPage();
-    return;
   }
   if (!authenticated) {
     renderLoginPage();

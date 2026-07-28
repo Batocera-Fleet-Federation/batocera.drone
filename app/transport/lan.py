@@ -1,9 +1,11 @@
 """LAN-direct transport: same-network drones transfer over the local network.
 
-Paired drones may reach each other at a private ``local_ip`` learned during
-pairing/discovery. The mTLS peer certificate still authenticates the target, so
-this does not require calling an external "what is my IP" service or comparing
-public addresses.
+When two drones sit behind the same router they each self-report the **same
+public IP** (exchanged directly peer-to-peer at pairing/discovery time, not via
+any central service). That is a reliable "same LAN" signal: the drone can then
+reach the peer directly at its ``local_ip`` -- far faster than a legacy WAN hop
+and with no port-forward. This reuses the existing direct mTLS ``/peer/*`` path
+(the drone cert's SANs already include its LAN IPs); only the address differs.
 
 A **tailnet** peer counts as LAN too: when both drones run a mesh-VPN daemon
 (see ``tailnet.py``), the peer's stable Tailnet address is directly reachable
@@ -18,7 +20,6 @@ fails the direct attempt and the selector falls back to the next transport.
 
 from __future__ import annotations
 
-import ipaddress
 from dataclasses import replace
 from typing import Any, Callable, Optional
 
@@ -36,7 +37,7 @@ class LanDirectTransport(PeerTransport):
         local_network: Callable[[], dict],
     ) -> None:
         # ``fetch_fn`` is the direct-path dispatch (same one DirectPublic uses);
-        # ``local_network`` returns this drone's tailnet/local network snapshot.
+        # ``local_network`` returns this drone's network info (public_ip, ipv4).
         self._fetch_fn = fetch_fn
         self._local_network = local_network
 
@@ -47,24 +48,9 @@ class LanDirectTransport(PeerTransport):
     def _same_network_url(self, peer: dict) -> Optional[str]:
         # Check the peer's cheap fields first so we only resolve our own network
         # (a probe) for actual LAN candidates -- not on every transfer/peer.
-        local_ip = str(peer.get("local_ip") or "").strip()
-        if not local_ip:
-            return None
-        try:
-            address = ipaddress.ip_address(local_ip.split("%", 1)[0])
-        except ValueError:
-            return None
-        if (
-            peer.get("paired") is True
-            and not address.is_global
-            and not address.is_loopback
-            and not address.is_unspecified
-            and not address.is_multicast
-        ):
-            return self._peer_url(peer, local_ip)
-        # Preserve explicit public-IP override support for unusual routed setups.
         peer_public = str(peer.get("public_ip") or peer.get("public") or "").strip()
-        if not peer_public:
+        local_ip = str(peer.get("local_ip") or "").strip()
+        if not peer_public or not local_ip:
             return None
         network = self._local_network() or {}
         my_public = str(network.get("public_ip") or "").strip()

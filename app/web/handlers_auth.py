@@ -1,10 +1,9 @@
 """RomRequestHandler login/logout/session-status handlers, as a mixin.
 
-Backs the SPA's login/setup page (replacing the old native-browser Basic Auth
-prompt): ``GET /auth/session`` (public, "am I logged in / is setup required"),
-``POST /auth/setup`` (public only until initialization completes),
-``POST /auth/login`` (public, verifies credentials and starts a session), and
-``POST /auth/logout`` (public/no-op-safe, ends the caller's own session). They are dispatched
+Backs the SPA's login page (replacing the old native-browser Basic Auth
+prompt): ``GET /auth/session`` (public, "am I logged in"), ``POST /auth/login``
+(public, verifies credentials and starts a session), ``POST /auth/logout``
+(public/no-op-safe, ends the caller's own session). All three are dispatched
 *before* the session-cookie gate in ``api_routes.py`` -- a browser with no
 cookie yet must be able to reach them. Composed onto ``RomRequestHandler``.
 """
@@ -17,44 +16,14 @@ except ImportError:  # pragma: no cover - direct script execution fallback
 
 class HandlersAuthMixin:
     def _handle_auth_session(self) -> None:
-        if not self.auth.credential_store.is_configured():
-            self._send_json(200, {"authenticated": False, "setup_required": True})
-            return
         session = self.auth.authenticate_request(self.headers)
         if session is None:
-            self._send_json(200, {"authenticated": False, "setup_required": False})
+            self._send_json(200, {"authenticated": False})
             return
-        self._send_json(200, {"authenticated": True, "setup_required": False, "username": session["username"]})
-
-    def _handle_auth_setup(self, payload: dict) -> None:
-        payload = payload if isinstance(payload, dict) else {}
-        username = str(payload.get("username") or "").strip()
-        password = str(payload.get("password") or "")
-        password_confirmation = str(payload.get("password_confirmation") or "")
-        if password != password_confirmation:
-            self._send_json(400, {"error": "password confirmation does not match"})
-            return
-        try:
-            result = self.auth.credential_store.initialize(username, password)
-        except ValueError as error:
-            self._send_json(400, {"error": str(error)})
-            return
-        except RuntimeError as error:
-            self._send_json(409, {"error": str(error)})
-            return
-        token = self.auth.session_store.create(result["username"])
-        cookie = build_session_cookie(token, secure=not self.settings.http_only)
-        self._send_json(
-            201,
-            {"status": "configured", "username": result["username"]},
-            extra_headers={"Set-Cookie": cookie},
-        )
+        self._send_json(200, {"authenticated": True, "username": session["username"]})
 
     def _handle_auth_login(self, payload: dict) -> None:
         payload = payload if isinstance(payload, dict) else {}
-        if not self.auth.credential_store.is_configured():
-            self._send_json(409, {"error": "first-boot setup is required", "setup_required": True})
-            return
         username = str(payload.get("username") or "").strip()
         password = str(payload.get("password") or "")
         token = self.auth.login(username, password) if username and password else None

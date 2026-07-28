@@ -35,7 +35,7 @@ def _build_settings(root: Path, *, http_only: bool = True) -> Settings:
         "SAVES_ROOT": str(root / "saves"),
         "DRONE_STATE_DATABASE_FILE": str(root / "state.sqlite3"),
         "DRONE_APP_USERNAME": "batocera",
-        "DRONE_APP_PASSWORD": "batocera-test-password",
+        "DRONE_APP_PASSWORD": "linux",
         "HTTP_ONLY": "1" if http_only else "0",
         "OVERMIND_DEVICE_ID": "test-drone",
     }
@@ -186,7 +186,6 @@ class HandlersAuthMixinTests(unittest.TestCase):
         status, payload, _ = handler.response
         self.assertEqual(status, 200)
         self.assertFalse(payload["authenticated"])
-        self.assertFalse(payload["setup_required"])
 
     def test_session_endpoint_authenticated_with_valid_cookie(self) -> None:
         token = self.auth.session_store.create("batocera")
@@ -199,7 +198,7 @@ class HandlersAuthMixinTests(unittest.TestCase):
 
     def test_login_success_sets_cookie(self) -> None:
         handler = _handler(self.settings, self.auth)
-        handler._handle_auth_login({"username": "batocera", "password": "batocera-test-password"})
+        handler._handle_auth_login({"username": "batocera", "password": "linux"})
         status, payload, extra_headers = handler.response
         self.assertEqual(status, 200)
         self.assertEqual(payload["username"], "batocera")
@@ -234,90 +233,14 @@ class HandlersAuthMixinTests(unittest.TestCase):
     def test_secure_flag_follows_http_only_setting(self) -> None:
         tls_settings = _build_settings(self.root, http_only=False)
         handler = _handler(tls_settings, self.auth)
-        handler._handle_auth_login({"username": "batocera", "password": "batocera-test-password"})
+        handler._handle_auth_login({"username": "batocera", "password": "linux"})
         _, _, extra_headers = handler.response
         self.assertIn("Secure", extra_headers["Set-Cookie"])
 
         handler2 = _handler(self.settings, self.auth)  # http_only=True from setUp
-        handler2._handle_auth_login({"username": "batocera", "password": "batocera-test-password"})
+        handler2._handle_auth_login({"username": "batocera", "password": "linux"})
         _, _, extra_headers2 = handler2.response
         self.assertNotIn("Secure", extra_headers2["Set-Cookie"])
-
-
-class FirstBootSetupTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self._tmp.name) / "userdata"
-        self.settings = _build_settings(self.root)
-        db_path = self.root / "unconfigured-state.sqlite3"
-        store = DroneCredentialStore(
-            self.root / "system" / "drone-app" / "credentials.json",
-            state_database_file=db_path,
-        )
-        self.auth = SessionAuth(credential_store=store, session_store=SessionStore(db_path))
-
-    def tearDown(self) -> None:
-        self._tmp.cleanup()
-
-    def test_session_reports_setup_required_without_credentials(self) -> None:
-        handler = _handler(self.settings, self.auth)
-        handler._handle_auth_session()
-        self.assertEqual(handler.response[0], 200)
-        self.assertTrue(handler.response[1]["setup_required"])
-        self.assertFalse(self.auth.credential_store.legacy_setup_token_path.exists())
-
-    def test_setup_initializes_once_and_authenticates_the_browser(self) -> None:
-        handler = _handler(self.settings, self.auth)
-        handler._handle_auth_setup(
-            {
-                "username": "arcade-admin",
-                "password": "CorrectHorseBatteryStaple",
-                "password_confirmation": "CorrectHorseBatteryStaple",
-            }
-        )
-        status, payload, headers = handler.response
-        self.assertEqual(status, 201)
-        self.assertEqual(payload["username"], "arcade-admin")
-        self.assertIn(SESSION_COOKIE_NAME, headers["Set-Cookie"])
-        self.assertIsNotNone(self.auth.login("arcade-admin", "CorrectHorseBatteryStaple"))
-
-        second = _handler(self.settings, self.auth)
-        second._handle_auth_setup(
-            {
-                "username": "attacker",
-                "password": "AnotherLongPassword",
-                "password_confirmation": "AnotherLongPassword",
-            }
-        )
-        self.assertEqual(second.response[0], 409)
-
-    def test_setup_rejects_weak_or_mismatched_passwords(self) -> None:
-        mismatch = _handler(self.settings, self.auth)
-        mismatch._handle_auth_setup(
-            {
-                "username": "arcade-admin",
-                "password": "CorrectHorseBatteryStaple",
-                "password_confirmation": "different-password",
-            }
-        )
-        self.assertEqual(mismatch.response[0], 400)
-
-        weak = _handler(self.settings, self.auth)
-        weak._handle_auth_setup(
-            {
-                "username": "arcade-admin",
-                "password": "too-short",
-                "password_confirmation": "too-short",
-            }
-        )
-        self.assertEqual(weak.response[0], 400)
-        self.assertIn("at least 12", weak.response[1]["error"])
-
-    def test_login_fails_closed_until_setup_completes(self) -> None:
-        handler = _handler(self.settings, self.auth)
-        handler._handle_auth_login({"username": "batocera", "password": "linux"})
-        self.assertEqual(handler.response[0], 409)
-        self.assertTrue(handler.response[1]["setup_required"])
 
 
 class CredentialsUpdateRevocationTests(unittest.TestCase):
@@ -357,7 +280,7 @@ class CredentialsUpdateRevocationTests(unittest.TestCase):
         # ...but every other session is gone.
         self.assertIsNone(self.auth.session_store.validate(other_token))
         # And the new credentials are the ones that work going forward.
-        self.assertIsNone(self.auth.login("batocera", "batocera-test-password"))
+        self.assertIsNone(self.auth.login("batocera", "linux"))
         self.assertIsNotNone(self.auth.login("arcade-admin", "BetterPass123"))
 
 

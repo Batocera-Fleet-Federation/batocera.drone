@@ -48,6 +48,17 @@ ensure_permissions() {
   echo "[drone-service] ✓ Runtime directories ready"
 }
 
+ensure_dns_fallback() {
+  if [ -w /etc/resolv.conf ]; then
+    if ! grep -q "^nameserver 1\\.1\\.1\\.1$" /etc/resolv.conf 2>/dev/null; then
+      echo "nameserver 1.1.1.1" >> /etc/resolv.conf
+    fi
+    if ! grep -q "^nameserver 8\\.8\\.8\\.8$" /etc/resolv.conf 2>/dev/null; then
+      echo "nameserver 8.8.8.8" >> /etc/resolv.conf
+    fi
+  fi
+}
+
 run_as_root_shell() {
   command="$1"
   sh -c "$command"
@@ -113,23 +124,24 @@ stage_latest_app_once() {
     1|true|yes|on|enabled) ;;
     *) echo "[drone-service] Automatic Drone update check disabled."; return 0 ;;
   esac
-  echo "[drone-service] Checking the signed Drone release bundle..."
+  runner="/tmp/drone-startup-update.$$"
+  echo "[drone-service] Checking for the latest Drone app bundle..."
   wait_for_network
-  if DRONE_APP_WORK_DIR="$WORK_DIR" PYTHONPATH="$WORK_DIR" python3 - <<'PY'
-from app.common.self_update import _download_latest_drone_app
-from app.common.settings import Settings
-
-result = _download_latest_drone_app(Settings.from_env())
-print(
-    "[drone-service] Verified and activated Drone "
-    f"{result.get('version', 'release')} ({result.get('copied_files', 0)} files)."
-)
-PY
-  then
-    echo "[drone-service] Signed Drone app bundle activated."
-  else
-    echo "[drone-service] Signed bundle update failed; retaining the validated local app."
+  if ! curl -fsSL --connect-timeout 10 --max-time 45 -o "$runner" https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/run_now.sh; then
+    rm -f "$runner"
+    echo "[drone-service] Latest bundle check failed; continuing with the validated local app."
+    return 0
   fi
+  chmod 755 "$runner" 2>/dev/null || true
+  if DRONE_APP_STAGE_ONLY=1 \
+      DRONE_APP_WORK_DIR="$WORK_DIR" \
+      DRONE_APP_ARCHIVE_URL="${DRONE_APP_ARCHIVE_URL:-https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/drone-app.tar.gz}" \
+      bash "$runner"; then
+    echo "[drone-service] Latest Drone app bundle staged."
+  else
+    echo "[drone-service] Latest bundle staging failed; validating the local app before launch."
+  fi
+  rm -f "$runner"
 }
 
 launch_drone() {
@@ -140,18 +152,30 @@ launch_drone() {
         stage_latest_app_once
       fi
       if ! validate_local_app; then
-        echo "[drone-service] Staged Drone app failed validation; retaining the prior signed release."
+        echo "[drone-service] Staged Drone app failed validation; downloading a clean bundle."
       else
         echo "[drone-service] Launching local Drone app from ${WORK_DIR}..."
         run_as_root_shell "cd '$WORK_DIR' && env PYTHONPATH='$WORK_DIR' HTTPS_PORT='${HTTPS_PORT:-443}' DRONE_COMPAT_HTTPS_PORTS='${DRONE_COMPAT_HTTPS_PORTS:-8443}' DRONE_PEER_MTLS_PORT='${DRONE_PEER_MTLS_PORT:-8543}' ROMS_ROOT='${ROMS_ROOT:-/userdata/roms}' BIOS_ROOT='${BIOS_ROOT:-/userdata/bios}' TLS_SELF_SIGNED_DIR='${TLS_SELF_SIGNED_DIR:-/userdata/system/certs}' LOG_DIR='${LOG_DIR:-/userdata/system/logs/drone-app}' LOG_MAX_BYTES='${LOG_MAX_BYTES:-5242880}' LOG_BACKUP_COUNT='${LOG_BACKUP_COUNT:-5}' DRONE_LOG_UNAUTHORIZED_REQUESTS='${DRONE_LOG_UNAUTHORIZED_REQUESTS:-0}' DRONE_UNAUTH_RATE_LIMIT_ENABLED='${DRONE_UNAUTH_RATE_LIMIT_ENABLED:-1}' DRONE_UNAUTH_RATE_LIMIT_REQUESTS='${DRONE_UNAUTH_RATE_LIMIT_REQUESTS:-60}' DRONE_UNAUTH_RATE_LIMIT_WINDOW_SECONDS='${DRONE_UNAUTH_RATE_LIMIT_WINDOW_SECONDS:-60}' ROM_METADATA_POLL_SECONDS='${ROM_METADATA_POLL_SECONDS:-900}' ROM_METADATA_INITIAL_DELAY_SECONDS='${ROM_METADATA_INITIAL_DELAY_SECONDS:-60}' ROM_METADATA_PROGRESS_SECONDS='${ROM_METADATA_PROGRESS_SECONDS:-30}' ROM_METADATA_PROGRESS_FILES='${ROM_METADATA_PROGRESS_FILES:-250}' ROM_METADATA_UPLOAD_CHUNK_SIZE='${ROM_METADATA_UPLOAD_CHUNK_SIZE:-250}' ROM_METADATA_HASH_IO_YIELD_SECONDS='${ROM_METADATA_HASH_IO_YIELD_SECONDS:-0.05}' ROM_METADATA_HASH_ROMS_ENABLED='${ROM_METADATA_HASH_ROMS_ENABLED:-1}' IMAGE_CACHE_TTL_SECONDS='${IMAGE_CACHE_TTL_SECONDS:-3600}' IMAGE_MISS_CACHE_TTL_SECONDS='${IMAGE_MISS_CACHE_TTL_SECONDS:-300}' IMAGE_CACHE_MAX_ITEMS='${IMAGE_CACHE_MAX_ITEMS:-1000}' IMAGE_CACHE_MAX_BYTES='${IMAGE_CACHE_MAX_BYTES:-134217728}' JSON_CACHE_TTL_SECONDS='${JSON_CACHE_TTL_SECONDS:-3600}' JSON_CACHE_MAX_ITEMS='${JSON_CACHE_MAX_ITEMS:-1000}' JSON_CACHE_MAX_BYTES='${JSON_CACHE_MAX_BYTES:-33554432}' OVERMIND_DRONE_TOKEN='${OVERMIND_DRONE_TOKEN:-}' OVERMIND_POLL_SECONDS='${OVERMIND_POLL_SECONDS:-60}' OVERMIND_SPEED_SAMPLE_SECONDS='${OVERMIND_SPEED_SAMPLE_SECONDS:-600}' python3 -m app.main"
         return "$?"
       fi
     fi
-    echo "[drone-service] Local Drone app import check failed."
+    echo "[drone-service] Local Drone app import check failed; downloading a fresh app bundle."
   fi
 
-  echo "[drone-service] Refusing an unsigned recovery download. Re-run the signed Batocera Drone installer."
-  return 1
+  runner="/tmp/drone-run-now.$$"
+  echo "[drone-service] Downloading and launching Drone app..."
+  wait_for_network
+  if ! curl -fsSL --connect-timeout 10 --max-time 120 -o "$runner" https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/run_now.sh; then
+    rm -f "$runner"
+    echo "[drone-service] Failed to download Drone launcher"
+    return 1
+  fi
+  chmod 755 "$runner" 2>/dev/null || true
+  export DRONE_APP_ARCHIVE_URL="${DRONE_APP_ARCHIVE_URL:-https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/drone-app.tar.gz}"
+  bash "$runner"
+  exit_code="$?"
+  rm -f "$runner"
+  return "$exit_code"
 }
 
 request_host_reboot() {
@@ -451,6 +475,7 @@ start_app() {
 
 run_supervisor() {
   ensure_permissions
+  ensure_dns_fallback
   start_control_worker
   supervise_drone
 }

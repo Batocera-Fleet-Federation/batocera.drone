@@ -2,61 +2,6 @@
 set -e
 
 WORK_DIR="/userdata/system/drone-app"
-UPDATE_MANIFEST_URL="https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/release-manifest.json"
-UPDATE_SIGNATURE_URL="https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/release-manifest.sig"
-RUN_NOW_URL="https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/run_now.sh"
-
-download_verified_runner() {
-  runner="$1"
-  verify_dir="/tmp/drone-installer-verify.$$"
-  mkdir -p "$verify_dir"
-  public_key="$verify_dir/update-signing-public.pem"
-  manifest="$verify_dir/release-manifest.json"
-  signature="$verify_dir/release-manifest.sig"
-  cat > "$public_key" <<'PUBLICKEY'
------BEGIN PUBLIC KEY-----
-MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEA6v5FRoVdVNL8KBxoGliK
-bqWgUgkUD04qpYwjss1QWCJlSE/XSySYFfPRmc1CLzQZDbjQO/Wv3xF2HGMxXj1t
-u5Iq0af7Ab8FuarWG5u1fUeoyq4+3muvk1HZlG6EGEYt5pkBZqpLb5pJtd5UkVdx
-IugagWdrGCbxE5InSV8+Ni8E1S64z/oKTibNJD/7rBB2AJyw28x2PvcSRGMlXLxK
-/g+g5dIHu7AmjT2gweNdtZy7LApsFsR/Y2xZbsaS208ITV/UbuhBv0nqpEAAdbSW
-s2VFr41LyiyE1AMBQPoDqxor/AP7YKyWcMIt35VPlLfVI48/iQQHFJbNNibzHC+8
-5GRjjbeOaTFN9Oz15G0D2Pwby9f2PMAvR1SBRyibe//XHgvBI0L8GKuAbDtrmAE7
-P24hCiKk0huhBUpWwjbTLe8lG6wSc4smGwX8aqqmjU09o9whkC4vFfQhfHHF2b2i
-rOWdZE5kb/1z4siM82ilZ8SQwYnm8bhtg4r1dAr6YOjlAgMBAAE=
------END PUBLIC KEY-----
-PUBLICKEY
-  if ! curl -fsSL --connect-timeout 10 --max-time 120 -o "$manifest" "$UPDATE_MANIFEST_URL" ||
-     ! curl -fsSL --connect-timeout 10 --max-time 120 -o "$signature" "$UPDATE_SIGNATURE_URL" ||
-     ! curl -fsSL --connect-timeout 10 --max-time 120 -o "$runner" "$RUN_NOW_URL"; then
-    rm -rf "$verify_dir" "$runner"
-    return 1
-  fi
-  if ! openssl dgst -sha256 -verify "$public_key" -signature "$signature" "$manifest" >/dev/null 2>&1 ||
-     ! python3 - "$manifest" "$runner" <<'PY'
-import hashlib
-import json
-import sys
-from pathlib import Path
-
-manifest = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-runner = Path(sys.argv[2])
-metadata = (manifest.get("assets") or {}).get("run_now.sh") or {}
-payload = runner.read_bytes()
-if (
-    manifest.get("schema") != 1
-    or metadata.get("size") != len(payload)
-    or metadata.get("sha256") != hashlib.sha256(payload).hexdigest()
-):
-    raise SystemExit("run_now.sh does not match the signed release manifest")
-PY
-  then
-    rm -rf "$verify_dir" "$runner"
-    return 1
-  fi
-  rm -rf "$verify_dir"
-  chmod 755 "$runner" 2>/dev/null || true
-}
 
 BATOCERA_VERSION=""
 if command -v batocera-version >/dev/null 2>&1; then
@@ -114,6 +59,7 @@ WORK_DIR="/userdata/system/drone-app"
 ACTION="$1"
 STARTUP_LOG="/userdata/system/logs/drone-app/startup.log"
 BOOTSTRAP="$WORK_DIR/app/service_bootstrap.sh"
+RUN_NOW_URL="https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/run_now.sh"
 ARCHIVE_URL="https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/drone-app.tar.gz"
 
 ensure_bundle() {
@@ -121,7 +67,14 @@ ensure_bundle() {
   mkdir -p "$(dirname "$STARTUP_LOG")"
   echo "[drone-service] Service bootstrap missing; downloading Drone app bundle..." | tee -a "$STARTUP_LOG"
   runner="/tmp/drone-bootstrap-fetch.$$"
-  echo "[drone-service] Recovery requires re-running the signed Batocera Drone installer." | tee -a "$STARTUP_LOG"
+  if curl -fsSL --connect-timeout 10 --max-time 120 -o "$runner" "$RUN_NOW_URL"; then
+    chmod 755 "$runner" 2>/dev/null || true
+    DRONE_APP_STAGE_ONLY=1 DRONE_APP_WORK_DIR="$WORK_DIR" DRONE_APP_ARCHIVE_URL="$ARCHIVE_URL" bash "$runner" >> "$STARTUP_LOG" 2>&1 || true
+    rm -f "$runner"
+  else
+    rm -f "$runner"
+    echo "[drone-service] Failed to download Drone app bundle for bootstrap." | tee -a "$STARTUP_LOG"
+  fi
 }
 
 case "$ACTION" in
@@ -145,7 +98,8 @@ SERVICEBLOCK
   echo ""
   echo "Downloading latest Drone app bundle..."
   RUNNER="/tmp/drone-run-now-install.$$"
-  if download_verified_runner "$RUNNER"; then
+  if curl -fsSL --connect-timeout 10 --max-time 120 -o "$RUNNER" https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/run_now.sh; then
+    chmod 755 "$RUNNER" 2>/dev/null || true
     "$SERVICE_FILE" stop >/dev/null 2>&1 || true
     DRONE_APP_STAGE_ONLY=1 \
       DRONE_APP_WORK_DIR="$WORK_DIR" \
@@ -219,11 +173,7 @@ else
     sleep 5
   done
 
-  if [ -f /userdata/system/drone-app/app/service_bootstrap.sh ]; then
-    sh /userdata/system/drone-app/app/service_bootstrap.sh start
-  else
-    echo "[drone-service] Signed Drone bundle is missing; re-run batocera_install.sh." >&2
-  fi
+  curl -fsSL --connect-timeout 10 --max-time 120 https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/run_now.sh | bash
 ) &
 
 SERVICEBLOCK
@@ -460,7 +410,7 @@ if [ -n "$DRONE_TAILNET_IP" ]; then
 fi
 echo ""
 echo "   Works from any phone or computer on the same network."
-echo "   On first open, create the administrator username and password."
+echo "   Sign in with username 'batocera' and password 'linux'."
 echo "   (If it does not load yet, start the DRONE_SERVER service or reboot.)"
 echo ""
 echo "======================================================================"

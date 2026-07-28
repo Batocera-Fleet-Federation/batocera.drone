@@ -3,8 +3,7 @@
 Extracted from ``drone_api.py``. Holds:
 
 * ``DroneCredentialStore`` — PBKDF2-hashed local credentials persisted in the
-  shared state DB. A new Drone has no universal fallback credential: its owner
-  must create the first administrator account during first-boot setup.
+  shared state DB (with an env/default fallback).
 * ``SessionStore`` + ``SessionAuth`` — cookie-based login, replacing the old
   ``BasicAuth``/``Authorization: Basic`` scheme. A browser's native Basic-auth
   prompt is invasive for humans and awkward for automation (every call needs
@@ -44,7 +43,6 @@ from threading import Lock
 from typing import Optional
 
 try:
-    from .privacy_logging import pseudonymize_ip
     from ..storage.state_store import database_path_for_legacy_file as _state_database_path_for_legacy_file
     from ..storage.state_store import create_session as _create_session
     from ..storage.state_store import delete_all_sessions as _delete_all_sessions
@@ -55,7 +53,6 @@ try:
     from ..storage.state_store import save_payload as _save_state_payload
     from ..storage.state_store import touch_session as _touch_session
 except ImportError:  # pragma: no cover - direct script execution fallback
-    from common.privacy_logging import pseudonymize_ip  # type: ignore
     from storage.state_store import database_path_for_legacy_file as _state_database_path_for_legacy_file  # type: ignore
     from storage.state_store import create_session as _create_session  # type: ignore
     from storage.state_store import delete_all_sessions as _delete_all_sessions  # type: ignore
@@ -86,9 +83,9 @@ DRONE_AUTH_BLOCK_DURATION_SECONDS = max(1.0, float(os.environ.get("DRONE_AUTH_BL
 
 
 class DroneCredentialStore:
+    DEFAULT_USERNAME = "batocera"
+    DEFAULT_PASSWORD = "linux"
     STATE_NAMESPACE = "credentials"
-    LEGACY_SETUP_TOKEN_FILENAME = "first-boot-setup-token"
-    MINIMUM_PASSWORD_LENGTH = 12
 
     def __init__(
         self,
@@ -102,7 +99,6 @@ class DroneCredentialStore:
         self.env_password = env_password
         self.state_database_file = state_database_file or _state_database_path_for_legacy_file(path)
         self._lock = Lock()
-        self._migrate_explicit_env_credentials()
 
     def _hash_password(self, password: str, salt: Optional[str] = None) -> str:
         salt_value = salt or secrets.token_hex(16)
@@ -119,7 +115,7 @@ class DroneCredentialStore:
         except Exception:
             return False
 
-    def _load_stored(self) -> dict:
+    def load(self) -> dict:
         data = _load_state_payload(
             self.state_database_file,
             self.STATE_NAMESPACE,
@@ -128,79 +124,38 @@ class DroneCredentialStore:
         )
         if isinstance(data, dict) and data.get("username") and data.get("password_hash"):
             return data
-        return {}
-
-    def _write_credentials(self, username: str, password: str) -> dict:
-        username = username.strip()
-        if not re.fullmatch(r"[A-Za-z0-9._@-]{3,64}", username):
-            raise ValueError("username must be 3-64 characters using letters, numbers, dot, dash, underscore, or @")
-        if len(password) < self.MINIMUM_PASSWORD_LENGTH:
-            raise ValueError(f"password must be at least {self.MINIMUM_PASSWORD_LENGTH} characters")
-        data = {
-            "username": username,
-            "password_hash": self._hash_password(password),
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }
-        _save_state_payload(
-            self.state_database_file,
-            self.STATE_NAMESPACE,
-            data,
-        )
-        self.path.unlink(missing_ok=True)
-        # Versions before direct first-boot setup persisted a code in this
-        # file. Remove any leftover copy after a successful upgrade/setup.
-        self.legacy_setup_token_path.unlink(missing_ok=True)
-        return {"username": username, "updated_at": data["updated_at"], "stored": True}
-
-    def _migrate_explicit_env_credentials(self) -> None:
-        """Hash an explicitly supplied username/password once.
-
-        Environment credentials are an intentional provisioning mechanism, not
-        a universal fallback. Both values must be present; a partial pair leaves
-        the Drone unconfigured and therefore unable to authenticate.
-        """
-        if self._load_stored() or not self.env_username or not self.env_password:
-            return
-        with self._lock:
-            if not self._load_stored():
-                try:
-                    self._write_credentials(self.env_username, self.env_password)
-                except ValueError:
-                    # Weak/invalid legacy environment values must not revive a
-                    # universal credential or prevent the setup UI from loading.
-                    return
-
-    @property
-    def legacy_setup_token_path(self) -> Path:
-        return self.path.resolve().parent / self.LEGACY_SETUP_TOKEN_FILENAME
-
-    def is_configured(self) -> bool:
-        return bool(self._load_stored())
-
-    def load(self) -> dict:
-        data = self._load_stored()
-        if data:
-            return data
-        return {"configured": False, "source": "unconfigured"}
-
-    def initialize(self, username: str, password: str) -> dict:
-        """Create the first credential exactly once."""
-        with self._lock:
-            if self._load_stored():
-                raise RuntimeError("Drone setup has already been completed")
-            return self._write_credentials(username, password)
+        username = self.env_username or self.DEFAULT_USERNAME
+        password = self.env_password or self.DEFAULT_PASSWORD
+        return {"username": username, "password_plain_fallback": password, "source": "default"}
 
     def check(self, username: str, password: str) -> bool:
         data = self.load()
-        if not data.get("password_hash"):
-            return False
         if not hmac.compare_digest(username, str(data.get("username") or "")):
             return False
-        return self._verify_hash(password, str(data["password_hash"]))
+        password_hash = data.get("password_hash")
+        if password_hash:
+            return self._verify_hash(password, str(password_hash))
+        return hmac.compare_digest(password, str(data.get("password_plain_fallback") or ""))
 
     def update(self, username: str, password: str) -> dict:
+        username = username.strip()
+        if not re.fullmatch(r"[A-Za-z0-9._@-]{3,64}", username):
+            raise ValueError("username must be 3-64 characters using letters, numbers, dot, dash, underscore, or @")
+        if len(password) < 8:
+            raise ValueError("password must be at least 8 characters")
         with self._lock:
-            return self._write_credentials(username, password)
+            data = {
+                "username": username,
+                "password_hash": self._hash_password(password),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            _save_state_payload(
+                self.state_database_file,
+                self.STATE_NAMESPACE,
+                data,
+            )
+            self.path.unlink(missing_ok=True)
+            return {"username": username, "updated_at": data["updated_at"], "stored": True}
 
 
 def _iso_now() -> str:
@@ -362,7 +317,7 @@ def record_unauthorized_response(client_ip: str, now: Optional[float] = None) ->
         _AUTH_BLOCKED_IPS[ip] = timestamp + DRONE_AUTH_BLOCK_DURATION_SECONDS
         _AUTH_401_BUCKETS.pop(ip, None)
     print(
-        f"Auth block: client={pseudonymize_ip(ip)} blocked after {DRONE_AUTH_BLOCK_THRESHOLD} unauthorized "
+        f"Auth block: ip={ip} blocked after {DRONE_AUTH_BLOCK_THRESHOLD} unauthorized "
         f"requests within {int(DRONE_AUTH_BLOCK_WINDOW_SECONDS)}s; "
         f"blocked for {int(DRONE_AUTH_BLOCK_DURATION_SECONDS)}s",
         file=sys.stdout,

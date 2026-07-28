@@ -1,7 +1,5 @@
-"""Signed Drone self-update with staged extraction and atomic activation."""
+"""Drone self-update: poll releases, download updates, and re-exec in place."""
 
-import hashlib
-import json
 import os
 import re
 import shutil
@@ -23,14 +21,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from settings import Settings  # type: ignore
 
 DRONE_LATEST_ARCHIVE_URL = "https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/drone-app.tar.gz"
-DRONE_LATEST_MANIFEST_URL = "https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/release-manifest.json"
-DRONE_LATEST_MANIFEST_SIGNATURE_URL = "https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/release-manifest.sig"
 DRONE_LATEST_RELEASE_URL = "https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest"
-DRONE_RELEASE_DOWNLOAD_ROOT = "https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/download"
-DRONE_UPDATE_PUBLIC_KEY = Path(__file__).resolve().parents[1] / "update-signing-public.pem"
-DRONE_UPDATE_MANIFEST_MAX_BYTES = 64 * 1024
-DRONE_UPDATE_SIGNATURE_MAX_BYTES = 16 * 1024
-DRONE_UPDATE_ARCHIVE_MAX_BYTES = 128 * 1024 * 1024
 DRONE_SELF_UPDATE_EXIT_CODE = 75
 DRONE_AUTO_UPDATE_FILE = "auto-update.enabled"
 DRONE_AUTO_UPDATE_POLL_SECONDS = 60
@@ -140,233 +131,61 @@ def _overlay_drone_release_tree(source: Path, target: Path) -> int:
     return copied
 
 
-def _download_file(url: str, destination: Path, *, max_bytes: int) -> None:
-    request = Request(url, headers={"User-Agent": "batocera-drone-self-update"})
-    total = 0
-    with urlopen(request, timeout=120) as response, destination.open("wb") as output:
-        while True:
-            chunk = response.read(min(1024 * 1024, max_bytes - total + 1))
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > max_bytes:
-                raise ValueError(f"download exceeded the {max_bytes}-byte safety limit: {url}")
-            output.write(chunk)
-    if total <= 0:
-        raise ValueError(f"download was empty: {url}")
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _verify_manifest_signature(manifest_path: Path, signature_path: Path) -> None:
-    public_key = Path(os.environ.get("DRONE_UPDATE_PUBLIC_KEY_FILE", str(DRONE_UPDATE_PUBLIC_KEY))).resolve()
-    if not public_key.is_file():
-        raise ValueError(f"Drone update public key is missing: {public_key}")
-    openssl = shutil.which("openssl")
-    if not openssl:
-        raise ValueError("openssl is required to verify Drone update signatures")
-    result = subprocess.run(
-        [
-            openssl,
-            "dgst",
-            "-sha256",
-            "-verify",
-            str(public_key),
-            "-signature",
-            str(signature_path),
-            str(manifest_path),
-        ],
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
-    if result.returncode != 0 or "Verified OK" not in (result.stdout or ""):
-        raise ValueError("Drone release manifest signature verification failed")
-
-
-def _load_release_manifest(manifest_path: Path) -> dict:
-    try:
-        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise ValueError(f"Drone release manifest is invalid: {error}") from error
-    if not isinstance(payload, dict) or payload.get("schema") != 1:
-        raise ValueError("Drone release manifest has an unsupported schema")
-    version = str(payload.get("version") or "")
-    if _semantic_version(version) is None:
-        raise ValueError("Drone release manifest has an invalid version")
-    assets = payload.get("assets")
-    if not isinstance(assets, dict):
-        raise ValueError("Drone release manifest has no asset map")
-    for asset_name, metadata in assets.items():
-        if not isinstance(asset_name, str) or Path(asset_name).name != asset_name:
-            raise ValueError("Drone release manifest contains an unsafe asset name")
-        if not isinstance(metadata, dict):
-            raise ValueError(f"Drone release manifest metadata is invalid for {asset_name}")
-        sha256 = str(metadata.get("sha256") or "")
-        size = metadata.get("size")
-        if not re.fullmatch(r"[0-9a-f]{64}", sha256) or not isinstance(size, int) or size <= 0:
-            raise ValueError(f"Drone release manifest digest is invalid for {asset_name}")
-    if "drone-app.tar.gz" not in assets:
-        raise ValueError("Drone release manifest does not describe drone-app.tar.gz")
-    return payload
-
-
-def _verified_release_manifest(temp_dir: Path) -> dict:
-    manifest_url = os.environ.get("DRONE_UPDATE_MANIFEST_URL", DRONE_LATEST_MANIFEST_URL)
-    signature_url = os.environ.get("DRONE_UPDATE_MANIFEST_SIGNATURE_URL", DRONE_LATEST_MANIFEST_SIGNATURE_URL)
-    manifest_path = temp_dir / "release-manifest.json"
-    signature_path = temp_dir / "release-manifest.sig"
-    _download_file(manifest_url, manifest_path, max_bytes=DRONE_UPDATE_MANIFEST_MAX_BYTES)
-    _download_file(signature_url, signature_path, max_bytes=DRONE_UPDATE_SIGNATURE_MAX_BYTES)
-    _verify_manifest_signature(manifest_path, signature_path)
-    return _load_release_manifest(manifest_path)
-
-
-def _verify_release_asset(path: Path, metadata: dict) -> None:
-    expected_size = int(metadata["size"])
-    actual_size = path.stat().st_size
-    if actual_size != expected_size:
-        raise ValueError(f"Drone archive size mismatch: expected {expected_size}, got {actual_size}")
-    actual_digest = _sha256_file(path)
-    if actual_digest != metadata["sha256"]:
-        raise ValueError("Drone archive SHA-256 verification failed")
-
-
-def _extract_release_archive(archive_path: Path, stage_dir: Path) -> int:
-    wanted_roots = {"app", "content"}
-    extracted_roots = set()
-    copied_files = 0
-    with tarfile.open(archive_path, "r:gz") as archive:
-        for member in archive.getmembers():
-            relative = member.name.lstrip("/")
-            parts = relative.split("/", 1)
-            if parts and parts[0] not in wanted_roots and len(parts) == 2:
-                relative = parts[1]
-                parts = relative.split("/", 1)
-            if not parts or parts[0] not in wanted_roots:
-                continue
-            relative_path = Path(relative)
-            if "__pycache__" in relative_path.parts or member.name.endswith(".pyc"):
-                continue
-            if member.issym() or member.islnk() or member.isdev():
-                raise ValueError(f"archive contains a disallowed special entry: {member.name}")
-            target = (stage_dir / relative_path).resolve()
-            if stage_dir not in target.parents and target != stage_dir:
-                raise ValueError(f"archive member escapes stage directory: {member.name}")
-            extracted_roots.add(parts[0])
-            if member.isdir():
-                target.mkdir(parents=True, exist_ok=True)
-                continue
-            if not member.isfile():
-                raise ValueError(f"archive contains an unsupported entry: {member.name}")
-            source = archive.extractfile(member)
-            if source is None:
-                raise ValueError(f"archive entry could not be read: {member.name}")
-            target.parent.mkdir(parents=True, exist_ok=True)
-            with source, target.open("wb") as output:
-                shutil.copyfileobj(source, output)
-            copied_files += 1
-    missing = wanted_roots - extracted_roots
-    if missing:
-        raise ValueError(f"Drone archive is missing required directories: {', '.join(sorted(missing))}")
-    required = (
-        stage_dir / "app" / "main.py",
-        stage_dir / "app" / "drone_api.py",
-        stage_dir / "app" / "service_bootstrap.sh",
-        stage_dir / "app" / "VERSION",
-    )
-    for path in required:
-        if not path.is_file() or path.stat().st_size <= 0:
-            raise ValueError(f"Drone archive is missing required file: {path.relative_to(stage_dir)}")
-    return copied_files
-
-
-def _activate_release(work_dir: Path, staged_release: Path, release_name: str) -> Path:
-    releases_dir = work_dir / ".releases"
-    releases_dir.mkdir(parents=True, exist_ok=True)
-    final_release = releases_dir / release_name
-    if final_release.exists():
-        shutil.rmtree(staged_release)
-    else:
-        staged_release.replace(final_release)
-
-    current_link = work_dir / "current"
-    temporary_current = work_dir / ".current.new"
-    temporary_current.unlink(missing_ok=True)
-    temporary_current.symlink_to(Path(".releases") / release_name, target_is_directory=True)
-
-    app_path = work_dir / "app"
-    content_path = work_dir / "content"
-    links_ready = app_path.is_symlink() and content_path.is_symlink()
-    if links_ready:
-        os.replace(temporary_current, current_link)
-        return final_release
-
-    legacy_release = releases_dir / f"pre-signed-update-{int(time.time())}"
-    legacy_release.mkdir(parents=True, exist_ok=False)
-    temporary_app = work_dir / ".app.new"
-    temporary_content = work_dir / ".content.new"
-    temporary_app.unlink(missing_ok=True)
-    temporary_content.unlink(missing_ok=True)
-    temporary_app.symlink_to(Path("current") / "app", target_is_directory=True)
-    temporary_content.symlink_to(Path("current") / "content", target_is_directory=True)
-    moved = []
-    try:
-        for name, path in (("app", app_path), ("content", content_path)):
-            if path.exists() or path.is_symlink():
-                destination = legacy_release / name
-                path.replace(destination)
-                moved.append((path, destination))
-        os.replace(temporary_current, current_link)
-        os.replace(temporary_app, app_path)
-        os.replace(temporary_content, content_path)
-    except Exception:
-        temporary_app.unlink(missing_ok=True)
-        temporary_content.unlink(missing_ok=True)
-        app_path.unlink(missing_ok=True)
-        content_path.unlink(missing_ok=True)
-        for original, saved in reversed(moved):
-            if saved.exists() or saved.is_symlink():
-                saved.replace(original)
-        raise
-    return final_release
-
-
 def _download_latest_drone_app_unlocked(settings: Settings) -> dict:
+    archive_url = os.environ.get("DRONE_APP_ARCHIVE_URL", DRONE_LATEST_ARCHIVE_URL)
     work_dir = _drone_work_dir(settings)
     work_dir.mkdir(parents=True, exist_ok=True)
     started_at = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="drone-update-", dir=str(work_dir)) as temp_dir_name:
         temp_dir = Path(temp_dir_name).resolve()
-        manifest = _verified_release_manifest(temp_dir)
-        version = manifest["version"]
-        archive_url = os.environ.get(
-            "DRONE_APP_ARCHIVE_URL",
-            f"{DRONE_RELEASE_DOWNLOAD_ROOT}/{version}/drone-app.tar.gz",
-        )
         archive_path = temp_dir / "drone-app.tar.gz"
-        _download_file(archive_url, archive_path, max_bytes=DRONE_UPDATE_ARCHIVE_MAX_BYTES)
-        _verify_release_asset(archive_path, manifest["assets"]["drone-app.tar.gz"])
-        stage_dir = temp_dir / "release"
+        request = Request(archive_url, headers={"User-Agent": "batocera-drone-self-update"})
+        with urlopen(request, timeout=120) as response:
+            with archive_path.open("wb") as output:
+                shutil.copyfileobj(response, output)
+        if not archive_path.exists() or archive_path.stat().st_size <= 0:
+            raise ValueError("downloaded Drone archive was empty")
+        stage_dir = temp_dir / "stage"
         stage_dir.mkdir()
-        copied_files = _extract_release_archive(archive_path, stage_dir)
-        archive_version = (stage_dir / "app" / "VERSION").read_text(encoding="utf-8").splitlines()[0].strip()
-        if archive_version != version:
-            raise ValueError(f"Drone archive version {archive_version!r} does not match signed manifest {version!r}")
-        release_name = f"{version.lstrip('v')}-{manifest['assets']['drone-app.tar.gz']['sha256'][:12]}"
-        activated_release = _activate_release(work_dir, stage_dir, release_name)
+        wanted_roots = {"app", "content"}
+        extracted_roots = set()
+        with tarfile.open(archive_path, "r:gz") as archive:
+            for member in archive.getmembers():
+                relative = member.name.lstrip("/")
+                parts = relative.split("/", 1)
+                if parts and parts[0] not in wanted_roots and len(parts) == 2:
+                    relative = parts[1]
+                    parts = relative.split("/", 1)
+                if not parts or parts[0] not in wanted_roots:
+                    continue
+                relative_path = Path(relative)
+                if "__pycache__" in relative_path.parts:
+                    continue
+                target = (stage_dir / relative_path).resolve()
+                if stage_dir not in target.parents and target != stage_dir:
+                    raise ValueError(f"archive member escapes stage directory: {member.name}")
+                extracted_roots.add(parts[0])
+                if member.isdir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                source = archive.extractfile(member)
+                if source is None:
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with source, target.open("wb") as output:
+                    shutil.copyfileobj(source, output)
+        missing = wanted_roots - extracted_roots
+        if missing:
+            raise ValueError(f"Drone archive is missing required directories: {', '.join(sorted(missing))}")
+        copied_files = 0
+        for name in sorted(wanted_roots):
+            source = stage_dir / name
+            target = work_dir / name
+            copied_files += _overlay_drone_release_tree(source, target)
     return {
         "status": "downloaded",
         "archive_url": archive_url,
-        "version": version,
         "work_dir": str(work_dir),
-        "release_dir": str(activated_release),
         "copied_files": copied_files,
         "duration_ms": int((time.monotonic() - started_at) * 1000),
         "restart_required": True,

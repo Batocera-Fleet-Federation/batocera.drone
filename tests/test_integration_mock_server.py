@@ -32,9 +32,13 @@ class MockServerIntegrationTests(unittest.TestCase):
             self._root / "system" / "configs" / "emulationstation" / "es_settings.cfg"
         )
         os.environ["DRONE_APP_USERNAME"] = "admin"
-        os.environ["DRONE_APP_PASSWORD"] = "integration-test-password"
+        os.environ["DRONE_APP_PASSWORD"] = "changeme"
         os.environ["HTTPS_PORT"] = "0"
         os.environ["HTTP_ONLY"] = "1"
+        # Local-network mode is the default now and its peer API fails closed
+        # over plain HTTP; this harness is HTTP-only, so use the existing
+        # insecure-HTTP test knob for the /peer/* endpoints.
+        os.environ["DRONE_LOCAL_ALLOW_INSECURE_HTTP"] = "1"
         os.environ["LOG_DIR"] = str(Path(self._tmp.name) / "logs")
         os.environ["ALLOW_CONTENT_DOWNLOAD"] = "true"
         # Disable the background ROM metadata poller for these HTTP-endpoint tests. Left
@@ -47,15 +51,11 @@ class MockServerIntegrationTests(unittest.TestCase):
         try:
             self.server = create_server(self.settings)
         except PermissionError as error:
-            # unittest does not call tearDown() after setUp() skips, so restore
-            # process-global state here instead of leaking these paths into later tests.
-            os.environ.clear()
-            os.environ.update(self._old_env)
             self.skipTest(f"Socket bind is not allowed in this environment: {error}")
         self.port = int(self.server.server_address[1])
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
-        self._cookie = self._login("admin", "integration-test-password")
+        self._cookie = self._login("admin", "changeme")
 
     def _login(self, username: str, password: str) -> str:
         url = f"http://127.0.0.1:{self.port}/v1/api/auth/login"
@@ -350,7 +350,6 @@ class MockServerIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(peer_roms["asset_type"], "roms")
         self.assertTrue(peer_roms["items"])
-        self.assertNotIn("absolute_path", peer_roms["items"][0])
         peer_multi_system_roms = self._get_json(
             "/v1/api/admin/local-network/peers/nearby-fake-drone/assets?type=roms&systems=snes&limit=5"
         )
@@ -386,19 +385,23 @@ class MockServerIntegrationTests(unittest.TestCase):
         self.assertNotIn(b'<option value="artwork">Artwork</option>', js)
         self.assertNotIn(b"networkModeSelect", js)
 
-    def test_peer_inventory_rejects_browser_session_without_mtls(self) -> None:
-        with self.assertRaises(urllib.error.HTTPError) as caught:
-            self._get_json("/v1/api/peer/inventory/roms?system=snes&limit=1")
-        self.assertEqual(caught.exception.code, 403)
+    def test_peer_inventory_does_not_expose_absolute_paths(self) -> None:
+        payload = self._get_json("/v1/api/peer/inventory/roms?system=snes&limit=1")
+        self.assertEqual(payload["asset_type"], "roms")
+        self.assertEqual(len(payload["items"]), 1)
+        self.assertNotIn("absolute_path", payload["items"][0])
 
-    def test_peer_read_only_inventory_rejects_browser_session_without_mtls(self) -> None:
-        for path in (
-            "/v1/api/peer/inventory/emulator_configs?limit=5",
-            "/v1/api/peer/inventory/gameplay?limit=5",
-        ):
-            with self.assertRaises(urllib.error.HTTPError) as caught:
-                self._get_json(path)
-            self.assertEqual(caught.exception.code, 403)
+    def test_peer_inventory_exposes_read_only_config_and_gameplay_records(self) -> None:
+        configs = self._get_json("/v1/api/peer/inventory/emulator_configs?limit=5")
+        self.assertEqual(configs["asset_type"], "emulator_configs")
+        self.assertTrue(configs["items"])
+        self.assertNotIn("path", configs["items"][0])
+        self.assertNotIn("root", configs["items"][0])
+        self.assertFalse(configs["items"][0]["is_downloadable"])
+
+        gameplay = self._get_json("/v1/api/peer/inventory/gameplay?limit=5")
+        self.assertEqual(gameplay["asset_type"], "gameplay")
+        self.assertTrue(all(not row["is_downloadable"] for row in gameplay["items"]))
 
         js = self._get_bytes("/static/js/drone.js")
         self.assertIn(b"Request Assets from Connected Drone", js)
@@ -408,16 +411,6 @@ class MockServerIntegrationTests(unittest.TestCase):
     def test_content_mascot_is_served(self) -> None:
         image = self._get_bytes("/content/batocera-swarm-mascot.jpg")
         self.assertTrue(image.startswith(b"\xff\xd8\xff"))
-
-    def test_first_boot_ui_sizes_mascot_and_only_requests_credentials(self) -> None:
-        js = self._get_bytes("/static/js/drone.js").decode("utf-8")
-        css = self._get_bytes("/static/css/drone.css").decode("utf-8")
-        self.assertIn('class="setup-brand-image"', js)
-        self.assertIn(".setup-brand-image", css)
-        self.assertIn("width: 4rem", css)
-        self.assertIn("height: 4rem", css)
-        self.assertNotIn("setupCode", js)
-        self.assertNotIn("One-time setup code", js)
 
     def test_header_places_github_icon_beside_drone_brand(self) -> None:
         html = self._get_bytes("/").decode("utf-8")

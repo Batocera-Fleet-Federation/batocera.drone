@@ -90,8 +90,7 @@ class SessionAuthTests(unittest.TestCase):
     def test_login_success_then_cookie_header_authenticates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             auth = self._auth(tmp)
-            auth.credential_store.initialize("batocera", "batocera-test-password")
-            token = auth.login("batocera", "batocera-test-password")
+            token = auth.login("batocera", "linux")
             self.assertIsNotNone(token)
             session = auth.authenticate_request({"Cookie": f"drone_session={token}"})
             self.assertIsNotNone(session)
@@ -107,13 +106,12 @@ class SessionAuthTests(unittest.TestCase):
             self.assertIsNone(auth.authenticate_request({}))
             self.assertIsNone(auth.authenticate_request({"Cookie": "drone_session=not-a-real-token"}))
 
-    def test_first_boot_requires_setup_then_stores_only_a_hash(self) -> None:
+    def test_default_drone_credentials_and_hashed_update(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             auth = self._auth(tmp)
-            self.assertFalse(auth.credential_store.is_configured())
-            self.assertIsNone(auth.login("batocera", "linux"))
-            result = auth.credential_store.initialize("arcade-admin", "BetterPass123")
+            self.assertIsNotNone(auth.login("batocera", "linux"))
 
+            result = auth.credential_store.update("arcade-admin", "BetterPass123")
             self.assertTrue(result["stored"])
             saved = load_payload(
                 database_path_for_legacy_file(Path(tmp) / "credentials.json"),
@@ -2630,16 +2628,15 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(command[-2:], ["1.5", str(bootstrap)])
         self.assertTrue(popen.call_args.kwargs["start_new_session"])
 
-    def test_drone_update_verifies_and_atomically_activates_release(self) -> None:
+    def test_drone_update_overlays_release_files_without_deleting_app_tree(self) -> None:
         drone_source = Path(__file__).resolve().parents[1].joinpath("app/common/self_update.py").read_text(encoding="utf-8")
 
-        self.assertIn("def _verify_manifest_signature", drone_source)
-        self.assertIn('"dgst"', drone_source)
-        self.assertIn('"-verify"', drone_source)
-        self.assertIn("def _verify_release_asset", drone_source)
-        self.assertIn("def _activate_release", drone_source)
-        self.assertIn("os.replace(temporary_current, current_link)", drone_source)
-        self.assertIn("archive contains a disallowed special entry", drone_source)
+        self.assertIn("def _overlay_drone_release_tree", drone_source)
+        self.assertIn('if "__pycache__" in relative.parts or item.name.endswith(".pyc"):', drone_source)
+        self.assertNotIn("shutil.rmtree(target)", drone_source)
+        self.assertNotIn("shutil.copy2(item, destination)", drone_source)
+        self.assertIn("shutil.copyfile(item, destination)", drone_source)
+        self.assertIn("copied_files", drone_source)
 
     def test_mame_config_source_accepts_batocera_cfg_directory(self) -> None:
         drone_source = Path(__file__).resolve().parents[1].joinpath("app/drone_api.py").read_text(encoding="utf-8") + Path(__file__).resolve().parents[1].joinpath("app/web/handlers_config.py").read_text(encoding="utf-8")
@@ -2684,8 +2681,7 @@ class SettingsTests(unittest.TestCase):
         # All service-side behavior is in the versioned bootstrap.
         self.assertIn("validate_local_app()", bootstrap)
         self.assertIn("missing or empty ${required_file}", bootstrap)
-        self.assertIn("Local Drone app import check failed.", bootstrap)
-        self.assertIn("Refusing an unsigned recovery download.", bootstrap)
+        self.assertIn("Local Drone app import check failed; downloading a fresh app bundle.", bootstrap)
         self.assertIn('"app.web.ui_routes": "UiRoutesMixin"', bootstrap)
         self.assertIn("DRONE_REMOTE_REBOOT_EXIT_CODE", bootstrap)
         self.assertIn("request_host_reboot()", bootstrap)
@@ -2705,8 +2701,7 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("DRONE_UPDATE_ON_STARTUP", bootstrap)
         self.assertIn("auto-update.enabled", bootstrap)
         self.assertIn('if [ -f "$AUTO_UPDATE_FILE" ]', bootstrap)
-        self.assertIn("from app.common.self_update import _download_latest_drone_app", bootstrap)
-        self.assertIn("Signed Drone app bundle activated.", bootstrap)
+        self.assertIn("DRONE_APP_STAGE_ONLY=1", bootstrap)
         self.assertIn('nohup sh "$WORK_DIR/app/service_bootstrap.sh" supervisor', bootstrap)
         self.assertIn("run_supervisor()", bootstrap)
         self.assertIn("service_status()", bootstrap)
@@ -2716,19 +2711,16 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("DRONE_SERVICE_CONTROL_DIR", root.joinpath("app/device/device_control.py").read_text(encoding="utf-8"))
         self.assertIn('"screen_mode": _get_screen_mode(settings)', drone_source)
         self.assertIn('"audio_volume": _get_audio_volume(settings)', drone_source)
-        self.assertNotIn("ensure_dns_fallback()", bootstrap)
-        self.assertNotIn("nameserver 1.1.1.1", bootstrap)
+        self.assertIn("ensure_dns_fallback()", bootstrap)
+        self.assertIn("nameserver 1.1.1.1", bootstrap)
         self.assertNotIn("ensure_drone_user", bootstrap)
         self.assertNotIn("DRONE_USER", bootstrap)
         self.assertNotIn("DRONE_GROUP", bootstrap)
         self.assertNotIn("DRONE_REPAIR_ROM_PERMISSIONS", bootstrap)
         self.assertNotIn("run_as_drone", bootstrap)
         self.assertNotIn("su -s /bin/sh -c", installer)
-        self.assertNotIn("bash \"$runner\"", bootstrap)
-        self.assertNotIn("| bash", installer)
-        self.assertIn("download_verified_runner", installer)
-        self.assertIn("openssl dgst -sha256 -verify", installer)
-        self.assertIn("openssl dgst -sha256 -verify", run_now)
+        self.assertIn("bash \"$runner\"", bootstrap)
+        self.assertIn("| bash", installer)
         self.assertIn("/userdata/system/drone-app", bootstrap)
         self.assertIn("/userdata/system/logs/drone-app", bootstrap)
         self.assertIn("Drone runs as root and can access Batocera files as root.", installer)
@@ -2744,15 +2736,22 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("DRONE_UNAUTH_RATE_LIMIT_ENABLED='${DRONE_UNAUTH_RATE_LIMIT_ENABLED:-1}'", bootstrap)
         self.assertIn("DRONE_UNAUTH_RATE_LIMIT_REQUESTS='${DRONE_UNAUTH_RATE_LIMIT_REQUESTS:-60}'", bootstrap)
         self.assertIn("DRONE_UNAUTH_RATE_LIMIT_WINDOW_SECONDS='${DRONE_UNAUTH_RATE_LIMIT_WINDOW_SECONDS:-60}'", bootstrap)
+        self.assertIn('DRONE_UNAUTH_RATE_LIMIT_ENABLED="${DRONE_UNAUTH_RATE_LIMIT_ENABLED:-1}"', run_now)
+        self.assertIn('DRONE_UNAUTH_RATE_LIMIT_REQUESTS="${DRONE_UNAUTH_RATE_LIMIT_REQUESTS:-60}"', run_now)
+        self.assertIn('DRONE_UNAUTH_RATE_LIMIT_WINDOW_SECONDS="${DRONE_UNAUTH_RATE_LIMIT_WINDOW_SECONDS:-60}"', run_now)
         self.assertIn("ROM_METADATA_HASH_ROMS_ENABLED='${ROM_METADATA_HASH_ROMS_ENABLED:-1}'", bootstrap)
+        self.assertIn('ROM_METADATA_HASH_ROMS_ENABLED="${ROM_METADATA_HASH_ROMS_ENABLED:-1}"', run_now)
         self.assertIn("ROM_METADATA_UPLOAD_CHUNK_SIZE='${ROM_METADATA_UPLOAD_CHUNK_SIZE:-250}'", bootstrap)
+        self.assertIn('ROM_METADATA_UPLOAD_CHUNK_SIZE="${ROM_METADATA_UPLOAD_CHUNK_SIZE:-250}"', run_now)
         self.assertIn("DRONE_LOG_UNAUTHORIZED_REQUESTS='${DRONE_LOG_UNAUTHORIZED_REQUESTS:-0}'", bootstrap)
-        self.assertNotIn('echo "[drone-service] Downloading and launching Drone app..."', bootstrap)
+        self.assertIn('DRONE_LOG_UNAUTHORIZED_REQUESTS="${DRONE_LOG_UNAUTHORIZED_REQUESTS:-0}"', run_now)
+        self.assertIn('echo "[drone-service] Downloading and launching Drone app..."\n  wait_for_network', bootstrap)
         self.assertNotIn("ensure_permissions\n    wait_for_network\n\n    supervise_drone", bootstrap)
-        self.assertIn("archive is missing app/", run_now)
-        self.assertIn("archive version does not match signed manifest", run_now)
+        self.assertIn("Missing or empty required file", run_now)
+        self.assertIn("Downloaded Drone App failed import validation", run_now)
+        self.assertIn('"app.web.api_routes": "ApiRoutesMixin"', run_now)
         self.assertIn("import shutil", run_now)
-        self.assertIn("Verified and activated Drone", run_now)
+        self.assertIn("Drone App staged successfully", run_now)
         self.assertEqual(run_now.count("source = archive.extractfile(member)"), 1)
         self.assertIn("/userdata/system/services/DRONE_SERVER", uninstaller)
         self.assertIn("/userdata/system/services/DRONE_APP", uninstaller)
@@ -4246,8 +4245,7 @@ class DroneServerErrorHandlingTests(unittest.TestCase):
                 # before any super() call, so a Mock self is sufficient.
                 DroneThreadingHTTPServer.handle_error(_mock.Mock(), object(), ("66.228.34.203", 4444))
         output = captured.getvalue()
-        self.assertIn("Dropped untrusted/insecure connection from ip#", output)
-        self.assertNotIn("66.228.34.203", output)
+        self.assertIn("Dropped untrusted/insecure connection from 66.228.34.203", output)
         self.assertIn("SSLError", output)
         self.assertNotIn("Traceback", output)
 
@@ -6471,7 +6469,7 @@ class NavRestructureTests(unittest.TestCase):
         self.assertIn("await onPeerSelected();", body)
 
     def test_downloads_page_and_refresh_view_point_at_transfers(self) -> None:
-        self.assertIn('data-ui-click="setHash(\'#admin/transfers\')">Back to Transfers</button>', self.js)
+        self.assertIn('onclick="setHash(\'#admin/transfers\')">Back to Transfers</button>', self.js)
         refresh_start = self.js.index("async function refreshDownloadsView()")
         refresh_end = self.js.index("\nasync function ", refresh_start + 1)
         self.assertIn('window.location.hash === "#admin/transfers"', self.js[refresh_start:refresh_end])

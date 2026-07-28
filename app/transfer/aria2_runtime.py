@@ -231,17 +231,10 @@ def _free_localhost_port() -> int:
 class Aria2Daemon:
     """One app-lifetime aria2c daemon: spawn, health-check, expose its RPC."""
 
-    def __init__(
-        self,
-        binary_path: str,
-        download_dir: Path,
-        log_file: Optional[Path] = None,
-        network_interface: Optional[str] = None,
-    ) -> None:
+    def __init__(self, binary_path: str, download_dir: Path, log_file: Optional[Path] = None) -> None:
         self.binary_path = binary_path
         self.download_dir = download_dir
         self.log_file = log_file
-        self.network_interface = str(network_interface or "").strip() or None
         self.process: Optional[subprocess.Popen] = None
         self.rpc: Optional[Aria2Rpc] = None
         self.port: Optional[int] = None
@@ -276,8 +269,6 @@ class Aria2Daemon:
             "--continue=true",
             "--auto-save-interval=30",
             "--bt-save-metadata=false",
-            "--bt-enable-lpd=false",
-            "--disable-ipv6=true",
             # Never mirror RPC-uploaded .torrent metadata into --dir as
             # <infohash>.torrent: the watch folder IS the download folder, so
             # the scanner would re-register aria2's own copy as a new torrent.
@@ -285,8 +276,6 @@ class Aria2Daemon:
             "--summary-interval=0",
             "--quiet=true",
         ]
-        if self.network_interface:
-            args.append(f"--interface={self.network_interface}")
         if self.log_file is not None:
             try:
                 self.log_file.parent.mkdir(parents=True, exist_ok=True)
