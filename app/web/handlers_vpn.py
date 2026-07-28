@@ -71,6 +71,11 @@ class HandlersVpnMixin:
         result = _vpn.set_sharing_enabled(self.settings, bool(payload.get("enabled")))
         self._send_json(200, result)
 
+    def _handle_admin_vpn_self_heal(self, payload: dict) -> None:
+        payload = payload if isinstance(payload, dict) else {}
+        result = _vpn.set_self_heal_enabled(self.settings, bool(payload.get("enabled")))
+        self._send_json(200, result)
+
     def _handle_admin_vpn_pull_from_peer(self, payload: dict) -> None:
         """Pull VPN config (+ credentials) from a paired peer and adopt it locally.
 

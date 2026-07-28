@@ -729,6 +729,10 @@ def _schemas() -> Dict[str, Schema]:
                 "source_peer_name": _string("Display name of source_peer_id's drone, empty if self-uploaded"),
                 "revoked_reason": _string("Set when the source peer stopped sharing and credentials were auto-removed; cleared by the next successful upload/import"),
                 "revoked_at": _string(fmt="date-time", nullable=True),
+                "self_heal_enabled": _boolean("Whether the background watchdog may auto-reconnect on failure; defaults to true"),
+                "self_heal_last_at": _string(fmt="date-time", nullable=True),
+                "self_heal_last_reason": _string("Why the most recent self-heal reconnect fired, e.g. a decrypt/replay error flood"),
+                "self_heal_recent_count": _integer("Self-heal reconnects within the current rate-limit window; the watchdog pauses once this hits the cap"),
                 "connected_at": _string(fmt="date-time", nullable=True),
                 "connected_duration_seconds": _integer(nullable=True),
                 "tunnel_ip": _string(nullable=True),
@@ -761,6 +765,8 @@ def _schemas() -> Dict[str, Schema]:
         ),
         "VpnSharingRequest": _object({"enabled": _boolean()}, ("enabled",)),
         "VpnSharingResponse": _object({"sharing_enabled": _boolean()}, ("sharing_enabled",)),
+        "VpnSelfHealRequest": _object({"enabled": _boolean()}, ("enabled",)),
+        "VpnSelfHealResponse": _object({"self_heal_enabled": _boolean()}, ("self_heal_enabled",)),
         "VpnPullFromPeerRequest": _object(
             {"peer_id": _string("drone_id of a paired peer that has VPN sharing turned on")},
             ("peer_id",),
@@ -1619,6 +1625,9 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             },
             "/admin/vpn/pull-from-peer": {
                 "post": _operation("Pull VPN config (+ credentials, if shared) from a paired peer and adopt it", {"200": _json_response("VpnPullFromPeerResponse"), "404": _json_response("ErrorResponse", "Unknown peer, or that peer has sharing off / no config"), "502": _json_response("ErrorResponse", "Could not reach that peer")}, request_body=_json_request("VpnPullFromPeerRequest"), tags=["admin", "vpn"], error_codes=("400", "401", "403", "404", "429", "500", "502", "503"))
+            },
+            "/admin/vpn/self-heal": {
+                "post": _operation("Toggle automatically reconnecting when the VPN connection fails (decrypt/replay errors or an explicit connection error); on by default", {"200": _json_response("VpnSelfHealResponse")}, request_body=_json_request("VpnSelfHealRequest"), tags=["admin", "vpn"], error_codes=("400", "401", "403", "429", "500", "503"))
             },
             "/admin/vpn/log/download": {
                 "get": _operation("Download the raw openvpn log", {"200": _media_response("Log file", ["text/plain"])}, tags=["admin", "vpn"], error_codes=("401", "403", "404", "429", "500"))

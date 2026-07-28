@@ -10,7 +10,9 @@ import stat
 import subprocess
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import List
 from unittest import mock
 from urllib.error import HTTPError
 
@@ -899,6 +901,227 @@ class BootstrapVpnFromSwarmTests(unittest.TestCase):
             with mock.patch("app.transfer.local_network.paired_peers", return_value=[peer]), \
                     mock.patch("app.transfer.peer_connectivity._peer_get_json_for_peer", side_effect=OSError("unreachable")):
                 self.assertFalse(vpn_manager.bootstrap_vpn_from_swarm(settings))
+
+
+class RecentLogFloodTests(unittest.TestCase):
+    def _settings_with_log(self, tmp: str, log_text: str) -> Settings:
+        settings = _build_settings(self, Path(tmp))
+        vpn_manager.vpn_dir(settings).mkdir(parents=True, exist_ok=True)
+        vpn_manager.log_path(settings).write_text(log_text, encoding="utf-8")
+        return settings
+
+    def test_none_when_log_is_healthy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._settings_with_log(tmp, "Initialization Sequence Completed\n")
+            self.assertIsNone(vpn_manager._recent_log_flood(settings))
+
+    def test_none_when_only_a_few_errors(self) -> None:
+        # A handful of replay errors is normal network jitter, not a real problem.
+        with tempfile.TemporaryDirectory() as tmp:
+            log = "Initialization Sequence Completed\n" + "\n".join(
+                f"2026-07-28 13:51:07 AEAD Decrypt error: bad packet ID (may be a replay): [ #{i} ]" for i in range(3)
+            )
+            settings = self._settings_with_log(tmp, log)
+            self.assertIsNone(vpn_manager._recent_log_flood(settings))
+
+    def test_detects_flood_in_recent_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log = "\n".join(
+                f"2026-07-28 13:51:07 AEAD Decrypt error: bad packet ID (may be a replay): [ #{i} ]" for i in range(20)
+            )
+            settings = self._settings_with_log(tmp, log)
+            result = vpn_manager._recent_log_flood(settings)
+            self.assertIsNotNone(result)
+            self.assertIn("decrypt/replay errors", result)
+
+    def test_old_flood_scrolled_out_of_recent_window_is_ignored(self) -> None:
+        # A burst that already happened and stopped must not look "currently
+        # broken" -- this is the real incident (498 replay errors accumulated
+        # over hours) if it were scanned as a whole rather than recently.
+        with tempfile.TemporaryDirectory() as tmp:
+            flood = "\n".join(f"2026-07-28 12:00:00 AEAD Decrypt error: bad packet ID: [ #{i} ]" for i in range(30))
+            healthy_tail = "\n".join(f"2026-07-28 13:00:{i:02d} some other benign log line {i}" for i in range(50))
+            settings = self._settings_with_log(tmp, flood + "\n" + healthy_tail)
+            self.assertIsNone(vpn_manager._recent_log_flood(settings))
+
+
+class SelfHealReasonTests(unittest.TestCase):
+    def test_none_when_disconnected(self) -> None:
+        # Never second-guess a disconnect -- whether a human did it on purpose
+        # or the sharing-revocation poller did it after wiping credentials.
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            snapshot = {"status": "disconnected", "message": "connection refused", "pid": None}
+            self.assertIsNone(vpn_manager._self_heal_reason(snapshot, settings))
+
+    def test_reason_from_explicit_error_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            snapshot = {"status": "error", "message": "AUTH_FAILED", "pid": 123}
+            self.assertEqual(vpn_manager._self_heal_reason(snapshot, settings), "AUTH_FAILED")
+
+    def test_reason_from_log_flood_while_status_says_connecting(self) -> None:
+        # The real incident: status() reported "connecting", not "error",
+        # because the flood had pushed the success marker out of its own
+        # detection window -- self-heal must catch this case too.
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            vpn_manager.vpn_dir(settings).mkdir(parents=True, exist_ok=True)
+            log = "\n".join(f"2026-07-28 13:51:07 AEAD Decrypt error: bad packet ID: [ #{i} ]" for i in range(20))
+            vpn_manager.log_path(settings).write_text(log, encoding="utf-8")
+            snapshot = {"status": "connecting", "message": "", "pid": 123}
+            self.assertIsNotNone(vpn_manager._self_heal_reason(snapshot, settings))
+
+    def test_none_when_connected_and_healthy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            vpn_manager.vpn_dir(settings).mkdir(parents=True, exist_ok=True)
+            vpn_manager.log_path(settings).write_text("Initialization Sequence Completed\n", encoding="utf-8")
+            snapshot = {"status": "connected", "message": "", "pid": 123}
+            self.assertIsNone(vpn_manager._self_heal_reason(snapshot, settings))
+
+    def test_none_without_a_pid_even_if_status_says_connecting(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            snapshot = {"status": "connecting", "message": "", "pid": None}
+            self.assertIsNone(vpn_manager._self_heal_reason(snapshot, settings))
+
+
+class ReconnectTests(unittest.TestCase):
+    def test_calls_disconnect_then_connect_in_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            calls: List[str] = []
+            with mock.patch.object(vpn_manager, "disconnect", side_effect=lambda s: (calls.append("disconnect"), {"status": "not_running"})[1]), \
+                    mock.patch.object(vpn_manager, "connect", side_effect=lambda s: (calls.append("connect"), {"status": "connecting"})[1]):
+                result = vpn_manager.reconnect(settings)
+            self.assertEqual(calls, ["disconnect", "connect"])
+            self.assertEqual(result["status"], "connecting")
+
+
+class CheckAndSelfHealTests(unittest.TestCase):
+    def _ready_settings(self, tmp: str) -> Settings:
+        settings = _build_settings(self, Path(tmp))
+        vpn_manager.save_uploaded_config(settings, "client.ovpn", SAMPLE_OVPN.encode())
+        vpn_manager.save_credentials(settings, "user", "pass")
+        return settings
+
+    def test_noop_when_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._ready_settings(tmp)
+            vpn_manager.set_self_heal_enabled(settings, False)
+            with mock.patch.object(vpn_manager, "status", return_value={"status": "error", "message": "boom", "pid": 1}), \
+                    mock.patch.object(vpn_manager, "reconnect") as reconnect:
+                self.assertIsNone(vpn_manager.check_and_self_heal(settings))
+            reconnect.assert_not_called()
+
+    def test_noop_when_not_configured(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))  # no config/credentials at all
+            with mock.patch.object(vpn_manager, "reconnect") as reconnect:
+                self.assertIsNone(vpn_manager.check_and_self_heal(settings))
+            reconnect.assert_not_called()
+
+    def test_noop_when_healthy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._ready_settings(tmp)
+            with mock.patch.object(vpn_manager, "status", return_value={"status": "connected", "message": "", "pid": 1}), \
+                    mock.patch.object(vpn_manager, "reconnect") as reconnect:
+                self.assertIsNone(vpn_manager.check_and_self_heal(settings))
+            reconnect.assert_not_called()
+
+    def test_noop_when_disconnected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._ready_settings(tmp)
+            with mock.patch.object(vpn_manager, "status", return_value={"status": "disconnected", "message": "", "pid": None}), \
+                    mock.patch.object(vpn_manager, "reconnect") as reconnect:
+                self.assertIsNone(vpn_manager.check_and_self_heal(settings))
+            reconnect.assert_not_called()
+
+    def test_reconnects_on_error_and_records_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._ready_settings(tmp)
+            with mock.patch.object(vpn_manager, "status", return_value={"status": "error", "message": "TLS Error", "pid": 1}), \
+                    mock.patch.object(vpn_manager, "reconnect", return_value={"status": "connecting"}) as reconnect:
+                result = vpn_manager.check_and_self_heal(settings)
+            reconnect.assert_called_once_with(settings)
+            self.assertEqual(result["action"], "reconnected")
+            self.assertEqual(result["reason"], "TLS Error")
+            state = vpn_manager._load_state(settings)
+            self.assertEqual(state["self_heal_last_reason"], "TLS Error")
+            self.assertIsNotNone(state["self_heal_last_at"])
+            self.assertEqual(len(state["self_heal_attempts"]), 1)
+
+    def test_rate_limited_too_soon_after_last_heal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._ready_settings(tmp)
+            now_iso = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+            vpn_manager._save_state(settings, self_heal_last_at=now_iso, self_heal_attempts=[now_iso])
+            with mock.patch.object(vpn_manager, "status", return_value={"status": "error", "message": "boom", "pid": 1}), \
+                    mock.patch.object(vpn_manager, "reconnect") as reconnect:
+                self.assertIsNone(vpn_manager.check_and_self_heal(settings))
+            reconnect.assert_not_called()
+
+    def test_reconnects_again_once_the_min_interval_elapses(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._ready_settings(tmp)
+            stale = (datetime.now(timezone.utc) - timedelta(seconds=vpn_manager.VPN_SELF_HEAL_MIN_INTERVAL_SECONDS + 5)).replace(microsecond=0).isoformat()
+            vpn_manager._save_state(settings, self_heal_last_at=stale, self_heal_attempts=[stale])
+            with mock.patch.object(vpn_manager, "status", return_value={"status": "error", "message": "boom", "pid": 1}), \
+                    mock.patch.object(vpn_manager, "reconnect", return_value={"status": "connecting"}) as reconnect:
+                result = vpn_manager.check_and_self_heal(settings)
+            reconnect.assert_called_once()
+            self.assertEqual(result["action"], "reconnected")
+
+    def test_pauses_after_hitting_the_window_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._ready_settings(tmp)
+            now = datetime.now(timezone.utc)
+            # Old enough to clear the min-interval cooldown, recent enough to
+            # still count against the rolling-window cap.
+            stale_enough = (now - timedelta(seconds=vpn_manager.VPN_SELF_HEAL_MIN_INTERVAL_SECONDS + 5)).replace(microsecond=0).isoformat()
+            attempts = [stale_enough] * vpn_manager.VPN_SELF_HEAL_MAX_ATTEMPTS_PER_WINDOW
+            vpn_manager._save_state(settings, self_heal_last_at=stale_enough, self_heal_attempts=attempts)
+            with mock.patch.object(vpn_manager, "status", return_value={"status": "error", "message": "boom", "pid": 1}), \
+                    mock.patch.object(vpn_manager, "reconnect") as reconnect:
+                result = vpn_manager.check_and_self_heal(settings)
+            reconnect.assert_not_called()
+            self.assertEqual(result["action"], "paused")
+
+    def test_cap_ages_out_and_self_heal_resumes_later(self) -> None:
+        # The cap is a temporary backoff, not a permanent give-up.
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._ready_settings(tmp)
+            long_ago = (datetime.now(timezone.utc) - timedelta(seconds=vpn_manager.VPN_SELF_HEAL_WINDOW_SECONDS + 60)).replace(microsecond=0).isoformat()
+            attempts = [long_ago] * vpn_manager.VPN_SELF_HEAL_MAX_ATTEMPTS_PER_WINDOW
+            vpn_manager._save_state(settings, self_heal_last_at=long_ago, self_heal_attempts=attempts)
+            with mock.patch.object(vpn_manager, "status", return_value={"status": "error", "message": "boom", "pid": 1}), \
+                    mock.patch.object(vpn_manager, "reconnect", return_value={"status": "connecting"}) as reconnect:
+                result = vpn_manager.check_and_self_heal(settings)
+            reconnect.assert_called_once()
+            self.assertEqual(result["action"], "reconnected")
+
+    def test_never_raises_on_unexpected_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._ready_settings(tmp)
+            with mock.patch.object(vpn_manager, "status", side_effect=RuntimeError("boom")):
+                self.assertIsNone(vpn_manager.check_and_self_heal(settings))
+
+
+class SetSelfHealEnabledTests(unittest.TestCase):
+    def test_defaults_to_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            self.assertTrue(vpn_manager.status(settings)["self_heal_enabled"])
+
+    def test_can_be_disabled_and_reenabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            result = vpn_manager.set_self_heal_enabled(settings, False)
+            self.assertFalse(result["self_heal_enabled"])
+            self.assertFalse(vpn_manager._load_state(settings)["self_heal_enabled"])
+            result = vpn_manager.set_self_heal_enabled(settings, True)
+            self.assertTrue(result["self_heal_enabled"])
 
 
 if __name__ == "__main__":

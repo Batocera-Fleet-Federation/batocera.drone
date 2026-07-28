@@ -230,6 +230,26 @@ class VpnSharingHandlerTests(unittest.TestCase):
             self.assertTrue(payload["sharing_enabled"])
             self.assertTrue(vpn_manager._load_state(settings)["sharing_enabled"])
 
+
+class VpnSelfHealHandlerTests(unittest.TestCase):
+    def test_disables_self_heal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            handler = _handler(settings)
+            handler._handle_admin_vpn_self_heal({"enabled": False})
+            status, payload = handler.response
+            self.assertEqual(status, 200)
+            self.assertFalse(payload["self_heal_enabled"])
+            self.assertFalse(vpn_manager._load_state(settings)["self_heal_enabled"])
+
+    def test_defaults_to_enabled_in_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            handler = _handler(settings)
+            handler._handle_admin_vpn_status()
+            _status, payload = handler.response
+            self.assertTrue(payload["self_heal_enabled"])
+
     def test_rejects_sharing_for_imported_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(self, Path(tmp))

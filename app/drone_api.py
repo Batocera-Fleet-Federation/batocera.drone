@@ -881,6 +881,7 @@ _DOWNLOAD_MANAGER = None
 _TORRENT_MANAGER = None
 _VPN_AUTO_CONNECT_ATTEMPTED = False
 _VPN_SHARING_POLLER_STARTED = False
+_VPN_SELF_HEAL_POLLER_STARTED = False
 # _PERFORMANCE_METRICS_LAST_SAMPLE moved to device/system_metrics.py.
 # LAUNCHBOX_API_BASE / LAUNCHBOX_IMAGE_BASE / SCRAPER_USER_AGENT moved to scrapers.py.
 try:  # ARTWORK_FIELDS now lives in roms/gamelist.py (re-exported for back-compat)
@@ -1846,7 +1847,7 @@ def _apply_server_tls(settings: Settings, server: ThreadingHTTPServer, *, peer_m
 
 
 def create_server(settings: Settings) -> ThreadingHTTPServer:
-    global _ROM_METADATA_POLLER_STARTED, _ROM_METADATA_WATCHER_STARTED, _LOCAL_NETWORK_WORKERS_STARTED, _GAME_PROCESS_MONITOR_STARTED, _GAME_PROCESS_MONITOR, _DOWNLOAD_MANAGER, _TORRENT_MANAGER, _AUTOMATION_POLLER_STARTED, _VPN_AUTO_CONNECT_ATTEMPTED, _VPN_SHARING_POLLER_STARTED
+    global _ROM_METADATA_POLLER_STARTED, _ROM_METADATA_WATCHER_STARTED, _LOCAL_NETWORK_WORKERS_STARTED, _GAME_PROCESS_MONITOR_STARTED, _GAME_PROCESS_MONITOR, _DOWNLOAD_MANAGER, _TORRENT_MANAGER, _AUTOMATION_POLLER_STARTED, _VPN_AUTO_CONNECT_ATTEMPTED, _VPN_SHARING_POLLER_STARTED, _VPN_SELF_HEAL_POLLER_STARTED
     roms_root, bios_root = _real_data_roots(settings)
     repository = RomRepository(
         roms_root,
@@ -1896,6 +1897,13 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
         # sharing is to periodically ask it (Drones are outbound-only, no push
         # channel) -- see run_sharing_revocation_poller's own docstring.
         Thread(target=_vpn_manager.run_sharing_revocation_poller, args=(settings,), name="drone-vpn-sharing-revocation", daemon=True).start()
+    if not _VPN_SELF_HEAL_POLLER_STARTED:
+        _VPN_SELF_HEAL_POLLER_STARTED = True
+        # Backgrounded forever-loop: detects and recovers from a broken tunnel
+        # (explicit connection errors, or a decrypt/replay-error flood) without
+        # anyone needing to notice and manually reconnect -- see
+        # run_self_heal_poller's own docstring for the rate-limiting.
+        Thread(target=_vpn_manager.run_self_heal_poller, args=(settings,), name="drone-vpn-self-heal", daemon=True).start()
     _ensure_game_event_spool(settings)
     if not _GAME_PROCESS_MONITOR_STARTED:
         poll_seconds = max(0.25, float(os.environ.get("GAME_PROCESS_POLL_SECONDS", "2")))

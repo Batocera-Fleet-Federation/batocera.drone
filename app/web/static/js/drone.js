@@ -3601,12 +3601,27 @@ function renderVpnRevokedNotice(payload) {
   return `<div class="alert alert-warning py-2 mb-3"><i class="bi bi-shield-exclamation me-1"></i><strong>VPN credentials removed${when}:</strong> ${escapeHtml(payload.revoked_reason)}</div>`;
 }
 
+// Same live-polled-region reasoning as renderVpnRevokedNotice above -- the
+// self-heal watchdog can reconnect at any time, not just while this page is
+// open. Styled as a quiet FYI rather than a warning: a successful self-heal
+// is the system working as intended, not a problem needing attention.
+function renderVpnSelfHealNote(payload) {
+  if (!payload.self_heal_last_at) return "";
+  const when = escapeHtml(formatCompactLocalDate(payload.self_heal_last_at));
+  const reason = escapeHtml(payload.self_heal_last_reason || "a connection problem");
+  const recentNote = (payload.self_heal_recent_count || 0) > 1
+    ? ` <span class="text-warning">Reconnected ${payload.self_heal_recent_count} times recently &mdash; if this keeps happening, something's likely still wrong.</span>`
+    : "";
+  return `<div class="small text-muted mb-3"><i class="bi bi-arrow-repeat me-1"></i>Auto-reconnected ${when} after: ${reason}.${recentNote}</div>`;
+}
+
 // First mount only: builds the stable skeleton. Later updates go through
 // patchVpnLive, which never recreates these container nodes -- the same
 // flash-free pattern as the Torrents grid's 3s auto-refresh.
 function renderVpnLive(payload) {
   return `
     <div id="vpnRevokedNotice">${renderVpnRevokedNotice(payload)}</div>
+    <div id="vpnSelfHealNote">${renderVpnSelfHealNote(payload)}</div>
     <div id="vpnValidationErrors">${renderVpnValidationErrors(payload)}</div>
     <div id="vpnActions">${renderVpnActions(payload)}</div>
     <div id="vpnStatusCards" class="row g-3 mb-3">${renderVpnStatusCards(payload)}</div>
@@ -3619,6 +3634,8 @@ function renderVpnLive(payload) {
 function patchVpnLive(payload) {
   const revokedNode = document.getElementById("vpnRevokedNotice");
   if (revokedNode) revokedNode.innerHTML = renderVpnRevokedNotice(payload);
+  const selfHealNode = document.getElementById("vpnSelfHealNote");
+  if (selfHealNode) selfHealNode.innerHTML = renderVpnSelfHealNote(payload);
   const errorsNode = document.getElementById("vpnValidationErrors");
   if (errorsNode) errorsNode.innerHTML = renderVpnValidationErrors(payload);
   const actionsNode = document.getElementById("vpnActions");
@@ -3679,6 +3696,15 @@ async function renderVpnPage() {
           </div>
         </div>
         <button class="btn btn-primary btn-sm" type="button" id="vpnCredentialsSaveBtn" onclick="saveVpnCredentials()"><i class="bi bi-save me-1"></i>Save</button>
+      </div>
+    </div>
+    <div class="card mb-3">
+      <div class="card-body">
+        <div class="form-check form-switch">
+          <input class="form-check-input" type="checkbox" role="switch" id="vpnSelfHeal" ${payload.self_heal_enabled ? "checked" : ""} onchange="setVpnSelfHeal(this.checked)">
+          <label class="form-check-label" for="vpnSelfHeal">Automatically reconnect if the VPN connection fails</label>
+        </div>
+        <p class="text-muted small mb-0 mt-1">Watches for connection errors and decrypt/replay-error floods and reconnects on its own, rate-limited so a persistent problem can't loop forever. On by default.</p>
       </div>
     </div>
     <div class="card mb-3">
@@ -3837,6 +3863,17 @@ async function setVpnSharing(enabled) {
   } catch (err) {
     if (checkbox) checkbox.checked = !enabled;
     showToast(`Failed to save sharing setting: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  }
+}
+
+async function setVpnSelfHeal(enabled) {
+  const checkbox = document.getElementById("vpnSelfHeal");
+  try {
+    await apiPost("/admin/vpn/self-heal", { enabled });
+    showToast(`VPN auto-reconnect ${enabled ? "enabled" : "disabled"}.`, "success");
+  } catch (err) {
+    if (checkbox) checkbox.checked = !enabled;
+    showToast(`Failed to save auto-reconnect setting: ${escapeHtml(err.message || "unknown error")}`, "danger");
   }
 }
 

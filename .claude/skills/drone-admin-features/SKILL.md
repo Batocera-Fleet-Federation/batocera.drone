@@ -168,10 +168,16 @@ fresh on every request (`/proc` scan for the running PID, tail the log, query
 card adds P2P sharing to a paired peer: an
 off-by-default toggle (`sharing_enabled`) plus a "Pull Configuration" picker
 that fetches another paired drone's config+credentials over the same
-mTLS `/peer/*` channel ROM/BIOS transfers use. See the dedicated
-**drone-vpn-management** skill for the config rewrite rules, credential
-storage, process-management design, and the peer-sharing design (including
-why it's gated on top of plain pairing, unlike every other asset type).
+mTLS `/peer/*` channel ROM/BIOS transfers use. A separate, default-on
+"Automatically reconnect if the VPN connection fails" toggle
+(`self_heal_enabled`) drives a background watchdog that detects both explicit
+connection errors and a decrypt/replay-error flood in the log, then
+reconnects on its own -- rate-limited so it can't loop forever against a
+persistently broken connection. See the dedicated **drone-vpn-management**
+skill for the config rewrite rules, credential storage, process-management
+design, the peer-sharing design (including why it's gated on top of plain
+pairing, unlike every other asset type), and the self-heal detection/backoff
+design.
 
 ### Automation (top-level navbar tab, not an admin tile)
 

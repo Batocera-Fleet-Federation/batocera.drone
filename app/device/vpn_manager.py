@@ -41,7 +41,7 @@ import signal
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Lock
 from typing import List, Optional
@@ -76,6 +76,26 @@ VPN_LOG_TAIL_LINES_FOR_DISPLAY = 200
 VPN_LOG_TAIL_LINES_FOR_DETECTION = 400
 VPN_LOG_TAIL_MAX_BYTES = 256 * 1024
 VPN_STATUSES = ("disconnected", "connecting", "connected", "error")
+
+# Self-heal watchdog: how often the background poller checks, how long it
+# waits between actual reconnect actions, and the rolling-window cap that
+# stops it from hammering a persistently-broken connection (or the VPN
+# provider's server) forever. The cap ages out on its own as old attempts
+# fall out of the window -- this is a temporary backoff, not a permanent
+# give-up; see run_self_heal_poller()'s docstring.
+VPN_SELF_HEAL_CHECK_INTERVAL_SECONDS = float(os.environ.get("DRONE_VPN_SELF_HEAL_CHECK_INTERVAL_SECONDS", "60"))
+VPN_SELF_HEAL_MIN_INTERVAL_SECONDS = float(os.environ.get("DRONE_VPN_SELF_HEAL_MIN_INTERVAL_SECONDS", "120"))
+VPN_SELF_HEAL_MAX_ATTEMPTS_PER_WINDOW = int(os.environ.get("DRONE_VPN_SELF_HEAL_MAX_ATTEMPTS_PER_WINDOW", "5"))
+VPN_SELF_HEAL_WINDOW_SECONDS = float(os.environ.get("DRONE_VPN_SELF_HEAL_WINDOW_SECONDS", "1800"))
+
+# A healthy, already-connected tunnel logs almost nothing -- openvpn only
+# writes on events. So if the *most recent* log lines are dominated by this
+# repeating warning, that's a strong signal something is actively wrong right
+# now, without needing to parse log timestamps: a one-off blip a while ago
+# would have scrolled out of such a short, recent window on its own.
+_UNHEALTHY_LOG_PATTERNS = ("AEAD Decrypt error", "bad packet ID")
+_UNHEALTHY_LOG_WINDOW_LINES = 40
+_UNHEALTHY_LOG_MIN_MATCHES = 10
 
 _CONNECT_LOCK = Lock()
 
@@ -135,6 +155,11 @@ def _load_state(settings: Settings) -> dict:
         "source_peer_name": str(stored.get("source_peer_name") or ""),
         "revoked_reason": str(stored.get("revoked_reason") or ""),
         "revoked_at": stored.get("revoked_at"),
+        # Default True: self-healing is opt-out, not opt-in.
+        "self_heal_enabled": bool(stored.get("self_heal_enabled", True)),
+        "self_heal_last_at": stored.get("self_heal_last_at"),
+        "self_heal_last_reason": str(stored.get("self_heal_last_reason") or ""),
+        "self_heal_attempts": [str(item) for item in (stored.get("self_heal_attempts") or []) if str(item or "").strip()],
     }
 
 
@@ -464,6 +489,11 @@ def set_sharing_enabled(settings: Settings, enabled: bool) -> dict:
     return {"sharing_enabled": state["sharing_enabled"]}
 
 
+def set_self_heal_enabled(settings: Settings, enabled: bool) -> dict:
+    state = _save_state(settings, self_heal_enabled=bool(enabled))
+    return {"self_heal_enabled": state["self_heal_enabled"]}
+
+
 # ----------------------------------------------------------------- status
 
 
@@ -561,6 +591,10 @@ def status(settings: Settings) -> dict:
         "source_peer_name": state["source_peer_name"],
         "revoked_reason": state["revoked_reason"],
         "revoked_at": state["revoked_at"],
+        "self_heal_enabled": state["self_heal_enabled"],
+        "self_heal_last_at": state["self_heal_last_at"],
+        "self_heal_last_reason": state["self_heal_last_reason"],
+        "self_heal_recent_count": len(_prune_self_heal_attempts(state["self_heal_attempts"], datetime.now(timezone.utc))),
         "connected_at": connected_at,
         "connected_duration_seconds": connected_duration_seconds,
         "tunnel_ip": tunnel_ip,
@@ -740,3 +774,149 @@ def run_sharing_revocation_poller(settings: Settings) -> None:
     while True:
         time.sleep(interval)
         check_sharing_revocation(settings)
+
+
+# ------------------------------------------------------------ self-heal
+
+
+def reconnect(settings: Settings) -> dict:
+    """Disconnect (if running) and connect fresh, as one operation.
+
+    No extra locking here on top of what ``connect``/``disconnect`` already do
+    individually -- ``_CONNECT_LOCK`` is a plain, non-reentrant ``Lock``, so
+    wrapping both calls in it too would deadlock.
+    """
+    disconnect(settings)
+    return connect(settings)
+
+
+def _recent_log_flood(settings: Settings) -> Optional[str]:
+    """Return a description if the most recent log lines are dominated by a
+    repeating decrypt/replay error, else None.
+
+    A healthy, already-connected tunnel logs almost nothing -- openvpn only
+    writes on events -- so this only looks at a short, *recent* window rather
+    than the whole log: a burst that already happened and stopped scrolls out
+    of it on its own, exactly like the real incident that prompted this
+    (498 replay errors accumulated over hours would otherwise permanently look
+    "unhealthy" long after the fact if we scanned the whole log).
+    """
+    lines = _log_lines(settings, _UNHEALTHY_LOG_WINDOW_LINES)
+    if not lines:
+        return None
+    matches = sum(1 for line in lines if any(pattern in line for pattern in _UNHEALTHY_LOG_PATTERNS))
+    if matches >= _UNHEALTHY_LOG_MIN_MATCHES:
+        return f"{matches} decrypt/replay errors in the last {len(lines)} log lines"
+    return None
+
+
+def _self_heal_reason(snapshot: dict, settings: Settings) -> Optional[str]:
+    """Why (if at all) the current status warrants a self-heal reconnect.
+
+    Deliberately never fires on "disconnected" -- that's either a user who
+    disconnected on purpose, or the sharing-revocation poller's own intentional
+    disconnect after credentials were wiped (see check_sharing_revocation);
+    self-heal must not fight either of those. "connecting"/"connected" are
+    both checked for the log-flood pattern because the real incident that
+    prompted this feature showed as "connecting" (the flood had pushed the
+    success marker out of the status detector's own tail window) rather than
+    the "error" status a human might expect.
+    """
+    status_value = snapshot.get("status")
+    if status_value == "disconnected":
+        return None
+    if status_value == "error":
+        return str(snapshot.get("message") or "connection error")
+    if status_value in ("connecting", "connected") and snapshot.get("pid"):
+        return _recent_log_flood(settings)
+    return None
+
+
+def _prune_self_heal_attempts(attempts: List[str], now: datetime) -> List[str]:
+    cutoff = now - timedelta(seconds=VPN_SELF_HEAL_WINDOW_SECONDS)
+    kept = []
+    for raw in attempts:
+        try:
+            parsed = datetime.fromisoformat(raw)
+        except ValueError:
+            continue
+        if parsed >= cutoff:
+            kept.append(raw)
+    return kept
+
+
+def check_and_self_heal(settings: Settings) -> Optional[dict]:
+    """Periodic watchdog: reconnect if the VPN is unhealthy for any detected
+    reason (see ``_self_heal_reason``). Self-healing is opt-out, not opt-in --
+    ``self_heal_enabled`` defaults to True.
+
+    Rate-limited two ways so this can never hammer the VPN provider or spin
+    the CPU: at most one reconnect per ``VPN_SELF_HEAL_MIN_INTERVAL_SECONDS``,
+    and at most ``VPN_SELF_HEAL_MAX_ATTEMPTS_PER_WINDOW`` within a rolling
+    ``VPN_SELF_HEAL_WINDOW_SECONDS`` window. The window cap is a *temporary*
+    backoff, not a permanent give-up -- old attempts age out on their own, so
+    a connection that's still bad an hour from now gets tried again rather
+    than staying disconnected forever; see the drone-vpn-management skill for
+    why this is deliberately not smarter than that (e.g. it does not try a
+    different server -- reconnecting to the same broken setup will keep
+    re-triggering until the underlying cause is actually fixed).
+
+    Never raises -- intended for an unattended background poller.
+    """
+    try:
+        state = _load_state(settings)
+        if not state["self_heal_enabled"]:
+            return None
+        if not state["has_config"] or not state["has_credentials"]:
+            return None
+
+        reason = _self_heal_reason(status(settings), settings)
+        if reason is None:
+            return None
+
+        now = datetime.now(timezone.utc)
+        last_at = state["self_heal_last_at"]
+        if last_at:
+            try:
+                elapsed = (now - datetime.fromisoformat(last_at)).total_seconds()
+                if elapsed < VPN_SELF_HEAL_MIN_INTERVAL_SECONDS:
+                    return None
+            except ValueError:
+                pass
+
+        attempts = _prune_self_heal_attempts(state["self_heal_attempts"], now)
+        if len(attempts) >= VPN_SELF_HEAL_MAX_ATTEMPTS_PER_WINDOW:
+            _save_state(settings, self_heal_attempts=attempts)
+            print(
+                f"VPN self-heal: pausing after {len(attempts)} reconnects in "
+                f"{int(VPN_SELF_HEAL_WINDOW_SECONDS / 60)} min -- most recent cause: {reason}",
+                file=sys.stderr, flush=True,
+            )
+            return {"action": "paused", "reason": reason}
+
+        attempts.append(now.replace(microsecond=0).isoformat())
+        result = reconnect(settings)
+        _save_state(
+            settings,
+            self_heal_last_at=now.replace(microsecond=0).isoformat(),
+            self_heal_last_reason=reason,
+            self_heal_attempts=attempts,
+        )
+        print(f"VPN self-heal: reconnected after detecting: {reason}", file=sys.stdout, flush=True)
+        return {"action": "reconnected", "reason": reason, "result": result}
+    except Exception as error:
+        print(f"VPN self-heal check failed: {error.__class__.__name__}: {error}", file=sys.stderr, flush=True)
+        return None
+
+
+def run_self_heal_poller(settings: Settings) -> None:
+    """Forever-loop calling check_and_self_heal on a fixed cadence.
+
+    Started as its own daemon thread from create_server(), same pattern as
+    run_sharing_revocation_poller -- a separate, narrowly-scoped background
+    loop per concern rather than one combined poller, matching this module's
+    existing style.
+    """
+    while True:
+        time.sleep(VPN_SELF_HEAL_CHECK_INTERVAL_SECONDS)
+        check_and_self_heal(settings)

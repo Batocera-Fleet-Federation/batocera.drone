@@ -1,6 +1,6 @@
 ---
 name: drone-vpn-management
-description: Use this when designing, reviewing, debugging, or modifying the Drone's VPN admin tile — OpenVPN client configuration/connection management, .ovpn upload and rewriting, VPN credential storage, connect/disconnect process control, VPN status detection, connecting automatically on Drone startup (unconditional + retried, no opt-in toggle), peer-to-peer VPN config/credential sharing between paired drones (single-hop-only provenance, share-revocation auto-disconnect/wipe), or app/device/vpn_manager.py, web/handlers_vpn.py, web/handlers_peer.py's _handle_peer_vpn_config.
+description: Use this when designing, reviewing, debugging, or modifying the Drone's VPN admin tile — OpenVPN client configuration/connection management, .ovpn upload and rewriting, VPN credential storage, connect/disconnect process control, VPN status detection, connecting automatically on Drone startup (unconditional + retried, no opt-in toggle), self-healing/auto-reconnect on connection failure or a decrypt/replay-error flood (default-on, rate-limited), peer-to-peer VPN config/credential sharing between paired drones (single-hop-only provenance, share-revocation auto-disconnect/wipe), or app/device/vpn_manager.py, web/handlers_vpn.py, web/handlers_peer.py's _handle_peer_vpn_config.
 ---
 
 # Drone VPN Management Skill
@@ -429,8 +429,88 @@ Key design decisions, and why:
   transfer). Only the terminal outcome is logged: which peer's config was
   adopted, or nothing at startup.
 
+## Self-heal: detect a broken tunnel and reconnect automatically
+
+Added 2026-07-28 after a real live incident: two Drones behind the same home
+router, both authenticated to the identical ProtonVPN credentials *and* the
+identical server node (a side effect of swarm VPN sharing propagating the
+whole `.ovpn`, server included, not just credentials -- see "Swarm bootstrap"
+above), produced a sustained flood of `AEAD Decrypt error: bad packet ID`
+lines on one of them for hours. Nothing noticed or recovered; a human had to
+find it by reading the raw openvpn log. User's explicit ask: default-on,
+toggleable-off, general-purpose self-healing -- "for any reason," not just
+this one incident's exact signature.
+
+**Detection (`_self_heal_reason`, `_recent_log_flood`)** covers two cases,
+deliberately scoped to what's actually observable rather than active network
+probing (e.g. no ping-through-the-tunnel check -- that would be a materially
+bigger feature than "notice openvpn's own signals"):
+
+1. `status()` already says `"error"` (the existing `_FAILURE_MARKERS`:
+   `AUTH_FAILED`, TLS errors, connection refused, etc.) -- self-heal is the
+   first thing that actually *acts* on this; previously a human had to notice
+   and click Connect again.
+2. **A repeating-error flood in the *most recent* log lines**, checked
+   regardless of what `status()` itself reports -- this is what actually
+   catches the incident above, where `status()` reported `"connecting"` (not
+   `"error"`) because the flood of error lines had pushed the
+   `_SUCCESS_MARKER` out of `status()`'s own 400-line detection tail. Only the
+   last `_UNHEALTHY_LOG_WINDOW_LINES` (40) are scanned, not the whole log,
+   specifically so a burst that already happened and stopped ages out on its
+   own -- a healthy, already-connected tunnel logs almost nothing, so a recent
+   window dominated by this pattern is a strong "actively broken right now"
+   signal without needing to parse log timestamps.
+
+**`"disconnected"` never triggers self-heal, on purpose** -- it's either a
+human who disconnected deliberately, or `check_sharing_revocation`'s own
+intentional disconnect after wiping credentials it no longer has any right to
+use. Self-healing either of those would be a real bug, not a feature. This is
+why `check_and_self_heal` also independently gates on `has_config`/
+`has_credentials` -- there is nothing to reconnect *with* once revoked, so it
+can never fight the revocation flow.
+
+**Rate-limited two independent ways**, because a background watchdog with no
+brake is how you get a reconnect storm against your own VPN provider:
+`VPN_SELF_HEAL_MIN_INTERVAL_SECONDS` (120s) between any two actual reconnect
+actions, and `VPN_SELF_HEAL_MAX_ATTEMPTS_PER_WINDOW` (5) inside a rolling
+`VPN_SELF_HEAL_WINDOW_SECONDS` (30 min). The window cap is a **temporary**
+backoff, not a permanent give-up -- attempts age out of the rolling window on
+their own (`_prune_self_heal_attempts`), so a connection still broken an hour
+later gets tried again rather than staying down forever with no path back
+except a manual click or a full restart. `run_self_heal_poller` checks every
+`VPN_SELF_HEAL_CHECK_INTERVAL_SECONDS` (60s) -- its own daemon thread, started
+from `create_server()` exactly like the sharing-revocation poller, not folded
+into that poller's slower 5-minute cadence (different concern, different
+natural interval, matches this module's existing one-thread-per-concern
+style).
+
+**Honest limitation, worth restating to a user who reports a similar
+incident**: self-heal is disconnect-then-reconnect to the *same* config. For
+a genuinely transient failure (a network blip, a momentary provider hiccup)
+that's exactly the right fix. For the incident that prompted this feature,
+reconnecting alone does **not** actually resolve the root cause -- both
+Drones will keep landing on the same colliding server node and the flood will
+likely resume, bounded only by the rate limit above. Self-heal is a safety
+net and a diagnostic signal (`self_heal_last_reason`/`self_heal_recent_count`
+in `status()`, surfaced in the UI), not a substitute for fixing same-node
+credential collisions by pointing Drones at different server nodes. Do not
+oversell this feature as "fixes" that class of problem when explaining it.
+
 ## Common failure patterns
 
+- Treating `"disconnected"` as something self-heal should fix — it must never
+  reconnect a tunnel a human (or the revocation flow) intentionally took down.
+- Scanning the *whole* VPN log for the decrypt/replay-error pattern instead of
+  just the recent window — a burst hours ago that already resolved would
+  permanently look "unhealthy" and never stop triggering reconnects.
+- Treating the self-heal window cap as a permanent give-up (e.g. clearing
+  `self_heal_attempts` only via a manual action) — it must keep aging out on
+  its own so a still-broken connection is retried later without a human
+  needing to intervene.
+- Implying self-heal "fixes" a same-server-node credential collision (the
+  incident that prompted this feature) — reconnecting to the same broken
+  config will very likely re-trigger the same flood; the actual fix is
+  different server nodes, which self-heal does not attempt.
 - Calling `bootstrap_vpn_from_swarm` (or its equivalent) when this drone
   already has its own config/credentials — it must only ever run after
   `validate_ready()` has already failed. Running it unconditionally would
@@ -555,7 +635,13 @@ Do not:
   config — it must stay gated behind `validate_ready()` already having failed,
 - adopt a shared config from a peer that is merely `sharing_enabled` but not
   currently `connected` — the bootstrap path specifically requires a proven
-  working tunnel on the source, unlike the manual pull flow.
+  working tunnel on the source, unlike the manual pull flow,
+- let `check_and_self_heal` act on a `"disconnected"` status, ever,
+- remove or weaken either self-heal rate limit (the per-reconnect cooldown or
+  the rolling-window cap) — both exist specifically to stop a background loop
+  from hammering the user's VPN provider,
+- default `self_heal_enabled` to off — this feature was explicitly requested
+  as default-on, opt-out.
 
 ## Default bias
 
