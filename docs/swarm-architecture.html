@@ -1,0 +1,1045 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>Batocera Swarm Architecture</title>
+<meta name="description" content="How Drones pair, transfer, and share a VPN across networks and geographies -- peer-to-peer, no central hub.">
+</head>
+<body>
+<style>
+  :root {
+    --ink: #0C1220;
+    --surface: #141E33;
+    --surface-2: #1C2A47;
+    --surface-3: #24345A;
+    --line: #2B3B5B;
+    --line-soft: #1F2C46;
+    --text: #EAEFF8;
+    --text-dim: #8C9AB8;
+    --text-faint: #5C6A8C;
+    --gold: #E3A857;
+    --gold-soft: rgba(227, 168, 87, 0.16);
+    --teal: #52C4CE;
+    --teal-soft: rgba(82, 196, 206, 0.14);
+    --green: #5FBF8A;
+    --red: #E2685F;
+    --radius-lg: 18px;
+    --radius-md: 12px;
+    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    --font-mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+  }
+
+  :root[data-theme="light"] {
+    --ink: #EFF3F8;
+    --surface: #FFFFFF;
+    --surface-2: #F3F6FB;
+    --surface-3: #E7ECF5;
+    --line: #C9D3E3;
+    --line-soft: #DCE3EF;
+    --text: #16213A;
+    --text-dim: #4C5A7A;
+    --text-faint: #7C89A6;
+    --gold: #A66B1E;
+    --gold-soft: rgba(166, 107, 30, 0.10);
+    --teal: #157985;
+    --teal-soft: rgba(21, 121, 133, 0.10);
+    --green: #22824F;
+    --red: #B93E37;
+  }
+
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      --ink: #EFF3F8;
+      --surface: #FFFFFF;
+      --surface-2: #F3F6FB;
+      --surface-3: #E7ECF5;
+      --line: #C9D3E3;
+      --line-soft: #DCE3EF;
+      --text: #16213A;
+      --text-dim: #4C5A7A;
+      --text-faint: #7C89A6;
+      --gold: #A66B1E;
+      --gold-soft: rgba(166, 107, 30, 0.10);
+      --teal: #157985;
+      --teal-soft: rgba(21, 121, 133, 0.10);
+      --green: #22824F;
+      --red: #B93E37;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  html { background: var(--ink); }
+
+  body {
+    margin: 0;
+    background:
+      radial-gradient(ellipse 900px 500px at 15% -10%, var(--gold-soft), transparent 60%),
+      radial-gradient(ellipse 900px 500px at 90% 10%, var(--teal-soft), transparent 55%),
+      var(--ink);
+    color: var(--text);
+    font-family: var(--font-sans);
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  ::selection { background: var(--gold-soft); }
+
+  a { color: inherit; }
+  a:focus-visible, button:focus-visible, summary:focus-visible {
+    outline: 2px solid var(--teal);
+    outline-offset: 3px;
+    border-radius: 4px;
+  }
+
+  .wrap {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 0 28px 96px;
+  }
+
+  /* ---------- top bar ---------- */
+  .topbar {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    backdrop-filter: blur(10px);
+    background: color-mix(in srgb, var(--ink) 82%, transparent);
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .topbar-inner {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 14px 28px;
+    display: flex;
+    align-items: center;
+    gap: 22px;
+    flex-wrap: wrap;
+  }
+  .topbar-mark {
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    letter-spacing: 0.06em;
+    color: var(--text-dim);
+    white-space: nowrap;
+  }
+  .topbar-mark b { color: var(--gold); font-weight: 700; }
+  .topbar-nav {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+    margin-left: auto;
+  }
+  .topbar-nav a {
+    text-decoration: none;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    padding: 7px 11px;
+    border-radius: 999px;
+    border: 1px solid transparent;
+    transition: border-color .15s ease, color .15s ease, background .15s ease;
+  }
+  .topbar-nav a:hover {
+    color: var(--text);
+    border-color: var(--line);
+    background: var(--surface);
+  }
+
+  /* ---------- header ---------- */
+  header.hero {
+    padding: 64px 0 40px;
+  }
+  .eyebrow {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--teal);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 0 0 18px;
+  }
+  .eyebrow::before {
+    content: "";
+    width: 26px;
+    height: 1px;
+    background: var(--teal);
+    display: inline-block;
+  }
+  h1 {
+    font-family: var(--font-mono);
+    font-weight: 700;
+    font-size: clamp(28px, 4vw, 42px);
+    letter-spacing: -0.01em;
+    line-height: 1.12;
+    margin: 0 0 18px;
+    text-wrap: balance;
+    max-width: 16ch;
+  }
+  h1 span { color: var(--gold); }
+  .dek {
+    font-size: 17px;
+    color: var(--text-dim);
+    max-width: 62ch;
+    margin: 0 0 30px;
+    text-wrap: pretty;
+  }
+
+  .fact-row {
+    display: flex;
+    gap: 14px;
+    flex-wrap: wrap;
+  }
+  .fact {
+    background: var(--surface);
+    border: 1px solid var(--line-soft);
+    border-radius: var(--radius-md);
+    padding: 12px 16px;
+    min-width: 148px;
+  }
+  .fact .n {
+    font-family: var(--font-mono);
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--text);
+    display: block;
+    font-variant-numeric: tabular-nums;
+  }
+  .fact .l {
+    font-size: 11.5px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+  }
+
+  /* ---------- legend ---------- */
+  .legend {
+    margin-top: 40px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 22px;
+    padding: 16px 20px;
+    background: var(--surface);
+    border: 1px solid var(--line-soft);
+    border-radius: var(--radius-md);
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    font-size: 12.5px;
+    color: var(--text-dim);
+    white-space: nowrap;
+  }
+  .legend-swatch {
+    width: 22px;
+    height: 0;
+    border-top-width: 2.5px;
+    border-top-style: solid;
+    flex: none;
+  }
+  .legend-swatch.dash { border-top-style: dashed; }
+  .legend-swatch.thick { border-top-width: 3.5px; }
+  .legend-dot {
+    width: 8px; height: 8px; border-radius: 50%; flex: none;
+  }
+
+  /* ---------- sections ---------- */
+  section.panel {
+    margin-top: 64px;
+    scroll-margin-top: 84px;
+  }
+  .panel-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 20px;
+    flex-wrap: wrap;
+    margin-bottom: 20px;
+  }
+  .panel-tag {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+    margin: 0 0 6px;
+  }
+  h2 {
+    font-family: var(--font-mono);
+    font-size: clamp(20px, 2.4vw, 26px);
+    font-weight: 700;
+    margin: 0;
+    letter-spacing: -0.005em;
+    text-wrap: balance;
+  }
+  .panel-note {
+    font-size: 14px;
+    color: var(--text-dim);
+    max-width: 46ch;
+    text-align: right;
+  }
+  @media (max-width: 720px) {
+    .panel-note { text-align: left; max-width: 60ch; }
+  }
+
+  .diagram-card {
+    background: linear-gradient(180deg, var(--surface) 0%, var(--surface) 100%);
+    border: 1px solid var(--line-soft);
+    border-radius: var(--radius-lg);
+    padding: 22px 22px 18px;
+    overflow-x: auto;
+  }
+  .diagram-card svg { display: block; width: 100%; height: auto; min-width: 640px; }
+
+  .caption {
+    margin: 16px 2px 0;
+    font-size: 13.5px;
+    color: var(--text-dim);
+    max-width: 78ch;
+    line-height: 1.6;
+  }
+  .caption code {
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    background: var(--surface-2);
+    border: 1px solid var(--line-soft);
+    padding: 1px 6px;
+    border-radius: 5px;
+    color: var(--text);
+  }
+
+  /* ---------- svg diagram text helpers ---------- */
+  svg text { font-family: var(--font-sans); fill: var(--text); }
+  .n-title { font-weight: 700; font-size: 13.5px; }
+  .n-sub { font-family: var(--font-mono); font-size: 10.5px; fill: var(--text-dim); letter-spacing: 0.01em; }
+  .n-badge { font-family: var(--font-mono); font-size: 9.5px; letter-spacing: 0.03em; }
+  .loc-title { font-family: var(--font-mono); font-weight: 700; font-size: 12px; letter-spacing: 0.05em; text-transform: uppercase; fill: var(--text-dim); }
+  .line-label { font-family: var(--font-mono); font-size: 10.5px; fill: var(--text-faint); letter-spacing: 0.02em; }
+  .step-label { font-family: var(--font-mono); font-size: 11px; fill: var(--teal); letter-spacing: 0.04em; text-transform: uppercase; }
+  .body-text { font-size: 12.5px; fill: var(--text-dim); }
+  .body-text.strong { fill: var(--text); font-weight: 600; }
+
+  .node-rect { fill: var(--surface-2); stroke: var(--line); stroke-width: 1.2; }
+  .node-rect.gold { stroke: var(--gold); stroke-width: 1.4; }
+  .node-rect.teal { stroke: var(--teal); stroke-width: 1.4; }
+  .node-rect.faint { fill: var(--surface); stroke: var(--line-soft); stroke-dasharray: 3 4; }
+  .loc-rect { fill: var(--surface-2); stroke: var(--line-soft); stroke-width: 1; }
+  .cloud-rect { fill: var(--teal-soft); stroke: var(--teal); stroke-width: 1.3; }
+
+  .ln { fill: none; stroke-linecap: round; }
+  .ln.gold { stroke: var(--gold); stroke-width: 2.4; }
+  .ln.teal { stroke: var(--teal); stroke-width: 2.2; }
+  .ln.teal.dash { stroke-dasharray: 6 5; }
+  .ln.wan { stroke: var(--text-faint); stroke-width: 1.8; stroke-dasharray: 2 5; }
+  .ln.tunnel { stroke: var(--teal); stroke-width: 2.6; }
+  .ln.tunnel.light { stroke-dasharray: 1 5; stroke-width: 2; opacity: 0.85; }
+  .ln.mesh-thin { stroke: var(--line); stroke-width: 1.4; }
+  .ln.mesh-thin.dash { stroke-dasharray: 5 4; }
+  .ln.red { stroke: var(--red); stroke-width: 2; stroke-dasharray: 4 4; }
+
+  .dot-live { fill: var(--green); }
+  .dot-off { fill: var(--text-faint); }
+
+  footer {
+    margin-top: 80px;
+    padding-top: 24px;
+    border-top: 1px solid var(--line-soft);
+    display: flex;
+    justify-content: space-between;
+    gap: 20px;
+    flex-wrap: wrap;
+    font-size: 12px;
+    color: var(--text-faint);
+    font-family: var(--font-mono);
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .panel { animation: rise 0.5s ease both; }
+  }
+  @keyframes rise {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  /* ---------- clickable terms ---------- */
+  .term {
+    cursor: pointer;
+    text-decoration: underline dotted;
+    text-decoration-color: color-mix(in srgb, currentColor 55%, transparent);
+    text-underline-offset: 3px;
+    text-decoration-thickness: 1.4px;
+    border: none;
+    background: none;
+    padding: 0;
+    font: inherit;
+    color: inherit;
+    transition: color .12s ease;
+  }
+  .term:hover, .term:focus-visible { color: var(--teal); }
+  tspan.term { cursor: pointer; transition: fill .12s ease; }
+  tspan.term:hover, tspan.term:focus-visible { fill: var(--teal); text-decoration: underline dotted; }
+
+  /* ---------- term drawer ---------- */
+  #termBackdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(3, 7, 15, 0.58);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .2s ease;
+    z-index: 60;
+  }
+  body.drawer-open #termBackdrop { opacity: 1; pointer-events: auto; }
+  body.drawer-open { overflow: hidden; }
+
+  #termDrawer {
+    position: fixed;
+    top: 0; right: 0; bottom: 0;
+    width: min(440px, 100vw);
+    background: var(--surface);
+    border-left: 1px solid var(--line);
+    box-shadow: -30px 0 70px rgba(0,0,0,0.4);
+    transform: translateX(100%);
+    transition: transform .3s cubic-bezier(.19,.88,.24,1);
+    z-index: 61;
+    display: flex;
+    flex-direction: column;
+    padding: 26px 28px 32px;
+    overflow-y: auto;
+  }
+  body.drawer-open #termDrawer { transform: translateX(0); }
+
+  @media (prefers-reduced-motion: reduce) {
+    #termBackdrop, #termDrawer { transition: none; }
+  }
+
+  #termDrawerClose {
+    align-self: flex-end;
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    color: var(--text-dim);
+    width: 34px; height: 34px;
+    border-radius: 9px;
+    cursor: pointer;
+    font-size: 18px;
+    line-height: 1;
+    margin-bottom: 22px;
+    font-family: var(--font-sans);
+  }
+  #termDrawerClose:hover { color: var(--text); border-color: var(--teal); }
+
+  #termDrawerEyebrow {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--teal);
+    margin: 0 0 10px;
+  }
+  #termDrawerTitle {
+    font-family: var(--font-mono);
+    font-size: 25px;
+    font-weight: 700;
+    letter-spacing: -0.005em;
+    margin: 0 0 20px;
+    color: var(--text);
+    text-wrap: balance;
+  }
+  #termDrawerBody p {
+    font-size: 14.5px;
+    line-height: 1.7;
+    color: var(--text-dim);
+    margin: 0 0 16px;
+  }
+  #termDrawerBody p:last-child { margin-bottom: 0; }
+  #termDrawerBody code {
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    background: var(--surface-2);
+    border: 1px solid var(--line-soft);
+    padding: 1px 6px;
+    border-radius: 5px;
+    color: var(--text);
+  }
+  #termDrawerFoot {
+    margin-top: auto;
+    padding-top: 20px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-faint);
+    border-top: 1px solid var(--line-soft);
+  }
+</style>
+
+<div class="topbar">
+  <div class="topbar-inner">
+    <span class="topbar-mark"><b>batocera</b>/fleet-federation &middot; swarm architecture</span>
+    <nav class="topbar-nav">
+      <a href="#topology">Topology</a>
+      <a href="#connectivity">Connectivity</a>
+      <a href="#security">Security</a>
+      <a href="#drone">Inside a Drone</a>
+      <a href="#vpn">VPN Sharing</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+  <header class="hero">
+    <p class="eyebrow">Reference diagram</p>
+    <h1>The swarm has no <span>center</span>.</h1>
+    <p class="dek">Every Drone is a Batocera machine that pairs directly with a handful of others, moves bytes only when spoken to, and never accepts an inbound connection. This is what that looks like once the swarm is spread across houses, cities, and countries.</p>
+
+    <div class="fact-row">
+      <div class="fact"><span class="n">0</span><span class="l">Central hub</span></div>
+      <div class="fact"><span class="n">3</span><span class="l">Connectivity tiers</span></div>
+      <div class="fact"><button type="button" class="term n" data-term="mtls" style="display:block">mTLS</button><span class="l">Peer trust model</span></div>
+      <div class="fact"><span class="n">1-hop</span><span class="l">VPN credential sharing</span></div>
+    </div>
+
+    <div class="legend" aria-label="Diagram legend, click a term for detail">
+      <span class="legend-item"><span class="legend-swatch" style="border-color:var(--gold)"></span><button type="button" class="term" data-term="lan-direct">LAN&#8209;direct</button> &mdash; same network</span>
+      <span class="legend-item"><span class="legend-swatch dash" style="border-color:var(--teal)"></span><button type="button" class="term" data-term="tailscale">Tailnet mesh</button> &mdash; cross&#8209;network</span>
+      <span class="legend-item"><span class="legend-swatch dash" style="border-color:var(--text-faint)"></span><button type="button" class="term" data-term="direct-wan">Direct&#8209;WAN</button> &mdash; legacy, port&#8209;forwarded</span>
+      <span class="legend-item"><span class="legend-swatch thick" style="border-color:var(--teal)"></span><button type="button" class="term" data-term="openvpn">OpenVPN</button> tunnel</span>
+      <span class="legend-item"><span class="legend-dot" style="background:var(--green)"></span>Connected / healthy</span>
+      <span class="legend-item"><span class="legend-dot" style="background:var(--red)"></span>Revoked / unreachable</span>
+    </div>
+  </header>
+
+  <!-- ================= SECTION 1: TOPOLOGY ================= -->
+  <section class="panel" id="topology">
+    <div class="panel-head">
+      <div>
+        <p class="panel-tag">01 &middot; The fleet, geographically</p>
+        <h2>Three houses, one swarm</h2>
+      </div>
+      <p class="panel-note">Every connector below is the <em>same</em> outbound mTLS peer channel &mdash; pairing, ROM/BIOS transfer, and VPN-credential sharing all ride over it. There is no separate network for any one of those jobs.</p>
+    </div>
+
+    <div class="diagram-card">
+      <svg viewBox="0 0 1160 610" role="img" aria-label="Three Batocera households in different countries, each running one or more Drones, connected via LAN, Tailscale tailnet, or legacy direct-WAN, with one Drone sharing a VPN subscription to the other two.">
+        <defs>
+          <marker id="arrowGold" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="var(--gold)"></path>
+          </marker>
+          <marker id="arrowTeal" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="var(--teal)"></path>
+          </marker>
+        </defs>
+
+        <!-- VPN provider -->
+        <rect x="460" y="18" width="240" height="52" rx="26" class="cloud-rect"></rect>
+        <text x="580" y="40" text-anchor="middle" class="n-title" fill="var(--teal)"><tspan class="term" tabindex="0" role="button" data-term="openvpn">VPN Provider</tspan></text>
+        <text x="580" y="56" text-anchor="middle" class="n-sub">OpenVPN endpoint &middot; outside the swarm</text>
+
+        <!-- tunnel lines from provider to each location's primary drone -->
+        <path d="M580,70 C580,110 580,140 580,168" class="ln tunnel"></path>
+        <text x="596" y="118" class="line-label">live tunnel</text>
+
+        <path d="M480,68 C360,105 260,140 205,170" class="ln tunnel light"></path>
+        <text x="238" y="128" class="line-label">independent tunnel</text>
+        <text x="238" y="140" class="line-label">(adopted credentials)</text>
+
+        <path d="M680,68 C820,105 920,140 975,170" class="ln tunnel light"></path>
+        <text x="812" y="128" class="line-label">independent tunnel</text>
+        <text x="812" y="140" class="line-label">(adopted credentials)</text>
+
+        <!-- ===== Location A: Portland ===== -->
+        <rect x="36" y="170" width="340" height="300" rx="16" class="loc-rect"></rect>
+        <text x="60" y="202" class="loc-title">Portland, OR &middot; home</text>
+        <text x="60" y="220" class="n-sub" fill="var(--text-faint)">2 Drones &middot; one public IP</text>
+
+        <rect x="60" y="240" width="140" height="98" rx="12" class="node-rect"></rect>
+        <text x="130" y="270" text-anchor="middle" class="n-title">living-room</text>
+        <text x="130" y="288" text-anchor="middle" class="n-sub">paired &middot; :8543</text>
+        <circle cx="72" cy="252" r="4" class="dot-live"></circle>
+
+        <rect x="216" y="240" width="140" height="98" rx="12" class="node-rect gold"></rect>
+        <text x="286" y="270" text-anchor="middle" class="n-title">bedroom</text>
+        <text x="286" y="288" text-anchor="middle" class="n-sub">adopted VPN creds</text>
+        <text x="286" y="304" text-anchor="middle" class="n-badge" fill="var(--teal)">VPN &#9679; connected</text>
+        <circle cx="228" cy="252" r="4" class="dot-live"></circle>
+
+        <line x1="200" y1="289" x2="216" y2="289" class="ln gold" style="stroke-width:3.5"></line>
+        <text x="140" y="360" class="line-label">LAN&#8209;direct &middot; same public IP, zero config</text>
+
+        <!-- ===== Location B: Berlin ===== -->
+        <rect x="425" y="170" width="310" height="300" rx="16" class="loc-rect"></rect>
+        <text x="449" y="202" class="loc-title">Berlin, DE &middot; studio</text>
+        <text x="449" y="220" class="n-sub" fill="var(--text-faint)">1 Drone &middot; VPN source</text>
+
+        <rect x="500" y="252" width="160" height="108" rx="12" class="node-rect teal"></rect>
+        <text x="580" y="284" text-anchor="middle" class="n-title">studio</text>
+        <text x="580" y="302" text-anchor="middle" class="n-sub">sharing_enabled &#9679; on</text>
+        <text x="580" y="318" text-anchor="middle" class="n-badge" fill="var(--teal)">VPN &#9679; source, connected</text>
+        <text x="580" y="332" text-anchor="middle" class="n-badge" fill="var(--text-faint)">shares config + creds &middot; mTLS</text>
+        <circle cx="512" cy="264" r="4" class="dot-live"></circle>
+
+        <!-- ===== Location C: Singapore ===== -->
+        <rect x="784" y="170" width="340" height="300" rx="16" class="loc-rect"></rect>
+        <text x="808" y="202" class="loc-title">Singapore &middot; office</text>
+        <text x="808" y="220" class="n-sub" fill="var(--text-faint)">1 Drone &middot; adopted VPN</text>
+
+        <rect x="884" y="252" width="160" height="108" rx="12" class="node-rect gold"></rect>
+        <text x="964" y="284" text-anchor="middle" class="n-title">office-01</text>
+        <text x="964" y="302" text-anchor="middle" class="n-sub">adopted VPN creds</text>
+        <text x="964" y="318" text-anchor="middle" class="n-badge" fill="var(--teal)">VPN &#9679; connected</text>
+        <text x="964" y="332" text-anchor="middle" class="n-badge" fill="var(--text-faint)">source: studio (Berlin)</text>
+        <circle cx="896" cy="264" r="4" class="dot-live"></circle>
+
+        <!-- mesh connections between locations -->
+        <path d="M376,300 C395,300 415,300 425,300" class="ln teal dash" marker-end="url(#arrowTeal)" marker-start="url(#arrowTeal)"></path>
+        <text x="380" y="418" class="line-label"><tspan class="term" tabindex="0" role="button" data-term="tailscale">tailnet mesh</tspan> &middot; <tspan class="term" tabindex="0" role="button" data-term="mtls">mTLS</tspan> pairing</text>
+        <text x="380" y="430" class="line-label">+ VPN credentials travel here</text>
+
+        <path d="M735,300 C755,300 774,300 784,300" class="ln teal dash" marker-end="url(#arrowTeal)" marker-start="url(#arrowTeal)"></path>
+        <text x="748" y="418" class="line-label"><tspan class="term" tabindex="0" role="button" data-term="tailscale">tailnet mesh</tspan> &middot; mTLS pairing</text>
+
+        <path d="M200,470 C400,560 780,560 962,470" class="ln wan"></path>
+        <text x="500" y="556" text-anchor="middle" class="line-label">direct&#8209;WAN (legacy) &middot; optional, needs port&#8209;forward on both ends</text>
+
+        <text x="60" y="595" class="body-text">No path between two Drones? They are simply unreachable &mdash; this fleet has no relay of last resort.</text>
+      </svg>
+    </div>
+    <p class="caption">Same-network Drones (Portland) reach each other over the LAN with zero configuration. Cross-network pairs (Portland&harr;Berlin, Berlin&harr;Singapore) use a shared <button type="button" class="term" data-term="tailscale">Tailscale tailnet</button>, which also carries the <button type="button" class="term" data-term="mtls">mTLS</button> pairing handshake and, once a Drone opts in, its shared VPN credentials &mdash; nothing here uses a separate transport for "VPN sharing" versus "ROM sync." A legacy direct-WAN path exists for pairs without a tailnet, but needs a port-forward on both ends.</p>
+  </section>
+
+  <!-- ================= SECTION 2: CONNECTIVITY ================= -->
+  <section class="panel" id="connectivity">
+    <div class="panel-head">
+      <div>
+        <p class="panel-tag">02 &middot; Transport selection</p>
+        <h2>Reaching a specific peer</h2>
+      </div>
+      <p class="panel-note">Every transfer picks its own route independently &mdash; <code>TransportSelector</code> tries each tier best-first and falls through on failure.</p>
+    </div>
+
+    <div class="diagram-card">
+      <svg viewBox="0 0 1160 260" role="img" aria-label="Three-tier connectivity fallback: LAN-direct, then Tailnet mesh, then legacy direct-WAN, otherwise unreachable.">
+        <defs>
+          <marker id="arrowChain" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="var(--text-faint)"></path>
+          </marker>
+        </defs>
+
+        <rect x="20" y="40" width="248" height="170" rx="14" class="node-rect gold"></rect>
+        <text x="144" y="72" text-anchor="middle" class="step-label" fill="var(--gold)">Tier 1</text>
+        <text x="144" y="96" text-anchor="middle" class="n-title">LAN&#8209;direct</text>
+        <text x="144" y="122" text-anchor="middle" class="body-text">Same public IP &#8658;</text>
+        <text x="144" y="138" text-anchor="middle" class="body-text">reach the peer's local IP</text>
+        <text x="144" y="154" text-anchor="middle" class="body-text">directly.</text>
+        <text x="144" y="182" text-anchor="middle" class="body-text strong">Zero configuration</text>
+
+        <line x1="268" y1="125" x2="304" y2="125" class="ln mesh-thin" marker-end="url(#arrowChain)"></line>
+        <text x="286" y="112" text-anchor="middle" class="line-label">fails</text>
+
+        <rect x="306" y="40" width="248" height="170" rx="14" class="node-rect teal"></rect>
+        <text x="430" y="72" text-anchor="middle" class="step-label" fill="var(--teal)">Tier 2</text>
+        <text x="430" y="96" text-anchor="middle" class="n-title">Tailnet mesh</text>
+        <text x="430" y="122" text-anchor="middle" class="body-text">Both Drones share a</text>
+        <text x="430" y="138" text-anchor="middle" class="body-text">Tailscale tailnet &#8658; NAT&#8209;</text>
+        <text x="430" y="154" text-anchor="middle" class="body-text">traversed private address.</text>
+        <text x="430" y="182" text-anchor="middle" class="body-text strong">Recommended, cross-network</text>
+
+        <line x1="554" y1="125" x2="590" y2="125" class="ln mesh-thin" marker-end="url(#arrowChain)"></line>
+        <text x="572" y="112" text-anchor="middle" class="line-label">fails</text>
+
+        <rect x="592" y="40" width="248" height="170" rx="14" class="node-rect faint"></rect>
+        <text x="716" y="72" text-anchor="middle" class="step-label" fill="var(--text-faint)">Tier 3</text>
+        <text x="716" y="96" text-anchor="middle" class="n-title">Direct&#8209;WAN</text>
+        <text x="716" y="122" text-anchor="middle" class="body-text">Peer is port&#8209;forwarded and</text>
+        <text x="716" y="138" text-anchor="middle" class="body-text">passes a live reachability</text>
+        <text x="716" y="154" text-anchor="middle" class="body-text">probe.</text>
+        <text x="716" y="182" text-anchor="middle" class="body-text strong">Legacy fallback</text>
+
+        <line x1="840" y1="125" x2="876" y2="125" class="ln red" marker-end="url(#arrowChain)"></line>
+        <text x="858" y="112" text-anchor="middle" class="line-label">fails</text>
+
+        <rect x="878" y="40" width="262" height="170" rx="14" style="fill:none;stroke:var(--red);stroke-width:1.2;stroke-dasharray:3 4"></rect>
+        <text x="1009" y="72" text-anchor="middle" class="step-label" fill="var(--red)">No tier left</text>
+        <text x="1009" y="100" text-anchor="middle" class="n-title">Unreachable</text>
+        <text x="1009" y="126" text-anchor="middle" class="body-text">Every transport is single-</text>
+        <text x="1009" y="142" text-anchor="middle" class="body-text">source, outbound-only, and</text>
+        <text x="1009" y="158" text-anchor="middle" class="body-text">mTLS-gated &mdash; there is no</text>
+        <text x="1009" y="174" text-anchor="middle" class="body-text">relay of last resort.</text>
+      </svg>
+    </div>
+    <p class="caption">This is <code>app/transport/</code>'s <code>TransportSelector</code>, used by every asset transfer, the remote-admin proxy, and VPN config pulls alike. It's single-source P2P, not torrent-style swarming: one active transfer per job, from one chosen peer.</p>
+  </section>
+
+  <!-- ================= SECTION 3: SECURITY ================= -->
+  <section class="panel" id="security">
+    <div class="panel-head">
+      <div>
+        <p class="panel-tag">03 &middot; Trust model</p>
+        <h2>Pairing, once &mdash; then cert-pinned forever</h2>
+      </div>
+      <p class="panel-note">No shared CA, no third party. A peer is trusted because, and only because, it's in <em>this</em> Drone's own paired-peer list.</p>
+    </div>
+
+    <div class="diagram-card">
+      <svg viewBox="0 0 1160 380" role="img" aria-label="Pairing flow via LAN code or Tailnet, followed by certificate pinning, and the two separate listener ports every Drone exposes.">
+        <defs>
+          <marker id="arrowFlow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="var(--text-faint)"></path>
+          </marker>
+        </defs>
+
+        <text x="20" y="28" class="loc-title">Pairing, once</text>
+
+        <rect x="20" y="44" width="220" height="70" rx="12" class="node-rect"></rect>
+        <text x="130" y="70" text-anchor="middle" class="n-title">LAN discovery</text>
+        <text x="130" y="90" text-anchor="middle" class="body-text">short-lived rotating code</text>
+
+        <rect x="20" y="126" width="220" height="70" rx="12" class="node-rect"></rect>
+        <text x="130" y="152" text-anchor="middle" class="n-title">Tailnet, code-free</text>
+        <text x="130" y="172" text-anchor="middle" class="body-text">only from an already-online</text>
+        <text x="130" y="188" text-anchor="middle" class="body-text">tailnet source address</text>
+
+        <path d="M240,79 C270,79 260,116 300,116" class="ln mesh-thin" marker-end="url(#arrowFlow)"></path>
+        <path d="M240,161 C270,161 260,124 300,124" class="ln mesh-thin"></path>
+
+        <rect x="302" y="80" width="230" height="72" rx="12" class="node-rect teal"></rect>
+        <text x="417" y="106" text-anchor="middle" class="n-title">Exchange certificates</text>
+        <text x="417" y="126" text-anchor="middle" class="body-text">self-signed, pinned by</text>
+        <text x="417" y="142" text-anchor="middle" class="body-text">SHA-256 fingerprint</text>
+
+        <line x1="532" y1="116" x2="568" y2="116" class="ln mesh-thin" marker-end="url(#arrowFlow)"></line>
+
+        <rect x="570" y="80" width="250" height="72" rx="12" class="node-rect gold"></rect>
+        <text x="695" y="106" text-anchor="middle" class="n-title">Paired-peer list</text>
+        <text x="695" y="126" text-anchor="middle" class="body-text">stored locally, per Drone &mdash;</text>
+        <text x="695" y="142" text-anchor="middle" class="body-text">the only authority that matters</text>
+
+        <line x1="20" y1="240" x2="1140" y2="240" class="ln mesh-thin"></line>
+        <text x="20" y="266" class="loc-title">Two doors into every Drone, every request</text>
+
+        <rect x="20" y="284" width="530" height="80" rx="12" class="node-rect"></rect>
+        <text x="44" y="310" class="n-title">Admin / Browser &middot; <tspan fill="var(--text-dim)" style="font-family:var(--font-mono)">:443</tspan></text>
+        <text x="44" y="330" class="body-text">Session cookie, SQLite-backed, 30-day sliding expiry.</text>
+        <text x="44" y="348" class="body-text">Never asked for a client certificate.</text>
+
+        <rect x="580" y="284" width="560" height="80" rx="12" class="node-rect teal"></rect>
+        <text x="604" y="310" class="n-title">Peer &middot; <tspan fill="var(--text-dim)" style="font-family:var(--font-mono)">:8543</tspan></text>
+        <text x="604" y="330" class="body-text">mTLS required. Client certificate's fingerprint must match the</text>
+        <text x="604" y="348" class="body-text">pinned value for that exact paired drone_id, every single request.</text>
+      </svg>
+    </div>
+    <p class="caption">Application authorization is exactly this list check &mdash; connectivity checks (every ~30s, cached locally) confirm a peer is <em>reachable</em>, never that it's <em>authorized</em>. The same mTLS identity backs ROM/BIOS/save/artwork transfers, the remote-admin proxy, and the VPN peer endpoint alike.</p>
+  </section>
+
+  <!-- ================= SECTION 4: INSIDE A DRONE ================= -->
+  <section class="panel" id="drone">
+    <div class="panel-head">
+      <div>
+        <p class="panel-tag">04 &middot; One machine, zoomed in</p>
+        <h2>Inside a Drone</h2>
+      </div>
+      <p class="panel-note">stdlib <button type="button" class="term" data-term="http-server" style="font-family:var(--font-mono);font-size:inherit">http.server</button> + <button type="button" class="term" data-term="sqlite">SQLite</button>. No database server, no message queue, no external runtime dependency.</p>
+    </div>
+
+    <div class="diagram-card">
+      <svg viewBox="0 0 1160 460" role="img" aria-label="Internal architecture of a single Drone: two HTTP listeners, background loops, the VPN manager spawning an independent openvpn process, a SQLite state store, and filesystem roots.">
+        <rect x="14" y="14" width="1132" height="432" rx="18" style="fill:none;stroke:var(--line-soft);stroke-width:1.4;stroke-dasharray:2 5"></rect>
+        <text x="38" y="46" class="loc-title">Drone process &middot; python3 -m app.main &middot; runs as root, on-device</text>
+
+        <!-- listeners -->
+        <rect x="38" y="64" width="330" height="60" rx="10" class="node-rect"></rect>
+        <text x="203" y="88" text-anchor="middle" class="n-title">Admin / Browser listener</text>
+        <text x="203" y="106" text-anchor="middle" class="n-sub">:443, :8443 compat &middot; session cookie</text>
+
+        <rect x="392" y="64" width="330" height="60" rx="10" class="node-rect teal"></rect>
+        <text x="557" y="88" text-anchor="middle" class="n-title">Peer <tspan class="term" tabindex="0" role="button" data-term="mtls">mTLS</tspan> listener</text>
+        <text x="557" y="106" text-anchor="middle" class="n-sub">:8543 &middot; client cert required</text>
+
+        <rect x="746" y="64" width="376" height="60" rx="10" class="node-rect gold"></rect>
+        <text x="934" y="88" text-anchor="middle" class="n-title">Transport selector</text>
+        <text x="934" y="106" text-anchor="middle" class="n-sub">LAN &#8594; tailnet &#8594; direct-WAN</text>
+
+        <!-- background loops -->
+        <text x="38" y="156" class="loc-title">Background loops, all daemon threads</text>
+        <rect x="38" y="168" width="266" height="76" rx="10" class="node-rect"></rect>
+        <text x="171" y="192" text-anchor="middle" class="n-title">Peer health check</text>
+        <text x="171" y="210" text-anchor="middle" class="body-text">every ~30s, all paired peers</text>
+        <text x="171" y="226" text-anchor="middle" class="body-text">jittered, results cached locally</text>
+
+        <rect x="320" y="168" width="266" height="76" rx="10" class="node-rect"></rect>
+        <text x="453" y="192" text-anchor="middle" class="n-title">ROM/BIOS/saves/movies scan</text>
+        <text x="453" y="210" text-anchor="middle" class="body-text">inotify-debounced filesystem</text>
+        <text x="453" y="226" text-anchor="middle" class="body-text">watch &#8594; sampled fingerprint</text>
+
+        <rect x="602" y="168" width="266" height="76" rx="10" class="node-rect teal"></rect>
+        <text x="735" y="192" text-anchor="middle" class="n-title">VPN connect + bootstrap</text>
+        <text x="735" y="210" text-anchor="middle" class="body-text">on startup: retry own config,</text>
+        <text x="735" y="226" text-anchor="middle" class="body-text">or adopt a connected peer's</text>
+
+        <rect x="884" y="168" width="238" height="76" rx="10" class="node-rect teal"></rect>
+        <text x="1003" y="192" text-anchor="middle" class="n-title">Sharing-revocation poll</text>
+        <text x="1003" y="210" text-anchor="middle" class="body-text">every ~5 min &mdash; only if this</text>
+        <text x="1003" y="226" text-anchor="middle" class="body-text">Drone imported a config</text>
+
+        <!-- vpn manager + process -->
+        <rect x="602" y="270" width="266" height="80" rx="10" class="node-rect">
+        </rect>
+        <text x="735" y="296" text-anchor="middle" class="n-title">VPN manager</text>
+        <text x="735" y="314" text-anchor="middle" class="body-text">rewrites .ovpn, manages</text>
+        <text x="735" y="330" text-anchor="middle" class="body-text">auth.txt (chmod 600)</text>
+
+        <line x1="868" y1="310" x2="900" y2="310" class="ln teal"></line>
+        <rect x="902" y="270" width="220" height="80" rx="10" class="node-rect" style="stroke-dasharray:3 4"></rect>
+        <text x="1012" y="296" text-anchor="middle" class="n-title">openvpn (OS process)</text>
+        <text x="1012" y="314" text-anchor="middle" class="body-text">daemonized, own session &mdash;</text>
+        <text x="1012" y="330" text-anchor="middle" class="body-text">outlives a Drone-app restart</text>
+
+        <!-- sqlite -->
+        <rect x="38" y="270" width="540" height="80" rx="10" class="node-rect gold"></rect>
+        <text x="308" y="296" text-anchor="middle" class="n-title"><tspan class="term" tabindex="0" role="button" data-term="sqlite">SQLite</tspan> state store</text>
+        <text x="308" y="316" text-anchor="middle" class="body-text">paired peers &middot; sessions &middot; VPN state &middot; ROM / BIOS / saves / movies caches</text>
+        <text x="308" y="334" text-anchor="middle" class="n-sub">one file, WAL mode, 0600</text>
+
+        <!-- filesystem roots -->
+        <text x="38" y="384" class="loc-title">Filesystem roots</text>
+        <g>
+          <rect x="38" y="396" width="255" height="46" rx="9" class="node-rect faint"></rect>
+          <text x="165" y="424" text-anchor="middle" class="n-sub">/userdata/roms</text>
+          <rect x="305" y="396" width="255" height="46" rx="9" class="node-rect faint"></rect>
+          <text x="432" y="424" text-anchor="middle" class="n-sub">/userdata/bios</text>
+          <rect x="572" y="396" width="255" height="46" rx="9" class="node-rect faint"></rect>
+          <text x="699" y="424" text-anchor="middle" class="n-sub">/userdata/saves</text>
+          <rect x="839" y="396" width="283" height="46" rx="9" class="node-rect faint"></rect>
+          <text x="980" y="424" text-anchor="middle" class="n-sub">/userdata/movies</text>
+        </g>
+      </svg>
+    </div>
+    <p class="caption">The VPN manager is deliberately stateless &mdash; <code>status()</code> recomputes from <code>/proc</code> and the log on every poll rather than keeping cached state in sync with a thread. The <button type="button" class="term" data-term="openvpn" style="font-family:var(--font-mono);font-size:inherit">openvpn</button> process it spawns is fully daemonized (its own session, its own process group), so it survives a Drone-app restart untouched; only a full machine reboot takes it down, which is exactly what the startup bootstrap above exists to recover from.</p>
+  </section>
+
+  <!-- ================= SECTION 5: VPN SHARING ================= -->
+  <section class="panel" id="vpn">
+    <div class="panel-head">
+      <div>
+        <p class="panel-tag">05 &middot; One subscription, the whole swarm</p>
+        <h2>VPN: share once, <button type="button" class="term" data-term="single-hop" style="font:inherit">single-hop</button> only</h2>
+      </div>
+      <p class="panel-note">Credentials travel only over the mTLS peer channel above &mdash; never through the browser-facing admin API, on either end.</p>
+    </div>
+
+    <div class="diagram-card">
+      <svg viewBox="0 0 1160 420" role="img" aria-label="VPN sharing lifecycle: a sharer with sharing enabled, a peer adopting its config, automatic startup bootstrap, and revocation when sharing is turned off.">
+        <defs>
+          <marker id="arrowVpn" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="var(--teal)"></path>
+          </marker>
+          <marker id="arrowRed" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="var(--red)"></path>
+          </marker>
+        </defs>
+
+        <text x="20" y="26" class="step-label" fill="var(--teal)">While sharing is on</text>
+
+        <rect x="20" y="40" width="280" height="132" rx="12" class="node-rect teal"></rect>
+        <text x="160" y="66" text-anchor="middle" class="n-title">Sharer</text>
+        <text x="160" y="86" text-anchor="middle" class="body-text">config uploaded by its own</text>
+        <text x="160" y="102" text-anchor="middle" class="body-text">owner &middot; sharing_enabled: on</text>
+        <text x="160" y="122" text-anchor="middle" class="n-badge" fill="var(--green)">&#9679; tunnel live</text>
+        <text x="160" y="140" text-anchor="middle" class="n-sub">source_peer_id: (none &mdash; original)</text>
+        <text x="160" y="156" text-anchor="middle" class="body-text" style="fill:var(--gold)">can share &middot; can never re-import</text>
+
+        <path d="M300,106 C330,106 330,106 360,106" class="ln teal" marker-end="url(#arrowVpn)"></path>
+        <text x="330" y="94" text-anchor="middle" class="line-label">GET /peer/vpn/config</text>
+
+        <rect x="362" y="40" width="280" height="132" rx="12" class="node-rect gold"></rect>
+        <text x="502" y="66" text-anchor="middle" class="n-title">Adopter</text>
+        <text x="502" y="86" text-anchor="middle" class="body-text">imports config + credentials</text>
+        <text x="502" y="102" text-anchor="middle" class="body-text">via <tspan style="font-family:var(--font-mono);font-size:11px">import_from_peer()</tspan></text>
+        <text x="502" y="122" text-anchor="middle" class="n-badge" fill="var(--green)">&#9679; tunnel live</text>
+        <text x="502" y="140" text-anchor="middle" class="n-sub">source_peer_id: sharer's id</text>
+        <text x="502" y="156" text-anchor="middle" class="body-text" style="fill:var(--red)">cannot itself be shared</text>
+
+        <rect x="704" y="40" width="436" height="132" rx="12" class="node-rect"></rect>
+        <text x="722" y="66" class="n-title">Two ways credentials arrive</text>
+        <text x="722" y="90" class="body-text">&#8226; Manual: someone clicks "Pull Configuration"</text>
+        <text x="722" y="108" class="body-text">&#8226; Automatic: a fresh Drone with no config of its own,</text>
+        <text x="722" y="124" class="body-text">&nbsp;&nbsp;on startup, adopts the first paired peer found both</text>
+        <text x="722" y="140" class="body-text">&nbsp;&nbsp;sharing <tspan style="font-style:italic">and</tspan> actively connected right now</text>
+        <text x="722" y="160" class="body-text" style="fill:var(--text-faint)">never overrides a config a Drone already has</text>
+
+        <line x1="20" y1="200" x2="1140" y2="200" class="ln mesh-thin"></line>
+        <text x="20" y="226" class="step-label" fill="var(--red)">When sharing is turned off</text>
+
+        <rect x="20" y="242" width="280" height="130" rx="12" class="node-rect"></rect>
+        <text x="160" y="268" text-anchor="middle" class="n-title">Sharer</text>
+        <text x="160" y="288" text-anchor="middle" class="body-text">owner flips sharing_enabled</text>
+        <text x="160" y="304" text-anchor="middle" class="body-text">to off (or removes the config)</text>
+        <text x="160" y="326" text-anchor="middle" class="n-badge" fill="var(--text-dim)">/peer/vpn/config now 404s</text>
+
+        <path d="M300,296 C330,296 330,296 360,296" class="ln red" marker-end="url(#arrowRed)"></path>
+        <text x="330" y="284" text-anchor="middle" class="line-label">next poll, &le;5 min</text>
+
+        <rect x="362" y="242" width="280" height="130" rx="12" style="fill:var(--surface-2);stroke:var(--red);stroke-width:1.3"></rect>
+        <text x="502" y="268" text-anchor="middle" class="n-title">Adopter, auto-revoked</text>
+        <text x="502" y="288" text-anchor="middle" class="body-text">disconnected &middot; credentials</text>
+        <text x="502" y="304" text-anchor="middle" class="body-text">wiped from disk</text>
+        <text x="502" y="324" text-anchor="middle" class="n-badge" fill="var(--text-faint)">config + origin kept on purpose</text>
+        <text x="502" y="340" text-anchor="middle" class="n-badge" fill="var(--text-faint)">(can never become shareable)</text>
+
+        <rect x="704" y="242" width="436" height="130" rx="12" class="node-rect"></rect>
+        <text x="722" y="268" class="n-title">Why nothing is deleted outright</text>
+        <text x="722" y="292" class="body-text">A drone that once imported a config keeps its</text>
+        <text x="722" y="308" class="body-text"><tspan style="font-family:var(--font-mono);font-size:11px">source_peer_id</tspan> forever &mdash; that's the permanent</text>
+        <text x="722" y="324" class="body-text">record that it was never the original creator, so it</text>
+        <text x="722" y="340" class="body-text">can't quietly start sharing what it doesn't own, even</text>
+        <text x="722" y="356" class="body-text">after its own credentials are gone.</text>
+      </svg>
+    </div>
+    <p class="caption">Everyone in the swarm is presumed to be the same owner &mdash; pairing is the only authorization check, same as ROM/BIOS transfer. Two independent gates keep credential distribution single-hop: <code>set_sharing_enabled()</code> refuses to turn on for an imported config, and <code>export_payload()</code> refuses to serve one, even if the first check were ever bypassed.</p>
+  </section>
+
+  <footer>
+    <span>Batocera Fleet Federation &middot; batocera.drone &middot; peer-to-peer, no central hub</span>
+    <span>Diagram reflects app/transport, app/device/vpn_manager.py, app/transfer/peer_connectivity.py as of 2026-07-28</span>
+  </footer>
+
+</div>
+
+<div id="termBackdrop"></div>
+<aside id="termDrawer" role="dialog" aria-modal="true" aria-labelledby="termDrawerTitle" aria-hidden="true">
+  <button id="termDrawerClose" type="button" aria-label="Close">&times;</button>
+  <p id="termDrawerEyebrow"></p>
+  <h3 id="termDrawerTitle"></h3>
+  <div id="termDrawerBody"></div>
+  <p id="termDrawerFoot">Dotted-underline terms anywhere on this page open this panel.</p>
+</aside>
+
+<script>
+(function () {
+  "use strict";
+
+  var GLOSSARY = {
+    "openvpn": {
+      eyebrow: "Technology &middot; tunnel",
+      title: "OpenVPN",
+      body: [
+        "An open-source VPN protocol and client, in wide use since 2001. It builds an encrypted tunnel between a device and a VPN provider's server, so the device's traffic appears to come from the provider's IP address instead of its own.",
+        "Each Drone runs its own <code>openvpn</code> process as an ordinary background program &mdash; there's no VPN logic built into Batocera or the Drone app itself. The Drone just manages the plumbing: it rewrites the provider's uploaded <code>.ovpn</code> file to point at a locally-managed credentials file, then starts, stops, and watches the process. The tunnel is exactly the openvpn everyone else uses; nothing here reimplements it."
+      ]
+    },
+    "tailscale": {
+      eyebrow: "Technology &middot; mesh networking",
+      title: "Tailscale &amp; tailnets",
+      body: [
+        "A mesh VPN built on WireGuard. Every device that joins the same <em>tailnet</em> gets a stable private address that every other device on that tailnet can reach directly &mdash; even behind different home routers, on opposite sides of the planet.",
+        "Each device registers with Tailscale's coordination service once, then negotiates a direct, encrypted, peer-to-peer connection using NAT traversal &mdash; the same family of technique that lets a video call punch through two home routers without either owner configuring anything. Once that connection exists, no further coordination is needed; if a direct path genuinely can't be established, Tailscale falls back to relaying through its own infrastructure.",
+        "For this fleet, a shared tailnet is what makes &ldquo;add a Drone in another country&rdquo; possible without touching a router: two paired Drones on the same tailnet look like they're on the same LAN to each other."
+      ]
+    },
+    "mtls": {
+      eyebrow: "Technology &middot; identity",
+      title: "Mutual TLS (mTLS)",
+      body: [
+        "Ordinary HTTPS &mdash; the padlock in a browser &mdash; only proves the <em>server's</em> identity to the visitor; the visitor doesn't prove anything back. Mutual TLS requires both sides to present a certificate and verify each other before any data moves.",
+        "Every Drone generates its own self-signed certificate. When two Drones pair, they exchange certificates and each pins the other's exact fingerprint. From then on, every peer request on either side is rejected unless the certificate presented matches the pinned fingerprint for that specific paired <code>drone_id</code> &mdash; there's no shared certificate authority anyone could compromise to impersonate a Drone."
+      ]
+    },
+    "lan-direct": {
+      eyebrow: "Concept &middot; connectivity tier 1",
+      title: "LAN-direct",
+      body: [
+        "The fastest, simplest path. If two Drones report the same public IP address &mdash; the one address their shared router shows to the internet &mdash; that's a strong signal they're behind the same router, so one can reach the other's local network address directly. No relay, no mesh, no configuration.",
+        "A false positive (two unrelated homes that happen to share a carrier-grade public IP) simply fails to connect, and the transport selector falls through to the next tier."
+      ]
+    },
+    "direct-wan": {
+      eyebrow: "Concept &middot; connectivity tier 3",
+      title: "Direct-WAN (legacy)",
+      body: [
+        "The original way two Drones on different networks found each other, before tailnet support existed: one Drone's owner forwards a port on their home router, so it can accept an inbound connection directly from the public internet.",
+        "It still works and is tried as a last resort, but it needs manual router configuration on at least one end and exposes a port to the open internet &mdash; exactly what the tailnet path avoids."
+      ]
+    },
+    "sqlite": {
+      eyebrow: "Technology &middot; storage",
+      title: "SQLite",
+      body: [
+        "A complete SQL database that lives in a single file, with no separate server process to install, configure, or keep running &mdash; and it ships inside Python's standard library.",
+        "Each Drone keeps one SQLite file for everything it needs to remember between restarts: its paired-peer list, session cookies, VPN state, and the scanned ROM/BIOS/save/movie caches. For a game console that's sometimes just a Raspberry Pi, that's the difference between &ldquo;just works&rdquo; and &ldquo;now install and babysit a database server.&rdquo;"
+      ]
+    },
+    "http-server": {
+      eyebrow: "Technology &middot; runtime",
+      title: "Python's http.server",
+      body: [
+        "The Drone's entire web server &mdash; the admin UI, the peer API, everything &mdash; is built on Python's built-in <code>http.server</code> module, not a framework like Flask or FastAPI.",
+        "That's a constraint, not a preference: Batocera's on-device Python can't assume any third-party packages are installed. Anything the Drone needs, it either writes from scratch against the standard library or vendors directly."
+      ]
+    },
+    "single-hop": {
+      eyebrow: "Concept &middot; VPN sharing",
+      title: "Single-hop sharing",
+      body: [
+        "A Drone that pulls a shared VPN config can use it, but can never re-share it to a third Drone &mdash; only the Drone whose owner originally uploaded the config is allowed to share it.",
+        "That rule is enforced twice, independently: once when a Drone tries to turn sharing on, and again at the exact moment credentials would actually leave the Drone. A bug in the first check alone still can't turn into a real leak, because the second one doesn't trust the first."
+      ]
+    }
+  };
+
+  var drawer = document.getElementById("termDrawer");
+  var eyebrowEl = document.getElementById("termDrawerEyebrow");
+  var titleEl = document.getElementById("termDrawerTitle");
+  var bodyEl = document.getElementById("termDrawerBody");
+  var closeBtn = document.getElementById("termDrawerClose");
+  var lastFocused = null;
+
+  function openTerm(key, triggerEl) {
+    var entry = GLOSSARY[key];
+    if (!entry || !drawer) return;
+    lastFocused = triggerEl || document.activeElement;
+    eyebrowEl.innerHTML = entry.eyebrow || "Technology";
+    titleEl.innerHTML = entry.title;
+    bodyEl.innerHTML = entry.body.map(function (para) { return "<p>" + para + "</p>"; }).join("");
+    document.body.classList.add("drawer-open");
+    drawer.setAttribute("aria-hidden", "false");
+    if (closeBtn) closeBtn.focus();
+  }
+
+  function closeTerm() {
+    document.body.classList.remove("drawer-open");
+    if (drawer) drawer.setAttribute("aria-hidden", "true");
+    if (lastFocused && typeof lastFocused.focus === "function") lastFocused.focus();
+  }
+
+  document.addEventListener("click", function (e) {
+    var trigger = e.target.closest && e.target.closest("[data-term]");
+    if (trigger) {
+      e.preventDefault();
+      openTerm(trigger.getAttribute("data-term"), trigger);
+      return;
+    }
+    if (e.target.id === "termBackdrop" || (e.target.closest && e.target.closest("#termDrawerClose"))) {
+      closeTerm();
+    }
+  });
+
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && document.body.classList.contains("drawer-open")) {
+      closeTerm();
+      return;
+    }
+    if ((e.key === "Enter" || e.key === " ") && e.target && e.target.matches && e.target.matches("[data-term]")) {
+      e.preventDefault();
+      openTerm(e.target.getAttribute("data-term"), e.target);
+    }
+  });
+})();
+</script>
+
+</body>
+</html>
