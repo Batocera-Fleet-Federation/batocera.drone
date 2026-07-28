@@ -456,7 +456,93 @@ class TorrentLifecycleTests(unittest.TestCase):
             self.assertTrue(by_name["b"]["seeding"])
             self.assertIsNotNone(by_name["b"]["completed_at"])
             self.assertEqual(by_name["c"]["status"], "error")
-            self.assertEqual(by_name["c"]["message"], "tracker exploded")
+            self.assertEqual(by_name["c"]["message"], "tracker exploded — automatic retry in 15s")
+
+    def test_errored_torrent_retries_behind_everything_already_queued(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            watch = root / "watch"
+            manager.update_settings({"directory": str(watch), "max_concurrent_downloads": 1})
+            for name in ("a", "b", "c"):
+                _write_torrent(watch, name)
+            manager._tick()
+
+            with manager._lock:
+                entries = {entry["name"]: entry for entry in manager._torrents.values()}
+                failed_gid = entries["a"]["gid"]
+            rpc.statuses[failed_gid].update(
+                {
+                    "status": "error",
+                    "errorMessage": "tracker exploded",
+                }
+            )
+
+            with mock.patch.object(torrent_manager, "TORRENT_RETRY_BASE_SECONDS", 10), \
+                    mock.patch.object(torrent_manager.time, "time", return_value=100):
+                manager._tick()
+            by_name = {entry["name"]: entry for entry in manager.snapshot()["torrents"]}
+            self.assertEqual(by_name["a"]["status"], "error")
+            self.assertEqual(by_name["b"]["status"], "downloading")
+            self.assertEqual(by_name["c"]["status"], "queued")
+            self.assertIn(failed_gid, [params[0] for params in rpc.method_calls("aria2.forceRemove")])
+
+            with mock.patch.object(torrent_manager.time, "time", return_value=111):
+                manager._tick()
+            by_name = {entry["name"]: entry for entry in manager.snapshot()["torrents"]}
+            self.assertEqual(by_name["a"]["status"], "queued")
+            self.assertEqual(by_name["c"]["status"], "queued")
+            with manager._lock:
+                entries = {entry["name"]: entry for entry in manager._torrents.values()}
+                self.assertLess(entries["c"]["queue_position"], entries["a"]["queue_position"])
+                active_b_gid = entries["b"]["gid"]
+
+            rpc.statuses[active_b_gid].update(
+                {
+                    "status": "complete",
+                    "totalLength": "1",
+                    "completedLength": "1",
+                }
+            )
+            with mock.patch.object(torrent_manager.time, "time", return_value=112):
+                manager._tick()
+            by_name = {entry["name"]: entry for entry in manager.snapshot()["torrents"]}
+            self.assertEqual(by_name["c"]["status"], "downloading")
+            self.assertEqual(by_name["a"]["status"], "queued")
+
+    def test_unreadable_torrent_retries_after_file_is_restored(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = TorrentManager(_build_settings(root), start_worker=False)
+            watch = root / "watch"
+            manager.update_settings({"directory": str(watch), "max_concurrent_downloads": 1})
+            first_path = _write_torrent(watch, "a")
+            with mock.patch.object(torrent_manager, "find_aria2c", return_value=None):
+                manager._tick()
+
+            first_path.unlink()
+            manager._daemon = FakeDaemon(rpc)
+            with mock.patch.object(torrent_manager.time, "time", return_value=100):
+                manager._tick()
+            first = manager.snapshot()["torrents"][0]
+            self.assertEqual(first["status"], "error")
+            self.assertIn("torrent file unreadable", first["message"])
+
+            _write_torrent(watch, "b")
+            _write_torrent(watch, "a")
+            with mock.patch.object(torrent_manager.time, "time", return_value=101):
+                manager._tick()
+            by_name = {entry["name"]: entry for entry in manager.snapshot()["torrents"]}
+            self.assertEqual(by_name["b"]["status"], "downloading")
+            self.assertEqual(by_name["a"]["status"], "error")
+
+            with mock.patch.object(torrent_manager.time, "time", return_value=116):
+                manager._tick()
+            by_name = {entry["name"]: entry for entry in manager.snapshot()["torrents"]}
+            self.assertEqual(by_name["b"]["status"], "downloading")
+            self.assertEqual(by_name["a"]["status"], "queued")
 
     def test_force_start_bypasses_concurrency(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -514,6 +600,13 @@ class TorrentLifecycleTests(unittest.TestCase):
             refreshed = manager.snapshot()["torrents"][0]
             self.assertEqual(refreshed["status"], "error")
             self.assertEqual(refreshed["message"], "Canceled")
+
+            with mock.patch.object(torrent_manager.time, "time", return_value=10_000):
+                manager._tick()
+            refreshed = manager.snapshot()["torrents"][0]
+            self.assertEqual(refreshed["status"], "error")
+            self.assertEqual(refreshed["message"], "Canceled")
+            self.assertEqual(len(rpc.method_calls("aria2.addTorrent")), 1)
 
     def test_cancel_seeding_torrent_stays_complete(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

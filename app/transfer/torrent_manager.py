@@ -19,6 +19,7 @@ Pure stdlib.
 """
 
 import base64
+import math
 import os
 import shutil
 import sys
@@ -62,6 +63,11 @@ TORRENT_FILE_ALLOCATION_MODES = ("none", "prealloc", "trunc", "falloc")
 TORRENT_STATUSES = ("queued", "downloading", "complete", "error")
 TORRENT_BROWSE_MAX_ENTRIES = 500
 TORRENT_UPLOAD_MAX_FILE_BYTES = 10 * 1024 * 1024
+TORRENT_RETRY_BASE_SECONDS = max(1.0, float(os.environ.get("DRONE_TORRENT_RETRY_BASE_SECONDS", "15")))
+TORRENT_RETRY_MAX_SECONDS = max(
+    TORRENT_RETRY_BASE_SECONDS,
+    float(os.environ.get("DRONE_TORRENT_RETRY_MAX_SECONDS", "300")),
+)
 
 _TELL_STATUS_KEYS = [
     "gid",
@@ -151,6 +157,10 @@ _ENTRY_PERSISTED_FIELDS = (
     "completed_bytes",
     "progress_percent",
     "files",
+    "queue_position",
+    "retry_count",
+    "retry_at",
+    "last_error",
 )
 
 _ENTRY_LIVE_DEFAULTS = {
@@ -275,6 +285,7 @@ class TorrentManager:
         self._daemon: Optional[Aria2Daemon] = None
         self._config: dict = _normalize_torrent_settings({}, settings)
         self._torrents: Dict[str, dict] = {}
+        self._next_queue_position: int = 1
         self._paused: bool = False
         self._recent_move_locations: List[str] = []
         self._restore_state()
@@ -321,6 +332,26 @@ class TorrentManager:
             entry["download_dir"] = str(entry.get("download_dir") or effective_download_directory(self._config))
             files_list = entry.get("files")
             entry["files"] = [str(p) for p in files_list] if isinstance(files_list, list) else []
+            try:
+                queue_position = int(entry.get("queue_position") or 0)
+            except (TypeError, ValueError):
+                queue_position = 0
+            if queue_position <= 0:
+                queue_position = self._take_queue_position_locked()
+            else:
+                self._next_queue_position = max(self._next_queue_position, queue_position + 1)
+            entry["queue_position"] = queue_position
+            entry["retry_count"] = max(0, int(entry.get("retry_count") or 0))
+            try:
+                entry["retry_at"] = float(entry.get("retry_at") or 0.0)
+            except (TypeError, ValueError):
+                entry["retry_at"] = 0.0
+            entry["last_error"] = str(entry.get("last_error") or entry.get("message") or "")
+            # Older persisted errors predate automatic retry metadata. Queue
+            # them for the first worker tick unless they were intentionally
+            # canceled by the user.
+            if entry["status"] == "error" and entry["message"] != "Canceled" and entry["retry_at"] <= 0:
+                entry["retry_at"] = time.time()
             self._torrents[entry_id] = entry
 
     def _persist_locked(self) -> None:
@@ -328,7 +359,7 @@ class TorrentManager:
             _state_database_path(self.settings.userdata_root),
             TORRENT_STATE_NAMESPACE,
             {
-                "version": 1,
+                "version": 2,
                 "settings": dict(self._config),
                 "paused": bool(self._paused),
                 "recent_move_locations": list(self._recent_move_locations),
@@ -341,6 +372,62 @@ class TorrentManager:
 
     def _sorted_entries_locked(self) -> List[dict]:
         return sorted(self._torrents.values(), key=lambda entry: (entry.get("added_at") or "", entry.get("id") or ""))
+
+    def _take_queue_position_locked(self) -> int:
+        position = self._next_queue_position
+        self._next_queue_position += 1
+        return position
+
+    def _scheduler_entries_locked(self) -> List[dict]:
+        """Queue order, independent from the user-visible original add time."""
+
+        return sorted(
+            self._torrents.values(),
+            key=lambda entry: (
+                int(entry.get("queue_position") or 0),
+                entry.get("added_at") or "",
+                entry.get("id") or "",
+            ),
+        )
+
+    def _schedule_retry_locked(self, entry: dict, message: str) -> Optional[str]:
+        """Keep a real failure visible, then retry it at the back of the queue."""
+
+        gid = entry.get("gid")
+        retry_count = max(0, int(entry.get("retry_count") or 0)) + 1
+        delay = min(
+            TORRENT_RETRY_MAX_SECONDS,
+            TORRENT_RETRY_BASE_SECONDS * (2 ** min(retry_count - 1, 10)),
+        )
+        error_message = str(message or "aria2 reported an error")
+        entry["status"] = "error"
+        entry["message"] = f"{error_message} — automatic retry in {int(math.ceil(delay))}s"
+        entry["last_error"] = error_message
+        entry["retry_count"] = retry_count
+        entry["retry_at"] = time.time() + delay
+        entry["gid"] = None
+        entry["force_started"] = False
+        entry["seeding"] = False
+        entry["download_speed_bps"] = 0
+        entry["upload_speed_bps"] = 0
+        entry["eta_seconds"] = None
+        return gid
+
+    def _requeue_due_errors_locked(self) -> bool:
+        now = time.time()
+        dirty = False
+        for entry in self._scheduler_entries_locked():
+            if entry.get("status") != "error" or entry.get("message") == "Canceled":
+                continue
+            retry_at = float(entry.get("retry_at") or 0.0)
+            if retry_at <= 0 or retry_at > now:
+                continue
+            entry["status"] = "queued"
+            entry["message"] = f"Retrying after error: {entry.get('last_error') or 'unknown error'}"
+            entry["retry_at"] = 0.0
+            entry["queue_position"] = self._take_queue_position_locked()
+            dirty = True
+        return dirty
 
     # ----------------------------------------------------------------- worker
 
@@ -426,6 +513,8 @@ class TorrentManager:
         with self._lock:
             config = dict(self._config)
             dirty = self._scan_watch_directory_locked(config)
+            if self._requeue_due_errors_locked():
+                dirty = True
             # Clears `gid` on any queued-but-not-yet-started entry whose
             # download location just changed -- to_add (below) then picks it
             # right back up in this same tick, re-adding it fresh at the new
@@ -435,7 +524,7 @@ class TorrentManager:
                 dirty = True
             to_add = [
                 dict(entry)
-                for entry in self._sorted_entries_locked()
+                for entry in self._scheduler_entries_locked()
                 if entry.get("status") == "queued" and not entry.get("gid")
             ]
             to_query = [
@@ -474,17 +563,19 @@ class TorrentManager:
                 if "gid" in result:
                     entry["gid"] = result["gid"]
                     entry["message"] = ""
+                    entry["retry_at"] = 0.0
                     if result.get("started"):
                         entry["status"] = "downloading"
                         entry["force_started"] = False
                 else:
-                    entry["status"] = "error"
-                    entry["message"] = result.get("error") or "failed to add torrent"
+                    self._schedule_retry_locked(entry, result.get("error") or "failed to add torrent")
             for entry_id, result in status_results.items():
                 entry = self._torrents.get(entry_id)
                 if entry is None:
                     continue
-                self._apply_aria2_status_locked(entry, result)
+                retry_gid = self._apply_aria2_status_locked(entry, result)
+                if retry_gid:
+                    orphaned_gids.append(retry_gid)
             if rpc is None:
                 aria2_missing = find_aria2c(self.settings) is None
                 for entry in self._torrents.values():
@@ -536,6 +627,10 @@ class TorrentManager:
                 "completed_bytes": 0,
                 "progress_percent": 0.0,
                 "files": [],
+                "queue_position": self._take_queue_position_locked(),
+                "retry_count": 0,
+                "retry_at": 0.0,
+                "last_error": "",
                 **dict(_ENTRY_LIVE_DEFAULTS),
             }
             dirty = True
@@ -567,7 +662,7 @@ class TorrentManager:
         except Aria2RpcError as error:
             return {"error": str(error)}
 
-    def _apply_aria2_status_locked(self, entry: dict, outcome: dict) -> None:
+    def _apply_aria2_status_locked(self, entry: dict, outcome: dict) -> Optional[str]:
         if "error" in outcome:
             # A vanished GID (daemon restarted) is recoverable: queue the entry
             # for a fresh paused add; completed entries stay completed.
@@ -577,7 +672,7 @@ class TorrentManager:
             entry["upload_speed_bps"] = 0
             if entry.get("status") in ("queued", "downloading"):
                 entry["status"] = "queued"
-            return
+            return None
         result = outcome.get("result") or {}
         total = int(result.get("totalLength") or 0)
         completed = int(result.get("completedLength") or 0)
@@ -606,6 +701,9 @@ class TorrentManager:
         if aria2_status == "active":
             entry["seeding"] = finished
             entry["status"] = "complete" if finished else "downloading"
+            entry["last_error"] = ""
+            entry["retry_count"] = 0
+            entry["retry_at"] = 0.0
             if finished and not entry.get("completed_at"):
                 entry["completed_at"] = _now_iso()
             entry["force_started"] = False
@@ -615,6 +713,9 @@ class TorrentManager:
         elif aria2_status == "complete":
             entry["seeding"] = False
             entry["status"] = "complete"
+            entry["last_error"] = ""
+            entry["retry_count"] = 0
+            entry["retry_at"] = 0.0
             entry["download_speed_bps"] = 0
             entry["eta_seconds"] = None
             if not entry.get("completed_at"):
@@ -626,17 +727,17 @@ class TorrentManager:
                 entry["status"] = "error"
                 entry["message"] = entry.get("message") or "Canceled"
         elif aria2_status == "error":
-            entry["seeding"] = False
-            entry["status"] = "error"
-            entry["message"] = str(result.get("errorMessage") or "aria2 reported an error")
-            entry["download_speed_bps"] = 0
-            entry["eta_seconds"] = None
+            return self._schedule_retry_locked(
+                entry,
+                str(result.get("errorMessage") or "aria2 reported an error"),
+            )
+        return None
 
     def _pick_startable_gids_locked(self, config: dict) -> List[str]:
         active = sum(1 for entry in self._torrents.values() if entry.get("status") == "downloading")
         slots = max(0, int(config["max_concurrent_downloads"]) - active)
         picked: List[str] = []
-        for entry in self._sorted_entries_locked():
+        for entry in self._scheduler_entries_locked():
             if slots <= 0:
                 break
             if entry.get("status") == "queued" and entry.get("gid"):
@@ -686,6 +787,10 @@ class TorrentManager:
                 entry["status"] = "queued"
                 entry["message"] = ""
                 entry["gid"] = None
+                entry["last_error"] = ""
+                entry["retry_count"] = 0
+                entry["retry_at"] = 0.0
+                entry["queue_position"] = self._take_queue_position_locked()
             entry["force_started"] = True
             if entry["status"] == "queued" and gid and status == "queued":
                 entry["status"] = "downloading"
@@ -729,6 +834,9 @@ class TorrentManager:
                 entry["eta_seconds"] = None
             entry["gid"] = None
             entry["force_started"] = False
+            entry["last_error"] = ""
+            entry["retry_count"] = 0
+            entry["retry_at"] = 0.0
             self._persist_locked()
         self._remove_from_aria2(gid)
         self.wake()

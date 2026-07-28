@@ -52,6 +52,24 @@ UI statuses are exactly `queued` / `downloading` / `complete` / `error`. A
 torrent that finished downloading but is still seeding reports `complete`
 with `seeding: true` — there is no separate "seeding" status.
 
+### Automatic retry goes to the back of the queue
+
+Real aria2 failures and failures while adding a `.torrent` remain visibly
+`error` during a short exponential backoff (15 seconds initially, capped at 5
+minutes). When the delay expires, the entry changes back to `queued` with a
+new persisted `queue_position`, behind every torrent that is already waiting.
+The scheduler uses this position rather than rewriting `added_at`, so the UI
+keeps showing the torrent's true original add time while retries cannot starve
+new work. `DRONE_TORRENT_RETRY_BASE_SECONDS` and
+`DRONE_TORRENT_RETRY_MAX_SECONDS` override the defaults.
+
+Intentional **Cancel** is terminal and is never automatically retried; Force
+Start remains the explicit way to restart a canceled torrent. A failed aria2
+GID is removed before its retry is re-added so stopped/error results do not
+collide with the fresh attempt. Older persisted error entries that predate
+retry metadata are made eligible on the first worker tick after upgrade, with
+the same exception for entries whose message is `Canceled`.
+
 ## Watched folder vs. download location (two independent settings)
 
 `directory` — the folder scanned for new `.torrent` files (`_scan_watch_directory_locked`).
