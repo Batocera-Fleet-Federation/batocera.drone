@@ -37,6 +37,10 @@ def _build_settings(test_case: unittest.TestCase, root: Path) -> Settings:
     patcher = mock.patch.object(vpn_manager, "_drone_install_root", return_value=root / "install-root")
     test_case.addCleanup(patcher.stop)
     patcher.start()
+    resolver = mock.patch.object(vpn_manager._vpn_dns, "resolver_path", return_value=root / "resolv.conf")
+    test_case.addCleanup(resolver.stop)
+    resolver.start()
+    (root / "resolv.conf").write_text("nameserver 192.0.2.53\n", encoding="utf-8")
     with mock.patch.dict("os.environ", env, clear=True):
         return Settings.from_env()
 
@@ -87,6 +91,29 @@ class RewriteConfigTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             vpn_manager.rewrite_ovpn_config("client\ndev tun\nauth-user-pass\n", Path("/x/auth.txt"))
 
+    def test_rejects_command_and_plugin_directives(self) -> None:
+        for directive in (
+            "script-security 2\nup /tmp/run-me",
+            "plugin /tmp/plugin.so",
+            "management 0.0.0.0 7505",
+            "management-client-user root",
+        ):
+            with self.subTest(directive=directive):
+                with self.assertRaises(ValueError):
+                    vpn_manager.rewrite_ovpn_config(SAMPLE_OVPN + directive + "\n", Path("/x/auth.txt"))
+
+    def test_rejects_external_key_material(self) -> None:
+        for directive in ("ca /tmp/ca.pem", "cert /tmp/client.pem", "key /tmp/client.key", "tls-auth /tmp/ta.key 1"):
+            with self.subTest(directive=directive):
+                with self.assertRaises(ValueError):
+                    vpn_manager.rewrite_ovpn_config(SAMPLE_OVPN + directive + "\n", Path("/x/auth.txt"))
+
+    def test_rejects_compression_and_unknown_directives(self) -> None:
+        for directive in ("compress lz4", "comp-lzo yes", "future-provider-option enabled"):
+            with self.subTest(directive=directive):
+                with self.assertRaises(ValueError):
+                    vpn_manager.rewrite_ovpn_config(SAMPLE_OVPN + directive + "\n", Path("/x/auth.txt"))
+
     def test_parsed_remotes_extracts_all_remote_lines(self) -> None:
         text = "remote a.example.net 1194\nremote b.example.net 443\nauth-user-pass\n"
         self.assertEqual(vpn_manager.parsed_remotes(text), ["a.example.net 1194", "b.example.net 443"])
@@ -131,6 +158,9 @@ class SaveUploadedConfigTests(unittest.TestCase):
             self.assertEqual(result["status"], "ok")
             self.assertEqual(result["config_filename"], "ProtonVPN-US.ovpn")
             self.assertEqual(result["remotes"], ["vpn.example.net 1194"])
+            config = vpn_manager.config_path(settings)
+            self.assertEqual(stat.S_IMODE(config.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(config.parent.stat().st_mode), 0o700)
             written = vpn_manager.config_path(settings).read_text()
             self.assertIn(f"auth-user-pass {vpn_manager.auth_path(settings)}", written)
             state = vpn_manager._load_state(settings)
@@ -818,6 +848,36 @@ class CheckSharingRevocationTests(unittest.TestCase):
                 self.assertFalse(vpn_manager.check_sharing_revocation(settings))
 
 
+class VpnDnsTests(unittest.TestCase):
+    def test_prepare_apply_and_restore_resolver(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            resolver = root / "resolv.conf"
+            resolver.write_text("nameserver 192.0.2.53\n", encoding="utf-8")
+            vpn_directory = root / "vpn"
+            vpn_manager._vpn_dns.prepare(vpn_directory, target=resolver)
+            applied = vpn_manager._vpn_dns.apply(["10.8.0.1", "invalid", "10.8.0.1"], target=resolver)
+            self.assertEqual(applied, ["10.8.0.1"])
+            self.assertIn("nameserver 10.8.0.1", resolver.read_text(encoding="utf-8"))
+            self.assertTrue(vpn_manager._vpn_dns.restore(vpn_directory, target=resolver))
+            self.assertEqual(resolver.read_text(encoding="utf-8"), "nameserver 192.0.2.53\n")
+
+    def test_sinkhole_blocks_external_resolution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            resolver = Path(tmp) / "resolv.conf"
+            vpn_manager._vpn_dns.sinkhole(target=resolver)
+            text = resolver.read_text(encoding="utf-8")
+            self.assertIn("nameserver 127.0.0.1", text)
+            self.assertIn("nameserver ::1", text)
+
+    def test_extracts_provider_dns_from_config_log_and_environment(self) -> None:
+        config = "dhcp-option DNS 10.8.0.1\n"
+        log = "PUSH_REPLY,'dhcp-option DNS6 2001:db8::53'\n"
+        with mock.patch.dict("os.environ", {"DRONE_VPN_DNS": "10.9.0.1"}, clear=False):
+            servers = vpn_manager._vpn_dns.provider_dns_servers(config, log)
+        self.assertEqual(servers, ["10.9.0.1", "10.8.0.1", "2001:db8::53"])
+
+
 class BootstrapVpnFromSwarmTests(unittest.TestCase):
     """bootstrap_vpn_from_swarm's own peer-search/skip/import logic, in
     isolation from maybe_auto_connect (see AutoConnectTests for the wiring:
@@ -992,7 +1052,7 @@ class ReconnectTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(self, Path(tmp))
             calls: List[str] = []
-            with mock.patch.object(vpn_manager, "disconnect", side_effect=lambda s: (calls.append("disconnect"), {"status": "not_running"})[1]), \
+            with mock.patch.object(vpn_manager, "disconnect", side_effect=lambda s, **kwargs: (calls.append("disconnect"), {"status": "not_running"})[1]), \
                     mock.patch.object(vpn_manager, "connect", side_effect=lambda s: (calls.append("connect"), {"status": "connecting"})[1]):
                 result = vpn_manager.reconnect(settings)
             self.assertEqual(calls, ["disconnect", "connect"])

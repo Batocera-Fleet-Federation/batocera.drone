@@ -4,18 +4,15 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Batocera Drone</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet">
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
+  <link href="/static/vendor/bootstrap/bootstrap.min.css?v={{DRONE_APP_VERSION}}" rel="stylesheet">
+  <link href="/static/vendor/bootstrap-icons/bootstrap-icons.css?v={{DRONE_APP_VERSION}}" rel="stylesheet">
   <link href="/static/css/drone.css?v={{DRONE_APP_VERSION}}" rel="stylesheet">
 </head>
 <body>
 <div class="container-fluid layout-shell py-3 py-lg-4">
   <div id="managedPeerBanner" class="alert alert-warning d-none d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3" role="alert">
     <span><i class="bi bi-broadcast me-2"></i><span class="managed-peer-banner-text fw-semibold"></span></span>
-    <button type="button" class="btn btn-sm btn-outline-dark" onclick="exitRemoteManagement()"><i class="bi bi-x-circle me-1"></i>Disconnect</button>
+    <button type="button" class="btn btn-sm btn-outline-dark" data-ui-click="exitRemoteManagement()"><i class="bi bi-x-circle me-1"></i>Disconnect</button>
   </div>
   <div class="sidebar rounded-3 p-2 p-md-3 mb-3">
     <div class="d-flex flex-column flex-lg-row align-items-lg-center gap-2 gap-lg-3">
@@ -51,7 +48,7 @@
     </div>
   </main>
 </div>
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script src="/static/vendor/bootstrap/bootstrap.bundle.min.js?v={{DRONE_APP_VERSION}}"></script>
 <script src="/static/js/drone.js?v={{DRONE_APP_VERSION}}"></script>
 </body>
 </html>

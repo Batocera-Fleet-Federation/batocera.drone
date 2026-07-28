@@ -32,7 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
 
@@ -103,8 +103,13 @@ jobs:
         if: steps.version.outputs.skip != 'true'
         env:
           RELEASE_VERSION: ${{ steps.version.outputs.tag }}
+          UPDATE_SIGNING_PRIVATE_KEY: ${{ secrets.DRONE_UPDATE_SIGNING_PRIVATE_KEY }}
         run: |
           set -euo pipefail
+          if [[ -z "$UPDATE_SIGNING_PRIVATE_KEY" ]]; then
+            echo "DRONE_UPDATE_SIGNING_PRIVATE_KEY is required to publish verifiable updates." >&2
+            exit 1
+          fi
           original_version="$(cat app/VERSION 2>/dev/null || true)"
           restore_version() {
             printf '%s\n' "$original_version" > app/VERSION
@@ -127,17 +132,52 @@ jobs:
             test -s "$asset"
           done
 
+          python3 - "$RELEASE_VERSION" <<'PY'
+          import hashlib
+          import json
+          import sys
+          from pathlib import Path
+
+          version = sys.argv[1]
+          assets = {}
+          for path in (
+              Path("dist/drone-app.tar.gz"),
+              Path("scripts/run_now.sh"),
+              Path("scripts/batocera_install.sh"),
+              Path("scripts/batocera_uninstall.sh"),
+          ):
+              payload = path.read_bytes()
+              assets[path.name] = {
+                  "sha256": hashlib.sha256(payload).hexdigest(),
+                  "size": len(payload),
+              }
+          manifest = {"schema": 1, "version": version, "assets": assets}
+          Path("dist/release-manifest.json").write_text(
+              json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+          signing_key="$RUNNER_TEMP/drone-update-signing.pem"
+          umask 077
+          printf '%s\n' "$UPDATE_SIGNING_PRIVATE_KEY" > "$signing_key"
+          openssl dgst -sha256 -sign "$signing_key" \
+            -out dist/release-manifest.sig dist/release-manifest.json
+          openssl dgst -sha256 -verify app/update-signing-public.pem \
+            -signature dist/release-manifest.sig dist/release-manifest.json
+          rm -f "$signing_key"
+
       - name: Set up QEMU
         if: steps.version.outputs.skip != 'true' && steps.version.outputs.dry_run != 'true'
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
 
       - name: Set up Docker Buildx
         if: steps.version.outputs.skip != 'true' && steps.version.outputs.dry_run != 'true'
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Log in to GHCR
         if: steps.version.outputs.skip != 'true' && steps.version.outputs.dry_run != 'true'
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -172,7 +212,7 @@ jobs:
 
       - name: Create GitHub release
         if: steps.version.outputs.skip != 'true' && steps.version.outputs.dry_run != 'true'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: Batocera Drone ${{ steps.version.outputs.tag }}
@@ -186,6 +226,8 @@ jobs:
             scripts/batocera_uninstall.sh
             scripts/run_now.sh
             dist/drone-app.tar.gz
+            dist/release-manifest.json
+            dist/release-manifest.sig
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

@@ -24,7 +24,7 @@ def main() -> None:
         str(mock_root / "system" / "configs" / "emulationstation" / "es_settings.cfg"),
     )
     os.environ.setdefault("DRONE_APP_USERNAME", "admin")
-    os.environ.setdefault("DRONE_APP_PASSWORD", "changeme")
+    os.environ.setdefault("DRONE_APP_PASSWORD", "mock-local-only-password")
     os.environ.setdefault("HTTPS_PORT", "8080")
     os.environ.setdefault("HTTP_ONLY", "1")
     os.environ.setdefault("LOG_DIR", str(ROOT / "local-data" / "logs"))
@@ -40,8 +40,8 @@ def main() -> None:
     server = create_server(settings)
     print(f"Mock data root: {mock_root}")
     print(f"Mock server running on http://127.0.0.1:{settings.https_port}")
-    print("Auth username: admin")
-    print("Auth password: changeme")
+    print(f"Auth username: {os.environ['DRONE_APP_USERNAME']}")
+    print(f"Auth password: {os.environ['DRONE_APP_PASSWORD']}")
     server.serve_forever()
 
 

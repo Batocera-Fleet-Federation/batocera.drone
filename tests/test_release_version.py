@@ -1,4 +1,5 @@
 import subprocess
+import re
 from pathlib import Path
 
 
@@ -6,6 +7,9 @@ SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "next-release-version
 DOCKER_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "docker-publish.sh"
 WORKFLOW = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "release.yml"
 CI_WORKFLOW = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml"
+PUBLIC_KEY = Path(__file__).resolve().parents[1] / "app" / "update-signing-public.pem"
+RUNNER = Path(__file__).resolve().parents[1] / "scripts" / "run_now.sh"
+INSTALLER = Path(__file__).resolve().parents[1] / "scripts" / "batocera_install.sh"
 
 
 def next_version(current: str, subject: str) -> str:
@@ -44,10 +48,20 @@ def test_release_workflow_is_main_only_and_uploads_drone_assets():
     assert "scripts/next-release-version.sh" in workflow
     assert "dist/drone-app.tar.gz" in workflow
     assert "scripts/batocera_install.sh" in workflow
+    assert "dist/release-manifest.json" in workflow
+    assert "dist/release-manifest.sig" in workflow
+    assert "DRONE_UPDATE_SIGNING_PRIVATE_KEY" in workflow
     assert "refs/tags/latest --force" in workflow
     assert 'args=(--version "$RELEASE_VERSION")' in workflow
     assert "./scripts/docker-publish.sh" in workflow
     assert "packages: write" in workflow
+    assert not re.search(r"uses:\s+\S+@v\d+", workflow)
+
+
+def test_bootstrap_scripts_pin_the_same_update_signing_key():
+    public_key = PUBLIC_KEY.read_text(encoding="utf-8").strip()
+    assert public_key in RUNNER.read_text(encoding="utf-8")
+    assert public_key in INSTALLER.read_text(encoding="utf-8")
 
 
 def test_ci_workflow_does_not_duplicate_main_push_release():

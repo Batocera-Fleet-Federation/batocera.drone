@@ -306,6 +306,11 @@ class LanDirectTransportTests(unittest.TestCase):
         peer = {"public_ip": "203.0.113.7", "local_ip": "192.168.1.50", "api_port": 443}
         self.assertEqual(transport.lan_url(peer), "https://192.168.1.50")
 
+    def test_paired_private_peer_does_not_require_public_ip_lookup(self):
+        transport = self._transport("")
+        peer = {"paired": True, "local_ip": "192.168.1.50", "api_port": 443}
+        self.assertEqual(transport.lan_url(peer), "https://192.168.1.50")
+
     def test_no_lan_url_when_public_ip_differs(self):
         transport = self._transport("203.0.113.7")
         self.assertIsNone(transport.lan_url({"public_ip": "198.51.100.9", "local_ip": "192.168.1.50"}))

@@ -37,6 +37,8 @@ APP_DIR = Path(__file__).resolve().parent
 
 try:
     from .app_version import drone_app_version as _drone_app_version
+    from .common.privacy_logging import pseudonymize_ip as _pseudonymize_ip
+    from .common.privacy_logging import sanitize_request_line as _sanitize_request_line
     from .web.api_routes import ApiRoutesMixin
     from .set_screen_mode import set_screen_mode as _set_screen_mode_helper
     from .set_volume import set_audio_volume as _set_audio_volume_helper
@@ -113,6 +115,8 @@ except ImportError:
     if __package__ not in (None, ""):
         raise
     from app_version import drone_app_version as _drone_app_version  # type: ignore
+    from common.privacy_logging import pseudonymize_ip as _pseudonymize_ip  # type: ignore
+    from common.privacy_logging import sanitize_request_line as _sanitize_request_line  # type: ignore
     from web.api_routes import ApiRoutesMixin  # type: ignore
     from set_screen_mode import set_screen_mode as _set_screen_mode_helper  # type: ignore
     from set_volume import set_audio_volume as _set_audio_volume_helper  # type: ignore
@@ -882,6 +886,7 @@ _TORRENT_MANAGER = None
 _VPN_AUTO_CONNECT_ATTEMPTED = False
 _VPN_SHARING_POLLER_STARTED = False
 _VPN_SELF_HEAL_POLLER_STARTED = False
+_VPN_PRIVACY_GUARD_STARTED = False
 # _PERFORMANCE_METRICS_LAST_SAMPLE moved to device/system_metrics.py.
 # LAUNCHBOX_API_BASE / LAUNCHBOX_IMAGE_BASE / SCRAPER_USER_AGENT moved to scrapers.py.
 try:  # ARTWORK_FIELDS now lives in roms/gamelist.py (re-exported for back-compat)
@@ -1250,13 +1255,13 @@ class RomRequestHandler(HandlersAuthMixin, HandlersSystemMixin, HandlersDownload
 
     def log_request(self, code="-", size="-") -> None:
         client_ip = self.client_address[0] if self.client_address else "-"
-        message = f'{client_ip} - "{self.requestline}" {code} {size}'
+        message = f'{_pseudonymize_ip(client_ip)} - "{_sanitize_request_line(self.requestline)}" {code} {size}'
         print(message, file=sys.stdout, flush=True)
 
     def log_error(self, format: str, *args) -> None:
         message = format % args if args else format
         client_ip = self.client_address[0] if self.client_address else "-"
-        print(f"{client_ip} - {message}", file=sys.stderr, flush=True)
+        print(f"{_pseudonymize_ip(client_ip)} - {message}", file=sys.stderr, flush=True)
 
     def _guess_content_type(self, path: Path) -> str:
         suffix = path.suffix.lower()
@@ -1323,7 +1328,8 @@ class RomRequestHandler(HandlersAuthMixin, HandlersSystemMixin, HandlersDownload
         if not is_ip_blocked(client_ip):
             return False
         print(
-            f"Blocked request: ip={client_ip} {self.command} {self.path.split('?', 1)[0]}",
+            f"Blocked request: client={_pseudonymize_ip(client_ip)} "
+            f"{self.command} {self.path.split('?', 1)[0]}",
             file=sys.stdout,
             flush=True,
         )
@@ -1363,9 +1369,8 @@ class RomRequestHandler(HandlersAuthMixin, HandlersSystemMixin, HandlersDownload
         return True
 
     def _send_security_headers(self) -> None:
-        image_sources = ["'self'", "data:", "https:"]
+        image_sources = ["'self'", "data:", "blob:"]
         if self.settings.use_fake_data:
-            image_sources.append("https:")
             fake_base = (self.settings.fake_image_base_url or "").strip()
             if fake_base:
                 parsed = urlparse(fake_base)
@@ -1378,12 +1383,14 @@ class RomRequestHandler(HandlersAuthMixin, HandlersSystemMixin, HandlersDownload
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
         self.send_header("Cache-Control", "no-store")
-        # CSP keeps UI/resource loading strict while still allowing bundled Swagger assets.
+        # Scripts and network requests are same-origin only. Inline styles remain
+        # allowed because the UI uses Bootstrap utility style attributes, but
+        # inline handlers and eval are deliberately excluded.
         self.send_header(
             "Content-Security-Policy",
-            f"default-src 'self'; img-src {' '.join(image_sources)}; style-src 'self' 'unsafe-inline' https://unpkg.com https://cdn.jsdelivr.net https://fonts.googleapis.com; "
-            "script-src 'self' 'unsafe-inline' https://unpkg.com https://cdn.jsdelivr.net; "
-            "font-src 'self' data: https://cdn.jsdelivr.net https://fonts.gstatic.com; connect-src 'self' https://unpkg.com https://cdn.jsdelivr.net; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+            f"default-src 'self'; img-src {' '.join(image_sources)}; style-src 'self' 'unsafe-inline'; "
+            "script-src 'self'; font-src 'self' data:; connect-src 'self'; media-src 'self' blob:; "
+            "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; worker-src 'none'",
         )
 
     def _build_fake_image_url(self, seed: str, width: int = 640, height: int = 360) -> str:
@@ -1533,8 +1540,6 @@ class RomRequestHandler(HandlersAuthMixin, HandlersSystemMixin, HandlersDownload
 
     def _peer_request_authorized(self) -> bool:
         if self.settings.http_only:
-            if _env_bool(False, "DRONE_LOCAL_ALLOW_INSECURE_HTTP"):
-                return True
             self._send_json(403, {"error": "local-network peer API requires HTTPS and a paired client certificate"})
             return False
         try:
@@ -1772,7 +1777,8 @@ class DroneThreadingHTTPServer(ThreadingHTTPServer):
                 # paired with (or that is not running HTTPS) trying to transfer.
                 hint = " — this looks like a Drone on your network that is not paired with this one (or is not running HTTPS). Pair it under Admin > Integration > Local Network. (repeats from this IP are suppressed for 60s)"
             print(
-                f"Dropped untrusted/insecure connection from {ip}: {error.__class__.__name__}: {error}{hint}",
+                f"Dropped untrusted/insecure connection from {_pseudonymize_ip(ip)}: "
+                f"{error.__class__.__name__}: {error}{hint}",
                 file=sys.stderr,
                 flush=True,
             )
@@ -1847,7 +1853,7 @@ def _apply_server_tls(settings: Settings, server: ThreadingHTTPServer, *, peer_m
 
 
 def create_server(settings: Settings) -> ThreadingHTTPServer:
-    global _ROM_METADATA_POLLER_STARTED, _ROM_METADATA_WATCHER_STARTED, _LOCAL_NETWORK_WORKERS_STARTED, _GAME_PROCESS_MONITOR_STARTED, _GAME_PROCESS_MONITOR, _DOWNLOAD_MANAGER, _TORRENT_MANAGER, _AUTOMATION_POLLER_STARTED, _VPN_AUTO_CONNECT_ATTEMPTED, _VPN_SHARING_POLLER_STARTED, _VPN_SELF_HEAL_POLLER_STARTED
+    global _ROM_METADATA_POLLER_STARTED, _ROM_METADATA_WATCHER_STARTED, _LOCAL_NETWORK_WORKERS_STARTED, _GAME_PROCESS_MONITOR_STARTED, _GAME_PROCESS_MONITOR, _DOWNLOAD_MANAGER, _TORRENT_MANAGER, _AUTOMATION_POLLER_STARTED, _VPN_AUTO_CONNECT_ATTEMPTED, _VPN_SHARING_POLLER_STARTED, _VPN_SELF_HEAL_POLLER_STARTED, _VPN_PRIVACY_GUARD_STARTED
     roms_root, bios_root = _real_data_roots(settings)
     repository = RomRepository(
         roms_root,
@@ -1861,6 +1867,14 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
         settings.password,
         state_database_file=_state_database_path(settings.userdata_root),
     )
+    setup_token = credential_store.ensure_setup_token()
+    if setup_token:
+        print(
+            "First-boot setup required. Open the Drone UI and enter setup code: "
+            f"{setup_token}",
+            file=sys.stdout,
+            flush=True,
+        )
     session_store = SessionStore(_state_database_path(settings.userdata_root))
     auth = SessionAuth(credential_store=credential_store, session_store=session_store)
     cert_state = DroneCertificateManager(settings).ensure_certificate()
@@ -1904,6 +1918,9 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
         # anyone needing to notice and manually reconnect -- see
         # run_self_heal_poller's own docstring for the rate-limiting.
         Thread(target=_vpn_manager.run_self_heal_poller, args=(settings,), name="drone-vpn-self-heal", daemon=True).start()
+    if not _VPN_PRIVACY_GUARD_STARTED:
+        _VPN_PRIVACY_GUARD_STARTED = True
+        Thread(target=_vpn_manager.run_privacy_guard_poller, args=(settings,), name="drone-vpn-privacy-guard", daemon=True).start()
     _ensure_game_event_spool(settings)
     if not _GAME_PROCESS_MONITOR_STARTED:
         poll_seconds = max(0.25, float(os.environ.get("GAME_PROCESS_POLL_SECONDS", "2")))
@@ -2040,7 +2057,7 @@ def main() -> None:
         server_auth = getattr(server, "auth", None)
         credential_store = getattr(server_auth, "credential_store", None)
         safe_username = credential_store.load().get("username") if credential_store else settings.username
-        print(f"Auth username: {safe_username}")
+        print(f"Auth username: {safe_username or 'not configured'}")
         scheme = "http" if settings.http_only else "https"
         print(f"Serving Drone App on {scheme}://0.0.0.0:{settings.https_port}", flush=True)
         server.serve_forever()

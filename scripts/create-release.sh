@@ -13,6 +13,8 @@ RELEASE_ASSETS=(
   "scripts/batocera_uninstall.sh"
   "scripts/run_now.sh"
   "dist/drone-app.tar.gz"
+  "dist/release-manifest.json"
+  "dist/release-manifest.sig"
 )
 
 RED='\033[0;31m'
@@ -62,7 +64,7 @@ fi
 
 for asset in "${RELEASE_ASSETS[@]}"; do
   if [[ ! -f "$asset" ]]; then
-    if [[ "$asset" == "dist/drone-app.tar.gz" ]]; then
+    if [[ "$asset" == dist/* ]]; then
       continue
     fi
     error "Release asset not found: $asset"
@@ -105,6 +107,7 @@ TODAY="$(date +%Y-%m-%d)"
 VERSION_FILE="app/VERSION"
 VERSION_FILE_EXISTED="0"
 VERSION_FILE_ORIGINAL=""
+SIGNING_KEY_TEMP=""
 
 if [[ -f "$VERSION_FILE" ]]; then
   VERSION_FILE_EXISTED="1"
@@ -119,7 +122,14 @@ restore_version_file() {
   fi
 }
 
-trap restore_version_file EXIT
+cleanup_release_state() {
+  restore_version_file
+  if [[ -n "$SIGNING_KEY_TEMP" ]]; then
+    rm -f "$SIGNING_KEY_TEMP"
+  fi
+}
+
+trap cleanup_release_state EXIT
 
 echo "══════════════════════════════════════════════════════════════"
 echo "  $PROJECT Release"
@@ -186,7 +196,50 @@ tar \
   -czf dist/drone-app.tar.gz \
   app content
 restore_version_file
-trap - EXIT
+
+if ! command -v openssl >/dev/null 2>&1; then
+  error "openssl is required to sign release manifests."
+fi
+SIGNING_KEY_PATH="${DRONE_UPDATE_SIGNING_PRIVATE_KEY_FILE:-}"
+if [[ -z "$SIGNING_KEY_PATH" && -n "${DRONE_UPDATE_SIGNING_PRIVATE_KEY:-}" ]]; then
+  SIGNING_KEY_TEMP="$(mktemp)"
+  chmod 600 "$SIGNING_KEY_TEMP"
+  printf '%s\n' "$DRONE_UPDATE_SIGNING_PRIVATE_KEY" > "$SIGNING_KEY_TEMP"
+  SIGNING_KEY_PATH="$SIGNING_KEY_TEMP"
+fi
+if [[ -z "$SIGNING_KEY_PATH" || ! -f "$SIGNING_KEY_PATH" ]]; then
+  error "Set DRONE_UPDATE_SIGNING_PRIVATE_KEY_FILE (preferred) or DRONE_UPDATE_SIGNING_PRIVATE_KEY."
+fi
+
+info "Creating and signing release manifest..."
+python3 - "$VERSION" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+version = sys.argv[1]
+assets = {}
+for path in (
+    Path("dist/drone-app.tar.gz"),
+    Path("scripts/run_now.sh"),
+    Path("scripts/batocera_install.sh"),
+    Path("scripts/batocera_uninstall.sh"),
+):
+    payload = path.read_bytes()
+    assets[path.name] = {
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "size": len(payload),
+    }
+Path("dist/release-manifest.json").write_text(
+    json.dumps({"schema": 1, "version": version, "assets": assets}, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+PY
+openssl dgst -sha256 -sign "$SIGNING_KEY_PATH" \
+  -out dist/release-manifest.sig dist/release-manifest.json
+openssl dgst -sha256 -verify app/update-signing-public.pem \
+  -signature dist/release-manifest.sig dist/release-manifest.json >/dev/null
 
 if ! git diff --quiet -- "$CHANGELOG" 2>/dev/null; then
   info "Committing changelog update..."

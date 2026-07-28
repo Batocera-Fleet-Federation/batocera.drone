@@ -1,24 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DRONE_APP_URL="${DRONE_APP_URL:-}"
-DRONE_APP_TEMPLATE_URL="${DRONE_APP_TEMPLATE_URL:-}"
-DRONE_APP_API_ROUTES_URL="${DRONE_APP_API_ROUTES_URL:-}"
-DRONE_APP_UI_ROUTES_URL="${DRONE_APP_UI_ROUTES_URL:-}"
-DRONE_APP_ROUTE_CONFIG_URL="${DRONE_APP_ROUTE_CONFIG_URL:-}"
-DRONE_APP_CSS_URL="${DRONE_APP_CSS_URL:-}"
-DRONE_APP_JS_URL="${DRONE_APP_JS_URL:-}"
-DRONE_APP_CONTENT_URL="${DRONE_APP_CONTENT_URL:-}"
-DRONE_APP_ARCHIVE_URL="${DRONE_APP_ARCHIVE_URL:-}"
-DRONE_APP_FALLBACK_ARCHIVE_URL="${DRONE_APP_FALLBACK_ARCHIVE_URL:-}"
-DRONE_APP_STAGE_ONLY="${DRONE_APP_STAGE_ONLY:-0}"
-DRONE_APP_BASE_URL="${DRONE_APP_BASE_URL:-${1:-https://raw.githubusercontent.com/Batocera-Fleet-Federation/batocera.drone/main}}"
+# Standalone, signed Drone bootstrap. This file may be downloaded by an
+# installer, but it never trusts the application archive until a manifest
+# signature made by the pinned offline release key has been verified.
 
-if [[ -z "$DRONE_APP_URL" && -z "$DRONE_APP_BASE_URL" ]]; then
-  echo "Usage:"
-  echo "  DRONE_APP_BASE_URL=<raw-base-url> ./run_now.sh"
-  echo "  ./run_now.sh <raw-base-url>"
-  echo "  or set all required file URLs directly"
+WORK_DIR="${DRONE_APP_WORK_DIR:-/userdata/system/drone-app}"
+STAGE_ONLY="${DRONE_APP_STAGE_ONLY:-0}"
+MANIFEST_URL="${DRONE_UPDATE_MANIFEST_URL:-https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/release-manifest.json}"
+SIGNATURE_URL="${DRONE_UPDATE_MANIFEST_SIGNATURE_URL:-https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/release-manifest.sig}"
+RELEASE_ROOT="${DRONE_RELEASE_DOWNLOAD_ROOT:-https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/download}"
+
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "python3 is required" >&2
+  exit 1
+fi
+if ! command -v openssl >/dev/null 2>&1; then
+  echo "openssl is required to verify Drone releases" >&2
   exit 1
 fi
 
@@ -28,312 +26,188 @@ if command -v curl >/dev/null 2>&1; then
 elif command -v wget >/dev/null 2>&1; then
   DOWNLOAD_TOOL="wget"
 else
-  echo "curl or wget is required"
-  exit 1
-fi
-
-if ! command -v python3 >/dev/null 2>&1; then
-  echo "python3 is required"
-  exit 1
-fi
-
-WORK_DIR="${DRONE_APP_WORK_DIR:-/userdata/system/drone-app}"
-mkdir -p "$WORK_DIR"
-APP_DIR="$WORK_DIR/app"
-APP_PATH="$APP_DIR/drone_api.py"
-MAIN_PATH="$APP_DIR/main.py"
-INIT_PATH="$APP_DIR/__init__.py"
-TEMPLATES_DIR="$APP_DIR/web/templates"
-TEMPLATE_PATH="$TEMPLATES_DIR/index.html"
-STATIC_DIR="$APP_DIR/web/static"
-CSS_PATH="$STATIC_DIR/css/drone.css"
-JS_PATH="$STATIC_DIR/js/drone.js"
-CONTENT_DIR="$WORK_DIR/content"
-API_ROUTES_PATH="$APP_DIR/web/api_routes.py"
-UI_ROUTES_PATH="$APP_DIR/web/ui_routes.py"
-ROUTE_CONFIG_PATH="$APP_DIR/web/route_config.py"
-
-if [[ -n "$DRONE_APP_BASE_URL" ]]; then
-  DRONE_APP_BASE_URL="${DRONE_APP_BASE_URL%/}"
-  DRONE_APP_URL="${DRONE_APP_URL:-$DRONE_APP_BASE_URL/app/drone_api.py}"
-  DRONE_APP_API_ROUTES_URL="${DRONE_APP_API_ROUTES_URL:-$DRONE_APP_BASE_URL/app/web/api_routes.py}"
-  DRONE_APP_UI_ROUTES_URL="${DRONE_APP_UI_ROUTES_URL:-$DRONE_APP_BASE_URL/app/web/ui_routes.py}"
-  DRONE_APP_ROUTE_CONFIG_URL="${DRONE_APP_ROUTE_CONFIG_URL:-$DRONE_APP_BASE_URL/app/web/route_config.py}"
-  DRONE_APP_TEMPLATE_URL="${DRONE_APP_TEMPLATE_URL:-$DRONE_APP_BASE_URL/app/web/templates/index.html}"
-  DRONE_APP_CSS_URL="${DRONE_APP_CSS_URL:-$DRONE_APP_BASE_URL/app/web/static/css/drone.css}"
-  DRONE_APP_JS_URL="${DRONE_APP_JS_URL:-$DRONE_APP_BASE_URL/app/web/static/js/drone.js}"
-  DRONE_APP_CONTENT_URL="${DRONE_APP_CONTENT_URL:-$DRONE_APP_BASE_URL/content}"
-
-  if [[ -z "$DRONE_APP_ARCHIVE_URL" && "$DRONE_APP_BASE_URL" == https://raw.githubusercontent.com/Batocera-Fleet-Federation/batocera.drone/* ]]; then
-    DRONE_APP_ARCHIVE_URL="https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/drone-app.tar.gz"
-  fi
-
-  if [[ -z "$DRONE_APP_FALLBACK_ARCHIVE_URL" && "$DRONE_APP_BASE_URL" == https://raw.githubusercontent.com/* ]]; then
-    raw_path="${DRONE_APP_BASE_URL#https://raw.githubusercontent.com/}"
-    owner="${raw_path%%/*}"
-    raw_path="${raw_path#*/}"
-    repo="${raw_path%%/*}"
-    raw_path="${raw_path#*/}"
-    ref="${raw_path%%/*}"
-    if [[ -n "$owner" && -n "$repo" && -n "$ref" ]]; then
-      DRONE_APP_FALLBACK_ARCHIVE_URL="https://codeload.github.com/$owner/$repo/tar.gz/$ref"
-    fi
-  fi
-fi
-
-if [[ -z "$DRONE_APP_URL" || -z "$DRONE_APP_API_ROUTES_URL" || -z "$DRONE_APP_UI_ROUTES_URL" || -z "$DRONE_APP_ROUTE_CONFIG_URL" || -z "$DRONE_APP_CSS_URL" || -z "$DRONE_APP_JS_URL" ]]; then
-  echo "Missing required app file URL(s)."
-  echo "Provide DRONE_APP_BASE_URL or set DRONE_APP_URL, DRONE_APP_API_ROUTES_URL, DRONE_APP_UI_ROUTES_URL, DRONE_APP_ROUTE_CONFIG_URL, DRONE_APP_CSS_URL, and DRONE_APP_JS_URL."
+  echo "curl or wget is required" >&2
   exit 1
 fi
 
 download_file() {
-  local src="$1"
-  local dst="$2"
+  local source_url="$1"
+  local destination="$2"
   if [[ "$DOWNLOAD_TOOL" == "curl" ]]; then
-    curl -fsSL --connect-timeout 10 --max-time 120 "$src" -o "$dst"
+    curl -fsSL --connect-timeout 10 --max-time 120 "$source_url" -o "$destination"
   else
-    wget -T 120 -qO "$dst" "$src"
+    wget -T 120 -qO "$destination" "$source_url"
   fi
 }
 
-download_archive_dirs() {
-  local archive_url="$1"
-  local archive_path="$WORK_DIR/source.tar.gz"
-  if ! download_file "$archive_url" "$archive_path"; then
-    echo "Failed to download archive from $archive_url"
-    return 1
-  fi
-  if [ ! -f "$archive_path" ]; then
-    echo "Archive download produced no file at $archive_path"
-    return 1
-  fi
-  python3 - "$archive_path" "$WORK_DIR" <<'PY'
+mkdir -p "$WORK_DIR"
+TEMP_DIR="$(mktemp -d "$WORK_DIR/.verified-bootstrap.XXXXXX")"
+cleanup() {
+  rm -rf "$TEMP_DIR"
+}
+trap cleanup EXIT
+
+PUBLIC_KEY="$TEMP_DIR/update-signing-public.pem"
+cat > "$PUBLIC_KEY" <<'PUBLICKEY'
+-----BEGIN PUBLIC KEY-----
+MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEA6v5FRoVdVNL8KBxoGliK
+bqWgUgkUD04qpYwjss1QWCJlSE/XSySYFfPRmc1CLzQZDbjQO/Wv3xF2HGMxXj1t
+u5Iq0af7Ab8FuarWG5u1fUeoyq4+3muvk1HZlG6EGEYt5pkBZqpLb5pJtd5UkVdx
+IugagWdrGCbxE5InSV8+Ni8E1S64z/oKTibNJD/7rBB2AJyw28x2PvcSRGMlXLxK
+/g+g5dIHu7AmjT2gweNdtZy7LApsFsR/Y2xZbsaS208ITV/UbuhBv0nqpEAAdbSW
+s2VFr41LyiyE1AMBQPoDqxor/AP7YKyWcMIt35VPlLfVI48/iQQHFJbNNibzHC+8
+5GRjjbeOaTFN9Oz15G0D2Pwby9f2PMAvR1SBRyibe//XHgvBI0L8GKuAbDtrmAE7
+P24hCiKk0huhBUpWwjbTLe8lG6wSc4smGwX8aqqmjU09o9whkC4vFfQhfHHF2b2i
+rOWdZE5kb/1z4siM82ilZ8SQwYnm8bhtg4r1dAr6YOjlAgMBAAE=
+-----END PUBLIC KEY-----
+PUBLICKEY
+
+MANIFEST="$TEMP_DIR/release-manifest.json"
+SIGNATURE="$TEMP_DIR/release-manifest.sig"
+ARCHIVE="$TEMP_DIR/drone-app.tar.gz"
+download_file "$MANIFEST_URL" "$MANIFEST"
+download_file "$SIGNATURE_URL" "$SIGNATURE"
+if ! openssl dgst -sha256 -verify "$PUBLIC_KEY" -signature "$SIGNATURE" "$MANIFEST" >/dev/null; then
+  echo "Drone release manifest signature verification failed" >&2
+  exit 1
+fi
+
+RELEASE_VERSION="$(python3 - "$MANIFEST" <<'PY'
+import json
+import re
+import sys
+
+payload = json.load(open(sys.argv[1], encoding="utf-8"))
+version = str(payload.get("version") or "")
+asset = (payload.get("assets") or {}).get("drone-app.tar.gz")
+if payload.get("schema") != 1 or not re.fullmatch(r"v?[0-9]+\.[0-9]+\.[0-9]+", version):
+    raise SystemExit("invalid signed release manifest")
+if not isinstance(asset, dict) or not re.fullmatch(r"[0-9a-f]{64}", str(asset.get("sha256") or "")):
+    raise SystemExit("signed manifest does not describe drone-app.tar.gz")
+if not isinstance(asset.get("size"), int) or asset["size"] <= 0:
+    raise SystemExit("signed archive size is invalid")
+print(version)
+PY
+)"
+
+ARCHIVE_URL="${DRONE_APP_ARCHIVE_URL:-$RELEASE_ROOT/$RELEASE_VERSION/drone-app.tar.gz}"
+download_file "$ARCHIVE_URL" "$ARCHIVE"
+
+python3 - "$MANIFEST" "$ARCHIVE" "$WORK_DIR" <<'PY'
+import hashlib
+import json
+import os
+import shutil
 import sys
 import tarfile
-import shutil
+import time
 from pathlib import Path
 
-archive_path = Path(sys.argv[1])
-work_dir = Path(sys.argv[2]).resolve()
-wanted_roots = ("app/", "content/")
+manifest_path, archive_path, work_dir = map(Path, sys.argv[1:])
+work_dir = work_dir.resolve()
+manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+version = manifest["version"]
+metadata = manifest["assets"]["drone-app.tar.gz"]
+if archive_path.stat().st_size != metadata["size"]:
+    raise SystemExit("Drone archive size does not match its signed manifest")
+digest = hashlib.sha256(archive_path.read_bytes()).hexdigest()
+if digest != metadata["sha256"]:
+    raise SystemExit("Drone archive digest does not match its signed manifest")
 
-with tarfile.open(archive_path, "r:gz") as archive:
-    for member in archive.getmembers():
-        relative = member.name.lstrip("/")
-        if not relative.startswith(wanted_roots):
+stage = work_dir / f".release-stage-{os.getpid()}"
+stage.mkdir(parents=True, exist_ok=False)
+wanted = {"app", "content"}
+seen = set()
+try:
+    with tarfile.open(archive_path, "r:gz") as archive:
+        for member in archive.getmembers():
+            relative = member.name.lstrip("/")
             parts = relative.split("/", 1)
-            if len(parts) != 2:
+            if parts[0] not in wanted and len(parts) == 2:
+                relative = parts[1]
+                parts = relative.split("/", 1)
+            if not parts or parts[0] not in wanted:
                 continue
-            relative = parts[1]
-        if not relative.startswith(wanted_roots):
-            continue
-        relative_path = Path(relative)
-        if "__pycache__" in relative_path.parts:
-            continue
-        target = (work_dir / relative_path).resolve()
-        if work_dir not in target.parents and target != work_dir:
-            raise RuntimeError(f"archive member escapes work dir: {member.name}")
-        if member.isdir():
-            target.mkdir(parents=True, exist_ok=True)
-            continue
-        source = archive.extractfile(member)
-        if source is None:
-            continue
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with source, target.open("wb") as output:
-            shutil.copyfileobj(source, output)
+            relative_path = Path(relative)
+            if "__pycache__" in relative_path.parts or member.name.endswith(".pyc"):
+                continue
+            if member.issym() or member.islnk() or member.isdev():
+                raise RuntimeError(f"archive contains special entry: {member.name}")
+            target = (stage / relative_path).resolve()
+            if stage not in target.parents and target != stage:
+                raise RuntimeError(f"archive member escapes staging: {member.name}")
+            seen.add(parts[0])
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+            elif member.isfile():
+                source = archive.extractfile(member)
+                if source is None:
+                    raise RuntimeError(f"cannot read archive member: {member.name}")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with source, target.open("wb") as output:
+                    shutil.copyfileobj(source, output)
+    if seen != wanted:
+        raise RuntimeError("archive is missing app/ or content/")
+    for required in ("main.py", "drone_api.py", "service_bootstrap.sh", "VERSION"):
+        if not (stage / "app" / required).is_file():
+            raise RuntimeError(f"archive is missing app/{required}")
+    archive_version = (stage / "app" / "VERSION").read_text(encoding="utf-8").splitlines()[0].strip()
+    if archive_version != version:
+        raise RuntimeError("archive version does not match signed manifest")
+
+    releases = work_dir / ".releases"
+    releases.mkdir(parents=True, exist_ok=True)
+    release = releases / f"{version.lstrip('v')}-{metadata['sha256'][:12]}"
+    if release.exists():
+        shutil.rmtree(stage)
+    else:
+        stage.replace(release)
+
+    current = work_dir / "current"
+    next_current = work_dir / ".current.new"
+    next_current.unlink(missing_ok=True)
+    next_current.symlink_to(Path(".releases") / release.name, target_is_directory=True)
+    app = work_dir / "app"
+    content = work_dir / "content"
+    if app.is_symlink() and content.is_symlink():
+        os.replace(next_current, current)
+    else:
+        legacy = releases / f"pre-signed-update-{int(time.time())}"
+        legacy.mkdir()
+        next_app = work_dir / ".app.new"
+        next_content = work_dir / ".content.new"
+        next_app.unlink(missing_ok=True)
+        next_content.unlink(missing_ok=True)
+        next_app.symlink_to(Path("current") / "app", target_is_directory=True)
+        next_content.symlink_to(Path("current") / "content", target_is_directory=True)
+        for name, path in (("app", app), ("content", content)):
+            if path.exists() or path.is_symlink():
+                path.replace(legacy / name)
+        os.replace(next_current, current)
+        os.replace(next_app, app)
+        os.replace(next_content, content)
+finally:
+    if stage.exists():
+        shutil.rmtree(stage)
 PY
-  rm -f "$archive_path"
-}
 
-copy_local_dirs() {
-  local base_path="${DRONE_APP_BASE_URL#file://}"
-  python3 - "$base_path" "$WORK_DIR" <<'PY'
-import shutil
-import sys
-from pathlib import Path
-from urllib.parse import unquote
-
-source_root = Path(unquote(sys.argv[1])).resolve()
-work_dir = Path(sys.argv[2]).resolve()
-
-for name in ("app", "content"):
-    source = source_root / name
-    target = work_dir / name
-    if not source.exists() or not source.is_dir():
-        raise RuntimeError(f"missing required source directory: {source}")
-    if target.exists():
-        shutil.rmtree(target)
-    ignore = shutil.ignore_patterns("__pycache__", "*.pyc")
-    shutil.copytree(source, target, ignore=ignore)
-PY
-}
-
-download_any_archive() {
-  if [[ -n "$DRONE_APP_ARCHIVE_URL" ]] && download_archive_dirs "$DRONE_APP_ARCHIVE_URL"; then
-    return 0
-  fi
-  if [[ -n "$DRONE_APP_FALLBACK_ARCHIVE_URL" ]] && download_archive_dirs "$DRONE_APP_FALLBACK_ARCHIVE_URL"; then
-    return 0
-  fi
-  return 1
-}
-
-if [[ -n "$DRONE_APP_BASE_URL" ]]; then
-  if download_any_archive; then
-    :
-  elif [[ "$DRONE_APP_BASE_URL" == file://* ]]; then
-    copy_local_dirs
-  else
-    echo "DRONE_APP_BASE_URL must be a GitHub raw URL, a file:// URL, or be paired with DRONE_APP_ARCHIVE_URL so app/ and content/ can be staged completely."
-    exit 1
-  fi
-else
-  mkdir -p "$APP_DIR"
-  download_file "$DRONE_APP_URL" "$APP_PATH"
-  mkdir -p "$APP_DIR/web"
-  download_file "$DRONE_APP_API_ROUTES_URL" "$API_ROUTES_PATH"
-  download_file "$DRONE_APP_UI_ROUTES_URL" "$UI_ROUTES_PATH"
-  download_file "$DRONE_APP_ROUTE_CONFIG_URL" "$ROUTE_CONFIG_PATH"
-  mkdir -p "$TEMPLATES_DIR"
-  mkdir -p "$(dirname "$CSS_PATH")" "$(dirname "$JS_PATH")"
-  cat > "$INIT_PATH" <<'EOF'
-# package marker
-EOF
-  cat > "$APP_DIR/web/__init__.py" <<'EOF'
-# package marker
-EOF
-  cat > "$MAIN_PATH" <<'EOF'
-from app.drone_api import main
-
-if __name__ == "__main__":
-    main()
-EOF
-fi
-
-if [[ -z "$DRONE_APP_BASE_URL" && ! -f "$TEMPLATE_PATH" ]] && ! download_file "$DRONE_APP_TEMPLATE_URL" "$TEMPLATE_PATH"; then
-  mkdir -p "$(dirname "$TEMPLATE_PATH")"
-  cat > "$TEMPLATE_PATH" <<'EOF'
-<!doctype html>
-<html>
-  <head><meta charset="utf-8"><title>Drone App</title></head>
-  <body><h1>Drone App Running</h1></body>
-</html>
-EOF
-fi
-
-if [[ -z "$DRONE_APP_BASE_URL" && ! -f "$CSS_PATH" ]]; then
-  mkdir -p "$(dirname "$CSS_PATH")"
-  download_file "$DRONE_APP_CSS_URL" "$CSS_PATH"
-fi
-
-if [[ -z "$DRONE_APP_BASE_URL" && ! -f "$JS_PATH" ]]; then
-  mkdir -p "$(dirname "$JS_PATH")"
-  download_file "$DRONE_APP_JS_URL" "$JS_PATH"
-fi
-
-if [[ -z "$DRONE_APP_BASE_URL" && -n "$DRONE_APP_CONTENT_URL" && ! -f "$CONTENT_DIR/batocera-swarm-mascot.jpg" ]]; then
-  mkdir -p "$CONTENT_DIR"
-  download_file "$DRONE_APP_CONTENT_URL/batocera-swarm-mascot.jpg" "$CONTENT_DIR/batocera-swarm-mascot.jpg"
-fi
-
-if [[ ! -f "$APP_PATH" || ! -d "$STATIC_DIR" || ! -d "$CONTENT_DIR" ]]; then
-  echo "Downloaded Drone App is incomplete. Expected app/, app/static/, and content/ under $WORK_DIR."
-  exit 1
-fi
-
-for required_file in \
-  "$MAIN_PATH" \
-  "$APP_PATH" \
-  "$API_ROUTES_PATH" \
-  "$UI_ROUTES_PATH" \
-  "$ROUTE_CONFIG_PATH"; do
-  if [[ ! -s "$required_file" ]]; then
-    echo "Downloaded Drone App is incomplete. Missing or empty required file: $required_file"
-    exit 1
-  fi
-done
-
-if ! PYTHONPATH="$WORK_DIR" python3 - <<'PY'
-import importlib
-
-required = {
-    "app.web.api_routes": "ApiRoutesMixin",
-    "app.web.ui_routes": "UiRoutesMixin",
-}
-
-for module_name, symbol in required.items():
-    module = importlib.import_module(module_name)
-    if not hasattr(module, symbol):
-        raise ImportError(f"{module_name} does not export {symbol}")
-
-importlib.import_module("app.drone_api")
-PY
-then
-  echo "Downloaded Drone App failed import validation. Refusing to launch incomplete app bundle."
-  exit 1
-fi
-
-echo "Downloaded Drone App to $WORK_DIR"
-
-if [[ "$DRONE_APP_STAGE_ONLY" == "1" || "$DRONE_APP_STAGE_ONLY" == "true" || "$DRONE_APP_STAGE_ONLY" == "yes" ]]; then
-  echo "Drone App staged successfully; launch skipped because DRONE_APP_STAGE_ONLY=${DRONE_APP_STAGE_ONLY}."
-  exit 0
-fi
+echo "Verified and activated Drone $RELEASE_VERSION in $WORK_DIR"
+case "$STAGE_ONLY" in
+  1|true|TRUE|yes|YES|on|ON) exit 0 ;;
+esac
 
 HTTPS_PORT="${HTTPS_PORT:-443}"
-
-# Prevent multiple instances - bail if the configured port is already in use.
-if lsof -i :"$HTTPS_PORT" >/dev/null 2>&1; then
-  echo "Port ${HTTPS_PORT} is already in use - Drone App may already be running. Exiting."
+if command -v lsof >/dev/null 2>&1 && lsof -i :"$HTTPS_PORT" >/dev/null 2>&1; then
+  echo "Port ${HTTPS_PORT} is already in use; Drone may already be running."
   exit 0
 fi
 
-# Ensure the Drone certificate directory exists so openssl can write to it
-DRONE_CERT_FILE="${DRONE_CERT_FILE:-}"
-DRONE_CERT_DIR="${DRONE_CERT_FILE%/*}"
-if [ -z "$DRONE_CERT_DIR" ]; then
-  DRONE_CERT_DIR="$WORK_DIR/certs"
-fi
-mkdir -p "$DRONE_CERT_DIR" 2>/dev/null || true
-
-# Do NOT clean up on exit — the app files must persist for use
-
-DRONE_APP_USERNAME="${DRONE_APP_USERNAME:-}"
-DRONE_APP_PASSWORD="${DRONE_APP_PASSWORD:-}"
-
-env \
+exec env \
   PYTHONPATH="$WORK_DIR${PYTHONPATH:+:$PYTHONPATH}" \
-  DRONE_APP_USERNAME="$DRONE_APP_USERNAME" \
-  DRONE_APP_PASSWORD="$DRONE_APP_PASSWORD" \
   HTTPS_PORT="$HTTPS_PORT" \
   DRONE_COMPAT_HTTPS_PORTS="${DRONE_COMPAT_HTTPS_PORTS:-8443}" \
   ROMS_ROOT="${ROMS_ROOT:-/userdata/roms}" \
   BIOS_ROOT="${BIOS_ROOT:-/userdata/bios}" \
   TLS_SELF_SIGNED_DIR="${TLS_SELF_SIGNED_DIR:-/userdata/system/certs}" \
   LOG_DIR="${LOG_DIR:-/userdata/system/logs/drone-app}" \
-  LOG_MAX_BYTES="${LOG_MAX_BYTES:-5242880}" \
-  LOG_BACKUP_COUNT="${LOG_BACKUP_COUNT:-5}" \
-  DRONE_LOG_UNAUTHORIZED_REQUESTS="${DRONE_LOG_UNAUTHORIZED_REQUESTS:-0}" \
-  DRONE_UNAUTH_RATE_LIMIT_ENABLED="${DRONE_UNAUTH_RATE_LIMIT_ENABLED:-1}" \
-  DRONE_UNAUTH_RATE_LIMIT_REQUESTS="${DRONE_UNAUTH_RATE_LIMIT_REQUESTS:-60}" \
-  DRONE_UNAUTH_RATE_LIMIT_WINDOW_SECONDS="${DRONE_UNAUTH_RATE_LIMIT_WINDOW_SECONDS:-60}" \
-  ROM_METADATA_POLL_SECONDS="${ROM_METADATA_POLL_SECONDS:-900}" \
-  ROM_METADATA_INITIAL_DELAY_SECONDS="${ROM_METADATA_INITIAL_DELAY_SECONDS:-60}" \
-  ROM_METADATA_PROGRESS_SECONDS="${ROM_METADATA_PROGRESS_SECONDS:-30}" \
-  ROM_METADATA_PROGRESS_FILES="${ROM_METADATA_PROGRESS_FILES:-250}" \
-  ROM_METADATA_UPLOAD_CHUNK_SIZE="${ROM_METADATA_UPLOAD_CHUNK_SIZE:-250}" \
-  ROM_METADATA_HASH_IO_YIELD_SECONDS="${ROM_METADATA_HASH_IO_YIELD_SECONDS:-0.05}" \
-  ROM_METADATA_HASH_ROMS_ENABLED="${ROM_METADATA_HASH_ROMS_ENABLED:-1}" \
-  IMAGE_CACHE_TTL_SECONDS="${IMAGE_CACHE_TTL_SECONDS:-3600}" \
-  IMAGE_MISS_CACHE_TTL_SECONDS="${IMAGE_MISS_CACHE_TTL_SECONDS:-300}" \
-  IMAGE_CACHE_MAX_ITEMS="${IMAGE_CACHE_MAX_ITEMS:-1000}" \
-  IMAGE_CACHE_MAX_BYTES="${IMAGE_CACHE_MAX_BYTES:-268435456}" \
-  JSON_CACHE_TTL_SECONDS="${JSON_CACHE_TTL_SECONDS:-3600}" \
-  JSON_CACHE_MAX_ITEMS="${JSON_CACHE_MAX_ITEMS:-2000}" \
-  JSON_CACHE_MAX_BYTES="${JSON_CACHE_MAX_BYTES:-67108864}" \
-  OVERMIND_DRONE_TOKEN="${OVERMIND_DRONE_TOKEN:-}" \
-  OVERMIND_POLL_SECONDS="${OVERMIND_POLL_SECONDS:-60}" \
-  OVERMIND_SPEED_SAMPLE_SECONDS="${OVERMIND_SPEED_SAMPLE_SECONDS:-600}" \
   python3 -m app.main

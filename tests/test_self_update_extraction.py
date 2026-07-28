@@ -1,15 +1,9 @@
-"""Tests for drone self-update archive extraction (``common/self_update.py``).
-
-Self-update is the most sensitive path on the device: an admin-triggered action makes
-the drone download ``drone-app.tar.gz`` and overlay it onto the *running* app tree, then
-re-exec. ``_download_latest_drone_app`` therefore hand-rolls a tar-slip barrier —
-each member is resolved and rejected if it escapes the staging dir — plus a
-leading-release-dir re-home and an ``{app, content}`` root allow-list. None of it was
-tested. These lock it: a crafted/compromised archive with ``..`` members must raise
-and never touch the work tree; legitimate archives overlay ``app``/``content`` while
-skipping ``__pycache__``/``.pyc`` and unrelated roots. See ``drone-p2p-transfer-security``.
-"""
+"""Signed, staged, atomic Drone self-update tests."""
+import hashlib
 import io
+import json
+import shutil
+import subprocess
 import tarfile
 import tempfile
 import threading
@@ -49,7 +43,18 @@ class DownloadLatestDroneAppTests(unittest.TestCase):
     def _run(self, archive_bytes):
         env = {"DRONE_APP_WORK_DIR": str(self.work_dir),
                "DRONE_APP_ARCHIVE_URL": "http://test.invalid/drone-app.tar.gz"}
+        manifest = {
+            "schema": 1,
+            "version": "v1.2.3",
+            "assets": {
+                "drone-app.tar.gz": {
+                    "sha256": hashlib.sha256(archive_bytes).hexdigest(),
+                    "size": len(archive_bytes),
+                }
+            },
+        }
         with mock.patch.dict("os.environ", env), \
+             mock.patch.object(self_update, "_verified_release_manifest", return_value=manifest), \
              mock.patch.object(self_update, "urlopen", lambda request, timeout=None: io.BytesIO(archive_bytes)):
             return self_update._download_latest_drone_app(self.settings)
 
@@ -57,6 +62,9 @@ class DownloadLatestDroneAppTests(unittest.TestCase):
     def test_extracts_app_and_content_skipping_pycache_and_other_roots(self):
         archive = _targz([
             ("app/main.py", b"m"),
+            ("app/drone_api.py", b"d"),
+            ("app/service_bootstrap.sh", b"s"),
+            ("app/VERSION", b"v1.2.3\n"),
             ("app/pkg/mod.py", b"p"),
             ("content/theme.css", b"c"),
             ("app/__pycache__/main.cpython-39.pyc", b"junk"),  # skipped
@@ -65,7 +73,7 @@ class DownloadLatestDroneAppTests(unittest.TestCase):
         result = self._run(archive)
         self.assertEqual(result["status"], "downloaded")
         self.assertTrue(result["restart_required"])
-        self.assertEqual(result["copied_files"], 3)
+        self.assertEqual(result["copied_files"], 6)
         self.assertEqual((self.work_dir / "app" / "main.py").read_bytes(), b"m")
         self.assertEqual((self.work_dir / "app" / "pkg" / "mod.py").read_bytes(), b"p")
         self.assertEqual((self.work_dir / "content" / "theme.css").read_bytes(), b"c")
@@ -76,10 +84,13 @@ class DownloadLatestDroneAppTests(unittest.TestCase):
         # GitHub release tarballs wrap everything in a top-level dir; it is stripped.
         archive = _targz([
             ("batocera.drone/app/main.py", b"m"),
+            ("batocera.drone/app/drone_api.py", b"d"),
+            ("batocera.drone/app/service_bootstrap.sh", b"s"),
+            ("batocera.drone/app/VERSION", b"v1.2.3\n"),
             ("batocera.drone/content/x.css", b"c"),
         ])
         result = self._run(archive)
-        self.assertEqual(result["copied_files"], 2)
+        self.assertEqual(result["copied_files"], 5)
         self.assertEqual((self.work_dir / "app" / "main.py").read_bytes(), b"m")
         self.assertEqual((self.work_dir / "content" / "x.css").read_bytes(), b"c")
 
@@ -117,6 +128,42 @@ class DownloadLatestDroneAppTests(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             self._run(b"")
         self.assertIn("empty", str(ctx.exception))
+
+    def test_rejects_archive_digest_mismatch_before_extraction(self):
+        archive = _targz([("app/main.py", b"m"), ("content/x", b"x")])
+        manifest = {
+            "schema": 1,
+            "version": "v1.2.3",
+            "assets": {"drone-app.tar.gz": {"sha256": "0" * 64, "size": len(archive)}},
+        }
+        env = {"DRONE_APP_WORK_DIR": str(self.work_dir), "DRONE_APP_ARCHIVE_URL": "http://test.invalid/archive"}
+        with mock.patch.dict("os.environ", env), \
+             mock.patch.object(self_update, "_verified_release_manifest", return_value=manifest), \
+             mock.patch.object(self_update, "urlopen", lambda request, timeout=None: io.BytesIO(archive)):
+            with self.assertRaisesRegex(ValueError, "SHA-256"):
+                self_update._download_latest_drone_app(self.settings)
+        self.assertFalse((self.work_dir / "app").exists())
+
+    def test_manifest_signature_verification_accepts_only_matching_key(self):
+        if not shutil.which("openssl"):
+            self.skipTest("openssl unavailable")
+        manifest = self.root / "manifest.json"
+        signature = self.root / "manifest.sig"
+        private_key = self.root / "private.pem"
+        public_key = self.root / "public.pem"
+        manifest.write_text('{"schema":1}\n', encoding="utf-8")
+        subprocess.run(
+            ["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048", "-out", str(private_key)],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(["openssl", "pkey", "-in", str(private_key), "-pubout", "-out", str(public_key)], check=True)
+        subprocess.run(["openssl", "dgst", "-sha256", "-sign", str(private_key), "-out", str(signature), str(manifest)], check=True)
+        with mock.patch.dict("os.environ", {"DRONE_UPDATE_PUBLIC_KEY_FILE": str(public_key)}):
+            self_update._verify_manifest_signature(manifest, signature)
+            manifest.write_text('{"schema":2}\n', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "signature"):
+                self_update._verify_manifest_signature(manifest, signature)
 
 
 class DroneAutoUpdateSettingTests(unittest.TestCase):

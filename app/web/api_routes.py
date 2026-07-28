@@ -533,6 +533,11 @@ class ApiRoutesMixin:
                 self._handle_auth_login(payload)
                 return
 
+            if api_path == "/auth/setup":
+                payload = self._read_json_body()
+                self._handle_auth_setup(payload)
+                return
+
             if api_path == "/auth/logout":
                 self._handle_auth_logout()
                 return

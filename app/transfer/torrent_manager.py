@@ -125,7 +125,7 @@ def _normalize_torrent_settings(raw, settings: Settings) -> dict:
         "download_directory": download_directory,
         # aria2 --seed-time, in minutes; 0 stops seeding as soon as the
         # download completes.
-        "seed_time": _int_value("seed_time", 60, 0, 60 * 24 * 30),
+        "seed_time": _int_value("seed_time", 0, 0, 60 * 24 * 30),
         "seed_ratio": round(seed_ratio, 2),
         # aria2 --bt-stop-timeout, in seconds; 0 disables the stall timeout.
         "bt_stop_timeout": _int_value("bt_stop_timeout", 0, 0, 24 * 3600),
@@ -287,6 +287,7 @@ class TorrentManager:
         self._torrents: Dict[str, dict] = {}
         self._next_queue_position: int = 1
         self._paused: bool = False
+        self._privacy_blocked: bool = bool(settings.torrent_require_vpn)
         self._recent_move_locations: List[str] = []
         self._restore_state()
         if start_worker:
@@ -449,7 +450,62 @@ class TorrentManager:
         except OSError:
             return None
 
+    def _vpn_tunnel_ready(self) -> bool:
+        if not self.settings.torrent_require_vpn:
+            return True
+        try:
+            try:
+                from ..device import vpn_manager
+            except ImportError:  # pragma: no cover - direct script execution fallback
+                from device import vpn_manager  # type: ignore
+
+            snapshot = vpn_manager.status(self.settings)
+        except Exception as error:
+            print(
+                f"Torrent VPN readiness check failed: {error.__class__.__name__}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return False
+        return snapshot.get("status") == "connected" and bool(snapshot.get("tunnel_ip"))
+
+    def _suspend_for_vpn_loss(self) -> None:
+        """Stop aria2 and make every live GID resumable after VPN recovery."""
+        daemon = self._daemon
+        if daemon is not None:
+            daemon.stop()
+        dirty = False
+        with self._lock:
+            for entry in self._torrents.values():
+                if entry.get("gid"):
+                    entry["gid"] = None
+                    dirty = True
+                if entry.get("status") == "downloading":
+                    entry["status"] = "queued"
+                    entry["queue_position"] = self._take_queue_position_locked()
+                    entry["message"] = "Paused: VPN connection required"
+                    entry["download_speed_bps"] = 0
+                    entry["upload_speed_bps"] = 0
+                    entry["eta_seconds"] = None
+                    entry["force_started"] = False
+                    dirty = True
+                elif entry.get("status") == "queued":
+                    if entry.get("message") != "Paused: VPN connection required":
+                        entry["message"] = "Paused: VPN connection required"
+                        dirty = True
+                elif entry.get("status") == "complete" and entry.get("seeding"):
+                    entry["seeding"] = False
+                    entry["message"] = "Seeding paused: VPN connection required"
+                    entry["upload_speed_bps"] = 0
+                    dirty = True
+            self._privacy_blocked = True
+            if dirty:
+                self._persist_locked()
+
     def _ensure_rpc(self, needs_daemon: bool, directory: str):
+        if self.settings.torrent_require_vpn and not self._vpn_tunnel_ready():
+            self._privacy_blocked = True
+            return None
         daemon = self._daemon
         if daemon is not None and daemon.running:
             return daemon.rpc
@@ -459,7 +515,12 @@ class TorrentManager:
         if not found:
             return None
         if daemon is None or daemon.binary_path != found["path"]:
-            daemon = Aria2Daemon(found["path"], Path(directory), log_file=self._aria2_log_path())
+            daemon = Aria2Daemon(
+                found["path"],
+                Path(directory),
+                log_file=self._aria2_log_path(),
+                network_interface="tun0" if self.settings.torrent_require_vpn else None,
+            )
             self._daemon = daemon
         if daemon.start():
             return daemon.rpc
@@ -533,7 +594,13 @@ class TorrentManager:
                 if entry.get("gid") and entry.get("status") != "error"
             ]
 
-        # Phase B (unlocked): talk to aria2.
+        # Phase B (unlocked): enforce the VPN boundary before talking to
+        # aria2. Interface binding is the kernel-level backstop; stopping the
+        # daemon here also makes the queue's state explicit and resumable.
+        if self.settings.torrent_require_vpn and not self._vpn_tunnel_ready():
+            self._suspend_for_vpn_loss()
+            return
+        self._privacy_blocked = False
         rpc = self._ensure_rpc(bool(to_add or to_query or stale_gids), config["directory"])
         for gid in stale_gids:
             self._remove_from_aria2(gid)
@@ -759,6 +826,9 @@ class TorrentManager:
         return None
 
     def force_start(self, entry_id: str) -> dict:
+        if self.settings.torrent_require_vpn and not self._vpn_tunnel_ready():
+            self._privacy_blocked = True
+            return {"status": "vpn_required", "message": "Connect the VPN before starting torrents."}
         with self._lock:
             entry = self._torrents.get(entry_id)
             if entry is None:
@@ -876,6 +946,9 @@ class TorrentManager:
         return self.snapshot()
 
     def resume(self) -> dict:
+        if self.settings.torrent_require_vpn and not self._vpn_tunnel_ready():
+            self._privacy_blocked = True
+            return self.snapshot()
         with self._lock:
             self._paused = False
             self._persist_locked()
@@ -1222,7 +1295,12 @@ class TorrentManager:
             config = dict(self._config)
             entries = [dict(entry) for entry in self._sorted_entries_locked()]
             paused = bool(self._paused)
+            privacy_blocked = bool(self._privacy_blocked)
             recent_move_locations = list(self._recent_move_locations)
+        vpn_connected = self._vpn_tunnel_ready()
+        if vpn_connected and privacy_blocked:
+            self._privacy_blocked = False
+            privacy_blocked = False
         daemon = self._daemon
         aria2 = aria2_install_state(self.settings)
         aria2["running"] = bool(daemon is not None and daemon.running)
@@ -1269,5 +1347,8 @@ class TorrentManager:
             "counts": counts,
             "torrents": torrents,
             "paused": paused,
+            "vpn_required": bool(self.settings.torrent_require_vpn),
+            "vpn_connected": vpn_connected,
+            "privacy_blocked": privacy_blocked,
             "recent_move_locations": recent_move_locations,
         }

@@ -10,7 +10,6 @@ import subprocess
 import sys
 import time
 from typing import Any, Callable, List, Optional
-from urllib.request import Request, urlopen
 
 try:
     from ..transport.tailnet import get_tailnet_ip, is_tailnet_address
@@ -136,7 +135,12 @@ def get_local_ip_addresses(
     open_url: Optional[Callable[..., Any]] = None,
     request_factory: Optional[Callable[..., Any]] = None,
 ) -> dict:
-    """Resolve this Drone's own local IPv4/IPv6 addresses (self-report + pairing payloads)."""
+    """Resolve local addresses without contacting a third-party public-IP service.
+
+    ``open_url`` and ``request_factory`` remain accepted for caller compatibility,
+    but are intentionally unused. A public endpoint may only be supplied explicitly
+    through ``DRONE_PUBLIC_IP_OVERRIDE``.
+    """
     ipv4: List[str] = []
     ipv6: List[str] = []
 
@@ -177,25 +181,17 @@ def get_local_ip_addresses(
     # Mesh-VPN overlay address (None off-tailnet) -- kept out of the ipv4 list so
     # host/report selection is unchanged; consumers read the dedicated field.
     tailnet_ip = get_tailnet_ip(socket_module=socket_api)
-    public_ip = None
-    try:
-        request = (request_factory or Request)("https://api.ipify.org", headers={"User-Agent": "batocera-drone-app/4.0"})
-        with (open_url or urlopen)(request, timeout=3) as response:
-            public_ip = response.read().decode("utf-8", errors="replace").strip() or None
-    except Exception:
-        public_ip = None
-    print(f"Drone network resolved ipv4={ipv4} ipv6={ipv6} gateway={gateway_ip} public={public_ip} tailnet={tailnet_ip}", file=sys.stdout, flush=True)
-    return {"ipv4": ipv4, "ipv6": ipv6, "gateway_ip": gateway_ip, "public_ip": public_ip, "tailnet_ip": tailnet_ip}
+    print(
+        f"Drone network resolved ipv4_count={len(ipv4)} ipv6_count={len(ipv6)} "
+        f"gateway={'yes' if gateway_ip else 'no'} tailnet={'yes' if tailnet_ip else 'no'}",
+        file=sys.stdout,
+        flush=True,
+    )
+    return {"ipv4": ipv4, "ipv6": ipv6, "gateway_ip": gateway_ip, "public_ip": None, "tailnet_ip": tailnet_ip}
 
 
 def local_network_snapshot() -> dict:
-    """This drone's network info (public_ip + LAN ipv4), cached briefly.
-
-    Used by the LAN-direct transport to detect same-LAN peers (peers behind the
-    same NAT report the same public IP). Cached because resolving the public IP
-    makes a network call; brief staleness is harmless -- a wrong guess just fails
-    the LAN attempt and the selector falls back to the next transport.
-    """
+    """This Drone's local network info, cached briefly."""
     now = time.monotonic()
     cache = _LOCAL_NETWORK_CACHE
     if cache["value"] and now - cache["at"] < _LOCAL_NETWORK_SNAPSHOT_TTL_SECONDS:
