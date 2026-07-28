@@ -409,6 +409,16 @@ class MockServerIntegrationTests(unittest.TestCase):
         image = self._get_bytes("/content/batocera-swarm-mascot.jpg")
         self.assertTrue(image.startswith(b"\xff\xd8\xff"))
 
+    def test_first_boot_ui_sizes_mascot_and_only_requests_credentials(self) -> None:
+        js = self._get_bytes("/static/js/drone.js").decode("utf-8")
+        css = self._get_bytes("/static/css/drone.css").decode("utf-8")
+        self.assertIn('class="setup-brand-image"', js)
+        self.assertIn(".setup-brand-image", css)
+        self.assertIn("width: 4rem", css)
+        self.assertIn("height: 4rem", css)
+        self.assertNotIn("setupCode", js)
+        self.assertNotIn("One-time setup code", js)
+
     def test_header_places_github_icon_beside_drone_brand(self) -> None:
         html = self._get_bytes("/").decode("utf-8")
         self.assertIn("Batocera Drone", html)

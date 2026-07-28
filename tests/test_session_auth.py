@@ -264,14 +264,12 @@ class FirstBootSetupTests(unittest.TestCase):
         handler._handle_auth_session()
         self.assertEqual(handler.response[0], 200)
         self.assertTrue(handler.response[1]["setup_required"])
-        self.assertTrue(self.auth.credential_store.setup_token_path.is_file())
+        self.assertFalse(self.auth.credential_store.legacy_setup_token_path.exists())
 
     def test_setup_initializes_once_and_authenticates_the_browser(self) -> None:
-        setup_token = self.auth.credential_store.ensure_setup_token()
         handler = _handler(self.settings, self.auth)
         handler._handle_auth_setup(
             {
-                "setup_token": setup_token,
                 "username": "arcade-admin",
                 "password": "CorrectHorseBatteryStaple",
                 "password_confirmation": "CorrectHorseBatteryStaple",
@@ -281,13 +279,11 @@ class FirstBootSetupTests(unittest.TestCase):
         self.assertEqual(status, 201)
         self.assertEqual(payload["username"], "arcade-admin")
         self.assertIn(SESSION_COOKIE_NAME, headers["Set-Cookie"])
-        self.assertFalse(self.auth.credential_store.setup_token_path.exists())
         self.assertIsNotNone(self.auth.login("arcade-admin", "CorrectHorseBatteryStaple"))
 
         second = _handler(self.settings, self.auth)
         second._handle_auth_setup(
             {
-                "setup_token": setup_token,
                 "username": "attacker",
                 "password": "AnotherLongPassword",
                 "password_confirmation": "AnotherLongPassword",
@@ -295,22 +291,10 @@ class FirstBootSetupTests(unittest.TestCase):
         )
         self.assertEqual(second.response[0], 409)
 
-    def test_setup_rejects_wrong_code_and_weak_or_mismatched_passwords(self) -> None:
-        wrong_code = _handler(self.settings, self.auth)
-        wrong_code._handle_auth_setup(
-            {
-                "setup_token": "wrong",
-                "username": "arcade-admin",
-                "password": "CorrectHorseBatteryStaple",
-                "password_confirmation": "CorrectHorseBatteryStaple",
-            }
-        )
-        self.assertEqual(wrong_code.response[0], 403)
-
+    def test_setup_rejects_weak_or_mismatched_passwords(self) -> None:
         mismatch = _handler(self.settings, self.auth)
         mismatch._handle_auth_setup(
             {
-                "setup_token": self.auth.credential_store.ensure_setup_token(),
                 "username": "arcade-admin",
                 "password": "CorrectHorseBatteryStaple",
                 "password_confirmation": "different-password",
@@ -319,15 +303,15 @@ class FirstBootSetupTests(unittest.TestCase):
         self.assertEqual(mismatch.response[0], 400)
 
         weak = _handler(self.settings, self.auth)
-        with self.assertRaisesRegex(ValueError, "at least 12"):
-            weak._handle_auth_setup(
-                {
-                    "setup_token": self.auth.credential_store.ensure_setup_token(),
-                    "username": "arcade-admin",
-                    "password": "too-short",
-                    "password_confirmation": "too-short",
-                }
-            )
+        weak._handle_auth_setup(
+            {
+                "username": "arcade-admin",
+                "password": "too-short",
+                "password_confirmation": "too-short",
+            }
+        )
+        self.assertEqual(weak.response[0], 400)
+        self.assertIn("at least 12", weak.response[1]["error"])
 
     def test_login_fails_closed_until_setup_completes(self) -> None:
         handler = _handler(self.settings, self.auth)

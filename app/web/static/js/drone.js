@@ -8211,19 +8211,17 @@ async function submitLogin() {
 }
 
 async function submitFirstBootSetup() {
-  const setupCodeInput = document.getElementById("setupCode");
   const usernameInput = document.getElementById("setupUsername");
   const passwordInput = document.getElementById("setupPassword");
   const confirmationInput = document.getElementById("setupPasswordConfirmation");
   const errorNode = document.getElementById("setupError");
   const button = document.getElementById("setupSubmitBtn");
-  const setupToken = (setupCodeInput.value || "").trim();
   const username = (usernameInput.value || "").trim();
   const password = passwordInput.value || "";
   const passwordConfirmation = confirmationInput.value || "";
   errorNode.classList.add("d-none");
-  if (!setupToken || !username || !password || !passwordConfirmation) {
-    errorNode.textContent = "Setup code, username, and both password fields are required.";
+  if (!username || !password || !passwordConfirmation) {
+    errorNode.textContent = "Username and both password fields are required.";
     errorNode.classList.remove("d-none");
     return;
   }
@@ -8245,7 +8243,6 @@ async function submitFirstBootSetup() {
       credentials: "include",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        setup_token: setupToken,
         username,
         password,
         password_confirmation: passwordConfirmation,
@@ -8301,14 +8298,7 @@ function renderFirstBootSetupPage() {
               <h4 class="mt-3 mb-1">Secure this Drone</h4>
               <div class="small text-muted">Create the first administrator account before the Drone can be used.</div>
             </div>
-            <div class="alert alert-info py-2 small">
-              Find the one-time setup code in the local Drone service log or console.
-            </div>
             <div id="setupError" class="alert alert-danger py-2 d-none"></div>
-            <div class="mb-3">
-              <label class="form-label" for="setupCode">One-time setup code</label>
-              <input class="form-control font-monospace" type="text" id="setupCode" autocomplete="one-time-code">
-            </div>
             <div class="mb-3">
               <label class="form-label" for="setupUsername">Administrator username</label>
               <input class="form-control" type="text" id="setupUsername" autocomplete="username">
@@ -8329,7 +8319,7 @@ function renderFirstBootSetupPage() {
     </div>
   `;
   const submit = () => submitFirstBootSetup();
-  for (const inputId of ["setupCode", "setupUsername", "setupPassword", "setupPasswordConfirmation"]) {
+  for (const inputId of ["setupUsername", "setupPassword", "setupPasswordConfirmation"]) {
     document.getElementById(inputId).addEventListener("keydown", (event) => {
       if (event.key === "Enter") {
         event.preventDefault();
@@ -8338,7 +8328,7 @@ function renderFirstBootSetupPage() {
     });
   }
   document.getElementById("setupSubmitBtn").addEventListener("click", submit);
-  document.getElementById("setupCode").focus();
+  document.getElementById("setupUsername").focus();
 }
 
 function renderLoginPage() {
@@ -8354,7 +8344,7 @@ function renderLoginPage() {
         <div class="card mt-5">
           <div class="card-body p-4">
             <div class="text-center mb-4">
-              <img src="/content/batocera-swarm-mascot.jpg" alt="" style="width:56px;height:56px;border-radius:50%;">
+              <img src="/content/batocera-swarm-mascot.jpg" alt="" class="setup-brand-image">
               <h4 class="mt-3 mb-0">Batocera Drone</h4>
               <div class="small text-muted">Sign in to continue</div>
             </div>

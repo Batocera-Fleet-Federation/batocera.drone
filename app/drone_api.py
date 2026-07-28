@@ -1867,14 +1867,6 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
         settings.password,
         state_database_file=_state_database_path(settings.userdata_root),
     )
-    setup_token = credential_store.ensure_setup_token()
-    if setup_token:
-        print(
-            "First-boot setup required. Open the Drone UI and enter setup code: "
-            f"{setup_token}",
-            file=sys.stdout,
-            flush=True,
-        )
     session_store = SessionStore(_state_database_path(settings.userdata_root))
     auth = SessionAuth(credential_store=credential_store, session_store=session_store)
     cert_state = DroneCertificateManager(settings).ensure_certificate()

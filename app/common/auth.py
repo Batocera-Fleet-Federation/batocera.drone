@@ -4,7 +4,7 @@ Extracted from ``drone_api.py``. Holds:
 
 * ``DroneCredentialStore`` — PBKDF2-hashed local credentials persisted in the
   shared state DB. A new Drone has no universal fallback credential: its owner
-  must complete a one-time-code-protected first-boot setup.
+  must create the first administrator account during first-boot setup.
 * ``SessionStore`` + ``SessionAuth`` — cookie-based login, replacing the old
   ``BasicAuth``/``Authorization: Basic`` scheme. A browser's native Basic-auth
   prompt is invasive for humans and awkward for automation (every call needs
@@ -87,7 +87,7 @@ DRONE_AUTH_BLOCK_DURATION_SECONDS = max(1.0, float(os.environ.get("DRONE_AUTH_BL
 
 class DroneCredentialStore:
     STATE_NAMESPACE = "credentials"
-    SETUP_TOKEN_FILENAME = "first-boot-setup-token"
+    LEGACY_SETUP_TOKEN_FILENAME = "first-boot-setup-token"
     MINIMUM_PASSWORD_LENGTH = 12
 
     def __init__(
@@ -147,7 +147,9 @@ class DroneCredentialStore:
             data,
         )
         self.path.unlink(missing_ok=True)
-        self.setup_token_path.unlink(missing_ok=True)
+        # Versions before direct first-boot setup persisted a code in this
+        # file. Remove any leftover copy after a successful upgrade/setup.
+        self.legacy_setup_token_path.unlink(missing_ok=True)
         return {"username": username, "updated_at": data["updated_at"], "stored": True}
 
     def _migrate_explicit_env_credentials(self) -> None:
@@ -169,8 +171,8 @@ class DroneCredentialStore:
                     return
 
     @property
-    def setup_token_path(self) -> Path:
-        return self.path.resolve().parent / self.SETUP_TOKEN_FILENAME
+    def legacy_setup_token_path(self) -> Path:
+        return self.path.resolve().parent / self.LEGACY_SETUP_TOKEN_FILENAME
 
     def is_configured(self) -> bool:
         return bool(self._load_stored())
@@ -181,42 +183,11 @@ class DroneCredentialStore:
             return data
         return {"configured": False, "source": "unconfigured"}
 
-    def ensure_setup_token(self) -> Optional[str]:
-        """Return the persistent first-boot token, creating it if necessary."""
-        if self.is_configured():
-            self.setup_token_path.unlink(missing_ok=True)
-            return None
-        configured = str(os.environ.get("DRONE_FIRST_BOOT_SETUP_TOKEN") or "").strip()
-        if configured:
-            return configured
-        try:
-            existing = self.setup_token_path.read_text(encoding="utf-8").strip()
-        except OSError:
-            existing = ""
-        if existing:
-            return existing
-        self.setup_token_path.parent.mkdir(parents=True, exist_ok=True)
-        token = secrets.token_urlsafe(18)
-        try:
-            descriptor = os.open(self.setup_token_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            return self.setup_token_path.read_text(encoding="utf-8").strip()
-        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
-            output.write(f"{token}\n")
-        try:
-            self.setup_token_path.chmod(0o600)
-        except OSError:
-            pass
-        return token
-
-    def initialize(self, username: str, password: str, setup_token: str) -> dict:
-        """Create the first credential exactly once after token verification."""
+    def initialize(self, username: str, password: str) -> dict:
+        """Create the first credential exactly once."""
         with self._lock:
             if self._load_stored():
                 raise RuntimeError("Drone setup has already been completed")
-            expected = self.ensure_setup_token()
-            if not expected or not hmac.compare_digest(str(setup_token or ""), expected):
-                raise PermissionError("invalid first-boot setup code")
             return self._write_credentials(username, password)
 
     def check(self, username: str, password: str) -> bool:

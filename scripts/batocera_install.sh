@@ -460,8 +460,7 @@ if [ -n "$DRONE_TAILNET_IP" ]; then
 fi
 echo ""
 echo "   Works from any phone or computer on the same network."
-echo "   On first open, create the administrator account using the one-time"
-echo "   setup code printed in the DRONE_SERVER service log."
+echo "   On first open, create the administrator username and password."
 echo "   (If it does not load yet, start the DRONE_SERVER service or reboot.)"
 echo ""
 echo "======================================================================"

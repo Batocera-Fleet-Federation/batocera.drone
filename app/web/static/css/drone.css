@@ -57,6 +57,14 @@
       object-fit: cover;
       display: block;
     }
+    .setup-brand-image {
+      display: inline-block;
+      width: 4rem;
+      height: 4rem;
+      max-width: 100%;
+      border-radius: 50%;
+      object-fit: cover;
+    }
     .brand-title-wrap {
       display: flex;
       align-items: baseline;

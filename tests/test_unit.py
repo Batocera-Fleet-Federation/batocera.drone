@@ -90,8 +90,7 @@ class SessionAuthTests(unittest.TestCase):
     def test_login_success_then_cookie_header_authenticates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             auth = self._auth(tmp)
-            setup_token = auth.credential_store.ensure_setup_token()
-            auth.credential_store.initialize("batocera", "batocera-test-password", setup_token)
+            auth.credential_store.initialize("batocera", "batocera-test-password")
             token = auth.login("batocera", "batocera-test-password")
             self.assertIsNotNone(token)
             session = auth.authenticate_request({"Cookie": f"drone_session={token}"})
@@ -113,8 +112,7 @@ class SessionAuthTests(unittest.TestCase):
             auth = self._auth(tmp)
             self.assertFalse(auth.credential_store.is_configured())
             self.assertIsNone(auth.login("batocera", "linux"))
-            setup_token = auth.credential_store.ensure_setup_token()
-            result = auth.credential_store.initialize("arcade-admin", "BetterPass123", setup_token)
+            result = auth.credential_store.initialize("arcade-admin", "BetterPass123")
 
             self.assertTrue(result["stored"])
             saved = load_payload(

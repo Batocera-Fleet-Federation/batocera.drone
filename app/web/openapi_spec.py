@@ -331,12 +331,11 @@ def _schemas() -> Dict[str, Schema]:
         ),
         "AuthSetupRequest": _object(
             {
-                "setup_token": _string("One-time code printed by the local Drone service"),
                 "username": _string(),
                 "password": {"type": "string", "minLength": 12},
                 "password_confirmation": {"type": "string", "minLength": 12},
             },
-            ("setup_token", "username", "password", "password_confirmation"),
+            ("username", "password", "password_confirmation"),
         ),
         "AuthSetupResponse": _object(
             {"status": _enum(["configured"]), "username": _string()},
@@ -1349,10 +1348,9 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             },
             "/auth/setup": {
                 "post": _operation(
-                    "Complete one-time-code-protected first-boot credential setup",
+                    "Create the first administrator account",
                     {
                         "201": _json_response("AuthSetupResponse", "Drone configured and session started"),
-                        "403": _json_response("ErrorResponse", "Invalid setup code"),
                         "409": _json_response("ErrorResponse", "Setup already completed"),
                     },
                     request_body=_json_request("AuthSetupRequest"),

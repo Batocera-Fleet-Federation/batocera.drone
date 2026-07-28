@@ -18,7 +18,6 @@ except ImportError:  # pragma: no cover - direct script execution fallback
 class HandlersAuthMixin:
     def _handle_auth_session(self) -> None:
         if not self.auth.credential_store.is_configured():
-            self.auth.credential_store.ensure_setup_token()
             self._send_json(200, {"authenticated": False, "setup_required": True})
             return
         session = self.auth.authenticate_request(self.headers)
@@ -32,16 +31,13 @@ class HandlersAuthMixin:
         username = str(payload.get("username") or "").strip()
         password = str(payload.get("password") or "")
         password_confirmation = str(payload.get("password_confirmation") or "")
-        setup_token = str(payload.get("setup_token") or "").strip()
         if password != password_confirmation:
             self._send_json(400, {"error": "password confirmation does not match"})
             return
         try:
-            result = self.auth.credential_store.initialize(username, password, setup_token)
-        except PermissionError:
-            client_ip = self.client_address[0] if self.client_address else "-"
-            record_unauthorized_response(client_ip)
-            self._send_json(403, {"error": "invalid first-boot setup code"})
+            result = self.auth.credential_store.initialize(username, password)
+        except ValueError as error:
+            self._send_json(400, {"error": str(error)})
             return
         except RuntimeError as error:
             self._send_json(409, {"error": str(error)})
