@@ -783,8 +783,9 @@ def _schemas() -> Dict[str, Schema]:
                 "has_credentials": _boolean(),
                 "username": _string(nullable=True),
                 "password": _string("Only ever served over this mTLS peer channel, never through any /admin/* response", nullable=True),
+                "connected": _boolean("Whether this drone's own VPN tunnel is actually up right now -- used by the swarm-bootstrap flow to only adopt from a peer with a proven-working connection, not merely one that's configured to share"),
             },
-            ("config_filename", "config_text", "has_credentials"),
+            ("config_filename", "config_text", "has_credentials", "connected"),
             description="This drone's VPN config as served to a paired peer -- only returned when sharing is on (see /admin/vpn/sharing).",
         ),
         "VpnVerifyIpResponse": _object(

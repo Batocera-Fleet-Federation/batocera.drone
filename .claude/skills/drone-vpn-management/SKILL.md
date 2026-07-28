@@ -363,8 +363,85 @@ own startup. Do not build a second boot-ordering-dependent OS service for
 this; it would be strictly more complex and less reliable than reusing the
 existing one.
 
+### Swarm bootstrap: a fresh/unconfigured drone adopts a connected peer's shared VPN
+
+Added 2026-07-28, same day as the toggle removal above, per an explicit user
+ask: "if a drone is not connected to a VPN, and the swarm contains a drone
+that has VPN connected + sharing VPN credentials, I want the drone to
+automatically pull these credentials, apply them, and start the VPN on
+startup." `bootstrap_vpn_from_swarm(settings)` implements this, called from
+`maybe_auto_connect` **only when `validate_ready()` already failed** — i.e.
+this drone has no usable config of its own:
+
+```python
+if validate_ready(settings):
+    bootstrap_vpn_from_swarm(settings)
+if validate_ready(settings):
+    return
+# ... existing connect-retry loop, unchanged, now possibly using a freshly-adopted config
+```
+
+Key design decisions, and why:
+
+- **Trigger is "no usable local config," not "temporarily disconnected."**
+  The user's literal words ("not connected to a VPN") could be read either
+  way; this skill's interpretation is deliberate, not an oversight —
+  `validate_ready()` failing (no config, or no credentials, e.g. right after
+  a revocation) is the trigger. A drone that already has its own saved
+  config/credentials is **never** touched by this, even if its own tunnel
+  happens to be down for some unrelated reason right now (bad password, wrong
+  server, provider outage) — auto-replacing a deliberately-configured setup
+  with a borrowed one on every restart would be a much bigger, more
+  surprising behavior change than what was asked for. If this reading turns
+  out wrong, that's a product question for the user, not something to "fix"
+  unilaterally back toward the broader reading.
+- **Only adopts from a peer that is actively `connected` right now**, not
+  merely `sharing_enabled` + configured. `export_payload()` (`vpn_manager.py`)
+  now includes `"connected": status(settings).get("status") == "connected"`
+  in its response — purely additive, the existing serve gate
+  (`sharing_enabled` + `has_config`) and the existing manual "Pull
+  Configuration" UI flow are unchanged and still work regardless of a peer's
+  live connection state. `bootstrap_vpn_from_swarm` is the one caller that
+  filters on it, because a live tunnel is the strongest available signal the
+  shared credentials genuinely work, and it prevents every drone in a
+  freshly-booted fleet from racing to adopt from an equally fresh, equally
+  unconnected peer.
+- **One pass over paired peers at boot, not a background search.** Matches
+  "start the VPN on startup" literally. If no qualifying peer is found this
+  boot, nothing retries the *search* until the next actual Drone-app restart
+  (the existing `connect()` retry loop only retries the *connect* step, and
+  only runs once a usable config already exists). Do not turn this into a
+  perpetual poller without the user asking for that specifically — see
+  `run_sharing_revocation_poller` for what a genuinely justified persistent
+  background thread looks like in this module, and note this isn't one.
+- **Reuses `import_from_peer` unchanged** — same as the manual pull flow, so
+  the auth-user-pass re-rewrite and provenance tracking (`source_peer_id`)
+  apply identically regardless of whether the import was human-triggered or
+  automatic. This also means an auto-bootstrapped config **cannot itself be
+  re-shared** (see the single-hop-only section above) and **will be
+  auto-revoked** by `check_sharing_revocation`'s existing poller exactly like
+  a manually-pulled one, with no special-casing needed for either.
+- **Per-peer failures are silently skipped, not logged as errors** — offline,
+  not sharing, sharing but not connected, or an import failure (e.g. a
+  malformed payload) all just move on to the next paired peer.
+  `paired_peers()`'s own order is used as-is; no LAN/latency-based ranking was
+  added for this bootstrap case (it's best-effort and rare, not a real
+  transfer). Only the terminal outcome is logged: which peer's config was
+  adopted, or nothing at startup.
+
 ## Common failure patterns
 
+- Calling `bootstrap_vpn_from_swarm` (or its equivalent) when this drone
+  already has its own config/credentials — it must only ever run after
+  `validate_ready()` has already failed. Running it unconditionally would
+  mean a perfectly good local VPN setup gets silently clobbered by whatever
+  paired peer happens to answer first on every restart.
+- Filtering peers on `sharing_enabled` alone for the swarm-bootstrap case —
+  `export_payload()`'s serve gate doesn't require the source to be
+  *connected*, only *sharing*, since the existing manual pull flow doesn't
+  need that. The bootstrap-specific `connected` check has to happen on the
+  *caller* side (`bootstrap_vpn_from_swarm`), not by changing what
+  `/peer/vpn/config` serves.
 - **The real bug that prompted the connect-on-boot rewrite**: the original
   `maybe_auto_connect()` called `connect()` exactly once and threw away the
   result on both success *and* failure — a transient boot-time condition
@@ -473,7 +550,12 @@ Do not:
 - clear `source_peer_id` anywhere except a genuine fresh `save_uploaded_config()`
   call, especially not during revocation cleanup,
 - treat a network error, timeout, or non-404 status as revocation — only an
-  explicit 404 or "peer no longer paired" may disconnect and wipe credentials.
+  explicit 404 or "peer no longer paired" may disconnect and wipe credentials,
+- call `bootstrap_vpn_from_swarm` when this drone already has a usable local
+  config — it must stay gated behind `validate_ready()` already having failed,
+- adopt a shared config from a peer that is merely `sharing_enabled` but not
+  currently `connected` — the bootstrap path specifically requires a proven
+  working tunnel on the source, unlike the manual pull flow.
 
 ## Default bias
 

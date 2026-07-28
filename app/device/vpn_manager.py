@@ -356,10 +356,65 @@ def disconnect(settings: Settings) -> dict:
         return {"status": "disconnected"}
 
 
+def bootstrap_vpn_from_swarm(settings: Settings) -> bool:
+    """Adopt a paired peer's actively-connected, shared VPN config as our own.
+
+    Only ever called from ``maybe_auto_connect`` when this drone has **no
+    usable config of its own** (``validate_ready()`` already failed) -- this
+    never overrides an existing local configuration, deliberate or otherwise.
+
+    Tries every paired peer, in ``local_network.paired_peers()``'s own order,
+    stopping at the first one that is both sharing (``GET /peer/vpn/config``
+    returns 200) *and* actively ``connected`` right now -- a peer that is
+    merely configured-to-share but not currently connected is skipped, since
+    a live tunnel is the signal its credentials genuinely work. This also
+    avoids every drone in a freshly-booted fleet racing to adopt from an
+    equally fresh, equally unconnected peer. Unreachable/offline peers and
+    peers not sharing are silently skipped, not errors -- there may be many
+    paired peers and only one needs to work. Returns True on the first
+    successful import.
+    """
+    try:
+        from ..transfer import local_network as _local_network
+        from ..transfer.peer_connectivity import _peer_get_json_for_peer
+    except ImportError:  # pragma: no cover - direct script execution fallback
+        from transfer import local_network as _local_network  # type: ignore
+        from transfer.peer_connectivity import _peer_get_json_for_peer  # type: ignore
+    for peer in _local_network.paired_peers(settings):
+        peer_id = str(peer.get("drone_id") or peer.get("device_id") or peer.get("id") or "").strip()
+        if not peer_id:
+            continue
+        try:
+            payload, _address = _peer_get_json_for_peer(peer, "/v1/api/peer/vpn/config", settings, peer_id=peer_id)
+        except Exception:
+            continue  # offline, not paired on this address, sharing off, no config, etc.
+        if not isinstance(payload, dict) or not payload.get("connected"):
+            continue
+        peer_name = str(peer.get("name") or peer.get("hostname") or peer_id)
+        try:
+            import_from_peer(settings, payload, source_peer_id=peer_id, source_peer_name=peer_name)
+        except Exception as error:
+            print(
+                f"Swarm VPN bootstrap: failed to adopt the config shared by {peer_name}: {error.__class__.__name__}: {error}",
+                file=sys.stderr, flush=True,
+            )
+            continue
+        print(f"Swarm VPN bootstrap: adopted the VPN configuration shared by {peer_name}", file=sys.stdout, flush=True)
+        return True
+    return False
+
+
 def maybe_auto_connect(settings: Settings) -> None:
     """Best-effort auto-connect on Drone startup whenever a ready-to-use
     configuration already exists (config + credentials + openvpn installed) --
     being configured is the only condition; there is no separate opt-in flag.
+
+    If this drone has no usable config of its own, it first tries to adopt
+    one shared by a paired peer that is actively connected right now (see
+    ``bootstrap_vpn_from_swarm``) -- a single pass over paired peers, not a
+    background search: this is a startup behavior, matching "start the VPN on
+    startup" rather than an ongoing hunt. If nothing turns up (or this drone
+    already has its own config), that step is a no-op either way.
 
     Retries a few times with a short delay: a fresh boot can hit transient
     conditions (network, ``/dev/net/tun``, or an external drive not mounted
@@ -374,6 +429,8 @@ def maybe_auto_connect(settings: Settings) -> None:
     (and therefore the rest of the admin UI) from starting.
     """
     try:
+        if validate_ready(settings):
+            bootstrap_vpn_from_swarm(settings)
         if validate_ready(settings):
             return
         result: dict = {}
@@ -545,6 +602,14 @@ def export_payload(settings: Settings) -> Optional[dict]:
         "config_text": cfg_path.read_text(encoding="utf-8"),
         "remotes": state["remotes"],
         "has_credentials": False,
+        # Whether *this* drone's own tunnel is actually up right now -- purely
+        # additive: the serve gate above (sharing_enabled + has_config) is
+        # unchanged, so the existing manual "Pull Configuration" flow behaves
+        # exactly as before regardless of this value. It exists for
+        # bootstrap_vpn_from_swarm() below, which only wants to adopt a config
+        # from a peer that's proven to actually work right now, not merely
+        # configured to share.
+        "connected": status(settings).get("status") == "connected",
     }
     if state["has_credentials"]:
         auth_file = auth_path(settings)

@@ -311,7 +311,11 @@ class AutoConnectTests(unittest.TestCase):
     """maybe_auto_connect has no opt-in toggle -- being configured (has_config +
     has_credentials + openvpn installed) is the only condition. See
     SharingProvenanceGateTests etc. for the unrelated sharing_enabled gate,
-    which only affects P2P export, not this boot-time connect behavior."""
+    which only affects P2P export, not this boot-time connect behavior.
+
+    bootstrap_vpn_from_swarm() is only ever invoked here, and only when this
+    drone has no usable config of its own -- see BootstrapVpnFromSwarmTests
+    for that function's own peer-search/skip/import behavior in isolation."""
 
     def test_does_nothing_when_not_ready(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -379,6 +383,51 @@ class AutoConnectTests(unittest.TestCase):
                 vpn_manager.maybe_auto_connect(settings)  # must not raise
             # A raised (not returned) failure aborts the loop rather than retrying blindly.
             connect.assert_called_once()
+
+    def test_swarm_bootstrap_not_attempted_when_already_ready(self) -> None:
+        # Never override an existing local configuration, deliberate or not.
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            vpn_manager.save_uploaded_config(settings, "client.ovpn", SAMPLE_OVPN.encode())
+            vpn_manager.save_credentials(settings, "user", "pass")
+            with mock.patch.object(vpn_manager, "find_openvpn_binary", return_value="/usr/sbin/openvpn"), \
+                    mock.patch.object(vpn_manager, "connect", return_value={"status": "connecting"}), \
+                    mock.patch.object(vpn_manager, "bootstrap_vpn_from_swarm") as bootstrap:
+                vpn_manager.maybe_auto_connect(settings)
+            bootstrap.assert_not_called()
+
+    def test_swarm_bootstrap_attempted_when_not_ready_and_nothing_found(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            with mock.patch.object(vpn_manager, "bootstrap_vpn_from_swarm", return_value=False) as bootstrap, \
+                    mock.patch.object(vpn_manager, "connect") as connect:
+                vpn_manager.maybe_auto_connect(settings)
+            bootstrap.assert_called_once_with(settings)
+            connect.assert_not_called()  # still nothing usable -- nothing to connect
+
+    def test_connects_after_a_successful_swarm_bootstrap(self) -> None:
+        # bootstrap_vpn_from_swarm's real job is writing a usable local config
+        # (via import_from_peer) as a side effect -- simulate that directly so
+        # the second validate_ready() check genuinely passes, exercising the
+        # real fall-through into the connect loop below it.
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+
+            def fake_bootstrap(_settings) -> bool:
+                vpn_manager.import_from_peer(
+                    _settings,
+                    {"config_filename": "client.ovpn", "config_text": SAMPLE_OVPN, "has_credentials": True, "username": "peeruser", "password": "peerpass123"},
+                    source_peer_id="peer-1", source_peer_name="Peer One",
+                )
+                return True
+
+            with mock.patch.object(vpn_manager, "bootstrap_vpn_from_swarm", side_effect=fake_bootstrap) as bootstrap, \
+                    mock.patch.object(vpn_manager, "find_openvpn_binary", return_value="/usr/sbin/openvpn"), \
+                    mock.patch.object(vpn_manager, "connect", return_value={"status": "connecting"}) as connect:
+                vpn_manager.maybe_auto_connect(settings)
+            bootstrap.assert_called_once_with(settings)
+            connect.assert_called_once_with(settings)
+            self.assertEqual(vpn_manager._load_state(settings)["source_peer_id"], "peer-1")
 
 
 class CheckPublicIpTests(unittest.TestCase):
@@ -523,6 +572,22 @@ class ExportPayloadTests(unittest.TestCase):
             self.assertTrue(payload["has_credentials"])
             self.assertEqual(payload["username"], "tokenuser")
             self.assertEqual(payload["password"], "tokenpass123")
+            self.assertFalse(payload["connected"])  # nothing actually running in this test
+
+    def test_connected_true_when_tunnel_is_actually_up(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            vpn_manager.save_uploaded_config(settings, "client.ovpn", SAMPLE_OVPN.encode())
+            vpn_manager.save_credentials(settings, "user", "pass")
+            vpn_manager.set_sharing_enabled(settings, True)
+            vpn_manager.vpn_dir(settings).mkdir(parents=True, exist_ok=True)
+            vpn_manager.log_path(settings).write_text("Initialization Sequence Completed\n", encoding="utf-8")
+            with mock.patch.object(vpn_manager, "find_openvpn_binary", return_value="/usr/sbin/openvpn"), \
+                    mock.patch.object(vpn_manager, "_find_running_openvpn_pid", return_value=999), \
+                    mock.patch.object(vpn_manager, "_tunnel_ip", return_value="10.8.0.2"):
+                payload = vpn_manager.export_payload(settings)
+            self.assertIsNotNone(payload)
+            self.assertTrue(payload["connected"])
 
     def test_credentials_excluded_when_not_saved(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -749,6 +814,91 @@ class CheckSharingRevocationTests(unittest.TestCase):
             settings = self._imported_settings(tmp)
             with mock.patch("app.transfer.local_network.get_paired_peer", side_effect=RuntimeError("boom")):
                 self.assertFalse(vpn_manager.check_sharing_revocation(settings))
+
+
+class BootstrapVpnFromSwarmTests(unittest.TestCase):
+    """bootstrap_vpn_from_swarm's own peer-search/skip/import logic, in
+    isolation from maybe_auto_connect (see AutoConnectTests for the wiring:
+    only called when not already ready, and how a success falls through into
+    the connect loop)."""
+
+    SHARED_CONNECTED = {
+        "config_filename": "client.ovpn", "config_text": SAMPLE_OVPN, "remotes": ["vpn.example.net 1194"],
+        "has_credentials": True, "username": "peeruser", "password": "peerpass123", "connected": True,
+    }
+    SHARED_NOT_CONNECTED = {**SHARED_CONNECTED, "connected": False}
+
+    def test_no_paired_peers_returns_false(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            with mock.patch("app.transfer.local_network.paired_peers", return_value=[]):
+                self.assertFalse(vpn_manager.bootstrap_vpn_from_swarm(settings))
+            self.assertFalse(vpn_manager._load_state(settings)["has_config"])
+
+    def test_skips_peer_that_is_sharing_but_not_connected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            peer = {"drone_id": "peer-1", "name": "Peer One"}
+            with mock.patch("app.transfer.local_network.paired_peers", return_value=[peer]), \
+                    mock.patch("app.transfer.peer_connectivity._peer_get_json_for_peer", return_value=(self.SHARED_NOT_CONNECTED, "https://peer")):
+                self.assertFalse(vpn_manager.bootstrap_vpn_from_swarm(settings))
+            self.assertFalse(vpn_manager._load_state(settings)["has_config"])
+
+    def test_imports_from_the_connected_sharing_peer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            peer = {"drone_id": "peer-1", "name": "Peer One"}
+            with mock.patch("app.transfer.local_network.paired_peers", return_value=[peer]), \
+                    mock.patch("app.transfer.peer_connectivity._peer_get_json_for_peer", return_value=(self.SHARED_CONNECTED, "https://peer")):
+                self.assertTrue(vpn_manager.bootstrap_vpn_from_swarm(settings))
+            state = vpn_manager._load_state(settings)
+            self.assertTrue(state["has_config"])
+            self.assertTrue(state["has_credentials"])
+            self.assertEqual(state["source_peer_id"], "peer-1")
+            self.assertEqual(state["source_peer_name"], "Peer One")
+
+    def test_skips_unreachable_peer_and_succeeds_on_the_next(self) -> None:
+        offline_peer = {"drone_id": "peer-offline", "name": "Offline Peer"}
+        working_peer = {"drone_id": "peer-2", "name": "Peer Two"}
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+
+            def fake_get_json(peer, *_args, **_kwargs):
+                if peer["drone_id"] == "peer-offline":
+                    raise OSError("unreachable")
+                return self.SHARED_CONNECTED, "https://peer"
+
+            with mock.patch("app.transfer.local_network.paired_peers", return_value=[offline_peer, working_peer]), \
+                    mock.patch("app.transfer.peer_connectivity._peer_get_json_for_peer", side_effect=fake_get_json):
+                self.assertTrue(vpn_manager.bootstrap_vpn_from_swarm(settings))
+            self.assertEqual(vpn_manager._load_state(settings)["source_peer_id"], "peer-2")
+
+    def test_skips_peer_whose_shared_payload_fails_to_import(self) -> None:
+        # A malformed/empty config_text makes import_from_peer raise -- must
+        # not abort the whole search, just move on to the next peer.
+        broken_peer = {"drone_id": "peer-broken", "name": "Broken Peer"}
+        working_peer = {"drone_id": "peer-2", "name": "Peer Two"}
+        broken_payload = {**self.SHARED_CONNECTED, "config_text": ""}
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+
+            def fake_get_json(peer, *_args, **_kwargs):
+                if peer["drone_id"] == "peer-broken":
+                    return broken_payload, "https://peer"
+                return self.SHARED_CONNECTED, "https://peer"
+
+            with mock.patch("app.transfer.local_network.paired_peers", return_value=[broken_peer, working_peer]), \
+                    mock.patch("app.transfer.peer_connectivity._peer_get_json_for_peer", side_effect=fake_get_json):
+                self.assertTrue(vpn_manager.bootstrap_vpn_from_swarm(settings))
+            self.assertEqual(vpn_manager._load_state(settings)["source_peer_id"], "peer-2")
+
+    def test_returns_false_when_no_peer_qualifies(self) -> None:
+        peer = {"drone_id": "peer-1", "name": "Peer One"}
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            with mock.patch("app.transfer.local_network.paired_peers", return_value=[peer]), \
+                    mock.patch("app.transfer.peer_connectivity._peer_get_json_for_peer", side_effect=OSError("unreachable")):
+                self.assertFalse(vpn_manager.bootstrap_vpn_from_swarm(settings))
 
 
 if __name__ == "__main__":
