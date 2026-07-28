@@ -158,11 +158,14 @@ of the above in depth.
 ### VPN
 
 Provider-agnostic OpenVPN client management (Proton VPN, NordVPN, PIA, ...) —
-upload a `.ovpn`, save credentials, Connect/Disconnect, live status, auto-start
-on Drone boot, log viewer/download. Unlike Torrents, there's no background
-worker: status is recomputed fresh on every request (`/proc` scan for the
-running PID, tail the log, query `tun0`) since a VPN connection is exactly one
-process. A "Share with Swarm" card adds P2P sharing to a paired peer: an
+upload a `.ovpn`, save credentials, Connect/Disconnect, live status, log
+viewer/download. Connects automatically whenever the Drone starts up and a
+config is ready (retried a few times; no opt-in toggle, no UI switch for this
+-- see the drone-vpn-management skill's "Connecting on boot" section). Unlike
+Torrents, there's no background worker for status itself: it's recomputed
+fresh on every request (`/proc` scan for the running PID, tail the log, query
+`tun0`) since a VPN connection is exactly one process. A "Share with Swarm"
+card adds P2P sharing to a paired peer: an
 off-by-default toggle (`sharing_enabled`) plus a "Pull Configuration" picker
 that fetches another paired drone's config+credentials over the same
 mTLS `/peer/*` channel ROM/BIOS transfers use. See the dedicated

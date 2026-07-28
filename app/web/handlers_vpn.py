@@ -1,10 +1,12 @@
 """RomRequestHandler VPN-admin handlers, as a mixin.
 
 The admin OpenVPN endpoints: status snapshot, upload a provider's .ovpn,
-save credentials, connect/disconnect, on-demand public-IP verification,
-the auto-start-on-boot toggle, and the log (view + download). Composed onto
-``RomRequestHandler``. See ``device/vpn_manager.py`` for the actual OpenVPN
-process/config management this delegates to.
+save credentials, connect/disconnect, on-demand public-IP verification, the
+P2P sharing toggle/pull-from-peer, and the log (view + download). Composed
+onto ``RomRequestHandler``. See ``device/vpn_manager.py`` for the actual
+OpenVPN process/config management this delegates to -- including
+``maybe_auto_connect()``, which connects on Drone startup automatically
+whenever a config is ready, with no separate admin action here for it.
 """
 
 from urllib.error import HTTPError
@@ -63,11 +65,6 @@ class HandlersVpnMixin:
     def _handle_admin_vpn_verify_ip(self) -> None:
         result = _vpn.check_public_ip()
         self._send_json(200 if "ip" in result else 502, result)
-
-    def _handle_admin_vpn_auto_start(self, payload: dict) -> None:
-        payload = payload if isinstance(payload, dict) else {}
-        result = _vpn.set_auto_start(self.settings, bool(payload.get("enabled")))
-        self._send_json(200, result)
 
     def _handle_admin_vpn_sharing(self, payload: dict) -> None:
         payload = payload if isinstance(payload, dict) else {}

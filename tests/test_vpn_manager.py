@@ -308,41 +308,77 @@ class ConnectDisconnectTests(unittest.TestCase):
 
 
 class AutoConnectTests(unittest.TestCase):
-    def test_does_nothing_when_auto_start_disabled(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            settings = _build_settings(self, Path(tmp))
-            with mock.patch.object(vpn_manager, "connect") as connect:
-                vpn_manager.maybe_auto_connect(settings)
-            connect.assert_not_called()
+    """maybe_auto_connect has no opt-in toggle -- being configured (has_config +
+    has_credentials + openvpn installed) is the only condition. See
+    SharingProvenanceGateTests etc. for the unrelated sharing_enabled gate,
+    which only affects P2P export, not this boot-time connect behavior."""
 
     def test_does_nothing_when_not_ready(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(self, Path(tmp))
-            vpn_manager.set_auto_start(settings, True)
             with mock.patch.object(vpn_manager, "connect") as connect:
                 vpn_manager.maybe_auto_connect(settings)
             connect.assert_not_called()
 
-    def test_connects_when_enabled_and_ready(self) -> None:
+    def test_connects_when_ready(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(self, Path(tmp))
             vpn_manager.save_uploaded_config(settings, "client.ovpn", SAMPLE_OVPN.encode())
             vpn_manager.save_credentials(settings, "user", "pass")
-            vpn_manager.set_auto_start(settings, True)
             with mock.patch.object(vpn_manager, "find_openvpn_binary", return_value="/usr/sbin/openvpn"), \
-                    mock.patch.object(vpn_manager, "connect") as connect:
+                    mock.patch.object(vpn_manager, "connect", return_value={"status": "connecting"}) as connect:
                 vpn_manager.maybe_auto_connect(settings)
             connect.assert_called_once_with(settings)
+
+    def test_retries_on_transient_failure_then_succeeds(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            vpn_manager.save_uploaded_config(settings, "client.ovpn", SAMPLE_OVPN.encode())
+            vpn_manager.save_credentials(settings, "user", "pass")
+            results = [
+                {"status": "error", "errors": ["network not ready"]},
+                {"status": "error", "errors": ["network not ready"]},
+                {"status": "connecting"},
+            ]
+            with mock.patch.object(vpn_manager, "find_openvpn_binary", return_value="/usr/sbin/openvpn"), \
+                    mock.patch.object(vpn_manager, "connect", side_effect=results) as connect, \
+                    mock.patch.object(vpn_manager, "time") as fake_time:
+                vpn_manager.maybe_auto_connect(settings)
+            self.assertEqual(connect.call_count, 3)
+            self.assertEqual(fake_time.sleep.call_count, 2)  # between attempts only, never after the final one
+
+    def test_already_running_short_circuits_like_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            vpn_manager.save_uploaded_config(settings, "client.ovpn", SAMPLE_OVPN.encode())
+            vpn_manager.save_credentials(settings, "user", "pass")
+            with mock.patch.object(vpn_manager, "find_openvpn_binary", return_value="/usr/sbin/openvpn"), \
+                    mock.patch.object(vpn_manager, "connect", return_value={"status": "already_running"}) as connect:
+                vpn_manager.maybe_auto_connect(settings)
+            connect.assert_called_once()
+
+    def test_gives_up_after_max_attempts_without_raising(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            vpn_manager.save_uploaded_config(settings, "client.ovpn", SAMPLE_OVPN.encode())
+            vpn_manager.save_credentials(settings, "user", "pass")
+            with mock.patch.object(vpn_manager, "VPN_AUTO_CONNECT_MAX_ATTEMPTS", 3), \
+                    mock.patch.object(vpn_manager, "find_openvpn_binary", return_value="/usr/sbin/openvpn"), \
+                    mock.patch.object(vpn_manager, "connect", return_value={"status": "error", "errors": ["auth failed"]}) as connect, \
+                    mock.patch.object(vpn_manager, "time"):
+                vpn_manager.maybe_auto_connect(settings)  # must not raise
+            self.assertEqual(connect.call_count, 3)
 
     def test_never_raises_even_if_connect_blows_up(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(self, Path(tmp))
             vpn_manager.save_uploaded_config(settings, "client.ovpn", SAMPLE_OVPN.encode())
             vpn_manager.save_credentials(settings, "user", "pass")
-            vpn_manager.set_auto_start(settings, True)
             with mock.patch.object(vpn_manager, "find_openvpn_binary", return_value="/usr/sbin/openvpn"), \
-                    mock.patch.object(vpn_manager, "connect", side_effect=RuntimeError("boom")):
+                    mock.patch.object(vpn_manager, "connect", side_effect=RuntimeError("boom")) as connect:
                 vpn_manager.maybe_auto_connect(settings)  # must not raise
+            # A raised (not returned) failure aborts the loop rather than retrying blindly.
+            connect.assert_called_once()
 
 
 class CheckPublicIpTests(unittest.TestCase):

@@ -724,7 +724,11 @@ def _schemas() -> Dict[str, Schema]:
                 "remotes": _array(_string()),
                 "has_credentials": _boolean(),
                 "username": _string("VPN username, for display -- the password is never returned"),
-                "auto_start": _boolean(),
+                "sharing_enabled": _boolean("Whether paired peers may pull this config; always false for an imported config"),
+                "source_peer_id": _string("Peer this config was imported from, empty if self-uploaded (self-uploaded configs may be shared; imported ones may not)"),
+                "source_peer_name": _string("Display name of source_peer_id's drone, empty if self-uploaded"),
+                "revoked_reason": _string("Set when the source peer stopped sharing and credentials were auto-removed; cleared by the next successful upload/import"),
+                "revoked_at": _string(fmt="date-time", nullable=True),
                 "connected_at": _string(fmt="date-time", nullable=True),
                 "connected_duration_seconds": _integer(nullable=True),
                 "tunnel_ip": _string(nullable=True),
@@ -733,7 +737,7 @@ def _schemas() -> Dict[str, Schema]:
                 "log_available": _boolean(),
                 "log_tail": _array(_string()),
             },
-            ("status", "installed", "has_config", "has_credentials", "auto_start", "validation_errors"),
+            ("status", "installed", "has_config", "has_credentials", "validation_errors"),
             description="OpenVPN configuration + live connection status snapshot.",
         ),
         "VpnUploadResponse": _object(
@@ -755,8 +759,34 @@ def _schemas() -> Dict[str, Schema]:
             ("status",),
             description="Result of a connect/disconnect action.",
         ),
-        "VpnAutoStartRequest": _object({"enabled": _boolean()}, ("enabled",)),
-        "VpnAutoStartResponse": _object({"auto_start": _boolean()}, ("auto_start",)),
+        "VpnSharingRequest": _object({"enabled": _boolean()}, ("enabled",)),
+        "VpnSharingResponse": _object({"sharing_enabled": _boolean()}, ("sharing_enabled",)),
+        "VpnPullFromPeerRequest": _object(
+            {"peer_id": _string("drone_id of a paired peer that has VPN sharing turned on")},
+            ("peer_id",),
+        ),
+        "VpnPullFromPeerResponse": _object(
+            {
+                "status": _string(),
+                "config_filename": _string(),
+                "remotes": _array(_string()),
+                "credentials_imported": _boolean("False if the peer shared a config but no credentials"),
+            },
+            ("status", "config_filename", "credentials_imported"),
+            description="Result of importing a peer's shared VPN config (+ credentials, if included).",
+        ),
+        "VpnPeerConfigResponse": _object(
+            {
+                "config_filename": _string(),
+                "config_text": _string("The rewritten .ovpn contents"),
+                "remotes": _array(_string()),
+                "has_credentials": _boolean(),
+                "username": _string(nullable=True),
+                "password": _string("Only ever served over this mTLS peer channel, never through any /admin/* response", nullable=True),
+            },
+            ("config_filename", "config_text", "has_credentials"),
+            description="This drone's VPN config as served to a paired peer -- only returned when sharing is on (see /admin/vpn/sharing).",
+        ),
         "VpnVerifyIpResponse": _object(
             {
                 "ip": _string(nullable=True),
@@ -1583,8 +1613,11 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             "/admin/vpn/verify-ip": {
                 "post": _operation("On-demand public-IP check to confirm the tunnel is actually routing traffic", {"200": _json_response("VpnVerifyIpResponse"), "502": _json_response("VpnVerifyIpResponse", "Could not determine the public IP")}, tags=["admin", "vpn"], error_codes=("401", "403", "429", "500", "503"))
             },
-            "/admin/vpn/auto-start": {
-                "post": _operation("Toggle connecting automatically when the Drone starts", {"200": _json_response("VpnAutoStartResponse")}, request_body=_json_request("VpnAutoStartRequest"), tags=["admin", "vpn"], error_codes=("400", "401", "403", "429", "500", "503"))
+            "/admin/vpn/sharing": {
+                "post": _operation("Toggle allowing paired peers to pull this VPN config; rejected if this config was itself imported from a peer", {"200": _json_response("VpnSharingResponse"), "400": _json_response("ErrorResponse", "This config was imported from a peer and cannot be re-shared")}, request_body=_json_request("VpnSharingRequest"), tags=["admin", "vpn"], error_codes=("400", "401", "403", "429", "500", "503"))
+            },
+            "/admin/vpn/pull-from-peer": {
+                "post": _operation("Pull VPN config (+ credentials, if shared) from a paired peer and adopt it", {"200": _json_response("VpnPullFromPeerResponse"), "404": _json_response("ErrorResponse", "Unknown peer, or that peer has sharing off / no config"), "502": _json_response("ErrorResponse", "Could not reach that peer")}, request_body=_json_request("VpnPullFromPeerRequest"), tags=["admin", "vpn"], error_codes=("400", "401", "403", "404", "429", "500", "502", "503"))
             },
             "/admin/vpn/log/download": {
                 "get": _operation("Download the raw openvpn log", {"200": _media_response("Log file", ["text/plain"])}, tags=["admin", "vpn"], error_codes=("401", "403", "404", "429", "500"))
@@ -1823,6 +1856,15 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
                     tags=["peer", "downloads"],
                     security=peer_security,
                     error_codes=("400", "403", "404", "429", "500"),
+                )
+            },
+            "/peer/vpn/config": {
+                "get": _operation(
+                    "Get this drone's shared VPN config (+ credentials, if included) -- only when sharing is on",
+                    {"200": _json_response("VpnPeerConfigResponse"), "404": _json_response("ErrorResponse", "Sharing is off, or no config has been uploaded")},
+                    tags=["peer", "vpn"],
+                    security=peer_security,
+                    error_codes=("403", "404", "429", "500"),
                 )
             },
         },

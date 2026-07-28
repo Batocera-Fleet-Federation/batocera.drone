@@ -3640,7 +3640,7 @@ async function renderVpnPage() {
   currentSystemContext = null;
   clearSystemTheme();
   titleNode.textContent = "VPN";
-  subtitleNode.textContent = "OpenVPN configuration and connection status";
+  subtitleNode.textContent = "OpenVPN configuration and connection status -- connects automatically whenever the Drone starts up";
   setLoading(true, "Loading VPN status...");
   let payload;
   try {
@@ -3679,14 +3679,6 @@ async function renderVpnPage() {
           </div>
         </div>
         <button class="btn btn-primary btn-sm" type="button" id="vpnCredentialsSaveBtn" onclick="saveVpnCredentials()"><i class="bi bi-save me-1"></i>Save</button>
-      </div>
-    </div>
-    <div class="card mb-3">
-      <div class="card-body">
-        <div class="form-check form-switch">
-          <input class="form-check-input" type="checkbox" role="switch" id="vpnAutoStart" ${payload.auto_start ? "checked" : ""} onchange="setVpnAutoStart(this.checked)">
-          <label class="form-check-label" for="vpnAutoStart">Start VPN automatically when the Drone starts</label>
-        </div>
       </div>
     </div>
     <div class="card mb-3">
@@ -3834,17 +3826,6 @@ async function verifyVpnPublicIp() {
   } finally {
     const node = document.getElementById("vpnPublicIp");
     if (node) node.innerHTML = vpnPublicIpText(vpnLastPublicIp);
-  }
-}
-
-async function setVpnAutoStart(enabled) {
-  const checkbox = document.getElementById("vpnAutoStart");
-  try {
-    await apiPost("/admin/vpn/auto-start", { enabled });
-    showToast(`VPN auto-start on boot ${enabled ? "enabled" : "disabled"}.`, "success");
-  } catch (err) {
-    if (checkbox) checkbox.checked = !enabled;
-    showToast(`Failed to save auto-start setting: ${escapeHtml(err.message || "unknown error")}`, "danger");
   }
 }
 

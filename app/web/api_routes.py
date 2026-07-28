@@ -781,11 +781,6 @@ class ApiRoutesMixin:
                 self._handle_admin_vpn_verify_ip()
                 return
 
-            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "vpn" and parts[2] == "auto-start":
-                payload = self._read_json_body()
-                self._handle_admin_vpn_auto_start(payload)
-                return
-
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "vpn" and parts[2] == "sharing":
                 payload = self._read_json_body()
                 self._handle_admin_vpn_sharing(payload)

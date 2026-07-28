@@ -1,6 +1,6 @@
 ---
 name: drone-vpn-management
-description: Use this when designing, reviewing, debugging, or modifying the Drone's VPN admin tile — OpenVPN client configuration/connection management, .ovpn upload and rewriting, VPN credential storage, connect/disconnect process control, VPN status detection, auto-start-on-boot, peer-to-peer VPN config/credential sharing between paired drones (single-hop-only provenance, share-revocation auto-disconnect/wipe), or app/device/vpn_manager.py, web/handlers_vpn.py, web/handlers_peer.py's _handle_peer_vpn_config.
+description: Use this when designing, reviewing, debugging, or modifying the Drone's VPN admin tile — OpenVPN client configuration/connection management, .ovpn upload and rewriting, VPN credential storage, connect/disconnect process control, VPN status detection, connecting automatically on Drone startup (unconditional + retried, no opt-in toggle), peer-to-peer VPN config/credential sharing between paired drones (single-hop-only provenance, share-revocation auto-disconnect/wipe), or app/device/vpn_manager.py, web/handlers_vpn.py, web/handlers_peer.py's _handle_peer_vpn_config.
 ---
 
 # Drone VPN Management Skill
@@ -327,21 +327,61 @@ on every 3s status tick would be wasteful and could hit rate limits. If a
 "verify automatically" feature is ever requested, poll it far less frequently
 than the status tick, not on the same cadence.
 
-## Auto-start on boot: no separate OS service
+## Connecting on boot: unconditional, retried, no separate OS service
 
-`maybe_auto_connect(settings)` runs once, in a background thread kicked off
-from `create_server()` (so it can't delay the server accepting its first
-request — `connect()` can block for several seconds). It simply checks the
-persisted `auto_start` flag and `validate_ready()`, then calls `connect()` if
-both pass. There is **no** new systemd/init.d unit created for this — the
-Drone app itself is already the boot-time service (`DRONE_SERVER`), so
-"start on boot" is satisfied by the already-boot-triggered app auto-connecting
-on its own startup. Do not build a second boot-ordering-dependent OS service
-for this; it would be strictly more complex and less reliable than reusing
-the existing one.
+`maybe_auto_connect(settings)` runs in a background thread kicked off from
+`create_server()` (so it can't delay the server accepting its first request —
+`connect()` can block for several seconds). **Being configured is the only
+condition** — `validate_ready()` (has_config + has_credentials + openvpn
+installed) gates it, nothing else. There used to be a separate `auto_start`
+opt-in toggle (state field, `set_auto_start()`, `POST /admin/vpn/auto-start`,
+a UI switch); it was **removed 2026-07-28** after a user reported VPN staying
+disconnected across Drone-app restarts even with the toggle already on — see
+"Common failure patterns" below for the real bug that turned out to be. The
+user's explicit call: connect-if-configured should not depend on a switch a
+person has to remember to flip per drone. Do not reintroduce a gating toggle
+for this without the user asking for one again.
+
+**Retries `VPN_AUTO_CONNECT_MAX_ATTEMPTS` times** (default 4, env
+`DRONE_VPN_AUTO_CONNECT_MAX_ATTEMPTS`) with a
+`VPN_AUTO_CONNECT_RETRY_DELAY_SECONDS` delay between attempts (default 15s,
+env `DRONE_VPN_AUTO_CONNECT_RETRY_DELAY_SECONDS`) before giving up, and logs
+every outcome (which attempt succeeded, or every error hit before giving up)
+— unlike the single-shot version this replaced, which called `connect()`
+exactly once and **discarded its result even on failure**, so a boot-time
+hiccup (network/`/dev/net/tun`/an external drive not mounted yet) produced a
+disconnected VPN with zero log evidence anything was even attempted. A
+`connecting`/`already_running` result stops the loop immediately; a raised
+(not returned) exception from `connect()` also stops immediately without
+retrying, since `connect()` itself is already defensive and a raise from it
+is unexpected enough that blind retrying isn't obviously safe.
+
+There is **no** new systemd/init.d unit created for this — the Drone app
+itself is already the boot-time service (`DRONE_SERVER`), so connecting on
+boot is satisfied by the already-boot-triggered app auto-connecting on its
+own startup. Do not build a second boot-ordering-dependent OS service for
+this; it would be strictly more complex and less reliable than reusing the
+existing one.
 
 ## Common failure patterns
 
+- **The real bug that prompted the connect-on-boot rewrite**: the original
+  `maybe_auto_connect()` called `connect()` exactly once and threw away the
+  result on both success *and* failure — a transient boot-time condition
+  (network/tun-module/external-drive-not-mounted-yet) failed silently, with
+  no log line, and VPN just stayed disconnected until a human noticed and
+  manually reconnected. Live-debugging evidence (process/session inspection
+  + `service_bootstrap.sh` review) ruled out anything actively killing
+  openvpn on a Drone-app restart (it's `setsid()`-daemonized, in its own
+  session, independent of the app process) — the bug was purely "one silent
+  attempt, no retry, no visibility." Any future one-shot "try once at
+  startup" pattern in this codebase should be viewed with the same
+  suspicion: does a transient boot-time failure actually get retried and
+  logged, or silently swallowed?
+- Reintroducing a toggle that gates connecting on boot behind anything other
+  than "is a config ready" — this was a deliberate, explicit product
+  decision (a user asked for it after finding the old opt-in toggle wasn't
+  enough), not an oversight to "fix" back.
 - Writing a test that calls `vpn_manager.save_uploaded_config`/
   `save_credentials`/etc. without patching `_drone_install_root` first — see
   "The test-isolation gotcha" above; this silently pollutes the real repo.

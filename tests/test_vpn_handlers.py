@@ -200,18 +200,6 @@ class VpnVerifyIpHandlerTests(unittest.TestCase):
             self.assertEqual(handler.response[0], 502)
 
 
-class VpnAutoStartHandlerTests(unittest.TestCase):
-    def test_enables_auto_start(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            settings = _build_settings(self, Path(tmp))
-            handler = _handler(settings)
-            handler._handle_admin_vpn_auto_start({"enabled": True})
-            status, payload = handler.response
-            self.assertEqual(status, 200)
-            self.assertTrue(payload["auto_start"])
-            self.assertTrue(vpn_manager._load_state(settings)["auto_start"])
-
-
 class VpnLogDownloadHandlerTests(unittest.TestCase):
     def test_missing_log_is_404(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

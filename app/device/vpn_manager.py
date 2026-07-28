@@ -21,11 +21,15 @@ Drone runs as root on-device (see ``service_bootstrap.sh``), so spawning and
 signaling openvpn needs no privilege-escalation dance -- direct subprocess
 calls, exactly like the wifi-recovery automation's ``batocera-wifi`` calls.
 
-"Start VPN on boot" does not create a separate OS service: the Drone app
+Connecting on boot does not create a separate OS service: the Drone app
 itself already starts at boot (it's the ``DRONE_SERVER`` service), so
-``maybe_auto_connect()`` just runs once during ``create_server()`` startup
-and connects if the setting is on and the config is ready. Simpler and more
-robust than juggling a second boot-ordering-dependent service unit.
+``maybe_auto_connect()`` runs during ``create_server()`` startup and connects
+whenever the config is ready -- being configured (a saved ``.ovpn`` +
+credentials) is the only condition, there is no separate opt-in toggle.
+Retries a few times with a short delay so a transient boot-time condition
+(network/mount not ready yet) self-heals without a human needing to notice
+and manually reconnect. Simpler and more robust than juggling a second
+boot-ordering-dependent service unit.
 """
 
 from __future__ import annotations
@@ -64,6 +68,8 @@ OPENVPN_AUTH_FILENAME = "auth.txt"
 OPENVPN_LOG_FILENAME = "vpn.log"
 VPN_UPLOAD_MAX_BYTES = 5 * 1024 * 1024
 VPN_CONNECT_TIMEOUT_SECONDS = float(os.environ.get("DRONE_VPN_CONNECT_TIMEOUT_SECONDS", "15"))
+VPN_AUTO_CONNECT_MAX_ATTEMPTS = int(os.environ.get("DRONE_VPN_AUTO_CONNECT_MAX_ATTEMPTS", "4"))
+VPN_AUTO_CONNECT_RETRY_DELAY_SECONDS = float(os.environ.get("DRONE_VPN_AUTO_CONNECT_RETRY_DELAY_SECONDS", "15"))
 VPN_DISCONNECT_GRACE_SECONDS = float(os.environ.get("DRONE_VPN_DISCONNECT_GRACE_SECONDS", "5"))
 VPN_PUBLIC_IP_CHECK_TIMEOUT_SECONDS = float(os.environ.get("DRONE_VPN_PUBLIC_IP_TIMEOUT_SECONDS", "8"))
 VPN_LOG_TAIL_LINES_FOR_DISPLAY = 200
@@ -118,7 +124,6 @@ def _load_state(settings: Settings) -> dict:
     stored = _load_state_payload(_state_database_path(settings.userdata_root), VPN_STATE_NAMESPACE, {})
     stored = stored if isinstance(stored, dict) else {}
     return {
-        "auto_start": bool(stored.get("auto_start", False)),
         "has_config": bool(stored.get("has_config", False)),
         "config_filename": str(stored.get("config_filename") or ""),
         "remotes": [str(item) for item in (stored.get("remotes") or []) if str(item or "").strip()],
@@ -352,25 +357,44 @@ def disconnect(settings: Settings) -> dict:
 
 
 def maybe_auto_connect(settings: Settings) -> None:
-    """Best-effort auto-connect on Drone startup when "start on boot" is enabled.
+    """Best-effort auto-connect on Drone startup whenever a ready-to-use
+    configuration already exists (config + credentials + openvpn installed) --
+    being configured is the only condition; there is no separate opt-in flag.
+
+    Retries a few times with a short delay: a fresh boot can hit transient
+    conditions (network, ``/dev/net/tun``, or an external drive not mounted
+    yet) that resolve moments later on their own. A single silent attempt
+    previously meant a boot-time hiccup left VPN disconnected until a human
+    noticed and manually reconnected -- the exact complaint that prompted this
+    retry behavior. Every outcome (success after N attempts, or giving up) is
+    logged, unlike the single-shot version this replaced, which discarded
+    ``connect()``'s result entirely on both success and failure.
 
     Never raises -- a failed auto-connect must not prevent the Drone app
     (and therefore the rest of the admin UI) from starting.
     """
     try:
-        state = _load_state(settings)
-        if not state["auto_start"]:
-            return
         if validate_ready(settings):
             return
-        connect(settings)
+        result: dict = {}
+        for attempt in range(1, VPN_AUTO_CONNECT_MAX_ATTEMPTS + 1):
+            result = connect(settings)
+            if result.get("status") in ("connecting", "already_running"):
+                if attempt > 1:
+                    print(
+                        f"VPN auto-connect succeeded on attempt {attempt}/{VPN_AUTO_CONNECT_MAX_ATTEMPTS}",
+                        file=sys.stdout, flush=True,
+                    )
+                return
+            if attempt < VPN_AUTO_CONNECT_MAX_ATTEMPTS:
+                time.sleep(VPN_AUTO_CONNECT_RETRY_DELAY_SECONDS)
+        errors = "; ".join(result.get("errors") or ["unknown error"])
+        print(
+            f"VPN auto-connect on startup failed after {VPN_AUTO_CONNECT_MAX_ATTEMPTS} attempts: {errors}",
+            file=sys.stderr, flush=True,
+        )
     except Exception as error:
         print(f"VPN auto-connect on startup failed: {error.__class__.__name__}: {error}", file=sys.stderr, flush=True)
-
-
-def set_auto_start(settings: Settings, enabled: bool) -> dict:
-    state = _save_state(settings, auto_start=bool(enabled))
-    return {"auto_start": state["auto_start"]}
 
 
 def set_sharing_enabled(settings: Settings, enabled: bool) -> dict:
@@ -475,7 +499,6 @@ def status(settings: Settings) -> dict:
         "remotes": state["remotes"],
         "has_credentials": state["has_credentials"],
         "username": state["username"],
-        "auto_start": state["auto_start"],
         "sharing_enabled": state["sharing_enabled"],
         "source_peer_id": state["source_peer_id"],
         "source_peer_name": state["source_peer_name"],
