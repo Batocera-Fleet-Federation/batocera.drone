@@ -915,69 +915,6 @@
       font-weight: 800;
       line-height: 1.2;
     }
-    .help-accordion .accordion-item {
-      color: var(--admin-text);
-      background: rgba(11, 16, 32, 0.38);
-      border-color: var(--admin-border);
-    }
-    .help-accordion .accordion-button {
-      color: var(--admin-text);
-      background: rgba(21, 31, 50, 0.78);
-      font-weight: 800;
-      box-shadow: none;
-      min-height: 3.1rem;
-    }
-    .help-accordion .accordion-button:not(.collapsed) {
-      color: #fff;
-      background: rgba(0, 194, 255, 0.14);
-      border-bottom: 1px solid var(--admin-border);
-    }
-    .help-accordion .accordion-button::after {
-      filter: invert(1) grayscale(1);
-      opacity: 0.8;
-    }
-    .help-accordion .accordion-body {
-      color: #d8e5f7;
-      line-height: 1.55;
-      background: rgba(11, 16, 32, 0.28);
-    }
-    .help-link-list {
-      display: grid;
-      gap: 0.55rem;
-    }
-    .help-link-row {
-      display: grid;
-      grid-template-columns: 2rem minmax(0, 1fr);
-      gap: 0.75rem;
-      align-items: center;
-      width: 100%;
-      min-height: 3.6rem;
-      padding: 0.65rem 0.75rem;
-      color: var(--admin-text);
-      background: rgba(11, 16, 32, 0.38);
-      border: 1px solid var(--admin-border);
-      border-radius: 8px;
-      text-align: left;
-    }
-    .help-link-row:hover,
-    .help-link-row:focus {
-      background: rgba(0, 194, 255, 0.12);
-      border-color: var(--admin-sidebar-accent);
-    }
-    .help-link-row i {
-      color: var(--admin-sidebar-accent);
-      font-size: 1.1rem;
-      text-align: center;
-    }
-    .help-link-row strong,
-    .help-link-row small {
-      display: block;
-      overflow-wrap: anywhere;
-    }
-    .help-link-row small,
-    .help-terms dd {
-      color: var(--admin-muted);
-    }
     .help-terms dt {
       color: var(--admin-text);
       font-size: 0.78rem;
@@ -986,6 +923,7 @@
       text-transform: uppercase;
     }
     .help-terms dd {
+      color: var(--admin-muted);
       margin: 0 0 0.85rem;
       line-height: 1.45;
     }
@@ -1229,6 +1167,89 @@
     }
     .gamelist-details dd {
       overflow-wrap: anywhere;
+    }
+    /* First-time-load onboarding tour (intro.js-style spotlight walkthrough) */
+    .tour-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 15000;
+      background: transparent;
+      cursor: pointer;
+    }
+    .tour-spotlight {
+      position: fixed;
+      z-index: 15001;
+      top: -9999px;
+      left: -9999px;
+      border-radius: 10px;
+      border: 2px solid var(--admin-sidebar-accent);
+      box-shadow: 0 0 0 9999px rgba(6, 10, 20, 0.82), 0 0 26px rgba(0, 194, 255, 0.55);
+      pointer-events: none;
+      opacity: 0;
+      transition: top 0.25s ease, left 0.25s ease, width 0.25s ease, height 0.25s ease, opacity 0.2s ease;
+    }
+    .tour-spotlight.is-visible {
+      opacity: 1;
+    }
+    .tour-tooltip {
+      position: fixed;
+      z-index: 15002;
+      top: -9999px;
+      left: -9999px;
+      width: min(320px, calc(100vw - 24px));
+      background: var(--admin-surface);
+      border: 1px solid var(--admin-border);
+      border-radius: 10px;
+      box-shadow: 0 0.75rem 2rem rgba(0, 0, 0, 0.45);
+      padding: 0.9rem 1rem;
+      opacity: 0;
+      transition: opacity 0.2s ease;
+    }
+    .tour-tooltip.is-visible {
+      opacity: 1;
+    }
+    .tour-tooltip-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 0.4rem;
+    }
+    .tour-tooltip-step {
+      color: var(--admin-muted);
+      font-size: 0.72rem;
+      font-weight: 800;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .tour-tooltip-close {
+      background: none;
+      border: 0;
+      color: var(--admin-muted);
+      padding: 0.15rem;
+      line-height: 1;
+      cursor: pointer;
+    }
+    .tour-tooltip-close:hover,
+    .tour-tooltip-close:focus-visible {
+      color: var(--admin-text);
+    }
+    .tour-tooltip-title {
+      color: var(--admin-text);
+      font-weight: 800;
+      font-size: 1rem;
+      margin-bottom: 0.35rem;
+    }
+    .tour-tooltip-body {
+      color: #d8e5f7;
+      font-size: 0.85rem;
+      line-height: 1.5;
+      margin-bottom: 0.75rem;
+    }
+    .tour-tooltip-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem;
     }
     /* Toast-style alert at top right */
     .toast-alert-container {

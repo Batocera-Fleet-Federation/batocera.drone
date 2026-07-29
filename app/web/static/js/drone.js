@@ -1953,6 +1953,201 @@ function showTechInfo(key) {
   const bsModal = window.bootstrap?.Modal ? window.bootstrap.Modal.getOrCreateInstance(modal) : null;
   bsModal?.show();
 }
+
+// First-time-load onboarding tour: a lightweight, dependency-free
+// intro.js-style walkthrough. Spotlights one persistent UI element at a
+// time (nav bar, notifications bell, status badges) with a step tooltip.
+// Auto-runs once per browser (localStorage-gated) and is always skippable --
+// via Close, "Skip tour", Escape, or clicking anywhere outside the tooltip.
+const ONBOARDING_TOUR_STORAGE_KEY = "droneOnboardingTourDismissedV1";
+const ONBOARDING_TOUR_STEPS = [
+  {
+    selector: "#notificationsBellWrap",
+    title: "Notifications",
+    body: "Anything that needs your attention -- finished downloads, device alerts -- shows up here.",
+  },
+  {
+    selector: "#systemsMenuBtn",
+    title: "Your library",
+    body: "Browse and search every system and game on this machine.",
+  },
+  {
+    selector: "#controlsMenuBtn",
+    title: "Controls",
+    body: "Screen mode, volume, and EmulationStation settings -- managed remotely from any browser.",
+  },
+  {
+    selector: "#automationMenuBtn",
+    title: "Automation",
+    body: "Hands-off behaviors like idle volume, exiting a stuck game, and Wi-Fi recovery run on their own.",
+  },
+  {
+    selector: "#swarmMenuBtn",
+    title: "Swarm",
+    body: "Pair with your other machines here and manage your whole fleet -- no central server required.",
+  },
+  {
+    selector: "#adminMenuBtn",
+    title: "Admin",
+    body: "Torrents, VPN, Email, and diagnostic tools all live here.",
+  },
+  {
+    selector: "#systemInfoBar",
+    title: "At a glance",
+    body: "Batocera version, machine ID, fleet connections, VPN, and email status. Tap any badge to jump straight to that page.",
+  },
+  {
+    selector: ".help-security-band",
+    title: "Security, explained",
+    body: "Tap any highlighted term on this page any time to see a plain-language explanation and a place to read more.",
+  },
+];
+let onboardingTourState = null;
+function isOnboardingTourTargetVisible(el) {
+  if (!el) return false;
+  const rect = el.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0 && el.offsetParent !== null;
+}
+function startOnboardingTour() {
+  const steps = ONBOARDING_TOUR_STEPS.filter((step) => isOnboardingTourTargetVisible(document.querySelector(step.selector)));
+  if (!steps.length) return;
+  endOnboardingTour(false);
+  onboardingTourState = {steps, index: 0};
+  ["tourBackdrop", "tourSpotlight", "tourTooltip"].forEach((id) => {
+    const el = document.createElement("div");
+    el.id = id;
+    el.className = id === "tourBackdrop" ? "tour-backdrop" : id === "tourSpotlight" ? "tour-spotlight" : "tour-tooltip";
+    document.body.appendChild(el);
+  });
+  document.getElementById("tourBackdrop").addEventListener("click", () => endOnboardingTour(true));
+  window.addEventListener("resize", onboardingTourReposition);
+  window.addEventListener("scroll", onboardingTourReposition, true);
+  window.addEventListener("hashchange", onboardingTourHashChange);
+  document.addEventListener("keydown", onboardingTourKeydown);
+  renderOnboardingTourStep();
+}
+function endOnboardingTour(markDismissed) {
+  if (markDismissed) {
+    try { localStorage.setItem(ONBOARDING_TOUR_STORAGE_KEY, "1"); } catch (_) {}
+  }
+  document.getElementById("tourBackdrop")?.remove();
+  document.getElementById("tourSpotlight")?.remove();
+  document.getElementById("tourTooltip")?.remove();
+  document.querySelectorAll(".tour-target-active").forEach((el) => el.classList.remove("tour-target-active"));
+  window.removeEventListener("resize", onboardingTourReposition);
+  window.removeEventListener("scroll", onboardingTourReposition, true);
+  window.removeEventListener("hashchange", onboardingTourHashChange);
+  document.removeEventListener("keydown", onboardingTourKeydown);
+  onboardingTourState = null;
+}
+function onboardingTourHashChange() {
+  // Safety net: the backdrop blocks clicks on the app underneath, but the
+  // hash can still change from outside the tour (browser back/forward) --
+  // don't leave a spotlight pointed at a page that's no longer showing.
+  endOnboardingTour(false);
+}
+function onboardingTourKeydown(event) {
+  if (!onboardingTourState) return;
+  if (event.key === "Escape") endOnboardingTour(true);
+  else if (event.key === "ArrowRight" || event.key === "Enter") onboardingTourNext();
+  else if (event.key === "ArrowLeft") onboardingTourBack();
+}
+function onboardingTourNext() {
+  if (!onboardingTourState) return;
+  if (onboardingTourState.index >= onboardingTourState.steps.length - 1) {
+    endOnboardingTour(true);
+    return;
+  }
+  onboardingTourState.index += 1;
+  renderOnboardingTourStep();
+}
+function onboardingTourBack() {
+  if (!onboardingTourState || onboardingTourState.index <= 0) return;
+  onboardingTourState.index -= 1;
+  renderOnboardingTourStep();
+}
+function onboardingTourReposition() {
+  if (onboardingTourState) renderOnboardingTourStep(true);
+}
+function renderOnboardingTourStep(isReposition = false) {
+  const state = onboardingTourState;
+  if (!state) return;
+  const step = state.steps[state.index];
+  const target = document.querySelector(step.selector);
+  if (!isOnboardingTourTargetVisible(target)) {
+    if (state.index < state.steps.length - 1) {
+      state.index += 1;
+      renderOnboardingTourStep(isReposition);
+    } else {
+      endOnboardingTour(false);
+    }
+    return;
+  }
+  document.querySelectorAll(".tour-target-active").forEach((el) => el.classList.remove("tour-target-active"));
+  target.classList.add("tour-target-active");
+  if (isReposition) {
+    positionOnboardingTourUI(target, step, state);
+  } else {
+    target.scrollIntoView({block: "center"});
+    requestAnimationFrame(() => requestAnimationFrame(() => positionOnboardingTourUI(target, step, state)));
+  }
+}
+function positionOnboardingTourUI(target, step, state) {
+  if (!onboardingTourState) return;
+  const rect = target.getBoundingClientRect();
+  const pad = 8;
+  const spotlight = document.getElementById("tourSpotlight");
+  if (!spotlight) return;
+  spotlight.style.top = `${Math.max(0, rect.top - pad)}px`;
+  spotlight.style.left = `${Math.max(0, rect.left - pad)}px`;
+  spotlight.style.width = `${rect.width + pad * 2}px`;
+  spotlight.style.height = `${rect.height + pad * 2}px`;
+  spotlight.classList.add("is-visible");
+
+  const tooltip = document.getElementById("tourTooltip");
+  if (!tooltip) return;
+  const isLast = state.index === state.steps.length - 1;
+  tooltip.innerHTML = `
+    <div class="tour-tooltip-header">
+      <span class="tour-tooltip-step">Step ${state.index + 1} of ${state.steps.length}</span>
+      <button type="button" class="tour-tooltip-close" onclick="endOnboardingTour(true)" aria-label="Close tour"><i class="bi bi-x-lg"></i></button>
+    </div>
+    <div class="tour-tooltip-title">${escapeHtml(step.title)}</div>
+    <div class="tour-tooltip-body">${escapeHtml(step.body)}</div>
+    <div class="tour-tooltip-footer">
+      <button type="button" class="btn btn-link btn-sm p-0 tour-skip-btn" onclick="endOnboardingTour(true)">Skip tour</button>
+      <div class="d-flex gap-2">
+        ${state.index > 0 ? `<button type="button" class="btn btn-outline-light btn-sm" onclick="onboardingTourBack()">Back</button>` : ""}
+        <button type="button" class="btn btn-primary btn-sm" onclick="onboardingTourNext()">${isLast ? "Done" : "Next"}</button>
+      </div>
+    </div>
+  `;
+  tooltip.classList.add("is-visible");
+
+  const viewportW = window.innerWidth;
+  const viewportH = window.innerHeight;
+  const tooltipRect = tooltip.getBoundingClientRect();
+  const spaceBelow = viewportH - rect.bottom;
+  const spaceAbove = rect.top;
+  let top = spaceBelow >= tooltipRect.height + 24 || spaceBelow >= spaceAbove
+    ? Math.min(rect.bottom + pad + 12, viewportH - tooltipRect.height - 12)
+    : Math.max(12, rect.top - pad - 12 - tooltipRect.height);
+  let left = Math.max(12, Math.min(rect.left + rect.width / 2 - tooltipRect.width / 2, viewportW - tooltipRect.width - 12));
+  tooltip.style.top = `${Math.max(12, top)}px`;
+  tooltip.style.left = `${left}px`;
+}
+function maybeAutoStartOnboardingTour() {
+  let dismissed = false;
+  try { dismissed = localStorage.getItem(ONBOARDING_TOUR_STORAGE_KEY) === "1"; } catch (_) { dismissed = true; }
+  if (dismissed || onboardingTourState) return;
+  // Badges/nav visibility settle asynchronously on boot; give them a moment
+  // so the tour doesn't measure an empty #systemInfoBar and skip that step.
+  setTimeout(() => {
+    if (!onboardingTourState && (window.location.hash === "" || window.location.hash === "#" || window.location.hash === "#home" || window.location.hash === "#help")) {
+      startOnboardingTour();
+    }
+  }, 600);
+}
 async function renderHelpPage() {
   currentSystemContext = null;
   clearSystemTheme();
@@ -1970,6 +2165,7 @@ async function renderHelpPage() {
           <div class="d-flex flex-wrap gap-2">
             <button class="btn btn-primary" type="button" onclick="setHash('#systems')"><i class="bi bi-grid me-1"></i>Browse your library</button>
             <button class="btn btn-outline-light" type="button" onclick="setHash('#admin/swarm')"><i class="bi bi-diagram-3 me-1"></i>See your fleet</button>
+            <button class="btn btn-outline-light" type="button" onclick="startOnboardingTour()"><i class="bi bi-signpost-2 me-1"></i>Take a quick tour</button>
           </div>
         </div>
       </div>
@@ -2046,119 +2242,19 @@ async function renderHelpPage() {
         </div>
       </div>
 
-      <div class="row g-4">
-        <div class="col-12 col-xl-7">
-          <div class="help-section">
-            <h3 class="h5 mb-3"><i class="bi bi-patch-question me-2"></i>Q&A</h3>
-            <div class="accordion help-accordion" id="helpAccordion">
-              ${[
-                {
-                  q: "Why would I use Batocera Drone?",
-                  a: "Drone turns this machine into something you can see and control from a browser. Check what's installed, fix missing artwork, watch gameplay history, read logs, and manage it alongside every other cabinet you own from the Swarm page. It's most powerful once you have more than one machine to keep in sync."
-                },
-                {
-                  q: "Can I copy content between machines?",
-                  a: "Yes. Pair your Drones on the Swarm page and they copy games, saves, BIOS, and artwork directly from each other over an encrypted peer-to-peer link — on the same network or across houses over the tailnet. Set something up on one machine and let the others pull it from the Transfers page."
-                },
-                {
-                  q: "Can I manage the machine remotely?",
-                  a: "Yes. The Controls page covers Kiosk mode, volume, screensaver, EmulationStation restarts, and the asset cache — and with the tailnet connected (Swarm page) you can open this same dashboard from your phone anywhere, not just at home."
-                },
-                {
-                  q: "Will my saves stay in sync?",
-                  a: "Drone tracks your save files locally and can copy them peer-to-peer to another cabinet on request. Pick up a game on one cabinet and continue on another."
-                },
-                {
-                  q: "What does the BIOS page do?",
-                  a: "Some emulators need firmware before games boot correctly. The BIOS page shows what this machine already has and what's missing, so you can spot gaps before they cause problems."
-                },
-                {
-                  q: "What can Artwork & Metadata fix?",
-                  a: "It repairs gamelist data — titles, descriptions, release dates, ratings, box art, marquees, and missing images — so your library looks complete and polished in Batocera."
-                },
-                {
-                  q: "What does the Downloads page track?",
-                  a: "Active, queued, and recent transfers heading to this machine, with progress, queue position, and cancellation controls for long file operations."
-                },
-                {
-                  q: "Can Drone fetch content on its own, not just sync between my machines?",
-                  a: "Yes — the Torrents page runs a small built-in torrent client on this Drone. Drop in a .torrent file, point it at a folder (including an external drive), and once it finishes, move the downloaded files anywhere on disk or let the rest of your fleet pull them peer-to-peer instead of downloading the same thing twice."
-                },
-                {
-                  q: "Can I run this Drone through a VPN?",
-                  a: "Yes — the VPN page manages an OpenVPN connection for this machine end to end: upload your provider's .ovpn file, add your credentials, and connect. Drone verifies the tunnel is actually up (interface, IP, and log output), so you're not left guessing whether it's working."
-                },
-                {
-                  q: "Can Drone send me email updates?",
-                  a: "Yes — the Email page connects Drone to your own SMTP provider (there's no Drone-run mail server) and can send a digest of fleet activity plus alerts for the specific events you choose, like a completed download or a device going offline. Credentials stay on this machine unless you choose to share them with a paired peer."
-                },
-                {
-                  q: "What is the Asset Cache?",
-                  a: "Drone's fast snapshot of what this machine holds — ROMs, BIOS, and artwork with their fingerprints. It's what makes browsing, searching, and peer-to-peer transfers quick without rescanning the disk every time."
-                },
-                {
-                  q: "What is the Swarm page?",
-                  a: "Your federation's home: one card per Drone (this one plus every paired machine) with live online status and library counts, pairing tools for nearby and far-away Drones, and the tailnet connection that makes everything reachable from anywhere. There is no central server — every Drone shows the whole swarm."
-                },
-                {
-                  q: "What is a tailnet and why do I need an account?",
-                  a: "A tailnet is a free private mesh network (from Tailscale) between your own devices. Home routers block incoming connections, so without it your Drones in different houses — and your phone when you're out — couldn't reach each other. The account exists only so your devices can recognize each other; content still moves directly between your machines, encrypted. Set it up once from the Swarm page."
-                },
-                {
-                  q: "Why are there Logs and Emulator Config pages?",
-                  a: "Logs help you diagnose launch, service, and emulator problems quickly. Emulator Configs surface configuration files from common emulator locations so you can inspect settings without digging through the filesystem."
-                },
-                {
-                  q: "Is it secure?",
-                  a: "Yes — see \"Private and secure by default\" near the top of this page for the specifics (encryption, certificate-verified peers, VPN support, local-only credentials, and brute-force protection), each with a plain-language explanation and a place to read more."
-                },
-                {
-                  q: "Why do some features disappear?",
-                  a: "Admin-only tools are hidden when admin routes are disabled or restricted by configuration. Everyday browsing still works while operational tools stay locked down."
-                }
-              ].map((item, index) => `
-                <div class="accordion-item">
-                  <h4 class="accordion-header" id="helpHeading${index}">
-                    <button class="accordion-button ${index === 0 ? "" : "collapsed"}" type="button" data-bs-toggle="collapse" data-bs-target="#helpAnswer${index}" aria-expanded="${index === 0 ? "true" : "false"}" aria-controls="helpAnswer${index}">
-                      ${escapeHtml(item.q)}
-                    </button>
-                  </h4>
-                  <div id="helpAnswer${index}" class="accordion-collapse collapse ${index === 0 ? "show" : ""}" aria-labelledby="helpHeading${index}" data-bs-parent="#helpAccordion">
-                    <div class="accordion-body">
-                      ${escapeHtml(item.a)}
-                      ${item.url ? `<div class="mt-2 small"><a href="${escapeHtml(item.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(item.linkText || item.url)} <i class="bi bi-box-arrow-up-right ms-1"></i></a></div>` : ""}
-                    </div>
-                  </div>
-                </div>
-              `).join("")}
-            </div>
-          </div>
-        </div>
-
-        <div class="col-12 col-xl-5">
-          <div class="help-section mb-4">
-            <h3 class="h5 mb-3"><i class="bi bi-stars me-2"></i>What Drone does for you</h3>
-            <div class="help-link-list">
-              <button class="help-link-row" type="button" onclick="setHash('#admin/transfers')"><i class="bi bi-arrow-left-right"></i><span><strong>Share across cabinets</strong><small>Copy games, saves, BIOS, and artwork peer-to-peer instead of downloading them everywhere.</small></span></button>
-              <button class="help-link-row" type="button" onclick="setHash('#admin/artwork')"><i class="bi bi-images"></i><span><strong>Polish your library</strong><small>Fix titles, descriptions, box art, and marquees so everything looks complete.</small></span></button>
-              <button class="help-link-row" type="button" onclick="setHash('#admin/logs/gameplay?lines=200')"><i class="bi bi-clock-history"></i><span><strong>See what's been played</strong><small>Review detected game launches and recent play sessions.</small></span></button>
-              <button class="help-link-row" type="button" onclick="setHash('#admin/system-info')"><i class="bi bi-pc-display"></i><span><strong>Check machine health</strong><small>CPU, memory, storage, network, and connection speed at a glance.</small></span></button>
-              <button class="help-link-row" type="button" onclick="setHash('#admin/torrents')"><i class="bi bi-magnet"></i><span><strong>Fetch new content</strong><small>Download via the built-in torrent client, then share it across your fleet.</small></span></button>
-              <button class="help-link-row" type="button" onclick="setHash('#admin/vpn')"><i class="bi bi-incognito"></i><span><strong>Go private</strong><small>Connect this machine to your VPN provider and confirm the tunnel is live.</small></span></button>
-              <button class="help-link-row" type="button" onclick="setHash('#admin/smtp')"><i class="bi bi-envelope"></i><span><strong>Stay in the loop</strong><small>Get an email digest and pick which events are worth an alert.</small></span></button>
-            </div>
-            <div class="mt-2 small">
-              <button class="btn btn-link p-0 align-baseline" type="button" onclick="setHash('#admin/swarm')">Manage your whole fleet on the Swarm page <i class="bi bi-arrow-right ms-1"></i></button>
-            </div>
-          </div>
-
-          <div class="help-section">
-            <h3 class="h5 mb-3"><i class="bi bi-lightbulb me-2"></i>Good to know</h3>
+      <div class="help-section mb-4">
+        <h3 class="h5 mb-3"><i class="bi bi-lightbulb me-2"></i>Good to know</h3>
+        <div class="row g-3">
+          <div class="col-12 col-md-6">
             <dl class="help-terms mb-0">
               <dt>Better with more machines</dt>
-              <dd>A single Drone is a handy dashboard. A few of them paired on the Swarm page become a fleet you keep in sync from any screen — no central server involved.</dd>
+              <dd class="mb-0">A single Drone is a handy dashboard. A few of them paired on the Swarm page become a fleet you keep in sync from any screen — no central server involved.</dd>
+            </dl>
+          </div>
+          <div class="col-12 col-md-6">
+            <dl class="help-terms mb-0">
               <dt>No middleman</dt>
-              <dd>There's no cloud account or company server in the loop. Your machines talk directly to each other, and only to devices you've explicitly paired.</dd>
+              <dd class="mb-0">There's no cloud account or company server in the loop. Your machines talk directly to each other, and only to devices you've explicitly paired.</dd>
             </dl>
           </div>
         </div>
@@ -2184,6 +2280,7 @@ async function renderHelpPage() {
     </div>
   `;
   setLoading(false);
+  maybeAutoStartOnboardingTour();
 }
 async function renderAdminPage() {
   currentSystemContext = null;
@@ -4521,7 +4618,6 @@ async function markAllNotificationsRead() {
 }
 
 async function clearAllNotifications() {
-  if (!window.confirm("Clear all notifications? This cannot be undone.")) return;
   try {
     await apiPost("/admin/notifications/clear", {});
   } catch (err) {
