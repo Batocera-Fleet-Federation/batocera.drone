@@ -116,6 +116,7 @@ let systemRomCache = {};
 let systemInfoLoaded = false;
 let adminEnabled = true;
 let loadingToastEl = null;
+let currentUsername = "";
 const UI_DATA_CACHE_TTL_MS = 5 * 60 * 1000;
 
 // Remote-drone impersonation: opening this app with ?manage=<peer_id> (and
@@ -6496,12 +6497,75 @@ function renderSwarmTailnetCard(tailnet) {
   }
   return `
     <div class="card log-card h-100">
-      <div class="card-header d-flex justify-content-between align-items-center gap-2">
+      <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
         <span><i class="bi bi-globe2 me-2" aria-hidden="true"></i>Tailnet (access from anywhere)</span>
-        ${state.enrolled ? '<button class="btn btn-sm btn-outline-primary text-nowrap" type="button" onclick="swarmToggleTailnetAuthRotation(true)"><i class="bi bi-arrow-repeat me-1"></i>Rotate Auth Token</button>' : ""}
+        <div class="d-flex flex-wrap align-items-center gap-2">
+          <button class="help-term" type="button" onclick="showTailnetGuideModal()"><i class="bi bi-question-circle-fill"></i>How does this work?</button>
+          ${state.enrolled ? '<button class="btn btn-sm btn-outline-primary text-nowrap" type="button" onclick="swarmToggleTailnetAuthRotation(true)"><i class="bi bi-arrow-repeat me-1"></i>Rotate Auth Token</button>' : ""}
+        </div>
       </div>
       <div class="card-body">${body}</div>
     </div>`;
+}
+
+// Full-length plain-language explainer for the Tailnet card -- deliberately
+// separate from the one-paragraph HELP_TECH_GLOSSARY['tailnet'] entry used
+// elsewhere (e.g. the home page): this covers install steps for a machine or
+// phone, what joining the mesh actually does, and the access-control model,
+// which doesn't fit in a single glossary paragraph.
+function showTailnetGuideModal() {
+  const modalId = "tailnetGuideModal";
+  let modal = document.getElementById(modalId);
+  if (!modal) {
+    modal = document.createElement("div");
+    modal.id = modalId;
+    modal.className = "modal fade";
+    modal.tabIndex = -1;
+    modal.setAttribute("aria-hidden", "true");
+    document.body.appendChild(modal);
+  }
+  modal.innerHTML = `
+    <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable modal-lg">
+      <div class="modal-content themed-modal">
+        <div class="modal-header">
+          <h5 class="modal-title mb-0"><i class="bi bi-globe2 me-2"></i>Reach your Drones from anywhere</h5>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <h6 class="text-uppercase small text-muted fw-bold mb-2">What is a tailnet?</h6>
+          <p class="small">A tailnet is your own private network of devices, built on top of the ordinary internet by a free service called <a href="https://tailscale.com" target="_blank" rel="noopener noreferrer">Tailscale</a>. Every device you add to it -- a Drone, your laptop, your phone -- gets its own stable private address and can reach every other device on the same tailnet directly, no matter which Wi-Fi or mobile network it happens to be on. Nothing needs opening on your router, and nothing outside your tailnet can see or use it.</p>
+
+          <h6 class="text-uppercase small text-muted fw-bold mb-2 mt-4">Is it secure?</h6>
+          <p class="small">Yes. Every connection between two of your devices is encrypted end-to-end with WireGuard, a modern, widely-audited encryption protocol, and traffic goes directly device-to-device wherever possible rather than through Tailscale's own servers -- those servers only help two of your devices find each other and never see what's inside the connection. A device can only become part of your tailnet if it's running the Tailscale app <em>and</em> signed in with your account, so a stranger who somehow learned a Drone's tailnet address still couldn't reach it.</p>
+
+          <h6 class="text-uppercase small text-muted fw-bold mb-2 mt-4">Install it on a machine or phone</h6>
+          <ol class="small mb-2">
+            <li>Grab the app for your device at <a href="https://tailscale.com/download" target="_blank" rel="noopener noreferrer">tailscale.com/download</a> (Windows, macOS, Linux, iOS, and Android are all supported, free for personal use).</li>
+            <li>Install it and sign in with the same Tailscale account used to connect this Drone above.</li>
+            <li>The device appears in your tailnet within seconds -- nothing else to configure.</li>
+          </ol>
+
+          <h6 class="text-uppercase small text-muted fw-bold mb-2 mt-4">What installing it actually does</h6>
+          <p class="small">Signing in adds that machine or phone to your private mesh. From that moment on it can reach, and be reached by, every other device already on your tailnet -- as if they all shared one network, even if they're actually on opposite sides of the world.</p>
+
+          <h6 class="text-uppercase small text-muted fw-bold mb-2 mt-4">Reaching a Drone from anywhere</h6>
+          <p class="small">Once your phone or another computer is signed into the same tailnet as this Drone, open the tailnet address shown on this card in a browser -- from a coffee shop, a friend's house, mobile data, anywhere -- and it opens exactly like it does at home. No port forwarding, no separate VPN toggle, no keeping track of a home IP address that keeps changing.</p>
+
+          <h6 class="text-uppercase small text-muted fw-bold mb-2 mt-4">Who's allowed in</h6>
+          <p class="small mb-0">Only devices with Tailscale installed and signed into your Tailscale account are members of your tailnet -- everyone else is invisible to it, including anyone else on the same Wi-Fi. You can see and remove any device from your tailnet at any time from Tailscale's own admin console. And being on the tailnet only gets a device to this Drone's front door: it still needs this Drone's own username and password to actually sign in (see the account button in the top-left of every page to change those).</p>
+        </div>
+        <div class="modal-footer">
+          <a href="https://tailscale.com/download" target="_blank" rel="noopener noreferrer" class="btn btn-outline-primary btn-sm me-auto"><i class="bi bi-box-arrow-up-right me-1"></i>Download Tailscale</a>
+          <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Close</button>
+        </div>
+      </div>
+    </div>`;
+  if (window.bootstrap?.Modal) {
+    window.bootstrap.Modal.getOrCreateInstance(modal).show();
+  } else {
+    modal.classList.add("show");
+    modal.style.display = "block";
+  }
 }
 
 async function renderSwarmPage() {
@@ -8691,6 +8755,7 @@ window.addEventListener("hashchange", router);
 async function startApp() {
   document.querySelector(".nav-actions")?.classList.remove("d-none");
   document.getElementById("logoutBtn")?.classList.remove("d-none");
+  document.getElementById("accountSettingsBtn")?.classList.remove("d-none");
   try {
     // managedPeer is not set yet at this point in startup, so this always
     // checks *this* Drone's own admin-enabled flag, never a peer's --
@@ -8780,9 +8845,108 @@ async function logout() {
   window.location.reload();
 }
 
+function openAccountSettingsModal() {
+  const modalId = "accountSettingsModal";
+  let modal = document.getElementById(modalId);
+  if (!modal) {
+    modal = document.createElement("div");
+    modal.id = modalId;
+    modal.className = "modal fade";
+    modal.tabIndex = -1;
+    modal.setAttribute("aria-hidden", "true");
+    document.body.appendChild(modal);
+  }
+  modal.innerHTML = `
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content themed-modal">
+        <div class="modal-header">
+          <h5 class="modal-title mb-0"><i class="bi bi-person-gear me-2"></i>Account Settings</h5>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <div id="accountSettingsError" class="alert alert-danger py-2 d-none"></div>
+          <div class="small text-muted mb-3">Changing your username or password signs out every other device or browser currently logged in -- this one stays signed in.</div>
+          <div class="mb-3">
+            <label class="form-label" for="accountSettingsUsername">Username</label>
+            <input class="form-control" type="text" id="accountSettingsUsername" autocomplete="username" value="${escapeHtml(currentUsername)}">
+            <div class="form-text">3-64 characters: letters, numbers, dot, dash, underscore, or @</div>
+          </div>
+          <div class="mb-3">
+            <label class="form-label" for="accountSettingsPassword">New password</label>
+            <input class="form-control" type="password" id="accountSettingsPassword" autocomplete="new-password">
+            <div class="form-text">At least 8 characters.</div>
+          </div>
+          <div class="mb-1">
+            <label class="form-label" for="accountSettingsPasswordConfirm">Confirm new password</label>
+            <input class="form-control" type="password" id="accountSettingsPasswordConfirm" autocomplete="new-password">
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="button" class="btn btn-primary" id="accountSettingsSaveBtn" onclick="submitAccountSettings()"><i class="bi bi-check-lg me-1"></i>Save Changes</button>
+        </div>
+      </div>
+    </div>`;
+  if (window.bootstrap?.Modal) {
+    window.bootstrap.Modal.getOrCreateInstance(modal).show();
+  } else {
+    modal.classList.add("show");
+    modal.style.display = "block";
+  }
+  document.getElementById("accountSettingsUsername")?.focus();
+}
+
+async function submitAccountSettings() {
+  const usernameInput = document.getElementById("accountSettingsUsername");
+  const passwordInput = document.getElementById("accountSettingsPassword");
+  const confirmInput = document.getElementById("accountSettingsPasswordConfirm");
+  const errorNode = document.getElementById("accountSettingsError");
+  const button = document.getElementById("accountSettingsSaveBtn");
+  const username = (usernameInput.value || "").trim();
+  const password = passwordInput.value || "";
+  const confirm = confirmInput.value || "";
+  errorNode.classList.add("d-none");
+  if (!/^[A-Za-z0-9._@-]{3,64}$/.test(username)) {
+    errorNode.textContent = "Username must be 3-64 characters using letters, numbers, dot, dash, underscore, or @.";
+    errorNode.classList.remove("d-none");
+    return;
+  }
+  if (password.length < 8) {
+    errorNode.textContent = "Password must be at least 8 characters.";
+    errorNode.classList.remove("d-none");
+    return;
+  }
+  if (password !== confirm) {
+    errorNode.textContent = "Passwords do not match.";
+    errorNode.classList.remove("d-none");
+    return;
+  }
+  button.disabled = true;
+  button.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Saving...';
+  try {
+    await apiPost("/admin/credentials/update", { username, password });
+    currentUsername = username;
+    const modal = document.getElementById("accountSettingsModal");
+    if (window.bootstrap?.Modal && modal) {
+      window.bootstrap.Modal.getOrCreateInstance(modal).hide();
+    } else if (modal) {
+      modal.classList.remove("show");
+      modal.style.display = "none";
+    }
+    showToast("Account credentials updated. Other sessions have been signed out.", "success");
+  } catch (err) {
+    errorNode.textContent = err.message || "Failed to update credentials.";
+    errorNode.classList.remove("d-none");
+  } finally {
+    button.disabled = false;
+    button.innerHTML = '<i class="bi bi-check-lg me-1"></i>Save Changes';
+  }
+}
+
 function renderLoginPage() {
   document.querySelector(".nav-actions")?.classList.add("d-none");
   document.getElementById("logoutBtn")?.classList.add("d-none");
+  document.getElementById("accountSettingsBtn")?.classList.add("d-none");
   const systemInfoBar = document.getElementById("systemInfoBar");
   if (systemInfoBar) systemInfoBar.innerHTML = "";
   titleNode.textContent = "";
@@ -8838,6 +9002,7 @@ async function bootstrapApp() {
   try {
     const session = await api("/auth/session");
     authenticated = !!session.authenticated;
+    currentUsername = authenticated ? (session.username || "") : "";
   } catch (_) {
     authenticated = false;
   }
@@ -8850,5 +9015,9 @@ async function bootstrapApp() {
 document.getElementById("logoutBtn")?.addEventListener("click", (event) => {
   event.preventDefault();
   logout();
+});
+document.getElementById("accountSettingsBtn")?.addEventListener("click", (event) => {
+  event.preventDefault();
+  openAccountSettingsModal();
 });
 bootstrapApp();
