@@ -1,6 +1,6 @@
 ---
 name: drone-architecture-overview
-description: Use this when you need the big-picture shape of the fleet before diving into a specific change — how Drones pair, how a transfer picks a route, how mTLS trust works, what's inside a single Drone process, or how VPN sharing fits together. Good first stop for "how does the swarm actually work", onboarding, cross-cutting design decisions, or explaining the architecture to someone. For implementation depth once you know which piece you're touching, use the narrower skills this one points to.
+description: Use this when you need the big-picture shape of the fleet before diving into a specific change — how Drones pair, how a transfer picks a route, how mTLS trust works, what's inside a single Drone process, or how VPN/SMTP credential sharing fits together. Good first stop for "how does the swarm actually work", onboarding, cross-cutting design decisions, or explaining the architecture to someone. For implementation depth once you know which piece you're touching, use the narrower skills this one points to.
 ---
 
 # Drone Swarm — High-Level Architecture
@@ -99,20 +99,34 @@ external runtime dependency, because Batocera's on-device Python can't assume
 any third-party package is installed. Runs as **root**, on-device
 (`python3 -m app.main`, supervised by `app/service_bootstrap.sh`).
 
-- **SQLite state store** (one file, WAL mode) — paired peers, sessions, VPN
-  state, and the scanned ROM/BIOS/save/movie caches. See `drone-db-management`.
+- **SQLite state store** (one file, WAL mode) — paired peers, sessions, VPN/
+  SMTP state, the scanned ROM/BIOS/save/movie caches, and the relational
+  `audit_log`/`notifications` tables (every notable local event — VPN
+  connect/disconnect, a new paired peer, assets added/removed, a manual
+  control or automation change, an asset uploaded/downloaded, a torrent
+  finishing — logged once, unconditionally, and shown in the notifications
+  bell). See `drone-db-management` and `drone-smtp-notifications`.
 - **Background daemon threads**, all started from `create_server()`:
   - Peer health check, every ~30s, all paired peers, jittered, cached locally.
   - ROM/BIOS/saves/movies filesystem scan, inotify-debounced.
   - VPN connect + swarm bootstrap, on startup (see below).
   - VPN sharing-revocation poll, every ~5 min, only if this Drone imported a
     shared config.
+  - SMTP sharing-revocation poll, same shape as VPN's, only if this Drone
+    imported shared email settings.
+  - Activity-digest email poll, every ~5 min — this codebase's "cron style
+    job": there is no OS cron anywhere in this app, every periodic feature is
+    this same in-process-thread shape.
 - **VPN manager** (`device/vpn_manager.py`) — deliberately stateless
   (`status()` recomputes from `/proc` + the log on every call rather than
   keeping cached state in sync with a thread) and spawns a real `openvpn` OS
   process that self-daemonizes into its own session — it survives a Drone-app
   restart untouched; only a full machine reboot takes it down. Depth:
   `drone-vpn-management` skill.
+- **SMTP manager** (`device/smtp_manager.py`) — no process to manage (sending
+  mail is a one-shot `smtplib` call, not a persistent connection), so unlike
+  VPN there's no self-heal/status-recompute concern here at all. Depth:
+  `drone-smtp-notifications` skill.
 
 ## VPN: one subscription, the whole swarm
 
@@ -142,6 +156,36 @@ Built on the P2P/security primitives above, not a separate system:
 Depth: `drone-vpn-management` skill (this is the fullest treatment; the section
 above is a summary).
 
+## SMTP: one mailbox, the whole swarm
+
+The same shape as VPN sharing above, reused deliberately rather than
+reinvented — read that section first. The differences:
+
+- Each Drone can independently configure SMTP/IMAP (host/port/auth/
+  from-address/recipient), send a Test Email, and toggle which of 10 local
+  activity types get included in a ~5-minute digest email.
+- **Sharing** (`sharing_enabled`, off by default) works identically:
+  `GET /peer/smtp/config`, single-hop-only, provenance-tracked, revoked
+  within one ~5 min poll cycle.
+- **No "connected" gate on swarm bootstrap.** VPN only auto-adopts a peer's
+  shared config if that peer's own tunnel is actually up right now — the
+  strongest signal the credentials genuinely work. SMTP has no persistent
+  connection to check, so any paired peer that is sharing and returns a
+  non-empty host qualifies immediately.
+- **The per-type digest toggles and the "send mail from this drone" master
+  switch are local-only, never shared** — each Drone emails its *own* audit
+  trail using its own (possibly-adopted) credentials, so "what gets emailed"
+  is inherently per-drone even when the credentials themselves are shared.
+- Every notable local event across the whole app (VPN state changes, a new
+  paired peer, ROM scan results, manual controls, automation changes, P2P
+  asset transfers, torrent completions) funnels through one function,
+  `device/notifications.py`'s `record_event()` — logged unconditionally to
+  the `audit_log`/`notifications` SQLite tables regardless of the digest
+  toggles, which only filter what the email poller sends.
+
+Depth: `drone-smtp-notifications` skill (this is the fullest treatment; the
+section above is a summary).
+
 ## Common failure patterns
 
 - Designing anything that assumes a central coordinator, a fleet-wide view, or a
@@ -160,7 +204,9 @@ above is a summary).
 - **P2P transfer, mTLS, peer selection depth** → `drone-p2p-transfer-security`
 - **Transport tiers / LAN / tailnet detail** → `drone-edge-networking`
 - **VPN feature implementation depth** → `drone-vpn-management`
+- **SMTP/notifications feature implementation depth** → `drone-smtp-notifications`
 - **Admin UI, routes, Swarm page, remote peer management** → `drone-admin-features`
+- **Torrents/aria2c + magnet links implementation depth** → `drone-torrents-management`
 - **SQLite schemas/migrations** → `drone-db-management`
 - **Debugging a real, running Drone** → `drone-live-debugging`
 

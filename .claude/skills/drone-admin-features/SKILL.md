@@ -1,14 +1,14 @@
 ---
 name: drone-admin-features
-description: Use this when designing, reviewing, debugging, or modifying the Drone admin panel — the Debug tile (System Info/System Logs/Emulators tabs), the Artwork tile (Artwork & Metadata/Theme Gallery tabs), Torrents, VPN, the top-level Automation nav tab, the Swarm page (Swarm/Transfers tabs — pairing, tailnet, remote peer management, ROMs/BIOS/saves/movies P2P sync), the ROMs/BIOS TreeGrid browser, per-system BIOS association, credentials/network-mode/certificate rotation, self-update buttons, the session-cookie login gate, or the admin route dispatch in app/web/api_routes.py and web/handlers_*.py. For deep Torrents/aria2 or VPN/OpenVPN implementation detail, see the dedicated drone-torrents-management and drone-vpn-management skills instead.
+description: Use this when designing, reviewing, debugging, or modifying the Drone admin panel — the Debug tile (System Info/System Logs/Emulators tabs), the Artwork tile (Artwork & Metadata/Theme Gallery tabs), Torrents, VPN, Email (SMTP/IMAP + notifications), the top-level Automation nav tab, the Swarm page (Swarm/Transfers tabs — pairing, tailnet, remote peer management, ROMs/BIOS/saves/movies P2P sync), the notifications bell/dropdown, the ROMs/BIOS TreeGrid browser, per-system BIOS association, credentials/network-mode/certificate rotation, self-update buttons, the session-cookie login gate, or the admin route dispatch in app/web/api_routes.py and web/handlers_*.py. For deep Torrents/aria2, VPN/OpenVPN, or SMTP/notifications implementation detail, see the dedicated drone-torrents-management, drone-vpn-management, and drone-smtp-notifications skills instead.
 ---
 
 # Drone Admin Features Skill
 
 ## Goal
 
-Keep the admin-features picture matching the actual 4-tile admin panel (each tile
-now a tabbed panel bundling what used to be separate tiles), not the frozen
+Keep the admin-features picture matching the actual 5-tile admin panel (some tiles
+are tabbed panels bundling what used to be separate tiles), not the frozen
 single-feature doc. `ADMIN_FEATURES.md` at the repo root is titled "Admin
 Features - Logs Viewer" and has never been updated since it was written — it
 documents only the very first admin tile, misattributes the frontend to
@@ -45,6 +45,11 @@ app/web/
                           # transfer/torrent_manager.py + transfer/aria2_runtime.py)
   handlers_vpn.py         # OpenVPN admin routes (see drone-vpn-management skill;
                           # backs onto device/vpn_manager.py)
+  handlers_smtp.py        # SMTP/IMAP admin routes (see drone-smtp-notifications
+                          # skill; backs onto device/smtp_manager.py)
+  handlers_notifications.py # notifications-inbox admin routes (see
+                          # drone-smtp-notifications skill; backs onto
+                          # storage/audit_store.py)
   static/js/drone.js      # ~7,200 lines — every admin panel's frontend
 common/
   auth.py                 # DroneCredentialStore + SessionAuth/SessionStore (see
@@ -80,20 +85,21 @@ gateway's own session expired" apart from a remote-admin-proxy 401. See
 handled server-side (never returned to the browser); changing credentials
 revokes every other session's cookie except the caller's own.
 
-## Admin menu (4 tiles, two of them tabbed)
+## Admin menu (5 tiles, some of them tabbed)
 
-`renderAdminMenu()` (`drone.js`) renders exactly 4 tiles — **Debug, Artwork,
-Torrents, VPN**. Debug and Artwork are each a tabbed panel bundling what used to
-be separate tiles; the shared `renderAdminPanelTabs(active, tabs)` helper builds
+`renderAdminMenu()` (`drone.js`) renders exactly 5 tiles — **Debug, Artwork,
+Torrents, VPN, Email**. Debug and Artwork are each a tabbed panel bundling what used
+to be separate tiles; the shared `renderAdminPanelTabs(active, tabs)` helper builds
 the tab bar for both (and for the Swarm page's Swarm/Transfers tabs — see below),
 prepended via string concatenation onto each underlying page's existing
 `content.innerHTML` template, so none of the underlying render functions needed
 restructuring. There is no "Integration" tile — pairing, tailnet, and fleet
 management live on the **Swarm** page, which is a top-level nav item (`#admin/swarm`,
 alongside Systems/Controls/Automation/Swarm/Admin in `index.html`'s sidebar), not
-one of these 4 admin tiles. See "The Swarm page" below. **Automation** is also not
-one of these 4 tiles — it was moved out to its own top-level navbar link
-(`automationMenuBtn`, `#admin/automation`).
+one of these 5 admin tiles. See "The Swarm page" below. **Automation** is also not
+one of these tiles — it was moved out to its own top-level navbar link
+(`automationMenuBtn`, `#admin/automation`). The **notifications bell** (top-left,
+global) is not a tile either — see "Notifications bell" below.
 
 ### Debug (System Info / System Logs / Emulators tabs)
 
@@ -179,6 +185,30 @@ design, the peer-sharing design (including why it's gated on top of plain
 pairing, unlike every other asset type), and the self-heal detection/backoff
 design.
 
+### Email (SMTP/IMAP + notification digest)
+
+Provider-agnostic SMTP/IMAP configuration -- host/port/STARTTLS-or-SSL/auth/
+from-address/recipient, plus IMAP fields that are stored and shared but not
+currently used to read a mailbox. A "Send mail from this drone" master switch
+gates the Test Email button and a background poller that emails a digest of
+recent activity roughly every 5 minutes (there is no OS cron in this app --
+every periodic feature, including this one, is an in-process thread; see
+drone-smtp-notifications). Ten independent toggles choose which activity
+types (VPN connected/disconnected, newly connected to swarm, assets
+added/removed, a manual control submitted, an automation setting updated,
+asset uploaded/downloaded, a torrent finishing) are included in that digest --
+these toggles only affect what gets emailed, not what's logged or shown in
+the notifications bell (see below), which is unconditional. A "Share with
+Swarm" card mirrors VPN's peer-sharing design closely: an off-by-default
+`sharing_enabled` toggle, single-hop provenance (an imported config can't be
+re-shared), and a "Pull Configuration" picker -- plus a drone with no email
+setup of its own automatically adopts a sharing peer's settings on startup
+(VPN's swarm-bootstrap has no equivalent gate on "is the peer's tunnel
+actually up right now" here, since SMTP has no persistent-connection concept
+to check). See the dedicated **drone-smtp-notifications** skill for the full
+settings-field split (shared vs. local-only), the audit_log/notifications
+SQLite schema, the digest poller, and every notification hook site in depth.
+
 ### Automation (top-level navbar tab, not an admin tile)
 
 `renderAutomationPage()` (`drone.js`) — three independent automations, each with
@@ -196,6 +226,28 @@ input-activity monitor) every `AUTOMATION_POLL_SECONDS`. Backend:
 `app/device/automation.py`. Reached via `automationMenuBtn` in `index.html`
 (`#admin/automation`) — it used to be an admin tile, but moved out to the
 top-level navbar alongside Systems/Controls/Swarm/Admin.
+
+## Notifications bell (top-left, global — not an admin tile)
+
+Reuses the mascot image in the top-left brand block (`index.html`'s
+`.brand-mark` `<span>`, `id="notificationsBellBtn"`) — before this feature
+that icon was purely decorative (no id, no click handler at all); the
+adjacent `#brandHomeBtn` text link already owned "go home" and is untouched.
+An unread-count badge (`#notificationsUnreadBadge`) sits on the icon,
+polling `GET /admin/notifications/unread-count` every 20s
+(`startNotificationsPoll()`, started/stopped from `applyAdminVisibility()`
+alongside the other admin-gated nav links, since `/admin/*` 403s when
+`admin_enabled` is off). Clicking opens a Bootstrap 5 dropdown
+(`data-bs-toggle="dropdown"`, no custom show/hide code) listing the most
+recent 20 notifications, populated on open (`show.bs.dropdown` →
+`refreshNotificationsDropdown()`) rather than kept continuously live-polled —
+an inbox that's closed doesn't need 3s freshness, only the badge does.
+Clicking a row marks it read; a small dismiss button removes just that one;
+"Clear all" (confirm-gated, matching this app's destructive-action
+convention) deletes every notification row — this never touches the
+underlying `audit_log` permanent trail, only the separate `notifications`
+inbox table. See the dedicated **drone-smtp-notifications** skill for the
+full schema and the 10 event types that populate this inbox.
 
 ## The Swarm page (top-level nav, not an admin tile)
 
@@ -335,19 +387,22 @@ cancel/retry/clear (`/admin/downloads/{pause,resume,clear}`,
   app-wide in a way that looks like a per-modal bug. See "The window.bootstrap
   collision gotcha" above.
 
-## Live-refreshing tile pattern (Torrents, VPN)
+## Live-refreshing tile pattern (Torrents, VPN, Email)
 
 Any tile that polls its own status every few seconds should patch specific
 already-mounted DOM nodes by id, never re-render (`.innerHTML =`) the whole
 tile on every poll tick — replacing the whole subtree on a 3s timer visibly
 flashes and clobbers in-progress edits in any form on the same page (e.g. an
-unsaved settings field). The established shape, followed by both
-`renderTorrentsLive`/`patchTorrentsLive` and `renderVpnLive`/`patchVpnLive` in
-`drone.js`: a `render*Live(payload)` builds the full skeleton once on page
-mount (stable container ids for each region that changes), and a separate
-`patch*Live(payload)` — called by both the `setInterval` poll and the manual
-Refresh button — only ever sets `.innerHTML` on those specific already-mounted
-leaf nodes.
+unsaved settings field). The established shape, followed by
+`renderTorrentsLive`/`patchTorrentsLive`, `renderVpnLive`/`patchVpnLive`, and
+`renderSmtpLive`/`patchSmtpLive` in `drone.js`: a `render*Live(payload)`
+builds the full skeleton once on page mount (stable container ids for each
+region that changes), and a separate `patch*Live(payload)` — called by both
+the `setInterval` poll and the manual Refresh button — only ever sets
+`.innerHTML` on those specific already-mounted leaf nodes. The notifications
+bell's own unread-count poll (global, not tile-scoped) follows the same
+leaf-patch discipline at a lighter 20s cadence — see "Notifications bell"
+above.
 
 ## Modal dismiss buttons: the `window.bootstrap` collision gotcha
 
@@ -439,7 +494,8 @@ Do not:
 ## Default bias
 
 When unsure, keep new admin functionality inside the fitting existing tile
-(only add a new tile for a genuinely new category, as Torrents and VPN were),
+(only add a new tile for a genuinely new category, as Torrents, VPN, and
+Email were),
 keep frontend route names symmetric with their backend route + handler, follow
 the live-refreshing tile pattern above for anything that polls, and keep
 destructive actions behind an explicit confirm step like the existing ones.

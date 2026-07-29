@@ -18,6 +18,7 @@ try:
     from ..common.logging_setup import _drone_log
     from ..common.settings import Settings
     from ..common.http_errors import _format_http_error
+    from ..device import notifications as _notifications
     from ..storage.rom_metadata_store import (
         _load_rom_metadata_cache,
         _persist_rom_metadata_cache,
@@ -38,6 +39,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from common.logging_setup import _drone_log  # type: ignore
     from common.settings import Settings  # type: ignore
     from common.http_errors import _format_http_error  # type: ignore
+    from device import notifications as _notifications  # type: ignore
     from storage.rom_metadata_store import (  # type: ignore
         _load_rom_metadata_cache,
         _persist_rom_metadata_cache,
@@ -399,6 +401,11 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
         key: value for key, value in next_entries.items()
         if persisted_entries.get(key) != value
     }
+    # Genuinely new keys within rom_updates, as opposed to an existing ROM
+    # that merely changed (re-fingerprinted, moved, etc.) -- only this subset
+    # is "added" for the asset_added notification below; the rest of
+    # rom_updates is not separately notification-worthy.
+    roms_added = len(set(rom_updates.keys()) - previous_keys)
     bios_updates = {
         key: value for key, value in next_bios_entries.items()
         if persisted_bios_entries.get(key) != value
@@ -430,6 +437,7 @@ def _poll_rom_metadata_cache(settings: Settings, repository: "RomRepository") ->
         "roms_discovered": discovered,
         "bios_discovered": bios_discovered,
         "artwork_discovered": artwork_discovered,
+        "roms_added": roms_added,
         "new_or_changed": len(new_or_changed),
         "roms_pending_fingerprint": len(new_or_changed),
         "bios_new_or_changed": len(bios_new_or_changed),
@@ -605,7 +613,18 @@ def _poll_rom_metadata_once(settings: Settings, repository: "RomRepository") -> 
     if not _begin_rom_metadata_activity("poll"):
         return {"status": "skipped", "reason": "metadata_already_running", "changed": False}
     try:
-        _poll_rom_metadata_cache(settings, repository)
+        _snapshot, _changed, scan_stats = _poll_rom_metadata_cache(settings, repository)
+        # One summarized event per completed scan pass, not per file -- this
+        # function is already single-flight-guarded (_begin_rom_metadata_activity
+        # above), so "once per pass" falls out for free.
+        if scan_stats.get("roms_added"):
+            _notifications.record_event(
+                settings, "asset_added", "Assets added to a system", f"{scan_stats['roms_added']} ROM(s) discovered"
+            )
+        if scan_stats.get("deleted"):
+            _notifications.record_event(
+                settings, "asset_removed", "Assets removed from a system", f"{scan_stats['deleted']} ROM(s) no longer found"
+            )
         try:
             _saves_store.sync_saves_cache(settings.saves_root)
         except Exception as error:

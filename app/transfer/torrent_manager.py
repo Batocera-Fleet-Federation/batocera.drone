@@ -29,10 +29,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from threading import Event, Lock, Thread
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import parse_qs
 
 try:
     from ..common.install_paths import drone_install_root as _drone_install_root
     from ..common.settings import Settings
+    from ..device import notifications as _notifications
     from ..storage.state_store import database_path as _state_database_path
     from ..storage.state_store import load_payload as _load_state_payload
     from ..storage.state_store import save_payload as _save_state_payload
@@ -46,6 +48,7 @@ try:
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.install_paths import drone_install_root as _drone_install_root  # type: ignore
     from common.settings import Settings  # type: ignore
+    from device import notifications as _notifications  # type: ignore
     from storage.state_store import database_path as _state_database_path  # type: ignore
     from storage.state_store import load_payload as _load_state_payload  # type: ignore
     from storage.state_store import save_payload as _save_state_payload  # type: ignore
@@ -148,6 +151,7 @@ _ENTRY_PERSISTED_FIELDS = (
     "id",
     "name",
     "torrent_file",
+    "magnet_uri",
     "download_dir",
     "status",
     "message",
@@ -275,6 +279,25 @@ def _remove_downloaded_payload(entry: dict) -> bool:
     return removed_ok
 
 
+def _magnet_display_name(magnet_uri: str) -> str:
+    """Best-effort display name for a freshly-added magnet link, from its
+    ``dn=`` parameter or a truncated infohash. Purely a placeholder --
+    ``_apply_aria2_status_locked``'s existing ``bittorrent.info.name``
+    handling (unchanged, applies regardless of how the entry was added)
+    overwrites this with the real torrent name once aria2 resolves metadata.
+    """
+    query = magnet_uri.split("?", 1)[1] if "?" in magnet_uri else ""
+    params = parse_qs(query)
+    for display_name in params.get("dn", []):
+        if display_name.strip():
+            return display_name.strip()
+    for topic in params.get("xt", []):
+        if topic.startswith("urn:btih:"):
+            infohash = topic[len("urn:btih:") :]
+            return f"Magnet ({infohash[:12]}…)"
+    return "Magnet link"
+
+
 class TorrentManager:
     """Watched-folder torrent queue backed by a local aria2c daemon."""
 
@@ -313,7 +336,13 @@ class TorrentManager:
                 continue
             entry_id = str(raw.get("id") or "").strip()
             torrent_file = str(raw.get("torrent_file") or "").strip()
-            if not entry_id or not torrent_file or entry_id in self._torrents:
+            magnet_uri = str(raw.get("magnet_uri") or "").strip()
+            # A magnet-only entry has no backing .torrent file on disk, so it
+            # must be accepted here on magnet_uri alone -- requiring
+            # torrent_file unconditionally would silently drop every magnet
+            # entry on each restart (it would never be re-inserted into
+            # self._torrents at all, not just lose its GID).
+            if not entry_id or not (torrent_file or magnet_uri) or entry_id in self._torrents:
                 continue
             entry = {field: raw.get(field) for field in _ENTRY_PERSISTED_FIELDS}
             entry.update(dict(_ENTRY_LIVE_DEFAULTS))
@@ -328,7 +357,7 @@ class TorrentManager:
             entry["completed_bytes"] = int(entry.get("completed_bytes") or 0)
             entry["progress_percent"] = float(entry.get("progress_percent") or 0.0)
             entry["message"] = str(entry.get("message") or "")
-            entry["name"] = str(entry.get("name") or Path(torrent_file).stem)
+            entry["name"] = str(entry.get("name") or (Path(torrent_file).stem if torrent_file else "Magnet link"))
             entry["download_dir"] = str(entry.get("download_dir") or effective_download_directory(self._config))
             files_list = entry.get("files")
             entry["files"] = [str(p) for p in files_list] if isinstance(files_list, list) else []
@@ -541,7 +570,10 @@ class TorrentManager:
         status_results: Dict[str, dict] = {}
         if rpc is not None:
             for entry in to_add:
-                add_results[entry["id"]] = self._add_torrent_via_rpc(rpc, entry, config)
+                if entry.get("magnet_uri"):
+                    add_results[entry["id"]] = self._add_magnet_via_rpc(rpc, entry, config)
+                else:
+                    add_results[entry["id"]] = self._add_torrent_via_rpc(rpc, entry, config)
             for entry in to_query:
                 status_results[entry["id"]] = self._query_torrent_via_rpc(rpc, entry)
 
@@ -656,6 +688,26 @@ class TorrentManager:
             return {"error": str(error)}
         return {"gid": str(gid), "started": force}
 
+    def _add_magnet_via_rpc(self, rpc, entry: dict, config: dict) -> dict:
+        # aria2's addUri handles magnet URIs directly -- Aria2Rpc.call() is
+        # already a generic JSON-RPC passthrough (see aria2_runtime.py), so no
+        # client-side method needs adding, only this caller. Same paused/dir
+        # options shape as _add_torrent_via_rpc above.
+        force = bool(entry.get("force_started"))
+        options = {
+            "dir": str(entry.get("download_dir") or effective_download_directory(config)),
+            "pause": "false" if force else "true",
+            "seed-time": str(config["seed_time"]),
+            "seed-ratio": str(config["seed_ratio"]),
+            "bt-stop-timeout": str(config["bt_stop_timeout"]),
+            "file-allocation": config["file_allocation"],
+        }
+        try:
+            gid = rpc.call("aria2.addUri", [[entry["magnet_uri"]], options])
+        except Aria2RpcError as error:
+            return {"error": str(error)}
+        return {"gid": str(gid), "started": force}
+
     def _query_torrent_via_rpc(self, rpc, entry: dict) -> dict:
         try:
             return {"result": rpc.call("aria2.tellStatus", [entry["gid"], _TELL_STATUS_KEYS])}
@@ -706,6 +758,9 @@ class TorrentManager:
             entry["retry_at"] = 0.0
             if finished and not entry.get("completed_at"):
                 entry["completed_at"] = _now_iso()
+                _notifications.record_event(
+                    self.settings, "torrent_completed", "Torrent download completed", str(entry.get("name") or "")
+                )
             entry["force_started"] = False
         elif aria2_status in ("waiting", "paused"):
             entry["seeding"] = False
@@ -720,6 +775,9 @@ class TorrentManager:
             entry["eta_seconds"] = None
             if not entry.get("completed_at"):
                 entry["completed_at"] = _now_iso()
+                _notifications.record_event(
+                    self.settings, "torrent_completed", "Torrent download completed", str(entry.get("name") or "")
+                )
         elif aria2_status == "removed":
             entry["seeding"] = False
             entry["gid"] = None
@@ -849,12 +907,14 @@ class TorrentManager:
                 return {"status": "not_found"}
             self._persist_locked()
         self._remove_from_aria2(entry.get("gid"))
-        torrent_file_removed = False
-        try:
-            Path(entry["torrent_file"]).unlink(missing_ok=True)
-            torrent_file_removed = True
-        except OSError as error:
-            print(f"Torrent file delete failed: {error}", file=sys.stderr, flush=True)
+        torrent_file_removed = True
+        if entry.get("torrent_file"):
+            torrent_file_removed = False
+            try:
+                Path(entry["torrent_file"]).unlink(missing_ok=True)
+                torrent_file_removed = True
+            except OSError as error:
+                print(f"Torrent file delete failed: {error}", file=sys.stderr, flush=True)
         downloaded_files_removed = _remove_downloaded_payload(entry)
         self.wake()
         return {
@@ -910,7 +970,7 @@ class TorrentManager:
                 self._persist_locked()
 
         for entry in targets:
-            if delete_torrent_file:
+            if delete_torrent_file and entry.get("torrent_file"):
                 try:
                     Path(entry["torrent_file"]).unlink(missing_ok=True)
                 except OSError as error:
@@ -1160,6 +1220,44 @@ class TorrentManager:
             "directory": str(directory),
         }
 
+    def add_magnet(self, magnet_uri: str) -> dict:
+        """Register a magnet link, the direct sibling of a scanned/uploaded
+        .torrent file -- same registry-entry shape (see
+        _scan_watch_directory_locked), minus a torrent_file since there is no
+        watched-folder file backing it. The next tick adds it to aria2 via
+        aria2.addUri instead of aria2.addTorrent (_add_magnet_via_rpc).
+        """
+        magnet_uri = str(magnet_uri or "").strip()
+        if not magnet_uri.startswith("magnet:?") or "xt=urn:btih:" not in magnet_uri:
+            raise ValueError("That doesn't look like a valid magnet link.")
+        name = _magnet_display_name(magnet_uri)
+        with self._lock:
+            config = dict(self._config)
+            entry_id = uuid.uuid4().hex[:12]
+            self._torrents[entry_id] = {
+                "id": entry_id,
+                "name": name,
+                "torrent_file": "",
+                "magnet_uri": magnet_uri,
+                "download_dir": effective_download_directory(config),
+                "status": "queued",
+                "message": "",
+                "added_at": _now_iso(),
+                "completed_at": None,
+                "total_bytes": 0,
+                "completed_bytes": 0,
+                "progress_percent": 0.0,
+                "files": [],
+                "queue_position": self._take_queue_position_locked(),
+                "retry_count": 0,
+                "retry_at": 0.0,
+                "last_error": "",
+                **dict(_ENTRY_LIVE_DEFAULTS),
+            }
+            self._persist_locked()
+        self.wake()
+        return {"status": "ok", "id": entry_id, "name": name}
+
     # ----------------------------------------------------------------- browse
 
     def _browse_roots(self) -> List[Path]:
@@ -1248,6 +1346,8 @@ class TorrentManager:
                     "connections": int(entry.get("connections") or 0),
                     "eta_seconds": entry.get("eta_seconds"),
                     "torrent_file": entry.get("torrent_file"),
+                    "magnet_uri": entry.get("magnet_uri"),
+                    "is_magnet": bool(entry.get("magnet_uri")),
                     "download_dir": entry.get("download_dir"),
                     "added_at": entry.get("added_at"),
                     "completed_at": entry.get("completed_at"),

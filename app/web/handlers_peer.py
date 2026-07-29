@@ -25,6 +25,8 @@ try:
         list_emulator_config_files as _list_emulator_config_files,
         read_emulator_config_file as _read_emulator_config_file,
     )
+    from ..device import notifications as _notifications
+    from ..device import smtp_manager as _smtp
     from ..device import vpn_manager as _vpn
     from ..roms.rom_metadata_state import _rom_metadata_cache_status
     from ..storage import movies_store as _movies_store
@@ -53,6 +55,8 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         list_emulator_config_files as _list_emulator_config_files,
         read_emulator_config_file as _read_emulator_config_file,
     )
+    from device import notifications as _notifications  # type: ignore
+    from device import smtp_manager as _smtp  # type: ignore
     from device import vpn_manager as _vpn  # type: ignore
     from roms.rom_metadata_state import _rom_metadata_cache_status  # type: ignore
     from storage import movies_store as _movies_store  # type: ignore
@@ -661,6 +665,25 @@ class HandlersPeerMixin:
         self.log_message("peer vpn config served has_credentials=%s", payload.get("has_credentials"))
         self._send_json(200, payload)
 
+    def _handle_peer_smtp_config(self) -> None:
+        """Serve this drone's SMTP/IMAP settings to a paired peer.
+
+        Mirrors _handle_peer_vpn_config exactly: gated by
+        _peer_request_authorized() (same mTLS pairing check as every other
+        /peer/* endpoint) plus smtp_manager's own sharing_enabled flag --
+        SMTP credentials are sensitive the same way VPN credentials are, so
+        pairing alone is not treated as implicit consent here either. See
+        the drone-smtp-notifications skill.
+        """
+        if not self._peer_request_authorized():
+            return
+        payload = _smtp.export_payload(self.settings)
+        if payload is None:
+            self._send_json(404, {"error": "SMTP sharing is not enabled on this drone, or no configuration has been set up yet"})
+            return
+        self.log_message("peer smtp config served host=%s", payload.get("host"))
+        self._send_json(200, payload)
+
     def _peer_requester_device_id(self) -> Optional[str]:
         """Best-effort identity of the peer on the other end of this mTLS
         connection, for upload-activity display only -- the authorization
@@ -721,6 +744,12 @@ class HandlersPeerMixin:
                         tracker.progress(upload_id, sent)
             if upload_id:
                 tracker.finish(upload_id, "completed")
+                _notifications.record_event(
+                    self.settings,
+                    "asset_uploaded",
+                    "Asset uploaded",
+                    str((upload_meta or {}).get("relative_path") or path.name),
+                )
         except Exception as error:
             if upload_id:
                 tracker.finish(upload_id, "failed", error=str(error))

@@ -54,6 +54,7 @@ try:
     from ..storage.state_store import database_path as _state_database_path
     from ..storage.state_store import load_payload as _load_state_payload
     from ..storage.state_store import save_payload as _save_state_payload
+    from . import notifications as _notifications
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.install_paths import drone_install_root as _drone_install_root  # type: ignore
     from common.logtail import _tail_lines  # type: ignore
@@ -61,6 +62,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from storage.state_store import database_path as _state_database_path  # type: ignore
     from storage.state_store import load_payload as _load_state_payload  # type: ignore
     from storage.state_store import save_payload as _save_state_payload  # type: ignore
+    from device import notifications as _notifications  # type: ignore
 
 VPN_STATE_NAMESPACE = "vpn_manager.json"
 OPENVPN_CONFIG_FILENAME = "client.ovpn"
@@ -160,6 +162,11 @@ def _load_state(settings: Settings) -> dict:
         "self_heal_last_at": stored.get("self_heal_last_at"),
         "self_heal_last_reason": str(stored.get("self_heal_last_reason") or ""),
         "self_heal_attempts": [str(item) for item in (stored.get("self_heal_attempts") or []) if str(item or "").strip()],
+        # Last connection_state status() itself observed -- used only to fire
+        # vpn_connected/vpn_disconnected notifications on a genuine edge,
+        # never on repeated polls of an unchanged status. Not surfaced in the
+        # status() response; it's bookkeeping, not user-facing state.
+        "last_status": str(stored.get("last_status") or ""),
     }
 
 
@@ -565,6 +572,15 @@ def status(settings: Settings) -> dict:
             message = failure_line.strip()
         else:
             connection_state = "connecting"
+
+    previous_status = state.get("last_status") or ""
+    if connection_state != previous_status:
+        if connection_state == "connected":
+            server = ", ".join(state.get("remotes") or []) or state.get("config_filename") or ""
+            _notifications.record_event(settings, "vpn_connected", "VPN connected", server)
+        elif previous_status == "connected":
+            _notifications.record_event(settings, "vpn_disconnected", "VPN disconnected", message)
+        state = _save_state(settings, last_status=connection_state)
 
     tunnel_ip = _tunnel_ip() if connection_state == "connected" else None
     connected_duration_seconds = None

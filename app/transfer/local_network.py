@@ -14,6 +14,7 @@ from threading import Thread
 from typing import Any, Callable, Optional
 
 try:
+    from ..device import notifications as _notifications
     from ..storage.state_store import (
         append_event,
         database_path,
@@ -24,6 +25,7 @@ try:
     )
     from ..transport.tailnet import get_tailnet_ip
 except ImportError:
+    from device import notifications as _notifications  # type: ignore
     from storage.state_store import (  # type: ignore
         append_event,
         database_path,
@@ -262,6 +264,7 @@ def save_paired_peer(settings: Any, peer: dict) -> dict:
     if not peer_id or peer_id == str(settings.device_id):
         raise ValueError("invalid peer id")
     peers = _load_peer_map(settings, "local_paired_peers")
+    is_new = peer_id not in peers
     stored = {
         **dict(peers.get(peer_id) or {}),
         **peer,
@@ -278,6 +281,14 @@ def save_paired_peer(settings: Any, peer: dict) -> dict:
     if peer_id in discovered:
         discovered[peer_id]["paired"] = True
         _save_peer_map(settings, "local_discovered_peers", discovered)
+    if is_new:
+        # The single choke point both genuine-pairing call sites
+        # (_handle_peer_pair, _local_pair_peer) go through -- covers both
+        # without duplicating the is_new check at each one, and without
+        # misfiring on the 3 other callers that only refresh an
+        # already-paired peer's address/last_seen.
+        peer_name = str(stored.get("name") or stored.get("hostname") or peer_id)
+        _notifications.record_event(settings, "swarm_peer_connected", "Newly connected to swarm", peer_name)
     return stored
 
 

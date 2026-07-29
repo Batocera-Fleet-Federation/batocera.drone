@@ -10,6 +10,8 @@ const automationMenuBtn = document.getElementById("automationMenuBtn");
 const swarmMenuBtn = document.getElementById("swarmMenuBtn");
 const adminMenuBtn = document.getElementById("adminMenuBtn");
 const apiAccessBtn = document.getElementById("apiAccessBtn");
+const notificationsBellWrap = document.getElementById("notificationsBellWrap");
+const notificationsBellBtn = document.getElementById("notificationsBellBtn");
 const droneVersionBadge = document.getElementById("droneVersionBadge");
 const titleNode = document.querySelector(".h3.mb-1");
 const subtitleNode = document.getElementById("pageSubtitle");
@@ -92,6 +94,10 @@ let torrentsInFlight = false;
 let torrentsLastPayload = null;
 let vpnTimer = null;
 let vpnInFlight = false;
+let smtpTimer = null;
+let smtpInFlight = false;
+let notificationsPollTimer = null;
+let notificationsDropdownOpen = false;
 let currentConfigSource = null;
 let emulatorConfigRows = [];
 let selectedEmulatorConfigIndex = 0;
@@ -356,11 +362,13 @@ function setLoading(isLoading, text = "Loading...") {
   }
 }
 function applyAdminVisibility() {
-  const adminLinks = [adminMenuBtn, controlsMenuBtn, automationMenuBtn, swarmMenuBtn, apiAccessBtn].filter(Boolean);
+  const adminLinks = [adminMenuBtn, controlsMenuBtn, automationMenuBtn, swarmMenuBtn, apiAccessBtn, notificationsBellWrap].filter(Boolean);
   if (adminEnabled) {
     adminLinks.forEach((link) => link.classList.remove("d-none"));
+    startNotificationsPoll();
   } else {
     adminLinks.forEach((link) => link.classList.add("d-none"));
+    stopNotificationsPoll();
   }
 }
 function escapeHtml(value) {
@@ -416,7 +424,13 @@ async function api(url) {
     let msg = `Request failed: ${res.status}`;
     try {
       const data = await res.json();
+      // Most handlers return {"error": "..."}; a few (e.g. VPN connect)
+      // return {"errors": [...]} instead -- without this fallback those
+      // calls threw a bare "Request failed: 400" and silently discarded the
+      // actual reason (e.g. "Use --help for more information." from a
+      // failed openvpn invocation), which is exactly what it looked like.
       if (data.error) msg = data.error;
+      else if (Array.isArray(data.errors) && data.errors.length) msg = data.errors.join(" ");
     } catch (_) {}
     throw new Error(msg);
   }
@@ -438,7 +452,13 @@ async function apiPost(url, payload) {
     let msg = `Request failed: ${res.status}`;
     try {
       const data = await res.json();
+      // Most handlers return {"error": "..."}; a few (e.g. VPN connect)
+      // return {"errors": [...]} instead -- without this fallback those
+      // calls threw a bare "Request failed: 400" and silently discarded the
+      // actual reason (e.g. "Use --help for more information." from a
+      // failed openvpn invocation), which is exactly what it looked like.
       if (data.error) msg = data.error;
+      else if (Array.isArray(data.errors) && data.errors.length) msg = data.errors.join(" ");
     } catch (_) {}
     throw new Error(msg);
   }
@@ -2133,6 +2153,14 @@ async function renderAdminMenu() {
           </div>
         </div>
       </div>
+      <div class="col-md-4 mb-3">
+        <div class="card admin-tile pointer h-100" onclick="setHash('#admin/smtp')">
+          <div class="card-body">
+            <h5 class="card-title"><i class="bi bi-envelope me-2"></i>Email</h5>
+            <p class="card-text">Configure SMTP/IMAP, share credentials with the swarm, and choose which activity gets emailed as a digest.</p>
+          </div>
+        </div>
+      </div>
     </div>
   `;
 }
@@ -2737,6 +2765,10 @@ async function renderTorrentsPage() {
         <button class="btn btn-sm btn-outline-primary" onclick="openTorrentUploadPicker()"><i class="bi bi-upload me-1"></i>Upload Torrents</button>
       </div>
       <div class="card-body">
+        <div class="d-flex flex-wrap align-items-center gap-2 mb-3">
+          <input class="form-control form-control-sm" type="text" id="magnetLinkInput" placeholder="Paste a magnet link (magnet:?xt=urn:btih:...)" style="max-width:420px" onkeydown="if (event.key === 'Enter') addMagnetLink();">
+          <button class="btn btn-sm btn-outline-primary" type="button" onclick="addMagnetLink()"><i class="bi bi-magnet me-1"></i>Add Magnet</button>
+        </div>
         <div class="row g-2 mb-2">
           <div class="col-12 col-lg-6">
             <label class="form-label mb-1" for="torrentDir">Torrent folder</label>
@@ -3482,6 +3514,20 @@ async function uploadTorrentFiles(files) {
   }
 }
 
+async function addMagnetLink() {
+  const input = document.getElementById("magnetLinkInput");
+  const magnetUri = (input && input.value || "").trim();
+  if (!magnetUri) return;
+  try {
+    const result = await apiPost("/admin/torrents/magnet", { magnet_uri: magnetUri });
+    showToast(`Added ${escapeHtml(result.name || "magnet link")} to the queue.`, "success");
+    if (input) input.value = "";
+    setTimeout(refreshTorrentsLive, 700);
+  } catch (err) {
+    showToast(`Failed to add magnet link: ${escapeHtml(err.message || "unknown error")}`, "danger", 8000);
+  }
+}
+
 function chooseTorrentDir() {
   const input = document.getElementById(torrentDirBrowserTargetInputId);
   const path = torrentDirBrowserSelectedPath;
@@ -3911,6 +3957,495 @@ async function pullVpnConfigFromPeer() {
     showToast(`Failed to pull VPN configuration: ${escapeHtml(err.message || "unknown error")}`, "danger", 8000);
     if (button) { button.disabled = false; button.innerHTML = '<i class="bi bi-cloud-arrow-down me-1"></i>Pull Configuration'; }
   }
+}
+
+// ------------------------------------------------------------------ SMTP
+
+function stopSmtpAutoRefresh() {
+  if (smtpTimer) {
+    clearInterval(smtpTimer);
+    smtpTimer = null;
+  }
+  smtpInFlight = false;
+}
+function startSmtpAutoRefresh() {
+  // Same reasoning as startVpnAutoRefresh: only ever patch the live region,
+  // never the settings form above it, so in-progress edits survive a poll.
+  stopSmtpAutoRefresh();
+  smtpTimer = setInterval(async () => {
+    if (document.hidden || smtpInFlight) return;
+    if (window.location.hash !== "#admin/smtp") return;
+    const liveNode = document.getElementById("smtpLive");
+    if (!liveNode) return;
+    smtpInFlight = true;
+    try {
+      const payload = await api("/admin/smtp");
+      if (
+        window.location.hash === "#admin/smtp" &&
+        liveNode.isConnected &&
+        document.getElementById("smtpLive") === liveNode &&
+        !liveNode.contains(document.activeElement)
+      ) {
+        patchSmtpLive(payload);
+      }
+    } catch (err) {
+      // Transient poll failure: leave the last good data in place silently.
+    } finally {
+      smtpInFlight = false;
+    }
+  }, 5000);
+}
+
+// Mirrors device/notifications.py's EVENT_TYPES/EVENT_TYPE_LABELS -- kept in
+// sync by hand since the frontend has no shared-schema codegen with the
+// stdlib backend.
+const SMTP_EVENT_TYPES = [
+  ["vpn_connected", "VPN connected"],
+  ["vpn_disconnected", "VPN disconnected"],
+  ["swarm_peer_connected", "Newly connected to swarm"],
+  ["asset_added", "Asset added to a system"],
+  ["asset_removed", "Asset removed from a system"],
+  ["manual_control_submitted", "Manual control submitted"],
+  ["automation_updated", "Automation setting updated"],
+  ["asset_uploaded", "Asset uploaded (served to a peer)"],
+  ["asset_downloaded", "Asset downloaded (pulled from a peer)"],
+  ["torrent_completed", "Torrent download completed"],
+];
+
+function renderSmtpRevokedNotice(payload) {
+  if (!payload.revoked_reason) return "";
+  const when = payload.revoked_at ? ` (${escapeHtml(formatCompactLocalDate(payload.revoked_at))})` : "";
+  return `<div class="alert alert-warning py-2 mb-3"><i class="bi bi-shield-exclamation me-1"></i><strong>Email credentials removed${when}:</strong> ${escapeHtml(payload.revoked_reason)}</div>`;
+}
+
+function renderSmtpTestNote(payload) {
+  const result = payload.last_test_result;
+  if (!result) return "";
+  const when = payload.last_test_at ? escapeHtml(formatCompactLocalDate(payload.last_test_at)) : "";
+  if (result.status === "ok") {
+    return `<div class="small text-success mb-3"><i class="bi bi-check-circle me-1"></i>Test email sent successfully${when ? ` (${when})` : ""}.</div>`;
+  }
+  return `<div class="small text-danger mb-3"><i class="bi bi-exclamation-triangle me-1"></i>Last test email failed${when ? ` (${when})` : ""}: ${escapeHtml(result.error || "unknown error")}</div>`;
+}
+
+function renderSmtpDigestNote(payload) {
+  if (payload.last_digest_error) {
+    return `<div class="small text-danger mb-3"><i class="bi bi-exclamation-triangle me-1"></i>Last digest email failed: ${escapeHtml(payload.last_digest_error)}</div>`;
+  }
+  if (!payload.last_digest_sent_at) return `<div class="small text-muted mb-3">No digest email has been sent yet.</div>`;
+  return `<div class="small text-muted mb-3"><i class="bi bi-envelope-check me-1"></i>Last digest email sent ${escapeHtml(formatCompactLocalDate(payload.last_digest_sent_at))}.</div>`;
+}
+
+// First mount only; patchSmtpLive never recreates these container nodes --
+// same flash-free pattern as renderVpnLive/patchVpnLive.
+function renderSmtpLive(payload) {
+  return `
+    <div id="smtpRevokedNotice">${renderSmtpRevokedNotice(payload)}</div>
+    <div id="smtpTestNote">${renderSmtpTestNote(payload)}</div>
+    <div id="smtpDigestNote">${renderSmtpDigestNote(payload)}</div>
+  `;
+}
+
+function patchSmtpLive(payload) {
+  const revokedNode = document.getElementById("smtpRevokedNotice");
+  if (revokedNode) revokedNode.innerHTML = renderSmtpRevokedNotice(payload);
+  const testNode = document.getElementById("smtpTestNote");
+  if (testNode) testNode.innerHTML = renderSmtpTestNote(payload);
+  const digestNode = document.getElementById("smtpDigestNote");
+  if (digestNode) digestNode.innerHTML = renderSmtpDigestNote(payload);
+}
+
+async function renderSmtpPage() {
+  currentSystemContext = null;
+  clearSystemTheme();
+  titleNode.textContent = "Email";
+  subtitleNode.textContent = "SMTP/IMAP configuration, swarm sharing, and activity-digest notifications";
+  setLoading(true, "Loading email settings...");
+  let payload;
+  try {
+    payload = await api("/admin/smtp");
+  } catch (err) {
+    setLoading(false);
+    content.innerHTML = `<div class="alert alert-danger">Failed to load email settings: ${escapeHtml(err.message || "unknown error")}</div>`;
+    return;
+  } finally {
+    setLoading(false);
+  }
+  const notify = payload.notify || {};
+  content.innerHTML = `
+    <div class="card mb-3">
+      <div class="card-header"><i class="bi bi-envelope-gear me-2"></i>SMTP / IMAP Settings</div>
+      <div class="card-body">
+        <p class="text-muted small">Used to send the activity digest and the Test Email below. IMAP fields are stored (and shared with the swarm, same as SMTP) but not currently used to read a mailbox.</p>
+        <h6 class="small text-uppercase text-muted mt-2">Outgoing (SMTP)</h6>
+        <div class="row g-2 mb-2">
+          <div class="col-sm-6 col-lg-4">
+            <label class="form-label mb-1" for="smtpHost">Host</label>
+            <input class="form-control form-control-sm" type="text" id="smtpHost" value="${escapeHtml(payload.host || "")}" placeholder="smtp.example.com">
+          </div>
+          <div class="col-sm-3 col-lg-2">
+            <label class="form-label mb-1" for="smtpPort">Port</label>
+            <input class="form-control form-control-sm" type="number" id="smtpPort" value="${escapeHtml(payload.port || 587)}">
+          </div>
+          <div class="col-sm-3 col-lg-2 d-flex align-items-end gap-3">
+            <div class="form-check form-switch">
+              <input class="form-check-input" type="checkbox" role="switch" id="smtpUseStarttls" ${payload.use_starttls ? "checked" : ""}>
+              <label class="form-check-label small" for="smtpUseStarttls">STARTTLS</label>
+            </div>
+            <div class="form-check form-switch">
+              <input class="form-check-input" type="checkbox" role="switch" id="smtpUseSsl" ${payload.use_ssl ? "checked" : ""}>
+              <label class="form-check-label small" for="smtpUseSsl">SSL</label>
+            </div>
+          </div>
+          <div class="col-sm-6 col-lg-4">
+            <label class="form-label mb-1" for="smtpUsername">Username</label>
+            <input class="form-control form-control-sm" type="text" id="smtpUsername" autocomplete="off" value="${escapeHtml(payload.username || "")}">
+          </div>
+          <div class="col-sm-6 col-lg-4">
+            <label class="form-label mb-1" for="smtpPassword">Password</label>
+            <input class="form-control form-control-sm" type="password" id="smtpPassword" autocomplete="off" placeholder="${payload.has_password ? "Saved (leave blank to keep)" : ""}">
+          </div>
+          <div class="col-sm-6 col-lg-4">
+            <label class="form-label mb-1" for="smtpFromAddress">From address</label>
+            <input class="form-control form-control-sm" type="email" id="smtpFromAddress" value="${escapeHtml(payload.from_address || "")}">
+          </div>
+          <div class="col-sm-6 col-lg-4">
+            <label class="form-label mb-1" for="smtpRecipientEmail">Send digest/test mail to</label>
+            <input class="form-control form-control-sm" type="email" id="smtpRecipientEmail" value="${escapeHtml(payload.recipient_email || "")}">
+          </div>
+        </div>
+        <h6 class="small text-uppercase text-muted mt-3">Incoming (IMAP)</h6>
+        <div class="row g-2 mb-2">
+          <div class="col-sm-6 col-lg-4">
+            <label class="form-label mb-1" for="smtpImapHost">Host</label>
+            <input class="form-control form-control-sm" type="text" id="smtpImapHost" value="${escapeHtml(payload.imap_host || "")}">
+          </div>
+          <div class="col-sm-3 col-lg-2">
+            <label class="form-label mb-1" for="smtpImapPort">Port</label>
+            <input class="form-control form-control-sm" type="number" id="smtpImapPort" value="${escapeHtml(payload.imap_port || 993)}">
+          </div>
+          <div class="col-sm-3 col-lg-2 d-flex align-items-end">
+            <div class="form-check form-switch">
+              <input class="form-check-input" type="checkbox" role="switch" id="smtpImapUseSsl" ${payload.imap_use_ssl ? "checked" : ""}>
+              <label class="form-check-label small" for="smtpImapUseSsl">SSL</label>
+            </div>
+          </div>
+          <div class="col-sm-6 col-lg-4">
+            <label class="form-label mb-1" for="smtpImapUsername">Username</label>
+            <input class="form-control form-control-sm" type="text" id="smtpImapUsername" autocomplete="off" value="${escapeHtml(payload.imap_username || "")}">
+          </div>
+          <div class="col-sm-6 col-lg-4">
+            <label class="form-label mb-1" for="smtpImapPassword">Password</label>
+            <input class="form-control form-control-sm" type="password" id="smtpImapPassword" autocomplete="off" placeholder="${payload.has_imap_password ? "Saved (leave blank to keep)" : ""}">
+          </div>
+        </div>
+        <div class="d-flex flex-wrap gap-2 mt-2">
+          <button class="btn btn-primary btn-sm" type="button" id="smtpSaveBtn" onclick="saveSmtpSettings()"><i class="bi bi-save me-1"></i>Save</button>
+          <button class="btn btn-outline-secondary btn-sm" type="button" id="smtpTestBtn" ${payload.has_config ? "" : "disabled"} onclick="sendSmtpTestEmail()"><i class="bi bi-send me-1"></i>Send Test Email</button>
+        </div>
+      </div>
+    </div>
+    <div class="card mb-3">
+      <div class="card-body">
+        <div class="form-check form-switch">
+          <input class="form-check-input" type="checkbox" role="switch" id="smtpEnabled" ${payload.smtp_enabled ? "checked" : ""} onchange="setSmtpEnabled(this.checked)">
+          <label class="form-check-label" for="smtpEnabled">Send mail from this drone</label>
+        </div>
+        <p class="text-muted small mb-0 mt-1">Controls the Test Email button and the ~5 minute activity-digest job. Independent of sharing below -- a drone can use settings shared by a peer but still keep this off, or vice versa.</p>
+      </div>
+    </div>
+    <div class="card mb-3">
+      <div class="card-header"><i class="bi bi-bell me-2"></i>Email Notifications</div>
+      <div class="card-body">
+        <p class="text-muted small">Which activity gets included the next time the digest email sends. Notifications always appear in the bell icon regardless of these toggles -- this only controls what's emailed.</p>
+        <div class="row g-2">
+          ${SMTP_EVENT_TYPES.map(([key, label]) => `
+            <div class="col-sm-6 col-lg-4">
+              <div class="form-check form-switch">
+                <input class="form-check-input" type="checkbox" role="switch" id="smtpNotify_${escapeHtml(key)}" ${notify[key] ? "checked" : ""} onchange="setSmtpNotificationToggle('${escapeHtml(key)}', this.checked)">
+                <label class="form-check-label small" for="smtpNotify_${escapeHtml(key)}">${escapeHtml(label)}</label>
+              </div>
+            </div>
+          `).join("")}
+        </div>
+      </div>
+    </div>
+    <div class="card mb-3">
+      <div class="card-header"><i class="bi bi-people me-2"></i>Share with Swarm</div>
+      <div class="card-body">
+        ${payload.source_peer_id ? `
+        <p class="text-muted small mb-0"><i class="bi bi-info-circle me-1"></i>This configuration was imported from <strong>${escapeHtml(payload.source_peer_name || payload.source_peer_id)}</strong> and cannot be re-shared &mdash; only the drone that originally set it up can share it with the swarm.</p>
+        ` : `
+        <p class="text-muted small">Share these SMTP/IMAP settings (including the password) with drones paired to this one, over the same cert-pinned peer link used for ROM/BIOS transfers -- never through the browser. Only paired drones can pull it, and only while this is turned on.</p>
+        <div class="form-check form-switch mb-3">
+          <input class="form-check-input" type="checkbox" role="switch" id="smtpSharingEnabled" ${payload.sharing_enabled ? "checked" : ""} onchange="setSmtpSharing(this.checked)">
+          <label class="form-check-label" for="smtpSharingEnabled">Allow paired drones to pull this email configuration</label>
+        </div>
+        `}
+        <hr>
+        <p class="text-muted small mb-2">A drone with no email configuration of its own automatically adopts a sharing peer's settings on startup. Already sharing on another drone? Pull it here instead of typing your own.</p>
+        <div class="d-flex flex-wrap align-items-end gap-2">
+          <div>
+            <label class="form-label mb-1" for="smtpPullPeer">Paired Drone</label>
+            <select id="smtpPullPeer" class="form-select form-select-sm" style="min-width:220px"><option value="">Loading...</option></select>
+          </div>
+          <button class="btn btn-outline-primary btn-sm" type="button" id="smtpPullBtn" disabled onclick="pullSmtpConfigFromPeer()"><i class="bi bi-cloud-arrow-down me-1"></i>Pull Configuration</button>
+        </div>
+      </div>
+    </div>
+    <div class="card"><div class="card-body">
+      <div id="smtpLive">${renderSmtpLive(payload)}</div>
+    </div></div>
+  `;
+  startSmtpAutoRefresh();
+  loadSmtpPullPeerOptions();
+}
+
+async function refreshSmtpLive() {
+  try {
+    const payload = await api("/admin/smtp");
+    if (document.getElementById("smtpLive")) patchSmtpLive(payload);
+  } catch (err) {
+    showToast(`Failed to refresh email status: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  }
+}
+
+function _smtpSettingsPayloadFromForm() {
+  return {
+    host: (document.getElementById("smtpHost").value || "").trim(),
+    port: parseInt(document.getElementById("smtpPort").value, 10) || 587,
+    use_starttls: document.getElementById("smtpUseStarttls").checked,
+    use_ssl: document.getElementById("smtpUseSsl").checked,
+    username: (document.getElementById("smtpUsername").value || "").trim(),
+    password: document.getElementById("smtpPassword").value || "",
+    from_address: (document.getElementById("smtpFromAddress").value || "").trim(),
+    recipient_email: (document.getElementById("smtpRecipientEmail").value || "").trim(),
+    imap_host: (document.getElementById("smtpImapHost").value || "").trim(),
+    imap_port: parseInt(document.getElementById("smtpImapPort").value, 10) || 993,
+    imap_use_ssl: document.getElementById("smtpImapUseSsl").checked,
+    imap_username: (document.getElementById("smtpImapUsername").value || "").trim(),
+    imap_password: document.getElementById("smtpImapPassword").value || "",
+  };
+}
+
+async function saveSmtpSettings() {
+  const button = document.getElementById("smtpSaveBtn");
+  if (button) button.disabled = true;
+  try {
+    await apiPost("/admin/smtp/settings", _smtpSettingsPayloadFromForm());
+    showToast("Email settings saved.", "success");
+    await renderSmtpPage();
+  } catch (err) {
+    showToast(`Failed to save email settings: ${escapeHtml(err.message || "unknown error")}`, "danger", 8000);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function sendSmtpTestEmail() {
+  const button = document.getElementById("smtpTestBtn");
+  if (button) { button.disabled = true; button.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Sending...'; }
+  try {
+    const result = await apiPost("/admin/smtp/test", {});
+    if (result.status === "ok") {
+      showToast("Test email sent.", "success");
+    } else {
+      showToast(`Test email failed: ${escapeHtml(result.error || "unknown error")}`, "danger", 8000);
+    }
+  } catch (err) {
+    showToast(`Test email failed: ${escapeHtml(err.message || "unknown error")}`, "danger", 8000);
+  } finally {
+    if (button) { button.disabled = false; button.innerHTML = '<i class="bi bi-send me-1"></i>Send Test Email'; }
+    await refreshSmtpLive();
+  }
+}
+
+async function setSmtpEnabled(enabled) {
+  const checkbox = document.getElementById("smtpEnabled");
+  try {
+    await apiPost("/admin/smtp/enabled", { enabled });
+    showToast(`Sending mail from this drone ${enabled ? "enabled" : "disabled"}.`, "success");
+  } catch (err) {
+    if (checkbox) checkbox.checked = !enabled;
+    showToast(`Failed to save setting: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  }
+}
+
+async function setSmtpNotificationToggle(eventType, enabled) {
+  const checkbox = document.getElementById(`smtpNotify_${eventType}`);
+  try {
+    await apiPost("/admin/smtp/notifications", { [eventType]: enabled });
+  } catch (err) {
+    if (checkbox) checkbox.checked = !enabled;
+    showToast(`Failed to save notification setting: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  }
+}
+
+async function setSmtpSharing(enabled) {
+  const checkbox = document.getElementById("smtpSharingEnabled");
+  try {
+    await apiPost("/admin/smtp/sharing", { enabled });
+    showToast(`Email sharing with paired drones ${enabled ? "enabled" : "disabled"}.`, "success");
+  } catch (err) {
+    if (checkbox) checkbox.checked = !enabled;
+    showToast(`Failed to save sharing setting: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  }
+}
+
+async function loadSmtpPullPeerOptions() {
+  const select = document.getElementById("smtpPullPeer");
+  const button = document.getElementById("smtpPullBtn");
+  if (!select) return;
+  try {
+    const overview = await api("/admin/swarm/overview");
+    const onlinePeers = (overview.drones || []).filter(drone => !drone.is_self && drone.online);
+    select.innerHTML = onlinePeers.length
+      ? onlinePeers.map(drone => `<option value="${escapeHtml(drone.drone_id || "")}">${escapeHtml(drone.name || drone.hostname || drone.drone_id || "Drone")}</option>`).join("")
+      : '<option value="">No paired drones online</option>';
+    if (button) button.disabled = !onlinePeers.length;
+  } catch (err) {
+    select.innerHTML = '<option value="">Failed to load drones</option>';
+    if (button) button.disabled = true;
+  }
+}
+
+async function pullSmtpConfigFromPeer() {
+  const select = document.getElementById("smtpPullPeer");
+  const peerId = select ? select.value : "";
+  if (!peerId) return;
+  const button = document.getElementById("smtpPullBtn");
+  if (button) { button.disabled = true; button.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Pulling...'; }
+  try {
+    await apiPost("/admin/smtp/pull-from-peer", { peer_id: peerId });
+    showToast("Pulled email configuration from peer.", "success");
+    await renderSmtpPage();
+  } catch (err) {
+    showToast(`Failed to pull email configuration: ${escapeHtml(err.message || "unknown error")}`, "danger", 8000);
+    if (button) { button.disabled = false; button.innerHTML = '<i class="bi bi-cloud-arrow-down me-1"></i>Pull Configuration'; }
+  }
+}
+
+// ------------------------------------------------------------ Notifications
+
+function stopNotificationsPoll() {
+  if (notificationsPollTimer) {
+    clearInterval(notificationsPollTimer);
+    notificationsPollTimer = null;
+  }
+}
+
+function startNotificationsPoll() {
+  // Lighter cadence than the 3s admin-tile polls above -- this only drives a
+  // badge count and runs on every page (not just while one tile is open), so
+  // there's no need to match their tighter interval.
+  stopNotificationsPoll();
+  refreshNotificationsUnreadCount();
+  notificationsPollTimer = setInterval(() => {
+    if (document.hidden) return;
+    refreshNotificationsUnreadCount();
+  }, 20000);
+}
+
+async function refreshNotificationsUnreadCount() {
+  try {
+    const payload = await api("/admin/notifications/unread-count");
+    const badge = document.getElementById("notificationsUnreadBadge");
+    if (!badge) return;
+    const count = payload.unread_count || 0;
+    if (count > 0) {
+      badge.textContent = count > 99 ? "99+" : String(count);
+      badge.classList.remove("d-none");
+    } else {
+      badge.classList.add("d-none");
+    }
+  } catch (err) {
+    // Transient poll failure: leave the last known badge state in place.
+  }
+}
+
+function renderNotificationItem(item) {
+  return `
+    <div class="notification-item ${item.read ? "is-read" : "is-unread"}" onclick="markNotificationRead(${item.id})">
+      <span class="notification-unread-dot"></span>
+      <div class="flex-grow-1">
+        <div class="small fw-semibold">${escapeHtml(item.title)}</div>
+        ${item.message ? `<div class="small text-muted">${escapeHtml(item.message)}</div>` : ""}
+        <div class="small text-muted">${escapeHtml(formatCompactLocalDate(item.created_at))}</div>
+      </div>
+      <button type="button" class="notification-dismiss-btn" onclick="event.stopPropagation(); dismissNotification(${item.id})" aria-label="Dismiss notification"><i class="bi bi-x-lg"></i></button>
+    </div>
+  `;
+}
+
+// Populated when the dropdown opens (show.bs.dropdown, wired near
+// brandHomeBtn's own listener) rather than kept live-polled -- a notification
+// inbox doesn't need 3s freshness while closed, only the unread badge does.
+async function refreshNotificationsDropdown() {
+  const dropdown = document.getElementById("notificationsDropdown");
+  if (!dropdown) return;
+  try {
+    const payload = await api("/admin/notifications?limit=20");
+    const items = payload.items || [];
+    const header = `
+      <div class="notifications-dropdown-header">
+        <strong>Notifications</strong>
+        <div>
+          <button type="button" class="btn btn-sm btn-link p-0 me-2" onclick="markAllNotificationsRead()">Mark all read</button>
+          <button type="button" class="btn btn-sm btn-link p-0 text-danger" onclick="clearAllNotifications()">Clear all</button>
+        </div>
+      </div>
+      <div class="dropdown-divider"></div>
+    `;
+    dropdown.innerHTML = items.length
+      ? header + items.map(renderNotificationItem).join("")
+      : header + '<div class="notifications-empty text-muted small px-2 py-3">No notifications yet.</div>';
+  } catch (err) {
+    dropdown.innerHTML = `<div class="text-danger small px-2 py-3">Failed to load notifications: ${escapeHtml(err.message || "unknown error")}</div>`;
+  }
+}
+
+async function markNotificationRead(id) {
+  try {
+    await apiPost(`/admin/notifications/${id}/read`, {});
+  } catch (err) {
+    // Ignore -- it'll just still show as unread next time the dropdown opens.
+  }
+  if (notificationsDropdownOpen) await refreshNotificationsDropdown();
+  await refreshNotificationsUnreadCount();
+}
+
+async function dismissNotification(id) {
+  try {
+    await apiPost(`/admin/notifications/${id}/dismiss`, {});
+  } catch (err) {
+    showToast(`Failed to dismiss notification: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    return;
+  }
+  await refreshNotificationsDropdown();
+  await refreshNotificationsUnreadCount();
+}
+
+async function markAllNotificationsRead() {
+  try {
+    await apiPost("/admin/notifications/read-all", {});
+  } catch (err) {
+    showToast(`Failed to mark notifications read: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    return;
+  }
+  await refreshNotificationsDropdown();
+  await refreshNotificationsUnreadCount();
+}
+
+async function clearAllNotifications() {
+  if (!window.confirm("Clear all notifications? This cannot be undone.")) return;
+  try {
+    await apiPost("/admin/notifications/clear", {});
+  } catch (err) {
+    showToast(`Failed to clear notifications: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    return;
+  }
+  await refreshNotificationsDropdown();
+  await refreshNotificationsUnreadCount();
 }
 
 async function purgeAssetCache() {
@@ -7760,6 +8295,9 @@ async function router() {
     if (hash !== "#admin/vpn") {
       stopVpnAutoRefresh();
     }
+    if (hash !== "#admin/smtp") {
+      stopSmtpAutoRefresh();
+    }
     document.body.classList.toggle("artwork-page", hash.startsWith("#admin/artwork"));
     if (hash === "#bios") {
       setHash(systemsTreeHash("", BIOS_TREE_ROOT));
@@ -7890,6 +8428,12 @@ async function router() {
         return;
       }
       await renderVpnPage();
+    } else if (hash === "#admin/smtp") {
+      if (!adminEnabled) {
+        setHash("");
+        return;
+      }
+      await renderSmtpPage();
     } else if (parseSystemRomHash(hash)) {
       const parsed = parseSystemRomHash(hash);
       await renderRomMediaPage(parsed.system, parsed.uniqueId, parsed.page);
@@ -7912,6 +8456,13 @@ backBtn.addEventListener("click", (event) => {
 brandHomeBtn.addEventListener("click", (event) => {
   event.preventDefault();
   setHash("#home");
+});
+notificationsBellBtn?.addEventListener("show.bs.dropdown", () => {
+  notificationsDropdownOpen = true;
+  refreshNotificationsDropdown();
+});
+notificationsBellBtn?.addEventListener("hide.bs.dropdown", () => {
+  notificationsDropdownOpen = false;
 });
 systemsMenuBtn.addEventListener("click", (event) => {
   event.preventDefault();

@@ -52,6 +52,18 @@ class FakeRpc:
                 "downloadSpeed": "0",
             }
             return gid
+        if method == "aria2.addUri":
+            self._gid_counter += 1
+            gid = f"gid{self._gid_counter}"
+            paused = params[1].get("pause") == "true"
+            self.statuses[gid] = {
+                "gid": gid,
+                "status": "paused" if paused else "active",
+                "totalLength": "0",
+                "completedLength": "0",
+                "downloadSpeed": "0",
+            }
+            return gid
         if method == "aria2.tellStatus":
             gid = params[0]
             if gid not in self.statuses:
@@ -722,6 +734,143 @@ class TorrentLifecycleTests(unittest.TestCase):
                 self.assertIn(entry["status"], ("queued", "downloading"))
                 if entry["status"] == "downloading":
                     self.assertNotEqual(entry["gid"], stale_gid)
+
+
+_MAGNET_URI = (
+    "magnet:?xt=urn:btih:c12fe1c06bba254a9dc9f519b335aa7c1367a88a&dn=Some+Test+File"
+)
+
+
+class TorrentCompletedNotificationTests(unittest.TestCase):
+    """torrent_completed must fire exactly once per torrent, the moment
+    completed_at is first set -- never again on later ticks that just
+    re-confirm the same complete/seeding status."""
+
+    def _manager(self, root: Path, rpc: FakeRpc) -> TorrentManager:
+        manager = TorrentManager(_build_settings(root), start_worker=False)
+        manager._daemon = FakeDaemon(rpc)
+        return manager
+
+    def test_fires_once_when_transitioning_to_complete(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            watch = root / "watch"
+            manager.update_settings({"directory": str(watch)})
+            _write_torrent(watch, "game")
+            with mock.patch.object(torrent_manager, "_notifications") as fake_notifications:
+                manager._tick()  # registers + adds (still active/incomplete)
+                with manager._lock:
+                    gid = next(iter(manager._torrents.values()))["gid"]
+                rpc.statuses[gid] = {
+                    "gid": gid, "status": "active", "totalLength": "100", "completedLength": "100", "downloadSpeed": "0",
+                }
+                manager._tick()  # completes here
+                manager._tick()  # must not re-fire
+                manager._tick()
+            fake_notifications.record_event.assert_called_once()
+            self.assertEqual(fake_notifications.record_event.call_args[0][1], "torrent_completed")
+            self.assertEqual(manager.snapshot()["torrents"][0]["status"], "complete")
+
+    def test_does_not_fire_while_still_downloading(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            watch = root / "watch"
+            manager.update_settings({"directory": str(watch)})
+            _write_torrent(watch, "game")
+            with mock.patch.object(torrent_manager, "_notifications") as fake_notifications:
+                manager._tick()
+                with manager._lock:
+                    gid = next(iter(manager._torrents.values()))["gid"]
+                rpc.statuses[gid] = {
+                    "gid": gid, "status": "active", "totalLength": "100", "completedLength": "50", "downloadSpeed": "10",
+                }
+                manager._tick()
+            fake_notifications.record_event.assert_not_called()
+
+
+class TorrentMagnetTests(unittest.TestCase):
+    def _manager(self, root: Path, rpc: FakeRpc) -> TorrentManager:
+        manager = TorrentManager(_build_settings(root), start_worker=False)
+        manager._daemon = FakeDaemon(rpc)
+        return manager
+
+    def test_add_magnet_rejects_invalid_uri(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = self._manager(Path(tmp), FakeRpc())
+            with self.assertRaises(ValueError):
+                manager.add_magnet("not-a-magnet-link")
+            with self.assertRaises(ValueError):
+                manager.add_magnet("magnet:?dn=missing-infohash")
+
+    def test_add_magnet_registers_entry_with_display_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = self._manager(Path(tmp), FakeRpc())
+            result = manager.add_magnet(_MAGNET_URI)
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(result["name"], "Some Test File")
+            entries = manager.snapshot()["torrents"]
+            self.assertEqual(len(entries), 1)
+            self.assertTrue(entries[0]["is_magnet"])
+            self.assertEqual(entries[0]["magnet_uri"], _MAGNET_URI)
+            self.assertEqual(entries[0]["status"], "queued")
+
+    def test_tick_adds_magnet_via_add_uri_paused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            manager.add_magnet(_MAGNET_URI)
+            manager._tick()
+            adds = rpc.method_calls("aria2.addUri")
+            self.assertEqual(len(adds), 1)
+            self.assertEqual(adds[0][0], [_MAGNET_URI])
+            self.assertEqual(adds[0][1]["pause"], "true")
+            entries = manager.snapshot()["torrents"]
+            self.assertIsNotNone(entries[0]["download_dir"])
+            with manager._lock:
+                gid = next(iter(manager._torrents.values()))["gid"]
+            self.assertIsNotNone(gid)
+            # aria2.addTorrent must never be called for a magnet-only entry --
+            # that path does Path(entry["torrent_file"]).read_bytes(), which
+            # would raise TypeError on the empty torrent_file a magnet entry has.
+            self.assertEqual(rpc.method_calls("aria2.addTorrent"), [])
+
+    def test_restart_restores_magnet_entry(self) -> None:
+        """Regression test for the _restore_state() gate that used to require
+        torrent_file unconditionally -- a magnet-only entry would previously
+        be silently dropped (not just lose its GID) on every Drone restart."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            manager.add_magnet(_MAGNET_URI)
+            manager._tick()
+            self.assertEqual(manager.snapshot()["torrents"][0]["status"], "downloading")
+
+            # Simulate a Drone restart: a second, independent TorrentManager
+            # pointed at the same state DB (same pattern as
+            # test_restart_restores_registry_and_requeues_inflight_downloads).
+            restarted = TorrentManager(_build_settings(root), start_worker=False)
+            entries = restarted.snapshot()["torrents"]
+            self.assertEqual(len(entries), 1)
+            self.assertTrue(entries[0]["is_magnet"])
+            self.assertEqual(entries[0]["magnet_uri"], _MAGNET_URI)
+            self.assertEqual(entries[0]["status"], "queued")
+            with restarted._lock:
+                self.assertIsNone(next(iter(restarted._torrents.values()))["gid"])
+
+    def test_delete_magnet_entry_does_not_crash_on_empty_torrent_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = self._manager(Path(tmp), FakeRpc())
+            added = manager.add_magnet(_MAGNET_URI)
+            result = manager.delete(added["id"])
+            self.assertEqual(result["status"], "deleted")
+            self.assertTrue(result["torrent_file_removed"])
+            self.assertEqual(manager.snapshot()["torrents"], [])
 
 
 class TorrentUploadTests(unittest.TestCase):

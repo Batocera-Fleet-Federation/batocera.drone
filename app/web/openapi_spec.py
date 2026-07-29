@@ -802,6 +802,135 @@ def _schemas() -> Dict[str, Schema]:
             },
             description="On-demand public-IP check (e.g. via ipinfo.io) to confirm traffic is routing through the tunnel.",
         ),
+        "SmtpStatusResponse": _object(
+            {
+                "has_config": _boolean(),
+                "host": _string(),
+                "port": _integer(),
+                "use_starttls": _boolean(),
+                "use_ssl": _boolean(),
+                "username": _string(),
+                "has_password": _boolean("Whether a password is stored -- the password itself is never returned"),
+                "from_address": _string(),
+                "recipient_email": _string("Where test and digest emails are sent"),
+                "imap_host": _string(),
+                "imap_port": _integer(),
+                "imap_use_ssl": _boolean(),
+                "imap_username": _string(),
+                "has_imap_password": _boolean("Whether an IMAP password is stored -- never returned"),
+                "sharing_enabled": _boolean("Whether paired peers may pull this config; always false for an imported config"),
+                "source_peer_id": _string("Peer this config was imported from, empty if self-configured"),
+                "source_peer_name": _string(),
+                "revoked_reason": _string(),
+                "revoked_at": _string(fmt="date-time", nullable=True),
+                "smtp_enabled": _boolean("Local master switch for sending mail from this drone -- independent of sharing"),
+                "notify": _object(additional_properties={"type": "boolean"}, description="event_type -> whether it's included in the email digest"),
+                "last_test_result": _object(additional_properties=True, description="{status, sent_at|error} of the most recent Test Email, or absent if never tested"),
+                "last_test_at": _string(fmt="date-time", nullable=True),
+                "last_digest_sent_at": _string(fmt="date-time", nullable=True),
+                "last_digest_error": _string(),
+            },
+            ("has_config", "smtp_enabled", "sharing_enabled"),
+            description="SMTP/IMAP configuration + sharing status snapshot.",
+        ),
+        "SmtpSettingsUpdateRequest": _object(
+            {
+                "host": _string(),
+                "port": _integer(),
+                "use_starttls": _boolean(),
+                "use_ssl": _boolean(),
+                "username": _string(),
+                "password": _string("Optional on update -- blank keeps the existing stored password"),
+                "from_address": _string(),
+                "recipient_email": _string(),
+                "imap_host": _string(),
+                "imap_port": _integer(),
+                "imap_use_ssl": _boolean(),
+                "imap_username": _string(),
+                "imap_password": _string("Optional on update -- blank keeps the existing stored password"),
+            },
+            description="Partial update accepted -- omitted fields keep their current value.",
+        ),
+        "SmtpEnabledRequest": _object({"enabled": _boolean()}, ("enabled",)),
+        "SmtpEnabledResponse": _object({"smtp_enabled": _boolean()}, ("smtp_enabled",)),
+        "SmtpNotificationTogglesRequest": _object(
+            additional_properties={"type": "boolean"},
+            description="event_type -> enabled; only keys present are changed.",
+        ),
+        "SmtpNotificationTogglesResponse": _object(
+            {"notify": _object(additional_properties={"type": "boolean"})}, ("notify",)
+        ),
+        "SmtpSharingRequest": _object({"enabled": _boolean()}, ("enabled",)),
+        "SmtpSharingResponse": _object({"sharing_enabled": _boolean()}, ("sharing_enabled",)),
+        "SmtpPullFromPeerRequest": _object(
+            {"peer_id": _string("drone_id of a paired peer that has SMTP sharing turned on")},
+            ("peer_id",),
+        ),
+        "SmtpPullFromPeerResponse": _object(
+            {"has_config": _boolean(), "host": _string(), "port": _integer()},
+            ("has_config",),
+            description="Result of importing a peer's shared SMTP/IMAP configuration -- same shape as SmtpStatusResponse.",
+            additional_properties=True,
+        ),
+        "SmtpTestResponse": _object(
+            {
+                "status": _enum(("ok", "error")),
+                "sent_at": _string(fmt="date-time", nullable=True),
+                "error": _string(nullable=True),
+            },
+            ("status",),
+            description="Result of the Test Email button.",
+        ),
+        "SmtpPeerConfigResponse": _object(
+            {
+                "host": _string(),
+                "port": _integer(),
+                "use_starttls": _boolean(),
+                "use_ssl": _boolean(),
+                "username": _string(),
+                "password": _string("Only ever served over this mTLS peer channel, never through any /admin/* response", nullable=True),
+                "from_address": _string(),
+                "recipient_email": _string(),
+                "imap_host": _string(),
+                "imap_port": _integer(),
+                "imap_use_ssl": _boolean(),
+                "imap_username": _string(),
+                "imap_password": _string(nullable=True),
+            },
+            ("host", "port"),
+            description="This drone's SMTP/IMAP settings as served to a paired peer -- only returned when sharing is on (see /admin/smtp/sharing).",
+        ),
+        "NotificationEntry": _object(
+            {
+                "id": _integer(),
+                "audit_log_id": _integer(),
+                "event_type": _string(),
+                "title": _string(),
+                "message": _string(),
+                "created_at": _string(fmt="date-time"),
+                "read_at": _string(fmt="date-time", nullable=True),
+                "read": _boolean(),
+            },
+            ("id", "event_type", "title", "created_at", "read"),
+        ),
+        "NotificationsListResponse": _object(
+            {
+                "items": _array(_ref("NotificationEntry")),
+                "limit": _integer(),
+                "has_more": _boolean(),
+                "next_before_id": _integer(nullable=True),
+                "unread_count": _integer(),
+            },
+            ("items", "limit", "has_more", "unread_count"),
+            description="Keyset-paginated notifications, newest first.",
+        ),
+        "NotificationUnreadCountResponse": _object({"unread_count": _integer()}, ("unread_count",)),
+        "NotificationActionResponse": _object({"status": _string()}, ("status",)),
+        "NotificationReadAllResponse": _object({"status": _string(), "marked_read": _integer()}, ("status", "marked_read")),
+        "NotificationClearRequest": _object({"only_read": _boolean("Clear only already-read notifications instead of all")}),
+        "NotificationClearResponse": _object({"status": _string(), "cleared": _integer()}, ("status", "cleared")),
+        "TorrentMagnetRequest": _object({"magnet_uri": _string()}, ("magnet_uri",)),
+        "TorrentMagnetResponse": _object({"status": _string(), "id": _string(), "name": _string()}, ("status", "id", "name")),
         "AssetCacheResponse": _object(
             {
                 "path": _string(),
@@ -1604,6 +1733,9 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             "/admin/torrents/clear": {
                 "post": _operation("Bulk-clean up torrents matching a scope", {"200": _json_response("TorrentClearResponse"), "400": _json_response("TorrentClearResponse", "No delete_* action selected")}, request_body=_json_request("TorrentClearRequest"), tags=["admin", "torrents"], error_codes=("401", "403", "429", "500", "503"))
             },
+            "/admin/torrents/magnet": {
+                "post": _operation("Add a magnet link to the torrent queue, paused like a scanned .torrent file", {"200": _json_response("TorrentMagnetResponse"), "400": _json_response("ErrorResponse", "Not a valid magnet link")}, request_body=_json_request("TorrentMagnetRequest"), tags=["admin", "torrents"], error_codes=("400", "401", "403", "429", "500", "503"))
+            },
             "/admin/vpn": {"get": _operation("Get OpenVPN configuration and live connection status", {"200": _json_response("VpnStatusResponse")}, tags=["admin", "vpn"], error_codes=("401", "403", "429", "500", "503"))},
             "/admin/vpn/upload": {
                 "post": _operation("Upload a provider .ovpn file (rewritten to use the managed credentials file)", {"200": _json_response("VpnUploadResponse"), "400": _json_response("ErrorResponse", "Not a valid OpenVPN config")}, request_body=_multipart_request("TorrentUploadRequest"), tags=["admin", "vpn"], error_codes=("401", "403", "429", "500", "503"))
@@ -1631,6 +1763,43 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             },
             "/admin/vpn/log/download": {
                 "get": _operation("Download the raw openvpn log", {"200": _media_response("Log file", ["text/plain"])}, tags=["admin", "vpn"], error_codes=("401", "403", "404", "429", "500"))
+            },
+            "/admin/smtp": {"get": _operation("Get SMTP/IMAP configuration and sharing status", {"200": _json_response("SmtpStatusResponse")}, tags=["admin", "smtp"], error_codes=("401", "403", "429", "500", "503"))},
+            "/admin/smtp/settings": {
+                "post": _operation("Save SMTP/IMAP settings (host/port/auth/from/recipient)", {"200": _json_response("SmtpStatusResponse"), "400": _json_response("ErrorResponse", "Missing/invalid host, from address, recipient, or port")}, request_body=_json_request("SmtpSettingsUpdateRequest"), tags=["admin", "smtp"], error_codes=("400", "401", "403", "429", "500", "503"))
+            },
+            "/admin/smtp/enabled": {
+                "post": _operation("Toggle whether this drone sends mail (Test Email + the digest poller) -- independent of sharing", {"200": _json_response("SmtpEnabledResponse")}, request_body=_json_request("SmtpEnabledRequest"), tags=["admin", "smtp"], error_codes=("401", "403", "429", "500", "503"))
+            },
+            "/admin/smtp/notifications": {
+                "post": _operation("Update which event types are included in the email digest", {"200": _json_response("SmtpNotificationTogglesResponse")}, request_body=_json_request("SmtpNotificationTogglesRequest"), tags=["admin", "smtp"], error_codes=("401", "403", "429", "500", "503"))
+            },
+            "/admin/smtp/sharing": {
+                "post": _operation("Toggle allowing paired peers to pull this SMTP config; rejected if this config was itself imported from a peer", {"200": _json_response("SmtpSharingResponse"), "400": _json_response("ErrorResponse", "This config was imported from a peer and cannot be re-shared")}, request_body=_json_request("SmtpSharingRequest"), tags=["admin", "smtp"], error_codes=("400", "401", "403", "429", "500", "503"))
+            },
+            "/admin/smtp/pull-from-peer": {
+                "post": _operation("Pull SMTP/IMAP settings from a paired peer and adopt them", {"200": _json_response("SmtpPullFromPeerResponse"), "404": _json_response("ErrorResponse", "Unknown peer, or that peer has sharing off / no config"), "502": _json_response("ErrorResponse", "Could not reach that peer")}, request_body=_json_request("SmtpPullFromPeerRequest"), tags=["admin", "smtp"], error_codes=("400", "401", "403", "404", "429", "500", "502", "503"))
+            },
+            "/admin/smtp/test": {
+                "post": _operation("Send a test email using the saved settings", {"200": _json_response("SmtpTestResponse"), "502": _json_response("SmtpTestResponse", "Send failed")}, tags=["admin", "smtp"], error_codes=("401", "403", "429", "500", "503"))
+            },
+            "/admin/notifications": {
+                "get": _operation("List notifications, newest first (keyset-paginated)", {"200": _json_response("NotificationsListResponse")}, parameters=[_query_param("before_id", _integer(), "Return items with id less than this"), _query_param("limit", _integer(), "Page size"), _query_param("unread_only", _string(), "1/true to return only unread items")], tags=["admin", "notifications"])
+            },
+            "/admin/notifications/unread-count": {
+                "get": _operation("Get the unread notification count (for the bell-icon badge)", {"200": _json_response("NotificationUnreadCountResponse")}, tags=["admin", "notifications"])
+            },
+            "/admin/notifications/{notification_id}/read": {
+                "post": _operation("Mark a notification read", {"200": _json_response("NotificationActionResponse"), "404": _json_response("NotificationActionResponse", "Notification not found")}, parameters=[_path_param("notification_id")], tags=["admin", "notifications"], error_codes=("401", "403", "429", "500"))
+            },
+            "/admin/notifications/read-all": {
+                "post": _operation("Mark every notification read", {"200": _json_response("NotificationReadAllResponse")}, tags=["admin", "notifications"])
+            },
+            "/admin/notifications/{notification_id}/dismiss": {
+                "post": _operation("Delete a single notification", {"200": _json_response("NotificationActionResponse"), "404": _json_response("NotificationActionResponse", "Notification not found")}, parameters=[_path_param("notification_id")], tags=["admin", "notifications"], error_codes=("401", "403", "429", "500"))
+            },
+            "/admin/notifications/clear": {
+                "post": _operation("Delete all notifications, or only already-read ones", {"200": _json_response("NotificationClearResponse")}, request_body=_json_request("NotificationClearRequest", required=False), tags=["admin", "notifications"])
             },
             "/admin/asset-cache": {"get": _operation("Get ROM, BIOS, and artwork asset cache progress", {"200": _json_response("AssetCacheResponse")}, tags=["admin"])},
             "/admin/asset-cache/purge": {"post": _operation("Purge cached asset metadata while keeping fingerprints", {"200": _json_response("AssetCachePurgeResponse")}, tags=["admin"])},
@@ -1873,6 +2042,15 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
                     "Get this drone's shared VPN config (+ credentials, if included) -- only when sharing is on",
                     {"200": _json_response("VpnPeerConfigResponse"), "404": _json_response("ErrorResponse", "Sharing is off, or no config has been uploaded")},
                     tags=["peer", "vpn"],
+                    security=peer_security,
+                    error_codes=("403", "404", "429", "500"),
+                )
+            },
+            "/peer/smtp/config": {
+                "get": _operation(
+                    "Get this drone's shared SMTP/IMAP settings -- only when sharing is on",
+                    {"200": _json_response("SmtpPeerConfigResponse"), "404": _json_response("ErrorResponse", "Sharing is off, or no config has been set up")},
+                    tags=["peer", "smtp"],
                     security=peer_security,
                     error_codes=("403", "404", "429", "500"),
                 )

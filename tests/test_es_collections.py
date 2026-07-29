@@ -659,7 +659,7 @@ class AdminControlsPageSplitTests(unittest.TestCase):
 
     def test_controls_nav_link_is_admin_gated(self) -> None:
         self.assertIn('const controlsMenuBtn = document.getElementById("controlsMenuBtn");', self.js)
-        self.assertIn("const adminLinks = [adminMenuBtn, controlsMenuBtn, automationMenuBtn, swarmMenuBtn, apiAccessBtn]", self.js)
+        self.assertIn("const adminLinks = [adminMenuBtn, controlsMenuBtn, automationMenuBtn, swarmMenuBtn, apiAccessBtn, notificationsBellWrap]", self.js)
         self.assertIn('controlsMenuBtn.addEventListener("click"', self.js)
         click_start = self.js.index('controlsMenuBtn.addEventListener("click"')
         click_end = self.js.index("});", click_start)

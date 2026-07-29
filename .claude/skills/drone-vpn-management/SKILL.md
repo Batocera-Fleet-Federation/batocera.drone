@@ -133,6 +133,53 @@ exempt — tests there always call `update_settings({"directory": ...})` with a
 tmp path before doing any real I/O, which is a different, equally valid way
 to avoid the same trap) should check for this class of bug too.
 
+### Real live incident: a release-versioned deploy layout broke `drone_install_root()` outright
+
+Found 2026-07-28 while live-debugging a user report of "Failed to connect:
+Request failed: 400" on every VPN connect attempt (both auto-connect-on-boot
+and a manual click). Root cause was in `common/install_paths.py`'s
+`drone_install_root()`, not in this module — but it broke VPN specifically
+and completely, because `vpn_dir()` is the one consumer with **no** way to
+override the computed path from user-facing settings (Torrents' watch folder
+is user-configurable and happened to mask the same underlying bug there).
+
+The device's deploy mechanism lays out `<install root>/app` as a symlink
+chain (`app -> current/app -> .releases/<version>/app`) for rollback-friendly
+deploys. `drone_install_root()` used to assume `Path(__file__).resolve().
+parents[2]` always lands two directories above a *stable* `app/` — true
+before this layout existed, false now: Python's import machinery reports
+`__file__` **already fully resolved through the symlink chain** (confirmed
+live: `__file__` itself, before `drone_install_root()` even touches it, was
+already `.../drone-app/.releases/0.1.91-.../app/common/install_paths.py`), so
+a fixed `parents[2]` silently landed inside the versioned release directory
+— which has no `vpn/` subfolder at all — instead of the stable install root.
+Every `openvpn --config <that wrong path>/vpn/client.ovpn` invocation then
+failed with `Error opening configuration file`, whose last output line
+("Use --help for more information.") is what `connect()`'s error-reduction
+surfaced. Reproduced by calling the real `vpn_manager.connect()` directly on
+the device via the `drone-live-debugging` skill's on-device-script technique,
+not by guessing from source alone.
+
+**Fix**: `drone_install_root()` now walks the resolved path's parents for a
+segment literally named `.releases` and returns *its* parent if found,
+falling back to the original fixed-depth computation when there's no such
+segment (a plain dev checkout). See `tests/test_install_paths.py` — in
+particular, the test that uses the exact real resolved path string found on
+the live device, which is the one that would have caught this before it
+shipped.
+
+A **second, independent** bug was found and fixed in the same session,
+worth knowing about even though it isn't specific to this module: `apiPost`/
+`api` in `drone.js` only ever read a `data.error` (singular string) field out
+of a failed response body — `_handle_admin_vpn_connect`'s `{"status":
+"error", "errors": [...]}` shape (plural array) fell through to a generic
+`Request failed: 400`, discarding the actual reason. This is exactly the
+symptom text the user reported. Fixed by having both helpers also fall back
+to joining a `data.errors` array when `data.error` is absent — a good
+reminder that a backend error shape and the frontend's generic error-message
+extraction can silently drift apart, and the failure mode is a genuinely
+unhelpful error message, not a crash, so it's easy to miss in review.
+
 ## `.ovpn` config rewrite rules (`rewrite_ovpn_config`)
 
 Applied to every uploaded config, regardless of provider:
@@ -542,6 +589,13 @@ oversell this feature as "fixes" that class of problem when explaining it.
 - Writing a test that calls `vpn_manager.save_uploaded_config`/
   `save_credentials`/etc. without patching `_drone_install_root` first — see
   "The test-isolation gotcha" above; this silently pollutes the real repo.
+- Assuming `common/install_paths.drone_install_root()` always lands at the
+  stable install root — under a release-versioned deploy layout it doesn't
+  unless it specifically walks past a `.releases` path segment; see "Real
+  live incident" above. This is the single most impactful bug found in this
+  module so far (it broke VPN connect outright, unconditionally, in
+  production) and is easy to reintroduce if that function is ever
+  "simplified" back to a fixed-depth `parents[N]` computation.
 - Using `killall openvpn` or matching on process name alone instead of the
   exact `--config <path>` argument — could affect an unrelated openvpn
   process on the same box.

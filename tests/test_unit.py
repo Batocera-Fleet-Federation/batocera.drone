@@ -6390,7 +6390,7 @@ class NavRestructureTests(unittest.TestCase):
 
         self.assertIn('const automationMenuBtn = document.getElementById("automationMenuBtn");', self.js)
         self.assertIn(
-            "const adminLinks = [adminMenuBtn, controlsMenuBtn, automationMenuBtn, swarmMenuBtn, apiAccessBtn]",
+            "const adminLinks = [adminMenuBtn, controlsMenuBtn, automationMenuBtn, swarmMenuBtn, apiAccessBtn, notificationsBellWrap]",
             self.js,
         )
         click_start = self.js.index('automationMenuBtn.addEventListener("click"')

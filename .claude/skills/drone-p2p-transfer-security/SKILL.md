@@ -334,21 +334,28 @@ path, and add a regression test that calls the actual poll/scan entry point
 that manually primes the cache before asserting on it will pass even if
 production never populates that cache at all.
 
-**The VPN config endpoint (`GET /peer/vpn/config`) is the one deliberate
-exception to "pairing alone is authorization."** It still requires
-`_peer_request_authorized()` like every endpoint above, but adds a **second,
-feature-owned gate** on top: the source drone's own `sharing_enabled` flag
-(`device/vpn_manager.py`), off by default and only ever flipped on by that
-drone's owner. Every other asset type here (roms/bios/saves/movies/artwork)
-is available to any paired peer with no further check, by design (see "Core
-Rules" above) — VPN credentials are the one payload sensitive enough to
-warrant an explicit opt-in on top of pairing. Don't use this as precedent to
-add gates to the other asset types, and don't remove this one from VPN "for
-consistency" — see the `drone-vpn-management` skill for the full rationale.
-It is also the one peer endpoint whose payload carries a plaintext secret
-(the OpenVPN credential) by design; that is still within the rules above,
-since mTLS + pairing was always the confidentiality boundary, not merely a
-convention that happened to apply only to non-secret files.
+**The VPN and SMTP config endpoints (`GET /peer/vpn/config`, `GET
+/peer/smtp/config`) are the two deliberate exceptions to "pairing alone is
+authorization."** Both still require `_peer_request_authorized()` like every
+endpoint above, but each adds a **second, feature-owned gate** on top: the
+source drone's own `sharing_enabled` flag (`device/vpn_manager.py` /
+`device/smtp_manager.py` respectively), off by default and only ever flipped
+on by that drone's owner. Every other asset type here
+(roms/bios/saves/movies/artwork) is available to any paired peer with no
+further check, by design (see "Core Rules" above) — VPN and SMTP credentials
+are payloads sensitive enough to warrant an explicit opt-in on top of
+pairing. Don't use this as precedent to add gates to the other asset types,
+and don't remove either of these two "for consistency" — see the
+`drone-vpn-management` and `drone-smtp-notifications` skills for the full
+rationale (both share the same shape: `sharing_enabled` + single-hop
+provenance + a revocation poller). They are also the only peer endpoints
+whose payload carries a plaintext secret (the OpenVPN credential; the
+SMTP/IMAP password) by design; that is still within the rules above, since
+mTLS + pairing was always the confidentiality boundary, not merely a
+convention that happened to apply only to non-secret files. If a third
+feature ever needs this same treatment, keep the pattern — a feature-owned
+`sharing_enabled` gate on top of pairing, not a change to the other asset
+types' pairing-only trust.
 
 ## Transfer Source Decision Rules
 

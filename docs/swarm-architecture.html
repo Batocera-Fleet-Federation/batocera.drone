@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark light">
 <title>Batocera Swarm Architecture</title>
-<meta name="description" content="How Drones pair, transfer, and share a VPN across networks and geographies -- peer-to-peer, no central hub.">
+<meta name="description" content="How Drones pair, transfer, and share a VPN or SMTP email configuration across networks and geographies -- peer-to-peer, no central hub.">
 </head>
 <body>
 <style>
@@ -901,11 +901,12 @@
       </svg>
     </div>
     <p class="caption">Everyone in the swarm is presumed to be the same owner &mdash; pairing is the only authorization check, same as ROM/BIOS transfer. Two independent gates keep credential distribution single-hop: <code>set_sharing_enabled()</code> refuses to turn on for an imported config, and <code>export_payload()</code> refuses to serve one, even if the first check were ever bypassed.</p>
+    <p class="caption">SMTP/IMAP email settings share this exact lifecycle over <code>GET /peer/smtp/config</code> (<code>app/device/smtp_manager.py</code>) &mdash; same off-by-default <code>sharing_enabled</code> gate, same single-hop provenance, same revocation poller. The one difference: SMTP's swarm-bootstrap has no "actively connected right now" check to wait for, since sending mail isn't a persistent tunnel &mdash; any paired peer that's sharing and returns a usable host qualifies immediately. See the <code>drone-smtp-notifications</code> skill for depth.</p>
   </section>
 
   <footer>
     <span>Batocera Fleet Federation &middot; batocera.drone &middot; peer-to-peer, no central hub</span>
-    <span>Diagram reflects app/transport, app/device/vpn_manager.py, app/transfer/peer_connectivity.py as of 2026-07-28</span>
+    <span>Diagram reflects app/transport, app/device/vpn_manager.py, app/device/smtp_manager.py, app/transfer/peer_connectivity.py as of 2026-07-28</span>
   </footer>
 
 </div>

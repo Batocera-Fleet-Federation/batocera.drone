@@ -19,6 +19,7 @@ from urllib.error import HTTPError
 
 try:
     from ..common.settings import Settings
+    from ..device import notifications as _notifications
     from ..storage import movies_store as _movies_store
     from ..storage import saves_store as _saves_store
     from ..storage.state_store import database_path as _state_database_path
@@ -39,6 +40,7 @@ try:
     )
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.settings import Settings  # type: ignore
+    from device import notifications as _notifications  # type: ignore
     from storage import movies_store as _movies_store  # type: ignore
     from storage import saves_store as _saves_store  # type: ignore
     from storage.state_store import database_path as _state_database_path  # type: ignore
@@ -1075,6 +1077,17 @@ class DownloadManager:
             if terminal_activity:
                 if _local_network.is_local_mode(self.settings):
                     _local_network.record_activity(self.settings, terminal_activity)
+                if terminal_activity.get("status") == "completed":
+                    _notifications.record_event(
+                        self.settings,
+                        "asset_downloaded",
+                        "Asset downloaded",
+                        str(terminal_activity.get("relative_path") or terminal_activity.get("rom_name") or ""),
+                        details={
+                            "asset_type": terminal_activity.get("asset_type"),
+                            "source_drone_id": terminal_activity.get("source_drone_id"),
+                        },
+                    )
                 if asset_type == "rom" and terminal_activity.get("status") == "completed":
                     _kick_asset_metadata_sync_after_download(self.settings, self.repository, config, "rom_download_completed")
                     # Receiver-driven artwork: pull the game's artwork from the same

@@ -18,6 +18,7 @@ try:
     from ..device.pixen import is_pixen_installed as _is_pixen_installed
     from ..device.pixen import pixen_script_path as _pixen_script_path
     from ..device.device_control import _apply_audio_volume, _apply_screen_mode, _get_audio_volume, _get_screen_mode
+    from ..device import notifications as _notifications
     from ..device.system_metrics import _collect_gpu_info, _collect_performance_metrics, _sample_speed
     from ..device.game_activity import (
         load_gameplay_history as _load_gameplay_history,
@@ -32,6 +33,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from device.pixen import is_pixen_installed as _is_pixen_installed  # type: ignore
     from device.pixen import pixen_script_path as _pixen_script_path  # type: ignore
     from device.device_control import _apply_audio_volume, _apply_screen_mode, _get_audio_volume, _get_screen_mode  # type: ignore
+    from device import notifications as _notifications  # type: ignore
     from device.system_metrics import _collect_gpu_info, _collect_performance_metrics, _sample_speed  # type: ignore
     from device.game_activity import (  # type: ignore
         load_gameplay_history as _load_gameplay_history,
@@ -460,6 +462,9 @@ class HandlersDiagnosticsMixin:
         except (OSError, subprocess.SubprocessError, ValueError) as error:
             self._send_json(500, {"error": f"Unable to set volume: {error}"})
             return
+        _notifications.record_event(
+            self.settings, "manual_control_submitted", "Manual control submitted", f"Volume set to {applied}"
+        )
         self._send_json(200, {"audio_volume": applied})
 
     def _handle_admin_screen_mode_get(self) -> None:
@@ -476,6 +481,9 @@ class HandlersDiagnosticsMixin:
         except (OSError, subprocess.SubprocessError, ET.ParseError, ValueError) as error:
             self._send_json(500, {"error": f"Unable to update screen mode: {error}"})
             return
+        _notifications.record_event(
+            self.settings, "manual_control_submitted", "Manual control submitted", f"Screen mode set to {mode}"
+        )
         self._send_json(200, {"screen_mode": mode, "emulationstation_restarted": restarted})
 
     # HandlersNetworkMixin methods now live in web/handlers_network.py (composed onto RomRequestHandler).

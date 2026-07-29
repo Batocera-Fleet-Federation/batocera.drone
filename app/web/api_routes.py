@@ -130,6 +130,10 @@ class ApiRoutesMixin:
                 self._handle_peer_vpn_config()
                 return
 
+            if len(parts) == 3 and parts[0] == "peer" and parts[1] == "smtp" and parts[2] == "config":
+                self._handle_peer_smtp_config()
+                return
+
             # Public: the SPA shell and its own "am I logged in" probe must be
             # reachable with no session cookie yet, or a browser could never
             # load the login form in the first place. Everything else below
@@ -346,6 +350,18 @@ class ApiRoutesMixin:
 
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "vpn" and parts[2] == "log" and parts[3] == "download":
                 self._handle_admin_vpn_log_download()
+                return
+
+            if len(parts) == 2 and parts[0] == "admin" and parts[1] == "smtp":
+                self._handle_admin_smtp_status()
+                return
+
+            if len(parts) == 2 and parts[0] == "admin" and parts[1] == "notifications":
+                self._handle_admin_notifications_list(query_params)
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "notifications" and parts[2] == "unread-count":
+                self._handle_admin_notifications_unread_count()
                 return
 
             if len(parts) == 2 and parts[0] == "admin" and parts[1] == "es-collections":
@@ -726,6 +742,11 @@ class ApiRoutesMixin:
                 self._handle_admin_torrents_upload()
                 return
 
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "torrents" and parts[2] == "magnet":
+                payload = self._read_json_body()
+                self._handle_admin_torrents_add_magnet(payload)
+                return
+
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "torrents" and parts[2] == "aria2" and parts[3] == "install":
                 self._handle_admin_torrents_aria2_install()
                 return
@@ -794,6 +815,52 @@ class ApiRoutesMixin:
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "vpn" and parts[2] == "self-heal":
                 payload = self._read_json_body()
                 self._handle_admin_vpn_self_heal(payload)
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "smtp" and parts[2] == "settings":
+                payload = self._read_json_body()
+                self._handle_admin_smtp_settings_update(payload)
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "smtp" and parts[2] == "enabled":
+                payload = self._read_json_body()
+                self._handle_admin_smtp_enabled(payload)
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "smtp" and parts[2] == "notifications":
+                payload = self._read_json_body()
+                self._handle_admin_smtp_notifications_update(payload)
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "smtp" and parts[2] == "sharing":
+                payload = self._read_json_body()
+                self._handle_admin_smtp_sharing(payload)
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "smtp" and parts[2] == "pull-from-peer":
+                payload = self._read_json_body()
+                self._handle_admin_smtp_pull_from_peer(payload)
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "smtp" and parts[2] == "test":
+                self._handle_admin_smtp_test()
+                return
+
+            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "notifications" and parts[3] == "read":
+                self._handle_admin_notification_read(parts[2])
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "notifications" and parts[2] == "read-all":
+                self._handle_admin_notifications_read_all()
+                return
+
+            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "notifications" and parts[3] == "dismiss":
+                self._handle_admin_notification_dismiss(parts[2])
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "notifications" and parts[2] == "clear":
+                payload = self._read_json_body()
+                self._handle_admin_notifications_clear(payload)
                 return
 
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "artwork" and parts[2] == "launchbox" and parts[3] == "apply":

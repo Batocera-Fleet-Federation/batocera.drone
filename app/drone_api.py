@@ -709,6 +709,14 @@ except ImportError:
 
 
 try:
+    from .device import smtp_manager as _smtp_manager
+except ImportError:
+    if __package__ not in (None, ""):
+        raise
+    from device import smtp_manager as _smtp_manager  # type: ignore
+
+
+try:
     from .transfer.peer_download import (
         _cached_rom_fingerprint_exists,
         _download_artwork_from_peer,
@@ -882,6 +890,9 @@ _TORRENT_MANAGER = None
 _VPN_AUTO_CONNECT_ATTEMPTED = False
 _VPN_SHARING_POLLER_STARTED = False
 _VPN_SELF_HEAL_POLLER_STARTED = False
+_SMTP_BOOTSTRAP_ATTEMPTED = False
+_SMTP_SHARING_POLLER_STARTED = False
+_AUDIT_EMAIL_POLLER_STARTED = False
 # _PERFORMANCE_METRICS_LAST_SAMPLE moved to device/system_metrics.py.
 # LAUNCHBOX_API_BASE / LAUNCHBOX_IMAGE_BASE / SCRAPER_USER_AGENT moved to scrapers.py.
 try:  # ARTWORK_FIELDS now lives in roms/gamelist.py (re-exported for back-compat)
@@ -1179,6 +1190,22 @@ except ImportError:
 
 
 try:
+    from .web.handlers_smtp import HandlersSmtpMixin
+except ImportError:
+    if __package__ not in (None, ""):
+        raise
+    from web.handlers_smtp import HandlersSmtpMixin  # type: ignore
+
+
+try:
+    from .web.handlers_notifications import HandlersNotificationsMixin
+except ImportError:
+    if __package__ not in (None, ""):
+        raise
+    from web.handlers_notifications import HandlersNotificationsMixin  # type: ignore
+
+
+try:
     from .web.handlers_system import HandlersSystemMixin
 except ImportError:
     if __package__ not in (None, ""):
@@ -1218,7 +1245,7 @@ except ImportError:
     from web.handlers_auth import HandlersAuthMixin  # type: ignore
 
 
-class RomRequestHandler(HandlersAuthMixin, HandlersSystemMixin, HandlersDownloadsMixin, HandlersTorrentsMixin, HandlersVpnMixin, HandlersDiagnosticsMixin, HandlersConfigMixin, HandlersNetworkMixin, HandlersArtworkMixin, HandlersContentMixin, ThemeMetaMixin, HandlersEsCollectionsMixin, HandlersPeerMixin, HandlersRemoteAdminMixin, ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
+class RomRequestHandler(HandlersAuthMixin, HandlersSystemMixin, HandlersDownloadsMixin, HandlersTorrentsMixin, HandlersVpnMixin, HandlersSmtpMixin, HandlersNotificationsMixin, HandlersDiagnosticsMixin, HandlersConfigMixin, HandlersNetworkMixin, HandlersArtworkMixin, HandlersContentMixin, ThemeMetaMixin, HandlersEsCollectionsMixin, HandlersPeerMixin, HandlersRemoteAdminMixin, ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
     server_version = "DroneApp/4.0"
     openapi_spec = OPENAPI_SPEC
     # Per-connection idle timeout (applied to the socket in BaseHTTPRequestHandler.setup).
@@ -1847,7 +1874,7 @@ def _apply_server_tls(settings: Settings, server: ThreadingHTTPServer, *, peer_m
 
 
 def create_server(settings: Settings) -> ThreadingHTTPServer:
-    global _ROM_METADATA_POLLER_STARTED, _ROM_METADATA_WATCHER_STARTED, _LOCAL_NETWORK_WORKERS_STARTED, _GAME_PROCESS_MONITOR_STARTED, _GAME_PROCESS_MONITOR, _DOWNLOAD_MANAGER, _TORRENT_MANAGER, _AUTOMATION_POLLER_STARTED, _VPN_AUTO_CONNECT_ATTEMPTED, _VPN_SHARING_POLLER_STARTED, _VPN_SELF_HEAL_POLLER_STARTED
+    global _ROM_METADATA_POLLER_STARTED, _ROM_METADATA_WATCHER_STARTED, _LOCAL_NETWORK_WORKERS_STARTED, _GAME_PROCESS_MONITOR_STARTED, _GAME_PROCESS_MONITOR, _DOWNLOAD_MANAGER, _TORRENT_MANAGER, _AUTOMATION_POLLER_STARTED, _VPN_AUTO_CONNECT_ATTEMPTED, _VPN_SHARING_POLLER_STARTED, _VPN_SELF_HEAL_POLLER_STARTED, _SMTP_BOOTSTRAP_ATTEMPTED, _SMTP_SHARING_POLLER_STARTED, _AUDIT_EMAIL_POLLER_STARTED
     roms_root, bios_root = _real_data_roots(settings)
     repository = RomRepository(
         roms_root,
@@ -1904,6 +1931,22 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
         # anyone needing to notice and manually reconnect -- see
         # run_self_heal_poller's own docstring for the rate-limiting.
         Thread(target=_vpn_manager.run_self_heal_poller, args=(settings,), name="drone-vpn-self-heal", daemon=True).start()
+    if not _SMTP_BOOTSTRAP_ATTEMPTED:
+        _SMTP_BOOTSTRAP_ATTEMPTED = True
+        # Backgrounded for the same reason as VPN's auto-connect above: a
+        # peer fetch must never delay the server accepting its first request.
+        Thread(target=_smtp_manager.maybe_bootstrap_smtp, args=(settings,), name="drone-smtp-bootstrap", daemon=True).start()
+    if not _SMTP_SHARING_POLLER_STARTED:
+        _SMTP_SHARING_POLLER_STARTED = True
+        # Same reasoning as VPN's sharing-revocation poller: outbound-only,
+        # no push channel, so revocation can only be learned by periodically asking.
+        Thread(target=_smtp_manager.run_sharing_revocation_poller, args=(settings,), name="drone-smtp-sharing-revocation", daemon=True).start()
+    if not _AUDIT_EMAIL_POLLER_STARTED:
+        _AUDIT_EMAIL_POLLER_STARTED = True
+        # The "cron style job every ~5 minutes" -- there is no OS cron
+        # anywhere in this app; every periodic feature is an in-process
+        # thread on this exact shape (see the VPN pollers just above).
+        Thread(target=_smtp_manager.run_audit_email_digest_poller, args=(settings,), name="drone-audit-email-digest", daemon=True).start()
     _ensure_game_event_spool(settings)
     if not _GAME_PROCESS_MONITOR_STARTED:
         poll_seconds = max(0.25, float(os.environ.get("GAME_PROCESS_POLL_SECONDS", "2")))

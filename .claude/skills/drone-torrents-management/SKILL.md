@@ -1,6 +1,6 @@
 ---
 name: drone-torrents-management
-description: Use this when designing, reviewing, debugging, or modifying the Drone's Torrents admin tile — watched-folder .torrent downloads, the local aria2c daemon/RPC lifecycle, the watched folder vs. download-location distinction, aria2c install, .torrent upload, force-start/cancel/delete, moving downloaded files out of a completed torrent, global pause/resume/bulk-clear, or app/transfer/torrent_manager.py, aria2_runtime.py, web/handlers_torrents.py.
+description: Use this when designing, reviewing, debugging, or modifying the Drone's Torrents admin tile — watched-folder .torrent downloads, magnet-link submission, the local aria2c daemon/RPC lifecycle, the watched folder vs. download-location distinction, aria2c install, .torrent upload, force-start/cancel/delete, moving downloaded files out of a completed torrent, global pause/resume/bulk-clear, or app/transfer/torrent_manager.py, aria2_runtime.py, web/handlers_torrents.py.
 ---
 
 # Drone Torrents Management Skill
@@ -35,6 +35,41 @@ worker thread (`_worker`/`_tick`, polling every `DRONE_TORRENT_POLL_SECONDS`,
 default 3s) — a real difference from `device/vpn_manager.py`'s stateless,
 compute-on-request design, because a torrent queue has actual scheduling work
 to do (which torrent gets a slot next), not just a single process to check.
+
+## Magnet links: a second entry point into the same scheduler
+
+`add_magnet(magnet_uri)` registers a magnet link exactly like
+`_scan_watch_directory_locked()` registers a scanned `.torrent` file — same
+entry shape, same `_torrents` dict, same scheduler — except there is no
+backing file, so the entry's `torrent_file` is `""` and a new `magnet_uri`
+field (added to `_ENTRY_PERSISTED_FIELDS`) carries the URI instead. `_tick()`'s
+Phase B branches on `entry.get("magnet_uri")` to call `_add_magnet_via_rpc`
+(`rpc.call("aria2.addUri", [[magnet_uri], options])`) instead of
+`_add_torrent_via_rpc` — **never** call the latter on a magnet-only entry:
+`Path(entry["torrent_file"]).read_bytes()` raises `TypeError` on an empty
+string, which is not caught by that function's `except OSError`, and would
+abort the whole tick's add/query loop for every other torrent too, not just
+the magnet one. `Aria2Rpc.call()` (`aria2_runtime.py`) is a generic JSON-RPC
+passthrough with no per-method allowlist, so `addUri` needed no client-side
+change, only the new caller. The display name is a best-effort parse of the
+magnet URI's own `dn=` parameter (`_magnet_display_name`), overwritten by the
+real torrent name once aria2 resolves BitTorrent metadata (the existing
+`bittorrent.info.name` handling in `_apply_aria2_status_locked` already
+applies regardless of how an entry was added — no magnet-specific code
+needed there).
+
+**The gotcha that bit here**: `_restore_state()`'s restart-recovery gate used
+to require `torrent_file` unconditionally
+(`if not entry_id or not torrent_file or ...: continue`) — for a magnet-only
+entry that's always empty, so the gate **silently dropped the entry
+entirely** on every Drone restart (not merely losing its GID, the way a
+`.torrent`-backed entry's stale GID is recovered). Fixed by accepting either
+`torrent_file` **or** `magnet_uri` being truthy; the rest of the
+restart-recovery logic (downgrade `queued`/`downloading` back to `queued`
+with `gid: None` so the next tick re-adds it) is already field-driven and
+needed no other change. `delete()`/`clear()`'s `Path(entry["torrent_file"]).
+unlink(...)` calls are guarded the same way (skip when `torrent_file` is
+empty) for the identical reason.
 
 ## Core design: the manager's own scheduler, not aria2's queue
 
@@ -328,6 +363,14 @@ re-`innerHTML` the whole tile, on every 3s poll tick.
   first with a tmp path -- see the `DRONE_VPN_DIR`-equivalent gotcha in
   `drone-vpn-management` for why this class of bug is easy to introduce for
   any install-root-relative path.
+- Assuming `default_torrent_directory()` (via `common/install_paths.
+  drone_install_root()`) always resolves to the stable install root -- a real
+  production bug (found live 2026-07-28, see `drone-vpn-management`'s "Real
+  live incident" section) had it silently landing inside a versioned
+  `.releases/<version>/` deploy subfolder instead. Torrents wasn't visibly
+  broken by it only because the watch/download folders are normally
+  user-configured (bypassing this function); an un-configured install on the
+  same deploy layout would hit it identically to how VPN did.
 - Trusting a client-supplied file path in `move_files()` instead of
   intersecting against `_resolve_known_files(entry)` -- would let a caller
   move arbitrary files the torrent never downloaded.
@@ -342,6 +385,13 @@ re-`innerHTML` the whole tile, on every 3s poll tick.
   `drone.js` -- see the "window.bootstrap collision" note in
   `drone-admin-features`'s modal section; it silently breaks every
   `data-bs-dismiss="modal"` button app-wide, including any new Torrents modal.
+- Requiring `torrent_file` unconditionally anywhere new code is added -- a
+  magnet-only entry has none; check `magnet_uri` too (or use
+  `entry.get("torrent_file")` truthiness rather than assuming it's always
+  set) the same way `_restore_state()`, `delete()`, and `clear()` now do.
+- Calling `_add_torrent_via_rpc` on an entry that has `magnet_uri` set
+  (or vice versa) -- `_tick()`'s Phase B must branch on `entry.get("magnet_uri")`
+  before picking which RPC caller to use.
 
 ## Expected output format
 

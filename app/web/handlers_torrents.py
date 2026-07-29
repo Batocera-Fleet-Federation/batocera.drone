@@ -65,6 +65,20 @@ class HandlersTorrentsMixin:
         result = manager.save_uploaded_torrents(files)
         self._send_json(200 if result.get("saved") else 400, result)
 
+    def _handle_admin_torrents_add_magnet(self, payload: dict) -> None:
+        manager = _get_torrent_manager()
+        if manager is None:
+            self._send_json(503, {"error": "torrent manager unavailable"})
+            return
+        payload = payload if isinstance(payload, dict) else {}
+        magnet_uri = str(payload.get("magnet_uri") or payload.get("uri") or "")
+        try:
+            result = manager.add_magnet(magnet_uri)
+        except ValueError as error:
+            self._send_json(400, {"error": str(error)})
+            return
+        self._send_json(200, result)
+
     def _handle_admin_torrents_aria2_install(self) -> None:
         manager = _get_torrent_manager()
         if manager is None:

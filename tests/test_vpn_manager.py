@@ -531,6 +531,59 @@ class StatusTests(unittest.TestCase):
             self.assertFalse(result["installed"])
 
 
+class ConnectedDisconnectedNotificationTests(unittest.TestCase):
+    """status() must fire vpn_connected/vpn_disconnected exactly once per
+    genuine transition -- never on a repeated poll of an unchanged status
+    (the admin UI polls status() every 3s)."""
+
+    def _settings_with_running_process(self, tmp: str, log_text: str):
+        settings = _build_settings(self, Path(tmp))
+        vpn_manager.save_uploaded_config(settings, "client.ovpn", SAMPLE_OVPN.encode())
+        vpn_manager.save_credentials(settings, "user", "pass")
+        vpn_manager.vpn_dir(settings).mkdir(parents=True, exist_ok=True)
+        vpn_manager.log_path(settings).write_text(log_text, encoding="utf-8")
+        return settings
+
+    def test_first_ever_disconnected_status_does_not_fire_disconnected(self) -> None:
+        # No prior status recorded yet -- this is not a real "it just went
+        # down" transition, just the first observation ever.
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            with mock.patch.object(vpn_manager, "find_openvpn_binary", return_value="/usr/sbin/openvpn"), \
+                    mock.patch.object(vpn_manager, "_find_running_openvpn_pid", return_value=None), \
+                    mock.patch.object(vpn_manager, "_notifications") as fake_notifications:
+                vpn_manager.status(settings)
+            fake_notifications.record_event.assert_not_called()
+
+    def test_connecting_fires_once_and_not_again_while_still_connected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._settings_with_running_process(tmp, "Initialization Sequence Completed\n")
+            with mock.patch.object(vpn_manager, "find_openvpn_binary", return_value="/usr/sbin/openvpn"), \
+                    mock.patch.object(vpn_manager, "_find_running_openvpn_pid", return_value=999), \
+                    mock.patch.object(vpn_manager, "_tunnel_ip", return_value="10.8.0.2"), \
+                    mock.patch.object(vpn_manager, "_notifications") as fake_notifications:
+                vpn_manager.status(settings)
+                vpn_manager.status(settings)
+                vpn_manager.status(settings)
+            fake_notifications.record_event.assert_called_once()
+            self.assertEqual(fake_notifications.record_event.call_args[0][1], "vpn_connected")
+
+    def test_disconnecting_after_connected_fires_disconnected_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._settings_with_running_process(tmp, "Initialization Sequence Completed\n")
+            with mock.patch.object(vpn_manager, "find_openvpn_binary", return_value="/usr/sbin/openvpn"), \
+                    mock.patch.object(vpn_manager, "_find_running_openvpn_pid", return_value=999), \
+                    mock.patch.object(vpn_manager, "_tunnel_ip", return_value="10.8.0.2"):
+                vpn_manager.status(settings)  # establishes "connected" as the baseline, unmocked notifications
+            with mock.patch.object(vpn_manager, "find_openvpn_binary", return_value="/usr/sbin/openvpn"), \
+                    mock.patch.object(vpn_manager, "_find_running_openvpn_pid", return_value=None), \
+                    mock.patch.object(vpn_manager, "_notifications") as fake_notifications:
+                vpn_manager.status(settings)
+                vpn_manager.status(settings)
+            fake_notifications.record_event.assert_called_once()
+            self.assertEqual(fake_notifications.record_event.call_args[0][1], "vpn_disconnected")
+
+
 class SharingEnabledTests(unittest.TestCase):
     def test_defaults_to_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
