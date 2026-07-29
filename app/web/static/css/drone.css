@@ -122,6 +122,10 @@
       position: relative;
       cursor: pointer;
       flex-shrink: 0;
+      overflow: visible;
+    }
+    .notifications-bell img {
+      border-radius: 50%;
     }
     .notifications-unread-badge {
       position: absolute;
@@ -440,6 +444,38 @@
     .log-card .card-header {
       background: rgba(31, 42, 68, 0.86);
       border-color: var(--admin-border);
+    }
+    .es-collections-scroll {
+      max-height: 280px;
+      overflow-y: auto;
+      transition: max-height 0.25s ease;
+    }
+    .es-collections-scroll.expanded {
+      max-height: none;
+    }
+    .es-collections-toggle {
+      display: flex;
+      justify-content: center;
+      border-top: 1px solid var(--admin-border);
+    }
+    .es-collections-toggle-btn {
+      width: 100%;
+      background: transparent;
+      border: 0;
+      color: var(--admin-muted);
+      padding: 0.4rem;
+      font-size: 0.82rem;
+      cursor: pointer;
+    }
+    .es-collections-toggle-btn:hover,
+    .es-collections-toggle-btn:focus-visible {
+      color: var(--admin-text);
+    }
+    .es-collections-toggle-btn i {
+      transition: transform 0.2s ease;
+    }
+    .es-collections-toggle-btn.expanded i {
+      transform: rotate(180deg);
     }
     .themed-table {
       --bs-table-bg: transparent;
@@ -956,6 +992,64 @@
     .help-terms dd:last-child {
       margin-bottom: 0;
     }
+    .help-security-band {
+      border: 1px solid rgba(0, 194, 255, 0.35);
+      background: linear-gradient(135deg, rgba(0, 194, 255, 0.10), rgba(255, 62, 165, 0.05));
+      border-radius: 8px;
+      padding: 1.1rem 1.25rem;
+    }
+    .help-security-band h3 i {
+      color: var(--admin-sidebar-accent);
+    }
+    .help-term-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+    }
+    .help-term {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      padding: 0.4rem 0.75rem;
+      border-radius: 999px;
+      border: 1px solid rgba(0, 194, 255, 0.35);
+      background: rgba(0, 194, 255, 0.08);
+      color: #d7f4ff;
+      font-size: 0.82rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: background 0.15s ease, transform 0.1s ease;
+    }
+    .help-term:hover,
+    .help-term:focus-visible {
+      background: rgba(0, 194, 255, 0.2);
+      transform: translateY(-1px);
+    }
+    .help-term:focus-visible {
+      outline: 2px solid var(--admin-sidebar-accent);
+      outline-offset: 2px;
+    }
+    .help-term i {
+      font-size: 0.72rem;
+      opacity: 0.85;
+    }
+    .help-term-inline {
+      background: none;
+      border: 0;
+      padding: 0;
+      margin: 0;
+      color: #7fe3ff;
+      text-decoration: underline;
+      text-decoration-style: dotted;
+      text-underline-offset: 2px;
+      cursor: pointer;
+      font: inherit;
+      font-weight: 700;
+    }
+    .help-term-inline:hover,
+    .help-term-inline:focus-visible {
+      color: #fff;
+    }
     .system-info-grid {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -1054,6 +1148,25 @@
       border: 1px solid rgba(0, 194, 255, 0.26);
       font-weight: 500;
       padding: 0.38rem 0.58rem;
+    }
+    #systemInfoBar button.badge.sysinfo-badge-btn {
+      cursor: pointer;
+      font: inherit;
+      font-weight: 500;
+      appearance: none;
+      -webkit-appearance: none;
+      transition: filter 0.15s ease, transform 0.1s ease;
+    }
+    #systemInfoBar button.badge.sysinfo-badge-btn:hover,
+    #systemInfoBar button.badge.sysinfo-badge-btn:focus-visible {
+      filter: brightness(1.25);
+    }
+    #systemInfoBar button.badge.sysinfo-badge-btn:focus-visible {
+      outline: 2px solid var(--admin-sidebar-accent);
+      outline-offset: 2px;
+    }
+    #systemInfoBar button.badge.sysinfo-badge-btn:active {
+      transform: translateY(1px);
     }
     .artwork-page .topbar {
       display: none !important;

@@ -15,6 +15,7 @@ from pathlib import Path
 try:
     from ..app_version import drone_app_version as _drone_app_version
     from ..common.settings import Settings
+    from ..common.batocera_version import _read_batocera_version
     from ..common.http_errors import _format_http_error
     from ..roms.rom_metadata_state import _rom_metadata_cache_status
     from ..transfer.drone_network import _get_local_ip_addresses
@@ -25,6 +26,7 @@ try:
 except ImportError:  # pragma: no cover - direct script execution fallback
     from app_version import drone_app_version as _drone_app_version  # type: ignore
     from common.settings import Settings  # type: ignore
+    from common.batocera_version import _read_batocera_version  # type: ignore
     from common.http_errors import _format_http_error  # type: ignore
     from roms.rom_metadata_state import _rom_metadata_cache_status  # type: ignore
     from transfer.drone_network import _get_local_ip_addresses  # type: ignore
@@ -57,14 +59,7 @@ def _collect_system_info_payload(settings: Settings) -> dict:
         uptime = float(Path("/proc/uptime").read_text(encoding="utf-8").split()[0])
     except Exception:
         uptime = None
-    batocera_version = None
-    for candidate in (settings.userdata_root / "system" / "batocera.version", Path("/usr/share/batocera/batocera.version")):
-        try:
-            if candidate.exists():
-                batocera_version = candidate.read_text(encoding="utf-8", errors="ignore").splitlines()[0].strip()
-                break
-        except Exception:
-            continue
+    batocera_version = _read_batocera_version(settings.userdata_root)
     asset_cache = {}
     try:
         cache_status = _rom_metadata_cache_status(settings)

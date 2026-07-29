@@ -1860,6 +1860,99 @@ async function renderSystemsPage() {
   setLoading(false);
   refreshRandomThemeLogo().catch(() => {});
 }
+// Plain-language explainers for the security/technology terms referenced on
+// the home page, opened by showTechInfo() -- keeps that copy skimmable while
+// still letting anyone tap a term for the real explanation + a place to read
+// more, instead of writing a full paragraph inline for each one.
+const HELP_TECH_GLOSSARY = {
+  e2ee: {
+    title: "End-to-end encryption",
+    icon: "bi-lock-fill",
+    body: "When two of your Drones exchange files directly, the connection is encrypted for the whole trip, from one machine straight to the other. Nothing in between -- including any relay hop a transfer might pass through -- can read what's inside; only the two machines involved hold the keys.",
+    link: "https://en.wikipedia.org/wiki/End-to-end_encryption",
+    linkText: "Read more about end-to-end encryption",
+  },
+  mtls: {
+    title: "Certificate-verified peers",
+    icon: "bi-patch-check-fill",
+    body: "Before two Drones will talk to each other, each one proves its identity with a certificate -- more like a passport that's hard to fake than a password that can be guessed. Because both sides check the other's certificate, a machine you haven't paired can't pretend to be one of yours, and yours won't be tricked into sending files to an impostor.",
+    link: "https://en.wikipedia.org/wiki/Mutual_authentication",
+    linkText: "Read more about mutual authentication",
+  },
+  vpn: {
+    title: "VPN support",
+    icon: "bi-incognito",
+    body: "A VPN routes this machine's traffic through an encrypted tunnel to a provider you choose, so your local network and internet provider can't see what it's doing. Upload your provider's configuration file on the VPN page, add your login, and Drone connects automatically -- reconnecting on its own if the tunnel ever drops.",
+    link: "https://en.wikipedia.org/wiki/Virtual_private_network",
+    linkText: "Read more about VPNs",
+  },
+  localcreds: {
+    title: "Credentials stay local",
+    icon: "bi-key-fill",
+    body: "Passwords, VPN logins, and email credentials are stored only on the machine you entered them on -- never uploaded anywhere, and never sent to another Drone without you asking for it. When you do choose to share a VPN or email setup with a paired machine, it travels over the same encrypted, certificate-verified link as everything else.",
+    link: "",
+    linkText: "",
+  },
+  bruteforce: {
+    title: "Brute-force protection",
+    icon: "bi-shield-exclamation",
+    body: "Login and admin routes watch for repeated failed attempts. Once too many happen too quickly from one place, further attempts are automatically slowed down or blocked, so guessing a password by brute force isn't practical.",
+    link: "https://en.wikipedia.org/wiki/Brute-force_attack",
+    linkText: "Read more about brute-force attacks",
+  },
+  p2p: {
+    title: "Peer-to-peer transfers",
+    icon: "bi-arrow-left-right",
+    body: "Instead of sending files up to a central server and back down again, your machines send content directly to each other over the same encrypted, certificate-verified link used everywhere else in Drone. It's faster, keeps your library from passing through anyone else's server, and only ever works between machines you've explicitly paired.",
+    link: "https://en.wikipedia.org/wiki/Peer-to-peer",
+    linkText: "Read more about peer-to-peer networking",
+  },
+  torrent: {
+    title: "BitTorrent",
+    icon: "bi-magnet",
+    body: "BitTorrent downloads a file in small pieces from multiple sources at once instead of one slow direct link, which is usually much faster for large or popular files. Drone runs a small torrent client so you can pull a .torrent file down on one machine, then let the rest of your fleet grab it from that machine peer-to-peer instead of downloading it all over again.",
+    link: "https://en.wikipedia.org/wiki/BitTorrent",
+    linkText: "Read more about BitTorrent",
+  },
+  tailnet: {
+    title: "Tailnet",
+    icon: "bi-globe2",
+    body: "A tailnet is a private mesh network -- from a free service called Tailscale -- that lets your own devices reach each other directly no matter which network they're on, without opening any ports or reconfiguring your router. It's what lets a Drone at a friend's house, or your phone out in the world, reach your machines back home.",
+    link: "https://tailscale.com/",
+    linkText: "Learn more at tailscale.com",
+  },
+};
+function showTechInfo(key) {
+  const entry = HELP_TECH_GLOSSARY[key];
+  if (!entry) return;
+  const modalId = "techInfoModal";
+  let modal = document.getElementById(modalId);
+  if (!modal) {
+    modal = document.createElement("div");
+    modal.id = modalId;
+    modal.className = "modal fade";
+    modal.tabIndex = -1;
+    document.body.appendChild(modal);
+  }
+  modal.innerHTML = `
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content themed-modal">
+        <div class="modal-header">
+          <h5 class="modal-title mb-0"><i class="bi ${entry.icon} me-2"></i>${escapeHtml(entry.title)}</h5>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <p class="mb-0">${escapeHtml(entry.body)}</p>
+        </div>
+        <div class="modal-footer">
+          ${entry.link ? `<a href="${escapeHtml(entry.link)}" target="_blank" rel="noopener noreferrer" class="btn btn-outline-primary btn-sm me-auto"><i class="bi bi-box-arrow-up-right me-1"></i>${escapeHtml(entry.linkText || "Learn more")}</a>` : ""}
+          <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Close</button>
+        </div>
+      </div>
+    </div>`;
+  const bsModal = window.bootstrap?.Modal ? window.bootstrap.Modal.getOrCreateInstance(modal) : null;
+  bsModal?.show();
+}
 async function renderHelpPage() {
   currentSystemContext = null;
   clearSystemTheme();
@@ -1872,18 +1965,46 @@ async function renderHelpPage() {
         <div>
           <div class="help-kicker">Batocera Drone</div>
           <h2 class="h3 mb-2">Run your whole collection like a fleet — not one machine at a time.</h2>
-          <p class="mb-2 text-muted">Drone runs quietly on this Batocera machine and gives you a browser dashboard for everything on it — your library, saves, BIOS, artwork, and live health — from any phone, tablet, or computer on your network. No controller or TV required.</p>
-          <p class="mb-0 text-muted">Pair your machines together on the Swarm page and they become a federation: copy content cabinet-to-cabinet, watch every Drone's health from any of them, and — with the free tailnet connection — reach it all from your phone anywhere in the world. No central server, no port forwarding.</p>
+          <p class="mb-2 text-muted">Drone runs quietly on this Batocera machine and gives you a management dashboard for everything on it — your library, saves, BIOS, artwork, and live health — from any phone, tablet, or computer on your network. No controller or TV required.</p>
+          <p class="mb-3 text-muted">Pair your machines together on the Swarm page and they become a fleet: copy content cabinet-to-cabinet over an encrypted peer-to-peer link, watch every Drone's health from any of them, and — with the free tailnet connection — reach it all from your phone anywhere in the world. No central server, no port forwarding, and your library never has to pass through anyone else's server.</p>
+          <div class="d-flex flex-wrap gap-2">
+            <button class="btn btn-primary" type="button" onclick="setHash('#systems')"><i class="bi bi-grid me-1"></i>Browse your library</button>
+            <button class="btn btn-outline-light" type="button" onclick="setHash('#admin/swarm')"><i class="bi bi-diagram-3 me-1"></i>See your fleet</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="help-security-band mb-4">
+        <div class="d-flex align-items-center gap-2 mb-2">
+          <i class="bi bi-shield-lock-fill fs-5"></i>
+          <h3 class="h5 mb-0">Private and secure by default</h3>
+        </div>
+        <p class="text-muted mb-3">Security isn't an add-on here — every connection between your machines is protected the same way automatically, and it's worth knowing what's actually doing the protecting. Tap any of these to find out:</p>
+        <div class="help-term-row">
+          <button class="help-term" type="button" onclick="showTechInfo('e2ee')"><i class="bi bi-lock-fill"></i>End-to-end encryption</button>
+          <button class="help-term" type="button" onclick="showTechInfo('mtls')"><i class="bi bi-patch-check-fill"></i>Certificate-verified peers</button>
+          <button class="help-term" type="button" onclick="showTechInfo('vpn')"><i class="bi bi-incognito"></i>VPN support</button>
+          <button class="help-term" type="button" onclick="showTechInfo('localcreds')"><i class="bi bi-key-fill"></i>Credentials stay local</button>
+          <button class="help-term" type="button" onclick="showTechInfo('bruteforce')"><i class="bi bi-shield-exclamation"></i>Brute-force protection</button>
         </div>
       </div>
 
       <div class="row g-3 mb-4">
         <div class="col-12 col-md-6 col-xl-4">
           <div class="help-metric h-100">
-            <i class="bi bi-phone"></i>
+            <i class="bi bi-speedometer2"></i>
             <div>
-              <div class="help-metric-title">Browse from anywhere</div>
-              <div class="text-muted small">View and search your entire collection from any browser on your network.</div>
+              <div class="help-metric-title">Management dashboard</div>
+              <div class="text-muted small">CPU, memory, storage, and network health at a glance, plus screen mode, volume, and EmulationStation controls — all from a browser.</div>
+            </div>
+          </div>
+        </div>
+        <div class="col-12 col-md-6 col-xl-4">
+          <div class="help-metric h-100">
+            <i class="bi bi-diagram-3"></i>
+            <div>
+              <div class="help-metric-title">Fleet management</div>
+              <div class="text-muted small">Pair your machines and every one of them shows the whole fleet's health and content — no central server required.</div>
             </div>
           </div>
         </div>
@@ -1891,8 +2012,17 @@ async function renderHelpPage() {
           <div class="help-metric h-100">
             <i class="bi bi-arrow-left-right"></i>
             <div>
-              <div class="help-metric-title">Sync between machines</div>
-              <div class="text-muted small">Copy games, saves, BIOS, and artwork cabinet-to-cabinet — no re-downloading.</div>
+              <div class="help-metric-title">Secure peer-to-peer sharing</div>
+              <div class="text-muted small">Copy games, saves, BIOS, and artwork directly between machines over an <button class="help-term-inline" type="button" onclick="event.stopPropagation(); showTechInfo('p2p')">encrypted peer-to-peer link</button> instead of re-downloading everything.</div>
+            </div>
+          </div>
+        </div>
+        <div class="col-12 col-md-6 col-xl-4">
+          <div class="help-metric h-100">
+            <i class="bi bi-robot"></i>
+            <div>
+              <div class="help-metric-title">Automation &amp; remote control</div>
+              <div class="text-muted small">Idle volume, stuck-game exit, and Wi-Fi recovery run on their own, or manage kiosk mode and restarts yourself, remotely.</div>
             </div>
           </div>
         </div>
@@ -1900,35 +2030,17 @@ async function renderHelpPage() {
           <div class="help-metric h-100">
             <i class="bi bi-magnet"></i>
             <div>
-              <div class="help-metric-title">Build your library</div>
-              <div class="text-muted small">Pull new content in with the built-in Torrents downloader, then share it across the fleet without downloading it twice.</div>
+              <div class="help-metric-title">Torrent manager</div>
+              <div class="text-muted small">Pull new content in with a built-in <button class="help-term-inline" type="button" onclick="event.stopPropagation(); showTechInfo('torrent')">BitTorrent</button> client, then share it across your fleet peer-to-peer.</div>
             </div>
           </div>
         </div>
         <div class="col-12 col-md-6 col-xl-4">
           <div class="help-metric h-100">
-            <i class="bi bi-sliders"></i>
+            <i class="bi bi-envelope"></i>
             <div>
-              <div class="help-metric-title">Manage remotely</div>
-              <div class="text-muted small">Kiosk mode, volume, restarts, and cache refreshes — from any browser, anywhere via the tailnet.</div>
-            </div>
-          </div>
-        </div>
-        <div class="col-12 col-md-6 col-xl-4">
-          <div class="help-metric h-100">
-            <i class="bi bi-incognito"></i>
-            <div>
-              <div class="help-metric-title">Private networking</div>
-              <div class="text-muted small">Route this machine through your own VPN provider — upload a config, add credentials, connect. No CLI required.</div>
-            </div>
-          </div>
-        </div>
-        <div class="col-12 col-md-6 col-xl-4">
-          <div class="help-metric h-100">
-            <i class="bi bi-shield-lock"></i>
-            <div>
-              <div class="help-metric-title">Secure by design</div>
-              <div class="text-muted small">Encrypted everywhere, certificate-verified peers, and credentials that never leave the machine.</div>
+              <div class="help-metric-title">Notifications &amp; email</div>
+              <div class="text-muted small">Get an email digest of fleet activity and pick exactly which events — downloads, offline devices, and more — are worth an alert.</div>
             </div>
           </div>
         </div>
@@ -1977,6 +2089,10 @@ async function renderHelpPage() {
                   a: "Yes — the VPN page manages an OpenVPN connection for this machine end to end: upload your provider's .ovpn file, add your credentials, and connect. Drone verifies the tunnel is actually up (interface, IP, and log output), so you're not left guessing whether it's working."
                 },
                 {
+                  q: "Can Drone send me email updates?",
+                  a: "Yes — the Email page connects Drone to your own SMTP provider (there's no Drone-run mail server) and can send a digest of fleet activity plus alerts for the specific events you choose, like a completed download or a device going offline. Credentials stay on this machine unless you choose to share them with a paired peer."
+                },
+                {
                   q: "What is the Asset Cache?",
                   a: "Drone's fast snapshot of what this machine holds — ROMs, BIOS, and artwork with their fingerprints. It's what makes browsing, searching, and peer-to-peer transfers quick without rescanning the disk every time."
                 },
@@ -1994,7 +2110,7 @@ async function renderHelpPage() {
                 },
                 {
                   q: "Is it secure?",
-                  a: "Drone keeps sensitive credentials local, gates protected tools behind authenticated routes, and uses certificates so trusted cabinets can identify each other without ever sharing private keys."
+                  a: "Yes — see \"Private and secure by default\" near the top of this page for the specifics (encryption, certificate-verified peers, VPN support, local-only credentials, and brute-force protection), each with a plain-language explanation and a place to read more."
                 },
                 {
                   q: "Why do some features disappear?",
@@ -2029,6 +2145,7 @@ async function renderHelpPage() {
               <button class="help-link-row" type="button" onclick="setHash('#admin/system-info')"><i class="bi bi-pc-display"></i><span><strong>Check machine health</strong><small>CPU, memory, storage, network, and connection speed at a glance.</small></span></button>
               <button class="help-link-row" type="button" onclick="setHash('#admin/torrents')"><i class="bi bi-magnet"></i><span><strong>Fetch new content</strong><small>Download via the built-in torrent client, then share it across your fleet.</small></span></button>
               <button class="help-link-row" type="button" onclick="setHash('#admin/vpn')"><i class="bi bi-incognito"></i><span><strong>Go private</strong><small>Connect this machine to your VPN provider and confirm the tunnel is live.</small></span></button>
+              <button class="help-link-row" type="button" onclick="setHash('#admin/smtp')"><i class="bi bi-envelope"></i><span><strong>Stay in the loop</strong><small>Get an email digest and pick which events are worth an alert.</small></span></button>
             </div>
             <div class="mt-2 small">
               <button class="btn btn-link p-0 align-baseline" type="button" onclick="setHash('#admin/swarm')">Manage your whole fleet on the Swarm page <i class="bi bi-arrow-right ms-1"></i></button>
@@ -2040,10 +2157,8 @@ async function renderHelpPage() {
             <dl class="help-terms mb-0">
               <dt>Better with more machines</dt>
               <dd>A single Drone is a handy dashboard. A few of them paired on the Swarm page become a fleet you keep in sync from any screen — no central server involved.</dd>
-              <dt>Peer-to-peer sync</dt>
-              <dd>Cabinets copy content directly from each other over encrypted links, so you don't re-download the same files on every machine.</dd>
-              <dt>Serious about security</dt>
-              <dd>Security was built in from the start, not bolted on. Every connection is encrypted over HTTPS, machine-to-machine transfers use mutually-authenticated TLS with pinned certificates so only trusted cabinets can connect, sensitive credentials never leave this machine, admin tools sit behind authentication, and unauthenticated requests are rate-limited and brute-force protected.</dd>
+              <dt>No middleman</dt>
+              <dd>There's no cloud account or company server in the loop. Your machines talk directly to each other, and only to devices you've explicitly paired.</dd>
             </dl>
           </div>
         </div>
@@ -2058,7 +2173,7 @@ async function renderHelpPage() {
           <li>Not sure of the name? Check Batocera under <strong>Network Settings</strong> &gt; <strong>Hostname</strong> and use that in place of <code>BATOCERA-HOSTNAME</code>.</li>
           <li>Older bookmarks and router rules can still use <code>https://BATOCERA-HOSTNAME.local:8443</code>.</li>
         </ol>
-        <h3 class="h5 mb-3"><i class="bi bi-globe2 me-2"></i>Reach this Drone from anywhere (tailnet)</h3>
+        <h3 class="h5 mb-3"><i class="bi bi-globe2 me-2"></i>Reach this Drone from anywhere (<button class="help-term-inline" type="button" onclick="showTechInfo('tailnet')">tailnet</button>)</h3>
         <p class="text-muted">No port forwarding or router changes needed. Connect this Drone to your tailnet once, and it gets a private <code>100.x</code> address that works from any network.</p>
         <ol class="mb-0">
           <li>Open the <strong>Swarm</strong> page and follow the <strong>Tailnet</strong> card: create the free account, paste an auth key, done.</li>
@@ -6815,9 +6930,9 @@ async function renderAutomationPage() {
     ? `<div class="text-muted small mb-3"><i class="bi bi-controller me-1"></i>${gameRunning ? "A game is currently running." : "No game is currently running."}</div>`
     : "";
   content.innerHTML = `
-    <div class="row">
-      <div class="col-lg-8">
-        <div class="card mb-3">
+    <div class="row row-cols-1 row-cols-lg-2 g-3">
+      <div class="col">
+        <div class="card h-100">
           <div class="card-header"><i class="bi bi-sliders me-2"></i>Set volume when idle</div>
           <div class="card-body">
             ${monitorAlert}
@@ -6840,7 +6955,9 @@ async function renderAutomationPage() {
             <button class="btn btn-primary" id="idleVolumeSaveBtn"><i class="bi bi-save me-1"></i>Save</button>
           </div>
         </div>
-        <div class="card mb-3">
+      </div>
+      <div class="col">
+        <div class="card h-100">
           <div class="card-header"><i class="bi bi-power me-2"></i>Exit game when idle</div>
           <div class="card-body">
             ${monitorAlert}
@@ -6859,7 +6976,9 @@ async function renderAutomationPage() {
             <button class="btn btn-primary" id="idleGameExitSaveBtn"><i class="bi bi-save me-1"></i>Save</button>
           </div>
         </div>
-        <div class="card">
+      </div>
+      <div class="col">
+        <div class="card h-100">
           <div class="card-header"><i class="bi bi-wifi me-2"></i>Recover Wi-Fi connection</div>
           <div class="card-body">
             <div class="text-muted small mb-3"><i class="bi bi-router me-1"></i>Wi-Fi is ${escapeHtml(wifiEnabledLabel)} and ${escapeHtml(wifiConnectedLabel)}.</div>
@@ -7909,7 +8028,7 @@ async function renderAdminSystemInfoPage() {
                 ${detail("Machine ID", fields.machine_id)}
                 ${detail("Network IP", fields.network_ip_address)}
                 ${detail("Router IP", fields.router_ip_address)}
-                ${detail("Batocera", fields.batocera_version || fields.system)}
+                ${detail("Batocera", fields.batocera_version)}
                 ${detail("PixN", pixnInstalled ? "Installed" : "Not installed")}
               </div>
             </div>
@@ -8042,14 +8161,20 @@ async function renderAdminControlsPage() {
           <input type="search" class="form-control form-control-sm" id="esCollectionsSearchInput" placeholder="Filter systems and collections...">
           <div class="small text-muted mt-2 d-none" id="esCollectionsNoMatches">No systems or collections match that search.</div>
         </div>
-        <div class="card-body" id="esCollectionsBody"><div class="text-muted">Loading...</div></div>
+        <div class="es-collections-scroll" id="esCollectionsScroll">
+          <div class="card-body" id="esCollectionsBody"><div class="text-muted">Loading...</div></div>
+        </div>
+        <div class="es-collections-toggle">
+          <button type="button" class="es-collections-toggle-btn" id="esCollectionsToggleBtn" aria-expanded="false" aria-controls="esCollectionsScroll">
+            <i class="bi bi-chevron-down"></i> <span class="es-collections-toggle-label">Show more</span>
+          </button>
+        </div>
       </div>
       <div class="card log-card">
         <div class="card-header d-flex justify-content-between align-items-center">
           <span><i class="bi bi-database-check me-2"></i>Asset Cache</span>
           <div class="d-flex gap-2">
             <button id="systemInfoAssetCacheRefreshBtn" class="btn btn-sm btn-outline-primary" type="button"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
-            <button class="btn btn-sm btn-outline-warning" type="button" onclick="clearPendingAssetChanges()"><i class="bi bi-x-circle me-1"></i>Clear Pending</button>
             <button class="btn btn-sm btn-outline-danger" type="button" onclick="purgeAssetCache()">Purge &amp; Resync</button>
           </div>
         </div>
@@ -8125,6 +8250,16 @@ async function renderAdminControlsPage() {
 
     loadScreenMode();
 
+    const esCollectionsToggleBtn = document.getElementById("esCollectionsToggleBtn");
+    const esCollectionsScroll = document.getElementById("esCollectionsScroll");
+    esCollectionsToggleBtn?.addEventListener("click", () => {
+      const expanded = esCollectionsScroll.classList.toggle("expanded");
+      esCollectionsToggleBtn.classList.toggle("expanded", expanded);
+      esCollectionsToggleBtn.setAttribute("aria-expanded", String(expanded));
+      esCollectionsToggleBtn.querySelector(".es-collections-toggle-label").textContent = expanded ? "Show less" : "Show more";
+      if (!expanded) esCollectionsScroll.scrollIntoView({block: "nearest"});
+    });
+
     document.getElementById("esCollectionsRefreshBtn")?.addEventListener("click", async () => {
       try {
         await loadEsCollections();
@@ -8178,19 +8313,8 @@ async function loadThemePage(offset = 0) {
   const data = await api(url);
   renderThemeGallery(data);
 }
-function _extractInfoField(lines, keys) {
-  const lowered = (keys || []).map((k) => String(k).toLowerCase());
-  for (const line of lines || []) {
-    const s = String(line || "");
-    const ls = s.toLowerCase();
-    for (const key of lowered) {
-      if (ls.includes(key) && s.includes(":")) {
-        const value = s.split(":", 2)[1].trim();
-        if (value) return value;
-      }
-    }
-  }
-  return null;
+function _sysInfoBadge(innerHtml, hash, title, style = "") {
+  return `<button type="button" class="badge sysinfo-badge-btn" style="${style}" onclick="setHash('${hash}')" title="${escapeHtml(title)}">${innerHtml}</button>`;
 }
 async function loadSystemInfoBar() {
   if (systemInfoLoaded) return;
@@ -8207,7 +8331,7 @@ async function loadSystemInfoBar() {
     const payload = await api("/admin/system-info");
     const fields = payload.fields || {};
     const lines = payload.lines || [];
-    const version = fields.batocera_version || fields.system || _extractInfoField(lines, ["version", "batocera version", "system"]);
+    const version = fields.batocera_version;
     const droneAppVersion = fields.drone_app_version || payload.drone_app_version || "";
     const machineId = fields.machine_id || "";
     const chips = [];
@@ -8215,12 +8339,12 @@ async function loadSystemInfoBar() {
       droneVersionBadge.textContent = droneAppVersion;
       droneVersionBadge.classList.remove("d-none");
     }
-    if (version) chips.push(`<span class="badge">Batocera: ${escapeHtml(version)}</span>`);
-    if (machineId) chips.push(`<span class="badge">Machine ID: ${escapeHtml(machineId)}</span>`);
+    if (version) chips.push(_sysInfoBadge(`Batocera: ${escapeHtml(version)}`, "#admin/system-info", "Open System Info"));
+    if (machineId) chips.push(_sysInfoBadge(`Machine ID: ${escapeHtml(machineId)}`, "#admin/system-info", "Open System Info"));
     try {
       const overview = await api("/admin/swarm/overview");
       const connectedCount = (overview.drones || []).filter(drone => drone.online).length;
-      chips.push(`<span class="badge" style="background:rgba(52,211,153,0.15);color:#34d399;border-color:rgba(52,211,153,0.4)">Connected: ${connectedCount}</span>`);
+      chips.push(_sysInfoBadge(`Connected: ${connectedCount}`, "#admin/swarm", "Open Swarm", "background:rgba(52,211,153,0.15);color:#34d399;border-color:rgba(52,211,153,0.4)"));
     } catch (_) {
       // Swarm overview is best-effort context, not core system info.
     }
@@ -8230,9 +8354,19 @@ async function loadSystemInfoBar() {
       const vpnStyle = vpnConnected
         ? "background:rgba(52,211,153,0.15);color:#34d399;border-color:rgba(52,211,153,0.4)"
         : "background:rgba(148,163,184,0.15);color:#94a3b8;border-color:rgba(148,163,184,0.4)";
-      chips.push(`<span class="badge" style="${vpnStyle}"><i class="bi bi-shield-lock me-1"></i>VPN: ${vpnConnected ? "Connected" : "Disconnected"}</span>`);
+      chips.push(_sysInfoBadge(`<i class="bi bi-shield-lock me-1"></i>VPN: ${vpnConnected ? "Connected" : "Disconnected"}`, "#admin/vpn", "Open VPN", vpnStyle));
     } catch (_) {
       // VPN status is best-effort context, not core system info.
+    }
+    try {
+      const smtp = await api("/admin/smtp");
+      const emailOn = !!smtp.smtp_enabled;
+      const emailStyle = emailOn
+        ? "background:rgba(52,211,153,0.15);color:#34d399;border-color:rgba(52,211,153,0.4)"
+        : "background:rgba(148,163,184,0.15);color:#94a3b8;border-color:rgba(148,163,184,0.4)";
+      chips.push(_sysInfoBadge(`<i class="bi bi-envelope me-1"></i>Email: ${emailOn ? "On" : "Off"}`, "#admin/smtp", "Open Email", emailStyle));
+    } catch (_) {
+      // SMTP status is best-effort context, not core system info.
     }
     if (machineNav && machineId) machineNav.textContent = `Machine ID: ${machineId}`;
     if (!chips.length && lines.length) {

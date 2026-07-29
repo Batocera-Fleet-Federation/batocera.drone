@@ -12,6 +12,7 @@ from pathlib import Path
 
 try:
     from ..app_version import drone_app_version as _drone_app_version
+    from ..common.batocera_version import _read_batocera_version
     from ..common.http_errors import _format_http_error
     from ..common.logtail import _tail_lines
     from ..device.tailnet_service import tailnet_status
@@ -27,6 +28,7 @@ try:
     from ..transfer.drone_network import _get_router_ip_address
 except ImportError:  # pragma: no cover - direct script execution fallback
     from app_version import drone_app_version as _drone_app_version  # type: ignore
+    from common.batocera_version import _read_batocera_version  # type: ignore
     from common.http_errors import _format_http_error  # type: ignore
     from common.logtail import _tail_lines  # type: ignore
     from device.tailnet_service import tailnet_status  # type: ignore
@@ -366,6 +368,13 @@ class HandlersDiagnosticsMixin:
                     fields["router_ip_address"] = value
                 elif key_lower == "battery":
                     fields["battery"] = value
+
+            # batocera-info's "Version" line is free-form CLI text and can be
+            # missing or differently labeled; the on-disk version file is the
+            # authoritative source for the actual Batocera release (e.g. "43.1").
+            file_batocera_version = _read_batocera_version(self.settings.userdata_root)
+            if file_batocera_version:
+                fields["batocera_version"] = file_batocera_version
 
             entries.insert(0, {"key": "Machine ID", "value": self.settings.device_id})
             entries.append({"key": "PixN Installed", "value": "yes" if pixen_installed else "no"})
