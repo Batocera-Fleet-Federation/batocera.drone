@@ -39,6 +39,36 @@ class MoviesStoreTest(unittest.TestCase):
         self.assertFalse(hasattr(entry, "system"))
         self.assertTrue(entry.fingerprint)
 
+    def test_scan_traverses_all_sibling_and_nested_subfolders(self):
+        # Real-world layout: multiple sibling category folders, one of them
+        # nested a level deeper still (per-show subfolders under "shows").
+        # os.walk() recurses into every directory it finds unless the walker
+        # explicitly prunes its dirnames list -- _iter_movie_files never does,
+        # so this must find every file regardless of how deep it's nested.
+        self._write("Vacation.mp4")
+        self._write("horror/The Shining.mp4")
+        self._write("comedy/Airplane.mp4")
+        self._write("shows/Breaking Bad/S01E01.mp4")
+        self._write("shows/Breaking Bad/S01E02.mp4")
+        self._write("shows/The Office/S02E05.mp4")
+        entries = movies_store.scan_movies(self.movies_root)
+        self.assertEqual(
+            sorted(entry.file_path for entry in entries),
+            [
+                "Vacation.mp4",
+                "comedy/Airplane.mp4",
+                "horror/The Shining.mp4",
+                "shows/Breaking Bad/S01E01.mp4",
+                "shows/Breaking Bad/S01E02.mp4",
+                "shows/The Office/S02E05.mp4",
+            ],
+        )
+        # sync_movies_cache()/list_movies() -- the paths actually served to
+        # peers -- must reflect the same full set, not just the top level.
+        movies_store.sync_movies_cache(self.movies_root)
+        listed_paths = sorted(item["file_path"] for item in movies_store.list_movies(self.movies_root))
+        self.assertEqual(listed_paths, sorted(entry.file_path for entry in entries))
+
     def test_scan_ignores_partial_and_lock_files(self):
         self._write("Real Movie.mp4")
         self._write("Downloading.mp4.part")
