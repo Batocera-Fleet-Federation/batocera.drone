@@ -1,6 +1,6 @@
 ---
 name: drone-smtp-notifications
-description: Use this when designing, reviewing, debugging, or modifying the Drone's SMTP/Email admin tile — SMTP/IMAP configuration, peer-to-peer email-credential sharing (mirrors VPN sharing), the Test Email button, the ~5-minute activity-digest poller, the relational audit_log/notifications SQLite tables, the 10 notification-type toggles, the notifications bell/dropdown reachable from the top-left drone icon, or app/device/smtp_manager.py, app/device/notifications.py, app/storage/audit_store.py, web/handlers_smtp.py, web/handlers_notifications.py.
+description: Use this when designing, reviewing, debugging, or modifying the Drone's SMTP/Email admin tile — SMTP configuration (outgoing mail only, no IMAP), peer-to-peer email-credential sharing (mirrors VPN sharing), the Test Email button, the ~5-minute activity-digest poller, the relational audit_log/notifications SQLite tables, the 10 notification-type toggles, the notifications bell/dropdown reachable from the top-left drone icon, the per-drone identifying label stamped on every outgoing email, or app/device/smtp_manager.py, app/device/notifications.py, app/storage/audit_store.py, web/handlers_smtp.py, web/handlers_notifications.py.
 ---
 
 # Drone SMTP / Notifications Skill
@@ -20,10 +20,12 @@ explains where SMTP genuinely differs and why.
 
 ```text
 app/device/
-  smtp_manager.py    # the whole SMTP/IMAP feature: settings, sharing,
+  smtp_manager.py    # the whole SMTP feature: settings, sharing,
                       # provenance, revocation, bootstrap, send_mail (stdlib
                       # smtplib), Test Email, the digest poller -- mirrors
-                      # vpn_manager.py's shape closely
+                      # vpn_manager.py's shape closely. Outgoing mail only --
+                      # no IMAP, this app never reads a mailbox (removed
+                      # 2026-07-28; it was stored-but-unused from the start).
   notifications.py    # EVENT_TYPES/EVENT_TYPE_LABELS (the 10 types) +
                       # record_event() -- a dependency-free "leaf" module
                       # (only imports storage/audit_store.py) so every layer
@@ -65,8 +67,7 @@ getting this split wrong is the most likely way to introduce a real bug here:
 
 - **Shared** (`_SHARED_FIELDS`, travel in `export_payload()`/
   `import_from_peer()`): `host, port, use_starttls, use_ssl, username,
-  password, from_address, recipient_email, imap_host, imap_port,
-  imap_use_ssl, imap_username, imap_password`. `recipient_email` — where
+  password, from_address, recipient_email`. `recipient_email` — where
   test/digest mail is actually delivered, distinct from `username` (an
   SMTP-AUTH login, not necessarily a mailbox) — is inferred as a required
   field, not something the original feature ask spelled out by name.
@@ -85,10 +86,13 @@ getting this split wrong is the most likely way to introduce a real bug here:
   buggy peer payload that tries to smuggle `notify`/`smtp_enabled` values in
   is silently ignored, not applied.
 
-IMAP fields are stored and shared alongside SMTP **but never consumed** —
-nothing in this app reads a mailbox. They exist because the feature spec
-asked for both to be configurable. Do not wire up mailbox-reading behavior
-without the user asking for it specifically.
+**No IMAP.** An earlier version of this feature stored (and shared) a
+parallel set of `imap_*` fields alongside SMTP, but nothing in this app ever
+read a mailbox with them — removed entirely 2026-07-28 (backend fields,
+`SmtpSettingsUpdateRequest`/`SmtpStatusResponse`/`SmtpPeerConfigResponse` in
+`openapi_spec.py`, the "Incoming (IMAP)" form section in `drone.js`). Don't
+reintroduce an IMAP field set "for completeness" without the user asking for
+actual mailbox-reading behavior to go with it.
 
 ## Peer-to-peer sharing, provenance, revocation, bootstrap (mirrors VPN)
 
@@ -113,7 +117,7 @@ exists on top of pairing, etc.). The concrete differences:
   found (in `local_network.paired_peers()`'s own order) wins. Per-peer
   failures (offline, not sharing, empty/malformed payload) are silently
   skipped, exactly like VPN.
-- **`_revoke_local_credentials()` wipes `password`/`imap_password` only** —
+- **`_revoke_local_credentials()` wipes `password` only** —
   same as VPN leaving the `.ovpn`/`source_peer_id` in place, the rest of the
   config (host/port/from/recipient/…) survives a revocation, and
   `source_peer_id` is *never* cleared here (only a genuine fresh
@@ -249,6 +253,23 @@ full-tree grep: zero pre-existing `smtplib`/`imaplib`/`email.*` usage
 anywhere in this repo before this feature — there is no other precedent to
 reconcile with.
 
+**Every outgoing email identifies its sending drone** (`_drone_label()`,
+added 2026-07-28 per direct user ask: "each email include the drone unique
+identifier so it is known which drone it came from"). `_drone_label(settings)`
+returns `"{socket.gethostname()} ({settings.device_id})"` — the same
+`device_id` shown as "Machine ID" in the Debug tile (`handlers_diagnostics.py`),
+paired with the hostname for human readability, since this app has no other
+user-facing drone display-name concept (`hostname_override` exists but is
+network-identity-only, never used for display — see `system_info.py`'s
+`device_name` which is also plain `socket.gethostname()`, unmodified by any
+override). `send_mail()` stamps it into the `From` header's display name via
+`email.utils.formataddr()` (so it's visible in an inbox list without opening
+the message); `send_test_email()` and `_compose_digest()` independently stamp
+it into their own subject line and the first body line (so it survives a mail
+client that only shows the bare From address). All three are deliberately
+redundant — don't collapse them down to just the `From` header without a
+concrete reason, since some clients hide/collapse display names.
+
 ## Frontend: SMTP page + the notifications bell
 
 `drone.js` (`renderSmtpPage`/`renderSmtpLive`/`patchSmtpLive`/
@@ -334,6 +355,13 @@ future page if one is ever wanted, but nothing in the frontend calls it yet.
   earlier (incorrect) research pass for this feature — it does not exist in
   `drone.js`; new UI code uses plain `onclick="..."` attributes, matching
   the VPN page and `renderAdminMenu()`.
+- Reintroducing IMAP fields "for parity" — this app has never read a
+  mailbox; they were removed 2026-07-28 specifically because they were
+  dead weight.
+- Dropping the `_drone_label()` stamp from any one of the three places it's
+  set (From display name, subject, body) — each is an independent chance for
+  a recipient to identify the sending drone, since not every mail client
+  surfaces all three.
 
 ## Expected output format
 
@@ -366,11 +394,11 @@ Files changed:
 
 Do not:
 
-- return the SMTP/IMAP password in any **`/admin/*`** (browser-facing) API
-  response — `smtp_manager.get_settings()`'s `_sanitized()` strips it to
-  `has_password`/`has_imap_password` booleans; the peer-to-peer
-  `/peer/smtp/config` payload is the one intentional, narrowly-scoped
-  exception, gated by pairing + `sharing_enabled`,
+- return the SMTP password in any **`/admin/*`** (browser-facing) API
+  response — `smtp_manager.get_settings()`'s `_sanitized()` strips it to a
+  `has_password` boolean; the peer-to-peer `/peer/smtp/config` payload is the
+  one intentional, narrowly-scoped exception, gated by pairing +
+  `sharing_enabled`,
 - let an imported SMTP config be re-shared — enforce single-hop-only in both
   `set_sharing_enabled` (reject) and `export_payload` (independently refuse),
   exactly like VPN,

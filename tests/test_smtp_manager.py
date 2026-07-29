@@ -236,7 +236,6 @@ class CheckSharingRevocationTests(unittest.TestCase):
                 self.assertTrue(smtp_manager.check_sharing_revocation(settings))
             state = smtp_manager._load_state(settings)
             self.assertEqual(state["password"], "")
-            self.assertEqual(state["imap_password"], "")
             self.assertIn("turned off sharing", state["revoked_reason"])
 
     def test_does_not_revoke_on_transient_network_error(self) -> None:

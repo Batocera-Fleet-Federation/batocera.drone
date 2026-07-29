@@ -1,6 +1,6 @@
 ---
 name: drone-admin-features
-description: Use this when designing, reviewing, debugging, or modifying the Drone admin panel — the Debug tile (System Info/System Logs/Emulators tabs), the Artwork tile (Artwork & Metadata/Theme Gallery tabs), Torrents, VPN, Email (SMTP/IMAP + notifications), the top-level Automation nav tab, the Swarm page (Swarm/Transfers tabs — pairing, tailnet, remote peer management, ROMs/BIOS/saves/movies P2P sync), the notifications bell/dropdown, the ROMs/BIOS TreeGrid browser, per-system BIOS association, credentials/network-mode/certificate rotation, self-update buttons, the session-cookie login gate, or the admin route dispatch in app/web/api_routes.py and web/handlers_*.py. For deep Torrents/aria2, VPN/OpenVPN, or SMTP/notifications implementation detail, see the dedicated drone-torrents-management, drone-vpn-management, and drone-smtp-notifications skills instead.
+description: Use this when designing, reviewing, debugging, or modifying the Drone admin panel — the Debug tile (System Info/System Logs/Emulators tabs), the Artwork tile (Artwork & Metadata/Theme Gallery tabs), Torrents, VPN, Email (SMTP + notifications), the top-level Automation nav tab, the Swarm page (Swarm/Transfers tabs — pairing, tailnet, remote peer management, ROMs/BIOS/saves/movies P2P sync), the notifications bell/dropdown, the ROMs/BIOS TreeGrid browser, per-system BIOS association, credentials/network-mode/certificate rotation, self-update buttons, the session-cookie login gate, or the admin route dispatch in app/web/api_routes.py and web/handlers_*.py. For deep Torrents/aria2, VPN/OpenVPN, or SMTP/notifications implementation detail, see the dedicated drone-torrents-management, drone-vpn-management, and drone-smtp-notifications skills instead.
 ---
 
 # Drone Admin Features Skill
@@ -45,7 +45,7 @@ app/web/
                           # transfer/torrent_manager.py + transfer/aria2_runtime.py)
   handlers_vpn.py         # OpenVPN admin routes (see drone-vpn-management skill;
                           # backs onto device/vpn_manager.py)
-  handlers_smtp.py        # SMTP/IMAP admin routes (see drone-smtp-notifications
+  handlers_smtp.py        # SMTP admin routes (see drone-smtp-notifications
                           # skill; backs onto device/smtp_manager.py)
   handlers_notifications.py # notifications-inbox admin routes (see
                           # drone-smtp-notifications skill; backs onto
@@ -185,18 +185,21 @@ design, the peer-sharing design (including why it's gated on top of plain
 pairing, unlike every other asset type), and the self-heal detection/backoff
 design.
 
-### Email (SMTP/IMAP + notification digest)
+### Email (SMTP + notification digest)
 
-Provider-agnostic SMTP/IMAP configuration -- host/port/STARTTLS-or-SSL/auth/
-from-address/recipient, plus IMAP fields that are stored and shared but not
-currently used to read a mailbox. A "Send mail from this drone" master switch
+Provider-agnostic SMTP configuration (outgoing mail only, no IMAP -- this app
+never reads a mailbox) -- host/port/STARTTLS-or-SSL/auth/from-address/
+recipient. A "Send mail from this drone" master switch
 gates the Test Email button and a background poller that emails a digest of
 recent activity roughly every 5 minutes (there is no OS cron in this app --
 every periodic feature, including this one, is an in-process thread; see
-drone-smtp-notifications). Ten independent toggles choose which activity
-types (VPN connected/disconnected, newly connected to swarm, assets
-added/removed, a manual control submitted, an automation setting updated,
-asset uploaded/downloaded, a torrent finishing) are included in that digest --
+drone-smtp-notifications). Every outgoing email identifies its sending drone
+(hostname + device_id, stamped in the From display name, subject, and body)
+so a swarm owner can tell multiple drones' emails apart at a glance. Ten
+independent toggles choose which activity types (VPN connected/disconnected,
+newly connected to swarm, assets added/removed, a manual control submitted,
+an automation setting updated, asset uploaded/downloaded, a torrent
+finishing) are included in that digest --
 these toggles only affect what gets emailed, not what's logged or shown in
 the notifications bell (see below), which is unconditional. A "Share with
 Swarm" card mirrors VPN's peer-sharing design closely: an off-by-default

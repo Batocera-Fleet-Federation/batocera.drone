@@ -2157,7 +2157,7 @@ async function renderAdminMenu() {
         <div class="card admin-tile pointer h-100" onclick="setHash('#admin/smtp')">
           <div class="card-body">
             <h5 class="card-title"><i class="bi bi-envelope me-2"></i>Email</h5>
-            <p class="card-text">Configure SMTP/IMAP, share credentials with the swarm, and choose which activity gets emailed as a digest.</p>
+            <p class="card-text">Configure SMTP, share credentials with the swarm, and choose which activity gets emailed as a digest.</p>
           </div>
         </div>
       </div>
@@ -4059,7 +4059,7 @@ async function renderSmtpPage() {
   currentSystemContext = null;
   clearSystemTheme();
   titleNode.textContent = "Email";
-  subtitleNode.textContent = "SMTP/IMAP configuration, swarm sharing, and activity-digest notifications";
+  subtitleNode.textContent = "SMTP configuration, swarm sharing, and activity-digest notifications";
   setLoading(true, "Loading email settings...");
   let payload;
   try {
@@ -4074,10 +4074,9 @@ async function renderSmtpPage() {
   const notify = payload.notify || {};
   content.innerHTML = `
     <div class="card mb-3">
-      <div class="card-header"><i class="bi bi-envelope-gear me-2"></i>SMTP / IMAP Settings</div>
+      <div class="card-header"><i class="bi bi-envelope-gear me-2"></i>SMTP Settings</div>
       <div class="card-body">
-        <p class="text-muted small">Used to send the activity digest and the Test Email below. IMAP fields are stored (and shared with the swarm, same as SMTP) but not currently used to read a mailbox.</p>
-        <h6 class="small text-uppercase text-muted mt-2">Outgoing (SMTP)</h6>
+        <p class="text-muted small">Used to send the activity digest and the Test Email below.</p>
         <div class="row g-2 mb-2">
           <div class="col-sm-6 col-lg-4">
             <label class="form-label mb-1" for="smtpHost">Host</label>
@@ -4112,31 +4111,6 @@ async function renderSmtpPage() {
           <div class="col-sm-6 col-lg-4">
             <label class="form-label mb-1" for="smtpRecipientEmail">Send digest/test mail to</label>
             <input class="form-control form-control-sm" type="email" id="smtpRecipientEmail" value="${escapeHtml(payload.recipient_email || "")}">
-          </div>
-        </div>
-        <h6 class="small text-uppercase text-muted mt-3">Incoming (IMAP)</h6>
-        <div class="row g-2 mb-2">
-          <div class="col-sm-6 col-lg-4">
-            <label class="form-label mb-1" for="smtpImapHost">Host</label>
-            <input class="form-control form-control-sm" type="text" id="smtpImapHost" value="${escapeHtml(payload.imap_host || "")}">
-          </div>
-          <div class="col-sm-3 col-lg-2">
-            <label class="form-label mb-1" for="smtpImapPort">Port</label>
-            <input class="form-control form-control-sm" type="number" id="smtpImapPort" value="${escapeHtml(payload.imap_port || 993)}">
-          </div>
-          <div class="col-sm-3 col-lg-2 d-flex align-items-end">
-            <div class="form-check form-switch">
-              <input class="form-check-input" type="checkbox" role="switch" id="smtpImapUseSsl" ${payload.imap_use_ssl ? "checked" : ""}>
-              <label class="form-check-label small" for="smtpImapUseSsl">SSL</label>
-            </div>
-          </div>
-          <div class="col-sm-6 col-lg-4">
-            <label class="form-label mb-1" for="smtpImapUsername">Username</label>
-            <input class="form-control form-control-sm" type="text" id="smtpImapUsername" autocomplete="off" value="${escapeHtml(payload.imap_username || "")}">
-          </div>
-          <div class="col-sm-6 col-lg-4">
-            <label class="form-label mb-1" for="smtpImapPassword">Password</label>
-            <input class="form-control form-control-sm" type="password" id="smtpImapPassword" autocomplete="off" placeholder="${payload.has_imap_password ? "Saved (leave blank to keep)" : ""}">
           </div>
         </div>
         <div class="d-flex flex-wrap gap-2 mt-2">
@@ -4176,7 +4150,7 @@ async function renderSmtpPage() {
         ${payload.source_peer_id ? `
         <p class="text-muted small mb-0"><i class="bi bi-info-circle me-1"></i>This configuration was imported from <strong>${escapeHtml(payload.source_peer_name || payload.source_peer_id)}</strong> and cannot be re-shared &mdash; only the drone that originally set it up can share it with the swarm.</p>
         ` : `
-        <p class="text-muted small">Share these SMTP/IMAP settings (including the password) with drones paired to this one, over the same cert-pinned peer link used for ROM/BIOS transfers -- never through the browser. Only paired drones can pull it, and only while this is turned on.</p>
+        <p class="text-muted small">Share these SMTP settings (including the password) with drones paired to this one, over the same cert-pinned peer link used for ROM/BIOS transfers -- never through the browser. Only paired drones can pull it, and only while this is turned on.</p>
         <div class="form-check form-switch mb-3">
           <input class="form-check-input" type="checkbox" role="switch" id="smtpSharingEnabled" ${payload.sharing_enabled ? "checked" : ""} onchange="setSmtpSharing(this.checked)">
           <label class="form-check-label" for="smtpSharingEnabled">Allow paired drones to pull this email configuration</label>
@@ -4220,11 +4194,6 @@ function _smtpSettingsPayloadFromForm() {
     password: document.getElementById("smtpPassword").value || "",
     from_address: (document.getElementById("smtpFromAddress").value || "").trim(),
     recipient_email: (document.getElementById("smtpRecipientEmail").value || "").trim(),
-    imap_host: (document.getElementById("smtpImapHost").value || "").trim(),
-    imap_port: parseInt(document.getElementById("smtpImapPort").value, 10) || 993,
-    imap_use_ssl: document.getElementById("smtpImapUseSsl").checked,
-    imap_username: (document.getElementById("smtpImapUsername").value || "").trim(),
-    imap_password: document.getElementById("smtpImapPassword").value || "",
   };
 }
 

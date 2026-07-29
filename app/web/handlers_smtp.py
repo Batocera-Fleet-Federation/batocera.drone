@@ -1,11 +1,11 @@
 """RomRequestHandler SMTP-admin handlers, as a mixin.
 
 The admin email endpoints: settings snapshot, save settings (host/port/tls/
-auth/from/recipient + IMAP fields), the notification-enabled switch, the
-per-event-type toggle set, the P2P sharing toggle/pull-from-peer, and the
-Test Email button. Composed onto ``RomRequestHandler``, mirroring
-``handlers_vpn.py``'s shape exactly. See ``device/smtp_manager.py`` for the
-actual settings/sharing/send logic this delegates to.
+auth/from/recipient), the notification-enabled switch, the per-event-type
+toggle set, the P2P sharing toggle/pull-from-peer, and the Test Email
+button. Composed onto ``RomRequestHandler``, mirroring ``handlers_vpn.py``'s
+shape exactly. See ``device/smtp_manager.py`` for the actual
+settings/sharing/send logic this delegates to.
 """
 
 from urllib.error import HTTPError
@@ -53,7 +53,7 @@ class HandlersSmtpMixin:
         self._send_json(200, result)
 
     def _handle_admin_smtp_pull_from_peer(self, payload: dict) -> None:
-        """Pull SMTP/IMAP settings from a paired peer and adopt them locally.
+        """Pull SMTP settings from a paired peer and adopt them locally.
 
         Mirrors ``handlers_vpn.py``'s ``_handle_admin_vpn_pull_from_peer``
         exactly: the same small one-shot cert-pinned JSON client, not the

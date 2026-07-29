@@ -161,9 +161,11 @@ above is a summary).
 The same shape as VPN sharing above, reused deliberately rather than
 reinvented — read that section first. The differences:
 
-- Each Drone can independently configure SMTP/IMAP (host/port/auth/
-  from-address/recipient), send a Test Email, and toggle which of 10 local
-  activity types get included in a ~5-minute digest email.
+- Each Drone can independently configure SMTP (host/port/auth/
+  from-address/recipient -- outgoing mail only, no IMAP), send a Test Email,
+  and toggle which of 10 local activity types get included in a ~5-minute
+  digest email. Every outgoing email identifies its sending drone (hostname +
+  device_id) in the From name, subject, and body.
 - **Sharing** (`sharing_enabled`, off by default) works identically:
   `GET /peer/smtp/config`, single-hop-only, provenance-tracked, revoked
   within one ~5 min poll cycle.

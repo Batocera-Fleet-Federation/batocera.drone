@@ -666,7 +666,7 @@ class HandlersPeerMixin:
         self._send_json(200, payload)
 
     def _handle_peer_smtp_config(self) -> None:
-        """Serve this drone's SMTP/IMAP settings to a paired peer.
+        """Serve this drone's SMTP settings to a paired peer.
 
         Mirrors _handle_peer_vpn_config exactly: gated by
         _peer_request_authorized() (same mTLS pairing check as every other

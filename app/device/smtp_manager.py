@@ -1,4 +1,4 @@
-"""SMTP/IMAP email configuration: send notification-digest and test emails
+"""SMTP email configuration: send notification-digest and test emails
 from the Drone admin UI, with the same peer-to-peer credential sharing model
 VPN uses (see ``device/vpn_manager.py``) -- configure once, share opt-in,
 single-hop provenance, auto-revoke if the sharing peer turns it off, and a
@@ -14,25 +14,29 @@ separate on-disk credentials file here, so there isn't one. This repo has no
 crypto library available either way (stdlib-only), so this is the same
 plaintext-on-disk tradeoff VPN already makes and documents.
 
-IMAP fields are stored and shared alongside SMTP but never consumed by this
-module -- nothing in this app reads a mailbox; they exist because the
-feature spec asked for both to be configurable.
-
 Notification-type toggles and the master ``smtp_enabled`` switch are
 local-only and never travel with the shared/exported payload: each drone
 runs its own digest poller against its own ``audit_log`` using its own
 (possibly-adopted) credentials, so "which of *my* events get emailed" is
 inherently per-drone, unlike the connection settings themselves.
+
+Every outgoing email identifies the sending drone (hostname + the same
+unique ``device_id`` shown as "Machine ID" in the Debug tile) in the From
+display name, subject line, and body -- a swarm owner receiving digests from
+several drones needs to tell them apart at a glance, without opening the
+message.
 """
 
 from __future__ import annotations
 
 import os
 import smtplib
+import socket
 import sys
 import time
 from datetime import datetime, timezone
 from email.mime.text import MIMEText
+from email.utils import formataddr
 from typing import Optional
 from urllib.error import HTTPError
 
@@ -63,7 +67,6 @@ AUDIT_EMAIL_MAX_ITEMS_PER_DIGEST = 200
 _SHARED_FIELDS = (
     "host", "port", "use_starttls", "use_ssl", "username", "password",
     "from_address", "recipient_email",
-    "imap_host", "imap_port", "imap_use_ssl", "imap_username", "imap_password",
 )
 
 
@@ -90,11 +93,6 @@ def _load_state(settings: Settings) -> dict:
         "password": str(stored.get("password") or ""),
         "from_address": str(stored.get("from_address") or ""),
         "recipient_email": str(stored.get("recipient_email") or ""),
-        "imap_host": str(stored.get("imap_host") or ""),
-        "imap_port": int(stored.get("imap_port") or 993),
-        "imap_use_ssl": bool(stored.get("imap_use_ssl", True)),
-        "imap_username": str(stored.get("imap_username") or ""),
-        "imap_password": str(stored.get("imap_password") or ""),
         # Sharing/provenance -- mirrors vpn_manager._load_state() exactly.
         "sharing_enabled": bool(stored.get("sharing_enabled", False)),
         "source_peer_id": str(stored.get("source_peer_id") or ""),
@@ -125,7 +123,6 @@ def _sanitized(state: dict) -> dict:
     mirrors the VPN rule that the password never returns to a browser."""
     sanitized = dict(state)
     sanitized["has_password"] = bool(sanitized.pop("password", ""))
-    sanitized["has_imap_password"] = bool(sanitized.pop("imap_password", ""))
     return sanitized
 
 
@@ -154,12 +151,6 @@ def update_settings(settings: Settings, payload: dict) -> dict:
         raise ValueError("SMTP port must be a number")
     if not 1 <= port <= 65535:
         raise ValueError("SMTP port must be between 1 and 65535")
-    try:
-        imap_port = int(payload.get("imap_port", current["imap_port"]))
-    except (TypeError, ValueError):
-        raise ValueError("IMAP port must be a number")
-    if not 1 <= imap_port <= 65535:
-        raise ValueError("IMAP port must be between 1 and 65535")
     updates = {
         "host": host,
         "port": port,
@@ -168,10 +159,6 @@ def update_settings(settings: Settings, payload: dict) -> dict:
         "username": str(payload.get("username", current["username"]) or "").strip(),
         "from_address": from_address,
         "recipient_email": recipient_email,
-        "imap_host": str(payload.get("imap_host", current["imap_host"]) or "").strip(),
-        "imap_port": imap_port,
-        "imap_use_ssl": bool(payload.get("imap_use_ssl", current["imap_use_ssl"])),
-        "imap_username": str(payload.get("imap_username", current["imap_username"]) or "").strip(),
         "has_config": True,
         # A direct settings save is always "self-owned" -- clears any prior
         # peer-import provenance, exactly like VPN's save_uploaded_config().
@@ -180,12 +167,10 @@ def update_settings(settings: Settings, payload: dict) -> dict:
         "revoked_reason": "",
         "revoked_at": None,
     }
-    # Passwords are optional on update (blank = "keep the existing value"),
-    # since the admin UI never echoes a stored password back into the form.
+    # Password is optional on update (blank = "keep the existing value"),
+    # since the admin UI never echoes the stored password back into the form.
     if str(payload.get("password") or "").strip():
         updates["password"] = str(payload["password"])
-    if str(payload.get("imap_password") or "").strip():
-        updates["imap_password"] = str(payload["imap_password"])
     state = _save_state(settings, **updates)
     return _sanitized(state)
 
@@ -219,7 +204,7 @@ def set_sharing_enabled(settings: Settings, enabled: bool) -> dict:
 
 
 def export_payload(settings: Settings) -> Optional[dict]:
-    """This drone's SMTP/IMAP settings for a paired peer to pull.
+    """This drone's SMTP settings for a paired peer to pull.
 
     None means "don't share" -- the caller (``GET /peer/smtp/config``) turns
     that into a 404. Mirrors ``vpn_manager.export_payload()``: only ever
@@ -234,7 +219,7 @@ def export_payload(settings: Settings) -> Optional[dict]:
 
 
 def import_from_peer(settings: Settings, payload: dict, *, source_peer_id: str, source_peer_name: str = "") -> dict:
-    """Adopt a peer's exported SMTP/IMAP settings as our own.
+    """Adopt a peer's exported SMTP settings as our own.
 
     Reuses ``update_settings()`` unchanged rather than writing state
     directly -- same reasoning as ``vpn_manager.import_from_peer()`` reusing
@@ -315,14 +300,14 @@ _SHARING_REVOKED_PEER_GONE = "The peer that shared this SMTP configuration is no
 
 
 def _revoke_local_credentials(settings: Settings, reason: str) -> None:
-    """Wipe imported SMTP/IMAP passwords (not the rest of the config, not
+    """Wipe the imported SMTP password (not the rest of the config, not
     ``source_peer_id``) -- mirrors ``vpn_manager._revoke_local_credentials()``:
     leaving provenance in place keeps ``set_sharing_enabled()``/
     ``export_payload()`` refusing to ever let this now-orphaned config be
     re-shared. Only a genuine fresh ``update_settings()`` call (a real new
     save) clears provenance.
     """
-    _save_state(settings, password="", imap_password="", revoked_reason=reason, revoked_at=_now_iso())
+    _save_state(settings, password="", revoked_reason=reason, revoked_at=_now_iso())
 
 
 def check_sharing_revocation(settings: Settings) -> bool:
@@ -377,6 +362,23 @@ def run_sharing_revocation_poller(settings: Settings) -> None:
 # --------------------------------------------------------------- sending
 
 
+def _drone_label(settings: Settings) -> str:
+    """Human-identifiable label for this drone: hostname + the same unique
+    ``device_id`` shown as "Machine ID" in the Debug tile. Stamped on every
+    outgoing email (From display name, subject, body) so a swarm owner
+    receiving digests from several drones can tell them apart at a glance,
+    without opening the message.
+    """
+    try:
+        hostname = socket.gethostname()
+    except OSError:
+        hostname = ""
+    device_id = settings.device_id or ""
+    if hostname and device_id:
+        return f"{hostname} ({device_id})"
+    return device_id or hostname or "unknown drone"
+
+
 def send_mail(settings: Settings, subject: str, body: str) -> None:
     """Stdlib-only send via ``smtplib`` -- raises ``SmtpSendError`` on any
     failure; callers decide how to surface it (a 4xx to the admin UI for
@@ -386,7 +388,7 @@ def send_mail(settings: Settings, subject: str, body: str) -> None:
         raise SmtpSendError("SMTP is not configured on this drone.")
     message = MIMEText(body, "plain", "utf-8")
     message["Subject"] = subject
-    message["From"] = state["from_address"]
+    message["From"] = formataddr((f"Batocera Drone - {_drone_label(settings)}", state["from_address"]))
     message["To"] = state["recipient_email"]
     try:
         client_cls = smtplib.SMTP_SSL if state["use_ssl"] else smtplib.SMTP
@@ -404,8 +406,9 @@ def send_mail(settings: Settings, subject: str, body: str) -> None:
 
 
 def send_test_email(settings: Settings) -> dict:
-    subject = "Batocera Drone: test email"
-    body = f"This is a test email from your Batocera Drone's SMTP settings.\n\nSent at {_now_iso()}."
+    label = _drone_label(settings)
+    subject = f"Batocera Drone [{label}]: test email"
+    body = f"This is a test email from your Batocera Drone's SMTP settings.\n\nDrone: {label}\nSent at {_now_iso()}."
     try:
         send_mail(settings, subject, body)
         result = {"status": "ok", "sent_at": _now_iso()}
@@ -415,9 +418,10 @@ def send_test_email(settings: Settings) -> dict:
     return result
 
 
-def _compose_digest(items: list) -> tuple:
-    subject = f"Batocera Drone: {len(items)} new notification{'s' if len(items) != 1 else ''}"
-    lines = [f"{len(items)} new item(s) since the last digest:", ""]
+def _compose_digest(items: list, settings: Settings) -> tuple:
+    drone_label = _drone_label(settings)
+    subject = f"Batocera Drone [{drone_label}]: {len(items)} new notification{'s' if len(items) != 1 else ''}"
+    lines = [f"Drone: {drone_label}", "", f"{len(items)} new item(s) since the last digest:", ""]
     for item in items:
         label = _notifications.EVENT_TYPE_LABELS.get(item["event_type"], item["event_type"])
         lines.append(f"- [{item['created_at']}] {label}: {item['title']}")
@@ -443,7 +447,7 @@ def send_digest_if_needed(settings: Settings) -> dict:
         prune_result = _audit_store.prune_old_events(settings)
         if not items:
             return {"status": "skipped", "reason": "nothing new", **prune_result}
-        subject, body = _compose_digest(items)
+        subject, body = _compose_digest(items, settings)
         try:
             send_mail(settings, subject, body)
         except SmtpSendError as error:

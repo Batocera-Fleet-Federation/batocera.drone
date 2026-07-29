@@ -901,7 +901,7 @@
       </svg>
     </div>
     <p class="caption">Everyone in the swarm is presumed to be the same owner &mdash; pairing is the only authorization check, same as ROM/BIOS transfer. Two independent gates keep credential distribution single-hop: <code>set_sharing_enabled()</code> refuses to turn on for an imported config, and <code>export_payload()</code> refuses to serve one, even if the first check were ever bypassed.</p>
-    <p class="caption">SMTP/IMAP email settings share this exact lifecycle over <code>GET /peer/smtp/config</code> (<code>app/device/smtp_manager.py</code>) &mdash; same off-by-default <code>sharing_enabled</code> gate, same single-hop provenance, same revocation poller. The one difference: SMTP's swarm-bootstrap has no "actively connected right now" check to wait for, since sending mail isn't a persistent tunnel &mdash; any paired peer that's sharing and returns a usable host qualifies immediately. See the <code>drone-smtp-notifications</code> skill for depth.</p>
+    <p class="caption">SMTP email settings share this exact lifecycle over <code>GET /peer/smtp/config</code> (<code>app/device/smtp_manager.py</code>) &mdash; same off-by-default <code>sharing_enabled</code> gate, same single-hop provenance, same revocation poller. The one difference: SMTP's swarm-bootstrap has no "actively connected right now" check to wait for, since sending mail isn't a persistent tunnel &mdash; any paired peer that's sharing and returns a usable host qualifies immediately. See the <code>drone-smtp-notifications</code> skill for depth.</p>
   </section>
 
   <footer>

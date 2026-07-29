@@ -350,7 +350,7 @@ and don't remove either of these two "for consistency" — see the
 rationale (both share the same shape: `sharing_enabled` + single-hop
 provenance + a revocation poller). They are also the only peer endpoints
 whose payload carries a plaintext secret (the OpenVPN credential; the
-SMTP/IMAP password) by design; that is still within the rules above, since
+SMTP password) by design; that is still within the rules above, since
 mTLS + pairing was always the confidentiality boundary, not merely a
 convention that happened to apply only to non-secret files. If a third
 feature ever needs this same treatment, keep the pattern — a feature-owned

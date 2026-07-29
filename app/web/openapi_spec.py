@@ -813,11 +813,6 @@ def _schemas() -> Dict[str, Schema]:
                 "has_password": _boolean("Whether a password is stored -- the password itself is never returned"),
                 "from_address": _string(),
                 "recipient_email": _string("Where test and digest emails are sent"),
-                "imap_host": _string(),
-                "imap_port": _integer(),
-                "imap_use_ssl": _boolean(),
-                "imap_username": _string(),
-                "has_imap_password": _boolean("Whether an IMAP password is stored -- never returned"),
                 "sharing_enabled": _boolean("Whether paired peers may pull this config; always false for an imported config"),
                 "source_peer_id": _string("Peer this config was imported from, empty if self-configured"),
                 "source_peer_name": _string(),
@@ -831,7 +826,7 @@ def _schemas() -> Dict[str, Schema]:
                 "last_digest_error": _string(),
             },
             ("has_config", "smtp_enabled", "sharing_enabled"),
-            description="SMTP/IMAP configuration + sharing status snapshot.",
+            description="SMTP configuration + sharing status snapshot.",
         ),
         "SmtpSettingsUpdateRequest": _object(
             {
@@ -843,11 +838,6 @@ def _schemas() -> Dict[str, Schema]:
                 "password": _string("Optional on update -- blank keeps the existing stored password"),
                 "from_address": _string(),
                 "recipient_email": _string(),
-                "imap_host": _string(),
-                "imap_port": _integer(),
-                "imap_use_ssl": _boolean(),
-                "imap_username": _string(),
-                "imap_password": _string("Optional on update -- blank keeps the existing stored password"),
             },
             description="Partial update accepted -- omitted fields keep their current value.",
         ),
@@ -869,7 +859,7 @@ def _schemas() -> Dict[str, Schema]:
         "SmtpPullFromPeerResponse": _object(
             {"has_config": _boolean(), "host": _string(), "port": _integer()},
             ("has_config",),
-            description="Result of importing a peer's shared SMTP/IMAP configuration -- same shape as SmtpStatusResponse.",
+            description="Result of importing a peer's shared SMTP configuration -- same shape as SmtpStatusResponse.",
             additional_properties=True,
         ),
         "SmtpTestResponse": _object(
@@ -891,14 +881,9 @@ def _schemas() -> Dict[str, Schema]:
                 "password": _string("Only ever served over this mTLS peer channel, never through any /admin/* response", nullable=True),
                 "from_address": _string(),
                 "recipient_email": _string(),
-                "imap_host": _string(),
-                "imap_port": _integer(),
-                "imap_use_ssl": _boolean(),
-                "imap_username": _string(),
-                "imap_password": _string(nullable=True),
             },
             ("host", "port"),
-            description="This drone's SMTP/IMAP settings as served to a paired peer -- only returned when sharing is on (see /admin/smtp/sharing).",
+            description="This drone's SMTP settings as served to a paired peer -- only returned when sharing is on (see /admin/smtp/sharing).",
         ),
         "NotificationEntry": _object(
             {
@@ -1764,9 +1749,9 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             "/admin/vpn/log/download": {
                 "get": _operation("Download the raw openvpn log", {"200": _media_response("Log file", ["text/plain"])}, tags=["admin", "vpn"], error_codes=("401", "403", "404", "429", "500"))
             },
-            "/admin/smtp": {"get": _operation("Get SMTP/IMAP configuration and sharing status", {"200": _json_response("SmtpStatusResponse")}, tags=["admin", "smtp"], error_codes=("401", "403", "429", "500", "503"))},
+            "/admin/smtp": {"get": _operation("Get SMTP configuration and sharing status", {"200": _json_response("SmtpStatusResponse")}, tags=["admin", "smtp"], error_codes=("401", "403", "429", "500", "503"))},
             "/admin/smtp/settings": {
-                "post": _operation("Save SMTP/IMAP settings (host/port/auth/from/recipient)", {"200": _json_response("SmtpStatusResponse"), "400": _json_response("ErrorResponse", "Missing/invalid host, from address, recipient, or port")}, request_body=_json_request("SmtpSettingsUpdateRequest"), tags=["admin", "smtp"], error_codes=("400", "401", "403", "429", "500", "503"))
+                "post": _operation("Save SMTP settings (host/port/auth/from/recipient)", {"200": _json_response("SmtpStatusResponse"), "400": _json_response("ErrorResponse", "Missing/invalid host, from address, recipient, or port")}, request_body=_json_request("SmtpSettingsUpdateRequest"), tags=["admin", "smtp"], error_codes=("400", "401", "403", "429", "500", "503"))
             },
             "/admin/smtp/enabled": {
                 "post": _operation("Toggle whether this drone sends mail (Test Email + the digest poller) -- independent of sharing", {"200": _json_response("SmtpEnabledResponse")}, request_body=_json_request("SmtpEnabledRequest"), tags=["admin", "smtp"], error_codes=("401", "403", "429", "500", "503"))
@@ -1778,7 +1763,7 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
                 "post": _operation("Toggle allowing paired peers to pull this SMTP config; rejected if this config was itself imported from a peer", {"200": _json_response("SmtpSharingResponse"), "400": _json_response("ErrorResponse", "This config was imported from a peer and cannot be re-shared")}, request_body=_json_request("SmtpSharingRequest"), tags=["admin", "smtp"], error_codes=("400", "401", "403", "429", "500", "503"))
             },
             "/admin/smtp/pull-from-peer": {
-                "post": _operation("Pull SMTP/IMAP settings from a paired peer and adopt them", {"200": _json_response("SmtpPullFromPeerResponse"), "404": _json_response("ErrorResponse", "Unknown peer, or that peer has sharing off / no config"), "502": _json_response("ErrorResponse", "Could not reach that peer")}, request_body=_json_request("SmtpPullFromPeerRequest"), tags=["admin", "smtp"], error_codes=("400", "401", "403", "404", "429", "500", "502", "503"))
+                "post": _operation("Pull SMTP settings from a paired peer and adopt them", {"200": _json_response("SmtpPullFromPeerResponse"), "404": _json_response("ErrorResponse", "Unknown peer, or that peer has sharing off / no config"), "502": _json_response("ErrorResponse", "Could not reach that peer")}, request_body=_json_request("SmtpPullFromPeerRequest"), tags=["admin", "smtp"], error_codes=("400", "401", "403", "404", "429", "500", "502", "503"))
             },
             "/admin/smtp/test": {
                 "post": _operation("Send a test email using the saved settings", {"200": _json_response("SmtpTestResponse"), "502": _json_response("SmtpTestResponse", "Send failed")}, tags=["admin", "smtp"], error_codes=("401", "403", "429", "500", "503"))
@@ -2048,7 +2033,7 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             },
             "/peer/smtp/config": {
                 "get": _operation(
-                    "Get this drone's shared SMTP/IMAP settings -- only when sharing is on",
+                    "Get this drone's shared SMTP settings -- only when sharing is on",
                     {"200": _json_response("SmtpPeerConfigResponse"), "404": _json_response("ErrorResponse", "Sharing is off, or no config has been set up")},
                     tags=["peer", "smtp"],
                     security=peer_security,
