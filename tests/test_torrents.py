@@ -456,6 +456,10 @@ class TorrentLifecycleTests(unittest.TestCase):
                 "errorMessage": "tracker exploded",
             }
             manager._tick()
+            # "b"'s completed_at needs a second tick reporting the same gid still
+            # finished before it's trusted (see TorrentCompletedNotificationTests) --
+            # everything else here is settled after just the one tick above.
+            manager._tick()
             by_name = {entry["name"]: entry for entry in manager.snapshot()["torrents"]}
             game_a = by_name["Game A (USA)"]
             self.assertEqual(game_a["status"], "downloading")
@@ -868,6 +872,68 @@ class TorrentCompletedNotificationTests(unittest.TestCase):
                 }
                 manager._tick()
             fake_notifications.record_event.assert_not_called()
+
+    def test_does_not_fire_for_a_one_tick_finished_blip_that_then_reverts(self) -> None:
+        # Regression test for a real live bug: two magnet-added torrents got
+        # completed_at set (and a "download completed" notification fired)
+        # while only 11-24% through their actual content. Evidence pointed at
+        # aria2 briefly reporting the same gid as "finished" against a tiny
+        # (metadata-sized) total for a single poll, before its own totals
+        # settled onto the real, much larger content -- not necessarily via a
+        # missed `followedBy` (that handoff is covered separately below), but
+        # any transient single-tick "finished" reading for a gid that then
+        # reverts to genuinely incomplete must never be trusted.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            manager.add_magnet(_MAGNET_URI)
+            manager._tick()
+            with manager._lock:
+                gid = next(iter(manager._torrents.values()))["gid"]
+
+            with mock.patch.object(torrent_manager, "_notifications") as fake_notifications:
+                # Tick: gid reports "finished" against a tiny (metadata-sized) total.
+                rpc.statuses[gid] = {
+                    "gid": gid, "status": "active", "totalLength": "1192915", "completedLength": "1192915",
+                    "downloadSpeed": "0",
+                }
+                manager._tick()
+                fake_notifications.record_event.assert_not_called()
+                self.assertIsNone(manager.snapshot()["torrents"][0]["completed_at"])
+
+                # Same gid, next tick: the real (much larger, mostly incomplete)
+                # totals show up instead of a second "finished" confirmation.
+                rpc.statuses[gid] = {
+                    "gid": gid, "status": "active", "totalLength": "477183500385", "completedLength": "34865152",
+                    "downloadSpeed": "1048576",
+                }
+                manager._tick()
+                fake_notifications.record_event.assert_not_called()
+                self.assertIsNone(manager.snapshot()["torrents"][0]["completed_at"])
+                self.assertEqual(manager.snapshot()["torrents"][0]["status"], "downloading")
+
+    def test_fires_once_the_same_gid_confirms_finished_on_two_consecutive_ticks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            manager.add_magnet(_MAGNET_URI)
+            manager._tick()
+            with manager._lock:
+                gid = next(iter(manager._torrents.values()))["gid"]
+            rpc.statuses[gid] = {
+                "gid": gid, "status": "active", "totalLength": "477183500385", "completedLength": "477183500385",
+                "downloadSpeed": "0",
+            }
+            with mock.patch.object(torrent_manager, "_notifications") as fake_notifications:
+                manager._tick()  # 1st "finished" observation -- not yet confirmed
+                fake_notifications.record_event.assert_not_called()
+                manager._tick()  # same gid, still finished -- confirmed
+                fake_notifications.record_event.assert_called_once()
+                manager._tick()  # already notified -- no re-fire
+                fake_notifications.record_event.assert_called_once()
+            self.assertIsNotNone(manager.snapshot()["torrents"][0]["completed_at"])
 
 
 class TorrentMagnetTests(unittest.TestCase):

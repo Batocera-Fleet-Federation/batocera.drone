@@ -179,15 +179,78 @@ class ConfigBackupSourceSelectionTests(unittest.TestCase):
             settings = _build_settings(root)
             _write(root / "system" / "configs" / "retroarch" / "retroarch.cfg", b"small")
             big_content = b"0" * (config_backup.BACKUP_MAX_CONFIG_FILE_BYTES + 1)
-            _write(root / "system" / "configs" / "citron" / "game.nca", big_content)
+            _write(root / "system" / "configs" / "citron" / "huge.xml", big_content)
 
             included, skipped = config_backup.collect_sources(settings)
             arcnames = {arc for _path, arc, _size in included}
             self.assertIn("system/configs/retroarch/retroarch.cfg", arcnames)
-            self.assertNotIn("system/configs/citron/game.nca", arcnames)
+            self.assertNotIn("system/configs/citron/huge.xml", arcnames)
             self.assertEqual(len(skipped), 1)
-            self.assertEqual(skipped[0]["path"], "system/configs/citron/game.nca")
+            self.assertEqual(skipped[0]["path"], "system/configs/citron/huge.xml")
             self.assertIn("20MB limit", skipped[0]["reason"])
+
+    def test_excludes_images_audio_and_firmware_under_configs_regardless_of_size(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = _build_settings(root)
+            _write(root / "system" / "configs" / "retroarch" / "retroarch.cfg", b"real setting")
+            _write(root / "system" / "configs" / "hypseus-singe" / "custom.ini", b"real setting")
+            _write(root / "system" / "configs" / "hypseus-singe" / "pics" / "spaceace.bmp", b"tiny-but-not-config")
+            _write(root / "system" / "configs" / "dolphin5-triforce" / "dolphin" / "Sys" / "Resources" / "Dolphin.png", b"icon")
+            _write(root / "system" / "configs" / "hypseus-singe" / "sound" / "theme.wav", b"audio")
+            _write(root / "system" / "configs" / "citron" / "game.nca", b"firmware-ish")
+            _write(root / "system" / "configs" / "Ryujinx" / "system" / "nand_blob", b"no-extension-firmware")
+
+            included, skipped = config_backup.collect_sources(settings)
+            arcnames = {arc for _path, arc, _size in included}
+            self.assertIn("system/configs/retroarch/retroarch.cfg", arcnames)
+            self.assertIn("system/configs/hypseus-singe/custom.ini", arcnames)
+            self.assertNotIn("system/configs/hypseus-singe/pics/spaceace.bmp", arcnames)
+            self.assertNotIn("system/configs/dolphin5-triforce/dolphin/Sys/Resources/Dolphin.png", arcnames)
+            self.assertNotIn("system/configs/hypseus-singe/sound/theme.wav", arcnames)
+            self.assertNotIn("system/configs/citron/game.nca", arcnames)
+            self.assertNotIn("system/configs/Ryujinx/system/nand_blob", arcnames)
+            reasons = {entry["path"]: entry["reason"] for entry in skipped}
+            self.assertIn("not a recognized configuration file type", reasons["system/configs/hypseus-singe/pics/spaceace.bmp"])
+
+    def test_excludes_shader_cache_directories_under_configs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = _build_settings(root)
+            _write(root / "system" / "configs" / "mesa_shader_cache" / "index" / "abc123", b"cache")
+            _write(root / "system" / "configs" / "retroarch" / "retroarch.cfg", b"real setting")
+
+            included, skipped = config_backup.collect_sources(settings)
+            arcnames = {arc for _path, arc, _size in included}
+            self.assertIn("system/configs/retroarch/retroarch.cfg", arcnames)
+            self.assertNotIn("system/configs/mesa_shader_cache/index/abc123", arcnames)
+            reasons = {entry["path"]: entry["reason"] for entry in skipped}
+            self.assertIn("cache directory", reasons["system/configs/mesa_shader_cache/index/abc123"])
+
+    def test_excludes_emulator_firmware_and_disk_images_under_saves(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = _build_settings(root)
+            _write(root / "saves" / "snes" / "game.srm", b"real save")
+            _write(root / "saves" / "psvita" / "vs0" / "data" / "internal" / "keylock.png", b"vita firmware")
+            _write(root / "saves" / "psvita" / "ux0" / "user" / "00" / "savedata" / "save0", b"real vita save")
+            _write(root / "saves" / "yuzu" / "0000000000000000" / "nand_blob", b"switch firmware")
+            _write(root / "saves" / "xbox" / "xbox_hdd.qcow2", b"virtual disk")
+            _write(root / "saves" / "mesa_shader_cache" / "index" / "deadbeef", b"cache")
+
+            included, skipped = config_backup.collect_sources(settings)
+            arcnames = {arc for _path, arc, _size in included}
+            self.assertIn("saves/snes/game.srm", arcnames)
+            self.assertIn("saves/psvita/ux0/user/00/savedata/save0", arcnames)
+            self.assertNotIn("saves/psvita/vs0/data/internal/keylock.png", arcnames)
+            self.assertNotIn("saves/yuzu/0000000000000000/nand_blob", arcnames)
+            self.assertNotIn("saves/xbox/xbox_hdd.qcow2", arcnames)
+            self.assertNotIn("saves/mesa_shader_cache/index/deadbeef", arcnames)
+            reasons = {entry["path"]: entry["reason"] for entry in skipped}
+            self.assertIn("firmware", reasons["saves/psvita/vs0/data/internal/keylock.png"])
+            self.assertIn("firmware", reasons["saves/yuzu/0000000000000000/nand_blob"])
+            self.assertIn("disk-image", reasons["saves/xbox/xbox_hdd.qcow2"])
+            self.assertIn("cache", reasons["saves/mesa_shader_cache/index/deadbeef"])
 
     def test_includes_saves_and_services_and_custom_scripts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

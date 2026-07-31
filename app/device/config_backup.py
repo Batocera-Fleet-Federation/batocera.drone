@@ -5,27 +5,37 @@ see the skill/PR discussion for why that's excluded) into one downloadable
 ``tar.gz``:
 
 * ``system/batocera.conf``
-* ``system/configs/**`` -- recursive, but any single file over
-  ``BACKUP_MAX_CONFIG_FILE_BYTES`` is skipped. This directory is *not*
-  reliably small: on a real device it held 254GB, almost all of it one
-  emulator's installed game/firmware content (Switch ``.nca`` files) rather
-  than settings. The size cap is what keeps this feature from trying to
-  tar an entire game library -- it excludes exactly the handful of
-  firmware/shader-cache/game-content outliers while keeping every genuine
-  small settings file, without needing a hand-maintained per-emulator
-  exclude list that would go stale as Batocera adds emulators.
+* ``system/configs/**`` -- recursive, but only files whose extension is a
+  recognized text-based settings format (``_CONFIG_TEXT_EXTENSIONS``), still
+  capped per-file at ``BACKUP_MAX_CONFIG_FILE_BYTES``. This directory is
+  *not* reliably "just settings": on a real device it held 254GB, almost all
+  of it one emulator's installed game/firmware content (Switch ``.nca``
+  files); a later live audit of a real ~1.44GB backup found several
+  emulators ship their OWN UI resources (icons, bezels, fonts, sound
+  effects -- e.g. Dolphin's ``Sys/Resources/``, hypseus-singe's ``pics/``)
+  and firmware/NAND installs (yuzu, Ryujinx, RPCS3) inside this same tree,
+  none of which is "configuration". An extension allowlist excludes all of
+  that -- and anything similar from an emulator Batocera adds in the future
+  -- without a hand-maintained per-emulator exclude list; the size cap
+  remains only as a backstop for a genuinely oversized text file.
 * ``roms/<system>/gamelist.xml`` for every system folder
 * ``system/services/*``, ``system/custom.sh*``, ``system/pro-custom.sh``,
   ``system/{custom,custom-scripts,scripts}/*`` -- small user-customization
   scripts
-* ``saves/**`` -- recursive, all files (also size-capped, generously, as a
-  pure defensive measure -- real saves total ~1GB on a real device)
+* ``saves/**`` -- recursive, all extensions kept (unlike ``configs/``, a real
+  save file is legitimately binary in whatever format its emulator uses),
+  still size-capped, generously, as a defensive measure. Cache directories,
+  firmware/disk-image extensions, and known emulated firmware/OS-partition
+  directories (see ``_CACHE_DIR_NAMES`` / ``_FIRMWARE_IMAGE_EXTENSIONS`` /
+  ``_EMULATOR_FIRMWARE_DIR_NAMES`` below) are excluded here too -- the same
+  live audit found a 238MB Xbox virtual-disk image and ~1GB of Vita3K/yuzu
+  emulated-firmware-partition data filed under "saves" that isn't actually
+  anyone's save data.
 
 Deliberately excluded: ``/userdata/bios`` and ROM files themselves (large,
-copyrighted, not "settings"), ``.cache``/``cache``/shader-cache directories,
-the Drone app's own state (credentials, VPN/SMTP passwords -- a separate,
-security-sensitive category the user chose to keep out of a downloadable
-file).
+copyrighted, not "settings"), the Drone app's own state (credentials,
+VPN/SMTP passwords -- a separate, security-sensitive category the user chose
+to keep out of a downloadable file).
 
 The tarball is built on a background thread (creation can take real time
 once saves are included) and written to a temp path, then atomically
@@ -40,6 +50,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import socket
 import tarfile
 import threading
@@ -76,6 +87,39 @@ APPLY_SERVICE_CONTROL_TIMEOUT_SECONDS = 600
 
 _CUSTOM_SCRIPT_DIRS = ("custom", "custom-scripts", "scripts")
 
+# Genuine, human-editable configuration/settings text formats -- see the module
+# docstring for why system/configs/** is filtered to this allowlist rather than
+# a size cap alone. Deliberately excludes image/audio/video/font/executable/
+# library/archive/database formats (all confirmed present in a real backup)
+# and, implicitly, anything with no extension at all (firmware/NAND dumps
+# overwhelmingly have none in practice).
+_CONFIG_TEXT_EXTENSIONS = {
+    ".cfg", ".conf", ".config", ".ini", ".xml", ".json", ".yaml", ".yml",
+    ".toml", ".properties", ".txt", ".cnf", ".list", ".opt", ".lpl",
+}
+
+# Pure caches -- regenerated automatically, never "settings" or "save data".
+# Matched as any directory segment (not just top-level), since some emulators
+# nest their own cache dir a level or two down.
+_CACHE_DIR_NAMES = {"cache", "mesa_shader_cache", "shader_cache", "shadercache", "radv_builtin_shaders"}
+
+# Full-disk/virtual-machine image formats -- never a real per-game save file
+# regardless of which emulator wrote them.
+_FIRMWARE_IMAGE_EXTENSIONS = {".qcow2", ".vdi", ".vmdk", ".img", ".iso"}
+
+# Emulated OS/firmware partitions some emulators keep alongside real per-game
+# saves in the same "saves" tree -- shipped system software, not anything the
+# user created. Vita3K's vs0 (firmware) / sa0 (system app data) / os0 (OS
+# core) / vd0 / pd0 partitions; real Vita game saves live under ux0, which is
+# deliberately NOT in this list and stays included.
+_EMULATOR_FIRMWARE_DIR_NAMES = {"vs0", "sa0", "os0", "vd0", "pd0"}
+
+# A Switch title ID of all zeros is always the system/firmware pseudo-title
+# (keys, NAND, firmware updates) in yuzu/Ryujinx-style NAND layouts, never a
+# real game's save data -- matched by pattern so this generalizes to any such
+# emulator rather than naming each one.
+_ALL_ZERO_TITLE_ID = re.compile(r"^0{16}$")
+
 
 def backups_directory(settings: Any) -> Path:
     directory = Path(settings.userdata_root) / "system" / "drone-app" / "config-backups"
@@ -89,6 +133,23 @@ def _walk_files(root: Path):
     for current_root, _dirs, file_names in os.walk(root, followlinks=False):
         for name in file_names:
             yield Path(current_root) / name
+
+
+def _safe_size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def _has_dir_segment(parts: Tuple[str, ...], names) -> bool:
+    # parts includes the filename as its last element -- only directory
+    # segments should be checked against a directory-name set.
+    return any(part.lower() in names for part in parts[:-1])
+
+
+def _has_all_zero_title_id_segment(parts: Tuple[str, ...]) -> bool:
+    return any(_ALL_ZERO_TITLE_ID.match(part) for part in parts[:-1])
 
 
 def _add_file(path: Path, arcname: str, included: List[Tuple[Path, str, int]], skipped: List[dict], *, max_bytes) -> None:
@@ -116,8 +177,15 @@ def collect_sources(settings: Any) -> Tuple[List[Tuple[Path, str, int]], List[di
 
     configs_dir = system_root / "configs"
     for path in _walk_files(configs_dir):
-        rel = path.relative_to(configs_dir).as_posix()
-        _add_file(path, f"system/configs/{rel}", included, skipped, max_bytes=BACKUP_MAX_CONFIG_FILE_BYTES)
+        rel = path.relative_to(configs_dir)
+        arcname = f"system/configs/{rel.as_posix()}"
+        if _has_dir_segment(rel.parts, _CACHE_DIR_NAMES):
+            skipped.append({"path": arcname, "size": _safe_size(path), "reason": "cache directory, not configuration"})
+            continue
+        if path.suffix.lower() not in _CONFIG_TEXT_EXTENSIONS:
+            skipped.append({"path": arcname, "size": _safe_size(path), "reason": "not a recognized configuration file type"})
+            continue
+        _add_file(path, arcname, included, skipped, max_bytes=BACKUP_MAX_CONFIG_FILE_BYTES)
 
     roms_root = Path(settings.roms_root)
     if roms_root.is_dir():
@@ -146,10 +214,27 @@ def collect_sources(settings: Any) -> Tuple[List[Tuple[Path, str, int]], List[di
 
     saves_root = Path(settings.saves_root)
     for path in _walk_files(saves_root):
-        rel = path.relative_to(saves_root).as_posix()
-        _add_file(path, f"saves/{rel}", included, skipped, max_bytes=BACKUP_MAX_SAVE_FILE_BYTES)
+        rel = path.relative_to(saves_root)
+        arcname = f"saves/{rel.as_posix()}"
+        if _has_dir_segment(rel.parts, _CACHE_DIR_NAMES):
+            skipped.append({"path": arcname, "size": _safe_size(path), "reason": "cache directory, not save data"})
+            continue
+        if _has_dir_segment(rel.parts, _EMULATOR_FIRMWARE_DIR_NAMES) or _has_all_zero_title_id_segment(rel.parts):
+            skipped.append({"path": arcname, "size": _safe_size(path), "reason": "emulator firmware/system-partition data, not a save file"})
+            continue
+        if path.suffix.lower() in _FIRMWARE_IMAGE_EXTENSIONS:
+            skipped.append({"path": arcname, "size": _safe_size(path), "reason": "firmware/disk-image format, not a save file"})
+            continue
+        _add_file(path, arcname, included, skipped, max_bytes=BACKUP_MAX_SAVE_FILE_BYTES)
 
     return included, skipped
+
+
+# A real device's saves/configs trees can contain thousands of non-config
+# files (images, firmware, caches); listing every one individually would make
+# MANIFEST.txt itself unwieldy. The aggregate count/bytes above is always
+# accurate regardless of this cap -- only the per-file listing is truncated.
+_MANIFEST_MAX_LISTED_SKIPPED = 500
 
 
 def _manifest_bytes(included: List[Tuple[Path, str, int]], skipped: List[dict]) -> bytes:
@@ -160,11 +245,14 @@ def _manifest_bytes(included: List[Tuple[Path, str, int]], skipped: List[dict]) 
         f"Included files: {len(included)}",
         f"Skipped files: {len(skipped)} ({skipped_bytes} bytes)",
         "",
-        "Skipped (over the per-file size limit, or unreadable):",
+        "Skipped (over the per-file size limit, unreadable, or not recognized as configuration/save data):",
     ]
     if skipped:
-        for entry in skipped:
+        for entry in skipped[:_MANIFEST_MAX_LISTED_SKIPPED]:
             lines.append(f"  {entry['path']}  ({entry['size']} bytes) -- {entry['reason']}")
+        remaining = len(skipped) - _MANIFEST_MAX_LISTED_SKIPPED
+        if remaining > 0:
+            lines.append(f"  ... and {remaining} more")
     else:
         lines.append("  (none)")
     return ("\n".join(lines) + "\n").encode("utf-8")

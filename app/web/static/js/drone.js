@@ -978,7 +978,7 @@ async function renderConfigBackupsPage() {
       </div>
       <div class="card-body">
         <p class="text-muted small mb-3">
-          Each backup bundles <code>batocera.conf</code>, <code>system/configs/**</code> (files over 20MB are skipped -- mostly emulator firmware/shader caches, not settings), every system's <code>gamelist.xml</code>, custom scripts under <code>system/services</code>/<code>custom</code>/<code>custom-scripts</code>/<code>scripts</code>, and everything in <code>saves/</code>. It does not include ROM/BIOS files or this Drone's own credentials.
+          Each backup bundles <code>batocera.conf</code>, the text-based settings files under <code>system/configs/**</code> (images, fonts, sound, firmware, and shader/other caches are excluded, whatever their size), every system's <code>gamelist.xml</code>, custom scripts under <code>system/services</code>/<code>custom</code>/<code>custom-scripts</code>/<code>scripts</code>, and everything in <code>saves/</code> except known emulator firmware/OS-partition data and disk images. It does not include ROM/BIOS files or this Drone's own credentials.
         </p>
         <div class="table-responsive"><table class="table table-sm table-hover align-middle themed-table local-assets-table bff-stack">
           <thead><tr><th>Name</th><th>Created</th><th>Status</th><th>Size</th><th>Files</th><th class="download-actions">Actions</th></tr></thead>

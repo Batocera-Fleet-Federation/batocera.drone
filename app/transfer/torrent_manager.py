@@ -777,11 +777,10 @@ class TorrentManager:
             entry["last_error"] = ""
             entry["retry_count"] = 0
             entry["retry_at"] = 0.0
-            if finished and not entry.get("completed_at"):
-                entry["completed_at"] = _now_iso()
-                _notifications.record_event(
-                    self.settings, "torrent_completed", "Torrent download completed", str(entry.get("name") or "")
-                )
+            if finished:
+                self._confirm_finished_and_notify_locked(entry)
+            else:
+                entry["_pending_complete_gid"] = None
             entry["force_started"] = False
         elif aria2_status in ("waiting", "paused"):
             entry["seeding"] = False
@@ -794,14 +793,11 @@ class TorrentManager:
             entry["retry_at"] = 0.0
             entry["download_speed_bps"] = 0
             entry["eta_seconds"] = None
-            if not entry.get("completed_at"):
-                entry["completed_at"] = _now_iso()
-                _notifications.record_event(
-                    self.settings, "torrent_completed", "Torrent download completed", str(entry.get("name") or "")
-                )
+            self._confirm_finished_and_notify_locked(entry)
         elif aria2_status == "removed":
             entry["seeding"] = False
             entry["gid"] = None
+            entry["_pending_complete_gid"] = None
             if entry.get("status") != "complete":
                 entry["status"] = "error"
                 entry["message"] = entry.get("message") or "Canceled"
@@ -811,6 +807,35 @@ class TorrentManager:
                 str(result.get("errorMessage") or "aria2 reported an error"),
             )
         return None
+
+    def _confirm_finished_and_notify_locked(self, entry: dict) -> None:
+        """Only fire ``torrent_completed`` (and set ``completed_at``) once the
+        same gid has reported "finished" on two consecutive ticks.
+
+        A magnet link's BitTorrent metadata fetch is itself a tiny, genuinely
+        "complete" aria2 download (a few KB -- the piece-hash/file-list info
+        dict, not the real content) that runs under its own gid before aria2
+        hands off to a new gid for the actual payload (see the ``followedBy``
+        handling above). That handoff is normally caught there, but a narrow
+        timing race can let a single poll observe the metadata gid as
+        "finished" before ``followedBy`` is populated in that response --
+        confirmed live: two real magnet-added torrents got ``completed_at``
+        (and a "download completed" notification) set while only 11-24%
+        through their actual content. A genuine completion trivially survives
+        an extra poll tick (nothing changes), but a one-tick metadata blip
+        does not -- its gid gets swapped out for the real content gid before
+        the next tick, so the "same gid, still finished" check below fails
+        for it and never fires.
+        """
+        gid = entry.get("gid")
+        if entry.get("_pending_complete_gid") == gid:
+            if not entry.get("completed_at"):
+                entry["completed_at"] = _now_iso()
+                _notifications.record_event(
+                    self.settings, "torrent_completed", "Torrent download completed", str(entry.get("name") or "")
+                )
+        else:
+            entry["_pending_complete_gid"] = gid
 
     def _pick_startable_gids_locked(self, config: dict) -> List[str]:
         active = sum(1 for entry in self._torrents.values() if entry.get("status") == "downloading")
