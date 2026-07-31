@@ -629,6 +629,31 @@
       white-space: nowrap;
       text-align: right;
     }
+    /* Torrents grid: fixed column widths (see the <colgroup> in
+       renderTorrentTableShell) plus no-wrap/ellipsis on every cell, so the
+       3s auto-refresh poll never reflows column widths or row heights out
+       from under a click in progress. Scoped to .torrents-table so the
+       Transfers/local-peer tables (which also use .download-table) are
+       unaffected. */
+    .torrents-table {
+      table-layout: fixed;
+    }
+    .torrents-table th,
+    .torrents-table td {
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+    .torrents-table tbody tr {
+      height: 2.5rem;
+    }
+    .torrents-table td.download-actions {
+      width: auto;
+      overflow: visible;
+    }
+    .torrents-table td.download-actions .btn + .btn {
+      margin-left: 0.2rem;
+    }
     .systems-tree-toolbar {
       background: rgba(31, 42, 68, 0.72);
       border: 1px solid var(--admin-border);

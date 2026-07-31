@@ -584,7 +584,20 @@ class TorrentLifecycleTests(unittest.TestCase):
             _write_torrent(watch, "a")
             manager._tick()
             entry = manager.snapshot()["torrents"][0]
-            manager.cancel(entry["id"])
+            with manager._lock:
+                gid = next(iter(manager._torrents.values()))["gid"]
+            # A real aria2-reported failure (not cancel(), which now requeues
+            # rather than erroring -- see test_cancel_active_requeues_* below)
+            # is what actually produces an "error" entry to force-start.
+            rpc.statuses[gid] = {
+                "gid": gid,
+                "status": "error",
+                "errorMessage": "simulated failure",
+                "totalLength": "0",
+                "completedLength": "0",
+                "downloadSpeed": "0",
+            }
+            manager._tick()
             self.assertEqual(manager.snapshot()["torrents"][0]["status"], "error")
             result = manager.force_start(entry["id"])
             self.assertEqual(result["status"], "ok")
@@ -594,7 +607,11 @@ class TorrentLifecycleTests(unittest.TestCase):
             self.assertEqual(adds[-1][2]["pause"], "false")
             self.assertEqual(manager.snapshot()["torrents"][0]["status"], "downloading")
 
-    def test_cancel_active_marks_error_and_removes_from_aria2(self) -> None:
+    def test_cancel_active_requeues_and_removes_from_aria2(self) -> None:
+        # "Cancel" on an active/queued torrent now sends it to the back of
+        # the queue (stop + free its slot) instead of marking it a terminal
+        # error, so a slow torrent can be bumped without losing progress or
+        # needing a manual Force Start to resume.
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             rpc = FakeRpc()
@@ -606,19 +623,44 @@ class TorrentLifecycleTests(unittest.TestCase):
             entry = manager.snapshot()["torrents"][0]
             self.assertEqual(entry["status"], "downloading")
             result = manager.cancel(entry["id"])
-            self.assertEqual(result["status"], "cancelled")
+            self.assertEqual(result["status"], "requeued")
             self.assertEqual(len(rpc.method_calls("aria2.forceRemove")), 1)
             self.assertEqual(len(rpc.method_calls("aria2.removeDownloadResult")), 1)
             refreshed = manager.snapshot()["torrents"][0]
-            self.assertEqual(refreshed["status"], "error")
-            self.assertEqual(refreshed["message"], "Canceled")
+            self.assertEqual(refreshed["status"], "queued")
+            self.assertEqual(refreshed["message"], "")
 
-            with mock.patch.object(torrent_manager.time, "time", return_value=10_000):
-                manager._tick()
+            # Requeued (not a terminal error) means it resumes on its own on
+            # the very next tick -- no Force Start required -- and since
+            # nothing else is queued ahead of it, it re-takes the free slot.
+            manager._tick()
             refreshed = manager.snapshot()["torrents"][0]
-            self.assertEqual(refreshed["status"], "error")
-            self.assertEqual(refreshed["message"], "Canceled")
-            self.assertEqual(len(rpc.method_calls("aria2.addTorrent")), 1)
+            self.assertEqual(refreshed["status"], "downloading")
+            self.assertEqual(len(rpc.method_calls("aria2.addTorrent")), 2)
+
+    def test_cancel_sends_torrent_to_back_of_queue(self) -> None:
+        # With the concurrency slot already taken by "a", cancelling it while
+        # "b" is waiting must land "a" behind "b" -- proving this is a real
+        # back-of-queue requeue, not just an in-place status flip.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            watch = root / "watch"
+            manager.update_settings({"directory": str(watch), "max_concurrent_downloads": 1})
+            _write_torrent(watch, "a")
+            manager._tick()
+            _write_torrent(watch, "b")
+            manager._tick()
+            by_name = {entry["name"]: entry for entry in manager.snapshot()["torrents"]}
+            self.assertEqual(by_name["a"]["status"], "downloading")
+            self.assertEqual(by_name["b"]["status"], "queued")
+
+            manager.cancel(by_name["a"]["id"])
+            manager._tick()
+            by_name = {entry["name"]: entry for entry in manager.snapshot()["torrents"]}
+            self.assertEqual(by_name["b"]["status"], "downloading")
+            self.assertEqual(by_name["a"]["status"], "queued")
 
     def test_cancel_seeding_torrent_stays_complete(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -645,7 +687,7 @@ class TorrentLifecycleTests(unittest.TestCase):
             self.assertEqual(entry["status"], "complete")
             self.assertTrue(entry["seeding"])
             result = manager.cancel(entry["id"])
-            self.assertEqual(result["status"], "cancelled")
+            self.assertEqual(result["status"], "seeding_stopped")
             refreshed = manager.snapshot()["torrents"][0]
             self.assertEqual(refreshed["status"], "complete")
             self.assertFalse(refreshed["seeding"])

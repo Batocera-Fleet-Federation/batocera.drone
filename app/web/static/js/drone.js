@@ -117,6 +117,11 @@ let systemInfoLoaded = false;
 let adminEnabled = true;
 let loadingToastEl = null;
 let currentUsername = "";
+// Bumped by every router() call, see router()'s staleness self-heal below --
+// fast repeat nav clicks fire hashchange faster than the in-flight page's own
+// awaited fetch/render can finish, so an older, slower render can otherwise
+// finish last and overwrite a newer page's already-rendered content/title.
+let routerNavToken = 0;
 const UI_DATA_CACHE_TTL_MS = 5 * 60 * 1000;
 
 // Remote-drone impersonation: opening this app with ?manage=<peer_id> (and
@@ -2809,32 +2814,52 @@ function torrentStatusBadge(row) {
   return `<span class="badge text-bg-${cls}" title="${escapeHtml(row.message || "")}">${escapeHtml(status)}</span>${seedNote}`;
 }
 
+// Each row always renders all 4 action slots in the same fixed order
+// (Force start / Cancel / Move files / Delete), hiding inapplicable ones with
+// `invisible` (visibility:hidden, not display:none) rather than omitting them
+// from the markup. This keeps every button in the exact same physical
+// position on every row regardless of status -- the previous
+// `.filter(Boolean)` approach collapsed the actions cell to only the
+// applicable buttons, so e.g. Delete would sit in a different spot on a
+// "downloading" row (2 buttons) vs. a "queued" row (3 buttons), which is
+// exactly what made it easy to misclick during the 3s auto-refresh.
 function renderTorrentRowMarkup(row) {
   const id = escapeHtml(row.id || "");
   const status = String(row.status || "queued");
   const pct = Number(row.progress_percent || 0);
   const canForceStart = ["queued", "error"].includes(status);
-  const canCancel = ["queued", "downloading"].includes(status) || (status === "complete" && row.seeding);
+  // "Cancel" now covers two distinct outcomes depending on status: a
+  // queued/downloading torrent gets stopped and sent to the back of the
+  // queue (see torrent_manager.py's cancel(), which requeues rather than
+  // erroring), while a completed-but-still-seeding torrent just stops
+  // seeding -- label/icon reflect whichever applies.
+  const canRequeue = ["queued", "downloading"].includes(status);
+  const canStopSeeding = status === "complete" && row.seeding;
+  const canCancel = canRequeue || canStopSeeding;
+  const cancelTitle = canRequeue ? "Send to queue" : "Stop seeding";
+  const cancelIcon = canRequeue ? "bi-hourglass-split" : "bi-stop-circle";
   const canMoveFiles = status === "complete";
   const progressText = row.total_bytes
     ? `${pct.toFixed(1)}% (${formatBytes(row.completed_bytes)} / ${formatBytes(row.total_bytes)})`
     : (status === "complete" ? "100%" : "0%");
   const etaSeconds = Number(row.eta_seconds);
   const etaText = status === "downloading" ? (Number.isFinite(etaSeconds) && etaSeconds > 0 ? formatDuration(etaSeconds) : "--") : "";
+  const actionSlot = (visible, cls, title, onclick, icon) =>
+    `<button class="btn btn-sm ${cls}${visible ? "" : " invisible"}" title="${title}" aria-label="${title}" aria-hidden="${visible ? "false" : "true"}" tabindex="${visible ? "0" : "-1"}" onclick="${visible ? onclick : ""}"><i class="bi ${icon}"></i></button>`;
   const actions = [
-    canForceStart ? `<button class="btn btn-sm btn-outline-success" title="Force start" aria-label="Force start" onclick="forceStartTorrent('${id}')"><i class="bi bi-lightning-charge"></i></button>` : "",
-    canCancel ? `<button class="btn btn-sm btn-outline-warning" title="Cancel" aria-label="Cancel" onclick="cancelTorrent('${id}')"><i class="bi bi-x-circle"></i></button>` : "",
-    canMoveFiles ? `<button class="btn btn-sm btn-outline-info" title="Move files" aria-label="Move files" onclick="openMoveFilesModal('${id}')"><i class="bi bi-folder-symlink"></i></button>` : "",
-    `<button class="btn btn-sm btn-outline-danger" title="Delete torrent" aria-label="Delete torrent" onclick="deleteTorrent('${id}')"><i class="bi bi-trash"></i></button>`,
-  ].filter(Boolean).join(" ");
+    actionSlot(canForceStart, "btn-outline-success", "Force start", `forceStartTorrent('${id}')`, "bi-lightning-charge"),
+    actionSlot(canCancel, "btn-outline-warning", cancelTitle, `cancelTorrent('${id}')`, cancelIcon),
+    actionSlot(canMoveFiles, "btn-outline-info", "Move files", `openMoveFilesModal('${id}')`, "bi-folder-symlink"),
+    actionSlot(true, "btn-outline-danger", "Delete torrent", `deleteTorrent('${id}')`, "bi-trash"),
+  ].join(" ");
   return `<tr>
     <td class="download-file" title="${escapeHtml(row.torrent_file || "")}">${escapeHtml(row.name || "")}</td>
     <td>${torrentStatusBadge(row)}</td>
-    <td class="small text-nowrap">${progressText}</td>
+    <td class="small" title="${escapeHtml(progressText)}">${progressText}</td>
     <td class="small">${row.download_speed_bps ? `${formatBytes(row.download_speed_bps)}/s` : ""}</td>
     <td class="small">${Number(row.num_seeders || 0)}</td>
     <td class="small">${Number(row.connections || 0)}</td>
-    <td class="small text-nowrap">${etaText}</td>
+    <td class="small">${etaText}</td>
     <td class="download-actions">${actions}</td>
   </tr>`;
 }
@@ -2849,12 +2874,22 @@ function renderTorrentTableBody(rows) {
 // The table/thead is mounted once (renderTorrentsLive) and never replaced;
 // only <tbody id="torrentsTableBody"> is patched by patchTorrentsLive, so the
 // 3s auto-refresh never flashes the grid.
+//
+// `torrents-table` (on top of the shared `download-table`/`local-assets-table`
+// classes also used by the Transfers and local-peer-browsing tables) carries
+// its own `table-layout: fixed` + explicit <colgroup> widths, scoped so it
+// doesn't change those other tables' layout. Fixed column widths, combined
+// with every cell truncating instead of wrapping (see drone.css), are what
+// stop the grid from resizing itself on every 3s poll -- row content length
+// (a progress readout growing from "0%" to "45.2% (1.2 GB / 4.5 GB)", a speed
+// number gaining digits, etc.) used to reflow every column's auto-fit width
+// out from under whatever the user was about to click.
 function renderTorrentTableShell(rows) {
-  // local-assets-table carries the same compact font-size/line-height/cell
-  // padding as the Swarm page's "Nearby Drones" table (#localPeersBody
-  // .themed-table) -- reused here as a general-purpose class rather than
-  // duplicating that rule under a second selector.
-  return `<div class="table-responsive"><table class="table table-sm table-hover align-middle themed-table download-table local-assets-table bff-stack">
+  return `<div class="table-responsive"><table class="table table-sm table-hover align-middle themed-table download-table local-assets-table bff-stack torrents-table">
+    <colgroup>
+      <col style="width:34%"><col style="width:10%"><col style="width:20%"><col style="width:10%">
+      <col style="width:6%"><col style="width:6%"><col style="width:8%"><col style="width:132px">
+    </colgroup>
     <thead><tr><th>Torrent</th><th>Status</th><th>Progress</th><th>Speed</th><th>SD</th><th>CN</th><th>ETA</th><th class="download-actions">Actions</th></tr></thead>
     <tbody id="torrentsTableBody">${renderTorrentTableBody(rows)}</tbody>
   </table></div>`;
@@ -3109,13 +3144,18 @@ async function forceStartTorrent(torrentId) {
   }
 }
 
+// Backs both the "Send to queue" and "Stop seeding" buttons (same backend
+// route -- torrent_manager.py's cancel() picks the outcome based on status).
+// No confirm dialog: sending a torrent back to the queue is no longer a
+// destructive, Force-Start-to-undo action -- it resumes on its own -- and
+// stopping seeding was already non-destructive.
 async function cancelTorrent(torrentId) {
-  if (!torrentId || !window.confirm("Cancel this torrent? Partially downloaded files are kept, and Force Start can resume it later.")) return;
+  if (!torrentId) return;
   try {
     await apiPost(`/admin/torrents/${encodeURIComponent(torrentId)}/cancel`, {});
     await refreshTorrentsLive();
   } catch (err) {
-    showToast(`Cancel failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    showToast(`Action failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
   }
 }
 
@@ -8541,6 +8581,7 @@ async function loadSystemInfoBar() {
   }
 }
 async function router() {
+  const myNavToken = ++routerNavToken;
   clearError();
   scrollContentToTop();
   try {
@@ -8706,6 +8747,18 @@ async function router() {
       return;
     } else {
       await renderHelpPage();
+    }
+    // The awaited render call above may have taken long enough that a newer
+    // nav click already fired its own router() call and rendered a
+    // different, more current page over top of this one -- in which case
+    // this call's own content/title write (already done, deep inside the
+    // render function above) is now stale and possibly still on screen.
+    // Re-run the router for whatever hash is current *now* so the page
+    // self-corrects immediately rather than sitting on the wrong content
+    // until another nav click or manual refresh.
+    if (myNavToken !== routerNavToken) {
+      await router();
+      return;
     }
   } catch (err) {
     setLoading(false);

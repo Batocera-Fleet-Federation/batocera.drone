@@ -873,6 +873,17 @@ class TorrentManager:
         return {"status": "ok"}
 
     def cancel(self, entry_id: str) -> dict:
+        """Stop a queued/downloading torrent and send it to the back of the
+        queue -- lets a slow torrent be bumped out of an active slot (to free
+        it for something faster) without losing its progress or requiring a
+        manual Force Start to resume, unlike the old "mark it a terminal
+        error" behavior. `_remove_from_aria2` only stops the aria2 process and
+        clears its result -- it does not delete the partial payload or the
+        `.aria2` resume file, so re-adding later continues where this left
+        off, same as the post-restart GID-recovery path. Stopping a completed,
+        still-seeding torrent is a distinct action (there is nothing to
+        "queue") and keeps its own "Seeding stopped" outcome.
+        """
         with self._lock:
             entry = self._torrents.get(entry_id)
             if entry is None:
@@ -885,11 +896,14 @@ class TorrentManager:
             if status == "complete" and seeding:
                 entry["seeding"] = False
                 entry["message"] = "Seeding stopped"
+                result_status = "seeding_stopped"
             else:
-                entry["status"] = "error"
-                entry["message"] = "Canceled"
+                entry["status"] = "queued"
+                entry["message"] = ""
                 entry["download_speed_bps"] = 0
                 entry["eta_seconds"] = None
+                entry["queue_position"] = self._take_queue_position_locked()
+                result_status = "requeued"
             entry["gid"] = None
             entry["force_started"] = False
             entry["last_error"] = ""
@@ -898,7 +912,7 @@ class TorrentManager:
             self._persist_locked()
         self._remove_from_aria2(gid)
         self.wake()
-        return {"status": "cancelled"}
+        return {"status": result_status}
 
     def delete(self, entry_id: str) -> dict:
         with self._lock:
