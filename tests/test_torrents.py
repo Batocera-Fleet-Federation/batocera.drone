@@ -638,6 +638,42 @@ class TorrentLifecycleTests(unittest.TestCase):
             self.assertEqual(refreshed["status"], "downloading")
             self.assertEqual(len(rpc.method_calls("aria2.addTorrent")), 2)
 
+    def test_cancel_errored_torrent_requeues_instead_of_not_cancelable(self) -> None:
+        # "Send to queue" is also offered on an errored torrent (in addition
+        # to Force Start) as a way to retry it without jumping the queue --
+        # cancel() must actually requeue an "error" entry, not reject it.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            watch = root / "watch"
+            manager.update_settings({"directory": str(watch), "max_concurrent_downloads": 1})
+            _write_torrent(watch, "a")
+            manager._tick()
+            with manager._lock:
+                gid = next(iter(manager._torrents.values()))["gid"]
+            rpc.statuses[gid] = {
+                "gid": gid,
+                "status": "error",
+                "errorMessage": "simulated failure",
+                "totalLength": "0",
+                "completedLength": "0",
+                "downloadSpeed": "0",
+            }
+            manager._tick()
+            entry = manager.snapshot()["torrents"][0]
+            self.assertEqual(entry["status"], "error")
+
+            result = manager.cancel(entry["id"])
+            self.assertEqual(result["status"], "requeued")
+            refreshed = manager.snapshot()["torrents"][0]
+            self.assertEqual(refreshed["status"], "queued")
+            self.assertEqual(refreshed["message"], "")
+
+            manager._tick()
+            refreshed = manager.snapshot()["torrents"][0]
+            self.assertEqual(refreshed["status"], "downloading")
+
     def test_cancel_sends_torrent_to_back_of_queue(self) -> None:
         # With the concurrency slot already taken by "a", cancelling it while
         # "b" is waiting must land "a" behind "b" -- proving this is a real

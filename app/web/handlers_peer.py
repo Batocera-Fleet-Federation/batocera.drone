@@ -25,10 +25,12 @@ try:
         list_emulator_config_files as _list_emulator_config_files,
         read_emulator_config_file as _read_emulator_config_file,
     )
+    from ..device import config_backup as _config_backup
     from ..device import notifications as _notifications
     from ..device import smtp_manager as _smtp
     from ..device import vpn_manager as _vpn
     from ..roms.rom_metadata_state import _rom_metadata_cache_status
+    from ..storage import config_backup_store as _config_backup_store
     from ..storage import movies_store as _movies_store
     from ..storage import saves_store as _saves_store
     from ..storage.rom_metadata_store import list_artwork_cache_page
@@ -55,10 +57,12 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         list_emulator_config_files as _list_emulator_config_files,
         read_emulator_config_file as _read_emulator_config_file,
     )
+    from device import config_backup as _config_backup  # type: ignore
     from device import notifications as _notifications  # type: ignore
     from device import smtp_manager as _smtp  # type: ignore
     from device import vpn_manager as _vpn  # type: ignore
     from roms.rom_metadata_state import _rom_metadata_cache_status  # type: ignore
+    from storage import config_backup_store as _config_backup_store  # type: ignore
     from storage import movies_store as _movies_store  # type: ignore
     from storage import saves_store as _saves_store  # type: ignore
     from storage.rom_metadata_store import list_artwork_cache_page  # type: ignore
@@ -286,6 +290,19 @@ class HandlersPeerMixin:
                     offset=offset,
                 )
             )
+        elif normalized == "config_backups":
+            # No system dimension at all -- selected_systems/system are
+            # accepted for a uniform request shape but ignored, same as
+            # movies. Only "complete" backups are ever downloadable, so
+            # list_complete_page() filters to those before paging.
+            return paged_response(
+                _config_backup_store.list_complete_page(
+                    self.settings,
+                    query=query,
+                    limit=limit,
+                    offset=offset,
+                )
+            )
         elif normalized == "emulator_configs":
             configs = _list_emulator_config_files(
                 self.settings,
@@ -410,7 +427,7 @@ class HandlersPeerMixin:
                 reverse=True,
             )
         else:
-            raise ValueError("asset type must be summary, roms, bios, artwork, saves, emulator_configs, or gameplay")
+            raise ValueError("asset type must be summary, roms, bios, artwork, saves, movies, config_backups, emulator_configs, or gameplay")
         rows = [
             {key: value for key, value in row.items() if key not in {"absolute_path"}}
             for row in rows
@@ -603,6 +620,35 @@ class HandlersPeerMixin:
         self._stream_file(
             target, "application/octet-stream", as_attachment=True,
             upload_meta={"asset_type": "movies", "relative_path": rel},
+        )
+
+    def _handle_peer_config_backup_download(self, file_name: str) -> None:
+        """Serve a config-backup tarball to an authenticated peer (mTLS when
+        enabled). Looked up by file_name (the same identity every other flat
+        asset type -- BIOS, movies -- uses), not by this drone's local
+        integer id, since a peer's request has no way to know that id. Only
+        "complete" backups are ever downloadable; a "creating"/"error" row's
+        file may not exist yet or may be a half-built temp file."""
+        if not self._peer_request_authorized():
+            return
+        name = unquote(file_name or "").strip()
+        if not name or "/" in name or "\\" in name or name.startswith("."):
+            self._send_json(400, {"error": "invalid backup file name"})
+            return
+        row = _config_backup_store.get_by_file_name(self.settings, name)
+        if row is None or row.get("status") != "complete":
+            self._send_json(404, {"error": "not found"})
+            return
+        backups_root = _config_backup.backups_directory(self.settings).resolve()
+        target = (backups_root / name).resolve()
+        if not target.exists() or not target.is_file() or backups_root not in target.parents:
+            self.log_error("peer config backup download failed file=%s resolved=%s reason=not_found", name, str(target))
+            self._send_json(404, {"error": "not found"})
+            return
+        self.log_message("peer config backup download file=%s bytes=%s", name, target.stat().st_size)
+        self._stream_file(
+            target, "application/gzip", as_attachment=True,
+            upload_meta={"asset_type": "config_backups", "relative_path": name},
         )
 
     def _handle_peer_save_download(self, system: str, relative_path: str) -> None:

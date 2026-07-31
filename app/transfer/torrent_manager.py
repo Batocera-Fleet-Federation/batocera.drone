@@ -894,16 +894,18 @@ class TorrentManager:
         return {"status": "ok"}
 
     def cancel(self, entry_id: str) -> dict:
-        """Stop a queued/downloading torrent and send it to the back of the
-        queue -- lets a slow torrent be bumped out of an active slot (to free
-        it for something faster) without losing its progress or requiring a
-        manual Force Start to resume, unlike the old "mark it a terminal
-        error" behavior. `_remove_from_aria2` only stops the aria2 process and
+        """Stop a queued/downloading/errored torrent and send it to the back
+        of the queue -- lets a slow torrent be bumped out of an active slot
+        (to free it for something faster), or an errored one be retried
+        without jumping the queue via Force Start, all without losing
+        progress. `_remove_from_aria2` only stops the aria2 process and
         clears its result -- it does not delete the partial payload or the
         `.aria2` resume file, so re-adding later continues where this left
         off, same as the post-restart GID-recovery path. Stopping a completed,
         still-seeding torrent is a distinct action (there is nothing to
-        "queue") and keeps its own "Seeding stopped" outcome.
+        "queue") and keeps its own "Seeding stopped" outcome. A torrent
+        already sitting in "queued" has nothing to do here -- the UI doesn't
+        even offer the button for that status.
         """
         with self._lock:
             entry = self._torrents.get(entry_id)
@@ -912,7 +914,7 @@ class TorrentManager:
             status = entry.get("status")
             seeding = bool(entry.get("seeding"))
             gid = entry.get("gid")
-            if status == "error" or (status == "complete" and not seeding):
+            if status == "complete" and not seeding:
                 return {"status": "not_cancelable"}
             if status == "complete" and seeding:
                 entry["seeding"] = False

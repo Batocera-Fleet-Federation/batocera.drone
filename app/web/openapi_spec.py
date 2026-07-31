@@ -628,6 +628,49 @@ def _schemas() -> Dict[str, Schema]:
             },
             description="Result of installing the static aria2c binary.",
         ),
+        "ConfigBackup": _object(
+            {
+                "id": _integer(),
+                "status": _enum(("creating", "complete", "error")),
+                "file_name": _string(),
+                "size_bytes": _integer(),
+                "included_file_count": _integer(),
+                "skipped_file_count": _integer("Files excluded, e.g. by the configs/ per-file size cap"),
+                "skipped_bytes": _integer(),
+                "error_message": _string(),
+                "created_at": _string(),
+                "completed_at": _string(),
+                "name": _string("User-supplied label, empty if none was given"),
+                "description": _string(),
+                "source_drone_id": _string("Set only when pulled from a paired peer, null for a locally-built backup"),
+                "source_drone_name": _string(),
+                "source_created_at": _string("The backup's original creation time on its source drone, if pulled from a peer"),
+                "is_local": _boolean("False when this backup was pulled from a paired peer rather than built here"),
+            },
+            ("id", "status", "file_name"),
+            description="One config-backup tarball's metadata (bytes live on disk, not in this row). Also a P2P asset type (config_backups) -- see /peer/config-backups/{file_name}.",
+        ),
+        "ConfigBackupsListResponse": _object({"backups": _array(_ref("ConfigBackup"))}, ("backups",)),
+        "ConfigBackupCreateRequest": _object(
+            {"name": _string(), "description": _string()},
+            description="Both optional -- a user-supplied label/description to identify this backup later, including to a peer browsing it via the Request Assets flow.",
+        ),
+        "ConfigBackupCreateResponse": _object(
+            {"status": _string(), "backup": _ref("ConfigBackup")},
+            ("status",),
+            description="'already_creating' (409) if a backup is already being built.",
+        ),
+        "ConfigBackupEmailResponse": _object(
+            {
+                "status": _enum(("sent", "not_configured", "too_large", "error", "not_found")),
+                "size_bytes": _integer("Present when status is 'too_large'"),
+                "limit_bytes": _integer("Present when status is 'too_large'"),
+                "error": _string("Present when status is 'error'"),
+            },
+            ("status",),
+            description="'not_configured'/'too_large'/'error' are 200s (not thrown errors) so the caller can branch on the exact outcome -- e.g. show a popup pointing at Email settings for 'not_configured'.",
+        ),
+        "ConfigBackupActionResponse": _object({"status": _string()}, ("status",)),
         "TorrentUploadRequest": _object(
             {"torrents": _array({"type": "string", "format": "binary"})},
             description="One or more .torrent files as multipart file parts (any field names).",
@@ -1697,6 +1740,22 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             },
             "/admin/torrents/aria2/install": {
                 "post": _operation("Download and install the static aria2c binary", {"200": _json_response("Aria2InstallResponse")}, tags=["admin", "torrents"], error_codes=("400", "401", "403", "429", "500", "503"))
+            },
+            "/admin/config-backups": {
+                "get": _operation("List config-backup tarballs, newest first", {"200": _json_response("ConfigBackupsListResponse")}, tags=["admin", "config-backups"], error_codes=("401", "403", "429", "500")),
+                "post": _operation("Start building a new config-backup tarball in the background", {"200": _json_response("ConfigBackupCreateResponse"), "409": _json_response("ConfigBackupCreateResponse", "A backup is already being built")}, request_body=_json_request("ConfigBackupCreateRequest"), tags=["admin", "config-backups"], error_codes=("401", "403", "429", "500")),
+            },
+            "/admin/config-backups/{backup_id}/download": {
+                "get": _operation("Download a completed config-backup tarball", {"200": {"description": "The tar.gz file", "content": {"application/gzip": {"schema": {"type": "string", "format": "binary"}}}}, "404": _json_response("ConfigBackupActionResponse", "Backup not found or not yet complete")}, parameters=[_path_param("backup_id")], tags=["admin", "config-backups"], error_codes=("401", "403", "429", "500"))
+            },
+            "/admin/config-backups/{backup_id}/delete": {
+                "post": _operation("Delete a config-backup tarball and its metadata", {"200": _json_response("ConfigBackupActionResponse"), "404": _json_response("ConfigBackupActionResponse", "Backup not found")}, parameters=[_path_param("backup_id")], tags=["admin", "config-backups"], error_codes=("401", "403", "429", "500"))
+            },
+            "/admin/config-backups/{backup_id}/email": {
+                "post": _operation("Email a completed config-backup tarball as an attachment (SMTP must be configured)", {"200": _json_response("ConfigBackupEmailResponse"), "404": _json_response("ConfigBackupEmailResponse", "Backup not found or not yet complete")}, parameters=[_path_param("backup_id")], tags=["admin", "config-backups"], error_codes=("401", "403", "429", "500"))
+            },
+            "/peer/config-backups/{file_name}": {
+                "get": _operation("mTLS: download a completed config-backup tarball from a paired peer", {"200": {"description": "The tar.gz file", "content": {"application/gzip": {"schema": {"type": "string", "format": "binary"}}}}, "400": _json_response("ConfigBackupActionResponse", "Invalid file name"), "404": _json_response("ConfigBackupActionResponse", "Backup not found or not yet complete")}, parameters=[_path_param("file_name")], tags=["peer", "config-backups"], error_codes=("401", "403", "429", "500"))
             },
             "/admin/torrents/{torrent_id}/force-start": {
                 "post": _operation("Force-start a torrent, bypassing the concurrency limit", {"200": _json_response("TorrentActionResponse"), "404": _json_response("TorrentActionResponse", "Torrent not found"), "409": _json_response("TorrentActionResponse", "Torrent already completed")}, parameters=[_path_param("torrent_id")], tags=["admin", "torrents"], error_codes=("400", "401", "403", "429", "500", "503"))

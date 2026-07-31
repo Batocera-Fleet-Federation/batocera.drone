@@ -98,17 +98,21 @@ keeps showing the torrent's true original add time while retries cannot starve
 new work. `DRONE_TORRENT_RETRY_BASE_SECONDS` and
 `DRONE_TORRENT_RETRY_MAX_SECONDS` override the defaults.
 
-**Cancel is a requeue, not a terminal error** -- clicking it on a
-queued/downloading torrent stops it (`_remove_from_aria2`) and sends it to
-the back of the queue with a fresh `queue_position`, so it resumes on its own
-on the next tick with no Force Start needed (partial progress is kept: the
-`.aria2` resume file on disk isn't touched). This lets a slow torrent be
-bumped out of an active slot to free it for something else. Canceling a
-completed-but-still-seeding torrent is the one exception -- that just stops
-seeding (`"Seeding stopped"`) since there's nothing to requeue. `cancel()`'s
-return `status` is `"requeued"` or `"seeding_stopped"` accordingly (an older
-`"cancelled"` value is gone). A failed aria2 GID is removed before its retry
-is re-added so stopped/error results do not collide with the fresh attempt.
+**Cancel is a requeue, not a terminal error** -- clicking it ("Send to queue"
+in the UI) on a downloading or errored torrent stops it (`_remove_from_aria2`)
+and sends it to the back of the queue with a fresh `queue_position`, so it
+resumes on its own on the next tick with no Force Start needed (partial
+progress is kept: the `.aria2` resume file on disk isn't touched). This lets
+a slow torrent be bumped out of an active slot to free it for something else,
+or an errored one be retried without jumping the queue the way Force Start
+does. A `queued` torrent has nothing to do here, so the UI doesn't offer the
+button for that status (though the backend will still no-op-requeue it if
+called directly). Canceling a completed-but-still-seeding torrent is the one
+exception -- that just stops seeding (`"Seeding stopped"`) since there's
+nothing to requeue. `cancel()`'s return `status` is `"requeued"` or
+`"seeding_stopped"` accordingly (an older `"cancelled"` value is gone). A
+failed aria2 GID is removed before its retry is re-added so stopped/error
+results do not collide with the fresh attempt.
 Entries persisted from **before** this change (status `error`, message
 `Canceled` -- the old terminal-cancel behavior) are exempted from the
 first-tick-after-upgrade retry-eligibility sweep for pre-retry-metadata error

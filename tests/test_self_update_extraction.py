@@ -19,6 +19,8 @@ from pathlib import Path
 from unittest import mock
 
 from app.common import self_update
+from app.common.settings import Settings
+from app.storage import audit_store
 
 
 def _targz(members):
@@ -117,6 +119,59 @@ class DownloadLatestDroneAppTests(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             self._run(b"")
         self.assertIn("empty", str(ctx.exception))
+
+
+class DownloadLatestDroneAppNotificationTests(unittest.TestCase):
+    """The single choke point behind both the manual "Update Drone" button and
+    the auto-update poller must record a drone_updated notification on a real
+    success, and must not record one when the download fails."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.work_dir = self.root / "work"
+        env = {
+            "USERDATA_ROOT": str(self.root / "userdata"),
+            "ROMS_ROOT": str(self.root / "roms"),
+            "BIOS_ROOT": str(self.root / "bios"),
+            "SAVES_ROOT": str(self.root / "saves"),
+            "DRONE_STATE_DATABASE_FILE": str(self.root / "state.sqlite3"),
+            "DRONE_DEVICE_ID": "self-update-notify-test",
+            "DRONE_APP_WORK_DIR": str(self.work_dir),
+            "DRONE_APP_ARCHIVE_URL": "http://test.invalid/drone-app.tar.gz",
+        }
+        self._env_patch = mock.patch.dict("os.environ", env, clear=True)
+        self._env_patch.start()
+        self.settings = Settings.from_env()
+
+    def tearDown(self):
+        self._env_patch.stop()
+        self._tmp.cleanup()
+
+    def test_successful_update_records_a_drone_updated_notification(self):
+        (self.work_dir / "app").mkdir(parents=True)
+        (self.work_dir / "app" / "VERSION").write_text("v1.0.0\n", encoding="utf-8")
+        archive = _targz([
+            ("app/main.py", b"m"),
+            ("app/VERSION", b"v1.0.1\n"),
+            ("content/theme.css", b"c"),
+        ])
+        with mock.patch.object(self_update, "urlopen", lambda request, timeout=None: io.BytesIO(archive)):
+            self_update._download_latest_drone_app(self.settings)
+
+        events = audit_store.list_unsent_events(self.settings, event_types=["drone_updated"])
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["title"], "Drone app updated")
+        self.assertIn("v1.0.0", events[0]["message"])
+        self.assertIn("v1.0.1", events[0]["message"])
+
+    def test_failed_update_does_not_record_a_notification(self):
+        with mock.patch.object(self_update, "urlopen", lambda request, timeout=None: io.BytesIO(b"")):
+            with self.assertRaises(ValueError):
+                self_update._download_latest_drone_app(self.settings)
+
+        events = audit_store.list_unsent_events(self.settings, event_types=["drone_updated"])
+        self.assertEqual(events, [])
 
 
 class DroneAutoUpdateSettingTests(unittest.TestCase):

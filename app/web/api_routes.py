@@ -118,6 +118,10 @@ class ApiRoutesMixin:
                 self._handle_peer_movie_download("/".join(parts[2:]))
                 return
 
+            if len(parts) >= 3 and parts[0] == "peer" and parts[1] == "config-backups":
+                self._handle_peer_config_backup_download("/".join(parts[2:]))
+                return
+
             if len(parts) >= 4 and parts[0] == "peer" and parts[1] == "saves":
                 self._handle_peer_save_download(parts[2], "/".join(parts[3:]))
                 return
@@ -342,6 +346,14 @@ class ApiRoutesMixin:
 
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "torrents" and parts[3] == "files":
                 self._handle_admin_torrent_files(parts[2])
+                return
+
+            if len(parts) == 2 and parts[0] == "admin" and parts[1] == "config-backups":
+                self._handle_admin_config_backups_list()
+                return
+
+            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "config-backups" and parts[3] == "download":
+                self._handle_admin_config_backup_download(parts[2])
                 return
 
             if len(parts) == 2 and parts[0] == "admin" and parts[1] == "vpn":
@@ -779,6 +791,19 @@ class ApiRoutesMixin:
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "torrents" and parts[2] == "clear":
                 payload = self._read_json_body()
                 self._handle_admin_torrents_clear(payload)
+                return
+
+            if len(parts) == 2 and parts[0] == "admin" and parts[1] == "config-backups":
+                payload = self._read_json_body()
+                self._handle_admin_config_backups_create(payload)
+                return
+
+            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "config-backups" and parts[3] == "delete":
+                self._handle_admin_config_backup_delete(parts[2])
+                return
+
+            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "config-backups" and parts[3] == "email":
+                self._handle_admin_config_backup_email(parts[2])
                 return
 
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "vpn" and parts[2] == "upload":

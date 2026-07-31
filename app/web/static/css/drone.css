@@ -654,6 +654,19 @@
     .torrents-table td.download-actions .btn + .btn {
       margin-left: 0.2rem;
     }
+    /* Every row always renders all 4 action buttons (see
+       renderTorrentRowMarkup); ones that don't apply to the current status
+       are `disabled` rather than removed, so the row's available actions
+       stay visible at a glance. Bootstrap's default :disabled state on an
+       outline button only nudges opacity down a bit -- it still reads as
+       "green"/"blue", not "off" -- so override with a flat neutral gray to
+       make disabled vs. enabled unambiguous at a glance. */
+    .torrents-table td.download-actions .btn:disabled {
+      color: var(--admin-muted);
+      border-color: var(--admin-border);
+      background: transparent;
+      opacity: 0.55;
+    }
     .systems-tree-toolbar {
       background: rgba(31, 42, 68, 0.72);
       border: 1px solid var(--admin-border);

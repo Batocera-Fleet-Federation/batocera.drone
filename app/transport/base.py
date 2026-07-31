@@ -42,6 +42,13 @@ class DownloadRequest:
     # Folder-unit ROMs only: the gamelist <path> (marker file) inside the transferred
     # folder; carries the ROM's identity/fingerprint and is written last on receive.
     marker_relative_path: Optional[str] = None
+    # config_backups only: the source peer's own label for the backup, carried
+    # through so the locally-registered row (see record_downloaded()) shows
+    # the same name/description/original-creation-time the peer set, not just
+    # a blank/renamed copy.
+    backup_name: str = ""
+    backup_description: str = ""
+    source_created_at: Optional[str] = None
 
 
 @dataclass

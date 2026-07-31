@@ -20,6 +20,11 @@ try:
 except ImportError:  # pragma: no cover - direct script execution fallback
     from settings import Settings  # type: ignore
 
+try:
+    from ..device import notifications as _notifications
+except ImportError:  # pragma: no cover - flat (no `app.` prefix) package mode
+    from device import notifications as _notifications  # type: ignore
+
 DRONE_LATEST_ARCHIVE_URL = "https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/drone-app.tar.gz"
 DRONE_LATEST_RELEASE_URL = "https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest"
 DRONE_SELF_UPDATE_EXIT_CODE = 75
@@ -193,8 +198,17 @@ def _download_latest_drone_app_unlocked(settings: Settings) -> dict:
 
 
 def _download_latest_drone_app(settings: Settings) -> dict:
+    previous_version = _installed_drone_version(settings)
     with _DRONE_UPDATE_LOCK:
-        return _download_latest_drone_app_unlocked(settings)
+        result = _download_latest_drone_app_unlocked(settings)
+    new_version = _installed_drone_version(settings)
+    _notifications.record_event(
+        settings,
+        "drone_updated",
+        "Drone app updated",
+        f"{previous_version or 'unknown'} -> {new_version or 'unknown'}; restarting to apply.",
+    )
+    return result
 
 
 def _schedule_supervised_service_restart(delay_seconds: float) -> bool:

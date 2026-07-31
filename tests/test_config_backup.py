@@ -1,0 +1,293 @@
+import tarfile
+import tempfile
+import time
+import unittest
+from pathlib import Path
+from unittest import mock
+
+import app.device.config_backup as config_backup
+import app.storage.config_backup_store as config_backup_store
+from app.common.settings import Settings
+
+
+def _build_settings(root: Path) -> Settings:
+    env = {
+        "USERDATA_ROOT": str(root),
+        "ROMS_ROOT": str(root / "roms"),
+        "BIOS_ROOT": str(root / "bios"),
+        "SAVES_ROOT": str(root / "saves"),
+        "DRONE_STATE_DATABASE_FILE": str(root / "state.sqlite3"),
+        "DRONE_DEVICE_ID": "local-test",
+        "LOG_DIR": str(root / "logs"),
+    }
+    with mock.patch.dict("os.environ", env, clear=True):
+        return Settings.from_env()
+
+
+def _write(path: Path, content: bytes = b"data") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content)
+
+
+def _wait_for_status(settings, backup_id, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        row = config_backup_store.get(settings, backup_id)
+        if row and row["status"] != config_backup_store.STATUS_CREATING:
+            return row
+        time.sleep(0.02)
+    raise AssertionError(f"backup {backup_id} still creating after {timeout}s")
+
+
+class ConfigBackupStoreTests(unittest.TestCase):
+    def test_create_pending_then_list_and_get(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            row = config_backup_store.create_pending(settings, "drone-config-backup-test.tar.gz")
+            self.assertEqual(row["status"], config_backup_store.STATUS_CREATING)
+            self.assertIsInstance(row["id"], int)
+
+            fetched = config_backup_store.get(settings, row["id"])
+            self.assertEqual(fetched["file_name"], "drone-config-backup-test.tar.gz")
+
+            listed = config_backup_store.list_all(settings)
+            self.assertEqual(len(listed), 1)
+            self.assertEqual(listed[0]["id"], row["id"])
+
+    def test_mark_complete_and_mark_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            row = config_backup_store.create_pending(settings, "a.tar.gz")
+            config_backup_store.mark_complete(
+                settings, row["id"], size_bytes=123, included_file_count=4, skipped_file_count=1, skipped_bytes=99
+            )
+            fetched = config_backup_store.get(settings, row["id"])
+            self.assertEqual(fetched["status"], config_backup_store.STATUS_COMPLETE)
+            self.assertEqual(fetched["size_bytes"], 123)
+            self.assertEqual(fetched["skipped_file_count"], 1)
+
+            row2 = config_backup_store.create_pending(settings, "b.tar.gz")
+            config_backup_store.mark_error(settings, row2["id"], "disk full")
+            fetched2 = config_backup_store.get(settings, row2["id"])
+            self.assertEqual(fetched2["status"], config_backup_store.STATUS_ERROR)
+            self.assertEqual(fetched2["error_message"], "disk full")
+
+    def test_delete_removes_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            row = config_backup_store.create_pending(settings, "a.tar.gz")
+            self.assertTrue(config_backup_store.delete(settings, row["id"]))
+            self.assertIsNone(config_backup_store.get(settings, row["id"]))
+            self.assertFalse(config_backup_store.delete(settings, row["id"]))
+
+    def test_create_pending_carries_name_and_description(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            row = config_backup_store.create_pending(settings, "a.tar.gz", name="Weekly", description="Just in case")
+            self.assertEqual(row["name"], "Weekly")
+            self.assertEqual(row["description"], "Just in case")
+            self.assertTrue(row["is_local"])
+            fetched = config_backup_store.get(settings, row["id"])
+            self.assertEqual(fetched["name"], "Weekly")
+            self.assertEqual(fetched["description"], "Just in case")
+
+    def test_create_pending_defaults_name_and_description_to_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            row = config_backup_store.create_pending(settings, "a.tar.gz")
+            self.assertEqual(row["name"], "")
+            self.assertEqual(row["description"], "")
+
+    def test_get_by_file_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            row = config_backup_store.create_pending(settings, "a.tar.gz")
+            fetched = config_backup_store.get_by_file_name(settings, "a.tar.gz")
+            self.assertEqual(fetched["id"], row["id"])
+            self.assertIsNone(config_backup_store.get_by_file_name(settings, "missing.tar.gz"))
+
+    def test_record_downloaded_creates_complete_row_with_source_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            row = config_backup_store.record_downloaded(
+                settings,
+                file_name="peer-a.tar.gz",
+                size_bytes=555,
+                name="Pulled backup",
+                description="from peer",
+                source_drone_id="drone-b",
+                source_drone_name="Living Room",
+                source_created_at="2026-01-01T00:00:00+00:00",
+            )
+            self.assertEqual(row["status"], config_backup_store.STATUS_COMPLETE)
+            self.assertEqual(row["size_bytes"], 555)
+            self.assertEqual(row["source_drone_id"], "drone-b")
+            self.assertEqual(row["source_drone_name"], "Living Room")
+            self.assertFalse(row["is_local"])
+            # any_creating() must never see a downloaded backup as in-progress.
+            self.assertFalse(config_backup_store.any_creating(settings))
+
+    def test_list_complete_page_filters_status_and_searches_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            complete = config_backup_store.create_pending(settings, "done.tar.gz", name="Weekly Snapshot")
+            config_backup_store.mark_complete(
+                settings, complete["id"], size_bytes=10, included_file_count=1, skipped_file_count=0, skipped_bytes=0
+            )
+            config_backup_store.create_pending(settings, "building.tar.gz", name="In progress")
+
+            page = config_backup_store.list_complete_page(settings)
+            self.assertEqual(page["total"], 1)
+            self.assertEqual(page["items"][0]["file_name"], "done.tar.gz")
+
+            match = config_backup_store.list_complete_page(settings, query="weekly")
+            self.assertEqual(match["total"], 1)
+            no_match = config_backup_store.list_complete_page(settings, query="nonexistent")
+            self.assertEqual(no_match["total"], 0)
+
+    def test_any_creating(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            self.assertFalse(config_backup_store.any_creating(settings))
+            row = config_backup_store.create_pending(settings, "a.tar.gz")
+            self.assertTrue(config_backup_store.any_creating(settings))
+            config_backup_store.mark_complete(
+                settings, row["id"], size_bytes=1, included_file_count=1, skipped_file_count=0, skipped_bytes=0
+            )
+            self.assertFalse(config_backup_store.any_creating(settings))
+
+
+class ConfigBackupSourceSelectionTests(unittest.TestCase):
+    def test_includes_batocera_conf_and_gamelist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = _build_settings(root)
+            _write(root / "system" / "batocera.conf", b"conf")
+            _write(root / "roms" / "snes" / "gamelist.xml", b"<gameList/>")
+            _write(root / "roms" / "snes" / "game.zip", b"not included")
+
+            included, skipped = config_backup.collect_sources(settings)
+            arcnames = {arc for _path, arc, _size in included}
+            self.assertIn("system/batocera.conf", arcnames)
+            self.assertIn("roms/snes/gamelist.xml", arcnames)
+            self.assertNotIn("roms/snes/game.zip", arcnames)
+            self.assertEqual(skipped, [])
+
+    def test_skips_large_config_files_but_keeps_small_ones(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = _build_settings(root)
+            _write(root / "system" / "configs" / "retroarch" / "retroarch.cfg", b"small")
+            big_content = b"0" * (config_backup.BACKUP_MAX_CONFIG_FILE_BYTES + 1)
+            _write(root / "system" / "configs" / "citron" / "game.nca", big_content)
+
+            included, skipped = config_backup.collect_sources(settings)
+            arcnames = {arc for _path, arc, _size in included}
+            self.assertIn("system/configs/retroarch/retroarch.cfg", arcnames)
+            self.assertNotIn("system/configs/citron/game.nca", arcnames)
+            self.assertEqual(len(skipped), 1)
+            self.assertEqual(skipped[0]["path"], "system/configs/citron/game.nca")
+            self.assertIn("20MB limit", skipped[0]["reason"])
+
+    def test_includes_saves_and_services_and_custom_scripts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = _build_settings(root)
+            _write(root / "saves" / "snes" / "game.srm", b"save")
+            _write(root / "system" / "services" / "DRONE_SERVER", b"#!/bin/sh")
+            _write(root / "system" / "custom-scripts" / "border.sh", b"#!/bin/sh")
+            _write(root / "system" / "custom.sh", b"#!/bin/sh")
+            _write(root / "system" / "pro-custom.sh", b"#!/bin/sh")
+
+            included, _skipped = config_backup.collect_sources(settings)
+            arcnames = {arc for _path, arc, _size in included}
+            self.assertIn("saves/snes/game.srm", arcnames)
+            self.assertIn("system/services/DRONE_SERVER", arcnames)
+            self.assertIn("system/custom-scripts/border.sh", arcnames)
+            self.assertIn("system/custom.sh", arcnames)
+            self.assertIn("system/pro-custom.sh", arcnames)
+
+    def test_excludes_bios_and_rom_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = _build_settings(root)
+            _write(root / "bios" / "scph5501.bin", b"bios")
+            _write(root / "roms" / "psx" / "game.chd", b"rom")
+
+            included, _skipped = config_backup.collect_sources(settings)
+            arcnames = {arc for _path, arc, _size in included}
+            self.assertEqual(arcnames, set())
+
+
+class ConfigBackupBuildTests(unittest.TestCase):
+    def test_create_backup_builds_downloadable_tarball(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = _build_settings(root)
+            _write(root / "system" / "batocera.conf", b"conf-bytes")
+            _write(root / "saves" / "snes" / "game.srm", b"save-bytes")
+
+            result = config_backup.create_backup(settings)
+            self.assertEqual(result["status"], "ok")
+            backup_id = result["backup"]["id"]
+
+            row = _wait_for_status(settings, backup_id)
+            self.assertEqual(row["status"], config_backup_store.STATUS_COMPLETE)
+            self.assertEqual(row["included_file_count"], 2)
+            self.assertGreater(row["size_bytes"], 0)
+
+            tarball_path = config_backup.backups_directory(settings) / row["file_name"]
+            self.assertTrue(tarball_path.is_file())
+            with tarfile.open(tarball_path, "r:gz") as tar:
+                names = set(tar.getnames())
+            self.assertIn("MANIFEST.txt", names)
+            self.assertIn("system/batocera.conf", names)
+            self.assertIn("saves/snes/game.srm", names)
+
+    def test_create_backup_rejects_concurrent_creation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            # Simulate an in-flight build without racing a real background
+            # thread: any_creating() is the sole source of truth, so a
+            # "creating" row is all that's needed to trigger the guard.
+            config_backup_store.create_pending(settings, "already-running.tar.gz")
+            result = config_backup.create_backup(settings)
+            self.assertEqual(result["status"], "already_creating")
+
+    def test_delete_backup_removes_file_and_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = _build_settings(root)
+            _write(root / "system" / "batocera.conf", b"conf-bytes")
+
+            result = config_backup.create_backup(settings)
+            row = _wait_for_status(settings, result["backup"]["id"])
+            tarball_path = config_backup.backups_directory(settings) / row["file_name"]
+            self.assertTrue(tarball_path.is_file())
+
+            delete_result = config_backup.delete_backup(settings, row["id"])
+            self.assertEqual(delete_result["status"], "deleted")
+            self.assertFalse(tarball_path.is_file())
+            self.assertIsNone(config_backup_store.get(settings, row["id"]))
+
+    def test_delete_backup_not_found(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            result = config_backup.delete_backup(settings, 999)
+            self.assertEqual(result["status"], "not_found")
+
+    def test_build_failure_marks_error_not_stuck_creating(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = _build_settings(root)
+            _write(root / "system" / "batocera.conf", b"conf-bytes")
+
+            with mock.patch.object(config_backup, "_build_tarball", side_effect=OSError("disk full")):
+                result = config_backup.create_backup(settings)
+            row = _wait_for_status(settings, result["backup"]["id"])
+            self.assertEqual(row["status"], config_backup_store.STATUS_ERROR)
+            self.assertIn("disk full", row["error_message"])
+
+
+if __name__ == "__main__":
+    unittest.main()

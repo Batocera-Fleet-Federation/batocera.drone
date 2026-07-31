@@ -35,8 +35,12 @@ import socket
 import sys
 import time
 from datetime import datetime, timezone
+from email import encoders
+from email.mime.base import MIMEBase
+from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formataddr
+from pathlib import Path
 from typing import Optional
 from urllib.error import HTTPError
 
@@ -57,6 +61,10 @@ except ImportError:  # pragma: no cover - direct script execution fallback
 
 SMTP_STATE_NAMESPACE = "smtp_manager.json"
 SMTP_SEND_TIMEOUT_SECONDS = float(os.environ.get("DRONE_SMTP_SEND_TIMEOUT_SECONDS", "15"))
+# An attachment (base64-inflated ~33%) can take far longer to transmit than a
+# plain-text digest/test email over a modest home upload link -- give it real
+# room rather than reusing the short default meant for a few KB of text.
+SMTP_ATTACHMENT_SEND_TIMEOUT_SECONDS = float(os.environ.get("DRONE_SMTP_ATTACHMENT_SEND_TIMEOUT_SECONDS", "120"))
 SMTP_SHARING_CHECK_INTERVAL_SECONDS = float(os.environ.get("DRONE_SMTP_SHARING_CHECK_INTERVAL_SECONDS", "300"))
 AUDIT_EMAIL_POLL_INTERVAL_SECONDS = float(os.environ.get("DRONE_AUDIT_EMAIL_INTERVAL_SECONDS", "300"))
 AUDIT_EMAIL_MAX_ITEMS_PER_DIGEST = 200
@@ -393,6 +401,42 @@ def send_mail(settings: Settings, subject: str, body: str) -> None:
     try:
         client_cls = smtplib.SMTP_SSL if state["use_ssl"] else smtplib.SMTP
         client = client_cls(state["host"], state["port"], timeout=SMTP_SEND_TIMEOUT_SECONDS)
+        try:
+            if state["use_starttls"] and not state["use_ssl"]:
+                client.starttls()
+            if state["username"] and state["password"]:
+                client.login(state["username"], state["password"])
+            client.send_message(message)
+        finally:
+            client.quit()
+    except (OSError, smtplib.SMTPException) as error:
+        raise SmtpSendError(f"{error.__class__.__name__}: {error}") from error
+
+
+def send_mail_with_attachment(settings: Settings, subject: str, body: str, attachment_path: Path, attachment_filename: str) -> None:
+    """Same stdlib-only ``smtplib`` send as ``send_mail``, plus one file
+    attachment (``email.mime.multipart``/``email.mime.base``, both stdlib --
+    no new dependency). Used only for config-backup tarballs today; the
+    caller is responsible for any size cap (this function will happily try
+    to send whatever it's given, and let the SMTP server itself reject an
+    oversized message rather than guessing every provider's limit here)."""
+    state = _load_state(settings)
+    if not state["has_config"]:
+        raise SmtpSendError("SMTP is not configured on this drone.")
+    message = MIMEMultipart()
+    message["Subject"] = subject
+    message["From"] = formataddr((f"Batocera Drone - {_drone_label(settings)}", state["from_address"]))
+    message["To"] = state["recipient_email"]
+    message.attach(MIMEText(body, "plain", "utf-8"))
+    part = MIMEBase("application", "gzip")
+    with open(attachment_path, "rb") as handle:
+        part.set_payload(handle.read())
+    encoders.encode_base64(part)
+    part.add_header("Content-Disposition", f'attachment; filename="{attachment_filename}"')
+    message.attach(part)
+    try:
+        client_cls = smtplib.SMTP_SSL if state["use_ssl"] else smtplib.SMTP
+        client = client_cls(state["host"], state["port"], timeout=SMTP_ATTACHMENT_SEND_TIMEOUT_SECONDS)
         try:
             if state["use_starttls"] and not state["use_ssl"]:
                 client.starttls()

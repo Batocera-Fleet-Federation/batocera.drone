@@ -856,8 +856,22 @@ class HandlersNetworkMixin:
                 expected_fingerprint=item.get("movies_fingerprint") or item.get("fingerprint"),
                 overwrite=overwrite_files,
             ))
+        elif asset_type == "config_backups":
+            relative_path = str(item.get("file_path") or item.get("relative_path") or item.get("file_name") or "").strip()
+            if not relative_path:
+                return jobs
+            jobs.append(manager.enqueue_config_backup(
+                config,
+                peer,
+                relative_path,
+                expected_size=item.get("size_bytes") or item.get("file_size"),
+                backup_name=str(item.get("name") or ""),
+                backup_description=str(item.get("description") or ""),
+                source_created_at=item.get("created_at"),
+                overwrite=overwrite_files,
+            ))
         else:
-            raise ValueError("asset_type must be roms, bios, artwork, saves, or movies")
+            raise ValueError("asset_type must be roms, bios, artwork, saves, movies, or config_backups")
         return jobs
 
     def _handle_admin_local_sync(self, payload: dict) -> None:
@@ -919,8 +933,8 @@ class HandlersNetworkMixin:
             return
         peer_id = str(payload.get("peer_id") or "").strip()
         asset_type = str(payload.get("asset_type") or "").strip().lower()
-        if asset_type not in {"roms", "bios", "artwork", "saves", "movies"}:
-            self._send_json(400, {"error": "Bulk copy supports roms, bios, artwork, saves, or movies"})
+        if asset_type not in {"roms", "bios", "artwork", "saves", "movies", "config_backups"}:
+            self._send_json(400, {"error": "Bulk copy supports roms, bios, artwork, saves, movies, or config_backups"})
             return
         system = str(payload.get("system") or "").strip()
         systems = [
