@@ -252,6 +252,26 @@ class ConfigBackupSourceSelectionTests(unittest.TestCase):
             self.assertIn("disk-image", reasons["saves/xbox/xbox_hdd.qcow2"])
             self.assertIn("cache", reasons["saves/mesa_shader_cache/index/deadbeef"])
 
+    def test_excludes_plugin_bundled_reference_data_but_keeps_plugin_settings(self) -> None:
+        # Regression test for a real live finding: MAME's History plugin ships
+        # a 60MB bundled reference database (dated 2024, clearly not anything
+        # the user generated) at plugins/data/history.db. A plugin's own small
+        # settings file (no "data" segment) is a different thing and stays.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = _build_settings(root)
+            _write(root / "saves" / "mame" / "plugins" / "data" / "history.db", b"bundled reference data")
+            _write(root / "saves" / "mame" / "plugins" / "hiscore" / "plugin.cfg", b"real plugin setting")
+            _write(root / "saves" / "mame" / "nvram" / "wh2j_16" / "saveram", b"real save")
+
+            included, skipped = config_backup.collect_sources(settings)
+            arcnames = {arc for _path, arc, _size in included}
+            self.assertNotIn("saves/mame/plugins/data/history.db", arcnames)
+            self.assertIn("saves/mame/plugins/hiscore/plugin.cfg", arcnames)
+            self.assertIn("saves/mame/nvram/wh2j_16/saveram", arcnames)
+            reasons = {entry["path"]: entry["reason"] for entry in skipped}
+            self.assertIn("plugin-bundled reference data", reasons["saves/mame/plugins/data/history.db"])
+
     def test_includes_saves_and_services_and_custom_scripts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

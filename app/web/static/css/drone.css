@@ -632,24 +632,31 @@
     /* Torrents grid: fixed column widths (see the <colgroup> in
        renderTorrentTableShell) plus no-wrap/ellipsis on every cell, so the
        3s auto-refresh poll never reflows column widths or row heights out
-       from under a click in progress. Scoped to .torrents-table so the
+       from under a click in progress. Desktop/tablet only (matches
+       table.bff-stack's own max-width: 767.98px breakpoint, complementary):
+       below that, table.bff-stack turns each row into a multi-line stacked
+       label:value card, which needs cells free to wrap and grow -- a fixed
+       2.5rem row height and nowrap/ellipsis instead clipped/overlapped the
+       stacked lines on top of each other. Scoped to .torrents-table so the
        Transfers/local-peer tables (which also use .download-table) are
-       unaffected. */
-    .torrents-table {
-      table-layout: fixed;
-    }
-    .torrents-table th,
-    .torrents-table td {
-      overflow: hidden;
-      white-space: nowrap;
-      text-overflow: ellipsis;
-    }
-    .torrents-table tbody tr {
-      height: 2.5rem;
-    }
-    .torrents-table td.download-actions {
-      width: auto;
-      overflow: visible;
+       unaffected either way. */
+    @media (min-width: 768px) {
+      .torrents-table {
+        table-layout: fixed;
+      }
+      .torrents-table th,
+      .torrents-table td {
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+      }
+      .torrents-table tbody tr {
+        height: 2.5rem;
+      }
+      .torrents-table td.download-actions {
+        width: auto;
+        overflow: visible;
+      }
     }
     .torrents-table td.download-actions .btn + .btn {
       margin-left: 0.2rem;

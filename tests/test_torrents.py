@@ -1596,6 +1596,33 @@ class TorrentDisplaySortTests(unittest.TestCase):
             self.assertEqual(names, ["d1", "q1", "e1", "c1"])
 
 
+class TorrentsGridMobileCssTests(unittest.TestCase):
+    """table.bff-stack (present on the torrents table, see
+    renderTorrentTableShell) turns each row into a stacked multi-line
+    label:value card on phone widths, auto-labeled from the <thead> via
+    decorateStackTables(). .torrents-table's own fixed 2.5rem row height plus
+    nowrap/ellipsis -- needed on desktop so the 3s auto-refresh poll never
+    reflows the grid mid-click -- used to apply unconditionally, clipping and
+    overlapping those stacked lines on top of each other on mobile. Regression
+    test: those rules must stay scoped to desktop/tablet widths only."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        root = Path(__file__).resolve().parents[1]
+        cls.css = root.joinpath("app/web/static/css/drone.css").read_text(encoding="utf-8")
+        cls.js = root.joinpath("app/web/static/js/drone.js").read_text(encoding="utf-8")
+
+    def test_fixed_row_height_and_nowrap_are_scoped_to_desktop_only(self) -> None:
+        self.assertIn(
+            "@media (min-width: 768px) {\n      .torrents-table {\n        table-layout: fixed;", self.css
+        )
+        self.assertIn("height: 2.5rem;", self.css)
+        self.assertIn("white-space: nowrap;", self.css)
+
+    def test_torrents_table_still_carries_bff_stack_for_mobile(self) -> None:
+        self.assertIn("bff-stack torrents-table", self.js)
+
+
 class Aria2RuntimeTests(unittest.TestCase):
     def test_asset_mapping(self) -> None:
         self.assertIn("x86_64", _asset_for_machine("x86_64"))
