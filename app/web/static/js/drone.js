@@ -1170,6 +1170,57 @@ function renderConfigBackupTreeList(files) {
   return `<ul class="file-tree">${renderConfigBackupTreeNode(tree)}</ul>`;
 }
 
+// The name's own extension, lowercased with the leading dot kept (e.g.
+// "retroarch.cfg" -> ".cfg"); files with no extension (or a leading-dot
+// dotfile like ".gitkeep", which has no *real* extension) bucket together.
+function configBackupFileExtension(relativePath) {
+  const name = String(relativePath || "").split("/").pop() || "";
+  const dotIndex = name.lastIndexOf(".");
+  if (dotIndex <= 0) return "(no extension)";
+  return name.slice(dotIndex).toLowerCase();
+}
+
+const CONFIG_BACKUP_EXTENSION_SUMMARY_MAX_ROWS = 40;
+
+function summarizeConfigBackupExtensions(files) {
+  const byExtension = new Map();
+  files.forEach((file) => {
+    const ext = configBackupFileExtension(file.relative_path || file.name || "");
+    const entry = byExtension.get(ext) || { ext, count: 0, size: 0 };
+    entry.count += 1;
+    entry.size += Number(file.size || 0);
+    byExtension.set(ext, entry);
+  });
+  return Array.from(byExtension.values()).sort((a, b) => b.size - a.size || b.count - a.count);
+}
+
+// A quick-glance summary at the top of the tree view -- how many of which
+// file type, and how much disk space each accounts for -- so it's obvious
+// at a glance what a backup is actually made of without expanding the tree.
+function renderConfigBackupExtensionSummary(files) {
+  if (!files.length) return "";
+  const rows = summarizeConfigBackupExtensions(files);
+  const shown = rows.slice(0, CONFIG_BACKUP_EXTENSION_SUMMARY_MAX_ROWS);
+  const remaining = rows.length - shown.length;
+  return `
+    <div class="table-responsive mb-3">
+      <table class="table table-sm table-hover align-middle themed-table mb-0">
+        <thead><tr><th>Type</th><th class="text-end">Files</th><th class="text-end">Size</th></tr></thead>
+        <tbody>
+          ${shown.map((row) => `
+            <tr>
+              <td class="small"><code>${escapeHtml(row.ext)}</code></td>
+              <td class="small text-end">${row.count}</td>
+              <td class="small text-end">${formatBytes(row.size)}</td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+      ${remaining > 0 ? `<div class="small text-muted mt-1">+${remaining} more type${remaining === 1 ? "" : "s"}</div>` : ""}
+    </div>
+  `;
+}
+
 // Delegated on the tree container: clicking a folder row toggles it expanded/
 // collapsed; file rows have nothing to do.
 function handleConfigBackupTreeClick(event) {
@@ -1224,6 +1275,7 @@ async function openConfigBackupTreeModal(backupId) {
     const files = payload.files || [];
     body.innerHTML = `
       <div class="small text-muted mb-2">${files.length} file${files.length === 1 ? "" : "s"}, ${formatBytes(payload.size_bytes || 0)} compressed</div>
+      ${renderConfigBackupExtensionSummary(files)}
       ${renderConfigBackupTreeList(files)}
     `;
   } catch (err) {
@@ -1254,12 +1306,12 @@ function openApplyConfigBackupModal(backupId) {
           <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
         </div>
         <div class="modal-body">
-          <p>This will extract <strong>${escapeHtml(displayName || "this backup")}</strong> onto this machine, overwriting the current <code>batocera.conf</code>, <code>system/configs</code>, every system's <code>gamelist.xml</code>, custom scripts, and everything in <code>saves/</code> with whatever is in the archive.</p>
+          <p>This will extract <strong>${escapeHtml(displayName || "this backup")}</strong> onto this machine. Every file the backup contains overwrites the matching file here (<code>batocera.conf</code>, specific <code>system/configs</code> settings, a system's <code>gamelist.xml</code>, custom scripts, specific saves). Nothing is deleted -- anything on this Drone that isn't part of this particular backup (other emulators' configs, other saves) is left exactly as it is.</p>
           <p>EmulationStation (and any running game) will be stopped during the copy and restarted afterward.</p>
-          <div class="alert alert-danger py-2 small mb-3"><strong>This cannot be undone.</strong> Whatever is currently on this Drone in those locations will be permanently replaced.</div>
+          <div class="alert alert-danger py-2 small mb-3"><strong>This cannot be undone.</strong> Whatever is currently in the files this backup targets will be permanently replaced.</div>
           <div class="form-check">
             <input class="form-check-input" type="checkbox" id="applyConfigBackupAck" onchange="document.getElementById('applyConfigBackupConfirmBtn').disabled = !this.checked">
-            <label class="form-check-label small" for="applyConfigBackupAck">I understand this will overwrite my current configuration, saves, and gamelists, and cannot be undone.</label>
+            <label class="form-check-label small" for="applyConfigBackupAck">I understand this will overwrite the specific files in this backup, and cannot be undone.</label>
           </div>
         </div>
         <div class="modal-footer">

@@ -386,10 +386,14 @@ def _request_config_backup_apply_service_control(request_payload: dict) -> bool:
 
 def apply_backup_to_machine(settings: Any, backup_id: int) -> dict:
     """Extract a completed backup back over this machine's real config/gamelist/
-    saves paths, overwriting whatever is currently there. Irreversible -- the
-    admin UI requires an explicit confirmation before calling this. Stops
-    EmulationStation (and any running game) during the copy and restarts it
-    afterward; see apply_config_backup.py for the actual extraction, shared
+    saves paths. This is an overlay, not a wipe-and-replace: only the files the
+    backup actually contains are written, straight onto their mapped destination;
+    nothing is deleted and no destination directory is cleared first, so a config
+    file or save from a different emulator/game that simply isn't part of this
+    backup is left untouched. Overwriting a file the backup DOES contain is still
+    irreversible -- the admin UI requires an explicit confirmation before calling
+    this. Stops EmulationStation (and any running game) during the copy and
+    restarts it afterward; see apply_config_backup.py for the actual extraction, shared
     between this in-process (root) path and the privileged-worker path below so
     the sequence can never drift between the two entry points."""
     row = _store.get(settings, backup_id)

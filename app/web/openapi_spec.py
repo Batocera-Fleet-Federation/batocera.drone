@@ -693,7 +693,7 @@ def _schemas() -> Dict[str, Schema]:
                 "error": _string("Present when status is 'error'"),
             },
             ("status",),
-            description="Extracts the tarball back onto this machine's real config/gamelist/saves paths, overwriting whatever is there now. Irreversible -- the admin UI requires an explicit confirmation before calling this. EmulationStation is stopped during the copy and restarted afterward.",
+            description="Extracts the tarball back onto this machine's real config/gamelist/saves paths. An overlay, not a wipe-and-replace: only files the backup actually contains are overwritten, nothing already on disk is deleted or cleared first. Overwriting a targeted file is still irreversible -- the admin UI requires an explicit confirmation before calling this. EmulationStation is stopped during the copy and restarted afterward.",
         ),
         "TorrentUploadRequest": _object(
             {"torrents": _array({"type": "string", "format": "binary"})},

@@ -115,6 +115,42 @@ class RestoreConfigBackupTests(unittest.TestCase):
         self.assertEqual((self.saves_root / "snes" / "game.srm").read_text(), "save-bytes")
         self.assertFalse((self.userdata_root / "system" / "MANIFEST.txt").exists())
 
+    def test_overlays_onto_existing_files_without_deleting_anything_not_in_the_backup(self):
+        # The user's explicit expectation: applying a backup updates the
+        # targeted files the archive actually contains, it must never wipe a
+        # destination directory first or otherwise remove files/saves that
+        # simply aren't part of this particular backup.
+        (self.userdata_root / "system" / "configs" / "retroarch").mkdir(parents=True)
+        (self.userdata_root / "system" / "configs" / "retroarch" / "retroarch.cfg").write_text("old-cfg")
+        # A sibling emulator's config the backup knows nothing about.
+        (self.userdata_root / "system" / "configs" / "mupen64").mkdir(parents=True)
+        (self.userdata_root / "system" / "configs" / "mupen64" / "mupen64.cfg").write_text("untouched-cfg")
+        (self.roms_root / "snes").mkdir(parents=True)
+        (self.roms_root / "snes" / "gamelist.xml").write_text("<old/>")
+        (self.saves_root / "snes").mkdir(parents=True)
+        (self.saves_root / "snes" / "other-game.srm").write_text("other-save-untouched")
+
+        result, _calls = self._run({
+            "system/configs/retroarch/retroarch.cfg": "new-cfg",
+            "roms/snes/gamelist.xml": "<new/>",
+            "saves/snes/game.srm": "new-save",
+        })
+
+        self.assertEqual(result["restored_file_count"], 3)
+        # Files the backup targeted are overwritten with the new content.
+        self.assertEqual(
+            (self.userdata_root / "system" / "configs" / "retroarch" / "retroarch.cfg").read_text(), "new-cfg"
+        )
+        self.assertEqual((self.roms_root / "snes" / "gamelist.xml").read_text(), "<new/>")
+        # Files the backup did not target -- including a sibling save in the
+        # very same directory as one that WAS restored -- are left exactly
+        # as they were, not deleted and not touched.
+        self.assertEqual(
+            (self.userdata_root / "system" / "configs" / "mupen64" / "mupen64.cfg").read_text(), "untouched-cfg"
+        )
+        self.assertEqual((self.saves_root / "snes" / "other-game.srm").read_text(), "other-save-untouched")
+        self.assertEqual((self.saves_root / "snes" / "game.srm").read_text(), "new-save")
+
     def test_kills_running_emulator_stops_and_starts_emulationstation(self):
         _result, calls = self._run({"system/batocera.conf": "conf-bytes"})
         self.assertIn(["/usr/bin/batocera-es-swissknife", "--emukill"], calls)

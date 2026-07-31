@@ -26,6 +26,13 @@ open while the restore overwrites it, then EmulationStation itself is stopped so
 can't clobber a restored gamelist.xml on its own exit later and so startup-only config
 changes actually take effect once it restarts.
 
+This is an overlay, never a wipe-and-replace: only the specific files present in the
+archive are written, each straight onto its mapped destination path. Nothing is deleted
+and no destination directory is cleared first -- a file that already exists on this
+Drone but isn't part of this particular backup (a different emulator's config, an
+unrelated game's save, ...) is left exactly as it was. See
+``RestoreConfigBackupTests.test_overlays_onto_existing_files_without_deleting_anything_not_in_the_backup``.
+
 Deliberately self-contained (stdlib only, no imports from the rest of the ``app``
 package) like the other privileged helper scripts: the caller (Drone app, which has
 full package access) resolves ``userdata_root``/``roms_root``/``saves_root`` from
@@ -127,6 +134,9 @@ def _resolve_restore_destination(arcname: str, userdata_root: Path, roms_root: P
 
 
 def _extract_all(archive_path: Path, userdata_root: Path, roms_root: Path, saves_root: Path) -> Tuple[int, List[dict]]:
+    # Overlay only -- never rmtree/clear a destination directory here. Each
+    # archive member is written straight onto its own mapped path; anything
+    # already on disk that this backup doesn't mention is left untouched.
     restored = 0
     skipped: List[dict] = []
     with tarfile.open(archive_path, "r:gz") as tar:

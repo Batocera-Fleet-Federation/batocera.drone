@@ -504,5 +504,43 @@ class ApplyBackupToMachineTests(unittest.TestCase):
             helper.assert_not_called()
 
 
+class ConfigBackupTreeUiContentTests(unittest.TestCase):
+    """The extension-count summary is computed client-side from the tree
+    endpoint's existing file list (no backend change) -- these just confirm
+    it's actually wired into the modal, mirroring the codebase's existing
+    grep-based content tests for other frontend-only additions."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        root = Path(__file__).resolve().parents[1]
+        cls.js = root.joinpath("app/web/static/js/drone.js").read_text(encoding="utf-8")
+
+    def _function_body(self, name: str) -> str:
+        start = self.js.index(name)
+        brace_start = self.js.index("{", start)
+        depth = 0
+        i = brace_start
+        while i < len(self.js):
+            char = self.js[i]
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    return self.js[start:i + 1]
+            i += 1
+        raise AssertionError(f"unbalanced braces scanning function starting {name!r}")
+
+    def test_extension_summary_function_defined_and_used_in_modal(self) -> None:
+        self.assertIn("function summarizeConfigBackupExtensions(files)", self.js)
+        self.assertIn("function renderConfigBackupExtensionSummary(files)", self.js)
+        modal_body = self._function_body("async function openConfigBackupTreeModal(")
+        self.assertIn("renderConfigBackupExtensionSummary(files)", modal_body)
+
+    def test_extension_summary_buckets_no_extension_files_together(self) -> None:
+        body = self._function_body("function configBackupFileExtension(relativePath)")
+        self.assertIn('"(no extension)"', body)
+
+
 if __name__ == "__main__":
     unittest.main()
