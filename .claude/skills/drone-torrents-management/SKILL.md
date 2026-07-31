@@ -98,12 +98,23 @@ keeps showing the torrent's true original add time while retries cannot starve
 new work. `DRONE_TORRENT_RETRY_BASE_SECONDS` and
 `DRONE_TORRENT_RETRY_MAX_SECONDS` override the defaults.
 
-Intentional **Cancel** is terminal and is never automatically retried; Force
-Start remains the explicit way to restart a canceled torrent. A failed aria2
-GID is removed before its retry is re-added so stopped/error results do not
-collide with the fresh attempt. Older persisted error entries that predate
-retry metadata are made eligible on the first worker tick after upgrade, with
-the same exception for entries whose message is `Canceled`.
+**Cancel is a requeue, not a terminal error** -- clicking it on a
+queued/downloading torrent stops it (`_remove_from_aria2`) and sends it to
+the back of the queue with a fresh `queue_position`, so it resumes on its own
+on the next tick with no Force Start needed (partial progress is kept: the
+`.aria2` resume file on disk isn't touched). This lets a slow torrent be
+bumped out of an active slot to free it for something else. Canceling a
+completed-but-still-seeding torrent is the one exception -- that just stops
+seeding (`"Seeding stopped"`) since there's nothing to requeue. `cancel()`'s
+return `status` is `"requeued"` or `"seeding_stopped"` accordingly (an older
+`"cancelled"` value is gone). A failed aria2 GID is removed before its retry
+is re-added so stopped/error results do not collide with the fresh attempt.
+Entries persisted from **before** this change (status `error`, message
+`Canceled` -- the old terminal-cancel behavior) are exempted from the
+first-tick-after-upgrade retry-eligibility sweep for pre-retry-metadata error
+entries, so an old canceled torrent doesn't spontaneously resume the moment a
+Drone with this fix starts up; a fresh Cancel today never produces such an
+entry.
 
 ## Watched folder vs. download location (two independent settings)
 
@@ -195,6 +206,33 @@ which aria2 then rejects as "InfoHash already registered" — a duplicate,
 permanently-errored entry for every real torrent. This was only caught by a
 live smoke test against a real aria2c binary; the mocked-RPC unit tests can't
 surface it because the fake RPC never actually writes a mirrored file.
+
+## Magnet metadata hand-off (`followedBy`/`following`)
+
+A magnet-added GID initially only fetches the BitTorrent **metadata** (the
+reconstructed `.torrent` info dict -- a few KB/MB) via `ut_metadata`/DHT, then
+reports itself `"complete"` at that tiny size -- aria2 automatically starts
+the **real** content download under a brand-new GID, linked back via
+`followedBy` (on the metadata GID) / `following` (on the new one). Without
+following this hand-off, `_apply_aria2_status_locked` would take that
+`"complete"`-at-a-few-MB status at face value and never look further: the UI
+shows the torrent finished at a tiny size while the real, much larger
+download -- often tens or hundreds of GB for a multi-file magnet -- runs to
+completion completely untracked (no queue-slot accounting, no progress, no
+move-files support). This is exactly a user-reported "pasting in a magnet
+link downloads the wrong/tiny file" bug, confirmed live against a real
+aria2c and a real multi-GB magnet link (a metadata GID completing at ~1.1MB
+with `followedBy` pointing at a second GID already at 477GB total/34MB
+downloaded with real peers attached). Fix: `_TELL_STATUS_KEYS` requests
+`followedBy`, and `_apply_aria2_status_locked` checks it **before** writing
+any of that response's total/completed/status onto the entry -- if present,
+it retargets `entry["gid"]` at `followedBy[0]` and returns immediately
+without touching those fields, so the next tick's query (now against the
+real GID) populates the real numbers instead. Mocked-RPC unit tests catch
+this one fine (just set `followedBy` in a `FakeRpc` status dict), but the
+live repro is what actually found it -- this field is easy to forget
+requesting/checking since it's absent from most tellStatus examples in
+aria2's own docs.
 
 ## Restart / GID lifecycle
 
@@ -356,6 +394,10 @@ re-`innerHTML` the whole tile, on every 3s poll tick.
   `aria2.changeOption`'s `dir` option -- confirmed against a real aria2c that
   this silently does nothing (no RPC error, but the file still lands at the
   original directory). Drop the GID and let it re-add fresh instead.
+- Trusting a magnet-added GID's own `"complete"` status/size at face value --
+  check `followedBy` first (see "Magnet metadata hand-off" above); otherwise
+  a torrent shows finished at a tiny metadata-only size while the real
+  download runs untracked under a GID this manager never queries.
 - Adding a new folder-picker field without reusing
   `openTorrentDirBrowser(targetInputId, title)` -- don't duplicate the modal.
 - Writing a test that touches the real, unconfigured default directory

@@ -84,6 +84,7 @@ _TELL_STATUS_KEYS = [
     "errorMessage",
     "bittorrent",
     "files",
+    "followedBy",
 ]
 
 
@@ -726,6 +727,26 @@ class TorrentManager:
                 entry["status"] = "queued"
             return None
         result = outcome.get("result") or {}
+        followed_by = result.get("followedBy")
+        if followed_by:
+            # A magnet-added GID first only fetches the BitTorrent metadata
+            # (the reconstructed .torrent info dict -- a few KB/MB) and then
+            # reports itself "complete" at that tiny size, while aria2
+            # automatically starts the real content download under a
+            # brand-new GID (linked back via this GID's `followedBy` /
+            # the new one's `following`). Without following this handoff, our
+            # own tracked entry stays pinned to the metadata-only GID
+            # forever: the UI shows the torrent as "complete" at a tiny size
+            # (this is the exact "downloads the wrong/tiny file" bug) while
+            # the real, much larger download runs to completion completely
+            # untracked -- no queue slot accounting, no progress, no move-
+            # files support. Confirmed live against a real aria2c and a real
+            # multi-GB magnet link. Retarget this entry at the new GID and
+            # bail out before writing this response's metadata-sized
+            # total/completed/status onto the entry -- the very next tick's
+            # query (now against the new GID) reports the real numbers.
+            entry["gid"] = str(followed_by[0])
+            return None
         total = int(result.get("totalLength") or 0)
         completed = int(result.get("completedLength") or 0)
         download_speed = int(result.get("downloadSpeed") or 0)

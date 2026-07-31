@@ -881,6 +881,61 @@ class TorrentMagnetTests(unittest.TestCase):
             # would raise TypeError on the empty torrent_file a magnet entry has.
             self.assertEqual(rpc.method_calls("aria2.addTorrent"), [])
 
+    def test_magnet_metadata_followed_by_switches_to_real_gid(self) -> None:
+        # Regression test for aria2's magnet-metadata handoff: the GID a
+        # magnet link is added under only ever fetches the .torrent metadata
+        # itself (a few KB/MB) and then reports "complete" at that tiny size,
+        # with a `followedBy` pointing at a brand-new GID that carries the
+        # real, much larger content download. Confirmed live against a real
+        # aria2c and a real multi-GB magnet link -- without following the
+        # handoff, the UI showed the torrent "complete" at the metadata's
+        # tiny size (exactly "downloads the wrong/tiny file") while the real
+        # download ran to completion completely untracked.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            manager.add_magnet(_MAGNET_URI)
+            manager._tick()
+            self.assertEqual(manager.snapshot()["torrents"][0]["status"], "downloading")
+            with manager._lock:
+                metadata_gid = next(iter(manager._torrents.values()))["gid"]
+
+            # aria2 finishes the metadata-only fetch and hands off to a new
+            # GID for the real content (real numbers from a live repro).
+            rpc.statuses[metadata_gid] = {
+                "gid": metadata_gid,
+                "status": "complete",
+                "totalLength": "1192915",
+                "completedLength": "1192915",
+                "downloadSpeed": "0",
+                "followedBy": ["content-gid"],
+            }
+            rpc.statuses["content-gid"] = {
+                "gid": "content-gid",
+                "status": "active",
+                "totalLength": "477183500385",
+                "completedLength": "34865152",
+                "downloadSpeed": "1048576",
+                "numSeeders": "1",
+                "connections": "44",
+                "bittorrent": {"info": {"name": "Law and Order - SVU (1999 - ongoing)"}},
+            }
+
+            manager._tick()
+            with manager._lock:
+                switched_gid = next(iter(manager._torrents.values()))["gid"]
+            self.assertEqual(switched_gid, "content-gid")
+            # Must not have latched onto the metadata GID's tiny "complete".
+            self.assertNotEqual(manager.snapshot()["torrents"][0]["status"], "complete")
+
+            manager._tick()
+            refreshed = manager.snapshot()["torrents"][0]
+            self.assertEqual(refreshed["status"], "downloading")
+            self.assertEqual(refreshed["total_bytes"], 477183500385)
+            self.assertEqual(refreshed["completed_bytes"], 34865152)
+            self.assertEqual(refreshed["name"], "Law and Order - SVU (1999 - ongoing)")
+
     def test_restart_restores_magnet_entry(self) -> None:
         """Regression test for the _restore_state() gate that used to require
         torrent_file unconditionally -- a magnet-only entry would previously
