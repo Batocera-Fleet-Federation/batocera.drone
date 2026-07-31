@@ -1509,6 +1509,63 @@
       font-size: 0.75rem;
     }
 
+    /* Backup Contents modal: the tree previously sat inside .file-tree's
+       shared 320px cap (see above), leaving most of the modal empty below
+       it. Scoped to this modal only (other .file-tree usages, e.g. Torrents'
+       Move Files modal, keep the shared cap) -- the meta line/extension
+       summary/search box size to their own content as normal flex items,
+       and the tree container is the one flex item that grows to consume
+       whatever vertical space is actually left in the modal. */
+    #configBackupTreeModal .modal-content {
+      height: 85vh;
+    }
+    #configBackupTreeModal .modal-body {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+    #configBackupTreeModal #configBackupExtensionSummaryContainer,
+    #configBackupTreeModal #configBackupTreeSearchInput {
+      flex: 0 0 auto;
+    }
+    #configBackupTreeModal #configBackupTreeListContainer {
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow-y: auto;
+    }
+    #configBackupTreeModal #configBackupTreeListContainer .file-tree {
+      max-height: none;
+      height: 100%;
+    }
+
+    /* System Info: Update History (each recorded Drone self-update, its
+       GitHub release link, and the commit notes fetched at update time) */
+    .update-history-list {
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+    .update-history-entry {
+      padding: 0.8rem;
+      background: rgba(11, 16, 32, 0.3);
+      border: 1px solid var(--admin-border);
+      border-radius: 8px;
+    }
+    .update-history-notes {
+      margin-top: 0.6rem;
+      padding: 0.6rem 0.75rem;
+      background: rgba(5, 12, 22, 0.55);
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      border-radius: 6px;
+      color: var(--admin-text);
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      font-family: var(--bs-font-monospace, monospace);
+      font-size: 0.78rem;
+      max-height: 220px;
+      overflow-y: auto;
+    }
+
     /* Image lightbox modal */
     .image-lightbox-overlay {
       position: fixed;

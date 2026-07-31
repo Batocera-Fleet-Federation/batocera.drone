@@ -1180,8 +1180,6 @@ function configBackupFileExtension(relativePath) {
   return name.slice(dotIndex).toLowerCase();
 }
 
-const CONFIG_BACKUP_EXTENSION_SUMMARY_MAX_ROWS = 40;
-
 function summarizeConfigBackupExtensions(files) {
   const byExtension = new Map();
   files.forEach((file) => {
@@ -1194,14 +1192,24 @@ function summarizeConfigBackupExtensions(files) {
   return Array.from(byExtension.values()).sort((a, b) => b.size - a.size || b.count - a.count);
 }
 
+const CONFIG_BACKUP_EXTENSION_SUMMARY_COLLAPSED_ROWS = 10;
+let configBackupTreeAllFiles = [];
+let configBackupTreeSearchQuery = "";
+let configBackupExtensionSummaryExpanded = false;
+
 // A quick-glance summary at the top of the tree view -- how many of which
 // file type, and how much disk space each accounts for -- so it's obvious
 // at a glance what a backup is actually made of without expanding the tree.
-function renderConfigBackupExtensionSummary(files) {
+// Collapsed to the top 10 (by size) rows by default; "Show all" expands it.
+function renderConfigBackupExtensionSummary(files, expanded) {
   if (!files.length) return "";
   const rows = summarizeConfigBackupExtensions(files);
-  const shown = rows.slice(0, CONFIG_BACKUP_EXTENSION_SUMMARY_MAX_ROWS);
-  const remaining = rows.length - shown.length;
+  const shown = expanded ? rows : rows.slice(0, CONFIG_BACKUP_EXTENSION_SUMMARY_COLLAPSED_ROWS);
+  const toggle = rows.length > CONFIG_BACKUP_EXTENSION_SUMMARY_COLLAPSED_ROWS
+    ? `<button type="button" class="btn btn-sm btn-outline-secondary w-100 mt-1" onclick="toggleConfigBackupExtensionSummary()">
+         <i class="bi ${expanded ? "bi-chevron-up" : "bi-chevron-down"} me-1"></i>${expanded ? "Show fewer" : `Show all ${rows.length} types`}
+       </button>`
+    : "";
   return `
     <div class="table-responsive mb-3">
       <table class="table table-sm table-hover align-middle themed-table mb-0">
@@ -1216,9 +1224,15 @@ function renderConfigBackupExtensionSummary(files) {
           `).join("")}
         </tbody>
       </table>
-      ${remaining > 0 ? `<div class="small text-muted mt-1">+${remaining} more type${remaining === 1 ? "" : "s"}</div>` : ""}
+      ${toggle}
     </div>
   `;
+}
+
+function toggleConfigBackupExtensionSummary() {
+  configBackupExtensionSummaryExpanded = !configBackupExtensionSummaryExpanded;
+  const container = document.getElementById("configBackupExtensionSummaryContainer");
+  if (container) container.innerHTML = renderConfigBackupExtensionSummary(configBackupTreeAllFiles, configBackupExtensionSummaryExpanded);
 }
 
 // Delegated on the tree container: clicking a folder row toggles it expanded/
@@ -1229,6 +1243,26 @@ function handleConfigBackupTreeClick(event) {
   if (node && node.dataset.kind === "dir") {
     node.classList.toggle("expanded");
   }
+}
+
+function renderConfigBackupTreeListContainer() {
+  const query = configBackupTreeSearchQuery.trim().toLowerCase();
+  if (!query) return renderConfigBackupTreeList(configBackupTreeAllFiles);
+  const filtered = configBackupTreeAllFiles.filter((file) =>
+    String(file.relative_path || file.name || "").toLowerCase().includes(query)
+  );
+  if (!filtered.length) {
+    return `<div class="text-muted small px-2 py-3 text-center">No files or folders match "${escapeHtml(configBackupTreeSearchQuery.trim())}".</div>`;
+  }
+  return renderConfigBackupTreeList(filtered);
+}
+
+// Only the tree list re-renders as the user types -- the search input itself
+// is never touched, so it never loses focus/cursor position mid-keystroke.
+function filterConfigBackupTree(value) {
+  configBackupTreeSearchQuery = value || "";
+  const container = document.getElementById("configBackupTreeListContainer");
+  if (container) container.innerHTML = renderConfigBackupTreeListContainer();
 }
 
 async function openConfigBackupTreeModal(backupId) {
@@ -1242,6 +1276,9 @@ async function openConfigBackupTreeModal(backupId) {
     modal.setAttribute("aria-hidden", "true");
     document.body.appendChild(modal);
   }
+  configBackupTreeAllFiles = [];
+  configBackupTreeSearchQuery = "";
+  configBackupExtensionSummaryExpanded = false;
   modal.innerHTML = `
     <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable modal-lg">
       <div class="modal-content themed-modal">
@@ -1249,38 +1286,42 @@ async function openConfigBackupTreeModal(backupId) {
           <h5 class="modal-title mb-0"><i class="bi bi-folder2-open me-2"></i>Backup Contents</h5>
           <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
         </div>
-        <div class="modal-body">
-          <div id="configBackupTreeBody"><div class="text-center py-3"><span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span></div></div>
+        <div class="modal-body" id="configBackupTreeModalBody">
+          <div class="small text-muted mb-2" id="configBackupTreeMeta"><span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Loading...</div>
+          <div id="configBackupExtensionSummaryContainer"></div>
+          <input type="text" class="form-control form-control-sm mb-2" id="configBackupTreeSearchInput" placeholder="Filter files and folders..." oninput="filterConfigBackupTree(this.value)">
+          <div id="configBackupTreeListContainer"></div>
         </div>
         <div class="modal-footer">
           <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Close</button>
         </div>
       </div>
     </div>`;
-  modal.querySelector("#configBackupTreeBody").addEventListener("click", handleConfigBackupTreeClick);
+  modal.querySelector("#configBackupTreeListContainer").addEventListener("click", handleConfigBackupTreeClick);
   if (window.bootstrap?.Modal) {
     window.bootstrap.Modal.getOrCreateInstance(modal).show();
   } else {
     modal.classList.add("show");
     modal.style.display = "block";
   }
-  const body = document.getElementById("configBackupTreeBody");
+  const meta = document.getElementById("configBackupTreeMeta");
   try {
     const payload = await api(`/admin/config-backups/${encodeURIComponent(backupId)}/tree`);
-    if (!document.body.contains(body)) return;
+    if (!document.body.contains(meta)) return;
     if (payload.status !== "ok") {
-      body.innerHTML = `<div class="text-danger small">Failed to read this archive: ${escapeHtml(payload.error || payload.status || "unknown error")}</div>`;
+      const modalBody = document.getElementById("configBackupTreeModalBody");
+      if (modalBody) modalBody.innerHTML = `<div class="text-danger small">Failed to read this archive: ${escapeHtml(payload.error || payload.status || "unknown error")}</div>`;
       return;
     }
-    const files = payload.files || [];
-    body.innerHTML = `
-      <div class="small text-muted mb-2">${files.length} file${files.length === 1 ? "" : "s"}, ${formatBytes(payload.size_bytes || 0)} compressed</div>
-      ${renderConfigBackupExtensionSummary(files)}
-      ${renderConfigBackupTreeList(files)}
-    `;
+    configBackupTreeAllFiles = payload.files || [];
+    meta.innerHTML = `${configBackupTreeAllFiles.length} file${configBackupTreeAllFiles.length === 1 ? "" : "s"}, ${formatBytes(payload.size_bytes || 0)} compressed`;
+    document.getElementById("configBackupExtensionSummaryContainer").innerHTML =
+      renderConfigBackupExtensionSummary(configBackupTreeAllFiles, configBackupExtensionSummaryExpanded);
+    document.getElementById("configBackupTreeListContainer").innerHTML = renderConfigBackupTreeListContainer();
   } catch (err) {
-    if (document.body.contains(body)) {
-      body.innerHTML = `<div class="text-danger small">Failed to load contents: ${escapeHtml(err.message || "unknown error")}</div>`;
+    const modalBody = document.getElementById("configBackupTreeModalBody");
+    if (modalBody && document.body.contains(modalBody)) {
+      modalBody.innerHTML = `<div class="text-danger small">Failed to load contents: ${escapeHtml(err.message || "unknown error")}</div>`;
     }
   }
 }
@@ -8622,12 +8663,46 @@ async function loadEsCollections() {
   const payload = await api("/admin/es-collections");
   renderEsCollectionsBody(payload);
 }
+function renderUpdateHistoryEntry(entry) {
+  const version = escapeHtml(entry.version || "unknown");
+  const previous = entry.previous_version ? `<span class="text-muted">${escapeHtml(entry.previous_version)} &rarr;</span> ` : "";
+  const link = entry.release_url
+    ? `<a href="${escapeHtml(entry.release_url)}" target="_blank" rel="noopener noreferrer" class="small"><i class="bi bi-box-arrow-up-right me-1"></i>View on GitHub</a>`
+    : "";
+  const notes = entry.release_notes
+    ? `<pre class="update-history-notes small mb-0">${escapeHtml(entry.release_notes)}</pre>`
+    : `<div class="small text-muted">No commit notes available for this update.</div>`;
+  return `
+    <div class="update-history-entry">
+      <div class="d-flex flex-wrap justify-content-between align-items-center gap-2">
+        <div>${previous}<strong>${version}</strong></div>
+        <div class="d-flex align-items-center gap-2">
+          <span class="small text-muted">${escapeHtml(formatCompactLocalDate(entry.applied_at) || entry.applied_at || "")}</span>
+          ${link}
+        </div>
+      </div>
+      ${notes}
+    </div>
+  `;
+}
+
+function renderUpdateHistorySection(updates) {
+  if (!updates.length) {
+    return `<div class="text-muted">This Drone hasn't recorded any self-updates yet.</div>`;
+  }
+  return `<div class="update-history-list">${updates.map(renderUpdateHistoryEntry).join("")}</div>`;
+}
+
 async function renderAdminSystemInfoPage() {
   titleNode.textContent = "System Info";
   subtitleNode.textContent = "Runtime, network, and Batocera details";
   setLoading(true, "Loading system information...");
   try {
-    const payload = await api("/admin/system-info?speed=1");
+    const [payload, updateHistoryPayload] = await Promise.all([
+      api("/admin/system-info?speed=1"),
+      api("/admin/system/update-history").catch(() => ({ updates: [] })),
+    ]);
+    const updateHistory = Array.isArray(updateHistoryPayload.updates) ? updateHistoryPayload.updates : [];
     const entries = Array.isArray(payload.entries) ? payload.entries : [];
     const fields = payload.fields || {};
     const metrics = payload.runtime_metrics || {};
@@ -8767,6 +8842,12 @@ async function renderAdminSystemInfoPage() {
               </div>
             </div>
           </div>
+        </div>
+      </div>
+      <div class="card log-card mt-3">
+        <div class="card-header"><i class="bi bi-clock-history me-2"></i>Update History</div>
+        <div class="card-body">
+          ${renderUpdateHistorySection(updateHistory)}
         </div>
       </div>
     `;

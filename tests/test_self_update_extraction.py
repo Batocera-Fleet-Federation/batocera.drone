@@ -10,6 +10,7 @@ and never touch the work tree; legitimate archives overlay ``app``/``content`` w
 skipping ``__pycache__``/``.pyc`` and unrelated roots. See ``drone-p2p-transfer-security``.
 """
 import io
+import json
 import tarfile
 import tempfile
 import threading
@@ -17,10 +18,12 @@ import types
 import unittest
 from pathlib import Path
 from unittest import mock
+from urllib.error import URLError
 
 from app.common import self_update
 from app.common.settings import Settings
 from app.storage import audit_store
+from app.storage import update_history_store
 
 
 def _targz(members):
@@ -173,6 +176,138 @@ class DownloadLatestDroneAppNotificationTests(unittest.TestCase):
         events = audit_store.list_unsent_events(self.settings, event_types=["drone_updated"])
         self.assertEqual(events, [])
 
+    def test_successful_update_records_history_and_includes_notes_in_notification(self):
+        (self.work_dir / "app").mkdir(parents=True)
+        (self.work_dir / "app" / "VERSION").write_text("v1.0.0\n", encoding="utf-8")
+        archive = _targz([
+            ("app/main.py", b"m"),
+            ("app/VERSION", b"v1.0.1\n"),
+            ("content/theme.css", b"c"),
+        ])
+        with mock.patch.object(self_update, "urlopen", lambda request, timeout=None: io.BytesIO(archive)), \
+             mock.patch.object(self_update, "_fetch_commit_notes", return_value="- did a thing (abc1234)"):
+            self_update._download_latest_drone_app(self.settings)
+
+        events = audit_store.list_unsent_events(self.settings, event_types=["drone_updated"])
+        self.assertIn("did a thing", events[0]["message"])
+
+        history = update_history_store.list_updates(self.settings)
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["version"], "v1.0.1")
+        self.assertEqual(history[0]["previous_version"], "v1.0.0")
+        self.assertEqual(history[0]["release_notes"], "- did a thing (abc1234)")
+        self.assertEqual(
+            history[0]["release_url"],
+            "https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/tag/v1.0.1",
+        )
+
+    def test_notification_message_has_no_notes_block_when_notes_are_unavailable(self):
+        (self.work_dir / "app").mkdir(parents=True)
+        (self.work_dir / "app" / "VERSION").write_text("v1.0.0\n", encoding="utf-8")
+        archive = _targz([("app/main.py", b"m"), ("app/VERSION", b"v1.0.1\n"), ("content/theme.css", b"c")])
+        with mock.patch.object(self_update, "urlopen", lambda request, timeout=None: io.BytesIO(archive)), \
+             mock.patch.object(self_update, "_fetch_commit_notes", return_value=""):
+            self_update._download_latest_drone_app(self.settings)
+
+        events = audit_store.list_unsent_events(self.settings, event_types=["drone_updated"])
+        self.assertEqual(events[0]["message"], "v1.0.0 -> v1.0.1; restarting to apply.")
+        history = update_history_store.list_updates(self.settings)
+        self.assertEqual(history[0]["release_notes"], "")
+
+
+class FetchCommitNotesTests(unittest.TestCase):
+    def test_returns_empty_when_no_previous_version(self) -> None:
+        self.assertEqual(self_update._fetch_commit_notes("", "v1.0.1"), "")
+
+    def test_returns_empty_when_versions_are_identical(self) -> None:
+        self.assertEqual(self_update._fetch_commit_notes("v1.0.0", "v1.0.0"), "")
+
+    def test_builds_bullet_list_from_compare_api_commits(self) -> None:
+        payload = json.dumps({
+            "commits": [
+                {"sha": "abc1234567890", "commit": {"message": "Fix a bug\n\nlonger body text"}},
+                {"sha": "def4567890123", "commit": {"message": "Add a feature"}},
+            ]
+        }).encode("utf-8")
+        with mock.patch.object(self_update, "urlopen", lambda request, timeout=None: io.BytesIO(payload)):
+            notes = self_update._fetch_commit_notes("v1.0.0", "v1.0.1")
+        self.assertEqual(notes, "- Fix a bug (abc1234)\n- Add a feature (def4567)")
+
+    def test_caps_at_max_commits_with_a_remaining_count(self) -> None:
+        commits = [
+            {"sha": f"{i:07d}", "commit": {"message": f"change {i}"}}
+            for i in range(self_update.RELEASE_NOTES_MAX_COMMITS + 5)
+        ]
+        payload = json.dumps({"commits": commits}).encode("utf-8")
+        with mock.patch.object(self_update, "urlopen", lambda request, timeout=None: io.BytesIO(payload)):
+            notes = self_update._fetch_commit_notes("v1.0.0", "v1.0.1")
+        lines = notes.splitlines()
+        self.assertEqual(len(lines), self_update.RELEASE_NOTES_MAX_COMMITS + 1)
+        self.assertEqual(lines[-1], "... and 5 more commit(s)")
+
+    def test_returns_empty_on_network_failure_without_raising(self) -> None:
+        def raise_error(request, timeout=None):
+            raise URLError("no network")
+
+        with mock.patch.object(self_update, "urlopen", raise_error):
+            notes = self_update._fetch_commit_notes("v1.0.0", "v1.0.1")
+        self.assertEqual(notes, "")
+
+    def test_returns_empty_on_malformed_json_without_raising(self) -> None:
+        with mock.patch.object(self_update, "urlopen", lambda request, timeout=None: io.BytesIO(b"not json")):
+            notes = self_update._fetch_commit_notes("v1.0.0", "v1.0.1")
+        self.assertEqual(notes, "")
+
+
+class DroneUpdateHistoryAdminHandlerTests(unittest.TestCase):
+    class _FakeHandler:
+        def __init__(self, settings) -> None:
+            self.settings = settings
+            self.response = None
+
+        def _send_json(self, status_code: int, payload: dict) -> None:
+            self.response = (status_code, payload)
+
+    def _handler(self, settings):
+        from app.web import handlers_system
+
+        class FakeHandler(handlers_system.HandlersSystemMixin, self._FakeHandler):
+            pass
+
+        return FakeHandler(settings)
+
+    def _build_settings(self, root: Path) -> Settings:
+        env = {
+            "USERDATA_ROOT": str(root / "userdata"),
+            "ROMS_ROOT": str(root / "roms"),
+            "BIOS_ROOT": str(root / "bios"),
+            "SAVES_ROOT": str(root / "saves"),
+            "DRONE_STATE_DATABASE_FILE": str(root / "state.sqlite3"),
+            "DRONE_DEVICE_ID": "update-history-handler-test",
+        }
+        with mock.patch.dict("os.environ", env, clear=True):
+            return Settings.from_env()
+
+    def test_returns_recorded_updates_newest_first(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._build_settings(Path(tmp))
+            update_history_store.record_update(settings, version="v1.0.0")
+            update_history_store.record_update(
+                settings, version="v1.0.1", previous_version="v1.0.0", release_notes="- did a thing"
+            )
+            handler = self._handler(settings)
+            handler._handle_admin_drone_update_history()
+            status_code, payload = handler.response
+            self.assertEqual(status_code, 200)
+            self.assertEqual([entry["version"] for entry in payload["updates"]], ["v1.0.1", "v1.0.0"])
+
+    def test_returns_empty_list_when_never_updated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._build_settings(Path(tmp))
+            handler = self._handler(settings)
+            handler._handle_admin_drone_update_history()
+            self.assertEqual(handler.response, (200, {"updates": []}))
+
 
 class DroneAutoUpdateSettingTests(unittest.TestCase):
     def setUp(self):
@@ -318,6 +453,22 @@ class OverlayReleaseTreeTests(unittest.TestCase):
     def test_missing_source_raises(self):
         with self.assertRaises(ValueError):
             self_update._overlay_drone_release_tree(self.root / "nope", self.root / "dst")
+
+
+class UpdateHistoryUiContentTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        root = Path(__file__).resolve().parents[1]
+        cls.js = root.joinpath("app/web/static/js/drone.js").read_text(encoding="utf-8")
+
+    def test_system_info_page_fetches_and_renders_update_history(self) -> None:
+        self.assertIn('api("/admin/system/update-history")', self.js)
+        self.assertIn("function renderUpdateHistorySection(updates)", self.js)
+        self.assertIn("function renderUpdateHistoryEntry(entry)", self.js)
+        self.assertIn("Update History", self.js)
+        page_start = self.js.index("async function renderAdminSystemInfoPage()")
+        page_end = self.js.index("\nasync function renderAdminControlsPage()")
+        self.assertIn("renderUpdateHistorySection(updateHistory)", self.js[page_start:page_end])
 
 
 if __name__ == "__main__":

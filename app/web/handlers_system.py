@@ -29,6 +29,7 @@ try:
     from ..device import notifications as _notifications
     from ..device.pixen import run_pixen_upgrade
     from ..device.game_activity import find_running_emulatorlauncher as _find_running_emulatorlauncher
+    from ..storage import update_history_store as _update_history_store
     from ..transfer.drone_tls import DroneCertificateManager
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.self_update import (  # type: ignore
@@ -51,6 +52,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from device import notifications as _notifications  # type: ignore
     from device.pixen import run_pixen_upgrade  # type: ignore
     from device.game_activity import find_running_emulatorlauncher as _find_running_emulatorlauncher  # type: ignore
+    from storage import update_history_store as _update_history_store  # type: ignore
     from transfer.drone_tls import DroneCertificateManager  # type: ignore
     from web.route_config import api_url  # type: ignore
 
@@ -69,6 +71,9 @@ class HandlersSystemMixin:
         except Exception:
             pass
         _restart_drone_process_soon()
+
+    def _handle_admin_drone_update_history(self) -> None:
+        self._send_json(200, {"updates": _update_history_store.list_updates(self.settings)})
 
     def _handle_admin_drone_auto_update_get(self) -> None:
         self._send_json(200, {"enabled": is_drone_auto_update_enabled(self.settings)})

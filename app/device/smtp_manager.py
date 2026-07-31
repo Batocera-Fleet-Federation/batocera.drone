@@ -469,8 +469,12 @@ def _compose_digest(items: list, settings: Settings) -> tuple:
     for item in items:
         label = _notifications.EVENT_TYPE_LABELS.get(item["event_type"], item["event_type"])
         lines.append(f"- [{item['created_at']}] {label}: {item['title']}")
-        if item.get("message"):
-            lines.append(f"    {item['message']}")
+        # Indent every line of the message, not just the first -- a
+        # drone_updated item's message can carry embedded newlines (the
+        # release notes commit list), and only indenting the first line
+        # would leave the rest looking like a new top-level digest entry.
+        for message_line in str(item.get("message") or "").splitlines():
+            lines.append(f"    {message_line}")
     return subject, "\n".join(lines)
 
 

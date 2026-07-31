@@ -1147,6 +1147,18 @@ def _schemas() -> Dict[str, Schema]:
         "DroneUpdateResponse": _object({"status": _string(), "version": _string(), "archive_url": _string(fmt="uri"), "elapsed_seconds": _number(), "restart": freeform}, description="Self-update result plus restart metadata."),
         "DroneAutoUpdateRequest": _object({"enabled": _boolean()}, ("enabled",)),
         "DroneAutoUpdateResponse": _object({"enabled": _boolean()}, ("enabled",)),
+        "DroneUpdateHistoryEntry": _object(
+            {
+                "id": _integer(),
+                "previous_version": _string(),
+                "version": _string(),
+                "release_url": _string(fmt="uri"),
+                "release_notes": _string("Commit summaries between previous_version and version, one per line"),
+                "applied_at": _string(),
+            },
+            ("id", "version", "applied_at"),
+        ),
+        "DroneUpdateHistoryResponse": _object({"updates": _array(_ref("DroneUpdateHistoryEntry"))}, ("updates",)),
         "PixnUpdateResponse": _object({"type": _string(), "status": _string(), "pid": _integer(nullable=True), "script": _string()}, ("type", "status", "script"), description="PixN upgrade script launch result."),
         "RestartEmulationStationResponse": _object({"status": _string()}, ("status",), description="Result of restarting EmulationStation (batocera-es-swissknife --restart or the init.d script)."),
         "CredentialsUpdateRequest": _object({"username": _string(), "password": _string()}, ("username", "password")),
@@ -1886,6 +1898,9 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             "/admin/automation/idle-game-exit": {"post": _operation("Update idle-game-exit automation", {"200": _json_response("IdleGameExitResponse")}, request_body=_json_request("IdleGameExitUpdateRequest"), tags=["admin"])},
             "/admin/automation/wifi-recovery": {"post": _operation("Update Wi-Fi recovery automation", {"200": _json_response("WifiRecoveryResponse")}, request_body=_json_request("WifiRecoveryUpdateRequest"), tags=["admin"])},
             "/admin/system/update-drone": {"post": _operation("Download and stage the latest Drone app release", {"200": _json_response("DroneUpdateResponse")}, tags=["admin"], error_codes=("400", "401", "403", "429", "500", "502"))},
+            "/admin/system/update-history": {
+                "get": _operation("List past Drone app self-updates (version, GitHub release link, commit notes)", {"200": _json_response("DroneUpdateHistoryResponse")}, tags=["admin"]),
+            },
             "/admin/system/auto-update": {
                 "get": _operation("Get automatic Drone update setting", {"200": _json_response("DroneAutoUpdateResponse")}, tags=["admin"]),
                 "post": _operation("Enable or disable the startup Drone update check", {"200": _json_response("DroneAutoUpdateResponse")}, request_body=_json_request("DroneAutoUpdateRequest"), tags=["admin"]),

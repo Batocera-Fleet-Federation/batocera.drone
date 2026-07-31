@@ -1,5 +1,6 @@
 """Drone self-update: poll releases, download updates, and re-exec in place."""
 
+import json
 import os
 import re
 import shutil
@@ -11,7 +12,7 @@ import time
 from pathlib import Path
 from threading import Event, Lock, Thread
 from typing import Optional, Tuple
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import unquote, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
@@ -22,16 +23,24 @@ except ImportError:  # pragma: no cover - direct script execution fallback
 
 try:
     from ..device import notifications as _notifications
+    from ..storage import update_history_store as _update_history_store
 except ImportError:  # pragma: no cover - flat (no `app.` prefix) package mode
     from device import notifications as _notifications  # type: ignore
+    from storage import update_history_store as _update_history_store  # type: ignore
 
 DRONE_LATEST_ARCHIVE_URL = "https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/drone-app.tar.gz"
 DRONE_LATEST_RELEASE_URL = "https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest"
+DRONE_RELEASE_TAG_URL_TEMPLATE = "https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/tag/{version}"
+DRONE_COMPARE_API_URL_TEMPLATE = "https://api.github.com/repos/Batocera-Fleet-Federation/batocera.drone/compare/{base}...{head}"
 DRONE_SELF_UPDATE_EXIT_CODE = 75
 DRONE_AUTO_UPDATE_FILE = "auto-update.enabled"
 DRONE_AUTO_UPDATE_POLL_SECONDS = 60
 DRONE_SERVICE_BOOTSTRAP = Path(__file__).resolve().parents[1] / "service_bootstrap.sh"
 DRONE_SERVICE_PID_FILE = Path("/tmp/drone-server.pid")
+# The hand-maintained CHANGELOG.md isn't updated for every release (several
+# recent tags have no entry at all), so it isn't a reliable source of "what
+# changed" -- the actual commit log between two tags always is.
+RELEASE_NOTES_MAX_COMMITS = 50
 
 _DRONE_UPDATE_LOCK = Lock()
 _SEMANTIC_VERSION_PATTERN = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$")
@@ -103,6 +112,46 @@ def _latest_drone_release_version(timeout_seconds: float = 10.0) -> str:
     if not location:
         raise ValueError("latest Drone release response did not include a redirect location")
     return _release_version_from_redirect(location)
+
+
+def _release_url_for_version(version: str) -> str:
+    return DRONE_RELEASE_TAG_URL_TEMPLATE.format(version=version)
+
+
+def _fetch_commit_notes(previous_version: str, new_version: str, timeout_seconds: float = 10.0) -> str:
+    """Best-effort: a bullet list of commit summaries between two tags, from
+    GitHub's compare API. Always populated (unlike CHANGELOG.md, see above)
+    since it reflects real commit history, not manual changelog upkeep.
+    Returns "" on any failure or when there's no real previous version to
+    compare against (e.g. the very first recorded update) -- callers must
+    treat that as "notes unavailable", never let it block the update itself.
+    """
+    if not previous_version or not new_version or previous_version == new_version:
+        return ""
+    url = DRONE_COMPARE_API_URL_TEMPLATE.format(base=previous_version, head=new_version)
+    request = Request(
+        url,
+        headers={"User-Agent": "batocera-drone-self-update", "Accept": "application/vnd.github+json"},
+    )
+    try:
+        with urlopen(request, timeout=timeout_seconds) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (HTTPError, URLError, OSError, ValueError) as error:
+        print(f"Unable to fetch Drone release notes {previous_version}...{new_version}: {error}", file=sys.stderr, flush=True)
+        return ""
+    commits = payload.get("commits") or []
+    lines = []
+    for commit in commits[:RELEASE_NOTES_MAX_COMMITS]:
+        message = str((commit.get("commit") or {}).get("message") or "").splitlines()
+        summary = message[0].strip() if message else ""
+        if not summary:
+            continue
+        sha = str(commit.get("sha") or "")[:7]
+        lines.append(f"- {summary} ({sha})" if sha else f"- {summary}")
+    remaining = len(commits) - RELEASE_NOTES_MAX_COMMITS
+    if remaining > 0:
+        lines.append(f"... and {remaining} more commit(s)")
+    return "\n".join(lines)
 
 
 def _installed_drone_version(settings: Settings) -> str:
@@ -202,12 +251,19 @@ def _download_latest_drone_app(settings: Settings) -> dict:
     with _DRONE_UPDATE_LOCK:
         result = _download_latest_drone_app_unlocked(settings)
     new_version = _installed_drone_version(settings)
-    _notifications.record_event(
+    release_url = _release_url_for_version(new_version) if new_version else ""
+    release_notes = _fetch_commit_notes(previous_version, new_version)
+    _update_history_store.record_update(
         settings,
-        "drone_updated",
-        "Drone app updated",
-        f"{previous_version or 'unknown'} -> {new_version or 'unknown'}; restarting to apply.",
+        version=new_version,
+        previous_version=previous_version,
+        release_url=release_url,
+        release_notes=release_notes,
     )
+    message = f"{previous_version or 'unknown'} -> {new_version or 'unknown'}; restarting to apply."
+    if release_notes:
+        message = f"{message}\n\n{release_notes}"
+    _notifications.record_event(settings, "drone_updated", "Drone app updated", message)
     return result
 
 

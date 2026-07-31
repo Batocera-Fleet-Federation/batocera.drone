@@ -435,6 +435,28 @@ class SendDigestIfNeededTests(unittest.TestCase):
             send_mail_again.assert_not_called()
             self.assertEqual(second_result["status"], "skipped")
 
+    def test_multiline_message_is_indented_on_every_line(self) -> None:
+        # A drone_updated event's message can carry the release-notes commit
+        # list as embedded newlines -- every line must stay indented under
+        # its item, not just the first, or the notes read as a new top-level
+        # digest entry.
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            smtp_manager.update_settings(settings, _VALID_SETTINGS)
+            smtp_manager._notifications.record_event(
+                settings,
+                "drone_updated",
+                "Drone app updated",
+                "v1.0.0 -> v1.0.1; restarting to apply.\n\n- Fixed a bug (abc1234)\n- Added a feature (def5678)",
+            )
+            with mock.patch.object(smtp_manager, "send_mail") as send_mail:
+                smtp_manager.send_digest_if_needed(settings)
+            body = send_mail.call_args[0][2]
+            body_lines = body.splitlines()
+            self.assertIn("    v1.0.0 -> v1.0.1; restarting to apply.", body_lines)
+            self.assertIn("    - Fixed a bug (abc1234)", body_lines)
+            self.assertIn("    - Added a feature (def5678)", body_lines)
+
     def test_only_includes_enabled_event_types(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(Path(tmp))

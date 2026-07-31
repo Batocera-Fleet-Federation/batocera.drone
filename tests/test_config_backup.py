@@ -553,13 +553,48 @@ class ConfigBackupTreeUiContentTests(unittest.TestCase):
 
     def test_extension_summary_function_defined_and_used_in_modal(self) -> None:
         self.assertIn("function summarizeConfigBackupExtensions(files)", self.js)
-        self.assertIn("function renderConfigBackupExtensionSummary(files)", self.js)
+        self.assertIn("function renderConfigBackupExtensionSummary(files, expanded)", self.js)
         modal_body = self._function_body("async function openConfigBackupTreeModal(")
-        self.assertIn("renderConfigBackupExtensionSummary(files)", modal_body)
+        self.assertIn("renderConfigBackupExtensionSummary(configBackupTreeAllFiles, configBackupExtensionSummaryExpanded)", modal_body)
 
     def test_extension_summary_buckets_no_extension_files_together(self) -> None:
         body = self._function_body("function configBackupFileExtension(relativePath)")
         self.assertIn('"(no extension)"', body)
+
+    def test_extension_summary_collapses_to_ten_rows_with_a_toggle(self) -> None:
+        body = self._function_body("function renderConfigBackupExtensionSummary(files, expanded)")
+        self.assertIn("CONFIG_BACKUP_EXTENSION_SUMMARY_COLLAPSED_ROWS", body)
+        self.assertIn("toggleConfigBackupExtensionSummary()", body)
+        self.assertIn("Show all", body)
+        collapsed_rows_line = next(
+            line for line in self.js.splitlines() if "CONFIG_BACKUP_EXTENSION_SUMMARY_COLLAPSED_ROWS =" in line
+        )
+        self.assertIn("10", collapsed_rows_line)
+
+    def test_search_input_filters_tree_without_losing_focus(self) -> None:
+        # The search <input> itself must never be part of a re-rendered
+        # innerHTML block, or every keystroke would recreate the DOM node and
+        # drop focus/cursor position -- only the tree list container is
+        # replaced on input.
+        modal_body = self._function_body("async function openConfigBackupTreeModal(")
+        self.assertIn('id="configBackupTreeSearchInput"', modal_body)
+        self.assertIn('oninput="filterConfigBackupTree(this.value)"', modal_body)
+        filter_body = self._function_body("function filterConfigBackupTree(value)")
+        self.assertIn('getElementById("configBackupTreeListContainer")', filter_body)
+        self.assertNotIn("configBackupTreeSearchInput", filter_body)
+
+    def test_search_filters_by_full_relative_path_case_insensitively(self) -> None:
+        body = self._function_body("function renderConfigBackupTreeListContainer()")
+        self.assertIn("toLowerCase()", body)
+        self.assertIn("relative_path", body)
+        self.assertIn("No files or folders match", body)
+
+    def test_tree_container_scoped_to_grow_full_modal_height(self) -> None:
+        css_root = Path(__file__).resolve().parents[1]
+        css = css_root.joinpath("app/web/static/css/drone.css").read_text(encoding="utf-8")
+        self.assertIn("#configBackupTreeModal .modal-body {", css)
+        self.assertIn("#configBackupTreeModal #configBackupTreeListContainer {", css)
+        self.assertIn("#configBackupTreeModal #configBackupTreeListContainer .file-tree {", css)
 
 
 if __name__ == "__main__":

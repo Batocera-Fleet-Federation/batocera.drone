@@ -400,6 +400,10 @@ class ApiRoutesMixin:
                 self._handle_admin_drone_auto_update_get()
                 return
 
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "system" and parts[2] == "update-history":
+                self._handle_admin_drone_update_history()
+                return
+
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "api" and parts[2] == "certificate":
                 self._handle_admin_api_certificate()
                 return
