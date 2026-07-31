@@ -356,6 +356,10 @@ class ApiRoutesMixin:
                 self._handle_admin_config_backup_download(parts[2])
                 return
 
+            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "config-backups" and parts[3] == "tree":
+                self._handle_admin_config_backup_tree(parts[2])
+                return
+
             if len(parts) == 2 and parts[0] == "admin" and parts[1] == "vpn":
                 self._handle_admin_vpn_status()
                 return
@@ -804,6 +808,10 @@ class ApiRoutesMixin:
 
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "config-backups" and parts[3] == "email":
                 self._handle_admin_config_backup_email(parts[2])
+                return
+
+            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "config-backups" and parts[3] == "apply":
+                self._handle_admin_config_backup_apply(parts[2])
                 return
 
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "vpn" and parts[2] == "upload":

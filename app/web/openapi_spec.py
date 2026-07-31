@@ -671,6 +671,30 @@ def _schemas() -> Dict[str, Schema]:
             description="'not_configured'/'too_large'/'error' are 200s (not thrown errors) so the caller can branch on the exact outcome -- e.g. show a popup pointing at Email settings for 'not_configured'.",
         ),
         "ConfigBackupActionResponse": _object({"status": _string()}, ("status",)),
+        "ConfigBackupTreeFile": _object({"relative_path": _string(), "size": _integer()}, ("relative_path", "size")),
+        "ConfigBackupTreeResponse": _object(
+            {
+                "status": _enum(("ok", "not_found", "error")),
+                "file_name": _string(),
+                "name": _string(),
+                "size_bytes": _integer(),
+                "files": _array(_ref("ConfigBackupTreeFile")),
+                "error": _string("Present when status is 'error'"),
+            },
+            ("status",),
+            description="Read-only listing of every file inside the tarball (path + size, never contents), for the admin UI's tree browser.",
+        ),
+        "ConfigBackupApplyResponse": _object(
+            {
+                "status": _enum(("ok", "not_found", "error")),
+                "restored_file_count": _integer(),
+                "skipped_file_count": _integer(),
+                "restarted_emulationstation": _boolean(),
+                "error": _string("Present when status is 'error'"),
+            },
+            ("status",),
+            description="Extracts the tarball back onto this machine's real config/gamelist/saves paths, overwriting whatever is there now. Irreversible -- the admin UI requires an explicit confirmation before calling this. EmulationStation is stopped during the copy and restarted afterward.",
+        ),
         "TorrentUploadRequest": _object(
             {"torrents": _array({"type": "string", "format": "binary"})},
             description="One or more .torrent files as multipart file parts (any field names).",
@@ -1747,6 +1771,12 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             },
             "/admin/config-backups/{backup_id}/download": {
                 "get": _operation("Download a completed config-backup tarball", {"200": {"description": "The tar.gz file", "content": {"application/gzip": {"schema": {"type": "string", "format": "binary"}}}}, "404": _json_response("ConfigBackupActionResponse", "Backup not found or not yet complete")}, parameters=[_path_param("backup_id")], tags=["admin", "config-backups"], error_codes=("401", "403", "429", "500"))
+            },
+            "/admin/config-backups/{backup_id}/tree": {
+                "get": _operation("List the files/directories inside a completed config-backup tarball (no contents)", {"200": _json_response("ConfigBackupTreeResponse"), "404": _json_response("ConfigBackupTreeResponse", "Backup not found or not yet complete")}, parameters=[_path_param("backup_id")], tags=["admin", "config-backups"], error_codes=("401", "403", "429", "500"))
+            },
+            "/admin/config-backups/{backup_id}/apply": {
+                "post": _operation("Apply (restore) a completed config-backup tarball onto this machine -- irreversible", {"200": _json_response("ConfigBackupApplyResponse"), "404": _json_response("ConfigBackupApplyResponse", "Backup not found or not yet complete")}, parameters=[_path_param("backup_id")], tags=["admin", "config-backups"], error_codes=("401", "403", "429", "500"))
             },
             "/admin/config-backups/{backup_id}/delete": {
                 "post": _operation("Delete a config-backup tarball and its metadata", {"200": _json_response("ConfigBackupActionResponse"), "404": _json_response("ConfigBackupActionResponse", "Backup not found")}, parameters=[_path_param("backup_id")], tags=["admin", "config-backups"], error_codes=("401", "403", "429", "500"))

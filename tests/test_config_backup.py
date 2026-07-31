@@ -276,6 +276,39 @@ class ConfigBackupBuildTests(unittest.TestCase):
             result = config_backup.delete_backup(settings, 999)
             self.assertEqual(result["status"], "not_found")
 
+    def test_build_backup_tree_lists_files_with_sizes_no_contents(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = _build_settings(root)
+            _write(root / "system" / "batocera.conf", b"conf-bytes")
+            _write(root / "system" / "configs" / "retroarch" / "retroarch.cfg", b"cfg-bytes-longer")
+            _write(root / "saves" / "snes" / "game.srm", b"save-bytes")
+
+            result = config_backup.create_backup(settings)
+            row = _wait_for_status(settings, result["backup"]["id"])
+
+            tree = config_backup.build_backup_tree(settings, row["id"])
+            self.assertEqual(tree["status"], "ok")
+            self.assertEqual(tree["file_name"], row["file_name"])
+            by_path = {entry["relative_path"]: entry["size"] for entry in tree["files"]}
+            self.assertEqual(by_path["system/batocera.conf"], len(b"conf-bytes"))
+            self.assertEqual(by_path["system/configs/retroarch/retroarch.cfg"], len(b"cfg-bytes-longer"))
+            self.assertEqual(by_path["saves/snes/game.srm"], len(b"save-bytes"))
+            self.assertIn("MANIFEST.txt", by_path)
+            # Read-only: no file contents anywhere in the response.
+            self.assertNotIn("conf-bytes", str(tree))
+
+    def test_build_backup_tree_not_found(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            self.assertEqual(config_backup.build_backup_tree(settings, 999)["status"], "not_found")
+
+    def test_build_backup_tree_rejects_incomplete_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            row = config_backup_store.create_pending(settings, "still-building.tar.gz")
+            self.assertEqual(config_backup.build_backup_tree(settings, row["id"])["status"], "not_found")
+
     def test_build_failure_marks_error_not_stuck_creating(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -287,6 +320,125 @@ class ConfigBackupBuildTests(unittest.TestCase):
             row = _wait_for_status(settings, result["backup"]["id"])
             self.assertEqual(row["status"], config_backup_store.STATUS_ERROR)
             self.assertIn("disk full", row["error_message"])
+
+
+class ApplyBackupToMachineTests(unittest.TestCase):
+    def _completed_backup(self, root: Path, settings: Settings) -> dict:
+        _write(root / "system" / "batocera.conf", b"conf-bytes")
+        result = config_backup.create_backup(settings)
+        return _wait_for_status(settings, result["backup"]["id"])
+
+    def test_not_found_when_backup_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            self.assertEqual(config_backup.apply_backup_to_machine(settings, 999)["status"], "not_found")
+
+    def test_not_found_when_backup_still_creating(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            row = config_backup_store.create_pending(settings, "still-building.tar.gz")
+            self.assertEqual(config_backup.apply_backup_to_machine(settings, row["id"])["status"], "not_found")
+
+    def test_root_direct_calls_restore_helper_under_es_lifecycle_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = _build_settings(root)
+            row = self._completed_backup(root, settings)
+            with mock.patch("app.device.config_backup.os.geteuid", return_value=0), \
+                 mock.patch(
+                     "app.device.config_backup._restore_config_backup_helper",
+                     return_value={"restored_file_count": 1, "skipped_file_count": 0, "restarted_emulationstation": True},
+                 ) as helper:
+                result = config_backup.apply_backup_to_machine(settings, row["id"])
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(result["restored_file_count"], 1)
+            self.assertTrue(result["restarted_emulationstation"])
+            helper.assert_called_once_with(
+                config_backup.backups_directory(settings) / row["file_name"],
+                settings.userdata_root, settings.roms_root, settings.saves_root,
+            )
+
+    def test_root_direct_records_config_backup_applied_notification(self) -> None:
+        from app.storage import audit_store
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = _build_settings(root)
+            row = self._completed_backup(root, settings)
+            with mock.patch("app.device.config_backup.os.geteuid", return_value=0), \
+                 mock.patch(
+                     "app.device.config_backup._restore_config_backup_helper",
+                     return_value={"restored_file_count": 1, "skipped_file_count": 0, "restarted_emulationstation": True},
+                 ):
+                config_backup.apply_backup_to_machine(settings, row["id"])
+            events = audit_store.list_unsent_events(settings, event_types=["config_backup_applied"])
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["title"], "Config backup applied to this machine")
+
+    def test_root_direct_helper_failure_returns_error_status_not_raise(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = _build_settings(root)
+            row = self._completed_backup(root, settings)
+            with mock.patch("app.device.config_backup.os.geteuid", return_value=0), \
+                 mock.patch(
+                     "app.device.config_backup._restore_config_backup_helper",
+                     side_effect=RuntimeError("EmulationStation did not restart"),
+                 ):
+                result = config_backup.apply_backup_to_machine(settings, row["id"])
+            self.assertEqual(result["status"], "error")
+            self.assertIn("did not restart", result["error"])
+
+    def test_non_root_dispatches_to_privileged_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = _build_settings(root)
+            row = self._completed_backup(root, settings)
+            with mock.patch("app.device.config_backup.os.geteuid", return_value=999), \
+                 mock.patch(
+                     "app.device.config_backup._request_config_backup_apply_service_control", return_value=True
+                 ) as dispatch:
+                result = config_backup.apply_backup_to_machine(settings, row["id"])
+            self.assertEqual(result["status"], "ok")
+            dispatch.assert_called_once()
+            request_payload = dispatch.call_args.args[0]
+            self.assertEqual(request_payload["archive_path"], str(config_backup.backups_directory(settings) / row["file_name"]))
+            self.assertEqual(request_payload["userdata_root"], str(settings.userdata_root))
+
+    def test_non_root_worker_unavailable_returns_error_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = _build_settings(root)
+            row = self._completed_backup(root, settings)
+            with mock.patch("app.device.config_backup.os.geteuid", return_value=999), \
+                 mock.patch(
+                     "app.device.config_backup._request_config_backup_apply_service_control", return_value=False
+                 ):
+                result = config_backup.apply_backup_to_machine(settings, row["id"])
+            self.assertEqual(result["status"], "error")
+
+    def test_fake_data_short_circuits_without_dispatching(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env = {
+                "USERDATA_ROOT": str(root),
+                "ROMS_ROOT": str(root / "roms"),
+                "BIOS_ROOT": str(root / "bios"),
+                "SAVES_ROOT": str(root / "saves"),
+                "DRONE_STATE_DATABASE_FILE": str(root / "state.sqlite3"),
+                "DRONE_DEVICE_ID": "local-test",
+                "LOG_DIR": str(root / "logs"),
+                "USE_FAKE_DATA": "true",
+            }
+            with mock.patch.dict("os.environ", env, clear=True):
+                settings = Settings.from_env()
+            row = self._completed_backup(root, settings)
+            with mock.patch("app.device.config_backup._request_config_backup_apply_service_control") as dispatch, \
+                 mock.patch("app.device.config_backup._restore_config_backup_helper") as helper:
+                result = config_backup.apply_backup_to_machine(settings, row["id"])
+            self.assertEqual(result["status"], "ok")
+            dispatch.assert_not_called()
+            helper.assert_not_called()
 
 
 if __name__ == "__main__":

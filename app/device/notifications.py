@@ -24,7 +24,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
 
 _LOG = logging.getLogger(__name__)
 
-# The 11 event types the SMTP notifications page exposes a toggle for. Order
+# The 12 event types the SMTP notifications page exposes a toggle for. Order
 # here is the order they render in on that page.
 EVENT_TYPES = (
     "vpn_connected",
@@ -38,6 +38,7 @@ EVENT_TYPES = (
     "asset_downloaded",
     "torrent_completed",
     "drone_updated",
+    "config_backup_applied",
 )
 
 EVENT_TYPE_LABELS = {
@@ -52,6 +53,7 @@ EVENT_TYPE_LABELS = {
     "asset_downloaded": "Asset downloaded (pulled from a peer)",
     "torrent_completed": "Torrent download completed",
     "drone_updated": "Drone app updated",
+    "config_backup_applied": "Config backup applied to this machine",
 }
 
 

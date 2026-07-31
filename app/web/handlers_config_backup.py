@@ -42,6 +42,16 @@ class HandlersConfigBackupMixin:
             raise FileNotFoundError()
         self._stream_file(file_path, "application/gzip", as_attachment=True)
 
+    def _handle_admin_config_backup_tree(self, raw_backup_id: str) -> None:
+        try:
+            backup_id = int(raw_backup_id)
+        except ValueError:
+            self._send_json(404, {"status": "not_found"})
+            return
+        result = _config_backup.build_backup_tree(self.settings, backup_id)
+        status_code = 404 if result.get("status") == "not_found" else 200
+        self._send_json(status_code, result)
+
     def _handle_admin_config_backup_delete(self, raw_backup_id: str) -> None:
         try:
             backup_id = int(raw_backup_id)
@@ -49,6 +59,21 @@ class HandlersConfigBackupMixin:
             self._send_json(404, {"status": "not_found"})
             return
         result = _config_backup.delete_backup(self.settings, backup_id)
+        status_code = 404 if result.get("status") == "not_found" else 200
+        self._send_json(status_code, result)
+
+    def _handle_admin_config_backup_apply(self, raw_backup_id: str) -> None:
+        try:
+            backup_id = int(raw_backup_id)
+        except ValueError:
+            self._send_json(404, {"status": "not_found"})
+            return
+        result = _config_backup.apply_backup_to_machine(self.settings, backup_id)
+        # "error" (e.g. EmulationStation didn't come back, or the privileged worker
+        # is unreachable) stays 200 so the frontend can show the real reason rather
+        # than a generic "Request failed" toast -- same reasoning as the email
+        # endpoint below. Only a genuinely unexpected case (the backup vanished) is
+        # a real 404.
         status_code = 404 if result.get("status") == "not_found" else 200
         self._send_json(status_code, result)
 

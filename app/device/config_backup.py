@@ -38,6 +38,7 @@ correctly across process restarts and doesn't leak state between tests.
 from __future__ import annotations
 
 import io
+import json
 import os
 import socket
 import tarfile
@@ -48,11 +49,17 @@ from pathlib import Path
 from typing import Any, List, Tuple
 
 try:
+    from ..apply_config_backup import restore_config_backup as _restore_config_backup_helper
     from ..common.batocera_version import _read_batocera_version
+    from ..common.runtime_state import _ES_LIFECYCLE_LOCK
+    from ..device import notifications as _notifications
     from ..device import smtp_manager as _smtp
     from ..storage import config_backup_store as _store
 except ImportError:  # pragma: no cover - direct script execution fallback
+    from apply_config_backup import restore_config_backup as _restore_config_backup_helper  # type: ignore
     from common.batocera_version import _read_batocera_version  # type: ignore
+    from common.runtime_state import _ES_LIFECYCLE_LOCK  # type: ignore
+    from device import notifications as _notifications  # type: ignore
     from device import smtp_manager as _smtp  # type: ignore
     from storage import config_backup_store as _store  # type: ignore
 
@@ -62,6 +69,10 @@ BACKUP_MAX_SAVE_FILE_BYTES = 500 * 1024 * 1024  # defensive only; real saves are
 # dominated by saves easily exceeds that, so this is checked up front with a
 # clear error rather than letting the send fail obscurely partway through.
 BACKUP_EMAIL_MAX_BYTES = 25 * 1024 * 1024
+# Generous: EmulationStation stop/start is usually well under a minute, but a
+# restore can also be extracting saves, so this leaves real headroom rather
+# than timing out a restore that is still genuinely in progress.
+APPLY_SERVICE_CONTROL_TIMEOUT_SECONDS = 600
 
 _CUSTOM_SCRIPT_DIRS = ("custom", "custom-scripts", "scripts")
 
@@ -218,6 +229,131 @@ def create_backup(settings: Any, *, name: str = "", description: str = "") -> di
     )
     thread.start()
     return {"status": "ok", "backup": row}
+
+
+def build_backup_tree(settings: Any, backup_id: int) -> dict:
+    """List every member (files only -- there are no directory entries, see
+    ``_build_tarball``'s ``recursive=False`` add) with its size, for the
+    read-only "view contents" tree in the admin UI. Never extracts anything
+    to disk; ``tarfile`` reads the member headers by streaming through the
+    gzip stream, so this is proportional to the archive's compressed size,
+    not something requiring a full extraction to answer."""
+    row = _store.get(settings, backup_id)
+    if row is None or row.get("status") != "complete":
+        return {"status": "not_found"}
+    file_path = backups_directory(settings) / row["file_name"]
+    if not file_path.is_file():
+        return {"status": "not_found"}
+    files: List[dict] = []
+    try:
+        with tarfile.open(file_path, "r:gz") as tar:
+            for member in tar.getmembers():
+                if not member.isfile():
+                    continue
+                files.append({"relative_path": member.name, "size": member.size})
+    except (tarfile.TarError, OSError) as error:
+        return {"status": "error", "error": str(error)}
+    return {
+        "status": "ok",
+        "file_name": row["file_name"],
+        "name": row.get("name") or "",
+        "size_bytes": row.get("size_bytes") or 0,
+        "files": files,
+    }
+
+
+def _request_config_backup_apply_service_control(request_payload: dict) -> bool:
+    control_dir = Path(os.environ.get("DRONE_SERVICE_CONTROL_DIR", "/userdata/system/drone-app/control"))
+    request_path = control_dir / "apply-config-backup.request"
+    result_path = control_dir / "apply-config-backup.result"
+    try:
+        result_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+    try:
+        control_dir.mkdir(parents=True, exist_ok=True)
+        request_path.write_text(json.dumps(request_payload), encoding="utf-8")
+    except OSError:
+        return False
+    deadline = time.monotonic() + max(
+        30.0, float(os.environ.get("DRONE_CONFIG_BACKUP_APPLY_TIMEOUT_SECONDS", str(APPLY_SERVICE_CONTROL_TIMEOUT_SECONDS)))
+    )
+    while time.monotonic() < deadline:
+        try:
+            if result_path.exists():
+                result = result_path.read_text(encoding="utf-8", errors="ignore").strip()
+                result_path.unlink(missing_ok=True)
+                if result == "ok":
+                    return True
+                raise OSError(result or "Privileged config backup restore failed")
+        except OSError:
+            raise
+        time.sleep(0.25)
+    try:
+        request_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+    raise OSError("Timed out waiting for the privileged config backup restore")
+
+
+def apply_backup_to_machine(settings: Any, backup_id: int) -> dict:
+    """Extract a completed backup back over this machine's real config/gamelist/
+    saves paths, overwriting whatever is currently there. Irreversible -- the
+    admin UI requires an explicit confirmation before calling this. Stops
+    EmulationStation (and any running game) during the copy and restarts it
+    afterward; see apply_config_backup.py for the actual extraction, shared
+    between this in-process (root) path and the privileged-worker path below so
+    the sequence can never drift between the two entry points."""
+    row = _store.get(settings, backup_id)
+    if row is None or row.get("status") != "complete":
+        return {"status": "not_found"}
+    archive_path = backups_directory(settings) / row["file_name"]
+    if not archive_path.is_file():
+        return {"status": "not_found"}
+
+    if getattr(settings, "use_fake_data", False):
+        result = {"restored_file_count": row.get("included_file_count") or 0, "skipped_file_count": 0, "restarted_emulationstation": False}
+    else:
+        request_payload = {
+            "archive_path": str(archive_path),
+            "userdata_root": str(settings.userdata_root),
+            "roms_root": str(settings.roms_root),
+            "saves_root": str(settings.saves_root),
+        }
+        try:
+            if hasattr(os, "geteuid") and os.geteuid() == 0:
+                # Serialized against screen-mode/ES-collections restarts for the same
+                # reason those share this lock: two overlapping stop/start sequences
+                # race the same EmulationStation/X session and can wedge it into a
+                # permanent crash loop.
+                with _ES_LIFECYCLE_LOCK:
+                    result = _restore_config_backup_helper(
+                        archive_path, settings.userdata_root, settings.roms_root, settings.saves_root
+                    )
+            else:
+                if not _request_config_backup_apply_service_control(request_payload):
+                    raise OSError(
+                        "Unable to dispatch the privileged config backup restore request; the Drone "
+                        "service control worker may not be running."
+                    )
+                # The privileged worker doesn't hand back file counts (only "ok"/error
+                # text) -- report the backup's own known file count instead of a real
+                # restored-count, which is still meaningful to show the user.
+                result = {
+                    "restored_file_count": row.get("included_file_count") or 0,
+                    "skipped_file_count": 0,
+                    "restarted_emulationstation": True,
+                }
+        except (OSError, RuntimeError) as error:
+            return {"status": "error", "error": str(error)}
+
+    _notifications.record_event(
+        settings,
+        "config_backup_applied",
+        "Config backup applied to this machine",
+        f"{row.get('name') or row['file_name']}: {result.get('restored_file_count', 0)} file(s) restored.",
+    )
+    return {"status": "ok", **result}
 
 
 def delete_backup(settings: Any, backup_id: int) -> dict:
