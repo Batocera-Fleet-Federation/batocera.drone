@@ -6,7 +6,9 @@ default-on auto-pull for a freshly-set-up drone with no config of its own.
 
 Unlike VPN there is no persistent connection to manage (no process, no PID,
 no self-heal) -- sending mail is a one-shot ``smtplib`` call made on demand
-(the Test Email button) or from the ~5-minute digest poller. Settings,
+(the Test Email button) or from the digest poller, which checks on a
+user-configurable interval (``digest_interval_seconds``, 1 minute-24 hours,
+default 5 minutes). Settings,
 *including the password*, live entirely in one JSON blob via the same
 ``storage/state_store.py`` mechanism VPN's whole state dict already uses --
 there is no OpenVPN-style ``auth-user-pass <file>`` requirement forcing a
@@ -66,7 +68,18 @@ SMTP_SEND_TIMEOUT_SECONDS = float(os.environ.get("DRONE_SMTP_SEND_TIMEOUT_SECOND
 # room rather than reusing the short default meant for a few KB of text.
 SMTP_ATTACHMENT_SEND_TIMEOUT_SECONDS = float(os.environ.get("DRONE_SMTP_ATTACHMENT_SEND_TIMEOUT_SECONDS", "120"))
 SMTP_SHARING_CHECK_INTERVAL_SECONDS = float(os.environ.get("DRONE_SMTP_SHARING_CHECK_INTERVAL_SECONDS", "300"))
+# Default/fallback seed for the user-configurable digest_interval_seconds
+# setting below (1 minute - 24 hours, default 5 minutes) -- once a drone has
+# saved its own value via the admin UI, that stored value always wins over
+# this env var; this only seeds a fresh drone that has never saved one.
 AUDIT_EMAIL_POLL_INTERVAL_SECONDS = float(os.environ.get("DRONE_AUDIT_EMAIL_INTERVAL_SECONDS", "300"))
+DIGEST_INTERVAL_MIN_SECONDS = 60
+DIGEST_INTERVAL_MAX_SECONDS = 86400
+# How often the poller thread wakes to check whether the user's configured
+# interval has elapsed -- independent of that interval itself, so a change
+# saved in the admin UI takes effect within one tick instead of waiting out
+# whatever (possibly much longer) interval was previously in effect.
+DIGEST_POLLER_TICK_SECONDS = 30.0
 AUDIT_EMAIL_MAX_ITEMS_PER_DIGEST = 200
 
 # Fields carried in the shared/exported payload (peer-to-peer, mirrors VPN's
@@ -85,6 +98,14 @@ class SmtpSendError(Exception):
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _clamp_digest_interval(value) -> int:
+    try:
+        seconds = int(value)
+    except (TypeError, ValueError):
+        seconds = int(AUDIT_EMAIL_POLL_INTERVAL_SECONDS)
+    return max(DIGEST_INTERVAL_MIN_SECONDS, min(DIGEST_INTERVAL_MAX_SECONDS, seconds))
 
 
 def _load_state(settings: Settings) -> dict:
@@ -109,6 +130,9 @@ def _load_state(settings: Settings) -> dict:
         "revoked_at": stored.get("revoked_at"),
         # Local-only -- never shared, see module docstring.
         "smtp_enabled": bool(stored.get("smtp_enabled", True)),
+        "digest_interval_seconds": _clamp_digest_interval(
+            stored.get("digest_interval_seconds", AUDIT_EMAIL_POLL_INTERVAL_SECONDS)
+        ),
         "notify": {
             event_type: bool(notify_stored.get(event_type, True)) for event_type in _notifications.EVENT_TYPES
         },
@@ -196,6 +220,24 @@ def update_notification_toggles(settings: Settings, payload: dict) -> dict:
             merged[event_type] = bool(payload[event_type])
     state = _save_state(settings, notify=merged)
     return {"notify": state["notify"]}
+
+
+def update_digest_interval(settings: Settings, seconds) -> dict:
+    """How often the activity-digest poller checks for new mail to send --
+    local-only, like ``smtp_enabled``/``notify`` (each drone runs its own
+    poller against its own audit_log), 1 minute to 24 hours, default 5
+    minutes (``AUDIT_EMAIL_POLL_INTERVAL_SECONDS``)."""
+    try:
+        value = int(seconds)
+    except (TypeError, ValueError):
+        raise ValueError("Digest interval must be a whole number of seconds")
+    if not DIGEST_INTERVAL_MIN_SECONDS <= value <= DIGEST_INTERVAL_MAX_SECONDS:
+        raise ValueError(
+            f"Digest interval must be between {DIGEST_INTERVAL_MIN_SECONDS} seconds (1 minute) and "
+            f"{DIGEST_INTERVAL_MAX_SECONDS} seconds (24 hours)"
+        )
+    state = _save_state(settings, digest_interval_seconds=value)
+    return {"digest_interval_seconds": state["digest_interval_seconds"]}
 
 
 # ------------------------------------------------------------ peer sharing
@@ -516,8 +558,22 @@ def run_audit_email_digest_poller(settings: Settings) -> None:
     in-process daemon thread on this exact shape (see
     ``run_sharing_revocation_poller`` above, or ``vpn_manager``'s own
     pollers, all started once from ``create_server()``).
+
+    Unlike the other pollers, the check interval here is user-configurable
+    (the Email Notifications "check every" control, ``digest_interval_seconds``,
+    1 minute-24 hours, default 5 minutes) and can change at any time while
+    this thread is already sleeping. So this wakes on a short fixed tick
+    (``DIGEST_POLLER_TICK_SECONDS``) and only actually calls
+    ``send_digest_if_needed`` once the *current* configured interval has
+    elapsed since the last check -- re-read fresh from state every tick, so
+    a change saved in the admin UI takes effect within one tick instead of
+    waiting out a stale (possibly much longer) previous interval.
     """
-    interval = max(60.0, AUDIT_EMAIL_POLL_INTERVAL_SECONDS)
+    last_check = time.monotonic()
     while True:
-        time.sleep(interval)
+        time.sleep(DIGEST_POLLER_TICK_SECONDS)
+        interval = _load_state(settings)["digest_interval_seconds"]
+        if time.monotonic() - last_check < interval:
+            continue
+        last_check = time.monotonic()
         send_digest_if_needed(settings)

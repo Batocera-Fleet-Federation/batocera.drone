@@ -1,6 +1,6 @@
 ---
 name: drone-smtp-notifications
-description: Use this when designing, reviewing, debugging, or modifying the Drone's SMTP/Email admin tile — SMTP configuration (outgoing mail only, no IMAP), peer-to-peer email-credential sharing (mirrors VPN sharing), the Test Email button, the ~5-minute activity-digest poller, the relational audit_log/notifications SQLite tables, the 10 notification-type toggles, the notifications bell/dropdown reachable from the top-left drone icon, the per-drone identifying label stamped on every outgoing email, or app/device/smtp_manager.py, app/device/notifications.py, app/storage/audit_store.py, web/handlers_smtp.py, web/handlers_notifications.py.
+description: Use this when designing, reviewing, debugging, or modifying the Drone's SMTP/Email admin tile — SMTP configuration (outgoing mail only, no IMAP), peer-to-peer email-credential sharing (mirrors VPN sharing), the Test Email button, the activity-digest poller and its user-configurable "check every" interval (1 minute-24 hours, default 5 minutes), the relational audit_log/notifications SQLite tables, the 10 notification-type toggles, the notifications bell/dropdown reachable from the top-left drone icon, the per-drone identifying label stamped on every outgoing email, or app/device/smtp_manager.py, app/device/notifications.py, app/storage/audit_store.py, web/handlers_smtp.py, web/handlers_notifications.py.
 ---
 
 # Drone SMTP / Notifications Skill
@@ -75,16 +75,18 @@ getting this split wrong is the most likely way to introduce a real bug here:
   `sharing_enabled` (default `False`), `source_peer_id`, `source_peer_name`,
   `revoked_reason`, `revoked_at`.
 - **Local-only, never shared**: `smtp_enabled` (master send switch, default
-  `True`), `notify` (dict of `event_type -> bool`, all 10 keys from
-  `notifications.EVENT_TYPES`, default `True` each), `last_test_result`,
-  `last_test_at`, `last_digest_sent_at`, `last_digest_error`. These stay
-  local because each drone runs its **own** digest poller against its
-  **own** `audit_log` using its own (possibly-adopted) credentials — "which
-  of *my* events get emailed" is inherently per-drone, unlike the connection
-  settings themselves. `import_from_peer()` only ever writes `_SHARED_FIELDS`
-  (via `update_settings()`, which ignores unknown keys) — a malicious or
-  buggy peer payload that tries to smuggle `notify`/`smtp_enabled` values in
-  is silently ignored, not applied.
+  `True`), `digest_interval_seconds` (how often the digest poller checks for
+  new mail, 60-86400, default 300 — see "The digest poller" below), `notify`
+  (dict of `event_type -> bool`, all 10 keys from `notifications.EVENT_TYPES`,
+  default `True` each), `last_test_result`, `last_test_at`,
+  `last_digest_sent_at`, `last_digest_error`. These stay local because each
+  drone runs its **own** digest poller against its **own** `audit_log` using
+  its own (possibly-adopted) credentials — "which of *my* events get emailed,
+  and how often" is inherently per-drone, unlike the connection settings
+  themselves. `import_from_peer()` only ever writes `_SHARED_FIELDS` (via
+  `update_settings()`, which ignores unknown keys) — a malicious or buggy
+  peer payload that tries to smuggle `notify`/`smtp_enabled`/
+  `digest_interval_seconds` values in is silently ignored, not applied.
 
 **No IMAP.** An earlier version of this feature stored (and shared) a
 parallel set of `imap_*` fields alongside SMTP, but nothing in this app ever
@@ -221,10 +223,31 @@ sharing-revocation/self-heal pollers, the ROM metadata scan, peer health
 checks, automation checks). Every one of them is an in-process
 `threading.Thread(daemon=True)` running `while True: time.sleep(interval);
 ...`, started exactly once from `create_server()` behind a module-level
-`_STARTED` guard flag. `run_audit_email_digest_poller()` follows this exact
-shape (`DRONE_AUDIT_EMAIL_INTERVAL_SECONDS`, default 300s, floored at 60s).
-**Do not build a new scheduling abstraction for this or any future periodic
-feature** — copy this pattern.
+`_STARTED` guard flag. **Do not build a new scheduling abstraction for this
+or any future periodic feature** — copy this pattern.
+
+**Unlike every other poller in this repo, the digest poller's check interval
+is user-configurable at runtime** — the Email Notifications card's "Check
+every" control (`digest_interval_seconds`, 60-86400 seconds / 1 minute-24
+hours, default 300s / 5 minutes, added as a direct user ask; validated and
+stored via `update_digest_interval()`, clamped defensively on every read by
+`_clamp_digest_interval()`; seeded on a fresh drone from the
+`DRONE_AUDIT_EMAIL_INTERVAL_SECONDS` env var, default 300, which now only
+matters before the first save). Because the value can change while the
+thread is mid-sleep, `run_audit_email_digest_poller()` does **not** do a
+plain `time.sleep(interval)` like every other poller here — it wakes on a
+short fixed tick (`DIGEST_POLLER_TICK_SECONDS`, 30s, not user-facing) and
+only calls `send_digest_if_needed()` once the **current** stored interval
+(re-read fresh from state every tick) has elapsed since the last check. This
+is still the same `Thread(daemon=True)` + `time.sleep` + module-level
+`_STARTED` guard shape as everything else — just ticking on a shorter,
+fixed cadence and comparing elapsed time against a value that can move,
+instead of sleeping for a fixed duration — so a change saved in the admin UI
+takes effect within ~30s instead of waiting out whatever (possibly
+much longer, up to 24h) interval was previously in effect. Don't reach for
+a real scheduler library or a per-setting timer/thread to solve this; this
+tick-and-compare shape is the intended pattern for any *future*
+user-configurable interval too.
 
 `send_digest_if_needed()` (called by the poller, and safe to call directly
 for a manual/test trigger) is a no-op unless `smtp_enabled` **and**
@@ -315,6 +338,18 @@ No separate paginated `#notifications` page exists — the dropdown shows the
 most recent 20 (`GET /admin/notifications?limit=20`); `audit_store`'s
 keyset pagination (`before_id`) is implemented and exposed via the API for a
 future page if one is ever wanted, but nothing in the frontend calls it yet.
+
+**The "Check every" digest-interval control** lives at the top of the Email
+Notifications card, above the per-event-type toggle grid (`renderSmtpPage()`
+in `drone.js`) — a plain minutes `<input type="number" min="1" max="1440">`
+(the backend stores/validates seconds; the frontend converts both ways) plus
+its own `id="smtpDigestIntervalSaveBtn"` Save button and
+`saveSmtpDigestInterval()` handler, posting to
+`POST /admin/smtp/digest-interval`. It is **not** part of the `smtpLive`
+live-refresh region — like the notify toggles and the settings form above
+it, it's rendered once on page load and left alone by `patchSmtpLive()`'s 5s
+poll, so an in-progress edit survives a tick, same reasoning as everything
+else on this page.
 
 ## Common failure patterns
 

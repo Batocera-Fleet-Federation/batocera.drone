@@ -869,6 +869,11 @@ class ApiRoutesMixin:
                 self._handle_admin_smtp_notifications_update(payload)
                 return
 
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "smtp" and parts[2] == "digest-interval":
+                payload = self._read_json_body()
+                self._handle_admin_smtp_digest_interval_update(payload)
+                return
+
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "smtp" and parts[2] == "sharing":
                 payload = self._read_json_body()
                 self._handle_admin_smtp_sharing(payload)

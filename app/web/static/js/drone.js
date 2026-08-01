@@ -5000,12 +5000,27 @@ async function renderSmtpPage() {
           <input class="form-check-input" type="checkbox" role="switch" id="smtpEnabled" ${payload.smtp_enabled ? "checked" : ""} onchange="setSmtpEnabled(this.checked)">
           <label class="form-check-label" for="smtpEnabled">Send mail from this drone</label>
         </div>
-        <p class="text-muted small mb-0 mt-1">Controls the Test Email button and the ~5 minute activity-digest job. Independent of sharing below -- a drone can use settings shared by a peer but still keep this off, or vice versa.</p>
+        <p class="text-muted small mb-0 mt-1">Controls the Test Email button and the activity-digest job below. Independent of sharing below -- a drone can use settings shared by a peer but still keep this off, or vice versa.</p>
       </div>
     </div>
     <div class="card mb-3">
       <div class="card-header"><i class="bi bi-bell me-2"></i>Email Notifications</div>
       <div class="card-body">
+        <p class="text-muted small mb-2">How often this drone checks for new activity and sends a digest email if anything qualifies.</p>
+        <div class="row g-2 align-items-end mb-3">
+          <div class="col-sm-4 col-lg-3">
+            <label class="form-label mb-1" for="smtpDigestIntervalMinutes">Check every</label>
+            <div class="input-group input-group-sm">
+              <input class="form-control" type="number" id="smtpDigestIntervalMinutes" min="1" max="1440" step="1" value="${Math.max(1, Math.round((payload.digest_interval_seconds || 300) / 60))}">
+              <span class="input-group-text">minutes</span>
+            </div>
+          </div>
+          <div class="col-sm-4 col-lg-3">
+            <button class="btn btn-outline-secondary btn-sm" type="button" id="smtpDigestIntervalSaveBtn" onclick="saveSmtpDigestInterval()"><i class="bi bi-save me-1"></i>Save</button>
+          </div>
+        </div>
+        <p class="text-muted small mb-2">From 1 minute to 24 hours (1440 minutes); defaults to 5 minutes.</p>
+        <hr>
         <p class="text-muted small">Which activity gets included the next time the digest email sends. Notifications always appear in the bell icon regardless of these toggles -- this only controls what's emailed.</p>
         <div class="row g-2">
           ${SMTP_EVENT_TYPES.map(([key, label]) => `
@@ -5112,6 +5127,25 @@ async function setSmtpEnabled(enabled) {
   } catch (err) {
     if (checkbox) checkbox.checked = !enabled;
     showToast(`Failed to save setting: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  }
+}
+
+async function saveSmtpDigestInterval() {
+  const input = document.getElementById("smtpDigestIntervalMinutes");
+  const button = document.getElementById("smtpDigestIntervalSaveBtn");
+  const minutes = parseInt(input.value, 10);
+  if (!Number.isFinite(minutes) || minutes < 1 || minutes > 1440) {
+    showToast("Enter a value between 1 minute and 1440 minutes (24 hours).", "danger");
+    return;
+  }
+  if (button) button.disabled = true;
+  try {
+    await apiPost("/admin/smtp/digest-interval", { digest_interval_seconds: minutes * 60 });
+    showToast("Digest email frequency saved.", "success");
+  } catch (err) {
+    showToast(`Failed to save digest frequency: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  } finally {
+    if (button) button.disabled = false;
   }
 }
 

@@ -887,6 +887,10 @@ def _schemas() -> Dict[str, Schema]:
                 "revoked_reason": _string(),
                 "revoked_at": _string(fmt="date-time", nullable=True),
                 "smtp_enabled": _boolean("Local master switch for sending mail from this drone -- independent of sharing"),
+                "digest_interval_seconds": _integer(
+                    "How often the digest poller checks for new mail to send, in seconds -- 60 (1 minute) to 86400 (24 hours), default 300 (5 minutes). Local to this drone, like smtp_enabled/notify.",
+                    default=300, minimum=60, maximum=86400,
+                ),
                 "notify": _object(additional_properties={"type": "boolean"}, description="event_type -> whether it's included in the email digest"),
                 "last_test_result": _object(additional_properties=True, description="{status, sent_at|error} of the most recent Test Email, or absent if never tested"),
                 "last_test_at": _string(fmt="date-time", nullable=True),
@@ -917,6 +921,13 @@ def _schemas() -> Dict[str, Schema]:
         ),
         "SmtpNotificationTogglesResponse": _object(
             {"notify": _object(additional_properties={"type": "boolean"})}, ("notify",)
+        ),
+        "SmtpDigestIntervalRequest": _object(
+            {"digest_interval_seconds": _integer("60 (1 minute) to 86400 (24 hours)", minimum=60, maximum=86400)},
+            ("digest_interval_seconds",),
+        ),
+        "SmtpDigestIntervalResponse": _object(
+            {"digest_interval_seconds": _integer(minimum=60, maximum=86400)}, ("digest_interval_seconds",)
         ),
         "SmtpSharingRequest": _object({"enabled": _boolean()}, ("enabled",)),
         "SmtpSharingResponse": _object({"sharing_enabled": _boolean()}, ("sharing_enabled",)),
@@ -1861,6 +1872,9 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             },
             "/admin/smtp/notifications": {
                 "post": _operation("Update which event types are included in the email digest", {"200": _json_response("SmtpNotificationTogglesResponse")}, request_body=_json_request("SmtpNotificationTogglesRequest"), tags=["admin", "smtp"], error_codes=("401", "403", "429", "500", "503"))
+            },
+            "/admin/smtp/digest-interval": {
+                "post": _operation("Update how often the digest poller checks for new mail to send (1 minute-24 hours)", {"200": _json_response("SmtpDigestIntervalResponse"), "400": _json_response("ErrorResponse", "Value outside 60-86400 seconds")}, request_body=_json_request("SmtpDigestIntervalRequest"), tags=["admin", "smtp"], error_codes=("400", "401", "403", "429", "500", "503"))
             },
             "/admin/smtp/sharing": {
                 "post": _operation("Toggle allowing paired peers to pull this SMTP config; rejected if this config was itself imported from a peer", {"200": _json_response("SmtpSharingResponse"), "400": _json_response("ErrorResponse", "This config was imported from a peer and cannot be re-shared")}, request_body=_json_request("SmtpSharingRequest"), tags=["admin", "smtp"], error_codes=("400", "401", "403", "429", "500", "503"))

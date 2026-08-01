@@ -43,6 +43,15 @@ class HandlersSmtpMixin:
         result = _smtp.update_notification_toggles(self.settings, payload)
         self._send_json(200, result)
 
+    def _handle_admin_smtp_digest_interval_update(self, payload: dict) -> None:
+        payload = payload if isinstance(payload, dict) else {}
+        try:
+            result = _smtp.update_digest_interval(self.settings, payload.get("digest_interval_seconds"))
+        except ValueError as error:
+            self._send_json(400, {"error": str(error)})
+            return
+        self._send_json(200, result)
+
     def _handle_admin_smtp_sharing(self, payload: dict) -> None:
         payload = payload if isinstance(payload, dict) else {}
         try:

@@ -105,6 +105,77 @@ class NotificationTogglesTests(unittest.TestCase):
             self.assertNotIn("not_a_real_event", result["notify"])
 
 
+class DigestIntervalTests(unittest.TestCase):
+    def test_defaults_to_five_minutes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            self.assertEqual(smtp_manager.get_settings(settings)["digest_interval_seconds"], 300)
+
+    def test_saves_a_valid_value(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            result = smtp_manager.update_digest_interval(settings, 900)
+            self.assertEqual(result["digest_interval_seconds"], 900)
+            self.assertEqual(smtp_manager._load_state(settings)["digest_interval_seconds"], 900)
+
+    def test_accepts_the_one_minute_floor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            result = smtp_manager.update_digest_interval(settings, 60)
+            self.assertEqual(result["digest_interval_seconds"], 60)
+
+    def test_accepts_the_twenty_four_hour_ceiling(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            result = smtp_manager.update_digest_interval(settings, 86400)
+            self.assertEqual(result["digest_interval_seconds"], 86400)
+
+    def test_rejects_below_one_minute(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            with self.assertRaises(ValueError):
+                smtp_manager.update_digest_interval(settings, 59)
+
+    def test_rejects_above_twenty_four_hours(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            with self.assertRaises(ValueError):
+                smtp_manager.update_digest_interval(settings, 86401)
+
+    def test_rejects_non_numeric(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            with self.assertRaises(ValueError):
+                smtp_manager.update_digest_interval(settings, "not-a-number")
+
+    def test_is_local_only_and_not_reset_by_settings_update(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            smtp_manager.update_digest_interval(settings, 1800)
+            smtp_manager.update_settings(settings, _VALID_SETTINGS)
+            self.assertEqual(smtp_manager._load_state(settings)["digest_interval_seconds"], 1800)
+
+    def test_excluded_from_shared_export_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            smtp_manager.update_settings(settings, _VALID_SETTINGS)
+            smtp_manager.update_digest_interval(settings, 1800)
+            smtp_manager.set_sharing_enabled(settings, True)
+            payload = smtp_manager.export_payload(settings)
+            self.assertNotIn("digest_interval_seconds", payload)
+
+    def test_out_of_range_stored_value_is_clamped_on_load(self) -> None:
+        # Defensive: a value that somehow landed outside the valid range
+        # (manual DB edit, a future bug) is clamped on read rather than
+        # trusted, matching every other bounds-checked field in this module.
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            smtp_manager._save_state(settings, digest_interval_seconds=999999)
+            self.assertEqual(smtp_manager._load_state(settings)["digest_interval_seconds"], 86400)
+            smtp_manager._save_state(settings, digest_interval_seconds=1)
+            self.assertEqual(smtp_manager._load_state(settings)["digest_interval_seconds"], 60)
+
+
 class SharingEnabledTests(unittest.TestCase):
     def test_defaults_to_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
