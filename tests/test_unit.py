@@ -5636,6 +5636,153 @@ class TailnetDiscoveryMergeTests(unittest.TestCase):
         saved.assert_not_called()
         self.assertIn("fingerprint", result["tailnet_identity_error"])
 
+    def test_tailnet_device_row_carries_dns_name(self) -> None:
+        from app.web import handlers_network
+
+        row = handlers_network.HandlersNetworkMixin._tailnet_device_row(
+            {"tailnet_id": "node-b", "tailnet_ip": "100.64.0.9", "dns_name": "batocera.tail1234.ts.net"}
+        )
+        self.assertEqual(row["dns_name"], "batocera.tail1234.ts.net")
+
+    def test_tailnet_device_row_defaults_dns_name_to_empty_string(self) -> None:
+        from app.web import handlers_network
+
+        row = handlers_network.HandlersNetworkMixin._tailnet_device_row({"tailnet_id": "node-b", "tailnet_ip": "100.64.0.9"})
+        self.assertEqual(row["dns_name"], "")
+
+    def test_tailnet_sync_restores_dns_name_on_existing_paired_peer(self) -> None:
+        from app.web import handlers_network
+
+        handler = handlers_network.HandlersNetworkMixin()
+        handler.settings = mock.MagicMock(device_id="local-a")
+        existing = {
+            "drone_id": "local-b",
+            "reachable_url": "https://192.168.1.22",
+            "tailnet_ip": "",
+            "dns_name": "",
+            "certificate_fingerprint": "aa:bb",
+            "paired": True,
+        }
+        device = {
+            "tailnet_id": "node-b",
+            "name": "Cabinet B",
+            "hostname": "cabinet-b",
+            "tailnet_ip": "100.64.0.9",
+            "dns_name": "cabinet-b.tail1234.ts.net",
+        }
+        info = {
+            "service": local_network.DISCOVERY_SERVICE,
+            "drone_id": "local-b",
+            "name": "Cabinet B",
+            "hostname": "cabinet-b",
+            "reachable_url": "https://cabinet-b.local",
+            "certificate_fingerprint": "aa:bb",
+        }
+        with mock.patch.object(handlers_network._local_network, "discovered_peers", return_value=[]), \
+                mock.patch.object(handlers_network._local_network, "record_discovered_peer", return_value=info), \
+                mock.patch.object(handlers_network._local_network, "get_paired_peer", return_value=existing), \
+                mock.patch.object(
+                    handlers_network._local_network,
+                    "save_paired_peer",
+                    side_effect=lambda settings, peer: {**peer, "paired": True},
+                ) as saved:
+            result = handler._sync_tailnet_device(device, info=info)
+
+        restored = saved.call_args.args[1]
+        self.assertEqual(restored["dns_name"], "cabinet-b.tail1234.ts.net")
+        self.assertEqual(result["dns_name"], "cabinet-b.tail1234.ts.net")
+
+    def test_tailnet_sync_preserves_existing_dns_name_when_new_lookup_lacks_it(self) -> None:
+        # A transient tailscale status query without a resolvable DNSName for
+        # this peer (e.g. MagicDNS momentarily unavailable) must not blow away
+        # a dns_name already on record.
+        from app.web import handlers_network
+
+        handler = handlers_network.HandlersNetworkMixin()
+        handler.settings = mock.MagicMock(device_id="local-a")
+        existing = {
+            "drone_id": "local-b",
+            "reachable_url": "https://192.168.1.22",
+            "tailnet_ip": "100.64.0.9",
+            "dns_name": "cabinet-b.tail1234.ts.net",
+            "certificate_fingerprint": "aa:bb",
+            "paired": True,
+        }
+        device = {"tailnet_id": "node-b", "tailnet_ip": "100.64.0.9"}
+        info = {
+            "service": local_network.DISCOVERY_SERVICE,
+            "drone_id": "local-b",
+            "certificate_fingerprint": "aa:bb",
+        }
+        with mock.patch.object(handlers_network._local_network, "discovered_peers", return_value=[]), \
+                mock.patch.object(handlers_network._local_network, "record_discovered_peer", return_value=info), \
+                mock.patch.object(handlers_network._local_network, "get_paired_peer", return_value=existing), \
+                mock.patch.object(
+                    handlers_network._local_network,
+                    "save_paired_peer",
+                    side_effect=lambda settings, peer: {**peer, "paired": True},
+                ) as saved:
+            handler._sync_tailnet_device(device, info=info)
+
+        restored = saved.call_args.args[1]
+        self.assertEqual(restored["dns_name"], "cabinet-b.tail1234.ts.net")
+
+    def test_tailnet_sync_first_time_pairing_carries_dns_name_to_pair_request(self) -> None:
+        from app.web import handlers_network
+
+        handler = handlers_network.HandlersNetworkMixin()
+        handler.settings = mock.MagicMock(device_id="local-a")
+        device = {
+            "tailnet_id": "node-b",
+            "name": "Cabinet B",
+            "hostname": "cabinet-b",
+            "tailnet_ip": "100.64.0.9",
+            "dns_name": "cabinet-b.tail1234.ts.net",
+        }
+        info = {
+            "service": local_network.DISCOVERY_SERVICE,
+            "drone_id": "local-b",
+            "name": "Cabinet B",
+            "hostname": "cabinet-b",
+            "reachable_url": "https://cabinet-b.local",
+            "certificate_fingerprint": "aa:bb",
+        }
+        with mock.patch.object(handlers_network._local_network, "discovered_peers", return_value=[]), \
+                mock.patch.object(handlers_network._local_network, "record_discovered_peer", return_value=info), \
+                mock.patch.object(handlers_network._local_network, "get_paired_peer", return_value=None), \
+                mock.patch.object(handlers_network._local_network, "is_tailnet_peer_forgotten", return_value=False), \
+                mock.patch.object(handlers_network, "_local_pair_peer", return_value={"paired": True}) as pair:
+            handler._sync_tailnet_device(device, info=info)
+
+        pair.assert_called_once()
+        tailnet_peer_arg = pair.call_args.args[1]
+        self.assertEqual(tailnet_peer_arg["dns_name"], "cabinet-b.tail1234.ts.net")
+
+    def test_swarm_probe_peer_includes_dns_name(self) -> None:
+        from app.web import handlers_network
+
+        handler = handlers_network.HandlersNetworkMixin()
+        handler.settings = mock.MagicMock(use_fake_data=False)
+        peer = {
+            "drone_id": "local-b",
+            "name": "Cabinet B",
+            "tailnet_ip": "100.64.0.9",
+            "dns_name": "cabinet-b.tail1234.ts.net",
+        }
+        with mock.patch.object(handlers_network, "_peer_get_json_for_peer", side_effect=RuntimeError("offline")):
+            entry = handler._swarm_probe_peer(peer)
+        self.assertEqual(entry["dns_name"], "cabinet-b.tail1234.ts.net")
+
+    def test_swarm_probe_peer_defaults_dns_name_to_empty_string(self) -> None:
+        from app.web import handlers_network
+
+        handler = handlers_network.HandlersNetworkMixin()
+        handler.settings = mock.MagicMock(use_fake_data=False)
+        peer = {"drone_id": "local-b", "name": "Cabinet B", "tailnet_ip": "100.64.0.9"}
+        with mock.patch.object(handlers_network, "_peer_get_json_for_peer", side_effect=RuntimeError("offline")):
+            entry = handler._swarm_probe_peer(peer)
+        self.assertEqual(entry["dns_name"], "")
+
 
 class SwarmPageTests(unittest.TestCase):
     """The Swarm page: navbar entry, hash route, fleet cards, and automatic
@@ -5754,6 +5901,46 @@ class SwarmPageTests(unittest.TestCase):
         self.assertIn('api("/admin/swarm/overview")', body)
         self.assertIn("Connected: ${connectedCount}", body)
         self.assertIn("filter(drone => drone.online)", body)
+
+    def test_swarm_page_caches_drones_by_id_for_the_tailnet_modal(self) -> None:
+        page_start = self.js.index("async function renderSwarmPage()")
+        page_end = self.js.index("async function renderIntegrationTransfersPanel", page_start)
+        body = self.js[page_start:page_end]
+        overview_index = body.index('api("/admin/swarm/overview")')
+        cache_index = body.index("swarmDronesById = Object.fromEntries(")
+        card_map_index = body.index("drones.map(renderSwarmDroneCard)")
+        # Populated from the overview drones list, before the cards are rendered
+        # (openTailnetPeerModal's onclick handlers rely on the cache already
+        # existing by the time a card can be clicked).
+        self.assertTrue(overview_index < cache_index < card_map_index)
+        self.assertIn('let swarmDronesById = {};', self.js)
+
+    def test_swarm_drone_card_shows_tailnet_dns_short_name_not_raw_ip(self) -> None:
+        card_start = self.js.index("function renderSwarmDroneCard(")
+        card_body = self.js[card_start:self.js.index("function swarmBrowsePeerAssets(", card_start)]
+        self.assertIn("tailnetShortHostname(drone.dns_name)", card_body)
+        self.assertIn('`https://${tailnetShort}`', card_body)
+        # Clicking the address opens the details modal rather than navigating.
+        self.assertIn("openTailnetPeerModal(decodeURIComponent(", card_body)
+
+    def test_tailnet_short_hostname_takes_the_first_dns_label(self) -> None:
+        fn_start = self.js.index("function tailnetShortHostname(")
+        fn_body = self.js[fn_start:self.js.index("function openTailnetPeerModal(", fn_start)]
+        self.assertIn('trimmed.split(".")[0]', fn_body)
+
+    def test_tailnet_peer_modal_shows_details_and_opens_url_in_new_tab(self) -> None:
+        modal_start = self.js.index("function openTailnetPeerModal(")
+        modal_end = self.js.index("async function swarmEnrollTailnet()", modal_start)
+        modal_body = self.js[modal_start:modal_end]
+        self.assertIn("swarmDronesById[String(peerId || \"\")]", modal_body)
+        self.assertIn('detail("Hostname"', modal_body)
+        self.assertIn('detail("Full DNS name", drone.dns_name)', modal_body)
+        self.assertIn('detail("Tailnet IP", drone.tailnet_ip)', modal_body)
+        self.assertIn('target="_blank" rel="noopener noreferrer"', modal_body)
+        # Falls back to the raw Tailnet IP (and says so) when no MagicDNS name
+        # has been recorded for this peer yet.
+        self.assertIn("drone.tailnet_ip ? `https://${drone.tailnet_ip}`", modal_body)
+        self.assertIn("No MagicDNS name on record yet", modal_body)
 
     def test_swarm_page_owns_pairing_and_nearby_drones(self) -> None:
         page_start = self.js.index("async function renderSwarmPage()")

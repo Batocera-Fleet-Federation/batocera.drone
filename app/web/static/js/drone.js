@@ -95,6 +95,7 @@ let torrentsLastPayload = null;
 let configBackupsTimer = null;
 let configBackupsInFlight = false;
 let configBackupsLastPayload = [];
+let swarmDronesById = {};
 let vpnTimer = null;
 let vpnInFlight = false;
 let smtpTimer = null;
@@ -7001,7 +7002,9 @@ function renderSwarmDroneCard(drone) {
     : "";
   const addressLines = [];
   if (drone.tailnet_ip) {
-    addressLines.push(`<div class="small text-truncate"><i class="bi bi-diagram-3 me-1" aria-hidden="true"></i>Tailnet <code>${escapeHtml(drone.tailnet_ip)}</code></div>`);
+    const tailnetShort = tailnetShortHostname(drone.dns_name);
+    const tailnetLabel = tailnetShort ? `https://${tailnetShort}` : drone.tailnet_ip;
+    addressLines.push(`<div class="small text-truncate"><i class="bi bi-diagram-3 me-1" aria-hidden="true"></i><button type="button" class="btn btn-link btn-sm p-0 align-baseline" onclick="openTailnetPeerModal(decodeURIComponent('${droneToken}'))" title="View Tailnet details">${escapeHtml(tailnetLabel)}</button></div>`);
   }
   const lanUrl = drone.advertised_reachable_url || drone.reachable_url;
   if (lanUrl) {
@@ -7051,6 +7054,67 @@ function swarmManagePeer(peerId, peerName) {
   url.search = `?manage=${encodeURIComponent(peerId)}&manage_name=${encodeURIComponent(peerName || peerId)}`;
   url.hash = "#admin";
   window.open(url.toString(), "_blank", "noopener");
+}
+
+// Tailnet's MagicDNS FQDN (e.g. "batocera.tailnet-name.ts.net") resolves its
+// bare first label (e.g. "batocera") on any device using this tailnet's DNS --
+// that's the short, memorable address ("https://batocera") worth showing/
+// linking instead of a raw Tailnet IP.
+function tailnetShortHostname(dnsName) {
+  const trimmed = String(dnsName || "").trim();
+  return trimmed ? trimmed.split(".")[0] : "";
+}
+
+// Clicking a card's Tailnet address opens this instead of navigating directly
+// -- lets you see the full Tailnet identity (and fall back to the raw IP when
+// no MagicDNS name is on record yet) before jumping to a new tab.
+function openTailnetPeerModal(peerId) {
+  const drone = swarmDronesById[String(peerId || "")];
+  if (!drone) return;
+  const shortName = tailnetShortHostname(drone.dns_name);
+  const url = shortName ? `https://${shortName}` : (drone.tailnet_ip ? `https://${drone.tailnet_ip}` : "");
+  const modalId = "tailnetPeerModal";
+  let modal = document.getElementById(modalId);
+  if (!modal) {
+    modal = document.createElement("div");
+    modal.id = modalId;
+    modal.className = "modal fade";
+    modal.tabIndex = -1;
+    modal.setAttribute("aria-hidden", "true");
+    document.body.appendChild(modal);
+  }
+  const detail = (label, value) => `<div class="asset-detail"><span>${escapeHtml(label)}</span><strong>${value ? escapeHtml(value) : "n/a"}</strong></div>`;
+  const noDnsNote = !drone.dns_name
+    ? `<div class="small text-muted mt-3"><i class="bi bi-info-circle me-1" aria-hidden="true"></i>No MagicDNS name on record yet for this Drone -- it appears the next time a Tailnet discovery sync sees it online. Falling back to its Tailnet IP address for now.</div>`
+    : "";
+  modal.innerHTML = `
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content themed-modal">
+        <div class="modal-header">
+          <h5 class="modal-title mb-0"><i class="bi bi-diagram-3 me-2"></i>Tailnet Details -- ${escapeHtml(drone.name || drone.drone_id || "Drone")}</h5>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <div class="asset-detail-panel">
+            ${detail("Hostname", shortName || drone.hostname)}
+            ${detail("Full DNS name", drone.dns_name)}
+            ${detail("Tailnet IP", drone.tailnet_ip)}
+            ${detail("Status", drone.is_self ? "This Drone" : (drone.online ? "Online" : "Offline"))}
+          </div>
+          ${noDnsNote}
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Close</button>
+          ${url ? `<a class="btn btn-primary" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer"><i class="bi bi-box-arrow-up-right me-1"></i>Open ${escapeHtml(url)}</a>` : ""}
+        </div>
+      </div>
+    </div>`;
+  if (window.bootstrap?.Modal) {
+    window.bootstrap.Modal.getOrCreateInstance(modal).show();
+  } else {
+    modal.classList.add("show");
+    modal.style.display = "block";
+  }
 }
 
 async function swarmEnrollTailnet() {
@@ -7250,6 +7314,7 @@ async function renderSwarmPage() {
     ]);
     const tailnet = discovery.tailnet || { installed: false };
     const drones = Array.isArray(overview.drones) ? overview.drones : [];
+    swarmDronesById = Object.fromEntries(drones.map((drone) => [String(drone.drone_id || ""), drone]));
     content.innerHTML = `
       ${renderSwarmTabBar("swarm")}
       <div class="row row-cols-1 row-cols-md-2 row-cols-xl-3 g-3 mb-3" id="swarmDroneGrid">

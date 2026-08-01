@@ -124,6 +124,14 @@ class HandlersNetworkMixin:
             "tailnet_id": str(device.get("tailnet_id") or tailnet_ip),
             "name": str(device.get("name") or device.get("hostname") or tailnet_ip or "Tailnet device"),
             "hostname": str(device.get("hostname") or ""),
+            # MagicDNS FQDN (e.g. "batocera.tailnet-name.ts.net"), straight from
+            # `tailscale status --json`'s Peer map (see tailnet_service.py's
+            # _tailnet_peers()) -- the first label is the short, bare hostname
+            # that resolves on any device using this tailnet's DNS (e.g.
+            # "https://batocera"). Carried through _sync_tailnet_device() onto
+            # the persisted peer record so the Swarm page can show/link it
+            # without re-running the tailscale CLI on every page load.
+            "dns_name": str(device.get("dns_name") or "").strip(),
             "reachable_url": _normalize_peer_address(tailnet_ip) if tailnet_ip else "",
             "tailnet_ip": tailnet_ip,
             "source": "Tailnet",
@@ -167,6 +175,7 @@ class HandlersNetworkMixin:
             "reachable_url": _normalize_peer_address(tailnet_ip),
             "advertised_reachable_url": str(info.get("reachable_url") or ""),
             "tailnet_ip": tailnet_ip,
+            "dns_name": str(row.get("dns_name") or ""),
             "source": "Tailnet",
             "pairing_source": "tailnet",
             "tailnet_device": False,
@@ -202,6 +211,7 @@ class HandlersNetworkMixin:
                     **existing,
                     "tailnet_id": str(row.get("tailnet_id") or existing.get("tailnet_id") or ""),
                     "tailnet_ip": tailnet_ip,
+                    "dns_name": str(row.get("dns_name") or existing.get("dns_name") or ""),
                 },
             )
             return _public_local_peer(restored)
@@ -412,6 +422,11 @@ class HandlersNetworkMixin:
             "reachable_url": str(peer.get("reachable_url") or ""),
             "advertised_reachable_url": str(peer.get("advertised_reachable_url") or ""),
             "tailnet_ip": str(peer.get("tailnet_ip") or ""),
+            # MagicDNS FQDN, if this peer has ever been seen/refreshed via a
+            # Tailnet discovery sync (see _sync_tailnet_device/_tailnet_device_row
+            # above) -- empty for a peer paired purely over LAN that this Drone
+            # has never matched against its own tailnet peer list.
+            "dns_name": str(peer.get("dns_name") or ""),
             "ui_url": self._swarm_peer_ui_url(peer),
             "error": None,
             "latency_ms": None,
