@@ -34,13 +34,25 @@ def _build_settings(root: Path) -> Settings:
 class FakeRpc:
     def __init__(self):
         self.calls = []
+        self.timeouts = []
         self._gid_counter = 0
         self.statuses = {}
+        # When set, the next aria2.addTorrent/addUri call raises this instead
+        # of succeeding (left in place across calls until a test clears it,
+        # so a whole retry sequence can be modeled).
+        self.add_error = None
+        # Pre-populated aria2.tellActive/tellWaiting responses, for testing
+        # the "InfoHash already registered" recovery path.
+        self.active = []
+        self.waiting = []
 
     def call(self, method, params=None, timeout=None):
         params = params or []
         self.calls.append((method, params))
+        self.timeouts.append((method, timeout))
         if method == "aria2.addTorrent":
+            if self.add_error:
+                raise Aria2RpcError(self.add_error)
             self._gid_counter += 1
             gid = f"gid{self._gid_counter}"
             paused = params[2].get("pause") == "true"
@@ -53,6 +65,8 @@ class FakeRpc:
             }
             return gid
         if method == "aria2.addUri":
+            if self.add_error:
+                raise Aria2RpcError(self.add_error)
             self._gid_counter += 1
             gid = f"gid{self._gid_counter}"
             paused = params[1].get("pause") == "true"
@@ -69,6 +83,10 @@ class FakeRpc:
             if gid not in self.statuses:
                 raise Aria2RpcError(f"GID {gid} is not found")
             return self.statuses[gid]
+        if method == "aria2.tellActive":
+            return self.active
+        if method == "aria2.tellWaiting":
+            return self.waiting
         if method == "aria2.unpause":
             gid = params[0]
             if gid in self.statuses:
@@ -385,6 +403,150 @@ class TorrentDownloadLocationTests(unittest.TestCase):
             adds = rpc.method_calls("aria2.addTorrent")
             self.assertEqual(adds[-1][2]["dir"], str(new_downloads))
             self.assertEqual(adds[-1][2]["pause"], "false")
+
+
+class AlreadyRegisteredRecoveryTests(unittest.TestCase):
+    """Regression tests for a real live bug: a torrent going from downloading
+    straight to a permanent "error" state that never recovers. Root cause,
+    found on a real device: aria2.addTorrent/addUri can legitimately take
+    longer than the RPC timeout to parse a large torrent's metadata; a
+    client-side timeout there does not mean the add failed server-side --
+    aria2 can still finish registering it, leaving a real paused GID we never
+    learn about. Every retry then repeats the same add, which aria2 correctly
+    rejects as "InfoHash ... is already registered" -- forever, since nothing
+    ever adopts or cleans up the orphaned GID. Confirmed live: one stuck
+    torrent had accumulated 6 duplicate paused GIDs for the same infohash."""
+
+    def _manager(self, root: Path, rpc: FakeRpc) -> TorrentManager:
+        manager = TorrentManager(_build_settings(root), start_worker=False)
+        manager._daemon = FakeDaemon(rpc)
+        return manager
+
+    def test_add_timeout_uses_a_longer_timeout_than_status_polls(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            watch = root / "watch"
+            manager.update_settings({"directory": str(watch)})
+            _write_torrent(watch, "game")
+            manager._tick()
+            add_timeouts = [t for m, t in rpc.timeouts if m == "aria2.addTorrent"]
+            self.assertEqual(add_timeouts, [torrent_manager.ARIA2_ADD_TIMEOUT_SECONDS])
+            self.assertGreater(torrent_manager.ARIA2_ADD_TIMEOUT_SECONDS, 5.0)
+
+    def test_already_registered_adopts_the_existing_gid_instead_of_erroring(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            watch = root / "watch"
+            manager.update_settings({"directory": str(watch)})
+            _write_torrent(watch, "game")
+
+            info_hash = "5a892b21006803f464c35df6d223938c9c85d3e1"
+            rpc.add_error = f"InfoHash {info_hash} is already registered."
+            rpc.waiting = [{"gid": "orphaned-gid", "infoHash": info_hash, "completedLength": "0"}]
+
+            manager._tick()
+            entry = next(iter(manager._torrents.values()))
+            self.assertEqual(entry["gid"], "orphaned-gid")
+            # Recovered with a real gid in the same tick the scheduler runs,
+            # so it's immediately picked up as downloading rather than
+            # sitting error'd or waiting for another retry cycle.
+            self.assertEqual(entry["status"], "downloading")
+
+    def test_adopts_the_copy_with_the_most_progress_when_several_are_registered(self) -> None:
+        # Live evidence showed several duplicate GIDs for the same infohash
+        # (repeated timeout/retry cycles) -- adopting the furthest-along one
+        # avoids throwing away real progress.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            watch = root / "watch"
+            manager.update_settings({"directory": str(watch)})
+            _write_torrent(watch, "game")
+
+            info_hash = "9c0fc1ca1fcc2bca0064c7b9645018a49b1feddc"
+            rpc.add_error = f"InfoHash {info_hash} is already registered."
+            rpc.waiting = [
+                {"gid": "stale-empty", "infoHash": info_hash, "completedLength": "0"},
+                {"gid": "furthest-along", "infoHash": info_hash, "completedLength": "7245194739"},
+                {"gid": "some-progress", "infoHash": info_hash, "completedLength": "100"},
+            ]
+
+            manager._tick()
+            entry = next(iter(manager._torrents.values()))
+            self.assertEqual(entry["gid"], "furthest-along")
+
+    def test_already_registered_with_no_matching_gid_falls_back_to_normal_retry(self) -> None:
+        # aria2 says it's registered, but a lookup can't find it (e.g. it
+        # finished/errored out and moved to tellStopped in between) -- must
+        # still fall back to the existing retry/backoff behavior rather than
+        # silently doing nothing.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            watch = root / "watch"
+            manager.update_settings({"directory": str(watch)})
+            _write_torrent(watch, "game")
+
+            rpc.add_error = "InfoHash 0000000000000000000000000000000000000000 is already registered."
+            rpc.waiting = []
+            rpc.active = []
+
+            manager._tick()
+            entry = next(iter(manager._torrents.values()))
+            self.assertEqual(entry["status"], "error")
+            self.assertIn("already registered", entry["message"])
+            self.assertIsNone(entry["gid"])
+
+    def test_unrelated_add_errors_are_not_treated_as_recoverable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            watch = root / "watch"
+            manager.update_settings({"directory": str(watch)})
+            _write_torrent(watch, "game")
+
+            rpc.add_error = "some unrelated aria2 failure"
+            rpc.waiting = [{"gid": "should-not-be-used", "infoHash": "irrelevant", "completedLength": "0"}]
+
+            manager._tick()
+            entry = next(iter(manager._torrents.values()))
+            self.assertEqual(entry["status"], "error")
+            self.assertIsNone(entry["gid"])
+
+    def test_recovery_survives_a_full_retry_cycle_without_erroring_again(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            watch = root / "watch"
+            manager.update_settings({"directory": str(watch)})
+            _write_torrent(watch, "game")
+
+            info_hash = "5a892b21006803f464c35df6d223938c9c85d3e1"
+            rpc.add_error = f"InfoHash {info_hash} is already registered."
+            rpc.waiting = [{"gid": "recovered-gid", "infoHash": info_hash, "completedLength": "12345"}]
+            manager._tick()
+
+            entry_id = next(iter(manager._torrents.keys()))
+            self.assertEqual(manager._torrents[entry_id]["gid"], "recovered-gid")
+
+            # Now let the recovered GID report real progress on the next poll,
+            # like a genuinely resumed download.
+            rpc.statuses["recovered-gid"] = {
+                "gid": "recovered-gid", "status": "active", "totalLength": "1000",
+                "completedLength": "500", "downloadSpeed": "10",
+            }
+            manager._tick()
+            refreshed = manager.snapshot()["torrents"][0]
+            self.assertEqual(refreshed["status"], "downloading")
+            self.assertEqual(refreshed["progress_percent"], 50.0)
 
 
 class TorrentLifecycleTests(unittest.TestCase):

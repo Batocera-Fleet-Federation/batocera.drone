@@ -21,6 +21,7 @@ Pure stdlib.
 import base64
 import math
 import os
+import re
 import shutil
 import sys
 import time
@@ -71,6 +72,21 @@ TORRENT_RETRY_MAX_SECONDS = max(
     TORRENT_RETRY_BASE_SECONDS,
     float(os.environ.get("DRONE_TORRENT_RETRY_MAX_SECONDS", "300")),
 )
+# aria2.addTorrent/addUri must parse the torrent's metadata before responding --
+# slow on a resource-constrained device for a large multi-file torrent (e.g. a
+# full TV series). The default 5s RPC timeout (aria2_runtime.ARIA2_RPC_TIMEOUT_
+# SECONDS) is fine for lightweight calls but too tight for this one: confirmed
+# live ("aria2 RPC aria2.addUri failed: timed out"), a client-side timeout here
+# does not mean the add failed server-side -- aria2 can still finish registering
+# the torrent after our request already gave up, leaving a real, paused GID we
+# never learn about. A more generous timeout just for these two calls make that
+# race less likely in the first place (see _recover_from_already_registered_locked
+# below for what happens on the retry once it's already happened).
+ARIA2_ADD_TIMEOUT_SECONDS = max(5.0, float(os.environ.get("DRONE_TORRENT_ADD_TIMEOUT_SECONDS", "30")))
+
+# aria2's own wording for errorCode=12 ("InfoHash already registered"), e.g.
+# "InfoHash 5a892b21006803f464c35df6d223938c9c85d3e1 is already registered."
+_ALREADY_REGISTERED_INFOHASH_RE = re.compile(r"InfoHash\s+([0-9a-fA-F]{40})\s+is already registered")
 
 _TELL_STATUS_KEYS = [
     "gid",
@@ -684,8 +700,15 @@ class TorrentManager:
             "file-allocation": config["file_allocation"],
         }
         try:
-            gid = rpc.call("aria2.addTorrent", [base64.b64encode(torrent_bytes).decode("ascii"), [], options])
+            gid = rpc.call(
+                "aria2.addTorrent",
+                [base64.b64encode(torrent_bytes).decode("ascii"), [], options],
+                timeout=ARIA2_ADD_TIMEOUT_SECONDS,
+            )
         except Aria2RpcError as error:
+            recovered_gid = self._recover_from_already_registered(rpc, str(error))
+            if recovered_gid:
+                return {"gid": recovered_gid, "started": False}
             return {"error": str(error)}
         return {"gid": str(gid), "started": force}
 
@@ -704,10 +727,46 @@ class TorrentManager:
             "file-allocation": config["file_allocation"],
         }
         try:
-            gid = rpc.call("aria2.addUri", [[entry["magnet_uri"]], options])
+            gid = rpc.call("aria2.addUri", [[entry["magnet_uri"]], options], timeout=ARIA2_ADD_TIMEOUT_SECONDS)
         except Aria2RpcError as error:
+            recovered_gid = self._recover_from_already_registered(rpc, str(error))
+            if recovered_gid:
+                return {"gid": recovered_gid, "started": False}
             return {"error": str(error)}
         return {"gid": str(gid), "started": force}
+
+    def _recover_from_already_registered(self, rpc, error_message: str) -> Optional[str]:
+        """aria2 rejects a duplicate add of an infohash it already has active or
+        paused ("InfoHash ... is already registered", errorCode=12). This is
+        recoverable, not a real failure: our own prior add attempt for the same
+        torrent can still be sitting there even though *we* think it failed --
+        confirmed live, caused by a client-side RPC timeout racing a slow-but-
+        eventually-successful add (see ARIA2_ADD_TIMEOUT_SECONDS above). Without
+        this, every retry just repeats the same failed add forever while aria2
+        quietly accumulates one more orphaned paused GID per attempt (seen live:
+        a single torrent with 6 duplicate paused GIDs for the same infohash,
+        none of them ever progressing). Look up the existing registration by
+        infohash and adopt whichever copy has the most progress instead.
+        """
+        match = _ALREADY_REGISTERED_INFOHASH_RE.search(error_message)
+        if not match:
+            return None
+        return self._find_existing_gid_for_infohash(rpc, match.group(1))
+
+    def _find_existing_gid_for_infohash(self, rpc, info_hash: str) -> Optional[str]:
+        keys = ["gid", "infoHash", "completedLength"]
+        candidates: List[dict] = []
+        try:
+            candidates.extend(rpc.call("aria2.tellActive", [keys]) or [])
+            candidates.extend(rpc.call("aria2.tellWaiting", [0, 1000, keys]) or [])
+        except Aria2RpcError:
+            return None
+        matches = [c for c in candidates if str(c.get("infoHash") or "").lower() == info_hash.lower()]
+        if not matches:
+            return None
+        best = max(matches, key=lambda c: int(c.get("completedLength") or 0))
+        gid = best.get("gid")
+        return str(gid) if gid else None
 
     def _query_torrent_via_rpc(self, rpc, entry: dict) -> dict:
         try:

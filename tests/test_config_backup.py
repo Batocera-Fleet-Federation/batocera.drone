@@ -589,12 +589,57 @@ class ConfigBackupTreeUiContentTests(unittest.TestCase):
         self.assertIn("relative_path", body)
         self.assertIn("No files or folders match", body)
 
+    def test_search_input_is_debounced(self) -> None:
+        # A real backup can have 10,000+ files; re-rendering the tree on every
+        # single keystroke (rather than once typing pauses) was the actual
+        # source of reported lag while typing -- confirmed by directly timing
+        # a filtered re-render against a large existing DOM tree (100-200ms+),
+        # dominated by replacing that many DOM nodes, not the array filtering.
+        filter_body = self._function_body("function filterConfigBackupTree(value)")
+        self.assertIn("setTimeout(", filter_body)
+        self.assertIn("clearTimeout(configBackupTreeFilterTimer)", filter_body)
+        debounce_line = next(
+            line for line in self.js.splitlines() if "CONFIG_BACKUP_TREE_FILTER_DEBOUNCE_MS =" in line
+        )
+        self.assertIn("200", debounce_line)
+
+    def test_search_results_are_capped_to_keep_renders_fast(self) -> None:
+        body = self._function_body("function renderConfigBackupTreeListContainer()")
+        self.assertIn("CONFIG_BACKUP_TREE_SEARCH_MAX_RESULTS", body)
+        self.assertIn("refine your search", body)
+        cap_line = next(
+            line for line in self.js.splitlines() if "CONFIG_BACKUP_TREE_SEARCH_MAX_RESULTS =" in line
+        )
+        self.assertIn("500", cap_line)
+
+    def test_extension_summary_files_and_size_headers_are_sortable(self) -> None:
+        body = self._function_body("function renderConfigBackupExtensionSummary(files, expanded)")
+        self.assertIn("setConfigBackupExtensionSort('count')", body)
+        self.assertIn("setConfigBackupExtensionSort('size')", body)
+        self.assertNotIn("setConfigBackupExtensionSort('ext')", body)
+        sort_fn_body = self._function_body("function setConfigBackupExtensionSort(key)")
+        self.assertIn('dir === "asc" ? "desc" : "asc"', sort_fn_body)
+
     def test_tree_container_scoped_to_grow_full_modal_height(self) -> None:
         css_root = Path(__file__).resolve().parents[1]
         css = css_root.joinpath("app/web/static/css/drone.css").read_text(encoding="utf-8")
         self.assertIn("#configBackupTreeModal .modal-body {", css)
         self.assertIn("#configBackupTreeModal #configBackupTreeListContainer {", css)
         self.assertIn("#configBackupTreeModal #configBackupTreeListContainer .file-tree {", css)
+
+    def test_extension_summary_stays_bounded_so_the_tree_still_gets_most_of_the_space(self) -> None:
+        # Regression test: the summary table (up to 10, or every row once
+        # expanded) previously had no height cap and could eat most of the
+        # modal on its own -- confirmed live it left the tree only ~60px tall
+        # in a modal with ~480px of body height. It now gets its own small
+        # internal scrollbar so the tree always gets the bulk of the space.
+        css_root = Path(__file__).resolve().parents[1]
+        css = css_root.joinpath("app/web/static/css/drone.css").read_text(encoding="utf-8")
+        self.assertIn("#configBackupTreeModal #configBackupExtensionSummaryContainer .table-responsive {", css)
+        summary_start = css.index("#configBackupTreeModal #configBackupExtensionSummaryContainer .table-responsive {")
+        summary_end = css.index("}", summary_start)
+        self.assertIn("max-height", css[summary_start:summary_end])
+        self.assertIn("overflow-y: auto", css[summary_start:summary_end])
 
 
 if __name__ == "__main__":

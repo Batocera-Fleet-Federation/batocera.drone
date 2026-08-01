@@ -1189,31 +1189,47 @@ function summarizeConfigBackupExtensions(files) {
     entry.size += Number(file.size || 0);
     byExtension.set(ext, entry);
   });
-  return Array.from(byExtension.values()).sort((a, b) => b.size - a.size || b.count - a.count);
+  return Array.from(byExtension.values());
 }
 
 const CONFIG_BACKUP_EXTENSION_SUMMARY_COLLAPSED_ROWS = 10;
 let configBackupTreeAllFiles = [];
 let configBackupTreeSearchQuery = "";
 let configBackupExtensionSummaryExpanded = false;
+let configBackupExtensionSummarySort = { key: "size", dir: "desc" };
+
+function sortConfigBackupExtensionRows(rows) {
+  const { key, dir } = configBackupExtensionSummarySort;
+  const sign = dir === "asc" ? 1 : -1;
+  return [...rows].sort((a, b) => sign * (a[key] - b[key]));
+}
 
 // A quick-glance summary at the top of the tree view -- how many of which
 // file type, and how much disk space each accounts for -- so it's obvious
 // at a glance what a backup is actually made of without expanding the tree.
-// Collapsed to the top 10 (by size) rows by default; "Show all" expands it.
+// Collapsed to the top 10 rows by default (sorted by the current column);
+// "Show all" expands it. Files/Size headers are clickable to sort by that
+// column, toggling direction on repeat clicks.
 function renderConfigBackupExtensionSummary(files, expanded) {
   if (!files.length) return "";
-  const rows = summarizeConfigBackupExtensions(files);
+  const rows = sortConfigBackupExtensionRows(summarizeConfigBackupExtensions(files));
   const shown = expanded ? rows : rows.slice(0, CONFIG_BACKUP_EXTENSION_SUMMARY_COLLAPSED_ROWS);
   const toggle = rows.length > CONFIG_BACKUP_EXTENSION_SUMMARY_COLLAPSED_ROWS
     ? `<button type="button" class="btn btn-sm btn-outline-secondary w-100 mt-1" onclick="toggleConfigBackupExtensionSummary()">
          <i class="bi ${expanded ? "bi-chevron-up" : "bi-chevron-down"} me-1"></i>${expanded ? "Show fewer" : `Show all ${rows.length} types`}
        </button>`
     : "";
+  const sortIndicator = (key) => configBackupExtensionSummarySort.key === key
+    ? `<i class="bi ${configBackupExtensionSummarySort.dir === "asc" ? "bi-caret-up-fill" : "bi-caret-down-fill"} ms-1"></i>`
+    : "";
   return `
     <div class="table-responsive mb-3">
       <table class="table table-sm table-hover align-middle themed-table mb-0">
-        <thead><tr><th>Type</th><th class="text-end">Files</th><th class="text-end">Size</th></tr></thead>
+        <thead><tr>
+          <th>Type</th>
+          <th class="text-end sortable-col" onclick="setConfigBackupExtensionSort('count')">Files${sortIndicator("count")}</th>
+          <th class="text-end sortable-col" onclick="setConfigBackupExtensionSort('size')">Size${sortIndicator("size")}</th>
+        </tr></thead>
         <tbody>
           ${shown.map((row) => `
             <tr>
@@ -1229,10 +1245,21 @@ function renderConfigBackupExtensionSummary(files, expanded) {
   `;
 }
 
-function toggleConfigBackupExtensionSummary() {
-  configBackupExtensionSummaryExpanded = !configBackupExtensionSummaryExpanded;
+function refreshConfigBackupExtensionSummary() {
   const container = document.getElementById("configBackupExtensionSummaryContainer");
   if (container) container.innerHTML = renderConfigBackupExtensionSummary(configBackupTreeAllFiles, configBackupExtensionSummaryExpanded);
+}
+
+function toggleConfigBackupExtensionSummary() {
+  configBackupExtensionSummaryExpanded = !configBackupExtensionSummaryExpanded;
+  refreshConfigBackupExtensionSummary();
+}
+
+function setConfigBackupExtensionSort(key) {
+  configBackupExtensionSummarySort = configBackupExtensionSummarySort.key === key
+    ? { key, dir: configBackupExtensionSummarySort.dir === "asc" ? "desc" : "asc" }
+    : { key, dir: "desc" };
+  refreshConfigBackupExtensionSummary();
 }
 
 // Delegated on the tree container: clicking a folder row toggles it expanded/
@@ -1245,24 +1272,52 @@ function handleConfigBackupTreeClick(event) {
   }
 }
 
+// A real backup can hold 10,000+ files -- rendering every match as a fully
+// expanded DOM tree got slow (100-200ms+ per keystroke on a real device's
+// worth of files, since replacing the existing large tree in the DOM is what
+// actually dominates the cost, not the filtering itself). Search results are
+// capped so each render stays fast regardless of how broad the query is; the
+// unfiltered full tree (no search box query yet) is intentionally NOT capped
+// here, since that's a one-time render at modal-open, not a per-keystroke one.
+const CONFIG_BACKUP_TREE_SEARCH_MAX_RESULTS = 500;
+
 function renderConfigBackupTreeListContainer() {
   const query = configBackupTreeSearchQuery.trim().toLowerCase();
   if (!query) return renderConfigBackupTreeList(configBackupTreeAllFiles);
-  const filtered = configBackupTreeAllFiles.filter((file) =>
-    String(file.relative_path || file.name || "").toLowerCase().includes(query)
-  );
+  const filtered = [];
+  let truncated = false;
+  for (const file of configBackupTreeAllFiles) {
+    if (!String(file.relative_path || file.name || "").toLowerCase().includes(query)) continue;
+    if (filtered.length >= CONFIG_BACKUP_TREE_SEARCH_MAX_RESULTS) {
+      truncated = true;
+      break;
+    }
+    filtered.push(file);
+  }
   if (!filtered.length) {
     return `<div class="text-muted small px-2 py-3 text-center">No files or folders match "${escapeHtml(configBackupTreeSearchQuery.trim())}".</div>`;
   }
-  return renderConfigBackupTreeList(filtered);
+  const note = truncated
+    ? `<div class="small text-muted px-2 py-1">Showing the first ${CONFIG_BACKUP_TREE_SEARCH_MAX_RESULTS} matches -- refine your search to narrow further.</div>`
+    : "";
+  return note + renderConfigBackupTreeList(filtered);
 }
 
 // Only the tree list re-renders as the user types -- the search input itself
 // is never touched, so it never loses focus/cursor position mid-keystroke.
+// Debounced so rapid typing doesn't trigger a (potentially 100ms+, see above)
+// re-render on every single keystroke -- only once typing pauses briefly.
+const CONFIG_BACKUP_TREE_FILTER_DEBOUNCE_MS = 200;
+let configBackupTreeFilterTimer = null;
+
 function filterConfigBackupTree(value) {
   configBackupTreeSearchQuery = value || "";
-  const container = document.getElementById("configBackupTreeListContainer");
-  if (container) container.innerHTML = renderConfigBackupTreeListContainer();
+  if (configBackupTreeFilterTimer) clearTimeout(configBackupTreeFilterTimer);
+  configBackupTreeFilterTimer = setTimeout(() => {
+    configBackupTreeFilterTimer = null;
+    const container = document.getElementById("configBackupTreeListContainer");
+    if (container) container.innerHTML = renderConfigBackupTreeListContainer();
+  }, CONFIG_BACKUP_TREE_FILTER_DEBOUNCE_MS);
 }
 
 async function openConfigBackupTreeModal(backupId) {
@@ -1279,6 +1334,11 @@ async function openConfigBackupTreeModal(backupId) {
   configBackupTreeAllFiles = [];
   configBackupTreeSearchQuery = "";
   configBackupExtensionSummaryExpanded = false;
+  configBackupExtensionSummarySort = { key: "size", dir: "desc" };
+  if (configBackupTreeFilterTimer) {
+    clearTimeout(configBackupTreeFilterTimer);
+    configBackupTreeFilterTimer = null;
+  }
   modal.innerHTML = `
     <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable modal-lg">
       <div class="modal-content themed-modal">

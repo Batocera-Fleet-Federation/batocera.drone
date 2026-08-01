@@ -490,6 +490,13 @@
       color: var(--admin-text);
       border-color: var(--admin-border);
     }
+    .themed-table thead th.sortable-col {
+      cursor: pointer;
+      user-select: none;
+    }
+    .themed-table thead th.sortable-col:hover {
+      color: var(--admin-sidebar-accent);
+    }
     /* Shared BFF mobile patterns (mirrored in overmind.css) */
     @media (max-width: 767.98px) {
       /* Segmented button groups: swipe horizontally instead of overflowing */
@@ -1517,7 +1524,7 @@
        and the tree container is the one flex item that grows to consume
        whatever vertical space is actually left in the modal. */
     #configBackupTreeModal .modal-content {
-      height: 85vh;
+      height: 90vh;
     }
     #configBackupTreeModal .modal-body {
       display: flex;
@@ -1527,6 +1534,14 @@
     #configBackupTreeModal #configBackupExtensionSummaryContainer,
     #configBackupTreeModal #configBackupTreeSearchInput {
       flex: 0 0 auto;
+    }
+    /* The summary table itself must stay bounded too -- up to 10 rows (or
+       every row, once "Show all" is clicked) would otherwise eat most of the
+       modal's height on its own, leaving almost nothing for the tree below
+       it. It gets its own small internal scrollbar instead. */
+    #configBackupTreeModal #configBackupExtensionSummaryContainer .table-responsive {
+      max-height: 180px;
+      overflow-y: auto;
     }
     #configBackupTreeModal #configBackupTreeListContainer {
       flex: 1 1 auto;
