@@ -76,6 +76,7 @@ class Settings:
     advertised_api_port: int
     peer_mtls_port: int
     advertised_peer_mtls_port: int
+    http_redirect_port: int
 
     image_cache_ttl_seconds: int
     image_miss_cache_ttl_seconds: int
@@ -159,6 +160,12 @@ class Settings:
             advertised_api_port=int(advertised_api_port_value),
             peer_mtls_port=int(peer_mtls_port_value),
             advertised_peer_mtls_port=int(advertised_peer_mtls_port_value),
+            # Plain-HTTP listener that only ever issues a 301 to the HTTPS
+            # equivalent URL -- nothing else is served on it. Set to 0 to
+            # disable it (matches the ROM_METADATA_POLL_SECONDS=0 convention
+            # elsewhere for "off"), e.g. if port 80 is already in use for
+            # something else on this machine.
+            http_redirect_port=int(os.environ.get("DRONE_HTTP_REDIRECT_PORT", "80")),
             image_cache_ttl_seconds=int(os.environ.get("IMAGE_CACHE_TTL_SECONDS", "3600")),
             image_miss_cache_ttl_seconds=int(os.environ.get("IMAGE_MISS_CACHE_TTL_SECONDS", "300")),
             image_cache_max_items=int(os.environ.get("IMAGE_CACHE_MAX_ITEMS", "1000")),

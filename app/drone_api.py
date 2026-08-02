@@ -1889,6 +1889,69 @@ def _apply_server_tls(settings: Settings, server: ThreadingHTTPServer, *, peer_m
     server.socket = ssl_context.wrap_socket(server.socket, server_side=True, do_handshake_on_connect=False)
 
 
+def _redirect_location(https_port: int, host_header: str, client_ip: str, path: str) -> str:
+    """Build the ``Location`` header for the plain-HTTP redirect listener.
+
+    Uses whatever host the client actually sent in its own ``Host`` header
+    (so ``batocera.local``, a raw LAN IP, a Tailscale name, etc. all keep
+    working unchanged) rather than any hostname this Drone thinks of itself
+    -- falls back to the observed client IP only when the request carried no
+    ``Host`` header at all. The port is suffixed only when it isn't the
+    implicit default (443), so the common case produces a plain
+    ``https://host/path`` URL.
+    """
+    hostname = host_header.split(":", 1)[0] if host_header else (client_ip or "")
+    port_suffix = "" if https_port == 443 else f":{https_port}"
+    return f"https://{hostname}{port_suffix}{path}"
+
+
+class _HttpRedirectHandler(BaseHTTPRequestHandler):
+    """The entire plain-HTTP listener (``settings.http_redirect_port``, default
+    80): every request gets a 301 to the same host/path over HTTPS, nothing
+    else is ever served here. A deliberately separate, minimal class -- not
+    ``RomRequestHandler`` -- so the real app surface is never reachable over
+    an unencrypted connection even by accident.
+    """
+
+    def __init__(self, *args, settings: Settings, **kwargs):
+        self.settings = settings
+        super().__init__(*args, **kwargs)
+
+    def _send_redirect(self) -> None:
+        client_ip = self.client_address[0] if self.client_address else ""
+        location = _redirect_location(self.settings.https_port, self.headers.get("Host", ""), client_ip, self.path)
+        self.send_response(301)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def do_GET(self) -> None:
+        self._send_redirect()
+
+    do_HEAD = do_GET
+    do_POST = do_GET
+    do_PUT = do_GET
+    do_DELETE = do_GET
+    do_PATCH = do_GET
+    do_OPTIONS = do_GET
+
+    def log_message(self, format: str, *args) -> None:  # noqa: A002 - stdlib signature
+        # Silenced deliberately: port 80 is one of the most commonly scanned
+        # ports on the internet and every real hit here is a one-line
+        # redirect with nothing to diagnose -- logging each one would flood
+        # stderr.log with scanner noise, the same reasoning behind
+        # DroneThreadingHTTPServer.handle_error's per-IP throttle on the TLS
+        # listeners below.
+        pass
+
+
+def _build_http_redirect_handler(settings: Settings):
+    def factory(*args, **kwargs):
+        return _HttpRedirectHandler(*args, settings=settings, **kwargs)
+
+    return factory
+
+
 def create_server(settings: Settings) -> ThreadingHTTPServer:
     global _ROM_METADATA_POLLER_STARTED, _ROM_METADATA_WATCHER_STARTED, _LOCAL_NETWORK_WORKERS_STARTED, _GAME_PROCESS_MONITOR_STARTED, _GAME_PROCESS_MONITOR, _DOWNLOAD_MANAGER, _TORRENT_MANAGER, _AUTOMATION_POLLER_STARTED, _VPN_AUTO_CONNECT_ATTEMPTED, _VPN_SHARING_POLLER_STARTED, _VPN_SELF_HEAL_POLLER_STARTED, _SMTP_BOOTSTRAP_ATTEMPTED, _SMTP_SHARING_POLLER_STARTED, _AUDIT_EMAIL_POLLER_STARTED
     roms_root, bios_root = _real_data_roots(settings)
@@ -2037,6 +2100,37 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
         peer_mtls_server.thread = peer_mtls_thread  # type: ignore[attr-defined]
         scheme = "http" if settings.http_only else "https"
         print(f"Serving Drone peer-mTLS listener on {scheme}://0.0.0.0:{settings.peer_mtls_port}", flush=True)
+
+    # Plain-HTTP -> HTTPS redirect listener. Skipped in http_only mode (there is
+    # no HTTPS to redirect to there) and when disabled via http_redirect_port=0.
+    # Never TLS-wrapped -- this is the one listener deliberately left unencrypted,
+    # and it only ever serves a 301 (see _HttpRedirectHandler).
+    http_redirect_server = None
+    if not settings.http_only and settings.http_redirect_port > 0:
+        try:
+            http_redirect_server = DroneThreadingHTTPServer(
+                ("0.0.0.0", settings.http_redirect_port), _build_http_redirect_handler(settings)
+            )
+        except OSError as error:
+            print(
+                f"HTTP->HTTPS redirect listener skipped on port {settings.http_redirect_port}: {error}",
+                file=sys.stderr,
+                flush=True,
+            )
+            http_redirect_server = None
+        else:
+            http_redirect_thread = Thread(
+                target=http_redirect_server.serve_forever,
+                name="drone-http-redirect-listener",
+                daemon=True,
+            )
+            http_redirect_thread.start()
+            http_redirect_server.thread = http_redirect_thread  # type: ignore[attr-defined]
+            print(
+                f"Serving HTTP->HTTPS redirect on http://0.0.0.0:{settings.http_redirect_port}",
+                flush=True,
+            )
+    server.http_redirect_server = http_redirect_server  # type: ignore[attr-defined]
 
     all_tls_servers = [server, *compatibility_servers] + ([peer_mtls_server] if peer_mtls_server else [])
     for tls_server in all_tls_servers:

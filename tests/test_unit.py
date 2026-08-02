@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 import time
 import unittest
-from threading import Event
+from threading import Event, Thread
 from unittest import mock
 from pathlib import Path
 from urllib.error import URLError
@@ -476,6 +476,17 @@ class SettingsTests(unittest.TestCase):
         ):
             settings = Settings.from_env()
         self.assertEqual(settings.compatibility_https_ports, (8443, 9443))
+
+    def test_http_redirect_port_defaults_to_80(self) -> None:
+        with mock.patch.dict("os.environ", {}, clear=True):
+            settings = Settings.from_env()
+        self.assertEqual(settings.http_redirect_port, 80)
+
+    def test_http_redirect_port_can_be_overridden_or_disabled(self) -> None:
+        with mock.patch.dict("os.environ", {"DRONE_HTTP_REDIRECT_PORT": "8080"}, clear=True):
+            self.assertEqual(Settings.from_env().http_redirect_port, 8080)
+        with mock.patch.dict("os.environ", {"DRONE_HTTP_REDIRECT_PORT": "0"}, clear=True):
+            self.assertEqual(Settings.from_env().http_redirect_port, 0)
 
     def test_device_id_persists_after_first_physical_mac_selection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4465,6 +4476,167 @@ class ListenerSurfaceRoutingTests(unittest.TestCase):
         handler = self._handler(server)
         self.assertFalse(handler._reject_if_wrong_listener_surface(["peer", "pair"], "/v1/api/peer/pair"))
         handler._send_json.assert_not_called()
+
+
+class RedirectLocationTests(unittest.TestCase):
+    """`_redirect_location` builds the Location header for the plain-HTTP
+    (settings.http_redirect_port, default 80) -> HTTPS redirect listener."""
+
+    def test_default_https_port_omits_port_suffix(self) -> None:
+        location = drone_api._redirect_location(443, "batocera.local", "192.168.0.5", "/")
+        self.assertEqual(location, "https://batocera.local/")
+
+    def test_non_default_https_port_is_suffixed(self) -> None:
+        location = drone_api._redirect_location(8443, "batocera.local", "192.168.0.5", "/")
+        self.assertEqual(location, "https://batocera.local:8443/")
+
+    def test_hosts_own_port_in_the_host_header_is_replaced_not_kept(self) -> None:
+        # A browser hitting the redirect listener on a non-default HTTP port
+        # sends "Host: batocera.local:8080" -- that :8080 must not leak into
+        # the https:// URL; only settings.https_port decides the target port.
+        location = drone_api._redirect_location(443, "batocera.local:8080", "192.168.0.5", "/systems")
+        self.assertEqual(location, "https://batocera.local/systems")
+
+    def test_missing_host_header_falls_back_to_client_ip(self) -> None:
+        location = drone_api._redirect_location(443, "", "192.168.0.5", "/")
+        self.assertEqual(location, "https://192.168.0.5/")
+
+    def test_path_and_query_string_are_preserved_verbatim(self) -> None:
+        location = drone_api._redirect_location(443, "batocera.local", "192.168.0.5", "/v1/api/movies?q=vacation")
+        self.assertEqual(location, "https://batocera.local/v1/api/movies?q=vacation")
+
+
+class HttpRedirectListenerTests(unittest.TestCase):
+    """Real-socket tests for _HttpRedirectHandler/the listener create_server()
+    starts on settings.http_redirect_port -- exercises the actual HTTP
+    response, not just the URL-building helper above."""
+
+    def _start_listener(self, https_port: int = 443):
+        settings = mock.Mock()
+        settings.https_port = https_port
+        server = drone_api.DroneThreadingHTTPServer(("127.0.0.1", 0), drone_api._build_http_redirect_handler(settings))
+        port = server.server_address[1]
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.shutdown)
+        self.addCleanup(server.server_close)
+        self.addCleanup(lambda: thread.join(timeout=3))
+        return port
+
+    def _get_raw(self, port: int, path: str = "/", host: str = "127.0.0.1"):
+        import http.client
+
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        try:
+            conn.request("GET", path, headers={"Host": host})
+            response = conn.getresponse()
+            response.read()
+            return response.status, dict(response.getheaders())
+        finally:
+            conn.close()
+
+    def test_redirects_get_to_https_with_301(self) -> None:
+        port = self._start_listener(https_port=443)
+        status, headers = self._get_raw(port, "/systems", host="batocera.local")
+        self.assertEqual(status, 301)
+        self.assertEqual(headers.get("Location"), "https://batocera.local/systems")
+
+    def test_redirects_other_methods_too(self) -> None:
+        port = self._start_listener(https_port=443)
+        import http.client
+
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        try:
+            conn.request("POST", "/v1/api/auth/login", body=b"{}", headers={"Host": "batocera.local"})
+            response = conn.getresponse()
+            response.read()
+            self.assertEqual(response.status, 301)
+            self.assertEqual(response.getheader("Location"), "https://batocera.local/v1/api/auth/login")
+        finally:
+            conn.close()
+
+    def test_redirect_uses_configured_non_default_https_port(self) -> None:
+        port = self._start_listener(https_port=8443)
+        status, headers = self._get_raw(port, "/", host="batocera.local")
+        self.assertEqual(status, 301)
+        self.assertEqual(headers.get("Location"), "https://batocera.local:8443/")
+
+
+class CreateServerHttpRedirectTests(unittest.TestCase):
+    """create_server()'s wiring of the redirect listener: started in normal
+    (HTTPS) mode, skipped in http_only mode (nothing to redirect to) and
+    when explicitly disabled via http_redirect_port=0."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self._root = Path(self._tmp.name) / "userdata"
+        seed_mock_userdata(self._root)
+        # Incremental overrides on top of the ambient environment (PATH, HOME,
+        # ...), not a wipe -- matches MockServerIntegrationTests' own fixture.
+        # Clearing the whole environment first previously made this hang: some
+        # subprocess call create_server() makes along the way depends on PATH
+        # being intact.
+        self._old_env = dict(os.environ)
+        os.environ.update({
+            "USERDATA_ROOT": str(self._root),
+            "ROMS_ROOT": str(self._root / "roms"),
+            "BIOS_ROOT": str(self._root / "bios"),
+            "SAVES_ROOT": str(self._root / "saves"),
+            "THEMES_ROOT": str(self._root / "themes"),
+            "BATOCERA_CONF_FILE": str(self._root / "system" / "batocera.conf"),
+            "ES_SETTINGS_FILE": str(self._root / "system" / "configs" / "emulationstation" / "es_settings.cfg"),
+            "DRONE_APP_USERNAME": "admin",
+            "DRONE_APP_PASSWORD": "changeme",
+            "HTTPS_PORT": "0",
+            "LOG_DIR": str(Path(self._tmp.name) / "logs"),
+            "ROM_METADATA_POLL_SECONDS": "0",
+        })
+        for stale_key in ("HTTP_ONLY", "DRONE_LOCAL_ALLOW_INSECURE_HTTP", "DRONE_HTTP_REDIRECT_PORT"):
+            os.environ.pop(stale_key, None)
+
+    def tearDown(self) -> None:
+        os.environ.clear()
+        os.environ.update(self._old_env)
+        self._tmp.cleanup()
+
+    def _create(self):
+        settings = drone_api.Settings.from_env()
+        try:
+            server = drone_api.create_server(settings)
+        except PermissionError as error:
+            self.skipTest(f"Socket bind is not allowed in this environment: {error}")
+            return
+        # This test never calls server.serve_forever() on the main listener
+        # (only create_server()'s own sub-listener threads run it) --
+        # server.shutdown() waits on an internal Event that only serve_forever()
+        # ever sets, so calling it here would block forever. server_close()
+        # just closes the socket and needs no running serve_forever() loop.
+        self.addCleanup(server.server_close)
+        if server.http_redirect_server is not None:
+            self.addCleanup(server.http_redirect_server.shutdown)
+            self.addCleanup(server.http_redirect_server.server_close)
+        return server
+
+    def test_redirect_listener_starts_in_https_mode(self) -> None:
+        # http_redirect_port=0 means "disabled" for this setting (unlike
+        # https_port=0, which means "let the OS pick an ephemeral port"), so
+        # this needs a real, fixed, unprivileged port to exercise the
+        # "started" path rather than the "disabled" one.
+        os.environ["DRONE_HTTP_REDIRECT_PORT"] = "18080"
+        server = self._create()
+        self.assertIsNotNone(server.http_redirect_server)
+
+    def test_redirect_listener_skipped_when_disabled(self) -> None:
+        os.environ["DRONE_HTTP_REDIRECT_PORT"] = "0"
+        server = self._create()
+        self.assertIsNone(server.http_redirect_server)
+
+    def test_redirect_listener_skipped_in_http_only_mode(self) -> None:
+        os.environ["HTTP_ONLY"] = "1"
+        os.environ["DRONE_LOCAL_ALLOW_INSECURE_HTTP"] = "1"
+        os.environ["DRONE_HTTP_REDIRECT_PORT"] = "18080"
+        server = self._create()
+        self.assertIsNone(server.http_redirect_server)
 
 
 class CrossListenerTrustRefreshTests(unittest.TestCase):
