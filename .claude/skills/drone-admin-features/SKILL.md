@@ -397,6 +397,97 @@ full-body response). Closing the modal (`hidden.bs.modal`) clears the
 `<video>`'s `src` and calls `.load()` so a movie doesn't keep
 decoding/streaming in the background after dismissal.
 
+**Movie artwork/metadata scraper (TMDb)** mirrors the ROM scraper shape
+(search → pick a match → apply) but is its own self-contained module,
+`app/movies/` (`tmdb_client.py` — stdlib `urlopen` HTTP client, api-key
+query-param auth, `append_to_response=credits` to fetch cast in the same
+call as details; `metadata_manager.py` — orchestration: settings storage,
+search, apply, artwork download). Settings (just the API key, sanitized —
+never returned to the browser, same convention as SMTP's password) live in
+the shared `state_store.py` `app_state` table (`movies_scraper.json`
+namespace), not a dedicated file. Scraped fields live in a new
+`movies_metadata_entries` SQLite table (`storage/movies_store.py`) keyed by
+`entry_key`, with a loose `extra_json` blob column (overview/tagline/
+genres/cast/release_date/rating/runtime_minutes) — the same
+loosely-structured-field pattern `rom_cache_entries`/`bios_cache_entries`
+already use, rather than one column per field.
+
+Artwork (poster + backdrop) downloads to an `images/` folder **sibling to
+the specific movie file**, not one shared root folder —
+`<movie's own folder>/images/<safe-stem>-tmdb-<field>.jpg`
+(`metadata_manager._artwork_path`), mirroring the ROM convention of an
+`images/` folder next to the content it decorates. This per-folder
+placement is deliberate, not incidental: two different shows that both
+happen to have a same-named episode file (e.g. two `S01E01.mp4`s in
+different show folders) must not collide and overwrite each other's art —
+see `test_movies_metadata_manager.py`'s
+`test_artwork_for_same_basename_in_different_folders_does_not_collide`.
+Served back via `GET /movies/{entry_key}/artwork/{field}` (`field` is
+`poster`/`backdrop`, mapped to the stored relative path via
+`_ARTWORK_FIELD_COLUMNS` in `handlers_movies.py`) — session-gated like the
+rest of the movies routes (viewing scraped art isn't admin-only), while the
+scrape/apply/settings routes themselves are under `/admin/movies/*` (an
+admin action). Admin routes: `GET/POST /admin/movies/scraper-settings`,
+`GET /admin/movies/{entry_key}/scrape/search?q=`,
+`POST /admin/movies/{entry_key}/scrape/apply` (`{tmdb_id}`).
+
+**Scraped title replaces the filename everywhere in the UI.** Once a movie
+has been scraped, its TMDb `title` is shown instead of the raw filename —
+`_apply_movie_display_titles()` (`handlers_movies.py`) overlays a
+`display_title` field onto every `/movies` list row (one bulk
+`list_movie_display_titles()` lookup, not a query per row) and
+`_handle_movie_detail` does the equivalent for the single-movie detail
+response; `drone.js` reads `movie.display_title` (falling back to the raw
+filename for anything never scraped) at every display site — the tree row
+label, the player-modal title, the details-page `<h2>`, and the Netflix
+explorer's card captions.
+
+**Movie details page** (`renderMovieDetailsPage(entryKey)`, route
+`#movies/<entry_key>` — parsed by `parseMoviesHash()`, dispatched from the
+same `hash.startsWith("#movies")` router branch as the tree/explorer views)
+is reached by clicking a movie's title in the tree row (now a `<button>`,
+`.movie-tree-title-btn`, styled to read as plain label text — the one tree
+row across the whole app where the label is a real button instead of a
+span/div, since it needs to navigate) or a card in the explorer. Fetches
+`GET /movies/{entry_key}` (backdrop as a hero background-image, poster,
+tagline, genre badges, cast chips, overview, Watch/Download actions) then
+independently renders a scraper card below it
+(`renderMovieScraperCard()`): if no TMDb API key is configured yet, an
+inline key-entry form (`renderMovieScraperApiKeyForm`); once one exists, a
+search box + result list (`renderMovieScraperSearchUi`/
+`searchMovieScraper`/`renderMovieScraperResult`) where picking a match
+(`applyMovieScraperResult`) calls the apply endpoint and re-renders the
+whole page from the fresh data — mirrors the ROM LaunchBox/TheGamesDB
+search-then-apply UX (`list-group-item-action` rows with a thumbnail), not
+a new pattern. The scraper card is admin-gated (`adminEnabled` check,
+matching every other `/admin/*`-backed UI element) even though the details
+page itself is reachable by anyone who can browse the library.
+
+**Netflix-style movie explorer** (`renderMovieExplorerPage()`, route
+`#movies/explore`, reached via the **Browse** button on the Movies tab) is
+a full-bleed grid of poster cards that visually **replaces the whole app
+chrome** while active — `document.body.classList.toggle
+("movie-explorer-active", ...)` is set unconditionally on every route
+change (same mechanism as the pre-existing `artwork-page` toggle), and
+`body.movie-explorer-active` CSS rules hide `.sidebar`/`#managedPeerBanner`/
+`#systemInfoBar` and strip the `.app-shell` padding/border so
+`.movie-explorer-overlay` reads as its own full-screen page rather than
+content embedded in the normal layout — **the router/render pipeline is
+otherwise unchanged**, this is a pure CSS takeover of the existing `#content`
+container, not a separate app mount. A **Back to Drone view** button
+(`setHash('#movies')`) is the only way out. Cards
+(`renderMovieExplorerCard`) point their `<img>` straight at
+`movieArtworkUrl(entryKey, "poster")` with an inline `onerror` fallback to a
+film-icon placeholder (same one-line `onerror` pattern the image-lightbox
+already uses) rather than a bulk metadata prefetch — the plain `/movies`
+list response has no poster path on it (only the single-movie detail
+endpoint does), so probing per-card via the artwork endpoint's own 404 is
+simpler than a second bulk endpoint. Search (`filterMovieExplorer`) is
+client-side over the already-fetched `moviesAllRows` (reused from the tree
+page's state var — refetched only if empty, so entering the explorer
+directly doesn't require visiting the tree first), same live-`oninput`
+convention as the tree's own search box.
+
 ## Per-system BIOS association (new — absent from the old doc)
 
 BIOS files are filed under each system's own "BIOS" category instead of one

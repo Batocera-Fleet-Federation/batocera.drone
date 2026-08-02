@@ -2064,6 +2064,22 @@ function movieDownloadUrl(entryKey) {
 function movieStreamUrl(entryKey) {
   return `${API_BASE}/movies/${encodeURIComponent(entryKey)}/stream`;
 }
+function movieArtworkUrl(entryKey, field) {
+  return `${API_BASE}/movies/${encodeURIComponent(entryKey)}/artwork/${encodeURIComponent(field)}`;
+}
+function movieDetailHash(entryKey) {
+  return `#movies/${encodeURIComponent(entryKey)}`;
+}
+function movieExploreHash() {
+  return `#movies/explore`;
+}
+function parseMoviesHash(hash) {
+  if (!hash.startsWith("#movies")) return null;
+  const rest = hash.slice("#movies".length).replace(/^\//, "");
+  if (!rest) return { view: "tree" };
+  if (rest === "explore") return { view: "explore" };
+  return { view: "detail", entryKey: decodeURIComponent(rest.split("?")[0]) };
+}
 function renderAssetsTabBar(active) {
   return renderAdminPanelTabs(active, [
     ["systems", "Systems", "bi-grid", "#systems"],
@@ -2080,7 +2096,10 @@ async function renderMoviesPage() {
     moviesTreeExpanded = new Set();
     content.innerHTML = `
       ${renderAssetsTabBar("movies")}
-      <div class="text-muted small mb-2">Movies and shows stored on this drone, laid out the same way they are on disk -- watch them right here or download a copy.</div>
+      <div class="d-flex flex-wrap align-items-start justify-content-between gap-2 mb-2">
+        <div class="text-muted small">Movies and shows stored on this drone, laid out the same way they are on disk -- watch them right here or download a copy.</div>
+        <button class="btn btn-outline-primary btn-sm text-nowrap" type="button" onclick="setHash(movieExploreHash())"><i class="bi bi-grid-3x3-gap me-1"></i>Browse</button>
+      </div>
       <div class="mb-3 systems-tree-toolbar">
         <label class="form-label" for="moviesTreeSearch">Search movies and folders</label>
         <div class="input-group">
@@ -2099,6 +2118,69 @@ async function renderMoviesPage() {
   } finally {
     setLoading(false);
   }
+}
+async function renderMovieExplorerPage() {
+  currentSystemContext = null;
+  clearSystemTheme();
+  setLoading(true, "Loading movies...");
+  try {
+    if (!moviesAllRows.length) {
+      const payload = await api("/movies");
+      moviesAllRows = payload.movies || [];
+    }
+    content.innerHTML = `
+      <div class="movie-explorer-overlay">
+        <div class="movie-explorer-topbar">
+          <div class="movie-explorer-brand"><i class="bi bi-film me-2"></i>Movies</div>
+          <div class="movie-explorer-search flex-grow-1">
+            <input id="movieExplorerSearch" type="search" class="form-control" placeholder="Search titles" oninput="filterMovieExplorer(this.value)" autofocus>
+          </div>
+          <button class="btn btn-outline-light btn-sm text-nowrap" type="button" onclick="setHash('#movies')"><i class="bi bi-arrow-left me-1"></i>Back to Drone view</button>
+        </div>
+        <div id="movie-explorer-grid" class="movie-explorer-grid"></div>
+      </div>
+    `;
+    filterMovieExplorer("");
+  } catch (err) {
+    content.innerHTML = `
+      <div class="movie-explorer-overlay">
+        <div class="movie-explorer-topbar">
+          <div class="movie-explorer-brand"><i class="bi bi-film me-2"></i>Movies</div>
+          <button class="btn btn-outline-light btn-sm text-nowrap" type="button" onclick="setHash('#movies')"><i class="bi bi-arrow-left me-1"></i>Back to Drone view</button>
+        </div>
+        <div class="alert alert-danger m-3">Failed to load movies: ${escapeHtml(err.message || "unknown error")}</div>
+      </div>
+    `;
+  } finally {
+    setLoading(false);
+  }
+}
+function filterMovieExplorer(queryValue) {
+  const grid = document.getElementById("movie-explorer-grid");
+  if (!grid) return;
+  const filter = String(queryValue || "").trim().toLowerCase();
+  const rows = filter
+    ? moviesAllRows.filter((m) => (m.display_title || m.movie_name || m.name || "").toLowerCase().includes(filter))
+    : moviesAllRows;
+  const sorted = [...rows].sort((a, b) =>
+    (a.display_title || a.movie_name || a.name || "").localeCompare(b.display_title || b.movie_name || b.name || "")
+  );
+  grid.innerHTML = sorted.length
+    ? sorted.map(renderMovieExplorerCard).join("")
+    : `<div class="text-muted p-4">No movies match "${escapeHtml(filter)}".</div>`;
+}
+function renderMovieExplorerCard(movie) {
+  const title = movie.display_title || movie.movie_name || movie.name || "";
+  const posterUrl = movieArtworkUrl(movie.entry_key, "poster");
+  return `
+    <button type="button" class="movie-explorer-card" title="${escapeHtml(title)}" onclick="setHash(movieDetailHash(${jsAttr(movie.entry_key)}))">
+      <div class="movie-explorer-card-poster">
+        <img src="${escapeHtml(posterUrl)}" alt="" loading="lazy" onerror="this.style.display='none'; this.nextElementSibling.classList.remove('d-none');">
+        <div class="movie-explorer-card-poster-fallback d-none"><i class="bi bi-film"></i></div>
+      </div>
+      <div class="movie-explorer-card-title">${escapeHtml(title)}</div>
+    </button>
+  `;
 }
 function moviesPathParts(movie) {
   const raw = String(movie.file_path || movie.relative_path || movie.movie_name || "")
@@ -2145,19 +2227,20 @@ function countMoviesFiles(node) {
 }
 function renderMoviesTreeLeafRow(file, depth) {
   const movie = file.movie || {};
-  const name = file.name || movie.movie_name || movie.name || "";
+  const rawName = file.name || movie.movie_name || movie.name || "";
+  const displayName = movie.display_title || rawName;
   const size = movie.byte_count !== undefined ? formatBytes(movie.byte_count) : "n/a";
   return `
     <div class="tree-grid-row tree-leaf-row movies-tree-row" style="--tree-depth:${depth}">
       <div class="tree-grid-main">
         <i class="bi bi-film tree-grid-icon"></i>
-        <div class="tree-grid-label text-truncate" title="${escapeHtml(movie.file_path || name)}">
-          <span class="fw-semibold">${escapeHtml(name)}</span>
-        </div>
+        <button type="button" class="tree-grid-label text-truncate movie-tree-title-btn" title="${escapeHtml(movie.file_path || rawName)}" onclick="setHash(movieDetailHash(${jsAttr(movie.entry_key)}))">
+          <span class="fw-semibold">${escapeHtml(displayName)}</span>
+        </button>
       </div>
       <div class="tree-grid-meta">${escapeHtml(size)}</div>
       <div class="tree-grid-action">
-        <button class="btn btn-outline-primary btn-sm" type="button" title="Watch" onclick="openMoviePlayerModal(${jsAttr(movie.entry_key)}, ${jsAttr(name)})"><i class="bi bi-play-circle"></i></button>
+        <button class="btn btn-outline-primary btn-sm" type="button" title="Watch" onclick="openMoviePlayerModal(${jsAttr(movie.entry_key)}, ${jsAttr(displayName)})"><i class="bi bi-play-circle"></i></button>
         ${
           movie.is_downloadable === false
             ? `<button class="btn btn-secondary btn-sm" type="button" title="Downloads disabled" disabled><i class="bi bi-slash-circle"></i></button>`
@@ -2225,8 +2308,8 @@ function openMoviePlayerModal(entryKey, movieName) {
     <div class="modal-dialog modal-dialog-centered modal-lg">
       <div class="modal-content themed-modal">
         <div class="modal-header">
-          <h5 class="modal-title mb-0"><i class="bi bi-film me-2"></i>${escapeHtml(movieName || "Movie")}</h5>
-          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+          <h5 class="modal-title mb-0 movie-player-modal-title" title="${escapeHtml(movieName || "Movie")}"><i class="bi bi-film me-2"></i><span class="movie-player-modal-title-text">${escapeHtml(movieName || "Movie")}</span></h5>
+          <button type="button" class="btn-close btn-close-white flex-shrink-0" data-bs-dismiss="modal" aria-label="Close"></button>
         </div>
         <div class="modal-body">
           <video id="moviePlayerVideo" class="w-100" style="max-height: 70vh; background: #000;" controls autoplay src="${movieStreamUrl(entryKey)}">
@@ -2254,6 +2337,195 @@ function openMoviePlayerModal(entryKey, movieName) {
   } else {
     modal.classList.add("show");
     modal.style.display = "block";
+  }
+}
+async function renderMovieDetailsPage(entryKey) {
+  currentSystemContext = null;
+  clearSystemTheme();
+  setLoading(true, "Loading movie...");
+  try {
+    const movie = await api(`/movies/${encodeURIComponent(entryKey)}`);
+    content.innerHTML = renderMovieDetailShell(movie);
+    await renderMovieScraperCard(entryKey, movie);
+  } catch (err) {
+    content.innerHTML = `
+      <button class="btn btn-outline-secondary btn-sm mb-3" type="button" onclick="setHash('#movies')"><i class="bi bi-arrow-left me-1"></i>Back to Movies</button>
+      <div class="alert alert-danger">Failed to load movie: ${escapeHtml(err.message || "unknown error")}</div>
+    `;
+  } finally {
+    setLoading(false);
+  }
+}
+function renderMovieDetailShell(movie) {
+  const meta = movie.metadata || null;
+  const rawName = movie.movie_name || movie.name || "";
+  const title = movie.display_title || rawName;
+  const entryKey = movie.entry_key;
+  const posterUrl = meta && meta.poster_relative_path ? movieArtworkUrl(entryKey, "poster") : null;
+  const backdropUrl = meta && meta.backdrop_relative_path ? movieArtworkUrl(entryKey, "backdrop") : null;
+  const year = meta && meta.release_date ? String(meta.release_date).slice(0, 4) : "";
+  const metaBits = [
+    year,
+    meta && meta.runtime_minutes ? `${meta.runtime_minutes} min` : "",
+    meta && meta.rating != null ? `<i class="bi bi-star-fill text-warning"></i> ${Number(meta.rating).toFixed(1)}` : "",
+  ].filter(Boolean);
+  const genres = (meta && meta.genres) || [];
+  const cast = (meta && meta.cast) || [];
+  return `
+    <button class="btn btn-outline-secondary btn-sm mb-3" type="button" onclick="setHash('#movies')"><i class="bi bi-arrow-left me-1"></i>Back to Movies</button>
+    <div class="movie-detail-hero" ${backdropUrl ? `style="background-image:linear-gradient(180deg, rgba(11,16,32,0.55) 0%, rgba(11,16,32,0.96) 100%), url('${escapeHtml(backdropUrl)}')"` : ""}>
+      <div class="movie-detail-hero-body">
+        ${
+          posterUrl
+            ? `<img class="movie-detail-poster" src="${escapeHtml(posterUrl)}" alt="">`
+            : `<div class="movie-detail-poster movie-detail-poster-placeholder"><i class="bi bi-film"></i></div>`
+        }
+        <div class="movie-detail-info min-width-0">
+          <h2 class="movie-detail-title" title="${escapeHtml(title)}">${escapeHtml(title)}</h2>
+          ${meta && meta.tagline ? `<div class="movie-detail-tagline fst-italic text-muted mb-2">${escapeHtml(meta.tagline)}</div>` : ""}
+          ${metaBits.length ? `<div class="text-muted small mb-2">${metaBits.join(" &middot; ")}</div>` : ""}
+          ${genres.length ? `<div class="mb-3">${genres.map((g) => `<span class="badge movie-genre-badge">${escapeHtml(g)}</span>`).join(" ")}</div>` : ""}
+          <div class="d-flex flex-wrap gap-2 mb-2">
+            <button class="btn btn-primary" type="button" onclick="openMoviePlayerModal(${jsAttr(entryKey)}, ${jsAttr(title)})"><i class="bi bi-play-circle me-1"></i>Watch</button>
+            ${
+              movie.is_downloadable === false
+                ? `<button class="btn btn-outline-secondary" type="button" disabled><i class="bi bi-slash-circle me-1"></i>Downloads disabled</button>`
+                : `<a class="btn btn-outline-primary" href="${movieDownloadUrl(entryKey)}"><i class="bi bi-download me-1"></i>Download</a>`
+            }
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="movie-detail-body">
+      ${
+        meta && meta.overview
+          ? `<h6>Overview</h6><p>${escapeHtml(meta.overview)}</p>`
+          : `<p class="text-muted small">No description yet -- scrape this movie below to fetch one from TMDb.</p>`
+      }
+      ${
+        cast.length
+          ? `<h6>Cast</h6><div class="mb-3">${cast.map((c) => `<span class="movie-cast-chip">${escapeHtml(c.name || "")}${c.character ? `<span class="text-muted"> as ${escapeHtml(c.character)}</span>` : ""}</span>`).join("")}</div>`
+          : ""
+      }
+      <div class="text-muted small">${escapeHtml(movie.file_path || rawName)} &middot; ${escapeHtml(formatBytes(movie.byte_count ?? movie.file_size))}</div>
+    </div>
+    <div id="movie-scraper-card" class="mt-4"></div>
+  `;
+}
+async function renderMovieScraperCard(entryKey, movie) {
+  const container = document.getElementById("movie-scraper-card");
+  if (!container) return;
+  if (!adminEnabled) {
+    container.innerHTML = "";
+    return;
+  }
+  container.innerHTML = `<div class="text-muted small"><span class="spinner-border spinner-border-sm me-2"></span>Loading scraper status...</div>`;
+  try {
+    const settings = await api("/admin/movies/scraper-settings");
+    container.innerHTML = settings.has_api_key
+      ? renderMovieScraperSearchUi(entryKey, movie)
+      : renderMovieScraperApiKeyForm(entryKey);
+  } catch (err) {
+    container.innerHTML = `<div class="alert alert-warning small mb-0">Scraper unavailable: ${escapeHtml(err.message || "unknown error")}</div>`;
+  }
+}
+function renderMovieScraperApiKeyForm(entryKey) {
+  return `
+    <div class="card">
+      <div class="card-header"><i class="bi bi-cloud-download me-1"></i>Artwork &amp; Metadata (TMDb)</div>
+      <div class="card-body">
+        <p class="text-muted small">Set a TMDb API key (v3 auth) to search for this movie and download its poster, backdrop, and details.</p>
+        <div class="input-group">
+          <input id="movieScraperApiKeyInput" type="password" class="form-control" placeholder="TMDb API key">
+          <button class="btn btn-primary" type="button" onclick="saveMovieScraperApiKey(${jsAttr(entryKey)})"><i class="bi bi-check-lg me-1"></i>Save</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+async function saveMovieScraperApiKey(entryKey) {
+  const input = document.getElementById("movieScraperApiKeyInput");
+  const apiKey = (input && input.value || "").trim();
+  if (!apiKey) {
+    showToast("Enter a TMDb API key first.", "warning");
+    return;
+  }
+  setLoading(true, "Saving TMDb API key...");
+  try {
+    await apiPost("/admin/movies/scraper-settings", { api_key: apiKey });
+    showToast("TMDb API key saved.", "success");
+    await renderMovieScraperCard(entryKey, null);
+    await searchMovieScraper(entryKey);
+  } catch (err) {
+    showToast(`Failed to save TMDb API key: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  } finally {
+    setLoading(false);
+  }
+}
+function renderMovieScraperSearchUi(entryKey, movie) {
+  const rawName = (movie && (movie.movie_name || movie.name)) || "";
+  return `
+    <div class="card">
+      <div class="card-header"><i class="bi bi-cloud-download me-1"></i>Artwork &amp; Metadata (TMDb)</div>
+      <div class="card-body">
+        <div class="input-group mb-3">
+          <input id="movieScraperQuery" type="text" class="form-control" value="${escapeHtml(rawName)}" placeholder="Search TMDb">
+          <button class="btn btn-primary" type="button" onclick="searchMovieScraper(${jsAttr(entryKey)})"><i class="bi bi-search me-1"></i>Search</button>
+        </div>
+        <div id="movie-scraper-results"></div>
+      </div>
+    </div>
+  `;
+}
+async function searchMovieScraper(entryKey) {
+  const resultsEl = document.getElementById("movie-scraper-results");
+  if (!resultsEl) return;
+  const queryInput = document.getElementById("movieScraperQuery");
+  const query = queryInput ? queryInput.value : "";
+  resultsEl.innerHTML = `<div class="text-muted small"><span class="spinner-border spinner-border-sm me-2"></span>Searching TMDb...</div>`;
+  try {
+    const data = await api(`/admin/movies/${encodeURIComponent(entryKey)}/scrape/search?q=${encodeURIComponent(query || "")}`);
+    const results = data.results || [];
+    resultsEl.innerHTML = results.length
+      ? `<div class="list-group">${results.map((r) => renderMovieScraperResult(entryKey, r)).join("")}</div>`
+      : `<div class="text-muted small">No TMDb matches found.</div>`;
+  } catch (err) {
+    resultsEl.innerHTML = `<div class="alert alert-warning small mb-0">Search failed: ${escapeHtml(err.message || "unknown error")}</div>`;
+  }
+}
+function renderMovieScraperResult(entryKey, result) {
+  const year = result.release_date ? String(result.release_date).slice(0, 4) : "";
+  return `
+    <button type="button" class="list-group-item list-group-item-action" onclick="applyMovieScraperResult(${jsAttr(entryKey)}, ${Number(result.tmdb_id)}, this)">
+      <div class="d-flex gap-3 align-items-center">
+        ${result.thumbnail_url ? `<img class="match-thumb" src="${escapeHtml(result.thumbnail_url)}" alt="">` : `<div class="match-thumb-placeholder"></div>`}
+        <div class="min-width-0">
+          <div class="fw-semibold">${escapeHtml(result.title || "")}${year ? ` <span class="text-muted">(${escapeHtml(year)})</span>` : ""}</div>
+          ${result.overview ? `<div class="text-muted small text-truncate-2">${escapeHtml(result.overview)}</div>` : ""}
+        </div>
+      </div>
+    </button>
+  `;
+}
+async function applyMovieScraperResult(entryKey, tmdbId, button) {
+  const originalHtml = button ? button.innerHTML : "";
+  if (button) {
+    button.disabled = true;
+    button.innerHTML = `<span class="spinner-border spinner-border-sm"></span>`;
+  }
+  setLoading(true, "Downloading artwork and metadata from TMDb...");
+  try {
+    await apiPost(`/admin/movies/${encodeURIComponent(entryKey)}/scrape/apply`, { tmdb_id: tmdbId });
+    showToast("Movie artwork and metadata updated.", "success");
+    await renderMovieDetailsPage(entryKey);
+  } catch (err) {
+    showToast(`Failed to apply TMDb match: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    if (button) {
+      button.disabled = false;
+      button.innerHTML = originalHtml;
+    }
+  } finally {
+    setLoading(false);
   }
 }
 function systemBiosTreeState(system) {
@@ -9574,6 +9846,7 @@ async function router() {
       stopSmtpAutoRefresh();
     }
     document.body.classList.toggle("artwork-page", hash.startsWith("#admin/artwork"));
+    document.body.classList.toggle("movie-explorer-active", hash.startsWith("#movies/explore"));
     if (hash === "#bios") {
       setHash(systemsTreeHash("", BIOS_TREE_ROOT));
       return;
@@ -9584,7 +9857,14 @@ async function router() {
     } else if (hash.startsWith("#systems")) {
       await renderSystemsPage();
     } else if (hash.startsWith("#movies")) {
-      await renderMoviesPage();
+      const parsed = parseMoviesHash(hash);
+      if (parsed && parsed.view === "detail") {
+        await renderMovieDetailsPage(parsed.entryKey);
+      } else if (parsed && parsed.view === "explore") {
+        await renderMovieExplorerPage();
+      } else {
+        await renderMoviesPage();
+      }
     } else if (hash === "#admin") {
       if (!adminEnabled) {
         setHash("");

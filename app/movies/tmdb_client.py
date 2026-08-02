@@ -1,0 +1,142 @@
+"""TMDb (The Movie Database) client: search, details+credits, image download.
+
+Used only by the Movies tab's metadata/artwork scraper -- see
+``movies/metadata_manager.py`` for where the API key is stored and
+``web/handlers_movies.py`` for the admin routes that call this. Same shape as
+``app/roms/scrapers.py``'s ``LaunchBoxClient`` -- stdlib ``urllib`` only, no
+third-party deps -- but movies have no per-system/per-platform matching
+concern LaunchBox has, so this is considerably simpler.
+
+Unlike LaunchBox/TheGamesDB (both keyless), TMDb requires a free API key --
+there is no keyless equivalent with comparable cast/description/genre/poster
+data for movies. The key is supplied by the user via the admin UI (see
+``metadata_manager.py``'s state storage), never hardcoded or read from an env
+var here -- this module only ever receives it as a parameter.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from typing import List, Optional, Tuple
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode, urlparse
+from urllib.request import Request, urlopen
+
+TMDB_API_BASE = "https://api.themoviedb.org/3"
+TMDB_IMAGE_BASE = "https://image.tmdb.org/t/p"
+TMDB_IMAGE_HOST = "image.tmdb.org"
+# w500/w1280 balance quality against a locked-down device's limited storage --
+# TMDb also serves "original", but that's far larger than this needs.
+TMDB_POSTER_SIZE = "w500"
+TMDB_POSTER_THUMB_SIZE = "w154"
+TMDB_BACKDROP_SIZE = "w1280"
+# Cast lists can run to 100+ credited people for a large production; the
+# `credits` payload is already ordered by billing, so the top 20 is the
+# meaningful cast, not an arbitrary cut.
+TMDB_CAST_LIMIT = 20
+SCRAPER_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+
+
+class TmdbUnavailableError(RuntimeError):
+    """Raised when TMDb can't be reached, rejects the request, or no API key is configured."""
+
+
+def tmdb_image_url(path: Optional[str], size: str) -> Optional[str]:
+    if not path:
+        return None
+    return f"{TMDB_IMAGE_BASE}/{size}{path}"
+
+
+class TmdbClient:
+    def __init__(self, api_key: str, timeout_seconds: int = 15):
+        self.api_key = str(api_key or "").strip()
+        self.timeout_seconds = timeout_seconds
+        if not self.api_key:
+            raise TmdbUnavailableError("No TMDb API key is configured")
+
+    def _get_json(self, path: str, params: Optional[dict] = None) -> dict:
+        query = dict(params or {})
+        query["api_key"] = self.api_key
+        url = f"{TMDB_API_BASE}{path}?{urlencode(query)}"
+        request = Request(url, headers={"User-Agent": SCRAPER_USER_AGENT, "Accept": "application/json"})
+        try:
+            with urlopen(request, timeout=self.timeout_seconds) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except HTTPError as error:
+            if error.code == 401:
+                raise TmdbUnavailableError("TMDb rejected the configured API key") from error
+            if error.code == 404:
+                raise TmdbUnavailableError("TMDb has no movie with that id") from error
+            raise TmdbUnavailableError(f"TMDb returned HTTP {error.code}") from error
+        except (URLError, TimeoutError, OSError) as error:
+            raise TmdbUnavailableError("TMDb could not be reached from this Drone") from error
+
+    def search(self, query: str, limit: int = 10) -> List[dict]:
+        normalized_query = str(query or "").strip()
+        if not normalized_query:
+            return []
+        payload = self._get_json("/search/movie", {"query": normalized_query, "include_adult": "false"})
+        results = payload.get("results") if isinstance(payload, dict) else None
+        if not isinstance(results, list):
+            return []
+        output = []
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            output.append(
+                {
+                    "tmdb_id": item.get("id"),
+                    "title": item.get("title") or item.get("original_title") or "",
+                    "release_date": item.get("release_date") or None,
+                    "overview": item.get("overview") or "",
+                    "thumbnail_url": tmdb_image_url(item.get("poster_path"), TMDB_POSTER_THUMB_SIZE),
+                }
+            )
+        return output[: max(1, min(int(limit), 20))]
+
+    def details(self, tmdb_id) -> dict:
+        safe_id = re.sub(r"[^0-9]", "", str(tmdb_id or ""))
+        if not safe_id:
+            raise ValueError("tmdb_id is required")
+        # append_to_response=credits gets cast/crew in the same request instead
+        # of a separate /credits call -- one HTTP round trip per apply.
+        payload = self._get_json(f"/movie/{safe_id}", {"append_to_response": "credits"})
+        genres = [genre.get("name") for genre in (payload.get("genres") or []) if isinstance(genre, dict) and genre.get("name")]
+        credits_payload = payload.get("credits") if isinstance(payload.get("credits"), dict) else {}
+        cast = []
+        for member in (credits_payload.get("cast") or [])[:TMDB_CAST_LIMIT]:
+            if not isinstance(member, dict) or not member.get("name"):
+                continue
+            cast.append({"name": member.get("name"), "character": member.get("character") or ""})
+        return {
+            "tmdb_id": payload.get("id"),
+            "title": payload.get("title") or payload.get("original_title") or "",
+            "overview": payload.get("overview") or "",
+            "tagline": payload.get("tagline") or "",
+            "genres": genres,
+            "cast": cast,
+            "release_date": payload.get("release_date") or None,
+            "rating": payload.get("vote_average"),
+            "runtime_minutes": payload.get("runtime"),
+            "poster_url": tmdb_image_url(payload.get("poster_path"), TMDB_POSTER_SIZE),
+            "backdrop_url": tmdb_image_url(payload.get("backdrop_path"), TMDB_BACKDROP_SIZE),
+        }
+
+    def download_image(self, url: str) -> Tuple[bytes, str]:
+        parsed = urlparse(str(url or ""))
+        if parsed.scheme != "https" or parsed.netloc != TMDB_IMAGE_HOST:
+            raise ValueError("image_url must be a TMDb image URL")
+        request = Request(url, headers={"User-Agent": SCRAPER_USER_AGENT, "Accept": "image/*"})
+        with urlopen(request, timeout=self.timeout_seconds) as response:
+            content_type = response.headers.get_content_type()
+            if not str(content_type or "").startswith("image/"):
+                raise ValueError("image_url did not return an image")
+            max_bytes = 20 * 1024 * 1024
+            data = response.read(max_bytes + 1)
+            if len(data) > max_bytes:
+                raise ValueError("image is too large")
+            return data, content_type

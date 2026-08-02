@@ -199,5 +199,77 @@ class MoviesStoreTest(unittest.TestCase):
         self.assertIsNone(movies_store.get_movie_by_key(self.movies_root, "not-a-real-key"))
 
 
+class MovieMetadataStoreTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.userdata = Path(self._tmp.name)
+        self.movies_root = self.userdata / "movies"
+        self.movies_root.mkdir(parents=True)
+        self._db_env = os.environ.get("DRONE_STATE_DATABASE_FILE")
+        os.environ["DRONE_STATE_DATABASE_FILE"] = str(self.userdata / "system" / "drone-app" / "cache.sqlite3")
+
+    def tearDown(self):
+        if self._db_env is None:
+            os.environ.pop("DRONE_STATE_DATABASE_FILE", None)
+        else:
+            os.environ["DRONE_STATE_DATABASE_FILE"] = self._db_env
+        self._tmp.cleanup()
+
+    def test_get_movie_metadata_returns_none_when_never_scraped(self):
+        self.assertIsNone(movies_store.get_movie_metadata(self.movies_root, "deadbeef"))
+
+    def test_save_and_get_round_trips_all_fields(self):
+        saved = movies_store.save_movie_metadata(
+            self.movies_root,
+            "deadbeef",
+            provider="tmdb",
+            provider_id="603",
+            title="The Matrix",
+            poster_relative_path="The Matrix/images/the-matrix-tmdb-image.jpg",
+            backdrop_relative_path="The Matrix/images/the-matrix-tmdb-fanart.jpg",
+            extra={
+                "overview": "A hacker discovers reality is a simulation.",
+                "genres": ["Action", "Science Fiction"],
+                "cast": [{"name": "Keanu Reeves", "character": "Neo"}],
+                "release_date": "1999-03-30",
+                "rating": 8.2,
+                "runtime_minutes": 136,
+            },
+        )
+        self.assertEqual(saved["title"], "The Matrix")
+        self.assertEqual(saved["provider"], "tmdb")
+        self.assertEqual(saved["provider_id"], "603")
+        self.assertEqual(saved["genres"], ["Action", "Science Fiction"])
+        self.assertEqual(saved["cast"], [{"name": "Keanu Reeves", "character": "Neo"}])
+        self.assertTrue(saved["scraped_at"])
+
+        fetched = movies_store.get_movie_metadata(self.movies_root, "deadbeef")
+        self.assertEqual(fetched, saved)
+
+    def test_save_upserts_on_re_scrape(self):
+        movies_store.save_movie_metadata(
+            self.movies_root, "deadbeef", provider="tmdb", provider_id="1", title="Wrong Movie",
+            poster_relative_path=None, backdrop_relative_path=None, extra={},
+        )
+        movies_store.save_movie_metadata(
+            self.movies_root, "deadbeef", provider="tmdb", provider_id="603", title="The Matrix",
+            poster_relative_path=None, backdrop_relative_path=None, extra={},
+        )
+        fetched = movies_store.get_movie_metadata(self.movies_root, "deadbeef")
+        self.assertEqual(fetched["title"], "The Matrix")
+        self.assertEqual(fetched["provider_id"], "603")
+
+    def test_list_movie_display_titles_only_includes_scraped_movies(self):
+        movies_store.save_movie_metadata(
+            self.movies_root, "aaaa", provider="tmdb", provider_id="1", title="Scraped Movie",
+            poster_relative_path=None, backdrop_relative_path=None, extra={},
+        )
+        titles = movies_store.list_movie_display_titles(self.movies_root)
+        self.assertEqual(titles, {"aaaa": "Scraped Movie"})
+
+    def test_list_movie_display_titles_empty_when_none_scraped(self):
+        self.assertEqual(movies_store.list_movie_display_titles(self.movies_root), {})
+
+
 if __name__ == "__main__":
     unittest.main()

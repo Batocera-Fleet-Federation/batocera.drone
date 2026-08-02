@@ -24,9 +24,11 @@ Same four responsibilities as the ROM/BIOS/saves inventories:
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -132,6 +134,19 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_movies_cache_page "
         "ON movies_cache_entries(file_path COLLATE NOCASE, entry_key)"
+    )
+    # Scraped TMDb metadata, one row per movie that has been scraped (not every
+    # movies_cache_entries row has one). title/poster/backdrop are their own
+    # columns since they're looked up on every list/detail response; the rest
+    # (overview, tagline, genres, cast, release_date, rating, runtime) is far
+    # more likely to grow/change shape over time, so it lives in extra_json --
+    # same "don't keep ALTERing for every optional field" convention
+    # rom_cache_entries/bios_cache_entries/artwork_cache_entries already use.
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS movies_metadata_entries ("
+        "entry_key TEXT PRIMARY KEY, provider TEXT NOT NULL, provider_id TEXT NOT NULL, "
+        "title TEXT NOT NULL DEFAULT '', poster_relative_path TEXT, backdrop_relative_path TEXT, "
+        "scraped_at TEXT NOT NULL, extra_json TEXT NOT NULL DEFAULT '{}')"
     )
     connection.commit()
 
@@ -308,6 +323,76 @@ def get_movie_by_key(movies_root: Path, entry_key: str) -> Optional[dict]:
         modified_time=int(row[4] or 0),
         fingerprint=row[5] or "",
     ).to_payload()
+
+
+def get_movie_metadata(movies_root: Path, entry_key: str) -> Optional[dict]:
+    """Return one movie's scraped TMDb metadata, or ``None`` if it has never
+    been scraped -- distinct from ``get_movie_by_key`` returning ``None`` for
+    an unknown *file*; a movie can exist with no metadata row at all."""
+    with _open(movies_root) as connection:
+        row = connection.execute(
+            "SELECT provider, provider_id, title, poster_relative_path, backdrop_relative_path, scraped_at, extra_json "
+            "FROM movies_metadata_entries WHERE entry_key = ?",
+            (entry_key,),
+        ).fetchone()
+    if not row:
+        return None
+    try:
+        extra = json.loads(row[6] or "{}")
+    except (TypeError, ValueError):
+        extra = {}
+    return {
+        "entry_key": entry_key,
+        "provider": row[0],
+        "provider_id": row[1],
+        "title": row[2] or "",
+        "poster_relative_path": row[3],
+        "backdrop_relative_path": row[4],
+        "scraped_at": row[5],
+        **extra,
+    }
+
+
+def save_movie_metadata(
+    movies_root: Path,
+    entry_key: str,
+    *,
+    provider: str,
+    provider_id: str,
+    title: str,
+    poster_relative_path: Optional[str],
+    backdrop_relative_path: Optional[str],
+    extra: dict,
+) -> dict:
+    """Upsert one movie's scraped metadata. ``extra`` is any JSON-serializable
+    dict (overview, tagline, genres, cast, release_date, rating,
+    runtime_minutes) -- see the module docstring's note on why this is a
+    single JSON blob column rather than one column per field."""
+    scraped_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    extra_json = json.dumps(extra or {})
+    with _open(movies_root) as connection:
+        connection.execute(
+            "INSERT INTO movies_metadata_entries "
+            "(entry_key, provider, provider_id, title, poster_relative_path, backdrop_relative_path, scraped_at, extra_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(entry_key) DO UPDATE SET provider=excluded.provider, provider_id=excluded.provider_id, "
+            "title=excluded.title, poster_relative_path=excluded.poster_relative_path, "
+            "backdrop_relative_path=excluded.backdrop_relative_path, scraped_at=excluded.scraped_at, "
+            "extra_json=excluded.extra_json",
+            (entry_key, provider, str(provider_id), title or "", poster_relative_path, backdrop_relative_path, scraped_at, extra_json),
+        )
+        connection.commit()
+    return get_movie_metadata(movies_root, entry_key)
+
+
+def list_movie_display_titles(movies_root: Path) -> dict:
+    """Return ``{entry_key: scraped_title}`` for every movie that has been
+    scraped -- used to overlay a clean title onto the plain list/tree
+    response without a JOIN in every list query (a personal movie library is
+    small enough that one extra bulk SELECT per list request is cheap)."""
+    with _open(movies_root) as connection:
+        rows = connection.execute("SELECT entry_key, title FROM movies_metadata_entries WHERE title != ''").fetchall()
+    return {row[0]: row[1] for row in rows}
 
 
 def list_movies_page(

@@ -371,9 +371,10 @@ def _schemas() -> Dict[str, Schema]:
         ),
         "MovieEntry": _object(
             {
-                "entry_key": _string("Stable id, used for /movies/{entry_key}/stream and /download"),
+                "entry_key": _string("Stable id, used for /movies/{entry_key}/stream, /download, and /artwork/{field}"),
                 "movie_name": _string(),
                 "name": _string(),
+                "display_title": _string("Scraped TMDb title if this movie has been scraped, otherwise movie_name"),
                 "file_path": _string(),
                 "relative_path": _string(),
                 "absolute_path": _string(),
@@ -398,6 +399,49 @@ def _schemas() -> Dict[str, Schema]:
             },
             ("movies", "count", "offset", "limit", "returned", "has_more"),
         ),
+        "MovieCastMember": _object({"name": _string(), "character": _string()}, description="One TMDb credits.cast entry, billing-ordered."),
+        "MovieMetadata": _object(
+            {
+                "entry_key": _string(),
+                "provider": _enum(["tmdb"]),
+                "provider_id": _string(),
+                "title": _string(),
+                "poster_relative_path": _string(nullable=True),
+                "backdrop_relative_path": _string(nullable=True),
+                "scraped_at": _string(fmt="date-time"),
+                "overview": _string(),
+                "tagline": _string(),
+                "genres": _array(_string()),
+                "cast": _array(_ref("MovieCastMember")),
+                "release_date": _string(nullable=True),
+                "rating": _number(nullable=True),
+                "runtime_minutes": _integer(nullable=True),
+            },
+            description="Scraped TMDb metadata for one movie -- absent (see MovieDetailResponse.metadata) until it has been scraped at least once.",
+        ),
+        "MovieDetailResponse": _object(
+            {"metadata": _object(additional_properties=True, description="MovieMetadata fields, or absent/null if never scraped")},
+            description="MovieEntry's fields plus the movie's scraped metadata (or null).",
+            additional_properties=True,
+        ),
+        "MovieScraperSettingsResponse": _object(
+            {"has_api_key": _boolean("Whether a TMDb API key is configured -- the key itself is never returned")},
+            ("has_api_key",),
+        ),
+        "MovieScraperSettingsUpdateRequest": _object({"api_key": _string("TMDb API key (v3 auth)")}, ("api_key",)),
+        "MovieScrapeSearchResult": _object(
+            {
+                "tmdb_id": _integer(),
+                "title": _string(),
+                "release_date": _string(nullable=True),
+                "overview": _string(),
+                "thumbnail_url": _string(nullable=True),
+            },
+        ),
+        "MovieScrapeSearchResponse": _object(
+            {"query": _string(), "results": _array(_ref("MovieScrapeSearchResult"))}, ("query", "results")
+        ),
+        "MovieScrapeApplyRequest": _object({"tmdb_id": _integer()}, ("tmdb_id",)),
         "SearchResponse": _object({"query": _string(), "system": _string(nullable=True), "results": _array(_ref("AssetEntry"))}, ("query", "results")),
         "RomFingerprintResponse": _object(
             {"system": _string(), "unique_id": _string(), "fingerprint": _string(), "cached": _boolean()},
@@ -1708,6 +1752,57 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
                     parameters=[_path_param("entry_key")],
                     tags=["downloads"],
                     error_codes=("401", "403", "404", "429", "500"),
+                )
+            },
+            "/movies/{entry_key}": {
+                "get": _operation(
+                    "Full detail for one movie: file info plus scraped TMDb metadata (metadata is null if never scraped)",
+                    {"200": _json_response("MovieDetailResponse", "Movie detail")},
+                    parameters=[_path_param("entry_key")],
+                    tags=["library"],
+                    error_codes=("401", "403", "404", "429", "500"),
+                )
+            },
+            "/movies/{entry_key}/artwork/{field}": {
+                "get": _operation(
+                    "Serve a scraped poster/backdrop image",
+                    {"200": _media_response("Artwork image bytes", ["image/jpeg"])},
+                    parameters=[_path_param("entry_key"), _path_param("field", "poster or backdrop")],
+                    tags=["library"],
+                    error_codes=("401", "403", "404", "429", "500"),
+                )
+            },
+            "/admin/movies/scraper-settings": {
+                "get": _operation(
+                    "Get whether a TMDb API key is configured (the key itself is never returned)",
+                    {"200": _json_response("MovieScraperSettingsResponse")},
+                    tags=["admin", "movies"],
+                ),
+                "post": _operation(
+                    "Save the TMDb API key used to scrape movie metadata/artwork",
+                    {"200": _json_response("MovieScraperSettingsResponse"), "400": _json_response("ErrorResponse", "Missing api_key")},
+                    request_body=_json_request("MovieScraperSettingsUpdateRequest"),
+                    tags=["admin", "movies"],
+                    error_codes=("400", "401", "403", "429", "500", "503"),
+                ),
+            },
+            "/admin/movies/{entry_key}/scrape/search": {
+                "get": _operation(
+                    "Search TMDb for this movie -- q defaults to a cleaned-up version of the filename if omitted",
+                    {"200": _json_response("MovieScrapeSearchResponse"), "404": _json_response("ErrorResponse", "Unknown movie"), "502": _json_response("ErrorResponse", "TMDb unreachable or no API key configured")},
+                    parameters=[_path_param("entry_key"), _query_param("q", _string(), "Search query; defaults to a cleaned-up filename")],
+                    tags=["admin", "movies"],
+                    error_codes=("401", "403", "404", "429", "500", "502", "503"),
+                )
+            },
+            "/admin/movies/{entry_key}/scrape/apply": {
+                "post": _operation(
+                    "Apply a chosen TMDb search result: downloads poster/backdrop art next to the movie file and saves metadata",
+                    {"200": _json_response("MovieMetadata"), "400": _json_response("ErrorResponse", "Missing/invalid tmdb_id"), "404": _json_response("ErrorResponse", "Unknown movie"), "502": _json_response("ErrorResponse", "TMDb unreachable or no API key configured")},
+                    request_body=_json_request("MovieScrapeApplyRequest"),
+                    parameters=[_path_param("entry_key")],
+                    tags=["admin", "movies"],
+                    error_codes=("400", "401", "403", "404", "429", "500", "502", "503"),
                 )
             },
             "/openapi.json": {

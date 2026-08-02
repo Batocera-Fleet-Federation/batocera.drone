@@ -284,6 +284,14 @@ class ApiRoutesMixin:
                 self._handle_movie_download(parts[1])
                 return
 
+            if len(parts) == 4 and parts[0] == "movies" and parts[2] == "artwork":
+                self._handle_movie_artwork(parts[1], parts[3])
+                return
+
+            if len(parts) == 2 and parts[0] == "movies":
+                self._handle_movie_detail(parts[1])
+                return
+
             if len(parts) == 3 and parts[0] == "systems" and parts[2] == "images":
                 self._handle_images_list(parts[1])
                 return
@@ -491,6 +499,14 @@ class ApiRoutesMixin:
                     query_params.get("rom_path", [""])[0],
                     query_params.get("q", [""])[0],
                 )
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "movies" and parts[2] == "scraper-settings":
+                self._handle_admin_movie_scraper_settings()
+                return
+
+            if len(parts) == 5 and parts[0] == "admin" and parts[1] == "movies" and parts[3] == "scrape" and parts[4] == "search":
+                self._handle_admin_movie_scrape_search(parts[2], query_params.get("q", [None])[0])
                 return
 
             if len(parts) == 2 and parts[0] == "admin" and parts[1] == "network-mode":
@@ -926,6 +942,16 @@ class ApiRoutesMixin:
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "notifications" and parts[2] == "clear":
                 payload = self._read_json_body()
                 self._handle_admin_notifications_clear(payload)
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "movies" and parts[2] == "scraper-settings":
+                payload = self._read_json_body()
+                self._handle_admin_movie_scraper_settings_update(payload)
+                return
+
+            if len(parts) == 5 and parts[0] == "admin" and parts[1] == "movies" and parts[3] == "scrape" and parts[4] == "apply":
+                payload = self._read_json_body()
+                self._handle_admin_movie_scrape_apply(parts[2], payload)
                 return
 
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "artwork" and parts[2] == "launchbox" and parts[3] == "apply":

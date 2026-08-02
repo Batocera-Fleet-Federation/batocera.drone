@@ -18,8 +18,20 @@ from typing import Optional
 
 try:
     from ..storage import movies_store as _movies_store
+    from ..movies import metadata_manager as _movies_metadata
+    from ..movies.tmdb_client import TmdbUnavailableError as _TmdbUnavailableError
 except ImportError:  # pragma: no cover - direct script execution fallback
     from storage import movies_store as _movies_store  # type: ignore
+    from movies import metadata_manager as _movies_metadata  # type: ignore
+    from movies.tmdb_client import TmdbUnavailableError as _TmdbUnavailableError  # type: ignore
+
+# Maps the public artwork field name (URL-facing, movie-flavored) to the
+# metadata row column that holds its stored relative path. File-naming on
+# disk uses the ROM-flavored "image"/"fanart" vocabulary instead (see
+# movies/metadata_manager.py's _artwork_path) so a scraped movie's artwork
+# reads as "just like a ROM's" -- the two vocabularies don't need to match,
+# this is just the lookup for serving what was already downloaded.
+_ARTWORK_FIELD_COLUMNS = {"poster": "poster_relative_path", "backdrop": "backdrop_relative_path"}
 
 # entry_key is always a hex-digest slice computed server-side (see
 # movies_store._entry_key) -- this just rejects anything that couldn't
@@ -56,6 +68,7 @@ class HandlersMoviesMixin:
                 self.settings.movies_root, query=str(query or ""), limit=safe_limit, offset=safe_offset
             )
             items = page["items"]
+            self._apply_movie_display_titles(items)
             if not self.settings.downloads_enabled:
                 for item in items:
                     item["is_downloadable"] = False
@@ -78,6 +91,7 @@ class HandlersMoviesMixin:
                 item for item in items
                 if query_value in " ".join([str(item.get("movie_name") or ""), str(item.get("file_path") or "")]).lower()
             ]
+        self._apply_movie_display_titles(items)
         if not self.settings.downloads_enabled:
             for item in items:
                 item["is_downloadable"] = False
@@ -92,6 +106,14 @@ class HandlersMoviesMixin:
                 "has_more": False,
             },
         )
+
+    def _apply_movie_display_titles(self, items: list) -> None:
+        """Overlay each movie's scraped TMDb title (once it has one) in place
+        of its raw filename -- one bulk lookup per list call, not a query per
+        row. Falls back to movie_name for anything never scraped."""
+        titles = _movies_store.list_movie_display_titles(self.settings.movies_root)
+        for item in items:
+            item["display_title"] = titles.get(item.get("entry_key")) or item.get("movie_name") or ""
 
     def _resolve_movie_path(self, entry_key: str) -> Path:
         """Look up a movie by its stable id and validate the resolved path
@@ -170,3 +192,96 @@ class HandlersMoviesMixin:
                     break
                 self.wfile.write(chunk)
                 remaining -= len(chunk)
+
+    # ------------------------------------------------------------- detail
+
+    def _handle_movie_detail(self, entry_key: str) -> None:
+        """Full detail payload for the movie details page: the file's own
+        info plus any scraped TMDb metadata (absent entirely if never
+        scraped -- the frontend falls back to showing just the filename)."""
+        movie = _movies_store.get_movie_by_key(self.settings.movies_root, entry_key)
+        if not movie:
+            raise FileNotFoundError()
+        if not self.settings.downloads_enabled:
+            movie["is_downloadable"] = False
+        metadata = _movies_store.get_movie_metadata(self.settings.movies_root, entry_key)
+        movie["display_title"] = (metadata or {}).get("title") or movie.get("movie_name") or ""
+        movie["metadata"] = metadata
+        self._send_json(200, movie)
+
+    def _handle_movie_artwork(self, entry_key: str, field: str) -> None:
+        """Serve a scraped poster/backdrop image. Session-gated like every
+        other movies route (not admin-only) -- viewing artwork for a movie
+        you can already browse isn't an admin action, only scraping it is."""
+        column = _ARTWORK_FIELD_COLUMNS.get(str(field or ""))
+        if not column:
+            raise FileNotFoundError()
+        if not _ENTRY_KEY_RE.match(str(entry_key or "")):
+            raise FileNotFoundError()
+        metadata = _movies_store.get_movie_metadata(self.settings.movies_root, entry_key)
+        relative_path = (metadata or {}).get(column)
+        if not relative_path:
+            raise FileNotFoundError()
+        movies_root = Path(self.settings.movies_root).resolve()
+        target = (movies_root / relative_path).resolve()
+        if target == movies_root or movies_root not in target.parents or not target.is_file():
+            raise FileNotFoundError()
+        self._stream_file(target, self._guess_content_type(target))
+
+    # ------------------------------------------------------------- scraper
+
+    def _handle_admin_movie_scraper_settings(self) -> None:
+        self._send_json(200, _movies_metadata.get_settings(self.settings))
+
+    def _handle_admin_movie_scraper_settings_update(self, payload: dict) -> None:
+        payload = payload if isinstance(payload, dict) else {}
+        try:
+            result = _movies_metadata.update_settings(self.settings, payload.get("api_key"))
+        except ValueError as error:
+            self._send_json(400, {"error": str(error)})
+            return
+        self._send_json(200, result)
+
+    def _handle_admin_movie_scrape_search(self, entry_key: str, query: Optional[str]) -> None:
+        movie = _movies_store.get_movie_by_key(self.settings.movies_root, entry_key)
+        if not movie:
+            self._send_json(404, {"error": "unknown movie"})
+            return
+        search_query = str(query or "").strip() or _clean_movie_query(movie.get("movie_name") or "")
+        try:
+            results = _movies_metadata.search(self.settings, search_query)
+        except _TmdbUnavailableError as error:
+            self._send_json(502, {"error": str(error)})
+            return
+        self._send_json(200, {"query": search_query, "results": results})
+
+    def _handle_admin_movie_scrape_apply(self, entry_key: str, payload: dict) -> None:
+        payload = payload if isinstance(payload, dict) else {}
+        tmdb_id = payload.get("tmdb_id")
+        if not tmdb_id:
+            self._send_json(400, {"error": "tmdb_id is required"})
+            return
+        try:
+            result = _movies_metadata.apply(self.settings, entry_key, tmdb_id)
+        except _movies_metadata.MovieNotFoundError:
+            self._send_json(404, {"error": "unknown movie"})
+            return
+        except _TmdbUnavailableError as error:
+            self._send_json(502, {"error": str(error)})
+            return
+        except ValueError as error:
+            self._send_json(400, {"error": str(error)})
+            return
+        self._send_json(200, result)
+
+
+def _clean_movie_query(file_name: str) -> str:
+    """A reasonable starting search query from a scene/torrent-style release
+    filename ("Movie.Title.2026.1080p.BluRay.x264-GROUP.mp4") -- strips the
+    extension and replaces separator punctuation with spaces. Not trying to
+    strip quality/group tags: TMDb's search is fuzzy enough to usually find
+    the right movie anyway, and the user sees results before applying one,
+    so a merely-decent default beats a fragile "smart" parser."""
+    name = Path(str(file_name or "")).stem
+    name = re.sub(r"[.\-_,;:\[\]()<>]+", " ", name)
+    return re.sub(r"\s+", " ", name).strip()

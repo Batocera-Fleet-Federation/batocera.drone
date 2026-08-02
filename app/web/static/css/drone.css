@@ -745,6 +745,21 @@
     .tree-grid-label {
       min-width: 0;
     }
+    /* A movie's tree-row label is a real <button> (unlike every other
+       tree-row label, which is a plain span/div) so it can navigate to the
+       movie's details page -- reset default button chrome so it still
+       reads as plain label text, not a button. */
+    .movie-tree-title-btn {
+      background: none;
+      border: 0;
+      padding: 0;
+      color: inherit;
+      text-align: left;
+    }
+    .movie-tree-title-btn:hover .fw-semibold,
+    .movie-tree-title-btn:focus .fw-semibold {
+      text-decoration: underline;
+    }
     .tree-grid-caret,
     .tree-grid-icon {
       color: var(--admin-muted);
@@ -1419,6 +1434,25 @@
       color: var(--admin-text);
     }
 
+    /* Movie player modal title: a long filename must stay on one line and
+       truncate with an ellipsis instead of wrapping or pushing the close
+       button out of the header. min-width:0 is the actual fix -- a flex
+       item's default min-width is auto (its content's natural width), which
+       silently defeats flex-shrink on long text unless overridden. The icon
+       stays a fixed-size sibling so only the text itself shrinks/truncates. */
+    .movie-player-modal-title {
+      display: flex;
+      align-items: center;
+      min-width: 0;
+      font-size: 1rem;
+    }
+    .movie-player-modal-title-text {
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+      min-width: 0;
+    }
+
     /* Compact hierarchical tree used by any filesystem-browsing UI (the
        folder picker, the Move Files file list) -- small font on purpose so a
        deep path doesn't eat the whole modal. Shared structure for both
@@ -1742,6 +1776,156 @@
       background: #090d18;
       border: 1px solid var(--admin-border);
       border-radius: 0.35rem;
+    }
+    .min-width-0 { min-width: 0; }
+    .text-truncate-2 {
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+
+    /* Movie details page: a hero band (backdrop background, poster + title/
+       actions) followed by a plain-text body (overview/cast) and the
+       TMDb scraper card. */
+    .movie-detail-hero {
+      background-color: #090d18;
+      background-size: cover;
+      background-position: center;
+      border-radius: 0.5rem;
+      padding: 1.5rem;
+      margin-bottom: 1.5rem;
+    }
+    .movie-detail-hero-body {
+      display: flex;
+      gap: 1.5rem;
+      align-items: flex-end;
+    }
+    .movie-detail-poster {
+      width: 140px;
+      height: 210px;
+      object-fit: cover;
+      border-radius: 0.4rem;
+      border: 1px solid var(--admin-border);
+      background: #090d18;
+      flex-shrink: 0;
+    }
+    .movie-detail-poster-placeholder {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 2.5rem;
+      color: var(--admin-border);
+    }
+    .movie-detail-info { flex: 1; }
+    .movie-detail-title {
+      color: var(--admin-text);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .movie-genre-badge {
+      background: rgba(59, 130, 246, 0.16);
+      color: var(--admin-text);
+      border: 1px solid var(--admin-border);
+      font-weight: 500;
+      margin-right: 0.25rem;
+    }
+    .movie-detail-body h6 { color: var(--admin-text); margin-top: 1rem; }
+    .movie-cast-chip {
+      display: inline-block;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid var(--admin-border);
+      border-radius: 999px;
+      padding: 0.2rem 0.65rem;
+      margin: 0 0.35rem 0.35rem 0;
+      font-size: 0.85rem;
+      color: var(--admin-text);
+    }
+
+    /* Netflix-style movie explorer: a full-bleed overlay that replaces the
+       app chrome (sidebar/nav) while active -- movie-explorer-active is
+       toggled on <body> by the router, same mechanism as .artwork-page. */
+    body.movie-explorer-active .sidebar,
+    body.movie-explorer-active #managedPeerBanner,
+    body.movie-explorer-active #systemInfoBar {
+      display: none;
+    }
+    body.movie-explorer-active .app-shell {
+      padding: 0;
+      background: transparent;
+      border: none;
+      box-shadow: none;
+    }
+    .movie-explorer-overlay {
+      background: #05070d;
+      min-height: calc(100vh - 2rem);
+      margin: -1rem;
+      padding: 1rem;
+      border-radius: 0.5rem;
+    }
+    .movie-explorer-topbar {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      margin-bottom: 1.25rem;
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      background: #05070d;
+      padding: 0.5rem 0;
+    }
+    .movie-explorer-brand {
+      color: var(--admin-text);
+      font-size: 1.25rem;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .movie-explorer-search { max-width: 360px; }
+    .movie-explorer-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+      gap: 1rem;
+    }
+    .movie-explorer-card {
+      background: transparent;
+      border: none;
+      padding: 0;
+      text-align: left;
+      cursor: pointer;
+      transition: transform 0.15s ease;
+    }
+    .movie-explorer-card:hover { transform: scale(1.04); }
+    .movie-explorer-card-poster {
+      position: relative;
+      width: 100%;
+      aspect-ratio: 2 / 3;
+      background: #12192b;
+      border: 1px solid var(--admin-border);
+      border-radius: 0.4rem;
+      overflow: hidden;
+    }
+    .movie-explorer-card-poster img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+    .movie-explorer-card-poster-fallback {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 2rem;
+      color: var(--admin-border);
+    }
+    .movie-explorer-card-title {
+      color: var(--admin-text);
+      font-size: 0.85rem;
+      margin-top: 0.4rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
     .marquee-source-grid {
       display: grid;
