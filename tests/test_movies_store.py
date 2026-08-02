@@ -76,6 +76,29 @@ class MoviesStoreTest(unittest.TestCase):
         entries = movies_store.scan_movies(self.movies_root)
         self.assertEqual([entry.file_path for entry in entries], ["Real Movie.mp4"])
 
+    def test_scan_ignores_non_video_files(self):
+        # A scraper/metadata sidecar (gamelist-style XML), a poster image, an
+        # .nfo release-info file, and a stray .db file must never be treated
+        # as a movie -- only recognized video containers count.
+        self._write("Real Movie.mp4")
+        self._write("Real Movie.xml")
+        self._write("Real Movie.nfo")
+        self._write("poster.jpg")
+        self._write("thumbs.db")
+        entries = movies_store.scan_movies(self.movies_root)
+        self.assertEqual([entry.file_path for entry in entries], ["Real Movie.mp4"])
+
+    def test_scan_recognizes_common_video_containers(self):
+        for name in ("A.mp4", "B.mkv", "C.avi", "D.mov", "E.webm", "F.m4v", "G.wmv", "H.flv", "I.mpg", "J.mpeg", "K.m2ts", "L.ts", "M.3gp"):
+            self._write(name)
+        entries = movies_store.scan_movies(self.movies_root)
+        self.assertEqual(len(entries), 13)
+
+    def test_scan_extension_match_is_case_insensitive(self):
+        self._write("Real Movie.MP4")
+        entries = movies_store.scan_movies(self.movies_root)
+        self.assertEqual([entry.file_path for entry in entries], ["Real Movie.MP4"])
+
     def test_fingerprint_matches_rom_repository_algorithm(self):
         path = self._write("Game Trailer.mp4", b"x" * 1000)
         # Same sampled-hash algorithm as RomRepository.build_fingerprint / saves.

@@ -28,13 +28,43 @@ _ENTRY_KEY_RE = re.compile(r"^[0-9a-f]{1,64}$")
 
 
 class HandlersMoviesMixin:
-    def _handle_movies_list(self, query: Optional[str] = None, limit: int = 100, offset: int = 0) -> None:
-        safe_limit = max(1, min(int(limit), 2000))
-        safe_offset = max(0, int(offset))
-        page = _movies_store.list_movies_page(
-            self.settings.movies_root, query=str(query or ""), limit=safe_limit, offset=safe_offset
-        )
-        items = page["items"]
+    def _handle_movies_list(self, query: Optional[str] = None, limit: Optional[int] = None, offset: int = 0) -> None:
+        """``limit=None`` (no ``limit`` query param) returns the whole
+        inventory in one shot -- same convention as ``_handle_rom_list``.
+        The Movies tab's folder tree needs the complete set client-side to
+        build the on-disk hierarchy (a movie library is far smaller than a
+        ROM set, so this is cheap); ``limit``/``offset`` stay available for
+        any caller that does want a page instead."""
+        if limit is not None:
+            safe_limit = max(1, min(int(limit), 2000))
+            safe_offset = max(0, int(offset))
+            page = _movies_store.list_movies_page(
+                self.settings.movies_root, query=str(query or ""), limit=safe_limit, offset=safe_offset
+            )
+            items = page["items"]
+            if not self.settings.downloads_enabled:
+                for item in items:
+                    item["is_downloadable"] = False
+            self._send_json(
+                200,
+                {
+                    "movies": items,
+                    "count": page["total"],
+                    "offset": page["offset"],
+                    "limit": page["limit"],
+                    "returned": len(items),
+                    "has_more": (page["offset"] + len(items)) < page["total"],
+                },
+                cache_key=f"json:/movies?limit={safe_limit}&offset={safe_offset}&q={str(query or '').strip().lower()}",
+            )
+            return
+        items = _movies_store.list_movies(self.settings.movies_root)
+        query_value = str(query or "").strip().lower()
+        if query_value:
+            items = [
+                item for item in items
+                if query_value in " ".join([str(item.get("movie_name") or ""), str(item.get("file_path") or "")]).lower()
+            ]
         if not self.settings.downloads_enabled:
             for item in items:
                 item["is_downloadable"] = False
@@ -42,13 +72,13 @@ class HandlersMoviesMixin:
             200,
             {
                 "movies": items,
-                "count": page["total"],
-                "offset": page["offset"],
-                "limit": page["limit"],
+                "count": len(items),
+                "offset": 0,
+                "limit": len(items),
                 "returned": len(items),
-                "has_more": (page["offset"] + len(items)) < page["total"],
+                "has_more": False,
             },
-            cache_key=f"json:/movies?limit={safe_limit}&offset={safe_offset}&q={str(query or '').strip().lower()}",
+            cache_key=f"json:/movies?q={query_value}",
         )
 
     def _resolve_movie_path(self, entry_key: str) -> Path:

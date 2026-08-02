@@ -297,6 +297,12 @@
     .emulator-tree-children {
       border-top: 0;
     }
+    /* Movies/shows tree: same depth-aware indentation as the emulator config
+       tree above, but keeps the standard 3-column grid (label, size, Watch/
+       Download action) instead of hiding the action column. */
+    .tree-grid-row.movies-tree-row {
+      padding-left: calc(0.75rem + (var(--tree-depth, 0) * 1.35rem));
+    }
     .emulator-config-filter-wrap {
       border-bottom: 1px solid var(--admin-border);
       background: rgba(11, 16, 32, 0.72);

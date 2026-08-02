@@ -340,16 +340,48 @@ line 65) plus the `renderSystemsTree`-family functions (`drone.js` lines
 bucket. Backend listing: `handlers_content.py` (`_handle_bios_list`,
 `system`/`unassigned` query params).
 
-`renderSystems()` puts an explicit "Systems" section header above this tree
-(so it reads as one labeled section among others on the page, now that Movies
-sits right below it) and a `<hr>`-separated "Movies" section under it — same
-`tree-grid-row`/`tree-leaf-row`/`tree-grid-action` visual language, but movies
-are a **flat** list (no system/artwork association, no expand-a-root step):
-`renderMoviesTreeFiles()`/`loadMoviesTreeFiles()` page through
-`GET /movies` (`limit`/`offset`/`q`, `handlers_movies.py`,
-`storage/movies_store.py`'s `list_movies_page`) directly into a
-`#movies-tree-files` container, mirroring `loadSystemBiosTreeFiles()`'s
-pagination shape. Each row has **Watch** (opens `openMoviePlayerModal()`, a
+The Assets page is two tabs, `renderAssetsTabBar(active)` (built on the shared
+`renderAdminPanelTabs` helper, same pattern as Debug/Artwork/Swarm) prepended
+onto each tab's own render function — **Systems** (`#systems`, unchanged
+tree above) and **Movies** (`#movies`, its own top-level router entry →
+`renderMoviesPage()`), not two sections stacked on one page. Both tabs are
+genuinely separate routes, each with its own dedicated page function, mirroring
+Debug's system-info/logs/emulators split — not one shared render function
+branching on a sub-hash.
+
+**Movies tab** (`renderMoviesPage()`): movies have no system/artwork
+association, so instead of the ROM tree's `system > games` shape this is a
+plain **filesystem tree** built from each movie's on-disk relative path.
+`GET /movies` with no `limit` query param returns the *entire* inventory in
+one response (`_handle_movies_list` in `handlers_movies.py` — `limit`/`offset`
+still work for a genuinely paged caller, mirroring `_handle_rom_list`'s
+dual-mode shape, but the tree needs the whole set client-side to build
+hierarchy, and movie libraries are far smaller than ROM sets so this is
+cheap). `buildMoviesTree()`/`renderMoviesTreeNode()`/`toggleMoviesFolder()` in
+`drone.js` are a line-for-line mirror of the Emulators tab's
+`buildEmulatorConfigTree()`/`renderEmulatorConfigTreeNode()`/
+`toggleEmulatorConfigFolder()` (arbitrary nesting depth via a `--tree-depth`
+CSS custom property, `moviesTreeExpanded`/`emulatorConfigTreeExpanded` — same
+shape, separate Set) — the one difference is the CSS: `.movies-tree-row` (in
+`drone.css`, next to `.emulator-tree-row`) reuses the same depth-indentation
+`calc()` but does **not** hide `.tree-grid-action` the way the emulator
+variant does, since movie rows need their Watch/Download buttons visible.
+Search (`#moviesTreeSearch`) filters live via `oninput` (no Filter/Clear
+buttons, unlike the Systems tree's search) since the whole tree is already
+loaded client-side — matches the Emulators tab's filter UX, not the Systems
+tab's.
+
+**Movie file discovery is an allowlist, not a denylist**
+(`storage/movies_store.py`'s `_VIDEO_SUFFIXES` — mp4/mkv/avi/mov/webm/m4v/wmv/
+flv/mpg/mpeg/m2ts/ts/3gp): `_iter_movie_files()` only yields files with a
+recognized video extension. Getting this wrong (e.g. reverting to an
+ignored-suffix denylist like `.tmp`/`.lock`/`.part`) lets scraper metadata
+XML, `.nfo` files, poster images, etc. sitting in `movies_root` show up as
+"movies" and get synced/transferred as if they were one — this is the actual
+shape of a real bug that shipped and was reported ("the movies shown are all
+xml files").
+
+Each leaf row has **Watch** (opens `openMoviePlayerModal()`, a
 dynamically-created Bootstrap modal with an inline `<video controls autoplay>`
 pointed at `GET /movies/{entry_key}/stream`) and **Download**
 (`GET /movies/{entry_key}/download`, plain `_stream_file(..., as_attachment=True)`).

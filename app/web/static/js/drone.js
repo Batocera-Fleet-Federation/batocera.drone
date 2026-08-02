@@ -81,11 +81,14 @@ let systemsTreeBiosPage = { bios: [], total: 0, nextOffset: 0, loading: false, e
 // system's known BIOS files) -- distinct from systemsTreeBiosPage, which backs the
 // top-level "Shared / Unassigned BIOS" root.
 let systemsTreeSystemBiosPages = {};
-// Movies section on the same Systems/Assets page -- a flat list (movies have no
-// system/artwork association), so unlike the tree above there's no per-root
-// expand/collapse state, just a search query + one page of results.
-let moviesQuery = "";
-let moviesTreePage = { movies: [], total: 0, nextOffset: 0, loading: false, error: false };
+// Movies tab (own top-level page, see renderMoviesPage/renderAssetsTabBar) --
+// the whole set loads once (movie libraries are far smaller than ROM sets),
+// then a folder tree is built from each movie's file_path client-side,
+// mirroring buildEmulatorConfigTree's shape exactly (movies have no
+// system/artwork association, so this is a plain filesystem tree, not a
+// system-rooted one).
+let moviesAllRows = [];
+let moviesTreeExpanded = new Set();
 let filterDropdownGlobalCloseBound = false;
 let filterDropdownState = {};
 let themeFilterInitialized = false;
@@ -1679,10 +1682,7 @@ function renderSystems(data) {
     selectedSystemsTreeCategory = null;
   }
   content.innerHTML = `
-    <div class="d-flex align-items-center gap-2 mb-2">
-      <i class="bi bi-grid"></i>
-      <h2 class="h5 mb-0">Systems</h2>
-    </div>
+    ${renderAssetsTabBar("systems")}
     <div class="mb-3 systems-tree-toolbar">
       <label class="form-label" for="systemsTreeSearch">Search systems, games, or BIOS</label>
       <div class="input-group">
@@ -1704,27 +1704,8 @@ function renderSystems(data) {
           ` : ""}`
         : `<div class="text-muted">No systems, games, or BIOS files matched your filter.</div>`
     }
-
-    <hr class="my-4">
-
-    <div class="d-flex align-items-center gap-2 mb-2">
-      <i class="bi bi-film"></i>
-      <h2 class="h5 mb-0">Movies</h2>
-    </div>
-    <div class="text-muted small mb-2">Movies stored on this drone -- watch them right here or download a copy.</div>
-    <div class="mb-3 systems-tree-toolbar">
-      <label class="form-label" for="moviesTreeSearch">Search movies</label>
-      <div class="input-group">
-        <span class="input-group-text"><i class="bi bi-funnel"></i></span>
-        <input id="moviesTreeSearch" class="form-control" type="search" value="${escapeHtml(moviesQuery)}" placeholder="Filter movies by name">
-        <button id="moviesTreeSearchBtn" type="button" class="btn btn-primary">Filter</button>
-        <button id="moviesTreeClearBtn" type="button" class="btn btn-outline-secondary">Clear</button>
-      </div>
-    </div>
-    <div id="movies-tree-files"></div>
   `;
   bindSystemsTreeToolbar();
-  bindMoviesTreeToolbar();
   if (selectedSystemsTreeRoot === BIOS_TREE_ROOT) {
     renderBiosTreeFiles();
   } else if (selectedSystemsTreeRoot && selectedSystemsTreeCategory === "bios") {
@@ -1732,7 +1713,6 @@ function renderSystems(data) {
   } else if (selectedSystemsTreeRoot) {
     renderSystemTreeFiles(selectedSystemsTreeRoot);
   }
-  renderMoviesTreeFiles();
 }
 function renderSystemTreeRoot(system) {
   const name = system.name || "";
@@ -2084,99 +2064,151 @@ function movieDownloadUrl(entryKey) {
 function movieStreamUrl(entryKey) {
   return `${API_BASE}/movies/${encodeURIComponent(entryKey)}/stream`;
 }
-function bindMoviesTreeToolbar() {
-  const input = document.getElementById("moviesTreeSearch");
-  const filterBtn = document.getElementById("moviesTreeSearchBtn");
-  const clearBtn = document.getElementById("moviesTreeClearBtn");
-  const apply = () => {
-    moviesQuery = (input ? input.value : "").trim();
-    loadMoviesTreeFiles({ reset: true });
-  };
-  if (input) input.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") {
-      event.preventDefault();
-      apply();
-    }
-  });
-  if (filterBtn) filterBtn.addEventListener("click", apply);
-  if (clearBtn) clearBtn.addEventListener("click", () => {
-    if (input) input.value = "";
-    apply();
-  });
+function renderAssetsTabBar(active) {
+  return renderAdminPanelTabs(active, [
+    ["systems", "Systems", "bi-grid", "#systems"],
+    ["movies", "Movies", "bi-film", "#movies"],
+  ]);
 }
-function renderMoviesTreeFiles() {
-  const target = document.getElementById("movies-tree-files");
-  if (!target) return;
-  const payload = moviesTreePage;
-  const movies = payload.movies || [];
-  const total = Number(payload.total || movies.length);
-  const loaded = movies.length;
-  const hasMore = loaded < total;
-  const firstLoad = payload.loading && !loaded;
-  target.innerHTML = firstLoad
-    ? '<div class="tree-grid-empty small text-muted">Loading first 10 movies...</div>'
-    : `
-      ${payload.error ? '<div class="alert alert-danger py-2 small mb-2">Unable to load movies.</div>' : ''}
-      <div class="tree-leaf-list">
-        ${movies.map((item) => {
-          const name = item.movie_name || item.name || "";
-          const size = item.byte_count !== undefined ? formatBytes(item.byte_count) : "n/a";
-          return `
-            <div class="tree-grid-row tree-leaf-row">
-              <div class="tree-grid-main">
-                <i class="bi bi-film tree-grid-icon"></i>
-                <div class="tree-grid-label text-truncate" title="${escapeHtml(item.file_path || name)}">
-                  <span class="fw-semibold">${escapeHtml(name)}</span>
-                </div>
-              </div>
-              <div class="tree-grid-meta">${escapeHtml(size)}</div>
-              <div class="tree-grid-action">
-                <button class="btn btn-outline-primary btn-sm" type="button" title="Watch" onclick="openMoviePlayerModal(${jsAttr(item.entry_key)}, ${jsAttr(name)})"><i class="bi bi-play-circle"></i></button>
-                ${
-                  item.is_downloadable === false
-                    ? `<button class="btn btn-secondary btn-sm" type="button" title="Downloads disabled" disabled><i class="bi bi-slash-circle"></i></button>`
-                    : `<a class="btn btn-primary btn-sm" title="Download" href="${movieDownloadUrl(item.entry_key)}"><i class="bi bi-download"></i></a>`
-                }
-              </div>
-            </div>
-          `;
-        }).join("") || '<div class="tree-grid-empty small text-muted">No movies found.</div>'}
-      </div>
-      <div class="tree-grid-more">
-        <span class="small text-muted">${total ? `Showing ${loaded.toLocaleString()} of ${total.toLocaleString()}` : "No movies reported"}</span>
-        <button class="btn btn-outline-primary btn-sm" type="button" ${!hasMore || payload.loading ? "disabled" : ""} onclick="loadMoviesTreeFiles({ reset: false })">
-          ${payload.loading && loaded ? '<span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>' : '<i class="bi bi-plus-circle me-1"></i>'}
-          Show more
-        </button>
-      </div>
-    `;
-}
-async function loadMoviesTreeFiles(options = {}) {
-  const reset = options.reset === true;
-  if (!reset && moviesTreePage.loading) return;
-  const existingMovies = reset ? [] : (moviesTreePage.movies || []);
-  const offset = reset ? 0 : Number(moviesTreePage.nextOffset ?? existingMovies.length);
-  moviesTreePage = { ...moviesTreePage, movies: existingMovies, loading: true, error: false };
-  renderMoviesTreeFiles();
+async function renderMoviesPage() {
+  currentSystemContext = null;
+  clearSystemTheme();
+  setLoading(true, "Loading movies...");
   try {
-    const params = new URLSearchParams();
-    params.set("limit", String(TREE_FILE_LOAD_SIZE));
-    params.set("offset", String(offset));
-    if ((moviesQuery || "").trim()) params.set("q", moviesQuery.trim());
-    const payload = await api(`/movies?${params.toString()}`);
-    const rows = payload.movies || [];
-    const loadedRows = reset ? rows : [...(moviesTreePage.movies || []), ...rows];
-    moviesTreePage = {
-      movies: loadedRows,
-      total: Number(payload.count ?? loadedRows.length),
-      nextOffset: offset + rows.length,
-      loading: false,
-      error: false,
-    };
+    const payload = await api("/movies");
+    moviesAllRows = payload.movies || [];
+    moviesTreeExpanded = new Set();
+    content.innerHTML = `
+      ${renderAssetsTabBar("movies")}
+      <div class="text-muted small mb-2">Movies and shows stored on this drone, laid out the same way they are on disk -- watch them right here or download a copy.</div>
+      <div class="mb-3 systems-tree-toolbar">
+        <label class="form-label" for="moviesTreeSearch">Search movies and folders</label>
+        <div class="input-group">
+          <span class="input-group-text"><i class="bi bi-funnel"></i></span>
+          <input id="moviesTreeSearch" class="form-control" type="search" placeholder="Filter by name" oninput="renderMoviesTreeIntoContainer(this.value)">
+        </div>
+      </div>
+      <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2 small text-muted">
+        <span>${moviesAllRows.length.toLocaleString()} movie${moviesAllRows.length === 1 ? "" : "s"}</span>
+      </div>
+      <div id="movies-tree-files"></div>
+    `;
+    renderMoviesTreeIntoContainer("");
   } catch (err) {
-    moviesTreePage = { ...moviesTreePage, loading: false, error: true };
+    content.innerHTML = `${renderAssetsTabBar("movies")}<div class="alert alert-danger">Failed to load movies: ${escapeHtml(err.message || "unknown error")}</div>`;
+  } finally {
+    setLoading(false);
   }
-  renderMoviesTreeFiles();
+}
+function moviesPathParts(movie) {
+  const raw = String(movie.file_path || movie.relative_path || movie.movie_name || "")
+    .replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+  const parts = raw.split("/").map((part) => part.trim()).filter(Boolean);
+  return parts.length ? parts : [movie.movie_name || movie.name || "movie"];
+}
+function buildMoviesTree(movies) {
+  const root = { key: "", name: "", dirs: new Map(), files: [] };
+  (movies || []).forEach((movie) => {
+    const parts = moviesPathParts(movie);
+    let node = root;
+    parts.slice(0, -1).forEach((part) => {
+      const key = node.key ? `${node.key}/${part}` : part;
+      if (!node.dirs.has(part)) node.dirs.set(part, { key, name: part, dirs: new Map(), files: [] });
+      node = node.dirs.get(part);
+    });
+    node.files.push({ name: parts[parts.length - 1] || movie.movie_name || movie.name, movie });
+  });
+  return root;
+}
+function sortMoviesTreeEntries(entries) {
+  return entries.sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), undefined, { sensitivity: "base" }));
+}
+function moviesNodeMatches(node, query) {
+  if (!query) return true;
+  if (String(node.name || "").toLowerCase().includes(query)) return true;
+  for (const file of node.files || []) {
+    if (String(file.name || file.movie?.movie_name || "").toLowerCase().includes(query)) return true;
+  }
+  for (const child of node.dirs.values()) {
+    if (moviesNodeMatches(child, query)) return true;
+  }
+  return false;
+}
+function moviesVisibleFiles(files, query) {
+  if (!query) return files;
+  return files.filter((file) => String(file.name || file.movie?.movie_name || "").toLowerCase().includes(query));
+}
+function countMoviesFiles(node) {
+  let total = (node.files || []).length;
+  for (const child of node.dirs.values()) total += countMoviesFiles(child);
+  return total;
+}
+function renderMoviesTreeLeafRow(file, depth) {
+  const movie = file.movie || {};
+  const name = file.name || movie.movie_name || movie.name || "";
+  const size = movie.byte_count !== undefined ? formatBytes(movie.byte_count) : "n/a";
+  return `
+    <div class="tree-grid-row tree-leaf-row movies-tree-row" style="--tree-depth:${depth}">
+      <div class="tree-grid-main">
+        <i class="bi bi-film tree-grid-icon"></i>
+        <div class="tree-grid-label text-truncate" title="${escapeHtml(movie.file_path || name)}">
+          <span class="fw-semibold">${escapeHtml(name)}</span>
+        </div>
+      </div>
+      <div class="tree-grid-meta">${escapeHtml(size)}</div>
+      <div class="tree-grid-action">
+        <button class="btn btn-outline-primary btn-sm" type="button" title="Watch" onclick="openMoviePlayerModal(${jsAttr(movie.entry_key)}, ${jsAttr(name)})"><i class="bi bi-play-circle"></i></button>
+        ${
+          movie.is_downloadable === false
+            ? `<button class="btn btn-secondary btn-sm" type="button" title="Downloads disabled" disabled><i class="bi bi-slash-circle"></i></button>`
+            : `<a class="btn btn-primary btn-sm" title="Download" href="${movieDownloadUrl(movie.entry_key)}"><i class="bi bi-download"></i></a>`
+        }
+      </div>
+    </div>
+  `;
+}
+function renderMoviesTreeNode(node, depth, query) {
+  if (!moviesNodeMatches(node, query)) return "";
+  const dirs = sortMoviesTreeEntries(Array.from(node.dirs.values())).map((child) => renderMoviesTreeNode(child, depth + 1, query)).join("");
+  const files = sortMoviesTreeEntries(moviesVisibleFiles(node.files || [], query)).map((file) => renderMoviesTreeLeafRow(file, depth + 1)).join("");
+  const expanded = Boolean(query) || moviesTreeExpanded.has(node.key);
+  const count = countMoviesFiles(node);
+  return `
+    <div class="movies-tree-node" data-folder-key="${escapeHtml(node.key)}">
+      <button type="button" class="tree-grid-row tree-category-row movies-tree-row text-start" style="--tree-depth:${depth}" onclick="toggleMoviesFolder(${jsAttr(node.key)})">
+        <div class="tree-grid-main">
+          <i class="bi ${expanded ? "bi-chevron-down" : "bi-chevron-right"} tree-grid-caret"></i>
+          <i class="bi ${expanded ? "bi-folder2-open" : "bi-folder2"} tree-grid-icon"></i>
+          <div class="tree-grid-label text-truncate" title="${escapeHtml(node.key)}"><span class="fw-semibold">${escapeHtml(node.name)}</span></div>
+        </div>
+        <div class="tree-grid-meta">${count.toLocaleString()} file${count === 1 ? "" : "s"}</div>
+        <div class="tree-grid-action"></div>
+      </button>
+      <div class="tree-branch" style="${expanded ? "" : "display:none;"}">${dirs}${files}</div>
+    </div>
+  `;
+}
+function renderMoviesTree(query) {
+  const tree = buildMoviesTree(moviesAllRows);
+  const dirNodes = sortMoviesTreeEntries(Array.from(tree.dirs.values())).map((node) => renderMoviesTreeNode(node, 0, query)).join("");
+  const rootFiles = sortMoviesTreeEntries(moviesVisibleFiles(tree.files, query)).map((file) => renderMoviesTreeLeafRow(file, 0)).join("");
+  if (!dirNodes && !rootFiles) {
+    return `<div class="text-muted">${moviesAllRows.length ? "No movies matched your filter." : "No movies found."}</div>`;
+  }
+  return `<div class="tree-grid">${dirNodes}${rootFiles}</div>`;
+}
+function renderMoviesTreeIntoContainer(queryValue = null) {
+  const container = document.getElementById("movies-tree-files");
+  if (!container) return;
+  const filter = queryValue === null ? (document.getElementById("moviesTreeSearch")?.value || "") : queryValue;
+  container.innerHTML = renderMoviesTree(String(filter || "").trim().toLowerCase());
+}
+function toggleMoviesFolder(key) {
+  const normalized = String(key || "");
+  if (!normalized) return;
+  if (moviesTreeExpanded.has(normalized)) moviesTreeExpanded.delete(normalized);
+  else moviesTreeExpanded.add(normalized);
+  renderMoviesTreeIntoContainer();
 }
 function openMoviePlayerModal(entryKey, movieName) {
   const modalId = "moviePlayerModal";
@@ -2631,8 +2663,6 @@ async function renderSystemsPage() {
   systemsTreeRomPages = {};
   systemsTreeMatchedSystems = new Set();
   systemsTreeBiosPage = { bios: [], total: 0, nextOffset: 0, loading: false, error: false };
-  moviesQuery = "";
-  moviesTreePage = { movies: [], total: 0, nextOffset: 0, loading: false, error: false };
   const [data, _biosSummary, searchData] = await Promise.all([
     getSystemsData(),
     loadBiosTreeSummary(),
@@ -2645,7 +2675,6 @@ async function renderSystemsPage() {
   } else if (selectedSystemsTreeRoot) {
     await loadSystemTreeFiles(selectedSystemsTreeRoot, { reset: true });
   }
-  await loadMoviesTreeFiles({ reset: true });
   setLoading(false);
   refreshRandomThemeLogo().catch(() => {});
 }
@@ -9554,6 +9583,8 @@ async function router() {
       await renderHelpPage();
     } else if (hash.startsWith("#systems")) {
       await renderSystemsPage();
+    } else if (hash.startsWith("#movies")) {
+      await renderMoviesPage();
     } else if (hash === "#admin") {
       if (!adminEnabled) {
         setHash("");

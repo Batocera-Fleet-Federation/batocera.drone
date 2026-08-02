@@ -1686,8 +1686,8 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             },
             "/movies": {
                 "get": _operation(
-                    "List local movies (flat inventory, no system grouping)",
-                    {"200": _json_response("MoviesListResponse", "Paged movies list")},
+                    "List local movies (flat inventory, no system grouping). Omit limit to get the whole set in one response (used by the Movies tab to build its folder tree client-side); pass limit for a paged response instead.",
+                    {"200": _json_response("MoviesListResponse", "Movies list -- paged if limit was given, otherwise the complete inventory")},
                     parameters=common_paging,
                     tags=["library"],
                 )

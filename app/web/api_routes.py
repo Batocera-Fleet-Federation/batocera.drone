@@ -262,17 +262,17 @@ class ApiRoutesMixin:
                 return
 
             if api_path == "/movies":
-                limit_raw = query_params.get("limit", ["100"])[0]
-                offset_raw = query_params.get("offset", ["0"])[0]
-                query = query_params.get("q", [None])[0]
+                limit = None
+                if query_params.get("limit", [None])[0] is not None:
+                    try:
+                        limit = int(query_params.get("limit", ["100"])[0])
+                    except Exception:
+                        limit = 100
                 try:
-                    limit = int(limit_raw)
-                except Exception:
-                    limit = 100
-                try:
-                    offset = int(offset_raw)
+                    offset = int(query_params.get("offset", ["0"])[0])
                 except Exception:
                     offset = 0
+                query = query_params.get("q", [None])[0]
                 self._handle_movies_list(query=query, limit=limit, offset=offset)
                 return
 

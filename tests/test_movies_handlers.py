@@ -130,6 +130,36 @@ class MoviesListHandlerTests(unittest.TestCase):
             self.assertEqual(payload["count"], 1)
             self.assertEqual(payload["movies"][0]["movie_name"], "Beta.mp4")
 
+    def test_no_limit_returns_the_whole_inventory_unpaginated(self) -> None:
+        # The Movies tab's folder tree needs the complete set client-side to
+        # build the on-disk hierarchy -- omitting limit must never truncate.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for index in range(5):
+                _write_movie(root, f"clips/Clip{index}.mp4", b"x")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+            handler = _handler(settings)
+            handler._handle_movies_list()
+            _status, payload = handler.json_response
+            self.assertEqual(payload["count"], 5)
+            self.assertEqual(len(payload["movies"]), 5)
+            self.assertFalse(payload["has_more"])
+
+    def test_explicit_limit_still_paginates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Alpha.mp4", b"a")
+            _write_movie(root, "Beta.mp4", b"b")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+            handler = _handler(settings)
+            handler._handle_movies_list(limit=1, offset=0)
+            _status, payload = handler.json_response
+            self.assertEqual(payload["count"], 2)
+            self.assertEqual(len(payload["movies"]), 1)
+            self.assertTrue(payload["has_more"])
+
 
 class ResolveMoviePathTests(unittest.TestCase):
     def test_unknown_entry_key_raises_not_found(self) -> None:

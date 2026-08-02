@@ -42,9 +42,17 @@ except ImportError:  # pragma: no cover - direct script execution fallback
 
 MOVIES_FINGERPRINT_ALGORITHM = _fp.FINGERPRINT_ALGORITHM
 
-# Files Batocera/editors sometimes write next to movies that are not
-# themselves transferable movies.
-_IGNORED_SUFFIXES = {".tmp", ".bak", ".lock", ".part"}
+# Recognized video file extensions -- movies_root can accumulate non-video
+# files alongside the real ones (scraper metadata XML, poster/thumbnail
+# images, .nfo files, partial ".part"/".lock" files from an in-progress
+# download, ...) that must never show up in the movie library or get synced/
+# transferred as if they were one. An allowlist (rather than trying to
+# enumerate every junk suffix that might show up) is the only thing that
+# actually guarantees that.
+_VIDEO_SUFFIXES = {
+    ".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v", ".wmv", ".flv",
+    ".mpg", ".mpeg", ".m2ts", ".ts", ".3gp",
+}
 
 
 def default_movies_root() -> Path:
@@ -135,7 +143,7 @@ def _iter_movie_files(movies_root: Path):
     for current_root, _dirs, file_names in os.walk(root):
         for name in sorted(file_names):
             file_path = Path(current_root) / name
-            if file_path.suffix.lower() in _IGNORED_SUFFIXES:
+            if file_path.suffix.lower() not in _VIDEO_SUFFIXES:
                 continue
             try:
                 if not file_path.is_file() or file_path.is_symlink():
