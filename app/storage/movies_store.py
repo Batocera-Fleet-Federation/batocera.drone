@@ -63,6 +63,7 @@ class MovieEntry:
 
     def to_payload(self) -> dict:
         return {
+            "entry_key": self.entry_key,
             "movie_name": self.movie_name,
             "name": self.movie_name,
             "file_path": self.file_path,
@@ -276,6 +277,29 @@ def list_movies(movies_root: Path) -> list[dict]:
         ).to_payload()
         for row in rows
     ]
+
+
+def get_movie_by_key(movies_root: Path, entry_key: str) -> Optional[dict]:
+    """Return one cached movie row by its ``entry_key`` (the stable,
+    path-based id used to identify a movie for streaming/download), or
+    ``None`` if unknown -- callers should treat that as a 404."""
+    with _open(movies_root) as connection:
+        row = connection.execute(
+            "SELECT file_path, movie_name, absolute_path, file_size, modified_time, fingerprint "
+            "FROM movies_cache_entries WHERE entry_key = ?",
+            (entry_key,),
+        ).fetchone()
+    if not row:
+        return None
+    return MovieEntry(
+        entry_key=entry_key,
+        file_path=row[0],
+        movie_name=row[1],
+        absolute_path=row[2] or "",
+        file_size=int(row[3] or 0),
+        modified_time=int(row[4] or 0),
+        fingerprint=row[5] or "",
+    ).to_payload()
 
 
 def list_movies_page(

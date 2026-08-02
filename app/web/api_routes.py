@@ -261,6 +261,29 @@ class ApiRoutesMixin:
                 self._handle_bios_download(parts[1])
                 return
 
+            if api_path == "/movies":
+                limit_raw = query_params.get("limit", ["100"])[0]
+                offset_raw = query_params.get("offset", ["0"])[0]
+                query = query_params.get("q", [None])[0]
+                try:
+                    limit = int(limit_raw)
+                except Exception:
+                    limit = 100
+                try:
+                    offset = int(offset_raw)
+                except Exception:
+                    offset = 0
+                self._handle_movies_list(query=query, limit=limit, offset=offset)
+                return
+
+            if len(parts) == 3 and parts[0] == "movies" and parts[2] == "stream":
+                self._handle_movie_stream(parts[1])
+                return
+
+            if len(parts) == 3 and parts[0] == "movies" and parts[2] == "download":
+                self._handle_movie_download(parts[1])
+                return
+
             if len(parts) == 3 and parts[0] == "systems" and parts[2] == "images":
                 self._handle_images_list(parts[1])
                 return

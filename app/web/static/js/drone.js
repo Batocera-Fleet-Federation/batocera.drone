@@ -81,6 +81,11 @@ let systemsTreeBiosPage = { bios: [], total: 0, nextOffset: 0, loading: false, e
 // system's known BIOS files) -- distinct from systemsTreeBiosPage, which backs the
 // top-level "Shared / Unassigned BIOS" root.
 let systemsTreeSystemBiosPages = {};
+// Movies section on the same Systems/Assets page -- a flat list (movies have no
+// system/artwork association), so unlike the tree above there's no per-root
+// expand/collapse state, just a search query + one page of results.
+let moviesQuery = "";
+let moviesTreePage = { movies: [], total: 0, nextOffset: 0, loading: false, error: false };
 let filterDropdownGlobalCloseBound = false;
 let filterDropdownState = {};
 let themeFilterInitialized = false;
@@ -1674,6 +1679,10 @@ function renderSystems(data) {
     selectedSystemsTreeCategory = null;
   }
   content.innerHTML = `
+    <div class="d-flex align-items-center gap-2 mb-2">
+      <i class="bi bi-grid"></i>
+      <h2 class="h5 mb-0">Systems</h2>
+    </div>
     <div class="mb-3 systems-tree-toolbar">
       <label class="form-label" for="systemsTreeSearch">Search systems, games, or BIOS</label>
       <div class="input-group">
@@ -1695,8 +1704,27 @@ function renderSystems(data) {
           ` : ""}`
         : `<div class="text-muted">No systems, games, or BIOS files matched your filter.</div>`
     }
+
+    <hr class="my-4">
+
+    <div class="d-flex align-items-center gap-2 mb-2">
+      <i class="bi bi-film"></i>
+      <h2 class="h5 mb-0">Movies</h2>
+    </div>
+    <div class="text-muted small mb-2">Movies stored on this drone -- watch them right here or download a copy.</div>
+    <div class="mb-3 systems-tree-toolbar">
+      <label class="form-label" for="moviesTreeSearch">Search movies</label>
+      <div class="input-group">
+        <span class="input-group-text"><i class="bi bi-funnel"></i></span>
+        <input id="moviesTreeSearch" class="form-control" type="search" value="${escapeHtml(moviesQuery)}" placeholder="Filter movies by name">
+        <button id="moviesTreeSearchBtn" type="button" class="btn btn-primary">Filter</button>
+        <button id="moviesTreeClearBtn" type="button" class="btn btn-outline-secondary">Clear</button>
+      </div>
+    </div>
+    <div id="movies-tree-files"></div>
   `;
   bindSystemsTreeToolbar();
+  bindMoviesTreeToolbar();
   if (selectedSystemsTreeRoot === BIOS_TREE_ROOT) {
     renderBiosTreeFiles();
   } else if (selectedSystemsTreeRoot && selectedSystemsTreeCategory === "bios") {
@@ -1704,6 +1732,7 @@ function renderSystems(data) {
   } else if (selectedSystemsTreeRoot) {
     renderSystemTreeFiles(selectedSystemsTreeRoot);
   }
+  renderMoviesTreeFiles();
 }
 function renderSystemTreeRoot(system) {
   const name = system.name || "";
@@ -2048,6 +2077,152 @@ function renderBiosTreeFiles() {
         </button>
       </div>
     `;
+}
+function movieDownloadUrl(entryKey) {
+  return `${API_BASE}/movies/${encodeURIComponent(entryKey)}/download`;
+}
+function movieStreamUrl(entryKey) {
+  return `${API_BASE}/movies/${encodeURIComponent(entryKey)}/stream`;
+}
+function bindMoviesTreeToolbar() {
+  const input = document.getElementById("moviesTreeSearch");
+  const filterBtn = document.getElementById("moviesTreeSearchBtn");
+  const clearBtn = document.getElementById("moviesTreeClearBtn");
+  const apply = () => {
+    moviesQuery = (input ? input.value : "").trim();
+    loadMoviesTreeFiles({ reset: true });
+  };
+  if (input) input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      apply();
+    }
+  });
+  if (filterBtn) filterBtn.addEventListener("click", apply);
+  if (clearBtn) clearBtn.addEventListener("click", () => {
+    if (input) input.value = "";
+    apply();
+  });
+}
+function renderMoviesTreeFiles() {
+  const target = document.getElementById("movies-tree-files");
+  if (!target) return;
+  const payload = moviesTreePage;
+  const movies = payload.movies || [];
+  const total = Number(payload.total || movies.length);
+  const loaded = movies.length;
+  const hasMore = loaded < total;
+  const firstLoad = payload.loading && !loaded;
+  target.innerHTML = firstLoad
+    ? '<div class="tree-grid-empty small text-muted">Loading first 10 movies...</div>'
+    : `
+      ${payload.error ? '<div class="alert alert-danger py-2 small mb-2">Unable to load movies.</div>' : ''}
+      <div class="tree-leaf-list">
+        ${movies.map((item) => {
+          const name = item.movie_name || item.name || "";
+          const size = item.byte_count !== undefined ? formatBytes(item.byte_count) : "n/a";
+          return `
+            <div class="tree-grid-row tree-leaf-row">
+              <div class="tree-grid-main">
+                <i class="bi bi-film tree-grid-icon"></i>
+                <div class="tree-grid-label text-truncate" title="${escapeHtml(item.file_path || name)}">
+                  <span class="fw-semibold">${escapeHtml(name)}</span>
+                </div>
+              </div>
+              <div class="tree-grid-meta">${escapeHtml(size)}</div>
+              <div class="tree-grid-action">
+                <button class="btn btn-outline-primary btn-sm" type="button" title="Watch" onclick="openMoviePlayerModal(${jsAttr(item.entry_key)}, ${jsAttr(name)})"><i class="bi bi-play-circle"></i></button>
+                ${
+                  item.is_downloadable === false
+                    ? `<button class="btn btn-secondary btn-sm" type="button" title="Downloads disabled" disabled><i class="bi bi-slash-circle"></i></button>`
+                    : `<a class="btn btn-primary btn-sm" title="Download" href="${movieDownloadUrl(item.entry_key)}"><i class="bi bi-download"></i></a>`
+                }
+              </div>
+            </div>
+          `;
+        }).join("") || '<div class="tree-grid-empty small text-muted">No movies found.</div>'}
+      </div>
+      <div class="tree-grid-more">
+        <span class="small text-muted">${total ? `Showing ${loaded.toLocaleString()} of ${total.toLocaleString()}` : "No movies reported"}</span>
+        <button class="btn btn-outline-primary btn-sm" type="button" ${!hasMore || payload.loading ? "disabled" : ""} onclick="loadMoviesTreeFiles({ reset: false })">
+          ${payload.loading && loaded ? '<span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>' : '<i class="bi bi-plus-circle me-1"></i>'}
+          Show more
+        </button>
+      </div>
+    `;
+}
+async function loadMoviesTreeFiles(options = {}) {
+  const reset = options.reset === true;
+  if (!reset && moviesTreePage.loading) return;
+  const existingMovies = reset ? [] : (moviesTreePage.movies || []);
+  const offset = reset ? 0 : Number(moviesTreePage.nextOffset ?? existingMovies.length);
+  moviesTreePage = { ...moviesTreePage, movies: existingMovies, loading: true, error: false };
+  renderMoviesTreeFiles();
+  try {
+    const params = new URLSearchParams();
+    params.set("limit", String(TREE_FILE_LOAD_SIZE));
+    params.set("offset", String(offset));
+    if ((moviesQuery || "").trim()) params.set("q", moviesQuery.trim());
+    const payload = await api(`/movies?${params.toString()}`);
+    const rows = payload.movies || [];
+    const loadedRows = reset ? rows : [...(moviesTreePage.movies || []), ...rows];
+    moviesTreePage = {
+      movies: loadedRows,
+      total: Number(payload.count ?? loadedRows.length),
+      nextOffset: offset + rows.length,
+      loading: false,
+      error: false,
+    };
+  } catch (err) {
+    moviesTreePage = { ...moviesTreePage, loading: false, error: true };
+  }
+  renderMoviesTreeFiles();
+}
+function openMoviePlayerModal(entryKey, movieName) {
+  const modalId = "moviePlayerModal";
+  let modal = document.getElementById(modalId);
+  if (!modal) {
+    modal = document.createElement("div");
+    modal.id = modalId;
+    modal.className = "modal fade";
+    modal.tabIndex = -1;
+    modal.setAttribute("aria-hidden", "true");
+    document.body.appendChild(modal);
+  }
+  modal.innerHTML = `
+    <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-content themed-modal">
+        <div class="modal-header">
+          <h5 class="modal-title mb-0"><i class="bi bi-film me-2"></i>${escapeHtml(movieName || "Movie")}</h5>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <video id="moviePlayerVideo" class="w-100" style="max-height: 70vh; background: #000;" controls autoplay src="${movieStreamUrl(entryKey)}">
+            Your browser can't play this video format. <a href="${movieDownloadUrl(entryKey)}">Download it</a> instead.
+          </video>
+        </div>
+        <div class="modal-footer">
+          <a class="btn btn-outline-primary" href="${movieDownloadUrl(entryKey)}"><i class="bi bi-download me-1"></i>Download</a>
+          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Close</button>
+        </div>
+      </div>
+    </div>`;
+  // Stop playback (and the in-flight stream) once the modal closes -- otherwise
+  // a movie keeps decoding/downloading in the background after it's dismissed.
+  modal.addEventListener("hidden.bs.modal", () => {
+    const video = document.getElementById("moviePlayerVideo");
+    if (video) {
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
+    }
+  }, { once: true });
+  if (window.bootstrap?.Modal) {
+    window.bootstrap.Modal.getOrCreateInstance(modal).show();
+  } else {
+    modal.classList.add("show");
+    modal.style.display = "block";
+  }
 }
 function systemBiosTreeState(system) {
   const key = String(system || "");
@@ -2456,6 +2631,8 @@ async function renderSystemsPage() {
   systemsTreeRomPages = {};
   systemsTreeMatchedSystems = new Set();
   systemsTreeBiosPage = { bios: [], total: 0, nextOffset: 0, loading: false, error: false };
+  moviesQuery = "";
+  moviesTreePage = { movies: [], total: 0, nextOffset: 0, loading: false, error: false };
   const [data, _biosSummary, searchData] = await Promise.all([
     getSystemsData(),
     loadBiosTreeSummary(),
@@ -2468,6 +2645,7 @@ async function renderSystemsPage() {
   } else if (selectedSystemsTreeRoot) {
     await loadSystemTreeFiles(selectedSystemsTreeRoot, { reset: true });
   }
+  await loadMoviesTreeFiles({ reset: true });
   setLoading(false);
   refreshRandomThemeLogo().catch(() => {});
 }

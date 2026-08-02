@@ -153,6 +153,28 @@ class MoviesStoreTest(unittest.TestCase):
         self.assertEqual(filtered["total"], 1)
         self.assertEqual(filtered["items"][0]["movie_name"], "Beta.mp4")
 
+    def test_list_movies_page_includes_entry_key(self):
+        # entry_key is the stable id the Systems/Assets page's Watch/Download
+        # buttons use to build /movies/{entry_key}/stream and /download URLs.
+        self._write("clips/Alpha.mp4")
+        movies_store.sync_movies_cache(self.movies_root)
+        page = movies_store.list_movies_page(self.movies_root)
+        self.assertTrue(page["items"][0]["entry_key"])
+
+    def test_get_movie_by_key_returns_matching_row(self):
+        self._write("clips/Alpha.mp4", b"alpha-bytes")
+        movies_store.sync_movies_cache(self.movies_root)
+        listed = movies_store.list_movies(self.movies_root)[0]
+        row = movies_store.get_movie_by_key(self.movies_root, listed["entry_key"])
+        self.assertIsNotNone(row)
+        self.assertEqual(row["file_path"], "clips/Alpha.mp4")
+        self.assertEqual(row["entry_key"], listed["entry_key"])
+
+    def test_get_movie_by_key_returns_none_for_unknown_key(self):
+        self._write("clips/Alpha.mp4")
+        movies_store.sync_movies_cache(self.movies_root)
+        self.assertIsNone(movies_store.get_movie_by_key(self.movies_root, "not-a-real-key"))
+
 
 if __name__ == "__main__":
     unittest.main()

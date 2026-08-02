@@ -369,6 +369,35 @@ def _schemas() -> Dict[str, Schema]:
             },
             ("bios", "count", "offset", "limit", "returned", "has_more", "systems", "systems_filtered"),
         ),
+        "MovieEntry": _object(
+            {
+                "entry_key": _string("Stable id, used for /movies/{entry_key}/stream and /download"),
+                "movie_name": _string(),
+                "name": _string(),
+                "file_path": _string(),
+                "relative_path": _string(),
+                "absolute_path": _string(),
+                "file_size": _integer(),
+                "byte_count": _integer(),
+                "modified_time": _integer("Unix timestamp (seconds)"),
+                "mtime": _integer("Unix timestamp (seconds)"),
+                "fingerprint": _string(),
+                "movies_fingerprint": _string(),
+                "is_downloadable": _boolean(),
+            },
+            description="One movie file under movies_root. Movies have no system/artwork association -- this is a flat inventory.",
+        ),
+        "MoviesListResponse": _object(
+            {
+                "movies": _array(_ref("MovieEntry")),
+                "count": _integer(),
+                "offset": _integer(),
+                "limit": _integer(),
+                "returned": _integer(),
+                "has_more": _boolean(),
+            },
+            ("movies", "count", "offset", "limit", "returned", "has_more"),
+        ),
         "SearchResponse": _object({"query": _string(), "system": _string(nullable=True), "results": _array(_ref("AssetEntry"))}, ("query", "results")),
         "RomFingerprintResponse": _object(
             {"system": _string(), "unique_id": _string(), "fingerprint": _string(), "cached": _boolean()},
@@ -1653,6 +1682,32 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
                     {"200": _media_response("BIOS file stream", ["application/octet-stream"])},
                     parameters=[_path_param("unique_id")],
                     tags=["downloads"],
+                )
+            },
+            "/movies": {
+                "get": _operation(
+                    "List local movies (flat inventory, no system grouping)",
+                    {"200": _json_response("MoviesListResponse", "Paged movies list")},
+                    parameters=common_paging,
+                    tags=["library"],
+                )
+            },
+            "/movies/{entry_key}/stream": {
+                "get": _operation(
+                    "Stream a movie inline for in-browser playback (Range/206-aware for seeking)",
+                    {"200": _media_response("Movie bytes", ["video/mp4", "video/webm", "video/x-matroska", "video/quicktime", "video/x-msvideo", "application/octet-stream"])},
+                    parameters=[_path_param("entry_key")],
+                    tags=["downloads"],
+                    error_codes=("401", "403", "404", "429", "500"),
+                )
+            },
+            "/movies/{entry_key}/download": {
+                "get": _operation(
+                    "Download a movie file by its entry_key",
+                    {"200": _media_response("Movie file stream", ["application/octet-stream"])},
+                    parameters=[_path_param("entry_key")],
+                    tags=["downloads"],
+                    error_codes=("401", "403", "404", "429", "500"),
                 )
             },
             "/openapi.json": {

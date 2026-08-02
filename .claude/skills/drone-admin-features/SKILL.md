@@ -331,12 +331,39 @@ untouched, so there's no mixed local/remote state to track. Backend:
 ## ROMs/BIOS TreeGrid browser (new — absent from the old doc)
 
 A compact, filesystem-tree-style browser reached from the main nav (not the
-admin panel): `system > games | bios > files`, 10 files per page with a
+admin panel) — the navbar link is labeled **Assets** (`systemsMenuBtn` in
+`index.html`; the `id` and the `#systems` hash are unchanged, only the visible
+text was renamed): `system > games | bios > files`, 10 files per page with a
 "Show more" button. Sentinel root `BIOS_TREE_ROOT = "__bios__"` (`drone.js`
 line 65) plus the `renderSystemsTree`-family functions (`drone.js` lines
 806-1273) drive both the per-system view and the top-level shared/unassigned
 bucket. Backend listing: `handlers_content.py` (`_handle_bios_list`,
 `system`/`unassigned` query params).
+
+`renderSystems()` puts an explicit "Systems" section header above this tree
+(so it reads as one labeled section among others on the page, now that Movies
+sits right below it) and a `<hr>`-separated "Movies" section under it — same
+`tree-grid-row`/`tree-leaf-row`/`tree-grid-action` visual language, but movies
+are a **flat** list (no system/artwork association, no expand-a-root step):
+`renderMoviesTreeFiles()`/`loadMoviesTreeFiles()` page through
+`GET /movies` (`limit`/`offset`/`q`, `handlers_movies.py`,
+`storage/movies_store.py`'s `list_movies_page`) directly into a
+`#movies-tree-files` container, mirroring `loadSystemBiosTreeFiles()`'s
+pagination shape. Each row has **Watch** (opens `openMoviePlayerModal()`, a
+dynamically-created Bootstrap modal with an inline `<video controls autoplay>`
+pointed at `GET /movies/{entry_key}/stream`) and **Download**
+(`GET /movies/{entry_key}/download`, plain `_stream_file(..., as_attachment=True)`).
+Both routes are session-gated like `/systems`/`/bios` (not `/admin/*` —
+browsing your own library isn't admin-only) and respect `downloads_enabled`
+the same way `_handle_download` does. The stream route is the one place in
+this app that implements HTTP `Range`/206 Partial Content
+(`_stream_movie_range` in `handlers_movies.py`) — necessary because a
+`<video>` element needs Range support to seek/scrub a large file without
+re-downloading from byte 0; nothing else here needed that (the per-game
+preview clips served by `_handle_public_video` are short enough for a plain
+full-body response). Closing the modal (`hidden.bs.modal`) clears the
+`<video>`'s `src` and calls `.load()` so a movie doesn't keep
+decoding/streaming in the background after dismissal.
 
 ## Per-system BIOS association (new — absent from the old doc)
 
