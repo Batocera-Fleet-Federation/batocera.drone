@@ -442,6 +442,37 @@ def _schemas() -> Dict[str, Schema]:
             {"query": _string(), "results": _array(_ref("MovieScrapeSearchResult"))}, ("query", "results")
         ),
         "MovieScrapeApplyRequest": _object({"tmdb_id": _integer()}, ("tmdb_id",)),
+        "MovieBulkScrapeJob": _object(
+            {
+                "id": _integer(),
+                "status": _enum(["running", "complete", "error"]),
+                "rescan_all": _boolean(),
+                "total": _integer(),
+                "processed": _integer(),
+                "matched_count": _integer(),
+                "skipped_count": _integer(),
+                "failed_count": _integer(),
+                "current_movie": _string(),
+                "error_message": _string(nullable=True),
+                "started_at": _string(fmt="date-time"),
+                "completed_at": _string(fmt="date-time", nullable=True),
+            },
+            description="Progress of the most recent bulk artwork/metadata scrape job.",
+        ),
+        "MovieBulkScrapeStatusResponse": _object(
+            {"job": _ref("MovieBulkScrapeJob")}, description="``job`` is null if no bulk scrape has ever been run."
+        ),
+        "MovieBulkScrapeStartRequest": _object(
+            {"rescan_all": _boolean("Re-scrape every movie, not just ones missing a poster (default false)")}
+        ),
+        "MovieBulkScrapeStartResponse": _object(
+            {
+                "status": _enum(["ok", "already_running", "error"]),
+                "job": _ref("MovieBulkScrapeJob"),
+                "error": _string(nullable=True),
+            },
+            ("status",),
+        ),
         "SearchResponse": _object({"query": _string(), "system": _string(nullable=True), "results": _array(_ref("AssetEntry"))}, ("query", "results")),
         "RomFingerprintResponse": _object(
             {"system": _string(), "unique_id": _string(), "fingerprint": _string(), "cached": _boolean()},
@@ -1804,6 +1835,25 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
                     tags=["admin", "movies"],
                     error_codes=("400", "401", "403", "404", "429", "500", "502", "503"),
                 )
+            },
+            "/admin/movies/scrape/bulk": {
+                "get": _operation(
+                    "Get the progress of the most recent bulk artwork/metadata scrape job",
+                    {"200": _json_response("MovieBulkScrapeStatusResponse")},
+                    tags=["admin", "movies"],
+                ),
+                "post": _operation(
+                    "Start a background job that scrapes every movie missing a poster (or all movies, if rescan_all is set) -- "
+                    "auto-applies the top TMDb search match for each, no per-movie confirmation",
+                    {
+                        "200": _json_response("MovieBulkScrapeStartResponse"),
+                        "409": _json_response("MovieBulkScrapeStartResponse", "A bulk scrape is already running"),
+                        "502": _json_response("MovieBulkScrapeStartResponse", "TMDb unreachable or no API key configured"),
+                    },
+                    request_body=_json_request("MovieBulkScrapeStartRequest"),
+                    tags=["admin", "movies"],
+                    error_codes=("401", "403", "409", "429", "500", "502", "503"),
+                ),
             },
             "/openapi.json": {
                 "get": _operation("OpenAPI spec", {"200": _json_response("OpenApiDocument", "OpenAPI JSON")}, tags=["meta"], error_codes=("401", "403", "429", "500"))

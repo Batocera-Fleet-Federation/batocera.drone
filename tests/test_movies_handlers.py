@@ -581,5 +581,87 @@ class MovieScrapeApplyHandlerTests(unittest.TestCase):
             self.assertEqual(payload["title"], "The Matrix")
 
 
+class MovieBulkScrapeHandlerTests(unittest.TestCase):
+    def test_status_wraps_get_bulk_scrape_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            handler = _handler(settings)
+            job = {"id": 1, "status": "running", "total": 5, "processed": 2}
+            with mock.patch.object(movies_metadata, "get_bulk_scrape_status", return_value=job) as status_fn:
+                handler._handle_admin_movie_scrape_bulk_status()
+            status_fn.assert_called_once_with(settings)
+            status, payload = handler.json_response
+            self.assertEqual(status, 200)
+            self.assertEqual(payload["job"], job)
+
+    def test_status_reports_null_job_when_none_has_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            handler = _handler(settings)
+            with mock.patch.object(movies_metadata, "get_bulk_scrape_status", return_value=None):
+                handler._handle_admin_movie_scrape_bulk_status()
+            _status, payload = handler.json_response
+            self.assertIsNone(payload["job"])
+
+    def test_start_defaults_rescan_all_to_false(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            handler = _handler(settings)
+            with mock.patch.object(movies_metadata, "start_bulk_scrape", return_value={"status": "ok", "job": {}}) as start:
+                handler._handle_admin_movie_scrape_bulk_start({})
+            start.assert_called_once_with(settings, rescan_all=False)
+            status, _payload = handler.json_response
+            self.assertEqual(status, 200)
+
+    def test_start_passes_through_rescan_all_true(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            handler = _handler(settings)
+            with mock.patch.object(movies_metadata, "start_bulk_scrape", return_value={"status": "ok", "job": {}}) as start:
+                handler._handle_admin_movie_scrape_bulk_start({"rescan_all": True})
+            start.assert_called_once_with(settings, rescan_all=True)
+
+    def test_already_running_is_409(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            handler = _handler(settings)
+            with mock.patch.object(movies_metadata, "start_bulk_scrape", return_value={"status": "already_running"}):
+                handler._handle_admin_movie_scrape_bulk_start({})
+            status, payload = handler.json_response
+            self.assertEqual(status, 409)
+            self.assertEqual(payload["status"], "already_running")
+
+    def test_no_api_key_is_502(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            handler = _handler(settings)
+            with mock.patch.object(
+                movies_metadata, "start_bulk_scrape", return_value={"status": "error", "error": "No TMDb API key is configured"}
+            ):
+                handler._handle_admin_movie_scrape_bulk_start({})
+            status, payload = handler.json_response
+            self.assertEqual(status, 502)
+            self.assertIn("No TMDb API key", payload["error"])
+
+    def test_ok_start_returns_the_job(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            handler = _handler(settings)
+            job = {"id": 7, "status": "running", "total": 3}
+            with mock.patch.object(movies_metadata, "start_bulk_scrape", return_value={"status": "ok", "job": job}):
+                handler._handle_admin_movie_scrape_bulk_start({"rescan_all": False})
+            status, payload = handler.json_response
+            self.assertEqual(status, 200)
+            self.assertEqual(payload["job"], job)
+
+    def test_non_dict_payload_is_treated_as_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            handler = _handler(settings)
+            with mock.patch.object(movies_metadata, "start_bulk_scrape", return_value={"status": "ok", "job": {}}) as start:
+                handler._handle_admin_movie_scrape_bulk_start(None)
+            start.assert_called_once_with(settings, rescan_all=False)
+
+
 if __name__ == "__main__":
     unittest.main()

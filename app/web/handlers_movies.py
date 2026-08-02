@@ -247,7 +247,7 @@ class HandlersMoviesMixin:
         if not movie:
             self._send_json(404, {"error": "unknown movie"})
             return
-        search_query = str(query or "").strip() or _clean_movie_query(movie.get("movie_name") or "")
+        search_query = str(query or "").strip() or _movies_metadata.clean_movie_query(movie.get("movie_name") or "")
         try:
             results = _movies_metadata.search(self.settings, search_query)
         except _TmdbUnavailableError as error:
@@ -274,14 +274,15 @@ class HandlersMoviesMixin:
             return
         self._send_json(200, result)
 
+    # ------------------------------------------------------- bulk scrape
 
-def _clean_movie_query(file_name: str) -> str:
-    """A reasonable starting search query from a scene/torrent-style release
-    filename ("Movie.Title.2026.1080p.BluRay.x264-GROUP.mp4") -- strips the
-    extension and replaces separator punctuation with spaces. Not trying to
-    strip quality/group tags: TMDb's search is fuzzy enough to usually find
-    the right movie anyway, and the user sees results before applying one,
-    so a merely-decent default beats a fragile "smart" parser."""
-    name = Path(str(file_name or "")).stem
-    name = re.sub(r"[.\-_,;:\[\]()<>]+", " ", name)
-    return re.sub(r"\s+", " ", name).strip()
+    def _handle_admin_movie_scrape_bulk_status(self) -> None:
+        self._send_json(200, {"job": _movies_metadata.get_bulk_scrape_status(self.settings)})
+
+    def _handle_admin_movie_scrape_bulk_start(self, payload: dict) -> None:
+        payload = payload if isinstance(payload, dict) else {}
+        result = _movies_metadata.start_bulk_scrape(self.settings, rescan_all=bool(payload.get("rescan_all")))
+        status_code = 409 if result.get("status") == "already_running" else (
+            502 if result.get("status") == "error" else 200
+        )
+        self._send_json(status_code, result)

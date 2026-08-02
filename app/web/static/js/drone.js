@@ -103,6 +103,8 @@ let torrentsLastPayload = null;
 let configBackupsTimer = null;
 let configBackupsInFlight = false;
 let configBackupsLastPayload = [];
+let movieBulkScrapeTimer = null;
+let movieBulkScrapeInFlight = false;
 let swarmDronesById = {};
 let vpnTimer = null;
 let vpnInFlight = false;
@@ -2528,6 +2530,181 @@ async function applyMovieScraperResult(entryKey, tmdbId, button) {
     setLoading(false);
   }
 }
+
+// ---------------------------------------------------- Admin Movies (bulk scrape)
+
+function stopMovieBulkScrapeAutoRefresh() {
+  if (movieBulkScrapeTimer) {
+    clearInterval(movieBulkScrapeTimer);
+    movieBulkScrapeTimer = null;
+  }
+  movieBulkScrapeInFlight = false;
+}
+// Only polls while a job is "running" -- a rare, one-off admin action (not a
+// persistent queue like Torrents), same reasoning as Config Backups' own
+// auto-refresh: starts on demand, stops itself once nothing is left running.
+function startMovieBulkScrapeAutoRefreshIfNeeded(job) {
+  if (!job || job.status !== "running") {
+    stopMovieBulkScrapeAutoRefresh();
+    return;
+  }
+  if (movieBulkScrapeTimer) return;
+  movieBulkScrapeTimer = setInterval(async () => {
+    if (document.hidden || movieBulkScrapeInFlight) return;
+    if (window.location.hash !== "#admin/movies") return;
+    const statusEl = document.getElementById("movieBulkScrapeStatus");
+    if (!statusEl) return;
+    movieBulkScrapeInFlight = true;
+    try {
+      const payload = await api("/admin/movies/scrape/bulk");
+      if (window.location.hash === "#admin/movies" && statusEl.isConnected) {
+        patchMovieBulkScrapeLive(payload.job || null);
+      }
+    } catch (err) {
+      // Transient poll failure: leave the last good data in place silently.
+    } finally {
+      movieBulkScrapeInFlight = false;
+    }
+  }, 2000);
+}
+function movieBulkScrapeStatusBadge(job) {
+  const status = String(job.status || "running");
+  const cls = status === "error" ? "danger" : status === "complete" ? "success" : "info";
+  const title = status === "error" ? escapeHtml(job.error_message || "") : "";
+  return `<span class="badge text-bg-${cls}" title="${title}">${escapeHtml(status)}</span>`;
+}
+function renderMovieBulkScrapeStatus(job) {
+  if (!job) {
+    return `<div class="text-muted small">No scrape has been run yet.</div>`;
+  }
+  const total = Number(job.total || 0);
+  const processed = Number(job.processed || 0);
+  const pct = total > 0 ? Math.round((processed / total) * 100) : 100;
+  const running = job.status === "running";
+  return `
+    <div class="d-flex align-items-center justify-content-between gap-2 mb-1">
+      <div>${movieBulkScrapeStatusBadge(job)} <span class="small text-muted">${job.rescan_all ? "Rescanning all movies" : "Scraping movies missing artwork"}</span></div>
+      <div class="small text-muted">${processed.toLocaleString()} / ${total.toLocaleString()}</div>
+    </div>
+    ${total > 0 ? `<div class="progress mb-2" style="height:0.5rem;"><div class="progress-bar${running ? " progress-bar-striped progress-bar-animated" : ""} bg-${job.status === "error" ? "danger" : "primary"}" style="width:${pct}%"></div></div>` : ""}
+    ${running && job.current_movie ? `<div class="small text-muted mb-2"><span class="spinner-border spinner-border-sm me-1"></span>Scraping: ${escapeHtml(job.current_movie)}</div>` : ""}
+    <div class="small text-muted">
+      ${Number(job.matched_count || 0).toLocaleString()} matched
+      &middot; ${Number(job.skipped_count || 0).toLocaleString()} skipped
+      &middot; ${Number(job.failed_count || 0).toLocaleString()} failed
+    </div>
+    ${job.status === "error" && job.error_message ? `<div class="alert alert-warning small mt-2 mb-0">${escapeHtml(job.error_message)}</div>` : ""}
+  `;
+}
+function patchMovieBulkScrapeLive(job) {
+  const statusEl = document.getElementById("movieBulkScrapeStatus");
+  if (statusEl) statusEl.innerHTML = renderMovieBulkScrapeStatus(job);
+  const running = job && job.status === "running";
+  const startBtn = document.getElementById("movieBulkScrapeStartBtn");
+  if (startBtn) {
+    startBtn.disabled = running;
+    startBtn.innerHTML = running
+      ? `<span class="spinner-border spinner-border-sm me-1"></span>Scraping...`
+      : `<i class="bi bi-play-fill me-1"></i>Start Scraping`;
+  }
+  const checkbox = document.getElementById("movieBulkScrapeRescanAll");
+  if (checkbox) checkbox.disabled = running;
+  startMovieBulkScrapeAutoRefreshIfNeeded(job);
+}
+function renderMovieAdminApiKeyForm() {
+  return `
+    <div class="card">
+      <div class="card-header"><i class="bi bi-cloud-download me-1"></i>Artwork &amp; Metadata (TMDb)</div>
+      <div class="card-body">
+        <p class="text-muted small">Set a TMDb API key (v3 auth) to enable scraping movie posters, backdrops, and metadata. This can also be set from any movie's own details page.</p>
+        <div class="input-group">
+          <input id="movieAdminApiKeyInput" type="password" class="form-control" placeholder="TMDb API key">
+          <button class="btn btn-primary" type="button" onclick="saveMovieAdminApiKey()"><i class="bi bi-check-lg me-1"></i>Save</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+async function saveMovieAdminApiKey() {
+  const input = document.getElementById("movieAdminApiKeyInput");
+  const apiKey = (input && input.value || "").trim();
+  if (!apiKey) {
+    showToast("Enter a TMDb API key first.", "warning");
+    return;
+  }
+  setLoading(true, "Saving TMDb API key...");
+  try {
+    await apiPost("/admin/movies/scraper-settings", { api_key: apiKey });
+    showToast("TMDb API key saved.", "success");
+    await renderAdminMoviesArtworkPage();
+  } catch (err) {
+    showToast(`Failed to save TMDb API key: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  } finally {
+    setLoading(false);
+  }
+}
+function renderMovieAdminBulkScrapeCard(job) {
+  const running = job && job.status === "running";
+  return `
+    <div class="card">
+      <div class="card-header"><i class="bi bi-collection-play me-1"></i>Bulk Scrape</div>
+      <div class="card-body">
+        <div class="form-check mb-3">
+          <input class="form-check-input" type="checkbox" id="movieBulkScrapeRescanAll" ${running ? "disabled" : ""}>
+          <label class="form-check-label" for="movieBulkScrapeRescanAll">Rescan all movies (unchecked: only scrape movies missing artwork)</label>
+        </div>
+        <button id="movieBulkScrapeStartBtn" class="btn btn-primary" type="button" onclick="startMovieBulkScrape()" ${running ? "disabled" : ""}>
+          ${running ? `<span class="spinner-border spinner-border-sm me-1"></span>Scraping...` : `<i class="bi bi-play-fill me-1"></i>Start Scraping`}
+        </button>
+        <div id="movieBulkScrapeStatus" class="mt-3">${renderMovieBulkScrapeStatus(job)}</div>
+      </div>
+    </div>
+  `;
+}
+async function startMovieBulkScrape() {
+  const checkbox = document.getElementById("movieBulkScrapeRescanAll");
+  const rescanAll = checkbox ? checkbox.checked : false;
+  setLoading(true, "Starting bulk scrape...");
+  try {
+    const result = await apiPost("/admin/movies/scrape/bulk", { rescan_all: rescanAll });
+    if (result.status === "already_running") {
+      showToast("A bulk scrape is already running.", "warning");
+    } else if (result.status === "error") {
+      showToast(`Could not start scraping: ${escapeHtml(result.error || "unknown error")}`, "danger");
+    } else {
+      showToast("Bulk scrape started.", "success");
+    }
+  } catch (err) {
+    showToast(`Could not start scraping: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  } finally {
+    setLoading(false);
+  }
+  if (window.location.hash === "#admin/movies") {
+    await renderAdminMoviesArtworkPage();
+  }
+}
+async function renderAdminMoviesArtworkPage() {
+  currentSystemContext = null;
+  clearSystemTheme();
+  setLoading(true, "Loading movie scraper settings...");
+  try {
+    const [settingsPayload, statusPayload] = await Promise.all([
+      api("/admin/movies/scraper-settings"),
+      api("/admin/movies/scrape/bulk"),
+    ]);
+    content.innerHTML = `
+      ${renderArtworkTabBar("movies")}
+      <div class="text-muted small mb-3">Scrape TMDb for movie poster/backdrop art and metadata (overview, cast, genres) -- the same scraper available on each movie's own details page, run here in bulk across your whole library.</div>
+      <div id="movieAdminScraperCard">${settingsPayload.has_api_key ? renderMovieAdminBulkScrapeCard(statusPayload.job) : renderMovieAdminApiKeyForm()}</div>
+    `;
+    startMovieBulkScrapeAutoRefreshIfNeeded(statusPayload.job);
+  } catch (err) {
+    content.innerHTML = `${renderArtworkTabBar("movies")}<div class="alert alert-danger">Failed to load movie scraper settings: ${escapeHtml(err.message || "unknown error")}</div>`;
+  } finally {
+    setLoading(false);
+  }
+}
+
 function systemBiosTreeState(system) {
   const key = String(system || "");
   if (!systemsTreeSystemBiosPages[key]) {
@@ -3408,6 +3585,7 @@ function renderArtworkTabBar(active) {
   return renderAdminPanelTabs(active, [
     ["metadata", "Artwork & Metadata", "bi-images", "#admin/artwork"],
     ["theme", "Theme Gallery", "bi-brush", "#theme"],
+    ["movies", "Movies", "bi-film", "#admin/movies"],
   ]);
 }
 
@@ -9845,6 +10023,9 @@ async function router() {
     if (hash !== "#admin/smtp") {
       stopSmtpAutoRefresh();
     }
+    if (hash !== "#admin/movies") {
+      stopMovieBulkScrapeAutoRefresh();
+    }
     document.body.classList.toggle("artwork-page", hash.startsWith("#admin/artwork"));
     document.body.classList.toggle("movie-explorer-active", hash.startsWith("#movies/explore"));
     if (hash === "#bios") {
@@ -9924,6 +10105,12 @@ async function router() {
       }
       const parsed = parseArtworkHash(hash) || { offset: 0, includeFilesystem: false, fields: ["image", "marquee"], systems: [], q: "", romStatus: "any" };
       await renderMissingArtworkPage(parsed.includeFilesystem, false, parsed.offset, parsed.fields, parsed.systems, parsed.q, parsed.romStatus);
+    } else if (hash === "#admin/movies") {
+      if (!adminEnabled) {
+        setHash("");
+        return;
+      }
+      await renderAdminMoviesArtworkPage();
     } else if (hash === "#admin/downloads") {
       if (!adminEnabled) {
         setHash("");

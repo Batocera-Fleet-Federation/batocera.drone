@@ -24,6 +24,7 @@ the original feature ask.
 from __future__ import annotations
 
 import re
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -33,6 +34,7 @@ try:
     from ..storage.state_store import load_payload as _load_state_payload
     from ..storage.state_store import save_payload as _save_state_payload
     from ..storage import movies_store as _movies_store
+    from ..storage import movie_scrape_jobs as _jobs
     from .tmdb_client import TmdbClient, TmdbUnavailableError
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.settings import Settings  # type: ignore
@@ -40,6 +42,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from storage.state_store import load_payload as _load_state_payload  # type: ignore
     from storage.state_store import save_payload as _save_state_payload  # type: ignore
     from storage import movies_store as _movies_store  # type: ignore
+    from storage import movie_scrape_jobs as _jobs  # type: ignore
     from movies.tmdb_client import TmdbClient, TmdbUnavailableError  # type: ignore
 
 MOVIES_SCRAPER_STATE_NAMESPACE = "movies_scraper.json"
@@ -87,6 +90,20 @@ def _client(settings: Settings) -> TmdbClient:
 
 def search(settings: Settings, query: str, *, client: Optional[TmdbClient] = None) -> list:
     return (client or _client(settings)).search(query)
+
+
+def clean_movie_query(file_name: str) -> str:
+    """A reasonable starting search query from a scene/torrent-style release
+    filename ("Movie.Title.2026.1080p.BluRay.x264-GROUP.mp4") -- strips the
+    extension and replaces separator punctuation with spaces. Not trying to
+    strip quality/group tags: TMDb's search is fuzzy enough to usually find
+    the right movie anyway, and the per-movie search UI shows results before
+    applying one, so a merely-decent default beats a fragile "smart" parser.
+    Shared between the per-movie manual search (handlers_movies.py) and the
+    bulk auto-scrape job below, which has no human to review a query."""
+    name = Path(str(file_name or "")).stem
+    name = re.sub(r"[.\-_,;:\[\]()<>]+", " ", name)
+    return re.sub(r"\s+", " ", name).strip()
 
 
 def _safe_movie_stem(movie_path: Path) -> str:
@@ -156,3 +173,95 @@ def apply(settings: Settings, entry_key: str, tmdb_id, *, client: Optional[TmdbC
         backdrop_relative_path=backdrop_relative_path,
         extra=extra,
     )
+
+
+# --------------------------------------------------------------- bulk scrape
+
+def _has_artwork(settings: Settings, entry_key: str) -> bool:
+    """"Missing artwork" (the bulk job's skip condition when ``rescan_all`` is
+    false) means no poster on file yet -- the poster is the primary artwork a
+    user actually notices missing; a movie that TMDb had no backdrop for but
+    does have a poster doesn't need to be re-queued every run."""
+    metadata = _movies_store.get_movie_metadata(settings.movies_root, entry_key)
+    return bool(metadata and metadata.get("poster_relative_path"))
+
+
+def _run_bulk_scrape_job(settings: Settings, job_id: int, candidates: list, client: TmdbClient) -> None:
+    matched = skipped = failed = 0
+    total = len(candidates)
+    for index, movie in enumerate(candidates):
+        _jobs.update_progress(
+            settings, job_id,
+            processed=index, current_movie=movie.get("movie_name") or "",
+            matched_count=matched, skipped_count=skipped, failed_count=failed,
+        )
+        try:
+            query = clean_movie_query(movie.get("movie_name") or "")
+            if not query:
+                # Nothing usable to search TMDb with (e.g. a filename that's
+                # all punctuation) -- counted separately from "failed" since
+                # no TMDb request was even attempted for this one.
+                skipped += 1
+                continue
+            results = client.search(query)
+            if not results:
+                failed += 1
+                continue
+            apply(settings, movie["entry_key"], results[0]["tmdb_id"], client=client)
+            matched += 1
+        except TmdbUnavailableError:
+            # The key was rejected or TMDb is unreachable -- every remaining
+            # candidate would fail the same way, so stop early rather than
+            # burning through the whole list one doomed request at a time.
+            failed += total - index
+            break
+        except Exception:  # noqa: BLE001 - one bad movie must not kill the whole run
+            failed += 1
+    _jobs.update_progress(
+        settings, job_id,
+        processed=total, current_movie="",
+        matched_count=matched, skipped_count=skipped, failed_count=failed,
+    )
+    _jobs.mark_complete(settings, job_id)
+
+
+# Guards the any_running()-check-then-create_running()-insert sequence below
+# against two nearly-simultaneous POSTs (the admin app is a threaded HTTP
+# server -- one request per thread) both reading "nothing running yet"
+# before either has inserted its row, which would start two jobs at once.
+# The SQLite row is still the cross-restart source of truth (matching
+# config_backup.py); this lock only closes the same-process race window
+# between that read and the write.
+_BULK_SCRAPE_START_LOCK = threading.Lock()
+
+
+def start_bulk_scrape(settings: Settings, *, rescan_all: bool = False, client: Optional[TmdbClient] = None) -> dict:
+    """Kick off a background job that scrapes every movie (``rescan_all``) or
+    only those still missing a poster (the default) -- searching TMDb by a
+    cleaned-up filename and auto-applying the top match, with no per-movie
+    confirmation (unlike the manual search-and-apply flow on a movie's own
+    details page). Only one job runs at a time; ``movie_scrape_jobs`` (not an
+    in-process flag) is the guard, same reasoning as config_backup.py's
+    ``any_creating`` check. ``client`` is injectable for tests, like
+    ``search``/``apply`` above; real callers always resolve it from the
+    stored API key."""
+    with _BULK_SCRAPE_START_LOCK:
+        if _jobs.any_running(settings):
+            return {"status": "already_running"}
+        try:
+            client = client or _client(settings)
+        except TmdbUnavailableError as error:
+            return {"status": "error", "error": str(error)}
+        movies = _movies_store.list_movies(settings.movies_root)
+        candidates = movies if rescan_all else [m for m in movies if not _has_artwork(settings, m["entry_key"])]
+        job = _jobs.create_running(settings, rescan_all=rescan_all, total=len(candidates))
+    thread = threading.Thread(
+        target=_run_bulk_scrape_job, args=(settings, job["id"], candidates, client),
+        name="movie-bulk-scrape", daemon=True,
+    )
+    thread.start()
+    return {"status": "ok", "job": job}
+
+
+def get_bulk_scrape_status(settings: Settings) -> Optional[dict]:
+    return _jobs.latest(settings)

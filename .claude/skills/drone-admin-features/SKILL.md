@@ -129,10 +129,12 @@ entry point (`#admin/system-info`, icon `bi-bug`), tab-switching via
   viewing/editing emulator config files on the machine. Backend:
   `handlers_config.py`.
 
-### Artwork (Artwork & Metadata / Theme Gallery tabs)
+### Artwork (Artwork & Metadata / Theme Gallery / Movies tabs)
 
 `renderArtworkTabBar(active)` collapses the former standalone Artwork & Metadata
-and Theme tiles into one entry point (`#admin/artwork`, icon `bi-images`).
+and Theme tiles into one entry point (`#admin/artwork`, icon `bi-images`), plus a
+third **Movies** tab (`#admin/movies`) added alongside them for the bulk TMDb
+scraper below.
 
 - **Artwork & Metadata** — scraping (LaunchBox/TheGamesDB/MobyGames):
   `/admin/artwork/{launchbox,thegamesdb,mobygames}/{search,apply}`; gamelist
@@ -142,6 +144,13 @@ and Theme tiles into one entry point (`#admin/artwork`, icon `bi-images`).
 - **Theme Gallery** — `renderThemeGalleryPage()` — browse and preview installed
   EmulationStation theme artwork (`#theme`, outside the admin route tree; reached
   via this tab, not a standalone tile anymore).
+- **Movies** — `renderAdminMoviesArtworkPage()` — TMDb API key entry (reusing the
+  same `has_api_key`-gated form shape as the per-movie details page's scraper
+  card, see the ROMs/BIOS TreeGrid section's Movies-tab writeup below) plus a
+  **bulk scrape** action: one "Rescan all movies" checkbox and a Start button
+  that scrapes either every movie or only ones still missing a poster. See
+  "Bulk movie scraping" under the Movies-tab writeup for the background-job
+  design.
 
 ### Torrents
 
@@ -462,6 +471,70 @@ search-then-apply UX (`list-group-item-action` rows with a thumbnail), not
 a new pattern. The scraper card is admin-gated (`adminEnabled` check,
 matching every other `/admin/*`-backed UI element) even though the details
 page itself is reachable by anyone who can browse the library.
+
+**Bulk movie scraping** (the Movies tab on the Artwork admin page,
+`renderAdminMoviesArtworkPage()`) auto-scrapes the whole library in one
+click instead of the per-movie manual search-and-apply flow above: for each
+candidate movie it searches TMDb by a cleaned-up filename
+(`metadata_manager.clean_movie_query()` — moved here from
+`handlers_movies.py` so both the manual per-movie search and this job share
+one implementation) and auto-applies the **top** result, with no human
+picking a match. "Rescan all movies" (unchecked by default) controls the
+candidate set: unchecked only queues movies with no poster yet
+(`metadata_manager._has_artwork()` — a movie counts as "has artwork" once it
+has a poster, regardless of backdrop); checked queues every movie,
+re-scraping ones already done.
+
+This is a one-shot **background job with a pollable status**, not one of
+this app's forever-loop pollers (VPN self-heal, SMTP digest, the ROM
+metadata scan) — for that shape, the closest and intentionally-copied
+precedent is **Config Backups** (`device/config_backup.py` +
+`storage/config_backup_store.py`), not those always-on threads. Mirrored
+directly:
+
+- **State lives in a SQLite row, not an in-process flag** —
+  `storage/movie_scrape_jobs.py`'s `movie_scrape_jobs` table
+  (`status: running|complete|error`, `total`/`processed`/`current_movie`,
+  `matched_count`/`skipped_count`/`failed_count`, `error_message`). Only the
+  most recent job matters (`latest()`) — unlike config backups, a bulk
+  scrape run isn't a downloadable artifact worth listing historically, so
+  this store has no `list_all`.
+- **`any_running()` is the guard**, checked before `create_running()`
+  inserts the new row — same shape as config backup's `any_creating()`. A
+  second start attempt gets `{"status": "already_running"}`, mapped to HTTP
+  409 by the handler (`_handle_admin_movie_scrape_bulk_start`), exactly like
+  `_handle_admin_config_backups_create`'s `already_creating` → 409 mapping.
+  **Unlike config backups**, `metadata_manager.start_bulk_scrape()` wraps
+  the check-then-insert in `_BULK_SCRAPE_START_LOCK` (a module-level
+  `threading.Lock()`) — found live-testing this feature: two POSTs arriving
+  on different request-handling threads at nearly the same instant could
+  both read "nothing running yet" before either had inserted its row,
+  starting two jobs at once. The SQLite row is still what makes the guard
+  survive a process restart; the lock only closes the same-process race
+  window between the read and the write. See
+  `test_two_truly_simultaneous_starts_only_let_one_through` in
+  `test_movies_metadata_manager.py` — a genuine two-thread test, not a
+  sequential "pre-insert a running row" check like the rest of that file's
+  guard tests, and it needs a real per-call delay in its fake TMDb client
+  (`search_delay_seconds`) or the winning job can finish before the losing
+  call even checks, making the race impossible to observe.
+- **`threading.Thread(daemon=True)`**, no pool, no cancel — one-shot, exactly
+  like `_run_backup_job`. `_run_bulk_scrape_job` stops early (breaks out of
+  the loop, counting every remaining candidate as failed) the moment TMDb
+  itself becomes unavailable (bad/revoked key, network down) rather than
+  retrying the same doomed call once per remaining movie; a single movie
+  with no TMDb match, or an empty query after cleaning (skipped, no request
+  even attempted), does **not** stop the run.
+- **Frontend polling**: `startMovieBulkScrapeAutoRefreshIfNeeded()` /
+  `patchMovieBulkScrapeLive()` in `drone.js` — the identical
+  only-poll-while-something-is-running, `document.hidden`-aware,
+  in-flight-guarded `setInterval(..., 2000)` shape as Config Backups'
+  `startConfigBackupsAutoRefreshIfNeeded`. (This is also why a
+  claude-in-chrome browser-automation session watching this page live may
+  see zero poll ticks: `document.hidden` is true for a backgrounded MCP tab,
+  same as it would be for a real minimized browser tab — check the job's
+  real state with a direct `GET /admin/movies/scrape/bulk` fetch instead of
+  waiting on the visible progress bar to move.)
 
 **Netflix-style movie explorer** (`renderMovieExplorerPage()`, route
 `#movies/explore`, reached via the **Browse** button on the Movies tab) is

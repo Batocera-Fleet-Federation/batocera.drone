@@ -1,8 +1,11 @@
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
+import app.storage.movie_scrape_jobs as movie_scrape_jobs
 import app.storage.movies_store as movies_store
 from app.common.settings import Settings
 from app.movies import metadata_manager
@@ -177,6 +180,206 @@ class ApplyTests(unittest.TestCase):
             self.assertNotEqual(bb_meta["poster_relative_path"], office_meta["poster_relative_path"])
             self.assertIn("Breaking Bad", bb_meta["poster_relative_path"])
             self.assertIn("The Office", office_meta["poster_relative_path"])
+
+
+class FakeBulkTmdbClient:
+    """Unlike FakeTmdbClient above (fixed details, fixed results), this fake
+    varies its response by query -- the bulk job searches a different query
+    per movie, so a single canned response can't exercise matched/failed
+    counting the way the per-movie tests need."""
+
+    def __init__(self, *, match_queries=None, unavailable_after=None, search_delay_seconds=0):
+        self._match_queries = match_queries if match_queries is not None else set()
+        self._unavailable_after = unavailable_after
+        self._search_delay_seconds = search_delay_seconds
+        self.search_calls = []
+
+    def search(self, query):
+        if self._search_delay_seconds:
+            time.sleep(self._search_delay_seconds)
+        self.search_calls.append(query)
+        if self._unavailable_after is not None and len(self.search_calls) > self._unavailable_after:
+            raise TmdbUnavailableError("TMDb rejected the configured API key")
+        if query in self._match_queries:
+            return [{"tmdb_id": 603, "title": "A Matched Movie"}]
+        return []
+
+    def details(self, tmdb_id):
+        return dict(_MATRIX_DETAILS, tmdb_id=tmdb_id)
+
+    def download_image(self, url):
+        return (b"fake-image-bytes", "image/jpeg")
+
+
+def _wait_for_bulk_scrape_status(settings, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        job = metadata_manager.get_bulk_scrape_status(settings)
+        if job and job["status"] != "running":
+            return job
+        time.sleep(0.02)
+    raise AssertionError(f"bulk scrape job still running after {timeout}s")
+
+
+class BulkScrapeTests(unittest.TestCase):
+    def test_no_job_yet_returns_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            self.assertIsNone(metadata_manager.get_bulk_scrape_status(settings))
+
+    def test_rejects_concurrent_start(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            movie_scrape_jobs.create_running(settings, rescan_all=False, total=1)
+            result = metadata_manager.start_bulk_scrape(settings, client=FakeBulkTmdbClient())
+            self.assertEqual(result["status"], "already_running")
+
+    def test_two_truly_simultaneous_starts_only_let_one_through(self):
+        # Regression test: any_running()-check-then-create_running()-insert
+        # is two separate SQLite operations, so two requests arriving on
+        # different threads at almost the same instant could both observe
+        # "nothing running yet" before either had inserted its row --
+        # _BULK_SCRAPE_START_LOCK exists specifically to close that window.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Some Movie.mp4")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+
+            results = []
+            barrier = threading.Barrier(2)
+
+            def _start():
+                barrier.wait(timeout=2)
+                # A tiny per-search delay keeps the winning job's background
+                # thread genuinely "running" past the barrier, so the losing
+                # call's any_running() check has something real to observe --
+                # without this, an instant fake client can let job 1 finish
+                # before job 2 even reaches the lock, making both legitimately "ok".
+                results.append(
+                    metadata_manager.start_bulk_scrape(settings, client=FakeBulkTmdbClient(search_delay_seconds=0.3))
+                )
+
+            threads = [threading.Thread(target=_start) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=5)
+
+            statuses = sorted(r["status"] for r in results)
+            self.assertEqual(statuses, ["already_running", "ok"])
+
+            # Let the winner's own background (daemon) thread finish before
+            # the tempdir goes away -- otherwise it tries to write to the
+            # now-deleted SQLite file after this block exits.
+            _wait_for_bulk_scrape_status(settings)
+
+    def test_no_api_key_returns_error_without_creating_a_job(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Some Movie.mp4")
+            settings = _build_settings(root)
+            result = metadata_manager.start_bulk_scrape(settings)
+            self.assertEqual(result["status"], "error")
+            self.assertIsNone(metadata_manager.get_bulk_scrape_status(settings))
+
+    def test_default_only_scrapes_movies_missing_a_poster(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Already Scraped.mp4")
+            _write_movie(root, "Needs Scraping.mp4")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+            by_name = {m["movie_name"]: m["entry_key"] for m in movies_store.list_movies(settings.movies_root)}
+
+            metadata_manager.apply(
+                settings, by_name["Already Scraped.mp4"], 1,
+                client=FakeTmdbClient(details=_MATRIX_DETAILS),
+            )
+
+            fake = FakeBulkTmdbClient(match_queries={"Needs Scraping"})
+            result = metadata_manager.start_bulk_scrape(settings, rescan_all=False, client=fake)
+            self.assertEqual(result["status"], "ok")
+            job = _wait_for_bulk_scrape_status(settings)
+
+            self.assertEqual(job["status"], "complete")
+            self.assertEqual(job["total"], 1)
+            self.assertEqual(fake.search_calls, ["Needs Scraping"])
+            self.assertEqual(job["matched_count"], 1)
+
+            # apply() takes the title from client.details(), not the search
+            # result -- FakeBulkTmdbClient.details() always returns
+            # _MATRIX_DETAILS regardless of which movie matched.
+            scraped = movies_store.get_movie_metadata(settings.movies_root, by_name["Needs Scraping.mp4"])
+            self.assertEqual(scraped["title"], "The Matrix")
+
+    def test_rescan_all_scrapes_every_movie_including_already_scraped_ones(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Already Scraped.mp4")
+            _write_movie(root, "Needs Scraping.mp4")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+            by_name = {m["movie_name"]: m["entry_key"] for m in movies_store.list_movies(settings.movies_root)}
+
+            metadata_manager.apply(
+                settings, by_name["Already Scraped.mp4"], 1,
+                client=FakeTmdbClient(details=_MATRIX_DETAILS),
+            )
+
+            fake = FakeBulkTmdbClient(match_queries={"Needs Scraping", "Already Scraped"})
+            result = metadata_manager.start_bulk_scrape(settings, rescan_all=True, client=fake)
+            self.assertEqual(result["status"], "ok")
+            job = _wait_for_bulk_scrape_status(settings)
+
+            self.assertEqual(job["total"], 2)
+            self.assertCountEqual(fake.search_calls, ["Needs Scraping", "Already Scraped"])
+            self.assertEqual(job["matched_count"], 2)
+
+    def test_counts_matched_skipped_and_failed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Good Match.mp4")
+            _write_movie(root, "No Match.mp4")
+            _write_movie(root, "----.mp4")  # cleans to an empty query -- skipped, not searched
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+
+            fake = FakeBulkTmdbClient(match_queries={"Good Match"})
+            result = metadata_manager.start_bulk_scrape(settings, rescan_all=True, client=fake)
+            self.assertEqual(result["status"], "ok")
+            job = _wait_for_bulk_scrape_status(settings)
+
+            self.assertEqual(job["status"], "complete")
+            self.assertEqual(job["total"], 3)
+            self.assertEqual(job["processed"], 3)
+            self.assertEqual(job["matched_count"], 1)
+            self.assertEqual(job["skipped_count"], 1)
+            self.assertEqual(job["failed_count"], 1)
+            self.assertNotIn("", fake.search_calls)
+
+    def test_tmdb_becoming_unavailable_mid_job_stops_early_without_erroring_the_job(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "First Movie.mp4")
+            _write_movie(root, "Second Movie.mp4")
+            _write_movie(root, "Third Movie.mp4")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+
+            # Rejects the key on the very first search call.
+            fake = FakeBulkTmdbClient(match_queries=set(), unavailable_after=0)
+            result = metadata_manager.start_bulk_scrape(settings, rescan_all=True, client=fake)
+            self.assertEqual(result["status"], "ok")
+            job = _wait_for_bulk_scrape_status(settings)
+
+            self.assertEqual(job["status"], "complete")
+            self.assertEqual(job["processed"], 3)
+            self.assertEqual(job["failed_count"], 3)
+            self.assertEqual(job["matched_count"], 0)
+            # Stopped after the first rejected call rather than retrying it
+            # for every remaining movie.
+            self.assertEqual(len(fake.search_calls), 1)
 
 
 if __name__ == "__main__":
