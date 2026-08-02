@@ -34,7 +34,21 @@ class HandlersMoviesMixin:
         The Movies tab's folder tree needs the complete set client-side to
         build the on-disk hierarchy (a movie library is far smaller than a
         ROM set, so this is cheap); ``limit``/``offset`` stay available for
-        any caller that does want a page instead."""
+        any caller that does want a page instead.
+
+        Deliberately **no** ``cache_key`` on either response below, unlike
+        most other list endpoints in this app. ``ExpiringLRUCache`` has no
+        invalidation hook -- nothing purges a cached entry when
+        ``sync_movies_cache()`` changes the underlying data, so a cached
+        response can keep serving a stale snapshot (files that were removed
+        from the scan, e.g. after the video-extension-allowlist fix, kept
+        appearing in the Movies tab for up to an hour after the cache itself
+        was already clean) for up to ``json_cache_ttl_seconds`` (default
+        3600s). Movies can change often (new downloads/deletes) and this
+        endpoint is only called once per Movies-tab visit, so the caching
+        trades a real correctness bug for a performance win this call site
+        doesn't need -- reading straight from SQLite here is already cheap.
+        """
         if limit is not None:
             safe_limit = max(1, min(int(limit), 2000))
             safe_offset = max(0, int(offset))
@@ -55,7 +69,6 @@ class HandlersMoviesMixin:
                     "returned": len(items),
                     "has_more": (page["offset"] + len(items)) < page["total"],
                 },
-                cache_key=f"json:/movies?limit={safe_limit}&offset={safe_offset}&q={str(query or '').strip().lower()}",
             )
             return
         items = _movies_store.list_movies(self.settings.movies_root)
@@ -78,7 +91,6 @@ class HandlersMoviesMixin:
                 "returned": len(items),
                 "has_more": False,
             },
-            cache_key=f"json:/movies?q={query_value}",
         )
 
     def _resolve_movie_path(self, entry_key: str) -> Path:

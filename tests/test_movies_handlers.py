@@ -48,10 +48,12 @@ class _FakeHandler:
         self.response_status = None
         self.response_headers = {}
         self.json_response = None
+        self.json_cache_key = "unset"
 
     # -- JSON path (used by _handle_movies_list) --
     def _send_json(self, status_code: int, payload: dict, cache_key=None, extra_headers=None) -> None:
         self.json_response = (status_code, payload)
+        self.json_cache_key = cache_key
 
     # -- raw streaming path (used by _stream_movie_range / _stream_file) --
     def send_response(self, status_code: int) -> None:
@@ -145,6 +147,27 @@ class MoviesListHandlerTests(unittest.TestCase):
             self.assertEqual(payload["count"], 5)
             self.assertEqual(len(payload["movies"]), 5)
             self.assertFalse(payload["has_more"])
+
+    def test_response_is_never_cached(self) -> None:
+        # Regression test: ExpiringLRUCache has no invalidation hook, so a
+        # cache_key here would let a stale snapshot (e.g. files a scan has
+        # since removed) keep being served for up to an hour after the
+        # underlying movies cache changed -- this bit us for real (a fixed
+        # video-extension filter cleaned the DB, but /movies kept serving a
+        # cached response with the old junk files for the rest of that
+        # cache entry's TTL). Both the unpaginated and paginated response
+        # paths must never pass a cache_key.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Vacation.mp4", b"x")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+            handler = _handler(settings)
+            handler._handle_movies_list()
+            self.assertIsNone(handler.json_cache_key)
+            handler2 = _handler(settings)
+            handler2._handle_movies_list(limit=10, offset=0)
+            self.assertIsNone(handler2.json_cache_key)
 
     def test_explicit_limit_still_paginates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
