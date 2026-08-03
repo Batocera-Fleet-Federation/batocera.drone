@@ -35,6 +35,7 @@ try:
     from ..storage.state_store import save_payload as _save_state_payload
     from ..storage import movies_store as _movies_store
     from ..storage import movie_scrape_jobs as _jobs
+    from . import filename_parser as _filename_parser
     from .tmdb_client import TmdbClient, TmdbUnavailableError
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.settings import Settings  # type: ignore
@@ -43,6 +44,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from storage.state_store import save_payload as _save_state_payload  # type: ignore
     from storage import movies_store as _movies_store  # type: ignore
     from storage import movie_scrape_jobs as _jobs  # type: ignore
+    from movies import filename_parser as _filename_parser  # type: ignore
     from movies.tmdb_client import TmdbClient, TmdbUnavailableError  # type: ignore
 
 MOVIES_SCRAPER_STATE_NAMESPACE = "movies_scraper.json"
@@ -175,6 +177,86 @@ def apply(settings: Settings, entry_key: str, tmdb_id, *, client: Optional[TmdbC
     )
 
 
+def apply_tv_episode(
+    settings: Settings,
+    entry_key: str,
+    tv_id,
+    season_number: int,
+    episode_number: int,
+    *,
+    show_details: Optional[dict] = None,
+    client: Optional[TmdbClient] = None,
+) -> dict:
+    """TV-episode counterpart of ``apply()``: fetches show-level details
+    (poster/backdrop/genres/cast -- all show-level in TMDb's data model, see
+    ``TmdbClient.tv_details``) plus this specific episode's title/overview/
+    air-date/still, downloads artwork next to the episode file the same way
+    ``apply()`` does for a movie, and saves it as one
+    ``movies_metadata_entries`` row like any other scrape (``provider``
+    distinguishes it: ``"tmdb_tv"`` vs plain movies' ``"tmdb"``).
+    ``show_details`` lets a caller that already fetched a show's details for
+    an earlier episode (the bulk job does, per show, once) skip refetching
+    it for every subsequent episode."""
+    movie = _movies_store.get_movie_by_key(settings.movies_root, entry_key)
+    if not movie:
+        raise MovieNotFoundError(entry_key)
+    movies_root = Path(settings.movies_root).resolve()
+    movie_path = Path(movie["absolute_path"]).resolve()
+
+    client = client or _client(settings)
+    show = show_details if show_details is not None else client.tv_details(tv_id)
+    episode = client.tv_episode_details(tv_id, season_number, episode_number)
+
+    poster_relative_path: Optional[str] = None
+    if show.get("poster_url"):
+        target = _artwork_path(movie_path, "image")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        data, _content_type = client.download_image(show["poster_url"])
+        target.write_bytes(data)
+        poster_relative_path = _relative_to_movies_root(movies_root, target)
+
+    # The episode's own "still" (a screenshot from that episode) is more
+    # useful as this file's backdrop than the show-wide backdrop would be --
+    # fall back to the show backdrop only when TMDb has no still for it.
+    backdrop_relative_path: Optional[str] = None
+    backdrop_source = episode.get("still_url") or show.get("backdrop_url")
+    if backdrop_source:
+        target = _artwork_path(movie_path, "fanart")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        data, _content_type = client.download_image(backdrop_source)
+        target.write_bytes(data)
+        backdrop_relative_path = _relative_to_movies_root(movies_root, target)
+
+    season_number, episode_number = int(season_number), int(episode_number)
+    title = f"{show.get('title') or ''} - S{season_number:02d}E{episode_number:02d}"
+    if episode.get("title"):
+        title += f" - {episode['title']}"
+
+    extra = {
+        "media_type": "tv_episode",
+        "show_title": show.get("title") or "",
+        "season_number": season_number,
+        "episode_number": episode_number,
+        "episode_title": episode.get("title") or "",
+        "overview": episode.get("overview") or show.get("overview") or "",
+        "tagline": show.get("tagline") or "",
+        "genres": show.get("genres") or [],
+        "cast": show.get("cast") or [],
+        "release_date": episode.get("air_date") or show.get("release_date"),
+        "rating": episode.get("rating") if episode.get("rating") is not None else show.get("rating"),
+    }
+    return _movies_store.save_movie_metadata(
+        settings.movies_root,
+        entry_key,
+        provider="tmdb_tv",
+        provider_id=f"{show.get('tmdb_id') or tv_id}-s{season_number}e{episode_number}",
+        title=title,
+        poster_relative_path=poster_relative_path,
+        backdrop_relative_path=backdrop_relative_path,
+        extra=extra,
+    )
+
+
 # --------------------------------------------------------------- bulk scrape
 
 def _has_artwork(settings: Settings, entry_key: str) -> bool:
@@ -186,9 +268,44 @@ def _has_artwork(settings: Settings, entry_key: str) -> bool:
     return bool(metadata and metadata.get("poster_relative_path"))
 
 
+def _search_movie_with_ladder(client: TmdbClient, movie_name: str) -> list:
+    """Try each ``(title, year)`` rung of ``filename_parser.search_candidates``
+    against TMDb movie search, stopping at the first hit -- see that
+    function's docstring for why the year-filtered title comes first. A
+    ``TmdbUnavailableError`` on any rung propagates immediately (the caller's
+    "stop the whole job" handling applies the same as a single-candidate
+    search would)."""
+    stem = Path(movie_name or "").stem
+    for title, year in _filename_parser.search_candidates(stem):
+        results = client.search(title, year=year)
+        if results:
+            return results
+    return []
+
+
+def _search_show_with_ladder(client: TmdbClient, show_title: str, year: Optional[str]) -> list:
+    """TV counterpart of ``_search_movie_with_ladder`` -- just the
+    year-filtered-then-unfiltered pair, since ``classify()`` already parsed a
+    clean show title straight from the episode's own filename (no scene-tag
+    stripping needed the way a movie filename needs it)."""
+    attempts = [(show_title, year)] if year else []
+    attempts.append((show_title, None))
+    for title, attempt_year in attempts:
+        if not title:
+            continue
+        results = client.search_tv(title, year=attempt_year)
+        if results:
+            return results
+    return []
+
+
 def _run_bulk_scrape_job(settings: Settings, job_id: int, candidates: list, client: TmdbClient) -> None:
     matched = skipped = failed = 0
     total = len(candidates)
+    # Per-job caches so a show with a dozen episodes only costs one TV search
+    # and one show-details fetch, not one per episode file.
+    show_id_by_title: dict = {}
+    show_details_by_id: dict = {}
     for index, movie in enumerate(candidates):
         _jobs.update_progress(
             settings, job_id,
@@ -196,14 +313,46 @@ def _run_bulk_scrape_job(settings: Settings, job_id: int, candidates: list, clie
             matched_count=matched, skipped_count=skipped, failed_count=failed,
         )
         try:
-            query = clean_movie_query(movie.get("movie_name") or "")
-            if not query:
+            parsed = _filename_parser.classify(
+                movie.get("file_path") or movie.get("relative_path") or "", movie.get("movie_name") or ""
+            )
+            if parsed.kind == _filename_parser.KIND_EXTRA:
+                # Bonus/behind-the-scenes content living in a Plex/Kodi
+                # extras folder (Featurettes, Interviews, ...) -- never a
+                # real movie or episode, so never worth a TMDb call. Counted
+                # with the other "nothing to search for" cases, not failed.
+                skipped += 1
+                continue
+
+            if parsed.kind == _filename_parser.KIND_EPISODE:
+                show_key = parsed.show_title.lower()
+                tv_id = show_id_by_title.get(show_key)
+                if tv_id is None:
+                    show_results = _search_show_with_ladder(client, parsed.show_title, parsed.year)
+                    if not show_results:
+                        failed += 1
+                        continue
+                    tv_id = show_results[0]["tmdb_id"]
+                    show_id_by_title[show_key] = tv_id
+                show_details = show_details_by_id.get(tv_id)
+                if show_details is None:
+                    show_details = client.tv_details(tv_id)
+                    show_details_by_id[tv_id] = show_details
+                apply_tv_episode(
+                    settings, movie["entry_key"], tv_id, parsed.season, parsed.episode,
+                    show_details=show_details, client=client,
+                )
+                matched += 1
+                continue
+
+            stem = Path(movie.get("movie_name") or "").stem
+            if not _filename_parser.search_candidates(stem):
                 # Nothing usable to search TMDb with (e.g. a filename that's
                 # all punctuation) -- counted separately from "failed" since
                 # no TMDb request was even attempted for this one.
                 skipped += 1
                 continue
-            results = client.search(query)
+            results = _search_movie_with_ladder(client, movie.get("movie_name") or "")
             if not results:
                 failed += 1
                 continue

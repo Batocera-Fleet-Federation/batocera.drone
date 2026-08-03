@@ -84,6 +84,58 @@ class TmdbClientSearchTests(unittest.TestCase):
             with self.assertRaises(TmdbUnavailableError):
                 client.search("matrix")
 
+    def test_year_is_passed_as_primary_release_year_filter(self) -> None:
+        payload = json.dumps({"results": []}).encode("utf-8")
+        client = TmdbClient("key")
+        with mock.patch("app.movies.tmdb_client.urlopen", return_value=FakeResponse(payload)) as urlopen:
+            client.search("halloween", year="1978")
+        requested_url = urlopen.call_args[0][0].full_url
+        self.assertIn("primary_release_year=1978", requested_url)
+
+    def test_no_year_omits_the_filter(self) -> None:
+        payload = json.dumps({"results": []}).encode("utf-8")
+        client = TmdbClient("key")
+        with mock.patch("app.movies.tmdb_client.urlopen", return_value=FakeResponse(payload)) as urlopen:
+            client.search("halloween")
+        requested_url = urlopen.call_args[0][0].full_url
+        self.assertNotIn("primary_release_year", requested_url)
+
+
+class TmdbClientSearchTvTests(unittest.TestCase):
+    def test_empty_query_returns_no_results_without_a_request(self) -> None:
+        client = TmdbClient("key")
+        with mock.patch("app.movies.tmdb_client.urlopen", side_effect=AssertionError("must not call TMDb")):
+            self.assertEqual(client.search_tv(""), [])
+
+    def test_parses_tv_results_using_name_fields(self) -> None:
+        payload = json.dumps(
+            {
+                "results": [
+                    {
+                        "id": 1405,
+                        "name": "Dexter",
+                        "first_air_date": "2006-10-01",
+                        "overview": "A blood spatter analyst.",
+                        "poster_path": "/dexter.jpg",
+                    }
+                ]
+            }
+        ).encode("utf-8")
+        client = TmdbClient("key")
+        with mock.patch("app.movies.tmdb_client.urlopen", return_value=FakeResponse(payload)):
+            results = client.search_tv("dexter")
+        self.assertEqual(results[0]["tmdb_id"], 1405)
+        self.assertEqual(results[0]["title"], "Dexter")
+        self.assertEqual(results[0]["release_date"], "2006-10-01")
+
+    def test_year_is_passed_as_first_air_date_year_filter(self) -> None:
+        payload = json.dumps({"results": []}).encode("utf-8")
+        client = TmdbClient("key")
+        with mock.patch("app.movies.tmdb_client.urlopen", return_value=FakeResponse(payload)) as urlopen:
+            client.search_tv("dexter", year="2006")
+        requested_url = urlopen.call_args[0][0].full_url
+        self.assertIn("first_air_date_year=2006", requested_url)
+
 
 class TmdbClientDetailsTests(unittest.TestCase):
     def test_parses_details_genres_and_cast(self) -> None:
@@ -142,6 +194,69 @@ class TmdbClientDetailsTests(unittest.TestCase):
         with mock.patch("app.movies.tmdb_client.urlopen", side_effect=error):
             with self.assertRaises(TmdbUnavailableError):
                 client.details(999999999)
+
+
+class TmdbClientTvDetailsTests(unittest.TestCase):
+    def test_parses_show_details_using_name_fields(self) -> None:
+        payload = json.dumps(
+            {
+                "id": 1405,
+                "name": "Dexter",
+                "overview": "A blood spatter analyst.",
+                "tagline": "",
+                "genres": [{"id": 1, "name": "Drama"}],
+                "first_air_date": "2006-10-01",
+                "vote_average": 8.0,
+                "poster_path": "/dexter.jpg",
+                "backdrop_path": "/dexter-bg.jpg",
+                "credits": {"cast": [{"name": "Michael C. Hall", "character": "Dexter Morgan"}]},
+            }
+        ).encode("utf-8")
+        client = TmdbClient("key")
+        with mock.patch("app.movies.tmdb_client.urlopen", return_value=FakeResponse(payload)):
+            details = client.tv_details(1405)
+        self.assertEqual(details["title"], "Dexter")
+        self.assertEqual(details["release_date"], "2006-10-01")
+        self.assertEqual(details["genres"], ["Drama"])
+        self.assertEqual(details["poster_url"], "https://image.tmdb.org/t/p/w500/dexter.jpg")
+
+    def test_missing_id_raises_value_error(self) -> None:
+        client = TmdbClient("key")
+        with self.assertRaises(ValueError):
+            client.tv_details("")
+
+
+class TmdbClientTvEpisodeDetailsTests(unittest.TestCase):
+    def test_parses_episode_details(self) -> None:
+        payload = json.dumps(
+            {
+                "name": "Dexter",
+                "overview": "Pilot episode.",
+                "air_date": "2006-10-01",
+                "vote_average": 7.5,
+                "still_path": "/still.jpg",
+            }
+        ).encode("utf-8")
+        client = TmdbClient("key")
+        with mock.patch("app.movies.tmdb_client.urlopen", return_value=FakeResponse(payload)):
+            details = client.tv_episode_details(1405, 1, 1)
+        self.assertEqual(details["title"], "Dexter")
+        self.assertEqual(details["air_date"], "2006-10-01")
+        self.assertEqual(details["still_url"], "https://image.tmdb.org/t/p/w1280/still.jpg")
+
+    def test_missing_ids_raise_value_error(self) -> None:
+        client = TmdbClient("key")
+        with self.assertRaises(ValueError):
+            client.tv_episode_details("", 1, 1)
+        with self.assertRaises(ValueError):
+            client.tv_episode_details(1405, "", 1)
+
+    def test_404_raises_tmdb_unavailable(self) -> None:
+        client = TmdbClient("key")
+        error = HTTPError("https://api.themoviedb.org/3/tv/1405/season/99/episode/1", 404, "Not Found", None, None)
+        with mock.patch("app.movies.tmdb_client.urlopen", side_effect=error):
+            with self.assertRaises(TmdbUnavailableError):
+                client.tv_episode_details(1405, 99, 1)
 
 
 class TmdbClientDownloadImageTests(unittest.TestCase):

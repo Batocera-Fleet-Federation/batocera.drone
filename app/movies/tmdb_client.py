@@ -75,11 +75,21 @@ class TmdbClient:
         except (URLError, TimeoutError, OSError) as error:
             raise TmdbUnavailableError("TMDb could not be reached from this Drone") from error
 
-    def search(self, query: str, limit: int = 10) -> List[dict]:
+    def search(self, query: str, limit: int = 10, *, year: Optional[str] = None) -> List[dict]:
+        """``year`` (when given) is passed as TMDb's ``primary_release_year``
+        filter -- the single biggest disambiguator for a scene-release
+        filename, since remakes/reboots sharing a title are common (this
+        matters even for something as ordinary as "Halloween", which spans a
+        dozen movies from 1978 to 2022). Callers that already parsed a year
+        out of the filename should always pass it; a caller unsure whether
+        the parsed year is trustworthy can retry once with ``year=None``."""
         normalized_query = str(query or "").strip()
         if not normalized_query:
             return []
-        payload = self._get_json("/search/movie", {"query": normalized_query, "include_adult": "false"})
+        params = {"query": normalized_query, "include_adult": "false"}
+        if year:
+            params["primary_release_year"] = str(year)
+        payload = self._get_json("/search/movie", params)
         results = payload.get("results") if isinstance(payload, dict) else None
         if not isinstance(results, list):
             return []
@@ -92,6 +102,34 @@ class TmdbClient:
                     "tmdb_id": item.get("id"),
                     "title": item.get("title") or item.get("original_title") or "",
                     "release_date": item.get("release_date") or None,
+                    "overview": item.get("overview") or "",
+                    "thumbnail_url": tmdb_image_url(item.get("poster_path"), TMDB_POSTER_THUMB_SIZE),
+                }
+            )
+        return output[: max(1, min(int(limit), 20))]
+
+    def search_tv(self, query: str, limit: int = 10, *, year: Optional[str] = None) -> List[dict]:
+        """Same shape as ``search`` but against ``/search/tv`` -- TMDb's TV
+        equivalent of ``primary_release_year`` is ``first_air_date_year``."""
+        normalized_query = str(query or "").strip()
+        if not normalized_query:
+            return []
+        params = {"query": normalized_query, "include_adult": "false"}
+        if year:
+            params["first_air_date_year"] = str(year)
+        payload = self._get_json("/search/tv", params)
+        results = payload.get("results") if isinstance(payload, dict) else None
+        if not isinstance(results, list):
+            return []
+        output = []
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            output.append(
+                {
+                    "tmdb_id": item.get("id"),
+                    "title": item.get("name") or item.get("original_name") or "",
+                    "release_date": item.get("first_air_date") or None,
                     "overview": item.get("overview") or "",
                     "thumbnail_url": tmdb_image_url(item.get("poster_path"), TMDB_POSTER_THUMB_SIZE),
                 }
@@ -124,6 +162,56 @@ class TmdbClient:
             "runtime_minutes": payload.get("runtime"),
             "poster_url": tmdb_image_url(payload.get("poster_path"), TMDB_POSTER_SIZE),
             "backdrop_url": tmdb_image_url(payload.get("backdrop_path"), TMDB_BACKDROP_SIZE),
+        }
+
+    def tv_details(self, tv_id) -> dict:
+        """Show-level details -- poster/backdrop/genres/cast are all
+        show-level in TMDb's data model (there's no per-episode poster, only
+        a per-episode "still" screenshot -- see ``tv_episode_details``), so
+        this is fetched once per show and reused across every episode file
+        that show has on disk."""
+        safe_id = re.sub(r"[^0-9]", "", str(tv_id or ""))
+        if not safe_id:
+            raise ValueError("tv_id is required")
+        payload = self._get_json(f"/tv/{safe_id}", {"append_to_response": "credits"})
+        genres = [genre.get("name") for genre in (payload.get("genres") or []) if isinstance(genre, dict) and genre.get("name")]
+        credits_payload = payload.get("credits") if isinstance(payload.get("credits"), dict) else {}
+        cast = []
+        for member in (credits_payload.get("cast") or [])[:TMDB_CAST_LIMIT]:
+            if not isinstance(member, dict) or not member.get("name"):
+                continue
+            cast.append({"name": member.get("name"), "character": member.get("character") or ""})
+        return {
+            "tmdb_id": payload.get("id"),
+            "title": payload.get("name") or payload.get("original_name") or "",
+            "overview": payload.get("overview") or "",
+            "tagline": payload.get("tagline") or "",
+            "genres": genres,
+            "cast": cast,
+            "release_date": payload.get("first_air_date") or None,
+            "rating": payload.get("vote_average"),
+            "poster_url": tmdb_image_url(payload.get("poster_path"), TMDB_POSTER_SIZE),
+            "backdrop_url": tmdb_image_url(payload.get("backdrop_path"), TMDB_BACKDROP_SIZE),
+        }
+
+    def tv_episode_details(self, tv_id, season_number, episode_number) -> dict:
+        """Episode-level details: title, overview, air date, rating, and a
+        "still" (a screenshot from the episode -- the closest TMDb has to
+        per-episode artwork). Raises ``TmdbUnavailableError`` (404 mapped the
+        same way ``details`` does) if the show has no such season/episode,
+        e.g. a locally-numbered episode that doesn't match TMDb's numbering."""
+        safe_tv_id = re.sub(r"[^0-9]", "", str(tv_id or ""))
+        safe_season = re.sub(r"[^0-9]", "", str(season_number or ""))
+        safe_episode = re.sub(r"[^0-9]", "", str(episode_number or ""))
+        if not safe_tv_id or not safe_season or not safe_episode:
+            raise ValueError("tv_id, season_number, and episode_number are required")
+        payload = self._get_json(f"/tv/{safe_tv_id}/season/{safe_season}/episode/{safe_episode}")
+        return {
+            "title": payload.get("name") or "",
+            "overview": payload.get("overview") or "",
+            "air_date": payload.get("air_date") or None,
+            "rating": payload.get("vote_average"),
+            "still_url": tmdb_image_url(payload.get("still_path"), TMDB_BACKDROP_SIZE),
         }
 
     def download_image(self, url: str) -> Tuple[bytes, str]:

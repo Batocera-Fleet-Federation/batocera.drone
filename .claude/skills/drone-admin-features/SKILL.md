@@ -474,16 +474,67 @@ page itself is reachable by anyone who can browse the library.
 
 **Bulk movie scraping** (the Movies tab on the Artwork admin page,
 `renderAdminMoviesArtworkPage()`) auto-scrapes the whole library in one
-click instead of the per-movie manual search-and-apply flow above: for each
-candidate movie it searches TMDb by a cleaned-up filename
-(`metadata_manager.clean_movie_query()` — moved here from
-`handlers_movies.py` so both the manual per-movie search and this job share
-one implementation) and auto-applies the **top** result, with no human
-picking a match. "Rescan all movies" (unchecked by default) controls the
-candidate set: unchecked only queues movies with no poster yet
+click instead of the per-movie manual search-and-apply flow above, with no
+human picking a match. "Rescan all movies" (unchecked by default) controls
+the candidate set: unchecked only queues movies with no poster yet
 (`metadata_manager._has_artwork()` — a movie counts as "has artwork" once it
 has a poster, regardless of backdrop); checked queues every movie,
-re-scraping ones already done.
+re-scraping ones already done. Unlike the manual per-movie search box (which
+still defaults its query to the simple `metadata_manager.clean_movie_query()`
+punctuation-strip — a human sees and can edit it before searching), the bulk
+job has no human in the loop, so it needs to get the query right
+automatically. Two pieces make that work, both in
+`app/movies/filename_parser.py` (pure, no I/O — see
+`test_movies_filename_parser.py`, written against a real 257-file mixed
+movie/TV library):
+
+- **`classify(file_path, file_name)`** decides *what kind of thing a file
+  is* before anything gets searched: `"episode"` if the filename matches the
+  Sonarr/TRaSH `Show (Year) - SxxEyy - Episode Title` convention (or the
+  older `1x04` style); `"extra"` if any path segment is one of
+  Plex/Kodi/Jellyfin's standard local-extras folder names (`Featurettes`,
+  `Behind the Scenes`, `Deleted Scenes`, `Interviews`, `Scenes`, `Shorts`,
+  `Trailers`, `Other`) — bonus cast-interview/making-of clips living
+  alongside real episodes match this exactly and are skipped without ever
+  burning a TMDb call; otherwise `"movie"`.
+- **`search_candidates(stem)`** turns a movie filename into an ordered
+  `(title, year)` ladder, most-precise first: scene-release convention
+  always puts the year immediately after the title
+  ("28.Days.Later.2002.1080p...") so truncating there in one cut both drops
+  every trailing quality/codec/release-group tag *and* yields a title+year
+  pair to pass through TMDb's `primary_release_year` filter — the single
+  biggest disambiguator for remakes/reboots sharing a title (this app's own
+  test library alone has a dozen different "Halloween" movies spanning
+  1978-2022). The same title is retried once more without the year filter
+  as a fallback rung, then an aggressive pass strips a controlled
+  vocabulary of scene tokens (resolution/source/codec/audio/edition/
+  language tags) plus a trailing `-GROUPNAME` release tag for filenames with
+  no year at all (the `"Ant-Man (1080p).mkv"` style). That trailing-tag
+  strip is single-token-only (`-[A-Za-z0-9.]+$`, no spaces) specifically so
+  it can't eat a legitimately hyphenated title's second half — an earlier,
+  looser version of this regex turned "Ant-Man" into "Ant" and "Bride of
+  Re-Animator" into "Bride of Re" by matching from the first hyphen to end
+  of string; see that regression test in `test_movies_metadata_manager.py`.
+  `_run_bulk_scrape_job` (movies) and `_search_movie_with_ladder` try each
+  rung against `client.search(title, year=year)` and stop at the first hit.
+- **TV episodes** get their own path: the show title parsed by `classify()`
+  is searched via `TmdbClient.search_tv`/`first_air_date_year` (same
+  year-then-no-year two-rung ladder, `_search_show_with_ladder`), then
+  `metadata_manager.apply_tv_episode()` fetches show-level details
+  (poster/backdrop/genres/cast — all show-level in TMDb's data model) plus
+  this specific episode's title/overview/air-date/still via
+  `TmdbClient.tv_episode_details`, and saves it as an ordinary
+  `movies_metadata_entries` row with `provider="tmdb_tv"` and an
+  `extra_json.media_type = "tv_episode"` marker (`show_title`/
+  `season_number`/`episode_number` alongside it — no schema change, same
+  loose-`extra_json`-blob convention as the movie fields). The bulk job
+  caches both the resolved TMDb show id and the fetched show-details payload
+  **per job run**, keyed by show title, so a season with a dozen episode
+  files costs exactly one TV search and one show-details fetch, not one of
+  each per episode (`test_multiple_episodes_of_the_same_show_only_search_and_fetch_show_details_once`).
+  The movie details page shows a `TV · S01E01` badge + show title above the
+  episode title when `metadata.media_type === "tv_episode"`
+  (`renderMovieDetailShell` in `drone.js`).
 
 This is a one-shot **background job with a pollable status**, not one of
 this app's forever-loop pollers (VPN self-heal, SMTP digest, the ROM

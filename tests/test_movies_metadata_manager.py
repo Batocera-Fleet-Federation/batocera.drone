@@ -34,16 +34,27 @@ def _write_movie(root: Path, rel: str, data: bytes = b"x") -> Path:
 
 
 class FakeTmdbClient:
-    def __init__(self, *, details=None, search_results=None):
+    def __init__(self, *, details=None, search_results=None, tv_details=None, tv_episode_details=None):
         self._details = details or {}
         self._search_results = search_results or []
+        self._tv_details = tv_details or {}
+        self._tv_episode_details = tv_episode_details or {}
         self.downloaded_urls = []
 
-    def search(self, query):
+    def search(self, query, year=None):
+        return self._search_results
+
+    def search_tv(self, query, year=None):
         return self._search_results
 
     def details(self, tmdb_id):
         return self._details
+
+    def tv_details(self, tv_id):
+        return self._tv_details
+
+    def tv_episode_details(self, tv_id, season_number, episode_number):
+        return self._tv_episode_details
 
     def download_image(self, url):
         self.downloaded_urls.append(url)
@@ -188,24 +199,51 @@ class FakeBulkTmdbClient:
     per movie, so a single canned response can't exercise matched/failed
     counting the way the per-movie tests need."""
 
-    def __init__(self, *, match_queries=None, unavailable_after=None, search_delay_seconds=0):
+    def __init__(
+        self, *, match_queries=None, unavailable_after=None, search_delay_seconds=0,
+        tv_match_queries=None, tv_details=None, tv_episode_details=None,
+    ):
         self._match_queries = match_queries if match_queries is not None else set()
+        self._tv_match_queries = tv_match_queries if tv_match_queries is not None else set()
         self._unavailable_after = unavailable_after
         self._search_delay_seconds = search_delay_seconds
+        self._tv_details = tv_details or dict(_MATRIX_DETAILS, title="A Matched Show")
+        self._tv_episode_details = tv_episode_details or {"title": "A Matched Episode", "overview": "", "air_date": None, "rating": None, "still_url": None}
         self.search_calls = []
+        self.search_tv_calls = []
+        self.tv_details_calls = []
+        self.tv_episode_details_calls = []
 
-    def search(self, query):
+    def _maybe_raise_unavailable(self, call_count):
+        if self._unavailable_after is not None and call_count > self._unavailable_after:
+            raise TmdbUnavailableError("TMDb rejected the configured API key")
+
+    def search(self, query, year=None):
         if self._search_delay_seconds:
             time.sleep(self._search_delay_seconds)
         self.search_calls.append(query)
-        if self._unavailable_after is not None and len(self.search_calls) > self._unavailable_after:
-            raise TmdbUnavailableError("TMDb rejected the configured API key")
+        self._maybe_raise_unavailable(len(self.search_calls) + len(self.search_tv_calls))
         if query in self._match_queries:
             return [{"tmdb_id": 603, "title": "A Matched Movie"}]
         return []
 
+    def search_tv(self, query, year=None):
+        self.search_tv_calls.append(query)
+        self._maybe_raise_unavailable(len(self.search_calls) + len(self.search_tv_calls))
+        if query in self._tv_match_queries:
+            return [{"tmdb_id": 909, "title": "A Matched Show"}]
+        return []
+
     def details(self, tmdb_id):
         return dict(_MATRIX_DETAILS, tmdb_id=tmdb_id)
+
+    def tv_details(self, tv_id):
+        self.tv_details_calls.append(tv_id)
+        return dict(self._tv_details, tmdb_id=tv_id)
+
+    def tv_episode_details(self, tv_id, season_number, episode_number):
+        self.tv_episode_details_calls.append((tv_id, season_number, episode_number))
+        return dict(self._tv_episode_details)
 
     def download_image(self, url):
         return (b"fake-image-bytes", "image/jpeg")
@@ -357,6 +395,121 @@ class BulkScrapeTests(unittest.TestCase):
             self.assertEqual(job["skipped_count"], 1)
             self.assertEqual(job["failed_count"], 1)
             self.assertNotIn("", fake.search_calls)
+
+    def test_year_bearing_scene_release_name_is_searched_with_year_filter_first(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "28.Days.Later.2002.1080p.BluRay.DDP5.1.x265.10bit-GalaxyRG265.mkv")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+
+            fake = FakeBulkTmdbClient(match_queries={"28 Days Later"})
+            metadata_manager.start_bulk_scrape(settings, rescan_all=True, client=fake)
+            job = _wait_for_bulk_scrape_status(settings)
+
+            self.assertEqual(job["matched_count"], 1)
+            # The year-truncated title is tried before anything noisier.
+            self.assertEqual(fake.search_calls[0], "28 Days Later")
+
+    def test_hyphenated_title_is_not_mangled_by_the_group_tag_stripper(self):
+        # Regression: an early version of the release-group stripper matched
+        # any "-word..." run to end of string, which ate "-Man" off
+        # "Ant-Man" -- see filename_parser.search_candidates's docstring.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Ant-Man (1080p).mkv")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+
+            fake = FakeBulkTmdbClient(match_queries={"Ant Man"})
+            metadata_manager.start_bulk_scrape(settings, rescan_all=True, client=fake)
+            job = _wait_for_bulk_scrape_status(settings)
+
+            self.assertEqual(job["matched_count"], 1)
+
+    def test_extras_folder_content_is_skipped_without_a_tmdb_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Shows/Dexter/Dexter (2006) S01/Featurettes/Blood Splatter 101.mkv")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+
+            fake = FakeBulkTmdbClient()
+            metadata_manager.start_bulk_scrape(settings, rescan_all=True, client=fake)
+            job = _wait_for_bulk_scrape_status(settings)
+
+            self.assertEqual(job["skipped_count"], 1)
+            self.assertEqual(job["matched_count"], 0)
+            self.assertEqual(job["failed_count"], 0)
+            self.assertEqual(fake.search_calls, [])
+            self.assertEqual(fake.search_tv_calls, [])
+
+    def test_tv_episode_is_searched_via_search_tv_and_saved_as_an_episode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(
+                root,
+                "Shows/Dexter/Dexter (2006) S01/Dexter (2006) - S01E01 - Dexter (1080p BluRay x265 Silence).mkv",
+            )
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+            entry_key = movies_store.list_movies(settings.movies_root)[0]["entry_key"]
+
+            fake = FakeBulkTmdbClient(
+                tv_match_queries={"Dexter"},
+                tv_details=dict(_MATRIX_DETAILS, title="Dexter", tmdb_id=909),
+                tv_episode_details={
+                    "title": "Dexter", "overview": "Pilot overview", "air_date": "2006-10-01",
+                    "rating": 8.0, "still_url": None,
+                },
+            )
+            result = metadata_manager.start_bulk_scrape(settings, rescan_all=True, client=fake)
+            self.assertEqual(result["status"], "ok")
+            job = _wait_for_bulk_scrape_status(settings)
+
+            self.assertEqual(job["matched_count"], 1)
+            self.assertEqual(fake.search_calls, [])
+            self.assertEqual(fake.search_tv_calls, ["Dexter"])
+            self.assertEqual(len(fake.tv_details_calls), 1)
+
+            scraped = movies_store.get_movie_metadata(settings.movies_root, entry_key)
+            self.assertEqual(scraped["provider"], "tmdb_tv")
+            self.assertEqual(scraped["title"], "Dexter - S01E01 - Dexter")
+            self.assertEqual(scraped["media_type"], "tv_episode")
+            self.assertEqual(scraped["show_title"], "Dexter")
+            self.assertEqual(scraped["season_number"], 1)
+            self.assertEqual(scraped["episode_number"], 1)
+
+    def test_multiple_episodes_of_the_same_show_only_search_and_fetch_show_details_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Shows/Dexter/Dexter (2006) S01/Dexter (2006) - S01E01 - Dexter.mkv")
+            _write_movie(root, "Shows/Dexter/Dexter (2006) S01/Dexter (2006) - S01E02 - Crocodile.mkv")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+
+            fake = FakeBulkTmdbClient(tv_match_queries={"Dexter"})
+            metadata_manager.start_bulk_scrape(settings, rescan_all=True, client=fake)
+            job = _wait_for_bulk_scrape_status(settings)
+
+            self.assertEqual(job["matched_count"], 2)
+            self.assertEqual(fake.search_tv_calls, ["Dexter"])
+            self.assertEqual(len(fake.tv_details_calls), 1)
+            self.assertEqual(len(fake.tv_episode_details_calls), 2)
+
+    def test_show_not_found_on_tmdb_counts_as_failed_not_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Shows/Unknown Show/Unknown Show (2020) - S01E01 - Pilot.mkv")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+
+            fake = FakeBulkTmdbClient()  # no tv_match_queries -- search_tv returns []
+            metadata_manager.start_bulk_scrape(settings, rescan_all=True, client=fake)
+            job = _wait_for_bulk_scrape_status(settings)
+
+            self.assertEqual(job["failed_count"], 1)
+            self.assertEqual(job["matched_count"], 0)
 
     def test_tmdb_becoming_unavailable_mid_job_stops_early_without_erroring_the_job(self):
         with tempfile.TemporaryDirectory() as tmp:

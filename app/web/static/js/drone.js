@@ -2373,6 +2373,10 @@ function renderMovieDetailShell(movie) {
   ].filter(Boolean);
   const genres = (meta && meta.genres) || [];
   const cast = (meta && meta.cast) || [];
+  const isTvEpisode = !!(meta && meta.media_type === "tv_episode");
+  const episodeBadge = isTvEpisode
+    ? `<span class="badge text-bg-info me-2">TV &middot; S${String(meta.season_number).padStart(2, "0")}E${String(meta.episode_number).padStart(2, "0")}</span>`
+    : "";
   return `
     <button class="btn btn-outline-secondary btn-sm mb-3" type="button" onclick="setHash('#movies')"><i class="bi bi-arrow-left me-1"></i>Back to Movies</button>
     <div class="movie-detail-hero" ${backdropUrl ? `style="background-image:linear-gradient(180deg, rgba(11,16,32,0.55) 0%, rgba(11,16,32,0.96) 100%), url('${escapeHtml(backdropUrl)}')"` : ""}>
@@ -2383,6 +2387,11 @@ function renderMovieDetailShell(movie) {
             : `<div class="movie-detail-poster movie-detail-poster-placeholder"><i class="bi bi-film"></i></div>`
         }
         <div class="movie-detail-info min-width-0">
+          ${
+            isTvEpisode
+              ? `<div class="small text-muted mb-1">${episodeBadge}${escapeHtml(meta.show_title || "")}</div>`
+              : ""
+          }
           <h2 class="movie-detail-title" title="${escapeHtml(title)}">${escapeHtml(title)}</h2>
           ${meta && meta.tagline ? `<div class="movie-detail-tagline fst-italic text-muted mb-2">${escapeHtml(meta.tagline)}</div>` : ""}
           ${metaBits.length ? `<div class="text-muted small mb-2">${metaBits.join(" &middot; ")}</div>` : ""}
