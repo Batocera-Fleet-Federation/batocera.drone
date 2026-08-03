@@ -385,12 +385,26 @@ class MovieCastTokenHandlerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             _write_movie(root, "Vacation.mp4", b"x")
-            settings = _build_settings(root)  # cast_enabled defaults False
+            settings = _build_settings(root, DRONE_CAST_ENABLED="0")  # cast_enabled defaults True; explicitly off here
             movies_store.sync_movies_cache(settings.movies_root)
             entry_key = movies_store.list_movies(settings.movies_root)[0]["entry_key"]
             handler = _handler(settings)
             with self.assertRaises(ValueError):
                 handler._handle_movie_cast_token_create(entry_key)
+
+    def test_casting_enabled_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Vacation.mp4", b"x")
+            settings = _build_settings(root)  # no DRONE_CAST_ENABLED override
+            movies_store.sync_movies_cache(settings.movies_root)
+            entry_key = movies_store.list_movies(settings.movies_root)[0]["entry_key"]
+            handler = _handler(settings)
+            handler.headers["Host"] = "batocera.local"
+            handler._handle_movie_cast_token_create(entry_key)
+            status, payload = handler.json_response
+            self.assertEqual(status, 200)
+            self.assertTrue(payload["token"])
 
     def test_unknown_movie_raises_not_found(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

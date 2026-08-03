@@ -4770,9 +4770,13 @@ class CastHttpListenerTests(unittest.TestCase):
 
 
 class CreateServerCastListenerTests(unittest.TestCase):
-    """create_server()'s wiring of the cast listener: only started when
-    settings.cast_enabled is opted in, unlike http_redirect_server which
-    starts by default -- mirrors CreateServerHttpRedirectTests above."""
+    """create_server()'s wiring of the cast listener: on by default (same as
+    http_redirect_server), opt-out via DRONE_CAST_ENABLED=0 -- mirrors
+    CreateServerHttpRedirectTests above. cast_http_port=0 in setUp's base
+    env is *not* a "disabled" sentinel the way http_redirect_port=0 is --
+    create_server only gates this listener on cast_enabled, so port 0 here
+    just means "let the OS pick an ephemeral port," same as https_port=0
+    above; each test overrides the port explicitly when it needs a fixed one."""
 
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -4816,15 +4820,16 @@ class CreateServerCastListenerTests(unittest.TestCase):
             self.addCleanup(server.cast_http_server.server_close)
         return server
 
-    def test_cast_listener_not_started_by_default(self) -> None:
-        server = self._create()
-        self.assertIsNone(server.cast_http_server)
-
-    def test_cast_listener_starts_when_enabled(self) -> None:
-        os.environ["DRONE_CAST_ENABLED"] = "1"
-        os.environ["DRONE_CAST_HTTP_PORT"] = "18096"
+    def test_cast_listener_starts_by_default(self) -> None:
+        # No DRONE_CAST_ENABLED override -- relies on cast_enabled's own
+        # default (True).
         server = self._create()
         self.assertIsNotNone(server.cast_http_server)
+
+    def test_cast_listener_can_be_disabled(self) -> None:
+        os.environ["DRONE_CAST_ENABLED"] = "0"
+        server = self._create()
+        self.assertIsNone(server.cast_http_server)
 
 
 class CrossListenerTrustRefreshTests(unittest.TestCase):

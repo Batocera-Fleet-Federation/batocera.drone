@@ -409,9 +409,12 @@ decoding/streaming in the background after dismissal.
 **Casting (Chromecast/AirPlay) from the player modal** exists because a cast
 receiver fetches the video file *itself*, directly -- no browser, no
 session cookie, and it can't get past this Drone's self-signed HTTPS cert
-either. Opt-in end to end, off by default:
+either. **On by default**, opt-out via `DRONE_CAST_ENABLED=0` -- same "on
+unless you turn it off" default as `http_redirect_port`, acceptable here
+specifically because the narrow token gate (below) keeps this from being a
+wide-open port the way a naive "just serve movies over HTTP" would be:
 
-- `settings.cast_enabled` (`DRONE_CAST_ENABLED`, default off) gates a
+- `settings.cast_enabled` (`DRONE_CAST_ENABLED`, default **on**) gates a
   second, deliberately minimal plain-HTTP listener on `settings.cast_http_port`
   (`DRONE_CAST_HTTP_PORT`, default 8095) -- `drone_api.py`'s
   `_CastHttpHandler`, a sibling to `_HttpRedirectHandler` (same "deliberately
@@ -419,8 +422,9 @@ either. Opt-in end to end, off by default:
   unencrypted HTTP" reasoning) that serves **exactly one route**,
   `GET /public/movies/{entry_key}/cast-stream?token=...`, Range-aware, and
   404s everything else -- not the movie list, not artwork, not the detail
-  JSON. When `cast_enabled` is off (the default), this listener is never
-  bound at all, so nothing about the app's exposed surface changes.
+  JSON. Set `cast_enabled` to false and this listener is never bound at
+  all, so nothing about the app's exposed surface changes from before this
+  feature existed.
 - The token is single-movie-scoped, minted by an *already-authenticated*
   request (`POST /movies/{entry_key}/cast-token`, session-gated like every
   other movies route) and stored the same way session tokens are
@@ -454,6 +458,26 @@ either. Opt-in end to end, off by default:
   with a valid token) since the Cast SDK's own device-discovery doesn't
   activate outside a genuine Chrome install with a real receiver nearby
   (a known SDK limitation, not something to debug in this codebase).
+- **`disableRemotePlayback` on the `<video>` element is load-bearing, not
+  decorative.** Found live on a real device: Android Chrome puts its *own*
+  native cast icon directly in a plain `<video controls>` element's control
+  bar (the HTML Remote Playback API's default UI) -- a completely separate
+  affordance from `<google-cast-launcher>`/`cast.framework` above, and one
+  this app never controls. Tapping *that* icon connects a session using
+  whatever the video's `src` happens to be at that moment -- the original
+  session-cookie-gated HTTPS stream URL, which the TV can't fetch -- so the
+  receiver connects and shows its idle "ready" screen while the phone,
+  none the wiser, just keeps playing locally. Symptom looked exactly like a
+  broken cast flow (TV "connects" but never plays; phone never stops) but
+  the actual `<google-cast-launcher>` → token → `loadMedia()` path was
+  never involved at all. `disableRemotePlayback` suppresses only that
+  native Chrome/Android affordance -- it does not touch AirPlay (a
+  separate WebKit-specific mechanism, `x-webkit-airplay`/
+  `webkitShowPlaybackTargetPicker`, unaffected by this attribute) or the
+  Google Cast Sender SDK integration (also unaffected -- different system
+  entirely). `loadMovieOntoCastSession` also now pauses the local
+  `<video>` once `session.loadMedia()` succeeds, so a *correctly* cast
+  movie doesn't keep decoding/playing locally either.
 - **Known real-world limitation, not a code issue**: Chromecast's default
   media receiver frequently can't decode MKV (this library's most common
   container for scene-release content) -- AirPlay/Apple TV is more

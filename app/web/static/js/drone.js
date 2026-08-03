@@ -2527,8 +2527,9 @@ function toggleMoviesFolder(key) {
 // session cookie nor its self-signed HTTPS cert works for them. Casting a
 // movie mints a short-lived, single-movie-scoped token
 // (POST /movies/{entryKey}/cast-token, see handlers_movies.py) good on a
-// second, plain-HTTP-only listener (opt-in, settings.cast_enabled --
-// disabled Drones get a clear error here, not a silent no-op) instead.
+// second, plain-HTTP-only listener (on by default, settings.cast_enabled --
+// a Drone with it turned off gets a clear error here, not a silent no-op)
+// instead.
 let currentPlayerEntryKey = null;
 let castApiReady = false;
 async function mintMovieCastToken(entryKey) {
@@ -2591,6 +2592,11 @@ async function loadMovieOntoCastSession(entryKey) {
   const request = new chrome.cast.media.LoadRequest(mediaInfo);
   try {
     await session.loadMedia(request);
+    // The receiver has it now -- stop decoding/playing locally too, or the
+    // phone keeps burning battery (and, on some devices, audio) on a movie
+    // that's supposed to have handed off to the TV.
+    const video = document.getElementById("moviePlayerVideo");
+    if (video) video.pause();
     showToast("Casting started.", "success");
   } catch (err) {
     // Most common real-world case: the Chromecast default receiver can't
@@ -2623,7 +2629,7 @@ function openMoviePlayerModal(entryKey, movieName) {
           <button type="button" class="btn-close btn-close-white flex-shrink-0" data-bs-dismiss="modal" aria-label="Close"></button>
         </div>
         <div class="modal-body">
-          <video id="moviePlayerVideo" class="w-100" style="max-height: 70vh; background: #000;" controls autoplay src="${movieStreamUrl(entryKey)}" ${airplaySupported ? 'x-webkit-airplay="allow"' : ""}>
+          <video id="moviePlayerVideo" class="w-100" style="max-height: 70vh; background: #000;" controls autoplay disableRemotePlayback src="${movieStreamUrl(entryKey)}">
             Your browser can't play this video format. <a href="${movieDownloadUrl(entryKey)}">Download it</a> instead.
           </video>
         </div>

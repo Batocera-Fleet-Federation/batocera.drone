@@ -168,15 +168,19 @@ class Settings:
             # elsewhere for "off"), e.g. if port 80 is already in use for
             # something else on this machine.
             http_redirect_port=int(os.environ.get("DRONE_HTTP_REDIRECT_PORT", "80")),
-            # Opt-in (default off): a Chromecast/AirPlay receiver fetches the
-            # movie file itself, directly, with no browser and no session
-            # cookie -- it cannot pass this Drone's self-signed HTTPS cert
-            # check either. cast_http_port is a second, deliberately minimal
-            # plain-HTTP listener (see drone_api.py's _CastHttpHandler) that
-            # serves *only* a single-use-token-gated stream route, never
-            # anything session-cookie-gated -- distinct from
-            # http_redirect_port, which never serves real content at all.
-            cast_enabled=_env_bool(False, "DRONE_CAST_ENABLED"),
+            # On by default (opt-OUT via DRONE_CAST_ENABLED=0): a
+            # Chromecast/AirPlay receiver fetches the movie file itself,
+            # directly, with no browser and no session cookie -- it cannot
+            # pass this Drone's self-signed HTTPS cert check either.
+            # cast_http_port is a second, deliberately minimal plain-HTTP
+            # listener (see drone_api.py's _CastHttpHandler) that serves
+            # *only* a single-use-token-gated stream route, never anything
+            # session-cookie-gated -- distinct from http_redirect_port,
+            # which never serves real content at all. Same "on unless you
+            # turn it off" default as http_redirect_port above; the token
+            # gate (movie_cast_tokens.py) is what keeps this narrow rather
+            # than needing to be opt-in the way a wide-open port would.
+            cast_enabled=_env_bool(True, "DRONE_CAST_ENABLED"),
             cast_http_port=int(os.environ.get("DRONE_CAST_HTTP_PORT", "8095")),
             image_cache_ttl_seconds=int(os.environ.get("IMAGE_CACHE_TTL_SECONDS", "3600")),
             image_miss_cache_ttl_seconds=int(os.environ.get("IMAGE_MISS_CACHE_TTL_SECONDS", "300")),

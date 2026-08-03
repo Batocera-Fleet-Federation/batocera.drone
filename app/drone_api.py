@@ -1991,8 +1991,9 @@ _CAST_VIDEO_CONTENT_TYPES = {
 
 class _CastHttpHandler(BaseHTTPRequestHandler):
     """A second, deliberately separate plain-HTTP listener
-    (``settings.cast_http_port``, only bound at all when
-    ``settings.cast_enabled`` is opted in) that serves *exactly one* route:
+    (``settings.cast_http_port``, bound whenever ``settings.cast_enabled``
+    is true -- on by default, see that field's docstring in
+    ``common/settings.py``) that serves *exactly one* route:
     ``GET /public/movies/{entry_key}/cast-stream?token=...``, Range-aware,
     gated by a single-movie-scoped token from
     ``storage/movie_cast_tokens.py``. Every other path (and there is no
@@ -2001,13 +2002,16 @@ class _CastHttpHandler(BaseHTTPRequestHandler):
 
     This exists because a Chromecast or AirPlay receiver fetches the video
     file itself, directly -- no browser, no session cookie, and it can't
-    click through this Drone's self-signed HTTPS certificate either (see
-    the ``cast_enabled`` field's docstring in ``common/settings.py``). A
+    click through this Drone's self-signed HTTPS certificate either. A
     deliberately separate, minimal class -- not ``RomRequestHandler`` --
     same reasoning as ``_HttpRedirectHandler`` above: the real app surface
     (session-gated browsing, admin actions, every other file this Drone
     holds) must never become reachable over an unencrypted connection just
-    because this one narrow, opt-in exception exists for it.
+    because this one narrow exception exists for it. The narrowness (a
+    single route, gated by a token only an already-authenticated request
+    could have minted) is what makes "on by default" an acceptable default
+    here, the same way ``_HttpRedirectHandler`` (which serves no real
+    content at all) already is.
     """
 
     def __init__(self, *args, settings: Settings, **kwargs):
@@ -2263,11 +2267,12 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
             )
     server.http_redirect_server = http_redirect_server  # type: ignore[attr-defined]
 
-    # Cast-stream listener: opt-in (settings.cast_enabled, default off) --
-    # unlike http_redirect_server above, this one plain-HTTP listener does
-    # serve real content (a token-gated movie stream, see
-    # _CastHttpHandler), so it stays off unless a user has explicitly
-    # chosen to allow casting to a Chromecast/AirPlay receiver on their LAN.
+    # Cast-stream listener: on by default (settings.cast_enabled), opt-out
+    # via DRONE_CAST_ENABLED=0. Unlike http_redirect_server above, this one
+    # plain-HTTP listener does serve real content (a token-gated movie
+    # stream, see _CastHttpHandler) -- acceptable on by default because
+    # that content is gated by a single-movie-scoped token only an
+    # already-authenticated session could have minted, not left wide open.
     cast_http_server = None
     if settings.cast_enabled:
         try:
