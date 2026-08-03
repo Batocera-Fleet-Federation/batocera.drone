@@ -395,6 +395,28 @@ def list_movie_display_titles(movies_root: Path) -> dict:
     return {row[0]: row[1] for row in rows}
 
 
+def list_movie_genres(movies_root: Path) -> dict:
+    """Return ``{entry_key: [genre, ...]}`` for every movie that has been
+    scraped and has at least one genre -- same bulk-lookup shape as
+    ``list_movie_display_titles``, used to overlay genres onto the plain
+    list response so the Movie Explorer's category sidebar doesn't need a
+    separate request per movie. ``genres`` lives in ``extra_json`` (see the
+    module docstring on that column), not its own column, for both movies
+    and TV episodes alike."""
+    with _open(movies_root) as connection:
+        rows = connection.execute("SELECT entry_key, extra_json FROM movies_metadata_entries").fetchall()
+    genres_by_key = {}
+    for entry_key, extra_json in rows:
+        try:
+            extra = json.loads(extra_json or "{}")
+        except (TypeError, ValueError):
+            continue
+        genres = extra.get("genres") if isinstance(extra, dict) else None
+        if genres:
+            genres_by_key[entry_key] = list(genres)
+    return genres_by_key
+
+
 def list_movies_page(
     movies_root: Path,
     *,

@@ -19,10 +19,12 @@ from typing import Optional
 try:
     from ..storage import movies_store as _movies_store
     from ..movies import metadata_manager as _movies_metadata
+    from ..movies import filename_parser as _filename_parser
     from ..movies.tmdb_client import TmdbUnavailableError as _TmdbUnavailableError
 except ImportError:  # pragma: no cover - direct script execution fallback
     from storage import movies_store as _movies_store  # type: ignore
     from movies import metadata_manager as _movies_metadata  # type: ignore
+    from movies import filename_parser as _filename_parser  # type: ignore
     from movies.tmdb_client import TmdbUnavailableError as _TmdbUnavailableError  # type: ignore
 
 # Maps the public artwork field name (URL-facing, movie-flavored) to the
@@ -69,6 +71,7 @@ class HandlersMoviesMixin:
             )
             items = page["items"]
             self._apply_movie_display_titles(items)
+            self._apply_movie_kind_and_genres(items)
             if not self.settings.downloads_enabled:
                 for item in items:
                     item["is_downloadable"] = False
@@ -92,6 +95,7 @@ class HandlersMoviesMixin:
                 if query_value in " ".join([str(item.get("movie_name") or ""), str(item.get("file_path") or "")]).lower()
             ]
         self._apply_movie_display_titles(items)
+        self._apply_movie_kind_and_genres(items)
         if not self.settings.downloads_enabled:
             for item in items:
                 item["is_downloadable"] = False
@@ -114,6 +118,20 @@ class HandlersMoviesMixin:
         titles = _movies_store.list_movie_display_titles(self.settings.movies_root)
         for item in items:
             item["display_title"] = titles.get(item.get("entry_key")) or item.get("movie_name") or ""
+
+    def _apply_movie_kind_and_genres(self, items: list) -> None:
+        """Overlay ``kind`` (``"movie"``/``"episode"``/``"extra"``, from
+        ``filename_parser.classify`` -- a pure filename/path check, so this
+        works immediately for every movie, scraped or not) and ``genres``
+        (from scraped TMDb metadata, one bulk lookup like
+        ``list_movie_display_titles``, empty for anything never scraped).
+        Feeds the Movie Explorer's Type (Movies/Shows) and Genre category
+        sidebar without a per-movie request."""
+        genres_by_key = _movies_store.list_movie_genres(self.settings.movies_root)
+        for item in items:
+            parsed = _filename_parser.classify(item.get("file_path") or item.get("relative_path") or "", item.get("movie_name") or "")
+            item["kind"] = parsed.kind
+            item["genres"] = genres_by_key.get(item.get("entry_key")) or []
 
     def _resolve_movie_path(self, entry_key: str) -> Path:
         """Look up a movie by its stable id and validate the resolved path
@@ -226,7 +244,14 @@ class HandlersMoviesMixin:
         target = (movies_root / relative_path).resolve()
         if target == movies_root or movies_root not in target.parents or not target.is_file():
             raise FileNotFoundError()
-        self._stream_file(target, self._guess_content_type(target))
+        # Same helper ROM artwork uses (handlers_peer.py): server-side
+        # in-memory cache (keyed by mtime, so a re-scrape overwriting this
+        # file is picked up immediately) plus a browser-facing
+        # Cache-Control: public, max-age=3600 -- posters/backdrops are
+        # requested repeatedly (tree thumbnails, the Explorer grid, and the
+        # detail page all hit this same URL) and rarely change, so this is a
+        # real repeat-view speedup, not just a server-load optimization.
+        self._stream_cached_image(target)
 
     # ------------------------------------------------------------- scraper
 
@@ -282,6 +307,34 @@ class HandlersMoviesMixin:
     def _handle_admin_movie_scrape_bulk_start(self, payload: dict) -> None:
         payload = payload if isinstance(payload, dict) else {}
         result = _movies_metadata.start_bulk_scrape(self.settings, rescan_all=bool(payload.get("rescan_all")))
+        status_code = 409 if result.get("status") == "already_running" else (
+            502 if result.get("status") == "error" else 200
+        )
+        self._send_json(status_code, result)
+
+    _BULK_ITEM_STATUSES = {"matched", "skipped", "failed"}
+
+    def _handle_admin_movie_scrape_bulk_items(self, status: str, limit: Optional[int], offset: int) -> None:
+        if status not in self._BULK_ITEM_STATUSES:
+            self._send_json(400, {"error": "status must be one of matched, skipped, failed"})
+            return
+        page = _movies_metadata.get_bulk_scrape_items(
+            self.settings, status, limit=int(limit) if limit is not None else 200, offset=offset
+        )
+        self._send_json(200, page)
+
+    def _handle_admin_movie_scrape_bulk_retry(self, payload: dict) -> None:
+        payload = payload if isinstance(payload, dict) else {}
+        entry_keys = payload.get("entry_keys")
+        status = payload.get("status")
+        if not entry_keys and status not in self._BULK_ITEM_STATUSES:
+            self._send_json(400, {"error": "either entry_keys or a status (matched, skipped, failed) is required"})
+            return
+        result = _movies_metadata.retry_bulk_scrape_items(
+            self.settings,
+            status=status if not entry_keys else None,
+            entry_keys=entry_keys if isinstance(entry_keys, list) else None,
+        )
         status_code = 409 if result.get("status") == "already_running" else (
             502 if result.get("status") == "error" else 200
         )

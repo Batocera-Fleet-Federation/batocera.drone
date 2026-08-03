@@ -84,6 +84,61 @@ class TmdbClientSearchTests(unittest.TestCase):
             with self.assertRaises(TmdbUnavailableError):
                 client.search("matrix")
 
+
+class TmdbClient429RetryTests(unittest.TestCase):
+    """A 429 used to be indistinguishable from a revoked API key -- both
+    raised TmdbUnavailableError immediately, which metadata_manager's bulk
+    job treats as "stop the whole run, fail everything left." A bulk scrape
+    of a large library can easily trip transient rate-limiting (the search
+    ladder alone issues up to 4 requests per movie), so a 429 needs to be
+    retried with backoff instead of aborting the run outright."""
+
+    def _rate_limited(self, retry_after=None):
+        headers = {"Retry-After": retry_after} if retry_after is not None else {}
+        return HTTPError("https://api.themoviedb.org/3/search/movie", 429, "Too Many Requests", headers, None)
+
+    def test_succeeds_after_one_retry(self) -> None:
+        payload = json.dumps({"results": []}).encode("utf-8")
+        client = TmdbClient("key")
+        with mock.patch("app.movies.tmdb_client.urlopen", side_effect=[self._rate_limited(), FakeResponse(payload)]):
+            with mock.patch("app.movies.tmdb_client.time.sleep") as sleep_mock:
+                results = client.search("halloween")
+        self.assertEqual(results, [])
+        sleep_mock.assert_called_once()
+
+    def test_honors_retry_after_header(self) -> None:
+        payload = json.dumps({"results": []}).encode("utf-8")
+        client = TmdbClient("key")
+        with mock.patch("app.movies.tmdb_client.urlopen", side_effect=[self._rate_limited(retry_after="5"), FakeResponse(payload)]):
+            with mock.patch("app.movies.tmdb_client.time.sleep") as sleep_mock:
+                client.search("halloween")
+        sleep_mock.assert_called_once_with(5.0)
+
+    def test_falls_back_to_backoff_when_retry_after_is_not_a_plain_number(self) -> None:
+        payload = json.dumps({"results": []}).encode("utf-8")
+        client = TmdbClient("key")
+        with mock.patch("app.movies.tmdb_client.urlopen", side_effect=[self._rate_limited(retry_after="not-a-number"), FakeResponse(payload)]):
+            with mock.patch("app.movies.tmdb_client.time.sleep") as sleep_mock:
+                client.search("halloween")
+        sleep_mock.assert_called_once_with(1.0)
+
+    def test_exhausting_retries_raises_tmdb_unavailable_not_a_crash(self) -> None:
+        client = TmdbClient("key")
+        with mock.patch("app.movies.tmdb_client.urlopen", side_effect=self._rate_limited()):
+            with mock.patch("app.movies.tmdb_client.time.sleep") as sleep_mock:
+                with self.assertRaises(TmdbUnavailableError):
+                    client.search("halloween")
+        self.assertEqual(sleep_mock.call_count, 3)
+
+    def test_401_never_retries(self) -> None:
+        client = TmdbClient("bad-key")
+        error = HTTPError("https://api.themoviedb.org/3/search/movie", 401, "Unauthorized", None, None)
+        with mock.patch("app.movies.tmdb_client.urlopen", side_effect=error):
+            with mock.patch("app.movies.tmdb_client.time.sleep") as sleep_mock:
+                with self.assertRaises(TmdbUnavailableError):
+                    client.search("matrix")
+        sleep_mock.assert_not_called()
+
     def test_year_is_passed_as_primary_release_year_filter(self) -> None:
         payload = json.dumps({"results": []}).encode("utf-8")
         client = TmdbClient("key")

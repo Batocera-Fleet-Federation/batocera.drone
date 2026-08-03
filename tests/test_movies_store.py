@@ -270,6 +270,22 @@ class MovieMetadataStoreTests(unittest.TestCase):
     def test_list_movie_display_titles_empty_when_none_scraped(self):
         self.assertEqual(movies_store.list_movie_display_titles(self.movies_root), {})
 
+    def test_list_movie_genres_only_includes_movies_with_genres(self):
+        movies_store.save_movie_metadata(
+            self.movies_root, "aaaa", provider="tmdb", provider_id="1", title="Has Genres",
+            poster_relative_path=None, backdrop_relative_path=None,
+            extra={"genres": ["Action", "Horror"]},
+        )
+        movies_store.save_movie_metadata(
+            self.movies_root, "bbbb", provider="tmdb", provider_id="2", title="No Genres Key",
+            poster_relative_path=None, backdrop_relative_path=None, extra={},
+        )
+        genres = movies_store.list_movie_genres(self.movies_root)
+        self.assertEqual(genres, {"aaaa": ["Action", "Horror"]})
+
+    def test_list_movie_genres_empty_when_none_scraped(self):
+        self.assertEqual(movies_store.list_movie_genres(self.movies_root), {})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1405,7 +1405,17 @@ class RomRequestHandler(HandlersAuthMixin, HandlersSystemMixin, HandlersDownload
         self._send_rate_limited()
         return True
 
-    def _send_security_headers(self) -> None:
+    def _send_security_headers(self, cache_control: str = "no-store") -> None:
+        # cache_control defaults to "no-store" for every JSON/HTML response
+        # (the right default when most of what this app serves is
+        # session-gated and changes often). A handful of cacheable-by-nature
+        # responses (scraped artwork, ROM images -- see
+        # HandlersPeerMixin._stream_cached_image) pass a real Cache-Control
+        # value instead; sending both here and a second Cache-Control header
+        # from the caller would produce two header lines that most clients
+        # concatenate into one comma-joined value, and "no-store" wins that
+        # combination regardless of what else is in it -- silently defeating
+        # the caching the caller asked for. One call site, one header.
         image_sources = ["'self'", "data:", "https:"]
         if self.settings.use_fake_data:
             image_sources.append("https:")
@@ -1420,7 +1430,7 @@ class RomRequestHandler(HandlersAuthMixin, HandlersSystemMixin, HandlersDownload
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", cache_control)
         # CSP keeps UI/resource loading strict while still allowing bundled Swagger assets.
         self.send_header(
             "Content-Security-Policy",

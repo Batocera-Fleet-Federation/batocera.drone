@@ -815,8 +815,7 @@ class HandlersPeerMixin:
             self.send_response(200)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(data)))
-            self._send_security_headers()
-            self.send_header("Cache-Control", "public, max-age=3600")
+            self._send_security_headers(cache_control="public, max-age=3600")
             self.end_headers()
             self.wfile.write(data)
             return
@@ -835,7 +834,6 @@ class HandlersPeerMixin:
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
-        self._send_security_headers()
-        self.send_header("Cache-Control", "public, max-age=3600")
+        self._send_security_headers(cache_control="public, max-age=3600")
         self.end_headers()
         self.wfile.write(data)

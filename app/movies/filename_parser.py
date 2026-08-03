@@ -39,16 +39,25 @@ EXTRAS_FOLDER_NAMES = frozenset(
 
 # "Show (2006) - S01E04 - Episode Title (1080p BluRay x265 Silence).mkv" --
 # the TRaSH/Sonarr convention. Year is optional (some libraries omit it).
+# The tail after the episode number is deliberately unconstrained (``.*$``,
+# not e.g. requiring a "- Title" separator): real libraries also use
+# "Show S01E04 [1080p][x265][group].mkv" -- tags jammed on with no separator
+# at all -- and an earlier, stricter version of this regex simply failed to
+# match those (falling through to KIND_MOVIE, which then got searched
+# against TMDb's *movie* endpoint and never matched). The tail is cleaned up
+# separately below into ``episode_title``, which is cosmetic only -- TMDb
+# search uses ``show``/``year`` alone, so a messy or empty tail here never
+# hurts match quality, only the display string.
 _EPISODE_RE = re.compile(
     r"^(?P<show>.+?)\s*(?:\(?(?P<year>(?:19|20)\d{2})\)?)?\s*[-_. ]+"
     r"[Ss](?P<season>\d{1,2})[.\s_-]?[Ee](?P<episode>\d{1,3})"
-    r"(?:\s*[-_.]\s*(?P<etitle>.+))?$"
+    r"(?P<tail>.*)$"
 )
 # "Show.2006.1x04.Episode.Title.mkv" -- the older "1x04" style.
 _ALT_EPISODE_RE = re.compile(
     r"^(?P<show>.+?)\s*(?:\(?(?P<year>(?:19|20)\d{2})\)?)?\s*[-_. ]+"
     r"(?P<season>\d{1,2})x(?P<episode>\d{2,3})"
-    r"(?:\s*[-_.]\s*(?P<etitle>.+))?$"
+    r"(?P<tail>.*)$"
 )
 
 # Scene-release tooling substitutes filesystem-illegal characters for
@@ -124,7 +133,9 @@ def classify(file_path: str, file_name: str) -> ParsedEntry:
         return ParsedEntry(kind=KIND_MOVIE)
 
     fields = match.groupdict()
-    episode_title = _BRACKETED_RE.sub("", fields.get("etitle") or "").strip(" -")
+    tail = _BRACKETED_RE.sub("", fields.get("tail") or "")
+    tail = _SCENE_TOKENS_RE.sub("", tail)
+    episode_title = tail.strip(" -_.:")
     return ParsedEntry(
         kind=KIND_EPISODE,
         show_title=_collapse(fields["show"]),

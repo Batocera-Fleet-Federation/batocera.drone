@@ -60,6 +60,38 @@ class ClassifyEpisodeTests(unittest.TestCase):
         self.assertEqual(result.season, 1)
         self.assertEqual(result.episode, 1)
 
+    def test_bracketed_tags_with_no_separator_before_them(self) -> None:
+        # Regression: found live on a real library -- "House M.D. S01E10
+        # [1080p] [x265] [pseudo].mkv" has no "- " (or any separator) between
+        # the episode number and its trailing quality tags. An earlier
+        # version of _EPISODE_RE required that separator and simply failed
+        # to match this, falling through to KIND_MOVIE -- which then got
+        # searched against TMDb's *movie* endpoint and could never match.
+        name = "House M.D. S01E10 [1080p] [x265] [pseudo].mkv"
+        result = filename_parser.classify(name, name)
+        self.assertEqual(result.kind, filename_parser.KIND_EPISODE)
+        self.assertEqual(result.season, 1)
+        self.assertEqual(result.episode, 10)
+        self.assertEqual(result.episode_title, "")
+
+    def test_space_separated_tags_with_no_separator_before_them(self) -> None:
+        # Same real-library regression, no brackets this time -- just plain
+        # space-separated tags jammed directly after the episode number.
+        name = "Law and Order SVU S27E17 1080p AMZN WEB-DL DDP5 1 H 264-NTb.mkv"
+        result = filename_parser.classify(name, name)
+        self.assertEqual(result.kind, filename_parser.KIND_EPISODE)
+        self.assertEqual(result.show_title, "Law and Order SVU")
+        self.assertEqual(result.season, 27)
+        self.assertEqual(result.episode, 17)
+
+    def test_custom_parenthetical_after_episode_number_does_not_break_parsing(self) -> None:
+        name = "Tales from the Crypt - S02E10 (The Ventriloquist's Dummy).mp4"
+        result = filename_parser.classify(name, name)
+        self.assertEqual(result.kind, filename_parser.KIND_EPISODE)
+        self.assertEqual(result.show_title, "Tales from the Crypt")
+        self.assertEqual(result.season, 2)
+        self.assertEqual(result.episode, 10)
+
 
 class ClassifyExtraTests(unittest.TestCase):
     def test_featurettes_folder_is_an_extra_even_without_episode_shape(self) -> None:
@@ -85,6 +117,18 @@ class ClassifyExtraTests(unittest.TestCase):
     def test_deleted_scenes_folder_is_an_extra(self) -> None:
         result = filename_parser.classify(
             "Movies/Some Movie (2020)/Deleted Scenes/scene1.mkv", "scene1.mkv"
+        )
+        self.assertEqual(result.kind, filename_parser.KIND_EXTRA)
+
+    def test_extras_in_a_named_subfolder_under_featurettes_are_still_extras(self) -> None:
+        # Regression: found live -- a numbered-clip naming style ("01. Seeing
+        # Walt.mkv", no SxxEyy at all) living two levels under Featurettes,
+        # in a subfolder with its own descriptive name. The extras-folder
+        # check just needs *any* ancestor segment to match, not the direct
+        # parent -- confirms that still holds with a named subfolder between.
+        result = filename_parser.classify(
+            "torrents/Lost (2004) S01-S06/Lost (2004) S02/Featurettes/Deleted Scenes/01. Seeing Walt.mkv",
+            "01. Seeing Walt.mkv",
         )
         self.assertEqual(result.kind, filename_parser.KIND_EXTRA)
 

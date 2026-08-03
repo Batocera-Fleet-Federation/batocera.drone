@@ -767,6 +767,30 @@
       font-size: 0.85rem;
       width: 0.9rem;
     }
+    /* A movie's tree row swaps the plain bi-film icon every other tree row
+       uses for a small poster thumbnail once one's been scraped -- makes
+       scraped artwork visible on the page people actually land on
+       (the default #movies view), not just the Explorer/detail page. */
+    .movies-tree-thumb {
+      flex: 0 0 auto;
+      width: 1.5rem;
+      height: 2.05rem;
+      border-radius: 0.2rem;
+      overflow: hidden;
+      background: rgba(255, 255, 255, 0.04);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .movies-tree-thumb img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+    .movies-tree-thumb-fallback {
+      color: var(--admin-muted);
+      font-size: 0.85rem;
+    }
     .tree-branch {
       border-top: 1px solid rgba(255, 255, 255, 0.06);
       background: rgba(255, 255, 255, 0.025);
@@ -1849,7 +1873,18 @@
     body.movie-explorer-active .sidebar,
     body.movie-explorer-active #managedPeerBanner,
     body.movie-explorer-active #systemInfoBar {
-      display: none;
+      /* #systemInfoBar carries Bootstrap's d-flex utility class
+         (display: flex !important in the template) -- without !important
+         here too, this rule loses the cascade and the bar stays visible. */
+      display: none !important;
+    }
+    /* Any Movies-tab view (tree list, single-movie detail page, and the
+       explorer covered above) drops the system info chip row -- it's just
+       CPU/version/email badges that crowd a "just show me the movie" page
+       and aren't specific to what's on screen; the sidebar/nav stay put
+       since, unlike the full-bleed explorer, these pages keep normal chrome. */
+    body.movies-page-active #systemInfoBar {
+      display: none !important;  /* see the !important note above */
     }
     body.movie-explorer-active .app-shell {
       padding: 0;
@@ -1882,10 +1917,70 @@
       white-space: nowrap;
     }
     .movie-explorer-search { max-width: 360px; }
+    .movie-explorer-body {
+      display: flex;
+      align-items: flex-start;
+      gap: 1.5rem;
+    }
+    .movie-explorer-sidebar {
+      flex: 0 0 180px;
+      position: sticky;
+      top: 4.5rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1.25rem;
+    }
+    .movie-explorer-sidebar-title {
+      color: var(--admin-border);
+      text-transform: uppercase;
+      font-size: 0.7rem;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      margin-bottom: 0.4rem;
+    }
+    .movie-explorer-sidebar-section {
+      display: flex;
+      flex-direction: column;
+      gap: 0.15rem;
+    }
+    .movie-explorer-category-btn {
+      background: transparent;
+      border: none;
+      color: var(--admin-text);
+      text-align: left;
+      padding: 0.35rem 0.5rem;
+      border-radius: 0.35rem;
+      font-size: 0.9rem;
+      opacity: 0.75;
+    }
+    .movie-explorer-category-btn:hover { background: rgba(255, 255, 255, 0.06); opacity: 1; }
+    .movie-explorer-category-btn.active {
+      background: rgba(59, 130, 246, 0.18);
+      color: #fff;
+      opacity: 1;
+      font-weight: 600;
+    }
     .movie-explorer-grid {
+      flex: 1 1 auto;
+      min-width: 0;
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
       gap: 1rem;
+    }
+    @media (max-width: 768px) {
+      .movie-explorer-body { flex-direction: column; }
+      .movie-explorer-sidebar {
+        position: static;
+        flex-direction: row;
+        flex-wrap: nowrap;
+        width: 100%;
+        overflow-x: auto;
+        gap: 1.5rem;
+        padding-bottom: 0.25rem;
+      }
+      .movie-explorer-sidebar-section { flex-direction: row; align-items: center; flex: none; }
+      .movie-explorer-sidebar-title { margin-bottom: 0; margin-right: 0.5rem; white-space: nowrap; }
+      .movie-explorer-category-btn { white-space: nowrap; }
     }
     .movie-explorer-card {
       background: transparent;

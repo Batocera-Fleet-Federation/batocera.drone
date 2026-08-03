@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import app.storage.movie_scrape_job_items as movie_scrape_job_items
 import app.storage.movie_scrape_jobs as movie_scrape_jobs
 import app.storage.movies_store as movies_store
 from app.common.settings import Settings
@@ -260,6 +261,14 @@ def _wait_for_bulk_scrape_status(settings, timeout=5.0):
 
 
 class BulkScrapeTests(unittest.TestCase):
+    def setUp(self):
+        # Real per-candidate throttling (see _throttle_before_tmdb_call) has
+        # no test value at real-time speed -- zero it out everywhere in this
+        # class rather than eating it in every test.
+        patcher = mock.patch("app.movies.metadata_manager._REQUEST_THROTTLE_SECONDS", 0)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_no_job_yet_returns_none(self):
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(Path(tmp))
@@ -396,6 +405,137 @@ class BulkScrapeTests(unittest.TestCase):
             self.assertEqual(job["failed_count"], 1)
             self.assertNotIn("", fake.search_calls)
 
+    def test_per_item_results_are_recorded_with_reasons(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Good Match.mp4")
+            _write_movie(root, "No Match.mp4")
+            _write_movie(root, "----.mp4")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+            by_name = {m["movie_name"]: m["entry_key"] for m in movies_store.list_movies(settings.movies_root)}
+
+            fake = FakeBulkTmdbClient(match_queries={"Good Match"})
+            metadata_manager.start_bulk_scrape(settings, rescan_all=True, client=fake)
+            _wait_for_bulk_scrape_status(settings)
+
+            matched = movie_scrape_job_items.list_by_status(settings, movie_scrape_job_items.STATUS_MATCHED)
+            self.assertEqual([i["entry_key"] for i in matched["items"]], [by_name["Good Match.mp4"]])
+
+            failed = movie_scrape_job_items.list_by_status(settings, movie_scrape_job_items.STATUS_FAILED)
+            self.assertEqual(failed["items"][0]["entry_key"], by_name["No Match.mp4"])
+            self.assertIn("no TMDb results", failed["items"][0]["reason"])
+
+            skipped = movie_scrape_job_items.list_by_status(settings, movie_scrape_job_items.STATUS_SKIPPED)
+            self.assertEqual(skipped["items"][0]["entry_key"], by_name["----.mp4"])
+
+    def test_extras_are_recorded_as_skipped_with_a_reason(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Shows/Dexter/Dexter (2006) S01/Featurettes/Blood Splatter 101.mkv")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+
+            metadata_manager.start_bulk_scrape(settings, rescan_all=True, client=FakeBulkTmdbClient())
+            _wait_for_bulk_scrape_status(settings)
+
+            skipped = movie_scrape_job_items.list_by_status(settings, movie_scrape_job_items.STATUS_SKIPPED)
+            self.assertEqual(skipped["total"], 1)
+            self.assertIn("extra", skipped["items"][0]["reason"])
+
+    def test_mid_job_tmdb_unavailable_records_every_remaining_item(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "First Movie.mp4")
+            _write_movie(root, "Second Movie.mp4")
+            _write_movie(root, "Third Movie.mp4")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+
+            fake = FakeBulkTmdbClient(match_queries=set(), unavailable_after=0)
+            metadata_manager.start_bulk_scrape(settings, rescan_all=True, client=fake)
+            _wait_for_bulk_scrape_status(settings)
+
+            failed = movie_scrape_job_items.list_by_status(settings, movie_scrape_job_items.STATUS_FAILED)
+            self.assertEqual(failed["total"], 3)
+            self.assertTrue(all("rate-limit" in i["reason"] or "rejected" in i["reason"] for i in failed["items"]))
+
+    def test_a_fresh_run_clears_the_previous_runs_item_breakdown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Good Match.mp4")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+
+            metadata_manager.start_bulk_scrape(settings, rescan_all=True, client=FakeBulkTmdbClient(match_queries={"Good Match"}))
+            _wait_for_bulk_scrape_status(settings)
+            self.assertEqual(movie_scrape_job_items.list_by_status(settings, movie_scrape_job_items.STATUS_MATCHED)["total"], 1)
+
+            _write_movie(root, "No Match.mp4")
+            movies_store.sync_movies_cache(settings.movies_root)
+            metadata_manager.start_bulk_scrape(settings, rescan_all=True, client=FakeBulkTmdbClient())
+            _wait_for_bulk_scrape_status(settings)
+            # The first run's "Good Match" matched-row is gone -- a fresh
+            # full run's breakdown replaces the previous one, not merges.
+            self.assertEqual(movie_scrape_job_items.list_by_status(settings, movie_scrape_job_items.STATUS_MATCHED)["total"], 0)
+
+    def test_retry_failed_rescopes_to_just_the_failed_set_and_updates_in_place(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Good Match.mp4")
+            _write_movie(root, "Retry Me.mp4")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+            by_name = {m["movie_name"]: m["entry_key"] for m in movies_store.list_movies(settings.movies_root)}
+
+            metadata_manager.start_bulk_scrape(settings, rescan_all=True, client=FakeBulkTmdbClient(match_queries={"Good Match"}))
+            _wait_for_bulk_scrape_status(settings)
+            self.assertEqual(movie_scrape_job_items.list_by_status(settings, movie_scrape_job_items.STATUS_FAILED)["total"], 1)
+
+            # Simulates the underlying problem (e.g. rate-limiting) having
+            # cleared: this time the retried title matches.
+            retry_client = FakeBulkTmdbClient(match_queries={"Retry Me"})
+            result = metadata_manager.retry_bulk_scrape_items(settings, status="failed", client=retry_client)
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(result["job"]["total"], 1)
+            _wait_for_bulk_scrape_status(settings)
+
+            self.assertEqual(retry_client.search_calls, ["Retry Me"])
+            self.assertEqual(movie_scrape_job_items.list_by_status(settings, movie_scrape_job_items.STATUS_FAILED)["total"], 0)
+            matched = movie_scrape_job_items.list_by_status(settings, movie_scrape_job_items.STATUS_MATCHED)
+            self.assertCountEqual([i["entry_key"] for i in matched["items"]], [by_name["Good Match.mp4"], by_name["Retry Me.mp4"]])
+
+    def test_retry_specific_entry_keys(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "No Match.mp4")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+            entry_key = movies_store.list_movies(settings.movies_root)[0]["entry_key"]
+
+            metadata_manager.start_bulk_scrape(settings, rescan_all=True, client=FakeBulkTmdbClient())
+            _wait_for_bulk_scrape_status(settings)
+
+            retry_client = FakeBulkTmdbClient(match_queries={"No Match"})
+            result = metadata_manager.retry_bulk_scrape_items(settings, entry_keys=[entry_key], client=retry_client)
+            self.assertEqual(result["job"]["total"], 1)
+            _wait_for_bulk_scrape_status(settings)
+            matched = movie_scrape_job_items.list_by_status(settings, movie_scrape_job_items.STATUS_MATCHED)
+            self.assertEqual([i["entry_key"] for i in matched["items"]], [entry_key])
+
+    def test_get_bulk_scrape_items_wraps_the_store(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "No Match.mp4")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+
+            metadata_manager.start_bulk_scrape(settings, rescan_all=True, client=FakeBulkTmdbClient())
+            _wait_for_bulk_scrape_status(settings)
+
+            page = metadata_manager.get_bulk_scrape_items(settings, "failed")
+            self.assertEqual(page["total"], 1)
+
     def test_year_bearing_scene_release_name_is_searched_with_year_filter_first(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -510,6 +650,29 @@ class BulkScrapeTests(unittest.TestCase):
 
             self.assertEqual(job["failed_count"], 1)
             self.assertEqual(job["matched_count"], 0)
+
+    def test_throttles_before_each_tmdb_touching_candidate(self):
+        # Uses the real (non-zeroed) module throttle constant for this one
+        # test -- everything else in this class patches it to 0 for speed.
+        # time.sleep is a process-wide singleton, and _wait_for_bulk_scrape_status's
+        # own polling loop also calls it (with a different, smaller delay) while
+        # this test's background job thread runs -- so this counts only the
+        # throttle's own 0.2s calls rather than asserting a single total call.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Good Match.mp4")
+            _write_movie(root, "----.mp4")  # empty query -- never touches TMDb, never throttled
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+
+            fake = FakeBulkTmdbClient(match_queries={"Good Match"})
+            with mock.patch("app.movies.metadata_manager._REQUEST_THROTTLE_SECONDS", 0.2):
+                with mock.patch("app.movies.metadata_manager.time.sleep") as sleep_mock:
+                    metadata_manager.start_bulk_scrape(settings, rescan_all=True, client=fake)
+                    job = _wait_for_bulk_scrape_status(settings)
+            self.assertEqual(job["matched_count"], 1)
+            throttle_calls = [c for c in sleep_mock.call_args_list if c.args == (0.2,)]
+            self.assertEqual(len(throttle_calls), 1)
 
     def test_tmdb_becoming_unavailable_mid_job_stops_early_without_erroring_the_job(self):
         with tempfile.TemporaryDirectory() as tmp:

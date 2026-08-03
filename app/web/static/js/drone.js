@@ -89,6 +89,12 @@ let systemsTreeSystemBiosPages = {};
 // system-rooted one).
 let moviesAllRows = [];
 let moviesTreeExpanded = new Set();
+// Movie Explorer's category sidebar (see renderMovieExplorerPage): "all" |
+// "movie" | "episode" for type, "" (no filter) or a genre string for genre --
+// both reset to their defaults each time the Explorer page is (re-)opened,
+// same as the search box already does.
+let movieExplorerTypeFilter = "all";
+let movieExplorerGenreFilter = "";
 let filterDropdownGlobalCloseBound = false;
 let filterDropdownState = {};
 let themeFilterInitialized = false;
@@ -105,6 +111,12 @@ let configBackupsInFlight = false;
 let configBackupsLastPayload = [];
 let movieBulkScrapeTimer = null;
 let movieBulkScrapeInFlight = false;
+let movieBulkScrapeWasRunning = false;
+// The open matched/skipped/failed breakdown panel on the admin Movies bulk
+// scrape card (see toggleMovieBulkScrapeBreakdown) -- null when closed.
+let movieBulkScrapeBreakdownStatus = null;
+let movieBulkScrapeBreakdownOffset = 0;
+const MOVIE_BULK_SCRAPE_BREAKDOWN_PAGE_SIZE = 50;
 let swarmDronesById = {};
 let vpnTimer = null;
 let vpnInFlight = false;
@@ -2124,6 +2136,8 @@ async function renderMoviesPage() {
 async function renderMovieExplorerPage() {
   currentSystemContext = null;
   clearSystemTheme();
+  movieExplorerTypeFilter = "all";
+  movieExplorerGenreFilter = "";
   setLoading(true, "Loading movies...");
   try {
     if (!moviesAllRows.length) {
@@ -2139,9 +2153,13 @@ async function renderMovieExplorerPage() {
           </div>
           <button class="btn btn-outline-light btn-sm text-nowrap" type="button" onclick="setHash('#movies')"><i class="bi bi-arrow-left me-1"></i>Back to Drone view</button>
         </div>
-        <div id="movie-explorer-grid" class="movie-explorer-grid"></div>
+        <div class="movie-explorer-body">
+          <aside id="movie-explorer-sidebar" class="movie-explorer-sidebar"></aside>
+          <div id="movie-explorer-grid" class="movie-explorer-grid"></div>
+        </div>
       </div>
     `;
+    renderMovieExplorerSidebar();
     filterMovieExplorer("");
   } catch (err) {
     content.innerHTML = `
@@ -2157,19 +2175,65 @@ async function renderMovieExplorerPage() {
     setLoading(false);
   }
 }
+function movieExplorerGenres() {
+  const genres = new Set();
+  moviesAllRows.forEach((m) => (m.genres || []).forEach((g) => g && genres.add(g)));
+  return [...genres].sort((a, b) => a.localeCompare(b));
+}
+function renderMovieExplorerSidebar() {
+  const sidebar = document.getElementById("movie-explorer-sidebar");
+  if (!sidebar) return;
+  const typeButton = (value, label) => `
+    <button type="button" class="movie-explorer-category-btn ${movieExplorerTypeFilter === value ? "active" : ""}" onclick="setMovieExplorerTypeFilter(${jsAttr(value)})">${escapeHtml(label)}</button>
+  `;
+  const genreButton = (value, label) => `
+    <button type="button" class="movie-explorer-category-btn ${movieExplorerGenreFilter === value ? "active" : ""}" onclick="setMovieExplorerGenreFilter(${jsAttr(value)})">${escapeHtml(label)}</button>
+  `;
+  const genres = movieExplorerGenres();
+  sidebar.innerHTML = `
+    <div class="movie-explorer-sidebar-section">
+      <div class="movie-explorer-sidebar-title">Type</div>
+      ${typeButton("all", "All")}
+      ${typeButton("movie", "Movies")}
+      ${typeButton("episode", "Shows")}
+    </div>
+    <div class="movie-explorer-sidebar-section">
+      <div class="movie-explorer-sidebar-title">Genres</div>
+      ${genreButton("", "All Genres")}
+      ${genres.length ? genres.map((g) => genreButton(g, g)).join("") : `<div class="text-muted small">Scrape movies to see genres.</div>`}
+    </div>
+  `;
+}
+function setMovieExplorerTypeFilter(value) {
+  movieExplorerTypeFilter = value;
+  renderMovieExplorerSidebar();
+  filterMovieExplorer(document.getElementById("movieExplorerSearch")?.value || "");
+}
+function setMovieExplorerGenreFilter(value) {
+  movieExplorerGenreFilter = value;
+  renderMovieExplorerSidebar();
+  filterMovieExplorer(document.getElementById("movieExplorerSearch")?.value || "");
+}
 function filterMovieExplorer(queryValue) {
   const grid = document.getElementById("movie-explorer-grid");
   if (!grid) return;
   const filter = String(queryValue || "").trim().toLowerCase();
-  const rows = filter
-    ? moviesAllRows.filter((m) => (m.display_title || m.movie_name || m.name || "").toLowerCase().includes(filter))
-    : moviesAllRows;
+  let rows = moviesAllRows;
+  if (movieExplorerTypeFilter !== "all") {
+    rows = rows.filter((m) => (m.kind || "movie") === movieExplorerTypeFilter);
+  }
+  if (movieExplorerGenreFilter) {
+    rows = rows.filter((m) => (m.genres || []).includes(movieExplorerGenreFilter));
+  }
+  if (filter) {
+    rows = rows.filter((m) => (m.display_title || m.movie_name || m.name || "").toLowerCase().includes(filter));
+  }
   const sorted = [...rows].sort((a, b) =>
     (a.display_title || a.movie_name || a.name || "").localeCompare(b.display_title || b.movie_name || b.name || "")
   );
   grid.innerHTML = sorted.length
     ? sorted.map(renderMovieExplorerCard).join("")
-    : `<div class="text-muted p-4">No movies match "${escapeHtml(filter)}".</div>`;
+    : `<div class="text-muted p-4">No movies match the current filters.</div>`;
 }
 function renderMovieExplorerCard(movie) {
   const title = movie.display_title || movie.movie_name || movie.name || "";
@@ -2232,10 +2296,17 @@ function renderMoviesTreeLeafRow(file, depth) {
   const rawName = file.name || movie.movie_name || movie.name || "";
   const displayName = movie.display_title || rawName;
   const size = movie.byte_count !== undefined ? formatBytes(movie.byte_count) : "n/a";
+  const posterUrl = movie.entry_key ? movieArtworkUrl(movie.entry_key, "poster") : "";
   return `
     <div class="tree-grid-row tree-leaf-row movies-tree-row" style="--tree-depth:${depth}">
       <div class="tree-grid-main">
-        <i class="bi bi-film tree-grid-icon"></i>
+        <span class="movies-tree-thumb">
+          ${
+            posterUrl
+              ? `<img src="${escapeHtml(posterUrl)}" alt="" loading="lazy" onerror="this.style.display='none'; this.nextElementSibling.classList.remove('d-none');"><i class="bi bi-film movies-tree-thumb-fallback d-none"></i>`
+              : `<i class="bi bi-film movies-tree-thumb-fallback"></i>`
+          }
+        </span>
         <button type="button" class="tree-grid-label text-truncate movie-tree-title-btn" title="${escapeHtml(movie.file_path || rawName)}" onclick="setHash(movieDetailHash(${jsAttr(movie.entry_key)}))">
           <span class="fw-semibold">${escapeHtml(displayName)}</span>
         </button>
@@ -2598,12 +2669,17 @@ function renderMovieBulkScrapeStatus(job) {
     ${total > 0 ? `<div class="progress mb-2" style="height:0.5rem;"><div class="progress-bar${running ? " progress-bar-striped progress-bar-animated" : ""} bg-${job.status === "error" ? "danger" : "primary"}" style="width:${pct}%"></div></div>` : ""}
     ${running && job.current_movie ? `<div class="small text-muted mb-2"><span class="spinner-border spinner-border-sm me-1"></span>Scraping: ${escapeHtml(job.current_movie)}</div>` : ""}
     <div class="small text-muted">
-      ${Number(job.matched_count || 0).toLocaleString()} matched
-      &middot; ${Number(job.skipped_count || 0).toLocaleString()} skipped
-      &middot; ${Number(job.failed_count || 0).toLocaleString()} failed
+      ${movieBulkScrapeCountLink("matched", job.matched_count)}
+      &middot; ${movieBulkScrapeCountLink("skipped", job.skipped_count)}
+      &middot; ${movieBulkScrapeCountLink("failed", job.failed_count)}
     </div>
     ${job.status === "error" && job.error_message ? `<div class="alert alert-warning small mt-2 mb-0">${escapeHtml(job.error_message)}</div>` : ""}
   `;
+}
+function movieBulkScrapeCountLink(status, count) {
+  const n = Number(count || 0);
+  if (!n) return `${n.toLocaleString()} ${escapeHtml(status)}`;
+  return `<button type="button" class="btn btn-link btn-sm p-0 align-baseline" onclick="toggleMovieBulkScrapeBreakdown(${jsAttr(status)})">${n.toLocaleString()} ${escapeHtml(status)}</button>`;
 }
 function patchMovieBulkScrapeLive(job) {
   const statusEl = document.getElementById("movieBulkScrapeStatus");
@@ -2618,6 +2694,14 @@ function patchMovieBulkScrapeLive(job) {
   }
   const checkbox = document.getElementById("movieBulkScrapeRescanAll");
   if (checkbox) checkbox.disabled = running;
+  // A job that just finished (running -> anything else) can have changed
+  // every bucket's contents -- refresh whichever breakdown panel is open
+  // (e.g. after "Retry failed", the failed list should reflect what's
+  // *still* failing, not what was failing before the retry ran).
+  if (movieBulkScrapeWasRunning && !running && movieBulkScrapeBreakdownStatus) {
+    loadMovieBulkScrapeBreakdown(movieBulkScrapeBreakdownStatus, 0);
+  }
+  movieBulkScrapeWasRunning = running;
   startMovieBulkScrapeAutoRefreshIfNeeded(job);
 }
 function renderMovieAdminApiKeyForm() {
@@ -2666,6 +2750,7 @@ function renderMovieAdminBulkScrapeCard(job) {
           ${running ? `<span class="spinner-border spinner-border-sm me-1"></span>Scraping...` : `<i class="bi bi-play-fill me-1"></i>Start Scraping`}
         </button>
         <div id="movieBulkScrapeStatus" class="mt-3">${renderMovieBulkScrapeStatus(job)}</div>
+        <div id="movieBulkScrapeBreakdown" class="mt-3"></div>
       </div>
     </div>
   `;
@@ -2692,9 +2777,107 @@ async function startMovieBulkScrape() {
     await renderAdminMoviesArtworkPage();
   }
 }
+async function toggleMovieBulkScrapeBreakdown(status) {
+  const container = document.getElementById("movieBulkScrapeBreakdown");
+  if (movieBulkScrapeBreakdownStatus === status) {
+    movieBulkScrapeBreakdownStatus = null;
+    if (container) container.innerHTML = "";
+    return;
+  }
+  await loadMovieBulkScrapeBreakdown(status, 0);
+}
+async function loadMovieBulkScrapeBreakdown(status, offset) {
+  const container = document.getElementById("movieBulkScrapeBreakdown");
+  if (!container) return;
+  movieBulkScrapeBreakdownStatus = status;
+  movieBulkScrapeBreakdownOffset = Math.max(0, offset || 0);
+  container.innerHTML = `<div class="text-muted small"><span class="spinner-border spinner-border-sm me-2"></span>Loading ${escapeHtml(status)} movies...</div>`;
+  try {
+    const page = await api(`/admin/movies/scrape/bulk/items/${encodeURIComponent(status)}?limit=${MOVIE_BULK_SCRAPE_BREAKDOWN_PAGE_SIZE}&offset=${movieBulkScrapeBreakdownOffset}`);
+    if (movieBulkScrapeBreakdownStatus === status) container.innerHTML = renderMovieBulkScrapeBreakdownPanel(status, page);
+  } catch (err) {
+    container.innerHTML = `<div class="alert alert-warning small mb-0">Could not load ${escapeHtml(status)} list: ${escapeHtml(err.message || "unknown error")}</div>`;
+  }
+}
+function renderMovieBulkScrapeBreakdownPanel(status, page) {
+  const items = page.items || [];
+  const total = Number(page.total || 0);
+  const offset = Number(page.offset || 0);
+  const limit = Number(page.limit || MOVIE_BULK_SCRAPE_BREAKDOWN_PAGE_SIZE);
+  const showing = items.length ? `${(offset + 1).toLocaleString()}-${(offset + items.length).toLocaleString()} of ${total.toLocaleString()}` : "0 of 0";
+  const retryAllBtn = status === "failed" && total
+    ? `<button class="btn btn-outline-primary btn-sm text-nowrap" type="button" onclick="retryAllMovieBulkScrapeFailed()"><i class="bi bi-arrow-repeat me-1"></i>Retry all ${total.toLocaleString()}</button>`
+    : "";
+  const rows = items.length
+    ? items.map((item) => `
+      <div class="d-flex align-items-start justify-content-between gap-2 py-2 border-bottom movie-bulk-scrape-item-row">
+        <div class="min-width-0">
+          <button type="button" class="btn btn-link btn-sm p-0 text-start text-truncate d-block" style="max-width: 100%;" title="${escapeHtml(item.file_path || item.movie_name || "")}" onclick="setHash(movieDetailHash(${jsAttr(item.entry_key)}))">${escapeHtml(item.movie_name || item.file_path || "")}</button>
+          ${item.reason ? `<div class="text-muted small">${escapeHtml(item.reason)}</div>` : ""}
+        </div>
+        ${
+          status === "failed"
+            ? `<button class="btn btn-outline-secondary btn-sm text-nowrap" type="button" onclick="retryMovieBulkScrapeItem(${jsAttr(item.entry_key)})"><i class="bi bi-arrow-repeat me-1"></i>Retry</button>`
+            : ""
+        }
+      </div>
+    `).join("")
+    : `<div class="text-muted small py-2">Nothing here.</div>`;
+  return `
+    <div class="card log-card">
+      <div class="card-header d-flex flex-wrap align-items-center justify-content-between gap-2">
+        <span class="text-capitalize">${escapeHtml(status)} movies</span>
+        <div class="d-flex align-items-center gap-2">
+          ${retryAllBtn}
+          <button class="btn btn-outline-secondary btn-sm" type="button" title="Close" onclick="toggleMovieBulkScrapeBreakdown(${jsAttr(status)})"><i class="bi bi-x-lg"></i></button>
+        </div>
+      </div>
+      <div class="card-body p-0" style="max-height: 360px; overflow-y: auto;">
+        <div class="px-3">${rows}</div>
+      </div>
+      <div class="card-footer d-flex align-items-center justify-content-between gap-2">
+        <span class="small text-muted">${showing}</span>
+        <div class="d-flex gap-2">
+          <button class="btn btn-sm btn-outline-primary" type="button" ${offset <= 0 ? "disabled" : ""} onclick="loadMovieBulkScrapeBreakdown(${jsAttr(status)}, ${Math.max(0, offset - limit)})">Previous</button>
+          <button class="btn btn-sm btn-outline-primary" type="button" ${offset + items.length >= total ? "disabled" : ""} onclick="loadMovieBulkScrapeBreakdown(${jsAttr(status)}, ${offset + limit})">Next</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+async function startMovieBulkScrapeRetry(body, loadingText) {
+  setLoading(true, loadingText);
+  try {
+    const result = await apiPost("/admin/movies/scrape/bulk/retry", body);
+    if (result.status === "already_running") {
+      showToast("A scrape is already running -- try again once it finishes.", "warning");
+    } else if (result.status === "error") {
+      showToast(`Could not start retry: ${escapeHtml(result.error || "unknown error")}`, "danger");
+    } else {
+      showToast("Retry started.", "success");
+      const statusPayload = await api("/admin/movies/scrape/bulk");
+      patchMovieBulkScrapeLive(statusPayload.job || null);
+    }
+  } catch (err) {
+    showToast(`Could not start retry: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  } finally {
+    setLoading(false);
+  }
+}
+async function retryMovieBulkScrapeItem(entryKey) {
+  await startMovieBulkScrapeRetry({ entry_keys: [entryKey] }, "Retrying...");
+}
+async function retryAllMovieBulkScrapeFailed() {
+  await startMovieBulkScrapeRetry({ status: "failed" }, "Retrying all failed movies...");
+}
 async function renderAdminMoviesArtworkPage() {
   currentSystemContext = null;
   clearSystemTheme();
+  // A fresh visit to this page always starts with the breakdown panel
+  // closed (its container is rebuilt below) -- reset the tracked state to
+  // match, so a stale "failed" from a previous visit can't cause
+  // patchMovieBulkScrapeLive to silently reopen it on the next poll tick.
+  movieBulkScrapeBreakdownStatus = null;
   setLoading(true, "Loading movie scraper settings...");
   try {
     const [settingsPayload, statusPayload] = await Promise.all([
@@ -3622,7 +3805,7 @@ async function renderAdminMenu() {
         <div class="card admin-tile pointer h-100" onclick="setHash('#admin/artwork')">
           <div class="card-body">
             <h5 class="card-title"><i class="bi bi-images me-2"></i>Artwork</h5>
-            <p class="card-text">Manage gamelist artwork, metadata, imports, uploads, marquee crops, and browse installed EmulationStation themes.</p>
+            <p class="card-text">Manage gamelist artwork, metadata, imports, uploads, marquee crops, browse installed EmulationStation themes, and scrape movie/TV posters and metadata from TMDb.</p>
           </div>
         </div>
       </div>
@@ -6424,9 +6607,21 @@ async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh 
   artworkFilterQuery = query || "";
   artworkRomStatus = ["any", "exists", "missing"].includes(romStatus) ? romStatus : "any";
   syncArtworkHash();
-  setLoading(true, includeFilesystem ? "Scanning ROM directories..." : "Scanning gamelists...");
   clearSystemTheme();
-  await refreshRandomThemeLogo();
+  // Paint the shell (tab bar + a scoped spinner) immediately, before the
+  // scan below -- previously nothing rendered into `content` until the scan
+  // resolved (which can take several seconds on a large ROM library),
+  // leaving whatever page you navigated from just sitting there looking
+  // stuck, with only a toast to say otherwise, for the whole wait. The tab
+  // bar being live right away also means Movies/Theme are one click away
+  // without waiting on this page's own scan at all.
+  content.innerHTML = `
+    ${renderArtworkTabBar("metadata")}
+    <div class="text-muted small py-5 text-center">
+      <span class="spinner-border spinner-border-sm me-2"></span>${includeFilesystem ? "Scanning ROM directories..." : "Scanning gamelists..."}
+    </div>
+  `;
+  refreshRandomThemeLogo().catch(() => {});
   try {
     const payload = await api(artworkPayloadUrl(forceRefresh));
     const roms = payload.roms || [];
@@ -6599,10 +6794,9 @@ async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh 
   } catch (err) {
     showToast(`Failed to scan artwork: ${escapeHtml(err.message || "unknown error")}`, "danger");
     content.innerHTML = `
-      <div class="text-muted">Artwork results could not be loaded.</div>
+      ${renderArtworkTabBar("metadata")}
+      <div class="alert alert-danger">Failed to load artwork data: ${escapeHtml(err.message || "unknown error")}</div>
     `;
-  } finally {
-    setLoading(false);
   }
 }
 const LAUNCHBOX_METADATA_FIELDS = [
@@ -10037,12 +10231,19 @@ async function router() {
     }
     document.body.classList.toggle("artwork-page", hash.startsWith("#admin/artwork"));
     document.body.classList.toggle("movie-explorer-active", hash.startsWith("#movies/explore"));
+    document.body.classList.toggle("movies-page-active", hash.startsWith("#movies"));
     if (hash === "#bios") {
       setHash(systemsTreeHash("", BIOS_TREE_ROOT));
       return;
+    } else if (hash === "" || hash === "#") {
+      // Movies loads fast (no gamelist scan involved) and is the page
+      // people actually want on open -- the help/tour page is still one
+      // click away (or #home/#help directly) for anyone who wants it.
+      setHash("#movies");
+      return;
     } else if (hash === "#theme") {
       await renderThemeGalleryPage();
-    } else if (hash === "" || hash === "#" || hash === "#home" || hash === "#help") {
+    } else if (hash === "#home" || hash === "#help") {
       await renderHelpPage();
     } else if (hash.startsWith("#systems")) {
       await renderSystemsPage();

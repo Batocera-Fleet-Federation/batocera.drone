@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import re
 import threading
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -35,6 +36,7 @@ try:
     from ..storage.state_store import save_payload as _save_state_payload
     from ..storage import movies_store as _movies_store
     from ..storage import movie_scrape_jobs as _jobs
+    from ..storage import movie_scrape_job_items as _job_items
     from . import filename_parser as _filename_parser
     from .tmdb_client import TmdbClient, TmdbUnavailableError
 except ImportError:  # pragma: no cover - direct script execution fallback
@@ -44,6 +46,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from storage.state_store import save_payload as _save_state_payload  # type: ignore
     from storage import movies_store as _movies_store  # type: ignore
     from storage import movie_scrape_jobs as _jobs  # type: ignore
+    from storage import movie_scrape_job_items as _job_items  # type: ignore
     from movies import filename_parser as _filename_parser  # type: ignore
     from movies.tmdb_client import TmdbClient, TmdbUnavailableError  # type: ignore
 
@@ -268,6 +271,22 @@ def _has_artwork(settings: Settings, entry_key: str) -> bool:
     return bool(metadata and metadata.get("poster_relative_path"))
 
 
+# A brief pause before each TMDb-touching candidate in a bulk run -- the
+# search ladder alone can issue up to 4 requests for one movie
+# (filename_parser.search_candidates), and without any pacing a large
+# library can trip TMDb's rate limiting well before the run finishes (see
+# TmdbClient's TMDB_MAX_429_RETRIES docstring for what an untreated 429
+# used to cascade into: a whole contiguous block of "failed" results that
+# had nothing to do with those movies' filenames). Module-level so tests
+# can zero it out via mock.patch instead of eating this delay for real.
+_REQUEST_THROTTLE_SECONDS = 0.2
+
+
+def _throttle_before_tmdb_call() -> None:
+    if _REQUEST_THROTTLE_SECONDS > 0:
+        time.sleep(_REQUEST_THROTTLE_SECONDS)
+
+
 def _search_movie_with_ladder(client: TmdbClient, movie_name: str) -> list:
     """Try each ``(title, year)`` rung of ``filename_parser.search_candidates``
     against TMDb movie search, stopping at the first hit -- see that
@@ -299,6 +318,20 @@ def _search_show_with_ladder(client: TmdbClient, show_title: str, year: Optional
     return []
 
 
+def _record_item(settings: Settings, movie: dict, status: str, reason: str = "") -> None:
+    """Log one candidate's outcome to ``movie_scrape_job_items`` -- backs the
+    admin UI's clickable matched/skipped/failed breakdown and "retry failed"
+    action. Best-effort: a logging failure here must never take down the
+    scrape itself, so it's swallowed rather than propagated."""
+    try:
+        _job_items.record(
+            settings, movie.get("entry_key") or "", movie.get("movie_name") or "",
+            movie.get("file_path") or movie.get("relative_path") or "", status, reason,
+        )
+    except Exception:  # noqa: BLE001 - diagnostics must not break the scrape
+        pass
+
+
 def _run_bulk_scrape_job(settings: Settings, job_id: int, candidates: list, client: TmdbClient) -> None:
     matched = skipped = failed = 0
     total = len(candidates)
@@ -322,15 +355,21 @@ def _run_bulk_scrape_job(settings: Settings, job_id: int, candidates: list, clie
                 # real movie or episode, so never worth a TMDb call. Counted
                 # with the other "nothing to search for" cases, not failed.
                 skipped += 1
+                _record_item(settings, movie, _job_items.STATUS_SKIPPED, "bonus/extra content (Featurettes-style folder)")
                 continue
 
             if parsed.kind == _filename_parser.KIND_EPISODE:
+                _throttle_before_tmdb_call()
                 show_key = parsed.show_title.lower()
                 tv_id = show_id_by_title.get(show_key)
                 if tv_id is None:
                     show_results = _search_show_with_ladder(client, parsed.show_title, parsed.year)
                     if not show_results:
                         failed += 1
+                        _record_item(
+                            settings, movie, _job_items.STATUS_FAILED,
+                            f"no TMDb show match for \"{parsed.show_title}\"",
+                        )
                         continue
                     tv_id = show_results[0]["tmdb_id"]
                     show_id_by_title[show_key] = tv_id
@@ -343,6 +382,7 @@ def _run_bulk_scrape_job(settings: Settings, job_id: int, candidates: list, clie
                     show_details=show_details, client=client,
                 )
                 matched += 1
+                _record_item(settings, movie, _job_items.STATUS_MATCHED)
                 continue
 
             stem = Path(movie.get("movie_name") or "").stem
@@ -351,21 +391,34 @@ def _run_bulk_scrape_job(settings: Settings, job_id: int, candidates: list, clie
                 # all punctuation) -- counted separately from "failed" since
                 # no TMDb request was even attempted for this one.
                 skipped += 1
+                _record_item(settings, movie, _job_items.STATUS_SKIPPED, "filename has no usable title text")
                 continue
+            _throttle_before_tmdb_call()
             results = _search_movie_with_ladder(client, movie.get("movie_name") or "")
             if not results:
                 failed += 1
+                _record_item(settings, movie, _job_items.STATUS_FAILED, "no TMDb results for any tried title/year")
                 continue
             apply(settings, movie["entry_key"], results[0]["tmdb_id"], client=client)
             matched += 1
-        except TmdbUnavailableError:
-            # The key was rejected or TMDb is unreachable -- every remaining
-            # candidate would fail the same way, so stop early rather than
-            # burning through the whole list one doomed request at a time.
+            _record_item(settings, movie, _job_items.STATUS_MATCHED)
+        except TmdbUnavailableError as error:
+            # The key was rejected or TMDb is unreachable/still rate-limited
+            # after TmdbClient's own retries -- every remaining candidate
+            # would fail the same way, so stop early rather than burning
+            # through the whole list one doomed request at a time. Still
+            # record each remaining candidate individually (not just the
+            # aggregate count) so "retry failed" has exact entry_keys to
+            # re-queue once the underlying problem (usually transient
+            # rate-limiting) has cleared.
+            reason = str(error)
+            for remaining in candidates[index:]:
+                _record_item(settings, remaining, _job_items.STATUS_FAILED, reason)
             failed += total - index
             break
-        except Exception:  # noqa: BLE001 - one bad movie must not kill the whole run
+        except Exception as error:  # noqa: BLE001 - one bad movie must not kill the whole run
             failed += 1
+            _record_item(settings, movie, _job_items.STATUS_FAILED, f"error: {error}")
     _jobs.update_progress(
         settings, job_id,
         processed=total, current_movie="",
@@ -403,6 +456,11 @@ def start_bulk_scrape(settings: Settings, *, rescan_all: bool = False, client: O
             return {"status": "error", "error": str(error)}
         movies = _movies_store.list_movies(settings.movies_root)
         candidates = movies if rescan_all else [m for m in movies if not _has_artwork(settings, m["entry_key"])]
+        # A fresh full/default run supersedes the previous run's breakdown
+        # entirely -- clear it before scraping starts so a status/items
+        # check made right after this returns never sees stale rows from an
+        # earlier run mixed in with the new one.
+        _job_items.clear(settings)
         job = _jobs.create_running(settings, rescan_all=rescan_all, total=len(candidates))
     thread = threading.Thread(
         target=_run_bulk_scrape_job, args=(settings, job["id"], candidates, client),
@@ -412,5 +470,46 @@ def start_bulk_scrape(settings: Settings, *, rescan_all: bool = False, client: O
     return {"status": "ok", "job": job}
 
 
+def retry_bulk_scrape_items(
+    settings: Settings, *, status: Optional[str] = None, entry_keys: Optional[list] = None,
+    client: Optional[TmdbClient] = None,
+) -> dict:
+    """Re-run the bulk scraper over a specific subset of the *last* run's
+    results: either every item still at ``status`` (e.g. ``"failed"`` -- the
+    common case, since a whole block of "failed" is usually TMDb rate-
+    limiting that's since cleared, not 1,500 genuinely unmatchable movies)
+    or an explicit ``entry_keys`` list for retrying one/a few by hand. Same
+    one-job-at-a-time guard and background-thread shape as
+    ``start_bulk_scrape``, but deliberately does **not** clear
+    ``movie_scrape_job_items`` first -- each retried item's row is upserted
+    in place by ``_run_bulk_scrape_job`` (moving it out of whichever bucket
+    it was retried from), while every other item from the last run is left
+    exactly as it was."""
+    with _BULK_SCRAPE_START_LOCK:
+        if _jobs.any_running(settings):
+            return {"status": "already_running"}
+        try:
+            client = client or _client(settings)
+        except TmdbUnavailableError as error:
+            return {"status": "error", "error": str(error)}
+        keys = list(entry_keys) if entry_keys else _job_items.entry_keys_by_status(settings, status or _job_items.STATUS_FAILED)
+        candidates = []
+        for key in keys:
+            movie = _movies_store.get_movie_by_key(settings.movies_root, key)
+            if movie:  # skip anything removed from disk since the last run
+                candidates.append(movie)
+        job = _jobs.create_running(settings, rescan_all=False, total=len(candidates))
+    thread = threading.Thread(
+        target=_run_bulk_scrape_job, args=(settings, job["id"], candidates, client),
+        name="movie-bulk-scrape-retry", daemon=True,
+    )
+    thread.start()
+    return {"status": "ok", "job": job}
+
+
 def get_bulk_scrape_status(settings: Settings) -> Optional[dict]:
     return _jobs.latest(settings)
+
+
+def get_bulk_scrape_items(settings: Settings, status: str, *, limit: int = 200, offset: int = 0) -> dict:
+    return _job_items.list_by_status(settings, status, limit=limit, offset=offset)

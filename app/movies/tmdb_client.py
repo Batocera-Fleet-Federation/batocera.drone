@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from typing import List, Optional, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlparse
@@ -39,6 +40,17 @@ SCRAPER_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
+# A bulk scrape can fire thousands of requests in a short span (the search
+# ladder alone can issue up to 4 per movie -- see filename_parser.py); a 429
+# there used to be treated exactly like a revoked API key ("stop the whole
+# job, mark every remaining candidate failed") by metadata_manager's bulk
+# job, which is almost certainly why a real 2,667-movie run once came back
+# "1,054 matched, 1,576 failed" -- a contiguous block of failures starting
+# right where TMDb started throttling, not 1,576 genuinely unmatchable
+# movies. Retrying a 429 with backoff here (honoring Retry-After when TMDb
+# sends one) turns that transient condition back into what it actually is.
+TMDB_MAX_429_RETRIES = 3
+TMDB_RETRY_BASE_DELAY_SECONDS = 1.0
 
 
 class TmdbUnavailableError(RuntimeError):
@@ -58,22 +70,39 @@ class TmdbClient:
         if not self.api_key:
             raise TmdbUnavailableError("No TMDb API key is configured")
 
+    def _retry_delay_seconds(self, error: HTTPError, attempt: int) -> float:
+        retry_after = error.headers.get("Retry-After") if error.headers else None
+        if retry_after:
+            try:
+                return max(0.5, float(retry_after))
+            except (TypeError, ValueError):
+                pass  # not a plain-seconds value (could be an HTTP-date) -- fall back to backoff
+        return TMDB_RETRY_BASE_DELAY_SECONDS * (2 ** attempt)
+
     def _get_json(self, path: str, params: Optional[dict] = None) -> dict:
         query = dict(params or {})
         query["api_key"] = self.api_key
         url = f"{TMDB_API_BASE}{path}?{urlencode(query)}"
         request = Request(url, headers={"User-Agent": SCRAPER_USER_AGENT, "Accept": "application/json"})
-        try:
-            with urlopen(request, timeout=self.timeout_seconds) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except HTTPError as error:
-            if error.code == 401:
-                raise TmdbUnavailableError("TMDb rejected the configured API key") from error
-            if error.code == 404:
-                raise TmdbUnavailableError("TMDb has no movie with that id") from error
-            raise TmdbUnavailableError(f"TMDb returned HTTP {error.code}") from error
-        except (URLError, TimeoutError, OSError) as error:
-            raise TmdbUnavailableError("TMDb could not be reached from this Drone") from error
+        attempt = 0
+        while True:
+            try:
+                with urlopen(request, timeout=self.timeout_seconds) as response:
+                    return json.loads(response.read().decode("utf-8"))
+            except HTTPError as error:
+                if error.code == 401:
+                    raise TmdbUnavailableError("TMDb rejected the configured API key") from error
+                if error.code == 404:
+                    raise TmdbUnavailableError("TMDb has no movie with that id") from error
+                if error.code == 429 and attempt < TMDB_MAX_429_RETRIES:
+                    time.sleep(self._retry_delay_seconds(error, attempt))
+                    attempt += 1
+                    continue
+                if error.code == 429:
+                    raise TmdbUnavailableError("TMDb is rate-limiting this Drone (429), retries exhausted") from error
+                raise TmdbUnavailableError(f"TMDb returned HTTP {error.code}") from error
+            except (URLError, TimeoutError, OSError) as error:
+                raise TmdbUnavailableError("TMDb could not be reached from this Drone") from error
 
     def search(self, query: str, limit: int = 10, *, year: Optional[str] = None) -> List[dict]:
         """``year`` (when given) is passed as TMDb's ``primary_release_year``

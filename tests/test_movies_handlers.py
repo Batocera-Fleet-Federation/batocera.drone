@@ -80,6 +80,18 @@ class _FakeHandler:
             self.response_headers["Content-Disposition"] = f'attachment; filename="{path.name}"'
         self.wfile.write(path.read_bytes())
 
+    # -- used by _handle_movie_artwork (real impl: handlers_peer.py's
+    # HandlersPeerMixin, shared with ROM artwork -- not mixed into this
+    # minimal fake, so a simplified stand-in covers the same observable
+    # behavior: 200 status, Content-Type, Cache-Control, and the bytes) --
+    def _stream_cached_image(self, path: Path) -> None:
+        if not path.is_file():
+            raise FileNotFoundError()
+        self.response_status = 200
+        self.response_headers["Content-Type"] = self._guess_content_type(path)
+        self.response_headers["Cache-Control"] = "public, max-age=3600"
+        self.wfile.write(path.read_bytes())
+
 
 def _handler(settings: Settings, **kwargs) -> _FakeHandler:
     class Handler(handlers_movies.HandlersMoviesMixin, _FakeHandler):
@@ -227,6 +239,45 @@ class MoviesListHandlerTests(unittest.TestCase):
             handler._handle_movies_list(limit=10, offset=0)
             _status, payload = handler.json_response
             self.assertEqual(payload["movies"][0]["display_title"], "The Matrix")
+
+    def test_kind_is_classified_from_filename_without_scraping(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Ant-Man (1080p).mp4", b"x")
+            _write_movie(root, "Shows/Dexter/Dexter (2006) S01/Dexter (2006) - S01E01 - Dexter.mkv", b"x")
+            _write_movie(root, "Shows/Dexter/Dexter (2006) S01/Featurettes/Blood Splatter 101.mkv", b"x")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+            handler = _handler(settings)
+            handler._handle_movies_list()
+            _status, payload = handler.json_response
+            kinds_by_name = {m["movie_name"]: m["kind"] for m in payload["movies"]}
+            self.assertEqual(kinds_by_name["Ant-Man (1080p).mp4"], "movie")
+            self.assertEqual(kinds_by_name["Dexter (2006) - S01E01 - Dexter.mkv"], "episode")
+            self.assertEqual(kinds_by_name["Blood Splatter 101.mkv"], "extra")
+
+    def test_genres_are_empty_until_scraped_then_reflect_saved_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "The.Matrix.1999.mp4", b"x")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+            entry_key = movies_store.list_movies(settings.movies_root)[0]["entry_key"]
+
+            handler = _handler(settings)
+            handler._handle_movies_list()
+            _status, payload = handler.json_response
+            self.assertEqual(payload["movies"][0]["genres"], [])
+
+            movies_store.save_movie_metadata(
+                settings.movies_root, entry_key, provider="tmdb", provider_id="603", title="The Matrix",
+                poster_relative_path=None, backdrop_relative_path=None,
+                extra={"genres": ["Action", "Science Fiction"]},
+            )
+            handler = _handler(settings)
+            handler._handle_movies_list()
+            _status, payload = handler.json_response
+            self.assertEqual(payload["movies"][0]["genres"], ["Action", "Science Fiction"])
 
 
 class ResolveMoviePathTests(unittest.TestCase):
@@ -661,6 +712,73 @@ class MovieBulkScrapeHandlerTests(unittest.TestCase):
             with mock.patch.object(movies_metadata, "start_bulk_scrape", return_value={"status": "ok", "job": {}}) as start:
                 handler._handle_admin_movie_scrape_bulk_start(None)
             start.assert_called_once_with(settings, rescan_all=False)
+
+
+class MovieBulkScrapeItemsHandlerTests(unittest.TestCase):
+    def test_lists_items_for_a_valid_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            handler = _handler(settings)
+            page = {"total": 2, "limit": 200, "offset": 0, "items": [{"entry_key": "a"}, {"entry_key": "b"}]}
+            with mock.patch.object(movies_metadata, "get_bulk_scrape_items", return_value=page) as get_items:
+                handler._handle_admin_movie_scrape_bulk_items("failed", None, 0)
+            get_items.assert_called_once_with(settings, "failed", limit=200, offset=0)
+            status, payload = handler.json_response
+            self.assertEqual(status, 200)
+            self.assertEqual(payload, page)
+
+    def test_invalid_status_is_400(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            handler = _handler(settings)
+            handler._handle_admin_movie_scrape_bulk_items("bogus", None, 0)
+            status, _payload = handler.json_response
+            self.assertEqual(status, 400)
+
+    def test_passes_through_limit_and_offset(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            handler = _handler(settings)
+            with mock.patch.object(movies_metadata, "get_bulk_scrape_items", return_value={}) as get_items:
+                handler._handle_admin_movie_scrape_bulk_items("matched", 50, 100)
+            get_items.assert_called_once_with(settings, "matched", limit=50, offset=100)
+
+
+class MovieBulkScrapeRetryHandlerTests(unittest.TestCase):
+    def test_retry_by_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            handler = _handler(settings)
+            with mock.patch.object(movies_metadata, "retry_bulk_scrape_items", return_value={"status": "ok", "job": {}}) as retry:
+                handler._handle_admin_movie_scrape_bulk_retry({"status": "failed"})
+            retry.assert_called_once_with(settings, status="failed", entry_keys=None)
+            status, _payload = handler.json_response
+            self.assertEqual(status, 200)
+
+    def test_retry_by_entry_keys_ignores_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            handler = _handler(settings)
+            with mock.patch.object(movies_metadata, "retry_bulk_scrape_items", return_value={"status": "ok", "job": {}}) as retry:
+                handler._handle_admin_movie_scrape_bulk_retry({"status": "failed", "entry_keys": ["a", "b"]})
+            retry.assert_called_once_with(settings, status=None, entry_keys=["a", "b"])
+
+    def test_missing_both_entry_keys_and_status_is_400(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            handler = _handler(settings)
+            handler._handle_admin_movie_scrape_bulk_retry({})
+            status, _payload = handler.json_response
+            self.assertEqual(status, 400)
+
+    def test_already_running_is_409(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            handler = _handler(settings)
+            with mock.patch.object(movies_metadata, "retry_bulk_scrape_items", return_value={"status": "already_running"}):
+                handler._handle_admin_movie_scrape_bulk_retry({"status": "failed"})
+            status, _payload = handler.json_response
+            self.assertEqual(status, 409)
 
 
 if __name__ == "__main__":

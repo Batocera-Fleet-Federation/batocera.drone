@@ -509,6 +509,14 @@ class ApiRoutesMixin:
                 self._handle_admin_movie_scrape_bulk_status()
                 return
 
+            if len(parts) == 6 and parts[0] == "admin" and parts[1] == "movies" and parts[2] == "scrape" and parts[3] == "bulk" and parts[4] == "items":
+                self._handle_admin_movie_scrape_bulk_items(
+                    parts[5],
+                    int(query_params["limit"][0]) if query_params.get("limit") else None,
+                    int(query_params.get("offset", ["0"])[0]),
+                )
+                return
+
             if len(parts) == 5 and parts[0] == "admin" and parts[1] == "movies" and parts[3] == "scrape" and parts[4] == "search":
                 self._handle_admin_movie_scrape_search(parts[2], query_params.get("q", [None])[0])
                 return
@@ -961,6 +969,11 @@ class ApiRoutesMixin:
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "movies" and parts[2] == "scrape" and parts[3] == "bulk":
                 payload = self._read_json_body()
                 self._handle_admin_movie_scrape_bulk_start(payload)
+                return
+
+            if len(parts) == 5 and parts[0] == "admin" and parts[1] == "movies" and parts[2] == "scrape" and parts[3] == "bulk" and parts[4] == "retry":
+                payload = self._read_json_body()
+                self._handle_admin_movie_scrape_bulk_retry(payload)
                 return
 
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "artwork" and parts[2] == "launchbox" and parts[3] == "apply":

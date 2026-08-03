@@ -612,6 +612,103 @@ page's state var — refetched only if empty, so entering the explorer
 directly doesn't require visiting the tree first), same live-`oninput`
 convention as the tree's own search box.
 
+**Explorer category sidebar** (Type: All/Movies/Shows, Genres: derived from
+scraped metadata) is a left-side filter panel added to the explorer, backed
+entirely by fields the `/movies` list response overlays onto every row
+regardless of scrape status: `kind` (`"movie"`/`"episode"`/`"extra"`, from
+`filename_parser.classify()` run server-side per row in
+`HandlersMoviesMixin._apply_movie_kind_and_genres` — no TMDb key or scrape
+needed, works immediately for every file) and `genres` (from scraped
+`movies_metadata_entries.extra_json`, empty until scraped). Client-side
+state (`movieExplorerTypeFilter`/`movieExplorerGenreFilter`, reset on every
+page visit) combines with the existing search filter in
+`filterMovieExplorer`; "extra" content only shows under the "All" type
+bucket (Featurettes-style bonus clips aren't really "a movie" or "an
+episode" — see the bulk-scraper writeup above), never under "Movies" or
+"Shows" specifically.
+
+**The plain Movies tree** (`renderMoviesTreeLeafRow`) also shows a small
+poster thumbnail per row now, same `movieArtworkUrl` + inline-`onerror`-to-
+film-icon pattern as the explorer cards — this was the actual fix for "I
+scraped movies but don't see artwork anywhere," since the tree (not the
+explorer) is what `#movies` — the app's default landing route, see below —
+actually renders.
+
+**`body.movies-page-active`** (toggled for any `#movies*` hash, alongside
+the pre-existing narrower `movie-explorer-active`) hides just
+`#systemInfoBar` on the tree and single-movie detail pages too (sidebar/nav
+stay, unlike the explorer's full takeover). Both this and the pre-existing
+`movie-explorer-active` rule need **`!important`** on `display: none` —
+`#systemInfoBar` carries Bootstrap's `.d-flex` utility class
+(`display: flex !important` in `templates/index.html`), so a plain
+`display: none` here loses the cascade and silently does nothing; this was
+true for the explorer's version of this rule too before it was fixed
+alongside the new one.
+
+**Default landing route is now `#movies`**, not the help/tour page — the
+router's `hash === "" || hash === "#"` branch redirects via `setHash`
+(same one-line pattern the `#bios` redirect already used), and `#home`/
+`#help` still work as explicit routes for anyone who wants the tour.
+Movies loads fast (no gamelist scan involved), unlike the Artwork &
+Metadata tab.
+
+**The Admin Artwork page (`renderMissingArtworkPage`) now paints its shell
+before scanning**, not after: the tab bar + a scoped spinner render into
+`content` immediately, then the (potentially multi-second) gamelist/ROM
+scan runs and replaces just that placeholder. Previously nothing rendered
+into `content` until the scan resolved, so navigating here left whatever
+page you came from sitting there looking stuck for the whole scan — the
+scan itself wasn't and isn't made faster, only the *page* stops blocking on
+it before showing anything.
+
+**Artwork response caching** (`_stream_cached_image` in
+`handlers_peer.py`, shared by ROM artwork and movie posters/backdrops/
+thumbnails alike) now actually sets a browser-cacheable
+`Cache-Control: public, max-age=3600` — it always *tried* to, but
+`_send_security_headers()`'s blanket `Cache-Control: no-store` (the right
+default for the session-gated JSON/HTML responses everywhere else) was
+sent as a **second, separate header line** right after it, and per HTTP
+semantics multiple `Cache-Control` headers concatenate with `no-store`
+winning regardless of what else is present — so every image response was
+silently uncacheable in the browser the whole time, only the server-side
+`image_cache`/`image_miss_cache` (`common/http_cache.py`'s
+`ExpiringLRUCache`/`ExpiringKeyCache`) was actually helping. Fixed by
+giving `_send_security_headers(cache_control="no-store")` a parameter
+instead of a hardcoded literal — every other call site is unaffected (all
+zero-arg), only `_stream_cached_image` passes the real value, so there's
+now exactly one `Cache-Control` header on that response, not two.
+
+**Bulk-scrape breakdown + retry**: the "X matched · Y skipped · Z failed"
+line on the Movies admin tab is now three clickable segments
+(`toggleMovieBulkScrapeBreakdown`), each opening a paginated list
+(`GET /admin/movies/scrape/bulk/items/{status}`, backed by
+`storage/movie_scrape_job_items.py` — one row per movie in the *most
+recent* run, same "only the latest run matters" convention
+`movie_scrape_jobs` uses, cleared and repopulated by
+`metadata_manager._run_bulk_scrape_job` via `_record_item` on every
+outcome) with the human-readable reason `_run_bulk_scrape_job` recorded for
+each (`"no TMDb results for any tried title/year"`, `"TMDb is
+rate-limiting this Drone (429), retries exhausted"`, etc.). Failed items
+get a per-row **Retry** and a bulk **Retry all N** button
+(`metadata_manager.retry_bulk_scrape_items`, `POST
+/admin/movies/scrape/bulk/retry` with either `{status: "failed"}` or an
+explicit `{entry_keys: [...]}`) — this reuses the same
+`_run_bulk_scrape_job` machinery scoped to just that candidate set, and
+deliberately does **not** clear the items table first, so a retry updates
+just the retried rows in place while everything else from the last run
+stays exactly as it was. This exists because a real 2,667-movie run once
+came back "1,054 matched, 1,576 failed," and the actual cause turned out to
+be TMDb rate-limiting cascading through the old "any `TmdbUnavailableError`
+mid-job marks every remaining candidate failed and stops" handling — not
+1,576 genuinely unmatchable movies. Two things now make that specific
+failure mode rarer *and* recoverable: `TmdbClient` retries a 429 with
+backoff (honoring `Retry-After`) before giving up
+(`TMDB_MAX_429_RETRIES`), and the bulk job pauses briefly before each
+TMDb-touching candidate (`_throttle_before_tmdb_call`,
+`_REQUEST_THROTTLE_SECONDS`) so a large library doesn't trip rate-limiting
+in the first place — but when a run *does* still hit a wall, "Retry all
+failed" is the recovery path instead of a full rescan-all.
+
 ## Per-system BIOS association (new — absent from the old doc)
 
 BIOS files are filed under each system's own "BIOS" category instead of one
