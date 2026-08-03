@@ -126,12 +126,34 @@ class HandlersMoviesMixin:
         (from scraped TMDb metadata, one bulk lookup like
         ``list_movie_display_titles``, empty for anything never scraped).
         Feeds the Movie Explorer's Type (Movies/Shows) and Genre category
-        sidebar without a per-movie request."""
+        sidebar without a per-movie request.
+
+        For ``kind == "episode"`` rows, also overlays ``show_title``/
+        ``season_number``/``episode_number``/``episode_title`` (parsed
+        straight from the filename, so -- like ``kind`` -- these work
+        pre-scrape) so the Explorer can group episodes into one card per
+        season without a request per movie. ``show_title`` is deliberately
+        the *filename-parsed* value, not the scraped TMDb name, even once
+        scraped: it has to stay the stable grouping key regardless of scrape
+        status, or a show with only some episodes scraped could split into
+        two cards for the same season if the parsed and TMDb names differ
+        even slightly. ``scraped_show_title`` carries the TMDb name
+        separately, only once scraped, purely as a nicer *display* label for
+        whichever season card a caller builds from these rows."""
         genres_by_key = _movies_store.list_movie_genres(self.settings.movies_root)
+        scraped_show_titles_by_key = _movies_store.list_movie_show_titles(self.settings.movies_root)
         for item in items:
             parsed = _filename_parser.classify(item.get("file_path") or item.get("relative_path") or "", item.get("movie_name") or "")
             item["kind"] = parsed.kind
             item["genres"] = genres_by_key.get(item.get("entry_key")) or []
+            if parsed.kind == _filename_parser.KIND_EPISODE:
+                item["show_title"] = parsed.show_title
+                item["season_number"] = parsed.season
+                item["episode_number"] = parsed.episode
+                item["episode_title"] = parsed.episode_title
+                scraped_show_title = scraped_show_titles_by_key.get(item.get("entry_key"))
+                if scraped_show_title:
+                    item["scraped_show_title"] = scraped_show_title
 
     def _resolve_movie_path(self, entry_key: str) -> Path:
         """Look up a movie by its stable id and validate the resolved path

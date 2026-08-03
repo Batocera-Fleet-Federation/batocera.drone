@@ -256,6 +256,50 @@ class MoviesListHandlerTests(unittest.TestCase):
             self.assertEqual(kinds_by_name["Dexter (2006) - S01E01 - Dexter.mkv"], "episode")
             self.assertEqual(kinds_by_name["Blood Splatter 101.mkv"], "extra")
 
+    def test_episode_rows_get_show_season_episode_fields_without_scraping(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Shows/Dexter/Dexter (2006) S01/Dexter (2006) - S01E01 - Dexter.mkv", b"x")
+            _write_movie(root, "Ant-Man (1080p).mp4", b"x")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+            handler = _handler(settings)
+            handler._handle_movies_list()
+            _status, payload = handler.json_response
+            by_name = {m["movie_name"]: m for m in payload["movies"]}
+
+            episode = by_name["Dexter (2006) - S01E01 - Dexter.mkv"]
+            self.assertEqual(episode["show_title"], "Dexter")
+            self.assertEqual(episode["season_number"], 1)
+            self.assertEqual(episode["episode_number"], 1)
+            self.assertEqual(episode["episode_title"], "Dexter")
+            self.assertNotIn("scraped_show_title", episode)
+
+            movie = by_name["Ant-Man (1080p).mp4"]
+            self.assertNotIn("show_title", movie)
+            self.assertNotIn("season_number", movie)
+
+    def test_scraped_show_title_overlays_canonical_name_once_scraped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Dexter (2006) - S01E01 - Dexter.mkv", b"x")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+            entry_key = movies_store.list_movies(settings.movies_root)[0]["entry_key"]
+            movies_store.save_movie_metadata(
+                settings.movies_root, entry_key, provider="tmdb_tv", provider_id="1-s1e1", title="Dexter - S01E01 - Dexter",
+                poster_relative_path=None, backdrop_relative_path=None,
+                extra={"media_type": "tv_episode", "show_title": "Dexter (2006 TV Series)", "season_number": 1, "episode_number": 1},
+            )
+            handler = _handler(settings)
+            handler._handle_movies_list()
+            _status, payload = handler.json_response
+            episode = payload["movies"][0]
+            # Grouping key stays the filename-parsed value...
+            self.assertEqual(episode["show_title"], "Dexter")
+            # ...while the scraped canonical name is available separately for display.
+            self.assertEqual(episode["scraped_show_title"], "Dexter (2006 TV Series)")
+
     def test_genres_are_empty_until_scraped_then_reflect_saved_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

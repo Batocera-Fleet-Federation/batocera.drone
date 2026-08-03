@@ -417,6 +417,28 @@ def list_movie_genres(movies_root: Path) -> dict:
     return genres_by_key
 
 
+def list_movie_show_titles(movies_root: Path) -> dict:
+    """Return ``{entry_key: show_title}`` for every scraped TV episode that
+    has one -- the *canonical* TMDb show name, distinct from whatever
+    ``filename_parser.classify()`` parsed straight out of the filename (used
+    as the stable grouping key for the Explorer's per-season show cards
+    regardless of scrape status; this is only the display-label upgrade
+    once at least one episode of a season has real metadata -- see
+    ``HandlersMoviesMixin._apply_movie_kind_and_genres``)."""
+    with _open(movies_root) as connection:
+        rows = connection.execute("SELECT entry_key, extra_json FROM movies_metadata_entries").fetchall()
+    titles_by_key = {}
+    for entry_key, extra_json in rows:
+        try:
+            extra = json.loads(extra_json or "{}")
+        except (TypeError, ValueError):
+            continue
+        show_title = extra.get("show_title") if isinstance(extra, dict) else None
+        if show_title:
+            titles_by_key[entry_key] = show_title
+    return titles_by_key
+
+
 def list_movies_page(
     movies_root: Path,
     *,

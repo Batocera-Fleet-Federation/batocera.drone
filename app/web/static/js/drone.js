@@ -2087,11 +2087,23 @@ function movieDetailHash(entryKey) {
 function movieExploreHash() {
   return `#movies/explore`;
 }
+// "show" is reserved -- an entry_key is always the hex-digest slice
+// movies_store._entry_key produces, which can never equal "show".
+function showDetailHash(showTitle, seasonNumber) {
+  const base = `#movies/show/${encodeURIComponent(showTitle)}`;
+  return seasonNumber != null ? `${base}/${seasonNumber}` : base;
+}
 function parseMoviesHash(hash) {
   if (!hash.startsWith("#movies")) return null;
   const rest = hash.slice("#movies".length).replace(/^\//, "");
   if (!rest) return { view: "tree" };
   if (rest === "explore") return { view: "explore" };
+  if (rest.startsWith("show/")) {
+    const parts = rest.split("/");
+    const showTitle = decodeURIComponent(parts[1] || "");
+    const seasonNumber = parts[2] ? parseInt(parts[2], 10) : null;
+    return { view: "show", showTitle, seasonNumber: Number.isFinite(seasonNumber) ? seasonNumber : null };
+  }
   return { view: "detail", entryKey: decodeURIComponent(rest.split("?")[0]) };
 }
 function renderAssetsTabBar(active) {
@@ -2214,6 +2226,46 @@ function setMovieExplorerGenreFilter(value) {
   renderMovieExplorerSidebar();
   filterMovieExplorer(document.getElementById("movieExplorerSearch")?.value || "");
 }
+// Groups "episode" kind rows into one synthetic card per (show, season) --
+// everything else (movies, and "extra" rows visible under the "All" type
+// filter) passes through as its own card, same as before this existed.
+// Grouping key is always the filename-parsed show_title (present pre-scrape
+// via kind/show_title on every row -- see HandlersMoviesMixin
+// ._apply_movie_kind_and_genres), never the scraped TMDb name, so a show
+// with only some episodes scraped can't split into two cards for the same
+// season just because the parsed and TMDb names differ slightly.
+function groupMoviesForExplorer(rows) {
+  const cards = [];
+  const seasonGroups = new Map();
+  rows.forEach((row) => {
+    if (row.kind !== "episode") {
+      cards.push(row);
+      return;
+    }
+    const key = `${String(row.show_title || "").toLowerCase()}::${row.season_number}`;
+    if (!seasonGroups.has(key)) seasonGroups.set(key, []);
+    seasonGroups.get(key).push(row);
+  });
+  seasonGroups.forEach((members) => {
+    members.sort((a, b) => (a.episode_number || 0) - (b.episode_number || 0));
+    const representative = members.find((m) => m.scraped_show_title) || members[0];
+    cards.push({
+      isSeasonGroup: true,
+      showTitle: representative.scraped_show_title || representative.show_title,
+      rawShowTitle: representative.show_title,
+      seasonNumber: representative.season_number,
+      entry_key: representative.entry_key,
+      genres: representative.genres || [],
+      episodeCount: members.length,
+    });
+  });
+  return cards;
+}
+function movieExplorerCardTitle(entry) {
+  return entry.isSeasonGroup
+    ? `${entry.showTitle} - Season ${entry.seasonNumber}`
+    : entry.display_title || entry.movie_name || entry.name || "";
+}
 function filterMovieExplorer(queryValue) {
   const grid = document.getElementById("movie-explorer-grid");
   if (!grid) return;
@@ -2228,24 +2280,128 @@ function filterMovieExplorer(queryValue) {
   if (filter) {
     rows = rows.filter((m) => (m.display_title || m.movie_name || m.name || "").toLowerCase().includes(filter));
   }
-  const sorted = [...rows].sort((a, b) =>
-    (a.display_title || a.movie_name || a.name || "").localeCompare(b.display_title || b.movie_name || b.name || "")
-  );
+  const cards = groupMoviesForExplorer(rows);
+  const sorted = [...cards].sort((a, b) => movieExplorerCardTitle(a).localeCompare(movieExplorerCardTitle(b)));
   grid.innerHTML = sorted.length
     ? sorted.map(renderMovieExplorerCard).join("")
     : `<div class="text-muted p-4">No movies match the current filters.</div>`;
 }
-function renderMovieExplorerCard(movie) {
-  const title = movie.display_title || movie.movie_name || movie.name || "";
-  const posterUrl = movieArtworkUrl(movie.entry_key, "poster");
+function renderMovieExplorerCard(entry) {
+  const title = movieExplorerCardTitle(entry);
+  const posterUrl = movieArtworkUrl(entry.entry_key, "poster");
+  const navigateHash = entry.isSeasonGroup
+    ? showDetailHash(entry.rawShowTitle, entry.seasonNumber)
+    : movieDetailHash(entry.entry_key);
   return `
-    <button type="button" class="movie-explorer-card" title="${escapeHtml(title)}" onclick="setHash(movieDetailHash(${jsAttr(movie.entry_key)}))">
+    <button type="button" class="movie-explorer-card" title="${escapeHtml(title)}" onclick="setHash(${jsAttr(navigateHash)})">
       <div class="movie-explorer-card-poster">
         <img src="${escapeHtml(posterUrl)}" alt="" loading="lazy" onerror="this.style.display='none'; this.nextElementSibling.classList.remove('d-none');">
         <div class="movie-explorer-card-poster-fallback d-none"><i class="bi bi-film"></i></div>
       </div>
       <div class="movie-explorer-card-title">${escapeHtml(title)}</div>
     </button>
+  `;
+}
+// Show detail page (route #movies/show/<name>[/<season>], reached by
+// clicking a season card in the explorer): a season selector plus that
+// season's artwork/overview/episode list, mirroring the single-movie detail
+// page's hero layout. Switching seasons is just a hash change (each season
+// tab links to #movies/show/<name>/<n>) -- the router re-renders this whole
+// page on every season click, which both updates the artwork/metadata (the
+// actual ask) and keeps the selected season bookmarkable/back-button-able,
+// same convention as every other stateful view in this app.
+async function renderShowDetailsPage(showTitle, seasonNumber) {
+  currentSystemContext = null;
+  clearSystemTheme();
+  setLoading(true, "Loading show...");
+  try {
+    if (!moviesAllRows.length) {
+      const payload = await api("/movies");
+      moviesAllRows = payload.movies || [];
+    }
+    const showKey = String(showTitle || "").toLowerCase();
+    const episodes = moviesAllRows.filter((m) => m.kind === "episode" && String(m.show_title || "").toLowerCase() === showKey);
+    if (!episodes.length) {
+      content.innerHTML = `
+        <button class="btn btn-outline-secondary btn-sm mb-3" type="button" onclick="setHash('#movies')"><i class="bi bi-arrow-left me-1"></i>Back to Movies</button>
+        <div class="alert alert-warning">No episodes found for "${escapeHtml(showTitle)}".</div>
+      `;
+      return;
+    }
+    const seasonsMap = new Map();
+    episodes.forEach((ep) => {
+      if (!seasonsMap.has(ep.season_number)) seasonsMap.set(ep.season_number, []);
+      seasonsMap.get(ep.season_number).push(ep);
+    });
+    const seasonNumbers = [...seasonsMap.keys()].sort((a, b) => a - b);
+    const selectedSeason = seasonNumbers.includes(seasonNumber) ? seasonNumber : seasonNumbers[0];
+    const seasonEpisodes = (seasonsMap.get(selectedSeason) || []).slice().sort((a, b) => (a.episode_number || 0) - (b.episode_number || 0));
+    const representative = seasonEpisodes.find((e) => e.scraped_show_title) || seasonEpisodes[0];
+    const displayShowTitle = representative.scraped_show_title || representative.show_title || showTitle;
+
+    let detail = null;
+    try {
+      detail = await api(`/movies/${encodeURIComponent(representative.entry_key)}`);
+    } catch (_) {
+      detail = null; // unscraped season -- render with no poster/overview rather than failing the page
+    }
+    const meta = detail && detail.metadata;
+    const posterUrl = meta && meta.poster_relative_path ? movieArtworkUrl(representative.entry_key, "poster") : null;
+    const backdropUrl = meta && meta.backdrop_relative_path ? movieArtworkUrl(representative.entry_key, "backdrop") : null;
+    const overview = (meta && (meta.season_overview || meta.overview)) || "";
+    const genres = (meta && meta.genres) || [];
+
+    content.innerHTML = `
+      <button class="btn btn-outline-secondary btn-sm mb-3" type="button" onclick="setHash('#movies')"><i class="bi bi-arrow-left me-1"></i>Back to Movies</button>
+      <div class="movie-detail-hero" ${backdropUrl ? `style="background-image:linear-gradient(180deg, rgba(11,16,32,0.55) 0%, rgba(11,16,32,0.96) 100%), url('${escapeHtml(backdropUrl)}')"` : ""}>
+        <div class="movie-detail-hero-body">
+          ${
+            posterUrl
+              ? `<img class="movie-detail-poster" src="${escapeHtml(posterUrl)}" alt="">`
+              : `<div class="movie-detail-poster movie-detail-poster-placeholder"><i class="bi bi-film"></i></div>`
+          }
+          <div class="movie-detail-info min-width-0">
+            <div class="small text-muted mb-1"><span class="badge text-bg-info me-2">TV Show</span>${seasonEpisodes.length} episode${seasonEpisodes.length === 1 ? "" : "s"}</div>
+            <h2 class="movie-detail-title" title="${escapeHtml(displayShowTitle)}">${escapeHtml(displayShowTitle)} &middot; Season ${selectedSeason}</h2>
+            ${genres.length ? `<div class="mb-2">${genres.map((g) => `<span class="badge movie-genre-badge">${escapeHtml(g)}</span>`).join(" ")}</div>` : ""}
+          </div>
+        </div>
+      </div>
+      <div class="movie-detail-body">
+        ${overview ? `<p>${escapeHtml(overview)}</p>` : `<p class="text-muted small">No description yet -- scrape an episode of this season to fetch one from TMDb.</p>`}
+        <div class="d-flex flex-wrap gap-2 my-3">
+          ${seasonNumbers.map((n) => `
+            <button type="button" class="btn btn-sm ${n === selectedSeason ? "btn-primary" : "btn-outline-primary"}" onclick="setHash(${jsAttr(showDetailHash(showTitle, n))})">Season ${n}</button>
+          `).join("")}
+        </div>
+        <div class="list-group">
+          ${seasonEpisodes.map(renderShowDetailEpisodeRow).join("")}
+        </div>
+      </div>
+    `;
+  } catch (err) {
+    content.innerHTML = `
+      <button class="btn btn-outline-secondary btn-sm mb-3" type="button" onclick="setHash('#movies')"><i class="bi bi-arrow-left me-1"></i>Back to Movies</button>
+      <div class="alert alert-danger">Failed to load show: ${escapeHtml(err.message || "unknown error")}</div>
+    `;
+  } finally {
+    setLoading(false);
+  }
+}
+function renderShowDetailEpisodeRow(ep) {
+  const label = `E${String(ep.episode_number || 0).padStart(2, "0")} - ${ep.episode_title || ep.movie_name || ""}`;
+  return `
+    <div class="list-group-item d-flex align-items-center justify-content-between gap-2 bg-transparent">
+      <button type="button" class="btn btn-link btn-sm p-0 text-start text-truncate min-width-0" title="${escapeHtml(ep.file_path || ep.movie_name || "")}" onclick="setHash(movieDetailHash(${jsAttr(ep.entry_key)}))">${escapeHtml(label)}</button>
+      <div class="d-flex gap-2 text-nowrap">
+        <button class="btn btn-outline-primary btn-sm" type="button" title="Watch" onclick="openMoviePlayerModal(${jsAttr(ep.entry_key)}, ${jsAttr(label)})"><i class="bi bi-play-circle"></i></button>
+        ${
+          ep.is_downloadable === false
+            ? `<button class="btn btn-secondary btn-sm" type="button" title="Downloads disabled" disabled><i class="bi bi-slash-circle"></i></button>`
+            : `<a class="btn btn-primary btn-sm" title="Download" href="${movieDownloadUrl(ep.entry_key)}"><i class="bi bi-download"></i></a>`
+        }
+      </div>
+    </div>
   `;
 }
 function moviesPathParts(movie) {
@@ -10253,6 +10409,8 @@ async function router() {
         await renderMovieDetailsPage(parsed.entryKey);
       } else if (parsed && parsed.view === "explore") {
         await renderMovieExplorerPage();
+      } else if (parsed && parsed.view === "show") {
+        await renderShowDetailsPage(parsed.showTitle, parsed.seasonNumber);
       } else {
         await renderMoviesPage();
       }

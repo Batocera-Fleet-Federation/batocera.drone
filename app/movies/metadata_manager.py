@@ -188,18 +188,21 @@ def apply_tv_episode(
     episode_number: int,
     *,
     show_details: Optional[dict] = None,
+    season_details: Optional[dict] = None,
     client: Optional[TmdbClient] = None,
 ) -> dict:
     """TV-episode counterpart of ``apply()``: fetches show-level details
-    (poster/backdrop/genres/cast -- all show-level in TMDb's data model, see
-    ``TmdbClient.tv_details``) plus this specific episode's title/overview/
-    air-date/still, downloads artwork next to the episode file the same way
-    ``apply()`` does for a movie, and saves it as one
-    ``movies_metadata_entries`` row like any other scrape (``provider``
+    (backdrop/genres/cast -- show-level in TMDb's data model, see
+    ``TmdbClient.tv_details``), this season's own details (TMDb gives each
+    season its own poster, often visibly different from the show's general
+    poster -- see ``TmdbClient.tv_season_details``), and this specific
+    episode's title/overview/air-date/still, downloads artwork next to the
+    episode file the same way ``apply()`` does for a movie, and saves it as
+    one ``movies_metadata_entries`` row like any other scrape (``provider``
     distinguishes it: ``"tmdb_tv"`` vs plain movies' ``"tmdb"``).
-    ``show_details`` lets a caller that already fetched a show's details for
-    an earlier episode (the bulk job does, per show, once) skip refetching
-    it for every subsequent episode."""
+    ``show_details``/``season_details`` let a caller that already fetched
+    them for an earlier episode of the same show/season (the bulk job does,
+    once each) skip refetching for every subsequent episode."""
     movie = _movies_store.get_movie_by_key(settings.movies_root, entry_key)
     if not movie:
         raise MovieNotFoundError(entry_key)
@@ -208,19 +211,27 @@ def apply_tv_episode(
 
     client = client or _client(settings)
     show = show_details if show_details is not None else client.tv_details(tv_id)
+    season = season_details if season_details is not None else client.tv_season_details(tv_id, season_number)
     episode = client.tv_episode_details(tv_id, season_number, episode_number)
 
+    # Season poster first -- it's usually a distinct image from the show's
+    # general poster (this is what makes clicking between seasons on the
+    # show detail page visibly change the artwork, not just the episode
+    # list). Falls back to the show poster for the (uncommon) case where
+    # TMDb has no dedicated poster for this season.
     poster_relative_path: Optional[str] = None
-    if show.get("poster_url"):
+    poster_source = season.get("poster_url") or show.get("poster_url")
+    if poster_source:
         target = _artwork_path(movie_path, "image")
         target.parent.mkdir(parents=True, exist_ok=True)
-        data, _content_type = client.download_image(show["poster_url"])
+        data, _content_type = client.download_image(poster_source)
         target.write_bytes(data)
         poster_relative_path = _relative_to_movies_root(movies_root, target)
 
     # The episode's own "still" (a screenshot from that episode) is more
     # useful as this file's backdrop than the show-wide backdrop would be --
     # fall back to the show backdrop only when TMDb has no still for it.
+    # (TMDb seasons have no backdrop of their own at all, unlike posters.)
     backdrop_relative_path: Optional[str] = None
     backdrop_source = episode.get("still_url") or show.get("backdrop_url")
     if backdrop_source:
@@ -241,6 +252,8 @@ def apply_tv_episode(
         "season_number": season_number,
         "episode_number": episode_number,
         "episode_title": episode.get("title") or "",
+        "season_name": season.get("title") or "",
+        "season_overview": season.get("overview") or "",
         "overview": episode.get("overview") or show.get("overview") or "",
         "tagline": show.get("tagline") or "",
         "genres": show.get("genres") or [],
@@ -336,9 +349,11 @@ def _run_bulk_scrape_job(settings: Settings, job_id: int, candidates: list, clie
     matched = skipped = failed = 0
     total = len(candidates)
     # Per-job caches so a show with a dozen episodes only costs one TV search
-    # and one show-details fetch, not one per episode file.
+    # and one show-details fetch (and a season's worth of episodes only one
+    # season-details fetch), not one per episode file.
     show_id_by_title: dict = {}
     show_details_by_id: dict = {}
+    season_details_by_key: dict = {}
     for index, movie in enumerate(candidates):
         _jobs.update_progress(
             settings, job_id,
@@ -377,9 +392,14 @@ def _run_bulk_scrape_job(settings: Settings, job_id: int, candidates: list, clie
                 if show_details is None:
                     show_details = client.tv_details(tv_id)
                     show_details_by_id[tv_id] = show_details
+                season_key = (tv_id, parsed.season)
+                season_details = season_details_by_key.get(season_key)
+                if season_details is None:
+                    season_details = client.tv_season_details(tv_id, parsed.season)
+                    season_details_by_key[season_key] = season_details
                 apply_tv_episode(
                     settings, movie["entry_key"], tv_id, parsed.season, parsed.episode,
-                    show_details=show_details, client=client,
+                    show_details=show_details, season_details=season_details, client=client,
                 )
                 matched += 1
                 _record_item(settings, movie, _job_items.STATUS_MATCHED)

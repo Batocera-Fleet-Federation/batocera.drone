@@ -35,10 +35,14 @@ def _write_movie(root: Path, rel: str, data: bytes = b"x") -> Path:
 
 
 class FakeTmdbClient:
-    def __init__(self, *, details=None, search_results=None, tv_details=None, tv_episode_details=None):
+    def __init__(
+        self, *, details=None, search_results=None, tv_details=None,
+        season_details=None, tv_episode_details=None,
+    ):
         self._details = details or {}
         self._search_results = search_results or []
         self._tv_details = tv_details or {}
+        self._season_details = season_details or {}
         self._tv_episode_details = tv_episode_details or {}
         self.downloaded_urls = []
 
@@ -53,6 +57,9 @@ class FakeTmdbClient:
 
     def tv_details(self, tv_id):
         return self._tv_details
+
+    def tv_season_details(self, tv_id, season_number):
+        return self._season_details
 
     def tv_episode_details(self, tv_id, season_number, episode_number):
         return self._tv_episode_details
@@ -194,6 +201,89 @@ class ApplyTests(unittest.TestCase):
             self.assertIn("The Office", office_meta["poster_relative_path"])
 
 
+class ApplyTvEpisodeTests(unittest.TestCase):
+    def test_unknown_movie_raises_not_found(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            with self.assertRaises(metadata_manager.MovieNotFoundError):
+                metadata_manager.apply_tv_episode(
+                    settings, "not-a-real-key", 1405, 1, 1,
+                    show_details=dict(_MATRIX_DETAILS, title="Dexter"),
+                    client=FakeTmdbClient(),
+                )
+
+    def test_prefers_season_poster_over_show_poster(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Dexter (2006) - S01E01 - Dexter.mkv")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+            entry_key = movies_store.list_movies(settings.movies_root)[0]["entry_key"]
+
+            fake = FakeTmdbClient(
+                tv_details=dict(_MATRIX_DETAILS, title="Dexter", poster_url="https://image.tmdb.org/t/p/w500/show-poster.jpg"),
+                season_details={"title": "Season 1", "overview": "", "air_date": None, "poster_url": "https://image.tmdb.org/t/p/w500/season1-poster.jpg"},
+                tv_episode_details={"title": "Dexter", "overview": "", "air_date": None, "rating": None, "still_url": None},
+            )
+            metadata_manager.apply_tv_episode(settings, entry_key, 1405, 1, 1, client=fake)
+            self.assertIn("https://image.tmdb.org/t/p/w500/season1-poster.jpg", fake.downloaded_urls)
+            self.assertNotIn("https://image.tmdb.org/t/p/w500/show-poster.jpg", fake.downloaded_urls)
+
+    def test_falls_back_to_show_poster_when_season_has_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Dexter (2006) - S01E01 - Dexter.mkv")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+            entry_key = movies_store.list_movies(settings.movies_root)[0]["entry_key"]
+
+            fake = FakeTmdbClient(
+                tv_details=dict(_MATRIX_DETAILS, title="Dexter", poster_url="https://image.tmdb.org/t/p/w500/show-poster.jpg"),
+                season_details={"title": "Season 1", "overview": "", "air_date": None, "poster_url": None},
+                tv_episode_details={"title": "Dexter", "overview": "", "air_date": None, "rating": None, "still_url": None},
+            )
+            metadata_manager.apply_tv_episode(settings, entry_key, 1405, 1, 1, client=fake)
+            self.assertIn("https://image.tmdb.org/t/p/w500/show-poster.jpg", fake.downloaded_urls)
+
+    def test_stores_season_name_and_overview(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Dexter (2006) - S01E01 - Dexter.mkv")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+            entry_key = movies_store.list_movies(settings.movies_root)[0]["entry_key"]
+
+            fake = FakeTmdbClient(
+                tv_details=dict(_MATRIX_DETAILS, title="Dexter"),
+                season_details={"title": "Season 1", "overview": "Dexter's first season.", "air_date": "2006-10-01", "poster_url": None},
+                tv_episode_details={"title": "Dexter", "overview": "Pilot.", "air_date": None, "rating": None, "still_url": None},
+            )
+            result = metadata_manager.apply_tv_episode(settings, entry_key, 1405, 1, 1, client=fake)
+            self.assertEqual(result["season_name"], "Season 1")
+            self.assertEqual(result["season_overview"], "Dexter's first season.")
+            # Episode's own overview is unaffected by the season's.
+            self.assertEqual(result["overview"], "Pilot.")
+
+    def test_season_details_param_skips_refetch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Dexter (2006) - S01E01 - Dexter.mkv")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+            entry_key = movies_store.list_movies(settings.movies_root)[0]["entry_key"]
+
+            class NoSeasonCallClient(FakeTmdbClient):
+                def tv_season_details(self, tv_id, season_number):
+                    raise AssertionError("must not call tv_season_details when season_details is already given")
+
+            fake = NoSeasonCallClient(tv_details=dict(_MATRIX_DETAILS, title="Dexter"))
+            metadata_manager.apply_tv_episode(
+                settings, entry_key, 1405, 1, 1,
+                season_details={"title": "Season 1", "overview": "", "air_date": None, "poster_url": None},
+                client=fake,
+            )
+
+
 class FakeBulkTmdbClient:
     """Unlike FakeTmdbClient above (fixed details, fixed results), this fake
     varies its response by query -- the bulk job searches a different query
@@ -202,17 +292,22 @@ class FakeBulkTmdbClient:
 
     def __init__(
         self, *, match_queries=None, unavailable_after=None, search_delay_seconds=0,
-        tv_match_queries=None, tv_details=None, tv_episode_details=None,
+        tv_match_queries=None, tv_details=None, season_details=None, tv_episode_details=None,
     ):
         self._match_queries = match_queries if match_queries is not None else set()
         self._tv_match_queries = tv_match_queries if tv_match_queries is not None else set()
         self._unavailable_after = unavailable_after
         self._search_delay_seconds = search_delay_seconds
         self._tv_details = tv_details or dict(_MATRIX_DETAILS, title="A Matched Show")
+        # No poster_url by default -- apply_tv_episode falls back to the show
+        # poster, which is what every test written before season-level
+        # posters existed already asserts on.
+        self._season_details = season_details or {"title": "", "overview": "", "air_date": None, "poster_url": None}
         self._tv_episode_details = tv_episode_details or {"title": "A Matched Episode", "overview": "", "air_date": None, "rating": None, "still_url": None}
         self.search_calls = []
         self.search_tv_calls = []
         self.tv_details_calls = []
+        self.tv_season_details_calls = []
         self.tv_episode_details_calls = []
 
     def _maybe_raise_unavailable(self, call_count):
@@ -241,6 +336,10 @@ class FakeBulkTmdbClient:
     def tv_details(self, tv_id):
         self.tv_details_calls.append(tv_id)
         return dict(self._tv_details, tmdb_id=tv_id)
+
+    def tv_season_details(self, tv_id, season_number):
+        self.tv_season_details_calls.append((tv_id, season_number))
+        return dict(self._season_details)
 
     def tv_episode_details(self, tv_id, season_number, episode_number):
         self.tv_episode_details_calls.append((tv_id, season_number, episode_number))
@@ -635,7 +734,26 @@ class BulkScrapeTests(unittest.TestCase):
             self.assertEqual(job["matched_count"], 2)
             self.assertEqual(fake.search_tv_calls, ["Dexter"])
             self.assertEqual(len(fake.tv_details_calls), 1)
+            self.assertEqual(len(fake.tv_season_details_calls), 1)
             self.assertEqual(len(fake.tv_episode_details_calls), 2)
+
+    def test_episodes_of_different_seasons_each_fetch_their_own_season_details(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Shows/Dexter/Dexter (2006) S01/Dexter (2006) - S01E01 - Dexter.mkv")
+            _write_movie(root, "Shows/Dexter/Dexter (2006) S02/Dexter (2006) - S02E01 - It's Alive!.mkv")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+
+            fake = FakeBulkTmdbClient(tv_match_queries={"Dexter"})
+            metadata_manager.start_bulk_scrape(settings, rescan_all=True, client=fake)
+            job = _wait_for_bulk_scrape_status(settings)
+
+            self.assertEqual(job["matched_count"], 2)
+            # One show search/details fetch shared across both seasons, but
+            # a season-details fetch per distinct (show, season) pair.
+            self.assertEqual(len(fake.tv_details_calls), 1)
+            self.assertCountEqual(fake.tv_season_details_calls, [(909, 1), (909, 2)])
 
     def test_show_not_found_on_tmdb_counts_as_failed_not_skipped(self):
         with tempfile.TemporaryDirectory() as tmp:

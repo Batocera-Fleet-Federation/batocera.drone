@@ -281,6 +281,40 @@ class TmdbClientTvDetailsTests(unittest.TestCase):
             client.tv_details("")
 
 
+class TmdbClientTvSeasonDetailsTests(unittest.TestCase):
+    def test_parses_season_details_including_its_own_poster(self) -> None:
+        payload = json.dumps(
+            {
+                "name": "Season 1",
+                "overview": "Dexter's first season.",
+                "air_date": "2006-10-01",
+                "poster_path": "/dexter-s1.jpg",
+            }
+        ).encode("utf-8")
+        client = TmdbClient("key")
+        with mock.patch("app.movies.tmdb_client.urlopen", return_value=FakeResponse(payload)):
+            details = client.tv_season_details(1405, 1)
+        self.assertEqual(details["title"], "Season 1")
+        self.assertEqual(details["overview"], "Dexter's first season.")
+        self.assertEqual(details["poster_url"], "https://image.tmdb.org/t/p/w500/dexter-s1.jpg")
+        # No backdrop_url key at all -- TMDb seasons have no backdrop of their own.
+        self.assertNotIn("backdrop_url", details)
+
+    def test_missing_ids_raise_value_error(self) -> None:
+        client = TmdbClient("key")
+        with self.assertRaises(ValueError):
+            client.tv_season_details("", 1)
+        with self.assertRaises(ValueError):
+            client.tv_season_details(1405, "")
+
+    def test_404_raises_tmdb_unavailable(self) -> None:
+        client = TmdbClient("key")
+        error = HTTPError("https://api.themoviedb.org/3/tv/1405/season/99", 404, "Not Found", None, None)
+        with mock.patch("app.movies.tmdb_client.urlopen", side_effect=error):
+            with self.assertRaises(TmdbUnavailableError):
+                client.tv_season_details(1405, 99)
+
+
 class TmdbClientTvEpisodeDetailsTests(unittest.TestCase):
     def test_parses_episode_details(self) -> None:
         payload = json.dumps(

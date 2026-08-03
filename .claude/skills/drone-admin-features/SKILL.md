@@ -627,6 +627,68 @@ bucket (Featurettes-style bonus clips aren't really "a movie" or "an
 episode" — see the bulk-scraper writeup above), never under "Movies" or
 "Shows" specifically.
 
+**Episodes group into one card per season** in the explorer instead of one
+card per episode file — `groupMoviesForExplorer()` groups every `kind ===
+"episode"` row by `(show_title, season_number)` after the type/genre/search
+filters run, leaving movie/extra rows as individual cards untouched. The
+grouping key is always `show_title` **as parsed straight from the
+filename** (present on every episode row pre-scrape, same source as `kind`
+— see the category sidebar section above), never the scraped TMDb name —
+a show with only some episodes scraped could otherwise split into two
+cards for the same season the moment the parsed and TMDb names differ even
+slightly (casing, "and" vs "&", ...). `scraped_show_title` carries the
+TMDb name separately, only once at least one episode in the group has been
+scraped, purely as a nicer *display* label
+(`representative.scraped_show_title || representative.show_title`) —
+grouping and display are deliberately decoupled fields for exactly this
+reason. A season card's poster comes from its lowest-numbered episode's
+`entry_key` (`movieArtworkUrl` + the same inline-`onerror`-to-icon fallback
+every other card already uses) and clicking it goes to
+`showDetailHash(rawShowTitle, seasonNumber)`, not the single-movie detail
+page.
+
+**Show detail page** (`renderShowDetailsPage`, route
+`#movies/show/<url-encoded-show-title>[/<season-number>]`, parsed by
+`parseMoviesHash`'s new `show/` branch) is what a season card opens: a
+season-tab strip (one button per season number found among that show's
+episodes) above an episode list for whichever season is selected — defaults
+to the lowest season number if the hash's season segment is missing or
+doesn't exist for this show. **Switching seasons is just a hash change**
+(each tab links to `showDetailHash(showTitle, n)`) — the router re-renders
+the whole page on every click, which is simultaneously the answer to
+"clicking a season should update the artwork/metadata" (the header
+poster/backdrop/overview/genres come from an on-demand `GET
+/movies/{entry_key}` fetch of the newly-selected season's lowest-numbered
+episode, so they always reflect the season now selected, not a stale
+season) and keeps the current season bookmarkable/back-button-able for
+free, same `#hash`-encodes-page-state convention every other stateful view
+in this app already follows — no separate partial-DOM-patch code path was
+needed. Reuses `.movie-detail-hero`/`.movie-detail-poster`/
+`.movie-detail-title`/`.movie-genre-badge` verbatim from the single-movie
+detail page's CSS for visual consistency; the overview shown prefers
+`metadata.season_overview` (see below) over the representative episode's
+own `overview`. Each episode row (`renderShowDetailEpisodeRow`) links to
+the **existing** single-movie detail page via `movieDetailHash(entry_key)`
+for Watch/Download/full metadata — this page only ever aggregates and
+routes, it doesn't duplicate the per-episode detail view.
+
+**Season-level TMDb data**: `TmdbClient.tv_season_details(tv_id,
+season_number)` hits `/tv/{id}/season/{n}`, which — unlike the show-level
+`/tv/{id}` — has its **own poster** (often visibly different from the
+show's general poster; TMDb has no season-level `backdrop_path` though, so
+backdrops stay show-level as before). `apply_tv_episode` now fetches this
+(via a new `season_details` param, cached per `(tv_id, season_number)` in
+`_run_bulk_scrape_job` exactly like `show_details` is cached per `tv_id` —
+one extra TMDb call per season, not per episode) and **prefers the season
+poster over the show poster** for what gets downloaded as the episode
+file's own artwork, falling back to the show poster only when TMDb has none
+for that season. `season_name`/`season_overview` are stored in
+`extra_json` alongside the existing per-episode fields. This is what
+actually makes the show detail page's season-switching change the artwork,
+not just re-list episodes — before this, every episode of every season
+downloaded the identical show-wide poster, so there was nothing to
+visually change between seasons.
+
 **The plain Movies tree** (`renderMoviesTreeLeafRow`) also shows a small
 poster thumbnail per row now, same `movieArtworkUrl` + inline-`onerror`-to-
 film-icon pattern as the explorer cards — this was the actual fix for "I

@@ -223,6 +223,27 @@ class TmdbClient:
             "backdrop_url": tmdb_image_url(payload.get("backdrop_path"), TMDB_BACKDROP_SIZE),
         }
 
+    def tv_season_details(self, tv_id, season_number) -> dict:
+        """Season-level details: TMDb gives each season its own poster
+        (often a distinct image from the show's own poster -- see
+        ``metadata_manager.apply_tv_episode``, which prefers this over the
+        show poster) and occasionally its own overview, but *not* its own
+        backdrop -- there's no ``backdrop_path`` on a TMDb season object, so
+        that stays show-level. Raises ``TmdbUnavailableError`` (404 mapped
+        the same way ``tv_episode_details`` does) if the show has no such
+        season."""
+        safe_tv_id = re.sub(r"[^0-9]", "", str(tv_id or ""))
+        safe_season = re.sub(r"[^0-9]", "", str(season_number or ""))
+        if not safe_tv_id or not safe_season:
+            raise ValueError("tv_id and season_number are required")
+        payload = self._get_json(f"/tv/{safe_tv_id}/season/{safe_season}")
+        return {
+            "title": payload.get("name") or "",
+            "overview": payload.get("overview") or "",
+            "air_date": payload.get("air_date") or None,
+            "poster_url": tmdb_image_url(payload.get("poster_path"), TMDB_POSTER_SIZE),
+        }
+
     def tv_episode_details(self, tv_id, season_number, episode_number) -> dict:
         """Episode-level details: title, overview, air date, rating, and a
         "still" (a screenshot from the episode -- the closest TMDb has to

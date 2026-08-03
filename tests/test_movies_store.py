@@ -286,6 +286,21 @@ class MovieMetadataStoreTests(unittest.TestCase):
     def test_list_movie_genres_empty_when_none_scraped(self):
         self.assertEqual(movies_store.list_movie_genres(self.movies_root), {})
 
+    def test_list_movie_show_titles_only_includes_scraped_episodes(self):
+        movies_store.save_movie_metadata(
+            self.movies_root, "aaaa", provider="tmdb_tv", provider_id="1-s1e1", title="Dexter - S01E01 - Dexter",
+            poster_relative_path=None, backdrop_relative_path=None,
+            extra={"media_type": "tv_episode", "show_title": "Dexter", "season_number": 1, "episode_number": 1},
+        )
+        movies_store.save_movie_metadata(
+            self.movies_root, "bbbb", provider="tmdb", provider_id="2", title="A Plain Movie",
+            poster_relative_path=None, backdrop_relative_path=None, extra={},
+        )
+        self.assertEqual(movies_store.list_movie_show_titles(self.movies_root), {"aaaa": "Dexter"})
+
+    def test_list_movie_show_titles_empty_when_none_scraped(self):
+        self.assertEqual(movies_store.list_movie_show_titles(self.movies_root), {})
+
 
 if __name__ == "__main__":
     unittest.main()
