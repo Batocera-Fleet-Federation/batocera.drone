@@ -28,6 +28,7 @@ from threading import Event
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from urllib.parse import parse_qs
 from urllib.parse import quote
 from urllib.parse import unquote
 from urllib.parse import urlparse
@@ -87,6 +88,9 @@ try:
     )
     from .roms.rom_fs_watcher import RomFilesystemWatcher
     from .storage import saves_store as _saves_store
+    from .storage import movies_store as _movies_store
+    from .storage import movie_cast_tokens as _movie_cast_tokens
+    from .common import http_range as _http_range
     from .storage.state_store import (
         append_event as _append_state_event,
         database_path as _state_database_path,
@@ -163,6 +167,9 @@ except ImportError:
     )
     from roms.rom_fs_watcher import RomFilesystemWatcher  # type: ignore
     from storage import saves_store as _saves_store  # type: ignore
+    from storage import movies_store as _movies_store  # type: ignore
+    from storage import movie_cast_tokens as _movie_cast_tokens  # type: ignore
+    from common import http_range as _http_range  # type: ignore
     from storage.state_store import (  # type: ignore
         append_event as _append_state_event,
         database_path as _state_database_path,
@@ -1431,12 +1438,16 @@ class RomRequestHandler(HandlersAuthMixin, HandlersSystemMixin, HandlersDownload
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
         self.send_header("Cache-Control", cache_control)
-        # CSP keeps UI/resource loading strict while still allowing bundled Swagger assets.
+        # CSP keeps UI/resource loading strict while still allowing bundled Swagger assets
+        # and (script-src/connect-src's www.gstatic.com) the Google Cast Sender SDK the
+        # movie player modal's Chromecast button loads -- see drone.js's loadCastSenderSdk.
+        # Harmless to always allow even when casting is disabled (settings.cast_enabled):
+        # the SDK is only ever fetched client-side when the movie player modal opens.
         self.send_header(
             "Content-Security-Policy",
             f"default-src 'self'; img-src {' '.join(image_sources)}; style-src 'self' 'unsafe-inline' https://unpkg.com https://cdn.jsdelivr.net https://fonts.googleapis.com; "
-            "script-src 'self' 'unsafe-inline' https://unpkg.com https://cdn.jsdelivr.net; "
-            "font-src 'self' data: https://cdn.jsdelivr.net https://fonts.gstatic.com; connect-src 'self' https://unpkg.com https://cdn.jsdelivr.net; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+            "script-src 'self' 'unsafe-inline' https://unpkg.com https://cdn.jsdelivr.net https://www.gstatic.com; "
+            "font-src 'self' data: https://cdn.jsdelivr.net https://fonts.gstatic.com; connect-src 'self' https://unpkg.com https://cdn.jsdelivr.net https://www.gstatic.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
         )
 
     def _build_fake_image_url(self, seed: str, width: int = 640, height: int = 360) -> str:
@@ -1962,6 +1973,116 @@ def _build_http_redirect_handler(settings: Settings):
     return factory
 
 
+# Video suffixes this app scans as movies (see storage/movies_store.py's
+# _VIDEO_SUFFIXES) mapped to a Content-Type -- duplicated here, not imported,
+# on purpose: this handful of lines is the entire content-type surface
+# _CastHttpHandler needs, and keeping it self-contained (rather than reaching
+# for RomRequestHandler._guess_content_type, which knows about two dozen
+# unrelated file types this listener will never serve) keeps this
+# security-sensitive class easy to read start to finish in one place.
+_CAST_VIDEO_CONTENT_TYPES = {
+    ".mp4": "video/mp4", ".mkv": "video/x-matroska", ".webm": "video/webm",
+    ".mov": "video/quicktime", ".qt": "video/quicktime", ".avi": "video/x-msvideo",
+    ".m4v": "video/x-m4v", ".wmv": "video/x-ms-wmv", ".flv": "video/x-flv",
+    ".mpg": "video/mpeg", ".mpeg": "video/mpeg", ".m2ts": "video/mp2t",
+    ".ts": "video/mp2t", ".3gp": "video/3gpp",
+}
+
+
+class _CastHttpHandler(BaseHTTPRequestHandler):
+    """A second, deliberately separate plain-HTTP listener
+    (``settings.cast_http_port``, only bound at all when
+    ``settings.cast_enabled`` is opted in) that serves *exactly one* route:
+    ``GET /public/movies/{entry_key}/cast-stream?token=...``, Range-aware,
+    gated by a single-movie-scoped token from
+    ``storage/movie_cast_tokens.py``. Every other path (and there is no
+    admin surface, no movie list, no artwork, nothing else at all here)
+    gets a bare 404.
+
+    This exists because a Chromecast or AirPlay receiver fetches the video
+    file itself, directly -- no browser, no session cookie, and it can't
+    click through this Drone's self-signed HTTPS certificate either (see
+    the ``cast_enabled`` field's docstring in ``common/settings.py``). A
+    deliberately separate, minimal class -- not ``RomRequestHandler`` --
+    same reasoning as ``_HttpRedirectHandler`` above: the real app surface
+    (session-gated browsing, admin actions, every other file this Drone
+    holds) must never become reachable over an unencrypted connection just
+    because this one narrow, opt-in exception exists for it.
+    """
+
+    def __init__(self, *args, settings: Settings, **kwargs):
+        self.settings = settings
+        super().__init__(*args, **kwargs)
+
+    def _send_404(self) -> None:
+        try:
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+
+    def do_GET(self) -> None:
+        try:
+            raw_path, _, raw_query = self.path.partition("?")
+            parts = [part for part in raw_path.split("/") if part]
+            if len(parts) != 4 or parts[0] != "public" or parts[1] != "movies" or parts[3] != "cast-stream":
+                self._send_404()
+                return
+            entry_key = parts[2]
+            token = parse_qs(raw_query).get("token", [""])[0]
+            if not _movie_cast_tokens.verify(self.settings, entry_key, token):
+                self._send_404()
+                return
+            try:
+                target = _movies_store.resolve_movie_stream_path(self.settings.movies_root, entry_key)
+            except FileNotFoundError:
+                self._send_404()
+                return
+            self._stream_range(target)
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # client went away mid-response -- nothing to send
+        except Exception as error:  # noqa: BLE001 - a cast request must never crash this listener's thread
+            self.log_error("cast-stream request failed: %s: %s", error.__class__.__name__, str(error))
+            self._send_404()
+
+    do_HEAD = do_GET
+
+    def _stream_range(self, path: Path) -> None:
+        file_size = path.stat().st_size
+        start, end, status = _http_range.parse_range_header(self.headers.get("Range"), file_size)
+        length = end - start + 1
+        content_type = _CAST_VIDEO_CONTENT_TYPES.get(path.suffix.lower(), "application/octet-stream")
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(length))
+        self.send_header("Accept-Ranges", "bytes")
+        if status == 206:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
+        self.end_headers()
+        if self.command == "HEAD":
+            return
+        with path.open("rb") as handle:
+            handle.seek(start)
+            remaining = length
+            while remaining > 0:
+                chunk = handle.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                remaining -= len(chunk)
+
+    def log_message(self, format: str, *args) -> None:  # noqa: A002 - stdlib signature
+        pass  # same reasoning as _HttpRedirectHandler.log_message
+
+
+def _build_cast_http_handler(settings: Settings):
+    def factory(*args, **kwargs):
+        return _CastHttpHandler(*args, settings=settings, **kwargs)
+
+    return factory
+
+
 def create_server(settings: Settings) -> ThreadingHTTPServer:
     global _ROM_METADATA_POLLER_STARTED, _ROM_METADATA_WATCHER_STARTED, _LOCAL_NETWORK_WORKERS_STARTED, _GAME_PROCESS_MONITOR_STARTED, _GAME_PROCESS_MONITOR, _DOWNLOAD_MANAGER, _TORRENT_MANAGER, _AUTOMATION_POLLER_STARTED, _VPN_AUTO_CONNECT_ATTEMPTED, _VPN_SHARING_POLLER_STARTED, _VPN_SELF_HEAL_POLLER_STARTED, _SMTP_BOOTSTRAP_ATTEMPTED, _SMTP_SHARING_POLLER_STARTED, _AUDIT_EMAIL_POLLER_STARTED
     roms_root, bios_root = _real_data_roots(settings)
@@ -2141,6 +2262,38 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
                 flush=True,
             )
     server.http_redirect_server = http_redirect_server  # type: ignore[attr-defined]
+
+    # Cast-stream listener: opt-in (settings.cast_enabled, default off) --
+    # unlike http_redirect_server above, this one plain-HTTP listener does
+    # serve real content (a token-gated movie stream, see
+    # _CastHttpHandler), so it stays off unless a user has explicitly
+    # chosen to allow casting to a Chromecast/AirPlay receiver on their LAN.
+    cast_http_server = None
+    if settings.cast_enabled:
+        try:
+            cast_http_server = DroneThreadingHTTPServer(
+                ("0.0.0.0", settings.cast_http_port), _build_cast_http_handler(settings)
+            )
+        except OSError as error:
+            print(
+                f"Cast-stream listener skipped on port {settings.cast_http_port}: {error}",
+                file=sys.stderr,
+                flush=True,
+            )
+            cast_http_server = None
+        else:
+            cast_http_thread = Thread(
+                target=cast_http_server.serve_forever,
+                name="drone-cast-http-listener",
+                daemon=True,
+            )
+            cast_http_thread.start()
+            cast_http_server.thread = cast_http_thread  # type: ignore[attr-defined]
+            print(
+                f"Serving cast-stream listener on http://0.0.0.0:{settings.cast_http_port} (token-gated, movies only)",
+                flush=True,
+            )
+    server.cast_http_server = cast_http_server  # type: ignore[attr-defined]
 
     all_tls_servers = [server, *compatibility_servers] + ([peer_mtls_server] if peer_mtls_server else [])
     for tls_server in all_tls_servers:

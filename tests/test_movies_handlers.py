@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import app.storage.movie_cast_tokens as movie_cast_tokens
 import app.storage.movies_store as movies_store
 from app.drone_api import Settings
 from app.movies import metadata_manager as movies_metadata
@@ -377,6 +378,72 @@ class MovieDownloadHandlerTests(unittest.TestCase):
             self.assertEqual(handler.response_status, 200)
             self.assertIn("attachment", handler.response_headers["Content-Disposition"])
             self.assertEqual(handler.wfile.getvalue(), b"movie-bytes")
+
+
+class MovieCastTokenHandlerTests(unittest.TestCase):
+    def test_casting_disabled_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Vacation.mp4", b"x")
+            settings = _build_settings(root)  # cast_enabled defaults False
+            movies_store.sync_movies_cache(settings.movies_root)
+            entry_key = movies_store.list_movies(settings.movies_root)[0]["entry_key"]
+            handler = _handler(settings)
+            with self.assertRaises(ValueError):
+                handler._handle_movie_cast_token_create(entry_key)
+
+    def test_unknown_movie_raises_not_found(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = _build_settings(root, DRONE_CAST_ENABLED="1")
+            handler = _handler(settings)
+            with self.assertRaises(FileNotFoundError):
+                handler._handle_movie_cast_token_create("deadbeef")
+
+    def test_mints_a_token_and_builds_the_cast_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Vacation.mp4", b"x")
+            settings = _build_settings(root, DRONE_CAST_ENABLED="1", DRONE_CAST_HTTP_PORT="8095")
+            movies_store.sync_movies_cache(settings.movies_root)
+            entry_key = movies_store.list_movies(settings.movies_root)[0]["entry_key"]
+            handler = _handler(settings)
+            handler.headers["Host"] = "batocera.local:443"
+            handler._handle_movie_cast_token_create(entry_key)
+            status, payload = handler.json_response
+            self.assertEqual(status, 200)
+            self.assertTrue(payload["token"])
+            self.assertTrue(payload["expires_at"])
+            self.assertEqual(
+                payload["cast_url"],
+                f"http://batocera.local:8095/public/movies/{entry_key}/cast-stream?token={payload['token']}",
+            )
+
+    def test_omits_port_suffix_when_cast_http_port_is_80(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Vacation.mp4", b"x")
+            settings = _build_settings(root, DRONE_CAST_ENABLED="1", DRONE_CAST_HTTP_PORT="80")
+            movies_store.sync_movies_cache(settings.movies_root)
+            entry_key = movies_store.list_movies(settings.movies_root)[0]["entry_key"]
+            handler = _handler(settings)
+            handler.headers["Host"] = "batocera.local"
+            handler._handle_movie_cast_token_create(entry_key)
+            _status, payload = handler.json_response
+            self.assertTrue(payload["cast_url"].startswith("http://batocera.local/public/movies/"))
+
+    def test_minted_token_verifies_for_this_movie(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Vacation.mp4", b"x")
+            settings = _build_settings(root, DRONE_CAST_ENABLED="1")
+            movies_store.sync_movies_cache(settings.movies_root)
+            entry_key = movies_store.list_movies(settings.movies_root)[0]["entry_key"]
+            handler = _handler(settings)
+            handler.headers["Host"] = "batocera.local"
+            handler._handle_movie_cast_token_create(entry_key)
+            _status, payload = handler.json_response
+            self.assertTrue(movie_cast_tokens.verify(settings, entry_key, payload["token"]))
 
 
 class MovieStreamRangeHandlerTests(unittest.TestCase):

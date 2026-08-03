@@ -4639,6 +4639,194 @@ class CreateServerHttpRedirectTests(unittest.TestCase):
         self.assertIsNone(server.http_redirect_server)
 
 
+class CastHttpListenerTests(unittest.TestCase):
+    """Real-socket tests for _CastHttpHandler/the listener create_server()
+    starts on settings.cast_http_port when cast_enabled -- exercises the
+    actual HTTP response (token verification, Range support, the 404
+    surface for everything else), not just the pure helpers it's built
+    from (movie_cast_tokens, http_range -- see their own test modules)."""
+
+    def _build_settings(self, root: Path, **overrides) -> Settings:
+        env = {
+            "USERDATA_ROOT": str(root),
+            "ROMS_ROOT": str(root / "roms"),
+            "BIOS_ROOT": str(root / "bios"),
+            "SAVES_ROOT": str(root / "saves"),
+            "MOVIES_ROOT": str(root / "movies"),
+            "DRONE_STATE_DATABASE_FILE": str(root / "state.sqlite3"),
+            "DRONE_DEVICE_ID": "cast-http-listener-test",
+            "DRONE_CAST_ENABLED": "1",
+        }
+        env.update(overrides)
+        with mock.patch.dict(os.environ, env, clear=True):
+            return Settings.from_env()
+
+    def _start_listener(self, settings: Settings) -> int:
+        server = drone_api.DroneThreadingHTTPServer(("127.0.0.1", 0), drone_api._build_cast_http_handler(settings))
+        port = server.server_address[1]
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.shutdown)
+        self.addCleanup(server.server_close)
+        self.addCleanup(lambda: thread.join(timeout=3))
+        return port
+
+    def _write_movie(self, root: Path, name: str, data: bytes) -> None:
+        path = root / "movies" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+
+    def _seed_movie_with_token(self, root: Path, data: bytes = b"0123456789"):
+        from app.storage import movie_cast_tokens, movies_store
+
+        self._write_movie(root, "Vacation.mp4", data)
+        settings = self._build_settings(root)
+        movies_store.sync_movies_cache(settings.movies_root)
+        entry_key = movies_store.list_movies(settings.movies_root)[0]["entry_key"]
+        token = movie_cast_tokens.create(settings, entry_key)["token"]
+        return settings, entry_key, token
+
+    def _get(self, port: int, path: str, headers=None):
+        import http.client
+
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        try:
+            conn.request("GET", path, headers=headers or {})
+            response = conn.getresponse()
+            body = response.read()
+            return response.status, dict(response.getheaders()), body
+        finally:
+            conn.close()
+
+    def test_valid_token_streams_the_whole_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings, entry_key, token = self._seed_movie_with_token(root)
+            port = self._start_listener(settings)
+            status, headers, body = self._get(port, f"/public/movies/{entry_key}/cast-stream?token={token}")
+            self.assertEqual(status, 200)
+            self.assertEqual(body, b"0123456789")
+            self.assertEqual(headers.get("Content-Type"), "video/mp4")
+            self.assertEqual(headers.get("Accept-Ranges"), "bytes")
+
+    def test_range_request_returns_partial_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings, entry_key, token = self._seed_movie_with_token(root, data=b"0123456789")
+            port = self._start_listener(settings)
+            status, headers, body = self._get(
+                port, f"/public/movies/{entry_key}/cast-stream?token={token}", headers={"Range": "bytes=2-5"}
+            )
+            self.assertEqual(status, 206)
+            self.assertEqual(body, b"2345")
+            self.assertEqual(headers.get("Content-Range"), "bytes 2-5/10")
+
+    def test_wrong_token_is_404(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings, entry_key, _token = self._seed_movie_with_token(root)
+            port = self._start_listener(settings)
+            status, _headers, _body = self._get(port, f"/public/movies/{entry_key}/cast-stream?token=not-the-real-token")
+            self.assertEqual(status, 404)
+
+    def test_missing_token_is_404(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings, entry_key, _token = self._seed_movie_with_token(root)
+            port = self._start_listener(settings)
+            status, _headers, _body = self._get(port, f"/public/movies/{entry_key}/cast-stream")
+            self.assertEqual(status, 404)
+
+    def test_token_for_a_different_movie_is_404(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings, _entry_key, token = self._seed_movie_with_token(root)
+            port = self._start_listener(settings)
+            status, _headers, _body = self._get(port, f"/public/movies/deadbeefdeadbeef/cast-stream?token={token}")
+            self.assertEqual(status, 404)
+
+    def test_any_other_path_is_404_even_with_a_valid_token(self) -> None:
+        # This listener serves exactly one route -- not the movie list, not
+        # artwork, not the detail JSON -- everything else 404s regardless of
+        # whether a token is present.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings, entry_key, token = self._seed_movie_with_token(root)
+            port = self._start_listener(settings)
+            for path in (f"/public/movies/{entry_key}/artwork/poster", f"/movies/{entry_key}", "/", "/movies"):
+                status, _headers, _body = self._get(port, f"{path}?token={token}")
+                self.assertEqual(status, 404, path)
+
+    def test_malformed_range_falls_back_to_full_response(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings, entry_key, token = self._seed_movie_with_token(root, data=b"0123456789")
+            port = self._start_listener(settings)
+            status, _headers, body = self._get(
+                port, f"/public/movies/{entry_key}/cast-stream?token={token}", headers={"Range": "not-a-range"}
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(body, b"0123456789")
+
+
+class CreateServerCastListenerTests(unittest.TestCase):
+    """create_server()'s wiring of the cast listener: only started when
+    settings.cast_enabled is opted in, unlike http_redirect_server which
+    starts by default -- mirrors CreateServerHttpRedirectTests above."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self._root = Path(self._tmp.name) / "userdata"
+        seed_mock_userdata(self._root)
+        self._old_env = dict(os.environ)
+        os.environ.update({
+            "USERDATA_ROOT": str(self._root),
+            "ROMS_ROOT": str(self._root / "roms"),
+            "BIOS_ROOT": str(self._root / "bios"),
+            "SAVES_ROOT": str(self._root / "saves"),
+            "THEMES_ROOT": str(self._root / "themes"),
+            "BATOCERA_CONF_FILE": str(self._root / "system" / "batocera.conf"),
+            "ES_SETTINGS_FILE": str(self._root / "system" / "configs" / "emulationstation" / "es_settings.cfg"),
+            "DRONE_APP_USERNAME": "admin",
+            "DRONE_APP_PASSWORD": "changeme",
+            "HTTPS_PORT": "0",
+            "LOG_DIR": str(Path(self._tmp.name) / "logs"),
+            "ROM_METADATA_POLL_SECONDS": "0",
+            "DRONE_HTTP_REDIRECT_PORT": "0",
+            "DRONE_CAST_HTTP_PORT": "0",
+        })
+        for stale_key in ("HTTP_ONLY", "DRONE_LOCAL_ALLOW_INSECURE_HTTP", "DRONE_CAST_ENABLED"):
+            os.environ.pop(stale_key, None)
+
+    def tearDown(self) -> None:
+        os.environ.clear()
+        os.environ.update(self._old_env)
+        self._tmp.cleanup()
+
+    def _create(self):
+        settings = drone_api.Settings.from_env()
+        try:
+            server = drone_api.create_server(settings)
+        except PermissionError as error:
+            self.skipTest(f"Socket bind is not allowed in this environment: {error}")
+            return
+        self.addCleanup(server.server_close)
+        if server.cast_http_server is not None:
+            self.addCleanup(server.cast_http_server.shutdown)
+            self.addCleanup(server.cast_http_server.server_close)
+        return server
+
+    def test_cast_listener_not_started_by_default(self) -> None:
+        server = self._create()
+        self.assertIsNone(server.cast_http_server)
+
+    def test_cast_listener_starts_when_enabled(self) -> None:
+        os.environ["DRONE_CAST_ENABLED"] = "1"
+        os.environ["DRONE_CAST_HTTP_PORT"] = "18096"
+        server = self._create()
+        self.assertIsNotNone(server.cast_http_server)
+
+
 class CrossListenerTrustRefreshTests(unittest.TestCase):
     """A pairing/cert-trust event handled by one listener must load the new
     peer certificate into every live listener's ssl_context, not just

@@ -2522,7 +2522,88 @@ function toggleMoviesFolder(key) {
   else moviesTreeExpanded.add(normalized);
   renderMoviesTreeIntoContainer();
 }
+// Casting (Chromecast/AirPlay) -- both receivers fetch the video file
+// themselves, directly, with no browser in the loop, so neither this app's
+// session cookie nor its self-signed HTTPS cert works for them. Casting a
+// movie mints a short-lived, single-movie-scoped token
+// (POST /movies/{entryKey}/cast-token, see handlers_movies.py) good on a
+// second, plain-HTTP-only listener (opt-in, settings.cast_enabled --
+// disabled Drones get a clear error here, not a silent no-op) instead.
+let currentPlayerEntryKey = null;
+let castApiReady = false;
+async function mintMovieCastToken(entryKey) {
+  try {
+    return await apiPost(`/movies/${encodeURIComponent(entryKey)}/cast-token`, {});
+  } catch (err) {
+    showToast(`Could not prepare casting: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    return null;
+  }
+}
+async function castMovieAirPlay(entryKey) {
+  const video = document.getElementById("moviePlayerVideo");
+  if (!video || typeof video.webkitShowPlaybackTargetPicker !== "function") return;
+  const castInfo = await mintMovieCastToken(entryKey);
+  if (!castInfo) return;
+  // The AirPlay receiver plays whatever the local <video> element's current
+  // src is -- swap to the token-authorized plain-HTTP URL first (preserving
+  // playback position/state) so the receiver can actually fetch it, then
+  // open the picker.
+  const wasPlaying = !video.paused;
+  const resumeAt = video.currentTime;
+  video.src = castInfo.cast_url;
+  video.currentTime = resumeAt;
+  if (wasPlaying) video.play().catch(() => {});
+  video.webkitShowPlaybackTargetPicker();
+}
+// Loaded lazily (only once the movie player modal has actually been opened,
+// not on every page load) since it fetches an external script from Google.
+function loadCastSenderSdk() {
+  if (document.getElementById("google-cast-sdk-script")) return;
+  window["__onGCastApiAvailable"] = function (isAvailable) {
+    if (isAvailable) initCastApi();
+  };
+  const script = document.createElement("script");
+  script.id = "google-cast-sdk-script";
+  script.src = "https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1";
+  document.head.appendChild(script);
+}
+function initCastApi() {
+  if (castApiReady || !window.cast?.framework) return;
+  castApiReady = true;
+  const context = cast.framework.CastContext.getInstance();
+  context.setOptions({
+    receiverApplicationId: chrome.cast.media.DEFAULT_MEDIA_RECEIVER_APP_ID,
+    autoJoinPolicy: chrome.cast.AutoJoinPolicy.ORIGIN_SCOPED,
+  });
+  context.addEventListener(cast.framework.CastContextEventType.SESSION_STATE_CHANGED, (event) => {
+    if (event.sessionState === cast.framework.SessionState.SESSION_STARTED && currentPlayerEntryKey) {
+      loadMovieOntoCastSession(currentPlayerEntryKey);
+    }
+  });
+}
+async function loadMovieOntoCastSession(entryKey) {
+  const session = cast.framework.CastContext.getInstance().getCurrentSession();
+  if (!session) return;
+  const castInfo = await mintMovieCastToken(entryKey);
+  if (!castInfo) return;
+  const mediaInfo = new chrome.cast.media.MediaInfo(castInfo.cast_url, castInfo.content_type || "video/mp4");
+  mediaInfo.streamType = chrome.cast.media.StreamType.BUFFERED;
+  const request = new chrome.cast.media.LoadRequest(mediaInfo);
+  try {
+    await session.loadMedia(request);
+    showToast("Casting started.", "success");
+  } catch (err) {
+    // Most common real-world case: the Chromecast default receiver can't
+    // decode this file's codec/container (MKV in particular is frequently
+    // unsupported on Chromecast hardware, unlike AirPlay/Apple TV which is
+    // more forgiving) -- surface whatever the SDK reports rather than a
+    // generic failure, since that's usually exactly what's wrong.
+    showToast(`Could not start casting: ${escapeHtml(String((err && (err.description || err.code)) || err))}`, "danger");
+  }
+}
 function openMoviePlayerModal(entryKey, movieName) {
+  currentPlayerEntryKey = entryKey;
+  loadCastSenderSdk();
   const modalId = "moviePlayerModal";
   let modal = document.getElementById(modalId);
   if (!modal) {
@@ -2533,6 +2614,7 @@ function openMoviePlayerModal(entryKey, movieName) {
     modal.setAttribute("aria-hidden", "true");
     document.body.appendChild(modal);
   }
+  const airplaySupported = typeof HTMLVideoElement !== "undefined" && !!HTMLVideoElement.prototype.webkitShowPlaybackTargetPicker;
   modal.innerHTML = `
     <div class="modal-dialog modal-dialog-centered modal-lg">
       <div class="modal-content themed-modal">
@@ -2541,11 +2623,17 @@ function openMoviePlayerModal(entryKey, movieName) {
           <button type="button" class="btn-close btn-close-white flex-shrink-0" data-bs-dismiss="modal" aria-label="Close"></button>
         </div>
         <div class="modal-body">
-          <video id="moviePlayerVideo" class="w-100" style="max-height: 70vh; background: #000;" controls autoplay src="${movieStreamUrl(entryKey)}">
+          <video id="moviePlayerVideo" class="w-100" style="max-height: 70vh; background: #000;" controls autoplay src="${movieStreamUrl(entryKey)}" ${airplaySupported ? 'x-webkit-airplay="allow"' : ""}>
             Your browser can't play this video format. <a href="${movieDownloadUrl(entryKey)}">Download it</a> instead.
           </video>
         </div>
         <div class="modal-footer">
+          <google-cast-launcher id="movieCastLauncher" class="movie-cast-launcher" title="Cast to a Chromecast device"></google-cast-launcher>
+          ${
+            airplaySupported
+              ? `<button type="button" class="btn btn-outline-primary" title="AirPlay" onclick="castMovieAirPlay(${jsAttr(entryKey)})"><i class="bi bi-airplay me-1"></i>AirPlay</button>`
+              : ""
+          }
           <a class="btn btn-outline-primary" href="${movieDownloadUrl(entryKey)}"><i class="bi bi-download me-1"></i>Download</a>
           <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Close</button>
         </div>
@@ -2553,6 +2641,9 @@ function openMoviePlayerModal(entryKey, movieName) {
     </div>`;
   // Stop playback (and the in-flight stream) once the modal closes -- otherwise
   // a movie keeps decoding/downloading in the background after it's dismissed.
+  // Deliberately does NOT touch an active cast session -- casting is meant to
+  // keep playing on the receiver after you close this page, same as any other
+  // Chromecast/AirPlay app.
   modal.addEventListener("hidden.bs.modal", () => {
     const video = document.getElementById("moviePlayerVideo");
     if (video) {
@@ -2560,6 +2651,7 @@ function openMoviePlayerModal(entryKey, movieName) {
       video.removeAttribute("src");
       video.load();
     }
+    currentPlayerEntryKey = null;
   }, { once: true });
   if (window.bootstrap?.Modal) {
     window.bootstrap.Modal.getOrCreateInstance(modal).show();

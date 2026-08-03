@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -323,6 +324,31 @@ def get_movie_by_key(movies_root: Path, entry_key: str) -> Optional[dict]:
         modified_time=int(row[4] or 0),
         fingerprint=row[5] or "",
     ).to_payload()
+
+
+# entry_key is always a hex-digest slice _entry_key() produces -- rejecting
+# anything else before it ever touches the filesystem, shared by every
+# movie-file-serving caller (the authenticated stream/download handlers and
+# the cast listener's token-gated route alike) below.
+_ENTRY_KEY_RE = re.compile(r"^[0-9a-f]{1,64}$")
+
+
+def resolve_movie_stream_path(movies_root: Path, entry_key: str) -> Path:
+    """Look up a movie by its stable id and validate the resolved path stays
+    inside ``movies_root`` -- the one path-traversal-safe lookup every
+    movie-file-serving handler shares (previously duplicated between the
+    session-gated stream/download routes and, now, the cast listener) so a
+    future fix to this check can't silently miss one of them."""
+    if not _ENTRY_KEY_RE.match(str(entry_key or "")):
+        raise FileNotFoundError()
+    row = get_movie_by_key(movies_root, entry_key)
+    if not row:
+        raise FileNotFoundError()
+    resolved_root = Path(movies_root).resolve()
+    target = (resolved_root / row["file_path"]).resolve()
+    if target == resolved_root or resolved_root not in target.parents or not target.is_file():
+        raise FileNotFoundError()
+    return target
 
 
 def get_movie_metadata(movies_root: Path, entry_key: str) -> Optional[dict]:

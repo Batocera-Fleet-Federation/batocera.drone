@@ -406,6 +406,61 @@ full-body response). Closing the modal (`hidden.bs.modal`) clears the
 `<video>`'s `src` and calls `.load()` so a movie doesn't keep
 decoding/streaming in the background after dismissal.
 
+**Casting (Chromecast/AirPlay) from the player modal** exists because a cast
+receiver fetches the video file *itself*, directly -- no browser, no
+session cookie, and it can't get past this Drone's self-signed HTTPS cert
+either. Opt-in end to end, off by default:
+
+- `settings.cast_enabled` (`DRONE_CAST_ENABLED`, default off) gates a
+  second, deliberately minimal plain-HTTP listener on `settings.cast_http_port`
+  (`DRONE_CAST_HTTP_PORT`, default 8095) -- `drone_api.py`'s
+  `_CastHttpHandler`, a sibling to `_HttpRedirectHandler` (same "deliberately
+  separate, minimal class, real app surface never reachable over
+  unencrypted HTTP" reasoning) that serves **exactly one route**,
+  `GET /public/movies/{entry_key}/cast-stream?token=...`, Range-aware, and
+  404s everything else -- not the movie list, not artwork, not the detail
+  JSON. When `cast_enabled` is off (the default), this listener is never
+  bound at all, so nothing about the app's exposed surface changes.
+- The token is single-movie-scoped, minted by an *already-authenticated*
+  request (`POST /movies/{entry_key}/cast-token`, session-gated like every
+  other movies route) and stored the same way session tokens are
+  (`storage/movie_cast_tokens.py` -- an opaque random SQLite row, not a
+  signed/stateless token, consistent with how the rest of this app does
+  auth) with a generous 12-hour TTL (a cast session can legitimately run
+  for hours). Knowing the token for one movie proves nothing about any
+  other. `movies_store.resolve_movie_stream_path` and
+  `common/http_range.parse_range_header` are the same path-traversal-safe
+  lookup and Range-parsing logic the authenticated stream route uses --
+  extracted to pure/shared functions specifically so this second listener
+  doesn't duplicate (and risk drifting from) that security-critical code.
+- **Frontend** (`drone.js`): `openMoviePlayerModal` feature-detects AirPlay
+  (`HTMLVideoElement.prototype.webkitShowPlaybackTargetPicker` -- Safari
+  only, hidden entirely elsewhere) and lazily loads the Google Cast Sender
+  SDK (`loadCastSenderSdk`, `https://www.gstatic.com/...cast_sender.js`,
+  added to the CSP's `script-src`/`connect-src`) the first time the modal
+  opens, rendering a `<google-cast-launcher>` custom element (invisible
+  until the SDK detects a receiver on the network -- absence of the icon
+  during dev/testing doesn't mean it's broken). Both paths call
+  `mintMovieCastToken` first, then either swap the local `<video>`'s `src`
+  to the returned `cast_url` before calling
+  `webkitShowPlaybackTargetPicker()` (AirPlay) or `session.loadMedia()` on
+  the active Cast session, keyed off a `cast.framework.CastContextEventType
+  .SESSION_STATE_CHANGED` listener and a module-level
+  `currentPlayerEntryKey` (set when the modal opens, cleared when it
+  closes) so the session-started handler knows *which* movie to load.
+  Verified end-to-end with real `curl` requests during development (mint →
+  fetch with zero cookies → 200 with correct bytes; Range request → 206;
+  wrong/missing token → 404; any other path on the cast port → 404 even
+  with a valid token) since the Cast SDK's own device-discovery doesn't
+  activate outside a genuine Chrome install with a real receiver nearby
+  (a known SDK limitation, not something to debug in this codebase).
+- **Known real-world limitation, not a code issue**: Chromecast's default
+  media receiver frequently can't decode MKV (this library's most common
+  container for scene-release content) -- AirPlay/Apple TV is more
+  forgiving. Casting also only works when the receiver is on the same LAN
+  as this Drone; it can't reach in over a tailnet the way a phone browser
+  can.
+
 **Movie artwork/metadata scraper (TMDb)** mirrors the ROM scraper shape
 (search → pick a match → apply) but is its own self-contained module,
 `app/movies/` (`tmdb_client.py` — stdlib `urlopen` HTTP client, api-key

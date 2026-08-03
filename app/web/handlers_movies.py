@@ -17,12 +17,16 @@ from pathlib import Path
 from typing import Optional
 
 try:
+    from ..common import http_range as _http_range
     from ..storage import movies_store as _movies_store
+    from ..storage import movie_cast_tokens as _movie_cast_tokens
     from ..movies import metadata_manager as _movies_metadata
     from ..movies import filename_parser as _filename_parser
     from ..movies.tmdb_client import TmdbUnavailableError as _TmdbUnavailableError
 except ImportError:  # pragma: no cover - direct script execution fallback
+    from common import http_range as _http_range  # type: ignore
     from storage import movies_store as _movies_store  # type: ignore
+    from storage import movie_cast_tokens as _movie_cast_tokens  # type: ignore
     from movies import metadata_manager as _movies_metadata  # type: ignore
     from movies import filename_parser as _filename_parser  # type: ignore
     from movies.tmdb_client import TmdbUnavailableError as _TmdbUnavailableError  # type: ignore
@@ -157,18 +161,11 @@ class HandlersMoviesMixin:
 
     def _resolve_movie_path(self, entry_key: str) -> Path:
         """Look up a movie by its stable id and validate the resolved path
-        stays inside ``movies_root`` -- same path-traversal discipline as
-        every other file-serving handler in this app."""
-        if not _ENTRY_KEY_RE.match(str(entry_key or "")):
-            raise FileNotFoundError()
-        row = _movies_store.get_movie_by_key(self.settings.movies_root, entry_key)
-        if not row:
-            raise FileNotFoundError()
-        movies_root = Path(self.settings.movies_root).resolve()
-        target = (movies_root / row["file_path"]).resolve()
-        if target == movies_root or movies_root not in target.parents or not target.is_file():
-            raise FileNotFoundError()
-        return target
+        stays inside ``movies_root`` -- shared with the cast listener (see
+        ``drone_api.py``'s ``_CastHttpHandler``) via
+        ``movies_store.resolve_movie_stream_path``, so this path-traversal
+        check has exactly one implementation."""
+        return _movies_store.resolve_movie_stream_path(self.settings.movies_root, entry_key)
 
     def _handle_movie_download(self, entry_key: str) -> None:
         if not self.settings.downloads_enabled:
@@ -192,28 +189,38 @@ class HandlersMoviesMixin:
         target = self._resolve_movie_path(entry_key)
         self._stream_movie_range(target, self._guess_content_type(target))
 
+    def _handle_movie_cast_token_create(self, entry_key: str) -> None:
+        """Mint a short-lived, single-movie-scoped token that lets a
+        Chromecast/AirPlay receiver stream this movie directly, with no
+        session cookie -- see ``storage/movie_cast_tokens.py`` for why that's
+        needed at all. Session-gated like every other movies route (an
+        already-logged-in browser is what's allowed to hand a cast device a
+        way in), not admin-only -- casting your own library isn't an admin
+        action any more than watching it in-browser is.
+
+        400s (via the standard ``ValueError`` -> 400 mapping, same as
+        ``_handle_movie_download``'s ``downloads_enabled`` check) when
+        casting isn't enabled on this Drone at all -- there would be no
+        plain-HTTP listener running to ever accept the token this would
+        mint, so failing here is clearer than minting one that goes nowhere.
+        """
+        if not self.settings.cast_enabled:
+            raise ValueError("casting is not enabled on this Drone")
+        target = self._resolve_movie_path(entry_key)  # 404s via FileNotFoundError if entry_key is unknown
+        result = _movie_cast_tokens.create(self.settings, entry_key)
+        host = str(self.headers.get("Host") or "").split(":", 1)[0]
+        port_suffix = "" if self.settings.cast_http_port == 80 else f":{self.settings.cast_http_port}"
+        cast_url = f"http://{host}{port_suffix}/public/movies/{entry_key}/cast-stream?token={result['token']}"
+        self._send_json(200, {
+            "token": result["token"],
+            "expires_at": result["expires_at"],
+            "cast_url": cast_url,
+            "content_type": self._guess_content_type(target),
+        })
+
     def _stream_movie_range(self, path: Path, content_type: str) -> None:
         file_size = path.stat().st_size
-        start, end, status = 0, file_size - 1, 200
-        range_header = self.headers.get("Range")
-        if range_header and range_header.startswith("bytes="):
-            try:
-                spec = range_header.split("=", 1)[1].split(",")[0].strip()
-                range_start, _, range_end = spec.partition("-")
-                if range_start:
-                    candidate_start = int(range_start)
-                    candidate_end = int(range_end) if range_end else file_size - 1
-                elif range_end:
-                    # Suffix form ("bytes=-500" -- last 500 bytes).
-                    candidate_start = max(0, file_size - int(range_end))
-                    candidate_end = file_size - 1
-                else:
-                    raise ValueError("empty range")
-                candidate_end = min(candidate_end, file_size - 1)
-                if 0 <= candidate_start <= candidate_end:
-                    start, end, status = candidate_start, candidate_end, 206
-            except (ValueError, IndexError):
-                pass  # malformed Range -- fall back to the full 200 response
+        start, end, status = _http_range.parse_range_header(self.headers.get("Range"), file_size)
         length = end - start + 1
         self.send_response(status)
         self.send_header("Content-Type", content_type)
