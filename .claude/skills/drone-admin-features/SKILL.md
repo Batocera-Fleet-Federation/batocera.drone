@@ -504,25 +504,60 @@ wide-open port the way a naive "just serve movies over HTTP" would be:
   entirely). `loadMovieOntoCastSession` also now pauses the local
   `<video>` once `session.loadMedia()` succeeds, so a *correctly* cast
   movie doesn't keep decoding/playing locally either.
+- **`protocol_version = "HTTP/1.1"` on the cast listener is load-bearing.**
+  Every other listener in this app inherits `BaseHTTPRequestHandler`'s
+  HTTP/1.0 default and is fine there (browsers cope). **A Chromecast does
+  not**: on an HTTP/1.0 progressive stream it commonly buffers forever
+  without ever starting playback -- confirmed live as the second distinct
+  cause of "TV shows a permanent loading spinner", after the DNS one above
+  was fixed and the receiver could finally reach the URL at all. Raising it
+  here is only safe because *every* response this handler can produce
+  carries an accurate `Content-Length` (200/206 the real body length,
+  404/204 an explicit 0), which is what makes keep-alive framing
+  unambiguous -- verified with three sequential range requests served over
+  one reused TCP connection. The `_response_started` flag exists for the
+  same reason: under keep-alive, emitting a second response into a
+  connection whose body is already partly written would corrupt the *next*
+  response on that socket (harmless under HTTP/1.0, where the close ended
+  the message anyway).
 - **A resolved `loadMedia()` promise does NOT mean playback started** -- it
-  only means the receiver *accepted* the request; it can still fail on the
-  first fetch/decode a moment later. `watchCastSessionForPlaybackFailure`
-  attaches a media-session update listener and reports
-  `PlayerState.IDLE` + `IdleReason.ERROR` as a real failure, because
-  otherwise the UI cheerfully claims "Casting started" for a cast that never
-  rendered a frame. `likelyUnsupportedOnChromecast` turns the two failure
-  causes that actually dominate this library into an explanation worth
-  acting on (`.mkv`, and `x265`/`HEVC` in the filename) rather than an
-  opaque error code -- it only shapes the *message*, it never blocks the
-  attempt, since some Google TV hardware does play both.
+  only means the receiver *accepted* the request, and it can then fail in
+  **two different ways** that need catching separately:
+  `PlayerState.IDLE` + `IdleReason.ERROR`, **or** never reporting anything
+  at all and buffering indefinitely. The second is what an unsupported
+  container actually does in practice (confirmed on a real device with an
+  MKV: cast connects, permanent spinner, **no error event is ever
+  emitted**) -- so an error-only listener still leaves the UI claiming
+  "Casting started" forever. `watchCastSessionForPlaybackFailure` therefore
+  pairs the error hook with a `CAST_PLAYBACK_START_TIMEOUT_MS` (25s,
+  deliberately generous -- a large file over a slow LAN legitimately takes
+  a while to start) stall timeout, and settles on the first of
+  PLAYING/error/timeout. `likelyUnsupportedOnChromecast` turns the two
+  causes that dominate this library (`.mkv`, and `x265`/`HEVC` in the
+  filename) into an explanation worth acting on, used both up-front (said
+  at cast time rather than making the user watch a spinner for 25s first)
+  and in the failure message. It only ever shapes *messaging* -- it never
+  blocks the attempt, since newer Google TV hardware does play some of
+  these.
+- **Cast requests are logged** (`_log_cast`, one concise line per range
+  served plus every rejected token), unlike `_HttpRedirectHandler`'s
+  deliberately silent listener. Casting fails *on the receiver* -- off
+  device, nothing to inspect -- so "did the TV ever actually fetch
+  anything, and what did we answer?" is the first question worth asking
+  when it doesn't work, and it's otherwise unanswerable. Look for
+  `cast-stream <ip> GET 206 video/... bytes A-B/N <filename>` in the
+  Drone's stdout log.
 - **Known real-world limitation, not a code issue**: Chromecast's default
-  media receiver doesn't support Matroska at all and only handles
+  media receiver **doesn't support Matroska at all** and only handles
   HEVC/H.265 on newer hardware -- between them that's most of a
-  scene-release library, and AirPlay/Apple TV is considerably more
-  forgiving. Casting also only works when the receiver is on the same LAN
-  as this Drone; it can't reach in over a tailnet the way a phone browser
-  can (and the LAN-IP cast URL above makes that explicit rather than
-  failing mysteriously).
+  scene-release library, and it is the reason an `.mkv` will still show a
+  permanent spinner no matter how correct the server side is. There is no
+  server-side fix short of remuxing/transcoding (not implemented; would
+  need ffmpeg on a low-power device). AirPlay/Apple TV is considerably
+  more forgiving and is the right answer for MKV. Casting also only works
+  when the receiver is on the same LAN as this Drone; it can't reach in
+  over a tailnet the way a phone browser can (and the LAN-IP cast URL
+  above makes that a clear failure rather than a mysterious one).
 
 **Movie artwork/metadata scraper (TMDb)** mirrors the ROM scraper shape
 (search → pick a match → apply) but is its own self-contained module,

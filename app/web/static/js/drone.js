@@ -2600,26 +2600,53 @@ function reportCastPlaybackFailure(detail) {
   showToast(
     `The TV couldn't play this movie${because}${detail ? ` (${escapeHtml(detail)})` : ""} Try AirPlay, or Download instead.`,
     "danger",
-    9000,
+    12000,
   );
 }
+// How long to let the receiver sit in BUFFERING before calling it stalled.
+// Generous: a large file over a slow LAN legitimately takes a while to
+// start, and a false "it failed" on a cast that was about to play would be
+// worse than waiting.
+const CAST_PLAYBACK_START_TIMEOUT_MS = 25000;
 // loadMedia() resolving only means the receiver ACCEPTED the request -- it
-// can still fail on the very first fetch/decode a moment later, which is
-// what a "TV switches to the cast screen, flickers, goes idle" symptom
-// actually is. Without this the UI would report a cheerful "Casting
-// started" for a cast that never played a frame.
+// can still fail afterwards, in two different ways that need catching
+// separately:
+//   * it reports an error (IDLE + IdleReason.ERROR), or
+//   * it never reports anything at all and just buffers forever.
+// The second is what an unsupported container actually does in practice
+// (confirmed on a real device with an MKV: cast connects, TV shows a
+// permanent loading spinner, no error event is ever emitted) -- so an
+// error-only listener would leave the UI claiming a cheerful "Casting
+// started" indefinitely. Hence the timeout as well as the error hook.
 function watchCastSessionForPlaybackFailure(session) {
   const media = session.getMediaSession();
   if (!media || typeof media.addUpdateListener !== "function") return;
-  const listener = (isAlive) => {
-    const idleReason = media.idleReason;
-    if (media.playerState === chrome.cast.media.PlayerState.IDLE && idleReason === chrome.cast.media.IdleReason.ERROR) {
-      reportCastPlaybackFailure("receiver reported a playback error");
-      media.removeUpdateListener(listener);
+  let settled = false;
+  let listener = null;
+  let stallTimer = null;
+  const settle = (report) => {
+    if (settled) return;
+    settled = true;
+    if (stallTimer) clearTimeout(stallTimer);
+    try {
+      if (listener) media.removeUpdateListener(listener);
+    } catch (_) {
+      // Listener already detached by the SDK -- nothing to undo.
+    }
+    if (report) report();
+  };
+  listener = (isAlive) => {
+    if (media.playerState === chrome.cast.media.PlayerState.PLAYING) {
+      settle(null); // actually playing on the TV -- stop watching
       return;
     }
-    if (!isAlive) media.removeUpdateListener(listener);
+    if (media.playerState === chrome.cast.media.PlayerState.IDLE && media.idleReason === chrome.cast.media.IdleReason.ERROR) {
+      settle(() => reportCastPlaybackFailure("receiver reported a playback error"));
+      return;
+    }
+    if (!isAlive) settle(null);
   };
+  stallTimer = setTimeout(() => settle(() => reportCastPlaybackFailure("the TV never started playing")), CAST_PLAYBACK_START_TIMEOUT_MS);
   media.addUpdateListener(listener);
 }
 async function loadMovieOntoCastSession(entryKey) {
@@ -2638,7 +2665,16 @@ async function loadMovieOntoCastSession(entryKey) {
     const video = document.getElementById("moviePlayerVideo");
     if (video) video.pause();
     watchCastSessionForPlaybackFailure(session);
-    showToast("Casting started.", "success");
+    // Say upfront when the format is one Chromecast's built-in player is
+    // known not to handle, rather than letting the user watch a spinner for
+    // 25s first -- the attempt still goes ahead (newer Google TV hardware
+    // does play some of these), this just sets the expectation honestly.
+    const hint = likelyUnsupportedOnChromecast(currentPlayerName);
+    if (hint) {
+      showToast(`Casting started, but ${hint} -- if the TV just shows a spinner, use AirPlay or Download instead.`, "warning", 12000);
+    } else {
+      showToast("Casting started.", "success");
+    }
   } catch (err) {
     // Rejected outright -- most often the receiver refusing the container/
     // codec before it even fetches (see likelyUnsupportedOnChromecast).

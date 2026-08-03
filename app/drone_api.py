@@ -2014,12 +2014,38 @@ class _CastHttpHandler(BaseHTTPRequestHandler):
     content at all) already is.
     """
 
+    # HTTP/1.1, unlike every other listener in this app (which all inherit
+    # BaseHTTPRequestHandler's HTTP/1.0 default and are fine there, because
+    # browsers cope with it). A Chromecast's media player does not: on an
+    # HTTP/1.0 progressive stream it commonly buffers forever without ever
+    # starting playback -- the exact "TV shows a permanent loading spinner"
+    # symptom this was reported with, once the URL itself was reachable.
+    # Safe to raise here specifically because every response this handler
+    # can produce carries an accurate Content-Length (200/206 the real body
+    # length, 404/204 an explicit 0), which is what makes keep-alive framing
+    # unambiguous; do NOT copy this to a handler that streams without one.
+    protocol_version = "HTTP/1.1"
+    server_version = "DroneAppCast/1.0"
+    # Same per-connection idle-timeout reasoning as RomRequestHandler.timeout
+    # -- with keep-alive now in play, a silent receiver would otherwise hold
+    # a thread indefinitely waiting for a next request that never comes.
+    timeout = max(15, int(os.environ.get("DRONE_REQUEST_TIMEOUT_SECONDS", "120")))
+
     def __init__(self, *args, settings: Settings, **kwargs):
         self.settings = settings
+        # Guards against emitting a second response into a connection whose
+        # body is already partly written (a mid-stream failure). Harmless
+        # under HTTP/1.0, where the close ended the message anyway; under
+        # keep-alive it would corrupt the *next* response on the socket.
+        self._response_started = False
         super().__init__(*args, **kwargs)
 
     def _send_404(self) -> None:
+        if self._response_started:
+            self.close_connection = True
+            return
         try:
+            self._response_started = True
             self.send_response(404)
             self.send_header("Content-Length", "0")
             self.end_headers()
@@ -2027,6 +2053,7 @@ class _CastHttpHandler(BaseHTTPRequestHandler):
             pass
 
     def do_GET(self) -> None:
+        self._response_started = False
         try:
             raw_path, _, raw_query = self.path.partition("?")
             parts = [part for part in raw_path.split("/") if part]
@@ -2036,11 +2063,16 @@ class _CastHttpHandler(BaseHTTPRequestHandler):
             entry_key = parts[2]
             token = parse_qs(raw_query).get("token", [""])[0]
             if not _movie_cast_tokens.verify(self.settings, entry_key, token):
+                # Worth a log line: this is what a receiver hits when a token
+                # has expired, and it is otherwise indistinguishable (from
+                # the TV's side) from the movie simply not playing.
+                self._log_cast(f"404 rejected token for {entry_key}")
                 self._send_404()
                 return
             try:
                 target = _movies_store.resolve_movie_stream_path(self.settings.movies_root, entry_key)
             except FileNotFoundError:
+                self._log_cast(f"404 unknown movie {entry_key}")
                 self._send_404()
                 return
             self._stream_range(target)
@@ -2067,6 +2099,7 @@ class _CastHttpHandler(BaseHTTPRequestHandler):
         # CORS preflight -- answered for any path (it reveals nothing; the
         # token check still gates the actual GET).
         try:
+            self._response_started = True
             self.send_response(204)
             self._send_cast_cors_headers()
             self.send_header("Content-Length", "0")
@@ -2079,6 +2112,7 @@ class _CastHttpHandler(BaseHTTPRequestHandler):
         start, end, status = _http_range.parse_range_header(self.headers.get("Range"), file_size)
         length = end - start + 1
         content_type = _CAST_VIDEO_CONTENT_TYPES.get(path.suffix.lower(), "application/octet-stream")
+        self._response_started = True
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(length))
@@ -2087,6 +2121,7 @@ class _CastHttpHandler(BaseHTTPRequestHandler):
         if status == 206:
             self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
         self.end_headers()
+        self._log_cast(f"{status} {content_type} bytes {start}-{end}/{file_size} {path.name}")
         if self.command == "HEAD":
             return
         with path.open("rb") as handle:
@@ -2099,8 +2134,20 @@ class _CastHttpHandler(BaseHTTPRequestHandler):
                 self.wfile.write(chunk)
                 remaining -= len(chunk)
 
+    def _log_cast(self, message: str) -> None:
+        """Cast requests DO get logged (one concise line each), unlike
+        ``_HttpRedirectHandler``'s deliberately silent listener. Casting
+        fails on the receiver, off-device, where there is nothing to inspect
+        -- so "did the TV ever actually fetch anything, and what did we
+        answer?" is the single most useful question when it doesn't work,
+        and without this the answer is unknowable. Volume is bounded: a
+        media player issues a modest number of range requests, not a flood.
+        """
+        client_ip = self.client_address[0] if self.client_address else "-"
+        print(f"cast-stream {client_ip} {self.command} {message}", file=sys.stdout, flush=True)
+
     def log_message(self, format: str, *args) -> None:  # noqa: A002 - stdlib signature
-        pass  # same reasoning as _HttpRedirectHandler.log_message
+        pass  # request-line noise; the useful signal is _log_cast's own lines
 
 
 def _build_cast_http_handler(settings: Settings):
