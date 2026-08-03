@@ -2531,6 +2531,7 @@ function toggleMoviesFolder(key) {
 // a Drone with it turned off gets a clear error here, not a silent no-op)
 // instead.
 let currentPlayerEntryKey = null;
+let currentPlayerName = "";
 let castApiReady = false;
 async function mintMovieCastToken(entryKey) {
   try {
@@ -2582,6 +2583,45 @@ function initCastApi() {
     }
   });
 }
+// Chromecast's default receiver plays MP4/H.264+AAC and WebM; it does NOT
+// play Matroska, and only newer hardware handles HEVC/H.265 -- both very
+// common in this library. Used purely to turn an opaque receiver failure
+// into an explanation worth acting on, never to block the attempt (some
+// Google TV devices do play these).
+function likelyUnsupportedOnChromecast(name) {
+  const text = String(name || "").toLowerCase();
+  if (text.endsWith(".mkv")) return "MKV isn't supported by Chromecast's built-in player";
+  if (/(^|[^a-z])(x265|h265|hevc)([^a-z]|$)/.test(text)) return "H.265/HEVC only plays on newer Chromecast hardware";
+  return null;
+}
+function reportCastPlaybackFailure(detail) {
+  const hint = likelyUnsupportedOnChromecast(currentPlayerName);
+  const because = hint ? ` -- ${hint}.` : ".";
+  showToast(
+    `The TV couldn't play this movie${because}${detail ? ` (${escapeHtml(detail)})` : ""} Try AirPlay, or Download instead.`,
+    "danger",
+    9000,
+  );
+}
+// loadMedia() resolving only means the receiver ACCEPTED the request -- it
+// can still fail on the very first fetch/decode a moment later, which is
+// what a "TV switches to the cast screen, flickers, goes idle" symptom
+// actually is. Without this the UI would report a cheerful "Casting
+// started" for a cast that never played a frame.
+function watchCastSessionForPlaybackFailure(session) {
+  const media = session.getMediaSession();
+  if (!media || typeof media.addUpdateListener !== "function") return;
+  const listener = (isAlive) => {
+    const idleReason = media.idleReason;
+    if (media.playerState === chrome.cast.media.PlayerState.IDLE && idleReason === chrome.cast.media.IdleReason.ERROR) {
+      reportCastPlaybackFailure("receiver reported a playback error");
+      media.removeUpdateListener(listener);
+      return;
+    }
+    if (!isAlive) media.removeUpdateListener(listener);
+  };
+  media.addUpdateListener(listener);
+}
 async function loadMovieOntoCastSession(entryKey) {
   const session = cast.framework.CastContext.getInstance().getCurrentSession();
   if (!session) return;
@@ -2597,18 +2637,17 @@ async function loadMovieOntoCastSession(entryKey) {
     // that's supposed to have handed off to the TV.
     const video = document.getElementById("moviePlayerVideo");
     if (video) video.pause();
+    watchCastSessionForPlaybackFailure(session);
     showToast("Casting started.", "success");
   } catch (err) {
-    // Most common real-world case: the Chromecast default receiver can't
-    // decode this file's codec/container (MKV in particular is frequently
-    // unsupported on Chromecast hardware, unlike AirPlay/Apple TV which is
-    // more forgiving) -- surface whatever the SDK reports rather than a
-    // generic failure, since that's usually exactly what's wrong.
-    showToast(`Could not start casting: ${escapeHtml(String((err && (err.description || err.code)) || err))}`, "danger");
+    // Rejected outright -- most often the receiver refusing the container/
+    // codec before it even fetches (see likelyUnsupportedOnChromecast).
+    reportCastPlaybackFailure(String((err && (err.description || err.code)) || err || ""));
   }
 }
 function openMoviePlayerModal(entryKey, movieName) {
   currentPlayerEntryKey = entryKey;
+  currentPlayerName = movieName || "";
   loadCastSenderSdk();
   const modalId = "moviePlayerModal";
   let modal = document.getElementById(modalId);
@@ -2658,6 +2697,7 @@ function openMoviePlayerModal(entryKey, movieName) {
       video.load();
     }
     currentPlayerEntryKey = null;
+    currentPlayerName = "";
   }, { once: true });
   if (window.bootstrap?.Modal) {
     window.bootstrap.Modal.getOrCreateInstance(modal).show();

@@ -23,6 +23,7 @@ try:
     from ..movies import metadata_manager as _movies_metadata
     from ..movies import filename_parser as _filename_parser
     from ..movies.tmdb_client import TmdbUnavailableError as _TmdbUnavailableError
+    from ..transfer.network_identity import is_advertisable_ip as _is_advertisable_ip
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common import http_range as _http_range  # type: ignore
     from storage import movies_store as _movies_store  # type: ignore
@@ -30,6 +31,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from movies import metadata_manager as _movies_metadata  # type: ignore
     from movies import filename_parser as _filename_parser  # type: ignore
     from movies.tmdb_client import TmdbUnavailableError as _TmdbUnavailableError  # type: ignore
+    from transfer.network_identity import is_advertisable_ip as _is_advertisable_ip  # type: ignore
 
 # Maps the public artwork field name (URL-facing, movie-flavored) to the
 # metadata row column that holds its stored relative path. File-naming on
@@ -208,15 +210,51 @@ class HandlersMoviesMixin:
             raise ValueError("casting is not enabled on this Drone")
         target = self._resolve_movie_path(entry_key)  # 404s via FileNotFoundError if entry_key is unknown
         result = _movie_cast_tokens.create(self.settings, entry_key)
-        host = str(self.headers.get("Host") or "").split(":", 1)[0]
         port_suffix = "" if self.settings.cast_http_port == 80 else f":{self.settings.cast_http_port}"
-        cast_url = f"http://{host}{port_suffix}/public/movies/{entry_key}/cast-stream?token={result['token']}"
+        cast_url = (
+            f"http://{self._cast_stream_host()}{port_suffix}"
+            f"/public/movies/{entry_key}/cast-stream?token={result['token']}"
+        )
         self._send_json(200, {
             "token": result["token"],
             "expires_at": result["expires_at"],
             "cast_url": cast_url,
             "content_type": self._guess_content_type(target),
         })
+
+    def _cast_stream_host(self) -> str:
+        """The host a *cast receiver* should dial this Drone at -- a raw LAN IP
+        whenever one is available, deliberately **not** the browser's ``Host``
+        header the way most self-referential URLs in this app are built.
+
+        Found live: casting appeared to connect (TV switches to the cast
+        screen) and then immediately fell back to the idle screen with only a
+        brief flicker. The cause was DNS, not media -- the URL was echoing
+        back whatever hostname the *browser* used (``batocera``,
+        ``batocera.local``, ...), and a Chromecast generally cannot resolve
+        local hostnames at all: its firmware commonly pins public DNS
+        (8.8.8.8) and does no mDNS/search-domain lookup, so the receiver's
+        very first fetch fails before a single byte of video is requested.
+        The phone resolving that name fine says nothing about the TV.
+
+        ``getsockname()`` is the local address this client actually reached
+        us on, so it is reachable on the network the client is sitting on --
+        which is the same network the cast receiver has to be on for casting
+        to work at all (see the tailnet caveat in the cast docs). Preferred
+        over re-deriving "some LAN IP" from the interface list, which on this
+        device can also turn up tailnet/container addresses a TV can't route
+        to. Falls back to the ``Host`` header only when the socket address
+        isn't usable (loopback in local dev, or a non-IP transport)."""
+        try:
+            local_ip = str(self.connection.getsockname()[0])
+        except Exception:  # noqa: BLE001 - any socket oddity just falls through to Host
+            local_ip = ""
+        if local_ip and _is_advertisable_ip(local_ip):
+            return f"[{local_ip}]" if ":" in local_ip else local_ip
+        host_header = str(self.headers.get("Host") or "").strip()
+        if host_header.startswith("["):  # "[::1]" / "[::1]:8443" -- keep the brackets, drop any port
+            return host_header.split("]", 1)[0] + "]"
+        return (host_header.rsplit(":", 1)[0] if ":" in host_header else host_header) or "localhost"
 
     def _stream_movie_range(self, path: Path, content_type: str) -> None:
         file_size = path.stat().st_size

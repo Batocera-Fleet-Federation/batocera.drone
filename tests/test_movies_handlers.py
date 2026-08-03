@@ -41,12 +41,27 @@ class _FakeHeaders(dict):
         return default
 
 
+class _FakeSocket:
+    """Stand-in for BaseHTTPRequestHandler.connection -- only getsockname()
+    matters here (see _cast_stream_host, which prefers the local address a
+    client actually connected to over the browser's Host header)."""
+
+    def __init__(self, local_address) -> None:
+        self._local_address = local_address
+
+    def getsockname(self):
+        return self._local_address
+
+
 class _FakeHandler:
-    def __init__(self, settings: Settings, *, range_header=None) -> None:
+    def __init__(self, settings: Settings, *, range_header=None, local_address=None) -> None:
         self.settings = settings
         self.headers = _FakeHeaders()
         if range_header is not None:
             self.headers["Range"] = range_header
+        # Default None (no usable socket) so every pre-existing test keeps
+        # exercising the Host-header fallback path it was written against.
+        self.connection = _FakeSocket(local_address) if local_address is not None else None
         self.wfile = io.BytesIO()
         self.response_status = None
         self.response_headers = {}
@@ -445,6 +460,57 @@ class MovieCastTokenHandlerTests(unittest.TestCase):
             handler._handle_movie_cast_token_create(entry_key)
             _status, payload = handler.json_response
             self.assertTrue(payload["cast_url"].startswith("http://batocera.local/public/movies/"))
+
+    def test_prefers_the_lan_ip_over_the_browsers_hostname(self) -> None:
+        # Regression: a Chromecast generally can't resolve local hostnames
+        # (its firmware pins public DNS and does no mDNS), so echoing back
+        # whatever name the *browser* used made the receiver's very first
+        # fetch fail -- the TV switched to the cast screen, flickered, and
+        # fell back to idle without ever requesting a byte of video.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Vacation.mp4", b"x")
+            settings = _build_settings(root, DRONE_CAST_ENABLED="1", DRONE_CAST_HTTP_PORT="8095")
+            movies_store.sync_movies_cache(settings.movies_root)
+            entry_key = movies_store.list_movies(settings.movies_root)[0]["entry_key"]
+            handler = _handler(settings, local_address=("192.168.1.50", 443))
+            handler.headers["Host"] = "batocera"
+            handler._handle_movie_cast_token_create(entry_key)
+            _status, payload = handler.json_response
+            self.assertTrue(
+                payload["cast_url"].startswith(f"http://192.168.1.50:8095/public/movies/{entry_key}/cast-stream?"),
+                payload["cast_url"],
+            )
+            self.assertNotIn("batocera", payload["cast_url"])
+
+    def test_falls_back_to_host_header_when_socket_address_is_loopback(self) -> None:
+        # Local dev (browsing via localhost) has no LAN-routable socket
+        # address to offer, so the Host header is still the best available
+        # answer -- casting can't work in that setup anyway.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Vacation.mp4", b"x")
+            settings = _build_settings(root, DRONE_CAST_ENABLED="1", DRONE_CAST_HTTP_PORT="8095")
+            movies_store.sync_movies_cache(settings.movies_root)
+            entry_key = movies_store.list_movies(settings.movies_root)[0]["entry_key"]
+            handler = _handler(settings, local_address=("127.0.0.1", 8899))
+            handler.headers["Host"] = "localhost:8899"
+            handler._handle_movie_cast_token_create(entry_key)
+            _status, payload = handler.json_response
+            self.assertTrue(payload["cast_url"].startswith("http://localhost:8095/public/movies/"), payload["cast_url"])
+
+    def test_ipv6_socket_address_is_bracketed_in_the_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Vacation.mp4", b"x")
+            settings = _build_settings(root, DRONE_CAST_ENABLED="1", DRONE_CAST_HTTP_PORT="8095")
+            movies_store.sync_movies_cache(settings.movies_root)
+            entry_key = movies_store.list_movies(settings.movies_root)[0]["entry_key"]
+            handler = _handler(settings, local_address=("fd00::5", 443, 0, 0))
+            handler.headers["Host"] = "batocera"
+            handler._handle_movie_cast_token_create(entry_key)
+            _status, payload = handler.json_response
+            self.assertTrue(payload["cast_url"].startswith("http://[fd00::5]:8095/public/movies/"), payload["cast_url"])
 
     def test_minted_token_verifies_for_this_movie(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

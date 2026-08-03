@@ -2052,6 +2052,28 @@ class _CastHttpHandler(BaseHTTPRequestHandler):
 
     do_HEAD = do_GET
 
+    def _send_cast_cors_headers(self) -> None:
+        """Google's default media receiver runs the playback page on Google's
+        own origin, so anything it fetches is cross-origin to it -- without
+        these it can reject the media before playing a frame. Safe to be
+        permissive: this listener only ever serves a movie whose
+        single-movie-scoped token the caller already had."""
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Range, Content-Type")
+        self.send_header("Access-Control-Expose-Headers", "Accept-Ranges, Content-Length, Content-Range")
+
+    def do_OPTIONS(self) -> None:
+        # CORS preflight -- answered for any path (it reveals nothing; the
+        # token check still gates the actual GET).
+        try:
+            self.send_response(204)
+            self._send_cast_cors_headers()
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+
     def _stream_range(self, path: Path) -> None:
         file_size = path.stat().st_size
         start, end, status = _http_range.parse_range_header(self.headers.get("Range"), file_size)
@@ -2061,6 +2083,7 @@ class _CastHttpHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(length))
         self.send_header("Accept-Ranges", "bytes")
+        self._send_cast_cors_headers()
         if status == 206:
             self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
         self.end_headers()

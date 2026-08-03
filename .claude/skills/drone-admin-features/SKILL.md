@@ -437,6 +437,32 @@ wide-open port the way a naive "just serve movies over HTTP" would be:
   lookup and Range-parsing logic the authenticated stream route uses --
   extracted to pure/shared functions specifically so this second listener
   doesn't duplicate (and risk drifting from) that security-critical code.
+- **The cast URL's host is a raw LAN IP, deliberately NOT the browser's
+  `Host` header** (`_cast_stream_host` in `handlers_movies.py`) -- the one
+  place in this app that doesn't build a self-referential URL from `Host`.
+  Found live, and the single most confusing failure this feature had:
+  casting *appeared* to connect (TV switches to the cast screen), flickered,
+  and dropped back to idle without playing. Nothing about the media was
+  wrong -- it was DNS. The URL echoed back whatever hostname the **browser**
+  used (`batocera`, `batocera.local`, ...) and **a Chromecast generally
+  cannot resolve local hostnames at all**: its firmware commonly pins public
+  DNS (8.8.8.8) and does no mDNS/search-domain lookup, so the receiver's
+  very first fetch died before requesting a byte of video. That the *phone*
+  resolves the name fine says nothing about the *TV*. The fix uses
+  `self.connection.getsockname()[0]` -- the local address this client
+  actually reached the Drone on, therefore reachable from the network the
+  client is on, which is the same network the receiver must be on anyway.
+  Preferred over re-deriving "some LAN IP" from the interface list, which on
+  this device also turns up tailnet/container addresses a TV can't route to.
+  Falls back to `Host` only when the socket address isn't advertisable
+  (loopback in local dev). **Don't "simplify" this back to the `Host`
+  header.**
+- **CORS headers on every cast response** (`_send_cast_cors_headers`, plus a
+  `do_OPTIONS` preflight): Google's default media receiver runs its playback
+  page on Google's own origin, so this Drone is cross-origin to it and it
+  can reject media that doesn't allow it. Permissive (`*`) is fine here --
+  the route is already gated by a token the caller had to be authenticated
+  to mint.
 - **Frontend** (`drone.js`): `openMoviePlayerModal` feature-detects AirPlay
   (`HTMLVideoElement.prototype.webkitShowPlaybackTargetPicker` -- Safari
   only, hidden entirely elsewhere) and lazily loads the Google Cast Sender
@@ -478,12 +504,25 @@ wide-open port the way a naive "just serve movies over HTTP" would be:
   entirely). `loadMovieOntoCastSession` also now pauses the local
   `<video>` once `session.loadMedia()` succeeds, so a *correctly* cast
   movie doesn't keep decoding/playing locally either.
+- **A resolved `loadMedia()` promise does NOT mean playback started** -- it
+  only means the receiver *accepted* the request; it can still fail on the
+  first fetch/decode a moment later. `watchCastSessionForPlaybackFailure`
+  attaches a media-session update listener and reports
+  `PlayerState.IDLE` + `IdleReason.ERROR` as a real failure, because
+  otherwise the UI cheerfully claims "Casting started" for a cast that never
+  rendered a frame. `likelyUnsupportedOnChromecast` turns the two failure
+  causes that actually dominate this library into an explanation worth
+  acting on (`.mkv`, and `x265`/`HEVC` in the filename) rather than an
+  opaque error code -- it only shapes the *message*, it never blocks the
+  attempt, since some Google TV hardware does play both.
 - **Known real-world limitation, not a code issue**: Chromecast's default
-  media receiver frequently can't decode MKV (this library's most common
-  container for scene-release content) -- AirPlay/Apple TV is more
+  media receiver doesn't support Matroska at all and only handles
+  HEVC/H.265 on newer hardware -- between them that's most of a
+  scene-release library, and AirPlay/Apple TV is considerably more
   forgiving. Casting also only works when the receiver is on the same LAN
   as this Drone; it can't reach in over a tailnet the way a phone browser
-  can.
+  can (and the LAN-IP cast URL above makes that explicit rather than
+  failing mysteriously).
 
 **Movie artwork/metadata scraper (TMDb)** mirrors the ROM scraper shape
 (search → pick a match → apply) but is its own self-contained module,
