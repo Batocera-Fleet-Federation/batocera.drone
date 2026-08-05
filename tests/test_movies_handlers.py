@@ -447,6 +447,10 @@ class MovieCastTokenHandlerTests(unittest.TestCase):
                 payload["cast_url"],
                 f"http://batocera.local:8095/public/movies/{entry_key}/cast-stream?token={payload['token']}",
             )
+            self.assertEqual(
+                payload["airplay_url"],
+                f"http://batocera.local:8095/public/movies/{entry_key}/airplay?token={payload['token']}&delivery=direct",
+            )
             self.assertEqual(payload["delivery"], "direct")
             self.assertFalse(payload["transcoded"])
 
@@ -471,6 +475,10 @@ class MovieCastTokenHandlerTests(unittest.TestCase):
             self.assertEqual(
                 payload["cast_url"],
                 f"http://batocera.local:8095/public/movies/{entry_key}/cast-hls/token-value/index.m3u8",
+            )
+            self.assertEqual(
+                payload["airplay_url"],
+                f"http://batocera.local:8095/public/movies/{entry_key}/airplay?token={payload['token']}&delivery=hls",
             )
             self.assertEqual(payload["content_type"], "application/x-mpegurl")
             self.assertEqual(payload["delivery"], "hls")

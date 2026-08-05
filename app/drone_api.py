@@ -2087,11 +2087,18 @@ class _CastHttpHandler(BaseHTTPRequestHandler):
                 and parts[1] == "movies"
                 and parts[3] == "cast-hls"
             )
-            if not direct_stream and not hls_asset:
+            airplay_page = (
+                len(parts) == 4
+                and parts[0] == "public"
+                and parts[1] == "movies"
+                and parts[3] == "airplay"
+            )
+            if not direct_stream and not hls_asset and not airplay_page:
                 self._send_404()
                 return
             entry_key = parts[2]
-            token = parts[4] if hls_asset else parse_qs(raw_query).get("token", [""])[0]
+            query = parse_qs(raw_query)
+            token = parts[4] if hls_asset else query.get("token", [""])[0]
             if not _movie_cast_tokens.verify(self.settings, entry_key, token):
                 # Worth a log line: this is what a receiver hits when a token
                 # has expired, and it is otherwise indistinguishable (from
@@ -2099,7 +2106,9 @@ class _CastHttpHandler(BaseHTTPRequestHandler):
                 self._log_cast(f"404 rejected token for {entry_key}")
                 self._send_404()
                 return
-            if hls_asset:
+            if airplay_page:
+                self._send_airplay_page(entry_key, token, query.get("delivery", [""])[0])
+            elif hls_asset:
                 try:
                     target, content_type = _movie_cast_stream.resolve_hls_asset(
                         self.settings, entry_key, token, parts[5]
@@ -2142,6 +2151,123 @@ class _CastHttpHandler(BaseHTTPRequestHandler):
             "Access-Control-Expose-Headers",
             "Accept-Ranges, Content-Length, Content-Range, Content-Type",
         )
+
+    def _send_airplay_page(self, entry_key: str, token: str, delivery: str) -> None:
+        """Serve a minimal HTTP-origin AirPlay controller for one movie.
+
+        Safari 18+ upgrades HTTP media embedded by an HTTPS page to HTTPS.
+        The cast listener cannot use HTTPS because a TV cannot trust Drone's
+        private ``.local`` certificate, so the controller itself must be the
+        top-level HTTP document. The same movie-scoped token gates both this
+        page and every media request it can issue.
+        """
+        if delivery == "hls":
+            try:
+                _movie_cast_stream.resolve_hls_asset(self.settings, entry_key, token, "index.m3u8")
+            except FileNotFoundError:
+                self._log_cast(f"404 unavailable AirPlay HLS stream for {entry_key}")
+                self._send_404()
+                return
+            media_path = f"/public/movies/{entry_key}/cast-hls/{token}/index.m3u8"
+            media_type = "application/x-mpegURL"
+        elif delivery == "direct":
+            try:
+                target = _movies_store.resolve_movie_stream_path(self.settings.movies_root, entry_key)
+            except FileNotFoundError:
+                self._send_404()
+                return
+            media_path = f"/public/movies/{entry_key}/cast-stream?token={token}"
+            media_type = _CAST_VIDEO_CONTENT_TYPES.get(target.suffix.lower(), "application/octet-stream")
+        else:
+            self._log_cast(f"404 invalid AirPlay delivery for {entry_key}")
+            self._send_404()
+            return
+
+        safe_media_path = html.escape(media_path, quote=True)
+        safe_media_type = html.escape(media_type, quote=True)
+        body = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Drone AirPlay</title>
+  <style>
+    :root {{ color-scheme: dark; font-family: system-ui, sans-serif; }}
+    body {{ margin: 0; min-height: 100vh; display: grid; place-items: center; background: #10151d; color: #f8f9fa; }}
+    main {{ width: min(92vw, 850px); text-align: center; }}
+    video {{ width: 100%; max-height: 68vh; background: #000; border-radius: .5rem; }}
+    button {{ margin-top: 1rem; padding: .8rem 1.2rem; border: 0; border-radius: .45rem; font: inherit; font-weight: 650; }}
+    button:not(:disabled) {{ cursor: pointer; background: #0d6efd; color: white; }}
+    #status {{ min-height: 1.5rem; color: #b8c0cc; }}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Drone AirPlay</h1>
+    <p id="status">Loading the TV-compatible stream…</p>
+    <video id="airplayVideo" controls playsinline preload="auto" x-webkit-airplay="allow">
+      <source src="{safe_media_path}" type="{safe_media_type}">
+    </video>
+    <button id="airplayButton" type="button" disabled>Preparing video…</button>
+  </main>
+  <script>
+    const video = document.getElementById("airplayVideo");
+    const button = document.getElementById("airplayButton");
+    const status = document.getElementById("status");
+    const ready = () => {{
+      button.disabled = false;
+      button.textContent = "Choose AirPlay device";
+      status.textContent = "The stream is ready.";
+    }};
+    video.addEventListener("loadedmetadata", ready, {{ once: true }});
+    video.addEventListener("canplay", ready, {{ once: true }});
+    video.addEventListener("error", () => {{
+      button.disabled = true;
+      button.textContent = "Stream unavailable";
+      status.textContent = "Safari could not load the prepared stream. Return to Drone and try again.";
+    }});
+    video.addEventListener("webkitcurrentplaybacktargetiswirelesschanged", () => {{
+      if (!video.webkitCurrentPlaybackTargetIsWireless) {{
+        status.textContent = "AirPlay disconnected.";
+        return;
+      }}
+      status.textContent = "AirPlay connected. Starting playback on the TV…";
+      const playback = video.play();
+      if (playback && typeof playback.catch === "function") {{
+        playback.catch(() => {{
+          status.textContent = "AirPlay connected. Press Play in the video controls to begin.";
+        }});
+      }}
+    }});
+    button.addEventListener("click", () => {{
+      if (typeof video.webkitShowPlaybackTargetPicker !== "function") {{
+        status.textContent = "Open this page in Safari to use AirPlay.";
+        return;
+      }}
+      video.webkitShowPlaybackTargetPicker();
+    }});
+    if (video.readyState >= 1) ready();
+  </script>
+</body>
+</html>
+""".encode("utf-8")
+        self._response_started = True
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'none'; media-src 'self'; script-src 'unsafe-inline'; "
+            "style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        )
+        self.end_headers()
+        self._log_cast(f"200 AirPlay controller {delivery} {entry_key}")
+        if self.command != "HEAD":
+            self.wfile.write(body)
 
     def do_OPTIONS(self) -> None:
         # CORS preflight -- answered for any path (it reveals nothing; the

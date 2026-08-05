@@ -2536,8 +2536,6 @@ let castApiReady = false;
 let castSdkStatus = "loading";
 let castDeviceState = "unknown";
 let castLoadInProgress = false;
-const preparedAirPlayStreams = new Map();
-let pendingAirPlayTargetListener = null;
 async function mintMovieCastToken(entryKey) {
   try {
     return await apiPost(`/movies/${encodeURIComponent(entryKey)}/cast-token`, {});
@@ -2547,68 +2545,43 @@ async function mintMovieCastToken(entryKey) {
   }
 }
 async function castMovieAirPlay(entryKey) {
-  const video = document.getElementById("moviePlayerVideo");
-  if (!video || typeof video.webkitShowPlaybackTargetPicker !== "function") return;
-  let castInfo = preparedAirPlayStreams.get(entryKey);
-  if (!castInfo) {
-    // Safari requires the playback-target picker to be opened from an active
-    // user gesture. A network await consumes that gesture, so preparation and
-    // selection are intentionally two explicit states: prepare now, then the
-    // next tap opens the picker synchronously and reliably.
-    const button = document.getElementById("movieAirPlayButton");
-    if (button) {
-      button.disabled = true;
-      button.innerHTML = `<span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>Preparing…`;
-    }
-    castInfo = await mintMovieCastToken(entryKey);
-    if (button) {
-      button.disabled = false;
-      button.innerHTML = `<i class="bi bi-airplay me-1"></i>Choose device`;
-    }
-    if (!castInfo) return;
-    preparedAirPlayStreams.set(entryKey, castInfo);
-    showToast("AirPlay is ready. Tap Choose device to select where to play it.", "info", 8000);
+  // Open synchronously while the click still carries user activation. The
+  // HTTP AirPlay controller is navigated into this window after FFmpeg is
+  // ready; opening only after that await would be blocked as a popup.
+  const airplayWindow = window.open("", "_blank");
+  if (!airplayWindow) {
+    showToast("Safari blocked the AirPlay window. Allow pop-ups for this Drone and try again.", "warning", 12000);
     return;
   }
-  // Keep the currently playable local source in place while Safari opens its
-  // picker. WebKit can reset/invalidate an AirPlay route when video.src is
-  // changed during selection. Once Safari reports that the selected playback
-  // target is wireless, swap to the token-authorized URL the receiver can
-  // fetch without this page's session cookie or self-signed HTTPS cert.
-  const wasPlaying = !video.paused;
-  const resumeAt = video.currentTime;
-  if (pendingAirPlayTargetListener) {
-    pendingAirPlayTargetListener.video.removeEventListener(
-      "webkitcurrentplaybacktargetiswirelesschanged",
-      pendingAirPlayTargetListener.listener,
-    );
-    pendingAirPlayTargetListener = null;
-  }
-  const handOffToAirPlay = () => {
-    if (!video.webkitCurrentPlaybackTargetIsWireless) return;
-    video.removeEventListener("webkitcurrentplaybacktargetiswirelesschanged", handOffToAirPlay);
-    pendingAirPlayTargetListener = null;
-    video.addEventListener("loadedmetadata", () => {
-      try {
-        video.currentTime = resumeAt;
-      } catch (_) {
-        // Some live-growing HLS playlists do not expose the old position yet.
-      }
-      if (wasPlaying) video.play().catch(() => {});
-    }, { once: true });
-    video.src = castInfo.cast_url;
-  };
-  pendingAirPlayTargetListener = { video, listener: handOffToAirPlay };
-  video.addEventListener("webkitcurrentplaybacktargetiswirelesschanged", handOffToAirPlay);
   try {
-    // Must remain synchronous in the click handler or Safari discards the
-    // transient user activation and silently refuses to show the picker.
-    video.webkitShowPlaybackTargetPicker();
+    airplayWindow.document.title = "Preparing Drone AirPlay";
+    airplayWindow.document.body.innerHTML = '<p style="font: 1rem system-ui; padding: 2rem">Preparing the TV-compatible stream…</p>';
+  } catch (_) {
+    // A browser may restrict even the initial about:blank document; the
+    // navigation below can still succeed.
+  }
+  const button = document.getElementById("movieAirPlayButton");
+  if (button) {
+    button.disabled = true;
+    button.innerHTML = `<span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>Preparing…`;
+  }
+  const castInfo = await mintMovieCastToken(entryKey);
+  if (button) {
+    button.disabled = false;
+    button.innerHTML = `<i class="bi bi-airplay me-1"></i>AirPlay`;
+  }
+  if (!castInfo) {
+    airplayWindow.close();
+    return;
+  }
+  try {
+    if (!castInfo.airplay_url) throw new Error("AirPlay controller URL is missing");
+    airplayWindow.location.replace(castInfo.airplay_url);
+    showToast("AirPlay is prepared in the new window. Tap Choose AirPlay device there.", "info", 10000);
   } catch (error) {
-    video.removeEventListener("webkitcurrentplaybacktargetiswirelesschanged", handOffToAirPlay);
-    pendingAirPlayTargetListener = null;
-    console.warn("Safari AirPlay picker failed", error);
-    showToast("Safari could not open the AirPlay device picker. Confirm AirPlay is enabled on the TV and try again.", "danger", 12000);
+    airplayWindow.close();
+    console.warn("Safari AirPlay controller failed", error);
+    showToast("Safari could not open the AirPlay controller. Allow pop-ups for this Drone and try again.", "danger", 12000);
   }
 }
 // Loaded lazily (only once the movie player modal has actually been opened,
@@ -2911,13 +2884,6 @@ function openMoviePlayerModal(entryKey, movieName) {
   // Chromecast/AirPlay app.
   modal.addEventListener("hidden.bs.modal", () => {
     const video = document.getElementById("moviePlayerVideo");
-    if (pendingAirPlayTargetListener) {
-      pendingAirPlayTargetListener.video.removeEventListener(
-        "webkitcurrentplaybacktargetiswirelesschanged",
-        pendingAirPlayTargetListener.listener,
-      );
-      pendingAirPlayTargetListener = null;
-    }
     if (video) {
       video.pause();
       video.removeAttribute("src");

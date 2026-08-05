@@ -2537,20 +2537,20 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("session = context.getCurrentSession();", cast_source)
         self.assertIn("if (!session) throw error;", cast_source)
 
-    def test_airplay_picker_keeps_user_gesture_and_defers_source_handoff(self) -> None:
+    def test_airplay_opens_http_controller_before_async_preparation(self) -> None:
         source = Path(__file__).resolve().parents[1].joinpath("app/web/static/js/drone.js").read_text(encoding="utf-8")
         start = source.index("async function castMovieAirPlay(")
         end = source.index("function loadCastSenderSdk()", start)
         airplay_source = source[start:end]
 
-        picker_position = airplay_source.index("video.webkitShowPlaybackTargetPicker();")
-        handoff_position = airplay_source.index("video.src = castInfo.cast_url;")
-        wireless_event_position = airplay_source.index('"webkitcurrentplaybacktargetiswirelesschanged"')
-        self.assertLess(wireless_event_position, picker_position)
-        self.assertLess(handoff_position, picker_position)
-        self.assertIn("if (!video.webkitCurrentPlaybackTargetIsWireless) return;", airplay_source)
-        self.assertIn("const handOffToAirPlay = () =>", airplay_source)
-        self.assertIn("Safari could not open the AirPlay device picker", airplay_source)
+        popup_position = airplay_source.index('window.open("", "_blank")')
+        preparation_position = airplay_source.index("await mintMovieCastToken(entryKey)")
+        navigation_position = airplay_source.index("airplayWindow.location.replace(castInfo.airplay_url)")
+        self.assertLess(popup_position, preparation_position)
+        self.assertLess(preparation_position, navigation_position)
+        self.assertNotIn("video.src = castInfo.cast_url", airplay_source)
+        self.assertIn("Safari blocked the AirPlay window", airplay_source)
+        self.assertIn("Tap Choose AirPlay device there", airplay_source)
 
     def test_integration_transfers_page_consolidates_uploads_and_downloads(self) -> None:
         js = Path(__file__).resolve().parents[1].joinpath("app/web/static/js/drone.js").read_text(encoding="utf-8")
@@ -4776,6 +4776,70 @@ class CastHttpListenerTests(unittest.TestCase):
             self.assertEqual(status, 206)
             self.assertEqual(body, b"2345")
             self.assertEqual(headers.get("Content-Type"), "video/mp2t")
+
+    def test_airplay_controller_is_token_gated_http_page_for_hls(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings, entry_key, token = self._seed_movie_with_token(root)
+            cache = settings.cast_cache_root / token
+            cache.mkdir(parents=True)
+            (cache / "index.m3u8").write_text("#EXTM3U\n", encoding="utf-8")
+            port = self._start_listener(settings)
+
+            status, headers, body = self._get(
+                port,
+                f"/public/movies/{entry_key}/airplay?token={token}&delivery=hls",
+            )
+            page = body.decode("utf-8")
+            self.assertEqual(status, 200)
+            self.assertEqual(headers.get("Content-Type"), "text/html; charset=utf-8")
+            self.assertEqual(headers.get("Cache-Control"), "no-store")
+            self.assertIn("default-src 'none'", headers.get("Content-Security-Policy", ""))
+            self.assertIn(
+                f'<source src="/public/movies/{entry_key}/cast-hls/{token}/index.m3u8" type="application/x-mpegURL">',
+                page,
+            )
+            self.assertIn("webkitShowPlaybackTargetPicker", page)
+            self.assertIn("Choose AirPlay device", page)
+            self.assertIn("const playback = video.play();", page)
+            self.assertIn("Press Play in the video controls", page)
+            self.assertNotIn("https://", page)
+
+    def test_airplay_controller_supports_direct_movie_delivery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings, entry_key, token = self._seed_movie_with_token(root)
+            port = self._start_listener(settings)
+
+            status, _headers, body = self._get(
+                port,
+                f"/public/movies/{entry_key}/airplay?token={token}&delivery=direct",
+            )
+            page = body.decode("utf-8")
+            self.assertEqual(status, 200)
+            self.assertIn(
+                f'<source src="/public/movies/{entry_key}/cast-stream?token={token}" type="video/mp4">',
+                page,
+            )
+
+    def test_airplay_controller_rejects_invalid_delivery_or_token(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings, entry_key, token = self._seed_movie_with_token(root)
+            port = self._start_listener(settings)
+
+            status, _headers, body = self._get(
+                port,
+                f"/public/movies/{entry_key}/airplay?token={token}&delivery=unknown",
+            )
+            self.assertEqual(status, 404)
+            self.assertEqual(body, b"")
+            status, _headers, body = self._get(
+                port,
+                f"/public/movies/{entry_key}/airplay?token=wrong&delivery=direct",
+            )
+            self.assertEqual(status, 404)
+            self.assertEqual(body, b"")
 
     def test_hls_route_does_not_expose_transcoder_log(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

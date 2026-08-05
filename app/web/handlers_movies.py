@@ -221,11 +221,17 @@ class HandlersMoviesMixin:
             _movie_cast_tokens.revoke(self.settings, result["token"])
             raise
         port_suffix = "" if self.settings.cast_http_port == 80 else f":{self.settings.cast_http_port}"
-        cast_url = f"http://{self._cast_stream_host()}{port_suffix}{delivery['url_path']}"
+        cast_base_url = f"http://{self._cast_stream_host()}{port_suffix}"
+        cast_url = f"{cast_base_url}{delivery['url_path']}"
+        airplay_url = (
+            f"{cast_base_url}/public/movies/{entry_key}/airplay"
+            f"?token={result['token']}&delivery={delivery['delivery']}"
+        )
         self._send_json(200, {
             "token": result["token"],
             "expires_at": result["expires_at"],
             "cast_url": cast_url,
+            "airplay_url": airplay_url,
             "content_type": delivery.get("content_type") or self._guess_content_type(target),
             "delivery": delivery["delivery"],
             "transcoded": bool(delivery.get("transcoded")),
