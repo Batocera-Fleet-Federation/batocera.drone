@@ -2537,6 +2537,21 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("session = context.getCurrentSession();", cast_source)
         self.assertIn("if (!session) throw error;", cast_source)
 
+    def test_airplay_picker_keeps_user_gesture_and_defers_source_handoff(self) -> None:
+        source = Path(__file__).resolve().parents[1].joinpath("app/web/static/js/drone.js").read_text(encoding="utf-8")
+        start = source.index("async function castMovieAirPlay(")
+        end = source.index("function loadCastSenderSdk()", start)
+        airplay_source = source[start:end]
+
+        picker_position = airplay_source.index("video.webkitShowPlaybackTargetPicker();")
+        handoff_position = airplay_source.index("video.src = castInfo.cast_url;")
+        wireless_event_position = airplay_source.index('"webkitcurrentplaybacktargetiswirelesschanged"')
+        self.assertLess(wireless_event_position, picker_position)
+        self.assertLess(handoff_position, picker_position)
+        self.assertIn("if (!video.webkitCurrentPlaybackTargetIsWireless) return;", airplay_source)
+        self.assertIn("const handOffToAirPlay = () =>", airplay_source)
+        self.assertIn("Safari could not open the AirPlay device picker", airplay_source)
+
     def test_integration_transfers_page_consolidates_uploads_and_downloads(self) -> None:
         js = Path(__file__).resolve().parents[1].joinpath("app/web/static/js/drone.js").read_text(encoding="utf-8")
 

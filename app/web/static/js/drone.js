@@ -2537,6 +2537,7 @@ let castSdkStatus = "loading";
 let castDeviceState = "unknown";
 let castLoadInProgress = false;
 const preparedAirPlayStreams = new Map();
+let pendingAirPlayTargetListener = null;
 async function mintMovieCastToken(entryKey) {
   try {
     return await apiPost(`/movies/${encodeURIComponent(entryKey)}/cast-token`, {});
@@ -2569,22 +2570,46 @@ async function castMovieAirPlay(entryKey) {
     showToast("AirPlay is ready. Tap Choose device to select where to play it.", "info", 8000);
     return;
   }
-  // The AirPlay receiver plays whatever the local <video> element's current
-  // src is -- swap to the token-authorized plain-HTTP URL first (preserving
-  // playback position/state) so the receiver can actually fetch it, then
-  // open the picker.
+  // Keep the currently playable local source in place while Safari opens its
+  // picker. WebKit can reset/invalidate an AirPlay route when video.src is
+  // changed during selection. Once Safari reports that the selected playback
+  // target is wireless, swap to the token-authorized URL the receiver can
+  // fetch without this page's session cookie or self-signed HTTPS cert.
   const wasPlaying = !video.paused;
   const resumeAt = video.currentTime;
-  video.src = castInfo.cast_url;
-  video.addEventListener("loadedmetadata", () => {
-    try {
-      video.currentTime = resumeAt;
-    } catch (_) {
-      // Some live-growing HLS playlists do not expose the old position yet.
-    }
-    if (wasPlaying) video.play().catch(() => {});
-  }, { once: true });
-  video.webkitShowPlaybackTargetPicker();
+  if (pendingAirPlayTargetListener) {
+    pendingAirPlayTargetListener.video.removeEventListener(
+      "webkitcurrentplaybacktargetiswirelesschanged",
+      pendingAirPlayTargetListener.listener,
+    );
+    pendingAirPlayTargetListener = null;
+  }
+  const handOffToAirPlay = () => {
+    if (!video.webkitCurrentPlaybackTargetIsWireless) return;
+    video.removeEventListener("webkitcurrentplaybacktargetiswirelesschanged", handOffToAirPlay);
+    pendingAirPlayTargetListener = null;
+    video.addEventListener("loadedmetadata", () => {
+      try {
+        video.currentTime = resumeAt;
+      } catch (_) {
+        // Some live-growing HLS playlists do not expose the old position yet.
+      }
+      if (wasPlaying) video.play().catch(() => {});
+    }, { once: true });
+    video.src = castInfo.cast_url;
+  };
+  pendingAirPlayTargetListener = { video, listener: handOffToAirPlay };
+  video.addEventListener("webkitcurrentplaybacktargetiswirelesschanged", handOffToAirPlay);
+  try {
+    // Must remain synchronous in the click handler or Safari discards the
+    // transient user activation and silently refuses to show the picker.
+    video.webkitShowPlaybackTargetPicker();
+  } catch (error) {
+    video.removeEventListener("webkitcurrentplaybacktargetiswirelesschanged", handOffToAirPlay);
+    pendingAirPlayTargetListener = null;
+    console.warn("Safari AirPlay picker failed", error);
+    showToast("Safari could not open the AirPlay device picker. Confirm AirPlay is enabled on the TV and try again.", "danger", 12000);
+  }
 }
 // Loaded lazily (only once the movie player modal has actually been opened,
 // not on every page load) since it fetches an external script from Google.
@@ -2886,6 +2911,13 @@ function openMoviePlayerModal(entryKey, movieName) {
   // Chromecast/AirPlay app.
   modal.addEventListener("hidden.bs.modal", () => {
     const video = document.getElementById("moviePlayerVideo");
+    if (pendingAirPlayTargetListener) {
+      pendingAirPlayTargetListener.video.removeEventListener(
+        "webkitcurrentplaybacktargetiswirelesschanged",
+        pendingAirPlayTargetListener.listener,
+      );
+      pendingAirPlayTargetListener = null;
+    }
     if (video) {
       video.pause();
       video.removeAttribute("src");
