@@ -368,7 +368,10 @@ class HandlersMoviesMixin:
                 search_query = custom_query
                 results = _movies_metadata.search(self.settings, search_query)
             else:
-                outcome = _movies_metadata.search_movie_default_query(self.settings, movie.get("movie_name") or "")
+                folder_name = _movies_metadata.movie_folder_name(movie)
+                outcome = _movies_metadata.search_movie_default_query(
+                    self.settings, movie.get("movie_name") or "", folder_name,
+                )
                 search_query = outcome["query"]
                 results = outcome["results"]
         except _TmdbUnavailableError as error:

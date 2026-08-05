@@ -169,6 +169,22 @@ class SearchCandidatesTests(unittest.TestCase):
         candidates = filename_parser.search_candidates("Hellraiser (2022) (1080p)")
         self.assertEqual(candidates[0], ("Hellraiser", "2022"))
 
+    def test_edition_tag_before_the_year_is_stripped_from_the_year_cut_candidate(self) -> None:
+        # Real reported failure: this release puts "Directors.Cut" *before*
+        # the year (most scene releases put edition tags after it), and
+        # TMDb's own title is "Alien Resurrection", not "Alien Resurrection
+        # Directors Cut" -- searching "Alien Resurrection" alone found it,
+        # "Alien Resurrection Director's Cut" did not. The year-cut
+        # candidate used to only run a punctuation collapse, never the
+        # scene-token strip, so this text leaked straight into candidate #1.
+        candidates = filename_parser.search_candidates(
+            "Alien.Resurrection.Directors.Cut.1997.1080p.BRrip.x264.GAZ.YIFY"
+        )
+        self.assertEqual(candidates[0], ("Alien Resurrection", "1997"))
+        # The un-stripped version is kept as a lower-priority fallback rather
+        # than dropped outright, in case the vocabulary ever over-matches.
+        self.assertIn(("Alien Resurrection Directors Cut", "1997"), candidates)
+
     def test_wrong_or_unhelpful_year_falls_back_to_unfiltered_search(self) -> None:
         # candidates[1] (same title, no year) exists precisely so a bulk job
         # can retry without the filter when the year-filtered search misses.
@@ -191,6 +207,58 @@ class SearchCandidatesTests(unittest.TestCase):
         # The year-cut candidate already gives a clean title; NORDIC only
         # shows up after the year so it never pollutes the primary candidate.
         self.assertEqual(candidates[0], ("Mortal Kombat II", "2026"))
+
+    def test_folder_name_candidate_is_tried_before_any_filename_rung(self) -> None:
+        # A well-organized parent folder rescues a filename that otherwise
+        # parses to nothing useful.
+        candidates = filename_parser.search_candidates("----", folder_name="Lost (2004)")
+        self.assertEqual(candidates[0], ("Lost", "2004"))
+
+    def test_folder_name_candidate_deduplicates_with_a_matching_filename_rung(self) -> None:
+        candidates = filename_parser.search_candidates(
+            "Alien.Resurrection.Directors.Cut.1997.1080p.BRrip.x264.GAZ.YIFY",
+            folder_name="Alien Resurrection (1997)",
+        )
+        self.assertEqual(candidates.count(("Alien Resurrection", "1997")), 1)
+
+    def test_folder_name_without_a_year_yields_no_extra_candidate(self) -> None:
+        # "Forensic Files" (no parenthesized year) is a real case where the
+        # filename's own show_title is already correct -- the folder isn't
+        # needed, and its absence must not raise or alter anything.
+        with_folder = filename_parser.search_candidates("Some.Movie.1999.1080p", folder_name="Forensic Files")
+        without_folder = filename_parser.search_candidates("Some.Movie.1999.1080p")
+        self.assertEqual(with_folder, without_folder)
+
+    def test_no_folder_name_behaves_exactly_as_before(self) -> None:
+        self.assertEqual(
+            filename_parser.search_candidates("28.Days.Later.2002.1080p.BluRay.DDP5.1.x265.10bit-GalaxyRG265"),
+            filename_parser.search_candidates(
+                "28.Days.Later.2002.1080p.BluRay.DDP5.1.x265.10bit-GalaxyRG265", folder_name=None,
+            ),
+        )
+
+
+class FolderTitleCandidateTests(unittest.TestCase):
+    def test_title_and_year_extracted_from_bare_folder_name(self) -> None:
+        self.assertEqual(filename_parser.folder_title_candidate("Lost (2004)"), ("Lost", "2004"))
+
+    def test_trailing_quality_tags_after_the_year_are_tolerated(self) -> None:
+        self.assertEqual(
+            filename_parser.folder_title_candidate("Alien Resurrection (1997) [1080p] [BluRay]"),
+            ("Alien Resurrection", "1997"),
+        )
+
+    def test_no_parenthesized_year_yields_none(self) -> None:
+        # A bare, unparenthesized year is deliberately not enough -- too
+        # likely to belong to a release-group or site-branding folder name
+        # rather than an actual "Title (Year)" folder.
+        self.assertIsNone(filename_parser.folder_title_candidate("Forensic Files"))
+        self.assertIsNone(filename_parser.folder_title_candidate("torrents"))
+        self.assertIsNone(filename_parser.folder_title_candidate("Season 00"))
+        self.assertIsNone(filename_parser.folder_title_candidate("WatchSoMiuch 2016 Releases"))
+
+    def test_empty_folder_name_yields_none(self) -> None:
+        self.assertIsNone(filename_parser.folder_title_candidate(""))
 
 
 if __name__ == "__main__":

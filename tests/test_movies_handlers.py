@@ -811,7 +811,7 @@ class MovieScrapeSearchHandlerTests(unittest.TestCase):
                 return_value={"query": "The Matrix (1999)", "results": [{"tmdb_id": 603}]},
             ) as ladder_search:
                 handler._handle_admin_movie_scrape_search(entry_key, None)
-            ladder_search.assert_called_once_with(settings, "The.Matrix.1999.1080p.mp4")
+            ladder_search.assert_called_once_with(settings, "The.Matrix.1999.1080p.mp4", None)
             status, payload = handler.json_response
             self.assertEqual(status, 200)
             self.assertEqual(payload["query"], "The Matrix (1999)")

@@ -137,6 +137,16 @@ let artworkSelectedSystems = [];
 let artworkFilterQuery = "";
 let artworkRomStatus = "any";
 let artworkFilterDebounceTimer = null;
+// Bumped by every renderMissingArtworkPage()/refreshArtworkResults() call --
+// the gamelist scan those await can take several seconds on a large ROM
+// library, so if the user navigates away (or re-enters the tab, firing a
+// second scan) before it resolves, the older call's own eventual completion
+// must not overwrite whatever is now on screen. Same local-token idiom as
+// emulatorConfigSelectionRequestId, scoped to this one feature rather than
+// router()'s page-navigation-wide routerNavToken, since a same-page double
+// fetch (e.g. Refresh clicked twice, or leaving and re-entering the tab)
+// needs the same guard without an intervening router() navigation.
+let artworkRenderRequestId = 0;
 let systemsCache = null;
 let systemRomCache = {};
 let systemInfoLoaded = false;
@@ -4298,7 +4308,14 @@ async function renderAdminMenu() {
         </div>
       </div>
       <div class="col-md-4 mb-3">
-        <div class="card admin-tile pointer h-100" onclick="setHash('#admin/artwork')">
+        <!-- Lands on Theme Gallery (#theme, a small paginated image list), not
+             Artwork & Metadata (#admin/artwork) -- that tab's gamelist scan can
+             take several seconds on a large ROM library, so making it the
+             *default* meant every visit to this tile paid that cost even for
+             someone who only wanted Movies or Theme Gallery. Same reasoning
+             already applied to the root "" hash defaulting to #movies instead
+             of a gamelist-scan-involving page -- see router()'s own comment. -->
+        <div class="card admin-tile pointer h-100" onclick="setHash('#theme')">
           <div class="card-body">
             <h5 class="card-title"><i class="bi bi-images me-2"></i>Artwork</h5>
             <p class="card-text">Manage gamelist artwork, metadata, imports, uploads, marquee crops, browse installed EmulationStation themes, and scrape movie/TV posters and metadata from TMDb.</p>
@@ -7056,12 +7073,15 @@ function updateArtworkPageFromPayload(payload) {
   if (cleanupBtn) cleanupBtn.disabled = total <= 0;
 }
 async function refreshArtworkResults(forceRefresh = false) {
+  const myArtworkRequestId = ++artworkRenderRequestId;
   setLoading(true, "Updating artwork results...");
   try {
     const payload = await api(artworkPayloadUrl(forceRefresh));
+    if (myArtworkRequestId !== artworkRenderRequestId) return; // superseded -- see artworkRenderRequestId
     updateArtworkPageFromPayload(payload);
     history.replaceState(null, "", artworkHash());
   } catch (err) {
+    if (myArtworkRequestId !== artworkRenderRequestId) return; // superseded -- see artworkRenderRequestId
     showToast(`Failed to update artwork results: ${escapeHtml(err.message || "unknown error")}`, "danger");
   } finally {
     setLoading(false);
@@ -7099,6 +7119,7 @@ function setupArtworkDropdownTools(kind, onApply) {
   }
 }
 async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh = false, offset = 0, fields = artworkSelectedFields, systems = artworkSelectedSystems, query = artworkFilterQuery, romStatus = artworkRomStatus) {
+  const myArtworkRequestId = ++artworkRenderRequestId;
   titleNode.textContent = "Artwork & Metadata";
   subtitleNode.textContent = "Manage gamelist.xml artwork, metadata, imports, uploads, and marquee crops";
   artworkIncludeFilesystem = !!includeFilesystem;
@@ -7125,6 +7146,7 @@ async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh 
   refreshRandomThemeLogo().catch(() => {});
   try {
     const payload = await api(artworkPayloadUrl(forceRefresh));
+    if (myArtworkRequestId !== artworkRenderRequestId) return; // superseded -- see artworkRenderRequestId
     const roms = payload.roms || [];
     const fieldCounts = payload.field_counts || {};
     const availableFields = [{ value: "any", label: "Any" }, { value: "show_all", label: "Show All" }].concat((payload.fields || []).map((field) => ({ value: field, label: field === "duplicate_artwork" ? "Duplicate Artwork" : field })));
@@ -7293,6 +7315,7 @@ async function renderMissingArtworkPage(includeFilesystem = false, forceRefresh 
       });
     }
   } catch (err) {
+    if (myArtworkRequestId !== artworkRenderRequestId) return; // superseded -- see artworkRenderRequestId
     showToast(`Failed to scan artwork: ${escapeHtml(err.message || "unknown error")}`, "danger");
     content.innerHTML = `
       ${renderArtworkTabBar("metadata")}

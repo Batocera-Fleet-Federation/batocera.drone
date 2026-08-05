@@ -936,6 +936,90 @@ TMDb-touching candidate (`_throttle_before_tmdb_call`,
 in the first place — but when a run *does* still hit a wall, "Retry all
 failed" is the recovery path instead of a full rescan-all.
 
+**A second, distinct cascade of the same shape was found and fixed later**
+(this one not about rate-limiting at all): a plain `404` on a single
+movie/show/season/episode lookup — most commonly a locally-numbered TV
+episode or season that doesn't match TMDb's own numbering (a season finale
+split into a different number of parts than TMDb's, a "Season 0" specials
+folder TMDb has no matching season for) — raised the exact same
+`TmdbUnavailableError`, so it *also* aborted the whole job and mass-failed
+every untouched remaining candidate, indistinguishable from the API key
+being rejected. Confirmed live against a real ~1,250-movie library: two
+consecutive bulk runs each reported "2 matched / 88 skipped / 1156 failed"
+in under 15 seconds — 1,151 of those "failures" shared one identical reason
+string (`"TMDb has no movie with that id"`), including obviously-unrelated
+movies and Featurettes-folder extras that were never actually attempted,
+just swept up after the first 404. Fixed by giving 404 its own exception,
+`TmdbNotFoundError(TmdbUnavailableError)` — the subclass relationship means
+every existing `except TmdbUnavailableError` catch (the per-movie manual
+scrape's HTTP 502 mapping, the job-start "no API key" guards) needed zero
+changes, since it still catches this too; only `_run_bulk_scrape_job`'s
+per-candidate loop gained a new `except TmdbNotFoundError` clause *before*
+its `except TmdbUnavailableError` clause (order matters — a subclass catch
+must come first or the parent clause shadows it) that fails just that one
+candidate and keeps going, leaving the broader "stop everything" behavior
+intact for a genuinely revoked key or exhausted rate-limit retries. A
+related bug surfaced by the same live investigation: `season_number=0` (a
+real, common "Season 0" convention) is falsy in Python, so the
+`str(x or "")` idiom `TmdbClient` used for digit-extraction silently treated
+a legitimate season-0 episode as a *missing* parameter, raising a spurious
+`ValueError` before ever reaching TMDb — fixed by a `_digits_only()` helper
+that checks `is None` instead of truthiness, used for every id/season/
+episode parameter.
+
+**Three more match-quality fixes landed in the same follow-up round, from
+more real reported misses:**
+
+- **Edition/cut tags leaking into the best candidate.** The year-cut
+  candidate (`search_candidates`'s highest-priority rung) used to only run a
+  punctuation collapse, never the scene-token strip — fine when an edition
+  tag comes *after* the year (the common case, already stripped by the
+  tag-stripped fallback further down the ladder), but
+  `"Alien.Resurrection.Directors.Cut.1997....mp4"` puts `"Directors.Cut"`
+  *before* the year, so it rode straight into candidate #1 as `"Alien
+  Resurrection Directors Cut"` — never TMDb's actual title. Fixed by running
+  `_SCENE_TOKENS_RE`/`_BRACKETED_RE` over the pre-year segment too before
+  collapsing it; the un-stripped version is still kept as a lower-priority
+  fallback rung rather than dropped, in case the vocabulary ever over-matches
+  part of a legitimate title.
+- **A parent folder's "Title (Year)" as an extra, high-priority candidate.**
+  `search_candidates(stem, folder_name=...)` now tries a well-formed folder
+  name (`filename_parser.folder_title_candidate`, deliberately conservative —
+  requires a *parenthesized* year, since a bare year in a folder name is too
+  often unrelated branding/release-group text) before any filename-derived
+  rung at all. This rescues a file whose own name has nothing usable in it
+  (a bare release id, a badly mangled name) as long as it sits in a
+  curated `"Title (Year)/"` folder — `metadata_manager.movie_folder_name()`
+  computes it from the movie's `file_path` and threads it through both
+  `_search_movie_with_ladder` (bulk) and `search_movie_default_query`
+  (per-movie manual search default), so both flows benefit identically, same
+  as every other fix in this section.
+- **Show-level metadata fallback instead of a bare failure.** A `TmdbNotFoundError`
+  on a TV *episode* lookup (inside `apply_tv_episode`) or *season* lookup
+  (in `_run_bulk_scrape_job`, before calling it) now degrades to an empty
+  dict instead of propagating — every field these feed into already falls
+  back to show-level data when the episode/season-specific value is absent
+  (`poster_source = season.get("poster_url") or show.get("poster_url")`,
+  etc.), so the entry ends up with the *show's* poster/backdrop/overview/
+  genres/cast and a generic `"Show - SxxEyy"` title rather than nothing at
+  all. This is exactly the right outcome for an anthology/documentary show
+  (the reported *Forensic Files* "Season 00" case) whose specials/episodes
+  rarely line up with TMDb's own numbering — some useful artwork beats none.
+  The degraded season_details is still cached under `season_details_by_key`
+  so a whole season of these doesn't re-attempt the same failing lookup once
+  per episode.
+- **"Multiple retries before it gives up"**: a specific `tmdb_id` from a
+  search hit can still 404 on its own `details()`/`tv_details()` call (a
+  stale/merged/removed catalog entry) even though the *search* succeeded —
+  previously this failed the whole candidate after just the top result.
+  `_apply_first_working_movie_match` (movies) and `_resolve_tv_show` (shows)
+  now try up to `_MAX_MATCH_ATTEMPTS` (3) of the search response's top
+  results in turn, stopping at the first whose details lookup actually
+  succeeds, and only raising/failing once every attempt has 404'd. `_resolve_tv_show`
+  caches only a *working* `(tv_id, show_details)` pair, never a broken one,
+  so a later episode of the same show doesn't re-attempt an id already known
+  to fail.
+
 ## Per-system BIOS association (new — absent from the old doc)
 
 BIOS files are filed under each system's own "BIOS" category instead of one

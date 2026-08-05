@@ -57,10 +57,47 @@ class TmdbUnavailableError(RuntimeError):
     """Raised when TMDb can't be reached, rejects the request, or no API key is configured."""
 
 
+class TmdbNotFoundError(TmdbUnavailableError):
+    """A specific TMDb id (movie/show/season/episode) doesn't exist -- unlike
+    TmdbUnavailableError's other cases (invalid API key, unreachable,
+    rate-limited), which mean every subsequent call will fail the same way,
+    this is scoped to one lookup: the id was valid a moment ago (usually just
+    returned by a search call), but the specific resource it points at
+    doesn't exist. Most commonly a locally-numbered TV episode or season that
+    doesn't match TMDb's own numbering -- a season finale split into a
+    different number of parts than TMDb's, a "Season 0" specials folder TMDb
+    has no matching season for, etc. -- real libraries are full of these.
+
+    Subclasses TmdbUnavailableError so any existing ``except
+    TmdbUnavailableError`` catch (e.g. the per-movie manual scrape's HTTP 502
+    mapping) still catches this unchanged; only the bulk scrape job's
+    per-candidate loop needs to tell the two apart, so a single 404 fails
+    just that one candidate instead of aborting the whole run. Real incident
+    this fixed: two consecutive bulk runs against a ~1,250-movie library each
+    reported roughly "2 matched / 88 skipped / 1156 failed" in under 15
+    seconds -- 1,151 of those "failures" shared one identical reason string
+    ("TMDb has no movie with that id"), because a single 404 partway through
+    the run (a mis-numbered episode) used to abort the whole job and stamp
+    every untouched remaining candidate -- including obviously-unrelated
+    movies and Featurettes-folder extras -- with that one error, rather than
+    just failing the one candidate that actually hit it."""
+
+
 def tmdb_image_url(path: Optional[str], size: str) -> Optional[str]:
     if not path:
         return None
     return f"{TMDB_IMAGE_BASE}/{size}{path}"
+
+
+def _digits_only(value) -> str:
+    """String-of-digits form of an id/number parameter, treating ``None``
+    (not a falsy ``0``) as "missing". Season/episode numbers can legitimately
+    be ``0`` (Plex/Kodi/Jellyfin's "Season 0" convention for standalone TV
+    specials), and the tempting ``str(value or "")`` idiom is wrong here --
+    ``0 or ""`` evaluates to ``""``, silently treating a real season-0 episode
+    as if the parameter were never passed at all and raising a spurious
+    "required" error instead of ever reaching TMDb."""
+    return re.sub(r"[^0-9]", "", "" if value is None else str(value))
 
 
 class TmdbClient:
@@ -93,7 +130,7 @@ class TmdbClient:
                 if error.code == 401:
                     raise TmdbUnavailableError("TMDb rejected the configured API key") from error
                 if error.code == 404:
-                    raise TmdbUnavailableError("TMDb has no movie with that id") from error
+                    raise TmdbNotFoundError("TMDb has no result for that id") from error
                 if error.code == 429 and attempt < TMDB_MAX_429_RETRIES:
                     time.sleep(self._retry_delay_seconds(error, attempt))
                     attempt += 1
@@ -166,7 +203,7 @@ class TmdbClient:
         return output[: max(1, min(int(limit), 20))]
 
     def details(self, tmdb_id) -> dict:
-        safe_id = re.sub(r"[^0-9]", "", str(tmdb_id or ""))
+        safe_id = _digits_only(tmdb_id)
         if not safe_id:
             raise ValueError("tmdb_id is required")
         # append_to_response=credits gets cast/crew in the same request instead
@@ -199,7 +236,7 @@ class TmdbClient:
         a per-episode "still" screenshot -- see ``tv_episode_details``), so
         this is fetched once per show and reused across every episode file
         that show has on disk."""
-        safe_id = re.sub(r"[^0-9]", "", str(tv_id or ""))
+        safe_id = _digits_only(tv_id)
         if not safe_id:
             raise ValueError("tv_id is required")
         payload = self._get_json(f"/tv/{safe_id}", {"append_to_response": "credits"})
@@ -232,8 +269,8 @@ class TmdbClient:
         that stays show-level. Raises ``TmdbUnavailableError`` (404 mapped
         the same way ``tv_episode_details`` does) if the show has no such
         season."""
-        safe_tv_id = re.sub(r"[^0-9]", "", str(tv_id or ""))
-        safe_season = re.sub(r"[^0-9]", "", str(season_number or ""))
+        safe_tv_id = _digits_only(tv_id)
+        safe_season = _digits_only(season_number)
         if not safe_tv_id or not safe_season:
             raise ValueError("tv_id and season_number are required")
         payload = self._get_json(f"/tv/{safe_tv_id}/season/{safe_season}")
@@ -250,9 +287,9 @@ class TmdbClient:
         per-episode artwork). Raises ``TmdbUnavailableError`` (404 mapped the
         same way ``details`` does) if the show has no such season/episode,
         e.g. a locally-numbered episode that doesn't match TMDb's numbering."""
-        safe_tv_id = re.sub(r"[^0-9]", "", str(tv_id or ""))
-        safe_season = re.sub(r"[^0-9]", "", str(season_number or ""))
-        safe_episode = re.sub(r"[^0-9]", "", str(episode_number or ""))
+        safe_tv_id = _digits_only(tv_id)
+        safe_season = _digits_only(season_number)
+        safe_episode = _digits_only(episode_number)
         if not safe_tv_id or not safe_season or not safe_episode:
             raise ValueError("tv_id, season_number, and episode_number are required")
         payload = self._get_json(f"/tv/{safe_tv_id}/season/{safe_season}/episode/{safe_episode}")

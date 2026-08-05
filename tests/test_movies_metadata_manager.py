@@ -10,7 +10,7 @@ import app.storage.movie_scrape_jobs as movie_scrape_jobs
 import app.storage.movies_store as movies_store
 from app.common.settings import Settings
 from app.movies import metadata_manager
-from app.movies.tmdb_client import TmdbUnavailableError
+from app.movies.tmdb_client import TmdbNotFoundError, TmdbUnavailableError
 
 
 def _build_settings(root: Path) -> Settings:
@@ -117,6 +117,20 @@ class SearchTests(unittest.TestCase):
             fake = FakeTmdbClient(search_results=[{"tmdb_id": 603, "title": "The Matrix"}])
             results = metadata_manager.search(settings, "matrix", client=fake)
             self.assertEqual(results, [{"tmdb_id": 603, "title": "The Matrix"}])
+
+
+class MovieFolderNameTests(unittest.TestCase):
+    def test_returns_the_immediate_parent_directory_name(self):
+        movie = {"file_path": "Alien Resurrection (1997)/Alien.Resurrection.1997.mkv"}
+        self.assertEqual(metadata_manager.movie_folder_name(movie), "Alien Resurrection (1997)")
+
+    def test_bare_file_with_no_parent_returns_none(self):
+        movie = {"file_path": "Alien.Resurrection.1997.mkv"}
+        self.assertIsNone(metadata_manager.movie_folder_name(movie))
+
+    def test_falls_back_to_relative_path_when_file_path_is_absent(self):
+        movie = {"relative_path": "Some Folder (2001)/movie.mkv"}
+        self.assertEqual(metadata_manager.movie_folder_name(movie), "Some Folder (2001)")
 
 
 class SearchMovieDefaultQueryTests(unittest.TestCase):
@@ -344,10 +358,25 @@ class FakeBulkTmdbClient:
     def __init__(
         self, *, match_queries=None, unavailable_after=None, search_delay_seconds=0,
         tv_match_queries=None, tv_details=None, season_details=None, tv_episode_details=None,
+        not_found_episodes=None, multi_result_queries=None, not_found_movie_ids=None,
+        not_found_show_ids=None, not_found_seasons=None,
     ):
         self._match_queries = match_queries if match_queries is not None else set()
         self._tv_match_queries = tv_match_queries if tv_match_queries is not None else set()
         self._unavailable_after = unavailable_after
+        # (season_number, episode_number) pairs that 404 on TMDb -- simulates
+        # a locally-numbered episode that doesn't match TMDb's own numbering
+        # (see TmdbNotFoundError), independent of _unavailable_after (which
+        # simulates a genuinely fatal, job-aborting condition instead).
+        self._not_found_episodes = not_found_episodes if not_found_episodes is not None else set()
+        # query -> list of search results, for tests exercising "try the next
+        # result before giving up" -- the plain match_queries set above can
+        # only ever produce a single canned result.
+        self._multi_result_queries = multi_result_queries or {}
+        self._not_found_movie_ids = not_found_movie_ids if not_found_movie_ids is not None else set()
+        self._not_found_show_ids = not_found_show_ids if not_found_show_ids is not None else set()
+        # (tv_id, season_number) pairs that 404 on tv_season_details.
+        self._not_found_seasons = not_found_seasons if not_found_seasons is not None else set()
         self._search_delay_seconds = search_delay_seconds
         self._tv_details = tv_details or dict(_MATRIX_DETAILS, title="A Matched Show")
         # No poster_url by default -- apply_tv_episode falls back to the show
@@ -370,6 +399,8 @@ class FakeBulkTmdbClient:
             time.sleep(self._search_delay_seconds)
         self.search_calls.append(query)
         self._maybe_raise_unavailable(len(self.search_calls) + len(self.search_tv_calls))
+        if query in self._multi_result_queries:
+            return list(self._multi_result_queries[query])
         if query in self._match_queries:
             return [{"tmdb_id": 603, "title": "A Matched Movie"}]
         return []
@@ -377,23 +408,33 @@ class FakeBulkTmdbClient:
     def search_tv(self, query, year=None):
         self.search_tv_calls.append(query)
         self._maybe_raise_unavailable(len(self.search_calls) + len(self.search_tv_calls))
+        if query in self._multi_result_queries:
+            return list(self._multi_result_queries[query])
         if query in self._tv_match_queries:
             return [{"tmdb_id": 909, "title": "A Matched Show"}]
         return []
 
     def details(self, tmdb_id):
+        if tmdb_id in self._not_found_movie_ids:
+            raise TmdbNotFoundError(f"TMDb has no result for that id ({tmdb_id})")
         return dict(_MATRIX_DETAILS, tmdb_id=tmdb_id)
 
     def tv_details(self, tv_id):
         self.tv_details_calls.append(tv_id)
+        if tv_id in self._not_found_show_ids:
+            raise TmdbNotFoundError(f"TMDb has no result for that id ({tv_id})")
         return dict(self._tv_details, tmdb_id=tv_id)
 
     def tv_season_details(self, tv_id, season_number):
         self.tv_season_details_calls.append((tv_id, season_number))
+        if (tv_id, season_number) in self._not_found_seasons:
+            raise TmdbNotFoundError(f"TMDb has no result for that id (s{season_number})")
         return dict(self._season_details)
 
     def tv_episode_details(self, tv_id, season_number, episode_number):
         self.tv_episode_details_calls.append((tv_id, season_number, episode_number))
+        if (season_number, episode_number) in self._not_found_episodes:
+            raise TmdbNotFoundError(f"TMDb has no result for that id (s{season_number}e{episode_number})")
         return dict(self._tv_episode_details)
 
     def download_image(self, url):
@@ -717,6 +758,25 @@ class BulkScrapeTests(unittest.TestCase):
 
             self.assertEqual(job["matched_count"], 1)
 
+    def test_parent_folder_name_rescues_an_otherwise_unsearchable_filename(self):
+        # "Perhaps using directory structure ... can be used to help?" -- a
+        # movie sitting in its own well-named "Title (Year)" folder should
+        # still be found even when the file's own name has nothing usable in
+        # it (a bare release id, or a name that got mangled some other way).
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Alien Resurrection (1997)/----.mkv")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+
+            fake = FakeBulkTmdbClient(match_queries={"Alien Resurrection"})
+            metadata_manager.start_bulk_scrape(settings, rescan_all=True, client=fake)
+            job = _wait_for_bulk_scrape_status(settings)
+
+            self.assertEqual(job["matched_count"], 1)
+            self.assertEqual(job["skipped_count"], 0)
+            self.assertEqual(fake.search_calls[0], "Alien Resurrection")
+
     def test_extras_folder_content_is_skipped_without_a_tmdb_call(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -819,6 +879,175 @@ class BulkScrapeTests(unittest.TestCase):
 
             self.assertEqual(job["failed_count"], 1)
             self.assertEqual(job["matched_count"], 0)
+
+    def test_a_single_episode_404_degrades_to_a_show_level_match_and_the_run_continues(self):
+        # Regression for a real incident: a single TmdbNotFoundError (e.g. a
+        # locally-numbered episode -- "S01E25" -- that doesn't match TMDb's
+        # own numbering for that show/season, as with a season finale split
+        # into a different number of parts) used to be indistinguishable
+        # from TMDb being completely unavailable. The bulk job aborted the
+        # whole run and mass-failed every remaining candidate with that one
+        # 404's message. Confirmed live: two consecutive real bulk runs
+        # against a ~1,250-movie library each reported "2 matched / 88
+        # skipped / 1156 failed" in under 15 seconds -- 1,151 of those
+        # "failures" shared one identical reason string, because they were
+        # never actually attempted, just swept up after the first 404.
+        #
+        # Fixed two ways: the mass-abort is gone (a 404 fails only that one
+        # candidate), *and* an episode-level 404 specifically no longer even
+        # counts as a failure at all -- it degrades to the show's own
+        # poster/backdrop/overview/genres with a generic "Show - SxxEyy"
+        # title, since that's a real, useful result for an anthology/
+        # documentary show whose specials rarely match TMDb's numbering
+        # (the reported Forensic Files "Season 00" case).
+        #
+        # File order matters here: the failing episode must sort *before*
+        # "Zzz Good Match" so a real run would reach it afterward -- proving
+        # the job kept going rather than merely finishing quickly by luck.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Shows/Lost/Lost (2004) - S01E24 - Exodus (2).mkv")
+            _write_movie(root, "Shows/Lost/Lost (2004) - S01E25 - Exodus (3).mkv")
+            _write_movie(root, "Zzz Good Match.mp4")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+            e25_key = next(
+                m["entry_key"] for m in movies_store.list_movies(settings.movies_root)
+                if "S01E25" in m["movie_name"]
+            )
+
+            fake = FakeBulkTmdbClient(
+                tv_match_queries={"Lost"},
+                match_queries={"Zzz Good Match"},
+                not_found_episodes={(1, 25)},
+            )
+            metadata_manager.start_bulk_scrape(settings, rescan_all=True, client=fake)
+            job = _wait_for_bulk_scrape_status(settings)
+
+            self.assertEqual(job["matched_count"], 3)  # S01E24 + degraded S01E25 + Zzz Good Match
+            self.assertEqual(job["failed_count"], 0)
+            self.assertEqual(job["skipped_count"], 0)
+
+            degraded = movies_store.get_movie_metadata(settings.movies_root, e25_key)
+            self.assertEqual(degraded["title"], "A Matched Show - S01E25")
+            self.assertEqual(degraded["episode_title"], "")
+            self.assertTrue(degraded["poster_relative_path"])  # show poster, via the fallback cascade
+
+    def test_movie_details_404_retries_the_next_search_result_before_giving_up(self):
+        # "Multiple retries before it gives up": the top search result's own
+        # tmdb_id can still 404 on details() (a stale/merged catalog entry),
+        # and the next result in the same search response is often the
+        # actual movie -- giving up after just the top result wasted an
+        # otherwise-good match.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Some.Movie.1999.1080p.BluRay.mp4")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+
+            fake = FakeBulkTmdbClient(
+                multi_result_queries={
+                    "Some Movie": [
+                        {"tmdb_id": 111, "title": "Wrong Movie"},
+                        {"tmdb_id": 222, "title": "Also Wrong"},
+                        {"tmdb_id": 603, "title": "Some Movie"},
+                    ]
+                },
+                not_found_movie_ids={111, 222},
+            )
+            metadata_manager.start_bulk_scrape(settings, rescan_all=True, client=fake)
+            job = _wait_for_bulk_scrape_status(settings)
+
+            self.assertEqual(job["matched_count"], 1)
+            self.assertEqual(job["failed_count"], 0)
+
+    def test_movie_fails_only_after_exhausting_all_retry_attempts(self):
+        # The other half of "multiple retries before it gives up": once every
+        # attempted result 404s, the candidate genuinely fails (recorded
+        # once, not per-attempt) and the run moves on to the next candidate
+        # rather than aborting.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "All.Broken.1999.1080p.mp4")
+            _write_movie(root, "Zzz Good Match.mp4")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+
+            fake = FakeBulkTmdbClient(
+                multi_result_queries={
+                    "All Broken": [
+                        {"tmdb_id": 111, "title": "X"},
+                        {"tmdb_id": 222, "title": "Y"},
+                        {"tmdb_id": 333, "title": "Z"},
+                    ]
+                },
+                match_queries={"Zzz Good Match"},
+                not_found_movie_ids={111, 222, 333},
+            )
+            metadata_manager.start_bulk_scrape(settings, rescan_all=True, client=fake)
+            job = _wait_for_bulk_scrape_status(settings)
+
+            self.assertEqual(job["matched_count"], 1)  # Zzz Good Match still processed
+            self.assertEqual(job["failed_count"], 1)  # All Broken, once, not three times
+            failed = metadata_manager.get_bulk_scrape_items(settings, movie_scrape_job_items.STATUS_FAILED)
+            self.assertEqual(len(failed["items"]), 1)
+            self.assertIn("All.Broken", failed["items"][0]["movie_name"])
+
+    def test_show_details_404_retries_the_next_show_result_before_giving_up(self):
+        # TV counterpart of the movie-details retry: the top show-search
+        # result's tv_id can 404 on tv_details() too.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Shows/Mystery Show/Mystery Show - S01E01 - Pilot.mkv")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+
+            fake = FakeBulkTmdbClient(
+                multi_result_queries={
+                    "Mystery Show": [
+                        {"tmdb_id": 111, "title": "Wrong Show"},
+                        {"tmdb_id": 909, "title": "Mystery Show"},
+                    ]
+                },
+                not_found_show_ids={111},
+            )
+            metadata_manager.start_bulk_scrape(settings, rescan_all=True, client=fake)
+            job = _wait_for_bulk_scrape_status(settings)
+
+            self.assertEqual(job["matched_count"], 1)
+            self.assertEqual(job["failed_count"], 0)
+            self.assertCountEqual(fake.tv_details_calls, [111, 909])
+
+    def test_season_404_degrades_to_show_level_poster_instead_of_failing(self):
+        # Real reported case: "Forensic Files" documentary-style episodes
+        # filed under a local "Season 00" folder rarely have a matching
+        # TMDb season at all. Degrading season_details to an empty dict
+        # (rather than failing the whole episode) lets apply_tv_episode's
+        # own poster fallback cascade reach the show's poster instead.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Shows/Forensic Files/Season 00/Forensic Files - S00E04 - Payback.mp4")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+            entry_key = movies_store.list_movies(settings.movies_root)[0]["entry_key"]
+
+            fake = FakeBulkTmdbClient(
+                tv_match_queries={"Forensic Files"},
+                tv_details={"tmdb_id": 909, "title": "Forensic Files", "poster_url": "https://image.tmdb.org/t/p/w500/ff.jpg", "backdrop_url": None, "overview": "True crime.", "tagline": "", "genres": [], "cast": [], "release_date": None, "rating": None},
+                not_found_seasons={(909, 0)},
+            )
+            metadata_manager.start_bulk_scrape(settings, rescan_all=True, client=fake)
+            job = _wait_for_bulk_scrape_status(settings)
+
+            self.assertEqual(job["matched_count"], 1)
+            self.assertEqual(job["failed_count"], 0)
+            metadata = movies_store.get_movie_metadata(settings.movies_root, entry_key)
+            # Episode-level lookup still succeeds here (only the season
+            # 404s), so the episode's own title is present -- what's
+            # degraded is specifically the poster, which falls back to the
+            # show's own poster since the season has none.
+            self.assertEqual(metadata["title"], "Forensic Files - S00E04 - A Matched Episode")
+            self.assertTrue(metadata["poster_relative_path"])
 
     def test_throttles_before_each_tmdb_touching_candidate(self):
         # Uses the real (non-zeroed) module throttle constant for this one

@@ -38,7 +38,7 @@ try:
     from ..storage import movie_scrape_jobs as _jobs
     from ..storage import movie_scrape_job_items as _job_items
     from . import filename_parser as _filename_parser
-    from .tmdb_client import TmdbClient, TmdbUnavailableError
+    from .tmdb_client import TmdbClient, TmdbNotFoundError, TmdbUnavailableError
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.settings import Settings  # type: ignore
     from storage.state_store import database_path as _state_database_path  # type: ignore
@@ -48,7 +48,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from storage import movie_scrape_jobs as _jobs  # type: ignore
     from storage import movie_scrape_job_items as _job_items  # type: ignore
     from movies import filename_parser as _filename_parser  # type: ignore
-    from movies.tmdb_client import TmdbClient, TmdbUnavailableError  # type: ignore
+    from movies.tmdb_client import TmdbClient, TmdbNotFoundError, TmdbUnavailableError  # type: ignore
 
 MOVIES_SCRAPER_STATE_NAMESPACE = "movies_scraper.json"
 # TMDb only ever serves posters/backdrops as JPEG -- unlike a generic
@@ -166,6 +166,14 @@ def apply(settings: Settings, entry_key: str, tmdb_id, *, client: Optional[TmdbC
     )
 
 
+# Substituted for season/episode TMDb lookups that 404 (TmdbNotFoundError) --
+# every field these two feed into already falls back to show-level data when
+# absent (see apply_tv_episode below), so an "empty" dict degrades gracefully
+# rather than leaving the entry with no artwork/metadata at all.
+_EMPTY_TV_SEASON_DETAILS = {"title": "", "overview": "", "air_date": None, "poster_url": None}
+_EMPTY_TV_EPISODE_DETAILS = {"title": "", "overview": "", "air_date": None, "rating": None, "still_url": None}
+
+
 def apply_tv_episode(
     settings: Settings,
     entry_key: str,
@@ -188,7 +196,16 @@ def apply_tv_episode(
     distinguishes it: ``"tmdb_tv"`` vs plain movies' ``"tmdb"``).
     ``show_details``/``season_details`` let a caller that already fetched
     them for an earlier episode of the same show/season (the bulk job does,
-    once each) skip refetching for every subsequent episode."""
+    once each) skip refetching for every subsequent episode.
+
+    A ``TmdbNotFoundError`` on the episode-specific lookup (locally-numbered
+    episode that doesn't match TMDb's numbering -- common for anthology/
+    documentary shows like *Forensic Files* whose "Season 00" specials rarely
+    line up with TMDb's own listing) degrades to show-level metadata instead
+    of leaving the entry with nothing: every field below already falls back
+    to ``show`` when the episode-specific value is missing, so an empty
+    episode dict yields the show's poster/backdrop/overview/genres/cast with
+    a generic "Show - SxxEyy" title in place of the specific episode title."""
     movie = _movies_store.get_movie_by_key(settings.movies_root, entry_key)
     if not movie:
         raise MovieNotFoundError(entry_key)
@@ -198,7 +215,10 @@ def apply_tv_episode(
     client = client or _client(settings)
     show = show_details if show_details is not None else client.tv_details(tv_id)
     season = season_details if season_details is not None else client.tv_season_details(tv_id, season_number)
-    episode = client.tv_episode_details(tv_id, season_number, episode_number)
+    try:
+        episode = client.tv_episode_details(tv_id, season_number, episode_number)
+    except TmdbNotFoundError:
+        episode = dict(_EMPTY_TV_EPISODE_DETAILS)
 
     # Season poster first -- it's usually a distinct image from the show's
     # general poster (this is what makes clicking between seasons on the
@@ -261,6 +281,17 @@ def apply_tv_episode(
 
 # --------------------------------------------------------------- bulk scrape
 
+def movie_folder_name(movie: dict) -> Optional[str]:
+    """The movie's immediate parent directory name, or ``None`` for a file
+    sitting directly under ``movies_root`` (or any other path with no
+    parent segment) -- fed to ``filename_parser.search_candidates``'s
+    ``folder_name`` so a "Title (Year)" folder (a curated Radarr/Filebot-
+    style movie folder, or this app's own "Shows/<Show (Year)>/" layout) can
+    rescue a search even when the file's own name doesn't parse well."""
+    parent = Path(movie.get("file_path") or movie.get("relative_path") or "").parent.name
+    return parent or None
+
+
 def _has_artwork(settings: Settings, entry_key: str) -> bool:
     """"Missing artwork" (the bulk job's skip condition when ``rescan_all`` is
     false) means no poster on file yet -- the poster is the primary artwork a
@@ -286,13 +317,14 @@ def _throttle_before_tmdb_call() -> None:
         time.sleep(_REQUEST_THROTTLE_SECONDS)
 
 
-def _search_movie_ladder_with_label(client: TmdbClient, movie_name: str) -> Tuple[str, list]:
+def _search_movie_ladder_with_label(client: TmdbClient, movie_name: str, folder_name: Optional[str] = None) -> Tuple[str, list]:
     """Try each ``(title, year)`` rung of ``filename_parser.search_candidates``
     against TMDb movie search, stopping at the first hit -- see that
-    function's docstring for why the year-filtered title comes first. A
-    ``TmdbUnavailableError`` on any rung propagates immediately (the caller's
-    "stop the whole job" handling applies the same as a single-candidate
-    search would).
+    function's docstring for why the year-filtered title comes first (and,
+    when ``folder_name`` is given, why a "Title (Year)" parent folder is
+    tried before any filename-derived rung at all). A ``TmdbUnavailableError``
+    on any rung propagates immediately (the caller's "stop the whole job"
+    handling applies the same as a single-candidate search would).
 
     Also returns a human-readable label ("title (year)", or the bare title
     when there's no year) for whichever rung actually matched -- or the last
@@ -309,7 +341,7 @@ def _search_movie_ladder_with_label(client: TmdbClient, movie_name: str) -> Tupl
     the file was renamed by hand first."""
     stem = Path(movie_name or "").stem
     label = movie_name or ""
-    for title, year in _filename_parser.search_candidates(stem):
+    for title, year in _filename_parser.search_candidates(stem, folder_name=folder_name):
         label = f"{title} ({year})" if year else title
         results = client.search(title, year=year)
         if results:
@@ -317,15 +349,17 @@ def _search_movie_ladder_with_label(client: TmdbClient, movie_name: str) -> Tupl
     return label, []
 
 
-def _search_movie_with_ladder(client: TmdbClient, movie_name: str) -> list:
+def _search_movie_with_ladder(client: TmdbClient, movie_name: str, folder_name: Optional[str] = None) -> list:
     """Bulk auto-scrape's entry point into the shared candidate ladder -- see
     ``_search_movie_ladder_with_label`` for the actual logic; this just
     discards the display label bulk has no use for."""
-    _label, results = _search_movie_ladder_with_label(client, movie_name)
+    _label, results = _search_movie_ladder_with_label(client, movie_name, folder_name)
     return results
 
 
-def search_movie_default_query(settings: Settings, movie_name: str, *, client: Optional[TmdbClient] = None) -> dict:
+def search_movie_default_query(
+    settings: Settings, movie_name: str, folder_name: Optional[str] = None, *, client: Optional[TmdbClient] = None,
+) -> dict:
     """Per-movie manual search's default (no custom query typed yet) case:
     reuses the exact same candidate ladder ``_search_movie_ladder_with_label``
     already trusts for bulk scraping, so a first-time search on a movie's own
@@ -338,7 +372,7 @@ def search_movie_default_query(settings: Settings, movie_name: str, *, client: O
     ``search``/``apply`` above; real callers always resolve it from the
     stored API key."""
     client = client or _client(settings)
-    query, results = _search_movie_ladder_with_label(client, movie_name)
+    query, results = _search_movie_ladder_with_label(client, movie_name, folder_name)
     return {"query": query, "results": results}
 
 
@@ -356,6 +390,60 @@ def _search_show_with_ladder(client: TmdbClient, show_title: str, year: Optional
         if results:
             return results
     return []
+
+
+# How many of a search response's top results to try before giving up on a
+# candidate entirely -- a specific tmdb_id from a search hit can still 404 on
+# its own details() call (a stale/merged/removed catalog entry is rare but
+# real), and the next result in the same response is often the actual movie/
+# show. Giving up after just the top result wasted an otherwise-good search
+# match; this is the "multiple retries before it gives up" behavior.
+_MAX_MATCH_ATTEMPTS = 3
+
+
+def _apply_first_working_movie_match(settings: Settings, movie: dict, results: list, client: TmdbClient) -> None:
+    """Try applying each of the top ``_MAX_MATCH_ATTEMPTS`` movie search
+    results in turn, stopping at the first whose ``details()`` lookup
+    actually succeeds. Raises the last ``TmdbNotFoundError`` if every
+    attempt 404s, so the caller's existing per-candidate handling records
+    the failure exactly as it would for a single-attempt miss."""
+    last_error: Optional[TmdbNotFoundError] = None
+    for result in results[:_MAX_MATCH_ATTEMPTS]:
+        try:
+            apply(settings, movie["entry_key"], result["tmdb_id"], client=client)
+            return
+        except TmdbNotFoundError as error:
+            last_error = error
+    raise last_error
+
+
+def _resolve_tv_show(
+    client: TmdbClient, show_title: str, year: Optional[str], show_id_by_title: dict, show_details_by_id: dict,
+) -> Tuple[Optional[int], Optional[dict]]:
+    """Resolve a show title to a *working* ``(tv_id, show_details)`` pair,
+    trying each of the top ``_MAX_MATCH_ATTEMPTS`` show-search results in
+    turn until one's ``tv_details()`` lookup actually succeeds -- the TV
+    side of ``_apply_first_working_movie_match``'s "try the next result"
+    retry, so a single stale/removed catalog entry doesn't fail the whole
+    show (and therefore every episode of it). Returns ``(None, None)`` if
+    nothing usable was found. Caches only a *working* id/details pair, never
+    a broken one, so a later episode of the same show doesn't re-attempt an
+    id already known to 404."""
+    show_key = show_title.lower()
+    cached_id = show_id_by_title.get(show_key)
+    if cached_id is not None:
+        return cached_id, show_details_by_id.get(cached_id)
+    show_results = _search_show_with_ladder(client, show_title, year)
+    for result in show_results[:_MAX_MATCH_ATTEMPTS]:
+        candidate_id = result["tmdb_id"]
+        try:
+            show_details = client.tv_details(candidate_id)
+        except TmdbNotFoundError:
+            continue
+        show_id_by_title[show_key] = candidate_id
+        show_details_by_id[candidate_id] = show_details
+        return candidate_id, show_details
+    return None, None
 
 
 def _record_item(settings: Settings, movie: dict, status: str, reason: str = "") -> None:
@@ -402,27 +490,29 @@ def _run_bulk_scrape_job(settings: Settings, job_id: int, candidates: list, clie
 
             if parsed.kind == _filename_parser.KIND_EPISODE:
                 _throttle_before_tmdb_call()
-                show_key = parsed.show_title.lower()
-                tv_id = show_id_by_title.get(show_key)
+                tv_id, show_details = _resolve_tv_show(
+                    client, parsed.show_title, parsed.year, show_id_by_title, show_details_by_id,
+                )
                 if tv_id is None:
-                    show_results = _search_show_with_ladder(client, parsed.show_title, parsed.year)
-                    if not show_results:
-                        failed += 1
-                        _record_item(
-                            settings, movie, _job_items.STATUS_FAILED,
-                            f"no TMDb show match for \"{parsed.show_title}\"",
-                        )
-                        continue
-                    tv_id = show_results[0]["tmdb_id"]
-                    show_id_by_title[show_key] = tv_id
-                show_details = show_details_by_id.get(tv_id)
-                if show_details is None:
-                    show_details = client.tv_details(tv_id)
-                    show_details_by_id[tv_id] = show_details
+                    failed += 1
+                    _record_item(
+                        settings, movie, _job_items.STATUS_FAILED,
+                        f"no TMDb show match for \"{parsed.show_title}\"",
+                    )
+                    continue
                 season_key = (tv_id, parsed.season)
                 season_details = season_details_by_key.get(season_key)
                 if season_details is None:
-                    season_details = client.tv_season_details(tv_id, parsed.season)
+                    try:
+                        season_details = client.tv_season_details(tv_id, parsed.season)
+                    except TmdbNotFoundError:
+                        # No TMDb season matching this locally-numbered one (a
+                        # "Season 0" specials folder is the common case) --
+                        # degrade to show-level data (apply_tv_episode's own
+                        # poster/backdrop cascade already falls back to the
+                        # show when the season has none) instead of failing
+                        # every episode of this season.
+                        season_details = dict(_EMPTY_TV_SEASON_DETAILS)
                     season_details_by_key[season_key] = season_details
                 apply_tv_episode(
                     settings, movie["entry_key"], tv_id, parsed.season, parsed.episode,
@@ -432,23 +522,41 @@ def _run_bulk_scrape_job(settings: Settings, job_id: int, candidates: list, clie
                 _record_item(settings, movie, _job_items.STATUS_MATCHED)
                 continue
 
+            folder_name = movie_folder_name(movie)
             stem = Path(movie.get("movie_name") or "").stem
-            if not _filename_parser.search_candidates(stem):
+            if not _filename_parser.search_candidates(stem, folder_name=folder_name):
                 # Nothing usable to search TMDb with (e.g. a filename that's
-                # all punctuation) -- counted separately from "failed" since
-                # no TMDb request was even attempted for this one.
+                # all punctuation, and no "Title (Year)" parent folder to
+                # rescue it either) -- counted separately from "failed"
+                # since no TMDb request was even attempted for this one.
                 skipped += 1
                 _record_item(settings, movie, _job_items.STATUS_SKIPPED, "filename has no usable title text")
                 continue
             _throttle_before_tmdb_call()
-            results = _search_movie_with_ladder(client, movie.get("movie_name") or "")
+            results = _search_movie_with_ladder(client, movie.get("movie_name") or "", folder_name)
             if not results:
                 failed += 1
                 _record_item(settings, movie, _job_items.STATUS_FAILED, "no TMDb results for any tried title/year")
                 continue
-            apply(settings, movie["entry_key"], results[0]["tmdb_id"], client=client)
+            _apply_first_working_movie_match(settings, movie, results, client)
             matched += 1
             _record_item(settings, movie, _job_items.STATUS_MATCHED)
+        except TmdbNotFoundError as error:
+            # A specific movie/show/season/episode id 404'd -- most often a
+            # locally-numbered TV episode or season that doesn't match TMDb's
+            # own numbering (a season finale split into a different number of
+            # parts, a "Season 0" specials folder TMDb has no season for,
+            # ...). This is a per-candidate miss, not TMDb being unavailable:
+            # only this one candidate fails and the run continues, unlike the
+            # broader TmdbUnavailableError below. Before this distinction
+            # existed, a single one of these anywhere in a run mass-failed
+            # every remaining candidate with this exact message instead --
+            # confirmed against a real ~1,250-movie library where two
+            # consecutive runs each reported "2 matched / 88 skipped / 1156
+            # failed" in under 15 seconds, 1,151 of those failures sharing
+            # this identical reason string.
+            failed += 1
+            _record_item(settings, movie, _job_items.STATUS_FAILED, str(error))
         except TmdbUnavailableError as error:
             # The key was rejected or TMDb is unreachable/still rate-limited
             # after TmdbClient's own retries -- every remaining candidate

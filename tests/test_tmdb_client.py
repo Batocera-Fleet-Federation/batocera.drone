@@ -3,7 +3,7 @@ import unittest
 from unittest import mock
 from urllib.error import HTTPError, URLError
 
-from app.movies.tmdb_client import TmdbClient, TmdbUnavailableError, tmdb_image_url
+from app.movies.tmdb_client import TmdbClient, TmdbNotFoundError, TmdbUnavailableError, tmdb_image_url
 
 
 class FakeResponse:
@@ -243,11 +243,15 @@ class TmdbClientDetailsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             client.details("")
 
-    def test_404_raises_tmdb_unavailable(self) -> None:
+    def test_404_raises_tmdb_not_found(self) -> None:
+        # TmdbNotFoundError subclasses TmdbUnavailableError -- a caller that
+        # only catches the broader type (e.g. the per-movie manual scrape's
+        # HTTP 502 mapping) is unaffected; only the bulk job's per-candidate
+        # loop needs to tell the two apart (see test_movies_metadata_manager.py).
         client = TmdbClient("key")
         error = HTTPError("https://api.themoviedb.org/3/movie/999999999", 404, "Not Found", None, None)
         with mock.patch("app.movies.tmdb_client.urlopen", side_effect=error):
-            with self.assertRaises(TmdbUnavailableError):
+            with self.assertRaises(TmdbNotFoundError):
                 client.details(999999999)
 
 
@@ -307,11 +311,26 @@ class TmdbClientTvSeasonDetailsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             client.tv_season_details(1405, "")
 
-    def test_404_raises_tmdb_unavailable(self) -> None:
+    def test_season_zero_is_not_treated_as_missing(self) -> None:
+        # Regression: season_number=0 is a real, common case (Plex/Kodi/
+        # Jellyfin's "Season 0" convention for standalone TV specials), but
+        # Python's `season_number or ""` idiom treats the falsy int 0 the
+        # same as an empty/missing value, raising a spurious ValueError
+        # before ever reaching TMDb. Confirmed live: three real "Forensic
+        # Files Season 00" episodes failed a bulk scrape with exactly this
+        # error ("tv_id and season_number are required").
+        payload = json.dumps({"name": "Specials", "overview": "", "air_date": None, "poster_path": None}).encode("utf-8")
+        client = TmdbClient("key")
+        with mock.patch("app.movies.tmdb_client.urlopen", return_value=FakeResponse(payload)) as urlopen:
+            details = client.tv_season_details(1405, 0)
+        self.assertEqual(details["title"], "Specials")
+        self.assertIn("/tv/1405/season/0", urlopen.call_args[0][0].full_url)
+
+    def test_404_raises_tmdb_not_found(self) -> None:
         client = TmdbClient("key")
         error = HTTPError("https://api.themoviedb.org/3/tv/1405/season/99", 404, "Not Found", None, None)
         with mock.patch("app.movies.tmdb_client.urlopen", side_effect=error):
-            with self.assertRaises(TmdbUnavailableError):
+            with self.assertRaises(TmdbNotFoundError):
                 client.tv_season_details(1405, 99)
 
 
@@ -340,11 +359,24 @@ class TmdbClientTvEpisodeDetailsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             client.tv_episode_details(1405, "", 1)
 
-    def test_404_raises_tmdb_unavailable(self) -> None:
+    def test_season_and_episode_zero_are_not_treated_as_missing(self) -> None:
+        # Same regression as tv_season_details -- season_number=0 (and, for
+        # consistency, episode_number=0) must not be mistaken for a missing
+        # parameter just because 0 is falsy in Python.
+        payload = json.dumps(
+            {"name": "Special", "overview": "", "air_date": None, "vote_average": None, "still_path": None}
+        ).encode("utf-8")
+        client = TmdbClient("key")
+        with mock.patch("app.movies.tmdb_client.urlopen", return_value=FakeResponse(payload)) as urlopen:
+            details = client.tv_episode_details(1405, 0, 0)
+        self.assertEqual(details["title"], "Special")
+        self.assertIn("/tv/1405/season/0/episode/0", urlopen.call_args[0][0].full_url)
+
+    def test_404_raises_tmdb_not_found(self) -> None:
         client = TmdbClient("key")
         error = HTTPError("https://api.themoviedb.org/3/tv/1405/season/99/episode/1", 404, "Not Found", None, None)
         with mock.patch("app.movies.tmdb_client.urlopen", side_effect=error):
-            with self.assertRaises(TmdbUnavailableError):
+            with self.assertRaises(TmdbNotFoundError):
                 client.tv_episode_details(1405, 99, 1)
 
 

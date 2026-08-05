@@ -7032,11 +7032,17 @@ class NavRestructureTests(unittest.TestCase):
     def test_theme_is_reachable_via_the_artwork_panel_tabs(self) -> None:
         # Theme was folded into the "Artwork" admin panel as a second tab
         # (alongside Artwork & Metadata) rather than getting its own
-        # admin-menu card.
+        # admin-menu card. The tile itself lands on #theme by default, not
+        # #admin/artwork -- that tab's gamelist scan can take several
+        # seconds on a large ROM library, so defaulting to it meant every
+        # visit to this tile paid that cost even for someone who only
+        # wanted Movies or Theme Gallery (see the tile's own comment in
+        # drone.js). Artwork & Metadata is still one click away via the tab
+        # bar checked below.
         menu_start = self.js.index("async function renderAdminMenu()")
         menu_end = self.js.index("async function updateDroneApp()")
         menu = self.js[menu_start:menu_end]
-        self.assertIn("setHash('#admin/artwork')", menu)
+        self.assertIn("setHash('#theme')", menu)
         self.assertIn(">Artwork<", menu)
         self.assertNotIn(">Theme<", menu)
 

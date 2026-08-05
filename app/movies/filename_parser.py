@@ -94,6 +94,14 @@ _TRAILING_GROUP_RE = re.compile(r"-[A-Za-z0-9.]{2,20}$")
 _BRACKETED_RE = re.compile(r"[\[\(][^\[\]()]*[\])]")
 _YEAR_RE = re.compile(r"\b((?:19|20)\d{2})\b")
 _PUNCTUATION_RE = re.compile(r"[.\-_,;:\[\]()<>/]+")
+# A "(Year)" anywhere in a *folder* name -- deliberately not anchored to the
+# end, since a well-organized folder can still carry trailing quality tags
+# ("Alien Resurrection (1997) [1080p] [BluRay]"), but unlike a filename's
+# year token this one must be parenthesized: a bare year is common enough in
+# an unrelated folder name (e.g. a release-group or torrent-site folder) that
+# treating it the same as a real "Title (Year)" folder would too often be
+# wrong.
+_FOLDER_YEAR_RE = re.compile(r"\((?P<year>(?:19|20)\d{2})\)")
 
 
 @dataclass(frozen=True)
@@ -115,6 +123,33 @@ def _normalize_unicode(text: str) -> str:
 def _collapse(text: str) -> str:
     text = _PUNCTUATION_RE.sub(" ", text)
     return re.sub(r"\s+", " ", text).strip()
+
+
+def folder_title_candidate(folder_name: str) -> Optional[Tuple[str, str]]:
+    """``(title, year)`` from a "Title (Year)" *folder* name (the common
+    Radarr/Filebot/Plex movie-folder convention -- and, in this app's own
+    library, the same shape a movies-download folder or a "Shows/<Show
+    (Year)>/" tree already uses), or ``None`` if the folder doesn't carry a
+    parenthesized year at all.
+
+    A folder someone (or something) organized things into is often a
+    cleaner, more trustworthy title than the release filename inside it --
+    especially once a human has renamed the folder by hand, or for a show
+    folder whose *episode* filenames are the messy part. Deliberately
+    conservative: requires the year to be parenthesized (unlike a filename's
+    year token, a bare year in a folder name is too often unrelated -- a
+    release-group or site-branding folder, not the title) and, unlike the
+    filename year-cut, doesn't also try the un-stripped variant -- a folder
+    name is far less likely to carry genuine title text past the tag-strip
+    than a full release filename is."""
+    match = _FOLDER_YEAR_RE.search(folder_name or "")
+    if not match:
+        return None
+    raw_title_part = folder_name[: match.start()]
+    title = _collapse(_SCENE_TOKENS_RE.sub(" ", _BRACKETED_RE.sub(" ", raw_title_part)))
+    if not title:
+        return None
+    return title, match.group("year")
 
 
 def classify(file_path: str, file_name: str) -> ParsedEntry:
@@ -146,22 +181,40 @@ def classify(file_path: str, file_name: str) -> ParsedEntry:
     )
 
 
-def search_candidates(stem: str) -> List[Tuple[str, Optional[str]]]:
+def search_candidates(stem: str, *, folder_name: Optional[str] = None) -> List[Tuple[str, Optional[str]]]:
     """Build an ordered ladder of ``(title, year)`` search candidates from a
     filename stem (extension already stripped) or a parsed show title --
     most-precise first. Callers try each in turn and stop at the first one
     that gets a TMDb hit.
 
-    The single most valuable move is candidate #1: truncate the title at its
-    year token and pass the year as a TMDb filter. Scene-release convention
-    always places the year immediately after the title, so this one cut
-    reliably drops every trailing quality/codec/group tag *and* disambiguates
-    remakes/reboots that share a title (this library alone has a dozen
-    different "Halloween" movies spanning 1978-2022). Candidate #2 repeats
-    the same title without the year filter, in case the filename's year is
-    wrong (a re-release date, a typo'd release-group tag). The rest are
-    fallbacks for names with no year at all (the "Ant-Man (1080p).mkv" style)
-    or where TMDb's fuzzy search still needs the noise stripped by hand.
+    ``folder_name`` (optional -- the file's immediate parent directory, if
+    any) is tried *first* when it carries a "Title (Year)" pattern
+    (``folder_title_candidate``): a folder someone organized things into is
+    often cleaner and more trustworthy than the release filename inside it.
+    Every rung below this is filename-only, unaffected by whether a folder
+    candidate was found.
+
+    The single most valuable filename-based move is the next candidate:
+    truncate the title at its year token and pass the year as a TMDb filter.
+    Scene-release convention always places the year immediately after the
+    title, so this one cut reliably drops every trailing quality/codec/group
+    tag *and* disambiguates remakes/reboots that share a title (this library
+    alone has a dozen different "Halloween" movies spanning 1978-2022). The
+    next rung repeats the same title without the year filter, in case the
+    filename's year is wrong (a re-release date, a typo'd release-group
+    tag). The rest are fallbacks for names with no year at all (the
+    "Ant-Man (1080p).mkv" style) or where TMDb's fuzzy search still needs the
+    noise stripped by hand.
+
+    The year-cut candidate also gets the *same* scene-token stripping as the
+    tag-stripped fallback below, not just a punctuation collapse -- some
+    releases put an edition tag *before* the year instead of after
+    ("Alien.Resurrection.Directors.Cut.1997...", rather than the more common
+    "Movie.1997.Directors.Cut..."), and TMDb's own title is never "Alien
+    Resurrection Directors Cut", so leaving that text in reliably broke the
+    match. The un-stripped year-cut title is still added as a further
+    fallback rung afterward, in case the vocabulary ever over-matches part of
+    a legitimate title.
     """
     stem = _normalize_unicode(stem)
     candidates: List[Tuple[str, Optional[str]]] = []
@@ -170,11 +223,23 @@ def search_candidates(stem: str) -> List[Tuple[str, Optional[str]]]:
         if title and (title, year) not in candidates:
             candidates.append((title, year))
 
+    folder_candidate = folder_title_candidate(folder_name) if folder_name else None
+    if folder_candidate:
+        folder_title, folder_year = folder_candidate
+        _add(folder_title, folder_year)
+        _add(folder_title, None)
+
     year_match = _YEAR_RE.search(stem)
     if year_match:
-        title = _collapse(stem[: year_match.start()])
+        raw_title_part = stem[: year_match.start()]
+        cleaned_title_part = _SCENE_TOKENS_RE.sub(" ", _BRACKETED_RE.sub(" ", raw_title_part))
+        title = _collapse(cleaned_title_part)
         _add(title, year_match.group(1))
         _add(title, None)
+        raw_title = _collapse(raw_title_part)
+        if raw_title != title:
+            _add(raw_title, year_match.group(1))
+            _add(raw_title, None)
 
     tag_stripped = _BRACKETED_RE.sub(" ", stem)
     tag_stripped = _SCENE_TOKENS_RE.sub(" ", tag_stripped)
