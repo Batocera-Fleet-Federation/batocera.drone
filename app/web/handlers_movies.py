@@ -147,7 +147,20 @@ class HandlersMoviesMixin:
         two cards for the same season if the parsed and TMDb names differ
         even slightly. ``scraped_show_title`` carries the TMDb name
         separately, only once scraped, purely as a nicer *display* label for
-        whichever season card a caller builds from these rows."""
+        whichever season card a caller builds from these rows.
+
+        ``kind == "extra"`` rows get the same ``show_title``/``season_number``
+        overlay *when* ``classify()`` managed to resolve one from the
+        directory structure (a Featurette's own filename essentially never
+        carries a show/season indicator the way a real episode's does) --
+        never ``episode_number``/``episode_title``, since bonus content isn't
+        a numbered episode. This is what lets the Movies UI group a
+        Featurette/deleted-scene/etc. file under the right show and season
+        instead of leaving it as an orphan card with no artwork and no
+        context -- previously every extra was invisible to that grouping
+        regardless of how clearly its own folder tree indicated where it
+        belonged (a real reported example: "Shows/Lost (2004)/Lost (2004)
+        S02/Featurettes/Lost - On Location/01. Adrift.mkv")."""
         genres_by_key = _movies_store.list_movie_genres(self.settings.movies_root)
         scraped_show_titles_by_key = _movies_store.list_movie_show_titles(self.settings.movies_root)
         for item in items:
@@ -159,6 +172,12 @@ class HandlersMoviesMixin:
                 item["season_number"] = parsed.season
                 item["episode_number"] = parsed.episode
                 item["episode_title"] = parsed.episode_title
+                scraped_show_title = scraped_show_titles_by_key.get(item.get("entry_key"))
+                if scraped_show_title:
+                    item["scraped_show_title"] = scraped_show_title
+            elif parsed.kind == _filename_parser.KIND_EXTRA and parsed.show_title:
+                item["show_title"] = parsed.show_title
+                item["season_number"] = parsed.season
                 scraped_show_title = scraped_show_titles_by_key.get(item.get("entry_key"))
                 if scraped_show_title:
                     item["scraped_show_title"] = scraped_show_title

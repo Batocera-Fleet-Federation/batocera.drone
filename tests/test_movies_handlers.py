@@ -295,6 +295,40 @@ class MoviesListHandlerTests(unittest.TestCase):
             self.assertNotIn("show_title", movie)
             self.assertNotIn("season_number", movie)
 
+    def test_extra_rows_get_show_and_season_from_directory_structure(self) -> None:
+        # Real reported gap: a Featurette's own filename almost never
+        # carries a show/season indicator, so these used to be invisible to
+        # the Movies UI's show/season grouping even when the folder tree
+        # around them made it obvious which show and season they belonged
+        # to. No episode_number/episode_title, though -- bonus content isn't
+        # a numbered episode.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(
+                root,
+                "Shows/Lost (2004)/Lost (2004) S02/Featurettes/Lost - On Location/01. Adrift.mkv",
+                b"x",
+            )
+            _write_movie(root, "Movies/Featurettes/RandomClip.mkv", b"x")  # no resolvable show/season
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+            handler = _handler(settings)
+            handler._handle_movies_list()
+            _status, payload = handler.json_response
+            by_name = {m["movie_name"]: m for m in payload["movies"]}
+
+            extra = by_name["01. Adrift.mkv"]
+            self.assertEqual(extra["kind"], "extra")
+            self.assertEqual(extra["show_title"], "Lost")
+            self.assertEqual(extra["season_number"], 2)
+            self.assertNotIn("episode_number", extra)
+            self.assertNotIn("episode_title", extra)
+
+            ungrouped = by_name["RandomClip.mkv"]
+            self.assertEqual(ungrouped["kind"], "extra")
+            self.assertNotIn("show_title", ungrouped)
+            self.assertNotIn("season_number", ungrouped)
+
     def test_scraped_show_title_overlays_canonical_name_once_scraped(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

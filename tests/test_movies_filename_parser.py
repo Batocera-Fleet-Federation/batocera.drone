@@ -100,6 +100,13 @@ class ClassifyExtraTests(unittest.TestCase):
             "Blood Splatter 101.mkv",
         )
         self.assertEqual(result.kind, filename_parser.KIND_EXTRA)
+        # Directory structure still resolves a show/season for it -- an
+        # extra isn't a numbered episode, but it should still be groupable
+        # under the right show/season in the Movies UI rather than left as
+        # an orphan card with no context.
+        self.assertEqual(result.show_title, "Dexter")
+        self.assertEqual(result.season, 1)
+        self.assertIsNone(result.episode)
 
     def test_nested_interviews_folder_is_an_extra(self) -> None:
         result = filename_parser.classify(
@@ -107,6 +114,8 @@ class ClassifyExtraTests(unittest.TestCase):
             "C.S. Lee.mkv",
         )
         self.assertEqual(result.kind, filename_parser.KIND_EXTRA)
+        self.assertEqual(result.show_title, "Dexter")
+        self.assertEqual(result.season, 2)
 
     def test_extras_folder_check_is_case_insensitive(self) -> None:
         result = filename_parser.classify(
@@ -131,10 +140,46 @@ class ClassifyExtraTests(unittest.TestCase):
             "01. Seeing Walt.mkv",
         )
         self.assertEqual(result.kind, filename_parser.KIND_EXTRA)
+        self.assertEqual(result.show_title, "Lost")
+        self.assertEqual(result.season, 2)
 
     def test_ordinary_folder_is_not_treated_as_an_extra(self) -> None:
         result = filename_parser.classify("Shows/Dexter/Dexter (2006) S01/x.mkv", "Blood Splatter 101.mkv")
         self.assertEqual(result.kind, filename_parser.KIND_MOVIE)
+
+    def test_real_reported_case_lost_on_location_deeply_nested(self) -> None:
+        # The exact reported example: a Featurette two levels deeper still
+        # ("Lost - On Location" between Featurettes and the file), numbered
+        # rather than SxxEyy-named, with no season/show indicator anywhere
+        # in its own filename at all.
+        result = filename_parser.classify(
+            "Shows/Lost (2004)/Lost (2004) S02/Featurettes/Lost - On Location/01. Adrift.mkv",
+            "01. Adrift.mkv",
+        )
+        self.assertEqual(result.kind, filename_parser.KIND_EXTRA)
+        self.assertEqual(result.show_title, "Lost")
+        self.assertEqual(result.season, 2)
+
+    def test_bare_season_folder_resolves_show_from_its_own_parent(self) -> None:
+        # Plex/Kodi/Jellyfin's "Season NN" convention carries no show name of
+        # its own -- has to come from one level further up (real example:
+        # Forensic Files' anthology-style "Season 00" specials folder).
+        result = filename_parser.classify(
+            "Shows/Forensic Files/Season 00/Featurettes/Behind the Investigation.mkv",
+            "Behind the Investigation.mkv",
+        )
+        self.assertEqual(result.kind, filename_parser.KIND_EXTRA)
+        self.assertEqual(result.show_title, "Forensic Files")
+        self.assertEqual(result.season, 0)
+
+    def test_no_resolvable_show_or_season_leaves_extra_ungrouped(self) -> None:
+        # No "<Show> SXX" or "Season NN" folder anywhere in the path -- must
+        # not guess; an ungrouped extra falls back to today's behavior
+        # (its own orphan card) rather than a wrong grouping.
+        result = filename_parser.classify("Movies/Featurettes/RandomClip.mkv", "RandomClip.mkv")
+        self.assertEqual(result.kind, filename_parser.KIND_EXTRA)
+        self.assertEqual(result.show_title, "")
+        self.assertIsNone(result.season)
 
 
 class SearchCandidatesTests(unittest.TestCase):

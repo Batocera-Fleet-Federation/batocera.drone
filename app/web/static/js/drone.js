@@ -2236,19 +2236,40 @@ function setMovieExplorerGenreFilter(value) {
   renderMovieExplorerSidebar();
   filterMovieExplorer(document.getElementById("movieExplorerSearch")?.value || "");
 }
-// Groups "episode" kind rows into one synthetic card per (show, season) --
-// everything else (movies, and "extra" rows visible under the "All" type
-// filter) passes through as its own card, same as before this existed.
-// Grouping key is always the filename-parsed show_title (present pre-scrape
-// via kind/show_title on every row -- see HandlersMoviesMixin
-// ._apply_movie_kind_and_genres), never the scraped TMDb name, so a show
-// with only some episodes scraped can't split into two cards for the same
-// season just because the parsed and TMDb names differ slightly.
+// A row belongs to a show/season group if it's a real episode, or an
+// "extra" (Featurette/deleted-scene/etc.) that classify() managed to
+// resolve a show_title/season_number for from its directory structure --
+// its own filename essentially never carries that indicator the way a real
+// episode's does (see HandlersMoviesMixin._apply_movie_kind_and_genres).
+// An extra with no resolvable show/season stays ungrouped (its own orphan
+// card), same as before this existed, rather than guessing.
+function isShowGroupableRow(row) {
+  return row.kind === "episode" || (row.kind === "extra" && !!row.show_title && row.season_number != null);
+}
+// Sorts a season's members with real episodes first (by episode_number),
+// extras afterward (alphabetically, since they have no reliable ordering
+// signal of their own) -- used by both the Explorer's season cards and the
+// show detail page's episode list so the two stay consistent.
+function compareShowGroupMembers(a, b) {
+  const aKey = a.kind === "extra" ? Number.POSITIVE_INFINITY : (a.episode_number || 0);
+  const bKey = b.kind === "extra" ? Number.POSITIVE_INFINITY : (b.episode_number || 0);
+  if (aKey !== bKey) return aKey - bKey;
+  return String(a.movie_name || a.name || "").localeCompare(String(b.movie_name || b.name || ""));
+}
+// Groups groupable rows (see isShowGroupableRow) into one synthetic card per
+// (show, season) -- everything else (movies, and an ungroupable "extra"
+// visible under the "All" type filter) passes through as its own card, same
+// as before this existed. Grouping key is always the filename-parsed
+// show_title (present pre-scrape via kind/show_title on every row -- see
+// HandlersMoviesMixin._apply_movie_kind_and_genres), never the scraped TMDb
+// name, so a show with only some episodes scraped can't split into two
+// cards for the same season just because the parsed and TMDb names differ
+// slightly.
 function groupMoviesForExplorer(rows) {
   const cards = [];
   const seasonGroups = new Map();
   rows.forEach((row) => {
-    if (row.kind !== "episode") {
+    if (!isShowGroupableRow(row)) {
       cards.push(row);
       return;
     }
@@ -2257,8 +2278,14 @@ function groupMoviesForExplorer(rows) {
     seasonGroups.get(key).push(row);
   });
   seasonGroups.forEach((members) => {
-    members.sort((a, b) => (a.episode_number || 0) - (b.episode_number || 0));
-    const representative = members.find((m) => m.scraped_show_title) || members[0];
+    members.sort(compareShowGroupMembers);
+    // Prefer a real episode as the representative (its entry_key drives the
+    // season card's poster lookup and the show-detail page's first-ever
+    // metadata fetch) -- an extra is never scraped, so it'd never have
+    // artwork of its own to offer either way.
+    const representative = members.find((m) => m.scraped_show_title)
+      || members.find((m) => m.kind === "episode")
+      || members[0];
     cards.push({
       isSeasonGroup: true,
       showTitle: representative.scraped_show_title || representative.show_title,
@@ -2282,7 +2309,13 @@ function filterMovieExplorer(queryValue) {
   const filter = String(queryValue || "").trim().toLowerCase();
   let rows = moviesAllRows;
   if (movieExplorerTypeFilter !== "all") {
-    rows = rows.filter((m) => (m.kind || "movie") === movieExplorerTypeFilter);
+    // "Shows" also keeps a groupable extra (a Featurette resolved to a
+    // show/season) -- otherwise it'd be filtered out here before
+    // groupMoviesForExplorer ever gets a chance to fold it into its
+    // season's card, and it would only ever show up under "All".
+    rows = rows.filter((m) => movieExplorerTypeFilter === "episode"
+      ? isShowGroupableRow(m)
+      : (m.kind || "movie") === movieExplorerTypeFilter);
   }
   if (movieExplorerGenreFilter) {
     rows = rows.filter((m) => (m.genres || []).includes(movieExplorerGenreFilter));
@@ -2330,7 +2363,7 @@ async function renderShowDetailsPage(showTitle, seasonNumber) {
       moviesAllRows = payload.movies || [];
     }
     const showKey = String(showTitle || "").toLowerCase();
-    const episodes = moviesAllRows.filter((m) => m.kind === "episode" && String(m.show_title || "").toLowerCase() === showKey);
+    const episodes = moviesAllRows.filter((m) => isShowGroupableRow(m) && String(m.show_title || "").toLowerCase() === showKey);
     if (!episodes.length) {
       content.innerHTML = `
         <button class="btn btn-outline-secondary btn-sm mb-3" type="button" onclick="setHash('#movies')"><i class="bi bi-arrow-left me-1"></i>Back to Movies</button>
@@ -2345,9 +2378,13 @@ async function renderShowDetailsPage(showTitle, seasonNumber) {
     });
     const seasonNumbers = [...seasonsMap.keys()].sort((a, b) => a - b);
     const selectedSeason = seasonNumbers.includes(seasonNumber) ? seasonNumber : seasonNumbers[0];
-    const seasonEpisodes = (seasonsMap.get(selectedSeason) || []).slice().sort((a, b) => (a.episode_number || 0) - (b.episode_number || 0));
-    const representative = seasonEpisodes.find((e) => e.scraped_show_title) || seasonEpisodes[0];
+    const seasonEpisodes = (seasonsMap.get(selectedSeason) || []).slice().sort(compareShowGroupMembers);
+    const representative = seasonEpisodes.find((e) => e.scraped_show_title)
+      || seasonEpisodes.find((e) => e.kind === "episode")
+      || seasonEpisodes[0];
     const displayShowTitle = representative.scraped_show_title || representative.show_title || showTitle;
+    const realEpisodeCount = seasonEpisodes.filter((e) => e.kind === "episode").length;
+    const extraCount = seasonEpisodes.length - realEpisodeCount;
 
     let detail = null;
     try {
@@ -2371,7 +2408,7 @@ async function renderShowDetailsPage(showTitle, seasonNumber) {
               : `<div class="movie-detail-poster movie-detail-poster-placeholder"><i class="bi bi-film"></i></div>`
           }
           <div class="movie-detail-info min-width-0">
-            <div class="small text-muted mb-1"><span class="badge text-bg-info me-2">TV Show</span>${seasonEpisodes.length} episode${seasonEpisodes.length === 1 ? "" : "s"}</div>
+            <div class="small text-muted mb-1"><span class="badge text-bg-info me-2">TV Show</span>${realEpisodeCount} episode${realEpisodeCount === 1 ? "" : "s"}${extraCount ? `, ${extraCount} extra${extraCount === 1 ? "" : "s"}` : ""}</div>
             <h2 class="movie-detail-title" title="${escapeHtml(displayShowTitle)}">${escapeHtml(displayShowTitle)} &middot; Season ${selectedSeason}</h2>
             ${genres.length ? `<div class="mb-2">${genres.map((g) => `<span class="badge movie-genre-badge">${escapeHtml(g)}</span>`).join(" ")}</div>` : ""}
           </div>
@@ -2399,10 +2436,14 @@ async function renderShowDetailsPage(showTitle, seasonNumber) {
   }
 }
 function renderShowDetailEpisodeRow(ep) {
-  const label = `E${String(ep.episode_number || 0).padStart(2, "0")} - ${ep.episode_title || ep.movie_name || ""}`;
+  const isExtra = ep.kind === "extra";
+  const label = isExtra
+    ? (ep.movie_name || ep.display_title || ep.name || "")
+    : `E${String(ep.episode_number || 0).padStart(2, "0")} - ${ep.episode_title || ep.movie_name || ""}`;
+  const badge = isExtra ? `<span class="badge text-bg-secondary me-2">Extra</span>` : "";
   return `
     <div class="list-group-item d-flex align-items-center justify-content-between gap-2 bg-transparent">
-      <button type="button" class="btn btn-link btn-sm p-0 text-start text-truncate min-width-0" title="${escapeHtml(ep.file_path || ep.movie_name || "")}" onclick="setHash(movieDetailHash(${jsAttr(ep.entry_key)}))">${escapeHtml(label)}</button>
+      <button type="button" class="btn btn-link btn-sm p-0 text-start text-truncate min-width-0" title="${escapeHtml(ep.file_path || ep.movie_name || "")}" onclick="setHash(movieDetailHash(${jsAttr(ep.entry_key)}))">${badge}${escapeHtml(label)}</button>
       <div class="d-flex gap-2 text-nowrap">
         <button class="btn btn-outline-primary btn-sm" type="button" title="Watch" onclick="openMoviePlayerModal(${jsAttr(ep.entry_key)}, ${jsAttr(label)})"><i class="bi bi-play-circle"></i></button>
         ${

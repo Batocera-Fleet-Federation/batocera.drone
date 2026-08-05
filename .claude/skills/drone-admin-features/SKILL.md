@@ -787,30 +787,54 @@ needed, works immediately for every file) and `genres` (from scraped
 `movies_metadata_entries.extra_json`, empty until scraped). Client-side
 state (`movieExplorerTypeFilter`/`movieExplorerGenreFilter`, reset on every
 page visit) combines with the existing search filter in
-`filterMovieExplorer`; "extra" content only shows under the "All" type
-bucket (Featurettes-style bonus clips aren't really "a movie" or "an
-episode" — see the bulk-scraper writeup above), never under "Movies" or
-"Shows" specifically.
+`filterMovieExplorer`. An "extra" (Featurette/deleted-scene/etc.) row shows
+under "Shows" too, folded into its season's card, **if and only if**
+`classify()` managed to resolve a `show_title`/`season_number` for it from
+the *directory structure* (see the next paragraph) — an extra with nothing
+resolvable stays "All"-only, its own orphan card, same as before this
+existed.
 
-**Episodes group into one card per season** in the explorer instead of one
-card per episode file — `groupMoviesForExplorer()` groups every `kind ===
-"episode"` row by `(show_title, season_number)` after the type/genre/search
-filters run, leaving movie/extra rows as individual cards untouched. The
-grouping key is always `show_title` **as parsed straight from the
-filename** (present on every episode row pre-scrape, same source as `kind`
-— see the category sidebar section above), never the scraped TMDb name —
-a show with only some episodes scraped could otherwise split into two
-cards for the same season the moment the parsed and TMDb names differ even
-slightly (casing, "and" vs "&", ...). `scraped_show_title` carries the
-TMDb name separately, only once at least one episode in the group has been
-scraped, purely as a nicer *display* label
-(`representative.scraped_show_title || representative.show_title`) —
-grouping and display are deliberately decoupled fields for exactly this
-reason. A season card's poster comes from its lowest-numbered episode's
-`entry_key` (`movieArtworkUrl` + the same inline-`onerror`-to-icon fallback
-every other card already uses) and clicking it goes to
-`showDetailHash(rawShowTitle, seasonNumber)`, not the single-movie detail
-page.
+**Episodes (and resolvable extras) group into one card per season** in the
+explorer instead of one card per file — `groupMoviesForExplorer()` groups
+every row `isShowGroupableRow()` accepts (`kind === "episode"` unconditionally,
+or `kind === "extra"` when it carries a `show_title`+`season_number`) by
+`(show_title, season_number)` after the type/genre/search filters run,
+leaving movie rows and ungroupable extras as individual cards untouched. The
+grouping key is always `show_title` **as parsed straight from the filename
+(episodes) or the directory structure (extras)** — present on every
+groupable row pre-scrape, same source as `kind` (see the category sidebar
+section above) — never the scraped TMDb name, for the same
+show-splits-into-two-cards reason as always. Real episodes sort first
+within a group (by `episode_number`), extras last, alphabetically
+(`compareShowGroupMembers`) — both here and on the show detail page's
+episode list, which uses the identical helper and the identical
+`isShowGroupableRow` filter. A season card's/detail page's representative
+row (drives the poster lookup and the first-ever `/movies/{entry_key}`
+metadata fetch) prefers a scraped episode, then any real episode, only
+falling back to an extra if the whole group is extras-only — extras are
+never scraped themselves, so they'd never have artwork of their own to
+offer anyway. `scraped_show_title` carries the TMDb name separately, only
+once at least one member has been scraped, purely as a nicer *display*
+label (`representative.scraped_show_title || representative.show_title`).
+
+**Directory-structure-derived show/season for extras**
+(`filename_parser._extra_show_season_from_path`, called from `classify()`'s
+`KIND_EXTRA` branch): a Featurette's own filename almost never carries a
+show/season indicator the way a real episode's does ("01. Adrift.mkv"
+tells you nothing), so this used to leave every extra invisible to the
+season grouping above regardless of how obvious its folder tree made the
+answer — a real reported example: `"Shows/Lost (2004)/Lost (2004)
+S02/Featurettes/Lost - On Location/01. Adrift.mkv"`. Searches ancestor path
+segments from the one closest to the file outward, recognizing two
+conventions: `"<Show> SXX"` (this app's own `"Shows/<Show (Year)>/<Show
+(Year)> SXX/"` layout — the segment's own prefix before `" SXX"` is the
+show, run through `folder_title_candidate()` for a clean title when it
+carries a year) and a bare `"Season NN"` folder (Plex/Kodi/Jellyfin
+convention — carries no show name of its own, so the show comes from
+*that* folder's own parent instead, e.g. `"Forensic Files"` one level above
+its `"Season 00"` specials folder). Returns `("", None)` — leaving the
+entry ungrouped, exactly like before — when neither convention matches
+anywhere in the path, deliberately never guessing.
 
 **Show detail page** (`renderShowDetailsPage`, route
 `#movies/show/<url-encoded-show-title>[/<season-number>]`, parsed by

@@ -102,6 +102,14 @@ _PUNCTUATION_RE = re.compile(r"[.\-_,;:\[\]()<>/]+")
 # treating it the same as a real "Title (Year)" folder would too often be
 # wrong.
 _FOLDER_YEAR_RE = re.compile(r"\((?P<year>(?:19|20)\d{2})\)")
+# A season folder that carries the show name in the same segment, e.g. this
+# app's own "Shows/<Show (Year)>/<Show (Year)> SXX/" layout
+# ("Lost (2004) S02"). No "E<nn>" suffix allowed -- a folder never
+# legitimately carries an episode number too, only a filename does.
+_SEASON_FOLDER_WITH_SHOW_RE = re.compile(r"^(?P<show>.+?)\s+S(?P<season>\d{1,2})$", re.IGNORECASE)
+# A bare "Season NN" folder (Plex/Kodi/Jellyfin convention) -- carries no
+# show name of its own; the show has to come from this folder's own parent.
+_BARE_SEASON_FOLDER_RE = re.compile(r"^season\s+(?P<season>\d{1,3})$", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -152,15 +160,58 @@ def folder_title_candidate(folder_name: str) -> Optional[Tuple[str, str]]:
     return title, match.group("year")
 
 
+def _extra_show_season_from_path(file_path: str) -> Tuple[str, Optional[int]]:
+    """Best-effort ``(show_title, season)`` for bonus/extra content, inferred
+    from the *directory structure* rather than the file's own name -- a
+    Featurette clip's filename ("01. Adrift.mkv") almost never carries a
+    show or season indicator the way a real episode's does, but the folder
+    tree around it usually does: either this app's own "Shows/<Show
+    (Year)>/<Show (Year)> SXX/" layout, or the Plex/Kodi/Jellyfin bare
+    "Season NN" folder convention (show name one level further up).
+
+    Searches from the segment closest to the file outward to the root,
+    stopping at the first match, so a deeper, unrelated "... S3" style
+    sub-featurette folder can't be mistaken for the real season folder
+    above it. Returns ``("", None)`` if neither convention matches anywhere
+    in the path -- callers should leave the entry ungrouped rather than
+    guess."""
+    segments = Path(file_path).parts[:-1]
+    for index in range(len(segments) - 1, -1, -1):
+        segment = segments[index]
+        with_show = _SEASON_FOLDER_WITH_SHOW_RE.match(segment)
+        if with_show:
+            folder_candidate = folder_title_candidate(with_show.group("show"))
+            show_title = folder_candidate[0] if folder_candidate else _collapse(with_show.group("show"))
+            if show_title:
+                return show_title, int(with_show.group("season"))
+            continue
+        bare = _BARE_SEASON_FOLDER_RE.match(segment)
+        if bare and index > 0:
+            parent = segments[index - 1]
+            folder_candidate = folder_title_candidate(parent)
+            show_title = folder_candidate[0] if folder_candidate else _collapse(parent)
+            if show_title:
+                return show_title, int(bare.group("season"))
+    return "", None
+
+
 def classify(file_path: str, file_name: str) -> ParsedEntry:
     """Decide whether ``file_name`` (at ``file_path`` within movies_root) is a
     movie, a TV episode, or bonus/extra content -- in that priority order:
     the extras-folder check runs first since a stray episode-shaped name
     inside a "Featurettes" folder (unlikely, but possible) is still extra
-    content, not something to search TMDb for."""
+    content, not something to search TMDb for.
+
+    Extra content also gets a best-effort ``show_title``/``season`` from the
+    directory structure (see ``_extra_show_season_from_path``) so the Movies
+    UI can list it under the right show/season instead of leaving it as an
+    orphan card with no artwork and no context -- ``episode``/
+    ``episode_title`` stay empty, since a Featurette isn't a numbered
+    episode."""
     path_segments = [segment.lower() for segment in Path(file_path).parts[:-1]]
     if any(segment in EXTRAS_FOLDER_NAMES for segment in path_segments):
-        return ParsedEntry(kind=KIND_EXTRA)
+        show_title, season = _extra_show_season_from_path(file_path)
+        return ParsedEntry(kind=KIND_EXTRA, show_title=show_title, season=season)
 
     stem = _normalize_unicode(Path(file_name).stem)
     match = _EPISODE_RE.match(stem) or _ALT_EPISODE_RE.match(stem)
