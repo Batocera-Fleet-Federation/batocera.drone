@@ -79,6 +79,11 @@ class Settings:
     http_redirect_port: int
     cast_enabled: bool
     cast_http_port: int
+    cast_transcode_enabled: bool
+    cast_ffmpeg_bin: str
+    cast_ffprobe_bin: str
+    cast_cache_root: Path
+    cast_hls_start_timeout_seconds: int
 
     image_cache_ttl_seconds: int
     image_miss_cache_ttl_seconds: int
@@ -174,7 +179,7 @@ class Settings:
             # pass this Drone's self-signed HTTPS cert check either.
             # cast_http_port is a second, deliberately minimal plain-HTTP
             # listener (see drone_api.py's _CastHttpHandler) that serves
-            # *only* a single-use-token-gated stream route, never anything
+            # *only* a single-movie-token-gated stream surface, never anything
             # session-cookie-gated -- distinct from http_redirect_port,
             # which never serves real content at all. Same "on unless you
             # turn it off" default as http_redirect_port above; the token
@@ -182,6 +187,24 @@ class Settings:
             # than needing to be opt-in the way a wide-open port would.
             cast_enabled=_env_bool(True, "DRONE_CAST_ENABLED"),
             cast_http_port=int(os.environ.get("DRONE_CAST_HTTP_PORT", "8095")),
+            # Google Cast's default receiver only accepts a narrow set of
+            # containers/codecs. Batocera includes ffmpeg/ffprobe, so movies
+            # outside that set are exposed as an on-demand HLS compatibility
+            # stream instead of connecting successfully and buffering forever.
+            # This remains optional for unusually resource-constrained systems;
+            # direct-compatible MP4/WebM casting still works when it is off.
+            cast_transcode_enabled=_env_bool(True, "DRONE_CAST_TRANSCODE_ENABLED"),
+            cast_ffmpeg_bin=os.environ.get("DRONE_CAST_FFMPEG_BIN", "ffmpeg"),
+            cast_ffprobe_bin=os.environ.get("DRONE_CAST_FFPROBE_BIN", "ffprobe"),
+            cast_cache_root=Path(
+                os.environ.get(
+                    "DRONE_CAST_CACHE_ROOT",
+                    str(userdata_root / "system" / "drone-app" / "cast-cache"),
+                )
+            ),
+            cast_hls_start_timeout_seconds=max(
+                5, int(os.environ.get("DRONE_CAST_HLS_START_TIMEOUT_SECONDS", "30"))
+            ),
             image_cache_ttl_seconds=int(os.environ.get("IMAGE_CACHE_TTL_SECONDS", "3600")),
             image_miss_cache_ttl_seconds=int(os.environ.get("IMAGE_MISS_CACHE_TTL_SECONDS", "300")),
             image_cache_max_items=int(os.environ.get("IMAGE_CACHE_MAX_ITEMS", "1000")),

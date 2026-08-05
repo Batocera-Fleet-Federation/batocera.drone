@@ -20,6 +20,7 @@ try:
     from ..common import http_range as _http_range
     from ..storage import movies_store as _movies_store
     from ..storage import movie_cast_tokens as _movie_cast_tokens
+    from ..movies import cast_stream as _movie_cast_stream
     from ..movies import metadata_manager as _movies_metadata
     from ..movies import filename_parser as _filename_parser
     from ..movies.tmdb_client import TmdbUnavailableError as _TmdbUnavailableError
@@ -28,6 +29,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from common import http_range as _http_range  # type: ignore
     from storage import movies_store as _movies_store  # type: ignore
     from storage import movie_cast_tokens as _movie_cast_tokens  # type: ignore
+    from movies import cast_stream as _movie_cast_stream  # type: ignore
     from movies import metadata_manager as _movies_metadata  # type: ignore
     from movies import filename_parser as _filename_parser  # type: ignore
     from movies.tmdb_client import TmdbUnavailableError as _TmdbUnavailableError  # type: ignore
@@ -210,16 +212,23 @@ class HandlersMoviesMixin:
             raise ValueError("casting is not enabled on this Drone")
         target = self._resolve_movie_path(entry_key)  # 404s via FileNotFoundError if entry_key is unknown
         result = _movie_cast_tokens.create(self.settings, entry_key)
+        try:
+            delivery = _movie_cast_stream.prepare(self.settings, target, entry_key, result["token"])
+        except Exception:
+            # Do not leave a valid 12-hour capability behind when FFmpeg is
+            # missing or compatibility-stream startup fails.
+            _movie_cast_stream.cancel(result["token"])
+            _movie_cast_tokens.revoke(self.settings, result["token"])
+            raise
         port_suffix = "" if self.settings.cast_http_port == 80 else f":{self.settings.cast_http_port}"
-        cast_url = (
-            f"http://{self._cast_stream_host()}{port_suffix}"
-            f"/public/movies/{entry_key}/cast-stream?token={result['token']}"
-        )
+        cast_url = f"http://{self._cast_stream_host()}{port_suffix}{delivery['url_path']}"
         self._send_json(200, {
             "token": result["token"],
             "expires_at": result["expires_at"],
             "cast_url": cast_url,
-            "content_type": self._guess_content_type(target),
+            "content_type": delivery.get("content_type") or self._guess_content_type(target),
+            "delivery": delivery["delivery"],
+            "transcoded": bool(delivery.get("transcoded")),
         })
 
     def _cast_stream_host(self) -> str:
@@ -335,13 +344,27 @@ class HandlersMoviesMixin:
         self._send_json(200, result)
 
     def _handle_admin_movie_scrape_search(self, entry_key: str, query: Optional[str]) -> None:
+        """A custom ``query`` (the user typed something into the search box)
+        is searched verbatim, one plain TMDb call, respecting exactly what
+        they asked for. With no custom query (the box's default state),
+        this instead runs the same candidate ladder the bulk scraper already
+        trusts (``search_movie_default_query`` -- title cleaned of scene
+        tags, year-filtered first) rather than a single dumb guess, so a
+        first-time search finds the right movie without the human needing to
+        rename the file or hand-clean the query first."""
         movie = _movies_store.get_movie_by_key(self.settings.movies_root, entry_key)
         if not movie:
             self._send_json(404, {"error": "unknown movie"})
             return
-        search_query = str(query or "").strip() or _movies_metadata.clean_movie_query(movie.get("movie_name") or "")
+        custom_query = str(query or "").strip()
         try:
-            results = _movies_metadata.search(self.settings, search_query)
+            if custom_query:
+                search_query = custom_query
+                results = _movies_metadata.search(self.settings, search_query)
+            else:
+                outcome = _movies_metadata.search_movie_default_query(self.settings, movie.get("movie_name") or "")
+                search_query = outcome["query"]
+                results = outcome["results"]
         except _TmdbUnavailableError as error:
             self._send_json(502, {"error": str(error)})
             return

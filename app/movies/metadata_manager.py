@@ -27,7 +27,7 @@ import re
 import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 try:
     from ..common.settings import Settings
@@ -95,20 +95,6 @@ def _client(settings: Settings) -> TmdbClient:
 
 def search(settings: Settings, query: str, *, client: Optional[TmdbClient] = None) -> list:
     return (client or _client(settings)).search(query)
-
-
-def clean_movie_query(file_name: str) -> str:
-    """A reasonable starting search query from a scene/torrent-style release
-    filename ("Movie.Title.2026.1080p.BluRay.x264-GROUP.mp4") -- strips the
-    extension and replaces separator punctuation with spaces. Not trying to
-    strip quality/group tags: TMDb's search is fuzzy enough to usually find
-    the right movie anyway, and the per-movie search UI shows results before
-    applying one, so a merely-decent default beats a fragile "smart" parser.
-    Shared between the per-movie manual search (handlers_movies.py) and the
-    bulk auto-scrape job below, which has no human to review a query."""
-    name = Path(str(file_name or "")).stem
-    name = re.sub(r"[.\-_,;:\[\]()<>]+", " ", name)
-    return re.sub(r"\s+", " ", name).strip()
 
 
 def _safe_movie_stem(movie_path: Path) -> str:
@@ -300,19 +286,60 @@ def _throttle_before_tmdb_call() -> None:
         time.sleep(_REQUEST_THROTTLE_SECONDS)
 
 
-def _search_movie_with_ladder(client: TmdbClient, movie_name: str) -> list:
+def _search_movie_ladder_with_label(client: TmdbClient, movie_name: str) -> Tuple[str, list]:
     """Try each ``(title, year)`` rung of ``filename_parser.search_candidates``
     against TMDb movie search, stopping at the first hit -- see that
     function's docstring for why the year-filtered title comes first. A
     ``TmdbUnavailableError`` on any rung propagates immediately (the caller's
     "stop the whole job" handling applies the same as a single-candidate
-    search would)."""
+    search would).
+
+    Also returns a human-readable label ("title (year)", or the bare title
+    when there's no year) for whichever rung actually matched -- or the last
+    rung tried, if none did -- so a caller that shows the query back to a
+    human (the per-movie manual search's default, see
+    ``search_movie_default_query`` below) can display what was actually
+    searched. This is the single implementation shared by that manual-search
+    default *and* the bulk auto-scrape job's ``_search_movie_with_ladder``
+    (which just discards the label): these two flows used to diverge -- the
+    manual search fell back to a much dumber punctuation-only cleanup with no
+    scene-tag stripping and no year filter -- which is why a release like
+    "10.Cloverfield.Lane.2016.1080p.BluRay.x264-[YTS.AG].mp4" would scrape
+    fine in bulk but come up empty from the movie's own details page unless
+    the file was renamed by hand first."""
     stem = Path(movie_name or "").stem
+    label = movie_name or ""
     for title, year in _filename_parser.search_candidates(stem):
+        label = f"{title} ({year})" if year else title
         results = client.search(title, year=year)
         if results:
-            return results
-    return []
+            return label, results
+    return label, []
+
+
+def _search_movie_with_ladder(client: TmdbClient, movie_name: str) -> list:
+    """Bulk auto-scrape's entry point into the shared candidate ladder -- see
+    ``_search_movie_ladder_with_label`` for the actual logic; this just
+    discards the display label bulk has no use for."""
+    _label, results = _search_movie_ladder_with_label(client, movie_name)
+    return results
+
+
+def search_movie_default_query(settings: Settings, movie_name: str, *, client: Optional[TmdbClient] = None) -> dict:
+    """Per-movie manual search's default (no custom query typed yet) case:
+    reuses the exact same candidate ladder ``_search_movie_ladder_with_label``
+    already trusts for bulk scraping, so a first-time search on a movie's own
+    details page finds the same match bulk would -- without the human first
+    having to rename the file or hand-clean the query. Returns
+    ``{"query", "results"}``: ``query`` is a human-readable label of whichever
+    rung actually matched (or the last one tried, if none did), for the
+    caller to show back to the user and reuse as the search box's value for
+    a follow-up manual retry. ``client`` is injectable for tests, like
+    ``search``/``apply`` above; real callers always resolve it from the
+    stored API key."""
+    client = client or _client(settings)
+    query, results = _search_movie_ladder_with_label(client, movie_name)
+    return {"query": query, "results": results}
 
 
 def _search_show_with_ladder(client: TmdbClient, show_title: str, year: Optional[str]) -> list:

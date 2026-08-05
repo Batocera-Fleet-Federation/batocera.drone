@@ -2533,6 +2533,10 @@ function toggleMoviesFolder(key) {
 let currentPlayerEntryKey = null;
 let currentPlayerName = "";
 let castApiReady = false;
+let castSdkStatus = "loading";
+let castDeviceState = "unknown";
+let castLoadInProgress = false;
+const preparedAirPlayStreams = new Map();
 async function mintMovieCastToken(entryKey) {
   try {
     return await apiPost(`/movies/${encodeURIComponent(entryKey)}/cast-token`, {});
@@ -2544,8 +2548,27 @@ async function mintMovieCastToken(entryKey) {
 async function castMovieAirPlay(entryKey) {
   const video = document.getElementById("moviePlayerVideo");
   if (!video || typeof video.webkitShowPlaybackTargetPicker !== "function") return;
-  const castInfo = await mintMovieCastToken(entryKey);
-  if (!castInfo) return;
+  let castInfo = preparedAirPlayStreams.get(entryKey);
+  if (!castInfo) {
+    // Safari requires the playback-target picker to be opened from an active
+    // user gesture. A network await consumes that gesture, so preparation and
+    // selection are intentionally two explicit states: prepare now, then the
+    // next tap opens the picker synchronously and reliably.
+    const button = document.getElementById("movieAirPlayButton");
+    if (button) {
+      button.disabled = true;
+      button.innerHTML = `<span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>Preparing…`;
+    }
+    castInfo = await mintMovieCastToken(entryKey);
+    if (button) {
+      button.disabled = false;
+      button.innerHTML = `<i class="bi bi-airplay me-1"></i>Choose device`;
+    }
+    if (!castInfo) return;
+    preparedAirPlayStreams.set(entryKey, castInfo);
+    showToast("AirPlay is ready. Tap Choose device to select where to play it.", "info", 8000);
+    return;
+  }
   // The AirPlay receiver plays whatever the local <video> element's current
   // src is -- swap to the token-authorized plain-HTTP URL first (preserving
   // playback position/state) so the receiver can actually fetch it, then
@@ -2553,35 +2576,129 @@ async function castMovieAirPlay(entryKey) {
   const wasPlaying = !video.paused;
   const resumeAt = video.currentTime;
   video.src = castInfo.cast_url;
-  video.currentTime = resumeAt;
-  if (wasPlaying) video.play().catch(() => {});
+  video.addEventListener("loadedmetadata", () => {
+    try {
+      video.currentTime = resumeAt;
+    } catch (_) {
+      // Some live-growing HLS playlists do not expose the old position yet.
+    }
+    if (wasPlaying) video.play().catch(() => {});
+  }, { once: true });
   video.webkitShowPlaybackTargetPicker();
 }
 // Loaded lazily (only once the movie player modal has actually been opened,
 // not on every page load) since it fetches an external script from Google.
 function loadCastSenderSdk() {
-  if (document.getElementById("google-cast-sdk-script")) return;
+  if (window.cast?.framework && window.chrome?.cast) {
+    initCastApi();
+    return;
+  }
+  if (document.getElementById("google-cast-sdk-script")) {
+    updateMovieCastButton();
+    return;
+  }
   window["__onGCastApiAvailable"] = function (isAvailable) {
-    if (isAvailable) initCastApi();
+    if (isAvailable) {
+      initCastApi();
+    } else {
+      castSdkStatus = "unavailable";
+      updateMovieCastButton();
+    }
   };
   const script = document.createElement("script");
   script.id = "google-cast-sdk-script";
   script.src = "https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1";
+  script.onerror = () => {
+    castSdkStatus = "failed";
+    updateMovieCastButton();
+  };
   document.head.appendChild(script);
 }
 function initCastApi() {
   if (castApiReady || !window.cast?.framework) return;
   castApiReady = true;
+  castSdkStatus = "ready";
   const context = cast.framework.CastContext.getInstance();
   context.setOptions({
     receiverApplicationId: chrome.cast.media.DEFAULT_MEDIA_RECEIVER_APP_ID,
     autoJoinPolicy: chrome.cast.AutoJoinPolicy.ORIGIN_SCOPED,
   });
+  const syncCastState = () => {
+    castDeviceState = String(context.getCastState?.() || "unknown");
+    updateMovieCastButton();
+  };
+  context.addEventListener(cast.framework.CastContextEventType.CAST_STATE_CHANGED, syncCastState);
   context.addEventListener(cast.framework.CastContextEventType.SESSION_STATE_CHANGED, (event) => {
-    if (event.sessionState === cast.framework.SessionState.SESSION_STARTED && currentPlayerEntryKey) {
-      loadMovieOntoCastSession(currentPlayerEntryKey);
-    }
+    // Loading is owned by castMovieChromecast(), after requestSession()
+    // resolves. Keeping this listener UI-only prevents SESSION_STARTED and
+    // the click path from racing and loading the same movie twice.
+    syncCastState();
   });
+  syncCastState();
+}
+function updateMovieCastButton() {
+  const button = document.getElementById("movieCastButton");
+  if (!button) return;
+  if (castLoadInProgress) {
+    button.disabled = true;
+    button.innerHTML = `<span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>Preparing…`;
+    return;
+  }
+  button.disabled = false;
+  if (castSdkStatus === "loading") {
+    button.innerHTML = `<span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>Cast`;
+    button.title = "Loading Google Cast device discovery";
+  } else if (castSdkStatus !== "ready") {
+    button.innerHTML = `<i class="bi bi-cast me-1"></i>Cast unavailable`;
+    button.title = "Google Cast could not start in this browser";
+  } else if (castDeviceState === String(cast.framework.CastState.NO_DEVICES_AVAILABLE)) {
+    button.innerHTML = `<i class="bi bi-cast me-1"></i>No devices`;
+    button.title = "No Google Cast devices were found on this network";
+  } else if (castDeviceState === String(cast.framework.CastState.CONNECTED)) {
+    button.innerHTML = `<i class="bi bi-cast me-1"></i>Choose device`;
+    button.title = "Choose or confirm the Google Cast device";
+  } else {
+    button.innerHTML = `<i class="bi bi-cast me-1"></i>Cast`;
+    button.title = "Choose a Google Cast device";
+  }
+}
+function castRequestErrorText(error) {
+  const code = String((error && (error.code || error.description)) || error || "");
+  if (code.includes("cancel")) return "";
+  if (code.includes("receiver_unavailable")) return "No Cast device is available. Confirm the browser and TV are on the same Wi-Fi network.";
+  if (code.includes("extension_missing") || code.includes("api_not_initialized")) {
+    return "Google Cast is unavailable in this browser. Use Chrome or Edge over HTTPS, then reload the page.";
+  }
+  return code ? `Could not connect to a Cast device (${code}).` : "Could not connect to a Cast device.";
+}
+async function castMovieChromecast(entryKey) {
+  if (!castApiReady || castSdkStatus !== "ready") {
+    showToast(
+      "Google Cast is not ready. Use a Cast-capable Chrome or Edge browser over HTTPS and allow local-network device access.",
+      "warning",
+      12000,
+    );
+    return;
+  }
+  const context = cast.framework.CastContext.getInstance();
+  castLoadInProgress = true;
+  updateMovieCastButton();
+  try {
+    // Official Cast Framework picker: the user chooses (or confirms) the
+    // receiver here, even if this origin auto-joined an earlier session. This
+    // call stays directly in the click handler to preserve the browser's
+    // transient user activation requirement.
+    await context.requestSession();
+    const session = context.getCurrentSession();
+    if (!session) throw new Error("receiver_unavailable");
+    await loadMovieOntoCastSession(entryKey, session);
+  } catch (error) {
+    const message = castRequestErrorText(error);
+    if (message) showToast(message, "danger", 12000);
+  } finally {
+    castLoadInProgress = false;
+    updateMovieCastButton();
+  }
 }
 // Chromecast's default receiver plays MP4/H.264+AAC and WebM; it does NOT
 // play Matroska, and only newer hardware handles HEVC/H.265 -- both very
@@ -2594,8 +2711,10 @@ function likelyUnsupportedOnChromecast(name) {
   if (/(^|[^a-z])(x265|h265|hevc)([^a-z]|$)/.test(text)) return "H.265/HEVC only plays on newer Chromecast hardware";
   return null;
 }
-function reportCastPlaybackFailure(detail) {
-  const hint = likelyUnsupportedOnChromecast(currentPlayerName);
+function reportCastPlaybackFailure(detail, castInfo = null) {
+  // The compatibility HLS path has already normalized the container/codecs,
+  // so only attach a format hint when the original file is being sent direct.
+  const hint = castInfo?.delivery === "hls" ? null : likelyUnsupportedOnChromecast(currentPlayerName);
   const because = hint ? ` -- ${hint}.` : ".";
   showToast(
     `The TV couldn't play this movie${because}${detail ? ` (${escapeHtml(detail)})` : ""} Try AirPlay, or Download instead.`,
@@ -2618,7 +2737,7 @@ const CAST_PLAYBACK_START_TIMEOUT_MS = 25000;
 // permanent loading spinner, no error event is ever emitted) -- so an
 // error-only listener would leave the UI claiming a cheerful "Casting
 // started" indefinitely. Hence the timeout as well as the error hook.
-function watchCastSessionForPlaybackFailure(session) {
+function watchCastSessionForPlaybackFailure(session, castInfo) {
   const media = session.getMediaSession();
   if (!media || typeof media.addUpdateListener !== "function") return;
   let settled = false;
@@ -2641,21 +2760,30 @@ function watchCastSessionForPlaybackFailure(session) {
       return;
     }
     if (media.playerState === chrome.cast.media.PlayerState.IDLE && media.idleReason === chrome.cast.media.IdleReason.ERROR) {
-      settle(() => reportCastPlaybackFailure("receiver reported a playback error"));
+      settle(() => reportCastPlaybackFailure("receiver reported a playback error", castInfo));
       return;
     }
     if (!isAlive) settle(null);
   };
-  stallTimer = setTimeout(() => settle(() => reportCastPlaybackFailure("the TV never started playing")), CAST_PLAYBACK_START_TIMEOUT_MS);
+  stallTimer = setTimeout(
+    () => settle(() => reportCastPlaybackFailure("the TV never started playing", castInfo)),
+    CAST_PLAYBACK_START_TIMEOUT_MS,
+  );
   media.addUpdateListener(listener);
 }
-async function loadMovieOntoCastSession(entryKey) {
-  const session = cast.framework.CastContext.getInstance().getCurrentSession();
+async function loadMovieOntoCastSession(entryKey, selectedSession = null) {
+  const session = selectedSession || cast.framework.CastContext.getInstance().getCurrentSession();
   if (!session) return;
   const castInfo = await mintMovieCastToken(entryKey);
   if (!castInfo) return;
   const mediaInfo = new chrome.cast.media.MediaInfo(castInfo.cast_url, castInfo.content_type || "video/mp4");
   mediaInfo.streamType = chrome.cast.media.StreamType.BUFFERED;
+  if (castInfo.delivery === "hls") {
+    mediaInfo.hlsSegmentFormat = chrome.cast.media.HlsSegmentFormat.TS;
+    mediaInfo.hlsVideoSegmentFormat = chrome.cast.media.HlsVideoSegmentFormat.MPEG2_TS;
+  }
+  mediaInfo.metadata = new chrome.cast.media.MovieMediaMetadata();
+  mediaInfo.metadata.title = currentPlayerName || "Movie";
   const request = new chrome.cast.media.LoadRequest(mediaInfo);
   try {
     await session.loadMedia(request);
@@ -2664,13 +2792,20 @@ async function loadMovieOntoCastSession(entryKey) {
     // that's supposed to have handed off to the TV.
     const video = document.getElementById("moviePlayerVideo");
     if (video) video.pause();
-    watchCastSessionForPlaybackFailure(session);
+    watchCastSessionForPlaybackFailure(session, castInfo);
     // Say upfront when the format is one Chromecast's built-in player is
     // known not to handle, rather than letting the user watch a spinner for
     // 25s first -- the attempt still goes ahead (newer Google TV hardware
     // does play some of these), this just sets the expectation honestly.
-    const hint = likelyUnsupportedOnChromecast(currentPlayerName);
-    if (hint) {
+    const hint = castInfo.delivery === "hls" ? null : likelyUnsupportedOnChromecast(currentPlayerName);
+    if (castInfo.delivery === "hls") {
+      showToast(
+        castInfo.transcoded
+          ? "Casting started with compatibility streaming."
+          : "Casting started with a cast-compatible stream.",
+        "success",
+      );
+    } else if (hint) {
       showToast(`Casting started, but ${hint} -- if the TV just shows a spinner, use AirPlay or Download instead.`, "warning", 12000);
     } else {
       showToast("Casting started.", "success");
@@ -2678,7 +2813,7 @@ async function loadMovieOntoCastSession(entryKey) {
   } catch (err) {
     // Rejected outright -- most often the receiver refusing the container/
     // codec before it even fetches (see likelyUnsupportedOnChromecast).
-    reportCastPlaybackFailure(String((err && (err.description || err.code)) || err || ""));
+    reportCastPlaybackFailure(String((err && (err.description || err.code)) || err || ""), castInfo);
   }
 }
 function openMoviePlayerModal(entryKey, movieName) {
@@ -2704,15 +2839,15 @@ function openMoviePlayerModal(entryKey, movieName) {
           <button type="button" class="btn-close btn-close-white flex-shrink-0" data-bs-dismiss="modal" aria-label="Close"></button>
         </div>
         <div class="modal-body">
-          <video id="moviePlayerVideo" class="w-100" style="max-height: 70vh; background: #000;" controls autoplay disableRemotePlayback src="${movieStreamUrl(entryKey)}">
+          <video id="moviePlayerVideo" class="w-100" style="max-height: 70vh; background: #000;" controls autoplay ${airplaySupported ? 'x-webkit-airplay="allow"' : "disableRemotePlayback"} src="${movieStreamUrl(entryKey)}">
             Your browser can't play this video format. <a href="${movieDownloadUrl(entryKey)}">Download it</a> instead.
           </video>
         </div>
         <div class="modal-footer">
-          <google-cast-launcher id="movieCastLauncher" class="movie-cast-launcher" title="Cast to a Chromecast device"></google-cast-launcher>
+          <button type="button" class="btn btn-outline-primary" id="movieCastButton" onclick="castMovieChromecast(${jsAttr(entryKey)})" title="Choose a Google Cast device"><span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>Cast</button>
           ${
             airplaySupported
-              ? `<button type="button" class="btn btn-outline-primary" title="AirPlay" onclick="castMovieAirPlay(${jsAttr(entryKey)})"><i class="bi bi-airplay me-1"></i>AirPlay</button>`
+              ? `<button type="button" class="btn btn-outline-primary" id="movieAirPlayButton" title="Prepare AirPlay" onclick="castMovieAirPlay(${jsAttr(entryKey)})"><i class="bi bi-airplay me-1"></i>AirPlay</button>`
               : ""
           }
           <a class="btn btn-outline-primary" href="${movieDownloadUrl(entryKey)}"><i class="bi bi-download me-1"></i>Download</a>
@@ -2735,6 +2870,7 @@ function openMoviePlayerModal(entryKey, movieName) {
     currentPlayerEntryKey = null;
     currentPlayerName = "";
   }, { once: true });
+  updateMovieCastButton();
   if (window.bootstrap?.Modal) {
     window.bootstrap.Modal.getOrCreateInstance(modal).show();
   } else {
@@ -2835,7 +2971,7 @@ async function renderMovieScraperCard(entryKey, movie) {
   try {
     const settings = await api("/admin/movies/scraper-settings");
     container.innerHTML = settings.has_api_key
-      ? renderMovieScraperSearchUi(entryKey, movie)
+      ? renderMovieScraperSearchUi(entryKey)
       : renderMovieScraperApiKeyForm(entryKey);
   } catch (err) {
     container.innerHTML = `<div class="alert alert-warning small mb-0">Scraper unavailable: ${escapeHtml(err.message || "unknown error")}</div>`;
@@ -2874,14 +3010,18 @@ async function saveMovieScraperApiKey(entryKey) {
     setLoading(false);
   }
 }
-function renderMovieScraperSearchUi(entryKey, movie) {
-  const rawName = (movie && (movie.movie_name || movie.name)) || "";
+function renderMovieScraperSearchUi(entryKey) {
+  // Deliberately blank, not the raw filename: an empty query tells the
+  // backend to search using its own cleaned-up-title candidate ladder
+  // (same one the bulk scraper uses) rather than the messy filename
+  // verbatim -- see searchMovieScraper, which fills this box in with
+  // whichever title that ladder actually searched once results come back.
   return `
     <div class="card">
       <div class="card-header"><i class="bi bi-cloud-download me-1"></i>Artwork &amp; Metadata (TMDb)</div>
       <div class="card-body">
         <div class="input-group mb-3">
-          <input id="movieScraperQuery" type="text" class="form-control" value="${escapeHtml(rawName)}" placeholder="Search TMDb">
+          <input id="movieScraperQuery" type="text" class="form-control" value="" placeholder="Leave blank to search using a cleaned-up title">
           <button class="btn btn-primary" type="button" onclick="searchMovieScraper(${jsAttr(entryKey)})"><i class="bi bi-search me-1"></i>Search</button>
         </div>
         <div id="movie-scraper-results"></div>
@@ -2893,14 +3033,18 @@ async function searchMovieScraper(entryKey) {
   const resultsEl = document.getElementById("movie-scraper-results");
   if (!resultsEl) return;
   const queryInput = document.getElementById("movieScraperQuery");
-  const query = queryInput ? queryInput.value : "";
+  const query = queryInput ? queryInput.value.trim() : "";
   resultsEl.innerHTML = `<div class="text-muted small"><span class="spinner-border spinner-border-sm me-2"></span>Searching TMDb...</div>`;
   try {
-    const data = await api(`/admin/movies/${encodeURIComponent(entryKey)}/scrape/search?q=${encodeURIComponent(query || "")}`);
+    const data = await api(`/admin/movies/${encodeURIComponent(entryKey)}/scrape/search?q=${encodeURIComponent(query)}`);
+    // The box started blank (or the user left it blank): show what the
+    // backend's candidate ladder actually searched, so it's both visible
+    // and ready to hand-edit for a follow-up retry.
+    if (queryInput && !query && data.query) queryInput.value = data.query;
     const results = data.results || [];
     resultsEl.innerHTML = results.length
       ? `<div class="list-group">${results.map((r) => renderMovieScraperResult(entryKey, r)).join("")}</div>`
-      : `<div class="text-muted small">No TMDb matches found.</div>`;
+      : `<div class="text-muted small">No TMDb matches found${data.query ? ` for "${escapeHtml(data.query)}"` : ""}.</div>`;
   } catch (err) {
     resultsEl.innerHTML = `<div class="alert alert-warning small mb-0">Search failed: ${escapeHtml(err.message || "unknown error")}</div>`;
   }
@@ -5212,6 +5356,10 @@ async function openMoveFilesModal(torrentId) {
           </div>
           <div id="moveFilesSuggestions" class="d-flex flex-wrap gap-2 mb-3">${renderMoveFilesLocationChips((torrentsLastPayload || {}).recent_move_locations)}</div>
           <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="moveFilesPreserveStructure" checked>
+            <label class="form-check-label small" for="moveFilesPreserveStructure">Preserve folder structure (uncheck to flatten all selected files directly into the destination folder)</label>
+          </div>
+          <div class="form-check">
             <input class="form-check-input" type="checkbox" id="moveFilesCleanup">
             <label class="form-check-label small" for="moveFilesCleanup">Delete the remaining downloaded files after moving (only if the move succeeds)</label>
           </div>
@@ -5243,6 +5391,7 @@ async function confirmMoveFiles(torrentId) {
   const checked = Array.from(document.querySelectorAll(".move-file-checkbox:checked")).map((el) => el.value);
   const destination = (document.getElementById("moveFilesDestination")?.value || "").trim();
   const cleanup = Boolean(document.getElementById("moveFilesCleanup")?.checked);
+  const preserveStructure = Boolean(document.getElementById("moveFilesPreserveStructure")?.checked);
   if (!checked.length) { showToast("Select at least one file to move.", "warning"); return; }
   if (!destination) { showToast("Choose a destination folder.", "warning"); return; }
   const btn = document.getElementById("moveFilesConfirmBtn");
@@ -5251,7 +5400,7 @@ async function confirmMoveFiles(torrentId) {
     btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Moving...';
   }
   try {
-    const result = await apiPost(`/admin/torrents/${encodeURIComponent(torrentId)}/move`, { files: checked, destination, cleanup });
+    const result = await apiPost(`/admin/torrents/${encodeURIComponent(torrentId)}/move`, { files: checked, destination, cleanup, preserve_structure: preserveStructure });
     const moved = (result.moved || []).length;
     const errors = (result.errors || []).length;
     if (result.status === "ok") {

@@ -90,6 +90,7 @@ try:
     from .storage import saves_store as _saves_store
     from .storage import movies_store as _movies_store
     from .storage import movie_cast_tokens as _movie_cast_tokens
+    from .movies import cast_stream as _movie_cast_stream
     from .common import http_range as _http_range
     from .storage.state_store import (
         append_event as _append_state_event,
@@ -169,6 +170,7 @@ except ImportError:
     from storage import saves_store as _saves_store  # type: ignore
     from storage import movies_store as _movies_store  # type: ignore
     from storage import movie_cast_tokens as _movie_cast_tokens  # type: ignore
+    from movies import cast_stream as _movie_cast_stream  # type: ignore
     from common import http_range as _http_range  # type: ignore
     from storage.state_store import (  # type: ignore
         append_event as _append_state_event,
@@ -865,6 +867,7 @@ _ROM_METADATA_POLLER_STARTED = False
 _ROM_METADATA_WATCHER_STARTED = False
 _ROM_METADATA_WATCHER = None
 _SAVES_METADATA_WATCHER = None
+_MOVIES_METADATA_WATCHER = None
 # File-only rotating stream for the Drone's own narration log; configured in
 # _configure_rotating_logs. _DRONE_ACTIVITY_LOG_STREAM now lives in logging_setup.py
 _LOCAL_NETWORK_WORKERS_STARTED = False
@@ -1760,12 +1763,13 @@ def _start_rom_metadata_poller(settings: Settings, repository: "RomRepository") 
 
 
 def _start_rom_metadata_watcher(settings: Settings) -> None:
-    """Wake the metadata poller in near real time when ROM files change.
+    """Wake the metadata poller in near real time when ROM, saves, or movie
+    files change.
 
     Best-effort: if inotify is unavailable the periodic poll still covers
     changes, so a failure here is logged and otherwise ignored.
     """
-    global _ROM_METADATA_WATCHER, _SAVES_METADATA_WATCHER
+    global _ROM_METADATA_WATCHER, _SAVES_METADATA_WATCHER, _MOVIES_METADATA_WATCHER
     watcher = RomFilesystemWatcher(
         settings.roms_root,
         _ROM_METADATA_WAKE.set,
@@ -1784,6 +1788,19 @@ def _start_rom_metadata_watcher(settings: Settings) -> None:
     )
     if saves_watcher.start():
         _SAVES_METADATA_WATCHER = saves_watcher
+    # And the movies tree -- previously the only asset type with no watcher at
+    # all, so a new/moved movie sat invisible until the next periodic poll
+    # (up to rom_metadata_poll_seconds later, no way to force it sooner short
+    # of the ROM-oriented "Purge Cache & Resync" button). Same near-real-time
+    # wake as ROMs/saves now.
+    movies_watcher = RomFilesystemWatcher(
+        settings.movies_root,
+        _ROM_METADATA_WAKE.set,
+        debounce_seconds=ROM_METADATA_WATCH_DEBOUNCE_SECONDS,
+        max_delay_seconds=ROM_METADATA_WATCH_MAX_DELAY_SECONDS,
+    )
+    if movies_watcher.start():
+        _MOVIES_METADATA_WATCHER = movies_watcher
 
 
 def _ensure_game_event_spool(settings: Settings) -> None:
@@ -1993,12 +2010,13 @@ class _CastHttpHandler(BaseHTTPRequestHandler):
     """A second, deliberately separate plain-HTTP listener
     (``settings.cast_http_port``, bound whenever ``settings.cast_enabled``
     is true -- on by default, see that field's docstring in
-    ``common/settings.py``) that serves *exactly one* route:
-    ``GET /public/movies/{entry_key}/cast-stream?token=...``, Range-aware,
+    ``common/settings.py``) that serves *exactly one* movie-stream surface,
     gated by a single-movie-scoped token from
-    ``storage/movie_cast_tokens.py``. Every other path (and there is no
-    admin surface, no movie list, no artwork, nothing else at all here)
-    gets a bare 404.
+    ``storage/movie_cast_tokens.py``: a Range-aware direct-file route plus
+    the playlist/segments of an FFmpeg compatibility stream when the source
+    container or codecs cannot play on the receiver. Every other path (and
+    there is no admin surface, no movie list, no artwork, nothing else at all
+    here) gets a bare 404.
 
     This exists because a Chromecast or AirPlay receiver fetches the video
     file itself, directly -- no browser, no session cookie, and it can't
@@ -2008,7 +2026,7 @@ class _CastHttpHandler(BaseHTTPRequestHandler):
     (session-gated browsing, admin actions, every other file this Drone
     holds) must never become reachable over an unencrypted connection just
     because this one narrow exception exists for it. The narrowness (a
-    single route, gated by a token only an already-authenticated request
+    single narrow surface, gated by a token only an already-authenticated request
     could have minted) is what makes "on by default" an acceptable default
     here, the same way ``_HttpRedirectHandler`` (which serves no real
     content at all) already is.
@@ -2057,11 +2075,23 @@ class _CastHttpHandler(BaseHTTPRequestHandler):
         try:
             raw_path, _, raw_query = self.path.partition("?")
             parts = [part for part in raw_path.split("/") if part]
-            if len(parts) != 4 or parts[0] != "public" or parts[1] != "movies" or parts[3] != "cast-stream":
+            direct_stream = (
+                len(parts) == 4
+                and parts[0] == "public"
+                and parts[1] == "movies"
+                and parts[3] == "cast-stream"
+            )
+            hls_asset = (
+                len(parts) == 6
+                and parts[0] == "public"
+                and parts[1] == "movies"
+                and parts[3] == "cast-hls"
+            )
+            if not direct_stream and not hls_asset:
                 self._send_404()
                 return
             entry_key = parts[2]
-            token = parse_qs(raw_query).get("token", [""])[0]
+            token = parts[4] if hls_asset else parse_qs(raw_query).get("token", [""])[0]
             if not _movie_cast_tokens.verify(self.settings, entry_key, token):
                 # Worth a log line: this is what a receiver hits when a token
                 # has expired, and it is otherwise indistinguishable (from
@@ -2069,13 +2099,28 @@ class _CastHttpHandler(BaseHTTPRequestHandler):
                 self._log_cast(f"404 rejected token for {entry_key}")
                 self._send_404()
                 return
-            try:
-                target = _movies_store.resolve_movie_stream_path(self.settings.movies_root, entry_key)
-            except FileNotFoundError:
-                self._log_cast(f"404 unknown movie {entry_key}")
-                self._send_404()
-                return
-            self._stream_range(target)
+            if hls_asset:
+                try:
+                    target, content_type = _movie_cast_stream.resolve_hls_asset(
+                        self.settings, entry_key, token, parts[5]
+                    )
+                except FileNotFoundError:
+                    self._log_cast(f"404 unknown HLS asset for {entry_key}")
+                    self._send_404()
+                    return
+                self._stream_range(
+                    target,
+                    content_type=content_type,
+                    cache_control="no-cache" if target.suffix == ".m3u8" else "public, max-age=43200",
+                )
+            else:
+                try:
+                    target = _movies_store.resolve_movie_stream_path(self.settings.movies_root, entry_key)
+                except FileNotFoundError:
+                    self._log_cast(f"404 unknown movie {entry_key}")
+                    self._send_404()
+                    return
+                self._stream_range(target)
         except (BrokenPipeError, ConnectionResetError):
             pass  # client went away mid-response -- nothing to send
         except Exception as error:  # noqa: BLE001 - a cast request must never crash this listener's thread
@@ -2092,8 +2137,11 @@ class _CastHttpHandler(BaseHTTPRequestHandler):
         single-movie-scoped token the caller already had."""
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Range, Content-Type")
-        self.send_header("Access-Control-Expose-Headers", "Accept-Ranges, Content-Length, Content-Range")
+        self.send_header("Access-Control-Allow-Headers", "Range, Content-Type, Accept-Encoding")
+        self.send_header(
+            "Access-Control-Expose-Headers",
+            "Accept-Ranges, Content-Length, Content-Range, Content-Type",
+        )
 
     def do_OPTIONS(self) -> None:
         # CORS preflight -- answered for any path (it reveals nothing; the
@@ -2107,16 +2155,24 @@ class _CastHttpHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
 
-    def _stream_range(self, path: Path) -> None:
+    def _stream_range(
+        self,
+        path: Path,
+        *,
+        content_type: Optional[str] = None,
+        cache_control: Optional[str] = None,
+    ) -> None:
         file_size = path.stat().st_size
         start, end, status = _http_range.parse_range_header(self.headers.get("Range"), file_size)
         length = end - start + 1
-        content_type = _CAST_VIDEO_CONTENT_TYPES.get(path.suffix.lower(), "application/octet-stream")
+        content_type = content_type or _CAST_VIDEO_CONTENT_TYPES.get(path.suffix.lower(), "application/octet-stream")
         self._response_started = True
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(length))
         self.send_header("Accept-Ranges", "bytes")
+        if cache_control:
+            self.send_header("Cache-Control", cache_control)
         self._send_cast_cors_headers()
         if status == 206:
             self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")

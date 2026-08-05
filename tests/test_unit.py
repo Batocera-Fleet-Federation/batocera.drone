@@ -4721,6 +4721,48 @@ class CastHttpListenerTests(unittest.TestCase):
             self.assertEqual(body, b"2345")
             self.assertEqual(headers.get("Content-Range"), "bytes 2-5/10")
 
+    def test_tokenized_hls_playlist_and_segment_are_served(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings, entry_key, token = self._seed_movie_with_token(root)
+            cache = settings.cast_cache_root / token
+            cache.mkdir(parents=True)
+            playlist_body = b"#EXTM3U\n#EXTINF:4.0,\nsegment-000000.ts\n"
+            (cache / "index.m3u8").write_bytes(playlist_body)
+            (cache / "segment-000000.ts").write_bytes(b"0123456789")
+            port = self._start_listener(settings)
+
+            status, headers, body = self._get(
+                port, f"/public/movies/{entry_key}/cast-hls/{token}/index.m3u8"
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(body, playlist_body)
+            self.assertEqual(headers.get("Content-Type"), "application/x-mpegurl")
+            self.assertEqual(headers.get("Cache-Control"), "no-cache")
+
+            status, headers, body = self._get(
+                port,
+                f"/public/movies/{entry_key}/cast-hls/{token}/segment-000000.ts",
+                headers={"Range": "bytes=2-5"},
+            )
+            self.assertEqual(status, 206)
+            self.assertEqual(body, b"2345")
+            self.assertEqual(headers.get("Content-Type"), "video/mp2t")
+
+    def test_hls_route_does_not_expose_transcoder_log(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings, entry_key, token = self._seed_movie_with_token(root)
+            cache = settings.cast_cache_root / token
+            cache.mkdir(parents=True)
+            (cache / "ffmpeg.log").write_text("private path details", encoding="utf-8")
+            port = self._start_listener(settings)
+            status, _headers, body = self._get(
+                port, f"/public/movies/{entry_key}/cast-hls/{token}/ffmpeg.log"
+            )
+            self.assertEqual(status, 404)
+            self.assertEqual(body, b"")
+
     def test_wrong_token_is_404(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

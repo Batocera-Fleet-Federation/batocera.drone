@@ -632,12 +632,24 @@ human picking a match. "Rescan all movies" (unchecked by default) controls
 the candidate set: unchecked only queues movies with no poster yet
 (`metadata_manager._has_artwork()` — a movie counts as "has artwork" once it
 has a poster, regardless of backdrop); checked queues every movie,
-re-scraping ones already done. Unlike the manual per-movie search box (which
-still defaults its query to the simple `metadata_manager.clean_movie_query()`
-punctuation-strip — a human sees and can edit it before searching), the bulk
-job has no human in the loop, so it needs to get the query right
-automatically. Two pieces make that work, both in
-`app/movies/filename_parser.py` (pure, no I/O — see
+re-scraping ones already done. The bulk job has no human in the loop, so it
+needs to get the query right automatically — the manual per-movie search box
+**shares that exact same logic** for its default (blank-box) query rather
+than a separate, weaker cleanup: they used to diverge (the per-movie search
+fell back to `metadata_manager.clean_movie_query()`, a plain punctuation-
+strip with no scene-tag stripping and no year filter), which is why a
+release like `"10.Cloverfield.Lane.2016.1080p.BluRay.x264-[YTS.AG].mp4"`
+scraped fine in bulk but came up empty from the movie's own details page
+unless the file was renamed by hand first — a real reported bug, fixed by
+routing both flows through the same ladder
+(`metadata_manager._search_movie_ladder_with_label`, wrapped as
+`_search_movie_with_ladder` for bulk — discards the label — and
+`search_movie_default_query` for the per-movie search's blank-box default,
+which also returns the label so the box can be filled in with whatever title
+actually matched, for a human to see and edit before a follow-up retry). A
+human-typed query still searches verbatim, one plain call, no ladder — the
+ladder only applies when the box is empty. Two pieces make the ladder work,
+both in `app/movies/filename_parser.py` (pure, no I/O — see
 `test_movies_filename_parser.py`, written against a real 257-file mixed
 movie/TV library):
 

@@ -68,6 +68,13 @@ class MovieCastTokensTests(unittest.TestCase):
             self.assertTrue(movie_cast_tokens.verify(settings, "aaaa", first["token"]))
             self.assertTrue(movie_cast_tokens.verify(settings, "aaaa", second["token"]))
 
+    def test_revoke_invalidates_token_immediately(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            result = movie_cast_tokens.create(settings, "aaaa")
+            movie_cast_tokens.revoke(settings, result["token"])
+            self.assertFalse(movie_cast_tokens.verify(settings, "aaaa", result["token"]))
+
 
 if __name__ == "__main__":
     unittest.main()

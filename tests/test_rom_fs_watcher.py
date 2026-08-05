@@ -11,7 +11,10 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
+import app.drone_api as drone_api
+from app.common.settings import Settings
 from app.roms.rom_fs_watcher import RomFilesystemWatcher
 
 
@@ -60,6 +63,95 @@ class RomFilesystemWatcherTests(unittest.TestCase):
                 self.assertTrue(fired.wait(5.0), "watcher did not wake on delete")
             finally:
                 watcher.stop()
+
+
+class StartRomMetadataWatcherTests(unittest.TestCase):
+    """``_start_rom_metadata_watcher`` (drone_api.py) is the wiring that
+    decides which trees get near-real-time inotify coverage. Real inotify
+    behavior is already covered generically above; this just verifies the
+    wiring itself covers ROMs, saves, *and* movies -- movies previously had
+    no watcher at all, so a new/moved movie file sat invisible until the next
+    periodic poll (see rom-scanner's _poll_rom_metadata_once)."""
+
+    def tearDown(self) -> None:
+        drone_api._ROM_METADATA_WATCHER = None
+        drone_api._SAVES_METADATA_WATCHER = None
+        drone_api._MOVIES_METADATA_WATCHER = None
+
+    def test_watches_roms_saves_and_movies_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "USERDATA_ROOT": str(root),
+                    "ROMS_ROOT": str(root / "roms"),
+                    "BIOS_ROOT": str(root / "bios"),
+                    "SAVES_ROOT": str(root / "saves"),
+                    "MOVIES_ROOT": str(root / "movies"),
+                    "DRONE_STATE_DATABASE_FILE": str(root / "state.sqlite3"),
+                    "DRONE_DEVICE_ID": "watcher-wiring-test",
+                },
+                clear=True,
+            ):
+                settings = Settings.from_env()
+
+            watched_paths = []
+
+            class FakeWatcher:
+                def __init__(self, path, on_change, **kwargs):
+                    self.path = Path(path)
+                    watched_paths.append(self.path)
+
+                def start(self) -> bool:
+                    return True
+
+            with mock.patch.object(drone_api, "RomFilesystemWatcher", FakeWatcher):
+                drone_api._start_rom_metadata_watcher(settings)
+
+            self.assertEqual(
+                watched_paths,
+                [settings.roms_root, settings.saves_root, settings.movies_root],
+            )
+            self.assertIsInstance(drone_api._ROM_METADATA_WATCHER, FakeWatcher)
+            self.assertIsInstance(drone_api._SAVES_METADATA_WATCHER, FakeWatcher)
+            self.assertIsInstance(drone_api._MOVIES_METADATA_WATCHER, FakeWatcher)
+            self.assertEqual(drone_api._MOVIES_METADATA_WATCHER.path, settings.movies_root)
+
+    def test_movies_watcher_not_set_when_start_fails(self) -> None:
+        # Best-effort: if inotify can't watch movies_root (missing dir, watch
+        # limit, non-Linux, ...) the global must stay None so status reporting
+        # and any future caller can't mistake it for an active watcher.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "USERDATA_ROOT": str(root),
+                    "ROMS_ROOT": str(root / "roms"),
+                    "BIOS_ROOT": str(root / "bios"),
+                    "SAVES_ROOT": str(root / "saves"),
+                    "MOVIES_ROOT": str(root / "movies"),
+                    "DRONE_STATE_DATABASE_FILE": str(root / "state.sqlite3"),
+                    "DRONE_DEVICE_ID": "watcher-wiring-test-2",
+                },
+                clear=True,
+            ):
+                settings = Settings.from_env()
+
+            class FailingWatcher:
+                def __init__(self, path, on_change, **kwargs):
+                    pass
+
+                def start(self) -> bool:
+                    return False
+
+            with mock.patch.object(drone_api, "RomFilesystemWatcher", FailingWatcher):
+                drone_api._start_rom_metadata_watcher(settings)
+
+            self.assertIsNone(drone_api._ROM_METADATA_WATCHER)
+            self.assertIsNone(drone_api._SAVES_METADATA_WATCHER)
+            self.assertIsNone(drone_api._MOVIES_METADATA_WATCHER)
 
 
 if __name__ == "__main__":

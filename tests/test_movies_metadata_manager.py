@@ -119,6 +119,57 @@ class SearchTests(unittest.TestCase):
             self.assertEqual(results, [{"tmdb_id": 603, "title": "The Matrix"}])
 
 
+class SearchMovieDefaultQueryTests(unittest.TestCase):
+    """search_movie_default_query() backs the per-movie manual search's
+    default (no custom query typed) case -- it must reuse the exact same
+    candidate ladder _search_movie_with_ladder already uses for bulk
+    scraping (filename_parser.search_candidates), not a separate, weaker
+    cleanup. The two filenames below are real reported failures: neither
+    used to scrape from the movie's own details page until the file was
+    renamed by hand first, even though bulk scraping already handled them
+    correctly (see BulkScrapeTests further down for that side)."""
+
+    def test_the_terminator_paren_quality_style(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            fake = FakeBulkTmdbClient(match_queries={"The Terminator"})
+            outcome = metadata_manager.search_movie_default_query(
+                settings, "The Terminator (1080p).mp4", client=fake
+            )
+            self.assertEqual(fake.search_calls, ["The Terminator"])
+            self.assertEqual(outcome["query"], "The Terminator")
+            self.assertEqual(outcome["results"], [{"tmdb_id": 603, "title": "A Matched Movie"}])
+
+    def test_10_cloverfield_lane_dot_separated_scene_release_style(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            fake = FakeBulkTmdbClient(match_queries={"10 Cloverfield Lane"})
+            outcome = metadata_manager.search_movie_default_query(
+                settings, "10.Cloverfield.Lane.2016.1080p.BluRay.x264-[YTS.AG].mp4", client=fake
+            )
+            # The year-truncated title is tried before anything noisier --
+            # same rung order bulk scraping already relies on.
+            self.assertEqual(fake.search_calls[0], "10 Cloverfield Lane")
+            self.assertEqual(outcome["query"], "10 Cloverfield Lane (2016)")
+            self.assertEqual(outcome["results"], [{"tmdb_id": 603, "title": "A Matched Movie"}])
+
+    def test_no_match_still_returns_a_usable_label_not_the_raw_filename(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            fake = FakeBulkTmdbClient()  # matches nothing
+            outcome = metadata_manager.search_movie_default_query(
+                settings, "Totally Obscure Film (1080p).mp4", client=fake
+            )
+            self.assertEqual(outcome["results"], [])
+            self.assertEqual(outcome["query"], "Totally Obscure Film 1080p")
+
+    def test_resolves_the_stored_api_key_when_no_client_injected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            with self.assertRaises(TmdbUnavailableError):
+                metadata_manager.search_movie_default_query(settings, "The Terminator (1080p).mp4")
+
+
 class ApplyTests(unittest.TestCase):
     def test_unknown_movie_raises_not_found(self):
         with tempfile.TemporaryDirectory() as tmp:

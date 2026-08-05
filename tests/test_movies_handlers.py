@@ -447,6 +447,51 @@ class MovieCastTokenHandlerTests(unittest.TestCase):
                 payload["cast_url"],
                 f"http://batocera.local:8095/public/movies/{entry_key}/cast-stream?token={payload['token']}",
             )
+            self.assertEqual(payload["delivery"], "direct")
+            self.assertFalse(payload["transcoded"])
+
+    def test_incompatible_movie_returns_hls_cast_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Shows/Example/Example - S01E01.mkv", b"x")
+            settings = _build_settings(root, DRONE_CAST_ENABLED="1", DRONE_CAST_HTTP_PORT="8095")
+            movies_store.sync_movies_cache(settings.movies_root)
+            entry_key = movies_store.list_movies(settings.movies_root)[0]["entry_key"]
+            handler = _handler(settings)
+            handler.headers["Host"] = "batocera.local"
+            prepared = {
+                "delivery": "hls",
+                "url_path": f"/public/movies/{entry_key}/cast-hls/token-value/index.m3u8",
+                "content_type": "application/x-mpegurl",
+                "transcoded": True,
+            }
+            with mock.patch.object(handlers_movies._movie_cast_stream, "prepare", return_value=prepared):
+                handler._handle_movie_cast_token_create(entry_key)
+            _status, payload = handler.json_response
+            self.assertEqual(
+                payload["cast_url"],
+                f"http://batocera.local:8095/public/movies/{entry_key}/cast-hls/token-value/index.m3u8",
+            )
+            self.assertEqual(payload["content_type"], "application/x-mpegurl")
+            self.assertEqual(payload["delivery"], "hls")
+            self.assertTrue(payload["transcoded"])
+
+    def test_stream_preparation_failure_revokes_the_new_token(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Episode.mkv", b"x")
+            settings = _build_settings(root, DRONE_CAST_ENABLED="1")
+            movies_store.sync_movies_cache(settings.movies_root)
+            entry_key = movies_store.list_movies(settings.movies_root)[0]["entry_key"]
+            handler = _handler(settings)
+            with mock.patch.object(
+                handlers_movies._movie_cast_stream, "prepare", side_effect=ValueError("ffmpeg failed")
+            ):
+                with self.assertRaisesRegex(ValueError, "ffmpeg failed"):
+                    handler._handle_movie_cast_token_create(entry_key)
+            with movie_cast_tokens._open(settings.userdata_root) as connection:
+                count = connection.execute("SELECT COUNT(*) FROM movie_cast_tokens").fetchone()[0]
+            self.assertEqual(count, 0)
 
     def test_omits_port_suffix_when_cast_http_port_is_80(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -740,7 +785,12 @@ class MovieScrapeSearchHandlerTests(unittest.TestCase):
             status, _payload = handler.json_response
             self.assertEqual(status, 404)
 
-    def test_defaults_query_to_a_cleaned_up_filename(self) -> None:
+    def test_defaults_query_to_the_search_ladders_best_candidate(self) -> None:
+        # Regression: this used to fall back to a dumb punctuation-only
+        # cleanup ("The Matrix 1999 1080p" -- year and quality tags left
+        # right in the query text) instead of reusing the same year-filtered
+        # candidate ladder the bulk scraper already trusts
+        # (filename_parser.search_candidates via search_movie_default_query).
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             _write_movie(root, "The.Matrix.1999.1080p.mp4", b"x")
@@ -748,12 +798,16 @@ class MovieScrapeSearchHandlerTests(unittest.TestCase):
             movies_store.sync_movies_cache(settings.movies_root)
             entry_key = movies_store.list_movies(settings.movies_root)[0]["entry_key"]
             handler = _handler(settings)
-            with mock.patch.object(movies_metadata, "search", return_value=[]) as search:
+            with mock.patch.object(
+                movies_metadata, "search_movie_default_query",
+                return_value={"query": "The Matrix (1999)", "results": [{"tmdb_id": 603}]},
+            ) as ladder_search:
                 handler._handle_admin_movie_scrape_search(entry_key, None)
-            search.assert_called_once_with(settings, "The Matrix 1999 1080p")
+            ladder_search.assert_called_once_with(settings, "The.Matrix.1999.1080p.mp4")
             status, payload = handler.json_response
             self.assertEqual(status, 200)
-            self.assertEqual(payload["query"], "The Matrix 1999 1080p")
+            self.assertEqual(payload["query"], "The Matrix (1999)")
+            self.assertEqual(payload["results"], [{"tmdb_id": 603}])
 
     def test_explicit_query_overrides_the_filename_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -768,6 +822,27 @@ class MovieScrapeSearchHandlerTests(unittest.TestCase):
             search.assert_called_once_with(settings, "the matrix")
             _status, payload = handler.json_response
             self.assertEqual(payload["results"], [{"tmdb_id": 1}])
+
+    def test_tmdb_unavailable_on_default_query_path_is_also_502(self) -> None:
+        # The default (no custom query) path goes through a different
+        # function (search_movie_default_query) than the explicit-query path
+        # -- make sure it maps TmdbUnavailableError to the same 502, not an
+        # uncaught exception.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Vacation.mp4", b"x")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+            entry_key = movies_store.list_movies(settings.movies_root)[0]["entry_key"]
+            handler = _handler(settings)
+            with mock.patch.object(
+                movies_metadata, "search_movie_default_query",
+                side_effect=TmdbUnavailableError("no key configured"),
+            ):
+                handler._handle_admin_movie_scrape_search(entry_key, None)
+            status, payload = handler.json_response
+            self.assertEqual(status, 502)
+            self.assertIn("no key configured", payload["error"])
 
     def test_tmdb_unavailable_is_502(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

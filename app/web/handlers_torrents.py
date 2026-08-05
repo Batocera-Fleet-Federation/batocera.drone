@@ -133,6 +133,7 @@ class HandlersTorrentsMixin:
             payload.get("files"),
             str(payload.get("destination") or ""),
             cleanup=bool(payload.get("cleanup")),
+            preserve_structure=bool(payload.get("preserve_structure")),
         )
         status_map = {
             "not_found": 404,

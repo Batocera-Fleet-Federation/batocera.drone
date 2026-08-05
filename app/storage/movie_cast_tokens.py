@@ -95,3 +95,12 @@ def verify(settings: Any, entry_key: str, token: str) -> bool:
             connection.commit()
             return False
     return row[0] == entry_key
+
+
+def revoke(settings: Any, token: str) -> None:
+    """Invalidate one token, primarily when stream preparation fails."""
+    if not token:
+        return
+    with _open(settings.userdata_root) as connection:
+        connection.execute("DELETE FROM movie_cast_tokens WHERE token = ?", (token,))
+        connection.commit()

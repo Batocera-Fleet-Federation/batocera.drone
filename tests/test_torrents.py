@@ -1588,6 +1588,99 @@ class TorrentFileManagementTests(unittest.TestCase):
             self.assertTrue((dest / "a.bin").exists())
             self.assertEqual(len(result["errors"]), 1)
 
+    def test_move_files_default_flattens_nested_layout(self) -> None:
+        # preserve_structure defaults to False -- unchanged historical
+        # behavior, callers that don't pass the new kwarg must keep flattening.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            watch = root / "watch"
+            sub = watch / "Pack" / "Sub"
+            sub.mkdir(parents=True)
+            file1 = sub / "one.bin"
+            file1.write_bytes(b"one")
+            manager, _ = self._completed_manager(root, FakeRpc(), {"Pack": [file1]})
+            entry = manager.snapshot()["torrents"][0]
+            dest = root / "moved"
+            result = manager.move_files(entry["id"], [str(file1)], str(dest), cleanup=False)
+            self.assertEqual(result["status"], "ok")
+            self.assertTrue((dest / "one.bin").exists())
+            self.assertFalse((dest / "Pack").exists())
+
+    def test_move_files_preserve_structure_recreates_nested_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            watch = root / "watch"
+            season1 = watch / "Show Pack" / "Season 1"
+            season2 = watch / "Show Pack" / "Season 2"
+            season1.mkdir(parents=True)
+            season2.mkdir(parents=True)
+            file1 = season1 / "e01.mkv"
+            file2 = season2 / "e01.mkv"
+            file1.write_bytes(b"one")
+            file2.write_bytes(b"two")
+            manager, _ = self._completed_manager(root, FakeRpc(), {"Show Pack": [file1, file2]})
+            entry = manager.snapshot()["torrents"][0]
+            dest = root / "moved"
+            result = manager.move_files(
+                entry["id"], [str(file1), str(file2)], str(dest), cleanup=False, preserve_structure=True
+            )
+            self.assertEqual(result["status"], "ok")
+            self.assertTrue((dest / "Show Pack" / "Season 1" / "e01.mkv").exists())
+            self.assertTrue((dest / "Show Pack" / "Season 2" / "e01.mkv").exists())
+            self.assertFalse(file1.exists())
+            self.assertFalse(file2.exists())
+
+    def test_move_files_preserve_structure_only_creates_folders_for_selected_files(self) -> None:
+        # A partial selection (some files in a folder unchecked) must not drag
+        # in folders the user didn't select anything from.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            watch = root / "watch"
+            season1 = watch / "Show Pack" / "Season 1"
+            season2 = watch / "Show Pack" / "Season 2"
+            season1.mkdir(parents=True)
+            season2.mkdir(parents=True)
+            file1 = season1 / "e01.mkv"
+            file2 = season2 / "e01.mkv"
+            file1.write_bytes(b"one")
+            file2.write_bytes(b"two")
+            manager, _ = self._completed_manager(root, FakeRpc(), {"Show Pack": [file1, file2]})
+            entry = manager.snapshot()["torrents"][0]
+            dest = root / "moved"
+            result = manager.move_files(
+                entry["id"], [str(file1)], str(dest), cleanup=False, preserve_structure=True
+            )
+            self.assertEqual(result["status"], "ok")
+            self.assertTrue((dest / "Show Pack" / "Season 1" / "e01.mkv").exists())
+            self.assertFalse((dest / "Show Pack" / "Season 2").exists())
+
+    def test_move_files_preserve_structure_collision_suffixes_within_same_subfolder(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            watch = root / "watch"
+            subfolder = watch / "Pack" / "Sub"
+            subfolder.mkdir(parents=True)
+            file1 = subfolder / "one.bin"
+            file1.write_bytes(b"new")
+            manager, _ = self._completed_manager(root, FakeRpc(), {"Pack": [file1]})
+            entry = manager.snapshot()["torrents"][0]
+            dest = root / "moved"
+            existing = dest / "Pack" / "Sub" / "one.bin"
+            existing.parent.mkdir(parents=True)
+            existing.write_bytes(b"already there")
+            result = manager.move_files(
+                entry["id"], [str(file1)], str(dest), cleanup=False, preserve_structure=True
+            )
+            self.assertEqual(result["status"], "ok")
+            # A collision at the destination renames the incoming file --
+            # it must stay in the same recreated subfolder, not fall back to
+            # the destination root.
+            self.assertTrue(existing.exists())
+            self.assertEqual(existing.read_bytes(), b"already there")
+            suffixed = dest / "Pack" / "Sub" / "one (2).bin"
+            self.assertTrue(suffixed.exists())
+            self.assertEqual(suffixed.read_bytes(), b"new")
+
     def test_recent_move_locations_dedupes_and_orders_most_recent_first(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

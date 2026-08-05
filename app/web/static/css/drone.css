@@ -1476,22 +1476,6 @@
       text-overflow: ellipsis;
       min-width: 0;
     }
-    /* <google-cast-launcher> is a custom element the Cast Sender SDK
-       defines once it loads (see drone.js's loadCastSenderSdk) -- it's
-       invisible/inert until then and stays icon-sized (no visible cast
-       button) until the SDK detects a receiver on the network, both by
-       design. Sized/aligned to sit inline with the Bootstrap buttons
-       around it in the player modal's footer rather than the SDK's own
-       tiny default box. */
-    .movie-cast-launcher {
-      display: inline-block;
-      width: 2.25rem;
-      height: 2.25rem;
-      vertical-align: middle;
-      --connected-color: var(--admin-sidebar-accent, #0dcaf0);
-      --disconnected-color: var(--admin-text, #fff);
-    }
-
     /* Compact hierarchical tree used by any filesystem-browsing UI (the
        folder picker, the Move Files file list) -- small font on purpose so a
        deep path doesn't eat the whole modal. Shared structure for both

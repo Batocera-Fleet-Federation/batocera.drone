@@ -230,6 +230,21 @@ def _resolve_known_files(entry: dict) -> List[Path]:
     return []
 
 
+def _relative_known_file_path(candidate: Path, download_dir_resolved: Optional[Path]) -> str:
+    """``candidate``'s path relative to the torrent's ``download_dir``, falling
+    back to just its filename when it isn't resolvable underneath it. This is
+    the original directory layout aria2 downloaded into (e.g. a multi-file
+    torrent's per-release folder and season subfolders), used both to display
+    the file tree and, when preserving structure, to rebuild it at the move
+    destination."""
+    if download_dir_resolved is not None:
+        try:
+            return str(candidate.resolve().relative_to(download_dir_resolved))
+        except (ValueError, OSError):
+            pass
+    return candidate.name
+
+
 def _torrent_root_dir(entry: dict, known_files: List[Path]) -> Optional[Path]:
     """The dedicated per-torrent subfolder under ``download_dir``, if aria2
     created one (typical for multi-file torrents) -- removing it cleans up
@@ -1137,12 +1152,7 @@ class TorrentManager:
                 size = candidate.stat().st_size if exists else None
             except OSError:
                 size = None
-            relative = candidate.name
-            if download_dir_resolved is not None:
-                try:
-                    relative = str(candidate.resolve().relative_to(download_dir_resolved))
-                except (ValueError, OSError):
-                    pass
+            relative = _relative_known_file_path(candidate, download_dir_resolved)
             files.append(
                 {
                     "path": str(candidate),
@@ -1154,7 +1164,15 @@ class TorrentManager:
             )
         return {"status": "ok", "files": files, "download_dir": download_dir}
 
-    def move_files(self, entry_id: str, requested_paths, destination: str, *, cleanup: bool) -> dict:
+    def move_files(
+        self,
+        entry_id: str,
+        requested_paths,
+        destination: str,
+        *,
+        cleanup: bool,
+        preserve_structure: bool = False,
+    ) -> dict:
         with self._lock:
             entry = self._torrents.get(entry_id)
             if entry is None:
@@ -1184,16 +1202,27 @@ class TorrentManager:
         except OSError as error:
             return {"status": "invalid_destination", "message": f"destination is not writable: {error}"}
 
+        download_dir = entry_copy.get("download_dir") or ""
+        try:
+            download_dir_resolved = Path(download_dir).resolve() if download_dir else None
+        except OSError:
+            download_dir_resolved = None
+
         moved: List[str] = []
         moved_sources: List[Path] = []
         errors: List[dict] = []
         for source in selected:
-            target = destination_path / source.name
+            if preserve_structure:
+                relative = _relative_known_file_path(source, download_dir_resolved)
+                target = destination_path / relative
+            else:
+                target = destination_path / source.name
             counter = 1
             while target.exists():
                 counter += 1
-                target = destination_path / f"{source.stem} ({counter}){source.suffix}"
+                target = target.with_name(f"{target.stem} ({counter}){target.suffix}")
             try:
+                target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(source), str(target))
                 moved.append(str(target))
                 moved_sources.append(source)
