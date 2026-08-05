@@ -68,7 +68,7 @@ working. Layout:
 - `web/` — api_routes/ui_routes (handler mixins), route_config, api_models, the FastAPI
   bridge (api_app/api_bridge/openapi_spec), server_tls, the `RomRequestHandler` `_handle_*`
   **mixins** (handlers_peer/content/artwork/network/config/system/downloads/diagnostics/
-  es_collections/remote_admin/theme), **plus `static/` + `templates/`**
+  es_collections/network_share/theme), **plus `static/` + `templates/`**
 - `transport/` — the outbound P2P stack: `base` (PeerTransport ABC), `selector`
   (`TransportSelector`), `lan` (`LanDirectTransport`), `direct_public`
   (`DirectPublicTransport`), `tailnet` (tailnet address detection). Also imported

@@ -638,11 +638,9 @@ class SettingsTests(unittest.TestCase):
             ],
         )
 
-    def test_peer_api_port_prefers_peer_mtls_port_by_default_but_not_for_admin_kind(self) -> None:
+    def test_peer_api_port_prefers_peer_mtls_port_by_default(self) -> None:
         peer = {"api_port": 8443, "peer_mtls_port": 8543}
         self.assertEqual(_peer_api_port(peer), 8543)
-        self.assertEqual(_peer_api_port(peer, port_kind="peer_mtls"), 8543)
-        self.assertEqual(_peer_api_port(peer, port_kind="admin"), 8443)
 
     def test_peer_api_port_falls_back_to_api_port_when_peer_mtls_port_absent(self) -> None:
         # Old, already-paired records (pre-listener-split) have no
@@ -663,15 +661,6 @@ class SettingsTests(unittest.TestCase):
             "peer_mtls_port": 8543,
         }
         self.assertEqual(_peer_address(peer), "https://bff-drone-b:8543")
-
-    def test_peer_address_admin_port_kind_ignores_peer_mtls_port_and_trusts_reachable_url(self) -> None:
-        peer = {
-            "reachable_url": "https://bff-drone-b:8443",
-            "scheme": "https",
-            "api_port": 8443,
-            "peer_mtls_port": 8543,
-        }
-        self.assertEqual(_peer_address(peer, port_kind="admin"), "https://bff-drone-b:8443")
 
     def test_peer_address_trusts_reachable_url_verbatim_when_ports_match(self) -> None:
         # No need to rebuild anything when peer_mtls_port isn't set (falls
@@ -701,17 +690,6 @@ class SettingsTests(unittest.TestCase):
                 "https://192.168.0.180:8543",
             ],
         )
-
-    def test_peer_address_candidates_admin_kind_keeps_api_port_verbatim(self) -> None:
-        from app.transfer.peer_connectivity import _peer_address_candidates
-
-        peer = {
-            "reachable_url": "https://192.168.0.180:8443",
-            "scheme": "https",
-            "api_port": 8443,
-            "peer_mtls_port": 8543,
-        }
-        self.assertEqual(_peer_address_candidates(peer, port_kind="admin"), ["https://192.168.0.180:8443"])
 
     def test_peer_json_falls_back_from_tailnet_to_ip_with_short_timeout(self) -> None:
         from app.transfer import peer_connectivity
@@ -6335,8 +6313,8 @@ class SwarmPageTests(unittest.TestCase):
         card_body = self.js[card_start:self.js.index("function swarmBrowsePeerAssets(", card_start)]
         for expected in (">This Drone<", ">Online<", ">Offline<", "Request Assets"):
             self.assertIn(expected, card_body)
-        # Managing a peer directly (Manage button) replaced navigating to its
-        # own separately-hosted UI in a new tab.
+        # No "open this peer's own UI" link -- the address is shown as plain
+        # text, not a navigable link to a separately-hosted UI.
         self.assertNotIn("Open UI", card_body)
         self.assertNotIn("drone.ui_url", card_body)
 
@@ -6349,7 +6327,7 @@ class SwarmPageTests(unittest.TestCase):
 
     def test_request_assets_deep_links_into_the_transfers_picker(self) -> None:
         browse_start = self.js.index("function swarmBrowsePeerAssets(")
-        browse_body = self.js[browse_start:self.js.index("function swarmManagePeer(", browse_start)]
+        browse_body = self.js[browse_start:self.js.index("async function swarmReferencePeerRoms(", browse_start)]
         self.assertIn("localPeerAssetContext.peerId", browse_body)
         self.assertIn('setHash("#admin/transfers")', browse_body)
 
@@ -6469,146 +6447,61 @@ class SwarmPageTests(unittest.TestCase):
         self.assertIn(">Forget</button>", card_body)
 
 
-class RemoteAdminUiTests(unittest.TestCase):
-    """Tab-scoped remote-drone impersonation: opening ?manage=<peer_id> in a
-    new tab (from the Swarm page's Manage button) proxies every admin call in
-    that tab to the peer, with no local/remote mixing to track per page."""
+class NetworkSharePageTests(unittest.TestCase):
+    """Swarm-page "Reference ROMs" button: mounts a paired peer's Batocera
+    Samba ROM share over SMB/CIFS and symlinks it in, instead of the removed
+    Manage button that used to occupy this slot."""
 
     @classmethod
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
         cls.js = root.joinpath("app/web/static/js/drone.js").read_text(encoding="utf-8")
-        cls.html = root.joinpath("app/web/templates/index.html").read_text(encoding="utf-8")
-        cls.css = root.joinpath("app/web/static/css/drone.css").read_text(encoding="utf-8")
 
-    def test_banner_uses_a_high_contrast_theme_not_stock_bootstrap_warning(self) -> None:
-        # Bootstrap's stock .alert-warning is pale yellow with dark text, but
-        # this app's global ".fw-semibold { color: var(--admin-text) }" rule
-        # (near-white) overrides that on the banner's bolded text, leaving
-        # illegible white-on-pale-yellow -- the CSS must set an explicit,
-        # high-contrast color for the banner text itself, not rely on
-        # bootstrap's alert-warning defaults surviving untouched.
-        self.assertIn("#managedPeerBanner.alert-warning", self.css)
-        self.assertIn("#managedPeerBanner .managed-peer-banner-text", self.css)
-        banner_rule = self.css[self.css.index("#managedPeerBanner.alert-warning"):]
-        self.assertIn("background:", banner_rule[: banner_rule.index("}")])
+    def test_manage_button_and_impersonation_machinery_are_gone(self) -> None:
+        self.assertNotIn("swarmManagePeer", self.js)
+        self.assertNotIn("managedPeer", self.js)
+        self.assertNotIn("ensureRemoteManagementReady", self.js)
+        self.assertNotIn("showRemoteConnectGate", self.js)
+        self.assertNotIn("/admin/remote/", self.js)
 
-    def test_connect_modal_is_dark_themed_like_the_rest_of_the_app(self) -> None:
-        # Without this, .text-muted's pale text (styled for a dark background
-        # everywhere else in this app) renders against bootstrap's stock white
-        # modal instead -- illegible and visually inconsistent.
-        self.assertIn("remote-connect-modal", self.css)
-        self.assertIn('class="modal-content remote-connect-modal"', self.js)
+    def test_swarm_page_fetches_network_shares_alongside_overview(self) -> None:
+        page_start = self.js.index("async function renderSwarmPage()")
+        page_end = self.js.index("async function renderIntegrationTransfersPanel", page_start)
+        body = self.js[page_start:page_end]
+        promise_all_index = body.index("Promise.all([")
+        promise_all_close = body.index("]);", promise_all_index)
+        shares_index = body.index('api("/admin/network-shares")')
+        self.assertTrue(promise_all_index < shares_index < promise_all_close)
+        self.assertIn("swarmNetworkSharesByPeer = Object.fromEntries", body)
 
-    def test_manage_button_opens_a_new_tab_with_the_query_string(self) -> None:
+    def test_card_shows_reference_button_gated_on_tailnet_and_online(self) -> None:
         card_start = self.js.index("function renderSwarmDroneCard(")
         card_body = self.js[card_start:self.js.index("function swarmBrowsePeerAssets(", card_start)]
-        self.assertIn("swarmManagePeer(decodeURIComponent(", card_body)
-        self.assertIn(">Manage</button>", card_body)
-        # Disabled for an offline peer -- nothing to connect to.
-        self.assertIn('${drone.online ? "" : "disabled"}', card_body)
+        self.assertIn("swarmReferencePeerRoms(decodeURIComponent(", card_body)
+        self.assertIn("swarmUnreferencePeerRoms(decodeURIComponent(", card_body)
+        self.assertIn("drone.online && drone.tailnet_ip", card_body)
 
-        fn_start = self.js.index("function swarmManagePeer(")
-        fn_body = self.js[fn_start:self.js.index("\nfunction ", fn_start + 1)]
-        self.assertIn('window.open(url.toString(), "_blank"', fn_body)
-        self.assertIn("?manage=", fn_body)
-        self.assertIn("manage_name=", fn_body)
+    def test_reference_flow_confirms_then_posts_enable(self) -> None:
+        fn_start = self.js.index("async function swarmReferencePeerRoms(")
+        fn_body = self.js[fn_start:self.js.index("\nasync function swarmUnreferencePeerRoms(", fn_start)]
+        self.assertIn("window.confirm(", fn_body)
+        self.assertIn("/admin/network-shares/${encodeURIComponent(peerId)}/enable", fn_body)
+        self.assertIn("await renderSwarmPage();", fn_body)
 
-    def test_banner_markup_is_hidden_by_default(self) -> None:
-        self.assertIn('id="managedPeerBanner"', self.html)
-        self.assertIn("d-none", self.html.split('id="managedPeerBanner"')[1].split(">")[0])
-        self.assertIn('class="managed-peer-banner-text', self.html)
-        self.assertIn("exitRemoteManagement()", self.html)
+    def test_unreference_flow_confirms_then_posts_disable(self) -> None:
+        fn_start = self.js.index("async function swarmUnreferencePeerRoms(")
+        fn_body = self.js[fn_start:self.js.index("\n// Tailnet's MagicDNS", fn_start)]
+        self.assertIn("window.confirm(", fn_body)
+        self.assertIn("/admin/network-shares/${encodeURIComponent(peerId)}/disable", fn_body)
 
-    def test_api_helpers_rewrite_to_the_generic_proxy_when_managing_a_peer(self) -> None:
-        fn_start = self.js.index("function _apiRequestUrl(")
-        fn_body = self.js[fn_start:self.js.index("\nasync function _handleApiUnauthorized", fn_start)]
-        self.assertIn('managedPeer && !url.startsWith("/admin/remote/")', fn_body)
-        self.assertIn("`${API_BASE}/remote/${encodeURIComponent(managedPeer.peerId)}${url}`", fn_body)
-        # Absolute URLs and the connect/disconnect/status endpoints themselves
-        # must never be rewritten -- they always mean this gateway.
-        self.assertIn('url.startsWith("http://") || url.startsWith("https://")', fn_body)
-
-    def test_unauthorized_handler_distinguishes_gateway_from_proxy_401s(self) -> None:
-        fn_start = self.js.index("async function _handleApiUnauthorized(")
-        fn_body = self.js[fn_start:self.js.index("\nasync function api(", fn_start)]
-        self.assertIn('res.headers.get("X-Drone-Auth-Required")', fn_body)
-        self.assertIn("window.location.reload()", fn_body)
-        # On a lost/rejected proxy session it reconnects then retries the
-        # *same* call, rather than separately re-rendering and still
-        # throwing -- which would otherwise race a fresh render against the
-        # original caller's own (now stale) error handling.
-        self.assertIn("showRemoteConnectGate(managedPeer)", fn_body)
-        self.assertIn("return retry()", fn_body)
-
-        api_start = self.js.index("async function api(url)")
-        api_body = self.js[api_start:self.js.index("\nasync function apiPost(", api_start)]
-        self.assertIn("_handleApiUnauthorized(res, () => api(url))", api_body)
-
-        post_start = self.js.index("async function apiPost(url, payload)")
-        post_body = self.js[post_start:self.js.index("\nasync function ", post_start + 1)]
-        self.assertIn("_handleApiUnauthorized(res, () => apiPost(url, payload))", post_body)
-
-    def test_start_app_checks_local_admin_before_impersonating(self) -> None:
-        # Session-login split bootstrapApp() into a thin session-check gate
-        # (see test_bootstrap_shows_login_when_session_check_fails) plus this
-        # function, which runs only once a valid session is confirmed.
-        fn_start = self.js.index("async function startApp()")
-        fn_body = self.js[fn_start:self.js.index("\nasync function submitLogin(", fn_start)]
-        probe_index = fn_body.index('api("/admin/configs/sources")')
-        ready_index = fn_body.index("await ensureRemoteManagementReady();")
-        info_bar_index = fn_body.index("loadSystemInfoBar();")
-        router_index = fn_body.index("await router();")
-        # Order matters: the local admin-enabled probe must run before
-        # managedPeer can be set, and the status bar/router must run after,
-        # so they proxy once a peer is being impersonated.
-        self.assertTrue(probe_index < ready_index < info_bar_index < router_index)
-
-    def test_bootstrap_shows_login_when_session_check_fails(self) -> None:
-        # Named bootstrapApp(), not bootstrap() -- a top-level `function
-        # bootstrap` declaration would shadow window.bootstrap (the Bootstrap
-        # UI library global), breaking every data-bs-dismiss="modal" button.
-        fn_start = self.js.index("async function bootstrapApp()")
-        fn_body = self.js[fn_start:self.js.index("\ndocument.getElementById(\"logoutBtn\")", fn_start)]
-        self.assertIn('api("/auth/session")', fn_body)
-        self.assertIn("renderLoginPage()", fn_body)
-        self.assertIn("await startApp()", fn_body)
-        # The login page must render (and bootstrap must bail out) before
-        # startApp() ever runs -- an unauthenticated visitor must never reach
-        # the admin-probe/router logic startApp() drives.
-        login_index = fn_body.index("renderLoginPage()")
-        start_app_index = fn_body.index("await startApp()")
-        self.assertTrue(login_index < start_app_index)
-
-    def test_ensure_remote_management_ready_checks_status_before_prompting(self) -> None:
-        fn_start = self.js.index("async function ensureRemoteManagementReady()")
-        fn_body = self.js[fn_start:self.js.index("\nfunction showRemoteConnectGate(", fn_start)]
-        self.assertIn("_parseManageParam()", fn_body)
-        self.assertIn("${API_BASE}/admin/remote/status?peer_id=", fn_body)
-        self.assertIn("if (status.connected)", fn_body)
-        self.assertIn("showRemoteConnectGate(requested)", fn_body)
-
-    def test_connect_gate_posts_credentials_and_never_persists_them_client_side(self) -> None:
-        fn_start = self.js.index("function showRemoteConnectGate(peer)")
-        fn_body = self.js[fn_start:self.js.index("\nfunction ensureToastContainer()", fn_start)]
-        self.assertIn("${API_BASE}/admin/remote/connect", fn_body)
-        self.assertIn('body: JSON.stringify({ peer_id: peer.peerId, username, password })', fn_body)
-        self.assertNotIn("sessionStorage", fn_body)
-        self.assertNotIn("localStorage", fn_body)
-        self.assertIn('data-bs-backdrop", "static"', fn_body)
-
-    def test_exit_remote_management_disconnects_before_navigating_away(self) -> None:
-        fn_start = self.js.index("async function exitRemoteManagement()")
-        fn_body = self.js[fn_start:self.js.index("\nasync function ensureRemoteManagementReady", fn_start)]
-        self.assertIn("${API_BASE}/admin/remote/disconnect", fn_body)
-        self.assertIn("peer_id: managedPeer.peerId", fn_body)
-        self.assertIn('url.search = ""', fn_body)
-
-    def test_managed_peer_state_never_stores_a_credential(self) -> None:
-        # The whole point: managedPeer only ever holds identity, never a secret.
-        declaration_index = self.js.index("let managedPeer = null;")
-        preceding_comment = self.js[max(0, declaration_index - 400):declaration_index]
-        self.assertIn("never a credential", preceding_comment)
+    def test_referencing_pill_shown_next_to_email_pill(self) -> None:
+        bar_start = self.js.index("async function loadSystemInfoBar()")
+        bar_end = self.js.index("async function router()", bar_start)
+        body = self.js[bar_start:bar_end]
+        email_index = body.index("Email: ${emailOn")
+        share_index = body.index("Referencing: ${shares.length}")
+        self.assertTrue(email_index < share_index)
+        self.assertIn('api("/admin/network-shares")', body)
 
 
 class TailnetServiceTests(unittest.TestCase):

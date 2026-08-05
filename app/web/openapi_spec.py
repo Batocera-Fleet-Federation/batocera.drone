@@ -441,7 +441,21 @@ def _schemas() -> Dict[str, Schema]:
         "MovieScrapeSearchResponse": _object(
             {"query": _string(), "results": _array(_ref("MovieScrapeSearchResult"))}, ("query", "results")
         ),
-        "MovieScrapeApplyRequest": _object({"tmdb_id": _integer()}, ("tmdb_id",)),
+        "MovieScrapeApplyRequest": _object(
+            {
+                "tmdb_id": _integer("A candidate already chosen from this app's own search results"),
+                "tmdb_url": _string(
+                    "Direct-lookup alternative to tmdb_id: a bare TMDb id or a full themoviedb.org movie URL "
+                    "(e.g. https://www.themoviedb.org/movie/21380-virus), for a title that search doesn't "
+                    "reliably surface. Exactly one of tmdb_id/tmdb_url is required; tmdb_id wins if both are sent.",
+                    nullable=True,
+                ),
+            },
+        ),
+        "MovieScrapeDeleteResponse": _object(
+            {"deleted": _boolean("Whether a metadata row existed and was removed; false is a normal no-op, not an error")},
+            ("deleted",),
+        ),
         "MovieBulkScrapeJob": _object(
             {
                 "id": _integer(),
@@ -1342,6 +1356,34 @@ def _schemas() -> Dict[str, Schema]:
             },
             ("active", "generated_at", "drones"),
         ),
+        "NetworkShareSystemRecord": _object(
+            {
+                "system": _string(description="System folder name (e.g. 'snes')"),
+                "had_local_collision": _boolean(description="Whether a local folder with real content already existed for this system"),
+                "renamed_to": _string(description="If a collision was resolved, the exact name the local folder was renamed to (e.g. 'snes.old') so it can be precisely restored later"),
+                "symlink_created": _boolean(),
+                "skipped_reason": _string(description="Non-empty when this system was left untouched, e.g. because <system>.old already existed"),
+            },
+            ("system", "had_local_collision", "symlink_created"),
+        ),
+        "NetworkShareRecord": _object(
+            {
+                "peer_id": _string(),
+                "peer_name": _string(),
+                "tailnet_ip": _string(),
+                "mount_point": _string(),
+                "enabled": _boolean(),
+                "status": _enum(["mounted", "peer_unreachable", "error", "pending"]),
+                "status_detail": _string(),
+                "systems": _array(_ref("NetworkShareSystemRecord")),
+                "created_at": _string(fmt="date-time"),
+                "updated_at": _string(fmt="date-time"),
+                "last_checked_at": _string(fmt="date-time", nullable=True),
+            },
+            ("peer_id", "peer_name", "status"),
+        ),
+        "NetworkShareListResponse": _object({"shares": _array(_ref("NetworkShareRecord"))}, ("shares",)),
+        "NetworkShareDisableResponse": _object({"status": _enum(["disabled", "not_found"]), "peer_id": _string()}, ("status", "peer_id")),
         "TailnetStatusResponse": _object(
             {
                 "installed": _boolean(description="tailscale binaries present under /userdata/system/tailscale"),
@@ -1382,36 +1424,6 @@ def _schemas() -> Dict[str, Schema]:
             {"auth_key": _string(description="Tailscale auth key (tskey-auth-...) from https://login.tailscale.com/admin/settings/keys")},
             ("auth_key",),
         ),
-        "RemoteProxyResponse": _object(
-            description="Relayed verbatim from the proxied peer route -- its shape matches whatever that route's own documented response is; this generic passthrough has no fixed schema of its own."
-        ),
-        "RemoteStatusResponse": _object(
-            {
-                "connected": _boolean(description="true when a cached remote-admin session already exists for this peer"),
-                "peer_id": _string(),
-                "name": _string(),
-            },
-            ("connected", "peer_id", "name"),
-        ),
-        "RemoteConnectRequest": _object(
-            {
-                "peer_id": _string(description="A paired peer's drone_id"),
-                "username": _string(description="That peer's own Drone login username"),
-                "password": _string(description="That peer's own Drone login password"),
-            },
-            ("peer_id", "username", "password"),
-        ),
-        "RemoteConnectResponse": _object(
-            {
-                "status": _enum(["connected"]),
-                "peer_id": _string(),
-                "name": _string(),
-                "drone_app_version": _string(description="The peer's reported Drone app version, when available"),
-            },
-            ("status", "peer_id", "name"),
-        ),
-        "RemoteDisconnectRequest": _object({"peer_id": _string()}, ("peer_id",)),
-        "RemoteDisconnectResponse": _object({"status": _enum(["disconnected"]), "peer_id": _string()}, ("status", "peer_id")),
         "LocalPeerForgetResponse": _object({"status": _enum(["forgotten", "not_found"]), "peer_id": _string()}, ("status", "peer_id")),
         "LocalSyncRequest": _object(
             {
@@ -1828,12 +1840,23 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             },
             "/admin/movies/{entry_key}/scrape/apply": {
                 "post": _operation(
-                    "Apply a chosen TMDb search result: downloads poster/backdrop art next to the movie file and saves metadata",
-                    {"200": _json_response("MovieMetadata"), "400": _json_response("ErrorResponse", "Missing/invalid tmdb_id"), "404": _json_response("ErrorResponse", "Unknown movie"), "502": _json_response("ErrorResponse", "TMDb unreachable or no API key configured")},
+                    "Apply a chosen TMDb search result (tmdb_id), or a directly pasted TMDb id/movie URL (tmdb_url) -- "
+                    "either way, downloads poster/backdrop art next to the movie file and saves metadata",
+                    {"200": _json_response("MovieMetadata"), "400": _json_response("ErrorResponse", "Missing/invalid tmdb_id or tmdb_url"), "404": _json_response("ErrorResponse", "Unknown movie"), "502": _json_response("ErrorResponse", "TMDb unreachable or no API key configured")},
                     request_body=_json_request("MovieScrapeApplyRequest"),
                     parameters=[_path_param("entry_key")],
                     tags=["admin", "movies"],
                     error_codes=("400", "401", "403", "404", "429", "500", "502", "503"),
+                )
+            },
+            "/admin/movies/{entry_key}/scrape/delete": {
+                "post": _operation(
+                    "Clear a movie/show entry's scraped TMDb metadata and artwork -- for when a scrape matched the "
+                    "wrong thing and it needs a clean slate before retrying",
+                    {"200": _json_response("MovieScrapeDeleteResponse")},
+                    parameters=[_path_param("entry_key")],
+                    tags=["admin", "movies"],
+                    error_codes=("401", "403", "429", "500", "503"),
                 )
             },
             "/admin/movies/scrape/bulk": {
@@ -2157,71 +2180,28 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             "/admin/local-network/pairing-code/rotate": {"post": _operation("Rotate Local Network pairing code", {"200": _json_response("PairingCodeResponse")}, tags=["admin", "local-network"], error_codes=("401", "403", "409", "429", "500"))},
             "/admin/local-network/pair-by-address": {"post": _operation("Pair with a peer at an operator-entered address (e.g. a tailnet IP; no multicast discovery needed)", {"200": _json_response("LocalPeerPairResponse")}, request_body=_json_request("LocalPeerPairByAddressRequest"), tags=["admin", "local-network"], error_codes=("400", "401", "403", "409", "429", "500", "502"))},
             "/admin/swarm/overview": {"get": _operation("Fleet overview: this Drone plus every paired peer, probed in parallel with a short per-peer budget", {"200": _json_response("SwarmOverviewResponse")}, tags=["admin", "local-network"])},
+            "/admin/network-shares": {"get": _operation("List this Drone's configured peer ROM references (SMB/CIFS network shares) and their live mount status", {"200": _json_response("NetworkShareListResponse")}, tags=["admin", "local-network"])},
+            "/admin/network-shares/{peer_id}/enable": {
+                "post": _operation(
+                    "Reference a paired peer's whole ROM library over SMB (mount + symlink every system, renaming any locally-colliding system folder to <system>.old first)",
+                    {"200": _json_response("NetworkShareRecord")},
+                    parameters=[_path_param("peer_id", "A paired peer's drone_id")],
+                    tags=["admin", "local-network"],
+                    error_codes=("400", "401", "403", "429", "500", "502"),
+                )
+            },
+            "/admin/network-shares/{peer_id}/disable": {
+                "post": _operation(
+                    "Stop referencing a peer's ROM library: unmount and precisely reverse only the renames/symlinks this Drone made for it",
+                    {"200": _json_response("NetworkShareDisableResponse")},
+                    parameters=[_path_param("peer_id", "A paired peer's drone_id")],
+                    tags=["admin", "local-network"],
+                    error_codes=("401", "403", "404", "429", "500"),
+                )
+            },
             "/admin/tailnet/status": {"get": _operation("Tailscale mesh status for the Swarm page onboarding card", {"200": _json_response("TailnetStatusResponse")}, tags=["admin", "local-network"])},
             "/admin/tailnet/enroll": {"post": _operation("Enroll this Drone in the tailnet with an auth key pasted in the UI", {"200": _json_response("TailnetStatusResponse")}, request_body=_json_request("TailnetEnrollRequest"), tags=["admin", "local-network"], error_codes=("400", "401", "403", "429", "500", "502"))},
             "/admin/tailnet/rotate-auth-key": {"post": _operation("Re-enroll this connected Drone with a replacement Tailscale auth key", {"200": _json_response("TailnetStatusResponse")}, request_body=_json_request("TailnetEnrollRequest"), tags=["admin", "local-network"], error_codes=("400", "401", "403", "429", "500", "502"))},
-            "/admin/remote/status": {
-                "get": _operation(
-                    "Check whether a remote-admin session is already cached for a peer",
-                    {"200": _json_response("RemoteStatusResponse")},
-                    description="Lets a newly opened impersonation tab skip the credential prompt when another tab already connected to the same peer within the session TTL.",
-                    parameters=[_query_param("peer_id", _string(), "A paired peer's drone_id")],
-                    tags=["admin", "remote"],
-                )
-            },
-            "/admin/remote/connect": {
-                "post": _operation(
-                    "Verify a paired peer's own Drone credentials and cache them for remote administration",
-                    {"200": _json_response("RemoteConnectResponse")},
-                    description="Credentials are held only in this Drone's process memory (never persisted, never returned to the browser) and are used solely to authenticate to that peer's own /admin/* surface -- the same login required to manage it directly.",
-                    request_body=_json_request("RemoteConnectRequest"),
-                    tags=["admin", "remote"],
-                    error_codes=("400", "401", "404", "409", "429", "500", "502"),
-                )
-            },
-            "/admin/remote/disconnect": {
-                "post": _operation(
-                    "Drop the cached remote-administration session for a peer",
-                    {"200": _json_response("RemoteDisconnectResponse")},
-                    request_body=_json_request("RemoteDisconnectRequest"),
-                    tags=["admin", "remote"],
-                    error_codes=("400", "401", "429", "500"),
-                )
-            },
-            "/remote/{peer_id}/admin/{admin_path}": {
-                "get": _operation(
-                    "Proxy an admin GET to a paired, connected peer's own /admin/* surface",
-                    {
-                        "200": {
-                            "description": "Whatever the proxied /admin/* route itself returns -- relayed verbatim",
-                            "content": {
-                                "application/json": {"schema": _ref("RemoteProxyResponse")},
-                                "text/plain": {"schema": {"type": "string"}},
-                            },
-                        }
-                    },
-                    description="Generic passthrough: forwards to https://<peer>/v1/api/admin/{admin_path} using the credentials cached by /admin/remote/connect. The peer authenticates and authorizes the request exactly as it would a direct browser call.",
-                    parameters=[_path_param("peer_id", "A paired peer's drone_id"), _path_param("admin_path", "Any existing /admin/* sub-path on the peer, e.g. system-info")],
-                    tags=["admin", "remote"],
-                    error_codes=("401", "403", "404", "429", "500", "502"),
-                ),
-                "post": _operation(
-                    "Proxy an admin POST to a paired, connected peer's own /admin/* surface",
-                    {
-                        "200": {
-                            "description": "Whatever the proxied /admin/* route itself returns -- relayed verbatim",
-                            "content": {
-                                "application/json": {"schema": _ref("RemoteProxyResponse")},
-                                "text/plain": {"schema": {"type": "string"}},
-                            },
-                        }
-                    },
-                    description="Same as the GET form, forwarding the request body and Content-Type unchanged.",
-                    parameters=[_path_param("peer_id", "A paired peer's drone_id"), _path_param("admin_path", "Any existing /admin/* sub-path on the peer")],
-                    tags=["admin", "remote"],
-                    error_codes=("400", "401", "403", "404", "429", "500", "502"),
-                ),
-            },
             "/admin/tailnet/discover": {"post": _operation("Fetch online Tailnet devices and automatically establish mTLS trust with Drones", {"200": _json_response("TailnetDiscoveryResponse")}, tags=["admin", "local-network"], error_codes=("401", "403", "429", "500", "502"))},
             "/admin/local-network/peers/{peer_id}/pair": {"post": _operation("Pair with a discovered Local Network peer", {"200": _json_response("LocalPeerPairResponse")}, parameters=[_path_param("peer_id")], request_body=_json_request("LocalPeerPairRequest"), tags=["admin", "local-network"], error_codes=("400", "401", "403", "404", "409", "429", "500"))},
             "/admin/local-network/peers/{peer_id}/forget": {"post": _operation("Forget a paired Local Network peer", {"200": _json_response("LocalPeerForgetResponse")}, parameters=[_path_param("peer_id")], tags=["admin", "local-network"])},

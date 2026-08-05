@@ -325,16 +325,8 @@ class ApiRoutesMixin:
                 self._handle_theme_asset(relative_path)
                 return
 
-            if parts and parts[0] in ("admin", "remote") and not self.settings.admin_enabled:
+            if parts and parts[0] == "admin" and not self.settings.admin_enabled:
                 self._send_json(403, {"error": "admin disabled"})
-                return
-
-            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "remote" and parts[2] == "status":
-                self._handle_admin_remote_status(query_params.get("peer_id", [""])[0])
-                return
-
-            if len(parts) >= 3 and parts[0] == "remote":
-                self._handle_admin_remote_proxy(parts[1], "/".join(parts[2:]), "GET", raw_query)
                 return
 
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "logs":
@@ -533,6 +525,10 @@ class ApiRoutesMixin:
                 self._handle_admin_swarm_overview()
                 return
 
+            if len(parts) == 2 and parts[0] == "admin" and parts[1] == "network-shares":
+                self._handle_admin_network_shares_list()
+                return
+
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "tailnet" and parts[2] == "status":
                 self._handle_admin_tailnet_status()
                 return
@@ -636,22 +632,8 @@ class ApiRoutesMixin:
                 _bridge.proxy(self, "POST")
                 return
 
-            if parts and parts[0] in ("admin", "remote") and not self.settings.admin_enabled:
+            if parts and parts[0] == "admin" and not self.settings.admin_enabled:
                 self._send_json(403, {"error": "admin disabled"})
-                return
-
-            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "remote" and parts[2] == "connect":
-                payload = self._read_json_body()
-                self._handle_admin_remote_connect(payload)
-                return
-
-            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "remote" and parts[2] == "disconnect":
-                payload = self._read_json_body()
-                self._handle_admin_remote_disconnect(payload)
-                return
-
-            if len(parts) >= 3 and parts[0] == "remote":
-                self._handle_admin_remote_proxy(parts[1], "/".join(parts[2:]), "POST", raw_query)
                 return
 
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "credentials" and parts[2] == "update":
@@ -689,6 +671,14 @@ class ApiRoutesMixin:
 
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "tailnet" and parts[2] == "discover":
                 self._handle_admin_tailnet_discover()
+                return
+
+            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "network-shares" and parts[3] == "enable":
+                self._handle_admin_network_share_enable(parts[2])
+                return
+
+            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "network-shares" and parts[3] == "disable":
+                self._handle_admin_network_share_disable(parts[2])
                 return
 
             if len(parts) == 5 and parts[0] == "admin" and parts[1] == "local-network" and parts[2] == "peers" and parts[4] == "pair":
@@ -968,6 +958,10 @@ class ApiRoutesMixin:
             if len(parts) == 5 and parts[0] == "admin" and parts[1] == "movies" and parts[3] == "scrape" and parts[4] == "apply":
                 payload = self._read_json_body()
                 self._handle_admin_movie_scrape_apply(parts[2], payload)
+                return
+
+            if len(parts) == 5 and parts[0] == "admin" and parts[1] == "movies" and parts[3] == "scrape" and parts[4] == "delete":
+                self._handle_admin_movie_scrape_delete(parts[2])
                 return
 
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "movies" and parts[2] == "scrape" and parts[3] == "bulk":

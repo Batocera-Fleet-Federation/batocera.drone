@@ -189,10 +189,10 @@ next field:
    field on an existing path).
 7. **UI**: `app/web/static/js/drone.js` (a control on the System Info page,
    POSTing to `/admin/es-collections` with just the one changed field — the
-   endpoint accepts partial updates). No second UI to keep in sync — a paired
-   peer's System Info page is reached through the Swarm page's remote-management
-   proxy (`handlers_remote_admin.py`, see the `drone-admin-features` skill), which
-   drives this exact same route rather than a separate remote-control surface.
+   endpoint accepts partial updates). There is no way to drive a paired peer's
+   own ES settings from this Drone's UI at all — that used to go through the
+   Swarm page's remote-management proxy, which was removed; changing a peer's
+   ES settings now means visiting that peer's own dashboard directly.
 8. **Tests**: `tests/test_es_collections.py` in this repo (state-read,
    apply/clamp/validate, the privileged-script XML write).
 
@@ -311,10 +311,11 @@ treat absence as "use the default," not as an error).
   (`_handle_admin_es_collections_get`/`_post`,
   `_handle_admin_music_volume_post`).
 - `app/web/static/js/drone.js` — the System Info page controls (Screen Mode,
-  Volume, Music Volume, Screensaver, Game Collections & Systems cards). A paired
-  peer's System Info page is reached and driven through the Swarm page's
-  credential-gated remote-management proxy (`handlers_remote_admin.py`) rather
-  than a separate mirrored UI — see the `drone-admin-features` skill.
+  Volume, Music Volume, Screensaver, Game Collections & Systems cards). These
+  only ever drive this Drone's own settings — the Swarm page's old
+  credential-gated remote-management proxy that used to let one Drone drive a
+  paired peer's System Info page has been removed (see `drone-admin-features`);
+  changing a peer's settings means visiting that peer's own dashboard.
 
 ## Testing pattern
 

@@ -252,9 +252,9 @@ rejected for this feature.
   (`handlers_vpn.py`'s `_handle_admin_vpn_pull_from_peer`) resolves the
   chosen peer via `transfer/local_network.get_paired_peer`, fetches
   `/v1/api/peer/vpn/config` with `transfer/peer_connectivity._peer_get_json_for_peer`
-  (the same small one-shot cert-pinned JSON client the remote-admin proxy
-  uses -- **not** the big-file `DownloadManager` queue; a VPN config is a few
-  KB of text, so progress/resume/cancel machinery would be pure overhead),
+  (a small one-shot cert-pinned JSON client -- **not** the big-file
+  `DownloadManager` queue; a VPN config is a few KB of text, so
+  progress/resume/cancel machinery would be pure overhead),
   and hands the result to `vpn_manager.import_from_peer(settings, payload)`.
 - **`import_from_peer` deliberately does not write files itself** — it calls
   the *existing*, already-tested `save_uploaded_config()` /

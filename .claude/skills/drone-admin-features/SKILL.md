@@ -1,6 +1,6 @@
 ---
 name: drone-admin-features
-description: Use this when designing, reviewing, debugging, or modifying the Drone admin panel — the Debug tile (System Info/System Logs/Emulators tabs), the Artwork tile (Artwork & Metadata/Theme Gallery tabs), Torrents, VPN, Email (SMTP + notifications), the top-level Automation nav tab, the Swarm page (Swarm/Transfers tabs — pairing, tailnet, remote peer management, ROMs/BIOS/saves/movies P2P sync), the notifications bell/dropdown, the ROMs/BIOS TreeGrid browser, per-system BIOS association, credentials/network-mode/certificate rotation, self-update buttons, the session-cookie login gate, or the admin route dispatch in app/web/api_routes.py and web/handlers_*.py. For deep Torrents/aria2, VPN/OpenVPN, or SMTP/notifications implementation detail, see the dedicated drone-torrents-management, drone-vpn-management, and drone-smtp-notifications skills instead.
+description: Use this when designing, reviewing, debugging, or modifying the Drone admin panel — the Debug tile (System Info/System Logs/Emulators tabs), the Artwork tile (Artwork & Metadata/Theme Gallery tabs), Torrents, VPN, Email (SMTP + notifications), the top-level Automation nav tab, the Swarm page (Swarm/Transfers tabs — pairing, tailnet, network-share peer ROM referencing, ROMs/BIOS/saves/movies P2P sync), the notifications bell/dropdown, the ROMs/BIOS TreeGrid browser, per-system BIOS association, credentials/network-mode/certificate rotation, self-update buttons, the session-cookie login gate, or the admin route dispatch in app/web/api_routes.py and web/handlers_*.py. For deep Torrents/aria2, VPN/OpenVPN, or SMTP/notifications implementation detail, see the dedicated drone-torrents-management, drone-vpn-management, and drone-smtp-notifications skills instead.
 ---
 
 # Drone Admin Features Skill
@@ -35,8 +35,9 @@ app/web/
   handlers_diagnostics.py # 376 lines — logs, system-info, gameplay-logs
   handlers_downloads.py   # 116 lines — download queue pause/resume/cancel/retry
   handlers_network.py     # 667 lines — pairing, LAN discovery, tailnet, swarm overview
-  handlers_remote_admin.py # session-cookie-gated proxy: drive a paired peer's own
-                          # /admin/* surface from this Drone's Swarm page
+  handlers_network_share.py # reference a paired peer's whole ROM library over
+                          # SMB/CIFS (see "Network-share peer ROM referencing" below;
+                          # backs onto device/network_share_manager.py)
   handlers_peer.py        # 503 lines — inbound P2P asset serving (mTLS)
   handlers_system.py      # 128 lines — network-mode, self-update, certificate rotate
   handlers_theme.py       # 139 lines — theme/branding assets
@@ -80,7 +81,7 @@ including every `admin/*` route — requires one, checked via
 `sessions` table), 30-day sliding expiry. A `401` from the gateway itself
 carries a custom `X-Drone-Auth-Required` marker header (not
 `WWW-Authenticate`) so `drone.js`'s `_handleApiUnauthorized` can tell "this
-gateway's own session expired" apart from a remote-admin-proxy 401. See
+gateway's own session expired." See
 `_handle_admin_credentials_update` for the one place a plain-text password is
 handled server-side (never returned to the browser); changing credentials
 revokes every other session's cookie except the caller's own.
@@ -285,8 +286,9 @@ reached via this tab bar instead of a separate navbar item now).
   (`handlers_network.py:_handle_admin_swarm_overview`): each peer is probed live, in
   parallel with a short per-peer timeout budget, so one offline Drone degrades to
   `online: false` instead of hanging the whole page — this is a live probe on every
-  page load, not a periodic-cache read. Each paired peer's card has a **Manage**
-  button (see "Remote peer management" below).
+  page load, not a periodic-cache read. Each online, tailnet-connected peer's card
+  has a **Reference ROMs**/**Stop Referencing** toggle (see "Network-share peer
+  ROM referencing" below).
 - **Tailnet card** — `GET /admin/tailnet/status` + `POST /admin/tailnet/discover`
   (`device/tailnet_service.py` backs this): enrollment status, one-click setup
   (paste a Tailscale auth key), auth-key rotation, and code-free pairing with any
@@ -306,36 +308,51 @@ reached via this tab bar instead of a separate navbar item now).
   `/admin/local-network/{status,discover,pairing-code/rotate,peers/{id}/{pair,forget,assets}}`.
   Backend: `handlers_network.py`.
 
-### Remote peer management (the "Manage" button)
+### Network-share peer ROM referencing (the "Reference ROMs" button)
 
-Opens a **separate browser tab** at `?manage=<peer_id>` that proxies every admin
-call for its whole lifetime to that one paired peer — the originating tab is
-untouched, so there's no mixed local/remote state to track. Backend:
-`handlers_remote_admin.py` (`HandlersRemoteAdminMixin`). Key properties:
+Lets this Drone show and play a paired peer's whole ROM library without
+copying it — reading bytes live over the network via a real SMB/CIFS mount of
+Batocera's own stock Samba export (`//<peer tailnet ip>/share/roms`; Drone
+does not set up anything on the peer side, only the client-side mount).
+Requires the peer to be on the same tailnet (gated on `drone.tailnet_ip` in
+the Swarm page). Backend: `handlers_network_share.py`
+(`HandlersNetworkShareMixin`), delegating to `device/network_share_manager.py`.
+Key properties:
 
-- **Credential-gated, not a new role system** — the peer's own existing admin login
-  is the real authorization check: `/admin/remote/connect` logs into the peer's own
-  `POST /auth/login` with the submitted credentials and caches **only the resulting
-  session cookie, server-side only, in memory, never on disk, never returned to the
-  browser**. That cookie is resent as a `Cookie` header on every proxied call, so the
-  target's own `SessionAuth.authenticate_request()` runs independently each time,
-  exactly as if the browser had connected to it directly — whatever that login can
-  do locally is exactly what it can do remotely, nothing more. (`PeerProxyResponse`
-  carries the peer's `Set-Cookie` back from the login call; see
-  `_cookie_pair_from_set_cookie` in `handlers_remote_admin.py`.)
-- A persistent top-of-page banner (`managedPeerBanner` in `index.html`) names the
-  peer whenever a tab is impersonating one; its absence is the "local" default.
-- Only lightweight admin JSON/text crosses this proxy — ROM/BIOS/save/artwork
-  *bytes* keep moving through the normal P2P transport directly between whichever
-  two Drones are actually transferring; this feature never sits in that data path.
-- Edge cases are classified, not pre-checked: unknown/forgotten peer → 404,
-  offline/unreachable → 502, wrong/revoked credentials → 401 (session cleared),
-  admin disabled on target → 409, an unsupported route → reported as a version
-  mismatch.
-- `peer_id` arrives as a URL path segment and must be `unquote()`d explicitly (unlike
-  query-string values, Python's stdlib server does not auto-decode path segments) —
-  a past regression here made every proxied call 404 even though `/admin/remote/connect`
-  worked (its `peer_id` comes from the JSON body, not the path).
+- **Mount + rename + symlink, no new scanning/gamelist code.** Once mounted,
+  each of the peer's system folders either symlinks straight into
+  `roms_root/<system>` (nothing local for that system yet), or, if a local
+  folder with real content already exists there, gets renamed aside to
+  `<system>.old` first (never deleted) and symlinked over — reusing
+  `RomRepository.should_include_system`'s existing `.old`-suffix convention
+  (`app/drone_api.py`) for "on disk, hidden from the system list," which is
+  also the standard upstream Batocera/EmulationStation trick. Because
+  `roms/rom_systems.py`'s `get_system_dir`/`list_system_names` already
+  transparently follow a symlink via `.resolve()`, and the scanner's `rglob`
+  follows it too, the existing ROM scanner and gamelist-merge code pick up a
+  referenced peer's games completely unmodified. If `<system>.old` already
+  exists, that system is skipped (never overwritten) and reported as such.
+- **Precise, state-driven reversal.** Every rename/symlink this feature
+  performs is recorded per peer+system in Drone's own state (not just
+  suffix-guessed), so disabling a reference (`POST
+  /admin/network-shares/{peer_id}/disable`) restores exactly what it changed —
+  remove the symlink, rename `<system>.old` back — and nothing else.
+- **Persistence mirrors VPN's connect-on-boot + self-heal**, not
+  fstab/systemd: `maybe_reconnect_all_on_boot` replays every configured
+  reference when the Drone service starts, and `run_watchdog_poller` re-mounts
+  a dropped share on a background thread. No OS-level mount unit is ever
+  written (Batocera's read-only/overlay-style updates make that riskier than
+  just having the always-on Drone process reassert it).
+- **Guest/anonymous mount only** (`mount -t cifs ... -o guest,ro,soft`) — no
+  credential UI. `ro` + `soft` matter: read-only because this Drone must never
+  write into the peer's ROM folder, and `soft` (not `hard`) so a dead peer
+  fails mount I/O within a bounded time instead of potentially stalling the
+  ROM-scanning poller thread (`roms/rom_scanner.py`), which walks the whole
+  `roms_root` tree — including anything symlinked in from a referenced peer —
+  on every scan pass.
+- The peer's tailnet IP is always resolved server-side from
+  `transfer/local_network.get_paired_peer`, never trusted from client input —
+  a mount can only ever target an actual paired swarm peer.
 
 ## ROMs/BIOS TreeGrid browser (new — absent from the old doc)
 
@@ -591,7 +608,10 @@ rest of the movies routes (viewing scraped art isn't admin-only), while the
 scrape/apply/settings routes themselves are under `/admin/movies/*` (an
 admin action). Admin routes: `GET/POST /admin/movies/scraper-settings`,
 `GET /admin/movies/{entry_key}/scrape/search?q=`,
-`POST /admin/movies/{entry_key}/scrape/apply` (`{tmdb_id}`).
+`POST /admin/movies/{entry_key}/scrape/apply` (`{tmdb_id}` **or** `{tmdb_url}`
+-- see "Direct TMDb link/ID lookup" below; `tmdb_id` wins if both are sent),
+`POST /admin/movies/{entry_key}/scrape/delete` (no body; idempotent --
+`{"deleted": false}` if there was nothing to remove, never an error).
 
 **Scraped title replaces the filename everywhere in the UI.** Once a movie
 has been scraped, its TMDb `title` is shown instead of the raw filename —
@@ -624,6 +644,52 @@ search-then-apply UX (`list-group-item-action` rows with a thumbnail), not
 a new pattern. The scraper card is admin-gated (`adminEnabled` check,
 matching every other `/admin/*`-backed UI element) even though the details
 page itself is reachable by anyone who can browse the library.
+
+**Remove scraped data** (`deleteMovieScraperMetadata()`, a card-header
+"Remove scraped data" button shown only when `movie.metadata` is present) --
+for when a scrape matched the wrong movie/show and a human wants a clean
+slate before retrying, since a plain re-scrape only ever overwrites whatever
+fields TMDb actually returns, it doesn't take stale fields back out.
+`window.confirm()`-gated like every other destructive action in this file
+(torrent delete, ROM gamelist-clear, ...). Backend:
+`metadata_manager.delete_metadata()` calls
+`movies_store.delete_movie_metadata()` (deletes the
+`movies_metadata_entries` row, returning what was deleted) then unlinks
+`poster_relative_path`/`backdrop_relative_path` off disk
+(`Path.unlink(missing_ok=True)` -- a file already gone, e.g. from a prior
+partial failure, is not an error). The movie/episode file itself is never
+touched, only its scraped metadata+artwork.
+
+**Direct TMDb link/ID lookup** (`movieScraperUrlInput` + `applyMovieScraperUrl()`,
+a second input group below the search box: "Can't find it? Paste a TMDb page
+link or ID instead") -- the escape hatch for a movie/show that title search
+doesn't reliably surface at all. Real case this was built for: **"Hell of the
+Dead"** doesn't come up under that title in this app's own TMDb search, but
+does exist on TMDb -- as `https://www.themoviedb.org/movie/21380-virus`,
+canonical title *Night of the Zombies*, original title *Virus*, AKA *Hell of
+the Living Dead* (the user's search term was itself a step removed from any
+of TMDb's own titles). Investigated live: TMDb's own site search for "Hell of
+the Dead" **does** eventually surface "Night of the Zombies / Virus" -- but at
+position 13 of 18 results, buried among a wall of similarly-worded
+"___ of the (Living) Dead" horror titles. `TmdbClient.search()`'s default
+`limit=10` (used by both the manual search box and the bulk-scrape ladder,
+neither of which passes an override) never reaches that far, so no amount of
+retyping the search box finds it -- the fix isn't a better query, it's
+bypassing search entirely for this one title. `tmdb_client.parse_tmdb_movie_id()`
+accepts either a bare numeric id or a full themoviedb.org movie URL (matched
+via `_TMDB_MOVIE_URL_RE = themoviedb\.org/movie/(\d+)`, **not** by stripping
+every non-digit character from the input -- that would wrongly concatenate
+unrelated digits from a slug, e.g. a movie literally titled "2012", or a
+query string like `?language=da-DK`); raises `ValueError` (mapped to 400,
+same as an invalid `tmdb_id`) if neither shape matches, rather than guessing.
+`metadata_manager.apply_by_reference()` parses then delegates straight to
+the existing `apply()` -- same artwork download, same metadata save, same
+response shape; this is purely a different way to pick *which* TMDb id to
+apply, not a parallel apply path. Works for TV episodes too (an episode's
+detail page is the exact same `renderMovieDetailsPage`/scraper-card
+component, keyed by the same `entry_key`), though the URL parser is
+movie-only (`/movie/{id}`, not `/tv/{id}`) since that's what a mis-matched
+title search actually needs in practice.
 
 **Bulk movie scraping** (the Movies tab on the Artwork admin page,
 `renderAdminMoviesArtworkPage()`) auto-scrapes the whole library in one
@@ -1095,6 +1161,18 @@ cancel/retry/clear (`/admin/downloads/{pause,resume,clear}`,
   Bootstrap UI library), breaking every `data-bs-dismiss="modal"` button
   app-wide in a way that looks like a per-modal bug. See "The window.bootstrap
   collision gotcha" above.
+- Assuming a title search coming up empty means TMDb doesn't have the
+  movie/show -- it can just mean the match is ranked outside
+  `TmdbClient.search()`'s default `limit=10` (raising the limit only helps a
+  *human* scrolling a manual search's dropdown; it's a no-op for the bulk
+  ladder, which only ever tries `results[:_MAX_MATCH_ATTEMPTS]`). See "Direct
+  TMDb link/ID lookup" above -- confirm on TMDb's own site search before
+  concluding a title is simply "not on TMDb".
+- Parsing a pasted TMDb URL by stripping every non-digit character
+  (`_digits_only`-style) instead of matching the specific `/movie/{id}` path
+  shape -- silently concatenates unrelated digits from the slug or query
+  string into a wrong id. Use `parse_tmdb_movie_id`'s scoped regex, not a
+  blind digit strip, for anything that parses a URL a human pasted in.
 
 ## Live-refreshing tile pattern (Torrents, VPN, Email)
 
@@ -1178,7 +1256,7 @@ BIOS/tree changes (if applicable):
 ...
 Swarm/pairing changes (if applicable):
 ...
-Remote peer management changes (if applicable):
+Network-share peer ROM referencing changes (if applicable):
 ...
 Tests:
 ...

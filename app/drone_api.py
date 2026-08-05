@@ -718,6 +718,14 @@ except ImportError:
 
 
 try:
+    from .device import network_share_manager as _network_share_manager
+except ImportError:
+    if __package__ not in (None, ""):
+        raise
+    from device import network_share_manager as _network_share_manager  # type: ignore
+
+
+try:
     from .device import smtp_manager as _smtp_manager
 except ImportError:
     if __package__ not in (None, ""):
@@ -900,6 +908,8 @@ _TORRENT_MANAGER = None
 _VPN_AUTO_CONNECT_ATTEMPTED = False
 _VPN_SHARING_POLLER_STARTED = False
 _VPN_SELF_HEAL_POLLER_STARTED = False
+_NETWORK_SHARE_BOOT_REPLAY_ATTEMPTED = False
+_NETWORK_SHARE_WATCHDOG_STARTED = False
 _SMTP_BOOTSTRAP_ATTEMPTED = False
 _SMTP_SHARING_POLLER_STARTED = False
 _AUDIT_EMAIL_POLLER_STARTED = False
@@ -1136,6 +1146,14 @@ except ImportError:
 
 
 try:
+    from .web.handlers_network_share import HandlersNetworkShareMixin
+except ImportError:
+    if __package__ not in (None, ""):
+        raise
+    from web.handlers_network_share import HandlersNetworkShareMixin  # type: ignore
+
+
+try:
     from .web.handlers_content import HandlersContentMixin
 except ImportError:
     if __package__ not in (None, ""):
@@ -1248,14 +1266,6 @@ except ImportError:
 
 
 try:
-    from .web.handlers_remote_admin import HandlersRemoteAdminMixin
-except ImportError:
-    if __package__ not in (None, ""):
-        raise
-    from web.handlers_remote_admin import HandlersRemoteAdminMixin  # type: ignore
-
-
-try:
     from .web.handlers_auth import HandlersAuthMixin
 except ImportError:
     if __package__ not in (None, ""):
@@ -1271,7 +1281,7 @@ except ImportError:
     from web.handlers_movies import HandlersMoviesMixin  # type: ignore
 
 
-class RomRequestHandler(HandlersAuthMixin, HandlersSystemMixin, HandlersDownloadsMixin, HandlersTorrentsMixin, HandlersVpnMixin, HandlersConfigBackupMixin, HandlersSmtpMixin, HandlersNotificationsMixin, HandlersDiagnosticsMixin, HandlersConfigMixin, HandlersNetworkMixin, HandlersArtworkMixin, HandlersContentMixin, HandlersMoviesMixin, ThemeMetaMixin, HandlersEsCollectionsMixin, HandlersPeerMixin, HandlersRemoteAdminMixin, ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
+class RomRequestHandler(HandlersAuthMixin, HandlersSystemMixin, HandlersDownloadsMixin, HandlersTorrentsMixin, HandlersVpnMixin, HandlersConfigBackupMixin, HandlersSmtpMixin, HandlersNotificationsMixin, HandlersDiagnosticsMixin, HandlersConfigMixin, HandlersNetworkMixin, HandlersArtworkMixin, HandlersContentMixin, HandlersMoviesMixin, ThemeMetaMixin, HandlersEsCollectionsMixin, HandlersPeerMixin, HandlersNetworkShareMixin, ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
     server_version = "DroneApp/4.0"
     openapi_spec = OPENAPI_SPEC
     # Per-connection idle timeout (applied to the socket in BaseHTTPRequestHandler.setup).
@@ -1359,9 +1369,8 @@ class RomRequestHandler(HandlersAuthMixin, HandlersSystemMixin, HandlersDownload
         # Deliberately NOT "WWW-Authenticate: Basic" -- that header is what makes
         # a browser pop its own native credential dialog, exactly the invasive
         # UX this session-cookie login replaces. X-Drone-Auth-Required is a
-        # same-origin-only marker so the SPA's own fetch() handling can tell
-        # "this gateway's session is gone" apart from a remote-admin proxy 401
-        # (which never sets it) -- see drone.js's _handleApiUnauthorized.
+        # same-origin-only marker the SPA's own fetch() handling checks for --
+        # see drone.js's _handleApiUnauthorized.
         self.send_header("X-Drone-Auth-Required", "1")
         self.send_header("Content-Type", "application/json")
         self._send_security_headers()
@@ -2340,7 +2349,7 @@ def _build_cast_http_handler(settings: Settings):
 
 
 def create_server(settings: Settings) -> ThreadingHTTPServer:
-    global _ROM_METADATA_POLLER_STARTED, _ROM_METADATA_WATCHER_STARTED, _LOCAL_NETWORK_WORKERS_STARTED, _GAME_PROCESS_MONITOR_STARTED, _GAME_PROCESS_MONITOR, _DOWNLOAD_MANAGER, _TORRENT_MANAGER, _AUTOMATION_POLLER_STARTED, _VPN_AUTO_CONNECT_ATTEMPTED, _VPN_SHARING_POLLER_STARTED, _VPN_SELF_HEAL_POLLER_STARTED, _SMTP_BOOTSTRAP_ATTEMPTED, _SMTP_SHARING_POLLER_STARTED, _AUDIT_EMAIL_POLLER_STARTED
+    global _ROM_METADATA_POLLER_STARTED, _ROM_METADATA_WATCHER_STARTED, _LOCAL_NETWORK_WORKERS_STARTED, _GAME_PROCESS_MONITOR_STARTED, _GAME_PROCESS_MONITOR, _DOWNLOAD_MANAGER, _TORRENT_MANAGER, _AUTOMATION_POLLER_STARTED, _VPN_AUTO_CONNECT_ATTEMPTED, _VPN_SHARING_POLLER_STARTED, _VPN_SELF_HEAL_POLLER_STARTED, _SMTP_BOOTSTRAP_ATTEMPTED, _SMTP_SHARING_POLLER_STARTED, _AUDIT_EMAIL_POLLER_STARTED, _NETWORK_SHARE_BOOT_REPLAY_ATTEMPTED, _NETWORK_SHARE_WATCHDOG_STARTED
     roms_root, bios_root = _real_data_roots(settings)
     repository = RomRepository(
         roms_root,
@@ -2397,6 +2406,17 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
         # anyone needing to notice and manually reconnect -- see
         # run_self_heal_poller's own docstring for the rate-limiting.
         Thread(target=_vpn_manager.run_self_heal_poller, args=(settings,), name="drone-vpn-self-heal", daemon=True).start()
+    if not _NETWORK_SHARE_BOOT_REPLAY_ATTEMPTED:
+        _NETWORK_SHARE_BOOT_REPLAY_ATTEMPTED = True
+        # Backgrounded for the same reason as VPN's auto-connect above: mounting
+        # a peer's CIFS share can block for real time and must never delay the
+        # server accepting its first request.
+        Thread(target=_network_share_manager.maybe_reconnect_all_on_boot, args=(settings,), name="drone-network-share-boot-replay", daemon=True).start()
+    if not _NETWORK_SHARE_WATCHDOG_STARTED:
+        _NETWORK_SHARE_WATCHDOG_STARTED = True
+        # Backgrounded forever-loop: re-mounts a referenced peer's share if it
+        # drops, same shape as VPN's self-heal poller above.
+        Thread(target=_network_share_manager.run_watchdog_poller, args=(settings,), name="drone-network-share-watchdog", daemon=True).start()
     if not _SMTP_BOOTSTRAP_ATTEMPTED:
         _SMTP_BOOTSTRAP_ATTEMPTED = True
         # Backgrounded for the same reason as VPN's auto-connect above: a

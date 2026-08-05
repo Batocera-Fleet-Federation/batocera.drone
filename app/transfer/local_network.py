@@ -357,8 +357,7 @@ def discovery_payload(settings: Any, certificate_fingerprint: str = "") -> dict:
     scheme = "http" if settings.http_only else "https"
     port = int(settings.advertised_api_port or settings.https_port or 443)
     # peer_mtls_port is a distinct, additional field -- api_port keeps meaning
-    # "this Drone's browser/admin port" (used by the Swarm page's "open peer's
-    # UI" link and the remote-admin proxy) and must never be repointed at the
+    # "this Drone's browser/admin port" and must never be repointed at the
     # dedicated peer-to-peer mTLS listener. Computed inline (not imported from
     # drone_network.py) to avoid a circular import -- drone_network already
     # imports this module.

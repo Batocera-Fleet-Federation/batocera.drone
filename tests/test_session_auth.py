@@ -3,8 +3,7 @@ GET /auth/session + POST /auth/login + POST /auth/logout handlers, and the
 credentials-update-revokes-other-sessions behavior.
 
 Replaces the old Basic-Auth scheme (see app/common/auth.py's module
-docstring for why); test_remote_admin.py covers the corresponding
-peer-to-peer login+cookie proxy rework.
+docstring for why).
 """
 
 import tempfile
@@ -142,7 +141,7 @@ class CookieHelperTests(unittest.TestCase):
 
 class _FakeHandler:
     """Minimal stand-in for RomRequestHandler -- same pattern as
-    test_remote_admin.py/test_es_collections.py's fake handlers."""
+    test_es_collections.py's fake handlers."""
 
     def __init__(self, settings: Settings, auth: SessionAuth, *, headers=None, body: bytes = b"") -> None:
         self.settings = settings

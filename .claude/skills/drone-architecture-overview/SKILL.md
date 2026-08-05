@@ -72,8 +72,8 @@ checks (below) confirm a peer is *reachable*, never that it's *authorized*. Dept
 ## Reaching a specific peer (the transport layer)
 
 `app/transport/`'s `TransportSelector` tries each tier best-first and falls
-through on failure — used by every asset transfer (ROM/BIOS/save/movie), the
-remote-admin proxy, and VPN config pulls alike:
+through on failure — used by every asset transfer (ROM/BIOS/save/movie) and
+VPN config pulls alike:
 
 1. **LAN-direct** (`transport/lan.py`) — both Drones report the same public IP
    ⇒ reach the peer's local IP directly. Zero configuration.
@@ -207,7 +207,7 @@ section above is a summary).
 - **Transport tiers / LAN / tailnet detail** → `drone-edge-networking`
 - **VPN feature implementation depth** → `drone-vpn-management`
 - **SMTP/notifications feature implementation depth** → `drone-smtp-notifications`
-- **Admin UI, routes, Swarm page, remote peer management** → `drone-admin-features`
+- **Admin UI, routes, Swarm page, network-share peer ROM referencing** → `drone-admin-features`
 - **Torrents/aria2c + magnet links implementation depth** → `drone-torrents-management`
 - **SQLite schemas/migrations** → `drone-db-management`
 - **Debugging a real, running Drone** → `drone-live-debugging`

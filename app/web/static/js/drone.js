@@ -118,6 +118,11 @@ let movieBulkScrapeBreakdownStatus = null;
 let movieBulkScrapeBreakdownOffset = 0;
 const MOVIE_BULK_SCRAPE_BREAKDOWN_PAGE_SIZE = 50;
 let swarmDronesById = {};
+// This Drone's own configured peer ROM references (SMB/CIFS network shares),
+// keyed by peer_id -- populated by renderSwarmPage(), read by
+// renderSwarmDroneCard() so each peer's card can show whether it's currently
+// referenced and by the system-info pill in loadSystemInfoBar().
+let swarmNetworkSharesByPeer = {};
 let vpnTimer = null;
 let vpnInFlight = false;
 let smtpTimer = null;
@@ -159,156 +164,6 @@ let currentUsername = "";
 // finish last and overwrite a newer page's already-rendered content/title.
 let routerNavToken = 0;
 const UI_DATA_CACHE_TTL_MS = 5 * 60 * 1000;
-
-// Remote-drone impersonation: opening this app with ?manage=<peer_id> (and
-// optionally &manage_name=<display name>) in the URL scopes the *entire tab*
-// to that paired peer for its whole lifetime -- every admin page, including
-// the Swarm page and the top status bar, renders that peer's own data via
-// this Drone's remote-admin proxy. There is no partial/mixed state to track:
-// a tab is either 100% this Drone (no query param) or 100% the impersonated
-// peer. Managing a different peer, or returning to this Drone, means opening
-// a different tab/URL -- closing the tab is how you stop.
-//
-// Credentials are cached server-side only (see /admin/remote/connect) and
-// are shared across any tab impersonating the same peer; this module-level
-// variable only ever holds {peerId, name}, never a credential.
-let managedPeer = null;
-
-function _parseManageParam() {
-  const params = new URLSearchParams(window.location.search);
-  const peerId = params.get("manage");
-  if (!peerId) return null;
-  return { peerId, name: params.get("manage_name") || peerId };
-}
-
-function updateManagedPeerBanner() {
-  const banner = document.getElementById("managedPeerBanner");
-  if (!banner) return;
-  if (managedPeer) {
-    banner.querySelector(".managed-peer-banner-text").textContent = `Managing ${managedPeer.name} -- this is NOT your local Drone`;
-    banner.classList.remove("d-none");
-  } else {
-    banner.classList.add("d-none");
-  }
-}
-
-async function exitRemoteManagement() {
-  // Actually drop the cached session (not just navigate away in this tab) --
-  // otherwise the credentials would linger server-side, reusable from any
-  // other tab, until the idle TTL expires.
-  if (managedPeer) {
-    try {
-      await fetch(`${API_BASE}/admin/remote/disconnect`, {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ peer_id: managedPeer.peerId }),
-      });
-    } catch (_) {
-      // Best-effort: still leave the impersonation view either way below.
-    }
-  }
-  const url = new URL(window.location.href);
-  url.search = "";
-  window.location.href = url.toString();
-}
-
-// Resolves once this tab is either impersonating nobody, or has a live,
-// verified remote-admin session for the requested peer -- blocking (via a
-// non-dismissable modal prompting for that peer's own credentials) exactly
-// once, and again any time the cached session is lost mid-session (TTL
-// expiry, service restart, or the peer changing its own password).
-async function ensureRemoteManagementReady() {
-  const requested = _parseManageParam();
-  if (!requested) return;
-  let status = { connected: false };
-  try {
-    const res = await fetch(`${API_BASE}/admin/remote/status?peer_id=${encodeURIComponent(requested.peerId)}`, { credentials: "include" });
-    if (res.ok) status = await res.json();
-  } catch (_) {
-    // Treated as not-yet-connected below; the connect gate will surface any
-    // real connectivity problem when it tries to verify credentials.
-  }
-  if (status.connected) {
-    managedPeer = { peerId: requested.peerId, name: status.name || requested.name };
-    updateManagedPeerBanner();
-    return;
-  }
-  await showRemoteConnectGate(requested);
-}
-
-function showRemoteConnectGate(peer) {
-  return new Promise((resolve) => {
-    const modalId = "remoteConnectModal";
-    let modal = document.getElementById(modalId);
-    if (!modal) {
-      modal = document.createElement("div");
-      modal.id = modalId;
-      modal.className = "modal fade";
-      modal.tabIndex = -1;
-      modal.setAttribute("data-bs-backdrop", "static");
-      modal.setAttribute("data-bs-keyboard", "false");
-      document.body.appendChild(modal);
-    }
-    modal.innerHTML = `
-      <div class="modal-dialog modal-dialog-centered">
-        <div class="modal-content remote-connect-modal">
-          <div class="modal-header">
-            <h5 class="modal-title mb-0"><i class="bi bi-broadcast me-2"></i>Connect to ${escapeHtml(peer.name)}</h5>
-          </div>
-          <div class="modal-body">
-            <p class="small text-muted">Enter <strong>${escapeHtml(peer.name)}'s own</strong> Drone login -- the same one used to sign into it directly. It is verified once and held only on this Drone; your browser never stores it.</p>
-            <div id="remoteConnectError" class="alert alert-danger d-none"></div>
-            <div class="mb-2"><label class="form-label small" for="remoteConnectUsername">Username</label><input id="remoteConnectUsername" class="form-control" autocomplete="off"></div>
-            <div class="mb-0"><label class="form-label small" for="remoteConnectPassword">Password</label><input id="remoteConnectPassword" type="password" class="form-control" autocomplete="off"></div>
-          </div>
-          <div class="modal-footer">
-            <button type="button" class="btn btn-outline-secondary" id="remoteConnectCancelBtn">Cancel</button>
-            <button type="button" class="btn btn-primary" id="remoteConnectSubmitBtn"><i class="bi bi-link-45deg me-1"></i>Connect</button>
-          </div>
-        </div>
-      </div>`;
-    const bsModal = window.bootstrap?.Modal ? window.bootstrap.Modal.getOrCreateInstance(modal) : null;
-    const errorBox = modal.querySelector("#remoteConnectError");
-    const usernameInput = modal.querySelector("#remoteConnectUsername");
-    const passwordInput = modal.querySelector("#remoteConnectPassword");
-    const submitBtn = modal.querySelector("#remoteConnectSubmitBtn");
-    modal.querySelector("#remoteConnectCancelBtn").addEventListener("click", () => exitRemoteManagement());
-    async function submit() {
-      const username = usernameInput.value;
-      const password = passwordInput.value;
-      if (!username || !password) return;
-      submitBtn.disabled = true;
-      submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Connecting...';
-      errorBox.classList.add("d-none");
-      try {
-        const res = await fetch(`${API_BASE}/admin/remote/connect`, {
-          method: "POST",
-          credentials: "include",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ peer_id: peer.peerId, username, password }),
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data.error || `Connect failed: ${res.status}`);
-        managedPeer = { peerId: peer.peerId, name: data.name || peer.name };
-        updateManagedPeerBanner();
-        if (bsModal) bsModal.hide();
-        else { modal.classList.remove("show"); modal.style.display = "none"; }
-        resolve();
-      } catch (err) {
-        errorBox.textContent = err.message || "Connection failed";
-        errorBox.classList.remove("d-none");
-        submitBtn.disabled = false;
-        submitBtn.innerHTML = '<i class="bi bi-link-45deg me-1"></i>Connect';
-      }
-    }
-    submitBtn.addEventListener("click", submit);
-    passwordInput.addEventListener("keydown", (event) => { if (event.key === "Enter") submit(); });
-    if (bsModal) bsModal.show();
-    else { modal.classList.add("show"); modal.style.display = "block"; }
-    setTimeout(() => usernameInput.focus(), 50);
-  });
-}
 
 // Toast notification system (appears at top-right)
 function ensureToastContainer() {
@@ -424,38 +279,15 @@ function escapeHtml(value) {
 function jsAttr(value) {
   return escapeHtml(JSON.stringify(value));
 }
-// When managing a peer, every relative admin call is transparently routed
-// through this Drone's generic remote-admin proxy instead of being handled
-// locally -- every existing page keeps working unchanged, since they all
-// call api()/apiPost() rather than fetch() directly. The connect/disconnect
-// calls themselves (`/admin/remote/...`) always target the gateway itself,
-// never the peer, so they are excluded from the rewrite.
 function _apiRequestUrl(url) {
   if (url.startsWith("http://") || url.startsWith("https://")) return url;
-  if (managedPeer && !url.startsWith("/admin/remote/")) {
-    return `${API_BASE}/remote/${encodeURIComponent(managedPeer.peerId)}${url}`;
-  }
   return `${API_BASE}${url}`;
 }
 async function _handleApiUnauthorized(res, retry) {
-  // A gateway-level auth challenge (this Drone's own session cookie expired
-  // or was never set) always carries X-Drone-Auth-Required; the remote-admin
-  // proxy's 401s (session expired/lost, or the peer rejected its credentials)
-  // never do. This whole tab is scoped to the impersonated peer, so recovery
-  // means reconnecting to that *same* peer -- then transparently retrying the
-  // exact call that failed, so the original caller's own success path runs
-  // normally instead of racing a separate re-render against its own stale
-  // error handling.
-  if (!managedPeer || res.headers.get("X-Drone-Auth-Required")) {
-    window.location.reload();
-    throw new Error("Authentication required");
-  }
-  let data = null;
-  try { data = await res.json(); } catch (_) {}
-  const message = (data && data.error) || `Lost the remote-admin session for ${managedPeer.name}`;
-  showToast(message, "warning");
-  await showRemoteConnectGate(managedPeer);
-  return retry();
+  // This Drone's own session cookie expired or was never set -- the only
+  // recovery is reloading into the login page.
+  window.location.reload();
+  throw new Error("Authentication required");
 }
 async function api(url) {
   const res = await fetch(_apiRequestUrl(url), { credentials: "include" });
@@ -3044,7 +2876,7 @@ async function renderMovieScraperCard(entryKey, movie) {
   try {
     const settings = await api("/admin/movies/scraper-settings");
     container.innerHTML = settings.has_api_key
-      ? renderMovieScraperSearchUi(entryKey)
+      ? renderMovieScraperSearchUi(entryKey, movie)
       : renderMovieScraperApiKeyForm(entryKey);
   } catch (err) {
     container.innerHTML = `<div class="alert alert-warning small mb-0">Scraper unavailable: ${escapeHtml(err.message || "unknown error")}</div>`;
@@ -3083,24 +2915,68 @@ async function saveMovieScraperApiKey(entryKey) {
     setLoading(false);
   }
 }
-function renderMovieScraperSearchUi(entryKey) {
+function renderMovieScraperSearchUi(entryKey, movie) {
   // Deliberately blank, not the raw filename: an empty query tells the
   // backend to search using its own cleaned-up-title candidate ladder
   // (same one the bulk scraper uses) rather than the messy filename
   // verbatim -- see searchMovieScraper, which fills this box in with
   // whichever title that ladder actually searched once results come back.
+  const hasMetadata = !!(movie && movie.metadata);
   return `
     <div class="card">
-      <div class="card-header"><i class="bi bi-cloud-download me-1"></i>Artwork &amp; Metadata (TMDb)</div>
+      <div class="card-header d-flex align-items-center justify-content-between gap-2">
+        <span><i class="bi bi-cloud-download me-1"></i>Artwork &amp; Metadata (TMDb)</span>
+        ${
+          hasMetadata
+            ? `<button class="btn btn-outline-danger btn-sm" type="button" onclick="deleteMovieScraperMetadata(${jsAttr(entryKey)})"><i class="bi bi-trash me-1"></i>Remove scraped data</button>`
+            : ""
+        }
+      </div>
       <div class="card-body">
         <div class="input-group mb-3">
           <input id="movieScraperQuery" type="text" class="form-control" value="" placeholder="Leave blank to search using a cleaned-up title">
           <button class="btn btn-primary" type="button" onclick="searchMovieScraper(${jsAttr(entryKey)})"><i class="bi bi-search me-1"></i>Search</button>
         </div>
-        <div id="movie-scraper-results"></div>
+        <div id="movie-scraper-results" class="mb-3"></div>
+        <div class="small text-muted mb-1">Can't find it? Paste a TMDb page link or ID instead (e.g. a movie that only matches under an alternate title):</div>
+        <div class="input-group">
+          <input id="movieScraperUrlInput" type="text" class="form-control" placeholder="https://www.themoviedb.org/movie/21380-virus or 21380">
+          <button class="btn btn-outline-primary" type="button" onclick="applyMovieScraperUrl(${jsAttr(entryKey)})"><i class="bi bi-link-45deg me-1"></i>Apply</button>
+        </div>
       </div>
     </div>
   `;
+}
+async function deleteMovieScraperMetadata(entryKey) {
+  if (!window.confirm("Remove the scraped TMDb metadata and artwork for this entry? This cannot be undone, but you can re-scrape it afterward.")) return;
+  setLoading(true, "Removing scraped metadata...");
+  try {
+    await apiPost(`/admin/movies/${encodeURIComponent(entryKey)}/scrape/delete`, {});
+    showToast("Scraped metadata removed.", "success");
+    await renderMovieDetailsPage(entryKey);
+  } catch (err) {
+    showToast(`Failed to remove scraped metadata: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  } finally {
+    setLoading(false);
+  }
+}
+async function applyMovieScraperUrl(entryKey) {
+  const input = document.getElementById("movieScraperUrlInput");
+  const reference = (input && input.value || "").trim();
+  if (!reference) {
+    showToast("Paste a TMDb link or ID first.", "warning");
+    return;
+  }
+  setLoading(true, "Downloading artwork and metadata from TMDb...");
+  try {
+    await apiPost(`/admin/movies/${encodeURIComponent(entryKey)}/scrape/apply`, { tmdb_url: reference });
+    showToast("Movie artwork and metadata updated.", "success");
+    await renderMovieDetailsPage(entryKey);
+  } catch (err) {
+    showToast(`Failed to apply that TMDb link: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  } finally {
+    setLoading(false);
+  }
 }
 async function searchMovieScraper(entryKey) {
   const resultsEl = document.getElementById("movie-scraper-results");
@@ -8446,11 +8322,23 @@ async function renderTransfersPage() {
   }
 }
 
+function _networkShareStatusBadge(share) {
+  const status = share.status;
+  const style = status === "mounted"
+    ? "background:rgba(52,211,153,0.15);color:#34d399;border-color:rgba(52,211,153,0.4)"
+    : status === "peer_unreachable" || status === "error"
+      ? "background:rgba(251,191,36,0.15);color:#fbbf24;border-color:rgba(251,191,36,0.4)"
+      : "background:rgba(148,163,184,0.15);color:#94a3b8;border-color:rgba(148,163,184,0.4)";
+  const label = status === "mounted" ? "Referencing" : status === "peer_unreachable" ? "Referencing (unreachable)" : status === "error" ? "Referencing (error)" : "Referencing...";
+  return `<span class="badge" style="${style}" title="${escapeHtml(share.status_detail || "This Drone is referencing this peer's ROM library over SMB")}"><i class="bi bi-hdd-network me-1"></i>${escapeHtml(label)}</span>`;
+}
+
 function renderSwarmDroneCard(drone) {
   const summary = drone.summary || {};
   const droneToken = encodeURIComponent(String(drone.drone_id || "")).replace(/'/g, "%27");
   const counts = summary.counts || {};
   const systems = Array.isArray(summary.systems) ? summary.systems : [];
+  const share = swarmNetworkSharesByPeer[String(drone.drone_id || "")];
   const badge = drone.is_self
     ? '<span class="badge text-bg-info">This Drone</span>'
     : drone.online
@@ -8469,6 +8357,11 @@ function renderSwarmDroneCard(drone) {
   if (lanUrl) {
     addressLines.push(`<div class="small text-truncate"><i class="bi bi-house me-1" aria-hidden="true"></i><span class="text-muted">${escapeHtml(lanUrl)}</span></div>`);
   }
+  if (share) {
+    const skippedCount = (share.systems || []).filter((row) => row.skipped_reason).length;
+    const skippedNote = skippedCount ? ` -- ${skippedCount} system${skippedCount === 1 ? "" : "s"} skipped (local collision)` : "";
+    addressLines.push(`<div class="small text-truncate">${_networkShareStatusBadge(share)}<span class="text-muted">${escapeHtml(skippedNote)}</span></div>`);
+  }
   const stats = drone.online && drone.summary
     ? `<div class="d-flex flex-wrap gap-3 small mt-2">
         <span><strong>${Number(counts.roms || 0)}</strong> ROMs</span>
@@ -8479,10 +8372,13 @@ function renderSwarmDroneCard(drone) {
     : drone.error
       ? `<div class="small text-warning mt-2"><i class="bi bi-exclamation-triangle me-1" aria-hidden="true"></i>${escapeHtml(drone.error)}</div>`
       : "";
+  const networkShareButton = share
+    ? `<button class="btn btn-sm btn-outline-secondary" onclick="swarmUnreferencePeerRoms(decodeURIComponent('${droneToken}'), ${jsAttr(drone.name || drone.drone_id || "")})"><i class="bi bi-x-circle me-1"></i>Stop Referencing</button>`
+    : `<button class="btn btn-sm btn-outline-info" onclick="swarmReferencePeerRoms(decodeURIComponent('${droneToken}'), ${jsAttr(drone.name || drone.drone_id || "")})" ${drone.online && drone.tailnet_ip ? "" : "disabled"} title="${drone.tailnet_ip ? "Reference this peer's whole ROM library over SMB, without copying it locally" : "Requires this peer to be on the same tailnet"}"><i class="bi bi-hdd-network me-1"></i>Reference ROMs</button>`;
   const actions = drone.is_self
     ? ""
     : `<div class="d-flex flex-wrap gap-2 mt-3">
-        <button class="btn btn-sm btn-outline-warning" onclick="swarmManagePeer(decodeURIComponent('${droneToken}'), ${jsAttr(drone.name || drone.drone_id || "")})" ${drone.online ? "" : "disabled"} title="Open a new tab that administers ${escapeHtml(drone.name || drone.drone_id || "this Drone")} directly, using its own login"><i class="bi bi-broadcast me-1"></i>Manage</button>
+        ${networkShareButton}
         <button class="btn btn-sm btn-outline-success" onclick="swarmBrowsePeerAssets(decodeURIComponent('${droneToken}'))" ${drone.online ? "" : "disabled"}><i class="bi bi-cloud-arrow-down me-1"></i>Request Assets</button>
         <button class="btn btn-sm btn-outline-danger" onclick="forgetLocalPeer(decodeURIComponent('${droneToken}'))"><i class="bi bi-x-circle me-1"></i>Forget</button>
       </div>`;
@@ -8505,14 +8401,44 @@ function swarmBrowsePeerAssets(peerId) {
   setHash("#admin/transfers");
 }
 
-function swarmManagePeer(peerId, peerName) {
-  // Opens a separate tab scoped entirely to that peer (see
-  // ensureRemoteManagementReady/_apiRequestUrl) -- this tab is completely
-  // unaffected, and closing the new tab is how you stop managing it.
-  const url = new URL(window.location.href);
-  url.search = `?manage=${encodeURIComponent(peerId)}&manage_name=${encodeURIComponent(peerName || peerId)}`;
-  url.hash = "#admin";
-  window.open(url.toString(), "_blank", "noopener");
+async function swarmReferencePeerRoms(peerId, peerName) {
+  const confirmed = window.confirm(
+    `Reference ${peerName}'s whole ROM library over the network?\n\n` +
+    `Every system it has will be symlinked in here -- games play by reading bytes ` +
+    `live from ${peerName}, not by copying them to this Drone.\n\n` +
+    `If a system already has local games here, the local folder is renamed to ` +
+    `"<system>.old" (never deleted) and the network copy takes its place; ` +
+    `disabling the reference restores it.`
+  );
+  if (!confirmed) return;
+  try {
+    setLoading(true, `Referencing ${peerName}'s ROMs...`);
+    const result = await apiPost(`/admin/network-shares/${encodeURIComponent(peerId)}/enable`, {});
+    if (result.status !== "mounted") {
+      showToast(`Could not reference ${escapeHtml(peerName)}: ${escapeHtml(result.status_detail || "mount failed")}`, "danger");
+    } else {
+      showToast(`Now referencing ${escapeHtml(peerName)}'s ROMs`, "success");
+    }
+  } catch (err) {
+    showToast(`Could not reference ${escapeHtml(peerName)}: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  } finally {
+    setLoading(false);
+    await renderSwarmPage();
+  }
+}
+
+async function swarmUnreferencePeerRoms(peerId, peerName) {
+  if (!window.confirm(`Stop referencing ${peerName}'s ROMs? Any local system folders that were renamed aside will be restored.`)) return;
+  try {
+    setLoading(true, `Removing reference to ${peerName}...`);
+    await apiPost(`/admin/network-shares/${encodeURIComponent(peerId)}/disable`, {});
+    showToast(`Stopped referencing ${escapeHtml(peerName)}'s ROMs`, "success");
+  } catch (err) {
+    showToast(`Failed to remove reference: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  } finally {
+    setLoading(false);
+    await renderSwarmPage();
+  }
 }
 
 // Tailnet's MagicDNS FQDN (e.g. "batocera.tailnet-name.ts.net") resolves its
@@ -8764,16 +8690,18 @@ async function renderSwarmPage() {
     // since tailnet/discover (a tailscale CLI subprocess plus its own probe of
     // newly-seen devices) and swarm/overview (a live probe of every paired
     // peer) can each take real time on their own.
-    const [discovery, overview] = await Promise.all([
+    const [discovery, overview, networkShares] = await Promise.all([
       apiPost("/admin/tailnet/discover", {}).catch(async () => ({
         tailnet: await api("/admin/tailnet/status").catch(() => ({ installed: false })),
         network: await api("/admin/local-network/status"),
       })),
       api("/admin/swarm/overview"),
+      api("/admin/network-shares").catch(() => ({ shares: [] })),
     ]);
     const tailnet = discovery.tailnet || { installed: false };
     const drones = Array.isArray(overview.drones) ? overview.drones : [];
     swarmDronesById = Object.fromEntries(drones.map((drone) => [String(drone.drone_id || ""), drone]));
+    swarmNetworkSharesByPeer = Object.fromEntries((networkShares.shares || []).map((share) => [String(share.peer_id || ""), share]));
     content.innerHTML = `
       ${renderSwarmTabBar("swarm")}
       <div class="row row-cols-1 row-cols-md-2 row-cols-xl-3 g-3 mb-3" id="swarmDroneGrid">
@@ -10754,6 +10682,19 @@ async function loadSystemInfoBar() {
     } catch (_) {
       // SMTP status is best-effort context, not core system info.
     }
+    try {
+      const networkShares = await api("/admin/network-shares");
+      const shares = networkShares.shares || [];
+      if (shares.length) {
+        const allHealthy = shares.every((share) => share.status === "mounted");
+        const shareStyle = allHealthy
+          ? "background:rgba(52,211,153,0.15);color:#34d399;border-color:rgba(52,211,153,0.4)"
+          : "background:rgba(251,191,36,0.15);color:#fbbf24;border-color:rgba(251,191,36,0.4)";
+        chips.push(_sysInfoBadge(`<i class="bi bi-hdd-network me-1"></i>Referencing: ${shares.length}`, "#admin/swarm", "Open Swarm", shareStyle));
+      }
+    } catch (_) {
+      // Network share status is best-effort context, not core system info.
+    }
     if (machineNav && machineId) machineNav.textContent = `Machine ID: ${machineId}`;
     if (!chips.length && lines.length) {
       chips.push(`<span class="badge">${escapeHtml(lines[0])}</span>`);
@@ -11033,10 +10974,6 @@ async function startApp() {
   document.getElementById("logoutBtn")?.classList.remove("d-none");
   document.getElementById("accountSettingsBtn")?.classList.remove("d-none");
   try {
-    // managedPeer is not set yet at this point in startup, so this always
-    // checks *this* Drone's own admin-enabled flag, never a peer's --
-    // deliberate: whether admin features can be used at all is a property of
-    // this gateway, independent of which peer you might go on to impersonate.
     await api("/admin/configs/sources");
     adminEnabled = true;
   } catch (error) {
@@ -11044,10 +10981,6 @@ async function startApp() {
     adminEnabled = !(msg.includes("admin disabled") || msg.includes("request failed: 403"));
   }
   applyAdminVisibility();
-  // From here on, if ?manage=<peer_id> is present, every api()/apiPost() call
-  // (including the status bar and Swarm page below) proxies to that peer --
-  // this tab now renders as that Drone's own dashboard would.
-  await ensureRemoteManagementReady();
   setupStackTables();
   loadSystemInfoBar();
   // Render immediately so UI/menu works even if theme discovery is slow.

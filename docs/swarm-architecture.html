@@ -672,7 +672,7 @@
         <text x="1009" y="174" text-anchor="middle" class="body-text">relay of last resort.</text>
       </svg>
     </div>
-    <p class="caption">This is <code>app/transport/</code>'s <code>TransportSelector</code>, used by every asset transfer, the remote-admin proxy, and VPN config pulls alike. It's single-source P2P, not torrent-style swarming: one active transfer per job, from one chosen peer.</p>
+    <p class="caption">This is <code>app/transport/</code>'s <code>TransportSelector</code>, used by every asset transfer and VPN config pulls alike. It's single-source P2P, not torrent-style swarming: one active transfer per job, from one chosen peer.</p>
   </section>
 
   <!-- ================= SECTION 3: SECURITY ================= -->
@@ -733,7 +733,7 @@
         <text x="604" y="348" class="body-text">pinned value for that exact paired drone_id, every single request.</text>
       </svg>
     </div>
-    <p class="caption">Application authorization is exactly this list check &mdash; connectivity checks (every ~30s, cached locally) confirm a peer is <em>reachable</em>, never that it's <em>authorized</em>. The same mTLS identity backs ROM/BIOS/save/artwork transfers, the remote-admin proxy, and the VPN peer endpoint alike.</p>
+    <p class="caption">Application authorization is exactly this list check &mdash; connectivity checks (every ~30s, cached locally) confirm a peer is <em>reachable</em>, never that it's <em>authorized</em>. The same mTLS identity backs ROM/BIOS/save/artwork transfers and the VPN peer endpoint alike.</p>
   </section>
 
   <!-- ================= SECTION 4: INSIDE A DRONE ================= -->

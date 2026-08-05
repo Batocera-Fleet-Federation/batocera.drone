@@ -302,22 +302,16 @@ def _peer_health_url(address: str) -> str:
     return f"{str(address or '').strip().rstrip('/')}/health"
 
 
-def _peer_api_port(peer: dict, *, port_kind: str = "peer_mtls") -> int:
-    """Resolve which port to dial for a peer.
+def _peer_api_port(peer: dict) -> int:
+    """Resolve which port to dial for a peer -- every actual peer-to-peer
+    ``/peer/*`` call.
 
-    ``port_kind="peer_mtls"`` (the default -- every actual peer-to-peer /peer/*
-    call) prefers the dedicated ``peer_mtls_port`` field, falling back to
+    Prefers the dedicated ``peer_mtls_port`` field, falling back to
     ``api_port`` for peer records that predate the listener split (old cached
     records with no ``peer_mtls_port`` key keep working exactly as before,
     which is what makes rollout across an already-paired fleet safe).
-    ``port_kind="admin"`` (only ``_peer_proxy_request``, which forwards to a
-    peer's own ``/v1/api/admin/*`` surface) always means the browser/admin
-    port and must never consider ``peer_mtls_port`` -- that port only serves
-    ``/peer/*`` and would 404 anything else.
     """
     try:
-        if port_kind == "admin":
-            return int(peer.get("api_port") or peer.get("port") or 443)
         return int(peer.get("peer_mtls_port") or peer.get("api_port") or peer.get("port") or 443)
     except (TypeError, ValueError):
         return 443
@@ -327,18 +321,18 @@ def _url_host(value: object) -> str:
     return str(urlparse(str(value or "").strip()).hostname or "").strip()
 
 
-def _peer_address(peer: dict, *, port_kind: str = "peer_mtls") -> Optional[str]:
+def _peer_address(peer: dict) -> Optional[str]:
     scheme = str(peer.get("scheme") or peer.get("protocol") or "https").strip() or "https"
-    port = _peer_api_port(peer, port_kind=port_kind)
+    port = _peer_api_port(peer)
     # reachable_url/public_reachable_url are pre-baked strings built (and kept
     # refreshed by the LAN discovery beacon) using the admin/browser api_port.
-    # Trusting them verbatim is correct whenever that's also what this call
-    # wants (port_kind="admin", or a peer_mtls peer whose resolved port
-    # happens to equal its admin port -- true for every peer record that
+    # Trusting them verbatim is correct whenever the resolved peer_mtls port
+    # happens to equal that admin api_port -- true for every peer record that
     # predates the listener split, since peer_mtls_port then just falls back
-    # to api_port). Only bypass them -- extracting the host and rebuilding
+    # to api_port. Only bypass them -- extracting the host and rebuilding
     # with the resolved port -- once the two genuinely diverge.
-    if port_kind == "admin" or port == _peer_api_port(peer, port_kind="admin"):
+    admin_port = int(peer.get("api_port") or peer.get("port") or 443)
+    if port == admin_port:
         public_reachable_url = str(peer.get("public_reachable_url") or "").strip().rstrip("/")
         if public_reachable_url:
             return public_reachable_url
@@ -398,7 +392,6 @@ def _peer_address_candidates(
     *,
     settings: Optional[Settings] = None,
     peer_id: Optional[str] = None,
-    port_kind: str = "peer_mtls",
 ) -> list[str]:
     """Return trusted peer routes with a persisted successful route first.
 
@@ -406,10 +399,6 @@ def _peer_address_candidates(
     peer's advertised hostname and finally literal IP routes. Tailscale keeps a
     same-LAN Tailnet connection peer-to-peer, while this ordering avoids paying
     stale LAN-IP and mDNS timeouts whenever a peer moves between networks.
-
-    ``port_kind`` -- see ``_peer_api_port``: ``"peer_mtls"`` (default, every
-    real peer-to-peer call) vs. ``"admin"`` (only ``_peer_proxy_request``,
-    which must keep resolving the peer's browser/admin port).
     """
     discovered: list[str] = []
 
@@ -419,7 +408,7 @@ def _peer_address_candidates(
             discovered.append(value)
 
     scheme = str(peer.get("scheme") or peer.get("protocol") or "https").strip() or "https"
-    port = _peer_api_port(peer, port_kind=port_kind)
+    port = _peer_api_port(peer)
     port_suffix = "" if (scheme == "https" and port == 443) or (scheme == "http" and port == 80) else f":{port}"
 
     def add_host(host_value: object) -> None:
@@ -434,8 +423,9 @@ def _peer_address_candidates(
     if is_tailnet_address(tailnet_ip):
         add_host(tailnet_ip)
     # See _peer_address for why this only bypasses the pre-baked URL fields
-    # once port_kind's resolved port actually diverges from the admin port.
-    if port_kind == "admin" or port == _peer_api_port(peer, port_kind="admin"):
+    # once the resolved port actually diverges from the admin api_port.
+    admin_port = int(peer.get("api_port") or peer.get("port") or 443)
+    if port == admin_port:
         for key in ("advertised_reachable_url", "public_reachable_url", "reachable_url"):
             add(peer.get(key))
     else:
@@ -476,9 +466,8 @@ def _preferred_peer_address(
     *,
     settings: Optional[Settings] = None,
     peer_id: Optional[str] = None,
-    port_kind: str = "peer_mtls",
 ) -> Optional[str]:
-    candidates = _peer_address_candidates(peer, settings=settings, peer_id=peer_id, port_kind=port_kind)
+    candidates = _peer_address_candidates(peer, settings=settings, peer_id=peer_id)
     return candidates[0] if candidates else None
 
 
@@ -573,126 +562,6 @@ def _peer_get_json_for_peer(
             # Malformed payloads and programming errors are not reachability
             # failures and should remain visible to the caller.
             raise
-    if last_error is not None:
-        raise last_error
-    raise ValueError("no peer address available")
-
-
-class PeerProxyResponse:
-    """A relayed peer HTTP response: status/content-type/body, never JSON-parsed.
-
-    Used for remote-admin proxying (see ``handlers_remote_admin.py``), where the
-    proxied route may return plain text (logs) or raw file content, not just
-    JSON -- the caller relays this verbatim rather than interpreting it.
-    ``set_cookie`` carries the peer's raw ``Set-Cookie`` response header
-    (only populated for the ``/auth/login`` call itself; None otherwise).
-    """
-
-    __slots__ = ("status", "content_type", "body", "set_cookie")
-
-    def __init__(self, status: int, content_type: str, body: bytes, set_cookie: Optional[str] = None) -> None:
-        self.status = status
-        self.content_type = content_type
-        self.body = body
-        self.set_cookie = set_cookie
-
-
-def _peer_proxy_request(
-    peer: dict,
-    method: str,
-    endpoint: str,
-    settings: Settings,
-    *,
-    body: Optional[bytes] = None,
-    cookie: Optional[str] = None,
-    content_type: Optional[str] = None,
-    peer_id: Optional[str] = None,
-    config: Optional[dict] = None,
-    timeout: float = PEER_CHECK_TIMEOUT_SECONDS,
-) -> PeerProxyResponse:
-    """Forward one HTTP request to a paired peer's own admin surface and relay
-    its raw response, for remote-administration proxying.
-
-    Same address iteration (cached route -> Tailnet -> host -> IP) and pinned
-    mTLS trust as ``_peer_get_json_for_peer``, generalized to an arbitrary
-    method/body and an explicit ``Cookie`` header -- this is always the
-    *target's own* session (obtained by logging into the peer with credentials
-    supplied by the caller), never this Drone's own local-network config. A
-    non-2xx response from the peer (bad credentials, unknown route, etc.) is
-    relayed as a ``PeerProxyResponse``, not raised -- the peer answered, so
-    trying another address cannot change the outcome (same reasoning as
-    ``_peer_get_json_for_peer``'s HTTPError handling); only connection-level
-    failures fall through to the next candidate address.
-
-    Multi-address fallback is restricted to safe-to-retry ``GET`` requests.
-    A mutating ``POST`` (many admin actions are not idempotent -- e.g.
-    restarting EmulationStation) uses only the single best candidate address
-    with the *full* timeout and never retries elsewhere: a timeout on that
-    address is ambiguous (still processing vs. truly unreachable), and
-    retrying via a second address could fire the same action twice on the
-    peer. A POST that only has one candidate address behaves the same either
-    way; this only changes behavior when there are several.
-    """
-    path = str(endpoint or "").strip()
-    if not path.startswith("/"):
-        raise ValueError("peer endpoint must start with /")
-    normalized_peer_id = str(
-        peer_id or peer.get("drone_id") or peer.get("device_id") or peer.get("id") or ""
-    ).strip()
-    # This proxies to the peer's own /v1/api/admin/* surface, never /peer/*,
-    # so it must always resolve the peer's browser/admin port -- the peer-mTLS
-    # listener rejects everything except /peer/* + /health.
-    addresses = _peer_address_candidates(peer, settings=settings, peer_id=normalized_peer_id, port_kind="admin")
-    if not addresses:
-        raise ValueError("no peer address available")
-    is_mutating = method.upper() != "GET"
-    if is_mutating:
-        addresses = addresses[:1]
-    headers = {"Accept": "application/json", "User-Agent": "batocera-drone-remote-admin/1.0"}
-    if cookie:
-        headers["Cookie"] = cookie
-    if body is not None and content_type:
-        headers["Content-Type"] = content_type
-    last_error: Optional[Exception] = None
-    for index, address in enumerate(addresses):
-        attempt_timeout = timeout
-        if not is_mutating and index < len(addresses) - 1:
-            attempt_timeout = min(float(timeout), PEER_CHECK_TIMEOUT_SECONDS)
-        url = f"{address}{path}"
-        cafile = _peer_trust_cafile(settings, peer_id=normalized_peer_id, config=config)
-        if url.startswith("https://") and normalized_peer_id and not cafile:
-            last_error = ssl.SSLError(f"no trusted certificate cached for peer {normalized_peer_id}")
-            continue
-        request = Request(url, data=body, method=method.upper(), headers=headers)
-        try:
-            with urlopen(
-                request,
-                timeout=attempt_timeout,
-                context=_drone_client_ssl_context(settings, url, verify=bool(cafile), cafile=cafile),
-            ) as response:
-                _remember_successful_peer_route(settings, normalized_peer_id, address)
-                return PeerProxyResponse(
-                    response.status,
-                    response.headers.get("Content-Type", "application/json"),
-                    response.read(),
-                    set_cookie=response.headers.get("Set-Cookie"),
-                )
-        except HTTPError as error:
-            # The peer answered (auth rejection, unknown route, ...); relay it
-            # as-is -- a different address cannot change an answered request.
-            return PeerProxyResponse(
-                error.code,
-                (error.headers.get("Content-Type") if error.headers else None) or "application/json",
-                error.read(),
-                set_cookie=(error.headers.get("Set-Cookie") if error.headers else None),
-            )
-        except ssl.SSLError as error:
-            last_error = ssl.SSLError(_peer_ssl_diagnostic(url, cafile, error))
-        except URLError as error:
-            reason = getattr(error, "reason", None)
-            last_error = URLError(_peer_ssl_diagnostic(url, cafile, reason)) if isinstance(reason, ssl.SSLError) else error
-        except OSError as error:
-            last_error = error
     if last_error is not None:
         raise last_error
     raise ValueError("no peer address available")
