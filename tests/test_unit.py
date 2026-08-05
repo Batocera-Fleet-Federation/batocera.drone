@@ -2524,6 +2524,19 @@ class SettingsTests(unittest.TestCase):
         self.assertNotIn("function renderBios()", source)
         self.assertNotIn("function renderBiosList", source)
 
+    def test_movie_cast_ui_distinguishes_google_cast_from_airplay(self) -> None:
+        source = Path(__file__).resolve().parents[1].joinpath("app/web/static/js/drone.js").read_text(encoding="utf-8")
+        cast_start = source.index("function updateMovieCastButton()")
+        cast_end = source.index("function likelyUnsupportedOnChromecast(", cast_start)
+        cast_source = source[cast_start:cast_end]
+
+        self.assertIn("No Chromecast", cast_source)
+        self.assertIn("Fire TV and AirPlay-only TVs do not", cast_source)
+        self.assertIn("code.includes(\"session_error\")", cast_source)
+        self.assertIn("context.getCastState?.() === cast.framework.CastState.NO_DEVICES_AVAILABLE", cast_source)
+        self.assertIn("session = context.getCurrentSession();", cast_source)
+        self.assertIn("if (!session) throw error;", cast_source)
+
     def test_integration_transfers_page_consolidates_uploads_and_downloads(self) -> None:
         js = Path(__file__).resolve().parents[1].joinpath("app/web/static/js/drone.js").read_text(encoding="utf-8")
 

@@ -2652,8 +2652,8 @@ function updateMovieCastButton() {
     button.innerHTML = `<i class="bi bi-cast me-1"></i>Cast unavailable`;
     button.title = "Google Cast could not start in this browser";
   } else if (castDeviceState === String(cast.framework.CastState.NO_DEVICES_AVAILABLE)) {
-    button.innerHTML = `<i class="bi bi-cast me-1"></i>No devices`;
-    button.title = "No Google Cast devices were found on this network";
+    button.innerHTML = `<i class="bi bi-cast me-1"></i>No Chromecast`;
+    button.title = "No Chromecast or Google TV receiver was found (Fire TV/AirPlay devices are not Google Cast receivers)";
   } else if (castDeviceState === String(cast.framework.CastState.CONNECTED)) {
     button.innerHTML = `<i class="bi bi-cast me-1"></i>Choose device`;
     button.title = "Choose or confirm the Google Cast device";
@@ -2663,9 +2663,14 @@ function updateMovieCastButton() {
   }
 }
 function castRequestErrorText(error) {
-  const code = String((error && (error.code || error.description)) || error || "");
+  const code = String((error && (error.code || error.description)) || error || "").toLowerCase();
   if (code.includes("cancel")) return "";
-  if (code.includes("receiver_unavailable")) return "No Cast device is available. Confirm the browser and TV are on the same Wi-Fi network.";
+  if (code.includes("receiver_unavailable")) {
+    return "No Google Cast receiver is available. Chromecast and Google TV use Google Cast; Fire TV and AirPlay-only TVs do not.";
+  }
+  if (code.includes("session_error")) {
+    return "The selected device could not start Google Cast. Choose a Chromecast or Google TV. For a Fire TV or AirPlay-only TV, open this page in Safari and use AirPlay.";
+  }
   if (code.includes("extension_missing") || code.includes("api_not_initialized")) {
     return "Google Cast is unavailable in this browser. Use Chrome or Edge over HTTPS, then reload the page.";
   }
@@ -2681,6 +2686,14 @@ async function castMovieChromecast(entryKey) {
     return;
   }
   const context = cast.framework.CastContext.getInstance();
+  if (context.getCastState?.() === cast.framework.CastState.NO_DEVICES_AVAILABLE) {
+    showToast(
+      "No Chromecast or Google TV is visible on this network. Fire TV is not a Google Cast receiver; open this page in Safari and use AirPlay for Fire TV.",
+      "warning",
+      12000,
+    );
+    return;
+  }
   castLoadInProgress = true;
   updateMovieCastButton();
   try {
@@ -2688,11 +2701,22 @@ async function castMovieChromecast(entryKey) {
     // receiver here, even if this origin auto-joined an earlier session. This
     // call stays directly in the click handler to preserve the browser's
     // transient user activation requirement.
-    await context.requestSession();
-    const session = context.getCurrentSession();
+    let session;
+    try {
+      await context.requestSession();
+      session = context.getCurrentSession();
+    } catch (error) {
+      // Auto-join and SESSION_STARTED can complete at the same time as the
+      // picker promise rejects. If the framework did establish a usable
+      // session, continue with that selected receiver instead of displaying
+      // a false session_error and abandoning the cast.
+      session = context.getCurrentSession();
+      if (!session) throw error;
+    }
     if (!session) throw new Error("receiver_unavailable");
     await loadMovieOntoCastSession(entryKey, session);
   } catch (error) {
+    console.warn("Google Cast session request failed", error);
     const message = castRequestErrorText(error);
     if (message) showToast(message, "danger", 12000);
   } finally {
@@ -2844,7 +2868,7 @@ function openMoviePlayerModal(entryKey, movieName) {
           </video>
         </div>
         <div class="modal-footer">
-          <button type="button" class="btn btn-outline-primary" id="movieCastButton" onclick="castMovieChromecast(${jsAttr(entryKey)})" title="Choose a Google Cast device"><span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>Cast</button>
+          <button type="button" class="btn btn-outline-primary" id="movieCastButton" onclick="castMovieChromecast(${jsAttr(entryKey)})" title="Choose a Chromecast or Google TV"><span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>Google Cast</button>
           ${
             airplaySupported
               ? `<button type="button" class="btn btn-outline-primary" id="movieAirPlayButton" title="Prepare AirPlay" onclick="castMovieAirPlay(${jsAttr(entryKey)})"><i class="bi bi-airplay me-1"></i>AirPlay</button>`
