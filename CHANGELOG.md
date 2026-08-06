@@ -3,7 +3,7 @@
 ## [v0.1.92] - 2026-07-28
  
 - revert: restore v0.1.89 after VPN DNS outage
-
+ 
 ## [v0.1.52] - 2026-07-14
 
 - Asset-cache error: Controls now stops stale async rendering after navigation and checks DOM elements before updating them. Uploader transfer disappearing: polling now refreshes both /admin/downloads and /admin/uploads, preserving Drone A’s upload row. Screensaver setting: updates now restart EmulationStation through the existing lifecycle lock so ScreenSaverTime takes effect.
