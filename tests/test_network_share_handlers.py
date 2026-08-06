@@ -126,6 +126,16 @@ class NetworkShareDisableHandlerTests(unittest.TestCase):
             status, payload = handler.response
             self.assertEqual(status, 404)
 
+    def test_disable_returns_502_when_cleanup_is_incomplete(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            handler = _handler(settings)
+            with mock.patch.object(network_share_manager, "disable", return_value={"status": "error", "peer_id": "p1", "status_detail": "cleanup failed"}):
+                handler._handle_admin_network_share_disable("p1")
+            status, payload = handler.response
+            self.assertEqual(status, 502)
+            self.assertEqual(payload["status"], "error")
+
 
 if __name__ == "__main__":
     unittest.main()

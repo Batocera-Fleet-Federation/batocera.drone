@@ -1385,8 +1385,13 @@ def _schemas() -> Dict[str, Schema]:
                 "enabled": _boolean(),
                 "status": _enum(["mounted", "peer_unreachable", "error", "pending"]),
                 "status_detail": _string(),
-                "systems": _array(_ref("NetworkShareSystemRecord")),
-                "bios": _array(_ref("NetworkShareBiosRecord")),
+                "mounted_address": _string(description="LAN or Tailscale address used for the current mount"),
+                "system_count": _integer(description="Number of active remote ROM system links"),
+                "bios_link_count": _integer(description="Number of missing local BIOS files supplied by remote links"),
+                "bios_local_count": _integer(description="Existing local BIOS files kept in place"),
+                "bios_remote_count": _integer(description="BIOS files visible on the source peer"),
+                "skipped_count": _integer(description="Local items kept or ROM collisions that could not be referenced"),
+                "remote_rom_count": _integer(description="Source peer ROM count from its local SQLite inventory"),
                 "created_at": _string(fmt="date-time"),
                 "updated_at": _string(fmt="date-time"),
                 "last_checked_at": _string(fmt="date-time", nullable=True),
@@ -2194,7 +2199,7 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             "/admin/network-shares": {"get": _operation("List this Drone's configured peer ROM references (SMB/CIFS network shares) and their live mount status", {"200": _json_response("NetworkShareListResponse")}, tags=["admin", "local-network"])},
             "/admin/network-shares/{peer_id}/enable": {
                 "post": _operation(
-                    "Reference a paired peer's whole ROM library and BIOS folder over SMB (mount + symlink every ROM system and BIOS file, renaming any locally-colliding entry aside with an .old suffix first)",
+                    "Reference a paired peer's whole ROM library over SMB, renaming local ROM system collisions aside and supplying only BIOS files missing locally",
                     {"200": _json_response("NetworkShareRecord")},
                     parameters=[_path_param("peer_id", "A paired peer's drone_id")],
                     tags=["admin", "local-network"],
@@ -2204,7 +2209,7 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             "/admin/network-shares/{peer_id}/disable": {
                 "post": _operation(
                     "Stop referencing a peer's ROM library: unmount and precisely reverse only the renames/symlinks this Drone made for it",
-                    {"200": _json_response("NetworkShareDisableResponse")},
+                    {"200": _json_response("NetworkShareDisableResponse"), "502": _json_response("NetworkShareRecord", "Some network references could not be safely removed")},
                     parameters=[_path_param("peer_id", "A paired peer's drone_id")],
                     tags=["admin", "local-network"],
                     error_codes=("401", "403", "404", "429", "500"),

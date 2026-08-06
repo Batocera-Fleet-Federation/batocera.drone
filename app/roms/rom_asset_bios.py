@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 try:
+    from ..common.network_references import is_network_reference, network_reference_root
     from ..common.http_cache import valid_segment
     from ..storage.rom_metadata_store import (
         _load_rom_metadata_cache,
@@ -22,6 +23,7 @@ try:
     )
     from .rom_metadata_state import _build_rom_metadata_snapshot_from_cache
 except ImportError:  # pragma: no cover - direct script execution fallback
+    from common.network_references import is_network_reference, network_reference_root  # type: ignore
     from common.http_cache import valid_segment  # type: ignore
     from storage.rom_metadata_store import (  # type: ignore
         _load_rom_metadata_cache,
@@ -229,11 +231,20 @@ class RomAssetBiosMixin:
             ".7z",
         }
 
+        share_root = network_reference_root()
         for current_root, dirs, file_names in os.walk(bios_root):
             root_path = Path(current_root)
 
+            dirs[:] = [
+                name for name in dirs
+                if not ((root_path / name).is_symlink() and is_network_reference(root_path / name, share_root))
+            ]
+
             for file_name in file_names:
-                file_path = (root_path / file_name).resolve()
+                candidate = root_path / file_name
+                if candidate.is_symlink() and is_network_reference(candidate, share_root):
+                    continue
+                file_path = candidate.resolve()
                 if not file_path.is_file():
                     continue
                 if not (file_path == bios_root or bios_root in file_path.parents):
@@ -268,11 +279,19 @@ class RomAssetBiosMixin:
     def find_bios_file_by_unique_id(self, unique_id: str) -> Path:
         unique_id = valid_segment(unique_id)
         bios_root = self.get_bios_root()
+        share_root = network_reference_root()
 
-        for current_root, _, file_names in os.walk(bios_root):
+        for current_root, dirs, file_names in os.walk(bios_root):
             root_path = Path(current_root)
+            dirs[:] = [
+                name for name in dirs
+                if not ((root_path / name).is_symlink() and is_network_reference(root_path / name, share_root))
+            ]
             for file_name in file_names:
-                file_path = (root_path / file_name).resolve()
+                candidate = root_path / file_name
+                if candidate.is_symlink() and is_network_reference(candidate, share_root):
+                    continue
+                file_path = candidate.resolve()
                 if not file_path.is_file():
                     continue
                 if self.build_unique_id(file_path) == unique_id:

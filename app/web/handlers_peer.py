@@ -201,19 +201,26 @@ class HandlersPeerMixin:
         }
         if normalized == "summary":
             cache_status = _rom_metadata_cache_status(self.settings)
-            system_rows = self.repository.list_systems()
+            local_system_names = set(self.repository.list_local_system_names())
+            system_rows = [
+                row for row in self.repository.list_systems()
+                if str(row.get("name") or "") in local_system_names
+            ]
             system_counts = {
                 str(row.get("name") or ""): int(row.get("rom_count") or 0)
                 for row in system_rows
                 if str(row.get("name") or "")
             }
-            system_names = sorted(set(self.repository.list_system_names()) | set(system_counts.keys()), key=str.lower)
+            system_names = sorted(local_system_names | set(system_counts.keys()), key=str.lower)
+            counts = dict(cache_status.get("counts") or {})
+            counts["systems"] = len(system_names)
+            counts["roms"] = sum(system_counts.values())
             return {
                 "drone_id": self.settings.device_id,
                 "name": socket.gethostname(),
                 "systems": system_names,
                 "system_counts": system_counts,
-                "counts": cache_status.get("counts") or {},
+                "counts": counts,
                 "updated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
             }
         selected_systems = [system] if system else sorted(systems)
