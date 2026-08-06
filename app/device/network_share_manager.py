@@ -51,7 +51,7 @@ import sys
 import threading
 import time
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import List, Optional
 from urllib.parse import urlparse
 
@@ -79,7 +79,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from transfer.peer_connectivity import _peer_get_json_for_peer  # type: ignore
 
 NETWORK_SHARE_STATE_NAMESPACE = "network_share_manager.json"
-NETWORK_SHARE_STATUSES = ("mounted", "peer_unreachable", "error", "pending")
+NETWORK_SHARE_STATUSES = ("mounted", "peer_unreachable", "error", "pending", "enabling", "detaching")
 NETWORK_SHARE_OLD_SUFFIX = ".old"
 NETWORK_SHARE_STATE_SCHEMA_VERSION = 2
 
@@ -92,12 +92,46 @@ NETWORK_SHARE_UMOUNT_TIMEOUT_SECONDS = float(os.environ.get("DRONE_NETWORK_SHARE
 NETWORK_SHARE_WATCHDOG_INTERVAL_SECONDS = float(os.environ.get("DRONE_NETWORK_SHARE_WATCHDOG_INTERVAL_SECONDS", "60"))
 NETWORK_SHARE_ATTRIBUTE_CACHE_SECONDS = max(1, int(os.environ.get("DRONE_NETWORK_SHARE_ACTIMEO_SECONDS", "30")))
 NETWORK_SHARE_PEER_SUMMARY_TIMEOUT_SECONDS = float(os.environ.get("DRONE_NETWORK_SHARE_PEER_SUMMARY_TIMEOUT_SECONDS", "6"))
+NETWORK_SHARE_PEER_BIOS_INVENTORY_TIMEOUT_SECONDS = float(os.environ.get("DRONE_NETWORK_SHARE_PEER_BIOS_INVENTORY_TIMEOUT_SECONDS", "15"))
 
 _STATE_MIGRATION_LOCK = threading.Lock()
+_STATE_LOCK = threading.RLock()
+_PEER_OPERATION_LOCKS_GUARD = threading.Lock()
+_PEER_OPERATION_LOCKS = {}
+_BACKGROUND_JOBS_LOCK = threading.Lock()
+_ACTIVE_DISABLE_JOBS = set()
+_ACTIVE_BIOS_JOBS = set()
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _operation_key(settings: Settings, peer_id: str) -> str:
+    return f"{_state_database_path(settings.userdata_root)}::{str(peer_id or '').strip()}"
+
+
+def _peer_operation_lock(settings: Settings, peer_id: str) -> threading.RLock:
+    """Serialize every lifecycle mutation for one peer.
+
+    HTTP requests, boot replay, the watchdog, and background BIOS work all run
+    on different threads.  Without this lock, an enable could recreate links
+    while detach was removing them, or a watchdog could remount a share between
+    detach's cleanup and final state deletion.
+    """
+    key = _operation_key(settings, peer_id)
+    with _PEER_OPERATION_LOCKS_GUARD:
+        lock = _PEER_OPERATION_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _PEER_OPERATION_LOCKS[key] = lock
+        return lock
+
+
+def _bios_reconciliation_background_enabled() -> bool:
+    return str(os.environ.get("DRONE_NETWORK_SHARE_BIOS_BACKGROUND", "1")).strip().lower() not in {
+        "0", "false", "no", "off",
+    }
 
 
 def _should_include_entry(name: str) -> bool:
@@ -132,22 +166,24 @@ def peer_mount_point(settings: Settings, peer_id: str) -> Path:
 
 
 def _load_state(settings: Settings) -> dict:
-    stored = _load_state_payload(_state_database_path(settings.userdata_root), NETWORK_SHARE_STATE_NAMESPACE, {})
-    stored = stored if isinstance(stored, dict) else {}
-    peers = stored.get("peers")
-    try:
-        schema_version = int(stored.get("schema_version") or 1)
-    except (TypeError, ValueError):
-        schema_version = 1
-    return {"schema_version": schema_version, "peers": peers if isinstance(peers, dict) else {}}
+    with _STATE_LOCK:
+        stored = _load_state_payload(_state_database_path(settings.userdata_root), NETWORK_SHARE_STATE_NAMESPACE, {})
+        stored = stored if isinstance(stored, dict) else {}
+        peers = stored.get("peers")
+        try:
+            schema_version = int(stored.get("schema_version") or 1)
+        except (TypeError, ValueError):
+            schema_version = 1
+        return {"schema_version": schema_version, "peers": peers if isinstance(peers, dict) else {}}
 
 
 def _save_state(settings: Settings, state: dict) -> None:
-    payload = {
-        "schema_version": int(state.get("schema_version") or NETWORK_SHARE_STATE_SCHEMA_VERSION),
-        "peers": state.get("peers") if isinstance(state.get("peers"), dict) else {},
-    }
-    _save_state_payload(_state_database_path(settings.userdata_root), NETWORK_SHARE_STATE_NAMESPACE, payload)
+    with _STATE_LOCK:
+        payload = {
+            "schema_version": int(state.get("schema_version") or NETWORK_SHARE_STATE_SCHEMA_VERSION),
+            "peers": state.get("peers") if isinstance(state.get("peers"), dict) else {},
+        }
+        _save_state_payload(_state_database_path(settings.userdata_root), NETWORK_SHARE_STATE_NAMESPACE, payload)
 
 
 def _get_peer_record(settings: Settings, peer_id: str) -> Optional[dict]:
@@ -155,24 +191,27 @@ def _get_peer_record(settings: Settings, peer_id: str) -> Optional[dict]:
 
 
 def _upsert_peer_record(settings: Settings, peer_id: str, **updates) -> dict:
-    state = _load_state(settings)
-    peer_id = str(peer_id or "").strip()
-    record = state["peers"].get(peer_id) or {
-        "peer_id": peer_id, "peer_name": "", "tailnet_ip": "", "mount_point": "",
-        "enabled": True, "status": "pending", "status_detail": "",
-        "systems": [], "bios": [], "created_at": _now_iso(), "last_checked_at": None,
-    }
-    record.update(updates)
-    record["updated_at"] = _now_iso()
-    state["peers"][peer_id] = record
-    _save_state(settings, state)
-    return record
+    with _STATE_LOCK:
+        state = _load_state(settings)
+        peer_id = str(peer_id or "").strip()
+        record = state["peers"].get(peer_id) or {
+            "peer_id": peer_id, "peer_name": "", "tailnet_ip": "", "mount_point": "",
+            "enabled": True, "status": "pending", "status_detail": "",
+            "systems": [], "bios": [], "bios_status": "pending",
+            "created_at": _now_iso(), "last_checked_at": None,
+        }
+        record.update(updates)
+        record["updated_at"] = _now_iso()
+        state["peers"][peer_id] = record
+        _save_state(settings, state)
+        return record
 
 
 def _delete_peer_record(settings: Settings, peer_id: str) -> None:
-    state = _load_state(settings)
-    state["peers"].pop(str(peer_id or "").strip(), None)
-    _save_state(settings, state)
+    with _STATE_LOCK:
+        state = _load_state(settings)
+        state["peers"].pop(str(peer_id or "").strip(), None)
+        _save_state(settings, state)
 
 
 def list_shares(settings: Settings) -> List[dict]:
@@ -234,6 +273,22 @@ def resolve_peer_target(settings: Settings, peer_id: str) -> dict:
 
 
 def _is_mounted(mount_point: Path) -> bool:
+    # Reading mountinfo is lexical and never asks the mounted filesystem to
+    # stat itself.  os.path.ismount() can enter an uninterruptible CIFS wait
+    # precisely when detach most needs to remain responsive.
+    try:
+        expected = os.path.abspath(os.path.normpath(str(mount_point)))
+        for line in Path("/proc/self/mountinfo").read_text(encoding="utf-8", errors="replace").splitlines():
+            fields = line.split()
+            if len(fields) < 5:
+                continue
+            mounted_at = fields[4].replace("\\040", " ").replace("\\011", "\t").replace("\\134", "\\")
+            if mounted_at == expected:
+                return True
+        if sys.platform.startswith("linux"):
+            return False
+    except OSError:
+        pass
     try:
         return os.path.ismount(str(mount_point))
     except OSError:
@@ -269,7 +324,11 @@ def _mount(addresses, mount_point: Path) -> dict:
                 # are both subfolders of it, so one mount covers both.
                 [
                     "mount", "-t", "cifs", f"//{address}/share", str(mount_point), "-o",
-                    f"guest,ro,soft,actimeo={NETWORK_SHARE_ATTRIBUTE_CACHE_SECONDS}",
+                    # Batocera's Samba export does not provide stable server
+                    # inode numbers.  The kernel otherwise discovers that only
+                    # after remote metadata access and retries with serverino
+                    # disabled, which added about a minute on the affected box.
+                    f"guest,ro,soft,noserverino,actimeo={NETWORK_SHARE_ATTRIBUTE_CACHE_SECONDS}",
                 ],
                 capture_output=True,
                 text=True,
@@ -285,11 +344,16 @@ def _mount(addresses, mount_point: Path) -> dict:
     return {"status": "error", "detail": "; ".join(errors) or "SMB mount failed"}
 
 
-def _unmount(mount_point: Path) -> None:
+def _unmount(mount_point: Path, *, detach_immediately: bool = False) -> None:
     if not _is_mounted(mount_point):
         return
     try:
-        result = subprocess.run(["umount", str(mount_point)], capture_output=True, text=True, timeout=NETWORK_SHARE_UMOUNT_TIMEOUT_SECONDS)
+        # Detach uses a lazy unmount first: it removes the mount from this
+        # namespace without waiting for an unhealthy SMB server or for an
+        # emulator's stale file handle.  Kernel cleanup can finish later while
+        # local directory restoration and the HTTP response proceed normally.
+        first = ["umount", "-l", str(mount_point)] if detach_immediately else ["umount", str(mount_point)]
+        result = subprocess.run(first, capture_output=True, text=True, timeout=NETWORK_SHARE_UMOUNT_TIMEOUT_SECONDS)
         if result.returncode != 0 and _is_mounted(mount_point):
             # Batocera's own network-share teardown falls back to a lazy
             # unmount the same way (board/batocera/fsoverlay S11share script).
@@ -333,9 +397,18 @@ def _apply_system_references(
         prior = existing_by_name.get(system)
         local_path = roms_root / system
         target = peer_roms_dir / system
+        old_path = roms_root / f"{system}{NETWORK_SHARE_OLD_SUFFIX}"
 
         if prior and prior.get("symlink_created") and _symlink_points_to(local_path, target):
             results.append(prior)
+            continue
+
+        # Recover an interrupted first enable whose symlink was created after
+        # the local folder was renamed but before the completed manifest was
+        # committed.  Both checks are lexical/local; neither follows SMB.
+        if _symlink_points_to(local_path, target):
+            renamed_to = old_path.name if old_path.exists() else ""
+            results.append({"system": system, "had_local_collision": bool(renamed_to), "renamed_to": renamed_to, "symlink_created": True, "skipped_reason": ""})
             continue
 
         if local_path.is_symlink() and _is_network_reference(local_path, network_share_dir(settings)):
@@ -354,10 +427,10 @@ def _apply_system_references(
             except OSError as error:
                 results.append({"system": system, "had_local_collision": False, "renamed_to": "", "symlink_created": False, "skipped_reason": f"symlink failed: {error}"})
                 continue
-            results.append({"system": system, "had_local_collision": False, "renamed_to": "", "symlink_created": True, "skipped_reason": ""})
+            renamed_to = old_path.name if old_path.exists() else ""
+            results.append({"system": system, "had_local_collision": bool(renamed_to), "renamed_to": renamed_to, "symlink_created": True, "skipped_reason": ""})
             continue
 
-        old_path = roms_root / f"{system}{NETWORK_SHARE_OLD_SUFFIX}"
         if old_path.exists() or old_path.is_symlink():
             results.append({"system": system, "had_local_collision": True, "renamed_to": "", "symlink_created": False, "skipped_reason": f"skipped: {old_path.name} already exists"})
             continue
@@ -413,37 +486,61 @@ def _revert_system_references(settings: Settings, mount_point: Path, systems: Li
 # -------------------------------------------------------------- bios refs
 
 
-def _apply_bios_references(settings: Settings, mount_point: Path, existing_bios: List[dict]) -> tuple[List[dict], int, int]:
-    """Link only BIOS files the satellite does not already have.
+def _safe_bios_relative_path(value: object) -> Optional[str]:
+    candidate = str(value or "").strip().replace("\\", "/")
+    path = PurePosixPath(candidate)
+    if not candidate or path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        return None
+    if not all(_should_include_entry(part) for part in path.parts):
+        return None
+    return path.as_posix()
 
-    Local BIOS wins.  Replacing thousands of existing local files with remote
-    links made every BIOS scan depend on SMB and provided no benefit on a
-    normally provisioned Batocera installation.  ``os.walk`` consumes Samba's
-    directory listings without an ``is_file``/``stat`` request per file.
 
-    Returns ``(created_or_retained_links, local_files_kept, remote_files_seen)``.
+def _list_peer_bios_relative_paths(mount_point: Path, inventory_paths: Optional[List[str]] = None) -> List[str]:
+    """Return a validated lexical BIOS inventory.
+
+    A paired peer normally supplies this from its local SQLite cache in the
+    inventory summary, avoiding all SMB metadata traffic.  SMB walking remains
+    a background-only fallback for a peer whose cache/certificate is not ready.
     """
+    if inventory_paths is not None:
+        return sorted(
+            {path for value in inventory_paths if (path := _safe_bios_relative_path(value))},
+            key=str.lower,
+        )
+    peer_bios_dir = mount_point / "bios"
+    relative_paths: List[str] = []
+    for current_root, directory_names, file_names in os.walk(peer_bios_dir, followlinks=False):
+        directory_names[:] = [name for name in directory_names if _should_include_entry(name)]
+        root_path = Path(current_root)
+        for name in file_names:
+            if not _should_include_entry(name):
+                continue
+            try:
+                relative_path = (root_path / name).relative_to(peer_bios_dir).as_posix()
+            except ValueError:
+                continue
+            safe_path = _safe_bios_relative_path(relative_path)
+            if safe_path:
+                relative_paths.append(safe_path)
+    return sorted(set(relative_paths), key=str.lower)
+
+
+def _apply_bios_references_from_paths(
+    settings: Settings,
+    mount_point: Path,
+    existing_bios: List[dict],
+    relative_paths: List[str],
+) -> tuple[List[dict], int, int]:
+    """Link missing BIOS files from an already-collected lexical inventory."""
     bios_root = settings.bios_root
     peer_bios_dir = mount_point / "bios"
     existing_by_path = {str(row.get("relative_path") or ""): row for row in existing_bios}
-    peer_files: List[Path] = []
-    try:
-        for current_root, directory_names, file_names in os.walk(peer_bios_dir, followlinks=False):
-            directory_names[:] = [name for name in directory_names if _should_include_entry(name)]
-            root_path = Path(current_root)
-            peer_files.extend(root_path / name for name in file_names if _should_include_entry(name))
-        peer_files.sort(key=lambda path: path.relative_to(peer_bios_dir).as_posix().lower())
-    except OSError:
-        return existing_bios, 0, len(existing_bios)  # mount unreadable right now -- watchdog will retry
-
     results: List[dict] = []
     local_files_kept = 0
     share_root = network_share_dir(settings)
-    for peer_file in peer_files:
-        try:
-            relative_path = peer_file.relative_to(peer_bios_dir).as_posix()
-        except ValueError:
-            continue
+    for relative_path in relative_paths:
+        peer_file = peer_bios_dir / relative_path
         prior = existing_by_path.get(relative_path)
         local_path = bios_root / relative_path
 
@@ -475,7 +572,21 @@ def _apply_bios_references(settings: Settings, mount_point: Path, existing_bios:
         # The remote copy is merely a fallback for files missing locally.
         local_files_kept += 1
 
-    return results, local_files_kept, len(peer_files)
+    return results, local_files_kept, len(relative_paths)
+
+
+def _apply_bios_references(
+    settings: Settings,
+    mount_point: Path,
+    existing_bios: List[dict],
+    inventory_paths: Optional[List[str]] = None,
+) -> tuple[List[dict], int, int]:
+    """Compatibility wrapper used by synchronous tests and recovery tools."""
+    try:
+        relative_paths = _list_peer_bios_relative_paths(mount_point, inventory_paths)
+    except OSError:
+        return existing_bios, 0, len(existing_bios)
+    return _apply_bios_references_from_paths(settings, mount_point, existing_bios, relative_paths)
 
 
 def _revert_bios_references(settings: Settings, mount_point: Path, bios_files: List[dict]) -> List[str]:
@@ -539,7 +650,7 @@ def _restore_or_remove_owned_link(link: Path, share_root: Path) -> Optional[str]
     return None
 
 
-def _recover_owned_orphaned_references(settings: Settings) -> List[str]:
+def _recover_owned_orphaned_references(settings: Settings, owned_root: Optional[Path] = None) -> List[str]:
     """Recover links left behind after a lost state record or v0.1.129 upgrade.
 
     ROM references are top-level links.  BIOS references can be nested, so the
@@ -547,7 +658,7 @@ def _recover_owned_orphaned_references(settings: Settings) -> List[str]:
     no target is ever resolved or statted.
     """
     errors: List[str] = []
-    share_root = network_share_dir(settings)
+    share_root = owned_root or network_share_dir(settings)
     try:
         for entry in settings.roms_root.iterdir():
             error = _restore_or_remove_owned_link(entry, share_root)
@@ -636,12 +747,36 @@ def _fetch_peer_summary(settings: Settings, target: dict) -> Optional[dict]:
     return summary if isinstance(summary, dict) else None
 
 
+def _fetch_peer_bios_paths(settings: Settings, target: dict) -> Optional[List[str]]:
+    peer = target.get("peer") if isinstance(target.get("peer"), dict) else None
+    if not peer or not str(peer.get("certificate_path") or "").strip():
+        return None
+    started = time.monotonic()
+    try:
+        summary, _address = _peer_get_json_for_peer(
+            peer,
+            "/v1/api/peer/inventory/summary?include_bios_paths=1",
+            settings,
+            peer_id=str(target.get("peer_id") or ""),
+            config={"network_mode": "local_network"},
+            timeout=NETWORK_SHARE_PEER_BIOS_INVENTORY_TIMEOUT_SECONDS,
+            overall_deadline=started + NETWORK_SHARE_PEER_BIOS_INVENTORY_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        return None
+    paths = summary.get("bios_paths") if isinstance(summary, dict) else None
+    return paths if isinstance(paths, list) else None
+
+
 def public_record(record: dict) -> dict:
     """Compact API representation; never serialize thousands of BIOS rows."""
     systems = record.get("systems") if isinstance(record.get("systems"), list) else []
     bios = record.get("bios") if isinstance(record.get("bios"), list) else []
     skipped_systems = sum(1 for row in systems if isinstance(row, dict) and row.get("skipped_reason"))
-    public = {key: value for key, value in record.items() if key not in {"systems", "bios", "remote_system_counts"}}
+    public = {
+        key: value for key, value in record.items()
+        if key not in {"systems", "bios", "remote_system_counts"} and not str(key).startswith("_")
+    }
     public.update(
         {
             "system_count": len([row for row in systems if isinstance(row, dict) and row.get("symlink_created")]),
@@ -652,7 +787,106 @@ def public_record(record: dict) -> dict:
     return public
 
 
+def _restore_local_fallback(settings: Settings, mount_point: Path, record: dict) -> List[str]:
+    """Restore every locally-owned path without touching the remote target."""
+    errors = _revert_system_references(settings, mount_point, record.get("systems") or [])
+    errors.extend(_revert_bios_references(settings, mount_point, record.get("bios") or []))
+    # Also recover mutations made immediately before an interrupted manifest
+    # commit. Ownership is restricted to this peer's mount root.
+    errors.extend(_recover_owned_orphaned_references(settings, mount_point))
+    return list(dict.fromkeys(errors))
+
+
+def _run_bios_reconciliation(
+    settings: Settings,
+    peer_id: str,
+    mount_point: Path,
+    target: Optional[dict],
+) -> None:
+    key = _operation_key(settings, peer_id)
+    try:
+        with _peer_operation_lock(settings, peer_id):
+            record = _get_peer_record(settings, peer_id)
+            if not record or not record.get("enabled", True) or record.get("status") == "detaching":
+                return
+            _upsert_peer_record(
+                settings,
+                peer_id,
+                bios_status="syncing",
+                bios_status_detail="Reconciling missing BIOS files in the background",
+            )
+        try:
+            inventory_paths = _fetch_peer_bios_paths(settings, target) if isinstance(target, dict) else None
+            relative_paths = _list_peer_bios_relative_paths(mount_point, inventory_paths)
+        except OSError as error:
+            with _peer_operation_lock(settings, peer_id):
+                current = _get_peer_record(settings, peer_id)
+                if current and current.get("enabled", True) and current.get("status") != "detaching":
+                    _upsert_peer_record(
+                        settings,
+                        peer_id,
+                        bios_status="error",
+                        bios_status_detail=f"BIOS inventory unavailable: {error}",
+                    )
+            return
+        with _peer_operation_lock(settings, peer_id):
+            record = _get_peer_record(settings, peer_id)
+            if not record or not record.get("enabled", True) or record.get("status") != "mounted":
+                return
+            bios, local_count, remote_count = _apply_bios_references_from_paths(
+                settings,
+                mount_point,
+                record.get("bios") or [],
+                relative_paths,
+            )
+            _upsert_peer_record(
+                settings,
+                peer_id,
+                bios=bios,
+                bios_local_count=local_count,
+                bios_remote_count=remote_count,
+                bios_status="ready",
+                bios_status_detail="",
+                last_checked_at=_now_iso(),
+            )
+    finally:
+        with _BACKGROUND_JOBS_LOCK:
+            _ACTIVE_BIOS_JOBS.discard(key)
+
+
+def _schedule_bios_reconciliation(
+    settings: Settings,
+    peer_id: str,
+    mount_point: Path,
+    target: Optional[dict],
+) -> bool:
+    key = _operation_key(settings, peer_id)
+    with _BACKGROUND_JOBS_LOCK:
+        if key in _ACTIVE_BIOS_JOBS:
+            return False
+        _ACTIVE_BIOS_JOBS.add(key)
+    thread = threading.Thread(
+        target=_run_bios_reconciliation,
+        args=(settings, peer_id, mount_point, target),
+        name=f"drone-network-share-bios-{_safe_dirname(peer_id)}",
+        daemon=True,
+    )
+    try:
+        thread.start()
+    except Exception:
+        with _BACKGROUND_JOBS_LOCK:
+            _ACTIVE_BIOS_JOBS.discard(key)
+        raise
+    return True
+
+
 def enable(settings: Settings, peer_id: str) -> dict:
+    peer_id = str(peer_id or "").strip()
+    with _peer_operation_lock(settings, peer_id):
+        return _enable_locked(settings, peer_id)
+
+
+def _enable_locked(settings: Settings, peer_id: str) -> dict:
     target = resolve_peer_target(settings, peer_id)
     migration = migrate_legacy_state(settings)
     if migration.get("errors"):
@@ -669,22 +903,62 @@ def enable(settings: Settings, peer_id: str) -> dict:
         )
     mount_point = peer_mount_point(settings, peer_id)
     prior = _get_peer_record(settings, peer_id)
+    if prior and (not prior.get("enabled", True) or prior.get("status") == "detaching"):
+        raise ValueError("network reference detach is still in progress")
+    if prior and prior.get("status") in {"pending", "enabling"}:
+        recovery_errors = _restore_local_fallback(settings, mount_point, prior)
+        _unmount(mount_point, detach_immediately=True)
+        if recovery_errors:
+            return _upsert_peer_record(
+                settings,
+                peer_id,
+                enabled=True,
+                status="error",
+                status_detail=f"Could not recover an interrupted enable: {recovery_errors[0]}",
+                last_checked_at=_now_iso(),
+            )
+        prior = _upsert_peer_record(settings, peer_id, systems=[], bios=[], bios_status="pending")
     existing_systems = (prior or {}).get("systems") or []
     existing_bios = (prior or {}).get("bios") or []
+    mount_was_active = _is_mounted(mount_point)
+
+    _upsert_peer_record(
+        settings,
+        peer_id,
+        peer_name=target["peer_name"],
+        tailnet_ip=target["tailnet_ip"],
+        mount_point=str(mount_point),
+        enabled=True,
+        status="enabling",
+        status_detail="Mounting the peer ROM library",
+        systems=existing_systems,
+        bios=existing_bios,
+        bios_status="pending",
+        last_checked_at=_now_iso(),
+    )
 
     mount_result = _mount(target["addresses"], mount_point)
     if mount_result["status"] != "mounted":
+        interrupted = {"systems": existing_systems, "bios": existing_bios}
+        recovery_errors = _restore_local_fallback(settings, mount_point, interrupted)
+        _unmount(mount_point, detach_immediately=True)
+        cleanup_safe = not recovery_errors
         record = _upsert_peer_record(
             settings, peer_id, peer_name=target["peer_name"], tailnet_ip=target["tailnet_ip"],
-            mount_point=str(mount_point), enabled=True, status="error",
-            status_detail=mount_result.get("detail", ""), systems=existing_systems, bios=existing_bios, last_checked_at=_now_iso(),
+            mount_point=str(mount_point), enabled=True, status="peer_unreachable" if cleanup_safe else "error",
+            status_detail=(mount_result.get("detail", "") if cleanup_safe else f"Could not restore local fallback: {recovery_errors[0]}"),
+            systems=[] if cleanup_safe else existing_systems,
+            bios=[] if cleanup_safe else existing_bios,
+            bios_status="pending" if cleanup_safe else "error",
+            last_checked_at=_now_iso(),
         )
-        return record
+        result = dict(record)
+        result["_refresh_required"] = bool(prior or existing_systems or existing_bios)
+        return result
 
     summary = _fetch_peer_summary(settings, target)
     peer_system_names = summary.get("systems") if isinstance(summary, dict) and isinstance(summary.get("systems"), list) else None
     systems = _apply_system_references(settings, mount_point, existing_systems, peer_system_names)
-    bios, bios_local_count, bios_remote_count = _apply_bios_references(settings, mount_point, existing_bios)
     raw_remote_system_counts = summary.get("system_counts") if isinstance(summary, dict) and isinstance(summary.get("system_counts"), dict) else {}
     remote_system_counts = {}
     for name, value in raw_remote_system_counts.items():
@@ -692,47 +966,131 @@ def enable(settings: Settings, peer_id: str) -> dict:
             remote_system_counts[str(name)] = max(0, int(value or 0))
         except (TypeError, ValueError):
             continue
-    record = _upsert_peer_record(
-        settings, peer_id, peer_name=target["peer_name"], tailnet_ip=target["tailnet_ip"],
+    record_updates = dict(
+        peer_name=target["peer_name"], tailnet_ip=target["tailnet_ip"],
         mount_point=str(mount_point), mounted_address=str(mount_result.get("address") or (prior or {}).get("mounted_address") or ""),
-        enabled=True, status="mounted", status_detail="", systems=systems, bios=bios,
-        bios_local_count=bios_local_count, bios_remote_count=bios_remote_count,
+        enabled=True, status="mounted", status_detail="", systems=systems, bios=existing_bios,
+        bios_status="pending", bios_status_detail="BIOS reconciliation queued",
         remote_system_counts=remote_system_counts,
         remote_rom_count=sum(int(value or 0) for value in remote_system_counts.values()),
         last_checked_at=_now_iso(),
     )
-    return record
+    # Keep synchronous behavior available for focused recovery tools and unit
+    # tests; production defaults to the non-blocking worker.
+    if not _bios_reconciliation_background_enabled():
+        peer_bios_paths = _fetch_peer_bios_paths(settings, target)
+        bios, bios_local_count, bios_remote_count = _apply_bios_references(
+            settings, mount_point, existing_bios, peer_bios_paths,
+        )
+        record_updates.update(
+            bios=bios,
+            bios_local_count=bios_local_count,
+            bios_remote_count=bios_remote_count,
+            bios_status="ready",
+            bios_status_detail="",
+        )
+    record = _upsert_peer_record(settings, peer_id, **record_updates)
+    if _bios_reconciliation_background_enabled():
+        _schedule_bios_reconciliation(settings, peer_id, mount_point, target)
+    result = dict(record)
+    result["_refresh_required"] = not mount_was_active
+    return result
 
 
 def disable(settings: Settings, peer_id: str) -> dict:
-    migration = migrate_legacy_state(settings)
-    record = _get_peer_record(settings, peer_id)
-    if not record:
-        return {"status": "not_found", "peer_id": peer_id}
-    if migration.get("errors"):
-        return _upsert_peer_record(
+    peer_id = str(peer_id or "").strip()
+    with _peer_operation_lock(settings, peer_id):
+        migration = migrate_legacy_state(settings)
+        record = _get_peer_record(settings, peer_id)
+        if not record:
+            return {"status": "not_found", "peer_id": peer_id}
+        # This write is the durable boundary.  Watchdog and boot replay see it
+        # before any symlink is touched and can only continue detach afterward.
+        record = _upsert_peer_record(
             settings,
             peer_id,
-            enabled=True,
-            status="error",
-            status_detail=f"Could not safely upgrade existing network references: {migration['errors'][0]}",
+            enabled=False,
+            status="detaching",
+            status_detail="Restoring local ROM and BIOS paths",
             last_checked_at=_now_iso(),
         )
-    mount_point = Path(str(record.get("mount_point") or peer_mount_point(settings, peer_id)))
-    errors = _revert_system_references(settings, mount_point, record.get("systems") or [])
-    errors.extend(_revert_bios_references(settings, mount_point, record.get("bios") or []))
-    _unmount(mount_point)
-    if errors:
-        return _upsert_peer_record(
+        if migration.get("errors"):
+            return _upsert_peer_record(
+                settings,
+                peer_id,
+                enabled=False,
+                status="error",
+                status_detail=f"Could not safely upgrade existing network references: {migration['errors'][0]}",
+                last_checked_at=_now_iso(),
+            )
+        mount_point = Path(str(record.get("mount_point") or peer_mount_point(settings, peer_id)))
+        errors = _restore_local_fallback(settings, mount_point, record)
+        _unmount(mount_point, detach_immediately=True)
+        if errors:
+            return _upsert_peer_record(
+                settings,
+                peer_id,
+                enabled=False,
+                status="error",
+                status_detail=f"Could not safely remove every reference: {errors[0]}",
+                last_checked_at=_now_iso(),
+            )
+        _delete_peer_record(settings, peer_id)
+        return {"status": "disabled", "peer_id": peer_id}
+
+
+def request_disable(settings: Settings, peer_id: str) -> dict:
+    """Persist detach intent and finish cleanup on a daemon thread."""
+    peer_id = str(peer_id or "").strip()
+    key = _operation_key(settings, peer_id)
+    with _peer_operation_lock(settings, peer_id):
+        record = _get_peer_record(settings, peer_id)
+        if not record:
+            return {"status": "not_found", "peer_id": peer_id}
+        record = _upsert_peer_record(
             settings,
             peer_id,
-            enabled=True,
-            status="error",
-            status_detail=f"Could not safely remove every reference: {errors[0]}",
+            enabled=False,
+            status="detaching",
+            status_detail="Detach accepted; restoring local ROM and BIOS paths",
             last_checked_at=_now_iso(),
         )
-    _delete_peer_record(settings, peer_id)
-    return {"status": "disabled", "peer_id": peer_id}
+        with _BACKGROUND_JOBS_LOCK:
+            if key in _ACTIVE_DISABLE_JOBS:
+                return public_record(record)
+            _ACTIVE_DISABLE_JOBS.add(key)
+
+    def finish() -> None:
+        try:
+            result = disable(settings, peer_id)
+            if result.get("status") == "disabled":
+                _refresh_emulationstation_after_share_change()
+        except Exception as error:
+            with _peer_operation_lock(settings, peer_id):
+                if _get_peer_record(settings, peer_id):
+                    _upsert_peer_record(
+                        settings,
+                        peer_id,
+                        enabled=False,
+                        status="error",
+                        status_detail=f"Detach failed and will be retried after restart: {error}",
+                        last_checked_at=_now_iso(),
+                    )
+        finally:
+            with _BACKGROUND_JOBS_LOCK:
+                _ACTIVE_DISABLE_JOBS.discard(key)
+
+    try:
+        threading.Thread(
+            target=finish,
+            name=f"drone-network-share-detach-{_safe_dirname(peer_id)}",
+            daemon=True,
+        ).start()
+    except Exception:
+        with _BACKGROUND_JOBS_LOCK:
+            _ACTIVE_DISABLE_JOBS.discard(key)
+        raise
+    return public_record(record)
 
 
 def status(settings: Settings) -> List[dict]:
@@ -758,19 +1116,40 @@ def _probe_mount_alive(mount_point: Path) -> bool:
         return False
 
 
+def _refresh_emulationstation_after_share_change() -> bool:
+    if str(os.environ.get("DRONE_NETWORK_SHARE_AUTO_REFRESH_ES", "1")).strip().lower() in {"0", "false", "no", "off"}:
+        return False
+    try:
+        from .device_control import _restart_emulationstation
+    except ImportError:  # pragma: no cover - direct script execution fallback
+        from device.device_control import _restart_emulationstation  # type: ignore
+    try:
+        return bool(_restart_emulationstation())
+    except Exception:
+        return False
+
+
 def maybe_reconnect_all_on_boot(settings: Settings) -> None:
     """Best-effort replay of every configured reference on Drone startup --
     never raises, logs and continues per-row, same defensive style as
     vpn_manager.maybe_auto_connect."""
     migrate_legacy_state(settings)
+    refresh_required = False
     for share in list_shares(settings):
         peer_id = str(share.get("peer_id") or "")
-        if not peer_id or not share.get("enabled", True):
+        if not peer_id:
             continue
         try:
-            enable(settings, peer_id)
+            if not share.get("enabled", True) or share.get("status") == "detaching":
+                result = disable(settings, peer_id)
+                refresh_required = refresh_required or result.get("status") == "disabled"
+            else:
+                result = enable(settings, peer_id)
+                refresh_required = refresh_required or bool(result.get("_refresh_required"))
         except Exception as error:
             print(f"Network share boot replay failed for {share.get('peer_name') or peer_id}: {error.__class__.__name__}: {error}", file=sys.stderr, flush=True)
+    if refresh_required and not _refresh_emulationstation_after_share_change():
+        print("Network share boot replay completed, but EmulationStation could not be refreshed", file=sys.stderr, flush=True)
 
 
 def run_watchdog_poller(settings: Settings) -> None:
@@ -781,15 +1160,30 @@ def run_watchdog_poller(settings: Settings) -> None:
         time.sleep(NETWORK_SHARE_WATCHDOG_INTERVAL_SECONDS)
         for share in list_shares(settings):
             peer_id = str(share.get("peer_id") or "")
-            if not peer_id or not share.get("enabled", True):
+            if not peer_id or not share.get("enabled", True) or share.get("status") == "detaching":
                 continue
             mount_point = Path(str(share.get("mount_point") or ""))
-            if mount_point and _probe_mount_alive(mount_point):
-                if share.get("status") != "mounted":
-                    _upsert_peer_record(settings, peer_id, status="mounted", status_detail="", last_checked_at=_now_iso())
-                continue
+            alive = bool(mount_point and _probe_mount_alive(mount_point))
+            refresh_required = False
             try:
-                _unmount(mount_point)
-                enable(settings, peer_id)
+                # Re-check under the same lock detach uses.  A watchdog probe
+                # may have started from a stale enabled snapshot just before
+                # request_disable persisted its intent.
+                with _peer_operation_lock(settings, peer_id):
+                    current = _get_peer_record(settings, peer_id)
+                    if not current or not current.get("enabled", True) or current.get("status") == "detaching":
+                        continue
+                    if alive:
+                        if current.get("status") != "mounted":
+                            _upsert_peer_record(settings, peer_id, status="mounted", status_detail="", last_checked_at=_now_iso())
+                        continue
+                    _unmount(mount_point)
+                    result = enable(settings, peer_id)
+                    refresh_required = bool(result.get("_refresh_required"))
             except Exception as error:
-                _upsert_peer_record(settings, peer_id, status="peer_unreachable", status_detail=str(error), last_checked_at=_now_iso())
+                with _peer_operation_lock(settings, peer_id):
+                    current = _get_peer_record(settings, peer_id)
+                    if current and current.get("enabled", True):
+                        _upsert_peer_record(settings, peer_id, status="peer_unreachable", status_detail=str(error), last_checked_at=_now_iso())
+            if refresh_required:
+                _refresh_emulationstation_after_share_change()

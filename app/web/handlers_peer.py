@@ -215,7 +215,7 @@ class HandlersPeerMixin:
             counts = dict(cache_status.get("counts") or {})
             counts["systems"] = len(system_names)
             counts["roms"] = sum(system_counts.values())
-            return {
+            response = {
                 "drone_id": self.settings.device_id,
                 "name": socket.gethostname(),
                 "systems": system_names,
@@ -223,6 +223,34 @@ class HandlersPeerMixin:
                 "counts": counts,
                 "updated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
             }
+            include_bios_paths = str((query_params.get("include_bios_paths") or [""])[0]).strip().lower() in {
+                "1", "true", "yes", "on",
+            }
+            if include_bios_paths:
+                bios_paths = []
+                offset = 0
+                while True:
+                    page = self.repository.list_bios_page(limit=5000, offset=offset)
+                    if page is None:
+                        # Never turn this API optimization into another full
+                        # filesystem scan.  The requester can reconcile BIOS
+                        # from SMB in its background worker until the cache is
+                        # authoritative.
+                        bios_paths = None
+                        break
+                    items = page.get("items") if isinstance(page.get("items"), list) else []
+                    for row in items:
+                        if not isinstance(row, dict):
+                            continue
+                        relative_path = str(row.get("relative_path") or row.get("file_path") or row.get("path") or "").strip()
+                        if relative_path:
+                            bios_paths.append(relative_path)
+                    offset += len(items)
+                    if not items or offset >= int(page.get("total") or 0):
+                        break
+                response["bios_paths"] = bios_paths
+                response["bios_paths_available"] = bios_paths is not None
+            return response
         selected_systems = [system] if system else sorted(systems)
 
         def paged_response(page: dict) -> dict:

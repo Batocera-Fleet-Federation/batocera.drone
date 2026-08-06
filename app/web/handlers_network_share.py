@@ -33,6 +33,6 @@ class HandlersNetworkShareMixin:
 
     def _handle_admin_network_share_disable(self, peer_id: str) -> None:
         peer_id = unquote(peer_id)
-        result = _network_share.disable(self.settings, peer_id)
-        status_code = 404 if result.get("status") == "not_found" else 502 if result.get("status") == "error" else 200
+        result = _network_share.request_disable(self.settings, peer_id)
+        status_code = 404 if result.get("status") == "not_found" else 202
         self._send_json(status_code, _network_share.public_record(result))

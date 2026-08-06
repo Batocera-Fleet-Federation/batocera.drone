@@ -6,6 +6,7 @@ while always preserving existing local BIOS files.
 
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -24,8 +25,11 @@ def _build_settings(test_case: unittest.TestCase, root: Path) -> Settings:
         "DRONE_DEVICE_ID": "network-share-test",
     }
     patcher = mock.patch.object(network_share_manager, "_drone_install_root", return_value=root / "install-root")
+    bios_patcher = mock.patch.object(network_share_manager, "_bios_reconciliation_background_enabled", return_value=False)
     test_case.addCleanup(patcher.stop)
+    test_case.addCleanup(bios_patcher.stop)
     patcher.start()
+    bios_patcher.start()
     with mock.patch.dict("os.environ", env, clear=True):
         settings = Settings.from_env()
     settings.roms_root.mkdir(parents=True, exist_ok=True)
@@ -136,6 +140,7 @@ class MountTargetTests(unittest.TestCase):
             options = args[args.index("-o") + 1]
             self.assertIn("ro", options.split(","))
             self.assertIn("soft", options.split(","))
+            self.assertIn("noserverino", options.split(","))
             self.assertIn(f"actimeo={network_share_manager.NETWORK_SHARE_ATTRIBUTE_CACHE_SECONDS}", options.split(","))
 
     def test_unreachable_lan_candidate_falls_back_to_tailnet(self) -> None:
@@ -164,11 +169,59 @@ class EnableTests(unittest.TestCase):
             failed = mock.Mock(returncode=1, stdout="", stderr="mount error(13): Permission denied\n")
             with mock.patch.object(network_share_manager.subprocess, "run", return_value=failed):
                 record = network_share_manager.enable(settings, "peer-1")
-            self.assertEqual(record["status"], "error")
+            self.assertEqual(record["status"], "peer_unreachable")
             self.assertTrue((settings.roms_root / "snes" / "game.zip").is_file())
             self.assertFalse((settings.roms_root / "snes.old").exists())
             self.assertTrue((settings.bios_root / "scph5501.bin").is_file())
             self.assertFalse((settings.bios_root / "scph5501.bin.old").exists())
+
+    def test_dead_remount_restores_local_folder_instead_of_leaving_dangling_link(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._settings_with_peer(tmp)
+            local_snes = settings.roms_root / "snes"
+            local_snes.mkdir()
+            (local_snes / "local.zip").write_text("local")
+            mount_point = network_share_manager.peer_mount_point(settings, "peer-1")
+            with mock.patch.object(
+                network_share_manager.subprocess,
+                "run",
+                side_effect=_mount_that_populates(mount_point, roms={"snes": ["peer.zip"]}),
+            ):
+                network_share_manager.enable(settings, "peer-1")
+            failed = mock.Mock(returncode=1, stdout="", stderr="host is down")
+            with mock.patch.object(network_share_manager.subprocess, "run", return_value=failed):
+                record = network_share_manager.enable(settings, "peer-1")
+
+            self.assertEqual(record["status"], "peer_unreachable")
+            self.assertFalse(local_snes.is_symlink())
+            self.assertEqual((local_snes / "local.zip").read_text(), "local")
+            self.assertFalse((settings.roms_root / "snes.old").exists())
+            self.assertEqual(record["systems"], [])
+
+    def test_background_bios_reconciliation_does_not_delay_rom_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._settings_with_peer(tmp)
+            mount_point = network_share_manager.peer_mount_point(settings, "peer-1")
+            run = _mount_that_populates(
+                mount_point,
+                roms={"snes": ["peer.zip"]},
+                bios={"scph5501.bin": "peer bios"},
+            )
+            with mock.patch.object(network_share_manager.subprocess, "run", side_effect=run), \
+                    mock.patch.object(network_share_manager, "_bios_reconciliation_background_enabled", return_value=True), \
+                    mock.patch.object(network_share_manager, "_schedule_bios_reconciliation", return_value=True) as schedule:
+                record = network_share_manager.enable(settings, "peer-1")
+
+            self.assertEqual(record["status"], "mounted")
+            self.assertEqual(record["bios_status"], "pending")
+            self.assertTrue((settings.roms_root / "snes").is_symlink())
+            self.assertFalse((settings.bios_root / "scph5501.bin").exists())
+            schedule.assert_called_once()
+            scheduled_settings, scheduled_peer, scheduled_mount, scheduled_target = schedule.call_args.args
+            self.assertIs(scheduled_settings, settings)
+            self.assertEqual(scheduled_peer, "peer-1")
+            self.assertEqual(scheduled_mount, mount_point)
+            self.assertEqual(scheduled_target["peer_id"], "peer-1")
 
     def test_no_local_collision_creates_plain_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -391,6 +444,48 @@ class BiosEnableTests(unittest.TestCase):
             self.assertTrue((settings.roms_root / "snes").is_symlink())
             self.assertTrue((settings.bios_root / "scph5501.bin").is_symlink())
 
+    def test_api_bios_inventory_avoids_walking_the_smb_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._settings_with_peer(tmp)
+            mount_point = network_share_manager.peer_mount_point(settings, "peer-1")
+            (mount_point / "bios" / "dc").mkdir(parents=True)
+            with mock.patch.object(network_share_manager.os, "walk", side_effect=AssertionError("must not walk SMB")):
+                bios, _local_count, remote_count = network_share_manager._apply_bios_references(
+                    settings,
+                    mount_point,
+                    [],
+                    ["dc/dc_boot.bin", "../escape.bin", "/absolute.bin"],
+                )
+
+            self.assertEqual(remote_count, 1)
+            self.assertEqual([row["relative_path"] for row in bios], ["dc/dc_boot.bin"])
+            self.assertTrue((settings.bios_root / "dc" / "dc_boot.bin").is_symlink())
+
+    def test_background_bios_worker_commits_ready_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._settings_with_peer(tmp)
+            mount_point = network_share_manager.peer_mount_point(settings, "peer-1")
+            peer_bios = mount_point / "bios" / "dc" / "dc_boot.bin"
+            peer_bios.parent.mkdir(parents=True)
+            peer_bios.write_text("peer bios")
+            network_share_manager._save_state(settings, {"schema_version": 2, "peers": {}})
+            network_share_manager._upsert_peer_record(
+                settings,
+                "peer-1",
+                enabled=True,
+                status="mounted",
+                mount_point=str(mount_point),
+                bios=[],
+                bios_status="pending",
+            )
+
+            network_share_manager._run_bios_reconciliation(settings, "peer-1", mount_point, None)
+
+            record = network_share_manager.get_share(settings, "peer-1")
+            self.assertEqual(record["bios_status"], "ready")
+            self.assertEqual(record["bios_remote_count"], 1)
+            self.assertTrue((settings.bios_root / "dc" / "dc_boot.bin").is_symlink())
+
 
 class DisableTests(unittest.TestCase):
     def _enabled_share(self, tmp: str, *, with_rom_collision: bool, with_bios_collision: bool = False, with_nested_bios: bool = False):
@@ -458,6 +553,23 @@ class DisableTests(unittest.TestCase):
             # Best-effort cleanup of the now-empty per-emulator subfolder Drone created.
             self.assertFalse((settings.bios_root / "dc").exists())
 
+    def test_request_disable_persists_intent_before_background_thread_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._enabled_share(tmp, with_rom_collision=True)
+
+            with mock.patch.object(threading.Thread, "start", return_value=None):
+                result = network_share_manager.request_disable(settings, "peer-1")
+
+            record = network_share_manager.get_share(settings, "peer-1")
+            self.assertEqual(result["status"], "detaching")
+            self.assertIsNotNone(record)
+            self.assertFalse(record["enabled"])
+            self.assertEqual(record["status"], "detaching")
+            with network_share_manager._BACKGROUND_JOBS_LOCK:
+                network_share_manager._ACTIVE_DISABLE_JOBS.discard(
+                    network_share_manager._operation_key(settings, "peer-1")
+                )
+
 
 class StatusAndBootReplayTests(unittest.TestCase):
     def test_status_flips_to_peer_unreachable_when_mount_point_not_actually_mounted(self) -> None:
@@ -497,10 +609,92 @@ class StatusAndBootReplayTests(unittest.TestCase):
                     mock.patch.object(network_share_manager, "_unmount") as unmount, \
                     mock.patch.object(network_share_manager, "enable") as fake_enable:
                 fake_time.sleep.side_effect = [None, StopIteration]
+                fake_enable.return_value = {"status": "mounted", "_refresh_required": False}
                 with self.assertRaises(StopIteration):
                     network_share_manager.run_watchdog_poller(settings)
             fake_enable.assert_called_with(settings, "peer-1")
             unmount.assert_called_once()
+
+    def test_watchdog_does_not_remount_after_detach_deleted_stale_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            network_share_manager._save_state(settings, {"schema_version": 2, "peers": {}})
+            network_share_manager._upsert_peer_record(
+                settings,
+                "peer-1",
+                peer_name="batocera",
+                enabled=True,
+                status="mounted",
+                mount_point=str(network_share_manager.peer_mount_point(settings, "peer-1")),
+            )
+
+            def detach_during_probe(_mount_point):
+                network_share_manager._delete_peer_record(settings, "peer-1")
+                return False
+
+            with mock.patch.object(network_share_manager, "_probe_mount_alive", side_effect=detach_during_probe), \
+                    mock.patch.object(network_share_manager, "time") as fake_time, \
+                    mock.patch.object(network_share_manager, "_unmount") as unmount, \
+                    mock.patch.object(network_share_manager, "enable") as enable:
+                fake_time.sleep.side_effect = [None, StopIteration]
+                with self.assertRaises(StopIteration):
+                    network_share_manager.run_watchdog_poller(settings)
+
+            unmount.assert_not_called()
+            enable.assert_not_called()
+
+    def test_boot_replay_finishes_interrupted_detach_and_refreshes_es(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            local_snes = settings.roms_root / "snes"
+            local_snes.mkdir()
+            (local_snes / "local.zip").write_text("local")
+            mount_point = network_share_manager.peer_mount_point(settings, "peer-1")
+            with mock.patch.object(network_share_manager._local_network, "get_paired_peer", return_value=_PEER), \
+                    mock.patch.object(network_share_manager.subprocess, "run", side_effect=_mount_that_populates(mount_point, roms={"snes": ["peer.zip"]})):
+                network_share_manager.enable(settings, "peer-1")
+            network_share_manager._upsert_peer_record(
+                settings,
+                "peer-1",
+                enabled=False,
+                status="detaching",
+                status_detail="power lost after detach acceptance",
+            )
+
+            with mock.patch.object(network_share_manager, "_refresh_emulationstation_after_share_change", return_value=True) as refresh, \
+                    mock.patch.object(network_share_manager.subprocess, "run", return_value=mock.Mock(returncode=0, stdout="", stderr="")):
+                network_share_manager.maybe_reconnect_all_on_boot(settings)
+
+            self.assertIsNone(network_share_manager.get_share(settings, "peer-1"))
+            self.assertFalse(local_snes.is_symlink())
+            self.assertEqual((local_snes / "local.zip").read_text(), "local")
+            self.assertFalse((settings.roms_root / "snes.old").exists())
+            refresh.assert_called_once_with()
+
+    def test_service_restart_does_not_refresh_es_when_mount_remained_active(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            network_share_manager._save_state(settings, {"schema_version": 2, "peers": {}})
+            network_share_manager._upsert_peer_record(
+                settings,
+                "peer-1",
+                peer_name="batocera",
+                enabled=True,
+                status="mounted",
+                mount_point=str(network_share_manager.peer_mount_point(settings, "peer-1")),
+            )
+            with mock.patch.object(
+                network_share_manager,
+                "enable",
+                return_value={"status": "mounted", "_refresh_required": False},
+            ), mock.patch.object(
+                network_share_manager,
+                "_refresh_emulationstation_after_share_change",
+                return_value=True,
+            ) as refresh:
+                network_share_manager.maybe_reconnect_all_on_boot(settings)
+
+            refresh.assert_not_called()
 
 
 class MigrationAndOfflineRecoveryTests(unittest.TestCase):
@@ -540,7 +734,9 @@ class MigrationAndOfflineRecoveryTests(unittest.TestCase):
                     mock.patch.object(network_share_manager, "_unmount"):
                 result = network_share_manager.disable(settings, "peer-1")
             self.assertEqual(result["status"], "error")
-            self.assertIsNotNone(network_share_manager.get_share(settings, "peer-1"))
+            record = network_share_manager.get_share(settings, "peer-1")
+            self.assertIsNotNone(record)
+            self.assertFalse(record["enabled"])
 
 
 if __name__ == "__main__":

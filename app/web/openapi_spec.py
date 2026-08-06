@@ -1383,8 +1383,10 @@ def _schemas() -> Dict[str, Schema]:
                 "tailnet_ip": _string(),
                 "mount_point": _string(),
                 "enabled": _boolean(),
-                "status": _enum(["mounted", "peer_unreachable", "error", "pending"]),
+                "status": _enum(["mounted", "peer_unreachable", "error", "pending", "enabling", "detaching"]),
                 "status_detail": _string(),
+                "bios_status": _enum(["pending", "syncing", "ready", "error"]),
+                "bios_status_detail": _string(),
                 "mounted_address": _string(description="LAN or Tailscale address used for the current mount"),
                 "system_count": _integer(description="Number of active remote ROM system links"),
                 "bios_link_count": _integer(description="Number of missing local BIOS files supplied by remote links"),
@@ -1399,7 +1401,7 @@ def _schemas() -> Dict[str, Schema]:
             ("peer_id", "peer_name", "status"),
         ),
         "NetworkShareListResponse": _object({"shares": _array(_ref("NetworkShareRecord"))}, ("shares",)),
-        "NetworkShareDisableResponse": _object({"status": _enum(["disabled", "not_found"]), "peer_id": _string()}, ("status", "peer_id")),
+        "NetworkShareDisableResponse": _object({"status": _enum(["detaching", "disabled", "not_found"]), "peer_id": _string()}, ("status", "peer_id")),
         "TailnetStatusResponse": _object(
             {
                 "installed": _boolean(description="tailscale binaries present under /userdata/system/tailscale"),
@@ -2208,8 +2210,8 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             },
             "/admin/network-shares/{peer_id}/disable": {
                 "post": _operation(
-                    "Stop referencing a peer's ROM library: unmount and precisely reverse only the renames/symlinks this Drone made for it",
-                    {"200": _json_response("NetworkShareDisableResponse"), "502": _json_response("NetworkShareRecord", "Some network references could not be safely removed")},
+                    "Durably begin detaching a peer's ROM library, then restore local paths and unmount in the background",
+                    {"202": _json_response("NetworkShareRecord"), "404": _json_response("NetworkShareDisableResponse")},
                     parameters=[_path_param("peer_id", "A paired peer's drone_id")],
                     tags=["admin", "local-network"],
                     error_codes=("401", "403", "404", "429", "500"),

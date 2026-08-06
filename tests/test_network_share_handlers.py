@@ -100,20 +100,21 @@ class NetworkShareEnableHandlerTests(unittest.TestCase):
 
 
 class NetworkShareDisableHandlerTests(unittest.TestCase):
-    def test_disable_returns_200_when_disabled(self) -> None:
+    def test_disable_returns_202_when_detach_is_accepted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(self, Path(tmp))
             handler = _handler(settings)
-            with mock.patch.object(network_share_manager, "disable", return_value={"status": "disabled", "peer_id": "p1"}):
+            with mock.patch.object(network_share_manager, "request_disable", return_value={"status": "detaching", "peer_id": "p1"}):
                 handler._handle_admin_network_share_disable("p1")
             status, payload = handler.response
-            self.assertEqual(status, 200)
+            self.assertEqual(status, 202)
+            self.assertEqual(payload["status"], "detaching")
 
     def test_disable_unquotes_a_percent_encoded_mac_style_peer_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(self, Path(tmp))
             handler = _handler(settings)
-            with mock.patch.object(network_share_manager, "disable", return_value={"status": "disabled", "peer_id": "58:47:ca:7e:38:57"}) as disable:
+            with mock.patch.object(network_share_manager, "request_disable", return_value={"status": "detaching", "peer_id": "58:47:ca:7e:38:57"}) as disable:
                 handler._handle_admin_network_share_disable("58%3A47%3Aca%3A7e%3A38%3A57")
             disable.assert_called_once_with(settings, "58:47:ca:7e:38:57")
 
@@ -121,20 +122,20 @@ class NetworkShareDisableHandlerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(self, Path(tmp))
             handler = _handler(settings)
-            with mock.patch.object(network_share_manager, "disable", return_value={"status": "not_found", "peer_id": "p1"}):
+            with mock.patch.object(network_share_manager, "request_disable", return_value={"status": "not_found", "peer_id": "p1"}):
                 handler._handle_admin_network_share_disable("p1")
             status, payload = handler.response
             self.assertEqual(status, 404)
 
-    def test_disable_returns_502_when_cleanup_is_incomplete(self) -> None:
+    def test_disable_returns_202_before_background_cleanup_completes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(self, Path(tmp))
             handler = _handler(settings)
-            with mock.patch.object(network_share_manager, "disable", return_value={"status": "error", "peer_id": "p1", "status_detail": "cleanup failed"}):
+            with mock.patch.object(network_share_manager, "request_disable", return_value={"status": "detaching", "peer_id": "p1", "status_detail": "cleanup queued"}):
                 handler._handle_admin_network_share_disable("p1")
             status, payload = handler.response
-            self.assertEqual(status, 502)
-            self.assertEqual(payload["status"], "error")
+            self.assertEqual(status, 202)
+            self.assertEqual(payload["status"], "detaching")
 
 
 if __name__ == "__main__":

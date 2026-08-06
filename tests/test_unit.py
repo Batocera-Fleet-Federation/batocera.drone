@@ -5175,6 +5175,37 @@ class LocalNetworkAssetCopyTests(unittest.TestCase):
             self.assertEqual(payload["counts"]["roms"], 2)
             self.assertEqual(payload["counts"]["bios"], 10)
 
+    def test_peer_summary_can_include_bios_paths_from_sqlite_without_filesystem_scan(self):
+        from app.web import handlers_peer
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            settings = self._settings(root)
+            repo = mock.Mock()
+            repo.list_local_system_names.return_value = ["snes"]
+            repo.list_systems.return_value = [{"name": "snes", "rom_count": 2}]
+            repo.list_bios_page.side_effect = [
+                {
+                    "total": 2,
+                    "items": [
+                        {"relative_path": "dc/dc_boot.bin"},
+                        {"relative_path": "scph5501.bin"},
+                    ],
+                }
+            ]
+            handler = self._handler(settings, repo)
+            with mock.patch.object(
+                handlers_peer,
+                "_rom_metadata_cache_status",
+                return_value={"counts": {"systems": 1, "roms": 2, "bios": 2}},
+            ):
+                payload = handler._collect_peer_inventory("summary", {"include_bios_paths": ["1"]})
+
+            self.assertTrue(payload["bios_paths_available"])
+            self.assertEqual(payload["bios_paths"], ["dc/dc_boot.bin", "scph5501.bin"])
+            repo.list_bios_page.assert_called_once_with(limit=5000, offset=0)
+            repo.list_bios_entries.assert_not_called()
+
     def test_collect_peer_inventory_roms_without_system_spans_all_systems(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
@@ -6596,7 +6627,8 @@ class NetworkSharePageTests(unittest.TestCase):
         fn_body = self.js[fn_start:self.js.index("\n// Tailnet's MagicDNS", fn_start)]
         self.assertIn("window.confirm(", fn_body)
         self.assertIn("/admin/network-shares/${encodeURIComponent(peerId)}/disable", fn_body)
-        self.assertIn("offerNetworkShareUiRefresh", fn_body)
+        self.assertIn('api("/admin/network-shares")', fn_body)
+        self.assertIn("detach is still running in the background", fn_body)
 
     def test_reference_refresh_prompt_restarts_emulationstation_only_after_confirmation(self) -> None:
         fn_start = self.js.index("async function offerNetworkShareUiRefresh(")

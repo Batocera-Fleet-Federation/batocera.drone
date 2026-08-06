@@ -8386,7 +8386,15 @@ function _networkShareStatusBadge(share) {
     : status === "peer_unreachable" || status === "error"
       ? "background:rgba(251,191,36,0.15);color:#fbbf24;border-color:rgba(251,191,36,0.4)"
       : "background:rgba(148,163,184,0.15);color:#94a3b8;border-color:rgba(148,163,184,0.4)";
-  const label = status === "mounted" ? "Referencing" : status === "peer_unreachable" ? "Referencing (unreachable)" : status === "error" ? "Referencing (error)" : "Referencing...";
+  const label = status === "mounted"
+    ? (share.bios_status === "syncing" || share.bios_status === "pending" ? "Referencing (BIOS syncing)" : "Referencing")
+    : status === "detaching"
+      ? "Detaching..."
+      : status === "peer_unreachable"
+        ? "Referencing (unreachable)"
+        : status === "error"
+          ? (share.enabled === false ? "Detach needs retry" : "Referencing (error)")
+          : "Referencing...";
   return `<span class="badge" style="${style}" title="${escapeHtml(share.status_detail || "This Drone is referencing this peer's ROM library over SMB")}"><i class="bi bi-hdd-network me-1"></i>${escapeHtml(label)}</span>`;
 }
 
@@ -8433,7 +8441,7 @@ function renderSwarmDroneCard(drone) {
       ? `<div class="small text-warning mt-2"><i class="bi bi-exclamation-triangle me-1" aria-hidden="true"></i>${escapeHtml(drone.error)}</div>`
       : "";
   const networkShareButton = share
-    ? `<button class="btn btn-sm btn-outline-secondary" onclick="swarmUnreferencePeerRoms(decodeURIComponent('${droneToken}'), ${jsAttr(drone.name || drone.drone_id || "")})"><i class="bi bi-x-circle me-1"></i>Stop Referencing</button>`
+    ? `<button class="btn btn-sm btn-outline-secondary" onclick="swarmUnreferencePeerRoms(decodeURIComponent('${droneToken}'), ${jsAttr(drone.name || drone.drone_id || "")})" ${share.status === "detaching" ? "disabled" : ""}><i class="bi bi-x-circle me-1"></i>${share.status === "detaching" ? "Detaching..." : share.enabled === false ? "Retry Detach" : "Stop Referencing"}</button>`
     : `<button class="btn btn-sm btn-outline-info" onclick="swarmReferencePeerRoms(decodeURIComponent('${droneToken}'), ${jsAttr(drone.name || drone.drone_id || "")})" ${drone.online && (drone.tailnet_ip || lanUrl) ? "" : "disabled"} title="${drone.tailnet_ip || lanUrl ? "Reference this peer's whole ROM library and missing BIOS files over SMB, without copying them locally" : "Requires a known LAN or Tailscale address"}"><i class="bi bi-hdd-network me-1"></i>Reference ROMs</button>`;
   const actions = drone.is_self
     ? ""
@@ -8508,9 +8516,21 @@ async function swarmUnreferencePeerRoms(peerId, peerName) {
   if (!window.confirm(`Stop referencing ${peerName}'s ROMs? Any local system folders that were renamed aside will be restored.`)) return;
   try {
     setLoading(true, `Removing reference to ${peerName}...`);
-    await apiPost(`/admin/network-shares/${encodeURIComponent(peerId)}/disable`, {});
+    const accepted = await apiPost(`/admin/network-shares/${encodeURIComponent(peerId)}/disable`, {});
+    if (accepted.status !== "detaching" && accepted.status !== "disabled") {
+      throw new Error(accepted.status_detail || "detach was not accepted");
+    }
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      const response = await api("/admin/network-shares");
+      const current = (response.shares || []).find((share) => String(share.peer_id || "") === String(peerId || ""));
+      if (!current) break;
+      if (current.status === "error") throw new Error(current.status_detail || "detach cleanup failed");
+      setLoading(true, `Restoring local ROMs and BIOS from ${peerName}...`);
+      await new Promise((resolve) => window.setTimeout(resolve, 1000));
+      if (attempt === 59) throw new Error("detach is still running in the background; check this page again shortly");
+    }
     showToast(`Stopped referencing ${escapeHtml(peerName)}'s ROMs`, "success");
-    await offerNetworkShareUiRefresh(`${peerName}'s network library was removed.`);
+    showToast("EmulationStation is refreshing its game list in the background.", "info", 8000);
   } catch (err) {
     showToast(`Failed to remove reference: ${escapeHtml(err.message || "unknown error")}`, "danger");
   } finally {
