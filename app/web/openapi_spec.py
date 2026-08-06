@@ -1366,6 +1366,16 @@ def _schemas() -> Dict[str, Schema]:
             },
             ("system", "had_local_collision", "symlink_created"),
         ),
+        "NetworkShareBiosRecord": _object(
+            {
+                "relative_path": _string(description="Path relative to bios_root, e.g. 'scph5501.bin' or 'dc/dc_boot.bin' for a per-emulator subfolder"),
+                "had_local_collision": _boolean(description="Whether a local file with real content already existed at this path"),
+                "renamed_to": _string(description="If a collision was resolved, the relative path the local file was renamed to (e.g. 'scph5501.bin.old') so it can be precisely restored later"),
+                "symlink_created": _boolean(),
+                "skipped_reason": _string(description="Non-empty when this file was left untouched, e.g. because <name>.old already existed"),
+            },
+            ("relative_path", "had_local_collision", "symlink_created"),
+        ),
         "NetworkShareRecord": _object(
             {
                 "peer_id": _string(),
@@ -1376,6 +1386,7 @@ def _schemas() -> Dict[str, Schema]:
                 "status": _enum(["mounted", "peer_unreachable", "error", "pending"]),
                 "status_detail": _string(),
                 "systems": _array(_ref("NetworkShareSystemRecord")),
+                "bios": _array(_ref("NetworkShareBiosRecord")),
                 "created_at": _string(fmt="date-time"),
                 "updated_at": _string(fmt="date-time"),
                 "last_checked_at": _string(fmt="date-time", nullable=True),
@@ -2183,7 +2194,7 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             "/admin/network-shares": {"get": _operation("List this Drone's configured peer ROM references (SMB/CIFS network shares) and their live mount status", {"200": _json_response("NetworkShareListResponse")}, tags=["admin", "local-network"])},
             "/admin/network-shares/{peer_id}/enable": {
                 "post": _operation(
-                    "Reference a paired peer's whole ROM library over SMB (mount + symlink every system, renaming any locally-colliding system folder to <system>.old first)",
+                    "Reference a paired peer's whole ROM library and BIOS folder over SMB (mount + symlink every ROM system and BIOS file, renaming any locally-colliding entry aside with an .old suffix first)",
                     {"200": _json_response("NetworkShareRecord")},
                     parameters=[_path_param("peer_id", "A paired peer's drone_id")],
                     tags=["admin", "local-network"],

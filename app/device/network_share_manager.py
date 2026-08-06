@@ -1,22 +1,37 @@
-"""Reference a paired peer's whole ROM library over SMB/CIFS instead of copying
-it: mount the peer's Batocera Samba share (``//<peer tailnet ip>/share/roms``,
-Batocera's own stock export -- nothing on the peer side is set up by Drone),
-then for every system folder the mount exposes, either symlink it straight
-into this Drone's ``roms_root`` (no local games for that system yet) or, if a
+"""Reference a paired peer's whole ROM library and BIOS folder over SMB/CIFS
+instead of copying them: mount the peer's Batocera Samba share
+(``//<peer tailnet ip>/share``, Batocera's own stock export -- nothing on the
+peer side is set up by Drone) once, then reconcile both ``roms/`` and
+``bios/`` under it into this Drone's own ``roms_root``/``bios_root``.
+
+**ROMs** are reconciled directory-by-directory (one system = one directory):
+either symlink a system straight in (no local games for it yet), or, if a
 local folder with real content already exists, rename it out of the way to
 ``<system>.old`` first and symlink over it -- never deleting anything.
-``<system>.old`` is not a new convention: ``RomRepository.should_include_system``
-already excludes any ``.old``-suffixed folder from Drone's own system list, and
-it's also the standard upstream Batocera/EmulationStation trick for "keep on
-disk, don't show" -- reusing it means zero new hide-logic and zero changes to
-any scanning/gamelist code, since ``get_system_dir``/``list_system_names``
-(``roms/rom_systems.py``) already transparently follow a symlink via
-``.resolve()``, and the scanner's ``rglob`` follows it too.
+**BIOS** files are reconciled file-by-file instead (BIOS is a flat pile of
+individual dependency files, some nested under a per-emulator subfolder, not
+a browsable catalog the way ROM systems are): same rename-aside-then-symlink
+behavior, just applied per file (``<name>.old``) rather than per directory.
 
-Every rename this module performs is recorded (which peer, which system, the
-exact original name) so disabling a reference can precisely reverse only what
-this module itself did -- never guessing from a bare ``.old`` suffix, which
-could belong to something else entirely.
+``.old`` is not a new convention: ``RomRepository.should_include_system``
+already excludes any ``.old``-suffixed folder from Drone's own system list
+(reused here for ROMs), and a bare ``.old`` suffix also isn't a recognized
+BIOS extension, so ``RomAssetBiosMixin.list_bios_entries``'s extension filter
+already excludes it too, for free. Both are also the standard upstream
+Batocera/EmulationStation trick for "keep on disk, don't show" -- reusing them
+means zero new hide-logic and zero changes to any scanning/gamelist code,
+since ``get_system_dir``/``list_system_names`` (``roms/rom_systems.py``)
+already transparently follow a symlink via ``.resolve()`` and the ROM
+scanner's ``rglob`` follows it too, and a BIOS *file* symlink (as opposed to a
+symlinked directory) is picked up by ``os.walk`` regardless of its
+``followlinks`` setting -- which is exactly why BIOS is mirrored file-by-file
+with real (non-symlink) parent directories, not by symlinking a whole
+per-emulator subfolder the way ROM systems are.
+
+Every rename this module performs is recorded (which peer, which system/file,
+the exact original name) so disabling a reference can precisely reverse only
+what this module itself did -- never guessing from a bare ``.old`` suffix,
+which could belong to something else entirely.
 
 Structurally mirrors ``vpn_manager.py`` on purpose: Drone already runs as root
 (see ``service_bootstrap.sh``), so mounting is a direct ``subprocess`` call,
@@ -76,10 +91,11 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
-def _should_include_system(name: str) -> bool:
+def _should_include_entry(name: str) -> bool:
     # Mirrors RomRepository.should_include_system (app/drone_api.py) without
-    # importing it -- both this module and the ROM scanner independently treat
-    # a `.old`-suffixed folder as "on disk, intentionally hidden."
+    # importing it -- used for both ROM system directory names and BIOS file
+    # names, so a peer's own hidden/renamed-aside entries never get mirrored
+    # back in as if they were real content.
     return not str(name or "").strip().lower().endswith(NETWORK_SHARE_OLD_SUFFIX)
 
 
@@ -126,7 +142,7 @@ def _upsert_peer_record(settings: Settings, peer_id: str, **updates) -> dict:
     record = state["peers"].get(peer_id) or {
         "peer_id": peer_id, "peer_name": "", "tailnet_ip": "", "mount_point": "",
         "enabled": True, "status": "pending", "status_detail": "",
-        "systems": [], "created_at": _now_iso(), "last_checked_at": None,
+        "systems": [], "bios": [], "created_at": _now_iso(), "last_checked_at": None,
     }
     record.update(updates)
     record["updated_at"] = _now_iso()
@@ -184,7 +200,9 @@ def _mount(tailnet_ip: str, mount_point: Path) -> dict:
         return {"status": "mounted"}
     try:
         result = subprocess.run(
-            ["mount", "-t", "cifs", f"//{tailnet_ip}/share/roms", str(mount_point), "-o", "guest,ro,soft"],
+            # The whole share, not just .../share/roms -- roms/ and bios/ are
+            # both subfolders of it, so one mount covers both.
+            ["mount", "-t", "cifs", f"//{tailnet_ip}/share", str(mount_point), "-o", "guest,ro,soft"],
             capture_output=True, text=True, timeout=NETWORK_SHARE_MOUNT_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.SubprocessError) as error:
@@ -212,13 +230,14 @@ def _unmount(mount_point: Path) -> None:
 
 
 def _apply_system_references(settings: Settings, mount_point: Path, existing_systems: List[dict]) -> List[dict]:
-    """Reconcile local roms_root against everything the mount currently
-    exposes. Idempotent -- safe to call again on every boot replay / watchdog
-    pass without re-doing work that's already correctly in place."""
+    """Reconcile local roms_root against everything the mount's roms/ export
+    currently exposes. Idempotent -- safe to call again on every boot replay /
+    watchdog pass without re-doing work that's already correctly in place."""
     roms_root = settings.roms_root
+    peer_roms_dir = mount_point / "roms"
     existing_by_name = {str(row.get("system") or ""): row for row in existing_systems}
     try:
-        peer_systems = sorted(entry.name for entry in mount_point.iterdir() if entry.is_dir() and _should_include_system(entry.name))
+        peer_systems = sorted(entry.name for entry in peer_roms_dir.iterdir() if entry.is_dir() and _should_include_entry(entry.name))
     except OSError:
         return existing_systems  # mount unreadable right now -- leave prior state untouched, watchdog will retry
 
@@ -226,7 +245,7 @@ def _apply_system_references(settings: Settings, mount_point: Path, existing_sys
     for system in peer_systems:
         prior = existing_by_name.get(system)
         local_path = roms_root / system
-        target = mount_point / system
+        target = peer_roms_dir / system
 
         if prior and prior.get("symlink_created") and local_path.is_symlink():
             try:
@@ -289,6 +308,107 @@ def _revert_system_references(settings: Settings, mount_point: Path, systems: Li
                     pass
 
 
+# -------------------------------------------------------------- bios refs
+
+
+def _apply_bios_references(settings: Settings, mount_point: Path, existing_bios: List[dict]) -> List[dict]:
+    """Reconcile local bios_root against every file the mount's bios/ export
+    currently has, file by file rather than directory by directory -- unlike
+    ROM systems, BIOS is mostly individual files (some nested one level under
+    a per-emulator subfolder like ``dc/``), not a directory worth referencing
+    wholesale. Idempotent, same shape as _apply_system_references."""
+    bios_root = settings.bios_root
+    peer_bios_dir = mount_point / "bios"
+    existing_by_path = {str(row.get("relative_path") or ""): row for row in existing_bios}
+    try:
+        peer_files = sorted(
+            entry for entry in peer_bios_dir.rglob("*")
+            if entry.is_file() and _should_include_entry(entry.name)
+        )
+    except OSError:
+        return existing_bios  # mount unreadable right now -- leave prior state untouched, watchdog will retry
+
+    results: List[dict] = []
+    for peer_file in peer_files:
+        try:
+            relative_path = peer_file.relative_to(peer_bios_dir).as_posix()
+        except ValueError:
+            continue
+        prior = existing_by_path.get(relative_path)
+        local_path = bios_root / relative_path
+
+        if prior and prior.get("symlink_created") and local_path.is_symlink():
+            try:
+                already_correct = local_path.resolve() == peer_file.resolve()
+            except OSError:
+                already_correct = False
+            if already_correct:
+                results.append(prior)
+                continue
+
+        if not local_path.exists() and not local_path.is_symlink():
+            try:
+                local_path.parent.mkdir(parents=True, exist_ok=True)
+                local_path.symlink_to(peer_file)
+            except OSError as error:
+                results.append({"relative_path": relative_path, "had_local_collision": False, "renamed_to": "", "symlink_created": False, "skipped_reason": f"symlink failed: {error}"})
+                continue
+            results.append({"relative_path": relative_path, "had_local_collision": False, "renamed_to": "", "symlink_created": True, "skipped_reason": ""})
+            continue
+
+        old_path = local_path.parent / f"{local_path.name}{NETWORK_SHARE_OLD_SUFFIX}"
+        if old_path.exists() or old_path.is_symlink():
+            results.append({"relative_path": relative_path, "had_local_collision": True, "renamed_to": "", "symlink_created": False, "skipped_reason": f"skipped: {old_path.name} already exists"})
+            continue
+        try:
+            local_path.rename(old_path)
+            local_path.symlink_to(peer_file)
+        except OSError as error:
+            results.append({"relative_path": relative_path, "had_local_collision": True, "renamed_to": "", "symlink_created": False, "skipped_reason": f"rename/symlink failed: {error}"})
+            continue
+        renamed_to = old_path.relative_to(bios_root).as_posix()
+        results.append({"relative_path": relative_path, "had_local_collision": True, "renamed_to": renamed_to, "symlink_created": True, "skipped_reason": ""})
+
+    return results
+
+
+def _revert_bios_references(settings: Settings, mount_point: Path, bios_files: List[dict]) -> None:
+    """Precise reversal driven only by our own stored records, mirroring
+    _revert_system_references. Best-effort removes any now-empty per-emulator
+    subfolder this module created along the way (never bios_root itself)."""
+    bios_root = settings.bios_root
+    peer_bios_dir = mount_point / "bios"
+    for row in bios_files:
+        if not row.get("symlink_created"):
+            continue
+        relative_path = str(row.get("relative_path") or "")
+        if not relative_path:
+            continue
+        local_path = bios_root / relative_path
+        if local_path.is_symlink():
+            try:
+                # Safety check: only remove it if it still points into our
+                # own mount -- if a human repointed/replaced it since, leave
+                # it alone rather than deleting something we no longer own.
+                if local_path.resolve().is_relative_to(peer_bios_dir.resolve()):
+                    local_path.unlink()
+            except OSError:
+                continue
+        renamed_to = str(row.get("renamed_to") or "")
+        if renamed_to and not local_path.exists() and not local_path.is_symlink():
+            old_path = bios_root / renamed_to
+            if old_path.exists():
+                try:
+                    old_path.rename(local_path)
+                except OSError:
+                    pass
+        if local_path.parent != bios_root:
+            try:
+                local_path.parent.rmdir()
+            except OSError:
+                pass  # not empty, or already gone -- both fine
+
+
 # --------------------------------------------------------------- lifecycle
 
 
@@ -297,21 +417,23 @@ def enable(settings: Settings, peer_id: str) -> dict:
     mount_point = peer_mount_point(settings, peer_id)
     prior = _get_peer_record(settings, peer_id)
     existing_systems = (prior or {}).get("systems") or []
+    existing_bios = (prior or {}).get("bios") or []
 
     mount_result = _mount(target["tailnet_ip"], mount_point)
     if mount_result["status"] != "mounted":
         record = _upsert_peer_record(
             settings, peer_id, peer_name=target["peer_name"], tailnet_ip=target["tailnet_ip"],
             mount_point=str(mount_point), enabled=True, status="error",
-            status_detail=mount_result.get("detail", ""), systems=existing_systems, last_checked_at=_now_iso(),
+            status_detail=mount_result.get("detail", ""), systems=existing_systems, bios=existing_bios, last_checked_at=_now_iso(),
         )
         return record
 
     systems = _apply_system_references(settings, mount_point, existing_systems)
+    bios = _apply_bios_references(settings, mount_point, existing_bios)
     record = _upsert_peer_record(
         settings, peer_id, peer_name=target["peer_name"], tailnet_ip=target["tailnet_ip"],
         mount_point=str(mount_point), enabled=True, status="mounted",
-        status_detail="", systems=systems, last_checked_at=_now_iso(),
+        status_detail="", systems=systems, bios=bios, last_checked_at=_now_iso(),
     )
     return record
 
@@ -322,6 +444,7 @@ def disable(settings: Settings, peer_id: str) -> dict:
         return {"status": "not_found", "peer_id": peer_id}
     mount_point = Path(str(record.get("mount_point") or peer_mount_point(settings, peer_id)))
     _revert_system_references(settings, mount_point, record.get("systems") or [])
+    _revert_bios_references(settings, mount_point, record.get("bios") or [])
     _unmount(mount_point)
     _delete_peer_record(settings, peer_id)
     return {"status": "disabled", "peer_id": peer_id}

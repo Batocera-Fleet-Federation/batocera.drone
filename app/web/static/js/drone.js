@@ -8358,8 +8358,8 @@ function renderSwarmDroneCard(drone) {
     addressLines.push(`<div class="small text-truncate"><i class="bi bi-house me-1" aria-hidden="true"></i><span class="text-muted">${escapeHtml(lanUrl)}</span></div>`);
   }
   if (share) {
-    const skippedCount = (share.systems || []).filter((row) => row.skipped_reason).length;
-    const skippedNote = skippedCount ? ` -- ${skippedCount} system${skippedCount === 1 ? "" : "s"} skipped (local collision)` : "";
+    const skippedCount = (share.systems || []).filter((row) => row.skipped_reason).length + (share.bios || []).filter((row) => row.skipped_reason).length;
+    const skippedNote = skippedCount ? ` -- ${skippedCount} item${skippedCount === 1 ? "" : "s"} skipped (local collision)` : "";
     addressLines.push(`<div class="small text-truncate">${_networkShareStatusBadge(share)}<span class="text-muted">${escapeHtml(skippedNote)}</span></div>`);
   }
   const stats = drone.online && drone.summary
@@ -8374,7 +8374,7 @@ function renderSwarmDroneCard(drone) {
       : "";
   const networkShareButton = share
     ? `<button class="btn btn-sm btn-outline-secondary" onclick="swarmUnreferencePeerRoms(decodeURIComponent('${droneToken}'), ${jsAttr(drone.name || drone.drone_id || "")})"><i class="bi bi-x-circle me-1"></i>Stop Referencing</button>`
-    : `<button class="btn btn-sm btn-outline-info" onclick="swarmReferencePeerRoms(decodeURIComponent('${droneToken}'), ${jsAttr(drone.name || drone.drone_id || "")})" ${drone.online && drone.tailnet_ip ? "" : "disabled"} title="${drone.tailnet_ip ? "Reference this peer's whole ROM library over SMB, without copying it locally" : "Requires this peer to be on the same tailnet"}"><i class="bi bi-hdd-network me-1"></i>Reference ROMs</button>`;
+    : `<button class="btn btn-sm btn-outline-info" onclick="swarmReferencePeerRoms(decodeURIComponent('${droneToken}'), ${jsAttr(drone.name || drone.drone_id || "")})" ${drone.online && drone.tailnet_ip ? "" : "disabled"} title="${drone.tailnet_ip ? "Reference this peer's whole ROM library and BIOS folder over SMB, without copying them locally" : "Requires this peer to be on the same tailnet"}"><i class="bi bi-hdd-network me-1"></i>Reference ROMs</button>`;
   const actions = drone.is_self
     ? ""
     : `<div class="d-flex flex-wrap gap-2 mt-3">
@@ -8403,21 +8403,21 @@ function swarmBrowsePeerAssets(peerId) {
 
 async function swarmReferencePeerRoms(peerId, peerName) {
   const confirmed = window.confirm(
-    `Reference ${peerName}'s whole ROM library over the network?\n\n` +
-    `Every system it has will be symlinked in here -- games play by reading bytes ` +
-    `live from ${peerName}, not by copying them to this Drone.\n\n` +
-    `If a system already has local games here, the local folder is renamed to ` +
-    `"<system>.old" (never deleted) and the network copy takes its place; ` +
+    `Reference ${peerName}'s whole ROM library and BIOS folder over the network?\n\n` +
+    `Every system and BIOS file it has will be symlinked in here -- games and ` +
+    `emulators read bytes live from ${peerName}, not from a local copy.\n\n` +
+    `If a system or BIOS file already exists locally, it's renamed aside with an ` +
+    `".old" suffix (never deleted) and the network copy takes its place; ` +
     `disabling the reference restores it.`
   );
   if (!confirmed) return;
   try {
-    setLoading(true, `Referencing ${peerName}'s ROMs...`);
+    setLoading(true, `Referencing ${peerName}'s ROMs and BIOS...`);
     const result = await apiPost(`/admin/network-shares/${encodeURIComponent(peerId)}/enable`, {});
     if (result.status !== "mounted") {
       showToast(`Could not reference ${escapeHtml(peerName)}: ${escapeHtml(result.status_detail || "mount failed")}`, "danger");
     } else {
-      showToast(`Now referencing ${escapeHtml(peerName)}'s ROMs`, "success");
+      showToast(`Now referencing ${escapeHtml(peerName)}'s ROMs and BIOS`, "success");
     }
   } catch (err) {
     showToast(`Could not reference ${escapeHtml(peerName)}: ${escapeHtml(err.message || "unknown error")}`, "danger");

@@ -6487,6 +6487,9 @@ class NetworkSharePageTests(unittest.TestCase):
         self.assertIn("window.confirm(", fn_body)
         self.assertIn("/admin/network-shares/${encodeURIComponent(peerId)}/enable", fn_body)
         self.assertIn("await renderSwarmPage();", fn_body)
+        # The confirm dialog and toasts must mention BIOS, not just ROMs --
+        # this button references both in one call.
+        self.assertIn("BIOS", fn_body)
 
     def test_unreference_flow_confirms_then_posts_disable(self) -> None:
         fn_start = self.js.index("async function swarmUnreferencePeerRoms(")
