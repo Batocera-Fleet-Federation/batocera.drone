@@ -1,7 +1,7 @@
 # Changelog
 
 ## [v0.1.92] - 2026-07-28
-
+ 
 - revert: restore v0.1.89 after VPN DNS outage
 
 ## [v0.1.52] - 2026-07-14
