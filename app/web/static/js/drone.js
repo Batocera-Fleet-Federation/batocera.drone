@@ -118,6 +118,13 @@ let movieBulkScrapeBreakdownStatus = null;
 let movieBulkScrapeBreakdownOffset = 0;
 const MOVIE_BULK_SCRAPE_BREAKDOWN_PAGE_SIZE = 50;
 let swarmDronesById = {};
+const SWARM_DATA_CACHE_TTL_MS = 30000;
+let swarmOverviewCache = null;
+let swarmOverviewCachedAt = 0;
+let swarmOverviewPromise = null;
+let tailnetDiscoveryCache = null;
+let tailnetDiscoveryCachedAt = 0;
+let tailnetDiscoveryPromise = null;
 // This Drone's own configured peer ROM references (SMB/CIFS network shares),
 // keyed by peer_id -- populated by renderSwarmPage(), read by
 // renderSwarmDroneCard() so each peer's card can show whether it's currently
@@ -337,6 +344,56 @@ async function apiPost(url, payload) {
     throw new Error(msg);
   }
   return await res.json();
+}
+
+async function loadSwarmOverview(force = false) {
+  const now = Date.now();
+  if (!force && swarmOverviewCache && now - swarmOverviewCachedAt < SWARM_DATA_CACHE_TTL_MS) {
+    return swarmOverviewCache;
+  }
+  if (swarmOverviewPromise) return swarmOverviewPromise;
+  const request = api("/admin/swarm/overview");
+  swarmOverviewPromise = request;
+  try {
+    const overview = await request;
+    swarmOverviewCache = overview;
+    swarmOverviewCachedAt = Date.now();
+    return overview;
+  } finally {
+    if (swarmOverviewPromise === request) swarmOverviewPromise = null;
+  }
+}
+
+async function loadTailnetDiscovery(force = false) {
+  const now = Date.now();
+  if (!force && tailnetDiscoveryCache && now - tailnetDiscoveryCachedAt < SWARM_DATA_CACHE_TTL_MS) {
+    return tailnetDiscoveryCache;
+  }
+  if (tailnetDiscoveryPromise) return tailnetDiscoveryPromise;
+  // A normal page render only reads stored state. The full Tailnet discovery
+  // path probes newly seen Drones and is reserved for an explicit Discover /
+  // Refresh action, so opening Swarm does not duplicate overview's peer work.
+  const request = force
+    ? apiPost("/admin/tailnet/discover", {})
+    : Promise.all([
+        api("/admin/tailnet/status").catch(() => ({ installed: false })),
+        api("/admin/local-network/status"),
+      ]).then(([tailnet, network]) => ({ tailnet, network }));
+  tailnetDiscoveryPromise = request;
+  try {
+    const discovery = await request;
+    tailnetDiscoveryCache = discovery;
+    tailnetDiscoveryCachedAt = Date.now();
+    if (force) swarmOverviewCachedAt = 0;
+    return discovery;
+  } finally {
+    if (tailnetDiscoveryPromise === request) tailnetDiscoveryPromise = null;
+  }
+}
+
+function invalidateSwarmDataCache() {
+  swarmOverviewCachedAt = 0;
+  tailnetDiscoveryCachedAt = 0;
 }
 function isUiCacheFresh(entry) {
   return entry && entry.data && (Date.now() - entry.loadedAt) < UI_DATA_CACHE_TTL_MS;
@@ -6085,7 +6142,7 @@ async function loadVpnPullPeerOptions() {
   const button = document.getElementById("vpnPullBtn");
   if (!select) return;
   try {
-    const overview = await api("/admin/swarm/overview");
+    const overview = await loadSwarmOverview();
     const onlinePeers = (overview.drones || []).filter(drone => !drone.is_self && drone.online);
     select.innerHTML = onlinePeers.length
       ? onlinePeers.map(drone => `<option value="${escapeHtml(drone.drone_id || "")}">${escapeHtml(drone.name || drone.hostname || drone.drone_id || "Drone")}</option>`).join("")
@@ -6459,7 +6516,7 @@ async function loadSmtpPullPeerOptions() {
   const button = document.getElementById("smtpPullBtn");
   if (!select) return;
   try {
-    const overview = await api("/admin/swarm/overview");
+    const overview = await loadSwarmOverview();
     const onlinePeers = (overview.drones || []).filter(drone => !drone.is_self && drone.online);
     select.innerHTML = onlinePeers.length
       ? onlinePeers.map(drone => `<option value="${escapeHtml(drone.drone_id || "")}">${escapeHtml(drone.name || drone.hostname || drone.drone_id || "Drone")}</option>`).join("")
@@ -8358,9 +8415,12 @@ function renderSwarmDroneCard(drone) {
     addressLines.push(`<div class="small text-truncate"><i class="bi bi-house me-1" aria-hidden="true"></i><span class="text-muted">${escapeHtml(lanUrl)}</span></div>`);
   }
   if (share) {
-    const skippedCount = (share.systems || []).filter((row) => row.skipped_reason).length + (share.bios || []).filter((row) => row.skipped_reason).length;
-    const skippedNote = skippedCount ? ` -- ${skippedCount} item${skippedCount === 1 ? "" : "s"} skipped (local collision)` : "";
-    addressLines.push(`<div class="small text-truncate">${_networkShareStatusBadge(share)}<span class="text-muted">${escapeHtml(skippedNote)}</span></div>`);
+    const skippedCount = Number(share.skipped_count || 0);
+    const referencedCount = Number(share.system_count || 0);
+    const biosLinkCount = Number(share.bios_link_count || 0);
+    const countNote = referencedCount || biosLinkCount ? ` -- ${referencedCount} systems, ${biosLinkCount} BIOS links` : "";
+    const skippedNote = skippedCount ? `; ${skippedCount} local item${skippedCount === 1 ? "" : "s"} kept` : "";
+    addressLines.push(`<div class="small text-truncate">${_networkShareStatusBadge(share)}<span class="text-muted">${escapeHtml(countNote + skippedNote)}</span></div>`);
   }
   const stats = drone.online && drone.summary
     ? `<div class="d-flex flex-wrap gap-3 small mt-2">
@@ -8374,7 +8434,7 @@ function renderSwarmDroneCard(drone) {
       : "";
   const networkShareButton = share
     ? `<button class="btn btn-sm btn-outline-secondary" onclick="swarmUnreferencePeerRoms(decodeURIComponent('${droneToken}'), ${jsAttr(drone.name || drone.drone_id || "")})"><i class="bi bi-x-circle me-1"></i>Stop Referencing</button>`
-    : `<button class="btn btn-sm btn-outline-info" onclick="swarmReferencePeerRoms(decodeURIComponent('${droneToken}'), ${jsAttr(drone.name || drone.drone_id || "")})" ${drone.online && drone.tailnet_ip ? "" : "disabled"} title="${drone.tailnet_ip ? "Reference this peer's whole ROM library and BIOS folder over SMB, without copying them locally" : "Requires this peer to be on the same tailnet"}"><i class="bi bi-hdd-network me-1"></i>Reference ROMs</button>`;
+    : `<button class="btn btn-sm btn-outline-info" onclick="swarmReferencePeerRoms(decodeURIComponent('${droneToken}'), ${jsAttr(drone.name || drone.drone_id || "")})" ${drone.online && (drone.tailnet_ip || lanUrl) ? "" : "disabled"} title="${drone.tailnet_ip || lanUrl ? "Reference this peer's whole ROM library and missing BIOS files over SMB, without copying them locally" : "Requires a known LAN or Tailscale address"}"><i class="bi bi-hdd-network me-1"></i>Reference ROMs</button>`;
   const actions = drone.is_self
     ? ""
     : `<div class="d-flex flex-wrap gap-2 mt-3">
@@ -8401,14 +8461,30 @@ function swarmBrowsePeerAssets(peerId) {
   setHash("#admin/transfers");
 }
 
+async function offerNetworkShareUiRefresh(actionLabel) {
+  if (!window.confirm(`${actionLabel}\n\nRestart EmulationStation now so Batocera rebuilds its game list? The Batocera UI will briefly reload.`)) {
+    showToast("Restart EmulationStation from Controls when you are ready to refresh the Batocera game list.", "info", 8000);
+    return;
+  }
+  setLoading(true, "Refreshing the Batocera game list...");
+  try {
+    await apiPost("/admin/system/restart-emulationstation", {});
+    showToast("EmulationStation restarted; Batocera is rebuilding the game list.", "success", 8000);
+  } catch (err) {
+    showToast(`The network reference is saved, but EmulationStation could not be restarted: ${escapeHtml(err.message || "unknown error")}`, "warning", 10000);
+  } finally {
+    setLoading(false);
+  }
+}
+
 async function swarmReferencePeerRoms(peerId, peerName) {
   const confirmed = window.confirm(
     `Reference ${peerName}'s whole ROM library and BIOS folder over the network?\n\n` +
     `Every system and BIOS file it has will be symlinked in here -- games and ` +
     `emulators read bytes live from ${peerName}, not from a local copy.\n\n` +
-    `If a system or BIOS file already exists locally, it's renamed aside with an ` +
-    `".old" suffix (never deleted) and the network copy takes its place; ` +
-    `disabling the reference restores it.`
+    `If a ROM system already exists locally, it is renamed aside with an ` +
+    `".old" suffix (never deleted) and restored when the reference is disabled. ` +
+    `Existing local BIOS files stay in place; the network only supplies missing BIOS.`
   );
   if (!confirmed) return;
   try {
@@ -8418,6 +8494,7 @@ async function swarmReferencePeerRoms(peerId, peerName) {
       showToast(`Could not reference ${escapeHtml(peerName)}: ${escapeHtml(result.status_detail || "mount failed")}`, "danger");
     } else {
       showToast(`Now referencing ${escapeHtml(peerName)}'s ROMs and BIOS`, "success");
+      await offerNetworkShareUiRefresh(`${peerName}'s network library is ready.`);
     }
   } catch (err) {
     showToast(`Could not reference ${escapeHtml(peerName)}: ${escapeHtml(err.message || "unknown error")}`, "danger");
@@ -8433,6 +8510,7 @@ async function swarmUnreferencePeerRoms(peerId, peerName) {
     setLoading(true, `Removing reference to ${peerName}...`);
     await apiPost(`/admin/network-shares/${encodeURIComponent(peerId)}/disable`, {});
     showToast(`Stopped referencing ${escapeHtml(peerName)}'s ROMs`, "success");
+    await offerNetworkShareUiRefresh(`${peerName}'s network library was removed.`);
   } catch (err) {
     showToast(`Failed to remove reference: ${escapeHtml(err.message || "unknown error")}`, "danger");
   } finally {
@@ -8520,6 +8598,7 @@ async function swarmEnrollTailnet() {
         : "Tailnet enrollment accepted; the address will appear shortly.",
       "success",
     );
+    invalidateSwarmDataCache();
     await renderSwarmPage();
   } catch (err) {
     showToast(`Tailnet enrollment failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
@@ -8555,6 +8634,7 @@ async function swarmRotateTailnetAuthKey() {
       "success",
     );
     input.value = "";
+    invalidateSwarmDataCache();
     await renderSwarmPage();
   } catch (err) {
     showToast(`Tailnet auth token rotation failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
@@ -8686,16 +8766,12 @@ async function renderSwarmPage() {
   subtitleNode.textContent = "Every Drone in your federation -- local and across the tailnet";
   setLoading(true, "Loading swarm...");
   try {
-    // Independent calls -- run concurrently rather than one after the other,
-    // since tailnet/discover (a tailscale CLI subprocess plus its own probe of
-    // newly-seen devices) and swarm/overview (a live probe of every paired
-    // peer) can each take real time on their own.
+    // Independent calls run concurrently. Default Tailnet/local-network state
+    // is read-only here; active discovery is reserved for the page's explicit
+    // Discover and Refresh controls.
     const [discovery, overview, networkShares] = await Promise.all([
-      apiPost("/admin/tailnet/discover", {}).catch(async () => ({
-        tailnet: await api("/admin/tailnet/status").catch(() => ({ installed: false })),
-        network: await api("/admin/local-network/status"),
-      })),
-      api("/admin/swarm/overview"),
+      loadTailnetDiscovery(),
+      loadSwarmOverview(),
       api("/admin/network-shares").catch(() => ({ shares: [] })),
     ]);
     const tailnet = discovery.tailnet || { installed: false };
@@ -8722,7 +8798,7 @@ async function renderSwarmPage() {
     async function refreshPairing(status = null, includeTailnet = false) {
       if (!status) {
         status = includeTailnet
-          ? (await apiPost("/admin/tailnet/discover", {})).network
+          ? (await loadTailnetDiscovery(true)).network
           : await api("/admin/local-network/status");
       }
       document.getElementById("localPairingBody").innerHTML = status.active
@@ -8814,7 +8890,7 @@ async function renderLocalTransferRequestPanel(target) {
     const peerSelect = document.getElementById("localAssetPeer");
     peerSelect.innerHTML = '<option value="">&lt;Select Drone&gt;</option>';
     updateRequestButtons();
-    const overview = await api("/admin/swarm/overview");
+    const overview = await loadSwarmOverview();
     const onlinePeers = (overview.drones || []).filter(drone => !drone.is_self && drone.online);
     const preselect = localPeerAssetContext.peerId;
     peerSelect.innerHTML = [
@@ -9000,6 +9076,7 @@ async function pairLocalPeer(peerId) {
   const code = window.prompt("Enter the 8-digit pairing code shown on the other Drone:");
   if (!code) return;
   await apiPost(`/admin/local-network/peers/${encodeURIComponent(peerId)}/pair`, { pairing_code: code.trim() });
+  invalidateSwarmDataCache();
   showToast("Drone paired.", "success");
   if (typeof window.refreshLocalNetwork === "function") await window.refreshLocalNetwork();
   if (typeof window.refreshLocalNetworkAssets === "function") await window.refreshLocalNetworkAssets();
@@ -9007,6 +9084,7 @@ async function pairLocalPeer(peerId) {
 
 async function restoreTailnetPeer(peerId) {
   await apiPost(`/admin/local-network/peers/${encodeURIComponent(peerId)}/restore-tailnet`, {});
+  invalidateSwarmDataCache();
   showToast("Tailnet Drone paired.", "success");
   await renderSwarmPage();
 }
@@ -9014,6 +9092,7 @@ async function restoreTailnetPeer(peerId) {
 async function forgetLocalPeer(peerId) {
   if (!window.confirm("Forget this paired Drone? It will need to be paired again before browsing or syncing.")) return;
   await apiPost(`/admin/local-network/peers/${encodeURIComponent(peerId)}/forget`, {});
+  invalidateSwarmDataCache();
   if (window.location.hash.startsWith("#admin/swarm")) {
     await renderSwarmPage();
     return;
@@ -10656,11 +10735,11 @@ async function loadSystemInfoBar() {
     if (version) chips.push(_sysInfoBadge(`Batocera: ${escapeHtml(version)}`, "#admin/system-info", "Open System Info"));
     if (machineId) chips.push(_sysInfoBadge(`Machine ID: ${escapeHtml(machineId)}`, "#admin/system-info", "Open System Info"));
     try {
-      const overview = await api("/admin/swarm/overview");
-      const connectedCount = (overview.drones || []).filter(drone => drone.online).length;
-      chips.push(_sysInfoBadge(`Connected: ${connectedCount}`, "#admin/swarm", "Open Swarm", "background:rgba(52,211,153,0.15);color:#34d399;border-color:rgba(52,211,153,0.4)"));
+      const network = await api("/admin/local-network/status");
+      const pairedCount = Number(network.paired_count || 0);
+      chips.push(_sysInfoBadge(`Paired: ${pairedCount}`, "#admin/swarm", "Open Swarm", "background:rgba(52,211,153,0.15);color:#34d399;border-color:rgba(52,211,153,0.4)"));
     } catch (_) {
-      // Swarm overview is best-effort context, not core system info.
+      // Paired-device status is best-effort context, not core system info.
     }
     try {
       const vpn = await api("/admin/vpn");

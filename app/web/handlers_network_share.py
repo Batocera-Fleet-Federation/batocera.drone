@@ -29,10 +29,10 @@ class HandlersNetworkShareMixin:
             self._send_json(400, {"error": str(error)})
             return
         status_code = 200 if result.get("status") == "mounted" else 502
-        self._send_json(status_code, result)
+        self._send_json(status_code, _network_share.public_record(result))
 
     def _handle_admin_network_share_disable(self, peer_id: str) -> None:
         peer_id = unquote(peer_id)
         result = _network_share.disable(self.settings, peer_id)
-        status_code = 404 if result.get("status") == "not_found" else 200
-        self._send_json(status_code, result)
+        status_code = 404 if result.get("status") == "not_found" else 502 if result.get("status") == "error" else 200
+        self._send_json(status_code, _network_share.public_record(result))

@@ -12,10 +12,12 @@ from typing import Dict, List, Optional, Tuple
 
 try:
     from ..common.http_cache import valid_segment
+    from ..common.network_references import is_network_reference, network_reference_root
     from ..storage.rom_metadata_store import _read_sqlite_asset_systems, rom_cache_has_entries, search_rom_entries
     from .gamelist import _normalize_gamelist_rom_path, _text_or_empty
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.http_cache import valid_segment  # type: ignore
+    from common.network_references import is_network_reference, network_reference_root  # type: ignore
     from storage.rom_metadata_store import _read_sqlite_asset_systems, rom_cache_has_entries, search_rom_entries  # type: ignore
     from roms.gamelist import _normalize_gamelist_rom_path, _text_or_empty  # type: ignore
 
@@ -38,18 +40,34 @@ class RomSystemsSearchMixin:
 
         return system_dir
 
-    def list_system_names(self) -> List[str]:
-        """List usable ROM system directories without walking their content."""
+    def list_system_names(self, *, include_network_references: bool = True) -> List[str]:
+        """List ROM systems without statting Drone-managed SMB targets.
+
+        Network references are valid native Batocera systems, but their target
+        type/liveness is owned by the network-share manager. Checking either
+        here turns a cheap directory listing into hundreds of SMB round trips.
+        """
         if not self.roms_root.exists():
             raise FileNotFoundError(str(self.roms_root))
         names = []
+        share_root = network_reference_root()
         for entry in sorted(self.roms_root.iterdir(), key=lambda p: p.name.lower()):
-            if not (entry.is_dir() or entry.is_symlink()) or not self.should_include_system(entry.name):
+            if not self.should_include_system(entry.name):
+                continue
+            if entry.is_symlink() and is_network_reference(entry, share_root):
+                if include_network_references:
+                    names.append(entry.name)
+                continue
+            if not (entry.is_dir() or entry.is_symlink()):
                 continue
             target_dir = entry.resolve()
             if target_dir.exists() and target_dir.is_dir():
                 names.append(entry.name)
         return names
+
+    def list_local_system_names(self) -> List[str]:
+        """List only systems whose metadata belongs in this Drone's cache."""
+        return self.list_system_names(include_network_references=False)
 
     def list_systems(self) -> List[dict]:
         cached_systems = _read_sqlite_asset_systems(self.roms_root.parent)
@@ -68,7 +86,7 @@ class RomSystemsSearchMixin:
             if counts:
                 return [{"name": name, "rom_count": counts[name]} for name in sorted(counts, key=str.lower)]
         systems = []
-        for system_name in self.list_system_names():
+        for system_name in self.list_local_system_names():
             target_dir = self.get_system_dir(system_name)
             rom_count = self._count_rom_items(system_name, target_dir)
             if rom_count < 1:
@@ -100,12 +118,7 @@ class RomSystemsSearchMixin:
         if not self.roms_root.exists():
             return []
         index: List[dict] = []
-        for entry in sorted(self.roms_root.iterdir(), key=lambda p: p.name.lower()):
-            if not (entry.is_dir() or entry.is_symlink()):
-                continue
-            if not self.should_include_system(entry.name):
-                continue
-            system_name = entry.name
+        for system_name in self.list_local_system_names():
             try:
                 _, roms = self.list_assets(system_name, "roms")
             except Exception:

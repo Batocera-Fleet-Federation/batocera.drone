@@ -1064,7 +1064,8 @@ class RomRepository(RomAssetBiosMixin, RomSystemsSearchMixin, RomScanMixin, RomA
 
     @staticmethod
     def should_include_system(name: str) -> bool:
-        return not str(name or "").strip().lower().endswith(".old")
+        lowered = str(name or "").strip().lower()
+        return bool(lowered) and not (lowered.endswith(".old") or ".old." in lowered)
 
     @staticmethod
     def build_unique_id(path: Path) -> str:

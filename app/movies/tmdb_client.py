@@ -100,6 +100,42 @@ def _digits_only(value) -> str:
     return re.sub(r"[^0-9]", "", "" if value is None else str(value))
 
 
+# Matches TMDb's own movie-page URL shape, e.g.
+# "https://www.themoviedb.org/movie/21380-virus?language=da-DK" -- deliberately
+# narrow (requires the literal "themoviedb.org/movie/" segment) rather than
+# just stripping every non-digit character from the input, which would
+# silently pick up unrelated digits from a slug or query string (a movie
+# titled with a year in its name, a "?page=2" param, etc.) instead of the
+# actual id.
+_TMDB_MOVIE_URL_RE = re.compile(r"themoviedb\.org/movie/(\d+)", re.IGNORECASE)
+
+
+def parse_tmdb_movie_id(value) -> str:
+    """Accept either a bare TMDb numeric id (e.g. ``"21380"``) or a full
+    themoviedb.org movie URL (e.g. someone pasting the address bar from a
+    movie they found on TMDb's own site, like
+    ``"https://www.themoviedb.org/movie/21380-virus?language=da-DK"``) and
+    return the digits-only id either way. This is the direct-lookup escape
+    hatch for a movie whose title search doesn't (reliably) surface it --
+    e.g. an obscure AKA search matches only weakly against TMDb's canonical
+    title, if at all, so a human who already found the right page on TMDb's
+    own site can paste its link straight in instead of fighting the search
+    box. Raises ``ValueError`` if neither shape matches, rather than
+    guessing -- a bare non-numeric string (or a URL for the wrong media type,
+    e.g. ``.../tv/...``) should fail loudly, not silently resolve to some
+    unrelated id."""
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError("A TMDb ID or link is required")
+    match = _TMDB_MOVIE_URL_RE.search(text)
+    if match:
+        return match.group(1)
+    digits = _digits_only(text)
+    if digits and digits == text:
+        return digits
+    raise ValueError("Could not find a TMDb movie ID in that link")
+
+
 class TmdbClient:
     def __init__(self, api_key: str, timeout_seconds: int = 15):
         self.api_key = str(api_key or "").strip()

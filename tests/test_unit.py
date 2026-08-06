@@ -2932,6 +2932,45 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(snapshot["systems"], [])
             self.assertEqual(snapshot["roms"], [])
 
+    def test_poll_rom_metadata_cache_skips_network_rom_and_bios_links(self) -> None:
+        import app.roms.rom_scanner as rom_scanner
+        import app.roms.rom_systems as rom_systems
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            share_root = root / "system" / "drone-app" / "network-shares"
+            remote_system = share_root / "peer-1" / "roms" / "gba"
+            remote_system.mkdir(parents=True)
+            (remote_system / "game.zip").write_bytes(b"remote-rom")
+            (remote_system / "gamelist.xml").write_text(
+                "<gameList><game><path>./game.zip</path><name>Remote</name></game></gameList>",
+                encoding="utf-8",
+            )
+            remote_bios = share_root / "peer-1" / "bios" / "remote.bin"
+            remote_bios.parent.mkdir(parents=True)
+            remote_bios.write_bytes(b"remote-bios")
+            (root / "roms").mkdir(parents=True)
+            (root / "bios").mkdir(parents=True)
+            (root / "roms" / "gba").symlink_to(remote_system, target_is_directory=True)
+            (root / "bios" / "remote.bin").symlink_to(remote_bios)
+            with mock.patch.dict(
+                "os.environ",
+                {"USERDATA_ROOT": str(root), "ROMS_ROOT": str(root / "roms"), "BIOS_ROOT": str(root / "bios")},
+                clear=True,
+            ):
+                settings = Settings.from_env()
+            repo = RomRepository(settings.roms_root, settings.bios_root)
+
+            with mock.patch.object(rom_systems, "network_reference_root", return_value=share_root), \
+                    mock.patch.object(rom_scanner, "network_reference_root", return_value=share_root):
+                snapshot, _changed, stats = _poll_rom_metadata_cache(settings, repo)
+
+            self.assertEqual(snapshot["systems"], [])
+            self.assertEqual(snapshot["roms"], [])
+            self.assertEqual(snapshot["bios"], [])
+            self.assertEqual(stats["systems_scanned"], 0)
+            self.assertEqual(stats["bios_discovered"], 0)
+
     def test_poll_rom_metadata_cache_unknown_bios_has_no_systems(self) -> None:
         import app.roms.rom_asset_bios as rom_asset_bios
 
@@ -3661,12 +3700,32 @@ class RepositoryTests(unittest.TestCase):
                 "<gameList><game><path>./Old Game.zip</path><name>Old Game</name></game></gameList>\n",
                 encoding="utf-8",
             )
+            (root / "roms" / "gba.old.20260805T120000").mkdir(parents=True)
             repo = RomRepository(root / "roms", root / "bios")
             systems = repo.list_systems()
             names = {item["name"] for item in systems}
             self.assertIn("snes", names)
             self.assertIn("gba", names)
             self.assertNotIn("snes.old", names)
+            self.assertNotIn("gba.old.20260805T120000", names)
+
+    def test_network_system_is_visible_but_excluded_from_local_scans_without_resolving(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            local_dir = root / "roms" / "snes"
+            local_dir.mkdir(parents=True)
+            (root / "bios").mkdir(parents=True)
+            share_root = root / "drone-app" / "network-shares"
+            remote_link = root / "roms" / "gba"
+            remote_link.symlink_to(share_root / "peer-1" / "roms" / "gba", target_is_directory=True)
+            repo = RomRepository(root / "roms", root / "bios")
+
+            with mock.patch("app.roms.rom_systems.network_reference_root", return_value=share_root):
+                self.assertEqual(repo.list_system_names(), ["gba", "snes"])
+                self.assertEqual(repo.list_local_system_names(), ["snes"])
+
+            self.assertTrue(remote_link.is_symlink())
+            self.assertFalse(remote_link.exists())  # target was deliberately never mounted
 
     def test_list_systems_does_not_hash_rom_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -5090,6 +5149,32 @@ class LocalNetworkAssetCopyTests(unittest.TestCase):
         handler.repository = repo
         return handler
 
+    def test_peer_summary_reports_only_local_sqlite_systems(self):
+        from app.web import handlers_peer
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            settings = self._settings(root)
+            repo = mock.Mock()
+            repo.list_local_system_names.return_value = ["snes"]
+            repo.list_systems.return_value = [
+                {"name": "snes", "rom_count": 2},
+                {"name": "remote-gba", "rom_count": 50000},
+            ]
+            handler = self._handler(settings, repo)
+            with mock.patch.object(
+                handlers_peer,
+                "_rom_metadata_cache_status",
+                return_value={"counts": {"systems": 2, "roms": 50002, "bios": 10}},
+            ):
+                payload = handler._collect_peer_inventory("summary", {})
+
+            self.assertEqual(payload["systems"], ["snes"])
+            self.assertEqual(payload["system_counts"], {"snes": 2})
+            self.assertEqual(payload["counts"]["systems"], 1)
+            self.assertEqual(payload["counts"]["roms"], 2)
+            self.assertEqual(payload["counts"]["bios"], 10)
+
     def test_collect_peer_inventory_roms_without_system_spans_all_systems(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
@@ -6289,25 +6374,39 @@ class SwarmPageTests(unittest.TestCase):
         page_start = self.js.index("async function renderSwarmPage()")
         page_end = self.js.index("async function renderIntegrationTransfersPanel", page_start)
         body = self.js[page_start:page_end]
-        self.assertIn('api("/admin/swarm/overview")', body)
+        self.assertIn("loadSwarmOverview()", body)
         self.assertIn("renderSwarmDroneCard", body)
 
+    def test_swarm_overview_deduplicates_inflight_calls_and_uses_short_cache(self) -> None:
+        helper_start = self.js.index("async function loadSwarmOverview(")
+        helper_end = self.js.index("async function loadTailnetDiscovery(", helper_start)
+        body = self.js[helper_start:helper_end]
+        self.assertIn("swarmOverviewPromise", body)
+        self.assertIn("SWARM_DATA_CACHE_TTL_MS", body)
+        self.assertIn('api("/admin/swarm/overview")', body)
+        self.assertEqual(self.js.count('api("/admin/swarm/overview")'), 1)
+
     def test_swarm_page_fetches_discovery_and_overview_concurrently(self) -> None:
-        # Regression: these two calls are independent (tailnet/discover is a
-        # tailscale CLI subprocess + its own peer probing; swarm/overview is a
-        # live probe of every paired peer) but were being awaited one after
-        # the other, doubling the page's worst-case load time for no reason.
+        # The stored Tailnet/local-network state and live swarm overview are
+        # independent and should not be awaited serially.
         page_start = self.js.index("async function renderSwarmPage()")
         page_end = self.js.index("async function renderIntegrationTransfersPanel", page_start)
         body = self.js[page_start:page_end]
         promise_all_index = body.index("Promise.all([")
-        discover_index = body.index('apiPost("/admin/tailnet/discover"')
-        overview_index = body.index('api("/admin/swarm/overview")')
+        discover_index = body.index("loadTailnetDiscovery()")
+        overview_index = body.index("loadSwarmOverview()")
         # Both calls must be arguments to the same Promise.all(...), i.e. both
         # indices fall between it and its closing "]);".
         promise_all_close = body.index("]);", promise_all_index)
         self.assertTrue(promise_all_index < discover_index < promise_all_close)
         self.assertTrue(promise_all_index < overview_index < promise_all_close)
+
+        discovery_start = self.js.index("async function loadTailnetDiscovery(")
+        discovery_end = self.js.index("function invalidateSwarmDataCache(", discovery_start)
+        discovery_body = self.js[discovery_start:discovery_end]
+        self.assertIn('force\n    ? apiPost("/admin/tailnet/discover", {})', discovery_body)
+        self.assertIn('api("/admin/tailnet/status")', discovery_body)
+        self.assertIn('api("/admin/local-network/status")', discovery_body)
 
         card_start = self.js.index("function renderSwarmDroneCard(")
         card_body = self.js[card_start:self.js.index("function swarmBrowsePeerAssets(", card_start)]
@@ -6371,19 +6470,19 @@ class SwarmPageTests(unittest.TestCase):
         self.assertNotIn("setHash('#admin/swarm')", menu_body)
         self.assertNotIn(">Swarm<", menu_body)
 
-    def test_system_info_bar_shows_connected_count(self) -> None:
+    def test_system_info_bar_uses_cheap_paired_count(self) -> None:
         bar_start = self.js.index("async function loadSystemInfoBar()")
         bar_end = self.js.index("async function router()", bar_start)
         body = self.js[bar_start:bar_end]
-        self.assertIn('api("/admin/swarm/overview")', body)
-        self.assertIn("Connected: ${connectedCount}", body)
-        self.assertIn("filter(drone => drone.online)", body)
+        self.assertIn('api("/admin/local-network/status")', body)
+        self.assertIn("Paired: ${pairedCount}", body)
+        self.assertNotIn('api("/admin/swarm/overview")', body)
 
     def test_swarm_page_caches_drones_by_id_for_the_tailnet_modal(self) -> None:
         page_start = self.js.index("async function renderSwarmPage()")
         page_end = self.js.index("async function renderIntegrationTransfersPanel", page_start)
         body = self.js[page_start:page_end]
-        overview_index = body.index('api("/admin/swarm/overview")')
+        overview_index = body.index("loadSwarmOverview()")
         cache_index = body.index("swarmDronesById = Object.fromEntries(")
         card_map_index = body.index("drones.map(renderSwarmDroneCard)")
         # Populated from the overview drones list, before the cards are rendered
@@ -6423,7 +6522,7 @@ class SwarmPageTests(unittest.TestCase):
         page_start = self.js.index("async function renderSwarmPage()")
         page_end = self.js.index("async function renderIntegrationTransfersPanel", page_start)
         body = self.js[page_start:page_end]
-        self.assertIn('apiPost("/admin/tailnet/discover", {})', body)
+        self.assertIn("loadTailnetDiscovery()", body)
         self.assertIn("renderSwarmTailnetCard(tailnet)", body)
         self.assertIn("Pairing code", body)
         self.assertIn("localPairCodeRotateBtn", body)
@@ -6474,12 +6573,12 @@ class NetworkSharePageTests(unittest.TestCase):
         self.assertTrue(promise_all_index < shares_index < promise_all_close)
         self.assertIn("swarmNetworkSharesByPeer = Object.fromEntries", body)
 
-    def test_card_shows_reference_button_gated_on_tailnet_and_online(self) -> None:
+    def test_card_shows_reference_button_gated_on_known_network_address_and_online(self) -> None:
         card_start = self.js.index("function renderSwarmDroneCard(")
         card_body = self.js[card_start:self.js.index("function swarmBrowsePeerAssets(", card_start)]
         self.assertIn("swarmReferencePeerRoms(decodeURIComponent(", card_body)
         self.assertIn("swarmUnreferencePeerRoms(decodeURIComponent(", card_body)
-        self.assertIn("drone.online && drone.tailnet_ip", card_body)
+        self.assertIn("drone.online && (drone.tailnet_ip || lanUrl)", card_body)
 
     def test_reference_flow_confirms_then_posts_enable(self) -> None:
         fn_start = self.js.index("async function swarmReferencePeerRoms(")
@@ -6487,6 +6586,7 @@ class NetworkSharePageTests(unittest.TestCase):
         self.assertIn("window.confirm(", fn_body)
         self.assertIn("/admin/network-shares/${encodeURIComponent(peerId)}/enable", fn_body)
         self.assertIn("await renderSwarmPage();", fn_body)
+        self.assertIn("offerNetworkShareUiRefresh", fn_body)
         # The confirm dialog and toasts must mention BIOS, not just ROMs --
         # this button references both in one call.
         self.assertIn("BIOS", fn_body)
@@ -6496,6 +6596,15 @@ class NetworkSharePageTests(unittest.TestCase):
         fn_body = self.js[fn_start:self.js.index("\n// Tailnet's MagicDNS", fn_start)]
         self.assertIn("window.confirm(", fn_body)
         self.assertIn("/admin/network-shares/${encodeURIComponent(peerId)}/disable", fn_body)
+        self.assertIn("offerNetworkShareUiRefresh", fn_body)
+
+    def test_reference_refresh_prompt_restarts_emulationstation_only_after_confirmation(self) -> None:
+        fn_start = self.js.index("async function offerNetworkShareUiRefresh(")
+        fn_end = self.js.index("async function swarmReferencePeerRoms(", fn_start)
+        fn_body = self.js[fn_start:fn_end]
+        self.assertIn("window.confirm", fn_body)
+        self.assertIn('apiPost("/admin/system/restart-emulationstation", {})', fn_body)
+        self.assertIn("rebuilds its game list", fn_body)
 
     def test_referencing_pill_shown_next_to_email_pill(self) -> None:
         bar_start = self.js.index("async function loadSystemInfoBar()")
@@ -7050,7 +7159,7 @@ class NavRestructureTests(unittest.TestCase):
         fn_end = self.js.index("\nfunction localAssetIncludeArtwork()")
         body = self.js[fn_start:fn_end]
         self.assertIn('&lt;Select Drone&gt;', body)
-        self.assertIn('api("/admin/swarm/overview")', body)
+        self.assertIn("loadSwarmOverview()", body)
         self.assertIn("!drone.is_self && drone.online", body)
         self.assertIn("await loadLocalPeerSystems();", body)
         self.assertNotIn("loadLocalPeerAssets()", body)

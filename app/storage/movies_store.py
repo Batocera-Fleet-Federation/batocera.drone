@@ -411,6 +411,24 @@ def save_movie_metadata(
     return get_movie_metadata(movies_root, entry_key)
 
 
+def delete_movie_metadata(movies_root: Path, entry_key: str) -> Optional[dict]:
+    """Remove one movie's scraped TMDb metadata row -- for when a scrape
+    matched the wrong movie/show and a human needs to clear it before
+    re-scraping. Returns what was deleted (including
+    ``poster_relative_path``/``backdrop_relative_path``, so a caller can also
+    remove the artwork files those columns point at) or ``None`` if the movie
+    had no metadata row to begin with -- that's a normal, idempotent no-op,
+    not an error; a movie file existing with nothing ever scraped for it is
+    the default state for most of a library."""
+    existing = get_movie_metadata(movies_root, entry_key)
+    if not existing:
+        return None
+    with _open(movies_root) as connection:
+        connection.execute("DELETE FROM movies_metadata_entries WHERE entry_key = ?", (entry_key,))
+        connection.commit()
+    return existing
+
+
 def list_movie_display_titles(movies_root: Path) -> dict:
     """Return ``{entry_key: scraped_title}`` for every movie that has been
     scraped -- used to overlay a clean title onto the plain list/tree

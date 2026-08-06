@@ -399,13 +399,24 @@ class HandlersMoviesMixin:
         self._send_json(200, {"query": search_query, "results": results})
 
     def _handle_admin_movie_scrape_apply(self, entry_key: str, payload: dict) -> None:
+        """``tmdb_id`` is the normal path (a candidate already chosen from
+        this app's own search results). ``tmdb_url`` is the direct-lookup
+        escape hatch: a bare TMDb id or a full themoviedb.org movie URL a
+        human pasted in after finding the right page on TMDb's own site --
+        for a title search that doesn't reliably surface it (see
+        ``metadata_manager.apply_by_reference``). Only one is needed;
+        ``tmdb_id`` wins if both happen to be present."""
         payload = payload if isinstance(payload, dict) else {}
         tmdb_id = payload.get("tmdb_id")
-        if not tmdb_id:
-            self._send_json(400, {"error": "tmdb_id is required"})
+        tmdb_url = payload.get("tmdb_url")
+        if not tmdb_id and not tmdb_url:
+            self._send_json(400, {"error": "tmdb_id or tmdb_url is required"})
             return
         try:
-            result = _movies_metadata.apply(self.settings, entry_key, tmdb_id)
+            if tmdb_id:
+                result = _movies_metadata.apply(self.settings, entry_key, tmdb_id)
+            else:
+                result = _movies_metadata.apply_by_reference(self.settings, entry_key, tmdb_url)
         except _movies_metadata.MovieNotFoundError:
             self._send_json(404, {"error": "unknown movie"})
             return
@@ -415,6 +426,14 @@ class HandlersMoviesMixin:
         except ValueError as error:
             self._send_json(400, {"error": str(error)})
             return
+        self._send_json(200, result)
+
+    def _handle_admin_movie_scrape_delete(self, entry_key: str) -> None:
+        """Clears a scraped movie/show entry's TMDb metadata + artwork --
+        for when a scrape matched the wrong thing and a human needs a clean
+        slate before retrying (a plain re-scrape only ever overwrites the
+        fields TMDb actually returns; it doesn't take fields back out)."""
+        result = _movies_metadata.delete_metadata(self.settings, entry_key)
         self._send_json(200, result)
 
     # ------------------------------------------------------- bulk scrape
