@@ -38,7 +38,7 @@ try:
     from ..storage import movie_scrape_jobs as _jobs
     from ..storage import movie_scrape_job_items as _job_items
     from . import filename_parser as _filename_parser
-    from .tmdb_client import TmdbClient, TmdbNotFoundError, TmdbUnavailableError
+    from .tmdb_client import TmdbClient, TmdbNotFoundError, TmdbUnavailableError, parse_tmdb_movie_id
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.settings import Settings  # type: ignore
     from storage.state_store import database_path as _state_database_path  # type: ignore
@@ -48,7 +48,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from storage import movie_scrape_jobs as _jobs  # type: ignore
     from storage import movie_scrape_job_items as _job_items  # type: ignore
     from movies import filename_parser as _filename_parser  # type: ignore
-    from movies.tmdb_client import TmdbClient, TmdbNotFoundError, TmdbUnavailableError  # type: ignore
+    from movies.tmdb_client import TmdbClient, TmdbNotFoundError, TmdbUnavailableError, parse_tmdb_movie_id  # type: ignore
 
 MOVIES_SCRAPER_STATE_NAMESPACE = "movies_scraper.json"
 # TMDb only ever serves posters/backdrops as JPEG -- unlike a generic
@@ -164,6 +164,42 @@ def apply(settings: Settings, entry_key: str, tmdb_id, *, client: Optional[TmdbC
         backdrop_relative_path=backdrop_relative_path,
         extra=extra,
     )
+
+
+def apply_by_reference(settings: Settings, entry_key: str, tmdb_reference: str, *, client: Optional[TmdbClient] = None) -> dict:
+    """``apply()``'s direct-lookup counterpart: takes whatever a human pasted
+    (a bare TMDb id, or a full themoviedb.org movie URL -- see
+    ``tmdb_client.parse_tmdb_movie_id``) instead of a tmdb_id already chosen
+    from this app's own search results. This is the escape hatch for a movie
+    whose title search doesn't reliably surface it -- e.g. it's catalogued
+    under an AKA/alternate title that TMDb's search only weakly (or never)
+    matches against, so no amount of retyping the search box finds it, even
+    though the human already found the right page by searching TMDb's own
+    site directly. Raises ``ValueError`` (via parse_tmdb_movie_id) for a
+    reference that isn't a recognizable id or movie URL, the same way a bad
+    tmdb_id already does -- callers need no separate error handling."""
+    tmdb_id = parse_tmdb_movie_id(tmdb_reference)
+    return apply(settings, entry_key, tmdb_id, client=client)
+
+
+def delete_metadata(settings: Settings, entry_key: str) -> dict:
+    """Remove a movie/show entry's scraped TMDb metadata and artwork -- for
+    when a scrape matched the wrong movie/show (a title that doesn't
+    disambiguate well, e.g.) and a human needs to clear it before retrying,
+    rather than being stuck with a permanently-wrong result. Deleting an
+    entry with no metadata is a no-op, not an error (see
+    ``movies_store.delete_movie_metadata``'s docstring) -- this mirrors how
+    ``get_movie_metadata`` already treats "never scraped" as a normal state,
+    not a missing-resource error."""
+    deleted = _movies_store.delete_movie_metadata(settings.movies_root, entry_key)
+    if not deleted:
+        return {"deleted": False}
+    movies_root = Path(settings.movies_root).resolve()
+    for column in ("poster_relative_path", "backdrop_relative_path"):
+        relative_path = deleted.get(column)
+        if relative_path:
+            (movies_root / relative_path).unlink(missing_ok=True)
+    return {"deleted": True}
 
 
 # Substituted for season/episode TMDb lookups that 404 (TmdbNotFoundError) --

@@ -3,7 +3,13 @@ import unittest
 from unittest import mock
 from urllib.error import HTTPError, URLError
 
-from app.movies.tmdb_client import TmdbClient, TmdbNotFoundError, TmdbUnavailableError, tmdb_image_url
+from app.movies.tmdb_client import (
+    TmdbClient,
+    TmdbNotFoundError,
+    TmdbUnavailableError,
+    parse_tmdb_movie_id,
+    tmdb_image_url,
+)
 
 
 class FakeResponse:
@@ -403,6 +409,62 @@ class TmdbClientDownloadImageTests(unittest.TestCase):
         with mock.patch("app.movies.tmdb_client.urlopen", return_value=FakeResponse(b"<html>oops</html>", "text/html")):
             with self.assertRaises(ValueError):
                 client.download_image("https://image.tmdb.org/t/p/w500/poster.jpg")
+
+
+class ParseTmdbMovieIdTests(unittest.TestCase):
+    """Regression coverage for the direct-lookup escape hatch: a human pastes
+    a themoviedb.org movie URL (or bare id) after finding the right page on
+    TMDb's own site, because search doesn't reliably surface it (e.g. a movie
+    catalogued under an AKA TMDb's search only weakly matches -- the real
+    live case this was built for: "Hell of the Dead" not finding "Night of
+    the Zombies" / TMDb id 21380, whose page is
+    https://www.themoviedb.org/movie/21380-virus)."""
+
+    def test_accepts_a_bare_numeric_id(self) -> None:
+        self.assertEqual(parse_tmdb_movie_id("21380"), "21380")
+
+    def test_accepts_the_exact_url_a_user_pasted(self) -> None:
+        self.assertEqual(
+            parse_tmdb_movie_id("https://www.themoviedb.org/movie/21380-virus?language=da-DK"), "21380"
+        )
+
+    def test_accepts_a_url_with_no_query_string(self) -> None:
+        self.assertEqual(parse_tmdb_movie_id("https://www.themoviedb.org/movie/21380-virus"), "21380")
+
+    def test_accepts_a_url_without_a_slug(self) -> None:
+        self.assertEqual(parse_tmdb_movie_id("https://www.themoviedb.org/movie/21380"), "21380")
+
+    def test_accepts_a_url_without_www_or_scheme(self) -> None:
+        self.assertEqual(parse_tmdb_movie_id("themoviedb.org/movie/21380-virus"), "21380")
+
+    def test_is_case_insensitive(self) -> None:
+        self.assertEqual(parse_tmdb_movie_id("HTTPS://WWW.THEMOVIEDB.ORG/MOVIE/21380-VIRUS"), "21380")
+
+    def test_does_not_blindly_concatenate_digits_from_the_slug(self) -> None:
+        # A movie literally titled "2012" would otherwise have its slug's
+        # digits wrongly appended to the real id by a naive "strip every
+        # non-digit character" approach (12345 + 2012 = 123452012).
+        self.assertEqual(parse_tmdb_movie_id("https://www.themoviedb.org/movie/12345-2012"), "12345")
+
+    def test_rejects_an_empty_reference(self) -> None:
+        with self.assertRaises(ValueError):
+            parse_tmdb_movie_id("")
+        with self.assertRaises(ValueError):
+            parse_tmdb_movie_id(None)
+
+    def test_rejects_a_non_numeric_non_url_string(self) -> None:
+        with self.assertRaises(ValueError):
+            parse_tmdb_movie_id("Hell of the Dead")
+
+    def test_rejects_a_string_with_embedded_digits_that_is_not_a_bare_id(self) -> None:
+        with self.assertRaises(ValueError):
+            parse_tmdb_movie_id("movie 123")
+
+    def test_rejects_a_tv_url(self) -> None:
+        # Deliberately narrow to /movie/ -- a /tv/ URL pasted by mistake
+        # should fail loudly rather than resolving to an unrelated id.
+        with self.assertRaises(ValueError):
+            parse_tmdb_movie_id("https://www.themoviedb.org/tv/1396-breaking-bad")
 
 
 if __name__ == "__main__":

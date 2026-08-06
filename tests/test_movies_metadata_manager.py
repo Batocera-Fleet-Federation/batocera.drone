@@ -266,6 +266,134 @@ class ApplyTests(unittest.TestCase):
             self.assertIn("The Office", office_meta["poster_relative_path"])
 
 
+class ApplyByReferenceTests(unittest.TestCase):
+    """apply_by_reference() is the direct-lookup escape hatch for a movie
+    whose title search doesn't reliably surface it -- a human pastes a
+    themoviedb.org movie URL (or bare id) they found by searching TMDb's own
+    site directly. Real live case this was built for: "Hell of the Dead"
+    (an AKA of TMDb id 21380, "Night of the Zombies" / "Virus") not coming
+    up under that title in this app's own TMDb search."""
+
+    def test_bare_id_applies_the_same_as_apply(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Hell of the Dead.mp4")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+            entry_key = movies_store.list_movies(settings.movies_root)[0]["entry_key"]
+
+            fake = FakeTmdbClient(details=_MATRIX_DETAILS)
+            result = metadata_manager.apply_by_reference(settings, entry_key, "603", client=fake)
+            self.assertEqual(result["title"], "The Matrix")
+            self.assertEqual(result["provider_id"], "603")
+
+    def test_full_tmdb_url_applies_correctly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Hell of the Dead.mp4")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+            entry_key = movies_store.list_movies(settings.movies_root)[0]["entry_key"]
+
+            details = dict(_MATRIX_DETAILS, tmdb_id=21380, title="Night of the Zombies")
+            fake = FakeTmdbClient(details=details)
+            result = metadata_manager.apply_by_reference(
+                settings, entry_key, "https://www.themoviedb.org/movie/21380-virus?language=da-DK", client=fake,
+            )
+            self.assertEqual(result["title"], "Night of the Zombies")
+            self.assertEqual(result["provider_id"], "21380")
+
+    def test_unparseable_reference_raises_value_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Hell of the Dead.mp4")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+            entry_key = movies_store.list_movies(settings.movies_root)[0]["entry_key"]
+
+            with self.assertRaises(ValueError):
+                metadata_manager.apply_by_reference(
+                    settings, entry_key, "not a tmdb link", client=FakeTmdbClient(details=_MATRIX_DETAILS),
+                )
+
+    def test_unknown_movie_still_raises_not_found(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            with self.assertRaises(metadata_manager.MovieNotFoundError):
+                metadata_manager.apply_by_reference(
+                    settings, "not-a-real-key", "21380", client=FakeTmdbClient(details=_MATRIX_DETAILS),
+                )
+
+
+class DeleteMetadataTests(unittest.TestCase):
+    def test_never_scraped_is_a_no_op(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "The Matrix (1999).mp4")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+            entry_key = movies_store.list_movies(settings.movies_root)[0]["entry_key"]
+
+            self.assertEqual(metadata_manager.delete_metadata(settings, entry_key), {"deleted": False})
+
+    def test_removes_the_metadata_row_and_the_artwork_files_on_disk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "The Matrix (1999).mp4")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+            entry_key = movies_store.list_movies(settings.movies_root)[0]["entry_key"]
+
+            fake = FakeTmdbClient(details=_MATRIX_DETAILS)
+            applied = metadata_manager.apply(settings, entry_key, 603, client=fake)
+            poster_path = root / "movies" / applied["poster_relative_path"]
+            backdrop_path = root / "movies" / applied["backdrop_relative_path"]
+            self.assertTrue(poster_path.is_file())
+            self.assertTrue(backdrop_path.is_file())
+
+            result = metadata_manager.delete_metadata(settings, entry_key)
+
+            self.assertEqual(result, {"deleted": True})
+            self.assertIsNone(movies_store.get_movie_metadata(settings.movies_root, entry_key))
+            self.assertFalse(poster_path.exists())
+            self.assertFalse(backdrop_path.exists())
+            # The movie file itself is untouched -- only the scraped
+            # metadata/artwork was ever meant to go away.
+            self.assertTrue((root / "movies" / "The Matrix (1999).mp4").is_file())
+
+    def test_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "The Matrix (1999).mp4")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+            entry_key = movies_store.list_movies(settings.movies_root)[0]["entry_key"]
+            metadata_manager.apply(settings, entry_key, 603, client=FakeTmdbClient(details=_MATRIX_DETAILS))
+
+            self.assertEqual(metadata_manager.delete_metadata(settings, entry_key), {"deleted": True})
+            # A second delete finds nothing left to remove -- must not raise
+            # (e.g. on the already-unlinked artwork files).
+            self.assertEqual(metadata_manager.delete_metadata(settings, entry_key), {"deleted": False})
+
+    def test_missing_artwork_files_on_disk_do_not_raise(self):
+        # The stored relative paths can outlive the files themselves (a
+        # human manually cleared the images/ folder, a prior partial
+        # failure, ...) -- deleting the row must not depend on the files
+        # still being there.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "The Matrix (1999).mp4")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+            entry_key = movies_store.list_movies(settings.movies_root)[0]["entry_key"]
+            metadata_manager.apply(settings, entry_key, 603, client=FakeTmdbClient(details=_MATRIX_DETAILS))
+
+            for image in (root / "movies").rglob("*.jpg"):
+                image.unlink()
+
+            self.assertEqual(metadata_manager.delete_metadata(settings, entry_key), {"deleted": True})
+
+
 class ApplyTvEpisodeTests(unittest.TestCase):
     def test_unknown_movie_raises_not_found(self):
         with tempfile.TemporaryDirectory() as tmp:

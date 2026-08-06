@@ -238,6 +238,58 @@ live repro is what actually found it -- this field is easy to forget
 requesting/checking since it's absent from most tellStatus examples in
 aria2's own docs.
 
+## "InfoHash already registered" recovery: two independent triggers
+
+aria2 rejects an `addTorrent`/`addUri` call for an infohash it already has
+active or paused with errorCode=12, `"InfoHash <hash> is already
+registered."` (`_ALREADY_REGISTERED_INFOHASH_RE`). This is recoverable, not a
+real failure -- our own prior add for the same torrent can still be sitting
+there even though *we* think it failed -- but it surfaces two structurally
+different ways, and both had to be handled separately because each is
+invisible to the other's recovery path:
+
+1. **Synchronous** (add-time): the `aria2.addTorrent`/`addUri` RPC call
+   itself raises `Aria2RpcError` with this message -- e.g. a client-side
+   timeout on a slow-to-parse large torrent races a still-successful
+   server-side add (`ARIA2_ADD_TIMEOUT_SECONDS` is deliberately longer than
+   status-poll timeouts for this reason). Caught in `_add_torrent_via_rpc`/
+   `_add_magnet_via_rpc`'s `except Aria2RpcError` block, which calls
+   `_recover_from_already_registered` right there.
+2. **Asynchronous** (query-time, live bug fixed 2026-08-05): aria2 can
+   instead *accept* the duplicate add with a brand-new GID, which only then
+   fails on its own -- reported solely on a later `aria2.tellStatus` poll
+   (`status: "error"`, matching `errorMessage`), never as an exception from
+   the add call. Confirmed live and reproduced deterministically against a
+   real aria2c binary (a duplicate `addUri` for an in-flight magnet's
+   info-hash is accepted with a new GID that errors out on its own the very
+   next tick). This is the actual shape of a user-reported "torrents go into
+   error state when seemingly downloading just fine right before" -- the
+   real download, under its original healthy GID elsewhere in aria2, was fine
+   the whole time; only the doomed duplicate ever errored. Caught in
+   `_query_torrent_via_rpc` (checks `result.get("errorMessage")` on every
+   status response, not just ones that raised) and applied in
+   `_apply_aria2_status_locked`'s `"recovered_gid" in outcome` branch, which
+   retargets `entry["gid"]` and hands back the doomed GID for the same Phase
+   D `_remove_from_aria2` cleanup that orphaned adds already use.
+
+Both funnel into the same `_recover_from_already_registered` /
+`_find_existing_gid_for_infohash` lookup (adopt whichever registered copy for
+that infohash has the most `completedLength`, across `tellActive` +
+`tellWaiting`) -- **do not duplicate this lookup** if a third trigger turns up
+later; add another caller into it instead.
+
+**Side effect worth knowing:** a same-tick recovery can hand
+`_pick_startable_gids_locked` a `queued` entry whose just-adopted gid turns
+out to already be active (not paused) in aria2 -- `aria2.unpause` on it then
+returns a harmless `"cannot be unpaused now"` error. Phase D's unpause loop
+matches this specific message (`_CANNOT_BE_UNPAUSED_RE`) and swallows it
+silently rather than logging it as a real unpause failure; an unrelated
+unpause error still logs normally.
+
+Tests: `AlreadyRegisteredRecoveryTests` (sync trigger) and
+`AsyncAlreadyRegisteredRecoveryTests` (async trigger + the unpause-suppression
+side effect) in `tests/test_torrents.py`.
+
 ## Restart / GID lifecycle
 
 aria2 GIDs do not survive a daemon restart (a fresh `Aria2Daemon` is a fresh
@@ -438,6 +490,12 @@ re-`innerHTML` the whole tile, on every 3s poll tick.
 - Calling `_add_torrent_via_rpc` on an entry that has `magnet_uri` set
   (or vice versa) -- `_tick()`'s Phase B must branch on `entry.get("magnet_uri")`
   before picking which RPC caller to use.
+- Assuming `_recover_from_already_registered` at add-time is the only place
+  "InfoHash already registered" can appear -- it can also surface later,
+  asynchronously, on a plain `tellStatus` poll with no add-time exception at
+  all. See "InfoHash already registered recovery: two independent triggers"
+  above; a fix that only checks the synchronous add-time exception path
+  leaves the async one flapping into `error` forever.
 
 ## Expected output format
 

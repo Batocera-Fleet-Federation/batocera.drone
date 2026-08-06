@@ -88,6 +88,13 @@ ARIA2_ADD_TIMEOUT_SECONDS = max(5.0, float(os.environ.get("DRONE_TORRENT_ADD_TIM
 # "InfoHash 5a892b21006803f464c35df6d223938c9c85d3e1 is already registered."
 _ALREADY_REGISTERED_INFOHASH_RE = re.compile(r"InfoHash\s+([0-9a-fA-F]{40})\s+is already registered")
 
+# aria2's error for aria2.unpause on a GID that is not actually paused --
+# harmless (the GID is already running under its own steam) but reachable
+# whenever a same-tick already-registered recovery (see
+# _apply_aria2_status_locked) hands _pick_startable_gids_locked a "queued"
+# entry whose recovered gid turns out to already be active in aria2.
+_CANNOT_BE_UNPAUSED_RE = re.compile(r"cannot be unpaused now", re.IGNORECASE)
+
 _TELL_STATUS_KEYS = [
     "gid",
     "status",
@@ -657,7 +664,8 @@ class TorrentManager:
             try:
                 rpc.call("aria2.unpause", [gid])
             except Aria2RpcError as error:
-                print(f"Torrent unpause failed for gid {gid}: {error}", file=sys.stderr, flush=True)
+                if not _CANNOT_BE_UNPAUSED_RE.search(str(error)):
+                    print(f"Torrent unpause failed for gid {gid}: {error}", file=sys.stderr, flush=True)
         for gid in orphaned_gids:
             self._remove_from_aria2(gid)
 
@@ -785,9 +793,28 @@ class TorrentManager:
 
     def _query_torrent_via_rpc(self, rpc, entry: dict) -> dict:
         try:
-            return {"result": rpc.call("aria2.tellStatus", [entry["gid"], _TELL_STATUS_KEYS])}
+            result = rpc.call("aria2.tellStatus", [entry["gid"], _TELL_STATUS_KEYS])
         except Aria2RpcError as error:
             return {"error": str(error)}
+        # A magnet-added GID can fail with "already registered" (errorCode=12)
+        # *asynchronously* -- reported only here, on a later status query --
+        # rather than synchronously from the addUri/addTorrent call itself.
+        # Confirmed live and reproduced deterministically against a real
+        # aria2c: a duplicate addUri for an info-hash aria2 already has
+        # active is accepted with a brand-new GID, which then immediately
+        # errors out on its own. _recover_from_already_registered (used by
+        # _add_torrent_via_rpc/_add_magnet_via_rpc above) only ever ran for
+        # the synchronous case, so this one fell through to a plain retry --
+        # which discards this GID, adds *another* new one, which fails the
+        # exact same asynchronous way, forever, even though the real
+        # download (under its original GID, elsewhere in aria2) was healthy
+        # the entire time. This is the actual live bug: a torrent that never
+        # stops "seemingly downloading fine right before erroring."
+        error_message = str((result or {}).get("errorMessage") or "") if isinstance(result, dict) else ""
+        recovered_gid = self._recover_from_already_registered(rpc, error_message)
+        if recovered_gid and recovered_gid != entry.get("gid"):
+            return {"recovered_gid": recovered_gid}
+        return {"result": result}
 
     def _apply_aria2_status_locked(self, entry: dict, outcome: dict) -> Optional[str]:
         if "error" in outcome:
@@ -800,6 +827,19 @@ class TorrentManager:
             if entry.get("status") in ("queued", "downloading"):
                 entry["status"] = "queued"
             return None
+        if "recovered_gid" in outcome:
+            # See _query_torrent_via_rpc's docstring: this GID asynchronously
+            # errored with "already registered", and a different, real GID
+            # for the same infohash was found instead -- retarget onto it
+            # (same bail-out-early shape as the followedBy handoff below) and
+            # hand back the doomed GID so it gets cleaned up rather than left
+            # to accumulate in aria2 as dead history.
+            doomed_gid = entry.get("gid")
+            entry["gid"] = outcome["recovered_gid"]
+            entry["last_error"] = ""
+            entry["retry_count"] = 0
+            entry["retry_at"] = 0.0
+            return doomed_gid
         result = outcome.get("result") or {}
         followed_by = result.get("followedBy")
         if followed_by:

@@ -1,3 +1,4 @@
+import contextlib
 import io
 import tempfile
 import unittest
@@ -45,6 +46,9 @@ class FakeRpc:
         # the "InfoHash already registered" recovery path.
         self.active = []
         self.waiting = []
+        # When set, aria2.unpause raises this instead of succeeding -- for
+        # testing Phase D's handling of a real aria2 unpause failure.
+        self.unpause_error = None
 
     def call(self, method, params=None, timeout=None):
         params = params or []
@@ -88,6 +92,8 @@ class FakeRpc:
         if method == "aria2.tellWaiting":
             return self.waiting
         if method == "aria2.unpause":
+            if self.unpause_error:
+                raise Aria2RpcError(self.unpause_error)
             gid = params[0]
             if gid in self.statuses:
                 self.statuses[gid]["status"] = "active"
@@ -547,6 +553,212 @@ class AlreadyRegisteredRecoveryTests(unittest.TestCase):
             refreshed = manager.snapshot()["torrents"][0]
             self.assertEqual(refreshed["status"], "downloading")
             self.assertEqual(refreshed["progress_percent"], 50.0)
+
+
+class AsyncAlreadyRegisteredRecoveryTests(unittest.TestCase):
+    """Regression tests for a second, distinct trigger of the same
+    "already registered" failure family as AlreadyRegisteredRecoveryTests
+    above -- found live via a user report of torrents going into an error
+    state despite "seemingly downloading just fine right before". Root
+    cause: aria2 can *accept* a duplicate addUri/addTorrent for an infohash
+    it already has active or paused, handing back a brand-new GID that only
+    then fails on its own -- asynchronously, discoverable solely on a later
+    aria2.tellStatus poll, never as an exception from the add call itself.
+    _recover_from_already_registered previously only ran from the
+    synchronous add-time except block (in _add_torrent_via_rpc /
+    _add_magnet_via_rpc), so this async failure fell through to a plain
+    retry that discarded the doomed GID and added yet another one -- which
+    failed the exact same asynchronous way, forever, even though the real
+    download (under its original, healthy GID elsewhere in aria2) was fine
+    the entire time. Reproduced deterministically against a real aria2c
+    binary before being fixed in _query_torrent_via_rpc /
+    _apply_aria2_status_locked."""
+
+    def _manager(self, root: Path, rpc: FakeRpc) -> TorrentManager:
+        manager = TorrentManager(_build_settings(root), start_worker=False)
+        manager._daemon = FakeDaemon(rpc)
+        return manager
+
+    def _inject_queued_entry_with_gid(self, manager: TorrentManager, entry_id: str, gid: str) -> None:
+        with manager._lock:
+            manager._torrents[entry_id] = {
+                "id": entry_id,
+                "name": "Queued Entry",
+                "torrent_file": "",
+                "magnet_uri": "magnet:?xt=urn:btih:deadbeefdeadbeefdeadbeefdeadbeefdeadbeef&dn=x",
+                "download_dir": str(manager.settings.userdata_root / "downloads"),
+                "status": "queued",
+                "message": "",
+                "added_at": "2026-01-01T00:00:00+00:00",
+                "completed_at": None,
+                "total_bytes": 0,
+                "completed_bytes": 0,
+                "progress_percent": 0.0,
+                "files": [],
+                "queue_position": 1,
+                "retry_count": 0,
+                "retry_at": 0.0,
+                "last_error": "",
+                "gid": gid,
+                "force_started": False,
+                "seeding": False,
+                "download_speed_bps": 0,
+                "upload_speed_bps": 0,
+                "num_seeders": 0,
+                "connections": 0,
+                "eta_seconds": None,
+            }
+
+    def test_async_already_registered_on_status_poll_adopts_the_healthy_gid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            watch = root / "watch"
+            manager.update_settings({"directory": str(watch)})
+            _write_torrent(watch, "game")
+
+            manager._tick()  # normal add; scheduler unpauses it in the same tick
+            entry_id = next(iter(manager._torrents.keys()))
+            doomed_gid = manager._torrents[entry_id]["gid"]
+            self.assertEqual(manager._torrents[entry_id]["status"], "downloading")
+
+            # The doomed GID now asynchronously errors out on its own -- no
+            # add-time exception, just a later tellStatus response.
+            info_hash = "5a892b21006803f464c35df6d223938c9c85d3e1"
+            rpc.statuses[doomed_gid] = {
+                "gid": doomed_gid,
+                "status": "error",
+                "errorMessage": f"InfoHash {info_hash} is already registered.",
+                "totalLength": "0",
+                "completedLength": "0",
+                "downloadSpeed": "0",
+            }
+            rpc.waiting = [{"gid": "healthy-real-gid", "infoHash": info_hash, "completedLength": "999999"}]
+
+            manager._tick()
+
+            entry = manager._torrents[entry_id]
+            self.assertEqual(entry["gid"], "healthy-real-gid")
+            # Stays downloading throughout -- this is the actual live bug:
+            # a torrent that never stops "seemingly downloading fine right
+            # before erroring" instead of flapping to "error" and back.
+            self.assertEqual(entry["status"], "downloading")
+            self.assertEqual(entry["retry_count"], 0)
+            self.assertEqual(entry["last_error"], "")
+            # The doomed GID must be cleaned up out of aria2, not left to
+            # accumulate as dead history.
+            self.assertIn([doomed_gid], rpc.method_calls("aria2.forceRemove"))
+
+    def test_async_already_registered_with_no_matching_gid_falls_back_to_a_plain_retry(self) -> None:
+        # If the lookup can't find any live registration for the infohash
+        # (e.g. it finished/errored out in between), this must still behave
+        # like an ordinary error -- not silently do nothing forever.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            watch = root / "watch"
+            manager.update_settings({"directory": str(watch)})
+            _write_torrent(watch, "game")
+
+            manager._tick()
+            entry_id = next(iter(manager._torrents.keys()))
+            doomed_gid = manager._torrents[entry_id]["gid"]
+
+            rpc.statuses[doomed_gid] = {
+                "gid": doomed_gid,
+                "status": "error",
+                "errorMessage": "InfoHash 0000000000000000000000000000000000000000 is already registered.",
+                "totalLength": "0",
+                "completedLength": "0",
+                "downloadSpeed": "0",
+            }
+            rpc.waiting = []
+            rpc.active = []
+
+            manager._tick()
+
+            entry = manager._torrents[entry_id]
+            self.assertEqual(entry["status"], "error")
+            self.assertIn("already registered", entry["message"])
+            self.assertIsNone(entry["gid"])
+            self.assertEqual(entry["retry_count"], 1)
+
+    def test_unrelated_status_errors_are_not_treated_as_recoverable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            watch = root / "watch"
+            manager.update_settings({"directory": str(watch)})
+            _write_torrent(watch, "game")
+
+            manager._tick()
+            entry_id = next(iter(manager._torrents.keys()))
+            doomed_gid = manager._torrents[entry_id]["gid"]
+
+            rpc.statuses[doomed_gid] = {
+                "gid": doomed_gid,
+                "status": "error",
+                "errorMessage": "some unrelated aria2 failure",
+                "totalLength": "0",
+                "completedLength": "0",
+                "downloadSpeed": "0",
+            }
+            rpc.waiting = [{"gid": "should-not-be-used", "infoHash": "irrelevant", "completedLength": "0"}]
+
+            manager._tick()
+
+            entry = manager._torrents[entry_id]
+            self.assertEqual(entry["status"], "error")
+            self.assertIsNone(entry["gid"])
+
+    def test_unpause_failure_is_silently_ignored_when_the_gid_is_already_active(self) -> None:
+        # _pick_startable_gids_locked can hand Phase D a "queued" entry whose
+        # gid a same-tick recovery just retargeted onto an aria2 download
+        # that turns out to already be active (not paused) -- confirmed
+        # live: aria2.unpause on such a gid returns a harmless "cannot be
+        # unpaused now" error that would otherwise spam stderr every tick.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            rpc.unpause_error = "GID#somegid cannot be unpaused now"
+            manager = self._manager(root, rpc)
+            watch = root / "watch"
+            manager.update_settings({"directory": str(watch)})
+            self._inject_queued_entry_with_gid(manager, "already-active", "somegid")
+            rpc.statuses["somegid"] = {
+                "gid": "somegid", "status": "paused", "totalLength": "0",
+                "completedLength": "0", "downloadSpeed": "0",
+            }
+
+            captured = io.StringIO()
+            with contextlib.redirect_stderr(captured):
+                manager._tick()
+
+            self.assertNotIn("cannot be unpaused now", captured.getvalue())
+            self.assertEqual(manager._torrents["already-active"]["status"], "downloading")
+
+    def test_unrelated_unpause_failure_is_still_logged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            rpc.unpause_error = "some unrelated aria2 failure"
+            manager = self._manager(root, rpc)
+            watch = root / "watch"
+            manager.update_settings({"directory": str(watch)})
+            self._inject_queued_entry_with_gid(manager, "queued-entry", "somegid")
+            rpc.statuses["somegid"] = {
+                "gid": "somegid", "status": "paused", "totalLength": "0",
+                "completedLength": "0", "downloadSpeed": "0",
+            }
+
+            captured = io.StringIO()
+            with contextlib.redirect_stderr(captured):
+                manager._tick()
+
+            self.assertIn("some unrelated aria2 failure", captured.getvalue())
 
 
 class TorrentLifecycleTests(unittest.TestCase):

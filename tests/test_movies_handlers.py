@@ -939,6 +939,71 @@ class MovieScrapeApplyHandlerTests(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertEqual(payload["title"], "The Matrix")
 
+    def test_tmdb_url_is_accepted_when_tmdb_id_is_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            handler = _handler(settings)
+            with mock.patch.object(
+                movies_metadata, "apply_by_reference", return_value={"title": "Night of the Zombies"},
+            ) as apply_by_reference:
+                handler._handle_admin_movie_scrape_apply(
+                    "deadbeef", {"tmdb_url": "https://www.themoviedb.org/movie/21380-virus?language=da-DK"},
+                )
+            apply_by_reference.assert_called_once_with(
+                settings, "deadbeef", "https://www.themoviedb.org/movie/21380-virus?language=da-DK",
+            )
+            status, payload = handler.json_response
+            self.assertEqual(status, 200)
+            self.assertEqual(payload["title"], "Night of the Zombies")
+
+    def test_tmdb_id_wins_when_both_are_present(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            handler = _handler(settings)
+            with mock.patch.object(movies_metadata, "apply", return_value={"title": "The Matrix"}) as apply, \
+                 mock.patch.object(movies_metadata, "apply_by_reference") as apply_by_reference:
+                handler._handle_admin_movie_scrape_apply("deadbeef", {"tmdb_id": 603, "tmdb_url": "21380"})
+            apply.assert_called_once_with(settings, "deadbeef", 603)
+            apply_by_reference.assert_not_called()
+            status, _payload = handler.json_response
+            self.assertEqual(status, 200)
+
+    def test_invalid_tmdb_url_is_400(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            handler = _handler(settings)
+            with mock.patch.object(movies_metadata, "apply_by_reference", side_effect=ValueError("Could not find a TMDb movie ID in that link")):
+                handler._handle_admin_movie_scrape_apply("deadbeef", {"tmdb_url": "not a tmdb link"})
+            status, payload = handler.json_response
+            self.assertEqual(status, 400)
+            self.assertIn("Could not find", payload["error"])
+
+
+class MovieScrapeDeleteHandlerTests(unittest.TestCase):
+    def test_deletes_and_returns_the_result(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            handler = _handler(settings)
+            with mock.patch.object(movies_metadata, "delete_metadata", return_value={"deleted": True}) as delete_fn:
+                handler._handle_admin_movie_scrape_delete("deadbeef")
+            delete_fn.assert_called_once_with(settings, "deadbeef")
+            status, payload = handler.json_response
+            self.assertEqual(status, 200)
+            self.assertEqual(payload, {"deleted": True})
+
+    def test_never_scraped_still_returns_200_with_deleted_false(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Vacation.mp4", b"x")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+            entry_key = movies_store.list_movies(settings.movies_root)[0]["entry_key"]
+            handler = _handler(settings)
+            handler._handle_admin_movie_scrape_delete(entry_key)
+            status, payload = handler.json_response
+            self.assertEqual(status, 200)
+            self.assertEqual(payload, {"deleted": False})
+
 
 class MovieBulkScrapeHandlerTests(unittest.TestCase):
     def test_status_wraps_get_bulk_scrape_status(self) -> None:

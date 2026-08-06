@@ -301,6 +301,31 @@ class MovieMetadataStoreTests(unittest.TestCase):
     def test_list_movie_show_titles_empty_when_none_scraped(self):
         self.assertEqual(movies_store.list_movie_show_titles(self.movies_root), {})
 
+    def test_delete_movie_metadata_returns_none_when_never_scraped(self):
+        self.assertIsNone(movies_store.delete_movie_metadata(self.movies_root, "deadbeef"))
+
+    def test_delete_movie_metadata_removes_the_row_and_returns_what_was_deleted(self):
+        movies_store.save_movie_metadata(
+            self.movies_root, "deadbeef", provider="tmdb", provider_id="603", title="The Matrix",
+            poster_relative_path="The Matrix/images/the-matrix-tmdb-image.jpg",
+            backdrop_relative_path="The Matrix/images/the-matrix-tmdb-fanart.jpg",
+            extra={"overview": "A hacker discovers reality is a simulation."},
+        )
+        deleted = movies_store.delete_movie_metadata(self.movies_root, "deadbeef")
+        self.assertEqual(deleted["title"], "The Matrix")
+        self.assertEqual(deleted["poster_relative_path"], "The Matrix/images/the-matrix-tmdb-image.jpg")
+        self.assertEqual(deleted["backdrop_relative_path"], "The Matrix/images/the-matrix-tmdb-fanart.jpg")
+        self.assertIsNone(movies_store.get_movie_metadata(self.movies_root, "deadbeef"))
+
+    def test_delete_movie_metadata_is_idempotent(self):
+        movies_store.save_movie_metadata(
+            self.movies_root, "deadbeef", provider="tmdb", provider_id="603", title="The Matrix",
+            poster_relative_path=None, backdrop_relative_path=None, extra={},
+        )
+        self.assertIsNotNone(movies_store.delete_movie_metadata(self.movies_root, "deadbeef"))
+        # A second delete finds nothing left -- must not raise.
+        self.assertIsNone(movies_store.delete_movie_metadata(self.movies_root, "deadbeef"))
+
 
 if __name__ == "__main__":
     unittest.main()
