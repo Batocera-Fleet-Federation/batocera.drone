@@ -85,6 +85,19 @@ class NetworkShareEnableHandlerTests(unittest.TestCase):
             self.assertEqual(status, 400)
             self.assertIn("not a paired peer", payload["error"])
 
+    def test_enable_unquotes_a_percent_encoded_mac_style_peer_id(self) -> None:
+        # Regression: peer ids look like MAC addresses (e.g.
+        # "58:47:ca:7e:38:57"); encodeURIComponent() on the client percent-
+        # encodes the ":"s, and the stdlib server does not auto-decode path
+        # segments -- without unquoting here, every real peer_id 404ed/failed
+        # lookup against the (un-encoded) paired-peer map.
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            handler = _handler(settings)
+            with mock.patch.object(network_share_manager, "enable", return_value={"status": "mounted", "peer_id": "58:47:ca:7e:38:57"}) as enable:
+                handler._handle_admin_network_share_enable("58%3A47%3Aca%3A7e%3A38%3A57")
+            enable.assert_called_once_with(settings, "58:47:ca:7e:38:57")
+
 
 class NetworkShareDisableHandlerTests(unittest.TestCase):
     def test_disable_returns_200_when_disabled(self) -> None:
@@ -95,6 +108,14 @@ class NetworkShareDisableHandlerTests(unittest.TestCase):
                 handler._handle_admin_network_share_disable("p1")
             status, payload = handler.response
             self.assertEqual(status, 200)
+
+    def test_disable_unquotes_a_percent_encoded_mac_style_peer_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            handler = _handler(settings)
+            with mock.patch.object(network_share_manager, "disable", return_value={"status": "disabled", "peer_id": "58:47:ca:7e:38:57"}) as disable:
+                handler._handle_admin_network_share_disable("58%3A47%3Aca%3A7e%3A38%3A57")
+            disable.assert_called_once_with(settings, "58:47:ca:7e:38:57")
 
     def test_disable_returns_404_when_not_found(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
