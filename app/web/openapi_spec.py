@@ -1465,6 +1465,7 @@ def _schemas() -> Dict[str, Schema]:
             ("auth_key",),
         ),
         "LocalPeerForgetResponse": _object({"status": _enum(["forgotten", "not_found"]), "peer_id": _string()}, ("status", "peer_id")),
+        "LocalPeerDismissResponse": _object({"status": _enum(["dismissed", "not_found"]), "peer_id": _string()}, ("status", "peer_id")),
         "LocalSyncRequest": _object(
             {
                 "peer_id": _string(),
@@ -2245,6 +2246,7 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             "/admin/tailnet/discover": {"post": _operation("Fetch online Tailnet devices and automatically establish mTLS trust with Drones", {"200": _json_response("TailnetDiscoveryResponse")}, tags=["admin", "local-network"], error_codes=("401", "403", "429", "500", "502"))},
             "/admin/local-network/peers/{peer_id}/pair": {"post": _operation("Pair with a discovered Local Network peer", {"200": _json_response("LocalPeerPairResponse")}, parameters=[_path_param("peer_id")], request_body=_json_request("LocalPeerPairRequest"), tags=["admin", "local-network"], error_codes=("400", "401", "403", "404", "409", "429", "500"))},
             "/admin/local-network/peers/{peer_id}/forget": {"post": _operation("Forget a paired Local Network peer", {"200": _json_response("LocalPeerForgetResponse")}, parameters=[_path_param("peer_id")], tags=["admin", "local-network"])},
+            "/admin/local-network/peers/{peer_id}/dismiss": {"post": _operation("Dismiss a never-paired discovered Local Network peer", {"200": _json_response("LocalPeerDismissResponse")}, parameters=[_path_param("peer_id")], tags=["admin", "local-network"])},
             "/admin/local-network/peers/{peer_id}/restore-tailnet": {"post": _operation("Restore automatic pairing for a forgotten online Tailnet Drone", {"200": _json_response("LocalPeerPairResponse")}, parameters=[_path_param("peer_id")], tags=["admin", "local-network"], error_codes=("401", "403", "404", "409", "429", "500", "502"))},
             "/admin/local-network/peers/{peer_id}/assets": {"get": _operation("Browse a paired peer's asset inventory", {"200": _json_response("PeerInventoryEnvelope")}, parameters=[_path_param("peer_id"), *peer_inventory_params], tags=["admin", "local-network"], error_codes=("400", "401", "403", "404", "409", "429", "500", "502"))},
             "/admin/local-network/sync": {"post": _operation("Queue one asset copy from a paired peer", {"202": _json_response("LocalSyncResponse")}, request_body=_json_request("LocalSyncRequest"), tags=["admin", "local-network"], error_codes=("400", "401", "403", "404", "409", "429", "500", "503"))},

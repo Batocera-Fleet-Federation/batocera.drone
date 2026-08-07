@@ -8160,8 +8160,14 @@ function renderLocalPeerRows(peers) {
       const url = String(peer.reachable_url || "");
       const insecure = !peer.paired && url !== "" && !/^https:/i.test(url);
       let actionCell;
+      // A never-paired row can always be manually cleared -- offered
+      // alongside whatever the primary action is, everywhere except the two
+      // tailnet-lifecycle branches below (their visibility is driven by the
+      // live tailnet device/forgotten-peer sync, not this discovered-peers
+      // store, so dismissing here wouldn't actually make them go away).
+      const dismissBtn = `<button class="btn btn-sm btn-outline-secondary" onclick="dismissLocalPeer(decodeURIComponent('${peerToken}'))" title="Remove from Nearby Drones. It will reappear if this address announces itself again.">Dismiss</button>`;
       if (peer.identity_conflict) {
-        actionCell = `<button class="btn btn-sm btn-outline-secondary" disabled title="This Drone advertises the same machine id as this device. Reset the Drone id on one machine before pairing.">Resolve ID</button>`;
+        actionCell = `<div class="d-flex gap-2 justify-content-end"><button class="btn btn-sm btn-outline-secondary" disabled title="This Drone advertises the same machine id as this device. Reset the Drone id on one machine before pairing.">Resolve ID</button>${dismissBtn}</div>`;
       } else if (peer.paired) {
         actionCell = `<div class="d-flex gap-2 justify-content-end"><button class="btn btn-sm btn-outline-primary" onclick="swarmBrowsePeerAssets(decodeURIComponent('${peerToken}'))">Browse</button><button class="btn btn-sm btn-outline-danger" onclick="forgetLocalPeer(decodeURIComponent('${peerToken}'))">Forget</button></div>`;
       } else if (peer.tailnet_forgotten || peer.tailnet_pair_error) {
@@ -8169,9 +8175,9 @@ function renderLocalPeerRows(peers) {
       } else if (peer.tailnet_device) {
         actionCell = '<span class="small text-muted">Not a Drone</span>';
       } else if (insecure) {
-        actionCell = `<button class="btn btn-sm btn-outline-secondary" disabled title="This Drone is advertising ${escapeHtml(url)} (not HTTPS), so it can't be paired for secure transfers. Update/repair the Drone on that machine.">Not secure</button>`;
+        actionCell = `<div class="d-flex gap-2 justify-content-end"><button class="btn btn-sm btn-outline-secondary" disabled title="This Drone is advertising ${escapeHtml(url)} (not HTTPS), so it can't be paired for secure transfers. Update/repair the Drone on that machine.">Not secure</button>${dismissBtn}</div>`;
       } else {
-        actionCell = `<button class="btn btn-sm btn-outline-primary" onclick="pairLocalPeer(decodeURIComponent('${peerToken}'))">Pair</button>`;
+        actionCell = `<div class="d-flex gap-2 justify-content-end"><button class="btn btn-sm btn-outline-primary" onclick="pairLocalPeer(decodeURIComponent('${peerToken}'))">Pair</button>${dismissBtn}</div>`;
       }
       return `<tr>
         <td><strong>${escapeHtml(peer.name || peer.hostname || peerId)}</strong>${insecure ? '<span class="badge text-bg-danger ms-2" title="Not running HTTPS — cannot pair">Not secure</span>' : ""}${peer.identity_conflict ? '<span class="badge text-bg-danger ms-2" title="This peer is advertising the same Drone id as this machine">Same ID</span>' : ""}</td>
@@ -9116,6 +9122,17 @@ async function restoreTailnetPeer(peerId) {
 async function forgetLocalPeer(peerId) {
   if (!window.confirm("Forget this paired Drone? It will need to be paired again before browsing or syncing.")) return;
   await apiPost(`/admin/local-network/peers/${encodeURIComponent(peerId)}/forget`, {});
+  invalidateSwarmDataCache();
+  if (window.location.hash.startsWith("#admin/swarm")) {
+    await renderSwarmPage();
+    return;
+  }
+  if (typeof window.refreshLocalNetwork === "function") await window.refreshLocalNetwork();
+  if (typeof window.refreshLocalNetworkAssets === "function") await window.refreshLocalNetworkAssets();
+}
+
+async function dismissLocalPeer(peerId) {
+  await apiPost(`/admin/local-network/peers/${encodeURIComponent(peerId)}/dismiss`, {});
   invalidateSwarmDataCache();
   if (window.location.hash.startsWith("#admin/swarm")) {
     await renderSwarmPage();

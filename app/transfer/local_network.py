@@ -146,17 +146,37 @@ def _join_multicast_group(sock: socket.socket) -> None:
             continue
 
 
+def _peer_last_seen(peer: dict) -> datetime:
+    try:
+        return datetime.fromisoformat(str(peer.get("last_seen") or ""))
+    except Exception:
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+
 def discovered_peers(settings: Any, include_stale: bool = False) -> list[dict]:
     peers = _load_peer_map(settings, "local_discovered_peers")
     cutoff = _now() - timedelta(seconds=DISCOVERY_STALE_SECONDS)
-    rows = []
-    for peer in peers.values():
-        try:
-            seen = datetime.fromisoformat(str(peer.get("last_seen") or ""))
-        except Exception:
-            seen = datetime.min.replace(tzinfo=timezone.utc)
-        if include_stale or seen >= cutoff:
-            rows.append(peer)
+    if not include_stale:
+        # A peer that has gone quiet (no re-announce within the stale window)
+        # and was never paired is a dead/one-off broadcaster -- e.g. a dev
+        # instance of this app run for manual testing, or hardware that has
+        # since left the network. Nothing else ever removes these, so the
+        # live view is also the reap point: drop them from storage here
+        # rather than just hiding them, or they'd linger in the state DB
+        # forever. Paired peers are untouched -- their lifecycle is owned by
+        # forget_peer/save_paired_peer, not announce recency.
+        live = {
+            peer_id: peer
+            for peer_id, peer in peers.items()
+            if peer.get("paired") or _peer_last_seen(peer) >= cutoff
+        }
+        if len(live) != len(peers):
+            _save_peer_map(settings, "local_discovered_peers", live)
+        peers = live
+    rows = [
+        peer for peer in peers.values()
+        if include_stale or peer.get("paired") or _peer_last_seen(peer) >= cutoff
+    ]
     return sorted(rows, key=lambda row: (str(row.get("name") or "").lower(), str(row.get("drone_id") or "")))
 
 
@@ -311,6 +331,21 @@ def forget_peer(settings: Any, peer_id: str) -> bool:
         discovered[normalized]["paired"] = False
         _save_peer_map(settings, "local_discovered_peers", discovered)
     return removed
+
+
+def dismiss_discovered_peer(settings: Any, peer_id: str) -> bool:
+    """Manually clear a never-paired discovered-peer row (e.g. a dead
+    dev-instance broadcaster) without waiting for it to go stale. Paired
+    peers have their own removal path (forget_peer) -- this refuses to touch
+    one, since "dismiss" only makes sense for a row nobody ever trusted."""
+    normalized = str(peer_id or "").strip()
+    peers = _load_peer_map(settings, "local_discovered_peers")
+    existing = peers.get(normalized)
+    if not existing or existing.get("paired"):
+        return False
+    del peers[normalized]
+    _save_peer_map(settings, "local_discovered_peers", peers)
+    return True
 
 
 def load_peer_checks(settings: Any) -> list[dict]:

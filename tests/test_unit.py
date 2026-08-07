@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from threading import Event, Thread
 from unittest import mock
 from pathlib import Path
@@ -180,6 +181,57 @@ class SettingsTests(unittest.TestCase):
                 paired = local_network.save_paired_peer(settings, {**discovered, "certificate_fingerprint": "abc"})
                 self.assertTrue(paired["paired"])
                 self.assertEqual(local_network.get_paired_peer(settings, "local-b")["certificate_fingerprint"], "abc")
+
+    def test_discovered_peers_reaps_stale_unpaired_rows_but_keeps_stale_paired_ones(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root), "DRONE_DEVICE_ID": "local-a"}, clear=True):
+                settings = Settings.from_env()
+                stale_iso = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+                save_payload(
+                    database_path(settings.userdata_root),
+                    "local_discovered_peers",
+                    {
+                        "ghost-drone": {"drone_id": "ghost-drone", "name": "Ghost", "last_seen": stale_iso, "paired": False},
+                        "stale-paired": {"drone_id": "stale-paired", "name": "Stale Paired", "last_seen": stale_iso, "paired": True},
+                        "fresh-drone": {"drone_id": "fresh-drone", "name": "Fresh", "last_seen": local_network._now_iso(), "paired": False},
+                    },
+                )
+                # The old, never-paired row is not just hidden -- it's reaped
+                # from storage the first time the live (non-stale) view is
+                # requested, since nothing else ever cleans it up.
+                live_ids = {peer["drone_id"] for peer in local_network.discovered_peers(settings, include_stale=False)}
+                self.assertEqual(live_ids, {"stale-paired", "fresh-drone"})
+                persisted_ids = set(load_payload(database_path(settings.userdata_root), "local_discovered_peers", {}))
+                self.assertEqual(persisted_ids, {"stale-paired", "fresh-drone"})
+                # The permissive (include_stale=True) view used by pairing
+                # lookups is unaffected by the reap and still sees everything
+                # that existed before the sweep.
+                all_ids = {peer["drone_id"] for peer in local_network.discovered_peers(settings, include_stale=True)}
+                self.assertEqual(all_ids, {"stale-paired", "fresh-drone"})
+
+    def test_dismiss_discovered_peer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            with mock.patch.dict("os.environ", {"USERDATA_ROOT": str(root), "DRONE_DEVICE_ID": "local-a"}, clear=True):
+                settings = Settings.from_env()
+                announcement = {
+                    "service": local_network.DISCOVERY_SERVICE,
+                    "drone_id": "local-b",
+                    "name": "Cabinet B",
+                    "scheme": "https",
+                    "api_port": 443,
+                }
+                local_network.record_discovered_peer(settings, announcement, "192.168.1.22")
+                self.assertFalse(local_network.dismiss_discovered_peer(settings, "no-such-peer"))
+                self.assertTrue(local_network.dismiss_discovered_peer(settings, "local-b"))
+                self.assertEqual(local_network.discovered_peers(settings, include_stale=True), [])
+                # A paired peer's discovered-store row is untouched -- forget_peer
+                # owns that lifecycle, not dismiss.
+                local_network.record_discovered_peer(settings, announcement, "192.168.1.22")
+                local_network.save_paired_peer(settings, {"drone_id": "local-b"})
+                self.assertFalse(local_network.dismiss_discovered_peer(settings, "local-b"))
+                self.assertEqual(len(local_network.discovered_peers(settings, include_stale=True)), 1)
 
     def test_local_ip_addresses_and_cert_ips_include_tailnet(self) -> None:
         from app.transfer import network_identity
@@ -6570,6 +6622,14 @@ class SwarmPageTests(unittest.TestCase):
         self.assertIn("<th>Source</th>", rows_body)
         self.assertIn('peer.source === "Local Network"', rows_body)
         self.assertIn("Tailnet", rows_body)
+        # An unpaired discovered row (Pair, Not secure, or identity-conflict)
+        # can always be manually cleared, without waiting for it to go stale.
+        self.assertIn("dismissLocalPeer", rows_body)
+        self.assertIn(">Dismiss</button>", rows_body)
+
+        dismiss_fn_start = self.js.index("async function dismissLocalPeer(")
+        dismiss_fn_body = self.js[dismiss_fn_start:self.js.index("\n}\n", dismiss_fn_start)]
+        self.assertIn("/dismiss`", dismiss_fn_body)
 
         card_start = self.js.index("function renderSwarmDroneCard(")
         card_body = self.js[card_start:self.js.index("function swarmBrowsePeerAssets(", card_start)]

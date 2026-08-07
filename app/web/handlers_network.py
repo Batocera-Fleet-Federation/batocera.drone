@@ -268,7 +268,7 @@ class HandlersNetworkMixin:
         seen_hosts = set()
         active_tailnet_ids = {str(peer.get("drone_id") or "") for peer in tailnet_devices or []}
         active_tailnet_addresses = {str(peer.get("tailnet_ip") or "") for peer in tailnet_devices or []}
-        for peer in _local_network.discovered_peers(self.settings, include_stale=True):
+        for peer in _local_network.discovered_peers(self.settings, include_stale=False):
             peer_id = str(peer.get("drone_id") or "")
             if hide_seeded_demo and peer_id == "fake-local-peer-01":
                 continue
@@ -558,6 +558,11 @@ class HandlersNetworkMixin:
         removed = _local_network.forget_peer(self.settings, peer_id)
         _local_peer_cert_cache_path(self.settings, peer_id).unlink(missing_ok=True)
         self._send_json(200, {"status": "forgotten" if removed else "not_found", "peer_id": peer_id})
+
+    def _handle_admin_local_peer_dismiss(self, peer_id: str) -> None:
+        peer_id = unquote(peer_id)
+        removed = _local_network.dismiss_discovered_peer(self.settings, peer_id)
+        self._send_json(200, {"status": "dismissed" if removed else "not_found", "peer_id": peer_id})
 
     def _handle_admin_local_peer_assets(self, peer_id: str, query_params: dict) -> None:
         peer_id = unquote(peer_id)

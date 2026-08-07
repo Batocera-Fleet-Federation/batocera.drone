@@ -155,6 +155,7 @@ class DroneOpenApiContractTest(unittest.TestCase):
             "/admin/local-network/pairing-code/rotate",
             "/admin/local-network/peers/{peer_id}/pair",
             "/admin/local-network/peers/{peer_id}/forget",
+            "/admin/local-network/peers/{peer_id}/dismiss",
             "/admin/local-network/peers/{peer_id}/restore-tailnet",
             "/admin/local-network/peers/{peer_id}/assets",
             "/admin/local-network/sync",

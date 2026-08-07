@@ -699,6 +699,10 @@ class ApiRoutesMixin:
                 self._handle_admin_local_peer_forget(parts[3])
                 return
 
+            if len(parts) == 5 and parts[0] == "admin" and parts[1] == "local-network" and parts[2] == "peers" and parts[4] == "dismiss":
+                self._handle_admin_local_peer_dismiss(parts[3])
+                return
+
             if len(parts) == 5 and parts[0] == "admin" and parts[1] == "local-network" and parts[2] == "peers" and parts[4] == "restore-tailnet":
                 self._handle_admin_tailnet_peer_restore(parts[3])
                 return
