@@ -205,6 +205,61 @@ class NfsBindMountTests(unittest.TestCase):
 
             run.assert_called_once_with(["/bin/mount", "--bind", str(source), str(target)])
 
+    def test_resolved_rom_sources_follow_external_links_and_skip_unsafe_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = _build_settings(self, root)
+            external_snes = root / "external" / "Super Nintendo"
+            external_snes.mkdir(parents=True)
+            (settings.roms_root / "snes").symlink_to(external_snes, target_is_directory=True)
+            local_nes = settings.roms_root / "nes"
+            local_nes.mkdir()
+            (settings.roms_root / "broken").symlink_to(root / "missing", target_is_directory=True)
+            (settings.roms_root / "genesis.old").mkdir()
+            network_root = root / "network-shares"
+            network_psx = network_root / "peer" / "roms" / "psx"
+            network_psx.mkdir(parents=True)
+            (settings.roms_root / "psx").symlink_to(network_psx, target_is_directory=True)
+
+            with mock.patch.object(nfs_export_manager, "network_reference_root", return_value=network_root):
+                sources = nfs_export_manager._resolved_rom_sources(settings)
+
+            self.assertEqual(sources, {"nes": local_nes.resolve(), "snes": external_snes.resolve()})
+
+    def test_resolved_rom_export_binds_each_real_system_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = _build_settings(self, root)
+            external_snes = root / "external" / "Super Nintendo"
+            external_snes.mkdir(parents=True)
+            (settings.roms_root / "snes").symlink_to(external_snes, target_is_directory=True)
+            local_nes = settings.roms_root / "nes"
+            local_nes.mkdir()
+            export_root = nfs_export_manager.export_root(settings)
+
+            with mock.patch.object(nfs_export_manager, "_is_mounted", return_value=False), \
+                    mock.patch.object(nfs_export_manager, "_mounted_descendants", return_value=[]), \
+                    mock.patch.object(nfs_export_manager, "_find_command", return_value="/bin/mount"), \
+                    mock.patch.object(
+                        nfs_export_manager,
+                        "_run",
+                        return_value=mock.Mock(returncode=0, stdout="", stderr=""),
+                    ) as run:
+                nfs_export_manager._ensure_resolved_rom_export(settings, export_root)
+
+            calls = [call.args[0] for call in run.call_args_list]
+            self.assertEqual(
+                calls,
+                [
+                    ["/bin/mount", "--bind", str(local_nes.resolve()), str(export_root / "roms" / "nes")],
+                    ["/bin/mount", "--bind", str(external_snes.resolve()), str(export_root / "roms" / "snes")],
+                ],
+            )
+            self.assertNotIn(
+                ["/bin/mount", "--bind", str(settings.roms_root), str(export_root / "roms")],
+                calls,
+            )
+
     def test_export_assigns_explicit_distinct_fsids_to_root_roms_and_bios(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(self, Path(tmp))
@@ -228,6 +283,8 @@ class NfsBindMountTests(unittest.TestCase):
             self.assertEqual(set(child_options), {"roms", "bios"})
             self.assertNotEqual(child_options["roms"], child_options["bios"])
             self.assertTrue(all("root_squash" in options.split(",") for options in child_options.values()))
+            self.assertIn("crossmnt", child_options["roms"].split(","))
+            self.assertNotIn("crossmnt", child_options["bios"].split(","))
 
     def test_unexport_removes_children_before_the_nfs4_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

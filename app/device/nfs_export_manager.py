@@ -2,7 +2,10 @@
 
 Batocera already ships and starts the kernel NFS service on supported builds,
 but does not export any directories by default.  Drone adds only a small,
-private pseudo-root containing bind mounts for ``roms/`` and ``bios/``.  It
+private pseudo-root containing resolved ROM-system bind mounts plus a BIOS
+bind mount.  Resolving each ROM system on the source is important: Batocera
+commonly represents systems as absolute symlinks into an external drive, and
+NFS would otherwise hand that source-only link text to the client.  Drone
 never exports all of ``/userdata`` and never edits Batocera's own exports file.
 
 Authorizations are keyed by paired Drone id and exact, trusted IP addresses.
@@ -25,6 +28,7 @@ from typing import Optional
 
 try:
     from ..common.install_paths import drone_install_root as _drone_install_root
+    from ..common.network_references import is_network_reference, network_reference_root
     from ..common.settings import Settings
     from ..storage.state_store import database_path as _state_database_path
     from ..storage.state_store import load_payload as _load_state_payload
@@ -32,6 +36,7 @@ try:
     from ..transfer import local_network as _local_network
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.install_paths import drone_install_root as _drone_install_root  # type: ignore
+    from common.network_references import is_network_reference, network_reference_root  # type: ignore
     from common.settings import Settings  # type: ignore
     from storage.state_store import database_path as _state_database_path  # type: ignore
     from storage.state_store import load_payload as _load_state_payload  # type: ignore
@@ -52,6 +57,9 @@ NFS_EXPORT_CHILD_FSIDS = {
     "roms": "7b0bfa2a7e1a5df3a7ad8f59386f80a1",
     "bios": "fda715050a2e55ac96b5535d59829c70",
 }
+NFS_EXPORT_ROM_OPTIONS = (
+    f"{NFS_EXPORT_BASE_OPTIONS},fsid={NFS_EXPORT_CHILD_FSIDS['roms']},crossmnt"
+)
 
 _STATE_LOCK = threading.RLock()
 _PRIVATE_IPV4_NETWORKS = tuple(
@@ -175,6 +183,20 @@ def _is_mounted(path: Path) -> bool:
     return os.path.abspath(os.path.normpath(str(path))) in _mounted_paths()
 
 
+def _path_depth(path: Path) -> int:
+    return len(Path(os.path.abspath(os.path.normpath(str(path)))).parts)
+
+
+def _mounted_descendants(path: Path) -> list[Path]:
+    root = os.path.abspath(os.path.normpath(str(path)))
+    prefix = root.rstrip(os.sep) + os.sep
+    return sorted(
+        (Path(candidate) for candidate in _mounted_paths() if candidate == root or candidate.startswith(prefix)),
+        key=_path_depth,
+        reverse=True,
+    )
+
+
 def _run(args: list[str]) -> subprocess.CompletedProcess:
     return subprocess.run(
         args,
@@ -189,14 +211,45 @@ def _command_error(result: subprocess.CompletedProcess, fallback: str) -> str:
     return detail[-1] if detail else fallback
 
 
-def _ensure_bind_mount(source: Path, target: Path) -> None:
+def _unmount_path(path: Path, *, best_effort: bool = False) -> None:
+    if not _is_mounted(path):
+        return
+    umount = _find_command("umount")
+    if not umount:
+        if best_effort:
+            return
+        raise RuntimeError("umount is not installed")
+    try:
+        result = _run([umount, str(path)])
+        if result.returncode != 0 and _is_mounted(path):
+            result = _run([umount, "-l", str(path)])
+        if result.returncode != 0 and _is_mounted(path) and not best_effort:
+            raise RuntimeError(_command_error(result, f"could not unmount {path}"))
+    except (OSError, subprocess.SubprocessError) as error:
+        if not best_effort:
+            raise RuntimeError(f"could not unmount {path}: {error}") from error
+
+
+def _same_directory(left: Path, right: Path) -> bool:
+    try:
+        left_stat = left.stat()
+        right_stat = right.stat()
+    except OSError:
+        return False
+    return (left_stat.st_dev, left_stat.st_ino) == (right_stat.st_dev, right_stat.st_ino)
+
+
+def _ensure_bind_mount(source: Path, target: Path, *, mounted: Optional[bool] = None) -> None:
     if not source.is_dir():
         raise RuntimeError(f"NFS source directory does not exist: {source}")
     if target.is_symlink():
         raise RuntimeError(f"NFS export target must not be a symlink: {target}")
     target.mkdir(parents=True, exist_ok=True)
-    if _is_mounted(target):
-        return
+    target_is_mounted = _is_mounted(target) if mounted is None else mounted
+    if target_is_mounted:
+        if _same_directory(source, target):
+            return
+        _unmount_path(target)
     mount = _find_command("mount")
     if not mount:
         raise RuntimeError("mount is not installed")
@@ -205,12 +258,94 @@ def _ensure_bind_mount(source: Path, target: Path) -> None:
         raise RuntimeError(_command_error(result, f"could not bind mount {source}"))
 
 
+def _should_include_rom_entry(name: str) -> bool:
+    lowered = str(name or "").strip().lower()
+    return bool(lowered) and not (lowered.endswith(".old") or ".old." in lowered)
+
+
+def _resolved_rom_sources(settings: Settings) -> dict[str, Path]:
+    """Return the source-local directory for each shareable ROM system.
+
+    The returned paths are fully resolved on the source Drone.  This converts
+    entries such as ``/userdata/roms/snes -> /media/roms/...`` into the real
+    directory that must be bind-mounted into the NFS namespace.  Drone-owned
+    network references are deliberately excluded to avoid recursively
+    re-exporting another peer's filesystem.
+    """
+    sources: dict[str, Path] = {}
+    share_root = network_reference_root()
+    try:
+        entries = sorted(Path(settings.roms_root).iterdir(), key=lambda path: path.name.lower())
+    except OSError as error:
+        raise RuntimeError(f"could not inspect the ROM library: {error}") from error
+    for entry in entries:
+        if not _should_include_rom_entry(entry.name):
+            continue
+        if entry.is_symlink() and is_network_reference(entry, share_root):
+            continue
+        try:
+            resolved = entry.resolve(strict=True)
+        except OSError:
+            continue
+        if resolved.is_dir():
+            sources[entry.name] = resolved
+    return sources
+
+
+def _remove_empty_mountpoint(path: Path) -> None:
+    try:
+        path.rmdir()
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise RuntimeError(f"NFS export mountpoint is not empty: {path}") from error
+
+
+def _ensure_resolved_rom_export(settings: Settings, root: Path) -> None:
+    """Build ``roms/`` from per-system binds of fully resolved source paths."""
+    roms_export = root / "roms"
+    if roms_export.is_symlink():
+        raise RuntimeError(f"NFS ROM export root must not be a symlink: {roms_export}")
+    roms_export.mkdir(parents=True, exist_ok=True)
+
+    # v0.1.134 and earlier bind-mounted the whole ROM root here. Remove that
+    # legacy mount before creating owned, empty per-system mountpoints.
+    mounted_targets = set(_mounted_descendants(roms_export))
+    if roms_export in mounted_targets:
+        for mounted in sorted(mounted_targets, key=_path_depth, reverse=True):
+            _unmount_path(mounted)
+        mounted_targets.clear()
+
+    sources = _resolved_rom_sources(settings)
+    desired_targets = {roms_export / name: source for name, source in sources.items()}
+
+    # Reconcile stale or retargeted system mounts before adding current ones.
+    for mounted in sorted(mounted_targets, key=_path_depth, reverse=True):
+        source = desired_targets.get(mounted)
+        if source is None or not _same_directory(source, mounted):
+            _unmount_path(mounted)
+            mounted_targets.discard(mounted)
+
+    try:
+        existing_entries = list(roms_export.iterdir())
+    except OSError as error:
+        raise RuntimeError(f"could not inspect the NFS ROM export: {error}") from error
+    for entry in existing_entries:
+        if entry not in desired_targets:
+            if entry.is_symlink() or not entry.is_dir():
+                raise RuntimeError(f"unexpected entry in Drone-owned NFS ROM export: {entry}")
+            _remove_empty_mountpoint(entry)
+
+    for target, source in desired_targets.items():
+        _ensure_bind_mount(source, target, mounted=target in mounted_targets)
+
+
 def _ensure_export_root(settings: Settings) -> Path:
     root = export_root(settings)
     if root.is_symlink():
         raise RuntimeError(f"NFS export root must not be a symlink: {root}")
     root.mkdir(parents=True, exist_ok=True)
-    _ensure_bind_mount(Path(settings.roms_root), root / "roms")
+    _ensure_resolved_rom_export(settings, root)
     _ensure_bind_mount(Path(settings.bios_root), root / "bios")
     return root
 
@@ -219,10 +354,8 @@ def _export_specs(settings: Settings) -> list[tuple[Path, str]]:
     root = export_root(settings)
     return [
         (root, NFS_EXPORT_ROOT_OPTIONS),
-        *[
-            (root / name, f"{NFS_EXPORT_BASE_OPTIONS},fsid={fsid}")
-            for name, fsid in NFS_EXPORT_CHILD_FSIDS.items()
-        ],
+        (root / "roms", NFS_EXPORT_ROM_OPTIONS),
+        (root / "bios", f"{NFS_EXPORT_BASE_OPTIONS},fsid={NFS_EXPORT_CHILD_FSIDS['bios']}"),
     ]
 
 
@@ -264,17 +397,10 @@ def _unexport_client(settings: Settings, address: str) -> Optional[str]:
 
 
 def _cleanup_bind_mounts(settings: Settings) -> None:
-    umount = _find_command("umount")
-    if not umount:
-        return
     root = export_root(settings)
-    for target in (root / "bios", root / "roms"):
-        if not _is_mounted(target):
-            continue
-        try:
-            _run([umount, "-l", str(target)])
-        except (OSError, subprocess.SubprocessError):
-            pass
+    roms_export = root / "roms"
+    for target in [*_mounted_descendants(roms_export), root / "bios"]:
+        _unmount_path(target, best_effort=True)
 
 
 def authorize_peer(settings: Settings, peer_id: str, observed_address: object = "") -> dict:

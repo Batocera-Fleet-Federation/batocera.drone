@@ -525,14 +525,7 @@ def _apply_system_references(
         peer_systems = sorted({str(name).strip() for name in peer_system_names if _should_include_entry(name)}, key=str.lower)
     else:
         try:
-            # scandir receives the directory-entry type from the server's readdir
-            # response on normal servers, avoiding a separate Path.stat round
-            # trip for every system on a high-latency connection.
-            with os.scandir(peer_roms_dir) as entries:
-                peer_systems = sorted(
-                    entry.name for entry in entries
-                    if _should_include_entry(entry.name) and entry.is_dir(follow_symlinks=False)
-                )
+            peer_systems = _mounted_peer_system_names(mount_point)
         except OSError:
             return existing_systems  # mount unreadable right now -- leave prior state untouched, watchdog will retry
 
@@ -598,6 +591,26 @@ def _apply_system_references(
         results.append({"system": system, "had_local_collision": True, "renamed_to": old_path.name, "symlink_created": True, "skipped_reason": ""})
 
     return results
+
+
+def _mounted_peer_system_names(mount_point: Path) -> List[str]:
+    """List real system directories exposed by the mounted transport.
+
+    ``follow_symlinks=False`` is intentional. An NFS server returns its own
+    absolute symlinks verbatim and the client would resolve them against its
+    local filesystem. Requiring a directory entry here both avoids that broken
+    chain and normally uses the type already supplied by one NFS/SMB readdir.
+    """
+    peer_roms_dir = mount_point / "roms"
+    with os.scandir(peer_roms_dir) as entries:
+        return sorted(
+            {
+                entry.name
+                for entry in entries
+                if _should_include_entry(entry.name) and entry.is_dir(follow_symlinks=False)
+            },
+            key=str.lower,
+        )
 
 
 def _revert_system_references(settings: Settings, mount_point: Path, systems: List[dict]) -> List[str]:
@@ -1128,6 +1141,60 @@ def _enable_locked(settings: Settings, peer_id: str) -> dict:
 
     summary = _fetch_peer_summary(settings, target)
     peer_system_names = summary.get("systems") if isinstance(summary, dict) and isinstance(summary.get("systems"), list) else None
+    preflight_detail = ""
+    try:
+        mounted_peer_system_names = _mounted_peer_system_names(mount_point)
+    except OSError as error:
+        mounted_peer_system_names = []
+        preflight_detail = f"Peer ROM export is not readable: {error}"
+    if not preflight_detail and peer_system_names is not None:
+        expected_system_names = sorted(
+            {str(name).strip() for name in peer_system_names if _should_include_entry(name)},
+            key=str.lower,
+        )
+        missing_system_names = sorted(set(expected_system_names) - set(mounted_peer_system_names), key=str.lower)
+        if missing_system_names:
+            preview = ", ".join(missing_system_names[:5])
+            if len(missing_system_names) > 5:
+                preview += ", ..."
+            preflight_detail = (
+                f"Peer ROM export is incomplete: {len(missing_system_names)} advertised system(s) "
+                f"are not real directories on the mounted share ({preview})"
+            )
+        peer_system_names = expected_system_names
+    elif peer_system_names is None:
+        peer_system_names = mounted_peer_system_names
+
+    if preflight_detail:
+        interrupted = {"systems": existing_systems, "bios": existing_bios}
+        recovery_errors = _restore_local_fallback(settings, mount_point, interrupted)
+        _unmount(mount_point, detach_immediately=True)
+        if str(mount_result.get("protocol") or (prior or {}).get("protocol") or "") == "nfs":
+            _revoke_nfs_export(settings, target)
+        cleanup_safe = not recovery_errors
+        record = _upsert_peer_record(
+            settings,
+            peer_id,
+            peer_name=target["peer_name"],
+            tailnet_ip=target["tailnet_ip"],
+            mount_point=str(mount_point),
+            mounted_address=str(mount_result.get("address") or (prior or {}).get("mounted_address") or ""),
+            enabled=True,
+            status="error",
+            status_detail=(preflight_detail if cleanup_safe else f"Could not restore local fallback: {recovery_errors[0]}"),
+            systems=[] if cleanup_safe else existing_systems,
+            bios=[] if cleanup_safe else existing_bios,
+            bios_status="pending" if cleanup_safe else "error",
+            protocol=str(mount_result.get("protocol") or (prior or {}).get("protocol") or ""),
+            nfs_version=str(mount_result.get("nfs_version") or (prior or {}).get("nfs_version") or ""),
+            export_path=str(mount_result.get("export_path") or (prior or {}).get("export_path") or ""),
+            transport_fallback_detail=str(mount_result.get("transport_fallback_detail") or ""),
+            last_checked_at=_now_iso(),
+        )
+        result = dict(record)
+        result["_refresh_required"] = bool(prior or existing_systems or existing_bios)
+        return result
+
     systems = _apply_system_references(settings, mount_point, existing_systems, peer_system_names)
     raw_remote_system_counts = summary.get("system_counts") if isinstance(summary, dict) and isinstance(summary.get("system_counts"), dict) else {}
     remote_system_counts = {}

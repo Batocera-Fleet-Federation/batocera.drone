@@ -62,6 +62,8 @@ def _mount_that_populates(mount_point: Path, roms: dict = None, bios: dict = Non
     def _run(args, **kwargs):
         if args[0] == "mount":
             mount_point.mkdir(parents=True, exist_ok=True)
+            (mount_point / "roms").mkdir(exist_ok=True)
+            (mount_point / "bios").mkdir(exist_ok=True)
             for system, files in (roms or {}).items():
                 system_dir = mount_point / "roms" / system
                 system_dir.mkdir(parents=True, exist_ok=True)
@@ -252,6 +254,106 @@ class EnableTests(unittest.TestCase):
             self.assertFalse((settings.roms_root / "snes.old").exists())
             self.assertTrue((settings.bios_root / "scph5501.bin").is_file())
             self.assertFalse((settings.bios_root / "scph5501.bin.old").exists())
+
+    def test_incomplete_export_never_renames_a_local_system(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._settings_with_peer(tmp)
+            local_snes = settings.roms_root / "snes"
+            local_snes.mkdir()
+            (local_snes / "local.zip").write_text("local")
+            mount_point = network_share_manager.peer_mount_point(settings, "peer-1")
+
+            def mount_with_source_absolute_symlink(args, **kwargs):
+                if args[0] == "mount":
+                    (mount_point / "roms").mkdir(parents=True, exist_ok=True)
+                    (mount_point / "bios").mkdir(exist_ok=True)
+                    (mount_point / "roms" / "snes").symlink_to(
+                        "/media/roms_retro/ROMs/Super Nintendo Entertainment System",
+                        target_is_directory=True,
+                    )
+                return mock.Mock(returncode=0, stdout="", stderr="")
+
+            with mock.patch.object(network_share_manager.subprocess, "run", side_effect=mount_with_source_absolute_symlink), \
+                    mock.patch.object(
+                        network_share_manager,
+                        "_fetch_peer_summary",
+                        return_value={"systems": ["snes"], "system_counts": {"snes": 10}},
+                    ):
+                record = network_share_manager.enable(settings, "peer-1")
+
+            self.assertEqual(record["status"], "error")
+            self.assertIn("not real directories", record["status_detail"])
+            self.assertFalse(local_snes.is_symlink())
+            self.assertEqual((local_snes / "local.zip").read_text(), "local")
+            self.assertFalse((settings.roms_root / "snes.old").exists())
+            self.assertEqual(record["systems"], [])
+
+    def test_mounted_system_inventory_rejects_source_side_symlinks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            mount_point = Path(tmp) / "mount"
+            (mount_point / "roms" / "gba").mkdir(parents=True)
+            (mount_point / "roms" / "snes").symlink_to(
+                "/media/roms_retro/ROMs/Super Nintendo Entertainment System",
+                target_is_directory=True,
+            )
+
+            self.assertEqual(network_share_manager._mounted_peer_system_names(mount_point), ["gba"])
+
+    def test_incomplete_active_nfs_export_restores_the_prior_local_folder(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._settings_with_peer(tmp)
+            mount_point = network_share_manager.peer_mount_point(settings, "peer-1")
+            (mount_point / "roms").mkdir(parents=True)
+            (mount_point / "bios").mkdir()
+            (mount_point / "roms" / "snes").symlink_to(
+                "/media/roms_retro/ROMs/Super Nintendo Entertainment System",
+                target_is_directory=True,
+            )
+            old_snes = settings.roms_root / "snes.old"
+            old_snes.mkdir()
+            (old_snes / "local.zip").write_text("local")
+            local_snes = settings.roms_root / "snes"
+            local_snes.symlink_to(mount_point / "roms" / "snes", target_is_directory=True)
+            network_share_manager._save_state(settings, {"schema_version": 3, "peers": {}})
+            network_share_manager._upsert_peer_record(
+                settings,
+                "peer-1",
+                peer_name="batocera",
+                enabled=True,
+                status="mounted",
+                mount_point=str(mount_point),
+                mounted_address="192.168.0.206",
+                protocol="nfs",
+                nfs_version="4.2",
+                export_path="/",
+                systems=[
+                    {
+                        "system": "snes",
+                        "had_local_collision": True,
+                        "renamed_to": "snes.old",
+                        "symlink_created": True,
+                        "skipped_reason": "",
+                    }
+                ],
+                bios=[],
+            )
+
+            with mock.patch.object(network_share_manager, "_is_mounted", return_value=True), \
+                    mock.patch.object(network_share_manager, "_unmount") as unmount, \
+                    mock.patch.object(network_share_manager, "_revoke_nfs_export") as revoke, \
+                    mock.patch.object(
+                        network_share_manager,
+                        "_fetch_peer_summary",
+                        return_value={"systems": ["snes"], "system_counts": {"snes": 10}},
+                    ):
+                record = network_share_manager.enable(settings, "peer-1")
+
+            self.assertEqual(record["status"], "error")
+            self.assertFalse(local_snes.is_symlink())
+            self.assertEqual((local_snes / "local.zip").read_text(), "local")
+            self.assertFalse(old_snes.exists())
+            unmount.assert_called_once_with(mount_point, detach_immediately=True)
+            revoke.assert_called_once()
 
     def test_existing_active_smb_mount_is_not_hot_switched_to_nfs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
