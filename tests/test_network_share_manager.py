@@ -1,5 +1,5 @@
-"""Network Share admin feature: mount a paired peer's whole Batocera Samba
-share (roms/ and bios/ both under it) and reconcile each into roms_root/
+"""Network Share admin feature: mount a paired peer's ROM/BIOS library over
+NFSv4 (or SMB fallback) and reconcile each into roms_root/
 bios_root as symlinks -- renaming locally colliding ROM system folders aside
 while always preserving existing local BIOS files.
 """
@@ -38,12 +38,20 @@ def _build_settings(test_case: unittest.TestCase, root: Path) -> Settings:
 
 
 _PEER = {"drone_id": "peer-1", "name": "batocera", "tailnet_ip": "100.121.183.109"}
+_CAPABILITY_FOR_CLIENT = {
+    "available": True,
+    "protocol": "nfs",
+    "versions": ["4.2", "4.1", "4"],
+    "preferred_version": "4.2",
+    "port": 2049,
+    "detail": "",
+}
 
 
 def _mount_that_populates(mount_point: Path, roms: dict = None, bios: dict = None):
     """Return a fake subprocess.run side effect that, on the `mount` call,
     actually creates the mount_point dir with the given layout -- standing in
-    for a real CIFS mount of the whole share (roms/ and bios/ both under it)
+    for a real network mount of the whole share (roms/ and bios/ both under it)
     for test purposes.
 
     ``roms`` is ``{system: [filenames]}``. ``bios`` is ``{relative_path:
@@ -151,6 +159,76 @@ class MountTargetTests(unittest.TestCase):
             self.assertEqual(result, {"status": "mounted", "address": "100.121.183.109"})
             self.assertIn("//100.121.183.109/share", run.call_args.args[0])
 
+    def test_nfs_mount_is_read_only_bounded_and_uses_negotiated_version(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            contract = {"versions": ["4.2", "4.1"], "preferred_version": "4.1", "export_path": "/"}
+            with mock.patch.object(network_share_manager, "_tcp_port_open", return_value=True), \
+                    mock.patch.object(
+                        network_share_manager.subprocess,
+                        "run",
+                        return_value=mock.Mock(returncode=0, stdout="", stderr=""),
+                    ) as run:
+                result = network_share_manager._mount_nfs("100.121.183.109", Path(tmp) / "mnt", contract)
+
+            self.assertEqual(result["protocol"], "nfs")
+            self.assertEqual(result["nfs_version"], "4.1")
+            args = run.call_args.args[0]
+            self.assertEqual(args[:3], ["mount", "-t", "nfs"])
+            self.assertIn("100.121.183.109:/", args)
+            options = args[args.index("-o") + 1].split(",")
+            self.assertIn("ro", options)
+            self.assertIn("soft", options)
+            self.assertIn("vers=4.1", options)
+            self.assertIn(f"timeo={network_share_manager.NETWORK_SHARE_NFS_TIMEOUT_TENTHS}", options)
+            self.assertIn(f"actimeo={network_share_manager.NETWORK_SHARE_ATTRIBUTE_CACHE_SECONDS}", options)
+
+
+class TransportSelectionTests(unittest.TestCase):
+    def test_auto_prefers_a_negotiated_nfs_mount(self) -> None:
+        target = {"peer_id": "peer-1", "addresses": ["192.168.0.206"], "peer": {"certificate_path": "/cert"}}
+        contract = {**_CAPABILITY_FOR_CLIENT, "export_path": "/"}
+        with mock.patch.object(network_share_manager, "_negotiate_nfs", return_value=contract), \
+                mock.patch.object(
+                    network_share_manager,
+                    "_mount_nfs",
+                    return_value={"status": "mounted", "address": "192.168.0.206", "protocol": "nfs"},
+                ) as mount_nfs, mock.patch.object(network_share_manager, "_mount") as mount_smb:
+            result = network_share_manager._mount_preferred_transport(mock.Mock(), target, Path("/mnt/peer"))
+
+        self.assertEqual(result["protocol"], "nfs")
+        mount_nfs.assert_called_once()
+        mount_smb.assert_not_called()
+
+    def test_auto_falls_back_to_smb_and_keeps_the_reason(self) -> None:
+        target = {"peer_id": "peer-1", "addresses": ["192.168.0.206"], "peer": {"certificate_path": "/cert"}}
+        with mock.patch.object(
+            network_share_manager,
+            "_negotiate_nfs",
+            return_value={"available": False, "detail": "NFS server unavailable"},
+        ), mock.patch.object(
+            network_share_manager,
+            "_mount",
+            return_value={"status": "mounted", "address": "192.168.0.206"},
+        ) as mount_smb:
+            result = network_share_manager._mount_preferred_transport(mock.Mock(), target, Path("/mnt/peer"))
+
+        self.assertEqual(result["protocol"], "smb")
+        self.assertEqual(result["transport_fallback_detail"], "NFS server unavailable")
+        mount_smb.assert_called_once()
+
+    def test_nfs_only_mode_never_attempts_smb(self) -> None:
+        target = {"peer_id": "peer-1", "addresses": ["192.168.0.206"], "peer": {"certificate_path": "/cert"}}
+        with mock.patch.dict("os.environ", {"DRONE_NETWORK_SHARE_PROTOCOL": "nfs"}), \
+                mock.patch.object(
+                    network_share_manager,
+                    "_negotiate_nfs",
+                    return_value={"available": False, "detail": "NFS server unavailable"},
+                ), mock.patch.object(network_share_manager, "_mount") as mount_smb:
+            result = network_share_manager._mount_preferred_transport(mock.Mock(), target, Path("/mnt/peer"))
+
+        self.assertEqual(result, {"status": "error", "detail": "NFS server unavailable", "protocol": "nfs"})
+        mount_smb.assert_not_called()
+
 
 class EnableTests(unittest.TestCase):
     def _settings_with_peer(self, tmp: str) -> Settings:
@@ -174,6 +252,34 @@ class EnableTests(unittest.TestCase):
             self.assertFalse((settings.roms_root / "snes.old").exists())
             self.assertTrue((settings.bios_root / "scph5501.bin").is_file())
             self.assertFalse((settings.bios_root / "scph5501.bin.old").exists())
+
+    def test_existing_active_smb_mount_is_not_hot_switched_to_nfs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._settings_with_peer(tmp)
+            mount_point = network_share_manager.peer_mount_point(settings, "peer-1")
+            (mount_point / "roms").mkdir(parents=True)
+            (mount_point / "bios").mkdir()
+            network_share_manager._save_state(settings, {"schema_version": 3, "peers": {}})
+            network_share_manager._upsert_peer_record(
+                settings,
+                "peer-1",
+                peer_name="batocera",
+                enabled=True,
+                status="mounted",
+                mount_point=str(mount_point),
+                mounted_address="192.168.0.206",
+                protocol="smb",
+            )
+            with mock.patch.object(network_share_manager, "_is_mounted", return_value=True), \
+                    mock.patch.object(network_share_manager, "_mount_preferred_transport") as select_transport, \
+                    mock.patch.object(network_share_manager, "_fetch_peer_summary", return_value={"systems": []}), \
+                    mock.patch.object(network_share_manager, "_fetch_peer_bios_paths", return_value=[]):
+                record = network_share_manager.enable(settings, "peer-1")
+
+            select_transport.assert_not_called()
+            self.assertEqual(record["status"], "mounted")
+            self.assertEqual(record["protocol"], "smb")
+            self.assertEqual(record["mounted_address"], "192.168.0.206")
 
     def test_dead_remount_restores_local_folder_instead_of_leaving_dangling_link(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -534,6 +640,32 @@ class DisableTests(unittest.TestCase):
             result = network_share_manager.disable(settings, "never-enabled")
             self.assertEqual(result["status"], "not_found")
 
+    def test_disabling_nfs_mount_revokes_source_authorization_after_local_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            mount_point = network_share_manager.peer_mount_point(settings, "peer-1")
+            network_share_manager._save_state(settings, {"schema_version": 3, "peers": {}})
+            network_share_manager._upsert_peer_record(
+                settings,
+                "peer-1",
+                enabled=True,
+                status="mounted",
+                mount_point=str(mount_point),
+                protocol="nfs",
+                systems=[],
+                bios=[],
+            )
+            target = {"peer_id": "peer-1", "addresses": ["100.121.183.109"], "peer": _PEER}
+            with mock.patch.object(network_share_manager, "_restore_local_fallback", return_value=[]), \
+                    mock.patch.object(network_share_manager, "_unmount"), \
+                    mock.patch.object(network_share_manager, "resolve_peer_target", return_value=target), \
+                    mock.patch.object(network_share_manager, "_revoke_nfs_export") as revoke:
+                result = network_share_manager.disable(settings, "peer-1")
+
+            self.assertEqual(result["status"], "disabled")
+            revoke.assert_called_once_with(settings, target)
+            self.assertIsNone(network_share_manager.get_share(settings, "peer-1"))
+
     def test_disable_restores_renamed_bios_file_and_removes_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = self._enabled_share(tmp, with_rom_collision=False, with_bios_collision=True)
@@ -714,7 +846,40 @@ class MigrationAndOfflineRecoveryTests(unittest.TestCase):
             self.assertFalse(link.is_symlink())
             self.assertEqual((link / "local.zip").read_text(), "local")
             self.assertFalse(original.exists())
-            self.assertEqual(network_share_manager._load_state(settings)["schema_version"], 2)
+            self.assertEqual(network_share_manager._load_state(settings)["schema_version"], 3)
+
+    def test_v2_transport_migration_does_not_unmount_or_rewrite_links(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            mount_point = network_share_manager.peer_mount_point(settings, "peer-1")
+            local_link = settings.roms_root / "snes"
+            local_link.symlink_to(mount_point / "roms" / "snes", target_is_directory=True)
+            network_share_manager._save_state(
+                settings,
+                {
+                    "schema_version": 2,
+                    "peers": {
+                        "peer-1": {
+                            "peer_id": "peer-1",
+                            "mount_point": str(mount_point),
+                            "enabled": True,
+                            "status": "mounted",
+                        }
+                    },
+                },
+            )
+
+            with mock.patch.object(network_share_manager, "_unmount") as unmount, \
+                    mock.patch.object(network_share_manager, "_recover_owned_orphaned_references") as recover:
+                result = network_share_manager.migrate_legacy_state(settings)
+
+            self.assertTrue(result["migrated"])
+            unmount.assert_not_called()
+            recover.assert_not_called()
+            self.assertTrue(local_link.is_symlink())
+            state = network_share_manager._load_state(settings)
+            self.assertEqual(state["schema_version"], 3)
+            self.assertEqual(state["peers"]["peer-1"]["protocol"], "smb")
 
     def test_disable_keeps_state_when_cleanup_is_not_safe(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -1,8 +1,10 @@
-"""Reference a paired peer's whole ROM library and BIOS folder over SMB/CIFS
-instead of copying them: mount the peer's Batocera Samba share
-(``//<peer tailnet ip>/share``, Batocera's own stock export -- nothing on the
-peer side is set up by Drone) once, then reconcile both ``roms/`` and
-``bios/`` under it into this Drone's own ``roms_root``/``bios_root``.
+"""Reference a paired peer's whole ROM library and BIOS folder over the network.
+
+New mounts negotiate a private, read-only NFSv4 export through the paired mTLS
+API and prefer it over both LAN and Tailscale. Older peers and NFS failures
+fall back to Batocera's stock ``//<peer>/share`` SMB export. Both transports
+present the same ``roms/`` + ``bios/`` layout at the same local mount point,
+so reconciliation and recovery remain transport-independent.
 
 **ROMs** are reconciled directory-by-directory (one system = one directory):
 either symlink a system straight in (no local games for it yet), or, if a
@@ -19,7 +21,7 @@ ROMs). It is also the standard upstream
 Batocera/EmulationStation trick for "keep on disk, don't show" -- reusing them
 lets Batocera's native EmulationStation discover the remote system links. The
 Drone metadata scanner deliberately excludes those links so routine scans and
-peer-health summaries never walk a latency-sensitive SMB tree.
+peer-health summaries never walk a latency-sensitive network filesystem.
 
 Every rename this module performs is recorded (which peer, which system/file,
 the exact original name) so disabling a reference can precisely reverse only
@@ -32,8 +34,7 @@ no privilege-escalation dance. State lives in the same small JSON-blob-in-
 SQLite pattern (``storage/state_store.py``) VPN uses for its own config,
 rather than a new dedicated table -- this is feature configuration for a
 handful of peers, not a large scannable inventory like ROMs/saves. Mounts are
-guest/anonymous only (matches Batocera's default open Samba config on a
-private tailnet) and read-only + ``soft`` (bounded failure instead of hanging
+read-only + ``soft`` (bounded failure instead of hanging
 Drone's own ROM-scanning poller thread if the source peer goes dark
 mid-session -- see the module docstring note in ``roms/rom_scanner.py`` for
 why an unbounded hang there would be worse than one peer's share going stale).
@@ -46,6 +47,7 @@ from __future__ import annotations
 
 import os
 import socket
+import ssl
 import subprocess
 import sys
 import threading
@@ -53,6 +55,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import List, Optional
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 
 try:
@@ -65,7 +68,7 @@ try:
     from ..storage.state_store import load_payload as _load_state_payload
     from ..storage.state_store import save_payload as _save_state_payload
     from ..transfer import local_network as _local_network
-    from ..transfer.peer_connectivity import _peer_get_json_for_peer
+    from ..transfer.peer_connectivity import _peer_get_json_for_peer, _peer_post_json_for_peer
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.install_paths import drone_install_root as _drone_install_root  # type: ignore
     from common.network_references import is_network_reference as _is_network_reference  # type: ignore
@@ -76,23 +79,29 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from storage.state_store import load_payload as _load_state_payload  # type: ignore
     from storage.state_store import save_payload as _save_state_payload  # type: ignore
     from transfer import local_network as _local_network  # type: ignore
-    from transfer.peer_connectivity import _peer_get_json_for_peer  # type: ignore
+    from transfer.peer_connectivity import _peer_get_json_for_peer, _peer_post_json_for_peer  # type: ignore
 
 NETWORK_SHARE_STATE_NAMESPACE = "network_share_manager.json"
 NETWORK_SHARE_STATUSES = ("mounted", "peer_unreachable", "error", "pending", "enabling", "detaching")
 NETWORK_SHARE_OLD_SUFFIX = ".old"
-NETWORK_SHARE_STATE_SCHEMA_VERSION = 2
+NETWORK_SHARE_LAYOUT_SCHEMA_VERSION = 2
+NETWORK_SHARE_STATE_SCHEMA_VERSION = 3
 
 NETWORK_SHARE_MOUNT_TIMEOUT_SECONDS = float(os.environ.get("DRONE_NETWORK_SHARE_MOUNT_TIMEOUT_SECONDS", "20"))
 NETWORK_SHARE_UMOUNT_TIMEOUT_SECONDS = float(os.environ.get("DRONE_NETWORK_SHARE_UMOUNT_TIMEOUT_SECONDS", "10"))
 # How often the watchdog re-probes every enabled share. Deliberately simpler
 # than VPN's rate-limited self-heal (no attempts-per-window backoff): a failed
-# CIFS mount attempt is cheap and already bounded by the `soft` mount option,
+# network-filesystem mount attempt is cheap and bounded by subprocess timeouts
+# plus the transport's `soft` mount option,
 # unlike VPN's remote-provider reconnect which can be a slow/costly handshake.
 NETWORK_SHARE_WATCHDOG_INTERVAL_SECONDS = float(os.environ.get("DRONE_NETWORK_SHARE_WATCHDOG_INTERVAL_SECONDS", "60"))
 NETWORK_SHARE_ATTRIBUTE_CACHE_SECONDS = max(1, int(os.environ.get("DRONE_NETWORK_SHARE_ACTIMEO_SECONDS", "30")))
 NETWORK_SHARE_PEER_SUMMARY_TIMEOUT_SECONDS = float(os.environ.get("DRONE_NETWORK_SHARE_PEER_SUMMARY_TIMEOUT_SECONDS", "6"))
 NETWORK_SHARE_PEER_BIOS_INVENTORY_TIMEOUT_SECONDS = float(os.environ.get("DRONE_NETWORK_SHARE_PEER_BIOS_INVENTORY_TIMEOUT_SECONDS", "15"))
+NETWORK_SHARE_NFS_NEGOTIATION_TIMEOUT_SECONDS = float(os.environ.get("DRONE_NETWORK_SHARE_NFS_NEGOTIATION_TIMEOUT_SECONDS", "8"))
+NETWORK_SHARE_NFS_PORT = 2049
+NETWORK_SHARE_NFS_TIMEOUT_TENTHS = max(1, int(os.environ.get("DRONE_NETWORK_SHARE_NFS_TIMEO_TENTHS", "50")))
+NETWORK_SHARE_NFS_RETRANS = max(1, int(os.environ.get("DRONE_NETWORK_SHARE_NFS_RETRANS", "2")))
 
 _STATE_MIGRATION_LOCK = threading.Lock()
 _STATE_LOCK = threading.RLock()
@@ -198,6 +207,8 @@ def _upsert_peer_record(settings: Settings, peer_id: str, **updates) -> dict:
             "peer_id": peer_id, "peer_name": "", "tailnet_ip": "", "mount_point": "",
             "enabled": True, "status": "pending", "status_detail": "",
             "systems": [], "bios": [], "bios_status": "pending",
+            "protocol": "", "nfs_version": "", "export_path": "",
+            "transport_fallback_detail": "",
             "created_at": _now_iso(), "last_checked_at": None,
         }
         record.update(updates)
@@ -226,7 +237,7 @@ def get_share(settings: Settings, peer_id: str) -> Optional[dict]:
 
 
 def resolve_peer_target(settings: Settings, peer_id: str) -> dict:
-    """Resolve trusted LAN-first SMB candidates for a paired peer.
+    """Resolve trusted LAN-first mount candidates for a paired peer.
 
     The peer record, not the browser payload, remains the sole source of every
     address.  A same-LAN address avoids routing thousands of filesystem
@@ -295,13 +306,17 @@ def _is_mounted(mount_point: Path) -> bool:
         return False
 
 
-def _smb_port_open(address: str, timeout: float = 1.0) -> bool:
-    """Cheaply reject an unreachable candidate before invoking mount.cifs."""
+def _tcp_port_open(address: str, port: int, timeout: float = 1.0) -> bool:
     try:
-        with socket.create_connection((address, 445), timeout=max(0.1, timeout)):
+        with socket.create_connection((address, int(port)), timeout=max(0.1, timeout)):
             return True
     except OSError:
         return False
+
+
+def _smb_port_open(address: str, timeout: float = 1.0) -> bool:
+    """Cheaply reject an unreachable candidate before invoking mount.cifs."""
+    return _tcp_port_open(address, 445, timeout)
 
 
 def _mount(addresses, mount_point: Path) -> dict:
@@ -344,6 +359,135 @@ def _mount(addresses, mount_point: Path) -> dict:
     return {"status": "error", "detail": "; ".join(errors) or "SMB mount failed"}
 
 
+def _mount_nfs(addresses, mount_point: Path, contract: dict) -> dict:
+    """Mount a negotiated NFSv4 pseudo-root over LAN, then Tailscale."""
+    mount_point.mkdir(parents=True, exist_ok=True)
+    if _is_mounted(mount_point):
+        return {"status": "mounted", "address": "", "protocol": "nfs"}
+    candidates = [str(addresses)] if isinstance(addresses, str) else [str(value) for value in addresses or []]
+    candidates = list(dict.fromkeys(value.strip() for value in candidates if value.strip()))
+    if not candidates:
+        return {"status": "error", "detail": "peer has no NFS address", "protocol": "nfs"}
+    versions = contract.get("versions") if isinstance(contract.get("versions"), list) else []
+    version = str(contract.get("preferred_version") or (versions[0] if versions else "4.2"))
+    if version not in {"4", "4.1", "4.2"}:
+        version = "4.2"
+    export_path = str(contract.get("export_path") or "/").strip()
+    if not export_path.startswith("/") or ".." in PurePosixPath(export_path).parts:
+        return {"status": "error", "detail": "peer returned an invalid NFS export path", "protocol": "nfs"}
+    errors = []
+    per_candidate_timeout = max(3.0, NETWORK_SHARE_MOUNT_TIMEOUT_SECONDS / max(1, len(candidates)))
+    options = (
+        f"ro,soft,timeo={NETWORK_SHARE_NFS_TIMEOUT_TENTHS},retrans={NETWORK_SHARE_NFS_RETRANS},"
+        f"proto=tcp,port={NETWORK_SHARE_NFS_PORT},vers={version},noatime,"
+        f"actimeo={NETWORK_SHARE_ATTRIBUTE_CACHE_SECONDS}"
+    )
+    for address in candidates:
+        if not _tcp_port_open(address, NETWORK_SHARE_NFS_PORT):
+            errors.append(f"{address}: NFS port unreachable")
+            continue
+        host = f"[{address}]" if ":" in address and not address.startswith("[") else address
+        try:
+            result = subprocess.run(
+                ["mount", "-t", "nfs", f"{host}:{export_path}", str(mount_point), "-o", options],
+                capture_output=True,
+                text=True,
+                timeout=per_candidate_timeout,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            errors.append(f"{address}: failed to run NFS mount: {error}")
+            continue
+        if result.returncode == 0:
+            return {
+                "status": "mounted",
+                "address": address,
+                "protocol": "nfs",
+                "nfs_version": version,
+                "export_path": export_path,
+            }
+        detail = (result.stderr or result.stdout or "").strip().splitlines()
+        errors.append(f"{address}: {detail[-1] if detail else f'NFS mount exited with status {result.returncode}'}")
+    return {"status": "error", "detail": "; ".join(errors) or "NFS mount failed", "protocol": "nfs"}
+
+
+def _network_share_protocol_preference() -> str:
+    preference = str(os.environ.get("DRONE_NETWORK_SHARE_PROTOCOL") or "auto").strip().lower()
+    return preference if preference in {"auto", "nfs", "smb"} else "auto"
+
+
+def _negotiate_nfs(settings: Settings, target: dict) -> dict:
+    peer = target.get("peer") if isinstance(target.get("peer"), dict) else None
+    peer_id = str(target.get("peer_id") or "").strip()
+    if not peer or not str(peer.get("certificate_path") or "").strip():
+        return {"available": False, "detail": "peer does not advertise the paired NFS capability API"}
+    started = time.monotonic()
+    try:
+        payload, api_address = _peer_post_json_for_peer(
+            peer,
+            "/v1/api/peer/network-share/nfs/authorize",
+            {"protocol_version": 1},
+            settings,
+            peer_id=peer_id,
+            timeout=NETWORK_SHARE_NFS_NEGOTIATION_TIMEOUT_SECONDS,
+            overall_deadline=started + NETWORK_SHARE_NFS_NEGOTIATION_TIMEOUT_SECONDS,
+        )
+    except HTTPError as error:
+        return {"available": False, "detail": f"peer NFS authorization returned HTTP {error.code}"}
+    except (OSError, URLError, ssl.SSLError, ValueError) as error:
+        return {"available": False, "detail": f"peer NFS authorization failed: {error}"}
+    if payload.get("available") is not True or str(payload.get("protocol") or "") != "nfs":
+        return {"available": False, "detail": str(payload.get("detail") or payload.get("error") or "peer NFS is unavailable")}
+    return {**payload, "api_address": api_address}
+
+
+def _revoke_nfs_export(settings: Settings, target: dict) -> None:
+    peer = target.get("peer") if isinstance(target.get("peer"), dict) else None
+    peer_id = str(target.get("peer_id") or "").strip()
+    if not peer or not peer_id or not str(peer.get("certificate_path") or "").strip():
+        return
+    try:
+        _peer_post_json_for_peer(
+            peer,
+            "/v1/api/peer/network-share/nfs/revoke",
+            {"protocol_version": 1},
+            settings,
+            peer_id=peer_id,
+            timeout=NETWORK_SHARE_NFS_NEGOTIATION_TIMEOUT_SECONDS,
+            overall_deadline=time.monotonic() + NETWORK_SHARE_NFS_NEGOTIATION_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        # The source persists exact-peer authorization and removes it when the
+        # peer is forgotten. A local detach must never fail because the source
+        # is currently offline; a future authorization refresh replaces it.
+        return
+
+
+def _mount_preferred_transport(settings: Settings, target: dict, mount_point: Path) -> dict:
+    preference = _network_share_protocol_preference()
+    nfs_detail = ""
+    if preference != "smb":
+        contract = _negotiate_nfs(settings, target)
+        if contract.get("available") is True:
+            nfs_result = _mount_nfs(target.get("addresses") or [], mount_point, contract)
+            if nfs_result.get("status") == "mounted":
+                return nfs_result
+            nfs_detail = str(nfs_result.get("detail") or "NFS mount failed")
+            _unmount(mount_point, detach_immediately=True)
+            _revoke_nfs_export(settings, target)
+        else:
+            nfs_detail = str(contract.get("detail") or "NFS unavailable")
+        if preference == "nfs":
+            return {"status": "error", "detail": nfs_detail, "protocol": "nfs"}
+
+    smb_result = _mount(target.get("addresses") or [], mount_point)
+    smb_result["protocol"] = "smb"
+    if nfs_detail:
+        smb_result["transport_fallback_detail"] = nfs_detail
+        if smb_result.get("status") != "mounted":
+            smb_result["detail"] = f"NFS: {nfs_detail}; SMB: {smb_result.get('detail') or 'mount failed'}"
+    return smb_result
+
+
 def _unmount(mount_point: Path, *, detach_immediately: bool = False) -> None:
     if not _is_mounted(mount_point):
         return
@@ -381,7 +525,7 @@ def _apply_system_references(
         peer_systems = sorted({str(name).strip() for name in peer_system_names if _should_include_entry(name)}, key=str.lower)
     else:
         try:
-            # scandir receives the directory-entry type from Samba's readdir
+            # scandir receives the directory-entry type from the server's readdir
             # response on normal servers, avoiding a separate Path.stat round
             # trip for every system on a high-latency connection.
             with os.scandir(peer_roms_dir) as entries:
@@ -405,7 +549,7 @@ def _apply_system_references(
 
         # Recover an interrupted first enable whose symlink was created after
         # the local folder was renamed but before the completed manifest was
-        # committed.  Both checks are lexical/local; neither follows SMB.
+        # committed. Both checks are lexical/local; neither follows the mount.
         if _symlink_points_to(local_path, target):
             renamed_to = old_path.name if old_path.exists() else ""
             results.append({"system": system, "had_local_collision": bool(renamed_to), "renamed_to": renamed_to, "symlink_created": True, "skipped_reason": ""})
@@ -500,7 +644,7 @@ def _list_peer_bios_relative_paths(mount_point: Path, inventory_paths: Optional[
     """Return a validated lexical BIOS inventory.
 
     A paired peer normally supplies this from its local SQLite cache in the
-    inventory summary, avoiding all SMB metadata traffic.  SMB walking remains
+    inventory summary, avoiding network-filesystem metadata traffic. Walking remains
     a background-only fallback for a peer whose cache/certificate is not ready.
     """
     if inventory_paths is not None:
@@ -689,38 +833,52 @@ def _recover_owned_orphaned_references(settings: Settings, owned_root: Optional[
 
 
 def migrate_legacy_state(settings: Settings) -> dict:
-    """One-time offline-safe migration from the original mount layout.
+    """Offline-safe migrations for mount layout and transport metadata.
 
     v0.1.129 mounted ``.../share/roms`` at the peer root; v0.1.131 mounted the
     whole share and expects a ``roms/`` child.  Reusing the old mount/links
     made every reference dangle.  Restore local content first, unmount the old
     layout, retain enabled peer records, and let boot replay build fresh links.
+
+    Schema v3 only adds the transport identity. Existing v2 mounts are known
+    SMB mounts and are deliberately left active; switching a live filesystem
+    underneath a running emulator would be less safe than migrating on its
+    next controlled remount.
     """
     with _STATE_MIGRATION_LOCK:
         state = _load_state(settings)
-        if int(state.get("schema_version") or 1) >= NETWORK_SHARE_STATE_SCHEMA_VERSION:
+        schema_version = int(state.get("schema_version") or 1)
+        if schema_version >= NETWORK_SHARE_STATE_SCHEMA_VERSION:
             return {"migrated": False, "errors": []}
-        errors = _recover_owned_orphaned_references(settings)
-        for peer_id, share in state["peers"].items():
-            mount_point = Path(str(share.get("mount_point") or peer_mount_point(settings, peer_id)))
-            _unmount(mount_point)
-            share.update(
-                {
-                    "systems": [],
-                    "bios": [],
-                    "bios_local_count": 0,
-                    "bios_remote_count": 0,
-                    "status": "pending" if share.get("enabled", True) else share.get("status", "pending"),
-                    "status_detail": "Network reference layout upgraded; reconnect pending" if share.get("enabled", True) else "",
-                    "updated_at": _now_iso(),
-                }
-            )
+        errors: List[str] = []
+        if schema_version < NETWORK_SHARE_LAYOUT_SCHEMA_VERSION:
+            errors = _recover_owned_orphaned_references(settings)
+            for peer_id, share in state["peers"].items():
+                mount_point = Path(str(share.get("mount_point") or peer_mount_point(settings, peer_id)))
+                _unmount(mount_point)
+                share.update(
+                    {
+                        "systems": [],
+                        "bios": [],
+                        "bios_local_count": 0,
+                        "bios_remote_count": 0,
+                        "status": "pending" if share.get("enabled", True) else share.get("status", "pending"),
+                        "status_detail": "Network reference layout upgraded; reconnect pending" if share.get("enabled", True) else "",
+                        "updated_at": _now_iso(),
+                    }
+                )
         if not errors:
+            for share in state["peers"].values():
+                if isinstance(share, dict):
+                    share.setdefault("protocol", "smb")
+                    share.setdefault("nfs_version", "")
+                    share.setdefault("export_path", "")
+                    share["updated_at"] = _now_iso()
             state["schema_version"] = NETWORK_SHARE_STATE_SCHEMA_VERSION
         _save_state(settings, state)
         if errors:
             print(f"Network share migration completed with {len(errors)} cleanup error(s): {errors[0]}", file=sys.stderr, flush=True)
-        else:
+        elif schema_version < NETWORK_SHARE_LAYOUT_SCHEMA_VERSION:
             print("Network share layout migration completed", file=sys.stdout, flush=True)
         return {"migrated": True, "errors": errors}
 
@@ -934,10 +1092,20 @@ def _enable_locked(settings: Settings, peer_id: str) -> dict:
         systems=existing_systems,
         bios=existing_bios,
         bios_status="pending",
+        protocol=str((prior or {}).get("protocol") or ""),
         last_checked_at=_now_iso(),
     )
 
-    mount_result = _mount(target["addresses"], mount_point)
+    if mount_was_active:
+        mount_result = {
+            "status": "mounted",
+            "address": str((prior or {}).get("mounted_address") or ""),
+            "protocol": str((prior or {}).get("protocol") or "smb"),
+            "nfs_version": str((prior or {}).get("nfs_version") or ""),
+            "export_path": str((prior or {}).get("export_path") or ""),
+        }
+    else:
+        mount_result = _mount_preferred_transport(settings, target, mount_point)
     if mount_result["status"] != "mounted":
         interrupted = {"systems": existing_systems, "bios": existing_bios}
         recovery_errors = _restore_local_fallback(settings, mount_point, interrupted)
@@ -950,6 +1118,8 @@ def _enable_locked(settings: Settings, peer_id: str) -> dict:
             systems=[] if cleanup_safe else existing_systems,
             bios=[] if cleanup_safe else existing_bios,
             bios_status="pending" if cleanup_safe else "error",
+            protocol=str(mount_result.get("protocol") or (prior or {}).get("protocol") or ""),
+            transport_fallback_detail=str(mount_result.get("transport_fallback_detail") or ""),
             last_checked_at=_now_iso(),
         )
         result = dict(record)
@@ -969,6 +1139,10 @@ def _enable_locked(settings: Settings, peer_id: str) -> dict:
     record_updates = dict(
         peer_name=target["peer_name"], tailnet_ip=target["tailnet_ip"],
         mount_point=str(mount_point), mounted_address=str(mount_result.get("address") or (prior or {}).get("mounted_address") or ""),
+        protocol=str(mount_result.get("protocol") or (prior or {}).get("protocol") or "smb"),
+        nfs_version=str(mount_result.get("nfs_version") or ""),
+        export_path=str(mount_result.get("export_path") or ""),
+        transport_fallback_detail=str(mount_result.get("transport_fallback_detail") or ""),
         enabled=True, status="mounted", status_detail="", systems=systems, bios=existing_bios,
         bios_status="pending", bios_status_detail="BIOS reconciliation queued",
         remote_system_counts=remote_system_counts,
@@ -1035,6 +1209,14 @@ def disable(settings: Settings, peer_id: str) -> dict:
                 status_detail=f"Could not safely remove every reference: {errors[0]}",
                 last_checked_at=_now_iso(),
             )
+        if str(record.get("protocol") or "") == "nfs":
+            try:
+                _revoke_nfs_export(settings, resolve_peer_target(settings, peer_id))
+            except Exception:
+                # Local recovery is authoritative. The source restricts the
+                # lingering read-only export to this still-paired Drone and
+                # revokes it when the peer is forgotten or reauthorized.
+                pass
         _delete_peer_record(settings, peer_id)
         return {"status": "disabled", "peer_id": peer_id}
 

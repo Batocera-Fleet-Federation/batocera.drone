@@ -726,6 +726,14 @@ except ImportError:
 
 
 try:
+    from .device import nfs_export_manager as _nfs_export_manager
+except ImportError:
+    if __package__ not in (None, ""):
+        raise
+    from device import nfs_export_manager as _nfs_export_manager  # type: ignore
+
+
+try:
     from .device import smtp_manager as _smtp_manager
 except ImportError:
     if __package__ not in (None, ""):
@@ -910,6 +918,7 @@ _VPN_SHARING_POLLER_STARTED = False
 _VPN_SELF_HEAL_POLLER_STARTED = False
 _NETWORK_SHARE_BOOT_REPLAY_ATTEMPTED = False
 _NETWORK_SHARE_WATCHDOG_STARTED = False
+_NFS_EXPORT_BOOT_REPLAY_ATTEMPTED = False
 _SMTP_BOOTSTRAP_ATTEMPTED = False
 _SMTP_SHARING_POLLER_STARTED = False
 _AUDIT_EMAIL_POLLER_STARTED = False
@@ -2350,7 +2359,7 @@ def _build_cast_http_handler(settings: Settings):
 
 
 def create_server(settings: Settings) -> ThreadingHTTPServer:
-    global _ROM_METADATA_POLLER_STARTED, _ROM_METADATA_WATCHER_STARTED, _LOCAL_NETWORK_WORKERS_STARTED, _GAME_PROCESS_MONITOR_STARTED, _GAME_PROCESS_MONITOR, _DOWNLOAD_MANAGER, _TORRENT_MANAGER, _AUTOMATION_POLLER_STARTED, _VPN_AUTO_CONNECT_ATTEMPTED, _VPN_SHARING_POLLER_STARTED, _VPN_SELF_HEAL_POLLER_STARTED, _SMTP_BOOTSTRAP_ATTEMPTED, _SMTP_SHARING_POLLER_STARTED, _AUDIT_EMAIL_POLLER_STARTED, _NETWORK_SHARE_BOOT_REPLAY_ATTEMPTED, _NETWORK_SHARE_WATCHDOG_STARTED
+    global _ROM_METADATA_POLLER_STARTED, _ROM_METADATA_WATCHER_STARTED, _LOCAL_NETWORK_WORKERS_STARTED, _GAME_PROCESS_MONITOR_STARTED, _GAME_PROCESS_MONITOR, _DOWNLOAD_MANAGER, _TORRENT_MANAGER, _AUTOMATION_POLLER_STARTED, _VPN_AUTO_CONNECT_ATTEMPTED, _VPN_SHARING_POLLER_STARTED, _VPN_SELF_HEAL_POLLER_STARTED, _SMTP_BOOTSTRAP_ATTEMPTED, _SMTP_SHARING_POLLER_STARTED, _AUDIT_EMAIL_POLLER_STARTED, _NETWORK_SHARE_BOOT_REPLAY_ATTEMPTED, _NETWORK_SHARE_WATCHDOG_STARTED, _NFS_EXPORT_BOOT_REPLAY_ATTEMPTED
     roms_root, bios_root = _real_data_roots(settings)
     repository = RomRepository(
         roms_root,
@@ -2407,10 +2416,16 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
         # anyone needing to notice and manually reconnect -- see
         # run_self_heal_poller's own docstring for the rate-limiting.
         Thread(target=_vpn_manager.run_self_heal_poller, args=(settings,), name="drone-vpn-self-heal", daemon=True).start()
+    if not _NFS_EXPORT_BOOT_REPLAY_ATTEMPTED:
+        _NFS_EXPORT_BOOT_REPLAY_ATTEMPTED = True
+        # Recreate source-side bind mounts and exact-peer exports after a
+        # service or machine restart. This is independent of client mount
+        # replay and never delays the HTTP listeners from becoming available.
+        Thread(target=_nfs_export_manager.restore_exports, args=(settings,), name="drone-nfs-export-boot-replay", daemon=True).start()
     if not _NETWORK_SHARE_BOOT_REPLAY_ATTEMPTED:
         _NETWORK_SHARE_BOOT_REPLAY_ATTEMPTED = True
         # Backgrounded for the same reason as VPN's auto-connect above: mounting
-        # a peer's CIFS share can block for real time and must never delay the
+        # a peer's network filesystem can block for real time and must never delay the
         # server accepting its first request.
         Thread(target=_network_share_manager.maybe_reconnect_all_on_boot, args=(settings,), name="drone-network-share-boot-replay", daemon=True).start()
     if not _NETWORK_SHARE_WATCHDOG_STARTED:

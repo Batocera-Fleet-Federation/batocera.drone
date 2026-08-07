@@ -45,6 +45,19 @@ stop_drone() {
   fi
 }
 
+cleanup_nfs_exports() {
+  helper="$WORK_DIR/app/device/nfs_export_manager.py"
+  if [ ! -f "$helper" ]; then
+    return 0
+  fi
+  echo "Removing Drone-owned NFS exports..."
+  if PYTHONPATH="$WORK_DIR" python3 -m app.device.nfs_export_manager cleanup; then
+    echo "✓ Removed Drone-owned NFS exports and bind mounts"
+  else
+    echo "Could not remove every Drone-owned NFS export; reboot Batocera before reusing the old export paths."
+  fi
+}
+
 remove_service_files() {
   removed=false
   for service_file in $SERVICE_FILES; do
@@ -199,6 +212,7 @@ remove_tailscale_mesh() {
 
 detect_install_method
 stop_drone
+cleanup_nfs_exports
 remove_service_files
 remove_legacy_custom_sh_block
 remove_tailscale_mesh

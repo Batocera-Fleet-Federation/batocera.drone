@@ -41,11 +41,11 @@ class RomSystemsSearchMixin:
         return system_dir
 
     def list_system_names(self, *, include_network_references: bool = True) -> List[str]:
-        """List ROM systems without statting Drone-managed SMB targets.
+        """List ROM systems without statting Drone-managed network targets.
 
         Network references are valid native Batocera systems, but their target
         type/liveness is owned by the network-share manager. Checking either
-        here turns a cheap directory listing into hundreds of SMB round trips.
+        here turns a cheap directory listing into hundreds of network round trips.
         """
         if not self.roms_root.exists():
             raise FileNotFoundError(str(self.roms_root))

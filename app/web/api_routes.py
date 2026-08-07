@@ -609,6 +609,15 @@ class ApiRoutesMixin:
                 self._handle_peer_pair(payload)
                 return
 
+            if len(parts) == 4 and parts[:3] == ["peer", "network-share", "nfs"]:
+                payload = self._read_json_body()
+                if parts[3] == "authorize":
+                    self._handle_peer_nfs_authorize(payload)
+                    return
+                if parts[3] == "revoke":
+                    self._handle_peer_nfs_revoke(payload)
+                    return
+
             # Public: must be reachable with no (or an already-invalid) session
             # cookie -- that's the whole point of a login endpoint.
             if api_path == "/auth/login":
