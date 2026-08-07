@@ -125,7 +125,7 @@ let swarmOverviewPromise = null;
 let tailnetDiscoveryCache = null;
 let tailnetDiscoveryCachedAt = 0;
 let tailnetDiscoveryPromise = null;
-// This Drone's own configured peer ROM references (SMB/CIFS network shares),
+// This Drone's own configured peer ROM references (NFS-preferred, SMB fallback),
 // keyed by peer_id -- populated by renderSwarmPage(), read by
 // renderSwarmDroneCard() so each peer's card can show whether it's currently
 // referenced and by the system-info pill in loadSystemInfoBar().
@@ -8381,13 +8381,15 @@ async function renderTransfersPage() {
 
 function _networkShareStatusBadge(share) {
   const status = share.status;
+  const transport = String(share.protocol || "").toUpperCase();
+  const transportSuffix = transport ? ` via ${transport}` : "";
   const style = status === "mounted"
     ? "background:rgba(52,211,153,0.15);color:#34d399;border-color:rgba(52,211,153,0.4)"
     : status === "peer_unreachable" || status === "error"
       ? "background:rgba(251,191,36,0.15);color:#fbbf24;border-color:rgba(251,191,36,0.4)"
       : "background:rgba(148,163,184,0.15);color:#94a3b8;border-color:rgba(148,163,184,0.4)";
   const label = status === "mounted"
-    ? (share.bios_status === "syncing" || share.bios_status === "pending" ? "Referencing (BIOS syncing)" : "Referencing")
+    ? (share.bios_status === "syncing" || share.bios_status === "pending" ? `Referencing${transportSuffix} (BIOS syncing)` : `Referencing${transportSuffix}`)
     : status === "detaching"
       ? "Detaching..."
       : status === "peer_unreachable"
@@ -8395,7 +8397,8 @@ function _networkShareStatusBadge(share) {
         : status === "error"
           ? (share.enabled === false ? "Detach needs retry" : "Referencing (error)")
           : "Referencing...";
-  return `<span class="badge" style="${style}" title="${escapeHtml(share.status_detail || "This Drone is referencing this peer's ROM library over SMB")}"><i class="bi bi-hdd-network me-1"></i>${escapeHtml(label)}</span>`;
+  const fallback = share.transport_fallback_detail ? ` NFS fallback reason: ${share.transport_fallback_detail}` : "";
+  return `<span class="badge" style="${style}" title="${escapeHtml(share.status_detail || `This Drone is referencing this peer's ROM library${transportSuffix}.${fallback}`)}"><i class="bi bi-hdd-network me-1"></i>${escapeHtml(label)}</span>`;
 }
 
 function renderSwarmDroneCard(drone) {
@@ -8442,7 +8445,7 @@ function renderSwarmDroneCard(drone) {
       : "";
   const networkShareButton = share
     ? `<button class="btn btn-sm btn-outline-secondary" onclick="swarmUnreferencePeerRoms(decodeURIComponent('${droneToken}'), ${jsAttr(drone.name || drone.drone_id || "")})" ${share.status === "detaching" ? "disabled" : ""}><i class="bi bi-x-circle me-1"></i>${share.status === "detaching" ? "Detaching..." : share.enabled === false ? "Retry Detach" : "Stop Referencing"}</button>`
-    : `<button class="btn btn-sm btn-outline-info" onclick="swarmReferencePeerRoms(decodeURIComponent('${droneToken}'), ${jsAttr(drone.name || drone.drone_id || "")})" ${drone.online && (drone.tailnet_ip || lanUrl) ? "" : "disabled"} title="${drone.tailnet_ip || lanUrl ? "Reference this peer's whole ROM library and missing BIOS files over SMB, without copying them locally" : "Requires a known LAN or Tailscale address"}"><i class="bi bi-hdd-network me-1"></i>Reference ROMs</button>`;
+    : `<button class="btn btn-sm btn-outline-info" onclick="swarmReferencePeerRoms(decodeURIComponent('${droneToken}'), ${jsAttr(drone.name || drone.drone_id || "")})" ${drone.online && (drone.tailnet_ip || lanUrl) ? "" : "disabled"} title="${drone.tailnet_ip || lanUrl ? "Reference this peer's ROM library and missing BIOS files over read-only NFSv4, with SMB compatibility fallback" : "Requires a known LAN or Tailscale address"}"><i class="bi bi-hdd-network me-1"></i>Reference ROMs</button>`;
   const actions = drone.is_self
     ? ""
     : `<div class="d-flex flex-wrap gap-2 mt-3">
@@ -8501,7 +8504,8 @@ async function swarmReferencePeerRoms(peerId, peerName) {
     if (result.status !== "mounted") {
       showToast(`Could not reference ${escapeHtml(peerName)}: ${escapeHtml(result.status_detail || "mount failed")}`, "danger");
     } else {
-      showToast(`Now referencing ${escapeHtml(peerName)}'s ROMs and BIOS`, "success");
+      const transport = String(result.protocol || "network").toUpperCase();
+      showToast(`Now referencing ${escapeHtml(peerName)}'s ROMs and BIOS via ${escapeHtml(transport)}`, "success");
       await offerNetworkShareUiRefresh(`${peerName}'s network library is ready.`);
     }
   } catch (err) {

@@ -1388,6 +1388,10 @@ def _schemas() -> Dict[str, Schema]:
                 "bios_status": _enum(["pending", "syncing", "ready", "error"]),
                 "bios_status_detail": _string(),
                 "mounted_address": _string(description="LAN or Tailscale address used for the current mount"),
+                "protocol": _string(description="Mounted transport: nfs (preferred) or smb (compatibility fallback)"),
+                "nfs_version": _string(description="Negotiated NFS version when protocol=nfs"),
+                "export_path": _string(description="Peer NFSv4 pseudo-root path when protocol=nfs"),
+                "transport_fallback_detail": _string(description="Why NFS negotiation or mounting fell back to SMB"),
                 "system_count": _integer(description="Number of active remote ROM system links"),
                 "bios_link_count": _integer(description="Number of missing local BIOS files supplied by remote links"),
                 "bios_local_count": _integer(description="Existing local BIOS files kept in place"),
@@ -1402,6 +1406,24 @@ def _schemas() -> Dict[str, Schema]:
         ),
         "NetworkShareListResponse": _object({"shares": _array(_ref("NetworkShareRecord"))}, ("shares",)),
         "NetworkShareDisableResponse": _object({"status": _enum(["detaching", "disabled", "not_found"]), "peer_id": _string()}, ("status", "peer_id")),
+        "NfsExportAuthorizationResponse": _object(
+            {
+                "available": _boolean(),
+                "protocol": _enum(["nfs"]),
+                "versions": _array(_string()),
+                "preferred_version": _string(),
+                "port": _integer(),
+                "detail": _string(),
+                "export_path": _string(),
+                "authorized_addresses": _array(_string()),
+                "peer_id": _string(),
+            },
+            ("available", "protocol", "versions", "preferred_version", "port", "export_path", "authorized_addresses", "peer_id"),
+        ),
+        "NfsExportRevokeResponse": _object(
+            {"status": _enum(["revoked", "not_found", "error"]), "peer_id": _string(), "status_detail": _string()},
+            ("status", "peer_id"),
+        ),
         "TailnetStatusResponse": _object(
             {
                 "installed": _boolean(description="tailscale binaries present under /userdata/system/tailscale"),
@@ -2198,10 +2220,10 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             "/admin/local-network/pairing-code/rotate": {"post": _operation("Rotate Local Network pairing code", {"200": _json_response("PairingCodeResponse")}, tags=["admin", "local-network"], error_codes=("401", "403", "409", "429", "500"))},
             "/admin/local-network/pair-by-address": {"post": _operation("Pair with a peer at an operator-entered address (e.g. a tailnet IP; no multicast discovery needed)", {"200": _json_response("LocalPeerPairResponse")}, request_body=_json_request("LocalPeerPairByAddressRequest"), tags=["admin", "local-network"], error_codes=("400", "401", "403", "409", "429", "500", "502"))},
             "/admin/swarm/overview": {"get": _operation("Fleet overview: this Drone plus every paired peer, probed in parallel with a short per-peer budget", {"200": _json_response("SwarmOverviewResponse")}, tags=["admin", "local-network"])},
-            "/admin/network-shares": {"get": _operation("List this Drone's configured peer ROM references (SMB/CIFS network shares) and their live mount status", {"200": _json_response("NetworkShareListResponse")}, tags=["admin", "local-network"])},
+            "/admin/network-shares": {"get": _operation("List this Drone's configured peer ROM references and their live NFS/SMB mount status", {"200": _json_response("NetworkShareListResponse")}, tags=["admin", "local-network"])},
             "/admin/network-shares/{peer_id}/enable": {
                 "post": _operation(
-                    "Reference a paired peer's whole ROM library over SMB, renaming local ROM system collisions aside and supplying only BIOS files missing locally",
+                    "Reference a paired peer's whole ROM library, preferring a private read-only NFSv4 export and falling back to SMB while preserving local ROM/BIOS collisions",
                     {"200": _json_response("NetworkShareRecord")},
                     parameters=[_path_param("peer_id", "A paired peer's drone_id")],
                     tags=["admin", "local-network"],
@@ -2271,6 +2293,24 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
                     "Peer health check",
                     {"200": _json_response("PeerHealthResponse")},
                     tags=["peer"],
+                    security=peer_security,
+                    error_codes=("403", "429", "500"),
+                )
+            },
+            "/peer/network-share/nfs/authorize": {
+                "post": _operation(
+                    "Authorize the paired caller's exact LAN/Tailscale addresses for the local read-only ROM/BIOS NFSv4 export",
+                    {"200": _json_response("NfsExportAuthorizationResponse")},
+                    tags=["peer", "local-network"],
+                    security=peer_security,
+                    error_codes=("403", "429", "500", "503"),
+                )
+            },
+            "/peer/network-share/nfs/revoke": {
+                "post": _operation(
+                    "Revoke the paired caller's source-side NFS authorization",
+                    {"200": _json_response("NfsExportRevokeResponse")},
+                    tags=["peer", "local-network"],
                     security=peer_security,
                     error_codes=("403", "429", "500"),
                 )

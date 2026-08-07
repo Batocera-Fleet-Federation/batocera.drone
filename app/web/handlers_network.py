@@ -15,6 +15,7 @@ from urllib.parse import quote, unquote
 
 try:
     from ..device.device_control import _ensure_rom_write_access
+    from ..device import nfs_export_manager as _nfs_exports
     from ..device.tailnet_service import tailnet_enroll, tailnet_rotate_auth_key, tailnet_status
     from ..roms.gamelist import ARTWORK_FIELDS, _normalize_gamelist_rom_path
     from ..storage.rom_metadata_store import match_rom_cache_page
@@ -34,6 +35,7 @@ try:
     from .server_tls import load_peer_cert_everywhere
 except ImportError:  # pragma: no cover - direct script execution fallback
     from device.device_control import _ensure_rom_write_access  # type: ignore
+    from device import nfs_export_manager as _nfs_exports  # type: ignore
     from device.tailnet_service import tailnet_enroll, tailnet_rotate_auth_key, tailnet_status  # type: ignore
     from roms.gamelist import ARTWORK_FIELDS, _normalize_gamelist_rom_path  # type: ignore
     from storage.rom_metadata_store import match_rom_cache_page  # type: ignore
@@ -550,6 +552,9 @@ class HandlersNetworkMixin:
 
     def _handle_admin_local_peer_forget(self, peer_id: str) -> None:
         peer_id = unquote(peer_id)
+        # Remove any source-side NFS authorization while the pairing record is
+        # still available. This never touches exports owned outside Drone.
+        _nfs_exports.revoke_peer(self.settings, peer_id)
         removed = _local_network.forget_peer(self.settings, peer_id)
         _local_peer_cert_cache_path(self.settings, peer_id).unlink(missing_ok=True)
         self._send_json(200, {"status": "forgotten" if removed else "not_found", "peer_id": peer_id})

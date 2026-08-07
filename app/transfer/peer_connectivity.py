@@ -160,6 +160,47 @@ def _peer_get_json(url: str, settings: Settings, peer_id: Optional[str] = None, 
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _peer_post_json(
+    url: str,
+    payload: dict,
+    settings: Settings,
+    peer_id: Optional[str] = None,
+    config: Optional[dict] = None,
+    refresh_cert: bool = False,
+    timeout: float = PEER_CHECK_TIMEOUT_SECONDS,
+) -> dict:
+    """POST JSON to a cert-pinned peer endpoint."""
+    cafile = _peer_trust_cafile(settings, peer_id=peer_id, config=config, refresh_cert=refresh_cert)
+    if url.startswith("https://") and peer_id and not cafile:
+        raise ssl.SSLError(f"no trusted certificate cached for peer {peer_id}")
+    request = Request(
+        url,
+        data=json.dumps(payload if isinstance(payload, dict) else {}).encode("utf-8"),
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "User-Agent": "batocera-drone-peer/1.0",
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(
+            request,
+            timeout=timeout,
+            context=_drone_client_ssl_context(settings, url, verify=bool(cafile), cafile=cafile),
+        ) as response:
+            raw = response.read()
+    except ssl.SSLError as error:
+        raise ssl.SSLError(_peer_ssl_diagnostic(url, cafile, error)) from error
+    except URLError as error:
+        reason = getattr(error, "reason", None)
+        if isinstance(reason, ssl.SSLError):
+            raise URLError(_peer_ssl_diagnostic(url, cafile, reason)) from error
+        raise
+    parsed = json.loads(raw.decode("utf-8")) if raw else {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def _local_pair_peer(
     settings: Settings,
     peer: dict,
@@ -561,6 +602,62 @@ def _peer_get_json_for_peer(
         except Exception:
             # Malformed payloads and programming errors are not reachability
             # failures and should remain visible to the caller.
+            raise
+    if last_error is not None:
+        raise last_error
+    raise ValueError("no peer address available")
+
+
+def _peer_post_json_for_peer(
+    peer: dict,
+    endpoint: str,
+    payload: dict,
+    settings: Settings,
+    *,
+    peer_id: Optional[str] = None,
+    config: Optional[dict] = None,
+    refresh_cert: bool = False,
+    timeout: float = PEER_CHECK_TIMEOUT_SECONDS,
+    overall_deadline: Optional[float] = None,
+) -> tuple[dict, str]:
+    """POST a peer endpoint with the same trusted address failover as GET."""
+    path = str(endpoint or "").strip()
+    if not path.startswith("/"):
+        raise ValueError("peer endpoint must start with /")
+    normalized_peer_id = str(
+        peer_id or peer.get("drone_id") or peer.get("device_id") or peer.get("id") or ""
+    ).strip()
+    addresses = _peer_address_candidates(peer, settings=settings, peer_id=normalized_peer_id)
+    if not addresses:
+        raise ValueError("no peer address available")
+    last_error: Optional[Exception] = None
+    for index, address in enumerate(addresses):
+        if overall_deadline is not None:
+            remaining = overall_deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            attempt_timeout = remaining if index == len(addresses) - 1 else min(remaining, PEER_CHECK_TIMEOUT_SECONDS)
+        else:
+            attempt_timeout = timeout
+            if index < len(addresses) - 1:
+                attempt_timeout = min(float(timeout), PEER_CHECK_TIMEOUT_SECONDS)
+        try:
+            response = _peer_post_json(
+                f"{address}{path}",
+                payload,
+                settings,
+                peer_id=peer_id,
+                config=config,
+                refresh_cert=refresh_cert,
+                timeout=attempt_timeout,
+            )
+            _remember_successful_peer_route(settings, normalized_peer_id, address)
+            return response, address
+        except HTTPError:
+            raise
+        except (OSError, URLError, ssl.SSLError) as error:
+            last_error = error
+        except Exception:
             raise
     if last_error is not None:
         raise last_error

@@ -1,7 +1,7 @@
 """Lexical helpers for Drone-owned network-share symlinks.
 
 These helpers deliberately never call :meth:`Path.resolve`.  Resolving a
-symlink into a dead CIFS mount can block for a long time or raise before the
+symlink into a dead network mount can block for a long time or raise before the
 caller gets a chance to remove the link.  Ownership checks only need the
 stored link text and a trusted local root, so normalising those strings is
 both faster and safer.
