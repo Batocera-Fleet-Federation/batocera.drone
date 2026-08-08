@@ -33,7 +33,7 @@ KIND_EXTRA = "extra"
 EXTRAS_FOLDER_NAMES = frozenset(
     {
         "featurettes", "behind the scenes", "deleted scenes", "interviews",
-        "scenes", "shorts", "trailers", "other",
+        "scenes", "shorts", "trailers", "other", "hidden extras", "extras",
     }
 )
 
@@ -110,6 +110,16 @@ _SEASON_FOLDER_WITH_SHOW_RE = re.compile(r"^(?P<show>.+?)\s+S(?P<season>\d{1,2})
 # A bare "Season NN" folder (Plex/Kodi/Jellyfin convention) -- carries no
 # show name of its own; the show has to come from this folder's own parent.
 _BARE_SEASON_FOLDER_RE = re.compile(r"^season\s+(?P<season>\d{1,3})$", re.IGNORECASE)
+# Last-resort season-folder fallback for a real-world "everything dumped in
+# one folder" release/reorg name that doesn't cleanly end in " SNN" or match
+# bare "Season NN" exactly -- e.g. "WandaVision (2021) Season 1 S01 (1080p
+# BluRay x265 HEVC 10bit EAC3 5.1 Silence)" or
+# "Secret.Invasion.S01.COMPLETE.1080p.DSNP.WEB-DL.DDP5.1.H.264-NTb[TGx]".
+# Takes the *first* season-shaped token (spelled-out "Season NN" or a bare
+# "SNN" abbreviation), word-boundaried so this can't fire on an actual
+# "S01E04" episode marker (never legitimate in a folder name) or match
+# mid-word. Tried only after the two stricter patterns above fail.
+_SEASON_TOKEN_RE = re.compile(r"\bseason\s+(?P<season_word>\d{1,3})\b|\bs(?P<season_abbr>\d{1,3})\b(?!e\d)", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -160,21 +170,38 @@ def folder_title_candidate(folder_name: str) -> Optional[Tuple[str, str]]:
     return title, match.group("year")
 
 
+def _season_and_show_from_combined_folder(segment: str) -> Tuple[str, Optional[int]]:
+    """Last-resort single-segment fallback -- see ``_SEASON_TOKEN_RE``.
+    Everything before the first season-shaped token is the show candidate,
+    run through the same year-aware folder cleanup ``folder_title_candidate``
+    already does for a proper "Title (Year)" folder, falling back to plain
+    tag-stripped collapse when there's no parenthesized year to anchor on."""
+    match = _SEASON_TOKEN_RE.search(segment)
+    if not match:
+        return "", None
+    season = int(match.group("season_word") or match.group("season_abbr"))
+    raw_show = segment[: match.start()]
+    folder_candidate = folder_title_candidate(raw_show)
+    show_title = folder_candidate[0] if folder_candidate else _collapse(_SCENE_TOKENS_RE.sub(" ", _BRACKETED_RE.sub(" ", raw_show)))
+    return (show_title, season) if show_title else ("", None)
+
+
 def _extra_show_season_from_path(file_path: str) -> Tuple[str, Optional[int]]:
     """Best-effort ``(show_title, season)`` for bonus/extra content, inferred
     from the *directory structure* rather than the file's own name -- a
     Featurette clip's filename ("01. Adrift.mkv") almost never carries a
     show or season indicator the way a real episode's does, but the folder
-    tree around it usually does: either this app's own "Shows/<Show
-    (Year)>/<Show (Year)> SXX/" layout, or the Plex/Kodi/Jellyfin bare
-    "Season NN" folder convention (show name one level further up).
+    tree around it usually does: this app's own "Shows/<Show (Year)>/<Show
+    (Year)> SXX/" layout, the Plex/Kodi/Jellyfin bare "Season NN" folder
+    convention (show name one level further up), or -- last resort -- a
+    messier combined folder that buries a season token in the middle of a
+    longer release/reorg name (see ``_season_and_show_from_combined_folder``).
 
     Searches from the segment closest to the file outward to the root,
     stopping at the first match, so a deeper, unrelated "... S3" style
     sub-featurette folder can't be mistaken for the real season folder
-    above it. Returns ``("", None)`` if neither convention matches anywhere
-    in the path -- callers should leave the entry ungrouped rather than
-    guess."""
+    above it. Returns ``("", None)`` if nothing matches anywhere in the
+    path -- callers should leave the entry ungrouped rather than guess."""
     segments = Path(file_path).parts[:-1]
     for index in range(len(segments) - 1, -1, -1):
         segment = segments[index]
@@ -192,6 +219,10 @@ def _extra_show_season_from_path(file_path: str) -> Tuple[str, Optional[int]]:
             show_title = folder_candidate[0] if folder_candidate else _collapse(parent)
             if show_title:
                 return show_title, int(bare.group("season"))
+            continue
+        combined_show, combined_season = _season_and_show_from_combined_folder(segment)
+        if combined_show:
+            return combined_show, combined_season
     return "", None
 
 

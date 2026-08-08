@@ -297,12 +297,6 @@
     .emulator-tree-children {
       border-top: 0;
     }
-    /* Movies/shows tree: same depth-aware indentation as the emulator config
-       tree above, but keeps the standard 3-column grid (label, size, Watch/
-       Download action) instead of hiding the action column. */
-    .tree-grid-row.movies-tree-row {
-      padding-left: calc(0.75rem + (var(--tree-depth, 0) * 1.35rem));
-    }
     .emulator-config-filter-wrap {
       border-bottom: 1px solid var(--admin-border);
       background: rgba(11, 16, 32, 0.72);
@@ -551,9 +545,7 @@
         grid-template-columns: minmax(0, 1fr);
       }
       .tree-category-row,
-      .tree-leaf-row,
-      .tree-grid-more,
-      .tree-grid-empty {
+      .tree-leaf-row {
         padding-left: 1.15rem;
       }
       .tree-grid-meta,
@@ -687,31 +679,12 @@
       background: transparent;
       opacity: 0.55;
     }
-    .systems-tree-toolbar {
-      background: rgba(31, 42, 68, 0.72);
-      border: 1px solid var(--admin-border);
-      border-radius: 8px;
-      padding: 0.9rem;
-    }
     .tree-grid {
       border: 1px solid var(--admin-border);
       border-radius: 8px;
       overflow: hidden;
       background: rgba(15, 23, 42, 0.22);
       font-size: 0.9rem;
-    }
-    .tree-root + .tree-root {
-      border-top: 1px solid var(--admin-border);
-    }
-    /* Shared/Unassigned BIOS is not a system -- its own grid box (dashed
-       border, small caption above) keeps it from reading as just one more
-       entry in the systems list above it. */
-    .tree-grid-bios-caption {
-      margin-top: 0.75rem;
-      margin-bottom: 0.35rem;
-    }
-    .tree-grid-bios-section {
-      border-style: dashed;
     }
     .tree-grid-row {
       align-items: center;
@@ -745,21 +718,6 @@
     .tree-grid-label {
       min-width: 0;
     }
-    /* A movie's tree-row label is a real <button> (unlike every other
-       tree-row label, which is a plain span/div) so it can navigate to the
-       movie's details page -- reset default button chrome so it still
-       reads as plain label text, not a button. */
-    .movie-tree-title-btn {
-      background: none;
-      border: 0;
-      padding: 0;
-      color: inherit;
-      text-align: left;
-    }
-    .movie-tree-title-btn:hover .fw-semibold,
-    .movie-tree-title-btn:focus .fw-semibold {
-      text-decoration: underline;
-    }
     .tree-grid-caret,
     .tree-grid-icon {
       color: var(--admin-muted);
@@ -767,36 +725,9 @@
       font-size: 0.85rem;
       width: 0.9rem;
     }
-    /* A movie's tree row swaps the plain bi-film icon every other tree row
-       uses for a small poster thumbnail once one's been scraped -- makes
-       scraped artwork visible on the page people actually land on
-       (the default #movies view), not just the Explorer/detail page. */
-    .movies-tree-thumb {
-      flex: 0 0 auto;
-      width: 1.5rem;
-      height: 2.05rem;
-      border-radius: 0.2rem;
-      overflow: hidden;
-      background: rgba(255, 255, 255, 0.04);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-    .movies-tree-thumb img {
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-    }
-    .movies-tree-thumb-fallback {
-      color: var(--admin-muted);
-      font-size: 0.85rem;
-    }
     .tree-branch {
       border-top: 1px solid rgba(255, 255, 255, 0.06);
       background: rgba(255, 255, 255, 0.025);
-    }
-    .tree-files {
-      border-top: 1px solid rgba(255, 255, 255, 0.06);
     }
     .tree-leaf-list {
       display: flex;
@@ -819,17 +750,6 @@
     .tree-grid-action .btn {
       line-height: 1;
       padding: 0.25rem 0.5rem;
-    }
-    .tree-grid-more {
-      align-items: center;
-      border-top: 1px solid rgba(255, 255, 255, 0.06);
-      display: flex;
-      gap: 0.75rem;
-      justify-content: space-between;
-      padding: 0.5rem 0.75rem 0.5rem 2.75rem;
-    }
-    .tree-grid-empty {
-      padding: 0.6rem 0.75rem 0.6rem 2.75rem;
     }
     .download-summary-grid,
     .asset-metric-grid {
@@ -1826,10 +1746,12 @@
       color: var(--admin-text);
     }
 
-    /* Netflix-style movie explorer: a full-bleed overlay that replaces the
-       app chrome (sidebar/nav) while active -- movie-explorer-active is
-       toggled on <body> by the router, same mechanism as .artwork-page. */
-    body.movie-explorer-active .sidebar,
+    /* Netflix-style movie/systems explorer: a full-bleed content area
+       (movie-explorer-active is toggled on <body> by the router, same
+       mechanism as .artwork-page) that still leaves the app's own navbar
+       (.sidebar, despite the name -- see index.html) visible/usable so
+       Browse being the default page doesn't strand anyone; only the small
+       system-info badge row goes away, same as every other Movies-tab view. */
     body.movie-explorer-active #systemInfoBar {
       /* #systemInfoBar carries Bootstrap's d-flex utility class
          (display: flex !important in the template) -- without !important
@@ -1952,6 +1874,12 @@
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
       gap: 1rem;
+    }
+    /* BIOS files have no artwork -- a plain name/size/download list, not
+       poster cards, so the 150px-card grid above (which would squeeze each
+       row into its own narrow column) is turned back into a normal block. */
+    .movie-explorer-grid.systems-explore-grid-bios {
+      display: block;
     }
     @media (max-width: 768px) {
       .movie-explorer-body { flex-direction: column; }

@@ -444,6 +444,25 @@ class HandlersMoviesMixin:
         result = _movies_metadata.delete_metadata(self.settings, entry_key)
         self._send_json(200, result)
 
+    # -------------------------------------------------------------- delete
+
+    def _handle_admin_movies_delete(self, payload: dict) -> None:
+        """Permanently deletes one or more movies/episodes (their files plus
+        any scraped metadata/artwork) -- the Movies/show detail pages' delete
+        action (confirmed via a modal client-side). Takes a batch so
+        "delete this whole show" is one request instead of one per episode."""
+        payload = payload if isinstance(payload, dict) else {}
+        entry_keys = payload.get("entry_keys")
+        if not isinstance(entry_keys, list) or not entry_keys:
+            self._send_json(400, {"error": "entry_keys is required"})
+            return
+        deleted = 0
+        for entry_key in entry_keys:
+            result = _movies_metadata.delete_movie(self.settings, str(entry_key))
+            if result.get("deleted"):
+                deleted += 1
+        self._send_json(200, {"deleted": deleted, "requested": len(entry_keys)})
+
     # ------------------------------------------------------- bulk scrape
 
     def _handle_admin_movie_scrape_bulk_status(self) -> None:

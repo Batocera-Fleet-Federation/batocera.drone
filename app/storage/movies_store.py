@@ -429,6 +429,31 @@ def delete_movie_metadata(movies_root: Path, entry_key: str) -> Optional[dict]:
     return existing
 
 
+def delete_movie_file(movies_root: Path, entry_key: str) -> dict:
+    """Permanently delete one movie/episode's file from disk plus its cache
+    entry -- the Movies UI detail page's delete action. An unknown entry_key
+    is a no-op (``{"deleted": False}``), not an error, same convention as
+    ``delete_movie_metadata``. The file is unlinked *before* the cache row is
+    removed: if the unlink fails (e.g. a read-only mount), the row -- and so
+    the movie's visibility in the UI -- is left untouched rather than making
+    a file that's still really on disk silently disappear from the library
+    until the next full rescan happens to re-add it."""
+    row = get_movie_by_key(movies_root, entry_key)
+    if not row:
+        return {"deleted": False}
+    resolved_root = Path(movies_root).resolve()
+    target = (resolved_root / row["file_path"]).resolve()
+    if target == resolved_root or resolved_root not in target.parents:
+        return {"deleted": False}
+    target.unlink(missing_ok=True)
+    with _open(movies_root) as connection:
+        _archive_deleted(connection, entry_key)
+        connection.execute("DELETE FROM movies_cache_entries WHERE entry_key = ?", (entry_key,))
+        _queue_change(connection, entry_key, "delete")
+        connection.commit()
+    return {"deleted": True, "file_path": row["file_path"]}
+
+
 def list_movie_display_titles(movies_root: Path) -> dict:
     """Return ``{entry_key: scraped_title}`` for every movie that has been
     scraped -- used to overlay a clean title onto the plain list/tree

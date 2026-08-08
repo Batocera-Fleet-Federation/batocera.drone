@@ -379,6 +379,10 @@ class TorrentManager:
         if not isinstance(stored, dict):
             return
         self._config = _normalize_torrent_settings(stored.get("settings"), self.settings)
+        # The watched folder stopped being user-configurable; self-heal any
+        # value a pre-upgrade install had persisted so it doesn't linger
+        # forever just because nothing else writes settings on its own.
+        self._config["directory"] = str(default_torrent_directory(self.settings))
         self._paused = bool(stored.get("paused"))
         recent = stored.get("recent_move_locations")
         self._recent_move_locations = [str(p) for p in recent][:MOVE_RECENT_LOCATIONS_MAX] if isinstance(recent, list) else []

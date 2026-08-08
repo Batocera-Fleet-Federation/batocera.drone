@@ -4,6 +4,7 @@ const backBtn = document.getElementById("backBtn") || {
   addEventListener() {},
 };
 const systemsMenuBtn = document.getElementById("systemsMenuBtn");
+const moviesMenuBtn = document.getElementById("moviesMenuBtn");
 const brandHomeBtn = document.getElementById("brandHomeBtn");
 const controlsMenuBtn = document.getElementById("controlsMenuBtn");
 const automationMenuBtn = document.getElementById("automationMenuBtn");
@@ -61,26 +62,12 @@ let currentSystemContext = null;
 let themeFilterSelectedSystems = [];
 let themeFilterQuery = "";
 const THEME_GALLERY_PAGE_SIZE = 100;
-const TREE_FILE_LOAD_SIZE = 10;
-const BIOS_TREE_ROOT = "__bios__";
 const ARTWORK_PAGE_SIZE = 200;
 const GAMELIST_EDIT_FIELDS = [
   "name", "sortname", "desc", "genre", "developer", "publisher", "releasedate",
   "players", "rating", "favorite", "hidden", "kidgame", "adult",
   "image", "thumbnail", "marquee", "fanart", "boxart", "video"
 ];
-let systemsTreeQuery = "";
-let systemsTreeData = { systems: [] };
-let systemsTreeMatchedSystems = new Set();
-let selectedSystemsTreeRoot = null;
-let selectedSystemsTreeCategory = null;
-let systemsTreeRomPages = {};
-let systemsTreeBiosSummary = { total: 0, loading: false, error: false };
-let systemsTreeBiosPage = { bios: [], total: 0, nextOffset: 0, loading: false, error: false };
-// Per-system BIOS pagination (the "BIOS" category under each system, filtered to that
-// system's known BIOS files) -- distinct from systemsTreeBiosPage, which backs the
-// top-level "Shared / Unassigned BIOS" root.
-let systemsTreeSystemBiosPages = {};
 // Systems Browse (the games-with-images grid, GET /roms): unlike Movies,
 // a ROM library can be far too large to load in one shot (some devices have
 // ~300 systems, individual systems can run into the thousands of ROMs), so
@@ -114,32 +101,39 @@ let systemsExploreGenreCounts = [];
 let systemsExploreTotal = 0;
 let systemsExploreHasMore = false;
 let systemsExploreLoadingMore = false;
-// Movies tab (own top-level page, see renderMoviesPage/renderAssetsTabBar) --
-// the whole set loads once (movie libraries are far smaller than ROM sets),
-// then a folder tree is built from each movie's file_path client-side,
-// mirroring buildEmulatorConfigTree's shape exactly (movies have no
-// system/artwork association, so this is a plain filesystem tree, not a
-// system-rooted one).
+// BIOS browsing lives inside the Systems Browse sidebar as a pinned pseudo-
+// "system" entry (selected the same way a real system is, via
+// setSystemsExploreSystem) rather than a separate page -- it has no genre
+// facet and its rows have no artwork, so it gets its own item list/render
+// path, but reuses the same System-panel selection UI and the same
+// total/hasMore/loadingMore paging state as the ROM path (only one of the
+// two is ever active at a time).
+const SYSTEMS_EXPLORE_BIOS_KEY = "__bios__";
+let systemsExploreBiosTotal = 0;
+let systemsExploreBiosItems = [];
+// Movies Browse (own top-level page, see renderMovieExplorerPage) -- the
+// whole set loads once (movie libraries are far smaller than ROM sets) and
+// is grouped/filtered client-side.
 let moviesAllRows = [];
-let moviesTreeExpanded = new Set();
-// Scroll position of the movies/systems tree+explorer list views, keyed by a
-// fixed bucket name (not the literal hash -- systemsTreeHash/
-// systemsExploreHash carry a query string that varies with the current
-// search/filter/system selection, so bucketing collapses all of those back
-// to one slot per view instead of fragmenting by every filter combination).
-// Captured by router() the moment any of the four is navigated away from
-// (e.g. into a movie/show/ROM detail page) and restored when landing back on
-// it, so "Back" doesn't dump the user at the top of a long list. Deliberately
-// an exception to this app's usual reset-scroll-on-nav convention, scoped to
-// just these four views.
+// Scroll position of the Movies/Systems Browse list views, keyed by a fixed
+// bucket name (not the literal hash -- systemsExploreHash carries a query
+// string that varies with the current search/filter/system selection, so
+// bucketing collapses all of those back to one slot per view instead of
+// fragmenting by every filter combination). Captured by router() the moment
+// either is navigated away from (e.g. into a movie/show/ROM detail page) and
+// restored when landing back on it, so "Back" doesn't dump the user at the
+// top of a long list. Deliberately an exception to this app's usual
+// reset-scroll-on-nav convention, scoped to just these two views.
 let movieListScrollPositions = {};
 let lastRenderedHash = "";
 function movieListScrollBucket(hash) {
   const value = String(hash || "");
-  if (value === "#movies") return "#movies";
-  if (value.startsWith("#movies/explore")) return "#movies/explore";
-  if (value.startsWith("#systems/explore")) return "#systems/explore";
-  if (value === "#systems" || value.startsWith("#systems?")) return "#systems";
+  // Browse is the only Movies/Systems view now -- the bare and "/explore"
+  // forms render the same page, so they share one scroll-position bucket
+  // apiece instead of the four separate ones this used to need back when
+  // each also had its own tree view.
+  if (value === "#movies" || value.startsWith("#movies/explore")) return "#movies/explore";
+  if (value === "#systems" || value.startsWith("#systems/explore") || value.startsWith("#systems?")) return "#systems/explore";
   return null;
 }
 // Movie Explorer's category sidebar (see renderMovieExplorerPage): "all" |
@@ -473,33 +467,6 @@ async function getSystemRomData(system, forceRefresh = false) {
   const data = await api(`/systems/${encodeURIComponent(key)}`);
   systemRomCache[key] = { data, loadedAt: Date.now() };
   return data;
-}
-async function getSystemRomPage(system, offset = 0, query = systemsTreeQuery) {
-  const params = new URLSearchParams();
-  params.set("limit", String(TREE_FILE_LOAD_SIZE));
-  params.set("offset", String(Math.max(0, Number(offset || 0))));
-  if ((query || "").trim()) params.set("q", query.trim());
-  return await api(`/systems/${encodeURIComponent(system)}?${params.toString()}`);
-}
-function systemsTreeHash(query = systemsTreeQuery, root = selectedSystemsTreeRoot) {
-  const params = new URLSearchParams();
-  if ((query || "").trim()) params.set("q", query.trim());
-  if (root) params.set("root", root);
-  const qs = params.toString();
-  return `#systems${qs ? `?${qs}` : ""}`;
-}
-function parseSystemsHash(hash) {
-  if (!hash.startsWith("#systems")) return null;
-  const queryIndex = hash.indexOf("?");
-  const params = new URLSearchParams(queryIndex >= 0 ? hash.substring(queryIndex + 1) : "");
-  return {
-    q: params.get("q") || "",
-    root: params.get("root") || null,
-  };
-}
-function updateSystemsTreeHash() {
-  const nextHash = systemsTreeHash();
-  if (window.location.hash !== nextHash) history.replaceState(null, "", nextHash);
 }
 function wildcardToRegExp(pattern) {
   const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&");
@@ -1657,405 +1624,6 @@ function setupLazyImages() {
 
   lazyImages.forEach((img) => imageObserver.observe(img));
 }
-function renderSystems(data) {
-  if (selectedSystemsTreeRoot) backBtn.classList.remove("d-none");
-  else backBtn.classList.add("d-none");
-  systemsTreeData = data || { systems: [] };
-  const query = (systemsTreeQuery || "").trim().toLowerCase();
-  const systems = (data.systems || [])
-    .filter((system) => !query || String(system.name || "").toLowerCase().includes(query) || systemsTreeMatchedSystems.has(String(system.name || "")))
-    .sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
-  const biosTotal = Number(systemsTreeBiosSummary.total || 0);
-  const showBiosRoot = biosTotal > 0 || selectedSystemsTreeRoot === BIOS_TREE_ROOT;
-  if (selectedSystemsTreeRoot && selectedSystemsTreeRoot !== BIOS_TREE_ROOT && !systems.some((system) => system.name === selectedSystemsTreeRoot)) {
-    selectedSystemsTreeRoot = null;
-    selectedSystemsTreeCategory = null;
-  }
-  if (selectedSystemsTreeRoot === BIOS_TREE_ROOT && !showBiosRoot) {
-    selectedSystemsTreeRoot = null;
-    selectedSystemsTreeCategory = null;
-  }
-  content.innerHTML = `
-    ${renderAssetsTabBar("systems")}
-    <div class="d-flex flex-wrap align-items-start justify-content-between gap-2 mb-2">
-      <div class="text-muted small">Every Batocera system on this Drone, laid out the same way they are on disk -- browse into a system for its games and BIOS.</div>
-      <button class="btn btn-outline-primary btn-sm text-nowrap" type="button" onclick="setHash(systemsExploreHash())"><i class="bi bi-grid-3x3-gap me-1"></i>Browse</button>
-    </div>
-    <div class="mb-3 systems-tree-toolbar">
-      <label class="form-label" for="systemsTreeSearch">Search systems, games, or BIOS</label>
-      <div class="input-group">
-        <span class="input-group-text"><i class="bi bi-funnel"></i></span>
-        <input id="systemsTreeSearch" class="form-control" type="search" value="${escapeHtml(systemsTreeQuery)}" placeholder="Filter systems, game names, paths, or BIOS">
-        <button id="systemsTreeSearchBtn" type="button" class="btn btn-primary">Filter</button>
-        <button id="systemsTreeClearBtn" type="button" class="btn btn-outline-secondary">Clear</button>
-      </div>
-    </div>
-    <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2 small text-muted">
-      <span>${systems.length.toLocaleString()} systems · ${biosTotal.toLocaleString()} BIOS files</span>
-    </div>
-    ${
-      systems.length || showBiosRoot
-        ? `${systems.length ? `<div class="tree-grid">${systems.map((system) => renderSystemTreeRoot(system)).join("")}</div>` : ""}
-          ${showBiosRoot ? `
-            <div class="tree-grid-bios-caption small text-muted">Not part of any single system</div>
-            <div class="tree-grid tree-grid-bios-section">${renderBiosTreeRoot(biosTotal)}</div>
-          ` : ""}`
-        : `<div class="text-muted">No systems, games, or BIOS files matched your filter.</div>`
-    }
-  `;
-  bindSystemsTreeToolbar();
-  if (selectedSystemsTreeRoot === BIOS_TREE_ROOT) {
-    renderBiosTreeFiles();
-  } else if (selectedSystemsTreeRoot && selectedSystemsTreeCategory === "bios") {
-    renderSystemBiosTreeFiles(selectedSystemsTreeRoot);
-  } else if (selectedSystemsTreeRoot) {
-    renderSystemTreeFiles(selectedSystemsTreeRoot);
-  }
-}
-function renderSystemTreeRoot(system) {
-  const name = system.name || "";
-  const active = selectedSystemsTreeRoot === name;
-  const romCount = Number(system.rom_count || 0);
-  return `
-    <div class="tree-root ${active ? "is-expanded" : ""}">
-      <button type="button" class="tree-grid-row tree-root-row ${active ? "is-active" : ""}" onclick="selectSystemTreeRoot(${jsAttr(name)})">
-        <div class="tree-grid-main">
-          <i class="bi ${active ? "bi-chevron-down" : "bi-chevron-right"} tree-grid-caret"></i>
-          <i class="bi bi-folder2${active ? "-open" : ""} tree-grid-icon"></i>
-          <div class="tree-grid-label"><span class="fw-semibold">${escapeHtml(name)}</span></div>
-        </div>
-        <div class="tree-grid-meta">${romCount.toLocaleString()} files</div>
-      </button>
-      ${active ? `
-        <div class="tree-branch">
-          <button type="button" class="tree-grid-row tree-category-row ${selectedSystemsTreeCategory === "games" ? "is-active" : ""}" onclick="selectSystemTreeCategory(${jsAttr(name)}, 'games')">
-            <div class="tree-grid-main">
-              <i class="bi bi-controller tree-grid-icon"></i>
-              <div class="tree-grid-label"><span class="fw-semibold">Games</span></div>
-            </div>
-            <div class="tree-grid-meta">${romCount.toLocaleString()} files</div>
-          </button>
-          ${selectedSystemsTreeCategory === "games" ? `<div id="tree-files-${cssSafeId(name)}" class="tree-files"></div>` : ""}
-          <button type="button" class="tree-grid-row tree-category-row ${selectedSystemsTreeCategory === "bios" ? "is-active" : ""}" onclick="selectSystemTreeCategory(${jsAttr(name)}, 'bios')">
-            <div class="tree-grid-main">
-              <i class="bi bi-cpu tree-grid-icon"></i>
-              <div class="tree-grid-label"><span class="fw-semibold">BIOS</span></div>
-            </div>
-          </button>
-          ${selectedSystemsTreeCategory === "bios" ? `<div id="tree-system-bios-files-${cssSafeId(name)}" class="tree-files"></div>` : ""}
-        </div>
-      ` : ""}
-    </div>
-  `;
-}
-function renderBiosTreeRoot(total) {
-  const active = selectedSystemsTreeRoot === BIOS_TREE_ROOT;
-  return `
-    <div class="tree-root ${active ? "is-expanded" : ""}">
-      <button type="button" class="tree-grid-row tree-root-row ${active ? "is-active" : ""}" onclick="selectBiosTreeRoot()">
-        <div class="tree-grid-main">
-          <i class="bi ${active ? "bi-chevron-down" : "bi-chevron-right"} tree-grid-caret"></i>
-          <i class="bi bi-cpu tree-grid-icon"></i>
-          <div class="tree-grid-label"><span class="fw-semibold">Shared / Unassigned BIOS</span></div>
-        </div>
-        <div class="tree-grid-meta">${Number(total || 0).toLocaleString()} files</div>
-      </button>
-      ${active ? `
-        <div class="tree-branch">
-          <button type="button" class="tree-grid-row tree-category-row ${selectedSystemsTreeCategory === "bios" ? "is-active" : ""}" onclick="selectSystemTreeCategory(${jsAttr(BIOS_TREE_ROOT)}, 'bios')">
-            <div class="tree-grid-main">
-              <i class="bi bi-cpu tree-grid-icon"></i>
-              <div class="tree-grid-label"><span class="fw-semibold">BIOS files</span></div>
-            </div>
-            <div class="tree-grid-meta">${Number(total || 0).toLocaleString()} files</div>
-          </button>
-          <div id="tree-files-${cssSafeId(BIOS_TREE_ROOT)}" class="tree-files"></div>
-        </div>
-      ` : ""}
-    </div>
-  `;
-}
-function bindSystemsTreeToolbar() {
-  const input = document.getElementById("systemsTreeSearch");
-  const filterBtn = document.getElementById("systemsTreeSearchBtn");
-  const clearBtn = document.getElementById("systemsTreeClearBtn");
-  const apply = () => {
-    systemsTreeQuery = (input ? input.value : "").trim();
-    selectedSystemsTreeRoot = null;
-    selectedSystemsTreeCategory = null;
-    systemsTreeRomPages = {};
-    systemsTreeBiosPage = { bios: [], total: 0, nextOffset: 0, loading: false, error: false };
-    systemsTreeSystemBiosPages = {};
-    updateSystemsTreeHash();
-    renderSystemsPage();
-  };
-  if (input) input.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") {
-      event.preventDefault();
-      apply();
-    }
-  });
-  if (filterBtn) filterBtn.addEventListener("click", apply);
-  if (clearBtn) clearBtn.addEventListener("click", () => {
-    if (input) input.value = "";
-    apply();
-  });
-}
-function cssSafeId(value) {
-  return btoa(unescape(encodeURIComponent(String(value)))).replace(/=+$/g, "").replace(/[^a-zA-Z0-9_-]/g, "_");
-}
-function systemTreeState(system) {
-  const key = String(system || "");
-  if (!systemsTreeRomPages[key]) {
-    systemsTreeRomPages[key] = { roms: [], total: 0, nextOffset: 0, loading: false, error: false };
-  }
-  return systemsTreeRomPages[key];
-}
-function selectSystemTreeRoot(system, category = "games") {
-  if (selectedSystemsTreeRoot === system) {
-    selectedSystemsTreeRoot = null;
-    selectedSystemsTreeCategory = null;
-    updateSystemsTreeHash();
-    renderSystems(systemsTreeData);
-    return;
-  }
-  selectedSystemsTreeRoot = system;
-  selectedSystemsTreeCategory = category;
-  updateSystemsTreeHash();
-  renderSystems(systemsTreeData);
-  if (category === "bios") {
-    loadSystemBiosTreeFiles(system, { reset: true });
-  } else {
-    systemsTreeRomPages[system] = { roms: [], total: 0, nextOffset: 0, loading: true, error: false };
-    loadSystemTreeFiles(system, { reset: true });
-  }
-}
-function selectBiosTreeRoot() {
-  if (selectedSystemsTreeRoot === BIOS_TREE_ROOT) {
-    selectedSystemsTreeRoot = null;
-    selectedSystemsTreeCategory = null;
-    updateSystemsTreeHash();
-    renderSystems(systemsTreeData);
-    return;
-  }
-  selectedSystemsTreeRoot = BIOS_TREE_ROOT;
-  selectedSystemsTreeCategory = "bios";
-  systemsTreeBiosPage = { bios: [], total: systemsTreeBiosSummary.total || 0, nextOffset: 0, loading: true, error: false };
-  updateSystemsTreeHash();
-  renderSystems(systemsTreeData);
-  loadBiosTreeFiles({ reset: true });
-}
-function selectSystemTreeCategory(root, category) {
-  if (root === BIOS_TREE_ROOT) {
-    if (selectedSystemsTreeRoot !== BIOS_TREE_ROOT) {
-      selectBiosTreeRoot();
-      return;
-    }
-    selectedSystemsTreeCategory = "bios";
-    updateSystemsTreeHash();
-    renderSystems(systemsTreeData);
-    return;
-  }
-  if (selectedSystemsTreeRoot !== root) {
-    selectSystemTreeRoot(root, category);
-    return;
-  }
-  if (selectedSystemsTreeCategory === category) {
-    return;
-  }
-  // Capture "already loaded" BEFORE re-rendering: renderSystems()'s trailing dispatch
-  // calls renderSystemBiosTreeFiles/renderSystemTreeFiles, whose state-lookup helpers
-  // lazily create an empty entry as a side effect -- checking hasOwnProperty *after*
-  // that render would always see the just-created entry and wrongly skip the fetch.
-  const alreadyLoadedBios = Object.prototype.hasOwnProperty.call(systemsTreeSystemBiosPages, root);
-  const alreadyLoadedGames = Object.prototype.hasOwnProperty.call(systemsTreeRomPages, root);
-  selectedSystemsTreeCategory = category;
-  updateSystemsTreeHash();
-  renderSystems(systemsTreeData);
-  if (category === "bios" && !alreadyLoadedBios) {
-    loadSystemBiosTreeFiles(root, { reset: true });
-  } else if (category === "games" && !alreadyLoadedGames) {
-    systemsTreeRomPages[root] = { roms: [], total: 0, nextOffset: 0, loading: true, error: false };
-    loadSystemTreeFiles(root, { reset: true });
-  }
-}
-async function loadSystemTreeFiles(system, options = {}) {
-  if (!system) return;
-  const reset = options.reset === true;
-  const state = reset ? { roms: [], total: 0, nextOffset: 0, loading: false, error: false } : systemTreeState(system);
-  if (!reset && state.loading) return;
-  const existingRows = reset ? [] : (state.roms || []);
-  const offset = reset ? 0 : Number(state.nextOffset ?? existingRows.length);
-  systemsTreeRomPages[system] = { ...state, roms: existingRows, loading: true, error: false };
-  renderSystemTreeFiles(system);
-  try {
-    const payload = await getSystemRomPage(system, offset, systemsTreeQuery);
-    if (selectedSystemsTreeRoot !== system || selectedSystemsTreeCategory !== "games") {
-      if (systemsTreeRomPages[system]) systemsTreeRomPages[system] = { ...systemsTreeRomPages[system], loading: false };
-      return;
-    }
-    const rows = payload.roms || [];
-    const loadedRows = reset ? rows : [...(systemsTreeRomPages[system]?.roms || []), ...rows];
-    systemsTreeRomPages[system] = {
-      roms: loadedRows,
-      total: Number(payload.count ?? loadedRows.length),
-      nextOffset: offset + rows.length,
-      loading: false,
-      error: false,
-    };
-  } catch (error) {
-    console.error("Error loading system tree files:", error);
-    systemsTreeRomPages[system] = { ...state, roms: existingRows, total: Number(state.total || 0), nextOffset: offset, loading: false, error: true };
-  }
-  renderSystemTreeFiles(system);
-}
-async function loadBiosTreeSummary() {
-  systemsTreeBiosSummary = { ...systemsTreeBiosSummary, loading: true, error: false };
-  try {
-    const params = new URLSearchParams();
-    params.set("limit", "1");
-    params.set("offset", "0");
-    params.set("unassigned", "true");
-    if ((systemsTreeQuery || "").trim()) params.set("q", systemsTreeQuery.trim());
-    const payload = await api(`/bios?${params.toString()}`);
-    systemsTreeBiosSummary = { total: Number(payload.count || 0), loading: false, error: false };
-  } catch (error) {
-    console.error("Error loading BIOS tree summary:", error);
-    systemsTreeBiosSummary = { total: 0, loading: false, error: true };
-  }
-}
-async function loadBiosTreeFiles(options = {}) {
-  const reset = options.reset === true;
-  const state = reset ? { bios: [], total: systemsTreeBiosSummary.total || 0, nextOffset: 0, loading: false, error: false } : systemsTreeBiosPage;
-  if (!reset && state.loading) return;
-  const existingRows = reset ? [] : (state.bios || []);
-  const offset = reset ? 0 : Number(state.nextOffset ?? existingRows.length);
-  systemsTreeBiosPage = { ...state, bios: existingRows, loading: true, error: false };
-  renderBiosTreeFiles();
-  try {
-    const params = new URLSearchParams();
-    params.set("limit", String(TREE_FILE_LOAD_SIZE));
-    params.set("offset", String(offset));
-    params.set("unassigned", "true");
-    if ((systemsTreeQuery || "").trim()) params.set("q", systemsTreeQuery.trim());
-    const payload = await api(`/bios?${params.toString()}`);
-    if (selectedSystemsTreeRoot !== BIOS_TREE_ROOT) {
-      systemsTreeBiosPage = { ...systemsTreeBiosPage, loading: false };
-      return;
-    }
-    const rows = payload.bios || [];
-    const loadedRows = reset ? rows : [...(systemsTreeBiosPage.bios || []), ...rows];
-    systemsTreeBiosPage = {
-      bios: loadedRows,
-      total: Number(payload.count ?? systemsTreeBiosSummary.total ?? loadedRows.length),
-      nextOffset: offset + rows.length,
-      loading: false,
-      error: false,
-    };
-    systemsTreeBiosSummary = { total: systemsTreeBiosPage.total, loading: false, error: false };
-  } catch (error) {
-    console.error("Error loading BIOS tree files:", error);
-    systemsTreeBiosPage = { ...state, bios: existingRows, total: Number(state.total || systemsTreeBiosSummary.total || 0), nextOffset: offset, loading: false, error: true };
-  }
-  renderBiosTreeFiles();
-}
-function renderSystemTreeFiles(system) {
-  const target = document.getElementById(`tree-files-${cssSafeId(system)}`);
-  if (!target) return;
-  const payload = systemTreeState(system);
-  const roms = payload.roms || [];
-  const total = Number(payload.total || roms.length);
-  const loaded = roms.length;
-  const hasMore = loaded < total;
-  const firstLoad = payload.loading && !loaded;
-  target.innerHTML = firstLoad
-    ? '<div class="tree-grid-empty small text-muted">Loading first 10 games...</div>'
-    : `
-      ${payload.error ? '<div class="alert alert-danger py-2 small mb-2">Unable to load games for this system.</div>' : ''}
-      <div class="tree-leaf-list">
-        ${roms.map((item) => {
-          const fileName = item.rom_file || item.name || "";
-          const label = item.title || item.name || fileName;
-          const size = item.byte_count !== undefined ? formatBytes(item.byte_count) : "n/a";
-          return `
-            <div class="tree-grid-row tree-leaf-row">
-              <div class="tree-grid-main">
-                <i class="bi bi-file-earmark-binary tree-grid-icon"></i>
-                <div class="tree-grid-label text-truncate" title="${escapeHtml(fileName || label)}">
-                  <span class="fw-semibold">${escapeHtml(label)}</span>
-                </div>
-              </div>
-              <div class="tree-grid-meta">${escapeHtml(size)}</div>
-              <div class="tree-grid-action">
-                <button class="btn btn-outline-primary btn-sm" type="button" title="View" onclick="setHash('${romMediaHash(system, item.unique_id, 1)}')"><i class="bi bi-eye"></i></button>
-                ${
-                  item.is_downloadable === false
-                    ? `<button class="btn btn-secondary btn-sm" type="button" title="Folder ROM (not downloadable)" disabled><i class="bi bi-folder2-open"></i></button>`
-                    : `<a class="btn btn-primary btn-sm" title="Download" href="${romDownloadUrl(system, item.unique_id)}"><i class="bi bi-download"></i></a>`
-                }
-              </div>
-            </div>
-          `;
-        }).join("") || '<div class="tree-grid-empty small text-muted">No games found for this filter.</div>'}
-      </div>
-      <div class="tree-grid-more">
-        <span class="small text-muted">${total ? `Showing ${loaded.toLocaleString()} of ${total.toLocaleString()}` : "No games reported"}</span>
-        <button class="btn btn-outline-primary btn-sm" type="button" ${!hasMore || payload.loading ? "disabled" : ""} onclick="loadSystemTreeFiles(${jsAttr(system)}, { reset: false })">
-          ${payload.loading && loaded ? '<span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>' : '<i class="bi bi-plus-circle me-1"></i>'}
-          Show more
-        </button>
-      </div>
-    `;
-}
-function renderBiosTreeFiles() {
-  const target = document.getElementById(`tree-files-${cssSafeId(BIOS_TREE_ROOT)}`);
-  if (!target) return;
-  const payload = systemsTreeBiosPage;
-  const rows = payload.bios || [];
-  const total = Number(payload.total || systemsTreeBiosSummary.total || rows.length);
-  const loaded = rows.length;
-  const hasMore = loaded < total;
-  const firstLoad = payload.loading && !loaded;
-  target.innerHTML = firstLoad
-    ? '<div class="tree-grid-empty small text-muted">Loading first 10 BIOS files...</div>'
-    : `
-      ${payload.error ? '<div class="alert alert-danger py-2 small mb-2">Unable to load BIOS files.</div>' : ''}
-      <div class="tree-leaf-list">
-        ${rows.map((item) => {
-          const path = item.path || item.name || "";
-          const label = item.name || path;
-          const fingerprint = item.bios_md5 || item.md5 || item.fingerprint || "";
-          const tooltip = fingerprint ? `${path} · ${fingerprint}` : path;
-          const size = item.byte_count !== undefined ? formatBytes(item.byte_count) : "n/a";
-          return `
-            <div class="tree-grid-row tree-leaf-row">
-              <div class="tree-grid-main">
-                <i class="bi bi-cpu tree-grid-icon"></i>
-                <div class="tree-grid-label text-truncate" title="${escapeHtml(tooltip)}">
-                  <span class="fw-semibold">${escapeHtml(label)}</span>
-                </div>
-              </div>
-              <div class="tree-grid-meta">${escapeHtml(size)}</div>
-              <div class="tree-grid-action">
-                ${
-                  item.is_downloadable === false
-                    ? `<button class="btn btn-secondary btn-sm" type="button" title="Disabled" disabled><i class="bi bi-slash-circle"></i></button>`
-                    : `<a class="btn btn-primary btn-sm" title="Download" href="${biosDownloadUrl(item.unique_id)}"><i class="bi bi-download"></i></a>`
-                }
-              </div>
-            </div>
-          `;
-        }).join("") || '<div class="tree-grid-empty small text-muted">No BIOS files found for this filter.</div>'}
-      </div>
-      <div class="tree-grid-more">
-        <span class="small text-muted">${total ? `Showing ${loaded.toLocaleString()} of ${total.toLocaleString()}` : "No BIOS files reported"}</span>
-        <button class="btn btn-outline-primary btn-sm" type="button" ${!hasMore || payload.loading ? "disabled" : ""} onclick="loadBiosTreeFiles({ reset: false })">
-          ${payload.loading && loaded ? '<span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>' : '<i class="bi bi-plus-circle me-1"></i>'}
-          Show more
-        </button>
-      </div>
-    `;
-}
 function movieDownloadUrl(entryKey) {
   return `${API_BASE}/movies/${encodeURIComponent(entryKey)}/download`;
 }
@@ -2080,8 +1648,9 @@ function showDetailHash(showTitle, seasonNumber) {
 function parseMoviesHash(hash) {
   if (!hash.startsWith("#movies")) return null;
   const rest = hash.slice("#movies".length).replace(/^\//, "");
-  if (!rest) return { view: "tree" };
-  if (rest === "explore") return { view: "explore" };
+  // Browse is the only Movies view now -- bare "#movies" and "#movies/explore"
+  // both mean it.
+  if (!rest || rest === "explore") return { view: "explore" };
   if (rest.startsWith("show/")) {
     const parts = rest.split("/");
     const showTitle = decodeURIComponent(parts[1] || "");
@@ -2089,46 +1658,6 @@ function parseMoviesHash(hash) {
     return { view: "show", showTitle, seasonNumber: Number.isFinite(seasonNumber) ? seasonNumber : null };
   }
   return { view: "detail", entryKey: decodeURIComponent(rest.split("?")[0]) };
-}
-function renderAssetsTabBar(active) {
-  return renderAdminPanelTabs(active, [
-    ["systems", "Systems", "bi-grid", "#systems"],
-    ["movies", "Movies", "bi-film", "#movies"],
-  ]);
-}
-async function renderMoviesPage() {
-  currentSystemContext = null;
-  clearSystemTheme();
-  setLoading(true, "Loading movies...");
-  try {
-    const payload = await api("/movies");
-    moviesAllRows = payload.movies || [];
-    moviesTreeExpanded = new Set();
-    content.innerHTML = `
-      ${renderAssetsTabBar("movies")}
-      <div class="d-flex flex-wrap align-items-start justify-content-between gap-2 mb-2">
-        <div class="text-muted small">Movies and shows stored on this drone, laid out the same way they are on disk -- watch them right here or download a copy.</div>
-        <button class="btn btn-outline-primary btn-sm text-nowrap" type="button" onclick="setHash(movieExploreHash())"><i class="bi bi-grid-3x3-gap me-1"></i>Browse</button>
-      </div>
-      <div class="mb-3 systems-tree-toolbar">
-        <label class="form-label" for="moviesTreeSearch">Search movies and folders</label>
-        <div class="input-group">
-          <span class="input-group-text"><i class="bi bi-funnel"></i></span>
-          <input id="moviesTreeSearch" class="form-control" type="search" placeholder="Filter by name" oninput="renderMoviesTreeIntoContainer(this.value)">
-        </div>
-      </div>
-      <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2 small text-muted">
-        <span>${moviesAllRows.length.toLocaleString()} movie${moviesAllRows.length === 1 ? "" : "s"}</span>
-      </div>
-      <div id="movies-tree-files"></div>
-    `;
-    renderMoviesTreeIntoContainer("");
-    restoreMovieListScroll("#movies");
-  } catch (err) {
-    content.innerHTML = `${renderAssetsTabBar("movies")}<div class="alert alert-danger">Failed to load movies: ${escapeHtml(err.message || "unknown error")}</div>`;
-  } finally {
-    setLoading(false);
-  }
 }
 async function renderMovieExplorerPage() {
   currentSystemContext = null;
@@ -2149,7 +1678,6 @@ async function renderMovieExplorerPage() {
           <div class="movie-explorer-search flex-grow-1">
             <input id="movieExplorerSearch" type="search" class="form-control" placeholder="Search titles" oninput="filterMovieExplorer(this.value)" autofocus>
           </div>
-          <button class="btn btn-outline-light btn-sm text-nowrap" type="button" onclick="setHash('#movies')"><i class="bi bi-arrow-left me-1"></i>Back to Drone view</button>
         </div>
         <div class="movie-explorer-body">
           <aside id="movie-explorer-sidebar" class="movie-explorer-sidebar"></aside>
@@ -2168,7 +1696,6 @@ async function renderMovieExplorerPage() {
       <div class="movie-explorer-overlay">
         <div class="movie-explorer-topbar">
           <div class="movie-explorer-brand"><i class="bi bi-film me-2"></i>Movies</div>
-          <button class="btn btn-outline-light btn-sm text-nowrap" type="button" onclick="setHash('#movies')"><i class="bi bi-arrow-left me-1"></i>Back to Drone view</button>
         </div>
         <div class="alert alert-danger m-3">Failed to load movies: ${escapeHtml(err.message || "unknown error")}</div>
       </div>
@@ -2180,7 +1707,9 @@ async function renderMovieExplorerPage() {
 function movieExplorerGenres() {
   const genres = new Set();
   moviesAllRows.forEach((m) => (m.genres || []).forEach((g) => g && genres.add(g)));
-  return [...genres].sort((a, b) => a.localeCompare(b));
+  // Most-to-least by how many movies currently match it (same faceted count
+  // shown next to each button), ties broken alphabetically.
+  return [...genres].sort((a, b) => movieExplorerGenreCount(b) - movieExplorerGenreCount(a) || a.localeCompare(b));
 }
 // "Shows" also keeps a groupable extra (a Featurette resolved to a
 // show/season) -- otherwise it'd be filtered out before groupMoviesForExplorer
@@ -2264,6 +1793,21 @@ function compareShowGroupMembers(a, b) {
   if (aKey !== bKey) return aKey - bKey;
   return String(a.movie_name || a.name || "").localeCompare(String(b.movie_name || b.name || ""));
 }
+// "&" and "and" show up interchangeably across different releases of the
+// same show -- confirmed live: "Law & Order Special Victims Unit" (seasons
+// 1-26, one release group) vs "Law and Order Special Victims Unit" (season
+// 27, a different one) are otherwise-identical raw show_title strings that
+// would otherwise land in two different groups/two different cards for the
+// same show. Normalized only for *matching* episodes together -- never for
+// what's actually displayed (movieExplorerCardTitle/the representative's own
+// show_title still show the real, unnormalized text).
+function movieShowGroupingKey(title) {
+  return String(title || "")
+    .toLowerCase()
+    .replace(/\s*&\s*/g, " and ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 // Groups groupable rows (see isShowGroupableRow) into one synthetic card per
 // show -- every season folds into the same card (clicking it lands on the
 // show detail page, which owns its own season switcher) -- everything else
@@ -2282,7 +1826,7 @@ function groupMoviesForExplorer(rows) {
       cards.push(row);
       return;
     }
-    const key = String(row.show_title || "").toLowerCase();
+    const key = movieShowGroupingKey(row.show_title);
     if (!showGroups.has(key)) showGroups.set(key, []);
     showGroups.get(key).push(row);
   });
@@ -2378,8 +1922,8 @@ async function renderShowDetailsPage(showTitle, seasonNumber) {
       const payload = await api("/movies");
       moviesAllRows = payload.movies || [];
     }
-    const showKey = String(showTitle || "").toLowerCase();
-    const episodes = moviesAllRows.filter((m) => isShowGroupableRow(m) && String(m.show_title || "").toLowerCase() === showKey);
+    const showKey = movieShowGroupingKey(showTitle);
+    const episodes = moviesAllRows.filter((m) => isShowGroupableRow(m) && movieShowGroupingKey(m.show_title) === showKey);
     if (!episodes.length) {
       content.innerHTML = `
         <button class="btn btn-outline-secondary btn-sm mb-3" type="button" onclick="setHash('#movies')"><i class="bi bi-arrow-left me-1"></i>Back to Movies</button>
@@ -2427,6 +1971,11 @@ async function renderShowDetailsPage(showTitle, seasonNumber) {
             <div class="small text-muted mb-1"><span class="badge text-bg-info me-2">TV Show</span>${realEpisodeCount} episode${realEpisodeCount === 1 ? "" : "s"}${extraCount ? `, ${extraCount} extra${extraCount === 1 ? "" : "s"}` : ""}</div>
             <h2 class="movie-detail-title" title="${escapeHtml(displayShowTitle)}">${escapeHtml(displayShowTitle)} &middot; Season ${selectedSeason}</h2>
             ${genres.length ? `<div class="mb-2">${genres.map((g) => `<span class="badge movie-genre-badge">${escapeHtml(g)}</span>`).join(" ")}</div>` : ""}
+            ${
+              adminEnabled
+                ? `<button class="btn btn-outline-danger btn-sm" type="button" onclick="deleteShowFromDetailPage(${jsAttr(showTitle)}, ${jsAttr(displayShowTitle)}, ${jsAttr(episodes.map((e) => e.entry_key))})"><i class="bi bi-trash me-1"></i>Delete Show</button>`
+                : ""
+            }
           </div>
         </div>
       </div>
@@ -2451,6 +2000,25 @@ async function renderShowDetailsPage(showTitle, seasonNumber) {
     setLoading(false);
   }
 }
+function deleteShowFromDetailPage(showTitle, displayShowTitle, entryKeys) {
+  openConfirmDeleteModal({
+    title: "Delete show?",
+    body: `<strong>${escapeHtml(displayShowTitle)}</strong> and all ${entryKeys.length} episode${entryKeys.length === 1 ? "" : "s"}/extras (every season) will be permanently deleted from disk. This cannot be undone.`,
+    confirmLabel: "Delete Show",
+    onConfirm: async () => {
+      setLoading(true, "Deleting show...");
+      try {
+        await deleteMoviesBatch(entryKeys);
+        showToast("Show deleted.", "success");
+        setHash("#movies");
+      } catch (err) {
+        showToast(`Delete failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
+      } finally {
+        setLoading(false);
+      }
+    },
+  });
+}
 function renderShowDetailEpisodeRow(ep) {
   const isExtra = ep.kind === "extra";
   const label = isExtra
@@ -2471,129 +2039,11 @@ function renderShowDetailEpisodeRow(ep) {
     </div>
   `;
 }
-function moviesPathParts(movie) {
-  const raw = String(movie.file_path || movie.relative_path || movie.movie_name || "")
-    .replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
-  const parts = raw.split("/").map((part) => part.trim()).filter(Boolean);
-  return parts.length ? parts : [movie.movie_name || movie.name || "movie"];
-}
-function buildMoviesTree(movies) {
-  const root = { key: "", name: "", dirs: new Map(), files: [] };
-  (movies || []).forEach((movie) => {
-    const parts = moviesPathParts(movie);
-    let node = root;
-    parts.slice(0, -1).forEach((part) => {
-      const key = node.key ? `${node.key}/${part}` : part;
-      if (!node.dirs.has(part)) node.dirs.set(part, { key, name: part, dirs: new Map(), files: [] });
-      node = node.dirs.get(part);
-    });
-    node.files.push({ name: parts[parts.length - 1] || movie.movie_name || movie.name, movie });
-  });
-  return root;
-}
 // Ignores a leading "The " (case-insensitive) when alphabetizing a movie/show
 // title, so e.g. "The Movie Pt1" sorts next to "Movie Pt2" instead of under
 // "T" -- standard library/media-catalog sort convention.
 function movieSortableTitle(value) {
   return String(value || "").replace(/^the\s+/i, "").trim();
-}
-function sortMoviesTreeEntries(entries) {
-  return entries.sort((a, b) => movieSortableTitle(a.name).localeCompare(movieSortableTitle(b.name), undefined, { sensitivity: "base" }));
-}
-function moviesNodeMatches(node, query) {
-  if (!query) return true;
-  if (String(node.name || "").toLowerCase().includes(query)) return true;
-  for (const file of node.files || []) {
-    if (String(file.name || file.movie?.movie_name || "").toLowerCase().includes(query)) return true;
-  }
-  for (const child of node.dirs.values()) {
-    if (moviesNodeMatches(child, query)) return true;
-  }
-  return false;
-}
-function moviesVisibleFiles(files, query) {
-  if (!query) return files;
-  return files.filter((file) => String(file.name || file.movie?.movie_name || "").toLowerCase().includes(query));
-}
-function countMoviesFiles(node) {
-  let total = (node.files || []).length;
-  for (const child of node.dirs.values()) total += countMoviesFiles(child);
-  return total;
-}
-function renderMoviesTreeLeafRow(file, depth) {
-  const movie = file.movie || {};
-  const rawName = file.name || movie.movie_name || movie.name || "";
-  const displayName = movie.display_title || rawName;
-  const size = movie.byte_count !== undefined ? formatBytes(movie.byte_count) : "n/a";
-  const posterUrl = movie.entry_key ? movieArtworkUrl(movie.entry_key, "poster") : "";
-  return `
-    <div class="tree-grid-row tree-leaf-row movies-tree-row" style="--tree-depth:${depth}">
-      <div class="tree-grid-main">
-        <span class="movies-tree-thumb">
-          ${
-            posterUrl
-              ? `<img src="${escapeHtml(posterUrl)}" alt="" loading="lazy" onerror="this.style.display='none'; this.nextElementSibling.classList.remove('d-none');"><i class="bi bi-film movies-tree-thumb-fallback d-none"></i>`
-              : `<i class="bi bi-film movies-tree-thumb-fallback"></i>`
-          }
-        </span>
-        <button type="button" class="tree-grid-label text-truncate movie-tree-title-btn" title="${escapeHtml(movie.file_path || rawName)}" onclick="setHash(movieDetailHash(${jsAttr(movie.entry_key)}))">
-          <span class="fw-semibold">${escapeHtml(displayName)}</span>
-        </button>
-      </div>
-      <div class="tree-grid-meta">${escapeHtml(size)}</div>
-      <div class="tree-grid-action">
-        <button class="btn btn-outline-primary btn-sm" type="button" title="Watch" onclick="openMoviePlayerModal(${jsAttr(movie.entry_key)}, ${jsAttr(displayName)})"><i class="bi bi-play-circle"></i></button>
-        ${
-          movie.is_downloadable === false
-            ? `<button class="btn btn-secondary btn-sm" type="button" title="Downloads disabled" disabled><i class="bi bi-slash-circle"></i></button>`
-            : `<a class="btn btn-primary btn-sm" title="Download" href="${movieDownloadUrl(movie.entry_key)}"><i class="bi bi-download"></i></a>`
-        }
-      </div>
-    </div>
-  `;
-}
-function renderMoviesTreeNode(node, depth, query) {
-  if (!moviesNodeMatches(node, query)) return "";
-  const dirs = sortMoviesTreeEntries(Array.from(node.dirs.values())).map((child) => renderMoviesTreeNode(child, depth + 1, query)).join("");
-  const files = sortMoviesTreeEntries(moviesVisibleFiles(node.files || [], query)).map((file) => renderMoviesTreeLeafRow(file, depth + 1)).join("");
-  const expanded = Boolean(query) || moviesTreeExpanded.has(node.key);
-  const count = countMoviesFiles(node);
-  return `
-    <div class="movies-tree-node" data-folder-key="${escapeHtml(node.key)}">
-      <button type="button" class="tree-grid-row tree-category-row movies-tree-row text-start" style="--tree-depth:${depth}" onclick="toggleMoviesFolder(${jsAttr(node.key)})">
-        <div class="tree-grid-main">
-          <i class="bi ${expanded ? "bi-chevron-down" : "bi-chevron-right"} tree-grid-caret"></i>
-          <i class="bi ${expanded ? "bi-folder2-open" : "bi-folder2"} tree-grid-icon"></i>
-          <div class="tree-grid-label text-truncate" title="${escapeHtml(node.key)}"><span class="fw-semibold">${escapeHtml(node.name)}</span></div>
-        </div>
-        <div class="tree-grid-meta">${count.toLocaleString()} file${count === 1 ? "" : "s"}</div>
-        <div class="tree-grid-action"></div>
-      </button>
-      <div class="tree-branch" style="${expanded ? "" : "display:none;"}">${dirs}${files}</div>
-    </div>
-  `;
-}
-function renderMoviesTree(query) {
-  const tree = buildMoviesTree(moviesAllRows);
-  const dirNodes = sortMoviesTreeEntries(Array.from(tree.dirs.values())).map((node) => renderMoviesTreeNode(node, 0, query)).join("");
-  const rootFiles = sortMoviesTreeEntries(moviesVisibleFiles(tree.files, query)).map((file) => renderMoviesTreeLeafRow(file, 0)).join("");
-  if (!dirNodes && !rootFiles) {
-    return `<div class="text-muted">${moviesAllRows.length ? "No movies matched your filter." : "No movies found."}</div>`;
-  }
-  return `<div class="tree-grid">${dirNodes}${rootFiles}</div>`;
-}
-function renderMoviesTreeIntoContainer(queryValue = null) {
-  const container = document.getElementById("movies-tree-files");
-  if (!container) return;
-  const filter = queryValue === null ? (document.getElementById("moviesTreeSearch")?.value || "") : queryValue;
-  container.innerHTML = renderMoviesTree(String(filter || "").trim().toLowerCase());
-}
-function toggleMoviesFolder(key) {
-  const normalized = String(key || "");
-  if (!normalized) return;
-  if (moviesTreeExpanded.has(normalized)) moviesTreeExpanded.delete(normalized);
-  else moviesTreeExpanded.add(normalized);
-  renderMoviesTreeIntoContainer();
 }
 // Casting (Chromecast/AirPlay) -- both receivers fetch the video file
 // themselves, directly, with no browser in the loop, so neither this app's
@@ -3035,6 +2485,11 @@ function renderMovieDetailShell(movie) {
                 ? `<button class="btn btn-outline-secondary" type="button" disabled><i class="bi bi-slash-circle me-1"></i>Downloads disabled</button>`
                 : `<a class="btn btn-outline-primary" href="${movieDownloadUrl(entryKey)}"><i class="bi bi-download me-1"></i>Download</a>`
             }
+            ${
+              adminEnabled
+                ? `<button class="btn btn-outline-danger" type="button" onclick="deleteMovieFromDetailPage(${jsAttr(entryKey)}, ${jsAttr(title)})"><i class="bi bi-trash me-1"></i>Delete</button>`
+                : ""
+            }
           </div>
         </div>
       </div>
@@ -3054,6 +2509,36 @@ function renderMovieDetailShell(movie) {
     </div>
     <div id="movie-scraper-card" class="mt-4"></div>
   `;
+}
+// Movie/episode files are gone from disk after any of these -- the whole
+// client-side movies cache is invalidated (not just the deleted row) since
+// every movies view (tree, explorer, show pages) reads from the same
+// moviesAllRows snapshot with no per-row invalidation of its own; the next
+// view that needs it refetches via its existing "if (!moviesAllRows.length)"
+// lazy-load guard.
+async function deleteMoviesBatch(entryKeys) {
+  const result = await apiPost("/admin/movies/delete", { entry_keys: entryKeys });
+  moviesAllRows = [];
+  return result;
+}
+function deleteMovieFromDetailPage(entryKey, title) {
+  openConfirmDeleteModal({
+    title: "Delete movie?",
+    body: `<strong>${escapeHtml(title)}</strong> will be permanently deleted from disk. This cannot be undone.`,
+    confirmLabel: "Delete",
+    onConfirm: async () => {
+      setLoading(true, "Deleting...");
+      try {
+        await deleteMoviesBatch([entryKey]);
+        showToast("Movie deleted.", "success");
+        setHash("#movies");
+      } catch (err) {
+        showToast(`Delete failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
+      } finally {
+        setLoading(false);
+      }
+    },
+  });
 }
 async function renderMovieScraperCard(entryKey, movie) {
   const container = document.getElementById("movie-scraper-card");
@@ -3510,97 +2995,6 @@ async function renderAdminMoviesArtworkPage() {
   }
 }
 
-function systemBiosTreeState(system) {
-  const key = String(system || "");
-  if (!systemsTreeSystemBiosPages[key]) {
-    systemsTreeSystemBiosPages[key] = { bios: [], total: 0, nextOffset: 0, loading: false, error: false };
-  }
-  return systemsTreeSystemBiosPages[key];
-}
-async function loadSystemBiosTreeFiles(system, options = {}) {
-  if (!system) return;
-  const reset = options.reset === true;
-  const state = reset ? { bios: [], total: 0, nextOffset: 0, loading: false, error: false } : systemBiosTreeState(system);
-  if (!reset && state.loading) return;
-  const existingRows = reset ? [] : (state.bios || []);
-  const offset = reset ? 0 : Number(state.nextOffset ?? existingRows.length);
-  systemsTreeSystemBiosPages[system] = { ...state, bios: existingRows, loading: true, error: false };
-  renderSystemBiosTreeFiles(system);
-  try {
-    const params = new URLSearchParams();
-    params.set("limit", String(TREE_FILE_LOAD_SIZE));
-    params.set("offset", String(offset));
-    params.set("system", system);
-    if ((systemsTreeQuery || "").trim()) params.set("q", systemsTreeQuery.trim());
-    const payload = await api(`/bios?${params.toString()}`);
-    if (selectedSystemsTreeRoot !== system || selectedSystemsTreeCategory !== "bios") {
-      if (systemsTreeSystemBiosPages[system]) systemsTreeSystemBiosPages[system] = { ...systemsTreeSystemBiosPages[system], loading: false };
-      return;
-    }
-    const rows = payload.bios || [];
-    const loadedRows = reset ? rows : [...(systemsTreeSystemBiosPages[system]?.bios || []), ...rows];
-    systemsTreeSystemBiosPages[system] = {
-      bios: loadedRows,
-      total: Number(payload.count ?? loadedRows.length),
-      nextOffset: offset + rows.length,
-      loading: false,
-      error: false,
-    };
-  } catch (error) {
-    console.error("Error loading system BIOS tree files:", error);
-    systemsTreeSystemBiosPages[system] = { ...state, bios: existingRows, total: Number(state.total || 0), nextOffset: offset, loading: false, error: true };
-  }
-  renderSystemBiosTreeFiles(system);
-}
-function renderSystemBiosTreeFiles(system) {
-  const target = document.getElementById(`tree-system-bios-files-${cssSafeId(system)}`);
-  if (!target) return;
-  const payload = systemBiosTreeState(system);
-  const rows = payload.bios || [];
-  const total = Number(payload.total || rows.length);
-  const loaded = rows.length;
-  const hasMore = loaded < total;
-  const firstLoad = payload.loading && !loaded;
-  target.innerHTML = firstLoad
-    ? '<div class="tree-grid-empty small text-muted">Loading first 10 BIOS files...</div>'
-    : `
-      ${payload.error ? '<div class="alert alert-danger py-2 small mb-2">Unable to load BIOS files.</div>' : ''}
-      <div class="tree-leaf-list">
-        ${rows.map((item) => {
-          const path = item.path || item.name || "";
-          const label = item.name || path;
-          const fingerprint = item.bios_md5 || item.md5 || item.fingerprint || "";
-          const tooltip = fingerprint ? `${path} · ${fingerprint}` : path;
-          const size = item.byte_count !== undefined ? formatBytes(item.byte_count) : "n/a";
-          return `
-            <div class="tree-grid-row tree-leaf-row">
-              <div class="tree-grid-main">
-                <i class="bi bi-cpu tree-grid-icon"></i>
-                <div class="tree-grid-label text-truncate" title="${escapeHtml(tooltip)}">
-                  <span class="fw-semibold">${escapeHtml(label)}</span>
-                </div>
-              </div>
-              <div class="tree-grid-meta">${escapeHtml(size)}</div>
-              <div class="tree-grid-action">
-                ${
-                  item.is_downloadable === false
-                    ? `<button class="btn btn-secondary btn-sm" type="button" title="Disabled" disabled><i class="bi bi-slash-circle"></i></button>`
-                    : `<a class="btn btn-primary btn-sm" title="Download" href="${biosDownloadUrl(item.unique_id)}"><i class="bi bi-download"></i></a>`
-                }
-              </div>
-            </div>
-          `;
-        }).join("") || '<div class="tree-grid-empty small text-muted">No BIOS files found for this system.</div>'}
-      </div>
-      <div class="tree-grid-more">
-        <span class="small text-muted">${total ? `Showing ${loaded.toLocaleString()} of ${total.toLocaleString()}` : "No BIOS files reported"}</span>
-        <button class="btn btn-outline-primary btn-sm" type="button" ${!hasMore || payload.loading ? "disabled" : ""} onclick="loadSystemBiosTreeFiles(${jsAttr(system)}, { reset: false })">
-          ${payload.loading && loaded ? '<span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>' : '<i class="bi bi-plus-circle me-1"></i>'}
-          Show more
-        </button>
-      </div>
-    `;
-}
 function parseSystemHash(hash) {
   if (!hash.startsWith("#system/") || hash.includes("/rom/")) return null;
   const raw = hash.substring("#system/".length);
@@ -3687,7 +3081,7 @@ async function renderRomMediaPage(system, uniqueId, page = 1) {
     subtitleNode.textContent = `${system} artwork and gamelist.xml metadata`;
     content.innerHTML = `
       <div class="mb-3 d-flex flex-wrap gap-2">
-        <button class="btn btn-outline-secondary" onclick="setHash('${systemsTreeHash("", system)}')">← Back to ${escapeHtml(system)}</button>
+        <button class="btn btn-outline-secondary" onclick="setHash('${systemsExploreHash(system)}')">← Back to ${escapeHtml(system)}</button>
         ${
           rom.is_downloadable === false
             ? `<button class="btn btn-outline-secondary" type="button" disabled><i class="bi bi-folder2-open me-1"></i>Folder ROM</button>`
@@ -3784,7 +3178,7 @@ async function renderRomMediaPage(system, uniqueId, page = 1) {
       });
   } catch (err) {
     showToast(`Failed to load ROM media: ${escapeHtml(err.message || "unknown error")}`, "danger");
-    setHash(systemsTreeHash("", system));
+    setHash(systemsExploreHash(system));
   } finally {
     setLoading(false);
   }
@@ -3906,33 +3300,6 @@ async function renderThemeGalleryPage() {
   await loadThemePage(0);
   setLoading(false);
 }
-async function renderSystemsPage() {
-  currentSystemContext = null;
-  setLoading(true, "Loading systems...");
-  clearSystemTheme();
-  const parsed = parseSystemsHash(window.location.hash) || { q: "", root: null };
-  systemsTreeQuery = parsed.q || "";
-  selectedSystemsTreeRoot = parsed.root || null;
-  selectedSystemsTreeCategory = selectedSystemsTreeRoot === BIOS_TREE_ROOT ? "bios" : (selectedSystemsTreeRoot ? "games" : null);
-  systemsTreeRomPages = {};
-  systemsTreeMatchedSystems = new Set();
-  systemsTreeBiosPage = { bios: [], total: 0, nextOffset: 0, loading: false, error: false };
-  const [data, _biosSummary, searchData] = await Promise.all([
-    getSystemsData(),
-    loadBiosTreeSummary(),
-    systemsTreeQuery ? api(`/search?q=${encodeURIComponent(systemsTreeQuery)}`).catch(() => ({ results: [] })) : Promise.resolve({ results: [] }),
-  ]);
-  systemsTreeMatchedSystems = new Set((searchData.results || []).map((item) => String(item.system || "")).filter(Boolean));
-  renderSystems(data);
-  if (selectedSystemsTreeRoot === BIOS_TREE_ROOT) {
-    await loadBiosTreeFiles({ reset: true });
-  } else if (selectedSystemsTreeRoot) {
-    await loadSystemTreeFiles(selectedSystemsTreeRoot, { reset: true });
-  }
-  restoreMovieListScroll("#systems");
-  setLoading(false);
-  refreshRandomThemeLogo().catch(() => {});
-}
 // "show" is reserved on the movies side for the same reason noted at
 // showDetailHash -- not relevant here, but kept as a plain query-string hash
 // (not a path segment) for the same reason: system/genre names can contain
@@ -3962,10 +3329,15 @@ async function renderSystemsExplorePage() {
   systemsExploreShowAllCategories = false;
   systemsExploreSystemFilterQuery = "";
   systemsExploreCategoryFilterQuery = "";
+  systemsExploreBiosItems = [];
   setLoading(true, "Loading systems...");
   try {
-    const data = await getSystemsData();
+    const [data, biosSummary] = await Promise.all([
+      getSystemsData(),
+      api("/bios?limit=1&offset=0").catch(() => ({ count: 0 })),
+    ]);
     systemsExploreAllSystems = (data.systems || []).slice().sort((a, b) => Number(b.rom_count || 0) - Number(a.rom_count || 0));
+    systemsExploreBiosTotal = Number(biosSummary.count || 0);
     content.innerHTML = `
       <div class="movie-explorer-overlay">
         <div class="movie-explorer-topbar">
@@ -3973,7 +3345,6 @@ async function renderSystemsExplorePage() {
           <div class="movie-explorer-search flex-grow-1">
             <input id="systemsExploreSearch" type="search" class="form-control" placeholder="Search games" oninput="filterSystemsExplore(this.value)" autofocus>
           </div>
-          <button class="btn btn-outline-light btn-sm text-nowrap" type="button" onclick="setHash(systemsTreeHash())"><i class="bi bi-arrow-left me-1"></i>Back to Drone view</button>
         </div>
         <div class="movie-explorer-body">
           <aside id="systems-explore-sidebar" class="movie-explorer-sidebar"></aside>
@@ -3985,14 +3356,13 @@ async function renderSystemsExplorePage() {
       </div>
     `;
     renderSystemsExploreSidebarShell();
-    await loadSystemsExploreRoms({ reset: true });
+    await loadSystemsExploreCurrentMode({ reset: true });
     restoreMovieListScroll("#systems/explore");
   } catch (err) {
     content.innerHTML = `
       <div class="movie-explorer-overlay">
         <div class="movie-explorer-topbar">
           <div class="movie-explorer-brand"><i class="bi bi-controller me-2"></i>Systems</div>
-          <button class="btn btn-outline-light btn-sm text-nowrap" type="button" onclick="setHash(systemsTreeHash())"><i class="bi bi-arrow-left me-1"></i>Back to Drone view</button>
         </div>
         <div class="alert alert-danger m-3">Failed to load systems: ${escapeHtml(err.message || "unknown error")}</div>
       </div>
@@ -4061,6 +3431,7 @@ function renderSystemsExploreSystemList() {
   const canExpand = !searching && systemsExploreAllSystems.length > SYSTEMS_EXPLORE_TOP_SYSTEM_COUNT;
   list.innerHTML = `
     ${searching ? "" : systemButton("", "All Systems", totalRoms)}
+    ${searching ? "" : systemButton(SYSTEMS_EXPLORE_BIOS_KEY, "BIOS", systemsExploreBiosTotal)}
     ${
       visibleSystems.length
         ? visibleSystems.map((s) => systemButton(s.name, s.name, s.rom_count)).join("")
@@ -4076,6 +3447,10 @@ function renderSystemsExploreSystemList() {
 function renderSystemsExploreCategoryList() {
   const list = document.getElementById("systems-explore-category-list");
   if (!list) return;
+  if (systemsExploreSelectedSystem === SYSTEMS_EXPLORE_BIOS_KEY) {
+    list.innerHTML = `<div class="text-muted small">Not applicable for BIOS files.</div>`;
+    return;
+  }
   const genreButton = (value, label, count) => `
     <button type="button" class="movie-explorer-category-btn ${systemsExploreSelectedGenre === value ? "active" : ""}" onclick="setSystemsExploreGenre(${jsAttr(value)})">
       <span>${escapeHtml(label)}</span><span class="movie-explorer-category-count">${Number(count || 0).toLocaleString()}</span>
@@ -4113,14 +3488,14 @@ async function setSystemsExploreSystem(value) {
   updateSystemsExploreHash();
   renderSystemsExploreSystemList();
   renderSystemsExploreCategoryList();
-  await loadSystemsExploreRoms({ reset: true });
+  await loadSystemsExploreCurrentMode({ reset: true });
 }
 async function setSystemsExploreGenre(value) {
   systemsExploreSelectedGenre = value;
   updateSystemsExploreHash();
   renderSystemsExploreSystemList();
   renderSystemsExploreCategoryList();
-  await loadSystemsExploreRoms({ reset: true });
+  await loadSystemsExploreCurrentMode({ reset: true });
 }
 function toggleSystemsExploreShowAllSystems() {
   systemsExploreShowAllSystems = !systemsExploreShowAllSystems;
@@ -4138,7 +3513,32 @@ let systemsExploreSearchDebounce = null;
 function filterSystemsExplore(value) {
   systemsExploreSearchQuery = value || "";
   clearTimeout(systemsExploreSearchDebounce);
-  systemsExploreSearchDebounce = setTimeout(() => loadSystemsExploreRoms({ reset: true }), 300);
+  systemsExploreSearchDebounce = setTimeout(() => loadSystemsExploreCurrentMode({ reset: true }), 300);
+}
+function loadSystemsExploreCurrentMode(opts = {}) {
+  return systemsExploreSelectedSystem === SYSTEMS_EXPLORE_BIOS_KEY
+    ? loadSystemsExploreBios(opts)
+    : loadSystemsExploreRoms(opts);
+}
+async function loadSystemsExploreBios(opts = {}) {
+  const reset = Boolean(opts.reset);
+  const offset = reset ? 0 : systemsExploreBiosItems.length;
+  if (systemsExploreLoadingMore) return;
+  systemsExploreLoadingMore = true;
+  renderSystemsExploreMoreButton();
+  try {
+    const params = new URLSearchParams({ limit: String(SYSTEMS_EXPLORE_PAGE_SIZE), offset: String(offset) });
+    if (systemsExploreSearchQuery.trim()) params.set("q", systemsExploreSearchQuery.trim());
+    const data = await api(`/bios?${params.toString()}`);
+    systemsExploreBiosItems = reset ? (data.bios || []) : [...systemsExploreBiosItems, ...(data.bios || [])];
+    systemsExploreTotal = Number(data.count || 0);
+    systemsExploreHasMore = Boolean(data.has_more);
+  } catch (err) {
+    showToast(`Failed to load BIOS files: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  } finally {
+    systemsExploreLoadingMore = false;
+    renderSystemsExploreGrid();
+  }
 }
 async function loadSystemsExploreRoms(opts = {}) {
   const reset = Boolean(opts.reset);
@@ -4170,25 +3570,67 @@ async function loadSystemsExploreRoms(opts = {}) {
 function renderSystemsExploreGrid() {
   const grid = document.getElementById("systems-explore-grid");
   if (!grid) return;
+  const isBios = systemsExploreSelectedSystem === SYSTEMS_EXPLORE_BIOS_KEY;
+  // #systems-explore-grid is normally a poster-card CSS grid (150px min
+  // columns, see .movie-explorer-grid) -- BIOS rows are a plain name/size/
+  // download list with no artwork, so without this override each row gets
+  // squeezed into a single ~150px card column and its label truncates to
+  // nothing (confirmed live: the row rendered with icon/size/button visible
+  // but an empty-looking label, even though the DOM text was there).
+  grid.classList.toggle("systems-explore-grid-bios", isBios);
+  if (isBios) {
+    grid.innerHTML = systemsExploreBiosItems.length
+      ? `<div class="tree-leaf-list">${systemsExploreBiosItems.map(renderSystemsExploreBiosRow).join("")}</div>`
+      : `<div class="text-muted p-4">No BIOS files match the current filters.</div>`;
+    renderSystemsExploreMoreButton();
+    return;
+  }
   grid.innerHTML = systemsExploreRoms.length
     ? systemsExploreRoms.map(renderSystemsExploreCard).join("")
     : `<div class="text-muted p-4">No games match the current filters.</div>`;
   renderSystemsExploreMoreButton();
   setupLazyImages();
 }
+function renderSystemsExploreBiosRow(item) {
+  const path = item.path || item.name || "";
+  const label = item.name || path;
+  const fingerprint = item.bios_md5 || item.md5 || item.fingerprint || "";
+  const tooltip = fingerprint ? `${path} · ${fingerprint}` : path;
+  const size = item.byte_count !== undefined ? formatBytes(item.byte_count) : "n/a";
+  return `
+    <div class="tree-grid-row tree-leaf-row">
+      <div class="tree-grid-main">
+        <i class="bi bi-cpu tree-grid-icon"></i>
+        <div class="tree-grid-label text-truncate" title="${escapeHtml(tooltip)}">
+          <span class="fw-semibold">${escapeHtml(label)}</span>
+        </div>
+      </div>
+      <div class="tree-grid-meta">${escapeHtml(size)}</div>
+      <div class="tree-grid-action">
+        ${
+          item.is_downloadable === false
+            ? `<button class="btn btn-secondary btn-sm" type="button" title="Downloads disabled" disabled><i class="bi bi-slash-circle"></i></button>`
+            : `<a class="btn btn-primary btn-sm" title="Download" href="${biosDownloadUrl(item.unique_id)}"><i class="bi bi-download"></i></a>`
+        }
+      </div>
+    </div>
+  `;
+}
 function renderSystemsExploreMoreButton() {
   const wrap = document.getElementById("systems-explore-more");
   if (!wrap) return;
+  const isBios = systemsExploreSelectedSystem === SYSTEMS_EXPLORE_BIOS_KEY;
+  const loadedCount = isBios ? systemsExploreBiosItems.length : systemsExploreRoms.length;
   if (!systemsExploreHasMore && !systemsExploreLoadingMore) {
-    wrap.innerHTML = systemsExploreRoms.length
-      ? `<span class="small text-muted">Showing ${systemsExploreRoms.length.toLocaleString()} of ${systemsExploreTotal.toLocaleString()}</span>`
+    wrap.innerHTML = loadedCount
+      ? `<span class="small text-muted">Showing ${loadedCount.toLocaleString()} of ${systemsExploreTotal.toLocaleString()}</span>`
       : "";
     return;
   }
   wrap.innerHTML = `
-    <button type="button" class="btn btn-outline-primary btn-sm" ${systemsExploreLoadingMore ? "disabled" : ""} onclick="loadSystemsExploreRoms({ reset: false })">
+    <button type="button" class="btn btn-outline-primary btn-sm" ${systemsExploreLoadingMore ? "disabled" : ""} onclick="loadSystemsExploreCurrentMode({ reset: false })">
       ${systemsExploreLoadingMore ? '<span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>' : '<i class="bi bi-plus-circle me-1"></i>'}
-      Show more (${systemsExploreRoms.length.toLocaleString()} of ${systemsExploreTotal.toLocaleString()})
+      Show more (${loadedCount.toLocaleString()} of ${systemsExploreTotal.toLocaleString()})
     </button>
   `;
 }
@@ -4307,6 +3749,42 @@ function showTechInfo(key) {
       </div>
     </div>`;
   const bsModal = window.bootstrap?.Modal ? window.bootstrap.Modal.getOrCreateInstance(modal) : null;
+  bsModal?.show();
+}
+
+// Generic destructive-action confirmation modal (Bootstrap, not
+// window.confirm()) -- title/confirmLabel are plain text (escaped here);
+// body is trusted HTML, so callers building it from user data must
+// escapeHtml() their own dynamic bits before interpolating.
+function openConfirmDeleteModal({ title, body, confirmLabel = "Delete", onConfirm }) {
+  const modalId = "confirmDeleteModal";
+  let modal = document.getElementById(modalId);
+  if (!modal) {
+    modal = document.createElement("div");
+    modal.id = modalId;
+    modal.className = "modal fade";
+    modal.tabIndex = -1;
+    document.body.appendChild(modal);
+  }
+  modal.innerHTML = `
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content themed-modal">
+        <div class="modal-header">
+          <h5 class="modal-title mb-0"><i class="bi bi-exclamation-triangle text-danger me-2"></i>${escapeHtml(title)}</h5>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body"><p class="mb-0">${body}</p></div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+          <button type="button" class="btn btn-danger btn-sm" id="confirmDeleteModalConfirmBtn">${escapeHtml(confirmLabel)}</button>
+        </div>
+      </div>
+    </div>`;
+  const bsModal = window.bootstrap?.Modal ? window.bootstrap.Modal.getOrCreateInstance(modal) : null;
+  modal.querySelector("#confirmDeleteModalConfirmBtn").addEventListener("click", () => {
+    bsModal?.hide();
+    onConfirm();
+  }, { once: true });
   bsModal?.show();
 }
 
@@ -5390,22 +4868,15 @@ async function renderTorrentsPage() {
           <input class="form-control form-control-sm" type="text" id="magnetLinkInput" placeholder="Paste a magnet link (magnet:?xt=urn:btih:...)" style="max-width:420px" onkeydown="if (event.key === 'Enter') addMagnetLink();">
           <button class="btn btn-sm btn-outline-primary" type="button" onclick="addMagnetLink()"><i class="bi bi-magnet me-1"></i>Add Magnet</button>
         </div>
+        <div class="small text-muted mb-2">Dropped/uploaded .torrent files are watched from <code>${escapeHtml(settings.directory || "")}</code>.</div>
         <div class="row g-2 mb-2">
-          <div class="col-12 col-lg-6">
-            <label class="form-label mb-1" for="torrentDir">Torrent folder</label>
-            <div class="input-group input-group-sm">
-              <input class="form-control" type="text" id="torrentDir" value="${escapeHtml(settings.directory || "")}">
-              <button class="btn btn-outline-secondary" type="button" onclick="openTorrentDirBrowser('torrentDir', 'Choose torrent folder')"><i class="bi bi-folder2-open me-1"></i>Browse</button>
-            </div>
-            <div class="form-text">Dropped .torrent files here start automatically; changing this later won't move torrents already in progress.</div>
-          </div>
-          <div class="col-12 col-lg-6">
+          <div class="col-12">
             <label class="form-label mb-1" for="torrentDownloadDir">Download location</label>
             <div class="input-group input-group-sm">
               <input class="form-control" type="text" id="torrentDownloadDir" placeholder="${escapeHtml(payload.effective_download_directory || settings.directory || "")}" value="${escapeHtml(settings.download_directory || "")}">
               <button class="btn btn-outline-secondary" type="button" onclick="openTorrentDirBrowser('torrentDownloadDir', 'Choose download location')"><i class="bi bi-folder2-open me-1"></i>Browse</button>
             </div>
-            <div class="form-text">Where downloads land (can differ from the torrent folder above, e.g. an external drive) -- leave blank to match it; applies until a torrent starts, not to ones already in progress.</div>
+            <div class="form-text">Where downloads land (can differ from the watched folder, e.g. an external drive) -- leave blank to match it; applies until a torrent starts, not to ones already in progress.</div>
           </div>
         </div>
         <div class="row g-2 mb-2">
@@ -5453,14 +4924,12 @@ async function refreshTorrentsLive() {
 }
 
 async function saveTorrentSettings() {
-  const dir = (document.getElementById("torrentDir").value || "").trim();
   const downloadDir = (document.getElementById("torrentDownloadDir").value || "").trim();
   const seedTime = parseInt(document.getElementById("torrentSeedTime").value, 10);
   const seedRatio = parseFloat(document.getElementById("torrentSeedRatio").value);
   const stallTimeout = parseInt(document.getElementById("torrentBtStopTimeout").value, 10);
   const fileAllocation = document.getElementById("torrentFileAllocation").checked ? "prealloc" : "none";
   const maxConcurrent = parseInt(document.getElementById("torrentMaxConcurrent").value, 10);
-  if (!dir) { showToast("Torrent folder is required.", "warning"); return; }
   if (!Number.isFinite(seedTime) || seedTime < 0) { showToast("Seed time must be 0 or more minutes.", "warning"); return; }
   if (!Number.isFinite(seedRatio) || seedRatio < 0) { showToast("Seed ratio must be 0 or more.", "warning"); return; }
   if (!Number.isFinite(stallTimeout) || stallTimeout < 0) { showToast("Stall timeout must be 0 or more seconds.", "warning"); return; }
@@ -5468,7 +4937,6 @@ async function saveTorrentSettings() {
   setLoading(true, "Saving torrent settings...");
   try {
     await apiPost("/admin/torrents/settings", {
-      directory: dir,
       download_directory: downloadDir,
       seed_time: seedTime,
       seed_ratio: seedRatio,
@@ -5873,7 +5341,7 @@ function bringModalToFront(modalEl) {
 // chooseTorrentDir() with no arguments. A lazy-loaded tree (not a drill-down
 // list) so the folder hierarchy stays visible while browsing -- each node
 // fetches its own children on first expand and caches them (dataset.loaded).
-let torrentDirBrowserTargetInputId = "torrentDir";
+let torrentDirBrowserTargetInputId = "torrentDownloadDir";
 let torrentDirBrowserSelectedPath = "";
 
 function renderTorrentDirNode(path, label) {
@@ -5887,7 +5355,7 @@ function renderTorrentDirNode(path, label) {
   </li>`;
 }
 
-function openTorrentDirBrowser(targetInputId = "torrentDir", title = "Choose torrent folder") {
+function openTorrentDirBrowser(targetInputId = "torrentDownloadDir", title = "Choose download location") {
   torrentDirBrowserTargetInputId = targetInputId;
   torrentDirBrowserSelectedPath = "";
   const modalId = "torrentDirBrowserModal";
@@ -11244,6 +10712,25 @@ async function loadSystemInfoBar() {
     systemInfoLoaded = true;
   }
 }
+// Silently updates the URL and re-renders for it immediately, in the same
+// async chain -- unlike setHash() (a real hashchange, handled by the
+// separately-scheduled "hashchange" listener invocation below), this
+// doesn't return until the redirected-to page has actually finished
+// rendering. Load-bearing for router()'s internal redirects (empty hash ->
+// "#movies", "#bios" -> the Systems Browse BIOS entry, the legacy
+// "#system/X" hash): using plain setHash()+return there used to race
+// startApp()'s own back-to-back double `await router()` calls (an
+// immediate render, then a second one once theme init finishes) -- both
+// landing on the same redirected-to hash right on top of each other, so
+// neither's async render (e.g. renderMovieExplorerPage's /movies fetch)
+// ever got to be the sole "latest" one; each completion kept finding a
+// newer call had started meanwhile and retried via router()'s own
+// stale-token self-heal, forever (live-reproduced: thousands of req/s
+// hammering /movies, CPU pegged, never settling on a fresh login).
+async function redirectRouterHash(hash) {
+  history.replaceState(null, "", hash);
+  await router();
+}
 async function router() {
   const myNavToken = ++routerNavToken;
   clearError();
@@ -11283,35 +10770,46 @@ async function router() {
     // takeover CSS wholesale (see renderSystemsExplorePage) rather than a
     // parallel duplicate set -- the class name predates this page but the
     // takeover behavior is identical, so it's shared instead of cloned.
-    document.body.classList.toggle("movie-explorer-active", hash.startsWith("#movies/explore") || hash.startsWith("#systems/explore"));
+    // Browse is the only Movies/Systems view now, so bare "#movies"/
+    // "#systems" get it too, not just their "/explore" spelling -- except a
+    // movie/show *detail* page (still "#movies/...") isn't the full-bleed
+    // grid, so those are excluded explicitly. "#systems" never collides with
+    // the ROM detail page's hash (singular "#system/...", handled by
+    // parseSystemRomHash), so no equivalent carve-out is needed there.
+    const moviesHashParsedForChrome = parseMoviesHash(hash);
+    const isMoviesExplorerRoute = hash.startsWith("#movies")
+      && (!moviesHashParsedForChrome || (moviesHashParsedForChrome.view !== "detail" && moviesHashParsedForChrome.view !== "show"));
+    document.body.classList.toggle("movie-explorer-active", isMoviesExplorerRoute || hash.startsWith("#systems"));
     document.body.classList.toggle("movies-page-active", hash.startsWith("#movies"));
     if (hash === "#bios") {
-      setHash(systemsTreeHash("", BIOS_TREE_ROOT));
+      await redirectRouterHash(systemsExploreHash(SYSTEMS_EXPLORE_BIOS_KEY));
       return;
     } else if (hash === "" || hash === "#") {
       // Movies loads fast (no gamelist scan involved) and is the page
       // people actually want on open -- the help/tour page is still one
       // click away (or #home/#help directly) for anyone who wants it.
-      setHash("#movies");
+      await redirectRouterHash("#movies");
       return;
     } else if (hash === "#theme") {
       await renderThemeGalleryPage();
     } else if (hash === "#home" || hash === "#help") {
       await renderHelpPage();
-    } else if (hash.startsWith("#systems/explore")) {
-      await renderSystemsExplorePage();
     } else if (hash.startsWith("#systems")) {
-      await renderSystemsPage();
+      // Browse is the only Systems view now -- "#systems" and
+      // "#systems/explore" render the same page (the plain form is what
+      // every nav link/back-button in the app uses).
+      await renderSystemsExplorePage();
     } else if (hash.startsWith("#movies")) {
       const parsed = parseMoviesHash(hash);
       if (parsed && parsed.view === "detail") {
         await renderMovieDetailsPage(parsed.entryKey);
-      } else if (parsed && parsed.view === "explore") {
-        await renderMovieExplorerPage();
       } else if (parsed && parsed.view === "show") {
         await renderShowDetailsPage(parsed.showTitle, parsed.seasonNumber);
       } else {
-        await renderMoviesPage();
+        // Browse is the only Movies view now -- "#movies" and
+        // "#movies/explore" both parse to view === "explore" and render the
+        // same page.
+        await renderMovieExplorerPage();
       }
     } else if (hash === "#admin") {
       if (!adminEnabled) {
@@ -11456,7 +10954,7 @@ async function router() {
       await renderRomMediaPage(parsed.system, parsed.uniqueId, parsed.page);
     } else if (parseSystemHash(hash)) {
       const parsed = parseSystemHash(hash);
-      setHash(systemsTreeHash("", parsed.system));
+      await redirectRouterHash(systemsExploreHash(parsed.system));
       return;
     } else {
       await renderHelpPage();
@@ -11496,6 +10994,10 @@ notificationsBellBtn?.addEventListener("hide.bs.dropdown", () => {
 systemsMenuBtn.addEventListener("click", (event) => {
   event.preventDefault();
   setHash("#systems");
+});
+moviesMenuBtn.addEventListener("click", (event) => {
+  event.preventDefault();
+  setHash("#movies");
 });
 controlsMenuBtn.addEventListener("click", (event) => {
   event.preventDefault();

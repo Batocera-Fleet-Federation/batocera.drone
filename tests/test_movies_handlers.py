@@ -1012,6 +1012,58 @@ class MovieScrapeDeleteHandlerTests(unittest.TestCase):
             self.assertEqual(payload, {"deleted": False})
 
 
+class MoviesDeleteHandlerTests(unittest.TestCase):
+    def test_deletes_a_single_movie(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = _write_movie(root, "Vacation.mp4", b"x")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+            entry_key = movies_store.list_movies(settings.movies_root)[0]["entry_key"]
+            handler = _handler(settings)
+
+            handler._handle_admin_movies_delete({"entry_keys": [entry_key]})
+
+            status, payload = handler.json_response
+            self.assertEqual(status, 200)
+            self.assertEqual(payload, {"deleted": 1, "requested": 1})
+            self.assertFalse(path.exists())
+
+    def test_deletes_a_batch_and_counts_only_the_ones_that_existed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "clips/S01E01.mp4", b"x")
+            _write_movie(root, "clips/S01E02.mp4", b"y")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+            entry_keys = [row["entry_key"] for row in movies_store.list_movies(settings.movies_root)]
+            handler = _handler(settings)
+
+            handler._handle_admin_movies_delete({"entry_keys": entry_keys + ["not-a-real-key"]})
+
+            status, payload = handler.json_response
+            self.assertEqual(status, 200)
+            self.assertEqual(payload, {"deleted": 2, "requested": 3})
+            self.assertEqual(movies_store.list_movies(settings.movies_root), [])
+
+    def test_missing_entry_keys_is_a_400(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            handler = _handler(settings)
+            handler._handle_admin_movies_delete({})
+            status, payload = handler.json_response
+            self.assertEqual(status, 400)
+            self.assertIn("entry_keys", payload["error"])
+
+    def test_empty_entry_keys_list_is_a_400(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            handler = _handler(settings)
+            handler._handle_admin_movies_delete({"entry_keys": []})
+            status, _ = handler.json_response
+            self.assertEqual(status, 400)
+
+
 class MovieBulkScrapeHandlerTests(unittest.TestCase):
     def test_status_wraps_get_bulk_scrape_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

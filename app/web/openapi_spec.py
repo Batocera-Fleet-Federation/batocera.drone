@@ -470,6 +470,17 @@ def _schemas() -> Dict[str, Schema]:
             {"deleted": _boolean("Whether a metadata row existed and was removed; false is a normal no-op, not an error")},
             ("deleted",),
         ),
+        "MovieDeleteRequest": _object(
+            {"entry_keys": _array(_string("One or more movie/episode entry_keys to permanently delete"))},
+            ("entry_keys",),
+        ),
+        "MovieDeleteResponse": _object(
+            {
+                "deleted": _integer("How many of the requested entry_keys actually had a file removed"),
+                "requested": _integer("How many entry_keys were requested"),
+            },
+            ("deleted", "requested"),
+        ),
         "MovieBulkScrapeJob": _object(
             {
                 "id": _integer(),
@@ -1919,6 +1930,16 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
                     parameters=[_path_param("entry_key")],
                     tags=["admin", "movies"],
                     error_codes=("401", "403", "429", "500", "503"),
+                )
+            },
+            "/admin/movies/delete": {
+                "post": _operation(
+                    "Permanently delete one or more movies/episodes (their files plus any scraped metadata/artwork). "
+                    "Takes a batch so deleting a whole show is one request instead of one per episode",
+                    {"200": _json_response("MovieDeleteResponse"), "400": _json_response("ErrorResponse", "Missing entry_keys")},
+                    request_body=_json_request("MovieDeleteRequest"),
+                    tags=["admin", "movies"],
+                    error_codes=("400", "401", "403", "429", "500", "503"),
                 )
             },
             "/admin/movies/scrape/bulk": {

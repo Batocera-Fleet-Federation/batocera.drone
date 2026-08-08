@@ -181,6 +181,18 @@ class TorrentSettingsTests(unittest.TestCase):
             self.assertEqual(config["max_concurrent_downloads"], 1)
             self.assertTrue(watch.is_dir())
 
+    def test_restore_state_resets_a_persisted_custom_directory_to_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = _build_settings(root)
+            manager = TorrentManager(settings, start_worker=False)
+            watch = root / "custom-watch"
+            manager.update_settings({"directory": str(watch)})
+            self.assertEqual(manager._config["directory"], str(watch))
+
+            restarted = TorrentManager(_build_settings(root), start_worker=False)
+            self.assertEqual(restarted._config["directory"], str(default_torrent_directory(settings)))
+
 
 class TorrentWatchScanTests(unittest.TestCase):
     def test_new_torrent_files_are_registered_once(self) -> None:
@@ -1177,7 +1189,10 @@ class TorrentLifecycleTests(unittest.TestCase):
             entries = restarted.snapshot()["torrents"]
             self.assertEqual(len(entries), 1)
             self.assertEqual(entries[0]["status"], "queued")
-            self.assertEqual(restarted.snapshot()["settings"]["directory"], str(watch))
+            # The watched folder is no longer user-configurable -- a restart
+            # self-heals it back to the install-root default even if an
+            # older persisted config had a custom value.
+            self.assertEqual(restarted.snapshot()["settings"]["directory"], str(default_torrent_directory(_build_settings(root))))
             with restarted._lock:
                 self.assertIsNone(next(iter(restarted._torrents.values()))["gid"])
 
@@ -2316,6 +2331,40 @@ class Aria2RuntimeTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     install_aria2(settings)
             self.assertFalse(aria2_runtime.managed_aria2c_path(settings).exists())
+
+
+class TorrentSettingsHandlerTests(unittest.TestCase):
+    """The watched folder ("directory") is no longer settable through the
+    admin HTTP API -- only TorrentManager.update_settings() itself (used
+    directly by tests/internal callers) still accepts it."""
+
+    def test_settings_update_strips_directory_from_the_payload(self) -> None:
+        from app.web import handlers_torrents
+
+        class _FakeManager:
+            def __init__(self) -> None:
+                self.received_payload = None
+
+            def update_settings(self, payload):
+                self.received_payload = payload
+                return {"directory": "/fixed/torrents", "max_concurrent_downloads": payload.get("max_concurrent_downloads", 3)}
+
+        class _FakeHandler(handlers_torrents.HandlersTorrentsMixin):
+            def __init__(self) -> None:
+                self.response = None
+
+            def _send_json(self, status_code, payload):
+                self.response = (status_code, payload)
+
+        fake_manager = _FakeManager()
+        handler = _FakeHandler()
+        with mock.patch.object(handlers_torrents, "_get_torrent_manager", return_value=fake_manager):
+            handler._handle_admin_torrents_settings_update({"directory": "/some/other/path", "max_concurrent_downloads": 5})
+
+        self.assertNotIn("directory", fake_manager.received_payload)
+        self.assertEqual(fake_manager.received_payload["max_concurrent_downloads"], 5)
+        self.assertEqual(handler.response[0], 200)
+        self.assertEqual(handler.response[1]["settings"]["directory"], "/fixed/torrents")
 
 
 if __name__ == "__main__":

@@ -38,6 +38,13 @@ class HandlersTorrentsMixin:
         if manager is None:
             self._send_json(503, {"error": "torrent manager unavailable"})
             return
+        # The watched torrent folder is no longer user-configurable -- always
+        # the install-root default (see default_torrent_directory()). Drop
+        # any "directory" the client sends so a stale/crafted payload can't
+        # override it; TorrentManager.update_settings() itself stays generic
+        # (tests and other internal callers still point it at an arbitrary
+        # directory directly).
+        payload = {key: value for key, value in (payload or {}).items() if key != "directory"}
         self._send_json(200, {"settings": manager.update_settings(payload)})
 
     def _handle_admin_torrents_browse(self, raw_path: str) -> None:

@@ -202,6 +202,15 @@ def delete_metadata(settings: Settings, entry_key: str) -> dict:
     return {"deleted": True}
 
 
+def delete_movie(settings: Settings, entry_key: str) -> dict:
+    """Permanently delete a movie/episode's underlying file, plus any scraped
+    metadata and artwork for it -- the Movies UI detail page's delete action.
+    Unlike ``delete_metadata`` (which only clears a scrape gone wrong, leaving
+    the file itself alone), this removes the file too."""
+    delete_metadata(settings, entry_key)
+    return _movies_store.delete_movie_file(settings.movies_root, entry_key)
+
+
 # Substituted for season/episode TMDb lookups that 404 (TmdbNotFoundError) --
 # every field these two feed into already falls back to show-level data when
 # absent (see apply_tv_episode below), so an "empty" dict degrades gracefully

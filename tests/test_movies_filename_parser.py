@@ -143,6 +143,61 @@ class ClassifyExtraTests(unittest.TestCase):
         self.assertEqual(result.show_title, "Lost")
         self.assertEqual(result.season, 2)
 
+    def test_hidden_extras_folder_is_recognized(self) -> None:
+        # Found live: "Hidden Extras" is a real folder name in use (5
+        # instances) but wasn't in EXTRAS_FOLDER_NAMES at all -- its contents
+        # fell through to plain movie/episode classification instead of
+        # being recognized as bonus content.
+        result = filename_parser.classify(
+            "Shows/Dexter/Dexter (2006) S06/Hidden Extras/Season Recap.mkv",
+            "Season Recap.mkv",
+        )
+        self.assertEqual(result.kind, filename_parser.KIND_EXTRA)
+        self.assertEqual(result.show_title, "Dexter")
+        self.assertEqual(result.season, 6)
+
+    def test_combined_season_folder_with_quality_tags_resolves_show_and_season(self) -> None:
+        # Found live: a season folder that never cleanly ends in " SNN" (see
+        # _SEASON_FOLDER_WITH_SHOW_RE) or matches bare "Season NN" exactly
+        # (_BARE_SEASON_FOLDER_RE) -- everything (show, a redundant spelled-
+        # out "Season 1", the real "S01" token, and quality tags) is jammed
+        # into one folder segment. Previously this Featurette was left an
+        # ungrouped orphan card.
+        result = filename_parser.classify(
+            "Shows/WandaVision (2021) Season 1 S01 (1080p BluRay x265 HEVC 10bit EAC3 5.1 Silence)/"
+            "Featurettes/Making Of.mkv",
+            "Making Of.mkv",
+        )
+        self.assertEqual(result.kind, filename_parser.KIND_EXTRA)
+        self.assertEqual(result.show_title, "WandaVision")
+        self.assertEqual(result.season, 1)
+
+    def test_combined_season_folder_without_year_or_spelled_out_season(self) -> None:
+        # Found live: a scene-release-style season folder with no
+        # parenthesized year to anchor folder_title_candidate on, and no
+        # spelled-out "Season" word either -- just a bare "S01" token buried
+        # in a dot-separated release name.
+        result = filename_parser.classify(
+            "Shows/Secret.Invasion.S01.COMPLETE.1080p.DSNP.WEB-DL.DDP5.1.H.264-NTb[TGx]/"
+            "Featurettes/Behind the Invasion.mkv",
+            "Behind the Invasion.mkv",
+        )
+        self.assertEqual(result.kind, filename_parser.KIND_EXTRA)
+        self.assertEqual(result.show_title, "Secret Invasion")
+        self.assertEqual(result.season, 1)
+
+    def test_combined_season_folder_fallback_never_fires_on_an_episode_marker(self) -> None:
+        # _SEASON_TOKEN_RE's bare-"SNN" alternative must not match the "S01"
+        # inside an actual "S01E04"-shaped token -- that's never legitimate
+        # in a folder name to begin with, but guard it explicitly since the
+        # new fallback is deliberately more permissive than the two stricter
+        # patterns it sits behind.
+        self.assertIsNone(filename_parser._SEASON_TOKEN_RE.search("Random Folder S01E04 Something"))
+        self.assertEqual(
+            filename_parser._season_and_show_from_combined_folder("Random Folder S01E04 Something"),
+            ("", None),
+        )
+
     def test_ordinary_folder_is_not_treated_as_an_extra(self) -> None:
         result = filename_parser.classify("Shows/Dexter/Dexter (2006) S01/x.mkv", "Blood Splatter 101.mkv")
         self.assertEqual(result.kind, filename_parser.KIND_MOVIE)

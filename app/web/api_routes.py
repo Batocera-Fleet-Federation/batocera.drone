@@ -995,6 +995,11 @@ class ApiRoutesMixin:
                 self._handle_admin_movie_scrape_delete(parts[2])
                 return
 
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "movies" and parts[2] == "delete":
+                payload = self._read_json_body()
+                self._handle_admin_movies_delete(payload)
+                return
+
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "movies" and parts[2] == "scrape" and parts[3] == "bulk":
                 payload = self._read_json_body()
                 self._handle_admin_movie_scrape_bulk_start(payload)

@@ -198,6 +198,55 @@ class MoviesStoreTest(unittest.TestCase):
         movies_store.sync_movies_cache(self.movies_root)
         self.assertIsNone(movies_store.get_movie_by_key(self.movies_root, "not-a-real-key"))
 
+    def test_delete_movie_file_removes_file_and_cache_entry(self):
+        path = self._write("clips/Alpha.mp4", b"alpha-bytes")
+        movies_store.sync_movies_cache(self.movies_root)
+        listed = movies_store.list_movies(self.movies_root)[0]
+        entry_key = listed["entry_key"]
+
+        result = movies_store.delete_movie_file(self.movies_root, entry_key)
+
+        self.assertEqual(result, {"deleted": True, "file_path": "clips/Alpha.mp4"})
+        self.assertFalse(path.exists())
+        self.assertIsNone(movies_store.get_movie_by_key(self.movies_root, entry_key))
+        self.assertEqual(movies_store.list_movies(self.movies_root), [])
+
+    def test_delete_movie_file_is_a_no_op_for_an_unknown_key(self):
+        self._write("clips/Alpha.mp4")
+        movies_store.sync_movies_cache(self.movies_root)
+        result = movies_store.delete_movie_file(self.movies_root, "not-a-real-key")
+        self.assertEqual(result, {"deleted": False})
+        # The real, unrelated file must be left untouched.
+        self.assertEqual(len(movies_store.list_movies(self.movies_root)), 1)
+
+    def test_delete_movie_file_survives_the_file_already_being_gone(self):
+        # e.g. a race with something else removing it -- missing_ok=True means
+        # this must still clean up the now-stale cache row, not raise.
+        path = self._write("clips/Alpha.mp4")
+        movies_store.sync_movies_cache(self.movies_root)
+        listed = movies_store.list_movies(self.movies_root)[0]
+        path.unlink()
+
+        result = movies_store.delete_movie_file(self.movies_root, listed["entry_key"])
+
+        self.assertEqual(result["deleted"], True)
+        self.assertIsNone(movies_store.get_movie_by_key(self.movies_root, listed["entry_key"]))
+
+    def test_delete_movie_file_rejects_a_path_traversal_file_path(self):
+        # A cache row can't normally hold a traversal path (scan_movies() only
+        # ever writes paths it found under movies_root), but this guards the
+        # boundary defensively the same way resolve_movie_stream_path does,
+        # rather than trusting the stored file_path unconditionally.
+        with movies_store._open(self.movies_root) as connection:
+            connection.execute(
+                "INSERT INTO movies_cache_entries (entry_key, file_path, movie_name, absolute_path, file_size, modified_time, fingerprint) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                ("evil", "../outside.mp4", "outside.mp4", "", 1, 1, "fp"),
+            )
+            connection.commit()
+        result = movies_store.delete_movie_file(self.movies_root, "evil")
+        self.assertEqual(result, {"deleted": False})
+
 
 class MovieMetadataStoreTests(unittest.TestCase):
     def setUp(self):

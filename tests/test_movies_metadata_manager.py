@@ -394,6 +394,49 @@ class DeleteMetadataTests(unittest.TestCase):
             self.assertEqual(metadata_manager.delete_metadata(settings, entry_key), {"deleted": True})
 
 
+class DeleteMovieTests(unittest.TestCase):
+    """delete_movie() -- unlike delete_metadata(), this removes the movie's
+    file itself too (plus any scraped metadata/artwork), for the Movies UI
+    detail page's delete action."""
+
+    def test_deletes_the_file_and_any_scraped_metadata_and_artwork(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            movie_path = _write_movie(root, "The Matrix (1999).mp4")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+            entry_key = movies_store.list_movies(settings.movies_root)[0]["entry_key"]
+            applied = metadata_manager.apply(settings, entry_key, 603, client=FakeTmdbClient(details=_MATRIX_DETAILS))
+            poster_path = root / "movies" / applied["poster_relative_path"]
+            self.assertTrue(poster_path.is_file())
+
+            result = metadata_manager.delete_movie(settings, entry_key)
+
+            self.assertEqual(result, {"deleted": True, "file_path": "The Matrix (1999).mp4"})
+            self.assertFalse(movie_path.exists())
+            self.assertFalse(poster_path.exists())
+            self.assertIsNone(movies_store.get_movie_metadata(settings.movies_root, entry_key))
+            self.assertIsNone(movies_store.get_movie_by_key(settings.movies_root, entry_key))
+
+    def test_deletes_a_never_scraped_movie_file_fine(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            movie_path = _write_movie(root, "Unscraped.mp4")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+            entry_key = movies_store.list_movies(settings.movies_root)[0]["entry_key"]
+
+            result = metadata_manager.delete_movie(settings, entry_key)
+
+            self.assertEqual(result, {"deleted": True, "file_path": "Unscraped.mp4"})
+            self.assertFalse(movie_path.exists())
+
+    def test_unknown_entry_key_is_a_no_op(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            self.assertEqual(metadata_manager.delete_movie(settings, "not-a-real-key"), {"deleted": False})
+
+
 class ApplyTvEpisodeTests(unittest.TestCase):
     def test_unknown_movie_raises_not_found(self):
         with tempfile.TemporaryDirectory() as tmp:

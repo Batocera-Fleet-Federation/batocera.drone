@@ -2544,15 +2544,43 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(snapshot["roms"][0]["metadata_source"], "gamelist.xml")
 
 
-    def test_bios_files_are_folded_into_systems_tree(self) -> None:
+    def test_bios_files_are_folded_into_systems_browse_sidebar(self) -> None:
+        # The old tree-view BIOS root (BIOS_TREE_ROOT/selectBiosTreeRoot/
+        # renderBiosTreeFiles) is gone along with the rest of the tree view --
+        # BIOS is now a pinned pseudo-"system" entry in the Systems Browse
+        # sidebar (see SYSTEMS_EXPLORE_BIOS_KEY), selected the same way a real
+        # system is.
         source = Path(__file__).resolve().parents[1].joinpath("app/web/static/js/drone.js").read_text(encoding="utf-8")
-        self.assertIn('const BIOS_TREE_ROOT = "__bios__";', source)
-        self.assertIn("function selectBiosTreeRoot()", source)
-        self.assertIn("function renderBiosTreeFiles()", source)
-        self.assertIn("Loading first 10 BIOS files", source)
-        self.assertIn("item.bios_md5 || item.md5 || item.fingerprint", source)
-        self.assertNotIn("function renderBios()", source)
-        self.assertNotIn("function renderBiosList", source)
+        self.assertIn('const SYSTEMS_EXPLORE_BIOS_KEY = "__bios__";', source)
+        self.assertNotIn("BIOS_TREE_ROOT", source)
+        self.assertNotIn("function selectBiosTreeRoot(", source)
+        self.assertNotIn("function renderBiosTreeFiles(", source)
+
+        system_list_start = source.index("function renderSystemsExploreSystemList(")
+        system_list_end = source.index("function renderSystemsExploreCategoryList(", system_list_start)
+        self.assertIn('systemButton(SYSTEMS_EXPLORE_BIOS_KEY, "BIOS", systemsExploreBiosTotal)', source[system_list_start:system_list_end])
+
+        category_list_start = source.index("function renderSystemsExploreCategoryList(")
+        category_list_end = source.index("function filterSystemsExploreSystemList(", category_list_start)
+        self.assertIn("Not applicable for BIOS files", source[category_list_start:category_list_end])
+
+        bios_loader_start = source.index("async function loadSystemsExploreBios(")
+        bios_loader_end = source.index("async function loadSystemsExploreRoms(", bios_loader_start)
+        bios_loader_body = source[bios_loader_start:bios_loader_end]
+        self.assertIn('api(`/bios?${params.toString()}`)', bios_loader_body)
+
+        bios_row_start = source.index("function renderSystemsExploreBiosRow(")
+        bios_row_end = source.index("function renderSystemsExploreMoreButton(", bios_row_start)
+        bios_row_body = source[bios_row_start:bios_row_end]
+        self.assertIn("item.bios_md5 || item.md5 || item.fingerprint", bios_row_body)
+        self.assertIn("biosDownloadUrl(item.unique_id)", bios_row_body)
+
+    def test_bios_route_redirects_into_systems_browse_bios_entry(self) -> None:
+        source = Path(__file__).resolve().parents[1].joinpath("app/web/static/js/drone.js").read_text(encoding="utf-8")
+        router_start = source.index("async function router()")
+        bios_branch_start = source.index('if (hash === "#bios")', router_start)
+        bios_branch_end = source.index("\n", source.index("return;", bios_branch_start))
+        self.assertIn("redirectRouterHash(systemsExploreHash(SYSTEMS_EXPLORE_BIOS_KEY))", source[bios_branch_start:bios_branch_end])
 
     def test_movie_cast_ui_distinguishes_google_cast_from_airplay(self) -> None:
         source = Path(__file__).resolve().parents[1].joinpath("app/web/static/js/drone.js").read_text(encoding="utf-8")
@@ -2837,7 +2865,7 @@ class SettingsTests(unittest.TestCase):
 
         self.assertIn("loadSystemInfoBar();", js_source)
         self.assertNotIn("await loadSystemInfoBar();", js_source)
-        self.assertIn("getSystemsData(),\n    loadBiosTreeSummary(),", js_source)
+        self.assertIn('getSystemsData(),\n      api("/bios?limit=1&offset=0")', js_source)
         self.assertNotIn("getSystemsData(),\n        refreshRandomThemeLogo(),", js_source)
         self.assertIn('api("/admin/system-info?speed=1")', js_source)
         self.assertIn("include_speed = ", api_routes)
@@ -6893,32 +6921,102 @@ class SwarmPageTests(unittest.TestCase):
 
 
 class SystemsExplorePageTests(unittest.TestCase):
-    """Systems Browse: a Movies-Explorer-style image grid of games, reached
-    from a Browse button on the Systems tab, with System (top-5 + show more)
-    and Category sidebar panels backed by GET /roms, and Movies Explorer's
-    own new per-facet counts + "Show more" render-pagination."""
+    """Systems Browse: a Movies-Explorer-style image grid of games, with
+    System (top-5 + show more) and Category sidebar panels backed by
+    GET /roms, and Movies Explorer's own per-facet counts + "Show more"
+    render-pagination. Browse is the only Systems/Movies view -- there is no
+    separate tree view or Browse button to reach it from anymore; bare
+    "#systems"/"#movies" render it directly."""
 
     @classmethod
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
         cls.js = root.joinpath("app/web/static/js/drone.js").read_text(encoding="utf-8")
 
-    def test_systems_tab_has_a_browse_button(self) -> None:
-        render_start = self.js.index("function renderSystems(data)")
-        render_end = self.js.index("function renderSystemTreeRoot(", render_start)
-        body = self.js[render_start:render_end]
-        self.assertIn("systemsExploreHash()", body)
-        self.assertIn(">Browse<", body)
+    def test_no_browse_button_exists_anywhere(self) -> None:
+        # Not a bare ">Browse<" search -- that text is legitimately reused by
+        # unrelated features (the torrent folder picker, Swarm's "Browse peer
+        # assets"). This checks specifically for the removed Systems/Movies
+        # tree-view "jump to the Browse grid" button.
+        self.assertNotIn("setHash(movieExploreHash())", self.js)
+        self.assertNotIn("setHash(systemsExploreHash())", self.js)
+        self.assertNotIn("bi-grid-3x3-gap", self.js)
 
-    def test_router_dispatches_systems_explore_hash_before_plain_systems(self) -> None:
+    def test_router_dispatches_plain_and_explore_systems_hashes_to_the_same_page(self) -> None:
         router_start = self.js.index("async function router()")
         router_body = self.js[router_start:self.js.index("catch (err)", router_start)]
-        explore_index = router_body.index('hash.startsWith("#systems/explore")')
-        plain_index = router_body.index('hash.startsWith("#systems")')
-        self.assertLess(explore_index, plain_index, "the /explore branch must be checked first, or the plain #systems branch shadows it")
+        self.assertIn('hash.startsWith("#systems")', router_body)
         self.assertIn("await renderSystemsExplorePage();", router_body)
-        # Shares the Movies Explorer's full-bleed chrome takeover.
-        self.assertIn('hash.startsWith("#movies/explore") || hash.startsWith("#systems/explore")', router_body)
+        # A single "#systems" branch covers both the bare and "/explore"
+        # spellings -- there's no separate tree-view branch to shadow.
+        self.assertNotIn('hash.startsWith("#systems/explore")', router_body)
+
+    def test_router_dispatches_plain_and_explore_movies_hashes_to_the_same_page(self) -> None:
+        router_start = self.js.index("async function router()")
+        router_body = self.js[router_start:self.js.index("catch (err)", router_start)]
+        movies_branch_start = router_body.index('} else if (hash.startsWith("#movies")) {')
+        movies_branch_end = router_body.index("} else if (hash ===", movies_branch_start)
+        movies_branch = router_body[movies_branch_start:movies_branch_end]
+        self.assertIn('parsed.view === "detail"', movies_branch)
+        self.assertIn('parsed.view === "show"', movies_branch)
+        self.assertIn("await renderMovieExplorerPage();", movies_branch)
+
+    def test_movies_and_systems_explore_share_the_full_bleed_chrome_takeover(self) -> None:
+        router_start = self.js.index("async function router()")
+        router_body = self.js[router_start:self.js.index("catch (err)", router_start)]
+        self.assertIn("isMoviesExplorerRoute || hash.startsWith(\"#systems\")", router_body)
+
+    def test_router_internal_redirects_use_redirectRouterHash_not_setHash(self) -> None:
+        # Regression test for a live-reproduced infinite loop: startApp()
+        # deliberately calls `await router()` twice back-to-back (an
+        # immediate render, then a second one once theme init finishes -- see
+        # startApp's own comments). router()'s internal redirects (empty hash
+        # -> "#movies", "#bios" -> the Browse sidebar's BIOS entry, the legacy
+        # "#system/X" hash) used to do `setHash(x); return;` -- a real
+        # hashchange, dispatched to a *separately scheduled* router() call --
+        # which let startApp's second `await router()` call race the first
+        # redirect's own async render. Whichever finished first always found
+        # a "newer" routerNavToken and retried via router()'s stale-token
+        # self-heal, spawning another call that itself immediately raced the
+        # other -- forever. Confirmed live: thousands of req/s to /movies,
+        # CPU pegged, never settling on a fresh login. redirectRouterHash()
+        # fixes this by updating the URL with history.replaceState (no
+        # event) and awaiting the real render inline, so the outer
+        # `await router()` call doesn't return until the whole redirect
+        # chain has actually finished.
+        helper_start = self.js.index("async function redirectRouterHash(")
+        helper_end = self.js.index("async function router() {", helper_start)
+        helper_body = self.js[helper_start:helper_end]
+        self.assertIn("history.replaceState(null, \"\", hash)", helper_body)
+        self.assertIn("await router();", helper_body)
+
+        router_start = self.js.index("async function router() {")
+        router_body = self.js[router_start:self.js.index("catch (err)", router_start)]
+        self.assertIn('await redirectRouterHash(systemsExploreHash(SYSTEMS_EXPLORE_BIOS_KEY));', router_body)
+        self.assertIn('await redirectRouterHash("#movies");', router_body)
+        self.assertIn('await redirectRouterHash(systemsExploreHash(parsed.system));', router_body)
+        # None of router()'s own internal redirects should use the
+        # fire-and-forget form anymore.
+        self.assertNotIn('setHash(systemsExploreHash(SYSTEMS_EXPLORE_BIOS_KEY));\n      return;', router_body)
+        self.assertNotIn('setHash("#movies");\n      return;', router_body)
+        self.assertNotIn('setHash(systemsExploreHash(parsed.system));\n      return;', router_body)
+
+    def test_bios_list_overrides_the_poster_card_grid_layout(self) -> None:
+        # Regression test for a live-reproduced bug: #systems-explore-grid is
+        # normally a poster-card CSS grid (150px min columns, see
+        # .movie-explorer-grid). Without this override, each plain BIOS row
+        # (no artwork, just an icon/name/size/download button) got squeezed
+        # into its own ~150px card column and the name label's box collapsed
+        # to zero width -- confirmed live via the rendered DOM: the text node
+        # was present ("dc_boot.bin") but its bounding rect measured
+        # width: 0, so nothing was visible except the icon/size/button.
+        grid_fn_start = self.js.index("function renderSystemsExploreGrid()")
+        grid_fn_end = self.js.index("function renderSystemsExploreBiosRow(", grid_fn_start)
+        grid_fn_body = self.js[grid_fn_start:grid_fn_end]
+        self.assertIn('classList.toggle("systems-explore-grid-bios", isBios)', grid_fn_body)
+
+        css_source = Path(__file__).resolve().parents[1].joinpath("app/web/static/css/drone.css").read_text(encoding="utf-8")
+        self.assertIn(".movie-explorer-grid.systems-explore-grid-bios", css_source)
 
     def test_sidebar_has_system_and_category_panels_with_top_five_and_counts(self) -> None:
         sidebar_start = self.js.index("function renderSystemsExploreSidebarShell()")
@@ -7030,6 +7128,73 @@ class SystemsExplorePageTests(unittest.TestCase):
         self.assertIn("MOVIE_EXPLORE_PAGE_SIZE", body)
         self.assertIn("growDisplay", body)
         self.assertIn("sorted.slice(0, movieExploreDisplayLimit)", body)
+
+    def test_show_grouping_normalizes_ampersand_and_the_word_and(self) -> None:
+        # Confirmed live: "Law & Order Special Victims Unit" (seasons 1-26,
+        # one release group) vs "Law and Order Special Victims Unit" (season
+        # 27, a different one) are otherwise-identical raw show_title strings
+        # -- without normalizing this, they land in two different groups/two
+        # different cards for the same show.
+        helper_start = self.js.index("function movieShowGroupingKey(")
+        helper_end = self.js.index("function groupMoviesForExplorer(", helper_start)
+        helper_body = self.js[helper_start:helper_end]
+        self.assertIn('replace(/\\s*&\\s*/g, " and ")', helper_body)
+
+        group_start = self.js.index("function groupMoviesForExplorer(")
+        group_end = self.js.index("function movieExplorerCardTitle(", group_start)
+        self.assertIn("movieShowGroupingKey(row.show_title)", self.js[group_start:group_end])
+
+        show_page_start = self.js.index("async function renderShowDetailsPage(")
+        show_page_end = self.js.index("const episodes = moviesAllRows.filter(", show_page_start)
+        show_page_body = self.js[show_page_start:self.js.index("\n", self.js.index("const episodes = moviesAllRows.filter(", show_page_start))]
+        self.assertIn("movieShowGroupingKey(showTitle)", self.js[show_page_start:show_page_end])
+        self.assertIn("movieShowGroupingKey(m.show_title)", show_page_body)
+
+    def test_movie_detail_page_has_admin_gated_delete_button(self) -> None:
+        shell_start = self.js.index("function renderMovieDetailShell(")
+        shell_end = self.js.index("async function renderMovieScraperCard(", shell_start)
+        body = self.js[shell_start:shell_end]
+        self.assertIn("adminEnabled", body)
+        self.assertIn("deleteMovieFromDetailPage(", body)
+
+    def test_delete_movie_from_detail_page_confirms_then_posts_batch_delete(self) -> None:
+        fn_start = self.js.index("function deleteMovieFromDetailPage(")
+        fn_end = self.js.index("async function renderMovieScraperCard(", fn_start)
+        body = self.js[fn_start:fn_end]
+        self.assertIn("openConfirmDeleteModal(", body)
+        self.assertIn("deleteMoviesBatch([entryKey])", body)
+        self.assertIn('setHash("#movies")', body)
+
+    def test_show_detail_page_has_admin_gated_delete_show_button(self) -> None:
+        show_page_start = self.js.index("async function renderShowDetailsPage(")
+        show_page_end = self.js.index("function deleteShowFromDetailPage(", show_page_start)
+        body = self.js[show_page_start:show_page_end]
+        self.assertIn("adminEnabled", body)
+        self.assertIn("deleteShowFromDetailPage(", body)
+        # The whole show (every season), not just the currently selected one.
+        self.assertIn("episodes.map((e) => e.entry_key)", body)
+
+    def test_delete_show_from_detail_page_confirms_then_posts_batch_delete(self) -> None:
+        fn_start = self.js.index("function deleteShowFromDetailPage(")
+        fn_end = self.js.index("function renderShowDetailEpisodeRow(", fn_start)
+        body = self.js[fn_start:fn_end]
+        self.assertIn("openConfirmDeleteModal(", body)
+        self.assertIn("deleteMoviesBatch(entryKeys)", body)
+        self.assertIn('setHash("#movies")', body)
+
+    def test_delete_movies_batch_posts_to_admin_movies_delete_and_invalidates_cache(self) -> None:
+        fn_start = self.js.index("async function deleteMoviesBatch(")
+        fn_end = self.js.index("function deleteMovieFromDetailPage(", fn_start)
+        body = self.js[fn_start:fn_end]
+        self.assertIn('apiPost("/admin/movies/delete", { entry_keys: entryKeys })', body)
+        self.assertIn("moviesAllRows = []", body)
+
+    def test_confirm_delete_modal_uses_a_real_bootstrap_modal_not_window_confirm(self) -> None:
+        fn_start = self.js.index("function openConfirmDeleteModal(")
+        fn_end = self.js.index("\n}\n", fn_start)
+        body = self.js[fn_start:fn_end]
+        self.assertNotIn("window.confirm(", body)
+        self.assertIn("bootstrap.Modal", body)
 
 
 class NetworkSharePageTests(unittest.TestCase):
