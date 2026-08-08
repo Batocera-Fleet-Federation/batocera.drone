@@ -1901,6 +1901,9 @@
       flex-direction: column;
       gap: 0.15rem;
     }
+    .movie-explorer-sidebar-search {
+      margin-bottom: 0.5rem;
+    }
     .movie-explorer-category-btn {
       background: transparent;
       border: none;

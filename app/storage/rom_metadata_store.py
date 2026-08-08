@@ -1629,8 +1629,11 @@ def list_rom_genre_counts(
     """Genre -> matching-ROM-count, scoped by the same system/search filters as
     list_rom_cache_page (so switching the System filter or typing a search
     updates the Category facet's counts to match, mirroring the Movies
-    Explorer sidebar's per-facet counting convention). Returns [] rather than
-    raising if the relational cache isn't ready yet."""
+    Explorer sidebar's per-facet counting convention). Sorted most-to-least
+    (ties broken alphabetically) -- the frontend's own low-count trim (hide
+    anything under 5 once a clearly dominant >=50 category exists) assumes
+    this ordering. Returns [] rather than raising if the relational cache
+    isn't ready yet."""
     selected_systems = _normalized_filters(systems)
     normalized_query = str(query or "").strip()
     where_parts: list[str] = []
@@ -1656,7 +1659,7 @@ def list_rom_genre_counts(
             rows = connection.execute(
                 "SELECT rom_genres.genre, COUNT(*) FROM rom_genres "
                 f"JOIN rom_cache_entries ON rom_cache_entries.entry_key = rom_genres.entry_key{where} "
-                "GROUP BY rom_genres.genre COLLATE NOCASE ORDER BY rom_genres.genre COLLATE NOCASE",
+                "GROUP BY rom_genres.genre COLLATE NOCASE ORDER BY COUNT(*) DESC, rom_genres.genre COLLATE NOCASE",
                 parameters,
             ).fetchall()
     except sqlite3.Error as error:

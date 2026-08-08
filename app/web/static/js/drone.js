@@ -90,9 +90,22 @@ let systemsTreeSystemBiosPages = {};
 // (genre) counts are computed server-side, scoped to whatever System/search
 // filter is currently active -- see list_rom_genre_counts.
 const SYSTEMS_EXPLORE_PAGE_SIZE = 200;
-const SYSTEMS_EXPLORE_TOP_SYSTEM_COUNT = 5;
+const SYSTEMS_EXPLORE_TOP_SYSTEM_COUNT = 10;
+const SYSTEMS_EXPLORE_TOP_CATEGORY_COUNT = 10;
+// Category noise reduction: a device's scraped genre data commonly has a
+// long tail of 1-4-item variants (typos, alternate scraper phrasings, ...)
+// alongside a real set of dominant categories -- hiding the tail only once
+// a clearly dominant (>=50) category exists avoids ever hiding anything on
+// a library too small/uniform for that split to mean anything. Bypassed
+// entirely while the Category search box has text, since that's a
+// deliberate lookup, not passive browsing.
+const SYSTEMS_EXPLORE_CATEGORY_MIN_COUNT = 5;
+const SYSTEMS_EXPLORE_CATEGORY_DOMINANT_THRESHOLD = 50;
 let systemsExploreAllSystems = [];
 let systemsExploreShowAllSystems = false;
+let systemsExploreShowAllCategories = false;
+let systemsExploreSystemFilterQuery = "";
+let systemsExploreCategoryFilterQuery = "";
 let systemsExploreSelectedSystem = "";
 let systemsExploreSelectedGenre = "";
 let systemsExploreSearchQuery = "";
@@ -3946,6 +3959,9 @@ async function renderSystemsExplorePage() {
   systemsExploreSelectedGenre = parsed.genre;
   systemsExploreSearchQuery = "";
   systemsExploreShowAllSystems = false;
+  systemsExploreShowAllCategories = false;
+  systemsExploreSystemFilterQuery = "";
+  systemsExploreCategoryFilterQuery = "";
   setLoading(true, "Loading systems...");
   try {
     const data = await getSystemsData();
@@ -3968,7 +3984,7 @@ async function renderSystemsExplorePage() {
         </div>
       </div>
     `;
-    renderSystemsExploreSidebar();
+    renderSystemsExploreSidebarShell();
     await loadSystemsExploreRoms({ reset: true });
     restoreMovieListScroll("#systems/explore");
   } catch (err) {
@@ -3985,58 +4001,134 @@ async function renderSystemsExplorePage() {
     setLoading(false);
   }
 }
-function renderSystemsExploreSidebar() {
+// The sidebar is a stable shell (rendered once, holds the two search boxes)
+// wrapping two independently-refreshed list sections -- re-rendering the
+// whole sidebar's innerHTML on every keystroke would tear down and recreate
+// the search <input> itself, losing focus/cursor position mid-type. Only
+// the list containers get replaced; the boxes stay put.
+function renderSystemsExploreSidebarShell() {
   const sidebar = document.getElementById("systems-explore-sidebar");
   if (!sidebar) return;
+  sidebar.innerHTML = `
+    <div class="movie-explorer-sidebar-section">
+      <div class="movie-explorer-sidebar-title">System</div>
+      <input type="search" class="form-control form-control-sm movie-explorer-sidebar-search" placeholder="Search systems" oninput="filterSystemsExploreSystemList(this.value)">
+      <div id="systems-explore-system-list"></div>
+    </div>
+    <div class="movie-explorer-sidebar-section">
+      <div class="movie-explorer-sidebar-title">Category</div>
+      <input type="search" class="form-control form-control-sm movie-explorer-sidebar-search" placeholder="Search categories" oninput="filterSystemsExploreCategoryList(this.value)">
+      <div id="systems-explore-category-list"></div>
+    </div>
+  `;
+  renderSystemsExploreSystemList();
+  renderSystemsExploreCategoryList();
+}
+function systemsExploreVisibleSystems() {
+  const search = systemsExploreSystemFilterQuery.trim().toLowerCase();
+  if (search) return systemsExploreAllSystems.filter((s) => String(s.name || "").toLowerCase().includes(search));
+  return systemsExploreShowAllSystems ? systemsExploreAllSystems : systemsExploreAllSystems.slice(0, SYSTEMS_EXPLORE_TOP_SYSTEM_COUNT);
+}
+// The threshold trim (see the constants above) and the top-N-unless-expanded
+// cap are independent steps -- trim first, then cap what's left, so a
+// "Show more" click reveals the rest of the *signal* categories, never the
+// long tail the trim already decided wasn't worth surfacing.
+function systemsExploreCategoriesAfterThreshold() {
+  const hasDominantCategory = systemsExploreGenreCounts.some((g) => Number(g.count || 0) >= SYSTEMS_EXPLORE_CATEGORY_DOMINANT_THRESHOLD);
+  return hasDominantCategory
+    ? systemsExploreGenreCounts.filter((g) => Number(g.count || 0) >= SYSTEMS_EXPLORE_CATEGORY_MIN_COUNT)
+    : systemsExploreGenreCounts;
+}
+function systemsExploreVisibleCategories() {
+  const search = systemsExploreCategoryFilterQuery.trim().toLowerCase();
+  if (search) return systemsExploreGenreCounts.filter((g) => String(g.name || "").toLowerCase().includes(search));
+  const afterThreshold = systemsExploreCategoriesAfterThreshold();
+  return systemsExploreShowAllCategories ? afterThreshold : afterThreshold.slice(0, SYSTEMS_EXPLORE_TOP_CATEGORY_COUNT);
+}
+function renderSystemsExploreSystemList() {
+  const list = document.getElementById("systems-explore-system-list");
+  if (!list) return;
   const systemButton = (value, label, count) => `
     <button type="button" class="movie-explorer-category-btn ${systemsExploreSelectedSystem === value ? "active" : ""}" onclick="setSystemsExploreSystem(${jsAttr(value)})">
       <span>${escapeHtml(label)}</span><span class="movie-explorer-category-count">${Number(count || 0).toLocaleString()}</span>
     </button>
   `;
+  const searching = Boolean(systemsExploreSystemFilterQuery.trim());
+  const visibleSystems = systemsExploreVisibleSystems();
+  const totalRoms = systemsExploreAllSystems.reduce((sum, s) => sum + Number(s.rom_count || 0), 0);
+  // "Show more" only makes sense against the passive top-5 default -- an
+  // active search already shows every match, uncapped.
+  const canExpand = !searching && systemsExploreAllSystems.length > SYSTEMS_EXPLORE_TOP_SYSTEM_COUNT;
+  list.innerHTML = `
+    ${searching ? "" : systemButton("", "All Systems", totalRoms)}
+    ${
+      visibleSystems.length
+        ? visibleSystems.map((s) => systemButton(s.name, s.name, s.rom_count)).join("")
+        : `<div class="text-muted small">No systems match "${escapeHtml(systemsExploreSystemFilterQuery)}".</div>`
+    }
+    ${canExpand ? `
+      <button type="button" class="movie-explorer-category-btn movie-explorer-sidebar-more-btn" onclick="toggleSystemsExploreShowAllSystems()">
+        ${systemsExploreShowAllSystems ? "Show less" : `Show more (${(systemsExploreAllSystems.length - SYSTEMS_EXPLORE_TOP_SYSTEM_COUNT).toLocaleString()})`}
+      </button>
+    ` : ""}
+  `;
+}
+function renderSystemsExploreCategoryList() {
+  const list = document.getElementById("systems-explore-category-list");
+  if (!list) return;
   const genreButton = (value, label, count) => `
     <button type="button" class="movie-explorer-category-btn ${systemsExploreSelectedGenre === value ? "active" : ""}" onclick="setSystemsExploreGenre(${jsAttr(value)})">
       <span>${escapeHtml(label)}</span><span class="movie-explorer-category-count">${Number(count || 0).toLocaleString()}</span>
     </button>
   `;
-  const totalRoms = systemsExploreAllSystems.reduce((sum, s) => sum + Number(s.rom_count || 0), 0);
-  const visibleSystems = systemsExploreShowAllSystems
-    ? systemsExploreAllSystems
-    : systemsExploreAllSystems.slice(0, SYSTEMS_EXPLORE_TOP_SYSTEM_COUNT);
-  const canExpand = systemsExploreAllSystems.length > SYSTEMS_EXPLORE_TOP_SYSTEM_COUNT;
-  sidebar.innerHTML = `
-    <div class="movie-explorer-sidebar-section">
-      <div class="movie-explorer-sidebar-title">System</div>
-      ${systemButton("", "All Systems", totalRoms)}
-      ${visibleSystems.map((s) => systemButton(s.name, s.name, s.rom_count)).join("")}
-      ${canExpand ? `
-        <button type="button" class="movie-explorer-category-btn movie-explorer-sidebar-more-btn" onclick="toggleSystemsExploreShowAllSystems()">
-          ${systemsExploreShowAllSystems ? "Show less" : `Show more (${(systemsExploreAllSystems.length - SYSTEMS_EXPLORE_TOP_SYSTEM_COUNT).toLocaleString()})`}
-        </button>
-      ` : ""}
-    </div>
-    <div class="movie-explorer-sidebar-section">
-      <div class="movie-explorer-sidebar-title">Category</div>
-      ${genreButton("", "All Categories", systemsExploreTotal)}
-      ${systemsExploreGenreCounts.length ? systemsExploreGenreCounts.map((g) => genreButton(g.name, g.name, g.count)).join("") : `<div class="text-muted small">Scrape games to see categories.</div>`}
-    </div>
+  const searching = Boolean(systemsExploreCategoryFilterQuery.trim());
+  const afterThreshold = systemsExploreCategoriesAfterThreshold();
+  const visible = systemsExploreVisibleCategories();
+  const canExpand = !searching && afterThreshold.length > SYSTEMS_EXPLORE_TOP_CATEGORY_COUNT;
+  let emptyMessage = "Scrape games to see categories.";
+  if (systemsExploreGenreCounts.length && searching) {
+    emptyMessage = `No categories match "${escapeHtml(systemsExploreCategoryFilterQuery)}".`;
+  }
+  list.innerHTML = `
+    ${searching ? "" : genreButton("", "All Categories", systemsExploreTotal)}
+    ${visible.length ? visible.map((g) => genreButton(g.name, g.name, g.count)).join("") : `<div class="text-muted small">${emptyMessage}</div>`}
+    ${canExpand ? `
+      <button type="button" class="movie-explorer-category-btn movie-explorer-sidebar-more-btn" onclick="toggleSystemsExploreShowAllCategories()">
+        ${systemsExploreShowAllCategories ? "Show less" : `Show more (${(afterThreshold.length - SYSTEMS_EXPLORE_TOP_CATEGORY_COUNT).toLocaleString()})`}
+      </button>
+    ` : ""}
   `;
+}
+function filterSystemsExploreSystemList(value) {
+  systemsExploreSystemFilterQuery = value || "";
+  renderSystemsExploreSystemList();
+}
+function filterSystemsExploreCategoryList(value) {
+  systemsExploreCategoryFilterQuery = value || "";
+  renderSystemsExploreCategoryList();
 }
 async function setSystemsExploreSystem(value) {
   systemsExploreSelectedSystem = value;
   systemsExploreSelectedGenre = "";
   updateSystemsExploreHash();
-  renderSystemsExploreSidebar();
+  renderSystemsExploreSystemList();
+  renderSystemsExploreCategoryList();
   await loadSystemsExploreRoms({ reset: true });
 }
 async function setSystemsExploreGenre(value) {
   systemsExploreSelectedGenre = value;
   updateSystemsExploreHash();
-  renderSystemsExploreSidebar();
+  renderSystemsExploreSystemList();
+  renderSystemsExploreCategoryList();
   await loadSystemsExploreRoms({ reset: true });
 }
 function toggleSystemsExploreShowAllSystems() {
   systemsExploreShowAllSystems = !systemsExploreShowAllSystems;
-  renderSystemsExploreSidebar();
+  renderSystemsExploreSystemList();
+}
+function toggleSystemsExploreShowAllCategories() {
+  systemsExploreShowAllCategories = !systemsExploreShowAllCategories;
+  renderSystemsExploreCategoryList();
 }
 function updateSystemsExploreHash() {
   const nextHash = systemsExploreHash();
@@ -4064,7 +4156,10 @@ async function loadSystemsExploreRoms(opts = {}) {
     systemsExploreTotal = Number(data.count || 0);
     systemsExploreHasMore = Boolean(data.has_more);
     systemsExploreGenreCounts = data.genres || [];
-    if (reset) renderSystemsExploreSidebar();
+    // Only the Category list depends on the /roms response -- System counts
+    // come from the separate /systems fetch at page load and don't change
+    // per query.
+    if (reset) renderSystemsExploreCategoryList();
   } catch (err) {
     showToast(`Failed to load games: ${escapeHtml(err.message || "unknown error")}`, "danger");
   } finally {

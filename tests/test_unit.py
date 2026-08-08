@@ -6238,6 +6238,18 @@ class RomGenreFacetAndBrowseTests(unittest.TestCase):
             counts = {row["name"]: row["count"] for row in list_rom_genre_counts(settings)}
             self.assertEqual(counts, {"Platform": 2, "Action": 1, "Adventure": 1})
 
+    def test_genre_counts_are_ordered_most_to_least(self) -> None:
+        # The Systems Browse sidebar's Category panel (and its low-count
+        # trim/"Show more" cap) both assume this ordering rather than
+        # re-sorting client-side.
+        from app.storage.rom_metadata_store import list_rom_genre_counts
+
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._seed(Path(tmp))
+            names_in_order = [row["name"] for row in list_rom_genre_counts(settings)]
+            self.assertEqual(names_in_order[0], "Platform")  # count 2, the only one above 1
+            self.assertEqual(set(names_in_order[1:]), {"Action", "Adventure"})  # tied at 1, alphabetical
+
     def test_genre_counts_scoped_to_system_filter(self) -> None:
         from app.storage.rom_metadata_store import list_rom_genre_counts
 
@@ -6909,15 +6921,81 @@ class SystemsExplorePageTests(unittest.TestCase):
         self.assertIn('hash.startsWith("#movies/explore") || hash.startsWith("#systems/explore")', router_body)
 
     def test_sidebar_has_system_and_category_panels_with_top_five_and_counts(self) -> None:
-        sidebar_start = self.js.index("function renderSystemsExploreSidebar()")
-        sidebar_end = self.js.index("async function setSystemsExploreSystem(", sidebar_start)
+        sidebar_start = self.js.index("function renderSystemsExploreSidebarShell()")
+        sidebar_end = self.js.index("function systemsExploreVisibleSystems(", sidebar_start)
         body = self.js[sidebar_start:sidebar_end]
         self.assertIn(">System<", body)
         self.assertIn(">Category<", body)
-        self.assertIn("SYSTEMS_EXPLORE_TOP_SYSTEM_COUNT", body)
-        self.assertIn("Show more", body)
-        self.assertIn("Show less", body)
-        self.assertIn("movie-explorer-category-count", body)
+        self.assertIn("systems-explore-system-list", body)
+        self.assertIn("systems-explore-category-list", body)
+        self.assertIn("filterSystemsExploreSystemList(this.value)", body)
+        self.assertIn("filterSystemsExploreCategoryList(this.value)", body)
+
+        system_list_start = self.js.index("function renderSystemsExploreSystemList()")
+        system_list_end = self.js.index("function renderSystemsExploreCategoryList()", system_list_start)
+        system_list_body = self.js[system_list_start:system_list_end]
+        self.assertIn("SYSTEMS_EXPLORE_TOP_SYSTEM_COUNT", system_list_body)
+        self.assertIn("Show more", system_list_body)
+        self.assertIn("Show less", system_list_body)
+        self.assertIn("movie-explorer-category-count", system_list_body)
+        # "Show more" only applies to the passive default -- an active search
+        # already shows every match uncapped.
+        self.assertIn("!searching", system_list_body)
+
+        category_list_start = self.js.index("function renderSystemsExploreCategoryList()")
+        category_list_end = self.js.index("function filterSystemsExploreSystemList(", category_list_start)
+        category_list_body = self.js[category_list_start:category_list_end]
+        self.assertIn("SYSTEMS_EXPLORE_TOP_CATEGORY_COUNT", category_list_body)
+        self.assertIn("Show more", category_list_body)
+        self.assertIn("Show less", category_list_body)
+        self.assertIn("toggleSystemsExploreShowAllCategories()", category_list_body)
+        # The show-more cap must apply to what's left *after* the low-count
+        # trim, not the raw unfiltered list -- otherwise expanding could
+        # reveal the long tail the trim exists to hide.
+        self.assertIn("systemsExploreCategoriesAfterThreshold()", category_list_body)
+
+    def test_sidebar_search_boxes_are_never_regenerated_by_list_updates(self) -> None:
+        # The <input> lives only in the shell, never in the two per-list
+        # render functions -- rebuilding it on every keystroke (e.g. if a
+        # list-render function re-emitted the <input> too) would drop focus
+        # and cursor position mid-type.
+        shell_start = self.js.index("function renderSystemsExploreSidebarShell()")
+        shell_end = self.js.index("function systemsExploreVisibleSystems(", shell_start)
+        self.assertEqual(self.js[shell_start:shell_end].count("<input"), 2)
+
+        for fn_name, next_fn_name in (
+            ("function renderSystemsExploreSystemList()", "function renderSystemsExploreCategoryList()"),
+            ("function renderSystemsExploreCategoryList()", "function filterSystemsExploreSystemList("),
+        ):
+            start = self.js.index(fn_name)
+            end = self.js.index(next_fn_name, start)
+            self.assertNotIn("<input", self.js[start:end], f"{fn_name} must not re-render the search box")
+
+    def test_category_list_hides_low_counts_only_when_a_dominant_category_exists(self) -> None:
+        helper_start = self.js.index("function systemsExploreCategoriesAfterThreshold()")
+        helper_end = self.js.index("function systemsExploreVisibleCategories()", helper_start)
+        body = self.js[helper_start:helper_end]
+        self.assertIn("SYSTEMS_EXPLORE_CATEGORY_DOMINANT_THRESHOLD", body)
+        self.assertIn("SYSTEMS_EXPLORE_CATEGORY_MIN_COUNT", body)
+        self.assertIn("hasDominantCategory", body)
+        self.assertEqual(self.js.count("const SYSTEMS_EXPLORE_CATEGORY_MIN_COUNT = 5;"), 1)
+        self.assertEqual(self.js.count("const SYSTEMS_EXPLORE_CATEGORY_DOMINANT_THRESHOLD = 50;"), 1)
+        # systemsExploreVisibleCategories builds on the threshold helper
+        # rather than re-deriving hasDominantCategory itself.
+        visible_start = self.js.index("function systemsExploreVisibleCategories()")
+        visible_end = self.js.index("function renderSystemsExploreSystemList()", visible_start)
+        self.assertIn("systemsExploreCategoriesAfterThreshold()", self.js[visible_start:visible_end])
+
+    def test_search_bypasses_top_five_cap_and_low_count_trim(self) -> None:
+        systems_helper_start = self.js.index("function systemsExploreVisibleSystems()")
+        systems_helper_end = self.js.index("function systemsExploreVisibleCategories()", systems_helper_start)
+        systems_body = self.js[systems_helper_start:systems_helper_end]
+        self.assertIn("if (search) return systemsExploreAllSystems.filter(", systems_body)
+
+        categories_helper_start = self.js.index("function systemsExploreVisibleCategories()")
+        categories_helper_end = self.js.index("function renderSystemsExploreSystemList()", categories_helper_start)
+        categories_body = self.js[categories_helper_start:categories_helper_end]
+        self.assertIn("if (search) return systemsExploreGenreCounts.filter(", categories_body)
 
     def test_browse_grid_fetches_paginated_roms_endpoint_with_filters(self) -> None:
         loader_start = self.js.index("async function loadSystemsExploreRoms(")
