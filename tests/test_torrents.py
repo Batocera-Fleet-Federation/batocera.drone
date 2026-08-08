@@ -49,6 +49,11 @@ class FakeRpc:
         # When set, aria2.unpause raises this instead of succeeding -- for
         # testing Phase D's handling of a real aria2 unpause failure.
         self.unpause_error = None
+        # When set, the next aria2.forceRemove/removeDownloadResult call
+        # raises this instead of succeeding -- for testing the pending-
+        # removal retry path (aria2 too busy/unresponsive to confirm a
+        # removal right away, confirmed live).
+        self.remove_error = None
 
     def call(self, method, params=None, timeout=None):
         params = params or []
@@ -98,6 +103,13 @@ class FakeRpc:
             if gid in self.statuses:
                 self.statuses[gid]["status"] = "active"
             return gid
+        if method in ("aria2.forceRemove", "aria2.removeDownloadResult"):
+            gid = params[0] if params else None
+            if self.remove_error:
+                raise Aria2RpcError(self.remove_error)
+            if gid not in self.statuses:
+                raise Aria2RpcError(f"GID#{gid} is not found in the queue.")
+            return "OK"
         return "OK"
 
     def method_calls(self, name):
@@ -1190,6 +1202,175 @@ class TorrentLifecycleTests(unittest.TestCase):
                 self.assertIn(entry["status"], ("queued", "downloading"))
                 if entry["status"] == "downloading":
                     self.assertNotEqual(entry["gid"], stale_gid)
+
+
+class TorrentAria2ReconciliationTests(unittest.TestCase):
+    """The UI must be an honest mirror of what aria2 is actually doing, not
+    just what this manager remembers adding -- confirmed live: a removal RPC
+    that couldn't land while aria2 was busy on a slow write left a real,
+    still-writing download orphaned in aria2 with zero representation
+    anywhere in the UI once its entry had already been dropped from our own
+    tracking. Covers the pending-removal retry (delete/cancel/clear) and
+    orphan-gid adoption (aria2.tellActive/tellWaiting)."""
+
+    def _manager(self, root: Path, rpc: FakeRpc) -> TorrentManager:
+        manager = TorrentManager(_build_settings(root), start_worker=False)
+        manager._daemon = FakeDaemon(rpc)
+        return manager
+
+    def test_delete_queues_gid_for_retry_when_aria2_is_busy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            watch = root / "watch"
+            manager.update_settings({"directory": str(watch)})
+            _write_torrent(watch, "a")
+            manager._tick()
+            entry = manager.snapshot()["torrents"][0]
+            with manager._lock:
+                gid = manager._torrents[entry["id"]]["gid"]
+
+            rpc.remove_error = "timed out"
+            result = manager.delete(entry["id"])
+            # Deletion from the UI is immediate/unconditional -- the entry is
+            # gone from the snapshot right away regardless of whether aria2
+            # could be reached.
+            self.assertEqual(result["status"], "deleted")
+            self.assertEqual(manager.snapshot()["torrents"], [])
+            with manager._lock:
+                self.assertIn(gid, manager._pending_removal_gids)
+
+            # aria2 recovers; the next tick must retry and actually drain it,
+            # not leave the download running forever unmanaged.
+            rpc.remove_error = None
+            manager._tick()
+            with manager._lock:
+                self.assertNotIn(gid, manager._pending_removal_gids)
+            self.assertIn(("aria2.forceRemove", [gid]), rpc.calls)
+
+    def test_gid_not_found_on_removal_counts_as_already_gone(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            watch = root / "watch"
+            manager.update_settings({"directory": str(watch)})
+            _write_torrent(watch, "a")
+            manager._tick()
+            entry = manager.snapshot()["torrents"][0]
+            with manager._lock:
+                gid = manager._torrents[entry["id"]]["gid"]
+            # Simulate aria2 having already forgotten this gid entirely (e.g.
+            # it finished being torn down by something else) rather than
+            # being merely busy -- forceRemove/removeDownloadResult raise
+            # "not found" for any gid FakeRpc hasn't registered.
+            del rpc.statuses[gid]
+
+            result = manager.delete(entry["id"])
+            self.assertEqual(result["status"], "deleted")
+            with manager._lock:
+                self.assertNotIn(gid, manager._pending_removal_gids)
+
+    def test_cancel_and_clear_also_queue_pending_removal_on_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            watch = root / "watch"
+            manager.update_settings({"directory": str(watch)})
+            _write_torrent(watch, "a")
+            _write_torrent(watch, "b")
+            manager.update_settings({"max_concurrent_downloads": 2})
+            manager._tick()
+            entries = {e["name"]: e for e in manager.snapshot()["torrents"]}
+            with manager._lock:
+                gid_a = manager._torrents[entries["a"]["id"]]["gid"]
+                gid_b = manager._torrents[entries["b"]["id"]]["gid"]
+
+            rpc.remove_error = "timed out"
+            manager.cancel(entries["a"]["id"])
+            with manager._lock:
+                self.assertIn(gid_a, manager._pending_removal_gids)
+
+            manager.clear({"scope": "all", "delete_from_ui": True})
+            with manager._lock:
+                self.assertIn(gid_b, manager._pending_removal_gids)
+            self.assertEqual(manager.snapshot()["torrents"], [])
+
+    def test_adopts_orphaned_gid_into_a_manageable_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            # aria2 already knows about this download -- e.g. left running
+            # after an earlier removal RPC failed -- but this manager has
+            # never added it and has no entry for it at all.
+            rpc.statuses["orphan-gid"] = {
+                "gid": "orphan-gid",
+                "status": "active",
+                "totalLength": "1000",
+                "completedLength": "400",
+                "downloadSpeed": "20",
+                "dir": "/media/roms_modern/torrents",
+                "bittorrent": {"info": {"name": "Orphaned Movie"}},
+            }
+            rpc.active = [rpc.statuses["orphan-gid"]]
+
+            manager._tick()
+
+            entries = manager.snapshot()["torrents"]
+            self.assertEqual(len(entries), 1)
+            adopted = entries[0]
+            self.assertEqual(adopted["name"], "Orphaned Movie")
+            self.assertEqual(adopted["status"], "downloading")
+            self.assertEqual(adopted["progress_percent"], 40.0)
+            self.assertEqual(adopted["download_dir"], "/media/roms_modern/torrents")
+
+            # Once adopted, it's a perfectly normal entry -- controllable
+            # like anything else the manager itself added.
+            result = manager.delete(adopted["id"])
+            self.assertEqual(result["status"], "deleted")
+            self.assertEqual(manager.snapshot()["torrents"], [])
+            self.assertIn(("aria2.forceRemove", ["orphan-gid"]), rpc.calls)
+
+    def test_does_not_readopt_a_gid_it_already_knows_about(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            watch = root / "watch"
+            manager.update_settings({"directory": str(watch)})
+            _write_torrent(watch, "a")
+            manager._tick()
+            with manager._lock:
+                gid = next(iter(manager._torrents.values()))["gid"]
+            # This tick's own tracked download also happens to show up in
+            # tellActive, exactly like it would against a real aria2c.
+            rpc.active = [rpc.statuses[gid]]
+
+            manager._tick()
+
+            self.assertEqual(len(manager.snapshot()["torrents"]), 1)
+
+    def test_does_not_adopt_magnet_metadata_gid_pending_followed_by_handoff(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            rpc.statuses["metadata-gid"] = {
+                "gid": "metadata-gid",
+                "status": "active",
+                "totalLength": "500",
+                "completedLength": "500",
+                "downloadSpeed": "0",
+                "followedBy": ["content-gid"],
+            }
+            rpc.active = [rpc.statuses["metadata-gid"]]
+
+            manager._tick()
+
+            self.assertEqual(manager.snapshot()["torrents"], [])
 
 
 _MAGNET_URI = (

@@ -95,6 +95,12 @@ _ALREADY_REGISTERED_INFOHASH_RE = re.compile(r"InfoHash\s+([0-9a-fA-F]{40})\s+is
 # entry whose recovered gid turns out to already be active in aria2.
 _CANNOT_BE_UNPAUSED_RE = re.compile(r"cannot be unpaused now", re.IGNORECASE)
 
+# aria2's error when a gid we're trying to remove is already gone (either
+# never existed or a prior removal already succeeded) -- e.g.
+# "GID#a2b4c6 is not found". Treated as a successful removal by
+# _remove_from_aria2 rather than something worth retrying forever.
+_GID_NOT_FOUND_RE = re.compile(r"is not found", re.IGNORECASE)
+
 _TELL_STATUS_KEYS = [
     "gid",
     "status",
@@ -108,6 +114,7 @@ _TELL_STATUS_KEYS = [
     "bittorrent",
     "files",
     "followedBy",
+    "dir",
 ]
 
 
@@ -350,6 +357,12 @@ class TorrentManager:
         self._next_queue_position: int = 1
         self._paused: bool = False
         self._recent_move_locations: List[str] = []
+        # gids we've told the UI are gone (delete/cancel/clear) but aria2
+        # hasn't actually confirmed removing yet -- e.g. it was too busy on
+        # a slow write to answer the RPC call. Retried every tick until
+        # aria2 confirms, so a removal can never silently strand a still-
+        # running download that nothing in the UI can see or control anymore.
+        self._pending_removal_gids: List[str] = []
         self._restore_state()
         if start_worker:
             thread = Thread(target=self._worker, name="drone-torrent-manager", daemon=True)
@@ -369,6 +382,8 @@ class TorrentManager:
         self._paused = bool(stored.get("paused"))
         recent = stored.get("recent_move_locations")
         self._recent_move_locations = [str(p) for p in recent][:MOVE_RECENT_LOCATIONS_MAX] if isinstance(recent, list) else []
+        pending_removals = stored.get("pending_removal_gids")
+        self._pending_removal_gids = [str(g) for g in pending_removals if g] if isinstance(pending_removals, list) else []
         entries = stored.get("torrents") if isinstance(stored.get("torrents"), list) else []
         for raw in entries:
             if not isinstance(raw, dict):
@@ -431,6 +446,7 @@ class TorrentManager:
                 "settings": dict(self._config),
                 "paused": bool(self._paused),
                 "recent_move_locations": list(self._recent_move_locations),
+                "pending_removal_gids": list(self._pending_removal_gids),
                 "torrents": [
                     {field: entry.get(field) for field in _ENTRY_PERSISTED_FIELDS}
                     for entry in self._sorted_entries_locked()
@@ -590,6 +606,7 @@ class TorrentManager:
             stale_gids = self._refresh_pending_download_dirs_locked(config)
             if stale_gids:
                 dirty = True
+            has_pending_removals = bool(self._pending_removal_gids)
             to_add = [
                 dict(entry)
                 for entry in self._scheduler_entries_locked()
@@ -602,9 +619,10 @@ class TorrentManager:
             ]
 
         # Phase B (unlocked): talk to aria2.
-        rpc = self._ensure_rpc(bool(to_add or to_query or stale_gids), config["directory"])
+        rpc = self._ensure_rpc(bool(to_add or to_query or stale_gids or has_pending_removals), config["directory"])
         for gid in stale_gids:
-            self._remove_from_aria2(gid)
+            if rpc is None or not self._remove_from_aria2(gid, rpc):
+                self._queue_pending_removal(gid)
         add_results: Dict[str, dict] = {}
         status_results: Dict[str, dict] = {}
         if rpc is not None:
@@ -667,7 +685,20 @@ class TorrentManager:
                 if not _CANNOT_BE_UNPAUSED_RE.search(str(error)):
                     print(f"Torrent unpause failed for gid {gid}: {error}", file=sys.stderr, flush=True)
         for gid in orphaned_gids:
-            self._remove_from_aria2(gid)
+            if not self._remove_from_aria2(gid, rpc):
+                self._queue_pending_removal(gid)
+
+        # Phase E (unlocked): retry any removals aria2 hasn't confirmed yet,
+        # and adopt any gid aria2 knows about that we've lost track of --
+        # keeps the UI an honest mirror of aria2's actual state rather than
+        # silently drifting out of sync with it. Confirmed live: a still-
+        # writing multi-GB download kept running in aria2, invisible to the
+        # UI and impossible to cancel from it, once its entry had been
+        # removed from our own tracking while aria2 was too busy on a slow
+        # drive to actually answer the removal RPC in time.
+        if rpc is not None:
+            self._retry_pending_removals(rpc)
+            self._adopt_orphaned_gids(rpc)
 
     def _scan_watch_directory_locked(self, config: dict) -> bool:
         directory = Path(config["directory"])
@@ -1072,7 +1103,8 @@ class TorrentManager:
             entry["retry_count"] = 0
             entry["retry_at"] = 0.0
             self._persist_locked()
-        self._remove_from_aria2(gid)
+        if not self._remove_from_aria2(gid):
+            self._queue_pending_removal(gid)
         self.wake()
         return {"status": result_status}
 
@@ -1082,7 +1114,8 @@ class TorrentManager:
             if entry is None:
                 return {"status": "not_found"}
             self._persist_locked()
-        self._remove_from_aria2(entry.get("gid"))
+        if not self._remove_from_aria2(entry.get("gid")):
+            self._queue_pending_removal(entry.get("gid"))
         torrent_file_removed = True
         if entry.get("torrent_file"):
             torrent_file_removed = False
@@ -1152,7 +1185,8 @@ class TorrentManager:
                 except OSError as error:
                     print(f"Torrent clear: file delete failed: {error}", file=sys.stderr, flush=True)
             if delete_downloaded_files or delete_from_ui:
-                self._remove_from_aria2(entry.get("gid"))
+                if not self._remove_from_aria2(entry.get("gid")):
+                    self._queue_pending_removal(entry.get("gid"))
             if delete_downloaded_files:
                 _remove_downloaded_payload(entry)
 
@@ -1320,20 +1354,113 @@ class TorrentManager:
         recent.insert(0, path)
         self._recent_move_locations = recent[:MOVE_RECENT_LOCATIONS_MAX]
 
-    def _remove_from_aria2(self, gid: Optional[str]) -> None:
+    def _remove_from_aria2(self, gid: Optional[str], rpc=None) -> bool:
+        """Best-effort stop+cleanup of a gid in aria2. Returns True once aria2
+        has confirmed the gid is actually gone (removed just now, or already
+        gone), False if the RPC calls couldn't be completed right now (aria2
+        busy/unreachable -- e.g. blocked on a slow write, confirmed live).
+        Callers that need this to eventually happen (delete/cancel/clear)
+        must queue the gid via _queue_pending_removal on a False return
+        rather than treating "we tried" as "it's actually gone" -- silently
+        doing that left a real, still-writing download orphaned in aria2
+        with zero representation anywhere in the UI once its entry was
+        removed from our own tracking.
+        """
+        if not gid:
+            return True
+        if rpc is None:
+            rpc = self._rpc_if_running()
+        if rpc is None:
+            return False
+        ok = True
+        for method in ("aria2.forceRemove", "aria2.removeDownloadResult"):
+            try:
+                rpc.call(method, [gid])
+            except Aria2RpcError as error:
+                if not _GID_NOT_FOUND_RE.search(str(error)):
+                    ok = False
+        return ok
+
+    def _queue_pending_removal(self, gid: Optional[str]) -> None:
         if not gid:
             return
-        rpc = self._rpc_if_running()
-        if rpc is None:
+        with self._lock:
+            if gid not in self._pending_removal_gids:
+                self._pending_removal_gids.append(gid)
+                self._persist_locked()
+
+    def _retry_pending_removals(self, rpc) -> None:
+        with self._lock:
+            pending = list(self._pending_removal_gids)
+        if not pending:
             return
+        still_pending = [gid for gid in pending if not self._remove_from_aria2(gid, rpc)]
+        with self._lock:
+            if still_pending != self._pending_removal_gids:
+                self._pending_removal_gids = still_pending
+                self._persist_locked()
+
+    def _adopt_orphaned_gids(self, rpc) -> None:
+        """Aria2 can end up running a download this manager has no entry for
+        -- most likely a removal RPC that couldn't land while aria2 was busy
+        (the entry was already dropped from our own tracking by delete/
+        cancel/clear regardless, per the docstring above), but also possibly
+        something added directly against aria2's RPC port by another caller.
+        Either way, the goal is a UI that's an honest mirror of what aria2 is
+        actually doing and lets the user act on it -- so any gid aria2
+        reports that isn't attached to one of our own entries gets a normal,
+        fully manageable entry created for it, reusing the exact same status-
+        mapping code path (_apply_aria2_status_locked) a regularly-tracked
+        entry goes through on every tick.
+        """
         try:
-            rpc.call("aria2.forceRemove", [gid])
+            active = rpc.call("aria2.tellActive", [_TELL_STATUS_KEYS]) or []
+            waiting = rpc.call("aria2.tellWaiting", [0, 1000, _TELL_STATUS_KEYS]) or []
         except Aria2RpcError:
-            pass
-        try:
-            rpc.call("aria2.removeDownloadResult", [gid])
-        except Aria2RpcError:
-            pass
+            return
+        with self._lock:
+            known_gids = {entry.get("gid") for entry in self._torrents.values() if entry.get("gid")}
+            dirty = False
+            for result in [*active, *waiting]:
+                gid = str(result.get("gid") or "")
+                if not gid or gid in known_gids:
+                    continue
+                if result.get("followedBy"):
+                    # A magnet's metadata-only gid, about to hand off to the
+                    # real content gid (see _apply_aria2_status_locked's
+                    # followedBy handling) -- that gid will surface in its
+                    # own right on this same sweep once aria2 reports it.
+                    continue
+                entry_id = uuid.uuid4().hex[:12]
+                entry = {
+                    "id": entry_id,
+                    "name": "",
+                    "torrent_file": "",
+                    "magnet_uri": "",
+                    "download_dir": str(result.get("dir") or ""),
+                    "status": "queued",
+                    "message": "",
+                    "added_at": _now_iso(),
+                    "completed_at": None,
+                    "total_bytes": 0,
+                    "completed_bytes": 0,
+                    "progress_percent": 0.0,
+                    "files": [],
+                    "queue_position": self._take_queue_position_locked(),
+                    "retry_count": 0,
+                    "retry_at": 0.0,
+                    "last_error": "",
+                    **dict(_ENTRY_LIVE_DEFAULTS),
+                }
+                entry["gid"] = gid
+                self._apply_aria2_status_locked(entry, {"result": result})
+                if not entry.get("name"):
+                    entry["name"] = f"Adopted download {gid[:8]}"
+                self._torrents[entry_id] = entry
+                known_gids.add(gid)
+                dirty = True
+            if dirty:
+                self._persist_locked()
 
     # ------------------------------------------------------- settings/install
 
