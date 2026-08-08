@@ -91,6 +91,13 @@ class MockServerIntegrationTests(unittest.TestCase):
         with urllib.request.urlopen(req, timeout=5) as resp:
             return resp.read()
 
+    def _get_with_headers(self, path: str):
+        url = f"http://127.0.0.1:{self.port}{path}"
+        req = urllib.request.Request(url)
+        req.add_header("Cookie", self._cookie)
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status, dict(resp.headers), resp.read()
+
     def _post_json(self, path: str, payload: dict) -> dict:
         url = f"http://127.0.0.1:{self.port}{path}"
         body = json.dumps(payload).encode("utf-8")
@@ -111,6 +118,44 @@ class MockServerIntegrationTests(unittest.TestCase):
         rom = next(item for item in payload["roms"] if item["rom_file"] == "Chrono Trigger (USA).zip")
         data = self._get_bytes(f"/v1/api/systems/snes/roms/{rom['unique_id']}")
         self.assertEqual(data, b"FAKE-SNES-ROM-1")
+
+    def test_browser_play_supported_systems_endpoint(self) -> None:
+        payload = self._get_json("/v1/api/browser-play/supported-systems")
+        self.assertEqual(payload["systems"].get("snes"), "snes9x")
+        self.assertEqual(payload["systems"].get("gba"), "mgba")
+        self.assertEqual(payload["systems"].get("psx"), "mednafen_psx_hw")
+        self.assertNotIn("dreamcast", payload["systems"])
+
+    def test_emulatorjs_player_html_has_relaxed_csp_and_cross_origin_isolation(self) -> None:
+        # player.html is opened in a new tab by drone.js's "Play in Browser" button
+        # (browserPlayUrl), not iframed -- it still needs its own narrower CSP than
+        # the site-wide default ('unsafe-eval'/'wasm-unsafe-eval' for the emulator
+        # core) plus COOP/COEP for crossOriginIsolated (SharedArrayBuffer), both
+        # carved out in ui_routes.py. X-Frame-Options/frame-ancestors stay at the
+        # site-wide strict default since nothing embeds this page.
+        status, headers, body = self._get_with_headers("/static/emulatorjs/player.html")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers.get("Content-Type"), "text/html; charset=utf-8")
+        self.assertEqual(headers.get("X-Frame-Options"), "DENY")
+        self.assertEqual(headers.get("Cross-Origin-Opener-Policy"), "same-origin")
+        self.assertEqual(headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
+        csp = headers.get("Content-Security-Policy", "")
+        self.assertIn("frame-ancestors 'none'", csp)
+        self.assertIn("'wasm-unsafe-eval'", csp)
+        self.assertIn("'unsafe-eval'", csp)
+        self.assertIn(b"EJS_player", body)
+
+    def test_emulatorjs_engine_and_core_assets_are_served(self) -> None:
+        status, headers, _ = self._get_with_headers("/static/emulatorjs/data/loader.js")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers.get("Content-Type"), "application/javascript")
+        status, _, _ = self._get_with_headers("/static/emulatorjs/data/cores/snes9x-wasm.data")
+        self.assertEqual(status, 200)
+
+    def test_other_static_pages_keep_the_default_strict_frame_ancestors(self) -> None:
+        _, headers, _ = self._get_with_headers("/static/css/drone.css")
+        self.assertEqual(headers.get("X-Frame-Options"), "DENY")
+        self.assertIn("frame-ancestors 'none'", headers.get("Content-Security-Policy", ""))
 
     def test_api_admin_status_and_openapi_mtls_guidance(self) -> None:
         payload = self._get_json("/v1/api/admin/api/status")

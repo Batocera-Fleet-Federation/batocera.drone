@@ -823,12 +823,13 @@ class HandlersPeerMixin:
         as_attachment: bool = False,
         extra_headers: Optional[dict] = None,
         upload_meta: Optional[dict] = None,
+        csp_override: Optional[str] = None,
     ) -> None:
         file_size = path.stat().st_size
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(file_size))
-        self._send_security_headers()
+        self._send_security_headers(csp_override=csp_override)
         if as_attachment:
             self.send_header("Content-Disposition", f'attachment; filename="{path.name}"')
         for key, value in (extra_headers or {}).items():

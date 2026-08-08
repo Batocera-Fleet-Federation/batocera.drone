@@ -11,6 +11,32 @@ except ImportError:
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
+# player.html is the "Play in Browser" EmulatorJS host page -- drone.js's "Play in
+# Browser" button opens it in a new tab (not an <iframe>: EmulatorJS needs
+# crossOriginIsolated -- see the COOP/COEP headers below -- and that requires the
+# *entire* ancestor chain to opt in, which would mean pushing COEP onto the main SPA
+# page too and risk breaking every cross-origin asset it loads today, Bootstrap/fonts/
+# Cast SDK included; a new top-level tab sidesteps that by being its own browsing
+# context with independent headers). It still needs its own narrower CSP than the
+# site-wide default: both 'wasm-unsafe-eval' (WebAssembly.instantiate) and
+# 'unsafe-eval' in script-src -- the decompressed core bundle's Emscripten glue code
+# calls plain eval()/new Function() too, and without 'unsafe-eval' that throws a CSP
+# EvalError that's swallowed silently, leaving the "Decompress Game Core" loading text
+# stuck forever with no visible error (found by injecting a window.onerror probe into
+# this page during development). Both directives are deliberately omitted from the
+# site-wide CSP elsewhere. blob: is for the emulator core's worker/audio plumbing.
+_EMULATORJS_PLAYER_CSP = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:; "
+    "worker-src 'self' blob:; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data: blob:; "
+    "media-src 'self' blob:; "
+    "font-src 'self' data:; "
+    "connect-src 'self' blob: https:; "
+    "object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+)
+
 
 def load_template(name: str) -> str:
     return (TEMPLATES_DIR / name).read_text(encoding="utf-8")
@@ -59,7 +85,20 @@ class UiRoutesMixin:
         target = (STATIC_DIR / rel).resolve()
         if STATIC_DIR.resolve() not in target.parents or not target.exists() or not target.is_file():
             raise FileNotFoundError()
-        self._stream_file(target, self._guess_content_type(target))
+        is_player_page = rel == "emulatorjs/player.html"
+        csp_override = _EMULATORJS_PLAYER_CSP if is_player_page else None
+        # crossOriginIsolated (COOP+COEP) unlocks SharedArrayBuffer, which the core's
+        # pthread-enabled Emscripten build wants after decompression -- without it (verified
+        # by testing with/without these two headers) it hangs indefinitely on "Download Game
+        # Data" instead of erroring. Same-origin requests are exempt from COEP's require-corp
+        # check, so no matching Cross-Origin-Resource-Policy header is needed on the engine/
+        # core files themselves -- everything under /static/ is same-origin.
+        extra_headers = (
+            {"Cross-Origin-Opener-Policy": "same-origin", "Cross-Origin-Embedder-Policy": "require-corp"}
+            if is_player_page
+            else None
+        )
+        self._stream_file(target, self._guess_content_type(target), csp_override=csp_override, extra_headers=extra_headers)
 
     def _handle_swagger_html(self) -> None:
         self._send_html(200, SWAGGER_HTML)

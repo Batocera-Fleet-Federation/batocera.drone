@@ -353,6 +353,11 @@ def _schemas() -> Dict[str, Schema]:
         ),
         "AssetEntry": asset_entry,
         "SystemsResponse": _object({"systems": _array(_ref("SystemSummary"))}, ("systems",), description="Installed systems visible to the Drone UI."),
+        "BrowserPlaySupportedSystemsResponse": _object(
+            {"systems": {"type": "object", "additionalProperties": _string("EmulatorJS core id")}},
+            ("systems",),
+            description="Batocera system name -> vendored EmulatorJS core id, for the in-browser Play button.",
+        ),
         "RomListResponse": _object({"system": _string(), "roms": _array(_ref("AssetEntry"))}, ("system", "roms")),
         "GenreCount": _object({"name": _string(), "count": _integer()}, ("name", "count")),
         "RomBrowseResponse": _object(
@@ -1795,6 +1800,13 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
                 )
             },
             "/systems": {"get": _operation("List systems", {"200": _json_response("SystemsResponse", "Systems list")}, tags=["library"])},
+            "/browser-play/supported-systems": {
+                "get": _operation(
+                    "List systems playable in-browser",
+                    {"200": _json_response("BrowserPlaySupportedSystemsResponse", "Supported systems")},
+                    tags=["library"],
+                )
+            },
             "/systems/{system}": {
                 "get": _operation(
                     "List ROMs for a system",

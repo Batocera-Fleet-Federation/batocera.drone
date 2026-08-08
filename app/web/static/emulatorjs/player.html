@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Play in Browser</title>
+<style>
+  html, body { margin: 0; padding: 0; width: 100%; height: 100%; background: #111318; overflow: hidden; }
+  #game { width: 100%; height: 100%; }
+  #ejsPlayerError {
+    display: none; box-sizing: border-box; width: 100%; height: 100%; padding: 24px;
+    color: #e7e9ee; font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    text-align: center; align-items: center; justify-content: center; flex-direction: column;
+  }
+</style>
+</head>
+<body>
+<div id="game"></div>
+<div id="ejsPlayerError">
+  <div>
+    <p id="ejsPlayerErrorText">This game can't be played in the browser.</p>
+  </div>
+</div>
+<script>
+(function () {
+  function showError(message) {
+    document.getElementById("game").style.display = "none";
+    var errorEl = document.getElementById("ejsPlayerError");
+    document.getElementById("ejsPlayerErrorText").textContent = message;
+    errorEl.style.display = "flex";
+  }
+
+  var params = new URLSearchParams(window.location.search);
+  var core = params.get("core");
+  var gameUrl = params.get("gameUrl");
+  var system = params.get("system");
+  var uniqueId = params.get("uniqueId");
+  var gameName = params.get("gameName") || "";
+
+  if (!core || !gameUrl || !system || !uniqueId) {
+    showError("Missing player parameters.");
+    return;
+  }
+  if (gameName) document.title = gameName + " -- Play in Browser";
+
+  // Same origin as the Drone app itself (this file is served from /static/), so
+  // EJS_gameUrl's fetch carries the same session cookie as the rest of the SPA --
+  // no separate auth wiring needed for the ROM byte fetch.
+  window.EJS_player = "#game";
+  window.EJS_core = core;
+  window.EJS_gameUrl = gameUrl;
+  window.EJS_gameName = gameName;
+  // Browser-local save state only (IndexedDB via EmulatorJS's own storage layer),
+  // namespaced per system+ROM -- deliberately not wired to the Drone's real
+  // saves/<system>/ files, see the browser-play-in-drone memory for why.
+  window.EJS_gameID = system + ":" + uniqueId;
+  window.EJS_pathtodata = "/static/emulatorjs/data/";
+  window.EJS_startOnLoaded = true;
+  // Only en-US.json is vendored (see data/localization/); a non-English browser
+  // locale 404s on its language file and loader.js falls back to English --
+  // harmless, not worth vendoring all ~20 locales for.
+  window.EJS_backgroundColor = "#111318";
+  window.EJS_backgroundBlur = false;
+
+  var loaderScript = document.createElement("script");
+  loaderScript.src = "/static/emulatorjs/data/loader.js";
+  loaderScript.onerror = function () {
+    showError("Failed to load the in-browser emulator engine.");
+  };
+  document.head.appendChild(loaderScript);
+})();
+</script>
+</body>
+</html>

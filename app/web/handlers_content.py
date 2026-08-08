@@ -13,11 +13,13 @@ from urllib.parse import quote, unquote
 try:
     from ..common.http_cache import valid_segment
     from ..device.device_control import _resolve_es_systems_effective, _resolve_theme_dir
+    from ..roms.browser_play import SYSTEM_CORE_MAP
     from ..storage.rom_metadata_store import _load_rom_metadata_cache
     from .route_config import api_url
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.http_cache import valid_segment  # type: ignore
     from device.device_control import _resolve_es_systems_effective, _resolve_theme_dir  # type: ignore
+    from roms.browser_play import SYSTEM_CORE_MAP  # type: ignore
     from storage.rom_metadata_store import _load_rom_metadata_cache  # type: ignore
     from web.route_config import api_url  # type: ignore
 
@@ -313,6 +315,16 @@ class HandlersContentMixin:
             if visible:
                 systems = [item for item in systems if str(item.get("name", "")).lower() in visible]
         self._send_json(200, {"systems": systems}, cache_key="json:/systems")
+
+    def _handle_browser_play_supported_systems(self) -> None:
+        """Static capability map: which systems have a vendored EmulatorJS core.
+
+        Purely a capability list -- it doesn't factor in ``downloads_enabled``
+        or per-ROM ``is_downloadable``. The frontend combines this with the
+        same ``is_downloadable`` flag it already uses to gate the Download
+        button, so Play in Browser is hidden exactly when Download would be.
+        """
+        self._send_json(200, {"systems": dict(SYSTEM_CORE_MAP)}, cache_key="json:/browser-play/supported-systems")
 
     def _handle_rom_list(
         self,

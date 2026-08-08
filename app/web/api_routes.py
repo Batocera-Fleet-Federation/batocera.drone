@@ -242,6 +242,10 @@ class ApiRoutesMixin:
                 )
                 return
 
+            if api_path == "/browser-play/supported-systems":
+                self._handle_browser_play_supported_systems()
+                return
+
             if len(parts) == 2 and parts[0] == "systems":
                 limit = None
                 offset = 0

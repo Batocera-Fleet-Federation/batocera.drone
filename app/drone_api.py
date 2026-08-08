@@ -1345,6 +1345,12 @@ class RomRequestHandler(HandlersAuthMixin, HandlersSystemMixin, HandlersDownload
             return "application/javascript"
         if suffix == ".css":
             return "text/css"
+        if suffix in (".html", ".htm"):
+            return "text/html; charset=utf-8"
+        if suffix == ".wasm":
+            return "application/wasm"
+        if suffix == ".json":
+            return "application/json"
         if suffix == ".svg":
             return "image/svg+xml"
         if suffix == ".png":
@@ -1442,7 +1448,7 @@ class RomRequestHandler(HandlersAuthMixin, HandlersSystemMixin, HandlersDownload
         self._send_rate_limited()
         return True
 
-    def _send_security_headers(self, cache_control: str = "no-store") -> None:
+    def _send_security_headers(self, cache_control: str = "no-store", csp_override: Optional[str] = None) -> None:
         # cache_control defaults to "no-store" for every JSON/HTML response
         # (the right default when most of what this app serves is
         # session-gated and changes often). A handful of cacheable-by-nature
@@ -1468,6 +1474,9 @@ class RomRequestHandler(HandlersAuthMixin, HandlersSystemMixin, HandlersDownload
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
         self.send_header("Cache-Control", cache_control)
+        if csp_override:
+            self.send_header("Content-Security-Policy", csp_override)
+            return
         # CSP keeps UI/resource loading strict while still allowing bundled Swagger assets
         # and (script-src/connect-src's www.gstatic.com) the Google Cast Sender SDK the
         # movie player modal's Chromecast button loads -- see drone.js's loadCastSenderSdk.

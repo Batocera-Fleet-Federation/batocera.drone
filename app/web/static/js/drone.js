@@ -1945,12 +1945,37 @@ function renderMovieExplorerDuplicateGroup(group) {
               ${item.recommended_keep ? `<span class="badge text-bg-success">Keep</span>` : ""}
               <span>${escapeHtml(item.byte_count !== undefined && item.byte_count !== null ? formatBytes(item.byte_count) : "n/a")}</span>
             </div>
-            <div class="tree-grid-action"></div>
+            <div class="tree-grid-action">
+              <button class="btn btn-outline-danger btn-sm" type="button" title="Delete this copy" onclick="deleteMovieDuplicateItem(${jsAttr(item.entry_key)}, ${jsAttr(item.display_title || item.movie_name)})"><i class="bi bi-trash"></i></button>
+            </div>
           </div>
         `).join("")}
       </div>
     </div>
   `;
+}
+// Targeted single delete for one duplicate-list row -- distinct from the bulk
+// "Review & Delete Duplicates" modal (openMovieDuplicatesReviewModal): confirms
+// then deletes just this one copy and refreshes the duplicates list in place
+// (no navigation away, unlike deleteMovieFromDetailPage's own-page delete).
+function deleteMovieDuplicateItem(entryKey, title) {
+  openConfirmDeleteModal({
+    title: "Delete movie?",
+    body: `<strong>${escapeHtml(title)}</strong> will be permanently deleted from disk. This cannot be undone.`,
+    confirmLabel: "Delete",
+    onConfirm: async () => {
+      setLoading(true, "Deleting...");
+      try {
+        await deleteMoviesBatch([entryKey]);
+        showToast("Movie deleted.", "success");
+        loadMovieExplorerDuplicates(document.getElementById("movieExplorerSearch")?.value || "");
+      } catch (err) {
+        showToast(`Delete failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
+      } finally {
+        setLoading(false);
+      }
+    },
+  });
 }
 function openMovieDuplicatesReviewModal() {
   const groups = movieExplorerDuplicateGroups.map((group) => ({ label: group.label, items: group.items }));
@@ -3137,6 +3162,15 @@ function parseSystemRomHash(hash) {
     page: Math.max(1, Number.parseInt(params.get("page") || "1", 10) || 1),
   };
 }
+let browserPlaySupportedSystemsPromise = null;
+function browserPlaySupportedSystems() {
+  if (!browserPlaySupportedSystemsPromise) {
+    browserPlaySupportedSystemsPromise = api("/browser-play/supported-systems")
+      .then((data) => data.systems || {})
+      .catch(() => ({}));
+  }
+  return browserPlaySupportedSystemsPromise;
+}
 function romMediaItems(system, rom) {
   const labels = {
     image: "Image",
@@ -3179,8 +3213,9 @@ async function renderRomMediaPage(system, uniqueId, page = 1) {
   backBtn.classList.remove("d-none");
   setLoading(true, "Loading ROM media...");
   try {
-    const [romsData] = await Promise.all([
+    const [romsData, browserPlayCores] = await Promise.all([
       getSystemRomData(system),
+      browserPlaySupportedSystems(),
       applySystemTheme(system),
     ]);
     const roms = romsData.roms || [];
@@ -3190,11 +3225,18 @@ async function renderRomMediaPage(system, uniqueId, page = 1) {
     const media = romMediaItems(system, rom);
     const primary = media.find((item) => item.field === "image") || media[0];
     const videoUrl = romVideoUrl(rom);
+    const browserPlayCore = browserPlayCores[String(system || "").toLowerCase()];
+    const canPlayInBrowser = Boolean(browserPlayCore) && rom.is_downloadable !== false;
     titleNode.textContent = rom.title || rom.name || "ROM Media";
     subtitleNode.textContent = `${system} artwork and gamelist.xml metadata`;
     content.innerHTML = `
       <div class="mb-3 d-flex flex-wrap gap-2">
         <button class="btn btn-outline-secondary" onclick="setHash('${systemsExploreHash(system)}')">← Back to ${escapeHtml(system)}</button>
+        ${
+          canPlayInBrowser
+            ? `<a class="btn btn-success" target="_blank" rel="noopener noreferrer" href="${escapeHtml(browserPlayUrl(system, rom.unique_id, rom.title || rom.name || "", browserPlayCore))}"><i class="bi bi-play-fill me-1"></i>Play in Browser</a>`
+            : ""
+        }
         ${
           rom.is_downloadable === false
             ? `<button class="btn btn-outline-secondary" type="button" disabled><i class="bi bi-folder2-open me-1"></i>Folder ROM</button>`
@@ -3300,6 +3342,24 @@ async function renderRomMediaPage(system, uniqueId, page = 1) {
   } finally {
     setLoading(false);
   }
+}
+// Opens EmulatorJS in a new tab rather than an <iframe> or the SPA's own DOM.
+// EmulatorJS wants crossOriginIsolated (COOP/COEP -- see ui_routes.py's
+// _EMULATORJS_PLAYER_CSP) for its pthread-enabled core build, which only takes
+// effect if every ancestor frame has those headers; retrofitting that onto the
+// whole SPA page risked breaking its existing cross-origin assets (Bootstrap/
+// fonts/Cast SDK). A new top-level tab is its own browsing context with
+// independent headers, sidestepping that entirely -- and, as a bonus, leaves no
+// EmulatorJS globals/WASM/audio-context state behind in the SPA's own realm.
+function browserPlayUrl(system, uniqueId, gameName, core) {
+  const params = new URLSearchParams({
+    core,
+    gameUrl: romDownloadUrl(system, uniqueId),
+    system,
+    uniqueId,
+    gameName: gameName || "",
+  });
+  return `/static/emulatorjs/player.html?${params.toString()}`;
 }
 // ROM files are gone from disk after this -- the client-side systems/ROM
 // caches are invalidated wholesale (not just the deleted row) since every
@@ -3819,12 +3879,37 @@ function renderSystemsExploreDuplicateGroup(group) {
               ${item.recommended_keep ? `<span class="badge text-bg-success">Keep</span>` : ""}
               <span>${escapeHtml(item.byte_count !== undefined ? formatBytes(item.byte_count) : "n/a")}</span>
             </div>
-            <div class="tree-grid-action"></div>
+            <div class="tree-grid-action">
+              <button class="btn btn-outline-danger btn-sm" type="button" title="Delete this copy" onclick="deleteRomDuplicateItem(${jsAttr(item.system)}, ${jsAttr(item.unique_id)}, ${jsAttr(item.rom_name)})"><i class="bi bi-trash"></i></button>
+            </div>
           </div>
         `).join("")}
       </div>
     </div>
   `;
+}
+// Targeted single delete for one duplicate-list row -- distinct from the bulk
+// "Review & Delete Duplicates" modal (openRomDuplicatesReviewModal): confirms
+// then deletes just this one copy and refreshes the duplicates list in place
+// (no navigation away, unlike deleteRomFromDetailPage's own-page delete).
+function deleteRomDuplicateItem(system, uniqueId, title) {
+  openConfirmDeleteModal({
+    title: "Delete game?",
+    body: `<strong>${escapeHtml(title)}</strong> will be permanently deleted from disk. This cannot be undone.`,
+    confirmLabel: "Delete",
+    onConfirm: async () => {
+      setLoading(true, "Deleting...");
+      try {
+        await deleteRomsBatch([{ system, unique_id: uniqueId }]);
+        showToast("Game deleted.", "success");
+        loadSystemsExploreDuplicates();
+      } catch (err) {
+        showToast(`Delete failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
+      } finally {
+        setLoading(false);
+      }
+    },
+  });
 }
 function openRomDuplicatesReviewModal() {
   const groups = systemsExploreDuplicateGroups.map((group) => ({
