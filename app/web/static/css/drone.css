@@ -1887,6 +1887,14 @@
       display: flex;
       flex-direction: column;
       gap: 1.25rem;
+      /* Bounded to the viewport (minus the sticky topbar) and independently
+         scrollable -- without this, a sidebar taller than the viewport
+         (Systems Browse's System/Category lists, once expanded/searched,
+         easily are) had no way to reveal its own overflow except scrolling
+         the whole page/grid past it first. Harmless on Movies' normally-short
+         Type/Genre lists, which never reach this height anyway. */
+      max-height: calc(100vh - 4.5rem - 1rem);
+      overflow-y: auto;
     }
     .movie-explorer-sidebar-title {
       color: var(--admin-border);
