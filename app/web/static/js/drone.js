@@ -7,7 +7,6 @@ const systemsMenuBtn = document.getElementById("systemsMenuBtn");
 const moviesMenuBtn = document.getElementById("moviesMenuBtn");
 const brandHomeBtn = document.getElementById("brandHomeBtn");
 const controlsMenuBtn = document.getElementById("controlsMenuBtn");
-const automationMenuBtn = document.getElementById("automationMenuBtn");
 const swarmMenuBtn = document.getElementById("swarmMenuBtn");
 const adminMenuBtn = document.getElementById("adminMenuBtn");
 const apiAccessBtn = document.getElementById("apiAccessBtn");
@@ -111,6 +110,14 @@ let systemsExploreLoadingMore = false;
 const SYSTEMS_EXPLORE_BIOS_KEY = "__bios__";
 let systemsExploreBiosTotal = 0;
 let systemsExploreBiosItems = [];
+// Duplicate-game finder: an icon-only toggle next to the search box (see
+// renderSystemsExplorePage) that swaps the grid from paginated ROM cards to
+// a flat list of duplicate groups within whatever System/Category/search
+// filter is currently active -- fetched in full (no "Show more" paging,
+// unlike the ROM grid) since a duplicates scan is already scoped down to
+// just the games that matched, not the whole library.
+let systemsExploreDuplicatesMode = false;
+let systemsExploreDuplicateGroups = [];
 // Movies Browse (own top-level page, see renderMovieExplorerPage) -- the
 // whole set loads once (movie libraries are far smaller than ROM sets) and
 // is grouped/filtered client-side.
@@ -142,6 +149,16 @@ function movieListScrollBucket(hash) {
 // same as the search box already does.
 let movieExplorerTypeFilter = "all";
 let movieExplorerGenreFilter = "";
+// Duplicate-movie/show finder: an icon-only toggle next to the search box
+// (see renderMovieExplorerPage) that swaps the grid from posters to a flat
+// list of duplicate groups within whatever Type/Genre/search filter is
+// currently active. Unlike the rest of the Explorer (client-side grouping
+// over the already-fetched moviesAllRows), duplicate grouping happens
+// server-side (GET /admin/movies/duplicates) since it needs its own
+// title/quality-tag parsing, not the show/episode grouping this page
+// already does.
+let movieExplorerDuplicatesMode = false;
+let movieExplorerDuplicateGroups = [];
 // The Explorer still fetches the whole (small, ~thousands-not-millions)
 // movies library in one shot -- unlike Systems Browse it needs the complete
 // set client-side anyway to group episodes into show cards and compute
@@ -322,7 +339,7 @@ function setLoading(isLoading, text = "Loading...") {
   }
 }
 function applyAdminVisibility() {
-  const adminLinks = [adminMenuBtn, controlsMenuBtn, automationMenuBtn, swarmMenuBtn, apiAccessBtn, notificationsBellWrap].filter(Boolean);
+  const adminLinks = [adminMenuBtn, controlsMenuBtn, swarmMenuBtn, apiAccessBtn, notificationsBellWrap].filter(Boolean);
   if (adminEnabled) {
     adminLinks.forEach((link) => link.classList.remove("d-none"));
     startNotificationsPoll();
@@ -1665,6 +1682,8 @@ async function renderMovieExplorerPage() {
   movieExplorerTypeFilter = "all";
   movieExplorerGenreFilter = "";
   movieExploreDisplayLimit = MOVIE_EXPLORE_PAGE_SIZE;
+  movieExplorerDuplicatesMode = false;
+  movieExplorerDuplicateGroups = [];
   setLoading(true, "Loading movies...");
   try {
     if (!moviesAllRows.length) {
@@ -1678,6 +1697,7 @@ async function renderMovieExplorerPage() {
           <div class="movie-explorer-search flex-grow-1">
             <input id="movieExplorerSearch" type="search" class="form-control" placeholder="Search titles" oninput="filterMovieExplorer(this.value)" autofocus>
           </div>
+          <button id="movieExplorerDuplicatesBtn" class="btn btn-outline-light btn-sm" type="button" title="Find duplicate movies/shows" onclick="toggleMovieExplorerDuplicatesMode()"><i class="bi bi-files"></i></button>
         </div>
         <div class="movie-explorer-body">
           <aside id="movie-explorer-sidebar" class="movie-explorer-sidebar"></aside>
@@ -1855,9 +1875,102 @@ function movieExplorerCardTitle(entry) {
     ? entry.showTitle
     : entry.display_title || entry.movie_name || entry.name || "";
 }
+async function toggleMovieExplorerDuplicatesMode() {
+  movieExplorerDuplicatesMode = !movieExplorerDuplicatesMode;
+  document.getElementById("movieExplorerDuplicatesBtn")?.classList.toggle("active", movieExplorerDuplicatesMode);
+  filterMovieExplorer(document.getElementById("movieExplorerSearch")?.value || "");
+}
+let movieExplorerDuplicatesLoading = false;
+async function loadMovieExplorerDuplicates(queryValue) {
+  const grid = document.getElementById("movie-explorer-grid");
+  if (!grid) return;
+  movieExplorerDuplicatesLoading = true;
+  renderMovieExplorerDuplicatesGrid(grid);
+  try {
+    const params = new URLSearchParams();
+    if (movieExplorerTypeFilter && movieExplorerTypeFilter !== "all") params.set("kind", movieExplorerTypeFilter);
+    if (movieExplorerGenreFilter) params.set("genre", movieExplorerGenreFilter);
+    if (String(queryValue || "").trim()) params.set("q", String(queryValue).trim());
+    const data = await api(`/admin/movies/duplicates?${params.toString()}`);
+    movieExplorerDuplicateGroups = data.groups || [];
+  } catch (err) {
+    showToast(`Failed to load duplicates: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    movieExplorerDuplicateGroups = [];
+  } finally {
+    movieExplorerDuplicatesLoading = false;
+    renderMovieExplorerDuplicatesGrid(grid);
+  }
+}
+function renderMovieExplorerDuplicatesGrid(grid) {
+  grid.classList.add("movie-explorer-grid-list");
+  const moreWrap = document.getElementById("movie-explorer-more");
+  if (moreWrap) moreWrap.innerHTML = "";  // duplicates are fetched all at once -- no paging
+  if (movieExplorerDuplicatesLoading) {
+    grid.innerHTML = `<div class="text-muted p-4"><span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Scanning for duplicates...</div>`;
+    return;
+  }
+  const groups = movieExplorerDuplicateGroups;
+  if (!groups.length) {
+    grid.innerHTML = `<div class="text-muted p-4">No duplicate movies or shows found in the current filters.</div>`;
+    return;
+  }
+  const deletableCount = groups.reduce((sum, group) => sum + group.items.filter((item) => !item.recommended_keep).length, 0);
+  grid.innerHTML = `
+    <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
+      <div class="text-muted small">${groups.length.toLocaleString()} duplicate${groups.length === 1 ? "" : "s"} found &middot; ${deletableCount.toLocaleString()} extra cop${deletableCount === 1 ? "y" : "ies"} can be removed.</div>
+      <button class="btn btn-danger btn-sm" type="button" onclick="openMovieDuplicatesReviewModal()"><i class="bi bi-trash me-1"></i>Review &amp; Delete Duplicates</button>
+    </div>
+    <div class="d-flex flex-column gap-3">
+      ${groups.map(renderMovieExplorerDuplicateGroup).join("")}
+    </div>
+  `;
+}
+function renderMovieExplorerDuplicateGroup(group) {
+  return `
+    <div class="card log-card">
+      <div class="card-header d-flex justify-content-between align-items-center gap-2">
+        <span class="fw-semibold text-truncate">${escapeHtml(group.label)}</span>
+        <span class="badge text-bg-secondary text-nowrap">${group.kind === "episode" ? "Episode" : "Movie"} &middot; ${group.items.length}</span>
+      </div>
+      <div class="tree-leaf-list">
+        ${group.items.map((item) => `
+          <div class="tree-grid-row tree-leaf-row">
+            <div class="tree-grid-main">
+              <i class="bi bi-film tree-grid-icon"></i>
+              <div class="tree-grid-label text-truncate" title="${escapeHtml(item.movie_name)}">
+                <span class="fw-semibold">${escapeHtml(item.display_title || item.movie_name)}</span>
+              </div>
+            </div>
+            <div class="tree-grid-meta d-flex align-items-center gap-2">
+              ${item.recommended_keep ? `<span class="badge text-bg-success">Keep</span>` : ""}
+              <span>${escapeHtml(item.byte_count !== undefined && item.byte_count !== null ? formatBytes(item.byte_count) : "n/a")}</span>
+            </div>
+            <div class="tree-grid-action"></div>
+          </div>
+        `).join("")}
+      </div>
+    </div>
+  `;
+}
+function openMovieDuplicatesReviewModal() {
+  const groups = movieExplorerDuplicateGroups.map((group) => ({ label: group.label, items: group.items }));
+  openDuplicatesReviewModal({
+    title: "Delete duplicate movies/shows?",
+    groups,
+    itemLabel: (item) => item.display_title || item.movie_name,
+    itemMeta: (item) => (item.byte_count !== undefined && item.byte_count !== null ? formatBytes(item.byte_count) : "n/a"),
+    deleteFn: (items) => deleteMoviesBatch(items.map((item) => item.entry_key)),
+    onDeleted: () => loadMovieExplorerDuplicates(document.getElementById("movieExplorerSearch")?.value || ""),
+  });
+}
 function filterMovieExplorer(queryValue, opts = {}) {
   const grid = document.getElementById("movie-explorer-grid");
   if (!grid) return;
+  if (movieExplorerDuplicatesMode) {
+    loadMovieExplorerDuplicates(queryValue || "");
+    return;
+  }
+  grid.classList.remove("movie-explorer-grid-list");
   if (opts.growDisplay) {
     movieExploreDisplayLimit += MOVIE_EXPLORE_PAGE_SIZE;
   } else {
@@ -3087,6 +3200,11 @@ async function renderRomMediaPage(system, uniqueId, page = 1) {
             ? `<button class="btn btn-outline-secondary" type="button" disabled><i class="bi bi-folder2-open me-1"></i>Folder ROM</button>`
             : `<a class="btn btn-primary" href="${romDownloadUrl(system, rom.unique_id)}"><i class="bi bi-download me-1"></i>Download</a>`
         }
+        ${
+          adminEnabled
+            ? `<button class="btn btn-outline-danger" type="button" onclick="deleteRomFromDetailPage(${jsAttr(system)}, ${jsAttr(rom.unique_id)}, ${jsAttr(rom.title || rom.name || "")})"><i class="bi bi-trash me-1"></i>Delete</button>`
+            : ""
+        }
       </div>
       <div class="card log-card mb-3">
         <div class="card-body">
@@ -3182,6 +3300,36 @@ async function renderRomMediaPage(system, uniqueId, page = 1) {
   } finally {
     setLoading(false);
   }
+}
+// ROM files are gone from disk after this -- the client-side systems/ROM
+// caches are invalidated wholesale (not just the deleted row) since every
+// Systems view reads from these same snapshots with no per-row
+// invalidation of their own; the next view that needs them refetches via
+// their existing forceRefresh-less lazy-load guards.
+async function deleteRomsBatch(items) {
+  const result = await apiPost("/admin/roms/delete", { items });
+  systemsCache = null;
+  systemRomCache = {};
+  return result;
+}
+function deleteRomFromDetailPage(system, uniqueId, title) {
+  openConfirmDeleteModal({
+    title: "Delete ROM?",
+    body: `<strong>${escapeHtml(title)}</strong> will be permanently deleted from disk. This cannot be undone.`,
+    confirmLabel: "Delete",
+    onConfirm: async () => {
+      setLoading(true, "Deleting...");
+      try {
+        await deleteRomsBatch([{ system, unique_id: uniqueId }]);
+        showToast("ROM deleted.", "success");
+        setHash(systemsExploreHash(system));
+      } catch (err) {
+        showToast(`Delete failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
+      } finally {
+        setLoading(false);
+      }
+    },
+  });
 }
 function renderThemeGallery(data) {
   backBtn.classList.remove("d-none");
@@ -3330,6 +3478,8 @@ async function renderSystemsExplorePage() {
   systemsExploreSystemFilterQuery = "";
   systemsExploreCategoryFilterQuery = "";
   systemsExploreBiosItems = [];
+  systemsExploreDuplicatesMode = false;
+  systemsExploreDuplicateGroups = [];
   setLoading(true, "Loading systems...");
   try {
     const [data, biosSummary] = await Promise.all([
@@ -3345,6 +3495,7 @@ async function renderSystemsExplorePage() {
           <div class="movie-explorer-search flex-grow-1">
             <input id="systemsExploreSearch" type="search" class="form-control" placeholder="Search games" oninput="filterSystemsExplore(this.value)" autofocus>
           </div>
+          <button id="systemsExploreDuplicatesBtn" class="btn btn-outline-light btn-sm" type="button" title="Find duplicate games" onclick="toggleSystemsExploreDuplicatesMode()"><i class="bi bi-files"></i></button>
         </div>
         <div class="movie-explorer-body">
           <aside id="systems-explore-sidebar" class="movie-explorer-sidebar"></aside>
@@ -3516,9 +3667,40 @@ function filterSystemsExplore(value) {
   systemsExploreSearchDebounce = setTimeout(() => loadSystemsExploreCurrentMode({ reset: true }), 300);
 }
 function loadSystemsExploreCurrentMode(opts = {}) {
-  return systemsExploreSelectedSystem === SYSTEMS_EXPLORE_BIOS_KEY
-    ? loadSystemsExploreBios(opts)
-    : loadSystemsExploreRoms(opts);
+  if (systemsExploreSelectedSystem === SYSTEMS_EXPLORE_BIOS_KEY) return loadSystemsExploreBios(opts);
+  if (systemsExploreDuplicatesMode) return loadSystemsExploreDuplicates();
+  return loadSystemsExploreRoms(opts);
+}
+async function toggleSystemsExploreDuplicatesMode() {
+  systemsExploreDuplicatesMode = !systemsExploreDuplicatesMode;
+  // BIOS has no "duplicate" concept of its own -- turning duplicates mode
+  // on while it's selected falls back to "All Systems" instead.
+  if (systemsExploreDuplicatesMode && systemsExploreSelectedSystem === SYSTEMS_EXPLORE_BIOS_KEY) {
+    systemsExploreSelectedSystem = "";
+    updateSystemsExploreHash();
+    renderSystemsExploreSystemList();
+    renderSystemsExploreCategoryList();
+  }
+  document.getElementById("systemsExploreDuplicatesBtn")?.classList.toggle("active", systemsExploreDuplicatesMode);
+  await loadSystemsExploreCurrentMode({ reset: true });
+}
+async function loadSystemsExploreDuplicates() {
+  systemsExploreLoadingMore = true;
+  renderSystemsExploreGrid();
+  try {
+    const params = new URLSearchParams();
+    if (systemsExploreSelectedSystem) params.set("system", systemsExploreSelectedSystem);
+    if (systemsExploreSelectedGenre) params.set("genre", systemsExploreSelectedGenre);
+    if (systemsExploreSearchQuery.trim()) params.set("q", systemsExploreSearchQuery.trim());
+    const data = await api(`/admin/roms/duplicates?${params.toString()}`);
+    systemsExploreDuplicateGroups = data.groups || [];
+  } catch (err) {
+    showToast(`Failed to load duplicates: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    systemsExploreDuplicateGroups = [];
+  } finally {
+    systemsExploreLoadingMore = false;
+    renderSystemsExploreGrid();
+  }
 }
 async function loadSystemsExploreBios(opts = {}) {
   const reset = Boolean(opts.reset);
@@ -3572,16 +3754,21 @@ function renderSystemsExploreGrid() {
   if (!grid) return;
   const isBios = systemsExploreSelectedSystem === SYSTEMS_EXPLORE_BIOS_KEY;
   // #systems-explore-grid is normally a poster-card CSS grid (150px min
-  // columns, see .movie-explorer-grid) -- BIOS rows are a plain name/size/
-  // download list with no artwork, so without this override each row gets
-  // squeezed into a single ~150px card column and its label truncates to
-  // nothing (confirmed live: the row rendered with icon/size/button visible
-  // but an empty-looking label, even though the DOM text was there).
-  grid.classList.toggle("systems-explore-grid-bios", isBios);
+  // columns, see .movie-explorer-grid) -- BIOS rows and duplicate groups are
+  // both plain lists with no artwork, so without this override each row
+  // gets squeezed into a single ~150px card column and its label truncates
+  // to nothing (confirmed live: the row rendered with icon/size/button
+  // visible but an empty-looking label, even though the DOM text was there).
+  grid.classList.toggle("movie-explorer-grid-list", isBios || systemsExploreDuplicatesMode);
   if (isBios) {
     grid.innerHTML = systemsExploreBiosItems.length
       ? `<div class="tree-leaf-list">${systemsExploreBiosItems.map(renderSystemsExploreBiosRow).join("")}</div>`
       : `<div class="text-muted p-4">No BIOS files match the current filters.</div>`;
+    renderSystemsExploreMoreButton();
+    return;
+  }
+  if (systemsExploreDuplicatesMode) {
+    renderSystemsExploreDuplicatesGrid(grid);
     renderSystemsExploreMoreButton();
     return;
   }
@@ -3591,12 +3778,84 @@ function renderSystemsExploreGrid() {
   renderSystemsExploreMoreButton();
   setupLazyImages();
 }
+function renderSystemsExploreDuplicatesGrid(grid) {
+  if (systemsExploreLoadingMore) {
+    grid.innerHTML = `<div class="text-muted p-4"><span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Scanning for duplicates...</div>`;
+    return;
+  }
+  const groups = systemsExploreDuplicateGroups;
+  if (!groups.length) {
+    grid.innerHTML = `<div class="text-muted p-4">No duplicate games found in the current filters.</div>`;
+    return;
+  }
+  const deletableCount = groups.reduce((sum, group) => sum + group.items.filter((item) => !item.recommended_keep).length, 0);
+  grid.innerHTML = `
+    <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
+      <div class="text-muted small">${groups.length.toLocaleString()} duplicate game${groups.length === 1 ? "" : "s"} found &middot; ${deletableCount.toLocaleString()} extra cop${deletableCount === 1 ? "y" : "ies"} can be removed.</div>
+      <button class="btn btn-danger btn-sm" type="button" onclick="openRomDuplicatesReviewModal()"><i class="bi bi-trash me-1"></i>Review &amp; Delete Duplicates</button>
+    </div>
+    <div class="d-flex flex-column gap-3">
+      ${groups.map(renderSystemsExploreDuplicateGroup).join("")}
+    </div>
+  `;
+}
+function renderSystemsExploreDuplicateGroup(group) {
+  return `
+    <div class="card log-card">
+      <div class="card-header d-flex justify-content-between align-items-center gap-2">
+        <span class="fw-semibold text-capitalize text-truncate">${escapeHtml(group.normalized_title)}</span>
+        <span class="badge text-bg-secondary text-nowrap">${escapeHtml(group.system)} &middot; ${group.items.length}</span>
+      </div>
+      <div class="tree-leaf-list">
+        ${group.items.map((item) => `
+          <div class="tree-grid-row tree-leaf-row">
+            <div class="tree-grid-main">
+              <i class="bi bi-controller tree-grid-icon"></i>
+              <div class="tree-grid-label text-truncate" title="${escapeHtml(item.rom_name)}">
+                <span class="fw-semibold">${escapeHtml(item.rom_name)}</span>
+              </div>
+            </div>
+            <div class="tree-grid-meta d-flex align-items-center gap-2">
+              ${item.recommended_keep ? `<span class="badge text-bg-success">Keep</span>` : ""}
+              <span>${escapeHtml(item.byte_count !== undefined ? formatBytes(item.byte_count) : "n/a")}</span>
+            </div>
+            <div class="tree-grid-action"></div>
+          </div>
+        `).join("")}
+      </div>
+    </div>
+  `;
+}
+function openRomDuplicatesReviewModal() {
+  const groups = systemsExploreDuplicateGroups.map((group) => ({
+    label: `${group.normalized_title} (${group.system})`,
+    items: group.items,
+  }));
+  openDuplicatesReviewModal({
+    title: "Delete duplicate games?",
+    groups,
+    itemLabel: (item) => item.rom_name,
+    itemMeta: (item) => (item.byte_count !== undefined ? formatBytes(item.byte_count) : "n/a"),
+    deleteFn: (items) => deleteRomsBatch(items.map((item) => ({ system: item.system, unique_id: item.unique_id }))),
+    onDeleted: () => loadSystemsExploreDuplicates(),
+  });
+}
 function renderSystemsExploreBiosRow(item) {
   const path = item.path || item.name || "";
   const label = item.name || path;
   const fingerprint = item.bios_md5 || item.md5 || item.fingerprint || "";
   const tooltip = fingerprint ? `${path} · ${fingerprint}` : path;
   const size = item.byte_count !== undefined ? formatBytes(item.byte_count) : "n/a";
+  // The accurate, per-file system association resolved at scan time against
+  // the vendored BIOS-md5 reference table (see rom_metadata_store.py's
+  // BiosCacheRow) -- distinct from the coarse folder-path grouping used for
+  // the sidebar's own System facet. Zero or multiple systems both land in
+  // the Unassigned/shared bucket, same convention as the "unassigned"
+  // filter elsewhere. Kept in the always-visible meta column (not appended
+  // to the truncating filename label) so it never gets clipped for a long
+  // filename.
+  const systems = Array.isArray(item.systems) ? item.systems.filter(Boolean) : [];
+  const systemsLabel = systems.length ? systems.join(", ") : "Unassigned";
   return `
     <div class="tree-grid-row tree-leaf-row">
       <div class="tree-grid-main">
@@ -3605,7 +3864,10 @@ function renderSystemsExploreBiosRow(item) {
           <span class="fw-semibold">${escapeHtml(label)}</span>
         </div>
       </div>
-      <div class="tree-grid-meta">${escapeHtml(size)}</div>
+      <div class="tree-grid-meta d-flex align-items-center gap-2">
+        <span class="badge text-bg-secondary text-truncate${systems.length ? "" : " opacity-50"}" style="max-width:160px" title="${escapeHtml(systemsLabel)}">${escapeHtml(systemsLabel)}</span>
+        <span>${escapeHtml(size)}</span>
+      </div>
       <div class="tree-grid-action">
         ${
           item.is_downloadable === false
@@ -3619,6 +3881,10 @@ function renderSystemsExploreBiosRow(item) {
 function renderSystemsExploreMoreButton() {
   const wrap = document.getElementById("systems-explore-more");
   if (!wrap) return;
+  if (systemsExploreDuplicatesMode) {
+    wrap.innerHTML = "";  // duplicates are fetched all at once -- no paging
+    return;
+  }
   const isBios = systemsExploreSelectedSystem === SYSTEMS_EXPLORE_BIOS_KEY;
   const loadedCount = isBios ? systemsExploreBiosItems.length : systemsExploreRoms.length;
   if (!systemsExploreHasMore && !systemsExploreLoadingMore) {
@@ -3788,6 +4054,93 @@ function openConfirmDeleteModal({ title, body, confirmLabel = "Delete", onConfir
   bsModal?.show();
 }
 
+// Duplicate-group review/bulk-delete modal, shared by the Systems and
+// Movies Browse duplicate finders -- the interaction (a checkable list,
+// pre-checked to everything except each group's recommended_keep item, a
+// live selected-count, one batch delete) is identical between the two;
+// only the item shape and the actual delete call differ, both supplied by
+// the caller. `groups` is [{ label, items: [...] }]; `itemLabel`/
+// `itemMeta` format one item's title line / size-and-detail subline;
+// `deleteFn(selectedItems)` performs the actual batch delete and should
+// throw on failure (caught here and surfaced as a toast, modal stays open
+// so the user can retry).
+let duplicatesReviewRows = [];
+function openDuplicatesReviewModal({ title, groups, itemLabel, itemMeta, deleteFn, onDeleted }) {
+  duplicatesReviewRows = [];
+  groups.forEach((group) => {
+    group.items.forEach((item) => {
+      duplicatesReviewRows.push({ groupLabel: group.label, item, checked: !item.recommended_keep });
+    });
+  });
+  const modalId = "duplicatesReviewModal";
+  let modal = document.getElementById(modalId);
+  if (!modal) {
+    modal = document.createElement("div");
+    modal.id = modalId;
+    modal.className = "modal fade";
+    modal.tabIndex = -1;
+    document.body.appendChild(modal);
+  }
+  const rowsHtml = duplicatesReviewRows.map((row, index) => `
+    <div class="form-check d-flex align-items-start gap-2 py-1 border-bottom">
+      <input class="form-check-input mt-1 flex-shrink-0" type="checkbox" id="dupRow${index}" data-row-index="${index}" ${row.checked ? "checked" : ""}>
+      <label class="form-check-label min-width-0" for="dupRow${index}">
+        <div class="text-truncate">${escapeHtml(itemLabel(row.item))}${row.item.recommended_keep ? ' <span class="badge text-bg-success">Keep</span>' : ""}</div>
+        <div class="text-muted small text-truncate">${escapeHtml(row.groupLabel)} &middot; ${escapeHtml(itemMeta(row.item))}</div>
+      </label>
+    </div>
+  `).join("");
+  modal.innerHTML = `
+    <div class="modal-dialog modal-dialog-centered modal-lg">
+      <div class="modal-content themed-modal">
+        <div class="modal-header">
+          <h5 class="modal-title mb-0"><i class="bi bi-exclamation-triangle text-danger me-2"></i>${escapeHtml(title)}</h5>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <p class="text-muted small">Everything except each group's highest-quality/latest-revision copy is checked by default. Review and adjust before deleting -- this cannot be undone.</p>
+          <div id="duplicatesReviewList" class="duplicates-review-list">${rowsHtml}</div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+          <button type="button" class="btn btn-danger btn-sm" id="duplicatesReviewConfirmBtn"><i class="bi bi-trash me-1"></i>Delete Selected (<span id="duplicatesReviewCount">0</span>)</button>
+        </div>
+      </div>
+    </div>`;
+  const listEl = modal.querySelector("#duplicatesReviewList");
+  const countEl = modal.querySelector("#duplicatesReviewCount");
+  const confirmBtn = modal.querySelector("#duplicatesReviewConfirmBtn");
+  const updateCount = () => {
+    const checked = listEl.querySelectorAll("input[type=checkbox]:checked").length;
+    countEl.textContent = String(checked);
+    confirmBtn.disabled = checked === 0;
+  };
+  listEl.addEventListener("change", (event) => {
+    const index = Number(event.target?.dataset?.rowIndex);
+    if (Number.isFinite(index) && duplicatesReviewRows[index]) duplicatesReviewRows[index].checked = event.target.checked;
+    updateCount();
+  });
+  updateCount();
+  const bsModal = window.bootstrap?.Modal ? window.bootstrap.Modal.getOrCreateInstance(modal) : null;
+  confirmBtn.addEventListener("click", async () => {
+    const selected = duplicatesReviewRows.filter((row) => row.checked).map((row) => row.item);
+    if (!selected.length) return;
+    confirmBtn.disabled = true;
+    confirmBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>Deleting...';
+    try {
+      await deleteFn(selected);
+      bsModal?.hide();
+      showToast(`Deleted ${selected.length} duplicate${selected.length === 1 ? "" : "s"}.`, "success");
+      await onDeleted();
+    } catch (err) {
+      showToast(`Delete failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
+      confirmBtn.disabled = false;
+      confirmBtn.innerHTML = `<i class="bi bi-trash me-1"></i>Delete Selected (<span id="duplicatesReviewCount">${selected.length}</span>)`;
+    }
+  });
+  bsModal?.show();
+}
+
 // First-time-load onboarding tour: a lightweight, dependency-free
 // intro.js-style walkthrough. Spotlights one persistent UI element at a
 // time (nav bar, notifications bell, status badges) with a step tooltip.
@@ -3811,11 +4164,6 @@ const ONBOARDING_TOUR_STEPS = [
     body: "Screen mode, volume, and EmulationStation settings -- managed remotely from any browser.",
   },
   {
-    selector: "#automationMenuBtn",
-    title: "Automation",
-    body: "Hands-off behaviors like idle volume, exiting a stuck game, and Wi-Fi recovery run on their own.",
-  },
-  {
     selector: "#swarmMenuBtn",
     title: "Swarm",
     body: "Pair with your other machines here and manage your whole fleet -- no central server required.",
@@ -3823,7 +4171,7 @@ const ONBOARDING_TOUR_STEPS = [
   {
     selector: "#adminMenuBtn",
     title: "Admin",
-    body: "Torrents, VPN, Email, and diagnostic tools all live here.",
+    body: "Torrents, VPN, Email, Automation, and diagnostic tools all live here.",
   },
   {
     selector: "#systemInfoBar",
@@ -4220,6 +4568,14 @@ async function renderAdminMenu() {
           <div class="card-body">
             <h5 class="card-title"><i class="bi bi-archive me-2"></i>Backups</h5>
             <p class="card-text">Bundle Batocera + emulator settings, gamelist.xml, saves, and custom scripts into a downloadable archive.</p>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-4 mb-3">
+        <div class="card admin-tile pointer h-100" onclick="setHash('#admin/automation')">
+          <div class="card-body">
+            <h5 class="card-title"><i class="bi bi-robot me-2"></i>Automation</h5>
+            <p class="card-text">Hands-off behaviors for this device: idle volume, exiting a stuck game, and Wi-Fi recovery.</p>
           </div>
         </div>
       </div>
@@ -11003,11 +11359,6 @@ controlsMenuBtn.addEventListener("click", (event) => {
   event.preventDefault();
   if (!adminEnabled) return;
   setHash("#admin/controls");
-});
-automationMenuBtn.addEventListener("click", (event) => {
-  event.preventDefault();
-  if (!adminEnabled) return;
-  setHash("#admin/automation");
 });
 swarmMenuBtn.addEventListener("click", (event) => {
   event.preventDefault();

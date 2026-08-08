@@ -8,6 +8,7 @@ BIOS file by unique-id. Composed onto ``RomRepository`` (methods stay ``self``-b
 import hashlib
 import json
 import os
+import shutil
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -16,6 +17,8 @@ try:
     from ..common.http_cache import valid_segment
     from ..storage.rom_metadata_store import (
         _load_rom_metadata_cache,
+        delete_rom_cache_entry,
+        get_rom_cache_row,
         list_bios_cache_page,
         list_rom_cache_page,
         list_rom_genre_counts,
@@ -28,6 +31,8 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from common.http_cache import valid_segment  # type: ignore
     from storage.rom_metadata_store import (  # type: ignore
         _load_rom_metadata_cache,
+        delete_rom_cache_entry,
+        get_rom_cache_row,
         list_bios_cache_page,
         list_rom_cache_page,
         list_rom_genre_counts,
@@ -232,6 +237,39 @@ class RomAssetBiosMixin:
                     )
 
         return asset_dir, items
+
+    def delete_rom(self, system: str, unique_id: str) -> dict:
+        """Permanently delete one ROM: the file (or, for a folder-unit ROM
+        like the lindbergh/dreamcast marker-file games, the whole folder),
+        its gamelist.xml entry, and its cache row -- the Systems Browse ROM
+        detail page's delete action. An unknown (system, unique_id) is a
+        no-op (``{"deleted": False}``), same convention as the movies-side
+        delete. The file is unlinked *before* the cache row is removed: if
+        the unlink fails, the row -- and so the ROM's visibility in the UI
+        -- is left untouched rather than making a file that's still really
+        on disk silently disappear until the next full rescan re-adds it."""
+        unique_id = valid_segment(unique_id)
+        row = get_rom_cache_row(self.settings, system, unique_id)
+        if not row:
+            return {"deleted": False}
+        system_dir = self.get_system_dir(system).resolve()
+        is_folder_unit = row["entry_type"] == "folder" and row["transfer_unit_path"]
+        relative_path = row["transfer_unit_path"] if is_folder_unit else row["file_path"]
+        if not relative_path:
+            return {"deleted": False}
+        target = (system_dir / relative_path).resolve()
+        if target == system_dir or system_dir not in target.parents:
+            return {"deleted": False}
+        if is_folder_unit:
+            shutil.rmtree(target, ignore_errors=False)
+        else:
+            target.unlink(missing_ok=True)
+        try:
+            self.remove_gamelist_entry(system, row["file_path"])
+        except FileNotFoundError:
+            pass  # never scraped / no gamelist entry -- not an error
+        delete_rom_cache_entry(self.settings, row["entry_key"])
+        return {"deleted": True, "file_path": row["file_path"], "rom_name": row["rom_name"]}
 
     def _cached_asset_snapshot(self) -> Optional[dict]:
         try:

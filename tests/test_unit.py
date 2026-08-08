@@ -6385,6 +6385,369 @@ class RomGenreFacetAndBrowseTests(unittest.TestCase):
             self.assertEqual(payload["count"], 1)
 
 
+class RomDeleteTests(unittest.TestCase):
+    """delete_rom() -- the Systems Browse ROM detail page's delete action
+    (and the duplicate-cleanup bulk delete): removes the file (or the whole
+    folder for a folder-unit ROM), the gamelist.xml entry if one exists, and
+    the cache row, mirroring movies_store.delete_movie_file's conventions
+    (unlink before touching the cache row; an unknown lookup is a no-op, not
+    an error)."""
+
+    def _settings(self, root):
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "USERDATA_ROOT": str(root),
+                "ROMS_ROOT": str(root / "roms"),
+                "BIOS_ROOT": str(root / "bios"),
+                "SAVES_ROOT": str(root / "saves"),
+                "DRONE_DEVICE_ID": "rom-delete-test",
+            },
+            clear=True,
+        ):
+            return drone_api.Settings.from_env()
+
+    def _handler(self, settings, repo):
+        handler = drone_api.RomRequestHandler.__new__(drone_api.RomRequestHandler)
+        handler.settings = settings
+        handler.repository = repo
+        return handler
+
+    def test_deletes_file_gamelist_entry_and_cache_row(self) -> None:
+        from app.storage.rom_metadata_store import get_rom_cache_row
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = self._settings(root)
+            system_dir = settings.roms_root / "snes"
+            system_dir.mkdir(parents=True)
+            rom_path = system_dir / "mario.zip"
+            rom_path.write_bytes(b"rom-data")
+            (system_dir / "gamelist.xml").write_text(
+                "<gameList><game><path>./mario.zip</path><name>Mario</name></game></gameList>\n",
+                encoding="utf-8",
+            )
+            entries = {"snes:mario.zip": {"system": "snes", "file_path": "mario.zip", "rom_name": "Mario", "unique_id": "abc123"}}
+            _persist_rom_metadata_cache(
+                settings,
+                {
+                    **_empty_rom_metadata_cache(),
+                    "entries": entries,
+                    "systems": [{"name": "snes", "rom_count": 1}],
+                    "last_full_scan_at": "2026-08-09T00:00:00Z",
+                    "scan_in_progress": False,
+                },
+                rom_updates=entries,
+            )
+            repo = drone_api.RomRepository(settings.roms_root, settings.bios_root, settings=settings)
+
+            result = repo.delete_rom("snes", "abc123")
+
+            self.assertEqual(result, {"deleted": True, "file_path": "mario.zip", "rom_name": "Mario"})
+            self.assertFalse(rom_path.exists())
+            self.assertIsNone(get_rom_cache_row(settings, "snes", "abc123"))
+            self.assertNotIn("mario.zip", (system_dir / "gamelist.xml").read_text(encoding="utf-8"))
+
+    def test_deletes_a_never_scraped_rom_with_no_gamelist_entry_fine(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = self._settings(root)
+            system_dir = settings.roms_root / "snes"
+            system_dir.mkdir(parents=True)
+            rom_path = system_dir / "unscraped.zip"
+            rom_path.write_bytes(b"rom-data")
+            entries = {"snes:unscraped.zip": {"system": "snes", "file_path": "unscraped.zip", "rom_name": "Unscraped", "unique_id": "xyz789"}}
+            _persist_rom_metadata_cache(
+                settings,
+                {
+                    **_empty_rom_metadata_cache(),
+                    "entries": entries,
+                    "systems": [{"name": "snes", "rom_count": 1}],
+                    "last_full_scan_at": "2026-08-09T00:00:00Z",
+                    "scan_in_progress": False,
+                },
+                rom_updates=entries,
+            )
+            repo = drone_api.RomRepository(settings.roms_root, settings.bios_root, settings=settings)
+
+            result = repo.delete_rom("snes", "xyz789")
+
+            self.assertTrue(result["deleted"])
+            self.assertFalse(rom_path.exists())
+
+    def test_deletes_the_whole_folder_for_a_folder_unit_rom(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = self._settings(root)
+            system_dir = settings.roms_root / "dreamcast"
+            game_dir = system_dir / "Some Game"
+            game_dir.mkdir(parents=True)
+            (game_dir / "disc1.gdi").write_bytes(b"data1")
+            (game_dir / "disc2.gdi").write_bytes(b"data2")
+            entries = {
+                "dreamcast:Some Game/disc1.gdi": {
+                    "system": "dreamcast", "file_path": "Some Game/disc1.gdi", "rom_name": "Some Game",
+                    "unique_id": "folder1", "entry_type": "folder", "transfer_unit_path": "Some Game",
+                },
+            }
+            _persist_rom_metadata_cache(
+                settings,
+                {
+                    **_empty_rom_metadata_cache(),
+                    "entries": entries,
+                    "systems": [{"name": "dreamcast", "rom_count": 1}],
+                    "last_full_scan_at": "2026-08-09T00:00:00Z",
+                    "scan_in_progress": False,
+                },
+                rom_updates=entries,
+            )
+            repo = drone_api.RomRepository(settings.roms_root, settings.bios_root, settings=settings)
+
+            result = repo.delete_rom("dreamcast", "folder1")
+
+            self.assertTrue(result["deleted"])
+            self.assertFalse(game_dir.exists())
+
+    def test_unknown_system_or_unique_id_is_a_no_op(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._settings(Path(tmp))
+            repo = drone_api.RomRepository(settings.roms_root, settings.bios_root, settings=settings)
+            self.assertEqual(repo.delete_rom("snes", "not-a-real-id"), {"deleted": False})
+
+    def test_handler_deletes_a_batch_and_counts_only_the_ones_that_existed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = self._settings(root)
+            system_dir = settings.roms_root / "snes"
+            system_dir.mkdir(parents=True)
+            (system_dir / "a.zip").write_bytes(b"a")
+            (system_dir / "b.zip").write_bytes(b"b")
+            entries = {
+                "snes:a.zip": {"system": "snes", "file_path": "a.zip", "rom_name": "A", "unique_id": "id-a"},
+                "snes:b.zip": {"system": "snes", "file_path": "b.zip", "rom_name": "B", "unique_id": "id-b"},
+            }
+            _persist_rom_metadata_cache(
+                settings,
+                {
+                    **_empty_rom_metadata_cache(),
+                    "entries": entries,
+                    "systems": [{"name": "snes", "rom_count": 2}],
+                    "last_full_scan_at": "2026-08-09T00:00:00Z",
+                    "scan_in_progress": False,
+                },
+                rom_updates=entries,
+            )
+            repo = drone_api.RomRepository(settings.roms_root, settings.bios_root, settings=settings)
+            handler = self._handler(settings, repo)
+            captured = {}
+            handler._send_json = lambda status, payload, **kwargs: captured.update({"status": status, "payload": payload})
+
+            handler._handle_admin_roms_delete({"items": [
+                {"system": "snes", "unique_id": "id-a"},
+                {"system": "snes", "unique_id": "id-b"},
+                {"system": "snes", "unique_id": "not-real"},
+            ]})
+
+            self.assertEqual(captured["status"], 200)
+            self.assertEqual(captured["payload"], {"deleted": 2, "requested": 3})
+            self.assertFalse((system_dir / "a.zip").exists())
+            self.assertFalse((system_dir / "b.zip").exists())
+
+    def test_handler_missing_items_is_a_400(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._settings(Path(tmp))
+            repo = drone_api.RomRepository(settings.roms_root, settings.bios_root, settings=settings)
+            handler = self._handler(settings, repo)
+            captured = {}
+            handler._send_json = lambda status, payload, **kwargs: captured.update({"status": status, "payload": payload})
+            handler._handle_admin_roms_delete({})
+            self.assertEqual(captured["status"], 400)
+
+
+class RomDuplicateNormalizationAndRankingTests(unittest.TestCase):
+    """normalize_rom_title()/rom_version_rank() -- the pure-function core of
+    duplicate detection, tested directly against real No-Intro-style names
+    so the SQL/grouping-integration tests below can stay focused on
+    plumbing rather than re-proving these cases."""
+
+    def test_strips_region_and_revision_tags_to_a_shared_base_title(self) -> None:
+        from app.roms.rom_duplicates import normalize_rom_title
+
+        self.assertEqual(normalize_rom_title("Super Mario World (USA)"), "super mario world")
+        self.assertEqual(normalize_rom_title("Super Mario World (USA) (Rev 1)"), "super mario world")
+        self.assertEqual(normalize_rom_title("Super Mario World (Europe)"), "super mario world")
+        self.assertEqual(
+            normalize_rom_title("Chrono Trigger (Japan) (En,Fr,De,Es,It)"),
+            normalize_rom_title("Chrono Trigger (USA)"),
+        )
+
+    def test_distinct_titles_stay_distinct(self) -> None:
+        from app.roms.rom_duplicates import normalize_rom_title
+
+        self.assertNotEqual(normalize_rom_title("Super Mario World (USA)"), normalize_rom_title("Super Mario Bros. (USA)"))
+
+    def test_numeric_revision_outranks_no_revision(self) -> None:
+        from app.roms.rom_duplicates import rom_version_rank
+
+        self.assertGreater(
+            rom_version_rank("Sonic the Hedgehog 2 (World) (Rev 1)"),
+            rom_version_rank("Sonic the Hedgehog 2 (World)"),
+        )
+
+    def test_higher_numeric_revision_outranks_lower(self) -> None:
+        from app.roms.rom_duplicates import rom_version_rank
+
+        self.assertGreater(rom_version_rank("Game (USA) (Rev 2)"), rom_version_rank("Game (USA) (Rev 1)"))
+
+    def test_numeric_revision_outranks_letter_revision(self) -> None:
+        from app.roms.rom_duplicates import rom_version_rank
+
+        self.assertGreater(rom_version_rank("Game (USA) (Rev 1)"), rom_version_rank("Game (USA) (Rev A)"))
+
+    def test_letter_revision_outranks_no_revision(self) -> None:
+        from app.roms.rom_duplicates import rom_version_rank
+
+        self.assertGreater(rom_version_rank("Game (USA) (Rev B)"), rom_version_rank("Game (USA)"))
+
+    def test_explicit_version_tag_outranks_rev_tag(self) -> None:
+        from app.roms.rom_duplicates import rom_version_rank
+
+        self.assertGreater(rom_version_rank("Game (USA) (v1.1)"), rom_version_rank("Game (USA) (Rev 9)"))
+
+    def test_region_priority_breaks_a_tie_when_neither_copy_has_a_revision(self) -> None:
+        from app.roms.rom_duplicates import rom_version_rank
+
+        self.assertGreater(rom_version_rank("Game (USA)"), rom_version_rank("Game (Japan)"))
+        self.assertGreater(rom_version_rank("Game (World)"), rom_version_rank("Game (USA)"))
+
+    def test_unknown_region_ranks_below_a_known_one(self) -> None:
+        from app.roms.rom_duplicates import rom_version_rank
+
+        self.assertGreater(rom_version_rank("Game (USA)"), rom_version_rank("Game (Elbonia)"))
+
+
+class RomDuplicateDetectionIntegrationTests(unittest.TestCase):
+    """find_duplicate_roms() -- groups by (system, normalized title),
+    ranks each group, and respects the same System/Category/search filters
+    GET /roms itself takes."""
+
+    def _settings(self, root):
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "USERDATA_ROOT": str(root),
+                "ROMS_ROOT": str(root / "roms"),
+                "BIOS_ROOT": str(root / "bios"),
+                "SAVES_ROOT": str(root / "saves"),
+                "DRONE_DEVICE_ID": "rom-duplicates-test",
+            },
+            clear=True,
+        ):
+            return drone_api.Settings.from_env()
+
+    def _handler(self, settings, repo):
+        handler = drone_api.RomRequestHandler.__new__(drone_api.RomRequestHandler)
+        handler.settings = settings
+        handler.repository = repo
+        return handler
+
+    def _seed(self, root):
+        settings = self._settings(root)
+        entries = {
+            "snes:mario-usa.zip": {"system": "snes", "file_path": "mario-usa.zip", "rom_name": "Super Mario World (USA)", "unique_id": "mario-usa", "genre": "Platform"},
+            "snes:mario-rev1.zip": {"system": "snes", "file_path": "mario-rev1.zip", "rom_name": "Super Mario World (USA) (Rev 1)", "unique_id": "mario-rev1", "genre": "Platform"},
+            "snes:mario-eu.zip": {"system": "snes", "file_path": "mario-eu.zip", "rom_name": "Super Mario World (Europe)", "unique_id": "mario-eu", "genre": "Platform"},
+            "snes:zelda.zip": {"system": "snes", "file_path": "zelda.zip", "rom_name": "Zelda no Densetsu (Japan)", "unique_id": "zelda-only", "genre": "Action"},
+            "genesis:sonic-usa.zip": {"system": "genesis", "file_path": "sonic-usa.zip", "rom_name": "Sonic the Hedgehog (USA)", "unique_id": "sonic-usa", "genre": "Platform"},
+            "genesis:sonic-jp.zip": {"system": "genesis", "file_path": "sonic-jp.zip", "rom_name": "Sonic the Hedgehog (Japan)", "unique_id": "sonic-jp", "genre": "Platform"},
+        }
+        _persist_rom_metadata_cache(
+            settings,
+            {
+                **_empty_rom_metadata_cache(),
+                "entries": entries,
+                "systems": [{"name": "snes", "rom_count": 4}, {"name": "genesis", "rom_count": 2}],
+                "last_full_scan_at": "2026-08-09T00:00:00Z",
+                "scan_in_progress": False,
+            },
+            rom_updates=entries,
+        )
+        return settings
+
+    def test_groups_same_system_same_title_variants_and_skips_singletons(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._seed(Path(tmp))
+            repo = drone_api.RomRepository(settings.roms_root, settings.bios_root, settings=settings)
+
+            groups = repo.find_duplicate_roms()
+
+            mario_groups = [g for g in groups if g["system"] == "snes" and "mario" in g["normalized_title"]]
+            self.assertEqual(len(mario_groups), 1)
+            self.assertEqual({item["unique_id"] for item in mario_groups[0]["items"]}, {"mario-usa", "mario-rev1", "mario-eu"})
+            # Zelda has only one copy -- never grouped as a duplicate.
+            self.assertFalse(any("zelda" in g["normalized_title"] for g in groups))
+
+    def test_recommended_keep_is_the_highest_ranked_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._seed(Path(tmp))
+            repo = drone_api.RomRepository(settings.roms_root, settings.bios_root, settings=settings)
+
+            groups = repo.find_duplicate_roms()
+            mario_group = next(g for g in groups if g["system"] == "snes" and "mario" in g["normalized_title"])
+
+            kept = [item for item in mario_group["items"] if item["recommended_keep"]]
+            self.assertEqual(len(kept), 1)
+            self.assertEqual(kept[0]["unique_id"], "mario-rev1")  # (Rev 1) beats plain USA/Europe copies
+
+    def test_never_groups_across_different_systems(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._seed(Path(tmp))
+            repo = drone_api.RomRepository(settings.roms_root, settings.bios_root, settings=settings)
+
+            groups = repo.find_duplicate_roms()
+
+            # No system filter here -- both snes (Mario) and genesis (Sonic)
+            # are in scope at once. Confirm the Sonic group only ever pulls
+            # in its own genesis copies, never anything from snes.
+            sonic_group = next(g for g in groups if "sonic" in g["normalized_title"])
+            self.assertEqual(sonic_group["system"], "genesis")
+            self.assertTrue(all(item["system"] == "genesis" for item in sonic_group["items"]))
+
+    def test_system_filter_narrows_duplicate_groups(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._seed(Path(tmp))
+            repo = drone_api.RomRepository(settings.roms_root, settings.bios_root, settings=settings)
+
+            groups = repo.find_duplicate_roms(systems=["genesis"])
+
+            self.assertTrue(all(g["system"] == "genesis" for g in groups))
+            self.assertTrue(any("sonic" in g["normalized_title"] for g in groups))
+
+    def test_genre_filter_narrows_duplicate_groups(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._seed(Path(tmp))
+            repo = drone_api.RomRepository(settings.roms_root, settings.bios_root, settings=settings)
+
+            groups = repo.find_duplicate_roms(genre="Action")
+
+            # Zelda is the only "Action" rom and it has no duplicate.
+            self.assertEqual(groups, [])
+
+    def test_handler_wraps_find_duplicate_roms_with_query_filters(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._seed(Path(tmp))
+            repo = drone_api.RomRepository(settings.roms_root, settings.bios_root, settings=settings)
+            handler = self._handler(settings, repo)
+            captured = {}
+            handler._send_json = lambda status, payload, **kwargs: captured.update({"status": status, "payload": payload})
+
+            handler._handle_admin_rom_duplicates(system="genesis")
+
+            self.assertEqual(captured["status"], 200)
+            groups = captured["payload"]["groups"]
+            self.assertTrue(all(g["system"] == "genesis" for g in groups))
+
+
 class TailnetDiscoveryMergeTests(unittest.TestCase):
     def test_peer_pair_accepts_code_free_request_only_from_online_tailnet_ip(self) -> None:
         from app.web import handlers_peer
@@ -7013,10 +7376,91 @@ class SystemsExplorePageTests(unittest.TestCase):
         grid_fn_start = self.js.index("function renderSystemsExploreGrid()")
         grid_fn_end = self.js.index("function renderSystemsExploreBiosRow(", grid_fn_start)
         grid_fn_body = self.js[grid_fn_start:grid_fn_end]
-        self.assertIn('classList.toggle("systems-explore-grid-bios", isBios)', grid_fn_body)
+        self.assertIn('classList.toggle("movie-explorer-grid-list", isBios || systemsExploreDuplicatesMode)', grid_fn_body)
 
         css_source = Path(__file__).resolve().parents[1].joinpath("app/web/static/css/drone.css").read_text(encoding="utf-8")
-        self.assertIn(".movie-explorer-grid.systems-explore-grid-bios", css_source)
+        self.assertIn(".movie-explorer-grid.movie-explorer-grid-list", css_source)
+
+    def test_bios_row_shows_which_system_it_belongs_to(self) -> None:
+        # item.systems is the accurate, per-file association resolved at
+        # scan time against the vendored BIOS-md5 reference table (see
+        # rom_metadata_store.py's BiosCacheRow/to_payload) -- already present
+        # on every /bios row with no extra fetch needed. Zero or multiple
+        # systems both fall back to "Unassigned", matching the same
+        # unassigned/shared convention used elsewhere for BIOS filtering.
+        row_start = self.js.index("function renderSystemsExploreBiosRow(")
+        row_end = self.js.index("function renderSystemsExploreMoreButton(", row_start)
+        row_body = self.js[row_start:row_end]
+        self.assertIn("Array.isArray(item.systems)", row_body)
+        self.assertIn('systems.length ? systems.join(", ") : "Unassigned"', row_body)
+        self.assertIn("systemsLabel", row_body)
+
+    def test_duplicates_button_is_an_icon_only_toggle_next_to_search(self) -> None:
+        page_start = self.js.index("async function renderSystemsExplorePage()")
+        page_end = self.js.index("function renderSystemsExploreSidebarShell(")
+        body = self.js[page_start:page_end]
+        self.assertIn('id="systemsExploreDuplicatesBtn"', body)
+        self.assertIn("toggleSystemsExploreDuplicatesMode()", body)
+        # Icon-only: a bi- icon with no adjacent label text inside the button.
+        self.assertIn('title="Find duplicate games"', body)
+
+    def test_toggle_falls_back_off_bios_and_dispatches_through_current_mode(self) -> None:
+        fn_start = self.js.index("async function toggleSystemsExploreDuplicatesMode(")
+        fn_end = self.js.index("async function loadSystemsExploreDuplicates(")
+        body = self.js[fn_start:fn_end]
+        self.assertIn("systemsExploreSelectedSystem = \"\"", body)
+        self.assertIn("loadSystemsExploreCurrentMode({ reset: true })", body)
+
+    def test_load_current_mode_dispatches_to_duplicates_before_roms(self) -> None:
+        fn_start = self.js.index("function loadSystemsExploreCurrentMode(")
+        fn_end = self.js.index("async function toggleSystemsExploreDuplicatesMode(")
+        body = self.js[fn_start:fn_end]
+        self.assertIn("systemsExploreDuplicatesMode", body)
+        self.assertIn("loadSystemsExploreDuplicates()", body)
+
+    def test_duplicates_fetch_respects_system_genre_and_search_filters(self) -> None:
+        fn_start = self.js.index("async function loadSystemsExploreDuplicates(")
+        fn_end = self.js.index("function renderSystemsExploreGrid(")
+        body = self.js[fn_start:fn_end]
+        self.assertIn('api(`/admin/roms/duplicates?${params.toString()}`)', body)
+        self.assertIn("params.set(\"system\", systemsExploreSelectedSystem)", body)
+        self.assertIn("params.set(\"genre\", systemsExploreSelectedGenre)", body)
+        self.assertIn('params.set("q", systemsExploreSearchQuery.trim())', body)
+
+    def test_duplicates_grid_reuses_the_plain_list_layout_not_the_card_grid(self) -> None:
+        fn_start = self.js.index("function renderSystemsExploreGrid(")
+        fn_end = self.js.index("function renderSystemsExploreDuplicatesGrid(")
+        body = self.js[fn_start:fn_end]
+        self.assertIn('classList.toggle("movie-explorer-grid-list", isBios || systemsExploreDuplicatesMode)', body)
+        self.assertIn("renderSystemsExploreDuplicatesGrid(grid)", body)
+
+    def test_duplicates_grid_shows_review_and_delete_button_with_extra_copy_count(self) -> None:
+        fn_start = self.js.index("function renderSystemsExploreDuplicatesGrid(")
+        fn_end = self.js.index("function renderSystemsExploreDuplicateGroup(")
+        body = self.js[fn_start:fn_end]
+        self.assertIn("openRomDuplicatesReviewModal()", body)
+        self.assertIn("extra cop", body)
+
+    def test_duplicate_group_row_flags_the_recommended_keep_item(self) -> None:
+        fn_start = self.js.index("function renderSystemsExploreDuplicateGroup(")
+        fn_end = self.js.index("function openRomDuplicatesReviewModal(")
+        body = self.js[fn_start:fn_end]
+        self.assertIn("item.recommended_keep", body)
+        self.assertIn('<span class="badge text-bg-success">Keep</span>', body)
+
+    def test_open_rom_duplicates_review_modal_wires_the_shared_modal(self) -> None:
+        fn_start = self.js.index("function openRomDuplicatesReviewModal(")
+        fn_end = self.js.index("function renderSystemsExploreBiosRow(")
+        body = self.js[fn_start:fn_end]
+        self.assertIn("openDuplicatesReviewModal(", body)
+        self.assertIn("deleteRomsBatch(items.map((item) => ({ system: item.system, unique_id: item.unique_id }))", body)
+        self.assertIn("loadSystemsExploreDuplicates()", body)
+
+    def test_more_button_is_suppressed_in_duplicates_mode_no_paging(self) -> None:
+        fn_start = self.js.index("function renderSystemsExploreMoreButton(")
+        fn_end = self.js.index("function renderSystemsExploreCard(")
+        body = self.js[fn_start:fn_end]
+        self.assertIn("systemsExploreDuplicatesMode", body)
 
     def test_sidebar_has_system_and_category_panels_with_top_five_and_counts(self) -> None:
         sidebar_start = self.js.index("function renderSystemsExploreSidebarShell()")
@@ -7150,6 +7594,54 @@ class SystemsExplorePageTests(unittest.TestCase):
         self.assertIn("movieShowGroupingKey(showTitle)", self.js[show_page_start:show_page_end])
         self.assertIn("movieShowGroupingKey(m.show_title)", show_page_body)
 
+    def test_movies_duplicates_button_is_an_icon_only_toggle_next_to_search(self) -> None:
+        page_start = self.js.index("async function renderMovieExplorerPage()")
+        page_end = self.js.index("function movieExplorerGenres(")
+        body = self.js[page_start:page_end]
+        self.assertIn('id="movieExplorerDuplicatesBtn"', body)
+        self.assertIn("toggleMovieExplorerDuplicatesMode()", body)
+        self.assertIn('title="Find duplicate movies/shows"', body)
+
+    def test_filter_movie_explorer_dispatches_to_duplicates_and_clears_list_class_otherwise(self) -> None:
+        fn_start = self.js.index("function filterMovieExplorer(")
+        fn_end = self.js.index("function renderMovieExplorerMoreButton(", fn_start)
+        body = self.js[fn_start:fn_end]
+        self.assertIn("movieExplorerDuplicatesMode", body)
+        self.assertIn("loadMovieExplorerDuplicates(queryValue || \"\")", body)
+        self.assertIn('classList.remove("movie-explorer-grid-list")', body)
+
+    def test_movies_duplicates_fetch_respects_kind_genre_and_search_filters(self) -> None:
+        fn_start = self.js.index("async function loadMovieExplorerDuplicates(")
+        fn_end = self.js.index("function renderMovieExplorerDuplicatesGrid(")
+        body = self.js[fn_start:fn_end]
+        self.assertIn('api(`/admin/movies/duplicates?${params.toString()}`)', body)
+        self.assertIn('params.set("kind", movieExplorerTypeFilter)', body)
+        self.assertIn('params.set("genre", movieExplorerGenreFilter)', body)
+        self.assertIn('params.set("q", String(queryValue).trim())', body)
+
+    def test_movies_duplicates_grid_uses_list_layout_and_shows_review_button(self) -> None:
+        fn_start = self.js.index("function renderMovieExplorerDuplicatesGrid(")
+        fn_end = self.js.index("function renderMovieExplorerDuplicateGroup(")
+        body = self.js[fn_start:fn_end]
+        self.assertIn('classList.add("movie-explorer-grid-list")', body)
+        self.assertIn("openMovieDuplicatesReviewModal()", body)
+        self.assertIn("extra cop", body)
+
+    def test_movie_duplicate_group_row_flags_the_recommended_keep_item(self) -> None:
+        fn_start = self.js.index("function renderMovieExplorerDuplicateGroup(")
+        fn_end = self.js.index("function openMovieDuplicatesReviewModal(")
+        body = self.js[fn_start:fn_end]
+        self.assertIn("item.recommended_keep", body)
+        self.assertIn('<span class="badge text-bg-success">Keep</span>', body)
+
+    def test_open_movie_duplicates_review_modal_wires_the_shared_modal(self) -> None:
+        fn_start = self.js.index("function openMovieDuplicatesReviewModal(")
+        fn_end = self.js.index("function filterMovieExplorer(")
+        body = self.js[fn_start:fn_end]
+        self.assertIn("openDuplicatesReviewModal(", body)
+        self.assertIn("deleteMoviesBatch(items.map((item) => item.entry_key))", body)
+        self.assertIn("loadMovieExplorerDuplicates(", body)
+
     def test_movie_detail_page_has_admin_gated_delete_button(self) -> None:
         shell_start = self.js.index("function renderMovieDetailShell(")
         shell_end = self.js.index("async function renderMovieScraperCard(", shell_start)
@@ -7195,6 +7687,17 @@ class SystemsExplorePageTests(unittest.TestCase):
         body = self.js[fn_start:fn_end]
         self.assertNotIn("window.confirm(", body)
         self.assertIn("bootstrap.Modal", body)
+
+    def test_duplicates_review_modal_pre_checks_everything_except_recommended_keep(self) -> None:
+        fn_start = self.js.index("function openDuplicatesReviewModal(")
+        fn_end = self.js.index("// First-time-load onboarding tour", fn_start)
+        body = self.js[fn_start:fn_end]
+        self.assertNotIn("window.confirm(", body)
+        self.assertIn("bootstrap.Modal", body)
+        self.assertIn("checked: !item.recommended_keep", body)
+        # Live selected-count, not a static label -- updates as checkboxes change.
+        self.assertIn('addEventListener("change"', body)
+        self.assertIn("duplicatesReviewCount", body)
 
 
 class NetworkSharePageTests(unittest.TestCase):
@@ -7728,25 +8231,23 @@ class NavRestructureTests(unittest.TestCase):
         self.assertIn('"#admin/transfers"', tabs_body)
         self.assertIn("Transfers", tabs_body)
 
-    def test_automation_is_an_admin_gated_navbar_link(self) -> None:
-        # Automation moved out of the admin-tile grid and into a top-level
-        # navbar destination, the same treatment Controls/Swarm already get.
-        self.assertIn('id="automationMenuBtn" href="#admin/automation"', self.html)
-        controls_pos = self.html.index('id="controlsMenuBtn"')
-        automation_pos = self.html.index('id="automationMenuBtn"')
-        admin_pos = self.html.index('id="adminMenuBtn"')
-        self.assertTrue(controls_pos < automation_pos < admin_pos)
+    def test_automation_is_an_admin_tile_not_a_navbar_link(self) -> None:
+        # Automation moved out of the top-level navbar and into the Admin
+        # dashboard as a tile, same treatment as Torrents/VPN/Email/Backups.
+        self.assertNotIn('id="automationMenuBtn"', self.html)
+        self.assertNotIn("automationMenuBtn", self.js)
 
-        self.assertIn('const automationMenuBtn = document.getElementById("automationMenuBtn");', self.js)
-        self.assertIn(
-            "const adminLinks = [adminMenuBtn, controlsMenuBtn, automationMenuBtn, swarmMenuBtn, apiAccessBtn, notificationsBellWrap]",
-            self.js,
-        )
-        click_start = self.js.index('automationMenuBtn.addEventListener("click"')
-        click_end = self.js.index("});", click_start)
-        click_body = self.js[click_start:click_end]
-        self.assertIn("if (!adminEnabled) return;", click_body)
-        self.assertIn('setHash("#admin/automation");', click_body)
+        menu_start = self.js.index("async function renderAdminMenu()")
+        menu_end = self.js.index("async function updateDroneApp()")
+        menu_body = self.js[menu_start:menu_end]
+        self.assertIn("setHash('#admin/automation')", menu_body)
+        self.assertIn("Automation", menu_body)
+
+    def test_games_nav_link_is_the_renamed_assets_link(self) -> None:
+        # Renamed from "Assets" to "Games" -- the element id/href/JS wiring
+        # (systemsMenuBtn -> "#systems") are unchanged, only the label.
+        self.assertIn('id="systemsMenuBtn" href="#systems" role="button" class="btn"><i class="bi bi-grid me-2"></i>Games</a>', self.html)
+        self.assertNotIn(">Assets<", self.html)
 
     def test_router_dispatches_transfers_and_redirects_integration_to_swarm(self) -> None:
         transfers_route = self.js.index('} else if (hash === "#admin/transfers")')
@@ -7842,6 +8343,29 @@ class RomMediaVideoAndMetadataTests(unittest.TestCase):
         self.assertIn("romVideoUrl(rom)", body)
         self.assertIn("romMetadataEditFormHtml(rom)", body)
         self.assertIn('document.getElementById("romMediaVideoBody")', body)
+
+    def test_rom_detail_page_has_admin_gated_delete_button(self) -> None:
+        fn_start = self.js.index("async function renderRomMediaPage(")
+        fn_end = self.js.index("\nfunction renderThemeGallery(")
+        body = self.js[fn_start:fn_end]
+        self.assertIn("adminEnabled", body)
+        self.assertIn("deleteRomFromDetailPage(", body)
+
+    def test_delete_rom_from_detail_page_confirms_then_posts_batch_delete(self) -> None:
+        fn_start = self.js.index("function deleteRomFromDetailPage(")
+        fn_end = self.js.index("function renderThemeGallery(")
+        body = self.js[fn_start:fn_end]
+        self.assertIn("openConfirmDeleteModal(", body)
+        self.assertIn("deleteRomsBatch([{ system, unique_id: uniqueId }])", body)
+        self.assertIn("setHash(systemsExploreHash(system))", body)
+
+    def test_delete_roms_batch_posts_to_admin_roms_delete_and_invalidates_caches(self) -> None:
+        fn_start = self.js.index("async function deleteRomsBatch(")
+        fn_end = self.js.index("function deleteRomFromDetailPage(")
+        body = self.js[fn_start:fn_end]
+        self.assertIn('apiPost("/admin/roms/delete", { items })', body)
+        self.assertIn("systemsCache = null", body)
+        self.assertIn("systemRomCache = {}", body)
 
     def test_video_upload_row_accepts_video_files_and_resolves_a_video_url(self) -> None:
         fn_start = self.js.index("function artworkImageUploadHtml(")

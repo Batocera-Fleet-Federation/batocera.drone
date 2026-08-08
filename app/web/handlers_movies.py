@@ -23,6 +23,7 @@ try:
     from ..movies import cast_stream as _movie_cast_stream
     from ..movies import metadata_manager as _movies_metadata
     from ..movies import filename_parser as _filename_parser
+    from ..movies import movie_duplicates as _movie_duplicates
     from ..movies.tmdb_client import TmdbUnavailableError as _TmdbUnavailableError
     from ..transfer.network_identity import is_advertisable_ip as _is_advertisable_ip
 except ImportError:  # pragma: no cover - direct script execution fallback
@@ -32,6 +33,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from movies import cast_stream as _movie_cast_stream  # type: ignore
     from movies import metadata_manager as _movies_metadata  # type: ignore
     from movies import filename_parser as _filename_parser  # type: ignore
+    from movies import movie_duplicates as _movie_duplicates  # type: ignore
     from movies.tmdb_client import TmdbUnavailableError as _TmdbUnavailableError  # type: ignore
     from transfer.network_identity import is_advertisable_ip as _is_advertisable_ip  # type: ignore
 
@@ -443,6 +445,17 @@ class HandlersMoviesMixin:
         fields TMDb actually returns; it doesn't take fields back out)."""
         result = _movies_metadata.delete_metadata(self.settings, entry_key)
         self._send_json(200, result)
+
+    # ----------------------------------------------------------- duplicates
+
+    def _handle_admin_movie_duplicates(self, kind: Optional[str] = None, genre: Optional[str] = None, query: Optional[str] = None) -> None:
+        """Duplicate movie/episode groups for the Movies Browse page's
+        duplicate finder -- the same Type/Genre/search filters the Movies
+        Explorer sidebar itself uses."""
+        groups = _movie_duplicates.find_duplicate_movies(
+            self.settings.movies_root, kind_filter=str(kind or ""), genre=str(genre or ""), query=str(query or ""),
+        )
+        self._send_json(200, {"groups": groups})
 
     # -------------------------------------------------------------- delete
 

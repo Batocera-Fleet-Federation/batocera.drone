@@ -1478,6 +1478,54 @@ def list_rom_rows_by_system(settings: Any, system: str, *, include_fingerprint: 
     return result
 
 
+def get_rom_cache_row(settings: Any, system: str, unique_id: str) -> Optional[dict]:
+    """Look up one ROM's cache row by (system, unique_id) -- the stable id
+    used in Browse/detail URLs. Returns entry_key (needed to delete the
+    row), file_path (for the safe on-disk path + gamelist.xml lookup), and
+    entry_type/extra_json (folder-unit ROMs carry their whole-folder path
+    in extra_json's transfer_unit_path, not file_path). ``None`` on a
+    lookup miss or SQL error -- callers treat both as "nothing to delete"."""
+    try:
+        with _open_rom_metadata_cache(settings) as connection:
+            row = connection.execute(
+                "SELECT entry_key, file_path, rom_name, entry_type, extra_json FROM rom_cache_entries "
+                "WHERE system = ? COLLATE NOCASE AND unique_id = ?",
+                (system, unique_id),
+            ).fetchone()
+    except sqlite3.Error as error:
+        print(f"ROM cache row lookup failed: {_format_store_error(error)}", file=sys.stderr, flush=True)
+        return None
+    if not row:
+        return None
+    extra = _loads_dict(row[4])
+    return {
+        "entry_key": row[0],
+        "file_path": row[1],
+        "rom_name": row[2],
+        "entry_type": row[3] or "file",
+        "transfer_unit_path": str(extra.get("transfer_unit_path") or ""),
+    }
+
+
+def delete_rom_cache_entry(settings: Any, entry_key: str) -> bool:
+    """Remove one ROM's cache row (archiving it + queuing the change),
+    mirroring what a normal scan does when it finds a file gone -- used for
+    immediate UI feedback on an explicit delete, without waiting for the
+    next scan cycle to reconcile it. False on a missing row or SQL error."""
+    try:
+        with _open_rom_metadata_cache(settings) as connection:
+            existing = connection.execute(
+                "SELECT 1 FROM rom_cache_entries WHERE entry_key = ?", (entry_key,)
+            ).fetchone()
+            if not existing:
+                return False
+            _persist_rows(connection, "rom", {}, [entry_key], {}, queue_changes=True)
+        return True
+    except sqlite3.Error as error:
+        print(f"ROM cache delete failed: {_format_store_error(error)}", file=sys.stderr, flush=True)
+        return False
+
+
 def _cache_is_ready(connection: sqlite3.Connection) -> bool:
     state = dict(
         connection.execute(

@@ -438,6 +438,42 @@ class HandlersContentMixin:
             },
         )
 
+    def _handle_admin_rom_duplicates(self, system: Optional[str] = None, genre: Optional[str] = None, query: Optional[str] = None) -> None:
+        """Duplicate-game groups for the Systems Browse page's duplicate
+        finder -- the same System/Category/search filters as GET /roms."""
+        system_value = str(system or "").strip()
+        genre_value = str(genre or "").strip()
+        query_value = str(query or "").strip()
+        systems_filter = [system_value] if system_value else None
+        groups = self.repository.find_duplicate_roms(systems=systems_filter, genre=genre_value, query=query_value)
+        self._send_json(200, {"groups": groups})
+
+    def _handle_admin_roms_delete(self, payload: dict) -> None:
+        """Permanently deletes one or more ROMs (their file(s) plus gamelist.xml
+        entry and cache row) -- the Systems Browse ROM detail page's delete
+        action, and the duplicate-cleanup bulk delete. Takes a batch so
+        clearing several duplicates is one request instead of one per ROM.
+        Unlike movies (a single flat entry_key across the library), a ROM
+        needs both its system and unique_id to identify -- entries are
+        ``{"system": ..., "unique_id": ...}`` pairs, not bare strings."""
+        payload = payload if isinstance(payload, dict) else {}
+        items = payload.get("items")
+        if not isinstance(items, list) or not items:
+            self._send_json(400, {"error": "items is required"})
+            return
+        deleted = 0
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            system = str(item.get("system") or "").strip()
+            unique_id = str(item.get("unique_id") or "").strip()
+            if not system or not unique_id:
+                continue
+            result = self.repository.delete_rom(system, unique_id)
+            if result.get("deleted"):
+                deleted += 1
+        self._send_json(200, {"deleted": deleted, "requested": len(items)})
+
     def _handle_images_list(self, system: str) -> None:
         _, images = self.repository.list_assets(system, "images")
         self._send_json(

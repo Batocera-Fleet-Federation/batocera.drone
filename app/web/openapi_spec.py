@@ -368,6 +368,29 @@ def _schemas() -> Dict[str, Schema]:
             ("roms", "count", "offset", "limit", "returned", "has_more", "genres"),
             description="Systems Browse page's paginated, cross-system card grid.",
         ),
+        "RomDuplicateItem": _object(
+            {
+                "system": _string(),
+                "unique_id": _string(),
+                "rom_name": _string(),
+                "byte_count": _integer(nullable=True),
+                "recommended_keep": _boolean("Whether this is the highest-ranked copy in its group -- the duplicate-cleanup UI's default is to keep this one and delete the rest"),
+            },
+            ("system", "unique_id", "rom_name", "recommended_keep"),
+        ),
+        "RomDuplicateGroup": _object(
+            {
+                "system": _string(),
+                "normalized_title": _string("The region/revision/scene-tag-stripped title every item in this group shares"),
+                "items": _array(_ref("RomDuplicateItem")),
+            },
+            ("system", "normalized_title", "items"),
+        ),
+        "RomDuplicatesResponse": _object(
+            {"groups": _array(_ref("RomDuplicateGroup"))},
+            ("groups",),
+            description="Games with more than one copy (same system, same title once region/revision/scene tags are stripped), within whatever System/Category/search filter is active.",
+        ),
         "ImageListResponse": _object({"system": _string(), "images": _array(_ref("AssetEntry"))}, ("system", "images")),
         "VideoListResponse": _object({"system": _string(), "videos": _array(_ref("AssetEntry"))}, ("system", "videos")),
         "BiosListResponse": _object(
@@ -478,6 +501,44 @@ def _schemas() -> Dict[str, Schema]:
             {
                 "deleted": _integer("How many of the requested entry_keys actually had a file removed"),
                 "requested": _integer("How many entry_keys were requested"),
+            },
+            ("deleted", "requested"),
+        ),
+        "MovieDuplicateItem": _object(
+            {
+                "entry_key": _string(),
+                "movie_name": _string(),
+                "display_title": _string(),
+                "byte_count": _integer(nullable=True),
+                "recommended_keep": _boolean("Whether this is the highest-ranked release in its group -- the duplicate-cleanup UI's default is to keep this one and delete the rest"),
+            },
+            ("entry_key", "movie_name", "recommended_keep"),
+        ),
+        "MovieDuplicateGroup": _object(
+            {
+                "kind": _enum(["movie", "episode"]),
+                "label": _string("Display label for the group -- the movie's title, or \"Show SxxEyy\" for an episode"),
+                "items": _array(_ref("MovieDuplicateItem")),
+            },
+            ("kind", "label", "items"),
+        ),
+        "MovieDuplicatesResponse": _object(
+            {"groups": _array(_ref("MovieDuplicateGroup"))},
+            ("groups",),
+            description="Movies/episodes with more than one copy (same normalized title+year, or same show+season+episode), within whatever Type/Genre/search filter is active.",
+        ),
+        "RomDeleteItem": _object(
+            {"system": _string("The ROM's system"), "unique_id": _string("The ROM's stable id within that system")},
+            ("system", "unique_id"),
+        ),
+        "RomDeleteRequest": _object(
+            {"items": _array(_ref("RomDeleteItem"))},
+            ("items",),
+        ),
+        "RomDeleteResponse": _object(
+            {
+                "deleted": _integer("How many of the requested items actually had a file removed"),
+                "requested": _integer("How many items were requested"),
             },
             ("deleted", "requested"),
         ),
@@ -1749,6 +1810,32 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
                     tags=["library"],
                 )
             },
+            "/admin/roms/duplicates": {
+                "get": _operation(
+                    "Find games with more than one copy (same system, same title once region/revision/scene tags "
+                    "are stripped), within the same System/Category/search filters as GET /roms. Each group's "
+                    "items are ranked by revision/version then region priority, with the top-ranked one flagged "
+                    "recommended_keep",
+                    {"200": _json_response("RomDuplicatesResponse")},
+                    parameters=[
+                        _query_param("system", _string(), "Narrow to one system"),
+                        _query_param("genre", _string(), "Narrow to one Category/genre"),
+                        _query_param("q", _string(), "Search query"),
+                    ],
+                    tags=["admin", "library"],
+                    error_codes=("401", "403", "429", "500", "503"),
+                )
+            },
+            "/admin/roms/delete": {
+                "post": _operation(
+                    "Permanently delete one or more ROMs (file(s) plus gamelist.xml entry and cache row). "
+                    "Takes a batch so clearing several duplicates is one request instead of one per ROM",
+                    {"200": _json_response("RomDeleteResponse"), "400": _json_response("ErrorResponse", "Missing items")},
+                    request_body=_json_request("RomDeleteRequest"),
+                    tags=["admin", "library"],
+                    error_codes=("400", "401", "403", "429", "500", "503"),
+                )
+            },
             "/systems/{system}/roms/{unique_id}": {
                 "get": _operation(
                     "Download ROM by unique ID",
@@ -1940,6 +2027,22 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
                     request_body=_json_request("MovieDeleteRequest"),
                     tags=["admin", "movies"],
                     error_codes=("400", "401", "403", "429", "500", "503"),
+                )
+            },
+            "/admin/movies/duplicates": {
+                "get": _operation(
+                    "Find movies/episodes with more than one copy (same normalized title+year, or same "
+                    "show+season+episode), within the same Type/Genre/search filters as the Movies Explorer. Each "
+                    "group's items are ranked by resolution then source tier then file size, with the top-ranked "
+                    "one flagged recommended_keep",
+                    {"200": _json_response("MovieDuplicatesResponse")},
+                    parameters=[
+                        _query_param("kind", _string(), "Narrow to \"movie\" or \"episode\""),
+                        _query_param("genre", _string(), "Narrow to one genre"),
+                        _query_param("q", _string(), "Search query"),
+                    ],
+                    tags=["admin", "movies"],
+                    error_codes=("401", "403", "429", "500", "503"),
                 )
             },
             "/admin/movies/scrape/bulk": {

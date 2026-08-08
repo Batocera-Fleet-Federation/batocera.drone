@@ -1797,6 +1797,10 @@
       white-space: nowrap;
     }
     .movie-explorer-search { max-width: 360px; }
+    .duplicates-review-list {
+      max-height: 55vh;
+      overflow-y: auto;
+    }
     .movie-explorer-body {
       display: flex;
       align-items: flex-start;
@@ -1875,10 +1879,12 @@
       grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
       gap: 1rem;
     }
-    /* BIOS files have no artwork -- a plain name/size/download list, not
-       poster cards, so the 150px-card grid above (which would squeeze each
-       row into its own narrow column) is turned back into a normal block. */
-    .movie-explorer-grid.systems-explore-grid-bios {
+    /* BIOS files and duplicate-group listings have no artwork -- a plain
+       name/size/download list, not poster cards, so the 150px-card grid
+       above (which would squeeze each row into its own narrow column,
+       collapsing its label to zero width) is turned back into a normal
+       block for these views. */
+    .movie-explorer-grid.movie-explorer-grid-list {
       display: block;
     }
     @media (max-width: 768px) {

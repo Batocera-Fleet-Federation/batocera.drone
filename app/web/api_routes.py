@@ -515,6 +515,22 @@ class ApiRoutesMixin:
                 self._handle_admin_movie_scraper_settings()
                 return
 
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "roms" and parts[2] == "duplicates":
+                self._handle_admin_rom_duplicates(
+                    system=query_params.get("system", [None])[0],
+                    genre=query_params.get("genre", [None])[0],
+                    query=query_params.get("q", [None])[0],
+                )
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "movies" and parts[2] == "duplicates":
+                self._handle_admin_movie_duplicates(
+                    kind=query_params.get("kind", [None])[0],
+                    genre=query_params.get("genre", [None])[0],
+                    query=query_params.get("q", [None])[0],
+                )
+                return
+
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "movies" and parts[2] == "scrape" and parts[3] == "bulk":
                 self._handle_admin_movie_scrape_bulk_status()
                 return
@@ -998,6 +1014,11 @@ class ApiRoutesMixin:
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "movies" and parts[2] == "delete":
                 payload = self._read_json_body()
                 self._handle_admin_movies_delete(payload)
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "roms" and parts[2] == "delete":
+                payload = self._read_json_body()
+                self._handle_admin_roms_delete(payload)
                 return
 
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "movies" and parts[2] == "scrape" and parts[3] == "bulk":

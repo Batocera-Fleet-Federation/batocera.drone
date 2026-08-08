@@ -1056,7 +1056,15 @@ except ImportError:
     from roms.rom_asset_bios import RomAssetBiosMixin  # type: ignore
 
 
-class RomRepository(RomAssetBiosMixin, RomSystemsSearchMixin, RomScanMixin, RomArtworkGamelistMixin, RomArtworkApplyMixin):
+try:
+    from .roms.rom_duplicates import RomDuplicatesMixin
+except ImportError:
+    if __package__ not in (None, ""):
+        raise
+    from roms.rom_duplicates import RomDuplicatesMixin  # type: ignore
+
+
+class RomRepository(RomAssetBiosMixin, RomSystemsSearchMixin, RomScanMixin, RomArtworkGamelistMixin, RomArtworkApplyMixin, RomDuplicatesMixin):
     def __init__(self, roms_root: Path, bios_root: Path, rom_search_cache_ttl_seconds: int = 300, settings=None):
         self.roms_root = roms_root
         self.bios_root = bios_root
