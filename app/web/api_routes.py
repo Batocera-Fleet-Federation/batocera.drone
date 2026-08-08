@@ -261,6 +261,24 @@ class ApiRoutesMixin:
                 self._handle_bios_download(parts[1])
                 return
 
+            if api_path == "/roms":
+                try:
+                    limit = int(query_params.get("limit", ["200"])[0])
+                except Exception:
+                    limit = 200
+                try:
+                    offset = int(query_params.get("offset", ["0"])[0])
+                except Exception:
+                    offset = 0
+                self._handle_rom_browse(
+                    limit=limit,
+                    offset=offset,
+                    system=query_params.get("system", [None])[0],
+                    genre=query_params.get("genre", [None])[0],
+                    query=query_params.get("q", [None])[0],
+                )
+                return
+
             if api_path == "/movies":
                 limit = None
                 if query_params.get("limit", [None])[0] is not None:

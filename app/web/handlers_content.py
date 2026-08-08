@@ -388,6 +388,56 @@ class HandlersContentMixin:
             cache_key = f"json:/systems/{system}?limit={safe_limit}&offset={safe_offset}&q={query_value}"
         self._send_json(200, payload, cache_key=cache_key)
 
+    def _handle_rom_browse(
+        self,
+        limit: Optional[int] = None,
+        offset: int = 0,
+        system: Optional[str] = None,
+        genre: Optional[str] = None,
+        query: Optional[str] = None,
+    ) -> None:
+        """The Systems Browse page's card grid -- games across every system by
+        default (``system`` narrows to one), paginated (default/max page
+        size mirrors the tree view's existing 5000 cap), with Category facet
+        counts scoped to whatever System/search filter is currently active
+        -- the same faceted-count convention the Movies Explorer sidebar
+        uses, computed server-side here since a ROM library can be far too
+        large to ship to the browser in one shot the way the Movies library
+        is (see list_rom_browse_page's docstring)."""
+        safe_limit = max(1, min(int(limit or 200), 5000))
+        safe_offset = max(0, int(offset or 0))
+        system_value = str(system or "").strip()
+        genre_value = str(genre or "").strip()
+        query_value = str(query or "").strip()
+        systems_filter = [system_value] if system_value else None
+        page = self.repository.list_rom_browse_page(
+            systems=systems_filter, genre=genre_value, query=query_value, limit=safe_limit, offset=safe_offset,
+        )
+        if page is None:
+            self._send_json(200, {
+                "roms": [], "count": 0, "offset": safe_offset, "limit": safe_limit,
+                "returned": 0, "has_more": False, "genres": [],
+            })
+            return
+        roms = page.get("items") or []
+        if not self.settings.downloads_enabled:
+            for item in roms:
+                item["is_downloadable"] = False
+        total = int(page.get("total") or 0)
+        genres = self.repository.list_rom_genre_facets(systems=systems_filter, query=query_value)
+        self._send_json(
+            200,
+            {
+                "roms": roms,
+                "count": total,
+                "offset": safe_offset,
+                "limit": safe_limit,
+                "returned": len(roms),
+                "has_more": (safe_offset + len(roms)) < total,
+                "genres": genres,
+            },
+        )
+
     def _handle_images_list(self, system: str) -> None:
         _, images = self.repository.list_assets(system, "images")
         self._send_json(

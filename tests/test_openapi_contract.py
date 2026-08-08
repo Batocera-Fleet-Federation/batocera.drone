@@ -95,6 +95,7 @@ class DroneOpenApiContractTest(unittest.TestCase):
             "/auth/logout",
             "/systems",
             "/systems/{system}",
+            "/roms",
             "/systems/{system}/roms/{unique_id}",
             "/systems/{system}/roms/{unique_id}/fingerprint",
             "/systems/{system}/images",

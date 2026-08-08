@@ -1910,6 +1910,11 @@
       border-radius: 0.35rem;
       font-size: 0.9rem;
       opacity: 0.75;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem;
+      width: 100%;
     }
     .movie-explorer-category-btn:hover { background: rgba(255, 255, 255, 0.06); opacity: 1; }
     .movie-explorer-category-btn.active {
@@ -1917,6 +1922,18 @@
       color: #fff;
       opacity: 1;
       font-weight: 600;
+    }
+    .movie-explorer-category-count {
+      font-size: 0.75rem;
+      opacity: 0.65;
+      font-variant-numeric: tabular-nums;
+    }
+    .movie-explorer-sidebar-more-btn {
+      font-style: italic;
+      justify-content: center;
+    }
+    .movie-explorer-grid-wrap {
+      flex: 1 1 auto;
     }
     .movie-explorer-grid {
       flex: 1 1 auto;
@@ -1976,6 +1993,13 @@
       color: var(--admin-text);
       font-size: 0.85rem;
       margin-top: 0.4rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .movie-explorer-card-subtitle {
+      color: var(--admin-border);
+      font-size: 0.72rem;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;

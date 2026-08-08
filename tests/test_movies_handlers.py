@@ -83,8 +83,8 @@ class _FakeHandler:
     def end_headers(self) -> None:
         pass
 
-    def _send_security_headers(self) -> None:
-        pass
+    def _send_security_headers(self, cache_control: str = "no-store") -> None:
+        self.response_headers["Cache-Control"] = cache_control
 
     def _guess_content_type(self, path: Path) -> str:
         return "video/mp4" if path.suffix == ".mp4" else "application/octet-stream"
@@ -632,6 +632,13 @@ class MovieStreamRangeHandlerTests(unittest.TestCase):
             self.assertEqual(handler.response_headers["Content-Length"], "10")
             self.assertNotIn("Content-Range", handler.response_headers)
             self.assertEqual(handler.wfile.getvalue(), b"0123456789")
+            # A movie is re-requested repeatedly within one viewing (each
+            # seek issues a fresh Range request; reopening the player modal
+            # re-hits this URL) and never changes underneath a stable
+            # entry_key, so the browser should be told it can reuse this --
+            # this must never regress to the "no-store" default every other
+            # session-gated response uses.
+            self.assertEqual(handler.response_headers["Cache-Control"], "public, max-age=300")
 
     def test_bounded_range_returns_206_with_requested_slice(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

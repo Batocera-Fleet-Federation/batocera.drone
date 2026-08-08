@@ -85,8 +85,17 @@ def _gamelist_metadata_for_reference(gamelist_path: str, game_id: str) -> dict:
 
 def _database_rom_metadata_fields(rom: dict, system_name: str, file_path: str, absolute: Path, stat_size: int, stat_mtime: int) -> dict:
     display_name = Path(file_path).stem
+    # rom["gamelist"] itself is excluded from the spread below (too big/raw to
+    # persist wholesale), but genre specifically is worth keeping -- it's the
+    # only thing backing the Systems Browse page's Category facet, which
+    # needs it indexed (rom_genres, populated from this field in
+    # rom_metadata_store._persist_rows) rather than re-parsed from
+    # gamelist.xml on every request the way the ROM detail page's live
+    # attach still does.
+    genre = _first_metadata_value((rom.get("gamelist") or {}).get("genre"))
     return {
         **{k: v for k, v in rom.items() if k not in {"fingerprint", "rom_fingerprint", "gamelist", "existing", "name", "title", "rom_name"}},
+        "genre": genre,
         "system": system_name,
         "system_name": system_name,
         "rom_name": display_name,

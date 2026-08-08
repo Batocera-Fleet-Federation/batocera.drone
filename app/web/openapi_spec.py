@@ -354,6 +354,20 @@ def _schemas() -> Dict[str, Schema]:
         "AssetEntry": asset_entry,
         "SystemsResponse": _object({"systems": _array(_ref("SystemSummary"))}, ("systems",), description="Installed systems visible to the Drone UI."),
         "RomListResponse": _object({"system": _string(), "roms": _array(_ref("AssetEntry"))}, ("system", "roms")),
+        "GenreCount": _object({"name": _string(), "count": _integer()}, ("name", "count")),
+        "RomBrowseResponse": _object(
+            {
+                "roms": _array(_ref("AssetEntry")),
+                "count": _integer(),
+                "offset": _integer(),
+                "limit": _integer(),
+                "returned": _integer(),
+                "has_more": _boolean(),
+                "genres": _array(_ref("GenreCount")),
+            },
+            ("roms", "count", "offset", "limit", "returned", "has_more", "genres"),
+            description="Systems Browse page's paginated, cross-system card grid.",
+        ),
         "ImageListResponse": _object({"system": _string(), "images": _array(_ref("AssetEntry"))}, ("system", "images")),
         "VideoListResponse": _object({"system": _string(), "videos": _array(_ref("AssetEntry"))}, ("system", "videos")),
         "BiosListResponse": _object(
@@ -1714,6 +1728,13 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
                     "List ROMs for a system",
                     {"200": _json_response("RomListResponse", "ROM list")},
                     parameters=[_path_param("system", "Batocera system key")],
+                    tags=["library"],
+                )
+            },
+            "/roms": {
+                "get": _operation(
+                    "Browse games across every system, paginated, with Category (genre) facet counts",
+                    {"200": _json_response("RomBrowseResponse", "Paginated cross-system ROM list")},
                     tags=["library"],
                 )
             },

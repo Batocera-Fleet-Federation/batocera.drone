@@ -18,6 +18,7 @@ try:
         _load_rom_metadata_cache,
         list_bios_cache_page,
         list_rom_cache_page,
+        list_rom_genre_counts,
         list_rom_rows_by_system,
         rom_cache_ready,
     )
@@ -29,6 +30,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         _load_rom_metadata_cache,
         list_bios_cache_page,
         list_rom_cache_page,
+        list_rom_genre_counts,
         list_rom_rows_by_system,
         rom_cache_ready,
     )
@@ -105,6 +107,44 @@ class RomAssetBiosMixin:
             except Exception:
                 continue
         return page
+
+    def list_rom_browse_page(
+        self,
+        *,
+        systems=None,
+        genre: str = "",
+        query: str = "",
+        limit: int = 200,
+        offset: int = 0,
+    ) -> Optional[dict]:
+        """The Systems Browse page's card grid: a plain SQLite-cache page,
+        across every system by default. Deliberately skips
+        list_rom_assets_page's per-row gamelist.xml re-attach -- a 200-row
+        page drawing from potentially 200 different systems (round-robin
+        ordering across all of them) would mean up to 200 separate gamelist
+        parses per page load. The grid only needs name/system/image/genre,
+        and genre already comes from the indexed rom_genres table (see
+        list_rom_cache_page's genre param), not a live re-parse -- images
+        resolve through the public-images endpoint's own filename-guess/
+        fallback chain, same as the tree view's thumbnails, with no
+        gamelist attach required either."""
+        if self.settings is None:
+            return None
+        page = list_rom_cache_page(self.settings, systems=systems, genre=genre, query=query, limit=limit, offset=offset)
+        if page is None:
+            return None
+        for item in page.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            item.pop("fingerprint", None)
+            item.pop("rom_fingerprint", None)
+            item.pop("absolute_path", None)
+        return page
+
+    def list_rom_genre_facets(self, *, systems=None, query: str = "") -> List[dict]:
+        if self.settings is None:
+            return []
+        return list_rom_genre_counts(self.settings, systems=systems, query=query)
 
     def list_bios_page(
         self,

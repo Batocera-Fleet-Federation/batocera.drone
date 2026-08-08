@@ -81,6 +81,26 @@ let systemsTreeBiosPage = { bios: [], total: 0, nextOffset: 0, loading: false, e
 // system's known BIOS files) -- distinct from systemsTreeBiosPage, which backs the
 // top-level "Shared / Unassigned BIOS" root.
 let systemsTreeSystemBiosPages = {};
+// Systems Browse (the games-with-images grid, GET /roms): unlike Movies,
+// a ROM library can be far too large to load in one shot (some devices have
+// ~300 systems, individual systems can run into the thousands of ROMs), so
+// this page is server-paginated (SYSTEMS_EXPLORE_PAGE_SIZE per page) rather
+// than fetching everything up front the way moviesAllRows does. The System
+// panel narrows to one system at a time (like Movies' Type filter); Category
+// (genre) counts are computed server-side, scoped to whatever System/search
+// filter is currently active -- see list_rom_genre_counts.
+const SYSTEMS_EXPLORE_PAGE_SIZE = 200;
+const SYSTEMS_EXPLORE_TOP_SYSTEM_COUNT = 5;
+let systemsExploreAllSystems = [];
+let systemsExploreShowAllSystems = false;
+let systemsExploreSelectedSystem = "";
+let systemsExploreSelectedGenre = "";
+let systemsExploreSearchQuery = "";
+let systemsExploreRoms = [];
+let systemsExploreGenreCounts = [];
+let systemsExploreTotal = 0;
+let systemsExploreHasMore = false;
+let systemsExploreLoadingMore = false;
 // Movies tab (own top-level page, see renderMoviesPage/renderAssetsTabBar) --
 // the whole set loads once (movie libraries are far smaller than ROM sets),
 // then a folder tree is built from each movie's file_path client-side,
@@ -89,12 +109,41 @@ let systemsTreeSystemBiosPages = {};
 // system-rooted one).
 let moviesAllRows = [];
 let moviesTreeExpanded = new Set();
+// Scroll position of the movies/systems tree+explorer list views, keyed by a
+// fixed bucket name (not the literal hash -- systemsTreeHash/
+// systemsExploreHash carry a query string that varies with the current
+// search/filter/system selection, so bucketing collapses all of those back
+// to one slot per view instead of fragmenting by every filter combination).
+// Captured by router() the moment any of the four is navigated away from
+// (e.g. into a movie/show/ROM detail page) and restored when landing back on
+// it, so "Back" doesn't dump the user at the top of a long list. Deliberately
+// an exception to this app's usual reset-scroll-on-nav convention, scoped to
+// just these four views.
+let movieListScrollPositions = {};
+let lastRenderedHash = "";
+function movieListScrollBucket(hash) {
+  const value = String(hash || "");
+  if (value === "#movies") return "#movies";
+  if (value.startsWith("#movies/explore")) return "#movies/explore";
+  if (value.startsWith("#systems/explore")) return "#systems/explore";
+  if (value === "#systems" || value.startsWith("#systems?")) return "#systems";
+  return null;
+}
 // Movie Explorer's category sidebar (see renderMovieExplorerPage): "all" |
 // "movie" | "episode" for type, "" (no filter) or a genre string for genre --
 // both reset to their defaults each time the Explorer page is (re-)opened,
 // same as the search box already does.
 let movieExplorerTypeFilter = "all";
 let movieExplorerGenreFilter = "";
+// The Explorer still fetches the whole (small, ~thousands-not-millions)
+// movies library in one shot -- unlike Systems Browse it needs the complete
+// set client-side anyway to group episodes into show cards and compute
+// accurate facet counts (see movieExplorerTypeCount/movieExplorerGenreCount)
+// -- but only renders this many cards at a time, growing via "Show more",
+// so a large filtered result doesn't dump thousands of DOM nodes/images in
+// one paint. Reset to the page size on every filter/search change.
+const MOVIE_EXPLORE_PAGE_SIZE = 200;
+let movieExploreDisplayLimit = MOVIE_EXPLORE_PAGE_SIZE;
 let filterDropdownGlobalCloseBound = false;
 let filterDropdownState = {};
 let themeFilterInitialized = false;
@@ -736,6 +785,19 @@ function scrollContentToTop() {
   }
   const main = document.querySelector("main");
   if (main) main.scrollTop = 0;
+}
+// Counterpart to the scroll-reset above, for the one deliberate exception to
+// it -- see movieListScrollPositions.
+function restoreMovieListScroll(hash) {
+  const saved = movieListScrollPositions[hash];
+  if (!saved) return;
+  try {
+    window.scrollTo({ top: saved.windowY, left: 0, behavior: "auto" });
+  } catch (_) {
+    window.scrollTo(0, saved.windowY);
+  }
+  const main = document.querySelector("main");
+  if (main) main.scrollTop = saved.mainTop;
 }
 function stopLogAutoRefresh() {
   if (logRefreshTimer) {
@@ -1547,6 +1609,12 @@ function loadRomCardImage(img) {
       return;
     }
     this.onerror = null;
+    // Reveal a sibling fallback element (e.g. a placeholder icon), same
+    // convention the Movies Explorer's inline onerror uses -- a no-op for
+    // callers with no such sibling (classList.remove on an element lacking
+    // the class is harmless), so this is safe for every existing caller.
+    this.style.display = "none";
+    this.nextElementSibling?.classList.remove("d-none");
   };
   img.src = primarySrc;
   img.dataset.loaded = "1";
@@ -1596,6 +1664,10 @@ function renderSystems(data) {
   }
   content.innerHTML = `
     ${renderAssetsTabBar("systems")}
+    <div class="d-flex flex-wrap align-items-start justify-content-between gap-2 mb-2">
+      <div class="text-muted small">Every Batocera system on this Drone, laid out the same way they are on disk -- browse into a system for its games and BIOS.</div>
+      <button class="btn btn-outline-primary btn-sm text-nowrap" type="button" onclick="setHash(systemsExploreHash())"><i class="bi bi-grid-3x3-gap me-1"></i>Browse</button>
+    </div>
     <div class="mb-3 systems-tree-toolbar">
       <label class="form-label" for="systemsTreeSearch">Search systems, games, or BIOS</label>
       <div class="input-group">
@@ -2038,6 +2110,7 @@ async function renderMoviesPage() {
       <div id="movies-tree-files"></div>
     `;
     renderMoviesTreeIntoContainer("");
+    restoreMovieListScroll("#movies");
   } catch (err) {
     content.innerHTML = `${renderAssetsTabBar("movies")}<div class="alert alert-danger">Failed to load movies: ${escapeHtml(err.message || "unknown error")}</div>`;
   } finally {
@@ -2049,6 +2122,7 @@ async function renderMovieExplorerPage() {
   clearSystemTheme();
   movieExplorerTypeFilter = "all";
   movieExplorerGenreFilter = "";
+  movieExploreDisplayLimit = MOVIE_EXPLORE_PAGE_SIZE;
   setLoading(true, "Loading movies...");
   try {
     if (!moviesAllRows.length) {
@@ -2066,12 +2140,16 @@ async function renderMovieExplorerPage() {
         </div>
         <div class="movie-explorer-body">
           <aside id="movie-explorer-sidebar" class="movie-explorer-sidebar"></aside>
-          <div id="movie-explorer-grid" class="movie-explorer-grid"></div>
+          <div class="movie-explorer-grid-wrap min-width-0">
+            <div id="movie-explorer-grid" class="movie-explorer-grid"></div>
+            <div id="movie-explorer-more" class="text-center mt-3"></div>
+          </div>
         </div>
       </div>
     `;
     renderMovieExplorerSidebar();
     filterMovieExplorer("");
+    restoreMovieListScroll(movieExploreHash());
   } catch (err) {
     content.innerHTML = `
       <div class="movie-explorer-overlay">
@@ -2091,14 +2169,42 @@ function movieExplorerGenres() {
   moviesAllRows.forEach((m) => (m.genres || []).forEach((g) => g && genres.add(g)));
   return [...genres].sort((a, b) => a.localeCompare(b));
 }
+// "Shows" also keeps a groupable extra (a Featurette resolved to a
+// show/season) -- otherwise it'd be filtered out before groupMoviesForExplorer
+// ever gets a chance to fold it into its show's card, and it would only ever
+// show up under "All". Shared by filterMovieExplorer and the sidebar's own
+// per-facet counts so both stay in exact agreement.
+function movieExplorerRowsMatchingType(rows, value) {
+  if (value === "all") return rows;
+  if (value === "episode") return rows.filter(isShowGroupableRow);
+  return rows.filter((m) => (m.kind || "movie") === value);
+}
+function movieExplorerRowsMatchingGenre(rows, value) {
+  if (!value) return rows;
+  return rows.filter((m) => (m.genres || []).includes(value));
+}
+// Each facet's counts hold the *other* active facet fixed and ask "how many
+// would match if this were selected instead" -- standard faceted-search
+// convention (picking a facet narrows the other facet's counts, never its
+// own) -- rather than a flat unfiltered total for every button.
+function movieExplorerTypeCount(value) {
+  return movieExplorerRowsMatchingType(movieExplorerRowsMatchingGenre(moviesAllRows, movieExplorerGenreFilter), value).length;
+}
+function movieExplorerGenreCount(value) {
+  return movieExplorerRowsMatchingGenre(movieExplorerRowsMatchingType(moviesAllRows, movieExplorerTypeFilter), value).length;
+}
 function renderMovieExplorerSidebar() {
   const sidebar = document.getElementById("movie-explorer-sidebar");
   if (!sidebar) return;
   const typeButton = (value, label) => `
-    <button type="button" class="movie-explorer-category-btn ${movieExplorerTypeFilter === value ? "active" : ""}" onclick="setMovieExplorerTypeFilter(${jsAttr(value)})">${escapeHtml(label)}</button>
+    <button type="button" class="movie-explorer-category-btn ${movieExplorerTypeFilter === value ? "active" : ""}" onclick="setMovieExplorerTypeFilter(${jsAttr(value)})">
+      <span>${escapeHtml(label)}</span><span class="movie-explorer-category-count">${movieExplorerTypeCount(value).toLocaleString()}</span>
+    </button>
   `;
   const genreButton = (value, label) => `
-    <button type="button" class="movie-explorer-category-btn ${movieExplorerGenreFilter === value ? "active" : ""}" onclick="setMovieExplorerGenreFilter(${jsAttr(value)})">${escapeHtml(label)}</button>
+    <button type="button" class="movie-explorer-category-btn ${movieExplorerGenreFilter === value ? "active" : ""}" onclick="setMovieExplorerGenreFilter(${jsAttr(value)})">
+      <span>${escapeHtml(label)}</span><span class="movie-explorer-category-count">${movieExplorerGenreCount(value).toLocaleString()}</span>
+    </button>
   `;
   const genres = movieExplorerGenres();
   sidebar.innerHTML = `
@@ -2146,40 +2252,40 @@ function compareShowGroupMembers(a, b) {
   return String(a.movie_name || a.name || "").localeCompare(String(b.movie_name || b.name || ""));
 }
 // Groups groupable rows (see isShowGroupableRow) into one synthetic card per
-// (show, season) -- everything else (movies, and an ungroupable "extra"
-// visible under the "All" type filter) passes through as its own card, same
-// as before this existed. Grouping key is always the filename-parsed
-// show_title (present pre-scrape via kind/show_title on every row -- see
+// show -- every season folds into the same card (clicking it lands on the
+// show detail page, which owns its own season switcher) -- everything else
+// (movies, and an ungroupable "extra" visible under the "All" type filter)
+// passes through as its own card, same as before this existed. Grouping key
+// is always the filename-parsed show_title (present pre-scrape via
+// kind/show_title on every row -- see
 // HandlersMoviesMixin._apply_movie_kind_and_genres), never the scraped TMDb
 // name, so a show with only some episodes scraped can't split into two
-// cards for the same season just because the parsed and TMDb names differ
-// slightly.
+// cards just because the parsed and TMDb names differ slightly.
 function groupMoviesForExplorer(rows) {
   const cards = [];
-  const seasonGroups = new Map();
+  const showGroups = new Map();
   rows.forEach((row) => {
     if (!isShowGroupableRow(row)) {
       cards.push(row);
       return;
     }
-    const key = `${String(row.show_title || "").toLowerCase()}::${row.season_number}`;
-    if (!seasonGroups.has(key)) seasonGroups.set(key, []);
-    seasonGroups.get(key).push(row);
+    const key = String(row.show_title || "").toLowerCase();
+    if (!showGroups.has(key)) showGroups.set(key, []);
+    showGroups.get(key).push(row);
   });
-  seasonGroups.forEach((members) => {
+  showGroups.forEach((members) => {
     members.sort(compareShowGroupMembers);
     // Prefer a real episode as the representative (its entry_key drives the
-    // season card's poster lookup and the show-detail page's first-ever
+    // show card's poster lookup and the show-detail page's first-ever
     // metadata fetch) -- an extra is never scraped, so it'd never have
     // artwork of its own to offer either way.
     const representative = members.find((m) => m.scraped_show_title)
       || members.find((m) => m.kind === "episode")
       || members[0];
     cards.push({
-      isSeasonGroup: true,
+      isShowGroup: true,
       showTitle: representative.scraped_show_title || representative.show_title,
       rawShowTitle: representative.show_title,
-      seasonNumber: representative.season_number,
       entry_key: representative.entry_key,
       genres: representative.genres || [],
       episodeCount: members.length,
@@ -2188,41 +2294,49 @@ function groupMoviesForExplorer(rows) {
   return cards;
 }
 function movieExplorerCardTitle(entry) {
-  return entry.isSeasonGroup
-    ? `${entry.showTitle} - Season ${entry.seasonNumber}`
+  return entry.isShowGroup
+    ? entry.showTitle
     : entry.display_title || entry.movie_name || entry.name || "";
 }
-function filterMovieExplorer(queryValue) {
+function filterMovieExplorer(queryValue, opts = {}) {
   const grid = document.getElementById("movie-explorer-grid");
   if (!grid) return;
+  if (opts.growDisplay) {
+    movieExploreDisplayLimit += MOVIE_EXPLORE_PAGE_SIZE;
+  } else {
+    movieExploreDisplayLimit = MOVIE_EXPLORE_PAGE_SIZE;
+  }
   const filter = String(queryValue || "").trim().toLowerCase();
-  let rows = moviesAllRows;
-  if (movieExplorerTypeFilter !== "all") {
-    // "Shows" also keeps a groupable extra (a Featurette resolved to a
-    // show/season) -- otherwise it'd be filtered out here before
-    // groupMoviesForExplorer ever gets a chance to fold it into its
-    // season's card, and it would only ever show up under "All".
-    rows = rows.filter((m) => movieExplorerTypeFilter === "episode"
-      ? isShowGroupableRow(m)
-      : (m.kind || "movie") === movieExplorerTypeFilter);
-  }
-  if (movieExplorerGenreFilter) {
-    rows = rows.filter((m) => (m.genres || []).includes(movieExplorerGenreFilter));
-  }
+  let rows = movieExplorerRowsMatchingGenre(movieExplorerRowsMatchingType(moviesAllRows, movieExplorerTypeFilter), movieExplorerGenreFilter);
   if (filter) {
     rows = rows.filter((m) => (m.display_title || m.movie_name || m.name || "").toLowerCase().includes(filter));
   }
   const cards = groupMoviesForExplorer(rows);
-  const sorted = [...cards].sort((a, b) => movieExplorerCardTitle(a).localeCompare(movieExplorerCardTitle(b)));
-  grid.innerHTML = sorted.length
-    ? sorted.map(renderMovieExplorerCard).join("")
+  const sorted = [...cards].sort((a, b) => movieSortableTitle(movieExplorerCardTitle(a)).localeCompare(movieSortableTitle(movieExplorerCardTitle(b))));
+  const visible = sorted.slice(0, movieExploreDisplayLimit);
+  grid.innerHTML = visible.length
+    ? visible.map(renderMovieExplorerCard).join("")
     : `<div class="text-muted p-4">No movies match the current filters.</div>`;
+  renderMovieExplorerMoreButton(visible.length, sorted.length, queryValue);
+}
+function renderMovieExplorerMoreButton(shown, total, queryValue) {
+  const wrap = document.getElementById("movie-explorer-more");
+  if (!wrap) return;
+  if (shown >= total) {
+    wrap.innerHTML = total ? `<span class="small text-muted">Showing all ${total.toLocaleString()}</span>` : "";
+    return;
+  }
+  wrap.innerHTML = `
+    <button type="button" class="btn btn-outline-primary btn-sm" onclick="filterMovieExplorer(${jsAttr(queryValue || "")}, { growDisplay: true })">
+      <i class="bi bi-plus-circle me-1"></i>Show more (${shown.toLocaleString()} of ${total.toLocaleString()})
+    </button>
+  `;
 }
 function renderMovieExplorerCard(entry) {
   const title = movieExplorerCardTitle(entry);
   const posterUrl = movieArtworkUrl(entry.entry_key, "poster");
-  const navigateHash = entry.isSeasonGroup
-    ? showDetailHash(entry.rawShowTitle, entry.seasonNumber)
+  const navigateHash = entry.isShowGroup
+    ? showDetailHash(entry.rawShowTitle)
     : movieDetailHash(entry.entry_key);
   return `
     <button type="button" class="movie-explorer-card" title="${escapeHtml(title)}" onclick="setHash(${jsAttr(navigateHash)})">
@@ -2364,8 +2478,14 @@ function buildMoviesTree(movies) {
   });
   return root;
 }
+// Ignores a leading "The " (case-insensitive) when alphabetizing a movie/show
+// title, so e.g. "The Movie Pt1" sorts next to "Movie Pt2" instead of under
+// "T" -- standard library/media-catalog sort convention.
+function movieSortableTitle(value) {
+  return String(value || "").replace(/^the\s+/i, "").trim();
+}
 function sortMoviesTreeEntries(entries) {
-  return entries.sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), undefined, { sensitivity: "base" }));
+  return entries.sort((a, b) => movieSortableTitle(a.name).localeCompare(movieSortableTitle(b.name), undefined, { sensitivity: "base" }));
 }
 function moviesNodeMatches(node, query) {
   if (!query) return true;
@@ -3796,8 +3916,202 @@ async function renderSystemsPage() {
   } else if (selectedSystemsTreeRoot) {
     await loadSystemTreeFiles(selectedSystemsTreeRoot, { reset: true });
   }
+  restoreMovieListScroll("#systems");
   setLoading(false);
   refreshRandomThemeLogo().catch(() => {});
+}
+// "show" is reserved on the movies side for the same reason noted at
+// showDetailHash -- not relevant here, but kept as a plain query-string hash
+// (not a path segment) for the same reason: system/genre names can contain
+// characters (spaces, slashes in some scraped genre strings) that are easier
+// to carry as encoded query values than path segments.
+function systemsExploreHash(system = systemsExploreSelectedSystem, genre = systemsExploreSelectedGenre) {
+  const params = new URLSearchParams();
+  if (system) params.set("system", system);
+  if (genre) params.set("genre", genre);
+  const qs = params.toString();
+  return `#systems/explore${qs ? `?${qs}` : ""}`;
+}
+function parseSystemsExploreHash(hash) {
+  if (!hash.startsWith("#systems/explore")) return null;
+  const queryIndex = hash.indexOf("?");
+  const params = new URLSearchParams(queryIndex >= 0 ? hash.substring(queryIndex + 1) : "");
+  return { system: params.get("system") || "", genre: params.get("genre") || "" };
+}
+async function renderSystemsExplorePage() {
+  currentSystemContext = null;
+  clearSystemTheme();
+  const parsed = parseSystemsExploreHash(window.location.hash) || { system: "", genre: "" };
+  systemsExploreSelectedSystem = parsed.system;
+  systemsExploreSelectedGenre = parsed.genre;
+  systemsExploreSearchQuery = "";
+  systemsExploreShowAllSystems = false;
+  setLoading(true, "Loading systems...");
+  try {
+    const data = await getSystemsData();
+    systemsExploreAllSystems = (data.systems || []).slice().sort((a, b) => Number(b.rom_count || 0) - Number(a.rom_count || 0));
+    content.innerHTML = `
+      <div class="movie-explorer-overlay">
+        <div class="movie-explorer-topbar">
+          <div class="movie-explorer-brand"><i class="bi bi-controller me-2"></i>Systems</div>
+          <div class="movie-explorer-search flex-grow-1">
+            <input id="systemsExploreSearch" type="search" class="form-control" placeholder="Search games" oninput="filterSystemsExplore(this.value)" autofocus>
+          </div>
+          <button class="btn btn-outline-light btn-sm text-nowrap" type="button" onclick="setHash(systemsTreeHash())"><i class="bi bi-arrow-left me-1"></i>Back to Drone view</button>
+        </div>
+        <div class="movie-explorer-body">
+          <aside id="systems-explore-sidebar" class="movie-explorer-sidebar"></aside>
+          <div id="systems-explore-grid-wrap" class="movie-explorer-grid-wrap min-width-0">
+            <div id="systems-explore-grid" class="movie-explorer-grid"></div>
+            <div id="systems-explore-more" class="text-center mt-3"></div>
+          </div>
+        </div>
+      </div>
+    `;
+    renderSystemsExploreSidebar();
+    await loadSystemsExploreRoms({ reset: true });
+    restoreMovieListScroll("#systems/explore");
+  } catch (err) {
+    content.innerHTML = `
+      <div class="movie-explorer-overlay">
+        <div class="movie-explorer-topbar">
+          <div class="movie-explorer-brand"><i class="bi bi-controller me-2"></i>Systems</div>
+          <button class="btn btn-outline-light btn-sm text-nowrap" type="button" onclick="setHash(systemsTreeHash())"><i class="bi bi-arrow-left me-1"></i>Back to Drone view</button>
+        </div>
+        <div class="alert alert-danger m-3">Failed to load systems: ${escapeHtml(err.message || "unknown error")}</div>
+      </div>
+    `;
+  } finally {
+    setLoading(false);
+  }
+}
+function renderSystemsExploreSidebar() {
+  const sidebar = document.getElementById("systems-explore-sidebar");
+  if (!sidebar) return;
+  const systemButton = (value, label, count) => `
+    <button type="button" class="movie-explorer-category-btn ${systemsExploreSelectedSystem === value ? "active" : ""}" onclick="setSystemsExploreSystem(${jsAttr(value)})">
+      <span>${escapeHtml(label)}</span><span class="movie-explorer-category-count">${Number(count || 0).toLocaleString()}</span>
+    </button>
+  `;
+  const genreButton = (value, label, count) => `
+    <button type="button" class="movie-explorer-category-btn ${systemsExploreSelectedGenre === value ? "active" : ""}" onclick="setSystemsExploreGenre(${jsAttr(value)})">
+      <span>${escapeHtml(label)}</span><span class="movie-explorer-category-count">${Number(count || 0).toLocaleString()}</span>
+    </button>
+  `;
+  const totalRoms = systemsExploreAllSystems.reduce((sum, s) => sum + Number(s.rom_count || 0), 0);
+  const visibleSystems = systemsExploreShowAllSystems
+    ? systemsExploreAllSystems
+    : systemsExploreAllSystems.slice(0, SYSTEMS_EXPLORE_TOP_SYSTEM_COUNT);
+  const canExpand = systemsExploreAllSystems.length > SYSTEMS_EXPLORE_TOP_SYSTEM_COUNT;
+  sidebar.innerHTML = `
+    <div class="movie-explorer-sidebar-section">
+      <div class="movie-explorer-sidebar-title">System</div>
+      ${systemButton("", "All Systems", totalRoms)}
+      ${visibleSystems.map((s) => systemButton(s.name, s.name, s.rom_count)).join("")}
+      ${canExpand ? `
+        <button type="button" class="movie-explorer-category-btn movie-explorer-sidebar-more-btn" onclick="toggleSystemsExploreShowAllSystems()">
+          ${systemsExploreShowAllSystems ? "Show less" : `Show more (${(systemsExploreAllSystems.length - SYSTEMS_EXPLORE_TOP_SYSTEM_COUNT).toLocaleString()})`}
+        </button>
+      ` : ""}
+    </div>
+    <div class="movie-explorer-sidebar-section">
+      <div class="movie-explorer-sidebar-title">Category</div>
+      ${genreButton("", "All Categories", systemsExploreTotal)}
+      ${systemsExploreGenreCounts.length ? systemsExploreGenreCounts.map((g) => genreButton(g.name, g.name, g.count)).join("") : `<div class="text-muted small">Scrape games to see categories.</div>`}
+    </div>
+  `;
+}
+async function setSystemsExploreSystem(value) {
+  systemsExploreSelectedSystem = value;
+  systemsExploreSelectedGenre = "";
+  updateSystemsExploreHash();
+  renderSystemsExploreSidebar();
+  await loadSystemsExploreRoms({ reset: true });
+}
+async function setSystemsExploreGenre(value) {
+  systemsExploreSelectedGenre = value;
+  updateSystemsExploreHash();
+  renderSystemsExploreSidebar();
+  await loadSystemsExploreRoms({ reset: true });
+}
+function toggleSystemsExploreShowAllSystems() {
+  systemsExploreShowAllSystems = !systemsExploreShowAllSystems;
+  renderSystemsExploreSidebar();
+}
+function updateSystemsExploreHash() {
+  const nextHash = systemsExploreHash();
+  if (window.location.hash !== nextHash) history.replaceState(null, "", nextHash);
+}
+let systemsExploreSearchDebounce = null;
+function filterSystemsExplore(value) {
+  systemsExploreSearchQuery = value || "";
+  clearTimeout(systemsExploreSearchDebounce);
+  systemsExploreSearchDebounce = setTimeout(() => loadSystemsExploreRoms({ reset: true }), 300);
+}
+async function loadSystemsExploreRoms(opts = {}) {
+  const reset = Boolean(opts.reset);
+  const offset = reset ? 0 : systemsExploreRoms.length;
+  if (systemsExploreLoadingMore) return;
+  systemsExploreLoadingMore = true;
+  renderSystemsExploreMoreButton();
+  try {
+    const params = new URLSearchParams({ limit: String(SYSTEMS_EXPLORE_PAGE_SIZE), offset: String(offset) });
+    if (systemsExploreSelectedSystem) params.set("system", systemsExploreSelectedSystem);
+    if (systemsExploreSelectedGenre) params.set("genre", systemsExploreSelectedGenre);
+    if (systemsExploreSearchQuery.trim()) params.set("q", systemsExploreSearchQuery.trim());
+    const data = await api(`/roms?${params.toString()}`);
+    systemsExploreRoms = reset ? (data.roms || []) : [...systemsExploreRoms, ...(data.roms || [])];
+    systemsExploreTotal = Number(data.count || 0);
+    systemsExploreHasMore = Boolean(data.has_more);
+    systemsExploreGenreCounts = data.genres || [];
+    if (reset) renderSystemsExploreSidebar();
+  } catch (err) {
+    showToast(`Failed to load games: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  } finally {
+    systemsExploreLoadingMore = false;
+    renderSystemsExploreGrid();
+  }
+}
+function renderSystemsExploreGrid() {
+  const grid = document.getElementById("systems-explore-grid");
+  if (!grid) return;
+  grid.innerHTML = systemsExploreRoms.length
+    ? systemsExploreRoms.map(renderSystemsExploreCard).join("")
+    : `<div class="text-muted p-4">No games match the current filters.</div>`;
+  renderSystemsExploreMoreButton();
+  setupLazyImages();
+}
+function renderSystemsExploreMoreButton() {
+  const wrap = document.getElementById("systems-explore-more");
+  if (!wrap) return;
+  if (!systemsExploreHasMore && !systemsExploreLoadingMore) {
+    wrap.innerHTML = systemsExploreRoms.length
+      ? `<span class="small text-muted">Showing ${systemsExploreRoms.length.toLocaleString()} of ${systemsExploreTotal.toLocaleString()}</span>`
+      : "";
+    return;
+  }
+  wrap.innerHTML = `
+    <button type="button" class="btn btn-outline-primary btn-sm" ${systemsExploreLoadingMore ? "disabled" : ""} onclick="loadSystemsExploreRoms({ reset: false })">
+      ${systemsExploreLoadingMore ? '<span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>' : '<i class="bi bi-plus-circle me-1"></i>'}
+      Show more (${systemsExploreRoms.length.toLocaleString()} of ${systemsExploreTotal.toLocaleString()})
+    </button>
+  `;
+}
+function renderSystemsExploreCard(rom) {
+  const title = rom.rom_name || rom.name || rom.rom_file || "";
+  const primarySrc = publicRomImageUrl(rom.system, rom.rom_file || title, rom.image_stem);
+  const fallbacks = JSON.stringify([romImageByIdUrl(rom.system, rom.unique_id)]);
+  const navigateHash = romMediaHash(rom.system, rom.unique_id);
+  return `
+    <button type="button" class="movie-explorer-card" title="${escapeHtml(title)}" onclick="setHash(${jsAttr(navigateHash)})">
+      <div class="movie-explorer-card-poster">
+        <img src="" data-src="${escapeHtml(primarySrc)}" data-fallbacks='${escapeHtml(fallbacks)}' alt="" loading="lazy">
+        <div class="movie-explorer-card-poster-fallback d-none"><i class="bi bi-controller"></i></div>
+      </div>
+      <div class="movie-explorer-card-title">${escapeHtml(title)}</div>
+      <div class="movie-explorer-card-subtitle">${escapeHtml(rom.system || "")}</div>
+    </button>
+  `;
 }
 // Plain-language explainers for the security/technology terms referenced on
 // the home page, opened by showTechInfo() -- keeps that copy skimmable while
@@ -10830,9 +11144,15 @@ async function loadSystemInfoBar() {
 async function router() {
   const myNavToken = ++routerNavToken;
   clearError();
+  const outgoingScrollBucket = movieListScrollBucket(lastRenderedHash);
+  if (outgoingScrollBucket) {
+    const main = document.querySelector("main");
+    movieListScrollPositions[outgoingScrollBucket] = { windowY: window.scrollY, mainTop: main ? main.scrollTop : 0 };
+  }
   scrollContentToTop();
   try {
     const hash = window.location.hash || "";
+    lastRenderedHash = hash;
     if (!hash.startsWith("#admin/logs/")) {
       stopLogAutoRefresh();
       currentLogSource = null;
@@ -10856,7 +11176,11 @@ async function router() {
       stopMovieBulkScrapeAutoRefresh();
     }
     document.body.classList.toggle("artwork-page", hash.startsWith("#admin/artwork"));
-    document.body.classList.toggle("movie-explorer-active", hash.startsWith("#movies/explore"));
+    // The Systems Browse grid reuses the movie-explorer-* full-bleed chrome-
+    // takeover CSS wholesale (see renderSystemsExplorePage) rather than a
+    // parallel duplicate set -- the class name predates this page but the
+    // takeover behavior is identical, so it's shared instead of cloned.
+    document.body.classList.toggle("movie-explorer-active", hash.startsWith("#movies/explore") || hash.startsWith("#systems/explore"));
     document.body.classList.toggle("movies-page-active", hash.startsWith("#movies"));
     if (hash === "#bios") {
       setHash(systemsTreeHash("", BIOS_TREE_ROOT));
@@ -10871,6 +11195,8 @@ async function router() {
       await renderThemeGalleryPage();
     } else if (hash === "#home" || hash === "#help") {
       await renderHelpPage();
+    } else if (hash.startsWith("#systems/explore")) {
+      await renderSystemsExplorePage();
     } else if (hash.startsWith("#systems")) {
       await renderSystemsPage();
     } else if (hash.startsWith("#movies")) {

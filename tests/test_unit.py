@@ -6102,6 +6102,201 @@ class LocalNetworkAssetCopyTests(unittest.TestCase):
             self.assertFalse(resumed["paused"])
 
 
+class RomGenreFacetAndBrowseTests(unittest.TestCase):
+    """The Systems Browse page's Category facet: genre indexed at scan time
+    (roms/gamelist.py's _database_rom_metadata_fields) into the normalized
+    rom_genres table (storage/rom_metadata_store.py), queried back via
+    list_rom_cache_page's genre filter and list_rom_genre_counts -- and the
+    cross-system paginated /roms endpoint (handlers_content._handle_rom_browse)
+    that serves the grid itself."""
+
+    def _settings(self, root):
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "USERDATA_ROOT": str(root),
+                "ROMS_ROOT": str(root / "roms"),
+                "BIOS_ROOT": str(root / "bios"),
+                "SAVES_ROOT": str(root / "saves"),
+                "DRONE_DEVICE_ID": "genre-facet-test",
+            },
+            clear=True,
+        ):
+            return drone_api.Settings.from_env()
+
+    def test_database_rom_metadata_fields_extracts_genre_from_gamelist(self) -> None:
+        from app.roms.gamelist import _database_rom_metadata_fields
+
+        rom = {
+            "file_path": "Chrono Trigger.zip",
+            "gamelist": {"genre": "RPG, Adventure"},
+        }
+        fields = _database_rom_metadata_fields(rom, "snes", "Chrono Trigger.zip", Path("/tmp/x"), 100, 0)
+        self.assertEqual(fields["genre"], "RPG, Adventure")
+
+    def test_database_rom_metadata_fields_genre_empty_when_no_gamelist_entry(self) -> None:
+        from app.roms.gamelist import _database_rom_metadata_fields
+
+        fields = _database_rom_metadata_fields({"file_path": "x.zip"}, "snes", "x.zip", Path("/tmp/x"), 1, 0)
+        self.assertEqual(fields["genre"], "")
+
+    def _seed(self, root):
+        settings = self._settings(root)
+        entries = {
+            "snes:mario.zip": {"system": "snes", "file_path": "mario.zip", "rom_name": "Mario", "genre": "Platform"},
+            "snes:zelda.zip": {"system": "snes", "file_path": "zelda.zip", "rom_name": "Zelda", "genre": "Action, Adventure"},
+            "genesis:sonic.zip": {"system": "genesis", "file_path": "sonic.zip", "rom_name": "Sonic", "genre": "Platform"},
+            "genesis:noGenre.zip": {"system": "genesis", "file_path": "noGenre.zip", "rom_name": "NoGenre", "genre": ""},
+        }
+        _persist_rom_metadata_cache(
+            settings,
+            {
+                **_empty_rom_metadata_cache(),
+                "entries": entries,
+                "systems": [{"name": "snes", "rom_count": 2}, {"name": "genesis", "rom_count": 2}],
+                "last_full_scan_at": "2026-08-09T00:00:00Z",
+                "scan_in_progress": False,
+            },
+            rom_updates=entries,
+        )
+        return settings
+
+    def test_genre_filter_matches_multi_valued_rom_and_excludes_others(self) -> None:
+        from app.storage.rom_metadata_store import list_rom_cache_page
+
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._seed(Path(tmp))
+            page = list_rom_cache_page(settings, genre="Adventure", limit=10, offset=0)
+            names = {item["rom_name"] for item in page["items"]}
+            self.assertEqual(names, {"Zelda"})
+            self.assertEqual(page["total"], 1)
+
+    def test_genre_filter_works_across_multiple_systems(self) -> None:
+        # Exercises the round-robin CTE path (len(selected_systems) != 1),
+        # which is exactly where a table-qualification bug (fixed live while
+        # building this) broke with "no such column: rom_cache_entries.entry_key"
+        # -- systems=None here spans both snes and genesis.
+        from app.storage.rom_metadata_store import list_rom_cache_page
+
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._seed(Path(tmp))
+            page = list_rom_cache_page(settings, genre="Platform", limit=10, offset=0)
+            names = {item["rom_name"] for item in page["items"]}
+            self.assertEqual(names, {"Mario", "Sonic"})
+            systems = {item["system"] for item in page["items"]}
+            self.assertEqual(systems, {"snes", "genesis"})
+
+    def test_genre_filter_combined_with_system_filter(self) -> None:
+        from app.storage.rom_metadata_store import list_rom_cache_page
+
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._seed(Path(tmp))
+            page = list_rom_cache_page(settings, systems=["genesis"], genre="Platform", limit=10, offset=0)
+            names = {item["rom_name"] for item in page["items"]}
+            self.assertEqual(names, {"Sonic"})
+
+    def test_genre_counts_reflect_multi_valued_membership(self) -> None:
+        from app.storage.rom_metadata_store import list_rom_genre_counts
+
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._seed(Path(tmp))
+            counts = {row["name"]: row["count"] for row in list_rom_genre_counts(settings)}
+            self.assertEqual(counts, {"Platform": 2, "Action": 1, "Adventure": 1})
+
+    def test_genre_counts_scoped_to_system_filter(self) -> None:
+        from app.storage.rom_metadata_store import list_rom_genre_counts
+
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._seed(Path(tmp))
+            counts = {row["name"]: row["count"] for row in list_rom_genre_counts(settings, systems=["snes"])}
+            self.assertEqual(counts, {"Platform": 1, "Action": 1, "Adventure": 1})
+
+    def test_deleting_a_rom_removes_its_genre_rows(self) -> None:
+        from app.storage.rom_metadata_store import list_rom_genre_counts
+
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._seed(Path(tmp))
+            # Passing a bare _empty_rom_metadata_cache() here would reset
+            # last_full_scan_at to null, making _cache_is_ready() false and
+            # every subsequent read return empty regardless of this delete --
+            # carry the same "scan complete" state forward like a real
+            # incremental poll would.
+            _persist_rom_metadata_cache(
+                settings,
+                {**_empty_rom_metadata_cache(), "last_full_scan_at": "2026-08-09T00:00:00Z", "scan_in_progress": False},
+                rom_deletes=["snes:mario.zip"],
+                queue_changes=False,
+            )
+            counts = {row["name"]: row["count"] for row in list_rom_genre_counts(settings)}
+            # Mario (snes, Platform) is gone; Sonic (genesis, Platform) remains.
+            self.assertEqual(counts.get("Platform"), 1)
+
+    def test_updating_a_rom_replaces_its_genre_rows_rather_than_accumulating(self) -> None:
+        from app.storage.rom_metadata_store import list_rom_genre_counts
+
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._seed(Path(tmp))
+            updated = {"snes:mario.zip": {"system": "snes", "file_path": "mario.zip", "rom_name": "Mario", "genre": "Puzzle"}}
+            _persist_rom_metadata_cache(
+                settings,
+                {**_empty_rom_metadata_cache(), "last_full_scan_at": "2026-08-09T00:00:00Z", "scan_in_progress": False},
+                rom_updates=updated,
+                queue_changes=False,
+            )
+            counts = {row["name"]: row["count"] for row in list_rom_genre_counts(settings)}
+            self.assertEqual(counts.get("Puzzle"), 1)
+            self.assertEqual(counts.get("Platform"), 1)  # Sonic only now
+
+    def _handler(self, settings, repo):
+        handler = drone_api.RomRequestHandler.__new__(drone_api.RomRequestHandler)
+        handler.settings = settings
+        handler.repository = repo
+        return handler
+
+    def test_handle_rom_browse_paginates_across_systems_with_genre_facets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._seed(Path(tmp))
+            repo = drone_api.RomRepository(settings.roms_root, settings.bios_root, settings=settings)
+            handler = self._handler(settings, repo)
+            captured = {}
+            handler._send_json = lambda status, payload, **kwargs: captured.update({"status": status, "payload": payload})
+
+            handler._handle_rom_browse(limit=2, offset=0)
+            self.assertEqual(captured["status"], 200)
+            payload = captured["payload"]
+            self.assertEqual(payload["count"], 4)
+            self.assertEqual(len(payload["roms"]), 2)
+            self.assertTrue(payload["has_more"])
+            genre_names = {row["name"] for row in payload["genres"]}
+            self.assertEqual(genre_names, {"Platform", "Action", "Adventure"})
+
+    def test_handle_rom_browse_system_filter_narrows_facets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._seed(Path(tmp))
+            repo = drone_api.RomRepository(settings.roms_root, settings.bios_root, settings=settings)
+            handler = self._handler(settings, repo)
+            captured = {}
+            handler._send_json = lambda status, payload, **kwargs: captured.update({"status": status, "payload": payload})
+
+            handler._handle_rom_browse(limit=50, offset=0, system="genesis")
+            payload = captured["payload"]
+            self.assertEqual({item["rom_name"] for item in payload["roms"]}, {"Sonic", "NoGenre"})
+            self.assertEqual({row["name"] for row in payload["genres"]}, {"Platform"})
+
+    def test_handle_rom_browse_genre_filter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._seed(Path(tmp))
+            repo = drone_api.RomRepository(settings.roms_root, settings.bios_root, settings=settings)
+            handler = self._handler(settings, repo)
+            captured = {}
+            handler._send_json = lambda status, payload, **kwargs: captured.update({"status": status, "payload": payload})
+
+            handler._handle_rom_browse(limit=50, offset=0, genre="Adventure")
+            payload = captured["payload"]
+            self.assertEqual({item["rom_name"] for item in payload["roms"]}, {"Zelda"})
+            self.assertEqual(payload["count"], 1)
+
+
 class TailnetDiscoveryMergeTests(unittest.TestCase):
     def test_peer_pair_accepts_code_free_request_only_from_online_tailnet_ip(self) -> None:
         from app.web import handlers_peer
@@ -6635,6 +6830,80 @@ class SwarmPageTests(unittest.TestCase):
         card_body = self.js[card_start:self.js.index("function swarmBrowsePeerAssets(", card_start)]
         self.assertIn("forgetLocalPeer", card_body)
         self.assertIn(">Forget</button>", card_body)
+
+
+class SystemsExplorePageTests(unittest.TestCase):
+    """Systems Browse: a Movies-Explorer-style image grid of games, reached
+    from a Browse button on the Systems tab, with System (top-5 + show more)
+    and Category sidebar panels backed by GET /roms, and Movies Explorer's
+    own new per-facet counts + "Show more" render-pagination."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        root = Path(__file__).resolve().parents[1]
+        cls.js = root.joinpath("app/web/static/js/drone.js").read_text(encoding="utf-8")
+
+    def test_systems_tab_has_a_browse_button(self) -> None:
+        render_start = self.js.index("function renderSystems(data)")
+        render_end = self.js.index("function renderSystemTreeRoot(", render_start)
+        body = self.js[render_start:render_end]
+        self.assertIn("systemsExploreHash()", body)
+        self.assertIn(">Browse<", body)
+
+    def test_router_dispatches_systems_explore_hash_before_plain_systems(self) -> None:
+        router_start = self.js.index("async function router()")
+        router_body = self.js[router_start:self.js.index("catch (err)", router_start)]
+        explore_index = router_body.index('hash.startsWith("#systems/explore")')
+        plain_index = router_body.index('hash.startsWith("#systems")')
+        self.assertLess(explore_index, plain_index, "the /explore branch must be checked first, or the plain #systems branch shadows it")
+        self.assertIn("await renderSystemsExplorePage();", router_body)
+        # Shares the Movies Explorer's full-bleed chrome takeover.
+        self.assertIn('hash.startsWith("#movies/explore") || hash.startsWith("#systems/explore")', router_body)
+
+    def test_sidebar_has_system_and_category_panels_with_top_five_and_counts(self) -> None:
+        sidebar_start = self.js.index("function renderSystemsExploreSidebar()")
+        sidebar_end = self.js.index("async function setSystemsExploreSystem(", sidebar_start)
+        body = self.js[sidebar_start:sidebar_end]
+        self.assertIn(">System<", body)
+        self.assertIn(">Category<", body)
+        self.assertIn("SYSTEMS_EXPLORE_TOP_SYSTEM_COUNT", body)
+        self.assertIn("Show more", body)
+        self.assertIn("Show less", body)
+        self.assertIn("movie-explorer-category-count", body)
+
+    def test_browse_grid_fetches_paginated_roms_endpoint_with_filters(self) -> None:
+        loader_start = self.js.index("async function loadSystemsExploreRoms(")
+        loader_end = self.js.index("function renderSystemsExploreGrid(", loader_start)
+        body = self.js[loader_start:loader_end]
+        self.assertIn("api(`/roms?", body)
+        self.assertIn("systemsExploreSelectedSystem", body)
+        self.assertIn("systemsExploreSelectedGenre", body)
+        self.assertIn("SYSTEMS_EXPLORE_PAGE_SIZE", body)
+        self.assertIn("data.genres", body)
+        self.assertIn("data.has_more", body)
+
+    def test_card_links_to_existing_rom_detail_page(self) -> None:
+        card_start = self.js.index("function renderSystemsExploreCard(")
+        card_body = self.js[card_start:self.js.index("\n}\n", card_start)]
+        self.assertIn("romMediaHash(rom.system, rom.unique_id)", card_body)
+        self.assertIn("publicRomImageUrl(", card_body)
+        self.assertIn("romImageByIdUrl(", card_body)
+
+    def test_movies_explorer_sidebar_shows_per_facet_counts(self) -> None:
+        sidebar_start = self.js.index("function renderMovieExplorerSidebar()")
+        sidebar_end = self.js.index("function setMovieExplorerTypeFilter(", sidebar_start)
+        body = self.js[sidebar_start:sidebar_end]
+        self.assertIn("movieExplorerTypeCount(value)", body)
+        self.assertIn("movieExplorerGenreCount(value)", body)
+        self.assertIn("movie-explorer-category-count", body)
+
+    def test_movies_explorer_paginates_render_with_show_more(self) -> None:
+        filter_start = self.js.index("function filterMovieExplorer(")
+        filter_end = self.js.index("function renderMovieExplorerCard(", filter_start)
+        body = self.js[filter_start:filter_end]
+        self.assertIn("MOVIE_EXPLORE_PAGE_SIZE", body)
+        self.assertIn("growDisplay", body)
+        self.assertIn("sorted.slice(0, movieExploreDisplayLimit)", body)
 
 
 class NetworkSharePageTests(unittest.TestCase):

@@ -300,7 +300,15 @@ class HandlersMoviesMixin:
         self.send_header("Accept-Ranges", "bytes")
         if status == 206:
             self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
-        self._send_security_headers()
+        # Same reasoning as the poster/backdrop cache (_stream_cached_image):
+        # a movie is requested repeatedly within one viewing (seeking issues
+        # a fresh Range request per jump, reopening the player modal re-hits
+        # this URL) and never changes underneath a stable entry_key, so the
+        # browser's own cache serving those repeat requests is a real
+        # speedup, not just a server-load one. Shorter than the artwork's
+        # 1-hour cache since a multi-GB file is far more expensive to keep
+        # around client-side.
+        self._send_security_headers(cache_control="public, max-age=300")
         self.end_headers()
         with path.open("rb") as handle:
             handle.seek(start)

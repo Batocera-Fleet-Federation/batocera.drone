@@ -346,6 +346,27 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
         "is_downloadable INTEGER NOT NULL DEFAULT 1, image_stem TEXT, extra_json TEXT NOT NULL DEFAULT '{}', "
         "UNIQUE(system, file_path))"
     )
+    # One row per (rom, genre) -- a rom_cache_entries row's genre can be a
+    # comma-joined multi-value string (gamelist.xml allows e.g. "Action,
+    # Platform" in one <genre> tag), so this normalizes it into an exact-
+    # match, indexable, countable form for the Systems Browse page's Category
+    # facet -- a plain LIKE '%x%' against a comma-joined column can't use an
+    # index and risks partial-word false positives at the ~hundreds-of-
+    # thousands-of-roms scale this device can reach. Populated in
+    # _persist_rows alongside the owning rom_cache_entries row, from the
+    # "genre" field _database_rom_metadata_fields (roms/gamelist.py) now
+    # carries through from the scan -- never re-derived here, and never
+    # queried standalone (always JOINed against rom_cache_entries), so a
+    # stale row left behind by some future bulk-delete path that bypasses
+    # _persist_rows is harmless rather than a correctness risk.
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS rom_genres (entry_key TEXT NOT NULL, system TEXT NOT NULL, genre TEXT NOT NULL)"
+    )
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_rom_genres_entry_key ON rom_genres(entry_key)")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_rom_genres_genre ON rom_genres(genre COLLATE NOCASE)")
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_rom_genres_system_genre ON rom_genres(system COLLATE NOCASE, genre COLLATE NOCASE)"
+    )
     connection.execute(
         "CREATE TABLE IF NOT EXISTS bios_cache_entries ("
         "entry_key TEXT PRIMARY KEY, file_path TEXT NOT NULL UNIQUE, name TEXT NOT NULL, unique_id TEXT, absolute_path TEXT, "
@@ -674,6 +695,7 @@ def _persist_rows(
         if asset_type == "rom":
             row = RomCacheRow.from_payload(str(key), value)
             _upsert_rom_row(connection, row)
+            _sync_rom_genres(connection, str(key), row.system, str(value.get("genre") or ""))
         elif asset_type == "bios":
             row = BiosCacheRow.from_payload(str(key), value)
             _upsert_bios_row(connection, row)
@@ -694,8 +716,20 @@ def _persist_rows(
             deleted_payload = _read_live_row_payload(connection, asset_type, key_text) or {"entry_key": key_text}
         _upsert_deleted_row(connection, asset_type, key_text, deleted_payload)
         connection.execute(f"DELETE FROM {table} WHERE entry_key = ?", (key_text,))
+        if asset_type == "rom":
+            connection.execute("DELETE FROM rom_genres WHERE entry_key = ?", (key_text,))
         if queue_changes:
             _queue_change(connection, asset_type, key_text, "delete")
+
+
+def _sync_rom_genres(connection: sqlite3.Connection, entry_key: str, system: str, genre_text: str) -> None:
+    connection.execute("DELETE FROM rom_genres WHERE entry_key = ?", (entry_key,))
+    genres = sorted({part.strip() for part in genre_text.split(",") if part.strip()})
+    if genres:
+        connection.executemany(
+            "INSERT INTO rom_genres (entry_key, system, genre) VALUES (?, ?, ?)",
+            [(entry_key, system, genre) for genre in genres],
+        )
 
 
 def _upsert_rom_row(connection: sqlite3.Connection, row: RomCacheRow) -> None:
@@ -1487,6 +1521,7 @@ def list_rom_cache_page(
     settings: Any,
     *,
     systems: Optional[Iterable[str]] = None,
+    genre: str = "",
     query: str = "",
     limit: int = 500,
     offset: int = 0,
@@ -1496,27 +1531,49 @@ def list_rom_cache_page(
     Multiple-system results retain the UI's round-robin ordering using a SQL
     window rank, but only the requested rows are decoded into Python objects.
     ``None`` means the relational cache is not authoritative yet.
+
+    ``genre`` is an exact (case-insensitive) match against the normalized
+    rom_genres table -- see its schema comment -- not a substring match
+    against the raw comma-joined field, so it stays index-backed at scale.
     """
     safe_limit, safe_offset = _page_bounds(limit, offset, maximum=5000)
     selected_systems = _normalized_filters(systems)
     normalized_query = str(query or "").strip()
+    normalized_genre = str(genre or "").strip()
     where_parts: list[str] = []
     parameters: list[Any] = []
     if selected_systems:
         placeholders = ",".join("?" for _ in selected_systems)
-        where_parts.append(f"system COLLATE NOCASE IN ({placeholders})")
+        where_parts.append(f"rom_cache_entries.system COLLATE NOCASE IN ({placeholders})")
         parameters.extend(selected_systems)
     if normalized_query:
         pattern = f"%{_escape_like(normalized_query)}%"
         where_parts.append(
-            "(rom_name COLLATE NOCASE LIKE ? ESCAPE '\\' "
-            "OR file_path COLLATE NOCASE LIKE ? ESCAPE '\\' "
-            "OR unique_id COLLATE NOCASE LIKE ? ESCAPE '\\' "
-            "OR fingerprint COLLATE NOCASE LIKE ? ESCAPE '\\')"
+            "(rom_cache_entries.rom_name COLLATE NOCASE LIKE ? ESCAPE '\\' "
+            "OR rom_cache_entries.file_path COLLATE NOCASE LIKE ? ESCAPE '\\' "
+            "OR rom_cache_entries.unique_id COLLATE NOCASE LIKE ? ESCAPE '\\' "
+            "OR rom_cache_entries.fingerprint COLLATE NOCASE LIKE ? ESCAPE '\\')"
         )
         parameters.extend([pattern, pattern, pattern, pattern])
+    join = ""
+    if normalized_genre:
+        join = " JOIN rom_genres ON rom_genres.entry_key = rom_cache_entries.entry_key"
+        where_parts.append("rom_genres.genre COLLATE NOCASE = ?")
+        parameters.append(normalized_genre)
     where = f" WHERE {' AND '.join(where_parts)}" if where_parts else ""
     columns = (
+        "rom_cache_entries.entry_key, rom_cache_entries.system, rom_cache_entries.file_path, "
+        "rom_cache_entries.rom_name, rom_cache_entries.unique_id, rom_cache_entries.file_size, "
+        "rom_cache_entries.modified_time, rom_cache_entries.entry_type, rom_cache_entries.fingerprint, "
+        "rom_cache_entries.gamelist_path, rom_cache_entries.gamelist_game_id, rom_cache_entries.is_downloadable, "
+        "rom_cache_entries.image_stem, rom_cache_entries.extra_json"
+    )
+    # Bare (unqualified) names for selecting back out of the `ranked` CTE below --
+    # its own projected columns are named for the last path segment only
+    # (`entry_key`, not `rom_cache_entries.entry_key`), so the outer SELECT
+    # can't reuse the qualified `columns` list the way the single-system path
+    # (selecting straight from rom_cache_entries) does.
+    plain_columns = (
         "entry_key, system, file_path, rom_name, unique_id, file_size, modified_time, entry_type, "
         "fingerprint, gamelist_path, gamelist_game_id, is_downloadable, image_stem, extra_json"
     )
@@ -1524,21 +1581,27 @@ def list_rom_cache_page(
         with _open_rom_metadata_cache(settings) as connection:
             if not _cache_is_ready(connection):
                 return None
-            total = int(connection.execute(f"SELECT COUNT(*) FROM rom_cache_entries{where}", parameters).fetchone()[0])
+            total = int(
+                connection.execute(
+                    f"SELECT COUNT(*) FROM rom_cache_entries{join}{where}", parameters
+                ).fetchone()[0]
+            )
             page_parameters = [*parameters, safe_limit, safe_offset]
             if len(selected_systems) == 1:
                 rows = connection.execute(
-                    f"SELECT {columns} FROM rom_cache_entries{where} "
-                    "ORDER BY rom_name COLLATE NOCASE, file_path COLLATE NOCASE, entry_key LIMIT ? OFFSET ?",
+                    f"SELECT {columns} FROM rom_cache_entries{join}{where} "
+                    "ORDER BY rom_cache_entries.rom_name COLLATE NOCASE, rom_cache_entries.file_path COLLATE NOCASE, "
+                    "rom_cache_entries.entry_key LIMIT ? OFFSET ?",
                     page_parameters,
                 ).fetchall()
             else:
                 rows = connection.execute(
                     f"WITH ranked AS (SELECT {columns}, "
-                    "ROW_NUMBER() OVER (PARTITION BY system COLLATE NOCASE "
-                    "ORDER BY rom_name COLLATE NOCASE, file_path COLLATE NOCASE, entry_key) AS system_position "
-                    f"FROM rom_cache_entries{where}) "
-                    f"SELECT {columns} FROM ranked "
+                    "ROW_NUMBER() OVER (PARTITION BY rom_cache_entries.system COLLATE NOCASE "
+                    "ORDER BY rom_cache_entries.rom_name COLLATE NOCASE, rom_cache_entries.file_path COLLATE NOCASE, "
+                    "rom_cache_entries.entry_key) AS system_position "
+                    f"FROM rom_cache_entries{join}{where}) "
+                    f"SELECT {plain_columns} FROM ranked "
                     "ORDER BY system_position, system COLLATE NOCASE, rom_name COLLATE NOCASE, "
                     "file_path COLLATE NOCASE, entry_key LIMIT ? OFFSET ?",
                     page_parameters,
@@ -1552,6 +1615,51 @@ def list_rom_cache_page(
         "offset": safe_offset,
         "items": [_rom_row_payload(row) for row in rows],
     }
+
+
+def list_rom_genre_counts(
+    settings: Any,
+    *,
+    systems: Optional[Iterable[str]] = None,
+    query: str = "",
+) -> list[dict]:
+    """Genre -> matching-ROM-count, scoped by the same system/search filters as
+    list_rom_cache_page (so switching the System filter or typing a search
+    updates the Category facet's counts to match, mirroring the Movies
+    Explorer sidebar's per-facet counting convention). Returns [] rather than
+    raising if the relational cache isn't ready yet."""
+    selected_systems = _normalized_filters(systems)
+    normalized_query = str(query or "").strip()
+    where_parts: list[str] = []
+    parameters: list[Any] = []
+    if selected_systems:
+        placeholders = ",".join("?" for _ in selected_systems)
+        where_parts.append(f"rom_cache_entries.system COLLATE NOCASE IN ({placeholders})")
+        parameters.extend(selected_systems)
+    if normalized_query:
+        pattern = f"%{_escape_like(normalized_query)}%"
+        where_parts.append(
+            "(rom_cache_entries.rom_name COLLATE NOCASE LIKE ? ESCAPE '\\' "
+            "OR rom_cache_entries.file_path COLLATE NOCASE LIKE ? ESCAPE '\\' "
+            "OR rom_cache_entries.unique_id COLLATE NOCASE LIKE ? ESCAPE '\\' "
+            "OR rom_cache_entries.fingerprint COLLATE NOCASE LIKE ? ESCAPE '\\')"
+        )
+        parameters.extend([pattern, pattern, pattern, pattern])
+    where = f" WHERE {' AND '.join(where_parts)}" if where_parts else ""
+    try:
+        with _open_rom_metadata_cache(settings) as connection:
+            if not _cache_is_ready(connection):
+                return []
+            rows = connection.execute(
+                "SELECT rom_genres.genre, COUNT(*) FROM rom_genres "
+                f"JOIN rom_cache_entries ON rom_cache_entries.entry_key = rom_genres.entry_key{where} "
+                "GROUP BY rom_genres.genre COLLATE NOCASE ORDER BY rom_genres.genre COLLATE NOCASE",
+                parameters,
+            ).fetchall()
+    except sqlite3.Error as error:
+        print(f"ROM genre count query failed: {_format_store_error(error)}", file=sys.stderr, flush=True)
+        return []
+    return [{"name": str(row[0]), "count": int(row[1])} for row in rows]
 
 
 def _bios_row_payload(values: tuple) -> dict:
