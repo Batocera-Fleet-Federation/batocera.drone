@@ -123,11 +123,12 @@ class RomAssetBiosMixin:
         page drawing from potentially 200 different systems (round-robin
         ordering across all of them) would mean up to 200 separate gamelist
         parses per page load. The grid only needs name/system/image/genre,
-        and genre already comes from the indexed rom_genres table (see
-        list_rom_cache_page's genre param), not a live re-parse -- images
-        resolve through the public-images endpoint's own filename-guess/
-        fallback chain, same as the tree view's thumbnails, with no
-        gamelist attach required either."""
+        and both already come from what was indexed at scan time instead of
+        a live re-parse: genre from the rom_genres table (see
+        list_rom_cache_page's genre param), and the real gamelist-referenced
+        image filename from image_relative_path (carried through
+        RomCacheRow.extra -- see roms/gamelist.py's
+        _database_rom_metadata_fields)."""
         if self.settings is None:
             return None
         page = list_rom_cache_page(self.settings, systems=systems, genre=genre, query=query, limit=limit, offset=offset)

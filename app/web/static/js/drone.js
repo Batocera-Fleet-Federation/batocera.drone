@@ -4099,8 +4099,16 @@ function renderSystemsExploreMoreButton() {
 }
 function renderSystemsExploreCard(rom) {
   const title = rom.rom_name || rom.name || rom.rom_file || "";
-  const primarySrc = publicRomImageUrl(rom.system, rom.rom_file || title, rom.image_stem);
-  const fallbacks = JSON.stringify([romImageByIdUrl(rom.system, rom.unique_id)]);
+  const guessedSrc = publicRomImageUrl(rom.system, rom.rom_file || title, rom.image_stem);
+  const idSrc = romImageByIdUrl(rom.system, rom.unique_id);
+  // Prefer the real gamelist-referenced image (roms/gamelist.py's
+  // image_relative_path) over the filename guess below -- Browse skips the
+  // live per-row gamelist re-attach the ROM detail page uses (see
+  // list_rom_browse_page's docstring), so without this a card only found an
+  // image when the actual scraped filename happened to match the ROM's own
+  // filename stem, which many scrapers don't follow.
+  const primarySrc = rom.image_relative_path ? artworkExistingImageUrl(rom, rom.image_relative_path) : guessedSrc;
+  const fallbacks = JSON.stringify(rom.image_relative_path ? [guessedSrc, idSrc] : [idSrc]);
   const navigateHash = romMediaHash(rom.system, rom.unique_id);
   return `
     <button type="button" class="movie-explorer-card" title="${escapeHtml(title)}" onclick="setHash(${jsAttr(navigateHash)})">

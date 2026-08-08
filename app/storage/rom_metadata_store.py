@@ -82,9 +82,12 @@ class RomCacheRow:
         gamelist_game_id = str(payload.get("gamelist_game_id") or file_path)
         # Folder-unit ROMs (marker file in a per-game folder) carry the folder rel path +
         # marker rel path through extra_json so peer inventory can serve them.
+        # image_relative_path is the real gamelist-referenced image filename (see
+        # roms/gamelist.py._database_rom_metadata_fields) -- Systems Browse's card
+        # grid uses it instead of guessing a filename.
         extra = {
             key: str(payload[key])
-            for key in ("transfer_unit_path", "marker_relative_path")
+            for key in ("transfer_unit_path", "marker_relative_path", "image_relative_path")
             if str(payload.get(key) or "").strip()
         }
         # rom_name is the gamelist <name> (the game's display name) -- that is the

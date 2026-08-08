@@ -85,17 +85,28 @@ def _gamelist_metadata_for_reference(gamelist_path: str, game_id: str) -> dict:
 
 def _database_rom_metadata_fields(rom: dict, system_name: str, file_path: str, absolute: Path, stat_size: int, stat_mtime: int) -> dict:
     display_name = Path(file_path).stem
-    # rom["gamelist"] itself is excluded from the spread below (too big/raw to
-    # persist wholesale), but genre specifically is worth keeping -- it's the
-    # only thing backing the Systems Browse page's Category facet, which
-    # needs it indexed (rom_genres, populated from this field in
-    # rom_metadata_store._persist_rows) rather than re-parsed from
-    # gamelist.xml on every request the way the ROM detail page's live
-    # attach still does.
+    # rom["gamelist"]/rom["existing"] are excluded from the spread below (too
+    # big/raw to persist wholesale), but two fields out of them are worth
+    # keeping explicitly:
+    #  - genre backs the Systems Browse page's Category facet (indexed into
+    #    rom_genres, see rom_metadata_store._persist_rows) instead of being
+    #    re-parsed from gamelist.xml on every request the way the ROM detail
+    #    page's live attach still does.
+    #  - image_relative_path is the *real* gamelist-referenced image file
+    #    (rom["existing"]["image"]) -- Browse's card grid was guessing a
+    #    filename instead (publicRomImageUrl's "<stem>-image.png" convention)
+    #    since it deliberately skips the live gamelist re-attach for
+    #    performance, and that guess misses for any ROM whose actual scraped
+    #    image filename doesn't happen to match the ROM's own filename stem.
+    #    Carried through RomCacheRow.extra (see its ALLOWED keys) same as
+    #    transfer_unit_path/marker_relative_path -- a single string, so it
+    #    doesn't need its own table the way genre's multi-value case does.
     genre = _first_metadata_value((rom.get("gamelist") or {}).get("genre"))
+    image_relative_path = _first_metadata_value((rom.get("existing") or {}).get("image"))
     return {
         **{k: v for k, v in rom.items() if k not in {"fingerprint", "rom_fingerprint", "gamelist", "existing", "name", "title", "rom_name"}},
         "genre": genre,
+        "image_relative_path": image_relative_path,
         "system": system_name,
         "system_name": system_name,
         "rom_name": display_name,

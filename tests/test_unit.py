@@ -6140,10 +6140,45 @@ class RomGenreFacetAndBrowseTests(unittest.TestCase):
         fields = _database_rom_metadata_fields({"file_path": "x.zip"}, "snes", "x.zip", Path("/tmp/x"), 1, 0)
         self.assertEqual(fields["genre"], "")
 
+    def test_database_rom_metadata_fields_extracts_real_image_path(self) -> None:
+        # Browse's card grid was guessing an image filename instead of using
+        # this -- confirmed live: images only showed up for ROMs whose actual
+        # scraped filename happened to match the guess convention.
+        from app.roms.gamelist import _database_rom_metadata_fields
+
+        rom = {
+            "file_path": "Chrono Trigger.zip",
+            "existing": {"image": "./images/ct_boxfront.png"},
+        }
+        fields = _database_rom_metadata_fields(rom, "snes", "Chrono Trigger.zip", Path("/tmp/x"), 100, 0)
+        self.assertEqual(fields["image_relative_path"], "./images/ct_boxfront.png")
+
+    def test_image_relative_path_round_trips_through_rom_cache_row(self) -> None:
+        from app.storage.rom_metadata_store import RomCacheRow
+
+        row = RomCacheRow.from_payload(
+            "snes:chrono.zip",
+            {"system": "snes", "file_path": "chrono.zip", "image_relative_path": "./images/ct_boxfront.png"},
+        )
+        self.assertEqual(row.to_payload()["image_relative_path"], "./images/ct_boxfront.png")
+
+    def test_classifier_version_was_bumped_so_existing_scans_backfill(self) -> None:
+        # genre and image_relative_path are new derived fields; the gamelist
+        # MD5 change-gate would otherwise carry forward pre-existing rows
+        # (from before this feature existed) forever without ever
+        # re-deriving either one. See rom_scanner.py's ROM_CLASSIFIER_VERSION
+        # comment for the established mechanism this relies on.
+        from app.roms.rom_scanner import ROM_CLASSIFIER_VERSION
+
+        self.assertGreaterEqual(ROM_CLASSIFIER_VERSION, 3)
+
     def _seed(self, root):
         settings = self._settings(root)
         entries = {
-            "snes:mario.zip": {"system": "snes", "file_path": "mario.zip", "rom_name": "Mario", "genre": "Platform"},
+            "snes:mario.zip": {
+                "system": "snes", "file_path": "mario.zip", "rom_name": "Mario", "genre": "Platform",
+                "image_relative_path": "./images/mario-image.png",
+            },
             "snes:zelda.zip": {"system": "snes", "file_path": "zelda.zip", "rom_name": "Zelda", "genre": "Action, Adventure"},
             "genesis:sonic.zip": {"system": "genesis", "file_path": "sonic.zip", "rom_name": "Sonic", "genre": "Platform"},
             "genesis:noGenre.zip": {"system": "genesis", "file_path": "noGenre.zip", "rom_name": "NoGenre", "genre": ""},
@@ -6269,6 +6304,19 @@ class RomGenreFacetAndBrowseTests(unittest.TestCase):
             self.assertTrue(payload["has_more"])
             genre_names = {row["name"] for row in payload["genres"]}
             self.assertEqual(genre_names, {"Platform", "Action", "Adventure"})
+
+    def test_handle_rom_browse_returns_real_image_path_when_indexed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self._seed(Path(tmp))
+            repo = drone_api.RomRepository(settings.roms_root, settings.bios_root, settings=settings)
+            handler = self._handler(settings, repo)
+            captured = {}
+            handler._send_json = lambda status, payload, **kwargs: captured.update({"status": status, "payload": payload})
+
+            handler._handle_rom_browse(limit=50, offset=0)
+            by_name = {row["rom_name"]: row for row in captured["payload"]["roms"]}
+            self.assertEqual(by_name["Mario"]["image_relative_path"], "./images/mario-image.png")
+            self.assertEqual(by_name["Zelda"].get("image_relative_path", ""), "")
 
     def test_handle_rom_browse_system_filter_narrows_facets(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

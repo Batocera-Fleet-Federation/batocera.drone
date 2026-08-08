@@ -70,8 +70,13 @@ ROM_METADATA_HASH_BUDGET_SECONDS = max(0.0, float(os.environ.get("ROM_METADATA_H
 # rom_transfer_unit). The per-system gamelist.xml MD5 gate skips unchanged systems, so
 # a rule change would otherwise never re-classify existing entries -- bump this to
 # force a one-time full re-index on the next poll. v2: folder-unit ROMs (marker file in
-# a per-game top-level folder) replace the immediate-parent resolution.
-ROM_CLASSIFIER_VERSION = 2
+# a per-game top-level folder) replace the immediate-parent resolution. v3: genre and
+# image_relative_path (gamelist.py._database_rom_metadata_fields) are new derived
+# fields on an already-fully-scanned, unchanged-gamelist.xml library -- without this
+# bump they'd never backfill (Systems Browse's Category facet stayed permanently
+# empty, and its card grid's guessed image filenames kept missing real ones, on any
+# device that wasn't otherwise due for a rescan).
+ROM_CLASSIFIER_VERSION = 3
 # ROM_METADATA_HASH_ROMS_ENABLED stays the single source in drone_api (tests patch it there
 # + rom_metadata_state reads it); lazy-imported inside _hash_rom_metadata_batches below.
 
