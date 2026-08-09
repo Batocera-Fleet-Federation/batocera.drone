@@ -153,6 +153,7 @@ def apply(settings: Settings, entry_key: str, tmdb_id, *, client: Optional[TmdbC
         "release_date": details.get("release_date"),
         "rating": details.get("rating"),
         "runtime_minutes": details.get("runtime_minutes"),
+        "youtube_trailer_key": details.get("youtube_trailer_key"),
     }
     return _movies_store.save_movie_metadata(
         settings.movies_root,
@@ -311,6 +312,10 @@ def apply_tv_episode(
         "cast": show.get("cast") or [],
         "release_date": episode.get("air_date") or show.get("release_date"),
         "rating": episode.get("rating") if episode.get("rating") is not None else show.get("rating"),
+        # Trailers are show-level in TMDb's data model (there's no
+        # per-episode trailer) -- same show-level-only shape as poster/
+        # backdrop/genres/cast above.
+        "youtube_trailer_key": show.get("youtube_trailer_key"),
     }
     return _movies_store.save_movie_metadata(
         settings.movies_root,

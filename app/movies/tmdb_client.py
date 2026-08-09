@@ -89,6 +89,45 @@ def tmdb_image_url(path: Optional[str], size: str) -> Optional[str]:
     return f"{TMDB_IMAGE_BASE}/{size}{path}"
 
 
+# Preference order for picking one trailer out of a show/movie's video list --
+# a "Trailer" beats a "Teaser" (which beats anything else), and within a type,
+# TMDb's ``official`` flag (set by their moderators, not upload metadata)
+# beats an unofficial fan upload of the same type.
+_TRAILER_TYPE_RANK = {"Trailer": 0, "Teaser": 1}
+
+
+def _pick_best_trailer_key(videos_payload: Optional[dict]) -> Optional[str]:
+    """Given a raw TMDb ``videos`` append_to_response payload, return the
+    YouTube video id (TMDb's ``key`` field) of the best trailer/teaser, or
+    ``None`` if this title has no YouTube video listed. Embedding only makes
+    sense for YouTube (that's the iframe embed the details page uses), so
+    videos hosted on Vimeo or elsewhere are ignored here even though TMDb
+    sometimes lists them."""
+    results = videos_payload.get("results") if isinstance(videos_payload, dict) else None
+    if not isinstance(results, list):
+        return None
+    candidates = []
+    for video in results:
+        if not isinstance(video, dict) or not video.get("key"):
+            continue
+        if video.get("site") != "YouTube":
+            continue
+        video_type = video.get("type")
+        if video_type not in _TRAILER_TYPE_RANK:
+            continue
+        candidates.append(video)
+    if not candidates:
+        return None
+    candidates.sort(
+        key=lambda video: (
+            _TRAILER_TYPE_RANK[video.get("type")],
+            0 if video.get("official") else 1,
+            video.get("published_at") or "",
+        )
+    )
+    return candidates[0].get("key")
+
+
 def _digits_only(value) -> str:
     """String-of-digits form of an id/number parameter, treating ``None``
     (not a falsy ``0``) as "missing". Season/episode numbers can legitimately
@@ -242,9 +281,10 @@ class TmdbClient:
         safe_id = _digits_only(tmdb_id)
         if not safe_id:
             raise ValueError("tmdb_id is required")
-        # append_to_response=credits gets cast/crew in the same request instead
-        # of a separate /credits call -- one HTTP round trip per apply.
-        payload = self._get_json(f"/movie/{safe_id}", {"append_to_response": "credits"})
+        # append_to_response=credits,videos gets cast/crew and the trailer
+        # list in the same request instead of two extra /credits and /videos
+        # calls -- one HTTP round trip per apply.
+        payload = self._get_json(f"/movie/{safe_id}", {"append_to_response": "credits,videos"})
         genres = [genre.get("name") for genre in (payload.get("genres") or []) if isinstance(genre, dict) and genre.get("name")]
         credits_payload = payload.get("credits") if isinstance(payload.get("credits"), dict) else {}
         cast = []
@@ -264,6 +304,7 @@ class TmdbClient:
             "runtime_minutes": payload.get("runtime"),
             "poster_url": tmdb_image_url(payload.get("poster_path"), TMDB_POSTER_SIZE),
             "backdrop_url": tmdb_image_url(payload.get("backdrop_path"), TMDB_BACKDROP_SIZE),
+            "youtube_trailer_key": _pick_best_trailer_key(payload.get("videos")),
         }
 
     def tv_details(self, tv_id) -> dict:
@@ -275,7 +316,7 @@ class TmdbClient:
         safe_id = _digits_only(tv_id)
         if not safe_id:
             raise ValueError("tv_id is required")
-        payload = self._get_json(f"/tv/{safe_id}", {"append_to_response": "credits"})
+        payload = self._get_json(f"/tv/{safe_id}", {"append_to_response": "credits,videos"})
         genres = [genre.get("name") for genre in (payload.get("genres") or []) if isinstance(genre, dict) and genre.get("name")]
         credits_payload = payload.get("credits") if isinstance(payload.get("credits"), dict) else {}
         cast = []
@@ -294,6 +335,7 @@ class TmdbClient:
             "rating": payload.get("vote_average"),
             "poster_url": tmdb_image_url(payload.get("poster_path"), TMDB_POSTER_SIZE),
             "backdrop_url": tmdb_image_url(payload.get("backdrop_path"), TMDB_BACKDROP_SIZE),
+            "youtube_trailer_key": _pick_best_trailer_key(payload.get("videos")),
         }
 
     def tv_season_details(self, tv_id, season_number) -> dict:

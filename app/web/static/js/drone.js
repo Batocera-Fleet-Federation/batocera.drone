@@ -2671,6 +2671,11 @@ function renderMovieDetailShell(movie) {
           : `<p class="text-muted small">No description yet -- scrape this movie below to fetch one from TMDb.</p>`
       }
       ${
+        meta && meta.youtube_trailer_key
+          ? `<h6>Trailer</h6><div class="ratio ratio-16x9 movie-detail-trailer mb-3"><iframe src="https://www.youtube.com/embed/${escapeHtml(meta.youtube_trailer_key)}" title="Trailer" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen loading="lazy" referrerpolicy="strict-origin-when-cross-origin"></iframe></div>`
+          : ""
+      }
+      ${
         cast.length
           ? `<h6>Cast</h6><div class="mb-3">${cast.map((c) => `<span class="movie-cast-chip">${escapeHtml(c.name || "")}${c.character ? `<span class="text-muted"> as ${escapeHtml(c.character)}</span>` : ""}</span>`).join("")}</div>`
           : ""
@@ -7010,8 +7015,7 @@ async function refreshNotificationsDropdown() {
       <div class="notifications-dropdown-header">
         <strong>Notifications</strong>
         <div>
-          <button type="button" class="btn btn-sm btn-link p-0 me-2" onclick="markAllNotificationsRead()">Mark all read</button>
-          <button type="button" class="btn btn-sm btn-link p-0 text-danger" onclick="clearAllNotifications()">Clear all</button>
+          <button type="button" class="btn btn-sm btn-link p-0 notifications-dismiss-all-btn" onclick="dismissAllNotifications()">Dismiss All</button>
         </div>
       </div>
       <div class="dropdown-divider"></div>
@@ -7045,22 +7049,14 @@ async function dismissNotification(id) {
   await refreshNotificationsUnreadCount();
 }
 
-async function markAllNotificationsRead() {
-  try {
-    await apiPost("/admin/notifications/read-all", {});
-  } catch (err) {
-    showToast(`Failed to mark notifications read: ${escapeHtml(err.message || "unknown error")}`, "danger");
-    return;
-  }
-  await refreshNotificationsDropdown();
-  await refreshNotificationsUnreadCount();
-}
-
-async function clearAllNotifications() {
+// Backend endpoint/store function are still named "clear" (see
+// handlers_notifications.py) -- kept as-is, this is just the UI-facing name
+// matching the per-item dismissNotification() terminology above.
+async function dismissAllNotifications() {
   try {
     await apiPost("/admin/notifications/clear", {});
   } catch (err) {
-    showToast(`Failed to clear notifications: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    showToast(`Failed to dismiss notifications: ${escapeHtml(err.message || "unknown error")}`, "danger");
     return;
   }
   await refreshNotificationsDropdown();

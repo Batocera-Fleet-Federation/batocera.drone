@@ -7677,6 +7677,18 @@ class SystemsExplorePageTests(unittest.TestCase):
         self.assertIn("adminEnabled", body)
         self.assertIn("deleteMovieFromDetailPage(", body)
 
+    def test_movie_detail_page_embeds_youtube_trailer_when_key_is_present(self) -> None:
+        shell_start = self.js.index("function renderMovieDetailShell(")
+        shell_end = self.js.index("async function renderMovieScraperCard(", shell_start)
+        body = self.js[shell_start:shell_end]
+        self.assertIn("meta && meta.youtube_trailer_key", body)
+        self.assertIn('class="ratio ratio-16x9 movie-detail-trailer', body)
+        self.assertIn("https://www.youtube.com/embed/${escapeHtml(meta.youtube_trailer_key)}", body)
+        self.assertIn("allowfullscreen", body)
+        # No download/fetch of the actual video -- only TMDb's YouTube video
+        # id gets embedded via YouTube's own iframe player.
+        self.assertNotIn("yt-dlp", body)
+
     def test_delete_movie_from_detail_page_confirms_then_posts_batch_delete(self) -> None:
         fn_start = self.js.index("function deleteMovieFromDetailPage(")
         fn_end = self.js.index("async function renderMovieScraperCard(", fn_start)
@@ -8462,3 +8474,38 @@ class GuessContentTypeVideoTests(unittest.TestCase):
         self.assertEqual(handler._guess_content_type(Path("clip.mkv")), "video/x-matroska")
         self.assertEqual(handler._guess_content_type(Path("clip.mov")), "video/quicktime")
         self.assertEqual(handler._guess_content_type(Path("clip.avi")), "video/x-msvideo")
+
+
+class NotificationsDropdownHeaderTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        root = Path(__file__).resolve().parents[1]
+        cls.js = root.joinpath("app/web/static/js/drone.js").read_text(encoding="utf-8")
+        cls.css = root.joinpath("app/web/static/css/drone.css").read_text(encoding="utf-8")
+
+    def test_header_has_only_dismiss_all_no_mark_all_read(self) -> None:
+        fn_start = self.js.index("async function refreshNotificationsDropdown(")
+        fn_end = self.js.index("\nasync function markNotificationRead(", fn_start)
+        body = self.js[fn_start:fn_end]
+        self.assertIn(">Dismiss All<", body)
+        self.assertIn("onclick=\"dismissAllNotifications()\"", body)
+        self.assertIn("notifications-dismiss-all-btn", body)
+        self.assertNotIn("Mark all read", body)
+        self.assertNotIn("markAllNotificationsRead", body)
+        # Scoped to the Dismiss All button's own class attribute -- text-danger
+        # legitimately still appears elsewhere in this function (the catch
+        # block's error state), which a blanket assertNotIn would wrongly flag.
+        button_start = body.index("<button", body.index("Dismiss All") - 200)
+        button_html = body[button_start:body.index(">", button_start) + 1]
+        self.assertNotIn("text-danger", button_html)
+
+    def test_mark_all_read_function_removed_dismiss_all_function_present(self) -> None:
+        self.assertNotIn("function markAllNotificationsRead(", self.js)
+        self.assertIn("async function dismissAllNotifications() {", self.js)
+        # UI-facing rename only -- the backend endpoint/store function keep
+        # their existing "clear" name (see handlers_notifications.py).
+        self.assertIn('await apiPost("/admin/notifications/clear", {})', self.js)
+
+    def test_dismiss_all_button_is_styled_white_not_red(self) -> None:
+        self.assertIn(".notifications-dismiss-all-btn {", self.css)
+        self.assertIn("color: var(--admin-text);", self.css)

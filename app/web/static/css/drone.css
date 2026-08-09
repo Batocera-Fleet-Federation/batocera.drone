@@ -191,6 +191,12 @@
     .notification-dismiss-btn:hover {
       color: #fff;
     }
+    .notifications-dismiss-all-btn {
+      color: var(--admin-text);
+    }
+    .notifications-dismiss-all-btn:hover {
+      color: #fff;
+    }
     .menu-label {
       font-size: 0.72rem;
       letter-spacing: 0.07em;
@@ -1735,6 +1741,14 @@
       margin-right: 0.25rem;
     }
     .movie-detail-body h6 { color: var(--admin-text); margin-top: 1rem; }
+    .movie-detail-trailer {
+      max-width: 640px;
+      border-radius: 0.4rem;
+      overflow: hidden;
+      border: 1px solid var(--admin-border);
+      background: #090d18;
+    }
+    .movie-detail-trailer iframe { border: 0; }
     .movie-cast-chip {
       display: inline-block;
       background: rgba(255, 255, 255, 0.06);

@@ -265,6 +265,32 @@ class ApplyTests(unittest.TestCase):
             self.assertIn("Breaking Bad", bb_meta["poster_relative_path"])
             self.assertIn("The Office", office_meta["poster_relative_path"])
 
+    def test_youtube_trailer_key_is_stored_on_extra(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "The Matrix (1999).mp4")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+            entry_key = movies_store.list_movies(settings.movies_root)[0]["entry_key"]
+
+            details = dict(_MATRIX_DETAILS, youtube_trailer_key="m8e-FF8MsqU")
+            result = metadata_manager.apply(settings, entry_key, 603, client=FakeTmdbClient(details=details))
+            self.assertEqual(result["youtube_trailer_key"], "m8e-FF8MsqU")
+
+            stored = movies_store.get_movie_metadata(settings.movies_root, entry_key)
+            self.assertEqual(stored["youtube_trailer_key"], "m8e-FF8MsqU")
+
+    def test_no_trailer_key_stores_none_not_a_missing_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "The Matrix (1999).mp4")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+            entry_key = movies_store.list_movies(settings.movies_root)[0]["entry_key"]
+
+            result = metadata_manager.apply(settings, entry_key, 603, client=FakeTmdbClient(details=_MATRIX_DETAILS))
+            self.assertIsNone(result["youtube_trailer_key"])
+
 
 class ApplyByReferenceTests(unittest.TestCase):
     """apply_by_reference() is the direct-lookup escape hatch for a movie
@@ -518,6 +544,24 @@ class ApplyTvEpisodeTests(unittest.TestCase):
                 season_details={"title": "Season 1", "overview": "", "air_date": None, "poster_url": None},
                 client=fake,
             )
+
+    def test_youtube_trailer_key_comes_from_show_level_details(self):
+        # Trailers are show-level in TMDb's data model (no per-episode
+        # trailer) -- same shape as poster/backdrop/genres/cast already are.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Dexter (2006) - S01E01 - Dexter.mkv")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+            entry_key = movies_store.list_movies(settings.movies_root)[0]["entry_key"]
+
+            fake = FakeTmdbClient(
+                tv_details=dict(_MATRIX_DETAILS, title="Dexter", youtube_trailer_key="dexter-trailer-key"),
+                season_details={"title": "Season 1", "overview": "", "air_date": None, "poster_url": None},
+                tv_episode_details={"title": "Dexter", "overview": "", "air_date": None, "rating": None, "still_url": None},
+            )
+            result = metadata_manager.apply_tv_episode(settings, entry_key, 1405, 1, 1, client=fake)
+            self.assertEqual(result["youtube_trailer_key"], "dexter-trailer-key")
 
 
 class FakeBulkTmdbClient:

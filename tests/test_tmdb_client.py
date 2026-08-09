@@ -7,6 +7,7 @@ from app.movies.tmdb_client import (
     TmdbClient,
     TmdbNotFoundError,
     TmdbUnavailableError,
+    _pick_best_trailer_key,
     parse_tmdb_movie_id,
     tmdb_image_url,
 )
@@ -35,6 +36,54 @@ class TmdbImageUrlTests(unittest.TestCase):
     def test_none_path_returns_none(self) -> None:
         self.assertIsNone(tmdb_image_url(None, "w500"))
         self.assertIsNone(tmdb_image_url("", "w500"))
+
+
+class PickBestTrailerKeyTests(unittest.TestCase):
+    """_pick_best_trailer_key extracts a YouTube video id (for iframe
+    embedding on the details page, see drone.js's renderMovieDetailShell)
+    out of TMDb's raw videos append_to_response payload -- never a
+    downloadable file, just the id YouTube's own embed URL needs."""
+
+    def test_no_payload_returns_none(self) -> None:
+        self.assertIsNone(_pick_best_trailer_key(None))
+        self.assertIsNone(_pick_best_trailer_key({}))
+        self.assertIsNone(_pick_best_trailer_key({"results": []}))
+
+    def test_picks_the_official_trailer(self) -> None:
+        payload = {
+            "results": [
+                {"key": "teaser-key", "site": "YouTube", "type": "Teaser", "official": True, "published_at": "2020-01-01"},
+                {"key": "trailer-key", "site": "YouTube", "type": "Trailer", "official": True, "published_at": "2020-02-01"},
+            ]
+        }
+        self.assertEqual(_pick_best_trailer_key(payload), "trailer-key")
+
+    def test_falls_back_to_teaser_when_no_trailer_exists(self) -> None:
+        payload = {"results": [{"key": "teaser-key", "site": "YouTube", "type": "Teaser", "official": True, "published_at": "2020-01-01"}]}
+        self.assertEqual(_pick_best_trailer_key(payload), "teaser-key")
+
+    def test_official_beats_unofficial_of_the_same_type(self) -> None:
+        payload = {
+            "results": [
+                {"key": "fan-upload", "site": "YouTube", "type": "Trailer", "official": False, "published_at": "2019-01-01"},
+                {"key": "official-upload", "site": "YouTube", "type": "Trailer", "official": True, "published_at": "2020-01-01"},
+            ]
+        }
+        self.assertEqual(_pick_best_trailer_key(payload), "official-upload")
+
+    def test_ignores_non_youtube_sites(self) -> None:
+        payload = {"results": [{"key": "vimeo-key", "site": "Vimeo", "type": "Trailer", "official": True, "published_at": "2020-01-01"}]}
+        self.assertIsNone(_pick_best_trailer_key(payload))
+
+    def test_ignores_unrecognized_video_types(self) -> None:
+        # e.g. "Clip", "Featurette", "Behind the Scenes" -- not something a
+        # details page would want auto-embedded as "the trailer".
+        payload = {"results": [{"key": "clip-key", "site": "YouTube", "type": "Clip", "official": True, "published_at": "2020-01-01"}]}
+        self.assertIsNone(_pick_best_trailer_key(payload))
+
+    def test_ignores_entries_with_no_key(self) -> None:
+        payload = {"results": [{"key": "", "site": "YouTube", "type": "Trailer", "official": True}]}
+        self.assertIsNone(_pick_best_trailer_key(payload))
 
 
 class TmdbClientConstructionTests(unittest.TestCase):
@@ -249,6 +298,29 @@ class TmdbClientDetailsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             client.details("")
 
+    def test_includes_youtube_trailer_key_from_videos_append_to_response(self) -> None:
+        payload = json.dumps(
+            {
+                "id": 603,
+                "title": "The Matrix",
+                "videos": {"results": [{"key": "m8e-FF8MsqU", "site": "YouTube", "type": "Trailer", "official": True, "published_at": "1999-01-01"}]},
+            }
+        ).encode("utf-8")
+        client = TmdbClient("key")
+        with mock.patch("app.movies.tmdb_client.urlopen", return_value=FakeResponse(payload)) as urlopen:
+            details = client.details(603)
+        self.assertEqual(details["youtube_trailer_key"], "m8e-FF8MsqU")
+        # One HTTP round trip covers cast/crew and videos both -- no separate
+        # /credits or /videos call.
+        self.assertIn("append_to_response=credits%2Cvideos", urlopen.call_args[0][0].full_url)
+
+    def test_no_videos_in_payload_yields_none_trailer_key(self) -> None:
+        payload = json.dumps({"id": 603, "title": "The Matrix"}).encode("utf-8")
+        client = TmdbClient("key")
+        with mock.patch("app.movies.tmdb_client.urlopen", return_value=FakeResponse(payload)):
+            details = client.details(603)
+        self.assertIsNone(details["youtube_trailer_key"])
+
     def test_404_raises_tmdb_not_found(self) -> None:
         # TmdbNotFoundError subclasses TmdbUnavailableError -- a caller that
         # only catches the broader type (e.g. the per-movie manual scrape's
@@ -289,6 +361,19 @@ class TmdbClientTvDetailsTests(unittest.TestCase):
         client = TmdbClient("key")
         with self.assertRaises(ValueError):
             client.tv_details("")
+
+    def test_includes_youtube_trailer_key_from_videos_append_to_response(self) -> None:
+        payload = json.dumps(
+            {
+                "id": 1405,
+                "name": "Dexter",
+                "videos": {"results": [{"key": "dexter-trailer", "site": "YouTube", "type": "Trailer", "official": True, "published_at": "2006-01-01"}]},
+            }
+        ).encode("utf-8")
+        client = TmdbClient("key")
+        with mock.patch("app.movies.tmdb_client.urlopen", return_value=FakeResponse(payload)):
+            details = client.tv_details(1405)
+        self.assertEqual(details["youtube_trailer_key"], "dexter-trailer")
 
 
 class TmdbClientTvSeasonDetailsTests(unittest.TestCase):
