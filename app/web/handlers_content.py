@@ -13,13 +13,13 @@ from urllib.parse import quote, unquote
 try:
     from ..common.http_cache import valid_segment
     from ..device.device_control import _resolve_es_systems_effective, _resolve_theme_dir
-    from ..roms.browser_play import SYSTEM_CORE_MAP
+    from ..roms.browser_play import ROMSET_SENSITIVE_SYSTEMS, SYSTEM_CORE_MAP
     from ..storage.rom_metadata_store import _load_rom_metadata_cache
     from .route_config import api_url
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.http_cache import valid_segment  # type: ignore
     from device.device_control import _resolve_es_systems_effective, _resolve_theme_dir  # type: ignore
-    from roms.browser_play import SYSTEM_CORE_MAP  # type: ignore
+    from roms.browser_play import ROMSET_SENSITIVE_SYSTEMS, SYSTEM_CORE_MAP  # type: ignore
     from storage.rom_metadata_store import _load_rom_metadata_cache  # type: ignore
     from web.route_config import api_url  # type: ignore
 
@@ -323,8 +323,17 @@ class HandlersContentMixin:
         or per-ROM ``is_downloadable``. The frontend combines this with the
         same ``is_downloadable`` flag it already uses to gate the Download
         button, so Play in Browser is hidden exactly when Download would be.
+
+        ``romset_sensitive`` flags systems (mame/fba/fbneo) where a vendored
+        core existing doesn't mean a given ROM will actually boot -- see
+        browser_play.ROMSET_SENSITIVE_SYSTEMS -- so the frontend can show a
+        compatibility caveat instead of the plain button it shows elsewhere.
         """
-        self._send_json(200, {"systems": dict(SYSTEM_CORE_MAP)}, cache_key="json:/browser-play/supported-systems")
+        self._send_json(
+            200,
+            {"systems": dict(SYSTEM_CORE_MAP), "romset_sensitive": sorted(ROMSET_SENSITIVE_SYSTEMS)},
+            cache_key="json:/browser-play/supported-systems",
+        )
 
     def _handle_rom_list(
         self,

@@ -354,8 +354,11 @@ def _schemas() -> Dict[str, Schema]:
         "AssetEntry": asset_entry,
         "SystemsResponse": _object({"systems": _array(_ref("SystemSummary"))}, ("systems",), description="Installed systems visible to the Drone UI."),
         "BrowserPlaySupportedSystemsResponse": _object(
-            {"systems": {"type": "object", "additionalProperties": _string("EmulatorJS core id")}},
-            ("systems",),
+            {
+                "systems": {"type": "object", "additionalProperties": _string("EmulatorJS core id")},
+                "romset_sensitive": _array(_string("System name needing an exact romset match to boot (e.g. mame, fbneo)")),
+            },
+            ("systems", "romset_sensitive"),
             description="Batocera system name -> vendored EmulatorJS core id, for the in-browser Play button.",
         ),
         "RomListResponse": _object({"system": _string(), "roms": _array(_ref("AssetEntry"))}, ("system", "roms")),

@@ -3179,11 +3179,16 @@ function parseSystemRomHash(hash) {
   };
 }
 let browserPlaySupportedSystemsPromise = null;
+// Resolves to { systems: {batocera_system: ejs_core_id}, romsetSensitive: Set<system> }.
+// romsetSensitive (mame/fba/fbneo) flags systems where a vendored core existing
+// doesn't mean a given ROM will actually boot -- see browser_play.py's
+// ROMSET_SENSITIVE_SYSTEMS -- so callers can show a compatibility caveat
+// instead of the plain "will work" promise every other system gets.
 function browserPlaySupportedSystems() {
   if (!browserPlaySupportedSystemsPromise) {
     browserPlaySupportedSystemsPromise = api("/browser-play/supported-systems")
-      .then((data) => data.systems || {})
-      .catch(() => ({}));
+      .then((data) => ({ systems: data.systems || {}, romsetSensitive: new Set(data.romset_sensitive || []) }))
+      .catch(() => ({ systems: {}, romsetSensitive: new Set() }));
   }
   return browserPlaySupportedSystemsPromise;
 }
@@ -3229,7 +3234,7 @@ async function renderRomMediaPage(system, uniqueId, page = 1) {
   backBtn.classList.remove("d-none");
   setLoading(true, "Loading ROM media...");
   try {
-    const [romsData, browserPlayCores] = await Promise.all([
+    const [romsData, browserPlayInfo] = await Promise.all([
       getSystemRomData(system),
       browserPlaySupportedSystems(),
       applySystemTheme(system),
@@ -3241,8 +3246,10 @@ async function renderRomMediaPage(system, uniqueId, page = 1) {
     const media = romMediaItems(system, rom);
     const primary = media.find((item) => item.field === "image") || media[0];
     const videoUrl = romVideoUrl(rom);
-    const browserPlayCore = browserPlayCores[String(system || "").toLowerCase()];
+    const systemLower = String(system || "").toLowerCase();
+    const browserPlayCore = browserPlayInfo.systems[systemLower];
     const canPlayInBrowser = Boolean(browserPlayCore) && rom.is_downloadable !== false;
+    const browserPlayRomsetSensitive = canPlayInBrowser && browserPlayInfo.romsetSensitive.has(systemLower);
     titleNode.textContent = rom.title || rom.name || "ROM Media";
     subtitleNode.textContent = `${system} artwork and gamelist.xml metadata`;
     content.innerHTML = `
@@ -3264,6 +3271,11 @@ async function renderRomMediaPage(system, uniqueId, page = 1) {
             : ""
         }
       </div>
+      ${
+        browserPlayRomsetSensitive
+          ? `<div class="alert alert-warning py-2 px-3 small mb-3"><i class="bi bi-exclamation-triangle me-1"></i>Arcade romset compatibility isn't guaranteed in the browser -- this file needs to exactly match the version the browser emulator core expects, which may differ from what runs on the device itself.</div>`
+          : ""
+      }
       <div class="card log-card mb-3">
         <div class="card-body">
           <div class="rom-media-hero">
@@ -3559,14 +3571,14 @@ async function renderSystemsExplorePage() {
   systemsExploreBrowserPlayOnly = false;
   setLoading(true, "Loading systems...");
   try {
-    const [data, biosSummary, browserPlayMap] = await Promise.all([
+    const [data, biosSummary, browserPlayInfo] = await Promise.all([
       getSystemsData(),
       api("/bios?limit=1&offset=0").catch(() => ({ count: 0 })),
       browserPlaySupportedSystems(),
     ]);
     systemsExploreAllSystems = (data.systems || []).slice().sort((a, b) => Number(b.rom_count || 0) - Number(a.rom_count || 0));
     systemsExploreBiosTotal = Number(biosSummary.count || 0);
-    systemsExploreBrowserPlayMap = browserPlayMap || {};
+    systemsExploreBrowserPlayMap = browserPlayInfo.systems || {};
     content.innerHTML = `
       <div class="movie-explorer-overlay">
         <div class="movie-explorer-topbar">

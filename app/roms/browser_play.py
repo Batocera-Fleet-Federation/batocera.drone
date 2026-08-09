@@ -10,13 +10,22 @@ core name directly (matches the vendored file names one-to-one, no alias-table
 guessing needed).
 
 Deliberately excludes systems that would need a threaded/SharedArrayBuffer core
-(psp -- requires cross-origin-isolation headers we don't otherwise need), a
-romset-version-sensitive arcade core (mame/fba -- upstream romset drift makes
-"why won't my arcade game load" a real support burden), or a BIOS+multi-disc-heavy
-setup (saturn, segacd) -- all addressable later without changing this module's shape.
+(psp -- requires cross-origin-isolation headers we don't otherwise need) or a
+BIOS+multi-disc-heavy setup (saturn, segacd) -- both addressable later without
+changing this module's shape.
+
+mame/fba/fbneo are included despite a real compatibility caveat: MAME and
+FBNeo cores are strict about matching one specific upstream romset revision
+(exact per-file CRCs, split-vs-merged conventions, BIOS requirements), and the
+vendored cores here track an older/independent romset generation than
+whatever Batocera's own bundled MAME/FBNeo build expects. A ROM that boots
+fine on the actual device is not guaranteed to boot in the browser core --
+unlike every other system in this map, where "shows up" reliably means "will
+work". ROMSET_SENSITIVE_SYSTEMS flags that caveat for the UI to surface
+instead of silently promising the same reliability as everything else.
 """
 
-from typing import Dict, Optional
+from typing import Dict, FrozenSet, Optional
 
 SYSTEM_CORE_MAP: Dict[str, str] = {
     "nes": "fceumm",
@@ -41,9 +50,23 @@ SYSTEM_CORE_MAP: Dict[str, str] = {
     "atari7800": "prosystem",
     "atari5200": "a5200",
     "3do": "opera",
+    "mame": "mame2003_plus",
+    "fba": "fbneo",
+    "fbneo": "fbneo",
 }
+
+# Systems in SYSTEM_CORE_MAP where core support existing doesn't mean a given
+# ROM will actually boot -- see the module docstring. The frontend uses this
+# to show a compatibility caveat instead of the plain "Play in Browser" button
+# it shows for every other system.
+ROMSET_SENSITIVE_SYSTEMS: FrozenSet[str] = frozenset({"mame", "fba", "fbneo"})
 
 
 def browser_play_core_for_system(system: str) -> Optional[str]:
     """The EmulatorJS core id for ``system``, or ``None`` if unsupported."""
     return SYSTEM_CORE_MAP.get(str(system or "").strip().lower())
+
+
+def browser_play_is_romset_sensitive(system: str) -> bool:
+    """Whether ``system``'s browser core needs an exact romset match to boot."""
+    return str(system or "").strip().lower() in ROMSET_SENSITIVE_SYSTEMS
