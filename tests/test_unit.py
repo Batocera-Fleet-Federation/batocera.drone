@@ -7532,7 +7532,11 @@ class SystemsExplorePageTests(unittest.TestCase):
         systems_helper_start = self.js.index("function systemsExploreVisibleSystems()")
         systems_helper_end = self.js.index("function systemsExploreVisibleCategories()", systems_helper_start)
         systems_body = self.js[systems_helper_start:systems_helper_end]
-        self.assertIn("if (search) return systemsExploreAllSystems.filter(", systems_body)
+        # "base" is systemsExploreAllSystems, optionally narrowed to browser-
+        # playable systems first (see systemsExploreBrowserPlayOnly) -- search
+        # still bypasses the cap/trim on top of whichever of those is in play.
+        self.assertIn("const base = systemsExploreBrowserPlayOnly", systems_body)
+        self.assertIn("if (search) return base.filter(", systems_body)
 
         categories_helper_start = self.js.index("function systemsExploreVisibleCategories()")
         categories_helper_end = self.js.index("function renderSystemsExploreSystemList()", categories_helper_start)

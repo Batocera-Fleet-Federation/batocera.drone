@@ -280,6 +280,7 @@ class ApiRoutesMixin:
                     system=query_params.get("system", [None])[0],
                     genre=query_params.get("genre", [None])[0],
                     query=query_params.get("q", [None])[0],
+                    browser_playable=query_params.get("browser_playable", ["false"])[0].strip().lower() in {"1", "true", "yes"},
                 )
                 return
 

@@ -12,7 +12,7 @@ from unittest import mock
 
 from app.transfer import local_network
 from app.mock_data import seed_mock_userdata
-from app.drone_api import Settings, create_server
+from app.drone_api import RomRepository, Settings, _poll_rom_metadata_once, create_server
 
 
 class MockServerIntegrationTests(unittest.TestCase):
@@ -98,6 +98,15 @@ class MockServerIntegrationTests(unittest.TestCase):
         with urllib.request.urlopen(req, timeout=5) as resp:
             return resp.status, dict(resp.headers), resp.read()
 
+    def _seed_rom_cache(self) -> None:
+        # The relational ROM cache (rom_cache_entries) that /roms (the browse
+        # grid endpoint) reads from is normally built by the background poller
+        # thread -- disabled here (ROM_METADATA_POLL_SECONDS=0, see setUp) so it
+        # can't outlive the test and race others. Running one scan pass
+        # synchronously is the same thing test_unit.py's poll-hashing tests do
+        # to populate it without that thread.
+        _poll_rom_metadata_once(self.settings, RomRepository(self.settings.roms_root, self.settings.bios_root))
+
     def _post_json(self, path: str, payload: dict) -> dict:
         url = f"http://127.0.0.1:{self.port}{path}"
         body = json.dumps(payload).encode("utf-8")
@@ -118,6 +127,31 @@ class MockServerIntegrationTests(unittest.TestCase):
         rom = next(item for item in payload["roms"] if item["rom_file"] == "Chrono Trigger (USA).zip")
         data = self._get_bytes(f"/v1/api/systems/snes/roms/{rom['unique_id']}")
         self.assertEqual(data, b"FAKE-SNES-ROM-1")
+
+    def test_roms_browse_browser_playable_filter_excludes_unsupported_system(self) -> None:
+        # dreamcast has no vendored EmulatorJS core (see browser_play.SYSTEM_CORE_MAP)
+        # and isn't in the mock fixture either way -- either reason yields zero rows,
+        # but this specifically exercises the filter's "system given but not
+        # browser-playable" path rather than just "system doesn't exist".
+        self._seed_rom_cache()
+        payload = self._get_json("/v1/api/roms?browser_playable=1&system=dreamcast")
+        self.assertEqual(payload["count"], 0)
+        self.assertEqual(payload["roms"], [])
+
+    def test_roms_browse_browser_playable_filter_keeps_supported_system(self) -> None:
+        self._seed_rom_cache()
+        payload = self._get_json("/v1/api/roms?browser_playable=1&system=snes")
+        self.assertGreater(payload["count"], 0)
+        self.assertTrue(all(item["system"] == "snes" for item in payload["roms"]))
+
+    def test_roms_browse_browser_playable_filter_without_system_spans_playable_systems(self) -> None:
+        # The mock fixture's systems (snes/gba/psx) are all in SYSTEM_CORE_MAP, so
+        # "all systems" under the filter should still surface every one of them --
+        # this is the "no explicit system" branch, not the single-system one above.
+        self._seed_rom_cache()
+        payload = self._get_json("/v1/api/roms?browser_playable=1&limit=200")
+        systems = {item["system"] for item in payload["roms"]}
+        self.assertTrue({"snes", "gba", "psx"}.issubset(systems))
 
     def test_browser_play_supported_systems_endpoint(self) -> None:
         payload = self._get_json("/v1/api/browser-play/supported-systems")

@@ -407,6 +407,7 @@ class HandlersContentMixin:
         system: Optional[str] = None,
         genre: Optional[str] = None,
         query: Optional[str] = None,
+        browser_playable: bool = False,
     ) -> None:
         """The Systems Browse page's card grid -- games across every system by
         default (``system`` narrows to one), paginated (default/max page
@@ -415,13 +416,27 @@ class HandlersContentMixin:
         -- the same faceted-count convention the Movies Explorer sidebar
         uses, computed server-side here since a ROM library can be far too
         large to ship to the browser in one shot the way the Movies library
-        is (see list_rom_browse_page's docstring)."""
+        is (see list_rom_browse_page's docstring).
+
+        ``browser_playable`` narrows to systems with a vendored EmulatorJS
+        core (see browser_play.SYSTEM_CORE_MAP / the ROM details page's "Play
+        in Browser" button) -- intersected with an explicit ``system``, or
+        standing in for "every system" on its own, so pagination/counts stay
+        correct instead of the frontend fetching a page and re-filtering it
+        down client-side (which would desync from ``count``/``has_more``)."""
         safe_limit = max(1, min(int(limit or 200), 5000))
         safe_offset = max(0, int(offset or 0))
         system_value = str(system or "").strip()
         genre_value = str(genre or "").strip()
         query_value = str(query or "").strip()
-        systems_filter = [system_value] if system_value else None
+        if browser_playable:
+            playable_systems = sorted(SYSTEM_CORE_MAP.keys())
+            if system_value:
+                systems_filter = [system_value] if system_value.lower() in SYSTEM_CORE_MAP else ["__no_match__"]
+            else:
+                systems_filter = playable_systems
+        else:
+            systems_filter = [system_value] if system_value else None
         page = self.repository.list_rom_browse_page(
             systems=systems_filter, genre=genre_value, query=query_value, limit=safe_limit, offset=safe_offset,
         )

@@ -95,6 +95,11 @@ let systemsExploreCategoryFilterQuery = "";
 let systemsExploreSelectedSystem = "";
 let systemsExploreSelectedGenre = "";
 let systemsExploreSearchQuery = "";
+let systemsExploreBrowserPlayOnly = false;
+// Populated once per page load from browserPlaySupportedSystems() (see
+// browserPlayUrl) so the System sidebar list can filter synchronously --
+// that call itself is async/cached, but list rendering isn't.
+let systemsExploreBrowserPlayMap = {};
 let systemsExploreRoms = [];
 let systemsExploreGenreCounts = [];
 let systemsExploreTotal = 0;
@@ -3551,14 +3556,17 @@ async function renderSystemsExplorePage() {
   systemsExploreBiosItems = [];
   systemsExploreDuplicatesMode = false;
   systemsExploreDuplicateGroups = [];
+  systemsExploreBrowserPlayOnly = false;
   setLoading(true, "Loading systems...");
   try {
-    const [data, biosSummary] = await Promise.all([
+    const [data, biosSummary, browserPlayMap] = await Promise.all([
       getSystemsData(),
       api("/bios?limit=1&offset=0").catch(() => ({ count: 0 })),
+      browserPlaySupportedSystems(),
     ]);
     systemsExploreAllSystems = (data.systems || []).slice().sort((a, b) => Number(b.rom_count || 0) - Number(a.rom_count || 0));
     systemsExploreBiosTotal = Number(biosSummary.count || 0);
+    systemsExploreBrowserPlayMap = browserPlayMap || {};
     content.innerHTML = `
       <div class="movie-explorer-overlay">
         <div class="movie-explorer-topbar">
@@ -3566,6 +3574,7 @@ async function renderSystemsExplorePage() {
           <div class="movie-explorer-search flex-grow-1">
             <input id="systemsExploreSearch" type="search" class="form-control" placeholder="Search games" oninput="filterSystemsExplore(this.value)" autofocus>
           </div>
+          <button id="systemsExploreBrowserPlayBtn" class="btn btn-outline-light btn-sm" type="button" title="Show only games playable in Chrome (Play in Browser -- other browsers aren't supported yet)" onclick="toggleSystemsExploreBrowserPlayOnly()"><i class="bi bi-play-circle"></i></button>
           <button id="systemsExploreDuplicatesBtn" class="btn btn-outline-light btn-sm" type="button" title="Find duplicate games" onclick="toggleSystemsExploreDuplicatesMode()"><i class="bi bi-files"></i></button>
         </div>
         <div class="movie-explorer-body">
@@ -3617,9 +3626,12 @@ function renderSystemsExploreSidebarShell() {
   renderSystemsExploreCategoryList();
 }
 function systemsExploreVisibleSystems() {
+  const base = systemsExploreBrowserPlayOnly
+    ? systemsExploreAllSystems.filter((s) => systemsExploreBrowserPlayMap[String(s.name || "").toLowerCase()])
+    : systemsExploreAllSystems;
   const search = systemsExploreSystemFilterQuery.trim().toLowerCase();
-  if (search) return systemsExploreAllSystems.filter((s) => String(s.name || "").toLowerCase().includes(search));
-  return systemsExploreShowAllSystems ? systemsExploreAllSystems : systemsExploreAllSystems.slice(0, SYSTEMS_EXPLORE_TOP_SYSTEM_COUNT);
+  if (search) return base.filter((s) => String(s.name || "").toLowerCase().includes(search));
+  return systemsExploreShowAllSystems ? base : base.slice(0, SYSTEMS_EXPLORE_TOP_SYSTEM_COUNT);
 }
 // The threshold trim (see the constants above) and the top-N-unless-expanded
 // cap are independent steps -- trim first, then cap what's left, so a
@@ -3647,13 +3659,20 @@ function renderSystemsExploreSystemList() {
   `;
   const searching = Boolean(systemsExploreSystemFilterQuery.trim());
   const visibleSystems = systemsExploreVisibleSystems();
-  const totalRoms = systemsExploreAllSystems.reduce((sum, s) => sum + Number(s.rom_count || 0), 0);
+  // "All Systems" here means "all systems currently in scope" -- every system
+  // normally, but only the browser-playable ones while that filter is on --
+  // so its count badge and the "Show more" threshold both match what's
+  // actually reachable instead of counting systems the toggle has hidden.
+  const scopedSystems = systemsExploreBrowserPlayOnly
+    ? systemsExploreAllSystems.filter((s) => systemsExploreBrowserPlayMap[String(s.name || "").toLowerCase()])
+    : systemsExploreAllSystems;
+  const totalRoms = scopedSystems.reduce((sum, s) => sum + Number(s.rom_count || 0), 0);
   // "Show more" only makes sense against the passive top-5 default -- an
   // active search already shows every match, uncapped.
-  const canExpand = !searching && systemsExploreAllSystems.length > SYSTEMS_EXPLORE_TOP_SYSTEM_COUNT;
+  const canExpand = !searching && scopedSystems.length > SYSTEMS_EXPLORE_TOP_SYSTEM_COUNT;
   list.innerHTML = `
     ${searching ? "" : systemButton("", "All Systems", totalRoms)}
-    ${searching ? "" : systemButton(SYSTEMS_EXPLORE_BIOS_KEY, "BIOS", systemsExploreBiosTotal)}
+    ${searching || systemsExploreBrowserPlayOnly ? "" : systemButton(SYSTEMS_EXPLORE_BIOS_KEY, "BIOS", systemsExploreBiosTotal)}
     ${
       visibleSystems.length
         ? visibleSystems.map((s) => systemButton(s.name, s.name, s.rom_count)).join("")
@@ -3755,6 +3774,22 @@ async function toggleSystemsExploreDuplicatesMode() {
   document.getElementById("systemsExploreDuplicatesBtn")?.classList.toggle("active", systemsExploreDuplicatesMode);
   await loadSystemsExploreCurrentMode({ reset: true });
 }
+async function toggleSystemsExploreBrowserPlayOnly() {
+  systemsExploreBrowserPlayOnly = !systemsExploreBrowserPlayOnly;
+  // BIOS isn't a game system and no system outside SYSTEM_CORE_MAP has any
+  // results left once filtered -- both fall back to "All Systems" (playable
+  // systems only) rather than leaving the selection pointed at something
+  // that can only ever show zero results while the toggle is on.
+  const selected = systemsExploreSelectedSystem.toLowerCase();
+  if (systemsExploreBrowserPlayOnly && (selected === SYSTEMS_EXPLORE_BIOS_KEY.toLowerCase() || (selected && !systemsExploreBrowserPlayMap[selected]))) {
+    systemsExploreSelectedSystem = "";
+    updateSystemsExploreHash();
+  }
+  renderSystemsExploreSystemList();
+  renderSystemsExploreCategoryList();
+  document.getElementById("systemsExploreBrowserPlayBtn")?.classList.toggle("active", systemsExploreBrowserPlayOnly);
+  await loadSystemsExploreCurrentMode({ reset: true });
+}
 async function loadSystemsExploreDuplicates() {
   systemsExploreLoadingMore = true;
   renderSystemsExploreGrid();
@@ -3804,6 +3839,7 @@ async function loadSystemsExploreRoms(opts = {}) {
     if (systemsExploreSelectedSystem) params.set("system", systemsExploreSelectedSystem);
     if (systemsExploreSelectedGenre) params.set("genre", systemsExploreSelectedGenre);
     if (systemsExploreSearchQuery.trim()) params.set("q", systemsExploreSearchQuery.trim());
+    if (systemsExploreBrowserPlayOnly) params.set("browser_playable", "1");
     const data = await api(`/roms?${params.toString()}`);
     systemsExploreRoms = reset ? (data.roms || []) : [...systemsExploreRoms, ...(data.roms || [])];
     systemsExploreTotal = Number(data.count || 0);
