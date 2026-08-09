@@ -7462,7 +7462,9 @@ class SystemsExplorePageTests(unittest.TestCase):
         body = self.js[fn_start:fn_end]
         self.assertIn("systemsExploreDuplicatesMode", body)
 
-    def test_sidebar_has_system_and_category_panels_with_top_five_and_counts(self) -> None:
+    def test_sidebar_has_system_and_category_panels_with_show_more_and_counts(self) -> None:
+        self.assertEqual(self.js.count("const SYSTEMS_EXPLORE_TOP_SYSTEM_COUNT = 7;"), 1)
+        self.assertEqual(self.js.count("const SYSTEMS_EXPLORE_TOP_CATEGORY_COUNT = 7;"), 1)
         sidebar_start = self.js.index("function renderSystemsExploreSidebarShell()")
         sidebar_end = self.js.index("function systemsExploreVisibleSystems(", sidebar_start)
         body = self.js[sidebar_start:sidebar_end]
@@ -7568,6 +7570,13 @@ class SystemsExplorePageTests(unittest.TestCase):
         self.assertIn("movieExplorerTypeCount(value)", body)
         self.assertIn("movieExplorerGenreCount(value)", body)
         self.assertIn("movie-explorer-category-count", body)
+        # Genres cap at the top-N default with the same "Show more"/"Show
+        # less" pattern Systems Browse's own System/Category lists use.
+        self.assertIn("MOVIE_EXPLORE_TOP_GENRE_COUNT", body)
+        self.assertIn("Show more", body)
+        self.assertIn("Show less", body)
+        self.assertIn("toggleMovieExplorerShowAllGenres()", body)
+        self.assertEqual(self.js.count("const MOVIE_EXPLORE_TOP_GENRE_COUNT = 7;"), 1)
 
     def test_movies_explorer_paginates_render_with_show_more(self) -> None:
         filter_start = self.js.index("function filterMovieExplorer(")

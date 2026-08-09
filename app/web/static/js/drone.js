@@ -76,8 +76,8 @@ const GAMELIST_EDIT_FIELDS = [
 // (genre) counts are computed server-side, scoped to whatever System/search
 // filter is currently active -- see list_rom_genre_counts.
 const SYSTEMS_EXPLORE_PAGE_SIZE = 200;
-const SYSTEMS_EXPLORE_TOP_SYSTEM_COUNT = 10;
-const SYSTEMS_EXPLORE_TOP_CATEGORY_COUNT = 10;
+const SYSTEMS_EXPLORE_TOP_SYSTEM_COUNT = 7;
+const SYSTEMS_EXPLORE_TOP_CATEGORY_COUNT = 7;
 // Category noise reduction: a device's scraped genre data commonly has a
 // long tail of 1-4-item variants (typos, alternate scraper phrasings, ...)
 // alongside a real set of dominant categories -- hiding the tail only once
@@ -154,6 +154,10 @@ function movieListScrollBucket(hash) {
 // same as the search box already does.
 let movieExplorerTypeFilter = "all";
 let movieExplorerGenreFilter = "";
+// Same top-N-unless-expanded "Show more"/"Show less" pattern as Systems
+// Browse's own System/Category lists (see SYSTEMS_EXPLORE_TOP_*_COUNT).
+const MOVIE_EXPLORE_TOP_GENRE_COUNT = 7;
+let movieExplorerShowAllGenres = false;
 // Duplicate-movie/show finder: an icon-only toggle next to the search box
 // (see renderMovieExplorerPage) that swaps the grid from posters to a flat
 // list of duplicate groups within whatever Type/Genre/search filter is
@@ -1697,6 +1701,7 @@ async function renderMovieExplorerPage() {
   clearSystemTheme();
   movieExplorerTypeFilter = "all";
   movieExplorerGenreFilter = "";
+  movieExplorerShowAllGenres = false;
   movieExploreDisplayLimit = MOVIE_EXPLORE_PAGE_SIZE;
   movieExplorerDuplicatesMode = false;
   movieExplorerDuplicateGroups = [];
@@ -1785,6 +1790,8 @@ function renderMovieExplorerSidebar() {
     </button>
   `;
   const genres = movieExplorerGenres();
+  const visibleGenres = movieExplorerShowAllGenres ? genres : genres.slice(0, MOVIE_EXPLORE_TOP_GENRE_COUNT);
+  const canExpandGenres = genres.length > MOVIE_EXPLORE_TOP_GENRE_COUNT;
   sidebar.innerHTML = `
     <div class="movie-explorer-sidebar-section">
       <div class="movie-explorer-sidebar-title">Type</div>
@@ -1795,9 +1802,18 @@ function renderMovieExplorerSidebar() {
     <div class="movie-explorer-sidebar-section">
       <div class="movie-explorer-sidebar-title">Genres</div>
       ${genreButton("", "All Genres")}
-      ${genres.length ? genres.map((g) => genreButton(g, g)).join("") : `<div class="text-muted small">Scrape movies to see genres.</div>`}
+      ${genres.length ? visibleGenres.map((g) => genreButton(g, g)).join("") : `<div class="text-muted small">Scrape movies to see genres.</div>`}
+      ${canExpandGenres ? `
+        <button type="button" class="movie-explorer-category-btn movie-explorer-sidebar-more-btn" onclick="toggleMovieExplorerShowAllGenres()">
+          ${movieExplorerShowAllGenres ? "Show less" : `Show more (${(genres.length - MOVIE_EXPLORE_TOP_GENRE_COUNT).toLocaleString()})`}
+        </button>
+      ` : ""}
     </div>
   `;
+}
+function toggleMovieExplorerShowAllGenres() {
+  movieExplorerShowAllGenres = !movieExplorerShowAllGenres;
+  renderMovieExplorerSidebar();
 }
 function setMovieExplorerTypeFilter(value) {
   movieExplorerTypeFilter = value;
