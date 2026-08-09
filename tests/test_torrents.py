@@ -2126,7 +2126,7 @@ class TorrentQueueControlTests(unittest.TestCase):
             self.assertEqual(statuses, ["queued"])
             self.assertEqual(len(rpc.method_calls("aria2.unpause")), 0)
 
-    def test_resume_clears_flag_and_unpauses_aria2(self) -> None:
+    def test_resume_clears_flag_and_unpauses_previously_active_gid(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             rpc = FakeRpc()
@@ -2134,14 +2134,58 @@ class TorrentQueueControlTests(unittest.TestCase):
             manager._daemon = FakeDaemon(rpc)
             watch = root / "watch"
             manager.update_settings({"directory": str(watch)})
-            manager.pause()
-            snapshot = manager.resume()
-            self.assertFalse(snapshot["paused"])
-            self.assertEqual(len(rpc.method_calls("aria2.unpauseAll")), 1)
             _write_torrent(watch, "a")
             manager._tick()
+            manager.pause()
+            rpc.calls.clear()
+            snapshot = manager.resume()
+            self.assertFalse(snapshot["paused"])
+            # No aria2.unpauseAll -- resume() targets only the gid(s) already
+            # holding an active slot (see the concurrency-limit regression
+            # test below for why a blanket unpauseAll is wrong here).
+            self.assertEqual(len(rpc.method_calls("aria2.unpauseAll")), 0)
+            self.assertEqual(len(rpc.method_calls("aria2.unpause")), 1)
             statuses = [entry["status"] for entry in manager.snapshot()["torrents"]]
             self.assertEqual(statuses, ["downloading"])
+
+    def test_resume_does_not_exceed_max_concurrent_downloads(self) -> None:
+        # Regression: resume() used to call aria2.unpauseAll, which wakes
+        # every paused gid at once -- including queued-but-added-paused
+        # torrents that pause()'s aria2.pauseAll swept up alongside the
+        # genuinely active ones -- so pausing then resuming started every
+        # torrent instead of respecting max_concurrent_downloads.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = TorrentManager(_build_settings(root), start_worker=False)
+            manager._daemon = FakeDaemon(rpc)
+            watch = root / "watch"
+            manager.update_settings({"directory": str(watch), "max_concurrent_downloads": 2})
+            for name in ("a", "b", "c"):
+                _write_torrent(watch, name)
+            manager._tick()
+            statuses = [entry["status"] for entry in manager.snapshot()["torrents"]]
+            self.assertEqual(statuses.count("downloading"), 2)
+            self.assertEqual(statuses.count("queued"), 1)
+
+            manager.pause()
+            rpc.calls.clear()
+            snapshot = manager.resume()
+            self.assertFalse(snapshot["paused"])
+            self.assertEqual(len(rpc.method_calls("aria2.unpauseAll")), 0)
+            # Only the two gids already downloading get unpaused directly --
+            # the still-queued third does not jump the scheduler.
+            self.assertEqual(len(rpc.method_calls("aria2.unpause")), 2)
+            statuses = [entry["status"] for entry in manager.snapshot()["torrents"]]
+            self.assertEqual(statuses.count("downloading"), 2)
+            self.assertEqual(statuses.count("queued"), 1)
+
+            # A further tick still respects the limit -- the queued entry
+            # doesn't get started until an active slot actually frees up.
+            manager._tick()
+            statuses = [entry["status"] for entry in manager.snapshot()["torrents"]]
+            self.assertEqual(statuses.count("downloading"), 2)
+            self.assertEqual(statuses.count("queued"), 1)
 
     def test_pause_persists_across_restart(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

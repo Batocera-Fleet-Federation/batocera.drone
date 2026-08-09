@@ -1149,15 +1149,31 @@ class TorrentManager:
         return self.snapshot()
 
     def resume(self) -> dict:
+        # Only wake the gids the scheduler had already granted an active slot
+        # to (status == "downloading") -- aria2.unpauseAll would also wake
+        # every merely-queued, added-paused torrent that pause()'s
+        # aria2.pauseAll swept up along with them, blowing straight past
+        # max_concurrent_downloads (confirmed live: pausing then resuming
+        # started every queued torrent at once instead of respecting the
+        # configured limit). Queued entries stay paused here and get picked
+        # up by the normal scheduler on the next tick (_pick_startable_gids_locked),
+        # exactly like a freshly-added torrent waiting for a free slot.
         with self._lock:
             self._paused = False
+            resume_gids = [
+                entry["gid"]
+                for entry in self._torrents.values()
+                if entry.get("status") == "downloading" and entry.get("gid")
+            ]
             self._persist_locked()
         rpc = self._rpc_if_running()
         if rpc is not None:
-            try:
-                rpc.call("aria2.unpauseAll")
-            except Aria2RpcError as error:
-                print(f"Torrent unpauseAll failed: {error}", file=sys.stderr, flush=True)
+            for gid in resume_gids:
+                try:
+                    rpc.call("aria2.unpause", [gid])
+                except Aria2RpcError as error:
+                    if not _CANNOT_BE_UNPAUSED_RE.search(str(error)):
+                        print(f"Torrent resume unpause failed for gid {gid}: {error}", file=sys.stderr, flush=True)
         self.wake()
         return self.snapshot()
 
