@@ -1859,6 +1859,16 @@ def _ensure_game_event_spool(settings: Settings) -> None:
 class DroneThreadingHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
     daemon_threads = True
+    # socketserver's default (5) is a TCP accept backlog, not a request-rate limit --
+    # it's how many not-yet-accepted connections the OS will hold before dropping new
+    # SYNs. 5 is too small for a process that's simultaneously serving the admin UI,
+    # answering peer-mTLS health checks from other paired drones, and polling its own
+    # background pollers -- live diagnostics on a real device caught connections
+    # stuck in SYN-RECV against the peer-mTLS listener at exactly this limit,
+    # producing multi-second delays loading the UI. 256 matches the order of
+    # magnitude every other service on the same device already uses (dropbear,
+    # rpcbind, tailscaled all sit at 1000-4096).
+    request_queue_size = 256
 
     # Per-IP throttle so a chatty unpaired peer (or scanner) can't flood the log
     # with one identical line per connection attempt.

@@ -4405,6 +4405,21 @@ class DroneServerErrorHandlingTests(unittest.TestCase):
         self.assertIn("SSLError", output)
         self.assertNotIn("Traceback", output)
 
+    def test_request_queue_size_is_not_the_stdlib_default(self) -> None:
+        # socketserver's default (5) is a TCP accept backlog too small for a
+        # process that's simultaneously serving the admin UI, answering
+        # peer-mTLS health checks from other paired drones, and running its own
+        # background pollers -- live diagnostics on a real device caught
+        # connections stuck in SYN-RECV against the peer-mTLS listener at
+        # exactly this limit, producing multi-second UI delays. Every
+        # DroneThreadingHTTPServer instance (main HTTPS, compatibility,
+        # peer-mTLS, HTTP redirect, cast-stream) picks this up automatically
+        # since it's a class attribute, not set per call site.
+        import socketserver
+
+        self.assertNotEqual(DroneThreadingHTTPServer.request_queue_size, socketserver.TCPServer.request_queue_size)
+        self.assertGreaterEqual(DroneThreadingHTTPServer.request_queue_size, 128)
+
 
 class DroneTlsHandshakeTests(unittest.TestCase):
     def test_request_handler_has_idle_timeout(self) -> None:
