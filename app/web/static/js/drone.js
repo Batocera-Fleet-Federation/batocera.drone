@@ -363,10 +363,21 @@ function _apiRequestUrl(url) {
   if (url.startsWith("http://") || url.startsWith("https://")) return url;
   return `${API_BASE}${url}`;
 }
+let _sessionExpiredToastShown = false;
 async function _handleApiUnauthorized(res, retry) {
-  // This Drone's own session cookie expired or was never set -- the only
-  // recovery is reloading into the login page.
-  window.location.reload();
+  // This Drone's own session cookie expired or was never set -- reloading
+  // into the login page is the only recovery, but it must not happen
+  // silently out from under the user. A background poll (e.g. the
+  // notifications badge's 20s timer, which runs on every page) can be the
+  // one that first notices an expired session -- on mobile in particular,
+  // where a backgrounded/locked tab often has its session cookie evicted by
+  // the time it's foregrounded again -- and an unconditional reload() right
+  // then would silently wipe out whatever the user was mid-typing (a search
+  // box, a form). Surface it and let them reload when they're ready instead.
+  if (!_sessionExpiredToastShown) {
+    _sessionExpiredToastShown = true;
+    showToast(`Your session has expired. <a href="#" onclick="window.location.reload();return false;" class="alert-link">Reload</a> to log in again.`, "danger", null);
+  }
   throw new Error("Authentication required");
 }
 async function api(url) {

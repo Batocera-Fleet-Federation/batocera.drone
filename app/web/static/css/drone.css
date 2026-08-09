@@ -1889,18 +1889,22 @@
     }
     @media (max-width: 768px) {
       .movie-explorer-body { flex-direction: column; }
+      /* Previously forced the sidebar (and each section within it) into a
+         horizontal row -- title, search box, and the *entire* button list all
+         crammed side by side -- which only looked okay for Movies' short
+         Type/Genre lists. Systems Browse's System/Category lists are longer
+         and independently searchable, so the row layout squeezed everything
+         into an unreadable, uncentered mess (confirmed live at narrow
+         viewport widths). Stacking vertically, full width, matches the
+         desktop layout's own per-section structure (title above search above
+         list) and scales to any list length. */
       .movie-explorer-sidebar {
         position: static;
-        flex-direction: row;
-        flex-wrap: nowrap;
         width: 100%;
-        overflow-x: auto;
-        gap: 1.5rem;
-        padding-bottom: 0.25rem;
+        max-height: none;
+        overflow-y: visible;
       }
-      .movie-explorer-sidebar-section { flex-direction: row; align-items: center; flex: none; }
-      .movie-explorer-sidebar-title { margin-bottom: 0; margin-right: 0.5rem; white-space: nowrap; }
-      .movie-explorer-category-btn { white-space: nowrap; }
+      .movie-explorer-sidebar-search { max-width: none; }
     }
     .movie-explorer-card {
       background: transparent;
