@@ -368,6 +368,62 @@ class FindLocalCoverImageTests(unittest.TestCase):
         self.assertIsNone(music_store.find_local_cover_image(track, self.music_root))
 
 
+class ListMusicUnderArtistFolderTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.userdata = Path(self._tmp.name)
+        self.music_root = self.userdata / "music"
+        self.music_root.mkdir(parents=True)
+        self._db_env = os.environ.get("DRONE_STATE_DATABASE_FILE")
+        os.environ["DRONE_STATE_DATABASE_FILE"] = str(self.userdata / "system" / "drone-app" / "cache.sqlite3")
+
+    def tearDown(self):
+        if self._db_env is None:
+            os.environ.pop("DRONE_STATE_DATABASE_FILE", None)
+        else:
+            os.environ["DRONE_STATE_DATABASE_FILE"] = self._db_env
+        self._tmp.cleanup()
+
+    def _write(self, rel, data=b"x"):
+        path = self.music_root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        return path
+
+    def test_returns_only_tracks_under_the_given_artist_folder(self):
+        self._write("Band/Album/01 - A.mp3")
+        self._write("Band/Album/02 - B.mp3")
+        self._write("Other Band/Album/01 - C.mp3")
+        music_store.sync_music_cache(self.music_root)
+        rows = music_store.list_music_under_artist_folder(self.music_root, "Band")
+        self.assertEqual(sorted(r["file_path"] for r in rows), [
+            "Band/Album/01 - A.mp3", "Band/Album/02 - B.mp3",
+        ])
+
+    def test_does_not_match_a_different_artist_sharing_a_prefix(self):
+        # "Band Extended" must not match a "Band" prefix query.
+        self._write("Band/Album/01 - A.mp3")
+        self._write("Band Extended/Album/01 - B.mp3")
+        music_store.sync_music_cache(self.music_root)
+        rows = music_store.list_music_under_artist_folder(self.music_root, "Band")
+        self.assertEqual([r["file_path"] for r in rows], ["Band/Album/01 - A.mp3"])
+
+    def test_empty_artist_folder_returns_nothing(self):
+        self.assertEqual(music_store.list_music_under_artist_folder(self.music_root, ""), [])
+
+    def test_unknown_artist_folder_returns_nothing(self):
+        self._write("Band/Album/01 - A.mp3")
+        music_store.sync_music_cache(self.music_root)
+        self.assertEqual(music_store.list_music_under_artist_folder(self.music_root, "Nobody"), [])
+
+    def test_artist_name_with_like_wildcard_characters_is_escaped(self):
+        self._write("100% Band/Album/01 - A.mp3")
+        self._write("100X Band/Album/01 - B.mp3")
+        music_store.sync_music_cache(self.music_root)
+        rows = music_store.list_music_under_artist_folder(self.music_root, "100% Band")
+        self.assertEqual([r["file_path"] for r in rows], ["100% Band/Album/01 - A.mp3"])
+
+
 class MusicLikesStoreTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

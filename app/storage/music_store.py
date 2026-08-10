@@ -323,6 +323,27 @@ def list_music(music_root: Path) -> list[dict]:
     ]
 
 
+def list_music_under_artist_folder(music_root: Path, artist_folder: str) -> list[dict]:
+    """Return ``{entry_key, file_path}`` pairs for every track whose
+    ``file_path`` starts with ``<artist_folder>/`` -- a cheap,
+    prefix-scoped alternative to scanning the whole library. Used to find
+    sibling tracks within the same on-disk artist folder (e.g. album-level
+    artwork fallback: if this track has no scraped art of its own, another
+    track from the same album might) without a full-table
+    classify_location pass over every track in the library."""
+    artist_folder = str(artist_folder or "").strip()
+    if not artist_folder:
+        return []
+    escaped = artist_folder.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    pattern = f"{escaped}/%"
+    with _open(music_root) as connection:
+        rows = connection.execute(
+            "SELECT entry_key, file_path FROM music_cache_entries WHERE file_path LIKE ? ESCAPE '\\'",
+            (pattern,),
+        ).fetchall()
+    return [{"entry_key": row[0], "file_path": row[1]} for row in rows]
+
+
 def get_music_by_key(music_root: Path, entry_key: str) -> Optional[dict]:
     """Return one cached music row by its ``entry_key`` (the stable,
     path-based id used to identify a track for streaming/download), or

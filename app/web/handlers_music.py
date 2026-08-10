@@ -254,14 +254,53 @@ class HandlersMusicMixin:
         _music_store.set_music_liked(self.settings.music_root, entry_key, liked)
         self._send_json(200, {"entry_key": entry_key, "liked": liked})
 
+    def _find_album_sibling_art(self, entry_key: str) -> Optional[Path]:
+        """If another track in the same on-disk (artist, album) folder has
+        scraped art of its own, use it -- every track's ``art`` is really
+        just that release's front cover (Cover Art Archive is release-level,
+        not track-level) saved individually per file, so a sibling's copy is
+        exactly as correct as this track's own would have been; the only
+        reason one track has it and another doesn't is a per-download hiccup
+        (a transient fetch failure, or a partial/incremental re-scrape),
+        never a real difference in what the "right" image is. Scoped to
+        tracks under the same artist folder (cheap prefix query, see
+        ``list_music_under_artist_folder``) and then filtered to the exact
+        matching album via ``classify_location``, so an artist with many
+        unrelated albums doesn't cross-contaminate."""
+        track = _music_store.get_music_by_key(self.settings.music_root, entry_key)
+        if not track:
+            return None
+        location = _music_filename_parser.classify_location(track.get("file_path") or "")
+        if not location.artist or not location.album:
+            return None
+        music_root = Path(self.settings.music_root).resolve()
+        candidates = _music_store.list_music_under_artist_folder(self.settings.music_root, location.artist)
+        for candidate in candidates:
+            if candidate["entry_key"] == entry_key:
+                continue
+            candidate_location = _music_filename_parser.classify_location(candidate["file_path"])
+            if candidate_location.album != location.album:
+                continue
+            metadata = _music_store.get_music_metadata(self.settings.music_root, candidate["entry_key"])
+            relative_path = (metadata or {}).get("art_relative_path")
+            if not relative_path:
+                continue
+            target = (music_root / relative_path).resolve()
+            if target == music_root or music_root not in target.parents or not target.is_file():
+                continue
+            return target
+        return None
+
     def _handle_music_artwork(self, entry_key: str, field: str) -> None:
         """Serve scraped album/artist art. Session-gated like every other
         music route (not admin-only) -- viewing artwork for a track you can
         already browse isn't an admin action, only scraping it is.
 
-        Falls back to a conventionally-named local image file on disk
-        (``cover.jpg``/``folder.jpg``/...) when there's no scraped art for
-        the ``art`` field -- never scraped, scraped but Cover Art Archive had
+        Falls back, in order, to: another track's scraped art from the same
+        album (``_find_album_sibling_art``), then a conventionally-named
+        local image file on disk (``cover.jpg``/``folder.jpg``/...) -- for
+        the ``art`` field only, whenever there's no scraped art on this
+        specific track -- never scraped, scraped but Cover Art Archive had
         nothing, or the scraped file went missing from disk. Only ``art``
         gets this fallback, not ``artist`` -- there's no equivalent "this is
         obviously the artist photo" folder-naming convention to trust the
@@ -279,6 +318,8 @@ class HandlersMusicMixin:
             candidate = (music_root / relative_path).resolve()
             if candidate != music_root and music_root in candidate.parents and candidate.is_file():
                 target = candidate
+        if target is None and field == "art":
+            target = self._find_album_sibling_art(entry_key)
         if target is None and field == "art":
             track = _music_store.get_music_by_key(self.settings.music_root, entry_key)
             if track and track.get("absolute_path"):
