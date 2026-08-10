@@ -294,5 +294,130 @@ class MusicMetadataStoreTests(unittest.TestCase):
         self.assertEqual(titles, {"key1": "Scraped Title"})
 
 
+class FindLocalCoverImageTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.userdata = Path(self._tmp.name)
+        self.music_root = self.userdata / "music"
+        self.music_root.mkdir(parents=True)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _write(self, rel, data=b"img-bytes"):
+        path = self.music_root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        return path
+
+    def test_no_image_present_returns_none(self):
+        track = self._write("Band/Album/Track.mp3")
+        self.assertIsNone(music_store.find_local_cover_image(track, self.music_root))
+
+    def test_finds_cover_jpg_beside_the_track(self):
+        track = self._write("Band/Album/Track.mp3")
+        cover = self._write("Band/Album/cover.jpg")
+        self.assertEqual(music_store.find_local_cover_image(track, self.music_root), cover)
+
+    def test_matches_case_insensitively(self):
+        track = self._write("Band/Album/Track.mp3")
+        cover = self._write("Band/Album/Cover.JPG")
+        self.assertEqual(music_store.find_local_cover_image(track, self.music_root), cover)
+
+    def test_recognizes_every_conventional_basename(self):
+        for basename in ("cover", "folder", "album", "front", "art"):
+            with self.subTest(basename=basename):
+                sub_root = self.music_root / basename
+                track_dir = sub_root / "Band" / "Album"
+                track_dir.mkdir(parents=True)
+                track = track_dir / "Track.mp3"
+                track.write_bytes(b"x")
+                image = track_dir / f"{basename}.png"
+                image.write_bytes(b"img")
+                self.assertEqual(music_store.find_local_cover_image(track, sub_root), image)
+
+    def test_ignores_an_unrecognized_image_filename(self):
+        # A folder can contain unrelated images (liner notes scan, a random
+        # screenshot) -- only the conventional basenames count as a match.
+        track = self._write("Band/Album/Track.mp3")
+        self._write("Band/Album/random-photo.jpg")
+        self.assertIsNone(music_store.find_local_cover_image(track, self.music_root))
+
+    def test_falls_back_to_the_artist_folder_one_level_up(self):
+        track = self._write("Band/Album/Track.mp3")
+        cover = self._write("Band/cover.jpg")
+        self.assertEqual(music_store.find_local_cover_image(track, self.music_root), cover)
+
+    def test_prefers_the_track_s_own_folder_over_the_parent(self):
+        track = self._write("Band/Album/Track.mp3")
+        own_cover = self._write("Band/Album/cover.jpg")
+        self._write("Band/cover.jpg")
+        self.assertEqual(music_store.find_local_cover_image(track, self.music_root), own_cover)
+
+    def test_does_not_search_above_the_artist_folder_for_a_singles_track(self):
+        # Artist/Song.mp3 (no album folder) -- the track's own folder IS the
+        # artist folder AND music_root's direct child, so there's no
+        # "one level up" to search that wouldn't just be music_root itself.
+        track = self._write("Solo Artist/Song.mp3")
+        self._write("cover.jpg")  # sitting directly at music_root
+        self.assertIsNone(music_store.find_local_cover_image(track, self.music_root))
+
+    def test_non_matching_suffix_is_ignored(self):
+        track = self._write("Band/Album/Track.mp3")
+        self._write("Band/Album/cover.gif")
+        self.assertIsNone(music_store.find_local_cover_image(track, self.music_root))
+
+
+class MusicLikesStoreTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.userdata = Path(self._tmp.name)
+        self.music_root = self.userdata / "music"
+        self.music_root.mkdir(parents=True)
+        self._db_env = os.environ.get("DRONE_STATE_DATABASE_FILE")
+        os.environ["DRONE_STATE_DATABASE_FILE"] = str(self.userdata / "system" / "drone-app" / "cache.sqlite3")
+
+    def tearDown(self):
+        if self._db_env is None:
+            os.environ.pop("DRONE_STATE_DATABASE_FILE", None)
+        else:
+            os.environ["DRONE_STATE_DATABASE_FILE"] = self._db_env
+        self._tmp.cleanup()
+
+    def test_a_track_is_unliked_by_default(self):
+        self.assertFalse(music_store.is_music_liked(self.music_root, "deadbeef"))
+        self.assertEqual(music_store.list_liked_music_keys(self.music_root), set())
+
+    def test_liking_and_unliking_round_trips(self):
+        music_store.set_music_liked(self.music_root, "deadbeef", True)
+        self.assertTrue(music_store.is_music_liked(self.music_root, "deadbeef"))
+        self.assertEqual(music_store.list_liked_music_keys(self.music_root), {"deadbeef"})
+
+        music_store.set_music_liked(self.music_root, "deadbeef", False)
+        self.assertFalse(music_store.is_music_liked(self.music_root, "deadbeef"))
+        self.assertEqual(music_store.list_liked_music_keys(self.music_root), set())
+
+    def test_liking_an_already_liked_track_is_a_no_op(self):
+        music_store.set_music_liked(self.music_root, "deadbeef", True)
+        music_store.set_music_liked(self.music_root, "deadbeef", True)
+        self.assertEqual(music_store.list_liked_music_keys(self.music_root), {"deadbeef"})
+
+    def test_unliking_a_never_liked_track_is_a_no_op(self):
+        music_store.set_music_liked(self.music_root, "deadbeef", False)
+        self.assertFalse(music_store.is_music_liked(self.music_root, "deadbeef"))
+
+    def test_list_liked_music_keys_only_includes_liked_tracks(self):
+        music_store.set_music_liked(self.music_root, "key1", True)
+        music_store.set_music_liked(self.music_root, "key2", False)
+        self.assertEqual(music_store.list_liked_music_keys(self.music_root), {"key1"})
+
+    def test_liking_is_independent_of_scraped_metadata(self):
+        # A track can be liked whether or not it's ever been scraped -- the
+        # two tables are unrelated.
+        music_store.set_music_liked(self.music_root, "deadbeef", True)
+        self.assertIsNone(music_store.get_music_metadata(self.music_root, "deadbeef"))
+        self.assertTrue(music_store.is_music_liked(self.music_root, "deadbeef"))
+
+
 if __name__ == "__main__":
     unittest.main()

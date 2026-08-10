@@ -68,6 +68,7 @@ class HandlersMusicMixin:
             items = page["items"]
             self._apply_music_display_titles(items)
             self._apply_music_grouping_and_genres(items)
+            self._apply_music_likes(items)
             if not self.settings.downloads_enabled:
                 for item in items:
                     item["is_downloadable"] = False
@@ -92,6 +93,7 @@ class HandlersMusicMixin:
             ]
         self._apply_music_display_titles(items)
         self._apply_music_grouping_and_genres(items)
+        self._apply_music_likes(items)
         if not self.settings.downloads_enabled:
             for item in items:
                 item["is_downloadable"] = False
@@ -150,6 +152,15 @@ class HandlersMusicMixin:
             item["disc_number"] = location.disc_number or track_info.disc_number
             item["track_number"] = track_info.track_number
             item["genres"] = genres_by_key.get(item.get("entry_key")) or []
+
+    def _apply_music_likes(self, items: list) -> None:
+        """Overlay ``liked`` (bool) from the liked-keys set -- one bulk
+        lookup per list call, same shape as ``_apply_music_display_titles``/
+        ``_apply_music_grouping_and_genres``, feeding the Music Explorer's
+        Likes filter section without a per-track request."""
+        liked_keys = _music_store.list_liked_music_keys(self.settings.music_root)
+        for item in items:
+            item["liked"] = item.get("entry_key") in liked_keys
 
     def _resolve_music_path(self, entry_key: str) -> Path:
         """Look up a track by its stable id and validate the resolved path
@@ -227,12 +238,34 @@ class HandlersMusicMixin:
         # (not the raw track_name) -- see that method's docstring for why.
         track["display_title"] = (metadata or {}).get("title") or track_info.title or track.get("track_name") or ""
         track["metadata"] = metadata
+        track["liked"] = _music_store.is_music_liked(self.settings.music_root, entry_key)
         self._send_json(200, track)
+
+    def _handle_music_like(self, entry_key: str, payload: dict) -> None:
+        """Toggle-or-set a track's liked flag. Not admin-gated -- liking a
+        track you can already browse/play isn't an admin action, same as
+        every other route in this module (see the module docstring)."""
+        track = _music_store.get_music_by_key(self.settings.music_root, entry_key)
+        if not track:
+            self._send_json(404, {"error": "unknown track"})
+            return
+        payload = payload if isinstance(payload, dict) else {}
+        liked = bool(payload.get("liked", True))
+        _music_store.set_music_liked(self.settings.music_root, entry_key, liked)
+        self._send_json(200, {"entry_key": entry_key, "liked": liked})
 
     def _handle_music_artwork(self, entry_key: str, field: str) -> None:
         """Serve scraped album/artist art. Session-gated like every other
         music route (not admin-only) -- viewing artwork for a track you can
-        already browse isn't an admin action, only scraping it is."""
+        already browse isn't an admin action, only scraping it is.
+
+        Falls back to a conventionally-named local image file on disk
+        (``cover.jpg``/``folder.jpg``/...) when there's no scraped art for
+        the ``art`` field -- never scraped, scraped but Cover Art Archive had
+        nothing, or the scraped file went missing from disk. Only ``art``
+        gets this fallback, not ``artist`` -- there's no equivalent "this is
+        obviously the artist photo" folder-naming convention to trust the
+        way there is for album/track cover art."""
         column = _ARTWORK_FIELD_COLUMNS.get(str(field or ""))
         if not column:
             raise FileNotFoundError()
@@ -240,11 +273,17 @@ class HandlersMusicMixin:
             raise FileNotFoundError()
         metadata = _music_store.get_music_metadata(self.settings.music_root, entry_key)
         relative_path = (metadata or {}).get(column)
-        if not relative_path:
-            raise FileNotFoundError()
         music_root = Path(self.settings.music_root).resolve()
-        target = (music_root / relative_path).resolve()
-        if target == music_root or music_root not in target.parents or not target.is_file():
+        target: Optional[Path] = None
+        if relative_path:
+            candidate = (music_root / relative_path).resolve()
+            if candidate != music_root and music_root in candidate.parents and candidate.is_file():
+                target = candidate
+        if target is None and field == "art":
+            track = _music_store.get_music_by_key(self.settings.music_root, entry_key)
+            if track and track.get("absolute_path"):
+                target = _music_store.find_local_cover_image(Path(track["absolute_path"]), music_root)
+        if target is None:
             raise FileNotFoundError()
         # Same helper ROM/movie artwork use (handlers_peer.py): server-side
         # in-memory cache (keyed by mtime) plus a browser-facing

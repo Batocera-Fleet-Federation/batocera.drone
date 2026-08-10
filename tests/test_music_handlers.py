@@ -274,6 +274,83 @@ class MusicListHandlerTests(unittest.TestCase):
             self.assertEqual(payload2["music"][0]["genres"], ["Rock"])
 
 
+class MusicLikeHandlerTests(unittest.TestCase):
+    def test_list_marks_liked_tracks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_track(root, "Artist/Track.mp3", b"x")
+            settings = _build_settings(root)
+            music_store.sync_music_cache(settings.music_root)
+            entry_key = music_store.list_music(settings.music_root)[0]["entry_key"]
+            music_store.set_music_liked(settings.music_root, entry_key, True)
+            handler = _handler(settings)
+            handler._handle_music_list()
+            _status, payload = handler.json_response
+            self.assertTrue(payload["music"][0]["liked"])
+
+    def test_list_marks_unliked_tracks_false(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_track(root, "Artist/Track.mp3", b"x")
+            settings = _build_settings(root)
+            music_store.sync_music_cache(settings.music_root)
+            handler = _handler(settings)
+            handler._handle_music_list()
+            _status, payload = handler.json_response
+            self.assertFalse(payload["music"][0]["liked"])
+
+    def test_detail_reflects_liked_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_track(root, "Artist/Track.mp3", b"x")
+            settings = _build_settings(root)
+            music_store.sync_music_cache(settings.music_root)
+            entry_key = music_store.list_music(settings.music_root)[0]["entry_key"]
+            music_store.set_music_liked(settings.music_root, entry_key, True)
+            handler = _handler(settings)
+            handler._handle_music_detail(entry_key)
+            _status, payload = handler.json_response
+            self.assertTrue(payload["liked"])
+
+    def test_like_toggle_sets_liked_true_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_track(root, "Artist/Track.mp3", b"x")
+            settings = _build_settings(root)
+            music_store.sync_music_cache(settings.music_root)
+            entry_key = music_store.list_music(settings.music_root)[0]["entry_key"]
+            handler = _handler(settings)
+            handler._handle_music_like(entry_key, {})
+            status, payload = handler.json_response
+            self.assertEqual(status, 200)
+            self.assertEqual(payload, {"entry_key": entry_key, "liked": True})
+            self.assertTrue(music_store.is_music_liked(settings.music_root, entry_key))
+
+    def test_like_toggle_can_explicitly_unlike(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_track(root, "Artist/Track.mp3", b"x")
+            settings = _build_settings(root)
+            music_store.sync_music_cache(settings.music_root)
+            entry_key = music_store.list_music(settings.music_root)[0]["entry_key"]
+            music_store.set_music_liked(settings.music_root, entry_key, True)
+            handler = _handler(settings)
+            handler._handle_music_like(entry_key, {"liked": False})
+            status, payload = handler.json_response
+            self.assertEqual(status, 200)
+            self.assertEqual(payload, {"entry_key": entry_key, "liked": False})
+            self.assertFalse(music_store.is_music_liked(settings.music_root, entry_key))
+
+    def test_like_unknown_track_is_404(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            handler = _handler(settings)
+            handler._handle_music_like("deadbeef", {"liked": True})
+            status, payload = handler.json_response
+            self.assertEqual(status, 404)
+            self.assertIn("error", payload)
+
+
 class ResolveMusicPathTests(unittest.TestCase):
     def test_unknown_entry_key_raises_not_found(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -495,6 +572,96 @@ class MusicArtworkHandlerTests(unittest.TestCase):
             handler = _handler(settings)
             with self.assertRaises(FileNotFoundError):
                 handler._handle_music_artwork(entry_key, "art")
+
+
+class MusicArtworkLocalFallbackHandlerTests(unittest.TestCase):
+    """A track with no *scraped* art falls back to a conventionally-named
+    local image file beside it on disk -- see
+    handlers_music._handle_music_artwork's docstring and
+    music_store.find_local_cover_image."""
+
+    def test_falls_back_to_local_cover_image_when_never_scraped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_track(root, "Band/Album/Track.mp3", b"x")
+            cover_path = root / "music" / "Band" / "Album" / "cover.jpg"
+            cover_path.write_bytes(b"local-cover-bytes")
+            settings = _build_settings(root)
+            music_store.sync_music_cache(settings.music_root)
+            entry_key = music_store.list_music(settings.music_root)[0]["entry_key"]
+            handler = _handler(settings)
+            handler._handle_music_artwork(entry_key, "art")
+            self.assertEqual(handler.response_status, 200)
+            self.assertEqual(handler.wfile.getvalue(), b"local-cover-bytes")
+
+    def test_scraped_with_no_art_found_still_falls_back_to_local_cover_image(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_track(root, "Band/Album/Track.mp3", b"x")
+            cover_path = root / "music" / "Band" / "Album" / "folder.png"
+            cover_path.write_bytes(b"local-folder-bytes")
+            settings = _build_settings(root)
+            music_store.sync_music_cache(settings.music_root)
+            entry_key = music_store.list_music(settings.music_root)[0]["entry_key"]
+            # A scrape that matched but Cover Art Archive had no image for
+            # the release -- art_relative_path stays None even though a
+            # metadata row exists.
+            music_store.save_music_metadata(
+                settings.music_root, entry_key, provider="musicbrainz", provider_id="1", title="Track",
+                art_relative_path=None, artist_art_relative_path=None, extra={},
+            )
+            handler = _handler(settings)
+            handler._handle_music_artwork(entry_key, "art")
+            self.assertEqual(handler.response_status, 200)
+            self.assertEqual(handler.wfile.getvalue(), b"local-folder-bytes")
+
+    def test_scraped_art_takes_priority_over_a_local_cover_image(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings, entry_key = self._scraped_settings_with_art(root)
+            cover_path = root / "music" / "Band" / "Album" / "cover.jpg"
+            cover_path.write_bytes(b"local-cover-bytes")
+            handler = _handler(settings)
+            handler._handle_music_artwork(entry_key, "art")
+            self.assertEqual(handler.wfile.getvalue(), b"scraped-art-bytes")
+
+    def test_local_fallback_does_not_apply_to_the_artist_field(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_track(root, "Band/Album/Track.mp3", b"x")
+            cover_path = root / "music" / "Band" / "Album" / "cover.jpg"
+            cover_path.write_bytes(b"local-cover-bytes")
+            settings = _build_settings(root)
+            music_store.sync_music_cache(settings.music_root)
+            entry_key = music_store.list_music(settings.music_root)[0]["entry_key"]
+            handler = _handler(settings)
+            with self.assertRaises(FileNotFoundError):
+                handler._handle_music_artwork(entry_key, "artist")
+
+    def test_neither_scraped_nor_local_art_raises_not_found(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_track(root, "Band/Album/Track.mp3", b"x")
+            settings = _build_settings(root)
+            music_store.sync_music_cache(settings.music_root)
+            entry_key = music_store.list_music(settings.music_root)[0]["entry_key"]
+            handler = _handler(settings)
+            with self.assertRaises(FileNotFoundError):
+                handler._handle_music_artwork(entry_key, "art")
+
+    def _scraped_settings_with_art(self, root: Path):
+        _write_track(root, "Band/Album/Track.mp3", b"x")
+        settings = _build_settings(root)
+        music_store.sync_music_cache(settings.music_root)
+        entry_key = music_store.list_music(settings.music_root)[0]["entry_key"]
+        art_path = root / "music" / "images" / "art.jpg"
+        art_path.parent.mkdir(parents=True, exist_ok=True)
+        art_path.write_bytes(b"scraped-art-bytes")
+        music_store.save_music_metadata(
+            settings.music_root, entry_key, provider="musicbrainz", provider_id="1", title="Track",
+            art_relative_path="images/art.jpg", artist_art_relative_path=None, extra={},
+        )
+        return settings, entry_key
 
 
 class MusicDeleteHandlerTests(unittest.TestCase):

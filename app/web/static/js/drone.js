@@ -132,6 +132,10 @@ let musicAllRows = [];
 let musicExplorerGenreFilter = "";
 let musicExplorerShowAllGenres = false;
 const MUSIC_EXPLORE_TOP_GENRE_COUNT = 7;
+let musicExplorerArtistFilter = "";
+let musicExplorerShowAllArtists = false;
+const MUSIC_EXPLORE_TOP_ARTIST_COUNT = 7;
+let musicExplorerLikedFilter = false;
 const MUSIC_EXPLORE_PAGE_SIZE = 200;
 let musicExploreDisplayLimit = MUSIC_EXPLORE_PAGE_SIZE;
 // Scroll position of the Movies/Systems Browse list views, keyed by a fixed
@@ -2355,27 +2359,91 @@ function musicSortableGroupKey(entry) {
   const secondary = entry.isAlbumGroup ? entry.album || "" : entry.display_title || entry.track_name || "";
   return `${artist} ${secondary}`.toLowerCase();
 }
+// Each facet's counts hold the *other* active facets fixed and ask "how many
+// would match if this were selected instead" -- same faceted-search
+// convention the Movies Explorer's Type/Genre sidebar uses (see
+// movieExplorerTypeCount/movieExplorerGenreCount) -- rather than a flat
+// unfiltered total for every button. musicExplorerFilteredRows composes all
+// three facets (Artist/Genre/Likes) so each facet's count function only has
+// to exclude itself, not hand-chain the other two.
+function musicExplorerRowsMatchingArtist(rows, value) {
+  if (!value) return rows;
+  return rows.filter((m) => (m.artist || "") === value);
+}
+function musicExplorerRowsMatchingGenre(rows, value) {
+  if (!value) return rows;
+  return rows.filter((m) => (m.genres || []).includes(value));
+}
+function musicExplorerRowsMatchingLiked(rows, value) {
+  if (!value) return rows;
+  return rows.filter((m) => !!m.liked);
+}
+function musicExplorerFilteredRows(opts = {}) {
+  let rows = musicAllRows;
+  if (!opts.excludeArtist) rows = musicExplorerRowsMatchingArtist(rows, musicExplorerArtistFilter);
+  if (!opts.excludeGenre) rows = musicExplorerRowsMatchingGenre(rows, musicExplorerGenreFilter);
+  if (!opts.excludeLiked) rows = musicExplorerRowsMatchingLiked(rows, musicExplorerLikedFilter);
+  return rows;
+}
+function musicExplorerArtists() {
+  const artists = new Set();
+  musicAllRows.forEach((m) => { if (m.artist) artists.add(m.artist); });
+  return [...artists].sort((a, b) => musicExplorerArtistCount(b) - musicExplorerArtistCount(a) || movieSortableTitle(a).localeCompare(movieSortableTitle(b)));
+}
+function musicExplorerArtistCount(value) {
+  return musicExplorerRowsMatchingArtist(musicExplorerFilteredRows({ excludeArtist: true }), value).length;
+}
 function musicExplorerGenres() {
   const genres = new Set();
   musicAllRows.forEach((m) => (m.genres || []).forEach((g) => g && genres.add(g)));
   return [...genres].sort((a, b) => musicExplorerGenreCount(b) - musicExplorerGenreCount(a) || a.localeCompare(b));
 }
 function musicExplorerGenreCount(value) {
-  if (!value) return musicAllRows.length;
-  return musicAllRows.filter((m) => (m.genres || []).includes(value)).length;
+  return musicExplorerRowsMatchingGenre(musicExplorerFilteredRows({ excludeGenre: true }), value).length;
+}
+function musicExplorerLikedCount(value) {
+  return musicExplorerRowsMatchingLiked(musicExplorerFilteredRows({ excludeLiked: true }), value).length;
 }
 function renderMusicExplorerSidebar() {
   const sidebar = document.getElementById("music-explorer-sidebar");
   if (!sidebar) return;
+  const artistButton = (value, label) => `
+    <button type="button" class="movie-explorer-category-btn ${musicExplorerArtistFilter === value ? "active" : ""}" onclick="setMusicExplorerArtistFilter(${jsAttr(value)})">
+      <span class="text-truncate">${escapeHtml(label)}</span><span class="movie-explorer-category-count">${musicExplorerArtistCount(value).toLocaleString()}</span>
+    </button>
+  `;
   const genreButton = (value, label) => `
     <button type="button" class="movie-explorer-category-btn ${musicExplorerGenreFilter === value ? "active" : ""}" onclick="setMusicExplorerGenreFilter(${jsAttr(value)})">
       <span>${escapeHtml(label)}</span><span class="movie-explorer-category-count">${musicExplorerGenreCount(value).toLocaleString()}</span>
     </button>
   `;
+  const likedButton = (value, label) => `
+    <button type="button" class="movie-explorer-category-btn ${musicExplorerLikedFilter === value ? "active" : ""}" onclick="setMusicExplorerLikedFilter(${value ? "true" : "false"})">
+      <span>${label}</span><span class="movie-explorer-category-count">${musicExplorerLikedCount(value).toLocaleString()}</span>
+    </button>
+  `;
+  const artists = musicExplorerArtists();
+  const visibleArtists = musicExplorerShowAllArtists ? artists : artists.slice(0, MUSIC_EXPLORE_TOP_ARTIST_COUNT);
+  const canExpandArtists = artists.length > MUSIC_EXPLORE_TOP_ARTIST_COUNT;
   const genres = musicExplorerGenres();
   const visibleGenres = musicExplorerShowAllGenres ? genres : genres.slice(0, MUSIC_EXPLORE_TOP_GENRE_COUNT);
   const canExpandGenres = genres.length > MUSIC_EXPLORE_TOP_GENRE_COUNT;
   sidebar.innerHTML = `
+    <div class="movie-explorer-sidebar-section">
+      <div class="movie-explorer-sidebar-title">Likes</div>
+      ${likedButton(false, "All Tracks")}
+      ${likedButton(true, `<i class="bi bi-hand-thumbs-up-fill me-1"></i>Liked`)}
+    </div>
+    <div class="movie-explorer-sidebar-section">
+      <div class="movie-explorer-sidebar-title">Artists</div>
+      ${artistButton("", "All Artists")}
+      ${artists.length ? visibleArtists.map((a) => artistButton(a, a)).join("") : `<div class="text-muted small">No artists found yet.</div>`}
+      ${canExpandArtists ? `
+        <button type="button" class="movie-explorer-category-btn movie-explorer-sidebar-more-btn" onclick="toggleMusicExplorerShowAllArtists()">
+          ${musicExplorerShowAllArtists ? "Show less" : `Show more (${(artists.length - MUSIC_EXPLORE_TOP_ARTIST_COUNT).toLocaleString()})`}
+        </button>
+      ` : ""}
+    </div>
     <div class="movie-explorer-sidebar-section">
       <div class="movie-explorer-sidebar-title">Genres</div>
       ${genreButton("", "All Genres")}
@@ -2387,6 +2455,20 @@ function renderMusicExplorerSidebar() {
       ` : ""}
     </div>
   `;
+}
+function setMusicExplorerLikedFilter(value) {
+  musicExplorerLikedFilter = value;
+  renderMusicExplorerSidebar();
+  filterMusicExplorer(document.getElementById("musicExplorerSearch")?.value || "");
+}
+function toggleMusicExplorerShowAllArtists() {
+  musicExplorerShowAllArtists = !musicExplorerShowAllArtists;
+  renderMusicExplorerSidebar();
+}
+function setMusicExplorerArtistFilter(value) {
+  musicExplorerArtistFilter = value;
+  renderMusicExplorerSidebar();
+  filterMusicExplorer(document.getElementById("musicExplorerSearch")?.value || "");
 }
 function toggleMusicExplorerShowAllGenres() {
   musicExplorerShowAllGenres = !musicExplorerShowAllGenres;
@@ -2406,9 +2488,7 @@ function filterMusicExplorer(queryValue, opts = {}) {
     musicExploreDisplayLimit = MUSIC_EXPLORE_PAGE_SIZE;
   }
   const filter = String(queryValue || "").trim().toLowerCase();
-  let rows = musicExplorerGenreFilter
-    ? musicAllRows.filter((m) => (m.genres || []).includes(musicExplorerGenreFilter))
-    : musicAllRows;
+  let rows = musicExplorerFilteredRows();
   if (filter) {
     rows = rows.filter((m) =>
       (m.display_title || m.track_name || m.name || "").toLowerCase().includes(filter)
@@ -2460,6 +2540,9 @@ async function renderMusicExplorerPage() {
   clearSystemTheme();
   musicExplorerGenreFilter = "";
   musicExplorerShowAllGenres = false;
+  musicExplorerArtistFilter = "";
+  musicExplorerShowAllArtists = false;
+  musicExplorerLikedFilter = false;
   musicExploreDisplayLimit = MUSIC_EXPLORE_PAGE_SIZE;
   setLoading(true, "Loading music...");
   try {
@@ -2549,18 +2632,20 @@ async function renderArtistDetailsPage(artist, albumParam) {
       detail = null; // unscraped album -- render with no art rather than failing the page
     }
     const meta = detail && detail.metadata;
-    const artUrl = meta && meta.art_relative_path ? musicArtworkUrl(representative.entry_key, "art") : null;
+    // Always attempt the artwork URL rather than gating on scraped metadata
+    // -- the endpoint itself falls back to a local cover.jpg/folder.jpg on
+    // disk when nothing's been scraped (see handlers_music._handle_music_artwork),
+    // so an unscraped album can still show real art; onerror below covers
+    // the case where neither exists.
+    const artUrl = musicArtworkUrl(representative.entry_key, "art");
     const genres = (meta && meta.genres) || [];
     const albumLabel = selectedAlbum || "Singles";
     content.innerHTML = `
       <button class="btn btn-outline-secondary btn-sm mb-3" type="button" onclick="setHash('#music')"><i class="bi bi-arrow-left me-1"></i>Back to Music</button>
       <div class="movie-detail-hero">
         <div class="movie-detail-hero-body">
-          ${
-            artUrl
-              ? `<img class="movie-detail-poster" src="${escapeHtml(artUrl)}" alt="">`
-              : `<div class="movie-detail-poster movie-detail-poster-placeholder"><i class="bi bi-music-note-beamed"></i></div>`
-          }
+          <img class="movie-detail-poster" src="${escapeHtml(artUrl)}" alt="" onerror="this.style.display='none'; this.nextElementSibling.classList.remove('d-none');">
+          <div class="movie-detail-poster movie-detail-poster-placeholder d-none"><i class="bi bi-music-note-beamed"></i></div>
           <div class="movie-detail-info min-width-0">
             <div class="small text-muted mb-1"><span class="badge text-bg-info me-2">Artist</span>${albumTracks.length} track${albumTracks.length === 1 ? "" : "s"}</div>
             <h2 class="movie-detail-title" title="${escapeHtml(artist)}">${escapeHtml(artist)} &middot; ${escapeHtml(albumLabel)}</h2>
@@ -2595,10 +2680,12 @@ function renderArtistDetailTrackRow(track, artist, album) {
   const label = track.track_number != null
     ? `${String(track.track_number).padStart(2, "0")} - ${track.display_title || track.track_name || ""}`
     : (track.display_title || track.track_name || "");
+  const liked = !!track.liked;
   return `
     <div class="list-group-item d-flex align-items-center justify-content-between gap-2 bg-transparent">
       <button type="button" class="btn btn-link btn-sm p-0 text-start text-truncate min-width-0" title="${escapeHtml(track.file_path || track.track_name || "")}" onclick="setHash(musicDetailHash(${jsAttr(track.entry_key)}))">${escapeHtml(label)}</button>
       <div class="d-flex gap-2 text-nowrap">
+        ${musicLikeButtonHtml(track.entry_key, liked, "icon")}
         <button class="btn btn-outline-primary btn-sm" type="button" title="Play" onclick="playMusicTrackFromAlbum(${jsAttr(track.entry_key)}, ${jsAttr(artist)}, ${jsAttr(album)})"><i class="bi bi-play-circle"></i></button>
         ${
           track.is_downloadable === false
@@ -2608,6 +2695,37 @@ function renderArtistDetailTrackRow(track, artist, album) {
       </div>
     </div>
   `;
+}
+// Shared like-button markup for both the track-row (icon-only, btn-sm) and
+// track-detail-page (icon+text) call sites, so toggleMusicLike has one
+// consistent shape to rebuild after a toggle instead of two.
+function musicLikeButtonHtml(entryKey, liked, variant) {
+  const sizeClass = variant === "icon" ? " btn-sm" : "";
+  const iconClass = liked ? "bi-hand-thumbs-up-fill" : "bi-hand-thumbs-up";
+  const label = variant === "text" ? (liked ? "Liked" : "Like") : "";
+  return `<button class="btn${sizeClass} ${liked ? "btn-primary" : "btn-outline-secondary"}" type="button" data-variant="${variant}" title="${liked ? "Unlike" : "Like"}" onclick="toggleMusicLike(${jsAttr(entryKey)}, ${liked}, this)"><i class="bi ${iconClass}${label ? " me-1" : ""}"></i>${label}</button>`;
+}
+// Toggles a track's liked flag and patches the DOM in place (no full
+// re-render) -- mirrors the lightweight optimistic-update shape used
+// elsewhere in this file (e.g. deleteMusicScraperMetadata re-renders the
+// whole card, but a single icon toggle doesn't need that). Also patches
+// musicAllRows in place so the Likes sidebar filter/count reflects the
+// change immediately without a re-fetch.
+async function toggleMusicLike(entryKey, likedNow, button) {
+  const nextLiked = !likedNow;
+  if (button) button.disabled = true;
+  try {
+    await apiPost(`/music/${encodeURIComponent(entryKey)}/like`, { liked: nextLiked });
+    const row = musicAllRows.find((m) => m.entry_key === entryKey);
+    if (row) row.liked = nextLiked;
+    if (button) {
+      const variant = button.dataset.variant || "icon";
+      button.outerHTML = musicLikeButtonHtml(entryKey, nextLiked, variant);
+    }
+  } catch (err) {
+    showToast(`Failed to update like: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    if (button) button.disabled = false;
+  }
 }
 async function renderMusicDetailsPage(entryKey) {
   currentSystemContext = null;
@@ -2631,7 +2749,10 @@ function renderMusicDetailShell(track) {
   const rawName = track.track_name || track.name || "";
   const title = track.display_title || rawName;
   const entryKey = track.entry_key;
-  const artUrl = meta && meta.art_relative_path ? musicArtworkUrl(entryKey, "art") : null;
+  // Always attempt the artwork URL -- see the matching comment in the
+  // artist/album detail page for why (local cover.jpg/folder.jpg fallback
+  // lives server-side in _handle_music_artwork).
+  const artUrl = musicArtworkUrl(entryKey, "art");
   const genres = (meta && meta.genres) || [];
   const artistLabel = (meta && meta.artist) || track.artist || "";
   const albumLabel = (meta && meta.album) || track.album || "";
@@ -2640,17 +2761,15 @@ function renderMusicDetailShell(track) {
     <button class="btn btn-outline-secondary btn-sm mb-3" type="button" onclick="setHash('#music')"><i class="bi bi-arrow-left me-1"></i>Back to Music</button>
     <div class="movie-detail-hero">
       <div class="movie-detail-hero-body">
-        ${
-          artUrl
-            ? `<img class="movie-detail-poster" src="${escapeHtml(artUrl)}" alt="">`
-            : `<div class="movie-detail-poster movie-detail-poster-placeholder"><i class="bi bi-music-note-beamed"></i></div>`
-        }
+        <img class="movie-detail-poster" src="${escapeHtml(artUrl)}" alt="" onerror="this.style.display='none'; this.nextElementSibling.classList.remove('d-none');">
+        <div class="movie-detail-poster movie-detail-poster-placeholder d-none"><i class="bi bi-music-note-beamed"></i></div>
         <div class="movie-detail-info min-width-0">
           <h2 class="movie-detail-title" title="${escapeHtml(title)}">${escapeHtml(title)}</h2>
           ${metaBits.length ? `<div class="text-muted small mb-2">${metaBits.map((bit) => escapeHtml(bit)).join(" &middot; ")}</div>` : ""}
           ${genres.length ? `<div class="mb-3">${genres.map((g) => `<span class="badge movie-genre-badge">${escapeHtml(g)}</span>`).join(" ")}</div>` : ""}
           <div class="d-flex flex-wrap gap-2 mb-2">
             <button class="btn btn-primary" type="button" onclick="playMusicTrack(${jsAttr(entryKey)}, ${jsAttr(title)}, ${jsAttr(artistLabel)})"><i class="bi bi-play-circle me-1"></i>Play</button>
+            ${musicLikeButtonHtml(entryKey, !!track.liked, "text")}
             ${
               track.is_downloadable === false
                 ? `<button class="btn btn-outline-secondary" type="button" disabled><i class="bi bi-slash-circle me-1"></i>Downloads disabled</button>`

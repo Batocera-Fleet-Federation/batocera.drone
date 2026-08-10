@@ -57,6 +57,17 @@ _AUDIO_SUFFIXES = {
     ".mp3", ".flac", ".ogg", ".opus", ".m4a", ".wav", ".wma", ".aac", ".aiff", ".ape",
 }
 
+# Conventionally-named local cover art -- the same "folder.jpg"/"cover.jpg"
+# convention Plex/Kodi/most media servers already recognize. Used as a
+# fallback when a track has no *scraped* art (never scraped, or scraped but
+# Cover Art Archive had nothing for that release) -- see
+# find_local_cover_image. Deliberately an allowlist of exact basenames, not
+# "the first image file in the folder": a folder can contain unrelated
+# images (a scan of liner notes, a random screenshot) that would be a wrong
+# guess to show as cover art.
+_COVER_IMAGE_BASENAMES = ("cover", "folder", "album", "front", "art")
+_COVER_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
+
 
 def default_music_root() -> Path:
     return Path(os.environ.get("MUSIC_ROOT", "/userdata/music"))
@@ -150,6 +161,13 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
         "entry_key TEXT PRIMARY KEY, provider TEXT NOT NULL, provider_id TEXT NOT NULL, "
         "title TEXT NOT NULL DEFAULT '', art_relative_path TEXT, artist_art_relative_path TEXT, "
         "scraped_at TEXT NOT NULL, extra_json TEXT NOT NULL DEFAULT '{}')"
+    )
+    # A liked track's row simply exists -- no "liked BOOLEAN" column with a
+    # value to keep in sync, just presence/absence, same shape as the
+    # cache_changes queue above. Independent of music_metadata_entries: a
+    # track can be liked whether or not it's ever been scraped.
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS music_likes (entry_key TEXT PRIMARY KEY, liked_at TEXT NOT NULL)"
     )
     connection.commit()
 
@@ -351,6 +369,38 @@ def resolve_music_stream_path(music_root: Path, entry_key: str) -> Path:
     return target
 
 
+def find_local_cover_image(track_absolute_path: Path, music_root: Path) -> Optional[Path]:
+    """Best-effort local fallback artwork for a track with nothing scraped
+    (or scraped with no art found) -- a conventionally-named image file
+    (``_COVER_IMAGE_BASENAMES``) directly beside the track, then one level up
+    (the artist root, for a library that keeps one cover image at
+    ``Artist/cover.jpg`` rather than per-album). Matched case-insensitively
+    (real libraries mix ``Cover.jpg``/``folder.JPG``/...). Returns the first
+    match, preferring the track's own folder over its parent; ``None`` if
+    nothing recognized is present in either."""
+    resolved_root = music_root.resolve()
+    track_dir = track_absolute_path.parent
+    search_dirs = [track_dir]
+    parent_dir = track_dir.parent
+    if track_dir.resolve() != resolved_root and parent_dir.resolve() != resolved_root:
+        search_dirs.append(parent_dir)
+    for directory in search_dirs:
+        try:
+            entries = list(directory.iterdir())
+        except OSError:
+            continue
+        by_lower_stem = {
+            entry.stem.lower(): entry
+            for entry in entries
+            if entry.is_file() and entry.suffix.lower() in _COVER_IMAGE_SUFFIXES
+        }
+        for basename in _COVER_IMAGE_BASENAMES:
+            match = by_lower_stem.get(basename)
+            if match:
+                return match
+    return None
+
+
 def get_music_metadata(music_root: Path, entry_key: str) -> Optional[dict]:
     """Return one track's scraped MusicBrainz metadata, or ``None`` if it has
     never been scraped -- distinct from ``get_music_by_key`` returning
@@ -484,6 +534,38 @@ def list_music_genres(music_root: Path) -> dict:
         if genres:
             genres_by_key[entry_key] = list(genres)
     return genres_by_key
+
+
+def set_music_liked(music_root: Path, entry_key: str, liked: bool) -> bool:
+    """Set or clear a track's liked flag. Idempotent either way (liking an
+    already-liked track, or unliking one that was never liked, is a normal
+    no-op, not an error) -- returns the resulting state."""
+    with _open(music_root) as connection:
+        if liked:
+            connection.execute(
+                "INSERT INTO music_likes (entry_key, liked_at) VALUES (?, ?) "
+                "ON CONFLICT(entry_key) DO NOTHING",
+                (entry_key, datetime.now(timezone.utc).replace(microsecond=0).isoformat()),
+            )
+        else:
+            connection.execute("DELETE FROM music_likes WHERE entry_key = ?", (entry_key,))
+        connection.commit()
+    return liked
+
+
+def is_music_liked(music_root: Path, entry_key: str) -> bool:
+    with _open(music_root) as connection:
+        row = connection.execute("SELECT 1 FROM music_likes WHERE entry_key = ?", (entry_key,)).fetchone()
+    return row is not None
+
+
+def list_liked_music_keys(music_root: Path) -> set:
+    """Bulk lookup of every liked entry_key -- same one-query-per-list-call
+    shape as ``list_music_genres``/``list_music_display_titles``, used to
+    overlay a ``liked`` flag onto list responses without a query per row."""
+    with _open(music_root) as connection:
+        rows = connection.execute("SELECT entry_key FROM music_likes").fetchall()
+    return {row[0] for row in rows}
 
 
 def list_music_page(

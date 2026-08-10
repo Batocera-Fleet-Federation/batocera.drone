@@ -5,17 +5,21 @@ description: Use this when designing, reviewing, or implementing the Drone Music
 
 # Drone Music Feature Skill
 
-## Status: planned design, not yet implemented (as of 2026-08-10)
+## Status: shipped (as of 2026-08-10), extended since — this file is historical design rationale
 
-**Nothing described below exists in code yet.** This skill captures the
-design agreed for the feature — mirroring the real, shipped Movies feature
-(`drone-movies-feature` skill) closely — so implementation across multiple
-sessions stays consistent. **Update this skill's status line and correct any
-detail that changed during implementation** the moment real code lands;
-until then, every file path/schema/route below is a plan, not a fact —
-verify against `drone-movies-feature`'s equivalent section (the thing being
-mirrored) if anything here seems unclear, and prefer the code over this file
-the instant code exists.
+The feature described below **is implemented and live** — Phases 0-3 all
+landed (Phase 4 P2P/TheAudioDB is still a real future follow-up). Most of
+this file is still an accurate account of *why* things are shaped the way
+they are, but it was written as a pre-implementation plan and has **not**
+been fully rewritten in shipped-past-tense — treat every file
+path/schema/route below as "this is what was planned and is, as far as
+anyone has gone back to verify, still true," not as a live source of truth.
+**Prefer the real code** (`app/music/`, `app/storage/music_store.py`,
+`app/web/handlers_music.py`, the `Music*` sections of `drone.js`) over this
+file the moment they disagree, and fix this file when you notice drift
+rather than leaving it stale for the next session. See "Shipped deviations /
+additions beyond this plan" below for real post-launch changes already known
+to exist.
 
 ## Goal / origin
 
@@ -240,6 +244,53 @@ buttons throughout call `playMusicTrack(entryKey, title, artist)` instead of
 opening a modal; `<audio>`'s native `ended` event advances a simple
 `musicPlayerQueue` array (set whenever an album/artist page's tracklist is
 opened) to the next track.
+
+## Shipped deviations / additions beyond this plan
+
+Real changes made after initial launch, not reflected in the sections above:
+
+- **`classify_location` also skips a release-type "category" folder.** Real
+  libraries (MusicBrainz Picard-tagged) often insert a wrapper folder between
+  Artist and the real album name — `Artist/Album/<Real Album Name>/track.ext`,
+  `Artist/Compilation/<Real Release>/track.ext`, etc. (a `_CATEGORY_FOLDER_NAMES`
+  allowlist mirroring MusicBrainz's own release-group type vocabulary).
+  Without this, every release of that type collapsed into one fake bucket —
+  found live against a real ~2,400-track library where "ATB / Album" held 22
+  different real albums' tracks, with same-titled tracks across them looking
+  like duplicates. `search_candidates` also gained `_clean_album_name` (strips
+  a leading year + trailing catalog/edition parentheticals) so a messy real
+  folder name like `2011 - Distant Earth (Deluxe Fanbox) (1061391KON)`
+  searches MusicBrainz as `ATB Distant Earth` first, raw name kept as a
+  fallback rung.
+- **Music Explorer sidebar gained Artist and Likes filter sections**,
+  alongside the originally-planned Genre section — all three are
+  cross-faceted (each facet's button counts hold the *other two* fixed, via
+  `musicExplorerFilteredRows({excludeX: true})` in `drone.js`), not
+  independent single-facet filters.
+- **Liked tracks (thumbs up).** A new `music_likes` table
+  (`music_store.py` — presence-only, no boolean column) + `POST
+  /music/{key}/like` (not admin-gated, same "browsing your own library isn't
+  an admin action" reasoning as every other `/music/*` route) +
+  `_apply_music_likes` overlay on list/detail responses. Toggled from a
+  shared `musicLikeButtonHtml(entryKey, liked, variant)` button (icon-only on
+  track rows, icon+text on the track detail page) via `toggleMusicLike`,
+  which patches `musicAllRows` in place so the Likes sidebar count/filter
+  update without a re-fetch.
+- **Local image files as scraper-fallback artwork.** `find_local_cover_image`
+  (`music_store.py`) recognizes conventionally-named local cover art
+  (`cover`/`folder`/`album`/`front`/`art`, any of `.jpg/.jpeg/.png/.webp`,
+  matched case-insensitively — the same convention Plex/Kodi/etc. use)
+  sitting beside a track, or one folder up (the artist root, for a library
+  that keeps one image per artist rather than per album). `_handle_music_artwork`
+  falls back to it for the `art` field only (not `artist`) whenever there's
+  no *scraped* art — never scraped, or scraped but Cover Art Archive had
+  nothing for that release. Scraped art always wins when both exist. The
+  frontend had to stop gating the `<img src>` on `meta && meta.art_relative_path`
+  before requesting it (`renderMusicDetailShell`, the artist/album detail
+  page) — that client-side gate would otherwise skip the request entirely
+  and never see the server-side fallback; now every artwork `<img>` always
+  attempts the URL and uses `onerror` to swap to the placeholder icon, same
+  pattern the Explorer card already used.
 
 ## Common failure patterns to avoid (learned from Movies, apply here too)
 
