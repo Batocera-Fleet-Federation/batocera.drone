@@ -497,7 +497,7 @@ class MockServerIntegrationTests(unittest.TestCase):
     def test_header_places_github_icon_beside_drone_brand(self) -> None:
         html = self._get_bytes("/").decode("utf-8")
         self.assertIn("Batocera Drone", html)
-        self.assertIn('id="systemsMenuBtn"', html)
+        self.assertIn('id="assetsMenuBtn"', html)
         self.assertIn('class="resource-links"', html)
         self.assertIn('class="resource-icon-link" title="GitHub" aria-label="GitHub"', html)
         self.assertIn('id="apiAccessBtn"', html)

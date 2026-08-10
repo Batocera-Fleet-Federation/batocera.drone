@@ -1967,6 +1967,79 @@
       text-overflow: ellipsis;
       white-space: nowrap;
     }
+    /* Games/Movies/Music switcher, spliced into the end of each Explorer
+       page's .movie-explorer-topbar (see renderAssetTypeSwitcher) -- the
+       search box's own flex-grow-1 already pushes this flush right. */
+    .asset-type-switcher {
+      display: flex;
+      gap: 0.4rem;
+      flex: 0 0 auto;
+    }
+    .asset-type-switcher-btn.active {
+      background: rgba(59, 130, 246, 0.18);
+      border-color: rgba(59, 130, 246, 0.4);
+      color: #fff;
+    }
+    /* Persistent bottom music player bar (see ensureMusicPlayerBar) -- stays
+       mounted across router navigation, unlike the Movies player's
+       one-video-at-a-time modal, since music listening is continuous while
+       browsing. Below any Bootstrap modal (z-index 1050+) so a modal opened
+       while music plays still layers on top. */
+    .music-player-bar {
+      position: fixed;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      z-index: 1040;
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 0.5rem 1rem;
+      background: #0b1020;
+      border-top: 1px solid var(--admin-border);
+      box-shadow: 0 -0.5rem 1.5rem rgba(0, 0, 0, 0.35);
+    }
+    .music-player-bar-art {
+      position: relative;
+      width: 2.75rem;
+      height: 2.75rem;
+      flex: 0 0 auto;
+      background: #12192b;
+      border: 1px solid var(--admin-border);
+      border-radius: 0.35rem;
+      overflow: hidden;
+    }
+    .music-player-bar-art img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+    .music-player-bar-art-fallback {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--admin-border);
+    }
+    .music-player-bar-info {
+      flex: 0 1 220px;
+      color: var(--admin-text);
+    }
+    .music-player-bar-controls {
+      flex: 1 1 auto;
+      justify-content: center;
+    }
+    .music-player-bar-controls audio {
+      height: 2.25rem;
+      max-width: 360px;
+      width: 100%;
+    }
+    @media (max-width: 768px) {
+      .music-player-bar { flex-wrap: wrap; }
+      .music-player-bar-info { flex-basis: 100%; order: 1; }
+      .music-player-bar-controls { order: 2; width: 100%; }
+    }
     .marquee-source-grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));

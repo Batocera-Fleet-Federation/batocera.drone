@@ -3,8 +3,7 @@ const backBtn = document.getElementById("backBtn") || {
   classList: { add() {}, remove() {} },
   addEventListener() {},
 };
-const systemsMenuBtn = document.getElementById("systemsMenuBtn");
-const moviesMenuBtn = document.getElementById("moviesMenuBtn");
+const assetsMenuBtn = document.getElementById("assetsMenuBtn");
 const brandHomeBtn = document.getElementById("brandHomeBtn");
 const controlsMenuBtn = document.getElementById("controlsMenuBtn");
 const swarmMenuBtn = document.getElementById("swarmMenuBtn");
@@ -127,6 +126,14 @@ let systemsExploreDuplicateGroups = [];
 // whole set loads once (movie libraries are far smaller than ROM sets) and
 // is grouped/filtered client-side.
 let moviesAllRows = [];
+// Music Browse (own top-level page, see renderMusicExplorerPage) -- same
+// whole-set-loads-once-then-groups-client-side shape as moviesAllRows.
+let musicAllRows = [];
+let musicExplorerGenreFilter = "";
+let musicExplorerShowAllGenres = false;
+const MUSIC_EXPLORE_TOP_GENRE_COUNT = 7;
+const MUSIC_EXPLORE_PAGE_SIZE = 200;
+let musicExploreDisplayLimit = MUSIC_EXPLORE_PAGE_SIZE;
 // Scroll position of the Movies/Systems Browse list views, keyed by a fixed
 // bucket name (not the literal hash -- systemsExploreHash carries a query
 // string that varies with the current search/filter/system selection, so
@@ -146,6 +153,7 @@ function movieListScrollBucket(hash) {
   // each also had its own tree view.
   if (value === "#movies" || value.startsWith("#movies/explore")) return "#movies/explore";
   if (value === "#systems" || value.startsWith("#systems/explore") || value.startsWith("#systems?")) return "#systems/explore";
+  if (value === "#music" || value.startsWith("#music/explore")) return "#music/explore";
   return null;
 }
 // Movie Explorer's category sidebar (see renderMovieExplorerPage): "all" |
@@ -199,6 +207,12 @@ let movieBulkScrapeWasRunning = false;
 let movieBulkScrapeBreakdownStatus = null;
 let movieBulkScrapeBreakdownOffset = 0;
 const MOVIE_BULK_SCRAPE_BREAKDOWN_PAGE_SIZE = 50;
+let musicBulkScrapeTimer = null;
+let musicBulkScrapeInFlight = false;
+let musicBulkScrapeWasRunning = false;
+let musicBulkScrapeBreakdownStatus = null;
+let musicBulkScrapeBreakdownOffset = 0;
+const MUSIC_BULK_SCRAPE_BREAKDOWN_PAGE_SIZE = 50;
 let swarmDronesById = {};
 const SWARM_DATA_CACHE_TTL_MS = 30000;
 let swarmOverviewCache = null;
@@ -1696,6 +1710,59 @@ function parseMoviesHash(hash) {
   }
   return { view: "detail", entryKey: decodeURIComponent(rest.split("?")[0]) };
 }
+function musicDownloadUrl(entryKey) {
+  return `${API_BASE}/music/${encodeURIComponent(entryKey)}/download`;
+}
+function musicStreamUrl(entryKey) {
+  return `${API_BASE}/music/${encodeURIComponent(entryKey)}/stream`;
+}
+function musicArtworkUrl(entryKey, field) {
+  return `${API_BASE}/music/${encodeURIComponent(entryKey)}/artwork/${encodeURIComponent(field)}`;
+}
+function musicDetailHash(entryKey) {
+  return `#music/${encodeURIComponent(entryKey)}`;
+}
+function musicExploreHash() {
+  return `#music/explore`;
+}
+// "artist" is reserved -- an entry_key is always the hex-digest slice
+// music_store._entry_key produces, which can never equal "artist".
+function artistDetailHash(artist, album) {
+  const base = `#music/artist/${encodeURIComponent(artist)}`;
+  return album != null && album !== "" ? `${base}/${encodeURIComponent(album)}` : base;
+}
+function parseMusicHash(hash) {
+  if (!hash.startsWith("#music")) return null;
+  const rest = hash.slice("#music".length).replace(/^\//, "");
+  if (!rest || rest === "explore") return { view: "explore" };
+  if (rest.startsWith("artist/")) {
+    const parts = rest.split("/");
+    const artist = decodeURIComponent(parts[1] || "");
+    const album = parts[2] !== undefined ? decodeURIComponent(parts[2]) : null;
+    return { view: "artist", artist, album };
+  }
+  return { view: "detail", entryKey: decodeURIComponent(rest.split("?")[0]) };
+}
+// Right-justified Games/Movies/Music switcher, spliced into the end of each
+// Explorer page's existing .movie-explorer-topbar row -- the search box's
+// own flex-grow-1 already pushes everything after it flush right, so this
+// needs no new layout mechanics. Replaces the two separate navbar links
+// (index.html's old #systemsMenuBtn "Games"/#moviesMenuBtn "Movies") with
+// one always-visible in-page control instead of a nav-level tab per type.
+function renderAssetTypeSwitcher(active) {
+  const types = [
+    ["systems", "Games", "bi-grid", "#systems"],
+    ["movies", "Movies", "bi-film", "#movies"],
+    ["music", "Music", "bi-music-note-beamed", "#music"],
+  ];
+  return `
+    <div class="asset-type-switcher">
+      ${types.map(([key, label, icon, hash]) => `
+        <button type="button" class="btn btn-outline-light btn-sm asset-type-switcher-btn ${active === key ? "active" : ""}" onclick="setHash(${jsAttr(hash)})"><i class="bi ${icon} me-1"></i>${label}</button>
+      `).join("")}
+    </div>
+  `;
+}
 async function renderMovieExplorerPage() {
   currentSystemContext = null;
   clearSystemTheme();
@@ -1719,6 +1786,7 @@ async function renderMovieExplorerPage() {
             <input id="movieExplorerSearch" type="search" class="form-control" placeholder="Search titles" oninput="filterMovieExplorer(this.value)" autofocus>
           </div>
           <button id="movieExplorerDuplicatesBtn" class="btn btn-outline-light btn-sm" type="button" title="Find duplicate movies/shows" onclick="toggleMovieExplorerDuplicatesMode()"><i class="bi bi-files"></i></button>
+          ${renderAssetTypeSwitcher("movies")}
         </div>
         <div class="movie-explorer-body">
           <aside id="movie-explorer-sidebar" class="movie-explorer-sidebar"></aside>
@@ -1737,6 +1805,7 @@ async function renderMovieExplorerPage() {
       <div class="movie-explorer-overlay">
         <div class="movie-explorer-topbar">
           <div class="movie-explorer-brand"><i class="bi bi-film me-2"></i>Movies</div>
+          ${renderAssetTypeSwitcher("movies")}
         </div>
         <div class="alert alert-danger m-3">Failed to load movies: ${escapeHtml(err.message || "unknown error")}</div>
       </div>
@@ -2214,6 +2283,655 @@ function renderShowDetailEpisodeRow(ep) {
 // "T" -- standard library/media-catalog sort convention.
 function movieSortableTitle(value) {
   return String(value || "").replace(/^the\s+/i, "").trim();
+}
+
+// ============================================================= Music =====
+// Music Browse mirrors the Movies Explorer/show-detail pattern closely --
+// Artist plays the role Show plays for Movies, Album plays the role Season
+// does. See the drone-music-feature skill for the full design rationale.
+// The one genuinely new pattern here (vs. Movies' one-video-at-a-time modal)
+// is the persistent bottom player bar further below, since music listening
+// is continuous while browsing rather than one track at a time in a modal.
+
+function musicArtistAlbumKey(artist, album) {
+  return `${String(artist || "").toLowerCase().trim()} ${String(album || "").toLowerCase().trim()}`;
+}
+// Sorts a group's tracks by disc, then track number, then title -- used by
+// both the Explorer's album cards (representative selection) and the
+// artist/album detail page's track list, so the two stay consistent (same
+// role compareShowGroupMembers plays for Movies).
+function compareMusicGroupMembers(a, b) {
+  const discA = a.disc_number || 0;
+  const discB = b.disc_number || 0;
+  if (discA !== discB) return discA - discB;
+  const trackA = a.track_number != null ? a.track_number : Number.POSITIVE_INFINITY;
+  const trackB = b.track_number != null ? b.track_number : Number.POSITIVE_INFINITY;
+  if (trackA !== trackB) return trackA - trackB;
+  return String(a.display_title || a.track_name || "").localeCompare(String(b.display_title || b.track_name || ""));
+}
+// Groups every row that has an artist into one card per (artist, album) pair
+// -- a track with no album folder groups under its artist with album="" (a
+// "Singles" bucket), same as every other track from that artist with no
+// album. A row with no artist at all (an orphan file directly under
+// music_root) stays its own individual card, same shape as an ungroupable
+// movie extra. Grouping key is always the folder-parsed artist/album (see
+// HandlersMusicMixin._apply_music_grouping_and_genres), never a scraped
+// canonical name, so a partially-scraped album can't split into two cards.
+function groupMusicForExplorer(rows) {
+  const cards = [];
+  const albumGroups = new Map();
+  rows.forEach((row) => {
+    if (!row.artist) {
+      cards.push(row);
+      return;
+    }
+    const key = musicArtistAlbumKey(row.artist, row.album);
+    if (!albumGroups.has(key)) albumGroups.set(key, []);
+    albumGroups.get(key).push(row);
+  });
+  albumGroups.forEach((members) => {
+    members.sort(compareMusicGroupMembers);
+    const representative = members[0];
+    cards.push({
+      isAlbumGroup: true,
+      artist: representative.artist,
+      album: representative.album,
+      entry_key: representative.entry_key,
+      genres: representative.genres || [],
+      trackCount: members.length,
+    });
+  });
+  return cards;
+}
+function musicExplorerCardTitle(entry) {
+  if (entry.isAlbumGroup) return entry.album || "Singles";
+  return entry.display_title || entry.track_name || entry.name || "";
+}
+// Sorts primarily by artist (so the grid reads like an alphabetized record
+// shelf), then by album/title -- mirrors movieSortableTitle's "ignore a
+// leading The" rule for the artist half.
+function musicSortableGroupKey(entry) {
+  const artist = movieSortableTitle(entry.isAlbumGroup ? entry.artist : entry.artist || "");
+  const secondary = entry.isAlbumGroup ? entry.album || "" : entry.display_title || entry.track_name || "";
+  return `${artist} ${secondary}`.toLowerCase();
+}
+function musicExplorerGenres() {
+  const genres = new Set();
+  musicAllRows.forEach((m) => (m.genres || []).forEach((g) => g && genres.add(g)));
+  return [...genres].sort((a, b) => musicExplorerGenreCount(b) - musicExplorerGenreCount(a) || a.localeCompare(b));
+}
+function musicExplorerGenreCount(value) {
+  if (!value) return musicAllRows.length;
+  return musicAllRows.filter((m) => (m.genres || []).includes(value)).length;
+}
+function renderMusicExplorerSidebar() {
+  const sidebar = document.getElementById("music-explorer-sidebar");
+  if (!sidebar) return;
+  const genreButton = (value, label) => `
+    <button type="button" class="movie-explorer-category-btn ${musicExplorerGenreFilter === value ? "active" : ""}" onclick="setMusicExplorerGenreFilter(${jsAttr(value)})">
+      <span>${escapeHtml(label)}</span><span class="movie-explorer-category-count">${musicExplorerGenreCount(value).toLocaleString()}</span>
+    </button>
+  `;
+  const genres = musicExplorerGenres();
+  const visibleGenres = musicExplorerShowAllGenres ? genres : genres.slice(0, MUSIC_EXPLORE_TOP_GENRE_COUNT);
+  const canExpandGenres = genres.length > MUSIC_EXPLORE_TOP_GENRE_COUNT;
+  sidebar.innerHTML = `
+    <div class="movie-explorer-sidebar-section">
+      <div class="movie-explorer-sidebar-title">Genres</div>
+      ${genreButton("", "All Genres")}
+      ${genres.length ? visibleGenres.map((g) => genreButton(g, g)).join("") : `<div class="text-muted small">Scrape music to see genres.</div>`}
+      ${canExpandGenres ? `
+        <button type="button" class="movie-explorer-category-btn movie-explorer-sidebar-more-btn" onclick="toggleMusicExplorerShowAllGenres()">
+          ${musicExplorerShowAllGenres ? "Show less" : `Show more (${(genres.length - MUSIC_EXPLORE_TOP_GENRE_COUNT).toLocaleString()})`}
+        </button>
+      ` : ""}
+    </div>
+  `;
+}
+function toggleMusicExplorerShowAllGenres() {
+  musicExplorerShowAllGenres = !musicExplorerShowAllGenres;
+  renderMusicExplorerSidebar();
+}
+function setMusicExplorerGenreFilter(value) {
+  musicExplorerGenreFilter = value;
+  renderMusicExplorerSidebar();
+  filterMusicExplorer(document.getElementById("musicExplorerSearch")?.value || "");
+}
+function filterMusicExplorer(queryValue, opts = {}) {
+  const grid = document.getElementById("music-explorer-grid");
+  if (!grid) return;
+  if (opts.growDisplay) {
+    musicExploreDisplayLimit += MUSIC_EXPLORE_PAGE_SIZE;
+  } else {
+    musicExploreDisplayLimit = MUSIC_EXPLORE_PAGE_SIZE;
+  }
+  const filter = String(queryValue || "").trim().toLowerCase();
+  let rows = musicExplorerGenreFilter
+    ? musicAllRows.filter((m) => (m.genres || []).includes(musicExplorerGenreFilter))
+    : musicAllRows;
+  if (filter) {
+    rows = rows.filter((m) =>
+      (m.display_title || m.track_name || m.name || "").toLowerCase().includes(filter)
+      || (m.artist || "").toLowerCase().includes(filter)
+      || (m.album || "").toLowerCase().includes(filter)
+    );
+  }
+  const cards = groupMusicForExplorer(rows);
+  const sorted = [...cards].sort((a, b) => musicSortableGroupKey(a).localeCompare(musicSortableGroupKey(b)));
+  const visible = sorted.slice(0, musicExploreDisplayLimit);
+  grid.innerHTML = visible.length
+    ? visible.map(renderMusicExplorerCard).join("")
+    : `<div class="text-muted p-4">No music matches the current filters.</div>`;
+  renderMusicExplorerMoreButton(visible.length, sorted.length, queryValue);
+}
+function renderMusicExplorerMoreButton(shown, total, queryValue) {
+  const wrap = document.getElementById("music-explorer-more");
+  if (!wrap) return;
+  if (shown >= total) {
+    wrap.innerHTML = total ? `<span class="small text-muted">Showing all ${total.toLocaleString()}</span>` : "";
+    return;
+  }
+  wrap.innerHTML = `
+    <button type="button" class="btn btn-outline-primary btn-sm" onclick="filterMusicExplorer(${jsAttr(queryValue || "")}, { growDisplay: true })">
+      <i class="bi bi-plus-circle me-1"></i>Show more (${shown.toLocaleString()} of ${total.toLocaleString()})
+    </button>
+  `;
+}
+function renderMusicExplorerCard(entry) {
+  const title = musicExplorerCardTitle(entry);
+  const subtitle = entry.isAlbumGroup ? entry.artist : entry.artist || "";
+  const artUrl = musicArtworkUrl(entry.entry_key, "art");
+  const navigateHash = entry.isAlbumGroup
+    ? artistDetailHash(entry.artist, entry.album || null)
+    : musicDetailHash(entry.entry_key);
+  return `
+    <button type="button" class="movie-explorer-card" title="${escapeHtml(title)}" onclick="setHash(${jsAttr(navigateHash)})">
+      <div class="movie-explorer-card-poster">
+        <img src="${escapeHtml(artUrl)}" alt="" loading="lazy" onerror="this.style.display='none'; this.nextElementSibling.classList.remove('d-none');">
+        <div class="movie-explorer-card-poster-fallback d-none"><i class="bi bi-music-note-beamed"></i></div>
+      </div>
+      <div class="movie-explorer-card-title">${escapeHtml(title)}</div>
+      ${subtitle ? `<div class="movie-explorer-card-subtitle text-truncate">${escapeHtml(subtitle)}</div>` : ""}
+    </button>
+  `;
+}
+async function renderMusicExplorerPage() {
+  currentSystemContext = null;
+  clearSystemTheme();
+  musicExplorerGenreFilter = "";
+  musicExplorerShowAllGenres = false;
+  musicExploreDisplayLimit = MUSIC_EXPLORE_PAGE_SIZE;
+  setLoading(true, "Loading music...");
+  try {
+    if (!musicAllRows.length) {
+      const payload = await api("/music");
+      musicAllRows = payload.music || [];
+    }
+    content.innerHTML = `
+      <div class="movie-explorer-overlay">
+        <div class="movie-explorer-topbar">
+          <div class="movie-explorer-brand"><i class="bi bi-music-note-beamed me-2"></i>Music</div>
+          <div class="movie-explorer-search flex-grow-1">
+            <input id="musicExplorerSearch" type="search" class="form-control" placeholder="Search artists, albums, songs" oninput="filterMusicExplorer(this.value)" autofocus>
+          </div>
+          ${renderAssetTypeSwitcher("music")}
+        </div>
+        <div class="movie-explorer-body">
+          <aside id="music-explorer-sidebar" class="movie-explorer-sidebar"></aside>
+          <div class="movie-explorer-grid-wrap min-width-0">
+            <div id="music-explorer-grid" class="movie-explorer-grid"></div>
+            <div id="music-explorer-more" class="text-center mt-3"></div>
+          </div>
+        </div>
+      </div>
+    `;
+    renderMusicExplorerSidebar();
+    filterMusicExplorer("");
+    restoreMovieListScroll(musicExploreHash());
+  } catch (err) {
+    content.innerHTML = `
+      <div class="movie-explorer-overlay">
+        <div class="movie-explorer-topbar">
+          <div class="movie-explorer-brand"><i class="bi bi-music-note-beamed me-2"></i>Music</div>
+          ${renderAssetTypeSwitcher("music")}
+        </div>
+        <div class="alert alert-danger m-3">Failed to load music: ${escapeHtml(err.message || "unknown error")}</div>
+      </div>
+    `;
+  } finally {
+    setLoading(false);
+  }
+}
+// Artist detail page (route #music/artist/<artist>[/<album>], reached by
+// clicking an album card in the explorer): an album-switcher tab strip above
+// that album's track list, mirroring renderShowDetailsPage's season strip.
+// Switching albums is just a hash change -- the router re-renders this whole
+// page, which both updates the artwork (an on-demand GET /music/{key} fetch
+// of the newly-selected album's first track) and keeps the selection
+// bookmarkable/back-button-able, same convention as the Movies show page.
+async function renderArtistDetailsPage(artist, albumParam) {
+  currentSystemContext = null;
+  clearSystemTheme();
+  setLoading(true, "Loading artist...");
+  try {
+    if (!musicAllRows.length) {
+      const payload = await api("/music");
+      musicAllRows = payload.music || [];
+    }
+    const artistKey = String(artist || "").toLowerCase().trim();
+    const tracks = musicAllRows.filter((m) => m.artist && String(m.artist).toLowerCase().trim() === artistKey);
+    if (!tracks.length) {
+      content.innerHTML = `
+        <button class="btn btn-outline-secondary btn-sm mb-3" type="button" onclick="setHash('#music')"><i class="bi bi-arrow-left me-1"></i>Back to Music</button>
+        <div class="alert alert-warning">No tracks found for "${escapeHtml(artist)}".</div>
+      `;
+      return;
+    }
+    const albumsMap = new Map();
+    tracks.forEach((t) => {
+      const key = t.album || "";
+      if (!albumsMap.has(key)) albumsMap.set(key, []);
+      albumsMap.get(key).push(t);
+    });
+    // "Singles" (album === "") always sorts last, after every real album name.
+    const albumNames = [...albumsMap.keys()].sort((a, b) => {
+      if (a === "" && b !== "") return 1;
+      if (b === "" && a !== "") return -1;
+      return a.localeCompare(b);
+    });
+    const selectedAlbum = albumNames.includes(albumParam) ? albumParam : albumNames[0];
+    const albumTracks = (albumsMap.get(selectedAlbum) || []).slice().sort(compareMusicGroupMembers);
+    const representative = albumTracks[0];
+    let detail = null;
+    try {
+      detail = await api(`/music/${encodeURIComponent(representative.entry_key)}`);
+    } catch (_) {
+      detail = null; // unscraped album -- render with no art rather than failing the page
+    }
+    const meta = detail && detail.metadata;
+    const artUrl = meta && meta.art_relative_path ? musicArtworkUrl(representative.entry_key, "art") : null;
+    const genres = (meta && meta.genres) || [];
+    const albumLabel = selectedAlbum || "Singles";
+    content.innerHTML = `
+      <button class="btn btn-outline-secondary btn-sm mb-3" type="button" onclick="setHash('#music')"><i class="bi bi-arrow-left me-1"></i>Back to Music</button>
+      <div class="movie-detail-hero">
+        <div class="movie-detail-hero-body">
+          ${
+            artUrl
+              ? `<img class="movie-detail-poster" src="${escapeHtml(artUrl)}" alt="">`
+              : `<div class="movie-detail-poster movie-detail-poster-placeholder"><i class="bi bi-music-note-beamed"></i></div>`
+          }
+          <div class="movie-detail-info min-width-0">
+            <div class="small text-muted mb-1"><span class="badge text-bg-info me-2">Artist</span>${albumTracks.length} track${albumTracks.length === 1 ? "" : "s"}</div>
+            <h2 class="movie-detail-title" title="${escapeHtml(artist)}">${escapeHtml(artist)} &middot; ${escapeHtml(albumLabel)}</h2>
+            ${genres.length ? `<div class="mb-2">${genres.map((g) => `<span class="badge movie-genre-badge">${escapeHtml(g)}</span>`).join(" ")}</div>` : ""}
+            <div class="d-flex flex-wrap gap-2 mt-2">
+              <button class="btn btn-primary btn-sm" type="button" onclick="playMusicAlbum(${jsAttr(artist)}, ${jsAttr(selectedAlbum)})"><i class="bi bi-play-circle me-1"></i>Play Album</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="movie-detail-body">
+        <div class="d-flex flex-wrap gap-2 my-3">
+          ${albumNames.map((name) => `
+            <button type="button" class="btn btn-sm ${name === selectedAlbum ? "btn-primary" : "btn-outline-primary"}" onclick="setHash(${jsAttr(artistDetailHash(artist, name))})">${escapeHtml(name || "Singles")}</button>
+          `).join("")}
+        </div>
+        <div class="list-group">
+          ${albumTracks.map((t) => renderArtistDetailTrackRow(t, artist, selectedAlbum)).join("")}
+        </div>
+      </div>
+    `;
+  } catch (err) {
+    content.innerHTML = `
+      <button class="btn btn-outline-secondary btn-sm mb-3" type="button" onclick="setHash('#music')"><i class="bi bi-arrow-left me-1"></i>Back to Music</button>
+      <div class="alert alert-danger">Failed to load artist: ${escapeHtml(err.message || "unknown error")}</div>
+    `;
+  } finally {
+    setLoading(false);
+  }
+}
+function renderArtistDetailTrackRow(track, artist, album) {
+  const label = track.track_number != null
+    ? `${String(track.track_number).padStart(2, "0")} - ${track.display_title || track.track_name || ""}`
+    : (track.display_title || track.track_name || "");
+  return `
+    <div class="list-group-item d-flex align-items-center justify-content-between gap-2 bg-transparent">
+      <button type="button" class="btn btn-link btn-sm p-0 text-start text-truncate min-width-0" title="${escapeHtml(track.file_path || track.track_name || "")}" onclick="setHash(musicDetailHash(${jsAttr(track.entry_key)}))">${escapeHtml(label)}</button>
+      <div class="d-flex gap-2 text-nowrap">
+        <button class="btn btn-outline-primary btn-sm" type="button" title="Play" onclick="playMusicTrackFromAlbum(${jsAttr(track.entry_key)}, ${jsAttr(artist)}, ${jsAttr(album)})"><i class="bi bi-play-circle"></i></button>
+        ${
+          track.is_downloadable === false
+            ? `<button class="btn btn-secondary btn-sm" type="button" title="Downloads disabled" disabled><i class="bi bi-slash-circle"></i></button>`
+            : `<a class="btn btn-primary btn-sm" title="Download" href="${musicDownloadUrl(track.entry_key)}"><i class="bi bi-download"></i></a>`
+        }
+      </div>
+    </div>
+  `;
+}
+async function renderMusicDetailsPage(entryKey) {
+  currentSystemContext = null;
+  clearSystemTheme();
+  setLoading(true, "Loading track...");
+  try {
+    const track = await api(`/music/${encodeURIComponent(entryKey)}`);
+    content.innerHTML = renderMusicDetailShell(track);
+    await renderMusicScraperCard(entryKey, track);
+  } catch (err) {
+    content.innerHTML = `
+      <button class="btn btn-outline-secondary btn-sm mb-3" type="button" onclick="setHash('#music')"><i class="bi bi-arrow-left me-1"></i>Back to Music</button>
+      <div class="alert alert-danger">Failed to load track: ${escapeHtml(err.message || "unknown error")}</div>
+    `;
+  } finally {
+    setLoading(false);
+  }
+}
+function renderMusicDetailShell(track) {
+  const meta = track.metadata || null;
+  const rawName = track.track_name || track.name || "";
+  const title = track.display_title || rawName;
+  const entryKey = track.entry_key;
+  const artUrl = meta && meta.art_relative_path ? musicArtworkUrl(entryKey, "art") : null;
+  const genres = (meta && meta.genres) || [];
+  const artistLabel = (meta && meta.artist) || track.artist || "";
+  const albumLabel = (meta && meta.album) || track.album || "";
+  const metaBits = [artistLabel, albumLabel, meta && meta.release_date ? String(meta.release_date).slice(0, 4) : ""].filter(Boolean);
+  return `
+    <button class="btn btn-outline-secondary btn-sm mb-3" type="button" onclick="setHash('#music')"><i class="bi bi-arrow-left me-1"></i>Back to Music</button>
+    <div class="movie-detail-hero">
+      <div class="movie-detail-hero-body">
+        ${
+          artUrl
+            ? `<img class="movie-detail-poster" src="${escapeHtml(artUrl)}" alt="">`
+            : `<div class="movie-detail-poster movie-detail-poster-placeholder"><i class="bi bi-music-note-beamed"></i></div>`
+        }
+        <div class="movie-detail-info min-width-0">
+          <h2 class="movie-detail-title" title="${escapeHtml(title)}">${escapeHtml(title)}</h2>
+          ${metaBits.length ? `<div class="text-muted small mb-2">${metaBits.map((bit) => escapeHtml(bit)).join(" &middot; ")}</div>` : ""}
+          ${genres.length ? `<div class="mb-3">${genres.map((g) => `<span class="badge movie-genre-badge">${escapeHtml(g)}</span>`).join(" ")}</div>` : ""}
+          <div class="d-flex flex-wrap gap-2 mb-2">
+            <button class="btn btn-primary" type="button" onclick="playMusicTrack(${jsAttr(entryKey)}, ${jsAttr(title)}, ${jsAttr(artistLabel)})"><i class="bi bi-play-circle me-1"></i>Play</button>
+            ${
+              track.is_downloadable === false
+                ? `<button class="btn btn-outline-secondary" type="button" disabled><i class="bi bi-slash-circle me-1"></i>Downloads disabled</button>`
+                : `<a class="btn btn-outline-primary" href="${musicDownloadUrl(entryKey)}"><i class="bi bi-download me-1"></i>Download</a>`
+            }
+            ${
+              adminEnabled
+                ? `<button class="btn btn-outline-danger" type="button" onclick="deleteMusicFromDetailPage(${jsAttr(entryKey)}, ${jsAttr(title)})"><i class="bi bi-trash me-1"></i>Delete</button>`
+                : ""
+            }
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="movie-detail-body">
+      <div class="text-muted small">${escapeHtml(track.file_path || rawName)} &middot; ${escapeHtml(formatBytes(track.byte_count ?? track.file_size))}</div>
+    </div>
+    <div id="music-scraper-card" class="mt-4"></div>
+  `;
+}
+// Track files are gone from disk after this -- invalidate the whole
+// client-side music cache (not just the deleted row), same reasoning as
+// deleteMoviesBatch: every music view reads from the same musicAllRows
+// snapshot with no per-row invalidation of its own.
+async function deleteMusicBatch(entryKeys) {
+  const result = await apiPost("/admin/music/delete", { entry_keys: entryKeys });
+  musicAllRows = [];
+  return result;
+}
+function deleteMusicFromDetailPage(entryKey, title) {
+  openConfirmDeleteModal({
+    title: "Delete track?",
+    body: `<strong>${escapeHtml(title)}</strong> will be permanently deleted from disk. This cannot be undone.`,
+    confirmLabel: "Delete",
+    onConfirm: async () => {
+      setLoading(true, "Deleting...");
+      try {
+        await deleteMusicBatch([entryKey]);
+        showToast("Track deleted.", "success");
+        setHash("#music");
+      } catch (err) {
+        showToast(`Delete failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
+      } finally {
+        setLoading(false);
+      }
+    },
+  });
+}
+// Mirrors renderMovieScraperCard's shape closely -- the one structural
+// difference is there is no API-key gate at all (MusicBrainz + Cover Art
+// Archive are both keyless, see music/musicbrainz_client.py's module
+// docstring), so this always renders the search UI directly instead of
+// branching on a has_api_key check.
+async function renderMusicScraperCard(entryKey, track) {
+  const container = document.getElementById("music-scraper-card");
+  if (!container) return;
+  if (!adminEnabled) {
+    container.innerHTML = "";
+    return;
+  }
+  container.innerHTML = renderMusicScraperSearchUi(entryKey, track);
+}
+function renderMusicScraperSearchUi(entryKey, track) {
+  // Deliberately blank, not the raw filename -- an empty query tells the
+  // backend to search using its own artist/album candidate ladder (the same
+  // one the bulk scraper uses), same convention as the Movies scraper card.
+  const hasMetadata = !!(track && track.metadata);
+  return `
+    <div class="card">
+      <div class="card-header d-flex align-items-center justify-content-between gap-2">
+        <span><i class="bi bi-cloud-download me-1"></i>Artwork &amp; Metadata (MusicBrainz)</span>
+        ${
+          hasMetadata
+            ? `<button class="btn btn-outline-danger btn-sm" type="button" onclick="deleteMusicScraperMetadata(${jsAttr(entryKey)})"><i class="bi bi-trash me-1"></i>Remove scraped data</button>`
+            : ""
+        }
+      </div>
+      <div class="card-body">
+        <div class="input-group mb-3">
+          <input id="musicScraperQuery" type="text" class="form-control" value="" placeholder="Leave blank to search by artist/album">
+          <button class="btn btn-primary" type="button" onclick="searchMusicScraper(${jsAttr(entryKey)})"><i class="bi bi-search me-1"></i>Search</button>
+        </div>
+        <div id="music-scraper-results" class="mb-3"></div>
+      </div>
+    </div>
+  `;
+}
+async function deleteMusicScraperMetadata(entryKey) {
+  if (!window.confirm("Remove the scraped MusicBrainz metadata and artwork for this track? This cannot be undone, but you can re-scrape it afterward.")) return;
+  setLoading(true, "Removing scraped metadata...");
+  try {
+    await apiPost(`/admin/music/${encodeURIComponent(entryKey)}/scrape/delete`, {});
+    showToast("Scraped metadata removed.", "success");
+    await renderMusicDetailsPage(entryKey);
+  } catch (err) {
+    showToast(`Failed to remove scraped metadata: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  } finally {
+    setLoading(false);
+  }
+}
+async function searchMusicScraper(entryKey) {
+  const resultsEl = document.getElementById("music-scraper-results");
+  if (!resultsEl) return;
+  const queryInput = document.getElementById("musicScraperQuery");
+  const query = queryInput ? queryInput.value.trim() : "";
+  resultsEl.innerHTML = `<div class="text-muted small"><span class="spinner-border spinner-border-sm me-2"></span>Searching MusicBrainz...</div>`;
+  try {
+    const data = await api(`/admin/music/${encodeURIComponent(entryKey)}/scrape/search?q=${encodeURIComponent(query)}`);
+    if (queryInput && !query && data.query) queryInput.value = data.query;
+    const results = data.results || [];
+    resultsEl.innerHTML = results.length
+      ? `<div class="list-group">${results.map((r) => renderMusicScraperResult(entryKey, r)).join("")}</div>`
+      : `<div class="text-muted small">No MusicBrainz matches found${data.query ? ` for "${escapeHtml(data.query)}"` : ""}.</div>`;
+  } catch (err) {
+    resultsEl.innerHTML = `<div class="alert alert-warning small mb-0">Search failed: ${escapeHtml(err.message || "unknown error")}</div>`;
+  }
+}
+// Search results come in two shapes -- a "release" (an album match: title/
+// artist/date/track_count) or a "recording" (a single-track match: title/
+// artist/release_title, used for the singles/no-album fallback rung -- see
+// music/metadata_manager.search_track_default_query) -- rendered with the
+// same list-group-item look as Movies' results but different subtext.
+function renderMusicScraperResult(entryKey, result) {
+  const year = result.date ? String(result.date).slice(0, 4) : "";
+  const isRelease = result.kind !== "recording";
+  const subtitle = isRelease
+    ? [result.artist, result.track_count ? `${result.track_count} tracks` : ""].filter(Boolean).join(" · ")
+    : [result.artist, result.release_title ? `from "${result.release_title}"` : ""].filter(Boolean).join(" · ");
+  return `
+    <button type="button" class="list-group-item list-group-item-action" onclick="applyMusicScraperResult(${jsAttr(entryKey)}, ${jsAttr(result.release_mbid || "")}, ${jsAttr(result.recording_mbid || "")}, this)">
+      <div class="d-flex gap-3 align-items-center">
+        <div class="match-thumb-placeholder"><i class="bi ${isRelease ? "bi-disc" : "bi-music-note-beamed"}"></i></div>
+        <div class="min-width-0">
+          <div class="fw-semibold">${escapeHtml(result.title || "")}${year ? ` <span class="text-muted">(${escapeHtml(year)})</span>` : ""}</div>
+          ${subtitle ? `<div class="text-muted small text-truncate-2">${escapeHtml(subtitle)}</div>` : ""}
+        </div>
+      </div>
+    </button>
+  `;
+}
+async function applyMusicScraperResult(entryKey, releaseMbid, recordingMbid, button) {
+  if (!releaseMbid) {
+    showToast("That result has no associated release to scrape from.", "warning");
+    return;
+  }
+  const originalHtml = button ? button.innerHTML : "";
+  if (button) {
+    button.disabled = true;
+    button.innerHTML = `<span class="spinner-border spinner-border-sm"></span>`;
+  }
+  setLoading(true, "Downloading artwork and metadata from MusicBrainz...");
+  try {
+    const payload = { release_mbid: releaseMbid };
+    if (recordingMbid) payload.recording_mbid = recordingMbid;
+    await apiPost(`/admin/music/${encodeURIComponent(entryKey)}/scrape/apply`, payload);
+    showToast("Track artwork and metadata updated.", "success");
+    await renderMusicDetailsPage(entryKey);
+  } catch (err) {
+    showToast(`Failed to apply MusicBrainz match: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    if (button) {
+      button.disabled = false;
+      button.innerHTML = originalHtml;
+    }
+  } finally {
+    setLoading(false);
+  }
+}
+
+// ---------------------------------------------------- persistent player bar
+// Unlike the Movies player (a one-video-at-a-time Bootstrap modal, closed on
+// navigation), music listening is continuous while browsing -- so this bar
+// is mounted once at app-shell level (ensureMusicPlayerBar(), called from
+// startApp()) and survives every router() content.innerHTML swap, same
+// "created once, persists across page renders" shape as ensureToastContainer.
+let musicPlayerQueue = [];
+let musicPlayerQueueIndex = -1;
+let musicPlayerCurrentEntryKey = null;
+function ensureMusicPlayerBar() {
+  if (document.getElementById("musicPlayerBar")) return;
+  const bar = document.createElement("div");
+  bar.id = "musicPlayerBar";
+  bar.className = "music-player-bar d-none";
+  bar.innerHTML = `
+    <div class="music-player-bar-art">
+      <img id="musicPlayerBarArt" src="" alt="" onerror="this.style.display='none'; this.nextElementSibling.classList.remove('d-none');">
+      <div class="music-player-bar-art-fallback d-none"><i class="bi bi-music-note-beamed"></i></div>
+    </div>
+    <div class="music-player-bar-info min-width-0">
+      <div id="musicPlayerBarTitle" class="text-truncate fw-semibold"></div>
+      <div id="musicPlayerBarArtist" class="text-truncate text-muted small"></div>
+    </div>
+    <div class="music-player-bar-controls d-flex align-items-center gap-2">
+      <button type="button" class="btn btn-outline-light btn-sm" title="Previous" onclick="playMusicPlayerPrevious()"><i class="bi bi-skip-start-fill"></i></button>
+      <audio id="musicPlayerBarAudio" controls></audio>
+      <button type="button" class="btn btn-outline-light btn-sm" title="Next" onclick="playMusicPlayerNext()"><i class="bi bi-skip-end-fill"></i></button>
+      <button type="button" class="btn btn-outline-light btn-sm" title="Close" onclick="closeMusicPlayerBar()"><i class="bi bi-x-lg"></i></button>
+    </div>
+  `;
+  document.body.appendChild(bar);
+  document.getElementById("musicPlayerBarAudio").addEventListener("ended", () => playMusicPlayerNext());
+}
+function closeMusicPlayerBar() {
+  const bar = document.getElementById("musicPlayerBar");
+  const audio = document.getElementById("musicPlayerBarAudio");
+  if (audio) {
+    audio.pause();
+    audio.removeAttribute("src");
+    audio.load();
+  }
+  bar?.classList.add("d-none");
+  musicPlayerQueue = [];
+  musicPlayerQueueIndex = -1;
+  musicPlayerCurrentEntryKey = null;
+}
+// Plays one track with no album queue context (e.g. the plain track detail
+// page's Play button) -- next/previous are no-ops until a real queue is set
+// via playMusicAlbum/playMusicTrackFromAlbum.
+function playMusicTrack(entryKey, title, artist) {
+  musicPlayerQueue = [entryKey];
+  musicPlayerQueueIndex = 0;
+  _playMusicPlayerEntry(entryKey, title, artist);
+}
+// Sets the queue to a whole album's tracks (disc/track-number order) and
+// starts playback at one specific track -- what the artist/album detail
+// page's per-row Play button calls, so next/previous walk the rest of that
+// album.
+function playMusicTrackFromAlbum(entryKey, artist, album) {
+  const tracks = musicAlbumTracksSorted(artist, album);
+  musicPlayerQueue = tracks.map((t) => t.entry_key);
+  musicPlayerQueueIndex = Math.max(0, musicPlayerQueue.indexOf(entryKey));
+  const track = tracks.find((t) => t.entry_key === entryKey) || tracks[0];
+  if (track) _playMusicPlayerEntry(track.entry_key, track.display_title || track.track_name, artist);
+}
+function playMusicAlbum(artist, album) {
+  const tracks = musicAlbumTracksSorted(artist, album);
+  if (!tracks.length) return;
+  musicPlayerQueue = tracks.map((t) => t.entry_key);
+  musicPlayerQueueIndex = 0;
+  const first = tracks[0];
+  _playMusicPlayerEntry(first.entry_key, first.display_title || first.track_name, artist);
+}
+function musicAlbumTracksSorted(artist, album) {
+  const artistKey = String(artist || "").toLowerCase().trim();
+  const albumKey = String(album || "");
+  return musicAllRows
+    .filter((m) => m.artist && String(m.artist).toLowerCase().trim() === artistKey && (m.album || "") === albumKey)
+    .slice()
+    .sort(compareMusicGroupMembers);
+}
+function playMusicPlayerNext() {
+  if (musicPlayerQueueIndex < 0 || musicPlayerQueueIndex >= musicPlayerQueue.length - 1) return;
+  musicPlayerQueueIndex += 1;
+  _playMusicPlayerEntryFromQueue();
+}
+function playMusicPlayerPrevious() {
+  if (musicPlayerQueueIndex <= 0) return;
+  musicPlayerQueueIndex -= 1;
+  _playMusicPlayerEntryFromQueue();
+}
+function _playMusicPlayerEntryFromQueue() {
+  const entryKey = musicPlayerQueue[musicPlayerQueueIndex];
+  if (!entryKey) return;
+  const row = musicAllRows.find((m) => m.entry_key === entryKey);
+  _playMusicPlayerEntry(entryKey, row ? (row.display_title || row.track_name) : entryKey, row ? row.artist : "");
+}
+function _playMusicPlayerEntry(entryKey, title, artist) {
+  ensureMusicPlayerBar();
+  musicPlayerCurrentEntryKey = entryKey;
+  const bar = document.getElementById("musicPlayerBar");
+  const audio = document.getElementById("musicPlayerBarAudio");
+  const art = document.getElementById("musicPlayerBarArt");
+  document.getElementById("musicPlayerBarTitle").textContent = title || "";
+  document.getElementById("musicPlayerBarArtist").textContent = artist || "";
+  if (art) {
+    art.style.display = "";
+    art.nextElementSibling?.classList.add("d-none");
+    art.src = musicArtworkUrl(entryKey, "art");
+  }
+  audio.src = musicStreamUrl(entryKey);
+  bar.classList.remove("d-none");
+  audio.play().catch(() => {});
 }
 // Casting (Chromecast/AirPlay) -- both receivers fetch the video file
 // themselves, directly, with no browser in the loop, so neither this app's
@@ -3170,6 +3888,252 @@ async function renderAdminMoviesArtworkPage() {
   }
 }
 
+// ---------------------------------------------------- Admin Music (bulk scrape)
+//
+// Mirrors the Admin Movies bulk-scrape block above closely -- the one
+// structural difference is there is no API-key gate at all (MusicBrainz +
+// Cover Art Archive are both keyless), so renderAdminMusicArtworkPage goes
+// straight to the bulk-scrape card with no has_api_key branch, and there is
+// no equivalent of renderMovieAdminApiKeyForm/saveMovieAdminApiKey here.
+
+function stopMusicBulkScrapeAutoRefresh() {
+  if (musicBulkScrapeTimer) {
+    clearInterval(musicBulkScrapeTimer);
+    musicBulkScrapeTimer = null;
+  }
+  musicBulkScrapeInFlight = false;
+}
+function startMusicBulkScrapeAutoRefreshIfNeeded(job) {
+  if (!job || job.status !== "running") {
+    stopMusicBulkScrapeAutoRefresh();
+    return;
+  }
+  if (musicBulkScrapeTimer) return;
+  musicBulkScrapeTimer = setInterval(async () => {
+    if (document.hidden || musicBulkScrapeInFlight) return;
+    if (window.location.hash !== "#admin/music") return;
+    const statusEl = document.getElementById("musicBulkScrapeStatus");
+    if (!statusEl) return;
+    musicBulkScrapeInFlight = true;
+    try {
+      const payload = await api("/admin/music/scrape/bulk");
+      if (window.location.hash === "#admin/music" && statusEl.isConnected) {
+        patchMusicBulkScrapeLive(payload.job || null);
+      }
+    } catch (err) {
+      // Transient poll failure: leave the last good data in place silently.
+    } finally {
+      musicBulkScrapeInFlight = false;
+    }
+  }, 2000);
+}
+function musicBulkScrapeStatusBadge(job) {
+  const status = String(job.status || "running");
+  const cls = status === "error" ? "danger" : status === "complete" ? "success" : "info";
+  const title = status === "error" ? escapeHtml(job.error_message || "") : "";
+  return `<span class="badge text-bg-${cls}" title="${title}">${escapeHtml(status)}</span>`;
+}
+function renderMusicBulkScrapeStatus(job) {
+  if (!job) {
+    return `<div class="text-muted small">No scrape has been run yet.</div>`;
+  }
+  const total = Number(job.total || 0);
+  const processed = Number(job.processed || 0);
+  const pct = total > 0 ? Math.round((processed / total) * 100) : 100;
+  const running = job.status === "running";
+  return `
+    <div class="d-flex align-items-center justify-content-between gap-2 mb-1">
+      <div>${musicBulkScrapeStatusBadge(job)} <span class="small text-muted">${job.rescan_all ? "Rescanning all music" : "Scraping tracks missing artwork"}</span></div>
+      <div class="small text-muted">${processed.toLocaleString()} / ${total.toLocaleString()}</div>
+    </div>
+    ${total > 0 ? `<div class="progress mb-2" style="height:0.5rem;"><div class="progress-bar${running ? " progress-bar-striped progress-bar-animated" : ""} bg-${job.status === "error" ? "danger" : "primary"}" style="width:${pct}%"></div></div>` : ""}
+    ${running && job.current_music ? `<div class="small text-muted mb-2"><span class="spinner-border spinner-border-sm me-1"></span>Scraping: ${escapeHtml(job.current_music)}</div>` : ""}
+    <div class="small text-muted">
+      ${musicBulkScrapeCountLink("matched", job.matched_count)}
+      &middot; ${musicBulkScrapeCountLink("skipped", job.skipped_count)}
+      &middot; ${musicBulkScrapeCountLink("failed", job.failed_count)}
+    </div>
+    ${job.status === "error" && job.error_message ? `<div class="alert alert-warning small mt-2 mb-0">${escapeHtml(job.error_message)}</div>` : ""}
+  `;
+}
+function musicBulkScrapeCountLink(status, count) {
+  const n = Number(count || 0);
+  if (!n) return `${n.toLocaleString()} ${escapeHtml(status)}`;
+  return `<button type="button" class="btn btn-link btn-sm p-0 align-baseline" onclick="toggleMusicBulkScrapeBreakdown(${jsAttr(status)})">${n.toLocaleString()} ${escapeHtml(status)}</button>`;
+}
+function patchMusicBulkScrapeLive(job) {
+  const statusEl = document.getElementById("musicBulkScrapeStatus");
+  if (statusEl) statusEl.innerHTML = renderMusicBulkScrapeStatus(job);
+  const running = job && job.status === "running";
+  const startBtn = document.getElementById("musicBulkScrapeStartBtn");
+  if (startBtn) {
+    startBtn.disabled = running;
+    startBtn.innerHTML = running
+      ? `<span class="spinner-border spinner-border-sm me-1"></span>Scraping...`
+      : `<i class="bi bi-play-fill me-1"></i>Start Scraping`;
+  }
+  const checkbox = document.getElementById("musicBulkScrapeRescanAll");
+  if (checkbox) checkbox.disabled = running;
+  if (musicBulkScrapeWasRunning && !running && musicBulkScrapeBreakdownStatus) {
+    loadMusicBulkScrapeBreakdown(musicBulkScrapeBreakdownStatus, 0);
+  }
+  musicBulkScrapeWasRunning = running;
+  startMusicBulkScrapeAutoRefreshIfNeeded(job);
+}
+function renderMusicAdminBulkScrapeCard(job) {
+  const running = job && job.status === "running";
+  return `
+    <div class="card">
+      <div class="card-header"><i class="bi bi-collection-play me-1"></i>Bulk Scrape</div>
+      <div class="card-body">
+        <div class="form-check mb-3">
+          <input class="form-check-input" type="checkbox" id="musicBulkScrapeRescanAll" ${running ? "disabled" : ""}>
+          <label class="form-check-label" for="musicBulkScrapeRescanAll">Rescan all music (unchecked: only scrape tracks missing artwork)</label>
+        </div>
+        <button id="musicBulkScrapeStartBtn" class="btn btn-primary" type="button" onclick="startMusicBulkScrape()" ${running ? "disabled" : ""}>
+          ${running ? `<span class="spinner-border spinner-border-sm me-1"></span>Scraping...` : `<i class="bi bi-play-fill me-1"></i>Start Scraping`}
+        </button>
+        <div id="musicBulkScrapeStatus" class="mt-3">${renderMusicBulkScrapeStatus(job)}</div>
+        <div id="musicBulkScrapeBreakdown" class="mt-3"></div>
+      </div>
+    </div>
+  `;
+}
+async function startMusicBulkScrape() {
+  const checkbox = document.getElementById("musicBulkScrapeRescanAll");
+  const rescanAll = checkbox ? checkbox.checked : false;
+  setLoading(true, "Starting bulk scrape...");
+  try {
+    const result = await apiPost("/admin/music/scrape/bulk", { rescan_all: rescanAll });
+    if (result.status === "already_running") {
+      showToast("A bulk scrape is already running.", "warning");
+    } else if (result.status === "error") {
+      showToast(`Could not start scraping: ${escapeHtml(result.error || "unknown error")}`, "danger");
+    } else {
+      showToast("Bulk scrape started.", "success");
+    }
+  } catch (err) {
+    showToast(`Could not start scraping: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  } finally {
+    setLoading(false);
+  }
+  if (window.location.hash === "#admin/music") {
+    await renderAdminMusicArtworkPage();
+  }
+}
+async function toggleMusicBulkScrapeBreakdown(status) {
+  const container = document.getElementById("musicBulkScrapeBreakdown");
+  if (musicBulkScrapeBreakdownStatus === status) {
+    musicBulkScrapeBreakdownStatus = null;
+    if (container) container.innerHTML = "";
+    return;
+  }
+  await loadMusicBulkScrapeBreakdown(status, 0);
+}
+async function loadMusicBulkScrapeBreakdown(status, offset) {
+  const container = document.getElementById("musicBulkScrapeBreakdown");
+  if (!container) return;
+  musicBulkScrapeBreakdownStatus = status;
+  musicBulkScrapeBreakdownOffset = Math.max(0, offset || 0);
+  container.innerHTML = `<div class="text-muted small"><span class="spinner-border spinner-border-sm me-2"></span>Loading ${escapeHtml(status)} music...</div>`;
+  try {
+    const page = await api(`/admin/music/scrape/bulk/items/${encodeURIComponent(status)}?limit=${MUSIC_BULK_SCRAPE_BREAKDOWN_PAGE_SIZE}&offset=${musicBulkScrapeBreakdownOffset}`);
+    if (musicBulkScrapeBreakdownStatus === status) container.innerHTML = renderMusicBulkScrapeBreakdownPanel(status, page);
+  } catch (err) {
+    container.innerHTML = `<div class="alert alert-warning small mb-0">Could not load ${escapeHtml(status)} list: ${escapeHtml(err.message || "unknown error")}</div>`;
+  }
+}
+function renderMusicBulkScrapeBreakdownPanel(status, page) {
+  const items = page.items || [];
+  const total = Number(page.total || 0);
+  const offset = Number(page.offset || 0);
+  const limit = Number(page.limit || MUSIC_BULK_SCRAPE_BREAKDOWN_PAGE_SIZE);
+  const showing = items.length ? `${(offset + 1).toLocaleString()}-${(offset + items.length).toLocaleString()} of ${total.toLocaleString()}` : "0 of 0";
+  const retryAllBtn = status === "failed" && total
+    ? `<button class="btn btn-outline-primary btn-sm text-nowrap" type="button" onclick="retryAllMusicBulkScrapeFailed()"><i class="bi bi-arrow-repeat me-1"></i>Retry all ${total.toLocaleString()}</button>`
+    : "";
+  const rows = items.length
+    ? items.map((item) => `
+      <div class="d-flex align-items-start justify-content-between gap-2 py-2 border-bottom movie-bulk-scrape-item-row">
+        <div class="min-width-0">
+          <button type="button" class="btn btn-link btn-sm p-0 text-start text-truncate d-block" style="max-width: 100%;" title="${escapeHtml(item.file_path || item.track_name || "")}" onclick="setHash(musicDetailHash(${jsAttr(item.entry_key)}))">${escapeHtml(item.track_name || item.file_path || "")}</button>
+          ${item.reason ? `<div class="text-muted small">${escapeHtml(item.reason)}</div>` : ""}
+        </div>
+        ${
+          status === "failed"
+            ? `<button class="btn btn-outline-secondary btn-sm text-nowrap" type="button" onclick="retryMusicBulkScrapeItem(${jsAttr(item.entry_key)})"><i class="bi bi-arrow-repeat me-1"></i>Retry</button>`
+            : ""
+        }
+      </div>
+    `).join("")
+    : `<div class="text-muted small py-2">Nothing here.</div>`;
+  return `
+    <div class="card log-card">
+      <div class="card-header d-flex flex-wrap align-items-center justify-content-between gap-2">
+        <span class="text-capitalize">${escapeHtml(status)} music</span>
+        <div class="d-flex align-items-center gap-2">
+          ${retryAllBtn}
+          <button class="btn btn-outline-secondary btn-sm" type="button" title="Close" onclick="toggleMusicBulkScrapeBreakdown(${jsAttr(status)})"><i class="bi bi-x-lg"></i></button>
+        </div>
+      </div>
+      <div class="card-body p-0" style="max-height: 360px; overflow-y: auto;">
+        <div class="px-3">${rows}</div>
+      </div>
+      <div class="card-footer d-flex align-items-center justify-content-between gap-2">
+        <span class="small text-muted">${showing}</span>
+        <div class="d-flex gap-2">
+          <button class="btn btn-sm btn-outline-primary" type="button" ${offset <= 0 ? "disabled" : ""} onclick="loadMusicBulkScrapeBreakdown(${jsAttr(status)}, ${Math.max(0, offset - limit)})">Previous</button>
+          <button class="btn btn-sm btn-outline-primary" type="button" ${offset + items.length >= total ? "disabled" : ""} onclick="loadMusicBulkScrapeBreakdown(${jsAttr(status)}, ${offset + limit})">Next</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+async function startMusicBulkScrapeRetry(body, loadingText) {
+  setLoading(true, loadingText);
+  try {
+    const result = await apiPost("/admin/music/scrape/bulk/retry", body);
+    if (result.status === "already_running") {
+      showToast("A scrape is already running -- try again once it finishes.", "warning");
+    } else if (result.status === "error") {
+      showToast(`Could not start retry: ${escapeHtml(result.error || "unknown error")}`, "danger");
+    } else {
+      showToast("Retry started.", "success");
+      const statusPayload = await api("/admin/music/scrape/bulk");
+      patchMusicBulkScrapeLive(statusPayload.job || null);
+    }
+  } catch (err) {
+    showToast(`Could not start retry: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  } finally {
+    setLoading(false);
+  }
+}
+async function retryMusicBulkScrapeItem(entryKey) {
+  await startMusicBulkScrapeRetry({ entry_keys: [entryKey] }, "Retrying...");
+}
+async function retryAllMusicBulkScrapeFailed() {
+  await startMusicBulkScrapeRetry({ status: "failed" }, "Retrying all failed tracks...");
+}
+async function renderAdminMusicArtworkPage() {
+  currentSystemContext = null;
+  clearSystemTheme();
+  musicBulkScrapeBreakdownStatus = null;
+  setLoading(true, "Loading music scraper status...");
+  try {
+    const statusPayload = await api("/admin/music/scrape/bulk");
+    content.innerHTML = `
+      ${renderArtworkTabBar("music")}
+      <div class="text-muted small mb-3">Scrape MusicBrainz + Cover Art Archive for album art and metadata (artist, album, genres, track titles) -- the same scraper available on each track's own details page, run here in bulk across your whole library. No account or API key needed.</div>
+      <div id="musicAdminScraperCard">${renderMusicAdminBulkScrapeCard(statusPayload.job)}</div>
+    `;
+    startMusicBulkScrapeAutoRefreshIfNeeded(statusPayload.job);
+  } catch (err) {
+    content.innerHTML = `${renderArtworkTabBar("music")}<div class="alert alert-danger">Failed to load music scraper status: ${escapeHtml(err.message || "unknown error")}</div>`;
+  } finally {
+    setLoading(false);
+  }
+}
+
 function parseSystemHash(hash) {
   if (!hash.startsWith("#system/") || hash.includes("/rom/")) return null;
   const raw = hash.substring("#system/".length);
@@ -3609,6 +4573,7 @@ async function renderSystemsExplorePage() {
           </div>
           <button id="systemsExploreBrowserPlayBtn" class="btn btn-outline-light btn-sm" type="button" title="Show only games playable in Chrome (Play in Browser -- other browsers aren't supported yet)" onclick="toggleSystemsExploreBrowserPlayOnly()"><i class="bi bi-play-circle"></i></button>
           <button id="systemsExploreDuplicatesBtn" class="btn btn-outline-light btn-sm" type="button" title="Find duplicate games" onclick="toggleSystemsExploreDuplicatesMode()"><i class="bi bi-files"></i></button>
+          ${renderAssetTypeSwitcher("systems")}
         </div>
         <div class="movie-explorer-body">
           <aside id="systems-explore-sidebar" class="movie-explorer-sidebar"></aside>
@@ -3627,6 +4592,7 @@ async function renderSystemsExplorePage() {
       <div class="movie-explorer-overlay">
         <div class="movie-explorer-topbar">
           <div class="movie-explorer-brand"><i class="bi bi-controller me-2"></i>Systems</div>
+          ${renderAssetTypeSwitcher("systems")}
         </div>
         <div class="alert alert-danger m-3">Failed to load systems: ${escapeHtml(err.message || "unknown error")}</div>
       </div>
@@ -4319,9 +5285,9 @@ const ONBOARDING_TOUR_STEPS = [
     body: "Anything that needs your attention -- finished downloads, device alerts -- shows up here.",
   },
   {
-    selector: "#systemsMenuBtn",
+    selector: "#assetsMenuBtn",
     title: "Your library",
-    body: "Browse and search every system and game on this machine.",
+    body: "Browse and search Games, Movies, and Music on this machine -- switch between them right from the search bar on each page.",
   },
   {
     selector: "#controlsMenuBtn",
@@ -4666,6 +5632,7 @@ function renderArtworkTabBar(active) {
     ["metadata", "Artwork & Metadata", "bi-images", "#admin/artwork"],
     ["theme", "Theme Gallery", "bi-brush", "#theme"],
     ["movies", "Movies", "bi-film", "#admin/movies"],
+    ["music", "Music", "bi-music-note-beamed", "#admin/music"],
   ]);
 }
 
@@ -11277,6 +12244,9 @@ async function router() {
     if (hash !== "#admin/movies") {
       stopMovieBulkScrapeAutoRefresh();
     }
+    if (hash !== "#admin/music") {
+      stopMusicBulkScrapeAutoRefresh();
+    }
     document.body.classList.toggle("artwork-page", hash.startsWith("#admin/artwork"));
     // The Systems Browse grid reuses the movie-explorer-* full-bleed chrome-
     // takeover CSS wholesale (see renderSystemsExplorePage) rather than a
@@ -11291,8 +12261,14 @@ async function router() {
     const moviesHashParsedForChrome = parseMoviesHash(hash);
     const isMoviesExplorerRoute = hash.startsWith("#movies")
       && (!moviesHashParsedForChrome || (moviesHashParsedForChrome.view !== "detail" && moviesHashParsedForChrome.view !== "show"));
-    document.body.classList.toggle("movie-explorer-active", isMoviesExplorerRoute || hash.startsWith("#systems"));
-    document.body.classList.toggle("movies-page-active", hash.startsWith("#movies"));
+    // Music reuses the identical movie-explorer-*/movies-page-active chrome
+    // classes (not a parallel music-explorer-active set) -- same "shared CSS,
+    // not cloned" convention #systems already follows for Movies' classes.
+    const musicHashParsedForChrome = parseMusicHash(hash);
+    const isMusicExplorerRoute = hash.startsWith("#music")
+      && (!musicHashParsedForChrome || (musicHashParsedForChrome.view !== "detail" && musicHashParsedForChrome.view !== "artist"));
+    document.body.classList.toggle("movie-explorer-active", isMoviesExplorerRoute || hash.startsWith("#systems") || isMusicExplorerRoute);
+    document.body.classList.toggle("movies-page-active", hash.startsWith("#movies") || hash.startsWith("#music"));
     if (hash === "#bios") {
       await redirectRouterHash(systemsExploreHash(SYSTEMS_EXPLORE_BIOS_KEY));
       return;
@@ -11322,6 +12298,15 @@ async function router() {
         // "#movies/explore" both parse to view === "explore" and render the
         // same page.
         await renderMovieExplorerPage();
+      }
+    } else if (hash.startsWith("#music")) {
+      const parsed = parseMusicHash(hash);
+      if (parsed && parsed.view === "detail") {
+        await renderMusicDetailsPage(parsed.entryKey);
+      } else if (parsed && parsed.view === "artist") {
+        await renderArtistDetailsPage(parsed.artist, parsed.album);
+      } else {
+        await renderMusicExplorerPage();
       }
     } else if (hash === "#admin") {
       if (!adminEnabled) {
@@ -11388,6 +12373,12 @@ async function router() {
         return;
       }
       await renderAdminMoviesArtworkPage();
+    } else if (hash === "#admin/music") {
+      if (!adminEnabled) {
+        setHash("");
+        return;
+      }
+      await renderAdminMusicArtworkPage();
     } else if (hash === "#admin/downloads") {
       if (!adminEnabled) {
         setHash("");
@@ -11503,13 +12494,9 @@ notificationsBellBtn?.addEventListener("show.bs.dropdown", () => {
 notificationsBellBtn?.addEventListener("hide.bs.dropdown", () => {
   notificationsDropdownOpen = false;
 });
-systemsMenuBtn.addEventListener("click", (event) => {
+assetsMenuBtn.addEventListener("click", (event) => {
   event.preventDefault();
   setHash("#systems");
-});
-moviesMenuBtn.addEventListener("click", (event) => {
-  event.preventDefault();
-  setHash("#movies");
 });
 controlsMenuBtn.addEventListener("click", (event) => {
   event.preventDefault();
@@ -11531,6 +12518,7 @@ async function startApp() {
   document.querySelector(".nav-actions")?.classList.remove("d-none");
   document.getElementById("logoutBtn")?.classList.remove("d-none");
   document.getElementById("accountSettingsBtn")?.classList.remove("d-none");
+  ensureMusicPlayerBar();
   try {
     await api("/admin/configs/sources");
     adminEnabled = true;

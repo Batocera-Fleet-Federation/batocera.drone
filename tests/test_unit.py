@@ -8283,11 +8283,15 @@ class NavRestructureTests(unittest.TestCase):
         self.assertIn("setHash('#admin/automation')", menu_body)
         self.assertIn("Automation", menu_body)
 
-    def test_games_nav_link_is_the_renamed_assets_link(self) -> None:
-        # Renamed from "Assets" to "Games" -- the element id/href/JS wiring
-        # (systemsMenuBtn -> "#systems") are unchanged, only the label.
-        self.assertIn('id="systemsMenuBtn" href="#systems" role="button" class="btn"><i class="bi bi-grid me-2"></i>Games</a>', self.html)
-        self.assertNotIn(">Assets<", self.html)
+    def test_games_and_movies_nav_links_are_consolidated_into_one_assets_link(self) -> None:
+        # The separate "Games" (#systems) and "Movies" (#movies) navbar links
+        # are gone -- replaced by one "Assets" link (still targeting
+        # #systems); Games/Movies/Music switching now happens via
+        # renderAssetTypeSwitcher() on each Explorer page itself, not the navbar.
+        self.assertIn('id="assetsMenuBtn" href="#systems" role="button" class="btn"><i class="bi bi-collection-play me-2"></i>Assets</a>', self.html)
+        self.assertNotIn('id="systemsMenuBtn"', self.html)
+        self.assertNotIn('id="moviesMenuBtn"', self.html)
+        self.assertIn("function renderAssetTypeSwitcher(", self.js)
 
     def test_router_dispatches_transfers_and_redirects_integration_to_swarm(self) -> None:
         transfers_route = self.js.index('} else if (hash === "#admin/transfers")')

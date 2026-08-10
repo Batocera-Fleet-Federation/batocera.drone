@@ -27,6 +27,7 @@ try:
     )
     from ..storage import saves_store as _saves_store
     from ..storage import movies_store as _movies_store
+    from ..storage import music_store as _music_store
     from .gamelist import _database_rom_metadata_fields
     from .rom_asset_bios import bios_systems_for_md5
     from .rom_inventory import _bios_cache_entry_key, _rom_cache_entry_key, _wire_rom_rows
@@ -49,6 +50,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     )
     from storage import saves_store as _saves_store  # type: ignore
     from storage import movies_store as _movies_store  # type: ignore
+    from storage import music_store as _music_store  # type: ignore
     from roms.gamelist import _database_rom_metadata_fields  # type: ignore
     from roms.rom_asset_bios import bios_systems_for_md5  # type: ignore
     from roms.rom_inventory import _bios_cache_entry_key, _rom_cache_entry_key, _wire_rom_rows  # type: ignore
@@ -643,6 +645,10 @@ def _poll_rom_metadata_once(settings: Settings, repository: "RomRepository") -> 
             _movies_store.sync_movies_cache(settings.movies_root)
         except Exception as error:
             print(f"Local movies cache scan failed: {_format_http_error(error)}", file=sys.stderr, flush=True)
+        try:
+            _music_store.sync_music_cache(settings.music_root)
+        except Exception as error:
+            print(f"Local music cache scan failed: {_format_http_error(error)}", file=sys.stderr, flush=True)
         return _complete_local_rom_metadata_cache(settings, repository, "scan_complete")
     finally:
         _end_rom_metadata_activity()
