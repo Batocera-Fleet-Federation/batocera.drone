@@ -1740,9 +1740,19 @@ function musicExploreHash() {
 }
 // "artist" is reserved -- an entry_key is always the hex-digest slice
 // music_store._entry_key produces, which can never equal "artist".
+//
+// `album === ""` (the "Singles" bucket) and `album == null` ("no
+// preference, use this artist's default album") must produce *different*
+// hashes -- both used to omit the album segment entirely, making them
+// indistinguishable once parsed back out by parseMusicHash (which then
+// falls back to this artist's first alphabetical *real* album for either
+// case). That was a real bug: clicking a "Singles" card in the Explorer
+// grid silently landed on whatever album sorts first for that artist
+// instead, which looked -- and was reported -- as if two unrelated albums
+// "were the same album", since both links led to the identical page.
 function artistDetailHash(artist, album) {
   const base = `#music/artist/${encodeURIComponent(artist)}`;
-  return album != null && album !== "" ? `${base}/${encodeURIComponent(album)}` : base;
+  return album != null ? `${base}/${encodeURIComponent(album)}` : base;
 }
 // entryKey is any one track in the album (the backend groups every sibling
 // on-disk itself, see handlers_music._album_group_entry_keys) -- artist/album
@@ -2576,7 +2586,7 @@ function renderMusicExplorerCard(entry) {
   const subtitle = entry.isAlbumGroup ? entry.artist : entry.artist || "";
   const artUrl = musicArtworkUrl(entry.entry_key, "art");
   const navigateHash = entry.isAlbumGroup
-    ? artistDetailHash(entry.artist, entry.album || null)
+    ? artistDetailHash(entry.artist, entry.album)
     : musicDetailHash(entry.entry_key);
   return `
     <button type="button" class="movie-explorer-card" title="${escapeHtml(title)}" onclick="setHash(${jsAttr(navigateHash)})">
