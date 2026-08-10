@@ -2703,7 +2703,7 @@ function musicLikeButtonHtml(entryKey, liked, variant) {
   const sizeClass = variant === "icon" ? " btn-sm" : "";
   const iconClass = liked ? "bi-hand-thumbs-up-fill" : "bi-hand-thumbs-up";
   const label = variant === "text" ? (liked ? "Liked" : "Like") : "";
-  return `<button class="btn${sizeClass} ${liked ? "btn-primary" : "btn-outline-secondary"}" type="button" data-variant="${variant}" title="${liked ? "Unlike" : "Like"}" onclick="toggleMusicLike(${jsAttr(entryKey)}, ${liked}, this)"><i class="bi ${iconClass}${label ? " me-1" : ""}"></i>${label}</button>`;
+  return `<button class="btn${sizeClass} ${liked ? "btn-primary" : "btn-outline-secondary"}" type="button" data-variant="${variant}" data-music-like-key="${escapeHtml(entryKey)}" title="${liked ? "Unlike" : "Like"}" onclick="toggleMusicLike(${jsAttr(entryKey)}, ${liked}, this)"><i class="bi ${iconClass}${label ? " me-1" : ""}"></i>${label}</button>`;
 }
 // Toggles a track's liked flag and patches the DOM in place (no full
 // re-render) -- mirrors the lightweight optimistic-update shape used
@@ -2711,20 +2711,27 @@ function musicLikeButtonHtml(entryKey, liked, variant) {
 // whole card, but a single icon toggle doesn't need that). Also patches
 // musicAllRows in place so the Likes sidebar filter/count reflects the
 // change immediately without a re-fetch.
+//
+// The same track's like button can be visible in more than one place at
+// once (a track row on the artist/album page AND the persistent player bar
+// showing that same track) -- every matching button, wherever toggled from,
+// is kept in sync via the shared data-music-like-key attribute rather than
+// only patching the one that was actually clicked.
 async function toggleMusicLike(entryKey, likedNow, button) {
   const nextLiked = !likedNow;
-  if (button) button.disabled = true;
+  const matches = document.querySelectorAll(`[data-music-like-key="${entryKey}"]`);
+  matches.forEach((el) => { el.disabled = true; });
   try {
     await apiPost(`/music/${encodeURIComponent(entryKey)}/like`, { liked: nextLiked });
     const row = musicAllRows.find((m) => m.entry_key === entryKey);
     if (row) row.liked = nextLiked;
-    if (button) {
-      const variant = button.dataset.variant || "icon";
-      button.outerHTML = musicLikeButtonHtml(entryKey, nextLiked, variant);
-    }
+    document.querySelectorAll(`[data-music-like-key="${entryKey}"]`).forEach((el) => {
+      const variant = el.dataset.variant || "icon";
+      el.outerHTML = musicLikeButtonHtml(entryKey, nextLiked, variant);
+    });
   } catch (err) {
     showToast(`Failed to update like: ${escapeHtml(err.message || "unknown error")}`, "danger");
-    if (button) button.disabled = false;
+    matches.forEach((el) => { el.disabled = false; });
   }
 }
 async function renderMusicDetailsPage(entryKey) {
@@ -2768,7 +2775,7 @@ function renderMusicDetailShell(track) {
           ${metaBits.length ? `<div class="text-muted small mb-2">${metaBits.map((bit) => escapeHtml(bit)).join(" &middot; ")}</div>` : ""}
           ${genres.length ? `<div class="mb-3">${genres.map((g) => `<span class="badge movie-genre-badge">${escapeHtml(g)}</span>`).join(" ")}</div>` : ""}
           <div class="d-flex flex-wrap gap-2 mb-2">
-            <button class="btn btn-primary" type="button" onclick="playMusicTrack(${jsAttr(entryKey)}, ${jsAttr(title)}, ${jsAttr(artistLabel)})"><i class="bi bi-play-circle me-1"></i>Play</button>
+            <button class="btn btn-primary" type="button" onclick="playMusicTrack(${jsAttr(entryKey)}, ${jsAttr(title)}, ${jsAttr(artistLabel)}, ${!!track.liked})"><i class="bi bi-play-circle me-1"></i>Play</button>
             ${musicLikeButtonHtml(entryKey, !!track.liked, "text")}
             ${
               track.is_downloadable === false
@@ -2962,6 +2969,7 @@ function ensureMusicPlayerBar() {
       <div id="musicPlayerBarArtist" class="text-truncate text-muted small"></div>
     </div>
     <div class="music-player-bar-controls d-flex align-items-center gap-2">
+      <span id="musicPlayerBarLike"></span>
       <button type="button" class="btn btn-outline-light btn-sm" title="Previous" onclick="playMusicPlayerPrevious()"><i class="bi bi-skip-start-fill"></i></button>
       <audio id="musicPlayerBarAudio" controls></audio>
       <button type="button" class="btn btn-outline-light btn-sm" title="Next" onclick="playMusicPlayerNext()"><i class="bi bi-skip-end-fill"></i></button>
@@ -2986,11 +2994,13 @@ function closeMusicPlayerBar() {
 }
 // Plays one track with no album queue context (e.g. the plain track detail
 // page's Play button) -- next/previous are no-ops until a real queue is set
-// via playMusicAlbum/playMusicTrackFromAlbum.
-function playMusicTrack(entryKey, title, artist) {
+// via playMusicAlbum/playMusicTrackFromAlbum. `liked` is passed in by the
+// caller (rather than looked up here) since musicAllRows may not be loaded
+// yet if the user navigated straight to a track detail page URL.
+function playMusicTrack(entryKey, title, artist, liked) {
   musicPlayerQueue = [entryKey];
   musicPlayerQueueIndex = 0;
-  _playMusicPlayerEntry(entryKey, title, artist);
+  _playMusicPlayerEntry(entryKey, title, artist, !!liked);
 }
 // Sets the queue to a whole album's tracks (disc/track-number order) and
 // starts playback at one specific track -- what the artist/album detail
@@ -3001,7 +3011,7 @@ function playMusicTrackFromAlbum(entryKey, artist, album) {
   musicPlayerQueue = tracks.map((t) => t.entry_key);
   musicPlayerQueueIndex = Math.max(0, musicPlayerQueue.indexOf(entryKey));
   const track = tracks.find((t) => t.entry_key === entryKey) || tracks[0];
-  if (track) _playMusicPlayerEntry(track.entry_key, track.display_title || track.track_name, artist);
+  if (track) _playMusicPlayerEntry(track.entry_key, track.display_title || track.track_name, artist, !!track.liked);
 }
 function playMusicAlbum(artist, album) {
   const tracks = musicAlbumTracksSorted(artist, album);
@@ -3009,7 +3019,7 @@ function playMusicAlbum(artist, album) {
   musicPlayerQueue = tracks.map((t) => t.entry_key);
   musicPlayerQueueIndex = 0;
   const first = tracks[0];
-  _playMusicPlayerEntry(first.entry_key, first.display_title || first.track_name, artist);
+  _playMusicPlayerEntry(first.entry_key, first.display_title || first.track_name, artist, !!first.liked);
 }
 function musicAlbumTracksSorted(artist, album) {
   const artistKey = String(artist || "").toLowerCase().trim();
@@ -3033,9 +3043,9 @@ function _playMusicPlayerEntryFromQueue() {
   const entryKey = musicPlayerQueue[musicPlayerQueueIndex];
   if (!entryKey) return;
   const row = musicAllRows.find((m) => m.entry_key === entryKey);
-  _playMusicPlayerEntry(entryKey, row ? (row.display_title || row.track_name) : entryKey, row ? row.artist : "");
+  _playMusicPlayerEntry(entryKey, row ? (row.display_title || row.track_name) : entryKey, row ? row.artist : "", !!(row && row.liked));
 }
-function _playMusicPlayerEntry(entryKey, title, artist) {
+function _playMusicPlayerEntry(entryKey, title, artist, liked) {
   ensureMusicPlayerBar();
   musicPlayerCurrentEntryKey = entryKey;
   const bar = document.getElementById("musicPlayerBar");
@@ -3048,9 +3058,19 @@ function _playMusicPlayerEntry(entryKey, title, artist) {
     art.nextElementSibling?.classList.add("d-none");
     art.src = musicArtworkUrl(entryKey, "art");
   }
+  updateMusicPlayerBarLikeButton(entryKey, !!liked);
   audio.src = musicStreamUrl(entryKey);
   bar.classList.remove("d-none");
   audio.play().catch(() => {});
+}
+// Rebuilds the player bar's like button for whichever track is now current
+// -- called whenever a new track starts (from _playMusicPlayerEntry); the
+// data-music-like-key-based sync in toggleMusicLike handles keeping it in
+// sync with the rest of the page once a track is already showing.
+function updateMusicPlayerBarLikeButton(entryKey, liked) {
+  const container = document.getElementById("musicPlayerBarLike");
+  if (!container) return;
+  container.innerHTML = musicLikeButtonHtml(entryKey, liked, "icon");
 }
 // Casting (Chromecast/AirPlay) -- both receivers fetch the video file
 // themselves, directly, with no browser in the loop, so neither this app's
