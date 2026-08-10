@@ -158,10 +158,12 @@ class MockServerIntegrationTests(unittest.TestCase):
         self.assertEqual(payload["systems"].get("snes"), "snes9x")
         self.assertEqual(payload["systems"].get("gba"), "mgba")
         self.assertEqual(payload["systems"].get("psx"), "mednafen_psx_hw")
-        self.assertEqual(payload["systems"].get("mame"), "mame2003_plus")
         self.assertEqual(payload["systems"].get("fbneo"), "fbneo")
         self.assertNotIn("dreamcast", payload["systems"])
-        self.assertEqual(sorted(payload["romset_sensitive"]), ["fba", "fbneo", "mame"])
+        # mame is deliberately excluded entirely (not just flagged sensitive)
+        # -- see app/roms/browser_play.py's module docstring.
+        self.assertNotIn("mame", payload["systems"])
+        self.assertEqual(sorted(payload["romset_sensitive"]), ["fba", "fbneo"])
 
     def test_emulatorjs_player_html_has_relaxed_csp_and_cross_origin_isolation(self) -> None:
         # player.html is opened in a new tab by drone.js's "Play in Browser" button

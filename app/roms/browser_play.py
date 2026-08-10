@@ -14,15 +14,31 @@ Deliberately excludes systems that would need a threaded/SharedArrayBuffer core
 BIOS+multi-disc-heavy setup (saturn, segacd) -- both addressable later without
 changing this module's shape.
 
-mame/fba/fbneo are included despite a real compatibility caveat: MAME and
-FBNeo cores are strict about matching one specific upstream romset revision
-(exact per-file CRCs, split-vs-merged conventions, BIOS requirements), and the
-vendored cores here track an older/independent romset generation than
-whatever Batocera's own bundled MAME/FBNeo build expects. A ROM that boots
-fine on the actual device is not guaranteed to boot in the browser core --
-unlike every other system in this map, where "shows up" reliably means "will
-work". ROMSET_SENSITIVE_SYSTEMS flags that caveat for the UI to surface
-instead of silently promising the same reliability as everything else.
+fba/fbneo are included despite a real compatibility caveat: these cores are
+strict about matching one specific upstream romset revision (exact per-file
+CRCs, split-vs-merged conventions, BIOS requirements), and the vendored core
+here tracks an older/independent romset generation than whatever Batocera's
+own bundled build expects. A ROM that boots fine on the actual device is not
+guaranteed to boot in the browser core -- unlike every other system in this
+map, where "shows up" reliably means "will work". ROMSET_SENSITIVE_SYSTEMS
+flags that caveat for the UI to surface instead of silently promising the
+same reliability as everything else.
+
+**mame is deliberately absent from this map entirely** (not just flagged
+sensitive) -- confirmed live against a real ~4,400-ROM full romset (folder
+named "mame-265", i.e. built for MAME 0.265/current) that the vendored
+``mame2003_plus`` core (~0.78-era romset conventions, the standard choice
+across every EmulatorJS deployment because a browser-shippable WASM build of
+current MAME doesn't exist -- the real thing is 400+MB as a native .so) is
+decades of driver/CRC/file-split revisions away from what a modern full
+romset actually contains. Unlike fba/fbneo (a narrower, closer version gap
+where *some* ROMs plausibly still work), the gap here is large enough that
+showing a "Play in Browser" button at all was judged more misleading than
+useful for a MAME library shaped like this one -- most games will simply
+fail to load. If a case ever justifies re-adding it (e.g. a specifically
+mame2003_plus-compatible ROM set), reintroduce the mapping and let
+ROMSET_SENSITIVE_SYSTEMS's caveat banner carry the risk again, same as
+fba/fbneo.
 """
 
 from typing import Dict, FrozenSet, Optional
@@ -50,7 +66,6 @@ SYSTEM_CORE_MAP: Dict[str, str] = {
     "atari7800": "prosystem",
     "atari5200": "a5200",
     "3do": "opera",
-    "mame": "mame2003_plus",
     "fba": "fbneo",
     "fbneo": "fbneo",
 }
@@ -59,7 +74,7 @@ SYSTEM_CORE_MAP: Dict[str, str] = {
 # ROM will actually boot -- see the module docstring. The frontend uses this
 # to show a compatibility caveat instead of the plain "Play in Browser" button
 # it shows for every other system.
-ROMSET_SENSITIVE_SYSTEMS: FrozenSet[str] = frozenset({"mame", "fba", "fbneo"})
+ROMSET_SENSITIVE_SYSTEMS: FrozenSet[str] = frozenset({"fba", "fbneo"})
 
 
 def browser_play_core_for_system(system: str) -> Optional[str]:
