@@ -6,16 +6,12 @@ After it is installed, you open Drone from a browser on your computer, phone, or
 
 ## TL;DR
 
-- Drone runs on each Batocera device and gives you a local web UI.
-- Overmind is the central hub that knows about all your Drones.
-- Each Drone checks in with Overmind, receives the current swarm list, and can test whether it can reach the other Drones directly.
-- Drone-to-Drone API calls can use mTLS. Drone creates its own local certificate on startup, so you do not need a public domain.
-- Drone reports live telemetry back to Overmind, including speed samples, filesystem changes, peer checks, gameplay, and ROM/library changes.
+- Drone runs on each Batocera device and gives you a local web UI. There is no central hub — every Drone is a standalone agent that pairs directly with a handful of others (peer-to-peer only).
+- Drones pair directly over the local network (short-lived 8-digit pairing code) or code-free over a shared Tailscale tailnet. Pairing exchanges and pins each Drone's self-signed certificate; there is no third party granting trust.
+- Drone-to-Drone API calls require mTLS with that pinned certificate. Drone creates its own local certificate on startup, so you do not need a public domain or a CA.
+- Local-network/tailnet P2P is always on — it is a fixed property of the architecture, not a toggle, since there is no hub to fall back to if it were disabled.
 - Containers are supported for local swarm testing. The Drone container creates a Batocera-like `/userdata` tree and copies a varied set of ROMs from `.github/data/roms/<system>/<files>`.
-- Drone checks in with Overmind every 30 seconds by default.
-- Overmind integration now uses an Overmind-generated authorization token instead of an integration password.
-- Drone caches approved peer certificates from Overmind before Drone-to-Drone mTLS calls.
-- The Drone admin header uses the shared project mascot at `content/batocera-swarm-mascot.jpg`, matching Overmind's landing and header branding without interfering with core workflows.
+- The Drone admin header uses the shared project mascot at `content/batocera-swarm-mascot.jpg`.
 
 ## What You Can Do With It
 
@@ -26,7 +22,7 @@ After it is installed, you open Drone from a browser on your computer, phone, or
 - Import artwork and metadata from LaunchBox and TheGamesDB when available.
 - Scrape, upload, and crop artwork from the admin artwork page or an individual ROM artwork page.
 - Use admin tools for logs, configs, cleanup, system information, and troubleshooting.
-- Link to Overmind to report status, telemetry, peer checks, and processed actions.
+- Pair directly with other Drones to browse and copy ROMs, BIOS, artwork, saves, and movies peer-to-peer.
 - Use the built-in API if you want to automate against your Batocera machine.
 
 ## Install On Batocera
@@ -101,46 +97,31 @@ The machine-readable OpenAPI file is here:
 https://<your-batocera-name>.local/v1/api/openapi.json
 ```
 
-## Overmind Integration
-
-Batocera Drone is the local Batocera agent. Overmind owns the Overlord UI, Drone authorization tokens, action queue, swarm list, peer status, and per-Drone auto-sync policy.
-
-Drone calls Overmind every 30 seconds by default. The alive payload includes the MAC-address `device_id`, discovered IPv4/IPv6 addresses, router/gateway IP when available, public IP when available, API port, protocol, local certificate metadata, ROM systems, and basic system information. During this poll Drone checks emulator configs and log sources and uploads only new or changed content, retrying until Overmind accepts it. When disconnection leaves more log output pending than one upload can hold, Drone sends the most recent output with an omission marker rather than replaying stale logs for many polls. Overmind validates `Authorization: Bearer <drone_token>` before accepting alive, action status, metadata, logs, telemetry events, peer checks, or speed samples.
-
-Overmind responds with the current swarm list, including each peer's reported public IP and public peer API URL. Drone stores that list locally, skips itself, and uses the public endpoint first for health checks and peer-to-peer asset transfers. The admin Overmind page shows whether the last peer check passed or failed, when it was checked, and the failure reason if there was one.
-
-Actions use a pull model because Overmind usually cannot connect inward to a Drone on a home network. The Overlord queues actions in Overmind, the Drone receives the current pending batch during alive polling, performs each action sequentially, then posts each result back to Overmind. Remote Restart is simulated in fake/demo mode. Kiosk mode actions set or remove EmulationStation's `UIMode` value and restart EmulationStation when Batocera's restart tool is available. Remote shutdown is not supported; legacy shutdown actions are rejected without execution.
-
-Drone also reports live events to Overmind. These include filesystem create/update/delete events for watched ROM/config/artwork/log paths, ROM/library changes, gameplay activity, and speed samples. Gameplay start/stop detection polls Linux procfs for Batocera's active `emulatorlauncher -system ... -rom ...` command every two seconds by default, rather than parsing EmulationStation launch logs. Set `GAME_PROCESS_POLL_SECONDS` to adjust that interval. Speed samples measure the Drone's Internet connection through Cloudflare Speed Test endpoints (`speed.cloudflare.com`), rather than transferring probe data through Overmind; only the resulting sample is reported to Overmind. Once Drone is connected to Overmind, it runs a speed test during its initial startup check-in and every 10 minutes thereafter by default. Set `OVERMIND_SPEED_SAMPLE_SECONDS` to adjust that interval, or set `DRONE_SPEED_TEST_BASE_URL`, `DRONE_SPEED_TEST_BYTES` (default `1000000` per direction), or `DRONE_SPEED_TEST_TIMEOUT_SECONDS` when a different compatible endpoint or probe size is needed.
-
-System information is collected at startup and refreshed occasionally. It can include hostname, OS/platform, Batocera version when available, Drone app version, architecture, CPU count, memory, disk, network addresses, uptime, and whether Drone is running in Docker.
-
-Drone-owned durable state is stored in its local SQLite database: Overmind configuration, swarm and peer-check snapshots, upload cursors/fingerprints, credentials, small MD5 lookup results, peer certificate metadata, and processed action history. Existing JSON or action-log state files are imported on first access and removed after successful migration. `OVERMIND_ACTION_LOG_MAX_BYTES` is retained as a compatibility setting and bounds the number of completed-action records retained in SQLite. Normal Drone stdout/stderr logs remain rotating files controlled by `LOG_MAX_BYTES` and `LOG_BACKUP_COUNT`, because log collection tails those streams directly.
-
-Local fake mode is opt-in with `USE_FAKE_DATA=true`. In Local Network mode, one visible nearby Drone is automatically shown as paired so asset requests can be exercised without completing the pairing flow; the remaining nearby Drones stay unpaired for pairing UI testing. A paired **Demo Arcade Cabinet** is used as a fallback when no nearby Drone has been discovered. Normal local Compose starts Drones unapproved so Overmind can show the pending Psionic connection.
-
 ## Local Network Mode
 
-Each Drone can enable either or both integration control planes:
+There is no central hub. Every Drone is a standalone agent; it discovers and pairs **directly** with other Drones on the local network (or code-free over a shared Tailscale tailnet) and talks to them peer-to-peer. This is a fixed property of the architecture, not an optional integration — it cannot be disabled.
 
-- **Overmind Integration** keeps the existing heartbeat, action, telemetry, inventory upload, and Overmind-managed swarm behavior.
-- **Local Network** discovers nearby Drones with a local multicast announcement and supports direct pairing and asset transfer.
+A discovered Drone is not trusted automatically. Open the Local Network page on the other Drone, enter its short-lived eight-digit pairing code, and confirm the pairing. Pairing exchanges and pins each Drone's self-signed certificate by exact fingerprint; private keys never leave their Drone, and there is no shared CA or third party granting trust.
 
-Enable Overmind and Local Network independently on **Admin > Integration**; both integrations can run at the same time. Configuration and enablement stay on that page, while **Overmind Integration** and **Local Network** have separate operational pages. With Local Network enabled, a discovered Drone is not trusted automatically. Open the Local Network page on the other Drone, enter its short-lived eight-digit pairing code, and confirm the pairing. Pairing exchanges and pins each Drone's public certificate; private keys never leave their Drone.
-
-After pairing, the page shows peer health and provides an asset-request workspace for connected Drones. Administrators can browse and copy ROMs, BIOS, artwork, and saves directly from another Drone, or request emulator-config metadata and gameplay history for inspection. Transfers use the existing recipient-pull queue, run one at a time, verify the advertised fingerprint or MD5 when available, and appear in the normal Downloads panel.
+After pairing, the page shows peer health and provides an asset-request workspace for connected Drones. Administrators can browse and copy ROMs, BIOS, artwork, saves, and movies directly from another Drone, or request emulator-config metadata and gameplay history for inspection. Transfers use a recipient-pull queue, run one at a time (single-source, not multi-peer swarming), verify the advertised fingerprint or MD5 when available, and appear in the normal Downloads panel. `TransportSelector` tries LAN-direct, then tailnet-direct, then a legacy direct-WAN/port-forward fallback, best-first — there is no relay of any kind, so a peer that's neither on the same LAN/tailnet nor port-forwarded is simply unreachable.
 
 The Swarm page can also reference a paired Drone's ROM and BIOS library without copying it. New references negotiate a Drone-owned, read-only NFSv4 export over the paired mTLS API, use a same-LAN route before Tailscale when available, and fall back automatically to Batocera's standard read-only SMB share when NFS is unavailable or the source runs an older Drone release. Source-side ROM symlinks (including absolute links into external drives) are resolved into real per-system directories inside the private export, and the client verifies the mounted system inventory before renaming any local folder. Saves and configuration always remain local. Existing active SMB references are not switched underneath a running emulator; they adopt NFS on their next controlled detach/reconnect. TCP port 2049 must be reachable between the two Drones on the LAN or permitted by the applicable Tailscale ACL. Source authorizations are restricted to the paired Drone's exact known LAN/Tailscale IPv4 addresses, restored after reboot, revoked on detach/unpair, and removed by the uninstaller.
 
 `DRONE_NETWORK_SHARE_PROTOCOL` may be set to `auto` (default), `nfs`, or `smb` for rollout diagnostics. NFS mounts are read-only and use bounded failure settings so an offline source cannot indefinitely block Drone or EmulationStation. The relevant tuning overrides are `DRONE_NETWORK_SHARE_NFS_NEGOTIATION_TIMEOUT_SECONDS`, `DRONE_NETWORK_SHARE_NFS_TIMEO_TENTHS`, `DRONE_NETWORK_SHARE_NFS_RETRANS`, and the existing `DRONE_NETWORK_SHARE_ACTIMEO_SECONDS`.
 
-Local mode state, discovered peers, paired peers, pairing codes, and health snapshots are stored in Drone's existing SQLite state database. The saved Overmind configuration is retained while suspended, so switching back to Overmind mode resumes the existing integration without reconfiguration.
+Local mode state, discovered peers, paired peers, pairing codes, and health snapshots are stored in Drone's existing SQLite state database.
+
+Drone also tracks gameplay activity and connection speed purely locally. Gameplay start/stop detection polls Linux procfs for Batocera's active `emulatorlauncher -system ... -rom ...` command every two seconds by default (set `GAME_PROCESS_POLL_SECONDS` to adjust). Speed samples measure the Drone's Internet connection through Cloudflare Speed Test endpoints (`speed.cloudflare.com`); set `DRONE_SPEED_TEST_BASE_URL`, `DRONE_SPEED_TEST_BYTES` (default `1000000` per direction), or `DRONE_SPEED_TEST_TIMEOUT_SECONDS` when a different compatible endpoint or probe size is needed. System information is collected at startup and refreshed occasionally, and can include hostname, OS/platform, Batocera version when available, Drone app version, architecture, CPU count, memory, disk, network addresses, uptime, and whether Drone is running in Docker.
+
+Drone-owned durable state is stored in its local SQLite database: paired-peer and pairing-code state, discovered/health snapshots, upload cursors/fingerprints, credentials, small MD5 lookup results, peer certificate metadata, and processed action/audit history. Existing JSON or action-log state files are imported on first access and removed after successful migration. Normal Drone stdout/stderr logs remain rotating files controlled by `LOG_MAX_BYTES` and `LOG_BACKUP_COUNT`, because log collection tails those streams directly.
+
+Local fake mode is opt-in with `USE_FAKE_DATA=true`. One visible nearby Drone is automatically shown as paired so asset requests can be exercised without completing the pairing flow; the remaining nearby Drones stay unpaired for pairing UI testing. A paired **Demo Arcade Cabinet** is used as a fallback when no nearby Drone has been discovered.
 
 ## Drone-to-Drone Security
 
 Drone can protect peer API routes with mTLS. In plain language, one Drone must show its local certificate before another Drone answers peer API calls.
 
-Drone creates or reuses a local self-signed certificate on startup. It does not need Let's Encrypt and does not need a public domain name. The certificate metadata is sent to Overmind so the swarm UI can show which certificate a Drone is using. The private key stays on the Drone.
+Drone creates or reuses a local self-signed certificate on startup. It does not need Let's Encrypt and does not need a public domain name. Its certificate metadata is shown on the Local Network page and exchanged with a peer during pairing so the paired Drone can pin it. The private key stays on the Drone.
 
 Useful settings:
 
@@ -153,7 +134,7 @@ DRONE_CERT_DAYS=825
 
 If you use your own certificate authority, set `DRONE_MTLS_CA_FILE` so Drone can ask the TLS layer to verify peer certificates.
 
-With Overmind enabled, Drone fetches approved peer public certificates from Overmind and caches them in `/userdata/system/drone-app/peer-certs/`. With Local Network enabled, an administrator-approved pairing exchanges and pins peer certificates separately in `/userdata/system/drone-app/local-peer-certs/`. When both are enabled, each request is authorized through its corresponding trust path. Discovery alone never grants access to peer health, inventory, or files.
+An administrator-approved pairing exchanges and pins each peer's self-signed certificate by exact fingerprint in `/userdata/system/drone-app/local-peer-certs/` — that pinned fingerprint is the only trust path; there is no shared CA. Discovery alone never grants access to peer health, inventory, or files.
 
 For API clients that need mTLS, use your client certificate and key from a trusted system:
 
@@ -185,10 +166,6 @@ docker build -t ghcr.io/batocera-fleet-federation/batocera-drone:local .
 The container entrypoint creates the folders, configs, logs, and ROM mount points Drone expects on Batocera. For swarm testing, run it through the shared Compose setup in the `.github` repo so each Drone gets a different identity and a copied subset of ROM files.
 
 The shared Compose swarm runs four lightweight Drones with unique hostnames, device ids, MAC addresses, ports, and volumes. Fake data is disabled unless `USE_FAKE_DATA=true` is set.
-
-## ROM Sync
-
-ROM sync is requested from Overmind, not by choosing a source Drone manually. The target Drone receives a `sync_rom` or `sync_system` action, checks its stored swarm list, picks a healthy source that Overmind has verified as publicly resolvable and that has the requested ROM, downloads one file at a time through the peer API, and reports sync activity back to Overmind. Drones without a verified public peer endpoint are never selected as ROM, BIOS, or artwork download sources.
 
 Publish a multi-arch GHCR image:
 
@@ -231,15 +208,9 @@ To prevent ROM and BIOS downloads through Drone:
 ALLOW_CONTENT_DOWNLOAD=false
 ```
 
-### Overmind Heartbeat and ROM Metadata
+### ROM Metadata Scanning
 
-The Drone admin Overmind Integration page supports two onboarding paths. The token flow uses an authorization token generated in Overmind. The Claim Ownership flow asks for Overmind URL, email, and password, sends them to Overmind over HTTPS, and stores only the returned Drone bearer token. Passwords are not logged or persisted by Drone.
-
-Drone heartbeats are intentionally lightweight. They report Drone identity, name, reachable network details, certificate metadata, downloads, and basic system health/status. Heartbeats do not scan ROM folders and do not calculate ROM MD5 hashes.
-
-Each heartbeat logs the send start, Overmind heartbeat endpoint, success or failure, response status when available, and duration.
-
-ROM inventory is handled by a separate low-priority poller. Its initial run waits 60 seconds after startup so Batocera services can settle, and subsequent polls default to every 5 minutes. Configure it with:
+ROM inventory is handled by a local, low-priority poller (there is nowhere to upload it to — it exists purely to keep Drone's own SQLite cache current for the web UI and peer transfers). Its initial run waits 60 seconds after startup so Batocera services can settle, and subsequent polls default to every 5 minutes, plus an inotify-debounced wake on filesystem changes. Configure it with:
 
 ```bash
 ROM_METADATA_POLL_SECONDS=300
@@ -253,7 +224,7 @@ The poller and other Drone-owned durable state share the local SQLite database a
 /userdata/system/drone-app/rom_metadata_cache.sqlite3
 ```
 
-The database filename is retained for in-place compatibility with existing ROM caches; it now also contains keyed application state, completed action records, and an outbound asset-change queue. Existing JSON caches are migrated on first use. On each poll Drone scans file size and modified time first, upserts only added or changed rows, deletes rows for removed assets, hashes only new or changed ROM files, and sends Overmind only pending asset upserts and deletions. A full catalog replacement is sent only by the queued Rebuild Asset Metadata action. Local collection and caching continue even when Drone is not connected to Overmind or Overmind is temporarily unavailable; unsent changes remain queued for retry. Discovery and MD5 work are checkpointed during progress so a restarted Drone resumes from completed hashes instead of starting the metadata build over. MD5 reads yield between chunks to avoid monopolizing slower storage, and heartbeat filesystem scanning pauses while metadata work is active.
+The database filename is retained for in-place compatibility with existing ROM caches; it now also contains keyed application state, completed action records, paired-peer state, and the ROM/BIOS/save/movie caches. Existing JSON caches are migrated on first use. On each poll Drone scans file size and modified time first, upserts only added or changed rows, deletes rows for removed assets, and hashes only new or changed ROM files (a sampled fingerprint, not a full-file MD5). A completed pass simply marks the local cache clean — nothing is uploaded anywhere. Discovery and hashing work are checkpointed during progress so a restarted Drone resumes from completed hashes instead of starting the metadata build over. Hash reads yield between chunks to avoid monopolizing slower storage, and other filesystem walks are deferred while metadata work is active.
 
 ROM metadata logs show cache load, scan, checkpoint, MD5 hashing, cache update, upload/skip, counts, and durations. The checkpoint cadence defaults to 250 assets or 30 seconds and can be changed with `ROM_METADATA_PROGRESS_FILES` and `ROM_METADATA_PROGRESS_SECONDS`; `ROM_METADATA_HASH_IO_YIELD_SECONDS` controls the storage-friendly pause after each 1 MB hashing read. During metadata activity Drone defers the emulator config crawl and duplicate filesystem telemetry walk so those tasks do not contend for the same drive. Individual ROM paths are not logged by default.
 
