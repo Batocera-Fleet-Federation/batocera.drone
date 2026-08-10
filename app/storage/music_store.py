@@ -484,6 +484,31 @@ def save_music_metadata(
     return get_music_metadata(music_root, entry_key)
 
 
+def set_music_art(music_root: Path, entry_key: str, art_relative_path: str) -> dict:
+    """Set (or replace) just a track's ``art_relative_path`` -- used by the
+    manual album-cover upload path, which must not clobber a track's real
+    scraped title/genres/MusicBrainz ids just because the user wants to
+    swap in a different image. Creates a minimal ``provider="manual"`` row
+    (mirroring ``save_music_metadata``'s upsert shape) if the track had
+    never been scraped/uploaded before; otherwise only the art column
+    changes, everything else untouched."""
+    with _open(music_root) as connection:
+        cursor = connection.execute(
+            "UPDATE music_metadata_entries SET art_relative_path = ? WHERE entry_key = ?",
+            (art_relative_path, entry_key),
+        )
+        if cursor.rowcount == 0:
+            scraped_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+            connection.execute(
+                "INSERT INTO music_metadata_entries "
+                "(entry_key, provider, provider_id, title, art_relative_path, artist_art_relative_path, scraped_at, extra_json) "
+                "VALUES (?, 'manual', '', '', ?, NULL, ?, '{}')",
+                (entry_key, art_relative_path, scraped_at),
+            )
+        connection.commit()
+    return get_music_metadata(music_root, entry_key)
+
+
 def delete_music_metadata(music_root: Path, entry_key: str) -> Optional[dict]:
     """Remove one track's scraped MusicBrainz metadata row -- for when a
     scrape matched the wrong track/album and a human needs to clear it before

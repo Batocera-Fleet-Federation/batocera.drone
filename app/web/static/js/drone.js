@@ -1720,8 +1720,17 @@ function musicDownloadUrl(entryKey) {
 function musicStreamUrl(entryKey) {
   return `${API_BASE}/music/${encodeURIComponent(entryKey)}/stream`;
 }
+// Bumped per entry_key right after a successful album-cover upload (see
+// uploadMusicAlbumArt) so a re-render in *this* browser session doesn't
+// serve a stale image from the artwork endpoint's
+// "Cache-Control: public, max-age=3600" -- the upload destination is a
+// fixed filename (album-cover.<ext>), so a re-upload overwrites the exact
+// URL the browser already cached. Empty until an upload happens, so a
+// normal (never-uploaded-to) track's artwork URL is unaffected.
+const musicArtCacheBust = new Map();
 function musicArtworkUrl(entryKey, field) {
-  return `${API_BASE}/music/${encodeURIComponent(entryKey)}/artwork/${encodeURIComponent(field)}`;
+  const bust = musicArtCacheBust.get(entryKey);
+  return `${API_BASE}/music/${encodeURIComponent(entryKey)}/artwork/${encodeURIComponent(field)}${bust ? `?v=${bust}` : ""}`;
 }
 function musicDetailHash(entryKey) {
   return `#music/${encodeURIComponent(entryKey)}`;
@@ -1734,6 +1743,51 @@ function musicExploreHash() {
 function artistDetailHash(artist, album) {
   const base = `#music/artist/${encodeURIComponent(artist)}`;
   return album != null && album !== "" ? `${base}/${encodeURIComponent(album)}` : base;
+}
+// entryKey is any one track in the album (the backend groups every sibling
+// on-disk itself, see handlers_music._album_group_entry_keys) -- artist/album
+// are only needed here to know which page to re-render afterward, not to
+// identify the target server-side.
+function openMusicAlbumArtPicker(entryKey, artist, album) {
+  let input = document.getElementById("musicAlbumArtUploadInput");
+  if (!input) {
+    input = document.createElement("input");
+    input.type = "file";
+    input.id = "musicAlbumArtUploadInput";
+    input.accept = "image/jpeg,image/png,image/webp";
+    input.className = "d-none";
+    document.body.appendChild(input);
+  }
+  input.onchange = async () => {
+    const file = input.files && input.files[0];
+    input.value = "";
+    if (file) await uploadMusicAlbumArt(entryKey, file, artist, album);
+  };
+  input.click();
+}
+async function uploadMusicAlbumArt(entryKey, file, artist, album) {
+  const formData = new FormData();
+  formData.append("file", file, file.name);
+  setLoading(true, "Uploading album cover...");
+  try {
+    const res = await fetch(_apiRequestUrl(`/admin/music/${encodeURIComponent(entryKey)}/artwork/upload`), { method: "POST", credentials: "include", body: formData });
+    let responsePayload = {};
+    try { responsePayload = await res.json(); } catch (_) {}
+    if (!res.ok) throw new Error(responsePayload.error || `Upload failed: ${res.status}`);
+    const bustToken = Date.now();
+    (responsePayload.entry_keys || []).forEach((key) => musicArtCacheBust.set(key, bustToken));
+    musicAllRows = []; // invalidate the client-side inventory cache so every view re-fetches fresh liked/genre/art state
+    showToast(`Album cover updated for ${responsePayload.updated} track${responsePayload.updated === 1 ? "" : "s"}.`, "success");
+    if (String(location.hash || "").startsWith("#music/artist/")) {
+      await renderArtistDetailsPage(artist, album);
+    } else {
+      await renderMusicDetailsPage(entryKey);
+    }
+  } catch (err) {
+    showToast(`Album cover upload failed: ${escapeHtml(err.message || "unknown error")}`, "danger", 8000);
+  } finally {
+    setLoading(false);
+  }
 }
 function parseMusicHash(hash) {
   if (!hash.startsWith("#music")) return null;
@@ -2652,6 +2706,11 @@ async function renderArtistDetailsPage(artist, albumParam) {
             ${genres.length ? `<div class="mb-2">${genres.map((g) => `<span class="badge movie-genre-badge">${escapeHtml(g)}</span>`).join(" ")}</div>` : ""}
             <div class="d-flex flex-wrap gap-2 mt-2">
               <button class="btn btn-primary btn-sm" type="button" onclick="playMusicAlbum(${jsAttr(artist)}, ${jsAttr(selectedAlbum)})"><i class="bi bi-play-circle me-1"></i>Play Album</button>
+              ${
+                adminEnabled
+                  ? `<button class="btn btn-outline-light btn-sm" type="button" title="Upload a cover image for this album -- applies to every track" onclick="openMusicAlbumArtPicker(${jsAttr(representative.entry_key)}, ${jsAttr(artist)}, ${jsAttr(selectedAlbum)})"><i class="bi bi-image me-1"></i>Upload Cover</button>`
+                  : ""
+              }
             </div>
           </div>
         </div>
@@ -2781,6 +2840,11 @@ function renderMusicDetailShell(track) {
               track.is_downloadable === false
                 ? `<button class="btn btn-outline-secondary" type="button" disabled><i class="bi bi-slash-circle me-1"></i>Downloads disabled</button>`
                 : `<a class="btn btn-outline-primary" href="${musicDownloadUrl(entryKey)}"><i class="bi bi-download me-1"></i>Download</a>`
+            }
+            ${
+              adminEnabled
+                ? `<button class="btn btn-outline-light" type="button" title="Upload a cover image for this album -- applies to every track" onclick="openMusicAlbumArtPicker(${jsAttr(entryKey)}, ${jsAttr(artistLabel)}, ${jsAttr(albumLabel)})"><i class="bi bi-image me-1"></i>Upload Cover</button>`
+                : ""
             }
             ${
               adminEnabled

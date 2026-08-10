@@ -24,16 +24,24 @@ from typing import Optional
 
 try:
     from ..common import http_range as _http_range
+    from ..common.multipart import boundary_from_content_type as _boundary_from_content_type
+    from ..common.multipart import parse_multipart_files as _parse_multipart_files
     from ..storage import music_store as _music_store
     from ..music import filename_parser as _music_filename_parser
     from ..music import metadata_manager as _music_metadata
     from ..music.musicbrainz_client import MusicBrainzUnavailableError as _MusicBrainzUnavailableError
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common import http_range as _http_range  # type: ignore
+    from common.multipart import boundary_from_content_type as _boundary_from_content_type  # type: ignore
+    from common.multipart import parse_multipart_files as _parse_multipart_files  # type: ignore
     from storage import music_store as _music_store  # type: ignore
     from music import filename_parser as _music_filename_parser  # type: ignore
     from music import metadata_manager as _music_metadata  # type: ignore
     from music.musicbrainz_client import MusicBrainzUnavailableError as _MusicBrainzUnavailableError  # type: ignore
+
+# Manual album-cover upload -- see _handle_admin_music_album_art_upload.
+_ALBUM_ART_UPLOAD_MAX_BODY_BYTES = 10 * 1024 * 1024
+_ALBUM_ART_ALLOWED_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 
 # Maps the public artwork field name (URL-facing) to the metadata row column
 # that holds its stored relative path -- "art" (album/track cover, from Cover
@@ -254,6 +262,29 @@ class HandlersMusicMixin:
         _music_store.set_music_liked(self.settings.music_root, entry_key, liked)
         self._send_json(200, {"entry_key": entry_key, "liked": liked})
 
+    def _album_group_entry_keys(self, entry_key: str) -> list:
+        """Every entry_key sharing this track's on-disk (artist, album)
+        folder, including ``entry_key`` itself -- scoped to tracks under the
+        same artist folder (cheap prefix query, see
+        ``list_music_under_artist_folder``) and then filtered to the exact
+        matching album via ``classify_location``, so an artist with many
+        unrelated albums doesn't cross-contaminate. Returns just
+        ``[entry_key]`` for an orphan/unknown track (nothing to group with)
+        rather than an empty list -- every caller needs at least the track
+        it started from."""
+        track = _music_store.get_music_by_key(self.settings.music_root, entry_key)
+        if not track:
+            return [entry_key]
+        location = _music_filename_parser.classify_location(track.get("file_path") or "")
+        if not location.artist or not location.album:
+            return [entry_key]
+        candidates = _music_store.list_music_under_artist_folder(self.settings.music_root, location.artist)
+        keys = [
+            candidate["entry_key"] for candidate in candidates
+            if _music_filename_parser.classify_location(candidate["file_path"]).album == location.album
+        ]
+        return keys or [entry_key]
+
     def _find_album_sibling_art(self, entry_key: str) -> Optional[Path]:
         """If another track in the same on-disk (artist, album) folder has
         scraped art of its own, use it -- every track's ``art`` is really
@@ -262,26 +293,12 @@ class HandlersMusicMixin:
         exactly as correct as this track's own would have been; the only
         reason one track has it and another doesn't is a per-download hiccup
         (a transient fetch failure, or a partial/incremental re-scrape),
-        never a real difference in what the "right" image is. Scoped to
-        tracks under the same artist folder (cheap prefix query, see
-        ``list_music_under_artist_folder``) and then filtered to the exact
-        matching album via ``classify_location``, so an artist with many
-        unrelated albums doesn't cross-contaminate."""
-        track = _music_store.get_music_by_key(self.settings.music_root, entry_key)
-        if not track:
-            return None
-        location = _music_filename_parser.classify_location(track.get("file_path") or "")
-        if not location.artist or not location.album:
-            return None
+        never a real difference in what the "right" image is."""
         music_root = Path(self.settings.music_root).resolve()
-        candidates = _music_store.list_music_under_artist_folder(self.settings.music_root, location.artist)
-        for candidate in candidates:
-            if candidate["entry_key"] == entry_key:
+        for candidate_key in self._album_group_entry_keys(entry_key):
+            if candidate_key == entry_key:
                 continue
-            candidate_location = _music_filename_parser.classify_location(candidate["file_path"])
-            if candidate_location.album != location.album:
-                continue
-            metadata = _music_store.get_music_metadata(self.settings.music_root, candidate["entry_key"])
+            metadata = _music_store.get_music_metadata(self.settings.music_root, candidate_key)
             relative_path = (metadata or {}).get("art_relative_path")
             if not relative_path:
                 continue
@@ -370,6 +387,63 @@ class HandlersMusicMixin:
             if target == music_root or music_root not in target.parents:
                 continue
             target.unlink(missing_ok=True)
+
+    # -------------------------------------------------------- manual upload
+
+    def _handle_admin_music_album_art_upload(self, entry_key: str) -> None:
+        """Upload a manual cover image for the whole album ``entry_key``
+        belongs to. Applies to every track sharing its on-disk (artist,
+        album) folder (``_album_group_entry_keys``) -- an uploaded album
+        cover is exactly as "album-level" as a MusicBrainz-scraped one,
+        which is also just one release-level image saved into every track's
+        own metadata row (see ``metadata_manager._apply_matched_track``'s
+        ``cover_bytes_cache``). Saved once, at a fixed filename under the
+        album's own ``images/`` folder (not per-track-stem-named, unlike
+        scraped art, since this genuinely is one file shared by every track
+        rather than N independently-downloaded copies) -- every group
+        member's ``art_relative_path`` just points at that same file.
+        Overwrites any art those tracks already had (scraped or previously
+        uploaded); other scraped fields (title, genres, MusicBrainz ids) are
+        left untouched via ``set_music_art``, which only ever touches the
+        art column."""
+        track = _music_store.get_music_by_key(self.settings.music_root, entry_key)
+        if not track:
+            self._send_json(404, {"error": "unknown track"})
+            return
+        content_type = self.headers.get("Content-Type", "")
+        if "multipart/form-data" not in content_type:
+            raise ValueError("multipart/form-data expected")
+        content_length = int(self.headers.get("Content-Length", 0) or 0)
+        if content_length <= 0 or content_length > _ALBUM_ART_UPLOAD_MAX_BODY_BYTES:
+            raise ValueError("invalid content size")
+        boundary = _boundary_from_content_type(content_type)
+        files = _parse_multipart_files(self.rfile.read(content_length), boundary)
+        if not files:
+            raise ValueError("no image file in upload")
+        filename, image_bytes = files[0]
+        suffix = Path(filename).suffix.lower()
+        if suffix not in _ALBUM_ART_ALLOWED_SUFFIXES:
+            raise ValueError("unsupported image type -- use jpg, png, or webp")
+
+        music_root = Path(self.settings.music_root).resolve()
+        track_path = (music_root / track["file_path"]).resolve()
+        if track_path == music_root or music_root not in track_path.parents:
+            raise ValueError("invalid track path")
+        images_dir = track_path.parent / "images"
+        images_dir.mkdir(parents=True, exist_ok=True)
+        dest_path = images_dir / f"album-cover{suffix}"
+        dest_path.write_bytes(image_bytes)
+        art_relative_path = dest_path.relative_to(music_root).as_posix()
+
+        entry_keys = self._album_group_entry_keys(entry_key)
+        for key in entry_keys:
+            _music_store.set_music_art(self.settings.music_root, key, art_relative_path)
+        # entry_keys (not just a count) so the frontend can cache-bust each
+        # affected track's artwork URL -- the destination filename is fixed
+        # (album-cover.<ext>, unlike scraped art's per-track-stem naming), so
+        # a re-upload overwrites the exact same URL every browser tab has
+        # cached under Cache-Control: public, max-age=3600.
+        self._send_json(200, {"updated": len(entry_keys), "entry_keys": entry_keys, "art_relative_path": art_relative_path})
 
     # ------------------------------------------------------------- scraper
     #

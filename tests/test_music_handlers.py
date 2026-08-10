@@ -46,12 +46,13 @@ class _FakeHeaders(dict):
 
 
 class _FakeHandler:
-    def __init__(self, settings: Settings, *, range_header=None) -> None:
+    def __init__(self, settings: Settings, *, range_header=None, body: bytes = b"") -> None:
         self.settings = settings
         self.headers = _FakeHeaders()
         if range_header is not None:
             self.headers["Range"] = range_header
         self.wfile = io.BytesIO()
+        self.rfile = io.BytesIO(body)
         self.response_status = None
         self.response_headers = {}
         self.json_response = None
@@ -99,6 +100,16 @@ def _handler(settings: Settings, **kwargs) -> _FakeHandler:
         pass
 
     return Handler(settings, **kwargs)
+
+
+def _multipart_body(field_name: str, filename: str, content: bytes, boundary: str = "TESTBOUNDARY") -> bytes:
+    return (
+        f"--{boundary}\r\n".encode()
+        + f'Content-Disposition: form-data; name="{field_name}"; filename="{filename}"\r\n'.encode()
+        + b"Content-Type: application/octet-stream\r\n\r\n"
+        + content
+        + f"\r\n--{boundary}--\r\n".encode()
+    )
 
 
 def _write_track(root: Path, rel: str, data: bytes) -> Path:
@@ -272,6 +283,107 @@ class MusicListHandlerTests(unittest.TestCase):
             handler2._handle_music_list()
             _status2, payload2 = handler2.json_response
             self.assertEqual(payload2["music"][0]["genres"], ["Rock"])
+
+
+class MusicAlbumArtUploadHandlerTests(unittest.TestCase):
+    def _upload(self, handler, entry_key, body, boundary="TESTBOUNDARY"):
+        handler.headers["Content-Type"] = f"multipart/form-data; boundary={boundary}"
+        handler.headers["Content-Length"] = str(len(body))
+        handler.rfile = io.BytesIO(body)
+        handler._handle_admin_music_album_art_upload(entry_key)
+
+    def test_upload_applies_to_every_track_in_the_album(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_track(root, "Band/Album/01 - A.mp3", b"x")
+            _write_track(root, "Band/Album/02 - B.mp3", b"y")
+            settings = _build_settings(root)
+            music_store.sync_music_cache(settings.music_root)
+            rows = {r["track_name"]: r["entry_key"] for r in music_store.list_music(settings.music_root)}
+
+            body = _multipart_body("file", "cover.jpg", b"uploaded-cover-bytes")
+            handler = _handler(settings)
+            self._upload(handler, rows["01 - A.mp3"], body)
+
+            status, payload = handler.json_response
+            self.assertEqual(status, 200)
+            self.assertEqual(payload["updated"], 2)
+            self.assertEqual(set(payload["entry_keys"]), set(rows.values()))
+            self.assertEqual(payload["art_relative_path"], "Band/Album/images/album-cover.jpg")
+
+            for key in rows.values():
+                metadata = music_store.get_music_metadata(settings.music_root, key)
+                self.assertEqual(metadata["art_relative_path"], "Band/Album/images/album-cover.jpg")
+            saved = root / "music" / "Band" / "Album" / "images" / "album-cover.jpg"
+            self.assertEqual(saved.read_bytes(), b"uploaded-cover-bytes")
+
+    def test_upload_does_not_clobber_a_tracks_existing_scraped_title(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_track(root, "Band/Album/01 - A.mp3", b"x")
+            settings = _build_settings(root)
+            music_store.sync_music_cache(settings.music_root)
+            entry_key = music_store.list_music(settings.music_root)[0]["entry_key"]
+            music_store.save_music_metadata(
+                settings.music_root, entry_key, provider="musicbrainz", provider_id="1", title="Real Title",
+                art_relative_path="old/art.jpg", artist_art_relative_path=None, extra={"genres": ["Rock"]},
+            )
+
+            body = _multipart_body("file", "cover.png", b"new-cover-bytes")
+            handler = _handler(settings)
+            self._upload(handler, entry_key, body)
+
+            metadata = music_store.get_music_metadata(settings.music_root, entry_key)
+            self.assertEqual(metadata["title"], "Real Title")
+            self.assertEqual(metadata["genres"], ["Rock"])
+            self.assertEqual(metadata["art_relative_path"], "Band/Album/images/album-cover.png")
+
+    def test_rejects_non_multipart_content_type(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_track(root, "Band/Album/01 - A.mp3", b"x")
+            settings = _build_settings(root)
+            music_store.sync_music_cache(settings.music_root)
+            entry_key = music_store.list_music(settings.music_root)[0]["entry_key"]
+            handler = _handler(settings)
+            handler.headers["Content-Type"] = "application/json"
+            handler.headers["Content-Length"] = "3"
+            with self.assertRaises(ValueError):
+                handler._handle_admin_music_album_art_upload(entry_key)
+
+    def test_rejects_an_unsupported_image_type(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_track(root, "Band/Album/01 - A.mp3", b"x")
+            settings = _build_settings(root)
+            music_store.sync_music_cache(settings.music_root)
+            entry_key = music_store.list_music(settings.music_root)[0]["entry_key"]
+            body = _multipart_body("file", "cover.gif", b"gif-bytes")
+            handler = _handler(settings)
+            with self.assertRaises(ValueError):
+                self._upload(handler, entry_key, body)
+
+    def test_no_file_in_upload_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_track(root, "Band/Album/01 - A.mp3", b"x")
+            settings = _build_settings(root)
+            music_store.sync_music_cache(settings.music_root)
+            entry_key = music_store.list_music(settings.music_root)[0]["entry_key"]
+            body = b"--TESTBOUNDARY--\r\n"
+            handler = _handler(settings)
+            with self.assertRaises(ValueError):
+                self._upload(handler, entry_key, body)
+
+    def test_unknown_track_is_404(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            handler = _handler(settings)
+            body = _multipart_body("file", "cover.jpg", b"bytes")
+            self._upload(handler, "deadbeef", body)
+            status, payload = handler.json_response
+            self.assertEqual(status, 404)
+            self.assertIn("error", payload)
 
 
 class MusicLikeHandlerTests(unittest.TestCase):

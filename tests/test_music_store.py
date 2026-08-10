@@ -285,6 +285,23 @@ class MusicMetadataStoreTests(unittest.TestCase):
         genres = music_store.list_music_genres(self.music_root)
         self.assertEqual(genres, {"key1": ["Jazz"]})
 
+    def test_set_music_art_creates_a_minimal_manual_row_when_never_scraped(self):
+        result = music_store.set_music_art(self.music_root, "deadbeef", "Artist/Album/images/album-cover.jpg")
+        self.assertEqual(result["provider"], "manual")
+        self.assertEqual(result["art_relative_path"], "Artist/Album/images/album-cover.jpg")
+        self.assertEqual(result["title"], "")
+
+    def test_set_music_art_only_touches_the_art_column_on_an_existing_row(self):
+        music_store.save_music_metadata(
+            self.music_root, "deadbeef", provider="musicbrainz", provider_id="1", title="Real Title",
+            art_relative_path="old/path.jpg", artist_art_relative_path=None, extra={"genres": ["Rock"]},
+        )
+        result = music_store.set_music_art(self.music_root, "deadbeef", "new/path.jpg")
+        self.assertEqual(result["art_relative_path"], "new/path.jpg")
+        self.assertEqual(result["title"], "Real Title")
+        self.assertEqual(result["provider"], "musicbrainz")
+        self.assertEqual(result["genres"], ["Rock"])
+
     def test_list_music_display_titles_only_includes_scraped_tracks(self):
         music_store.save_music_metadata(
             self.music_root, "key1", provider="musicbrainz", provider_id="1", title="Scraped Title",

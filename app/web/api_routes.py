@@ -1077,6 +1077,10 @@ class ApiRoutesMixin:
                 self._handle_admin_music_scrape_delete(parts[2])
                 return
 
+            if len(parts) == 5 and parts[0] == "admin" and parts[1] == "music" and parts[3] == "artwork" and parts[4] == "upload":
+                self._handle_admin_music_album_art_upload(parts[2])
+                return
+
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "movies" and parts[2] == "delete":
                 payload = self._read_json_body()
                 self._handle_admin_movies_delete(payload)
