@@ -91,7 +91,10 @@ def _relative_to_music_root(music_root: Path, path: Path) -> str:
     return path.resolve().relative_to(music_root.resolve()).as_posix()
 
 
-def _match_track_in_release(release: dict, *, recording_mbid: Optional[str], disc_number: Optional[int], track_number: Optional[int], parsed_title: str) -> Optional[dict]:
+def _match_track_in_release(
+    release: dict, *, recording_mbid: Optional[str], disc_number: Optional[int],
+    track_number: Optional[int], parsed_title: str, allow_single_track_fallback: bool = True,
+) -> Optional[dict]:
     """Pick which of a release's tracks corresponds to one on-disk file, in
     priority order:
 
@@ -102,7 +105,20 @@ def _match_track_in_release(release: dict, *, recording_mbid: Optional[str], dis
        the common case, since most libraries number their files to match
        the album's real tracklist.
     3. The release has exactly one track (a single) -- unambiguous
-       regardless of what the file's own name says.
+       regardless of what the file's own name says, **but only when
+       ``allow_single_track_fallback`` is true**. The bulk scraper's groups
+       loop calls this once per *local* file against the *same* resolved
+       release; if the release genuinely (or wrongly) has only one track,
+       this fallback would otherwise match every distinct local file in a
+       multi-track album to that identical one track -- a real bug caught
+       live: an 11-track compilation folder got matched to a MusicBrainz
+       release that turned out to be a single-track live-broadcast
+       recording, and every track in the folder silently received the
+       exact same scraped title. The caller disables this fallback whenever
+       there's more than one local file being matched against the same
+       release (see ``_run_bulk_scrape_job``); it stays enabled for a
+       genuine one-file-one-release match (the singles loop, a manual
+       per-track apply, or a group that only has one local file).
     4. Closest case-insensitive title match against the file's parsed
        title.
 
@@ -120,7 +136,7 @@ def _match_track_in_release(release: dict, *, recording_mbid: Optional[str], dis
             track_disc = track.get("disc_number") or 1
             if track_disc == disc_number and track.get("track_number") == track_number:
                 return track
-    if len(tracks) == 1:
+    if allow_single_track_fallback and len(tracks) == 1:
         return tracks[0]
     if parsed_title:
         needle = parsed_title.strip().lower()
@@ -128,6 +144,31 @@ def _match_track_in_release(release: dict, *, recording_mbid: Optional[str], dis
             if str(track.get("title") or "").strip().lower() == needle:
                 return track
     return None
+
+
+def _select_release_candidate(results: list, local_count: int) -> dict:
+    """Prefer the first release search result whose reported ``track_count``
+    is plausible for the local group size (>= ``local_count`` -- a local rip
+    is rarely more complete than the official release) over blindly trusting
+    the top hit. Falls back to ``results[0]`` when no candidate's track count
+    is known or plausible, so this never does worse than the old
+    always-take-the-top-hit behavior.
+
+    Exists because of a real bug caught live: the top search hit for an
+    11-track local compilation folder was a MusicBrainz "Broadcast" release
+    (a DJ radio set) with exactly one track -- picking it meant every one of
+    the 11 distinct local files got matched against that same single track
+    (see ``_match_track_in_release``'s ``allow_single_track_fallback``,
+    which stops that collision even if a bad candidate is still picked, but
+    preferring a track-count-plausible candidate here avoids the bad pick in
+    the first place, so the group actually gets real per-track metadata
+    instead of just failing safely).
+    """
+    for candidate in results:
+        track_count = candidate.get("track_count")
+        if isinstance(track_count, int) and track_count >= local_count:
+            return candidate
+    return results[0]
 
 
 def _apply_matched_track(
@@ -341,7 +382,8 @@ def _run_bulk_scrape_job(settings: Settings, job_id: int, groups: list, singles:
                     _record_item(settings, row, _job_items.STATUS_SKIPPED, "no MusicBrainz release results")
                 processed += 1
                 continue
-            release = client.release_lookup(results[0]["release_mbid"])
+            release = client.release_lookup(_select_release_candidate(results, len(rows))["release_mbid"])
+            allow_single_track_fallback = len(rows) == 1
             for row in rows:
                 location = _filename_parser.classify_location(row["file_path"])
                 track_info = _filename_parser.parse_track_filename(row["track_name"])
@@ -349,6 +391,7 @@ def _run_bulk_scrape_job(settings: Settings, job_id: int, groups: list, singles:
                     release, recording_mbid=None,
                     disc_number=location.disc_number or track_info.disc_number,
                     track_number=track_info.track_number, parsed_title=track_info.title,
+                    allow_single_track_fallback=allow_single_track_fallback,
                 )
                 if not matched_track:
                     failed += 1
