@@ -11864,6 +11864,25 @@ async function applyDroneScreenMode(mode) {
   }
 }
 
+// Sanitizes a system/collection name into a value safe to use in an HTML
+// id/for attribute -- system names are normally already id-safe ("nes",
+// "arcade"), but custom collection names come from a directory glob
+// (custom-*.cfg stems) and could contain spaces or other characters an id
+// attribute can't. Real live bug: this function was called from
+// renderEsCheckboxGrid below since the Game Collections feature's very
+// first commit but was never actually defined anywhere in this file --
+// every call threw "cssSafeId is not defined", which broke not just the
+// Game Collections section but silently took the Music Volume and
+// Screensaver sliders down with it too (their enable-and-populate step,
+// syncMusicVolumeControls/syncScreensaverControls, runs later in the same
+// renderEsCollectionsBody call and never got reached once this exception
+// propagated out of it -- see the outer try/catch in
+// renderAdminControlsPage, which only knew to show "Unable to load
+// collections" and had no idea two unrelated sliders were casualties).
+function cssSafeId(value) {
+  return String(value || "").replace(/[^a-zA-Z0-9_-]+/g, "-");
+}
+
 function renderEsCheckboxGrid(items, field) {
   if (!items.length) return '<div class="small text-muted">None found.</div>';
   return `<div class="row row-cols-2 row-cols-md-3 row-cols-lg-4 g-1">
@@ -11979,12 +11998,20 @@ function wireEsCollectionsSaveButton() {
 }
 
 function renderEsCollectionsBody(state) {
+  // Music Volume/Screensaver come from the same GET as the systems/
+  // collections list (one es_settings.cfg-backed endpoint), but they're
+  // otherwise unrelated features -- sync them first, before anything that
+  // renders the (much larger, more failure-prone) collections grid, so a
+  // bug in that rendering can never again silently take the sliders down
+  // with it the way the missing cssSafeId definition just did (that
+  // exception aborted this whole function before reaching either sync
+  // call, leaving both sliders permanently stuck disabled).
+  syncMusicVolumeControls(state.music_volume);
+  syncScreensaverControls(state.screensaver_minutes);
   const body = document.getElementById("esCollectionsBody");
   if (!body) return;
   body.innerHTML = renderEsCollectionsCard(state);
   wireEsCollectionsSaveButton();
-  syncMusicVolumeControls(state.music_volume);
-  syncScreensaverControls(state.screensaver_minutes);
   wireEsCollectionsSearch();
   filterEsCollections(document.getElementById("esCollectionsSearchInput")?.value || "");
 }
