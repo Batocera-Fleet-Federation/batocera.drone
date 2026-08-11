@@ -2467,6 +2467,15 @@ function musicExplorerArtists() {
 function musicExplorerArtistCount(value) {
   return musicExplorerRowsMatchingArtist(musicExplorerFilteredRows({ excludeArtist: true }), value).length;
 }
+// Any one track by this artist, to build an artist-photo artwork URL from
+// (musicArtworkUrl needs a track entry_key, not an artist name) -- opportunistic,
+// same as everywhere else artist photos show up: most artists have none, so
+// the caller's onerror just removes the <img> rather than showing a placeholder.
+function musicArtistRepresentativeEntryKey(artist) {
+  const artistKey = String(artist || "").toLowerCase().trim();
+  const row = musicAllRows.find((m) => m.artist && String(m.artist).toLowerCase().trim() === artistKey);
+  return row ? row.entry_key : null;
+}
 function musicExplorerGenres() {
   const genres = new Set();
   musicAllRows.forEach((m) => (m.genres || []).forEach((g) => g && genres.add(g)));
@@ -2481,11 +2490,17 @@ function musicExplorerLikedCount(value) {
 function renderMusicExplorerSidebar() {
   const sidebar = document.getElementById("music-explorer-sidebar");
   if (!sidebar) return;
-  const artistButton = (value, label) => `
+  const artistButton = (value, label) => {
+    const representativeEntryKey = value ? musicArtistRepresentativeEntryKey(value) : null;
+    const avatar = representativeEntryKey
+      ? `<img class="music-artist-sidebar-avatar" src="${escapeHtml(musicArtworkUrl(representativeEntryKey, "artist"))}" alt="" onerror="this.remove();">`
+      : "";
+    return `
     <button type="button" class="movie-explorer-category-btn ${musicExplorerArtistFilter === value ? "active" : ""}" onclick="setMusicExplorerArtistFilter(${jsAttr(value)})">
-      <span class="text-truncate">${escapeHtml(label)}</span><span class="movie-explorer-category-count">${musicExplorerArtistCount(value).toLocaleString()}</span>
+      <span class="d-flex align-items-center gap-2 min-width-0 flex-grow-1">${avatar}<span class="text-truncate">${escapeHtml(label)}</span></span><span class="movie-explorer-category-count">${musicExplorerArtistCount(value).toLocaleString()}</span>
     </button>
   `;
+  };
   const genreButton = (value, label) => `
     <button type="button" class="movie-explorer-category-btn ${musicExplorerGenreFilter === value ? "active" : ""}" onclick="setMusicExplorerGenreFilter(${jsAttr(value)})">
       <span>${escapeHtml(label)}</span><span class="movie-explorer-category-count">${musicExplorerGenreCount(value).toLocaleString()}</span>

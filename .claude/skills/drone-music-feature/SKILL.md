@@ -370,6 +370,20 @@ Real changes made after initial launch, not reflected in the sections above:
   this (only ever exercised through `FakeCoverArtClient` in
   `metadata_manager` tests) -- see the new `tests/test_coverart_client.py`.
 
+- **Artist photos now show up in two more places, and album art has one
+  more fallback tier.** The Music Explorer sidebar's Artists filter list
+  shows a small circular avatar (`.music-artist-sidebar-avatar`,
+  `musicArtistRepresentativeEntryKey` finds any one track by that artist to
+  build the artwork URL from) beside each artist name -- absent for most
+  artists, same opportunistic `onerror`-removes-the-`<img>` pattern as the
+  album-page avatar. `handlers_music._handle_music_artwork`'s `art`-field
+  fallback chain gained a fourth and final tier: this artist's own scraped
+  photo (`_find_artist_photo`, a prefix-scoped `list_music_under_artist_folder`
+  query across the *whole* artist, not just one album group), tried only
+  after a track's own art, sibling album art, and a local cover image file
+  have all failed -- so an album with no cover of its own shows the artist's
+  photo instead of a bare placeholder icon, wherever art is requested.
+
 ## Common failure patterns to avoid (learned from Movies, apply here too)
 
 - Using a scraped artist/album name as the grouping key instead of the

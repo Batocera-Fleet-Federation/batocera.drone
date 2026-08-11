@@ -308,20 +308,49 @@ class HandlersMusicMixin:
             return target
         return None
 
+    def _find_artist_photo(self, entry_key: str) -> Optional[Path]:
+        """Last-resort album-art fallback: this artist's own scraped photo,
+        from any track of theirs that has one. Used only once every more
+        specific option has failed (no scraped art of its own, no sibling
+        album art, no local cover image file) -- an artist photo is a
+        reasonable stand-in for a missing album cover (same person,
+        recognizable at a glance in a grid of square covers) but is never
+        preferred over anything more specific to the actual album."""
+        track = _music_store.get_music_by_key(self.settings.music_root, entry_key)
+        if not track:
+            return None
+        location = _music_filename_parser.classify_location(track.get("file_path") or "")
+        if not location.artist:
+            return None
+        music_root = Path(self.settings.music_root).resolve()
+        candidates = _music_store.list_music_under_artist_folder(self.settings.music_root, location.artist)
+        for candidate in candidates:
+            metadata = _music_store.get_music_metadata(self.settings.music_root, candidate["entry_key"])
+            relative_path = (metadata or {}).get("artist_art_relative_path")
+            if not relative_path:
+                continue
+            target = (music_root / relative_path).resolve()
+            if target == music_root or music_root not in target.parents or not target.is_file():
+                continue
+            return target
+        return None
+
     def _handle_music_artwork(self, entry_key: str, field: str) -> None:
         """Serve scraped album/artist art. Session-gated like every other
         music route (not admin-only) -- viewing artwork for a track you can
         already browse isn't an admin action, only scraping it is.
 
         Falls back, in order, to: another track's scraped art from the same
-        album (``_find_album_sibling_art``), then a conventionally-named
-        local image file on disk (``cover.jpg``/``folder.jpg``/...) -- for
-        the ``art`` field only, whenever there's no scraped art on this
-        specific track -- never scraped, scraped but Cover Art Archive had
-        nothing, or the scraped file went missing from disk. Only ``art``
-        gets this fallback, not ``artist`` -- there's no equivalent "this is
+        album (``_find_album_sibling_art``), a conventionally-named local
+        image file on disk (``cover.jpg``/``folder.jpg``/...), then finally
+        this artist's own scraped photo (``_find_artist_photo``) -- for the
+        ``art`` field only, whenever there's no scraped art on this specific
+        track -- never scraped, scraped but Cover Art Archive had nothing,
+        or the scraped file went missing from disk. Only ``art`` gets this
+        fallback chain, not ``artist`` -- there's no equivalent "this is
         obviously the artist photo" folder-naming convention to trust the
-        way there is for album/track cover art."""
+        way there is for album/track cover art, and an artist photo falling
+        back to itself would be a no-op anyway."""
         column = _ARTWORK_FIELD_COLUMNS.get(str(field or ""))
         if not column:
             raise FileNotFoundError()
@@ -341,6 +370,8 @@ class HandlersMusicMixin:
             track = _music_store.get_music_by_key(self.settings.music_root, entry_key)
             if track and track.get("absolute_path"):
                 target = _music_store.find_local_cover_image(Path(track["absolute_path"]), music_root)
+        if target is None and field == "art":
+            target = self._find_artist_photo(entry_key)
         if target is None:
             raise FileNotFoundError()
         # Same helper ROM/movie artwork use (handlers_peer.py): server-side

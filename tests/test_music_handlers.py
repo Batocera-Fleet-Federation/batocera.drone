@@ -887,6 +887,103 @@ class MusicArtworkAlbumSiblingFallbackHandlerTests(unittest.TestCase):
             self.assertEqual(handler.wfile.getvalue(), b"local-cover-bytes")
 
 
+class MusicArtworkArtistPhotoFallbackHandlerTests(unittest.TestCase):
+    """When nothing more specific to the album is available (no scraped art
+    of its own, no sibling album art, no local cover image), the ``art``
+    field falls all the way back to this artist's own scraped photo, found
+    on any track of theirs -- see handlers_music._find_artist_photo."""
+
+    def test_falls_back_to_the_artists_photo_from_a_different_album(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_track(root, "Band/Album One/01 - A.mp3", b"x")
+            _write_track(root, "Band/Album Two/01 - B.mp3", b"y")
+            settings = _build_settings(root)
+            music_store.sync_music_cache(settings.music_root)
+            rows = {r["file_path"]: r["entry_key"] for r in music_store.list_music(settings.music_root)}
+
+            photo_path = root / "music" / "Band" / "Album One" / "images" / "artist-photo.jpg"
+            photo_path.parent.mkdir(parents=True, exist_ok=True)
+            photo_path.write_bytes(b"artist-photo-bytes")
+            music_store.save_music_metadata(
+                settings.music_root, rows["Band/Album One/01 - A.mp3"], provider="musicbrainz", provider_id="1",
+                title="", art_relative_path=None,
+                artist_art_relative_path="Band/Album One/images/artist-photo.jpg", extra={},
+            )
+
+            handler = _handler(settings)
+            handler._handle_music_artwork(rows["Band/Album Two/01 - B.mp3"], "art")
+            self.assertEqual(handler.response_status, 200)
+            self.assertEqual(handler.wfile.getvalue(), b"artist-photo-bytes")
+
+    def test_album_specific_art_takes_priority_over_the_artist_photo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_track(root, "Band/Album One/01 - A.mp3", b"x")
+            _write_track(root, "Band/Album Two/01 - B.mp3", b"y")
+            settings = _build_settings(root)
+            music_store.sync_music_cache(settings.music_root)
+            rows = {r["file_path"]: r["entry_key"] for r in music_store.list_music(settings.music_root)}
+
+            images_dir = root / "music" / "Band" / "Album One" / "images"
+            images_dir.mkdir(parents=True, exist_ok=True)
+            (images_dir / "artist-photo.jpg").write_bytes(b"artist-photo-bytes")
+            music_store.save_music_metadata(
+                settings.music_root, rows["Band/Album One/01 - A.mp3"], provider="musicbrainz", provider_id="1",
+                title="", art_relative_path=None,
+                artist_art_relative_path="Band/Album One/images/artist-photo.jpg", extra={},
+            )
+            (root / "music" / "Band" / "Album Two" / "cover.jpg").write_bytes(b"local-cover-bytes")
+
+            handler = _handler(settings)
+            handler._handle_music_artwork(rows["Band/Album Two/01 - B.mp3"], "art")
+            self.assertEqual(handler.wfile.getvalue(), b"local-cover-bytes")
+
+    def test_a_different_artists_photo_is_never_used(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_track(root, "Band One/Album/01 - A.mp3", b"x")
+            _write_track(root, "Band Two/Album/01 - B.mp3", b"y")
+            settings = _build_settings(root)
+            music_store.sync_music_cache(settings.music_root)
+            rows = {r["file_path"]: r["entry_key"] for r in music_store.list_music(settings.music_root)}
+
+            photo_path = root / "music" / "Band One" / "Album" / "images" / "artist-photo.jpg"
+            photo_path.parent.mkdir(parents=True, exist_ok=True)
+            photo_path.write_bytes(b"band-one-photo")
+            music_store.save_music_metadata(
+                settings.music_root, rows["Band One/Album/01 - A.mp3"], provider="musicbrainz", provider_id="1",
+                title="", art_relative_path=None,
+                artist_art_relative_path="Band One/Album/images/artist-photo.jpg", extra={},
+            )
+
+            handler = _handler(settings)
+            with self.assertRaises(FileNotFoundError):
+                handler._handle_music_artwork(rows["Band Two/Album/01 - B.mp3"], "art")
+
+    def test_the_artist_field_itself_never_falls_back_to_this_chain(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_track(root, "Band/Album One/01 - A.mp3", b"x")
+            _write_track(root, "Band/Album Two/01 - B.mp3", b"y")
+            settings = _build_settings(root)
+            music_store.sync_music_cache(settings.music_root)
+            rows = {r["file_path"]: r["entry_key"] for r in music_store.list_music(settings.music_root)}
+
+            photo_path = root / "music" / "Band" / "Album One" / "images" / "artist-photo.jpg"
+            photo_path.parent.mkdir(parents=True, exist_ok=True)
+            photo_path.write_bytes(b"artist-photo-bytes")
+            music_store.save_music_metadata(
+                settings.music_root, rows["Band/Album One/01 - A.mp3"], provider="musicbrainz", provider_id="1",
+                title="", art_relative_path=None,
+                artist_art_relative_path="Band/Album One/images/artist-photo.jpg", extra={},
+            )
+
+            handler = _handler(settings)
+            with self.assertRaises(FileNotFoundError):
+                handler._handle_music_artwork(rows["Band/Album Two/01 - B.mp3"], "artist")
+
+
 class MusicDeleteHandlerTests(unittest.TestCase):
     def test_deletes_a_single_track(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
