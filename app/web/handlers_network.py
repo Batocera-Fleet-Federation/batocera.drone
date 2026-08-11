@@ -11,12 +11,18 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
+from urllib.error import HTTPError
 from urllib.parse import quote, unquote
 
 try:
     from ..device.device_control import _ensure_rom_write_access
     from ..device import nfs_export_manager as _nfs_exports
     from ..device.tailnet_service import tailnet_enroll, tailnet_rotate_auth_key, tailnet_status
+    from ..device.tailnet_service import (
+        set_tailnet_sharing_enabled as _set_tailnet_sharing_enabled,
+        import_tailnet_from_peer as _import_tailnet_from_peer,
+        tailnet_sharing_status as _tailnet_sharing_status,
+    )
     from ..roms.gamelist import ARTWORK_FIELDS, _normalize_gamelist_rom_path
     from ..storage.rom_metadata_store import match_rom_cache_page
     from ..transfer import local_network as _local_network
@@ -37,6 +43,11 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from device.device_control import _ensure_rom_write_access  # type: ignore
     from device import nfs_export_manager as _nfs_exports  # type: ignore
     from device.tailnet_service import tailnet_enroll, tailnet_rotate_auth_key, tailnet_status  # type: ignore
+    from device.tailnet_service import (  # type: ignore
+        set_tailnet_sharing_enabled as _set_tailnet_sharing_enabled,
+        import_tailnet_from_peer as _import_tailnet_from_peer,
+        tailnet_sharing_status as _tailnet_sharing_status,
+    )
     from roms.gamelist import ARTWORK_FIELDS, _normalize_gamelist_rom_path  # type: ignore
     from storage.rom_metadata_store import match_rom_cache_page  # type: ignore
     from transfer import local_network as _local_network  # type: ignore
@@ -461,10 +472,13 @@ class HandlersNetworkMixin:
         return entry
 
     def _handle_admin_tailnet_status(self) -> None:
-        self._send_json(200, tailnet_status())
+        payload = tailnet_status()
+        payload.update(_tailnet_sharing_status(self.settings))
+        self._send_json(200, payload)
 
     def _handle_admin_tailnet_discover(self) -> None:
         status = tailnet_status()
+        status.update(_tailnet_sharing_status(self.settings))
         tailnet_devices = self._sync_tailnet_peers(status)
         self._send_json(
             200,
@@ -490,8 +504,12 @@ class HandlersNetworkMixin:
     def _handle_admin_tailnet_enroll(self, payload: dict) -> None:
         """Enroll this drone in the tailnet with an auth key pasted in the UI.
 
-        The key is a secret: it goes straight to the tailscale CLI and is never
-        logged or included in any response/error text.
+        The key is a secret: it goes straight to the tailscale CLI and is
+        never logged or included in any response/error text. It *is*
+        persisted locally (see tailnet_service.tailnet_enroll) so this
+        drone can later choose to share it with paired peers -- a separate,
+        explicit opt-in via _handle_admin_tailnet_sharing, off by default,
+        same as VPN/SMTP.
         """
         try:
             status = tailnet_enroll(str(payload.get("auth_key") or ""), self.settings)
@@ -503,7 +521,10 @@ class HandlersNetworkMixin:
         self._send_json(200, {"status": "enrolled" if status.get("enrolled") else "pending", **status})
 
     def _handle_admin_tailnet_rotate_auth_key(self, payload: dict) -> None:
-        """Re-enroll this Drone with a replacement key without retaining it."""
+        """Re-enroll this Drone with a replacement key -- persists the new
+        key the same way a fresh enroll does (see tailnet_enroll), and
+        resets sharing provenance to self-owned since this is a genuine new
+        credential, not an import."""
         try:
             status = tailnet_rotate_auth_key(str(payload.get("auth_key") or ""), self.settings)
         except ValueError:
@@ -512,6 +533,48 @@ class HandlersNetworkMixin:
             self._send_json(502, {"error": str(error)})
             return
         self._send_json(200, {"status": "enrolled" if status.get("enrolled") else "pending", **status})
+
+    def _handle_admin_tailnet_sharing(self, payload: dict) -> None:
+        payload = payload if isinstance(payload, dict) else {}
+        result = _set_tailnet_sharing_enabled(self.settings, bool(payload.get("enabled")))
+        self._send_json(200, result)
+
+    def _handle_admin_tailnet_pull_from_peer(self, payload: dict) -> None:
+        """Pull a Tailscale auth key from a paired peer and enroll with it.
+
+        Reuses the same cert-pinned mTLS client (_peer_get_json_for_peer)
+        that backs every other peer request -- mirrors
+        _handle_admin_vpn_pull_from_peer exactly.
+        """
+        payload = payload if isinstance(payload, dict) else {}
+        peer_id = str(payload.get("peer_id") or "").strip()
+        if not peer_id:
+            raise ValueError("peer_id is required")
+        peer = _local_network.get_paired_peer(self.settings, peer_id)
+        if not peer:
+            self._send_json(404, {"error": "That drone is not a paired peer."})
+            return
+        try:
+            remote_payload, _address = _peer_get_json_for_peer(peer, "/v1/api/peer/tailnet/config", self.settings, peer_id=peer_id)
+        except HTTPError as error:
+            if error.code == 404:
+                self._send_json(404, {"error": "That drone has Tailnet sharing turned off, or is not enrolled yet."})
+            else:
+                self._send_json(502, {"error": f"That drone rejected the request (HTTP {error.code})."})
+            return
+        except Exception as error:
+            self._send_json(502, {"error": f"Could not reach that drone: {error}"})
+            return
+        peer_name = str(peer.get("name") or peer.get("hostname") or peer_id)
+        try:
+            result = _import_tailnet_from_peer(self.settings, remote_payload, source_peer_id=peer_id, source_peer_name=peer_name)
+        except ValueError as error:
+            self._send_json(400, {"error": str(error)})
+            return
+        except RuntimeError as error:
+            self._send_json(502, {"error": str(error)})
+            return
+        self._send_json(200, {"status": "enrolled" if result.get("enrolled") else "pending", **result})
 
     def _handle_admin_swarm_overview(self) -> None:
         """One entry per Drone in the federation: this machine plus every paired

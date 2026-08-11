@@ -18,6 +18,7 @@ from urllib.parse import unquote
 try:
     from ..common.auth import record_unauthorized_response
     from ..device.tailnet_service import tailnet_peer_ips
+    from ..device.tailnet_service import export_tailnet_payload as _tailnet_export_payload
     from ..device.game_activity import (
         load_gameplay_history as _load_gameplay_history,
         load_gameplay_history_page as _load_gameplay_history_page,
@@ -51,6 +52,7 @@ try:
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.auth import record_unauthorized_response  # type: ignore
     from device.tailnet_service import tailnet_peer_ips  # type: ignore
+    from device.tailnet_service import export_tailnet_payload as _tailnet_export_payload  # type: ignore
     from device.game_activity import (  # type: ignore
         load_gameplay_history as _load_gameplay_history,
         load_gameplay_history_page as _load_gameplay_history_page,
@@ -797,6 +799,24 @@ class HandlersPeerMixin:
             self._send_json(404, {"error": "SMTP sharing is not enabled on this drone, or no configuration has been set up yet"})
             return
         self.log_message("peer smtp config served host=%s", payload.get("host"))
+        self._send_json(200, payload)
+
+    def _handle_peer_tailnet_config(self) -> None:
+        """Serve this drone's Tailscale auth key to a paired peer.
+
+        Mirrors _handle_peer_vpn_config exactly: gated by
+        _peer_request_authorized() (same mTLS pairing check as every other
+        /peer/* endpoint) plus tailnet_service's own sharing_enabled flag --
+        an auth key is sensitive the same way VPN/SMTP credentials are, so
+        pairing alone is not treated as implicit consent here either.
+        """
+        if not self._peer_request_authorized():
+            return
+        payload = _tailnet_export_payload(self.settings)
+        if payload is None:
+            self._send_json(404, {"error": "Tailnet sharing is not enabled on this drone, or it is not enrolled yet"})
+            return
+        self.log_message("peer tailnet config served enrolled=%s", payload.get("enrolled"))
         self._send_json(200, payload)
 
     def _peer_requester_device_id(self) -> Optional[str]:

@@ -188,6 +188,39 @@ reinvented — read that section first. The differences:
 Depth: `drone-smtp-notifications` skill (this is the fullest treatment; the
 section above is a summary).
 
+## Tailscale: shared enrollment, same single-hop model as VPN/SMTP
+
+A third instance of the identical sharing shape, added after VPN/SMTP
+(`app/device/tailnet_service.py`'s "peer sharing" section) — read the VPN
+section first, this is the differences only:
+
+- What's shared is the **enrollment auth key**, not an ongoing session
+  credential. `tailnet_enroll()`/`tailnet_rotate_auth_key()` now persist the
+  key used (previously discarded immediately after the one `tailscale up`
+  call) so it can later be shared — a real, deliberate change to a
+  previously-documented "never retained" property, held to the same
+  plaintext-JSON storage standard VPN/SMTP already use, not a new one. Only
+  works end-to-end if the key was created as **reusable** in the Tailscale
+  admin console (the enrollment UI already nudges users toward this); a
+  single-use key fails on the second drone with whatever error `tailscale
+  up` itself returns.
+- **Sharing** (`sharing_enabled`, off by default): `GET /peer/tailnet/config`,
+  single-hop-only (same two-layer enforcement as VPN),
+  provenance-tracked via `source_peer_id`.
+- **Revocation deliberately does not disconnect anything.** VPN's revocation
+  disconnects the tunnel because the credentials are what keep it up.
+  Tailscale enrollment is a one-time join this drone may depend on for its
+  *own* unrelated P2P networking — revoking only clears the locally-stored
+  key and forces `sharing_enabled` off; it never calls `tailscale logout`.
+  The real authority over whether a device stays in the tailnet is
+  Tailscale's own admin console, not this app.
+- **Swarm bootstrap** mirrors VPN's "connected" gate: only adopts a peer's
+  shared key if that peer's own payload reports `enrolled: true` right now.
+
+Depth: `drone-vpn-management` skill's "Single-hop only"/"Revocation"
+sections describe the shared model in full; `tailnet_service.py`'s "peer
+sharing" section docstrings cover the Tailscale-specific deviations inline.
+
 ## Common failure patterns
 
 - Designing anything that assumes a central coordinator, a fleet-wide view, or a

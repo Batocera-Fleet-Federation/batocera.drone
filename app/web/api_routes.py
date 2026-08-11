@@ -138,6 +138,10 @@ class ApiRoutesMixin:
                 self._handle_peer_smtp_config()
                 return
 
+            if len(parts) == 3 and parts[0] == "peer" and parts[1] == "tailnet" and parts[2] == "config":
+                self._handle_peer_tailnet_config()
+                return
+
             # Public: the SPA shell and its own "am I logged in" probe must be
             # reachable with no session cookie yet, or a browser could never
             # load the login form in the first place. Everything else below
@@ -766,6 +770,16 @@ class ApiRoutesMixin:
 
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "tailnet" and parts[2] == "discover":
                 self._handle_admin_tailnet_discover()
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "tailnet" and parts[2] == "sharing":
+                payload = self._read_json_body()
+                self._handle_admin_tailnet_sharing(payload)
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "tailnet" and parts[2] == "pull-from-peer":
+                payload = self._read_json_body()
+                self._handle_admin_tailnet_pull_from_peer(payload)
                 return
 
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "network-shares" and parts[3] == "enable":

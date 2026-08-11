@@ -7895,6 +7895,52 @@ async function pullVpnConfigFromPeer() {
   }
 }
 
+// -------------------------------------------------------------- Tailnet sharing
+// Direct structural copies of setVpnSharing/loadVpnPullPeerOptions/
+// pullVpnConfigFromPeer just above -- same single-hop-only sharing model,
+// same peer-picker source (GET /admin/swarm/overview via loadSwarmOverview).
+async function setTailnetSharing(enabled) {
+  const checkbox = document.getElementById("tailnetSharingEnabled");
+  try {
+    await apiPost("/admin/tailnet/sharing", { enabled });
+    showToast(`Tailnet auth-key sharing with paired drones ${enabled ? "enabled" : "disabled"}.`, "success");
+  } catch (err) {
+    if (checkbox) checkbox.checked = !enabled;
+    showToast(`Failed to save sharing setting: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  }
+}
+async function loadTailnetPullPeerOptions() {
+  const select = document.getElementById("tailnetPullPeer");
+  const button = document.getElementById("tailnetPullBtn");
+  if (!select) return;
+  try {
+    const overview = await loadSwarmOverview();
+    const onlinePeers = (overview.drones || []).filter(drone => !drone.is_self && drone.online);
+    select.innerHTML = onlinePeers.length
+      ? onlinePeers.map(drone => `<option value="${escapeHtml(drone.drone_id || "")}">${escapeHtml(drone.name || drone.hostname || drone.drone_id || "Drone")}</option>`).join("")
+      : '<option value="">No paired drones online</option>';
+    if (button) button.disabled = !onlinePeers.length;
+  } catch (err) {
+    select.innerHTML = '<option value="">Failed to load drones</option>';
+    if (button) button.disabled = true;
+  }
+}
+async function pullTailnetConfigFromPeer() {
+  const select = document.getElementById("tailnetPullPeer");
+  const peerId = select ? select.value : "";
+  if (!peerId) return;
+  const button = document.getElementById("tailnetPullBtn");
+  if (button) { button.disabled = true; button.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Pulling...'; }
+  try {
+    await apiPost("/admin/tailnet/pull-from-peer", { peer_id: peerId });
+    showToast("Enrolled using the auth key shared by that drone.", "success");
+    await renderSwarmPage();
+  } catch (err) {
+    showToast(`Failed to pull the Tailscale auth key: ${escapeHtml(err.message || "unknown error")}`, "danger", 8000);
+    if (button) { button.disabled = false; button.innerHTML = '<i class="bi bi-cloud-arrow-down me-1"></i>Pull Configuration'; }
+  }
+}
+
 // ------------------------------------------------------------------ SMTP
 
 function stopSmtpAutoRefresh() {
@@ -10386,6 +10432,43 @@ async function swarmRotateTailnetAuthKey() {
   }
 }
 
+// The "Share with Swarm" toggle (or, for an imported key, a notice that it
+// can't be re-shared -- single-hop-only, exactly like VPN/SMTP: enforced
+// both here (hiding the toggle) and independently server-side in
+// export_tailnet_payload()) plus a "Pull Configuration" peer picker, always
+// available even before this drone is enrolled -- a fresh drone can join by
+// pulling a peer's shared key instead of pasting one of its own. Only works
+// end-to-end if the key was created as *reusable* in the Tailscale admin
+// console (the same guidance already given in the "Connect" steps below);
+// a single-use key will fail on the second drone with whatever error
+// tailscale itself returns.
+function renderTailnetShareSection(state) {
+  const sharingControl = !state.enrolled
+    ? ""
+    : state.source_peer_id
+    ? `<p class="text-muted small mb-2"><i class="bi bi-info-circle me-1"></i>This auth key was imported from <strong>${escapeHtml(state.source_peer_name || state.source_peer_id)}</strong> and cannot be re-shared &mdash; only the drone that originally connected with it can share it with the swarm.</p>`
+    : `
+      <div class="form-check form-switch mb-2">
+        <input class="form-check-input" type="checkbox" role="switch" id="tailnetSharingEnabled" ${state.sharing_enabled ? "checked" : ""} onchange="setTailnetSharing(this.checked)">
+        <label class="form-check-label" for="tailnetSharingEnabled">Allow paired drones to pull this auth key</label>
+      </div>`;
+  return `
+    <hr>
+    <div class="small text-muted mb-2">
+      <strong>Share with Swarm.</strong>
+      ${state.enrolled
+        ? "Share this drone's auth key with paired drones over the same cert-pinned peer link used for ROM/BIOS transfers -- never through the browser."
+        : "Already enrolled on another drone in your swarm? Pull its auth key here instead of pasting your own."}
+    </div>
+    ${sharingControl}
+    <div class="d-flex flex-wrap align-items-end gap-2">
+      <div>
+        <label class="form-label mb-1" for="tailnetPullPeer">Paired Drone</label>
+        <select id="tailnetPullPeer" class="form-select form-select-sm" style="min-width:220px"><option value="">Loading...</option></select>
+      </div>
+      <button class="btn btn-outline-primary btn-sm" type="button" id="tailnetPullBtn" disabled onclick="pullTailnetConfigFromPeer()"><i class="bi bi-cloud-arrow-down me-1"></i>Pull Configuration</button>
+    </div>`;
+}
 function renderSwarmTailnetCard(tailnet) {
   const state = tailnet || {};
   let body;
@@ -10404,7 +10487,8 @@ function renderSwarmTailnetCard(tailnet) {
           <button id="swarmTailnetRotateSubmitBtn" class="btn btn-primary text-nowrap" type="button" onclick="swarmRotateTailnetAuthKey()"><i class="bi bi-arrow-repeat me-1"></i>Rotate</button>
           <button class="btn btn-outline-secondary" type="button" onclick="swarmToggleTailnetAuthRotation(false)">Cancel</button>
         </div>
-      </div>`;
+      </div>
+      ${renderTailnetShareSection(state)}`;
   } else if (!state.installed) {
     body = `
       <div class="d-flex align-items-center gap-2 mb-2"><span class="badge text-bg-secondary">Not installed</span></div>
@@ -10427,7 +10511,8 @@ function renderSwarmTailnetCard(tailnet) {
       <div class="row g-2 align-items-end">
         <div class="col-12 col-md-8"><label class="form-label small" for="swarmTailnetKey">Auth key</label><input id="swarmTailnetKey" class="form-control" type="password" placeholder="tskey-auth-..." autocomplete="off"></div>
         <div class="col-12 col-md-4"><button id="swarmTailnetEnrollBtn" class="btn btn-primary w-100" onclick="swarmEnrollTailnet()"><i class="bi bi-link-45deg me-1"></i>Connect</button></div>
-      </div>`;
+      </div>
+      ${renderTailnetShareSection(state)}`;
   }
   return `
     <div class="card log-card h-100">
@@ -10438,7 +10523,10 @@ function renderSwarmTailnetCard(tailnet) {
           ${state.enrolled ? '<button class="btn btn-sm btn-outline-primary text-nowrap" type="button" onclick="swarmToggleTailnetAuthRotation(true)"><i class="bi bi-arrow-repeat me-1"></i>Rotate Auth Token</button>' : ""}
         </div>
       </div>
-      <div class="card-body">${body}</div>
+      <div class="card-body">
+        <div class="small text-muted mb-2"><i class="bi bi-info-circle me-1"></i>This is required to connect Drones across different networks (different homes, or a phone away from home) -- Drones already on the same local network can find each other without it.</div>
+        ${body}
+      </div>
     </div>`;
 }
 
@@ -10537,6 +10625,7 @@ async function renderSwarmPage() {
         <div class="card-header d-flex justify-content-between align-items-center"><span><i class="bi bi-radar me-2" aria-hidden="true"></i>Nearby Drones</span><div class="d-flex gap-2"><button class="btn btn-sm btn-outline-primary" id="localDiscoverBtn"><i class="bi bi-radar me-1"></i>Discover</button><button class="btn btn-sm btn-outline-secondary" id="localRefreshBtn"><i class="bi bi-arrow-repeat"></i></button></div></div>
         <div class="card-body" id="localPeersBody"><div class="text-muted">Loading peers...</div></div>
       </div>`;
+    loadTailnetPullPeerOptions();
 
     async function refreshPairing(status = null, includeTailnet = false) {
       if (!status) {

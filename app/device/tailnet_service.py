@@ -23,6 +23,7 @@ before -- a human still has to paste a key, and it can still expire.
 from __future__ import annotations
 
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -30,14 +31,23 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
 try:
     from ..common.http_errors import _format_http_error
+    from ..common.settings import Settings
+    from ..storage.state_store import database_path as _state_database_path
+    from ..storage.state_store import load_payload as _load_state_payload
+    from ..storage.state_store import save_payload as _save_state_payload
     from ..transport.tailnet import get_tailnet_ip
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.http_errors import _format_http_error  # type: ignore
+    from common.settings import Settings  # type: ignore
+    from storage.state_store import database_path as _state_database_path  # type: ignore
+    from storage.state_store import load_payload as _load_state_payload  # type: ignore
+    from storage.state_store import save_payload as _save_state_payload  # type: ignore
     from transport.tailnet import get_tailnet_ip  # type: ignore
 
 TAILSCALE_DIR = Path("/userdata/system/tailscale")
@@ -372,6 +382,20 @@ def tailnet_enroll(auth_key: str, settings: Optional[Any] = None) -> dict:
             "Tailnet enrollment failed: " + (detail[-1] if detail else f"exit code {proc.returncode}")
         )
     _maybe_disable_key_expiry(settings)
+    if settings is not None:
+        # A direct enroll (a human pasting a key, or tailnet_rotate_auth_key
+        # -- which calls this function internally) is always a fresh,
+        # self-owned key: reset sharing provenance to empty, same "fresh
+        # write = clean provenance" rule vpn_manager.save_uploaded_config()
+        # follows. import_tailnet_from_peer() calls this function first
+        # (to actually enroll), then re-applies the real peer provenance
+        # immediately after in its own follow-up call -- get that ordering
+        # backwards and every import would look self-owned and pass the
+        # single-hop sharing gate it's meant to fail.
+        _save_sharing_state(
+            settings, auth_key=key, source_peer_id="", source_peer_name="",
+            revoked_reason="", revoked_at=None,
+        )
     return tailnet_status()
 
 
@@ -410,3 +434,251 @@ def tailnet_rotate_auth_key(auth_key: str, settings: Optional[Any] = None) -> di
         raise RuntimeError(
             "Tailnet auth token rotation disconnected this Drone but re-enrollment failed: " + str(error).replace(key, "[redacted]")
         ) from error
+
+
+# ------------------------------------------------------------ peer sharing
+#
+# Mirrors vpn_manager.py's peer-sharing section closely (single-hop-only
+# provenance, share-revocation, default-off swarm bootstrap) -- see that
+# module and the drone-vpn-management skill for the shared design rationale.
+# One deliberate difference: revocation here never touches the live tailnet
+# connection (see _revoke_local_sharing()'s docstring) -- Tailscale
+# enrollment is a one-time join this drone may depend on for its own
+# unrelated P2P networking, unlike VPN's credentials, which are what keeps
+# an active tunnel up in the first place.
+
+TAILNET_SHARING_STATE_NAMESPACE = "tailnet_sharing.json"
+TAILNET_SHARING_CHECK_INTERVAL_SECONDS = float(os.environ.get("DRONE_TAILNET_SHARING_CHECK_INTERVAL_SECONDS", "300"))
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _load_sharing_state(settings: Settings) -> dict:
+    stored = _load_state_payload(_state_database_path(settings.userdata_root), TAILNET_SHARING_STATE_NAMESPACE, {})
+    stored = stored if isinstance(stored, dict) else {}
+    return {
+        "auth_key": str(stored.get("auth_key") or ""),
+        "sharing_enabled": bool(stored.get("sharing_enabled", False)),
+        "source_peer_id": str(stored.get("source_peer_id") or ""),
+        "source_peer_name": str(stored.get("source_peer_name") or ""),
+        "revoked_reason": str(stored.get("revoked_reason") or ""),
+        "revoked_at": stored.get("revoked_at"),
+    }
+
+
+def _save_sharing_state(settings: Settings, **updates) -> dict:
+    state = _load_sharing_state(settings)
+    state.update(updates)
+    _save_state_payload(_state_database_path(settings.userdata_root), TAILNET_SHARING_STATE_NAMESPACE, state)
+    return state
+
+
+def tailnet_sharing_status(settings: Settings) -> dict:
+    """Sharing/provenance fields for the admin status payload -- never
+    includes the raw ``auth_key`` (mirrors ``vpn_manager.status()`` never
+    returning the VPN password), just whether one is on file to share."""
+    state = _load_sharing_state(settings)
+    return {
+        "sharing_enabled": state["sharing_enabled"],
+        "has_shared_key": bool(state["auth_key"]),
+        "source_peer_id": state["source_peer_id"],
+        "source_peer_name": state["source_peer_name"],
+        "revoked_reason": state["revoked_reason"],
+        "revoked_at": state["revoked_at"],
+    }
+
+
+def set_tailnet_sharing_enabled(settings: Settings, enabled: bool) -> dict:
+    """Mirrors ``vpn_manager.set_sharing_enabled()`` exactly: an imported key
+    can never be re-shared -- only the drone that originally enrolled with
+    it (a real paste into ``tailnet_enroll()``, not an import) can turn
+    sharing on. Enforced here *and* independently in
+    ``export_tailnet_payload()``, same belt-and-suspenders reasoning as
+    VPN/SMTP -- don't remove either check on the assumption the other
+    covers it."""
+    if enabled and _load_sharing_state(settings)["source_peer_id"]:
+        raise ValueError(
+            "This Tailscale auth key was imported from another drone and cannot be re-shared. "
+            "Only the drone that originally connected with it can share it with the swarm."
+        )
+    state = _save_sharing_state(settings, sharing_enabled=bool(enabled))
+    return {"sharing_enabled": state["sharing_enabled"]}
+
+
+def export_tailnet_payload(settings: Settings) -> Optional[dict]:
+    """This drone's Tailscale auth key for a paired peer to pull.
+
+    ``None`` means "don't share" -- the caller (``GET /peer/tailnet/config``)
+    turns that into a 404. Mirrors ``vpn_manager.export_payload()``: only
+    ever served over the cert-pinned mTLS ``/peer/*`` channel, gated by
+    pairing (checked by the caller) plus ``sharing_enabled`` here, never
+    returned to a browser. The redundant ``source_peer_id`` check is kept
+    here too even though ``set_tailnet_sharing_enabled()`` already refuses
+    to enable sharing on an imported key -- this is the actual point the
+    key would leave the drone, so it's the right place to enforce
+    single-hop-only even if a future bug ever let ``sharing_enabled`` get
+    set some other way.
+    """
+    state = _load_sharing_state(settings)
+    if not state["sharing_enabled"] or not state["auth_key"] or state["source_peer_id"]:
+        return None
+    return {"auth_key": state["auth_key"], "enrolled": tailnet_status().get("enrolled")}
+
+
+def import_tailnet_from_peer(settings: Settings, payload: dict, *, source_peer_id: str, source_peer_name: str = "") -> dict:
+    """Adopt a peer's shared Tailscale auth key: enroll with it (reusing
+    ``tailnet_enroll()``, the same real enrollment path a human pasting a
+    key uses -- not a separate write), then re-apply the real provenance
+    immediately after. ``tailnet_enroll()`` resets provenance to
+    "self-owned" as part of its own fresh-enrollment semantics, so the
+    ordering here matters exactly like
+    ``vpn_manager.import_from_peer()``'s does.
+
+    ``source_peer_id`` is supplied by the *caller* (the drone_id it just
+    successfully mTLS-authenticated against), never trusted from the wire
+    payload -- this becomes the key's permanent provenance marker, checked
+    by ``set_tailnet_sharing_enabled()``/``export_tailnet_payload()`` to
+    enforce single-hop-only sharing.
+    """
+    source_peer_id = str(source_peer_id or "").strip()
+    if not source_peer_id:
+        raise ValueError("source_peer_id is required to import a peer's Tailscale auth key")
+    payload = payload if isinstance(payload, dict) else {}
+    auth_key = str(payload.get("auth_key") or "")
+    if not auth_key:
+        raise ValueError("peer did not return a Tailscale auth key")
+    result = tailnet_enroll(auth_key, settings)
+    _save_sharing_state(settings, source_peer_id=source_peer_id, source_peer_name=str(source_peer_name or "").strip())
+    return result
+
+
+def bootstrap_tailnet_from_swarm(settings: Settings) -> bool:
+    """Adopt a paired peer's actively-shared, currently-working Tailscale
+    enrollment as our own -- mirrors ``vpn_manager.bootstrap_vpn_from_swarm()``
+    closely (the ``enrolled`` check on the peer's payload plays the same
+    role as VPN's ``connected`` check: only adopt from a peer that is
+    demonstrably actually on the tailnet right now, not merely configured
+    to share).
+
+    Only ever called when this drone is **not currently enrolled** -- never
+    overrides an existing enrollment. Tries every paired peer, in
+    ``local_network.paired_peers()``'s own order, stopping at the first one
+    that is both sharing and enrolled right now. Per-peer failures (offline,
+    not sharing, malformed payload) are silently skipped, not errors --
+    there may be many paired peers and only one needs to work.
+    """
+    try:
+        from ..transfer import local_network as _local_network
+        from ..transfer.peer_connectivity import _peer_get_json_for_peer
+    except ImportError:  # pragma: no cover - direct script execution fallback
+        from transfer import local_network as _local_network  # type: ignore
+        from transfer.peer_connectivity import _peer_get_json_for_peer  # type: ignore
+    for peer in _local_network.paired_peers(settings):
+        peer_id = str(peer.get("drone_id") or peer.get("device_id") or peer.get("id") or "").strip()
+        if not peer_id:
+            continue
+        try:
+            payload, _address = _peer_get_json_for_peer(peer, "/v1/api/peer/tailnet/config", settings, peer_id=peer_id)
+        except Exception:
+            continue  # offline, not paired on this address, sharing off, no key, etc.
+        if not isinstance(payload, dict) or not payload.get("auth_key") or not payload.get("enrolled"):
+            continue
+        peer_name = str(peer.get("name") or peer.get("hostname") or peer_id)
+        try:
+            import_tailnet_from_peer(settings, payload, source_peer_id=peer_id, source_peer_name=peer_name)
+        except Exception as error:
+            print(
+                f"Swarm Tailnet bootstrap: failed to adopt the auth key shared by {peer_name}: "
+                f"{error.__class__.__name__}: {error}",
+                file=sys.stderr, flush=True,
+            )
+            continue
+        print(f"Swarm Tailnet bootstrap: enrolled using the auth key shared by {peer_name}", file=sys.stdout, flush=True)
+        return True
+    return False
+
+
+def maybe_bootstrap_tailnet(settings: Settings) -> None:
+    """Best-effort, called once from ``create_server()`` startup, mirroring
+    ``smtp_manager.maybe_bootstrap_smtp()``. Never raises."""
+    try:
+        if not tailnet_status().get("enrolled"):
+            bootstrap_tailnet_from_swarm(settings)
+    except Exception as error:
+        print(f"Tailnet swarm bootstrap failed: {error.__class__.__name__}: {error}", file=sys.stderr, flush=True)
+
+
+_SHARING_REVOKED_PEER_OFF = "The peer sharing this Tailscale auth key turned off sharing, so it was removed from this drone."
+_SHARING_REVOKED_PEER_GONE = "The peer that shared this Tailscale auth key is no longer paired, so it was removed from this drone."
+
+
+def _revoke_local_sharing(settings: Settings, reason: str) -> None:
+    """Clear the imported auth key and stop sharing -- deliberately does
+    **not** call ``tailscale logout`` or otherwise touch the live tailnet
+    connection. Unlike VPN's revocation (which disconnects an active tunnel
+    that the credentials themselves keep alive), Tailscale enrollment is a
+    one-time join: this drone may depend on that tailnet membership for its
+    own unrelated P2P networking regardless of whether the auth key that
+    enrolled it is still shareable. Revoking here only means "this drone
+    can no longer claim to have a live, working copy of that key to hand to
+    further peers" -- the actual authority over whether a device stays in
+    the tailnet is Tailscale's own admin console, not this app.
+
+    ``source_peer_id`` deliberately survives, same reasoning as
+    ``vpn_manager._revoke_local_credentials()``: wiping it would let this
+    now-orphaned entry pass the single-hop sharing gate as if it were
+    self-owned. Only a genuine fresh ``tailnet_enroll()`` call clears it.
+    """
+    _save_sharing_state(settings, auth_key="", sharing_enabled=False, revoked_reason=reason, revoked_at=_now_iso())
+
+
+def check_tailnet_sharing_revocation(settings: Settings) -> bool:
+    """If this auth key was imported from a peer, verify that peer still
+    shares it; revoke (clear the stored key, never the live connection) if
+    not. Returns True iff a revocation just happened. Mirrors
+    ``vpn_manager.check_sharing_revocation()`` exactly -- see that
+    function's docstring for why only "peer gone" / "peer 404s" count as
+    revocation, and every other outcome (unreachable, timeout, any other
+    HTTP status) changes nothing: a flaky or briefly-offline peer must
+    never strip a working setup. Never raises (intended to run unattended
+    on a background poller)."""
+    try:
+        state = _load_sharing_state(settings)
+        source_peer_id = state["source_peer_id"]
+        if not source_peer_id or not state["auth_key"]:
+            return False
+        try:
+            from ..transfer import local_network as _local_network
+            from ..transfer.peer_connectivity import _peer_get_json_for_peer
+        except ImportError:  # pragma: no cover - direct script execution fallback
+            from transfer import local_network as _local_network  # type: ignore
+            from transfer.peer_connectivity import _peer_get_json_for_peer  # type: ignore
+        peer = _local_network.get_paired_peer(settings, source_peer_id)
+        if not peer:
+            _revoke_local_sharing(settings, _SHARING_REVOKED_PEER_GONE)
+            return True
+        try:
+            _peer_get_json_for_peer(peer, "/v1/api/peer/tailnet/config", settings, peer_id=source_peer_id)
+            return False
+        except urllib.error.HTTPError as error:
+            if error.code == 404:
+                _revoke_local_sharing(settings, _SHARING_REVOKED_PEER_OFF)
+                return True
+            return False
+        except Exception:
+            return False
+    except Exception as error:
+        print(f"Tailnet sharing revocation check failed: {error.__class__.__name__}: {error}", file=sys.stderr, flush=True)
+        return False
+
+
+def run_tailnet_sharing_revocation_poller(settings: Settings) -> None:
+    """Forever-loop checking whether an imported auth key's sharing was
+    revoked -- mirrors ``vpn_manager.run_sharing_revocation_poller()``
+    exactly. Started as its own daemon thread from ``create_server()``."""
+    interval = max(30.0, TAILNET_SHARING_CHECK_INTERVAL_SECONDS)
+    while True:
+        time.sleep(interval)
+        check_tailnet_sharing_revocation(settings)

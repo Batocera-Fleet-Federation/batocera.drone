@@ -8129,13 +8129,21 @@ class TailnetKeyExpiryTests(unittest.TestCase):
             payload = {"BackendState": "Running", "Self": {"TailscaleIPs": ["100.64.0.7"], "ID": "n7"}}
             return mock.Mock(returncode=0, stdout=json.dumps(payload), stderr="")
 
-        settings = mock.Mock(tailscale_oauth_client_id="id", tailscale_oauth_client_secret="secret")
-        with tempfile.NamedTemporaryFile() as fake_cli, \
-                mock.patch.object(tailnet_service, "TAILSCALE_CLI", Path(fake_cli.name)), \
-                mock.patch.object(tailnet_service.subprocess, "run", side_effect=fake_run), \
-                mock.patch.object(tailnet_service, "disable_key_expiry") as disable:
-            tailnet_service.tailnet_enroll("tskey-auth-test", settings)
-        disable.assert_called_once_with("id", "secret")
+        with tempfile.TemporaryDirectory() as userdata_root:
+            # A real userdata_root is needed now that tailnet_enroll()
+            # persists sharing state (see device/tailnet_service.py's "peer
+            # sharing" section) -- this test only cares about the key-expiry
+            # call, but the Mock still has to support that side effect.
+            settings = mock.Mock(
+                tailscale_oauth_client_id="id", tailscale_oauth_client_secret="secret",
+                userdata_root=Path(userdata_root),
+            )
+            with tempfile.NamedTemporaryFile() as fake_cli, \
+                    mock.patch.object(tailnet_service, "TAILSCALE_CLI", Path(fake_cli.name)), \
+                    mock.patch.object(tailnet_service.subprocess, "run", side_effect=fake_run), \
+                    mock.patch.object(tailnet_service, "disable_key_expiry") as disable:
+                tailnet_service.tailnet_enroll("tskey-auth-test", settings)
+            disable.assert_called_once_with("id", "secret")
 
     def test_enroll_without_settings_does_not_attempt_key_expiry_disable(self) -> None:
         from app.device import tailnet_service
