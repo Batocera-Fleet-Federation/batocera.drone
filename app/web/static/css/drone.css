@@ -1994,6 +1994,20 @@
       border-color: rgba(59, 130, 246, 0.4);
       color: #fff;
     }
+    /* Below this width, brand + search + switcher-with-labels no longer fit
+       on one row (confirmed live -- the switcher overflowed off the page).
+       flex-wrap alone would let the switcher wrap wherever it happens to
+       run out of room; flex-basis:100% instead forces it onto its own full
+       row directly under the search bar every time, and its buttons drop
+       to icon-only (title= tooltip still carries the label). */
+    @media (max-width: 768px) {
+      .movie-explorer-topbar { flex-wrap: wrap; }
+      .asset-type-switcher {
+        flex: 1 1 100%;
+        justify-content: center;
+      }
+      .asset-type-switcher-btn-label { display: none; }
+    }
     /* Persistent bottom music player bar (see ensureMusicPlayerBar) -- stays
        mounted across router navigation, unlike the Movies player's
        one-video-at-a-time modal, since music listening is continuous while

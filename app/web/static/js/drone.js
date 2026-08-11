@@ -1821,9 +1821,16 @@ function parseMusicHash(hash) {
 // Right-justified Games/Movies/Music switcher, spliced into the end of each
 // Explorer page's existing .movie-explorer-topbar row -- the search box's
 // own flex-grow-1 already pushes everything after it flush right, so this
-// needs no new layout mechanics. Replaces the two separate navbar links
-// (index.html's old #systemsMenuBtn "Games"/#moviesMenuBtn "Movies") with
-// one always-visible in-page control instead of a nav-level tab per type.
+// needs no new layout mechanics on desktop widths. Replaces the two separate
+// navbar links (index.html's old #systemsMenuBtn "Games"/#moviesMenuBtn
+// "Movies") with one always-visible in-page control instead of a nav-level
+// tab per type.
+//
+// On narrow (<=768px) viewports brand+search+switcher-with-labels no longer
+// fit on one row -- see the .movie-explorer-topbar/.asset-type-switcher
+// rules in drone.css, which wrap the switcher onto its own full-width row
+// under the search bar and hide each button's label span (below), leaving
+// icon-only buttons.
 function renderAssetTypeSwitcher(active) {
   const types = [
     ["systems", "Games", "bi-grid", "#systems"],
@@ -1833,7 +1840,7 @@ function renderAssetTypeSwitcher(active) {
   return `
     <div class="asset-type-switcher">
       ${types.map(([key, label, icon, hash]) => `
-        <button type="button" class="btn btn-outline-light btn-sm asset-type-switcher-btn ${active === key ? "active" : ""}" onclick="setHash(${jsAttr(hash)})"><i class="bi ${icon} me-1"></i>${label}</button>
+        <button type="button" class="btn btn-outline-light btn-sm asset-type-switcher-btn ${active === key ? "active" : ""}" title="${escapeHtml(label)}" onclick="setHash(${jsAttr(hash)})"><i class="bi ${icon} me-1"></i><span class="asset-type-switcher-btn-label">${escapeHtml(label)}</span></button>
       `).join("")}
     </div>
   `;
