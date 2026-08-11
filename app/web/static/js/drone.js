@@ -2854,7 +2854,7 @@ function renderMusicDetailShell(track) {
           ${metaBits.length ? `<div class="text-muted small mb-2">${metaBits.map((bit) => escapeHtml(bit)).join(" &middot; ")}</div>` : ""}
           ${genres.length ? `<div class="mb-3">${genres.map((g) => `<span class="badge movie-genre-badge">${escapeHtml(g)}</span>`).join(" ")}</div>` : ""}
           <div class="d-flex flex-wrap gap-2 mb-2">
-            <button class="btn btn-primary btn-sm" type="button" title="Play" onclick="playMusicTrack(${jsAttr(entryKey)}, ${jsAttr(title)}, ${jsAttr(artistLabel)}, ${!!track.liked})"><i class="bi bi-play-circle"></i></button>
+            <button class="btn btn-primary btn-sm" type="button" title="Play" onclick="playMusicTrack(${jsAttr(entryKey)}, ${jsAttr(title)}, ${jsAttr(track.artist || artistLabel)}, ${!!track.liked}, ${jsAttr(track.album)})"><i class="bi bi-play-circle"></i></button>
             ${musicLikeButtonHtml(entryKey, !!track.liked, "icon")}
             ${
               track.is_downloadable === false
@@ -3025,13 +3025,20 @@ async function applyMusicAlbumScraperResult(entryKey, artist, album, releaseMbid
 let musicPlayerQueue = [];
 let musicPlayerQueueIndex = -1;
 let musicPlayerCurrentEntryKey = null;
+// The currently playing track's *folder-derived* artist/album (never a
+// scraped canonical name -- see the module docstring's grouping-key rule)
+// -- openMusicPlayerBarAlbum() navigates with these, so they must match
+// the same keys renderArtistDetailsPage filters musicAllRows by, or the
+// destination page would come up empty.
+let musicPlayerCurrentArtist = null;
+let musicPlayerCurrentAlbum = null;
 function ensureMusicPlayerBar() {
   if (document.getElementById("musicPlayerBar")) return;
   const bar = document.createElement("div");
   bar.id = "musicPlayerBar";
   bar.className = "music-player-bar d-none";
   bar.innerHTML = `
-    <div class="music-player-bar-art">
+    <div class="music-player-bar-art" role="button" tabindex="0" title="Back to album" onclick="openMusicPlayerBarAlbum()" onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openMusicPlayerBarAlbum(); }">
       <img id="musicPlayerBarArt" src="" alt="" onerror="this.style.display='none'; this.nextElementSibling.classList.remove('d-none');">
       <div class="music-player-bar-art-fallback d-none"><i class="bi bi-music-note-beamed"></i></div>
     </div>
@@ -3062,16 +3069,21 @@ function closeMusicPlayerBar() {
   musicPlayerQueue = [];
   musicPlayerQueueIndex = -1;
   musicPlayerCurrentEntryKey = null;
+  musicPlayerCurrentArtist = null;
+  musicPlayerCurrentAlbum = null;
 }
 // Plays one track with no album queue context (e.g. the plain track detail
 // page's Play button) -- next/previous are no-ops until a real queue is set
 // via playMusicAlbum/playMusicTrackFromAlbum. `liked` is passed in by the
 // caller (rather than looked up here) since musicAllRows may not be loaded
-// yet if the user navigated straight to a track detail page URL.
-function playMusicTrack(entryKey, title, artist, liked) {
+// yet if the user navigated straight to a track detail page URL. `artist`/
+// `album` must be the folder-derived values (track.artist/track.album from
+// the detail payload, not a scraped meta.artist/meta.album) -- see
+// musicPlayerCurrentArtist's docstring for why.
+function playMusicTrack(entryKey, title, artist, liked, album) {
   musicPlayerQueue = [entryKey];
   musicPlayerQueueIndex = 0;
-  _playMusicPlayerEntry(entryKey, title, artist, !!liked);
+  _playMusicPlayerEntry(entryKey, title, artist, !!liked, album);
 }
 // Sets the queue to a whole album's tracks (disc/track-number order) and
 // starts playback at one specific track -- what the artist/album detail
@@ -3082,7 +3094,7 @@ function playMusicTrackFromAlbum(entryKey, artist, album) {
   musicPlayerQueue = tracks.map((t) => t.entry_key);
   musicPlayerQueueIndex = Math.max(0, musicPlayerQueue.indexOf(entryKey));
   const track = tracks.find((t) => t.entry_key === entryKey) || tracks[0];
-  if (track) _playMusicPlayerEntry(track.entry_key, track.display_title || track.track_name, artist, !!track.liked);
+  if (track) _playMusicPlayerEntry(track.entry_key, track.display_title || track.track_name, artist, !!track.liked, album);
 }
 function playMusicAlbum(artist, album) {
   const tracks = musicAlbumTracksSorted(artist, album);
@@ -3090,7 +3102,7 @@ function playMusicAlbum(artist, album) {
   musicPlayerQueue = tracks.map((t) => t.entry_key);
   musicPlayerQueueIndex = 0;
   const first = tracks[0];
-  _playMusicPlayerEntry(first.entry_key, first.display_title || first.track_name, artist, !!first.liked);
+  _playMusicPlayerEntry(first.entry_key, first.display_title || first.track_name, artist, !!first.liked, album);
 }
 function musicAlbumTracksSorted(artist, album) {
   const artistKey = String(artist || "").toLowerCase().trim();
@@ -3114,11 +3126,13 @@ function _playMusicPlayerEntryFromQueue() {
   const entryKey = musicPlayerQueue[musicPlayerQueueIndex];
   if (!entryKey) return;
   const row = musicAllRows.find((m) => m.entry_key === entryKey);
-  _playMusicPlayerEntry(entryKey, row ? (row.display_title || row.track_name) : entryKey, row ? row.artist : "", !!(row && row.liked));
+  _playMusicPlayerEntry(entryKey, row ? (row.display_title || row.track_name) : entryKey, row ? row.artist : "", !!(row && row.liked), row ? row.album : null);
 }
-function _playMusicPlayerEntry(entryKey, title, artist, liked) {
+function _playMusicPlayerEntry(entryKey, title, artist, liked, album) {
   ensureMusicPlayerBar();
   musicPlayerCurrentEntryKey = entryKey;
+  musicPlayerCurrentArtist = artist || null;
+  musicPlayerCurrentAlbum = album != null ? album : null;
   const bar = document.getElementById("musicPlayerBar");
   const audio = document.getElementById("musicPlayerBarAudio");
   const art = document.getElementById("musicPlayerBarArt");
@@ -3133,6 +3147,17 @@ function _playMusicPlayerEntry(entryKey, title, artist, liked) {
   audio.src = musicStreamUrl(entryKey);
   bar.classList.remove("d-none");
   audio.play().catch(() => {});
+}
+// Clicking the player bar's album art navigates back to that track's
+// album/song detail page -- artistDetailHash's null-vs-empty-string
+// distinction matters here: an artist with no album grouping at all (never
+// happens once something's actually playing, but guarded anyway) leaves
+// musicPlayerCurrentAlbum null, which lands on the artist's default album
+// rather than a specific one, same fallback renderArtistDetailsPage itself
+// uses for an unrecognized album param.
+function openMusicPlayerBarAlbum() {
+  if (!musicPlayerCurrentArtist) return;
+  setHash(artistDetailHash(musicPlayerCurrentArtist, musicPlayerCurrentAlbum));
 }
 // Rebuilds the player bar's like button for whichever track is now current
 // -- called whenever a new track starts (from _playMusicPlayerEntry); the
@@ -6472,6 +6497,11 @@ function renderTorrentRowMarkup(row) {
   const progressText = row.total_bytes
     ? `${pct.toFixed(1)}% (${formatBytes(row.completed_bytes)} / ${formatBytes(row.total_bytes)})`
     : (status === "complete" ? "100%" : "0%");
+  // The bar's own overlaid label is deliberately more compact than
+  // progressText (percentage + total size, not completed/total) -- the
+  // column is narrow and this is a glanceable summary; the full
+  // completed/total breakdown is still one hover away via the cell's title.
+  const progressLabel = row.total_bytes ? `${pct.toFixed(1)}% · ${formatBytes(row.total_bytes)}` : progressText;
   const etaSeconds = Number(row.eta_seconds);
   const etaText = status === "downloading" ? (Number.isFinite(etaSeconds) && etaSeconds > 0 ? formatDuration(etaSeconds) : "--") : "";
   // Every row always shows all 4 action buttons in the same fixed order --
@@ -6491,7 +6521,12 @@ function renderTorrentRowMarkup(row) {
   return `<tr>
     <td class="download-file" title="${escapeHtml(row.torrent_file || "")}">${escapeHtml(row.name || "")}</td>
     <td>${torrentStatusBadge(row)}</td>
-    <td class="small" title="${escapeHtml(progressText)}">${progressText}</td>
+    <td class="torrent-progress-cell" title="${escapeHtml(progressText)}">
+      <div class="torrent-progress-wrap">
+        <div class="progress"><div class="progress-bar torrent-progress-bar-${escapeHtml(status)}" style="width:${pct}%"></div></div>
+        <span class="torrent-progress-label">${escapeHtml(progressLabel)}</span>
+      </div>
+    </td>
     <td class="small">${row.download_speed_bps ? `${formatBytes(row.download_speed_bps)}/s` : ""}</td>
     <td class="small">${Number(row.num_seeders || 0)}</td>
     <td class="small">${Number(row.connections || 0)}</td>
@@ -6516,14 +6551,16 @@ function renderTorrentTableBody(rows) {
 // its own `table-layout: fixed` + explicit <colgroup> widths, scoped so it
 // doesn't change those other tables' layout. Fixed column widths, combined
 // with every cell truncating instead of wrapping (see drone.css), are what
-// stop the grid from resizing itself on every 3s poll -- row content length
-// (a progress readout growing from "0%" to "45.2% (1.2 GB / 4.5 GB)", a speed
-// number gaining digits, etc.) used to reflow every column's auto-fit width
-// out from under whatever the user was about to click.
+// stop the grid from resizing itself on every 3s poll -- a speed number
+// gaining digits, etc. would otherwise reflow every column's auto-fit width
+// out from under whatever the user was about to click. The Progress column's
+// own label is an absolutely-positioned overlay on top of the (fixed-width)
+// bar rather than normal inline text for the same reason -- its length
+// growing from "0%" to "45.2% · 4.5 GB" never affects the bar's box size.
 function renderTorrentTableShell(rows) {
   return `<div class="table-responsive"><table class="table table-sm table-hover align-middle themed-table download-table local-assets-table bff-stack torrents-table">
     <colgroup>
-      <col style="width:28%"><col style="width:9%"><col style="width:18%"><col style="width:9%">
+      <col style="width:26%"><col style="width:8%"><col style="width:22%"><col style="width:8%">
       <col style="width:5%"><col style="width:5%"><col style="width:8%"><col style="width:18%">
     </colgroup>
     <thead><tr><th>Torrent</th><th>Status</th><th>Progress</th><th>Speed</th><th>SD</th><th>CN</th><th>ETA</th><th class="download-actions">Actions</th></tr></thead>

@@ -685,6 +685,58 @@
       background: transparent;
       opacity: 0.55;
     }
+    /* The Progress column's percentage + total-size readout renders as a
+       label overlaid on the bar itself (position: absolute, inset: 0) rather
+       than normal text beside/inside it -- the overlay always spans the
+       *whole* bar regardless of the current fill width, so it stays fully
+       legible even at very low percentages, where text nested inside a
+       narrow colored fill div would otherwise get clipped by the bar's own
+       overflow. text-shadow (not a solid backdrop) keeps it readable over
+       both the filled and unfilled portions of the bar without needing two
+       differently-styled label halves. */
+    .torrent-progress-wrap {
+      position: relative;
+      display: flex;
+      align-items: center;
+      height: 1.1rem;
+    }
+    .torrent-progress-wrap .progress {
+      width: 100%;
+      height: 1.1rem;
+      background: rgba(5, 12, 22, 0.72);
+      border: 1px solid rgba(148, 163, 184, 0.18);
+    }
+    .torrent-progress-label {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.68rem;
+      font-weight: 600;
+      color: #fff;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.65);
+      pointer-events: none;
+      white-space: nowrap;
+    }
+    /* Status-colored fill, scoped through the extra .torrent-progress-wrap
+       ancestor so its specificity (3 classes) reliably beats the shared
+       ".download-table .progress-bar" gradient rule above (2 classes) that
+       every other download table also relies on -- a plain Bootstrap
+       ".bg-danger" utility class on the bar itself loses that fight (lower
+       specificity than the compound selector), which is what silently kept
+       every torrent's bar the same color regardless of status before this.
+       "downloading" intentionally has no override -- it keeps the shared
+       teal/green in-progress gradient every other download table uses. */
+    .torrents-table .torrent-progress-wrap .progress-bar.torrent-progress-bar-error {
+      background: linear-gradient(90deg, #f87171, #dc2626);
+    }
+    .torrents-table .torrent-progress-wrap .progress-bar.torrent-progress-bar-complete {
+      background: linear-gradient(90deg, #34d399, #10b981);
+    }
+    .torrents-table .torrent-progress-wrap .progress-bar.torrent-progress-bar-queued {
+      background: #475569;
+    }
     .tree-grid {
       border: 1px solid var(--admin-border);
       border-radius: 8px;
@@ -2049,6 +2101,11 @@
       border: 1px solid var(--admin-border);
       border-radius: 0.35rem;
       overflow: hidden;
+      cursor: pointer;
+    }
+    .music-player-bar-art:hover,
+    .music-player-bar-art:focus-visible {
+      border-color: #3b82f6;
     }
     .music-player-bar-art img {
       width: 100%;
