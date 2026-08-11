@@ -169,6 +169,17 @@ class TmdbClient429RetryTests(unittest.TestCase):
                 client.search("halloween")
         sleep_mock.assert_called_once_with(5.0)
 
+    def test_retry_after_is_capped_at_the_maximum_delay(self) -> None:
+        # Real live bug: an uncapped Retry-After left a bulk-scrape
+        # background thread blocked in this exact sleep for hours, deaf to
+        # Stop the whole time (see TMDB_MAX_RETRY_DELAY_SECONDS).
+        payload = json.dumps({"results": []}).encode("utf-8")
+        client = TmdbClient("key")
+        with mock.patch("app.movies.tmdb_client.urlopen", side_effect=[self._rate_limited(retry_after="7200"), FakeResponse(payload)]):
+            with mock.patch("app.movies.tmdb_client.time.sleep") as sleep_mock:
+                client.search("halloween")
+        sleep_mock.assert_called_once_with(60.0)
+
     def test_falls_back_to_backoff_when_retry_after_is_not_a_plain_number(self) -> None:
         payload = json.dumps({"results": []}).encode("utf-8")
         client = TmdbClient("key")

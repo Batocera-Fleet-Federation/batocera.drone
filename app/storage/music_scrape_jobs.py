@@ -29,6 +29,15 @@ STATUS_COMPLETE = "complete"
 STATUS_ERROR = "error"
 STATUS_STOPPED = "stopped"
 
+# A "running" job with no progress update in this long is treated as
+# orphaned/dead, not genuinely still working -- see reconcile_if_stale.
+# Generous on purpose: even a pathologically large group (dozens of tracks,
+# each candidate potentially eating up to MUSICBRAINZ_MAX_RETRY_DELAY_SECONDS
+# per retry, up to a few retries) should still tick well inside this window
+# under any real MusicBrainz-availability condition; only a genuine hang
+# (e.g. the uncapped-Retry-After bug this replaces) goes this long silent.
+STALE_AFTER_SECONDS = 600
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -66,13 +75,14 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
     # Drone upgrades in place (see the drone-db-management skill: never bump
     # applied schema in place, add columns idempotently).
     _ensure_column(connection, "music_scrape_jobs", "stop_requested", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(connection, "music_scrape_jobs", "updated_at", "TEXT")
     connection.execute("CREATE INDEX IF NOT EXISTS idx_music_scrape_jobs_status ON music_scrape_jobs(status)")
     connection.commit()
 
 
 _COLUMNS = (
     "id, status, rescan_all, total, processed, matched_count, skipped_count, "
-    "failed_count, current_music, error_message, started_at, completed_at, stop_requested"
+    "failed_count, current_music, error_message, started_at, completed_at, stop_requested, updated_at"
 )
 
 
@@ -91,6 +101,7 @@ def _row_to_dict(row: tuple) -> dict:
         "started_at": row[10],
         "completed_at": row[11],
         "stop_requested": bool(row[12]),
+        "updated_at": row[13] or row[10],
     }
 
 
@@ -98,8 +109,8 @@ def create_running(settings: Any, *, rescan_all: bool, total: int) -> dict:
     started_at = _now()
     with _open(settings.userdata_root) as connection:
         cursor = connection.execute(
-            "INSERT INTO music_scrape_jobs (status, rescan_all, total, started_at) VALUES (?, ?, ?, ?)",
-            (STATUS_RUNNING, 1 if rescan_all else 0, int(total), started_at),
+            "INSERT INTO music_scrape_jobs (status, rescan_all, total, started_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            (STATUS_RUNNING, 1 if rescan_all else 0, int(total), started_at, started_at),
         )
         job_id = cursor.lastrowid
     return {
@@ -116,6 +127,7 @@ def create_running(settings: Any, *, rescan_all: bool, total: int) -> dict:
         "started_at": started_at,
         "completed_at": None,
         "stop_requested": False,
+        "updated_at": started_at,
     }
 
 
@@ -129,11 +141,13 @@ def update_progress(
     skipped_count: int,
     failed_count: int,
 ) -> None:
+    # updated_at is this job's heartbeat -- reconcile_if_stale uses it to
+    # tell "still genuinely working" from "orphaned" (see that function).
     with _open(settings.userdata_root) as connection:
         connection.execute(
             "UPDATE music_scrape_jobs SET processed = ?, current_music = ?, matched_count = ?, "
-            "skipped_count = ?, failed_count = ? WHERE id = ?",
-            (int(processed), str(current_music or ""), int(matched_count), int(skipped_count), int(failed_count), job_id),
+            "skipped_count = ?, failed_count = ?, updated_at = ? WHERE id = ?",
+            (int(processed), str(current_music or ""), int(matched_count), int(skipped_count), int(failed_count), _now(), job_id),
         )
 
 
@@ -182,13 +196,63 @@ def is_stop_requested(settings: Any, job_id: int) -> bool:
     return bool(row and row[0])
 
 
+def reconcile_if_stale(settings: Any) -> None:
+    """A "running" job with no heartbeat (see ``update_progress``) in
+    ``STALE_AFTER_SECONDS`` is treated as orphaned -- its background thread
+    is presumed dead (a hang, a killed process that never reached a
+    terminal status, ...) rather than genuinely still working -- and gets
+    marked ``STATUS_ERROR`` so ``any_running()`` stops blocking a fresh
+    scrape and the status view reflects reality instead of "running"
+    forever. Called from both ``any_running()`` and ``latest()`` (not just
+    ``start_bulk_scrape``) so every entry point -- the status endpoint the
+    admin UI polls every 2s, clicking Stop, or clicking Start -- self-heals
+    on its own within one call, not just whichever specific path someone
+    happened to think to guard.
+
+    Exists because of a real live incident: an uncapped ``Retry-After``
+    sleep (now capped, see ``MUSICBRAINZ_MAX_RETRY_DELAY_SECONDS``) left a
+    job's background thread blocked for 5+ hours. ``stop_requested`` was
+    set correctly, but the thread never returned to the top of its loop to
+    see it, and there was no way to start a new scrape short of hand-editing
+    the job row's status on the live device.
+    """
+    with _open(settings.userdata_root) as connection:
+        row = connection.execute(
+            "SELECT id, updated_at, started_at FROM music_scrape_jobs WHERE status = ? ORDER BY id DESC LIMIT 1",
+            (STATUS_RUNNING,),
+        ).fetchone()
+        if not row:
+            return
+        job_id, updated_at, started_at = row
+        heartbeat = updated_at or started_at
+        try:
+            age_seconds = (datetime.now(timezone.utc) - datetime.fromisoformat(heartbeat)).total_seconds()
+        except (TypeError, ValueError):
+            return
+        if age_seconds <= STALE_AFTER_SECONDS:
+            return
+        connection.execute(
+            "UPDATE music_scrape_jobs SET status = ?, error_message = ?, completed_at = ? WHERE id = ? AND status = ?",
+            (
+                STATUS_ERROR,
+                f"Scrape appears stalled (no progress for over {STALE_AFTER_SECONDS // 60} minutes) -- marked as failed so a new scrape can start.",
+                _now(),
+                job_id,
+                STATUS_RUNNING,
+            ),
+        )
+        connection.commit()
+
+
 def latest(settings: Any) -> Optional[dict]:
+    reconcile_if_stale(settings)
     with _open(settings.userdata_root) as connection:
         row = connection.execute(f"SELECT {_COLUMNS} FROM music_scrape_jobs ORDER BY id DESC LIMIT 1").fetchone()
     return _row_to_dict(row) if row else None
 
 
 def any_running(settings: Any) -> bool:
+    reconcile_if_stale(settings)
     with _open(settings.userdata_root) as connection:
         row = connection.execute("SELECT 1 FROM music_scrape_jobs WHERE status = ? LIMIT 1", (STATUS_RUNNING,)).fetchone()
     return row is not None

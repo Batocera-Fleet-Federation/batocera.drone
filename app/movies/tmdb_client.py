@@ -51,6 +51,13 @@ SCRAPER_USER_AGENT = (
 # sends one) turns that transient condition back into what it actually is.
 TMDB_MAX_429_RETRIES = 3
 TMDB_RETRY_BASE_DELAY_SECONDS = 1.0
+# A server-sent Retry-After is honored (see _retry_delay_seconds), but never
+# past this cap -- the identical uncapped-sleep bug was caught live on the
+# MusicBrainz client (see MUSICBRAINZ_MAX_RETRY_DELAY_SECONDS's comment): a
+# large Retry-After would otherwise block _run_bulk_scrape_job's background
+# thread synchronously for however long the server asked, deaf to Stop for
+# the whole duration.
+TMDB_MAX_RETRY_DELAY_SECONDS = 60.0
 
 
 class TmdbUnavailableError(RuntimeError):
@@ -186,7 +193,7 @@ class TmdbClient:
         retry_after = error.headers.get("Retry-After") if error.headers else None
         if retry_after:
             try:
-                return max(0.5, float(retry_after))
+                return min(TMDB_MAX_RETRY_DELAY_SECONDS, max(0.5, float(retry_after)))
             except (TypeError, ValueError):
                 pass  # not a plain-seconds value (could be an HTTP-date) -- fall back to backoff
         return TMDB_RETRY_BASE_DELAY_SECONDS * (2 ** attempt)

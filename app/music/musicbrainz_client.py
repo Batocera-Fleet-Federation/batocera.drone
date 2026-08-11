@@ -45,6 +45,14 @@ MUSICBRAINZ_USER_AGENT = (
 MUSICBRAINZ_MIN_REQUEST_INTERVAL_SECONDS = 1.05
 MUSICBRAINZ_MAX_503_RETRIES = 3
 MUSICBRAINZ_RETRY_BASE_DELAY_SECONDS = 1.0
+# A server-sent Retry-After is honored (see _retry_delay_seconds), but never
+# past this cap. Real live bug: MusicBrainz rate-limited this Drone and sent
+# a large Retry-After; with no cap, _run_bulk_scrape_job's background thread
+# slept synchronously for hours -- Stop correctly set stop_requested in
+# SQLite, but the thread never returned to the top of its loop to see it,
+# and there was no way to start a fresh scrape (any_running() still saw
+# "running") short of hand-editing the job row on the live device.
+MUSICBRAINZ_MAX_RETRY_DELAY_SECONDS = 60.0
 
 _throttle_lock = threading.Lock()
 _last_request_at = 0.0
@@ -84,7 +92,7 @@ class MusicBrainzClient:
         retry_after = error.headers.get("Retry-After") if error.headers else None
         if retry_after:
             try:
-                return max(0.5, float(retry_after))
+                return min(MUSICBRAINZ_MAX_RETRY_DELAY_SECONDS, max(0.5, float(retry_after)))
             except (TypeError, ValueError):
                 pass
         return MUSICBRAINZ_RETRY_BASE_DELAY_SECONDS * (2 ** attempt)
