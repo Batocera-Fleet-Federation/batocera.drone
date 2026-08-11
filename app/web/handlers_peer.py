@@ -32,6 +32,7 @@ try:
     from ..device import nfs_export_manager as _nfs_exports
     from ..device import smtp_manager as _smtp
     from ..device import vpn_manager as _vpn
+    from ..device import enrollment_mailbox as _mailbox
     from ..roms.rom_metadata_state import _rom_metadata_cache_status
     from ..storage import config_backup_store as _config_backup_store
     from ..storage import movies_store as _movies_store
@@ -66,6 +67,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from device import nfs_export_manager as _nfs_exports  # type: ignore
     from device import smtp_manager as _smtp  # type: ignore
     from device import vpn_manager as _vpn  # type: ignore
+    from device import enrollment_mailbox as _mailbox  # type: ignore
     from roms.rom_metadata_state import _rom_metadata_cache_status  # type: ignore
     from storage import config_backup_store as _config_backup_store  # type: ignore
     from storage import movies_store as _movies_store  # type: ignore
@@ -817,6 +819,25 @@ class HandlersPeerMixin:
             self._send_json(404, {"error": "Tailnet sharing is not enabled on this drone, or it is not enrolled yet"})
             return
         self.log_message("peer tailnet config served enrolled=%s", payload.get("enrolled"))
+        self._send_json(200, payload)
+
+    def _handle_peer_mailbox_config(self) -> None:
+        """Serve this drone's GitHub enrollment-mailbox token+repo to a paired peer.
+
+        Mirrors _handle_peer_vpn_config exactly: gated by
+        _peer_request_authorized() (same mTLS pairing check as every other
+        /peer/* endpoint) plus enrollment_mailbox's own sharing_enabled flag
+        -- a GitHub token is sensitive the same way VPN/SMTP/Tailscale
+        credentials are, so pairing alone is not treated as implicit consent
+        here either.
+        """
+        if not self._peer_request_authorized():
+            return
+        payload = _mailbox.export_payload(self.settings)
+        if payload is None:
+            self._send_json(404, {"error": "Mailbox sharing is not enabled on this drone, or it is not configured yet"})
+            return
+        self.log_message("peer mailbox config served repo=%s", payload.get("github_repo"))
         self._send_json(200, payload)
 
     def _peer_requester_device_id(self) -> Optional[str]:

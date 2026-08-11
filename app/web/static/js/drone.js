@@ -7941,6 +7941,86 @@ async function pullTailnetConfigFromPeer() {
   }
 }
 
+// -------------------------------------------------------- Enrollment Mailbox
+// Same sharing shape as VPN/SMTP/Tailnet just above (single-hop, source_peer_id
+// gate, same peer-picker source) -- the token+repo, not the "check now"/save
+// actions, is what's shared.
+async function setMailboxSharing(enabled) {
+  const checkbox = document.getElementById("mailboxSharingEnabled");
+  try {
+    await apiPost("/admin/mailbox/sharing", { enabled });
+    showToast(`Mailbox configuration sharing with paired drones ${enabled ? "enabled" : "disabled"}.`, "success");
+  } catch (err) {
+    if (checkbox) checkbox.checked = !enabled;
+    showToast(`Failed to save sharing setting: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  }
+}
+async function loadMailboxPullPeerOptions() {
+  const select = document.getElementById("mailboxPullPeer");
+  const button = document.getElementById("mailboxPullBtn");
+  if (!select) return;
+  try {
+    const overview = await loadSwarmOverview();
+    const onlinePeers = (overview.drones || []).filter(drone => !drone.is_self && drone.online);
+    select.innerHTML = onlinePeers.length
+      ? onlinePeers.map(drone => `<option value="${escapeHtml(drone.drone_id || "")}">${escapeHtml(drone.name || drone.hostname || drone.drone_id || "Drone")}</option>`).join("")
+      : '<option value="">No paired drones online</option>';
+    if (button) button.disabled = !onlinePeers.length;
+  } catch (err) {
+    select.innerHTML = '<option value="">Failed to load drones</option>';
+    if (button) button.disabled = true;
+  }
+}
+async function pullMailboxConfigFromPeer() {
+  const select = document.getElementById("mailboxPullPeer");
+  const peerId = select ? select.value : "";
+  if (!peerId) return;
+  const button = document.getElementById("mailboxPullBtn");
+  if (button) { button.disabled = true; button.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Pulling...'; }
+  try {
+    await apiPost("/admin/mailbox/pull-from-peer", { peer_id: peerId });
+    showToast("Adopted the mailbox configuration shared by that drone.", "success");
+    await renderSwarmPage();
+  } catch (err) {
+    showToast(`Failed to pull mailbox configuration: ${escapeHtml(err.message || "unknown error")}`, "danger", 8000);
+    if (button) { button.disabled = false; button.innerHTML = '<i class="bi bi-cloud-arrow-down me-1"></i>Pull Configuration'; }
+  }
+}
+async function saveMailboxConfig() {
+  const repoInput = document.getElementById("mailboxRepo");
+  const tokenInput = document.getElementById("mailboxToken");
+  const button = document.getElementById("mailboxSaveBtn");
+  const repo = repoInput ? repoInput.value.trim() : "";
+  const token = tokenInput ? tokenInput.value.trim() : "";
+  if (button) { button.disabled = true; button.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Saving...'; }
+  try {
+    await apiPost("/admin/mailbox/config", { github_repo: repo, github_token: token });
+    showToast("Mailbox configuration saved.", "success");
+    await renderSwarmPage();
+  } catch (err) {
+    showToast(`Failed to save mailbox configuration: ${escapeHtml(err.message || "unknown error")}`, "danger", 8000);
+    if (button) { button.disabled = false; button.innerHTML = '<i class="bi bi-save me-1"></i>Save'; }
+  }
+}
+async function checkMailboxNow() {
+  const button = document.getElementById("mailboxCheckNowBtn");
+  if (button) { button.disabled = true; button.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Checking...'; }
+  try {
+    const result = await apiPost("/admin/mailbox/check-now", {});
+    const messages = {
+      already_enrolled: "This drone is already on the tailnet.",
+      already_pending: "An enrollment issue is already open and waiting for your approval.",
+      notified: "Posted a new enrollment issue with a fresh approval link.",
+      skipped: "Mailbox is not configured yet.",
+    };
+    showToast(messages[result.status] || `Check finished: ${escapeHtml(result.status || "unknown")}`, result.status === "error" ? "danger" : "success");
+    await renderSwarmPage();
+  } catch (err) {
+    showToast(`Check failed: ${escapeHtml(err.message || "unknown error")}`, "danger", 8000);
+    if (button) { button.disabled = false; button.innerHTML = '<i class="bi bi-arrow-repeat me-1"></i>Check Now'; }
+  }
+}
+
 // ------------------------------------------------------------------ SMTP
 
 function stopSmtpAutoRefresh() {
@@ -10530,6 +10610,130 @@ function renderSwarmTailnetCard(tailnet) {
     </div>`;
 }
 
+// Lets a Drone with no reachable admin UI (e.g. shipped to a rental property
+// with no one there to help) ask its owner for Tailscale approval without any
+// secret ever crossing the network to it -- see device/enrollment_mailbox.py's
+// module docstring for the full design. Card shape (status + config form +
+// share section) mirrors renderSwarmTailnetCard closely.
+function renderMailboxShareSection(state) {
+  const sharingControl = !state.has_config
+    ? ""
+    : state.source_peer_id
+    ? `<p class="text-muted small mb-2"><i class="bi bi-info-circle me-1"></i>This configuration was imported from <strong>${escapeHtml(state.source_peer_name || state.source_peer_id)}</strong> and cannot be re-shared &mdash; only the drone that originally set it up can share it with the swarm.</p>`
+    : `
+      <div class="form-check form-switch mb-2">
+        <input class="form-check-input" type="checkbox" role="switch" id="mailboxSharingEnabled" ${state.sharing_enabled ? "checked" : ""} onchange="setMailboxSharing(this.checked)">
+        <label class="form-check-label" for="mailboxSharingEnabled">Allow paired drones to pull this configuration</label>
+      </div>`;
+  return `
+    <hr>
+    <div class="small text-muted mb-2">
+      <strong>Share with Swarm.</strong>
+      ${state.has_config
+        ? "Share this drone's mailbox token+repo with paired drones over the same cert-pinned peer link used for ROM/BIOS transfers -- never through the browser."
+        : "Already configured on another drone in your swarm? Pull its mailbox configuration here instead of typing your own."}
+    </div>
+    ${sharingControl}
+    <div class="d-flex flex-wrap align-items-end gap-2">
+      <div>
+        <label class="form-label mb-1" for="mailboxPullPeer">Paired Drone</label>
+        <select id="mailboxPullPeer" class="form-select form-select-sm" style="min-width:220px"><option value="">Loading...</option></select>
+      </div>
+      <button class="btn btn-outline-primary btn-sm" type="button" id="mailboxPullBtn" disabled onclick="pullMailboxConfigFromPeer()"><i class="bi bi-cloud-arrow-down me-1"></i>Pull Configuration</button>
+    </div>`;
+}
+function renderSwarmMailboxCard(mailbox) {
+  const state = mailbox || {};
+  let statusBadge;
+  if (!state.has_config) {
+    statusBadge = '<span class="badge text-bg-secondary">Not configured</span>';
+  } else if (state.tracked_issue_number) {
+    statusBadge = '<span class="badge text-bg-warning text-dark">Awaiting your approval</span>';
+  } else {
+    statusBadge = '<span class="badge text-bg-success">Configured</span>';
+  }
+  const issueLink = state.tracked_issue_url
+    ? `<div class="small mt-1"><a href="${escapeHtml(state.tracked_issue_url)}" target="_blank" rel="noopener noreferrer"><i class="bi bi-box-arrow-up-right me-1"></i>Open the pending enrollment issue</a></div>`
+    : "";
+  const checkNowButton = state.has_config
+    ? `<div class="mt-2"><button class="btn btn-sm btn-outline-secondary" type="button" id="mailboxCheckNowBtn" onclick="checkMailboxNow()"><i class="bi bi-arrow-repeat me-1"></i>Check Now</button></div>`
+    : "";
+  const body = `
+    <div class="d-flex flex-wrap align-items-center gap-2 mb-2">${statusBadge}${state.github_repo ? ` <code>${escapeHtml(state.github_repo)}</code>` : ""}</div>
+    ${issueLink}
+    <div class="row g-2 align-items-end mt-1">
+      <div class="col-12 col-md-5"><label class="form-label small" for="mailboxRepo">Private GitHub repo</label><input id="mailboxRepo" class="form-control" type="text" placeholder="yourname/drone-enrollment-mailbox" value="${escapeHtml(state.github_repo || "")}"></div>
+      <div class="col-12 col-md-5"><label class="form-label small" for="mailboxToken">GitHub token</label><input id="mailboxToken" class="form-control" type="password" placeholder="${state.has_token ? "Unchanged" : "github_pat_..."}" autocomplete="off"></div>
+      <div class="col-12 col-md-2"><button id="mailboxSaveBtn" class="btn btn-primary w-100" type="button" onclick="saveMailboxConfig()"><i class="bi bi-save me-1"></i>Save</button></div>
+    </div>
+    ${checkNowButton}
+    ${renderMailboxShareSection(state)}`;
+  return `
+    <div class="card log-card h-100">
+      <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
+        <span><i class="bi bi-mailbox2 me-2" aria-hidden="true"></i>Enrollment Mailbox</span>
+        <button class="help-term" type="button" onclick="showMailboxGuideModal()"><i class="bi bi-question-circle-fill"></i>How does this work?</button>
+      </div>
+      <div class="card-body">
+        <div class="small text-muted mb-2"><i class="bi bi-info-circle me-1"></i>For a Drone you can't reach at all (shipped somewhere with no one there to help) -- it asks you to approve it for the tailnet without any secret ever having to reach it.</div>
+        ${body}
+      </div>
+    </div>`;
+}
+
+// Full-length plain-language explainer for the mailbox card -- deliberately
+// separate from the Tailnet guide modal: this covers a different problem
+// (a Drone with no reachable admin UI at all) and a one-time GitHub setup
+// step the Tailnet card's guide has no reason to mention.
+function showMailboxGuideModal() {
+  const modalId = "mailboxGuideModal";
+  let modal = document.getElementById(modalId);
+  if (!modal) {
+    modal = document.createElement("div");
+    modal.id = modalId;
+    modal.className = "modal fade";
+    modal.tabIndex = -1;
+    modal.setAttribute("aria-hidden", "true");
+    document.body.appendChild(modal);
+  }
+  modal.innerHTML = `
+    <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable modal-lg">
+      <div class="modal-content themed-modal">
+        <div class="modal-header">
+          <h5 class="modal-title mb-0"><i class="bi bi-mailbox2 me-2"></i>Enroll a Drone you can't reach</h5>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <h6 class="text-uppercase small text-muted fw-bold mb-2">The problem this solves</h6>
+          <p class="small">A Drone shipped somewhere with no one there to help (a rental property, a relative's house) has no way to receive a Tailscale key -- there's no admin UI to paste one into, because reaching that admin UI across networks is exactly what Tailscale enrollment is needed for in the first place.</p>
+
+          <h6 class="text-uppercase small text-muted fw-bold mb-2 mt-4">How it works</h6>
+          <p class="small">Tailscale doesn't actually require a secret to enroll -- it can print a one-time web link that <em>you</em> approve from any browser, anywhere, with nothing sensitive ever reaching the Drone. The only remaining problem is getting that link <em>out</em> to you, and that's what this feature does: every Drone already talks to github.com for its own update checks, so an unenrolled Drone posts the link as an issue in a private GitHub repo you set up, and GitHub's own notifications tell you it's waiting.</p>
+
+          <h6 class="text-uppercase small text-muted fw-bold mb-2 mt-4">One-time setup (a few minutes)</h6>
+          <ol class="small mb-2">
+            <li>Create a small private repository on GitHub to use only as this mailbox (e.g. <code>drone-enrollment-mailbox</code>).</li>
+            <li>Create a <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener noreferrer">fine-grained personal access token</a> scoped to <em>only</em> that repository, with <strong>Issues: Read and write</strong> permission and nothing else.</li>
+            <li>Paste the repo (as <code>owner/repo</code>) and the token below, on any Drone that's still reachable -- ideally before it ships anywhere.</li>
+          </ol>
+
+          <h6 class="text-uppercase small text-muted fw-bold mb-2 mt-4">Why this is safe</h6>
+          <p class="small mb-0">The token can only open, edit, and close issues in the one repository you chose for it -- it can't read your code, touch releases, or access anything else on your GitHub account. If it ever leaked, the worst outcome is someone spamming that one issue tracker. When several Drones are set up together before shipping, this configuration can be shared between them the same single-hop way VPN/SMTP/Tailscale credentials are, below.</p>
+        </div>
+        <div class="modal-footer">
+          <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener noreferrer" class="btn btn-outline-primary btn-sm me-auto"><i class="bi bi-box-arrow-up-right me-1"></i>Create a token</a>
+          <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Close</button>
+        </div>
+      </div>
+    </div>`;
+  if (window.bootstrap?.Modal) {
+    window.bootstrap.Modal.getOrCreateInstance(modal).show();
+  } else {
+    modal.classList.add("show");
+    modal.style.display = "block";
+  }
+}
+
 // Full-length plain-language explainer for the Tailnet card -- deliberately
 // separate from the one-paragraph HELP_TECH_GLOSSARY['tailnet'] entry used
 // elsewhere (e.g. the home page): this covers install steps for a machine or
@@ -10600,10 +10804,11 @@ async function renderSwarmPage() {
     // Independent calls run concurrently. Default Tailnet/local-network state
     // is read-only here; active discovery is reserved for the page's explicit
     // Discover and Refresh controls.
-    const [discovery, overview, networkShares] = await Promise.all([
+    const [discovery, overview, networkShares, mailbox] = await Promise.all([
       loadTailnetDiscovery(),
       loadSwarmOverview(),
       api("/admin/network-shares").catch(() => ({ shares: [] })),
+      api("/admin/mailbox/status").catch(() => ({ has_config: false })),
     ]);
     const tailnet = discovery.tailnet || { installed: false };
     const drones = Array.isArray(overview.drones) ? overview.drones : [];
@@ -10621,11 +10826,15 @@ async function renderSwarmPage() {
           <div class="card-body" id="localPairingBody"><div class="text-muted">Loading pairing...</div></div>
         </div></div>
       </div>
+      <div class="row g-3 mb-3 align-items-stretch">
+        <div class="col-12">${renderSwarmMailboxCard(mailbox)}</div>
+      </div>
       <div class="card log-card mb-3">
         <div class="card-header d-flex justify-content-between align-items-center"><span><i class="bi bi-radar me-2" aria-hidden="true"></i>Nearby Drones</span><div class="d-flex gap-2"><button class="btn btn-sm btn-outline-primary" id="localDiscoverBtn"><i class="bi bi-radar me-1"></i>Discover</button><button class="btn btn-sm btn-outline-secondary" id="localRefreshBtn"><i class="bi bi-arrow-repeat"></i></button></div></div>
         <div class="card-body" id="localPeersBody"><div class="text-muted">Loading peers...</div></div>
       </div>`;
     loadTailnetPullPeerOptions();
+    loadMailboxPullPeerOptions();
 
     async function refreshPairing(status = null, includeTailnet = false) {
       if (!status) {

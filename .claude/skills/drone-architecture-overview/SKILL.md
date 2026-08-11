@@ -221,6 +221,48 @@ Depth: `drone-vpn-management` skill's "Single-hop only"/"Revocation"
 sections describe the shared model in full; `tailnet_service.py`'s "peer
 sharing" section docstrings cover the Tailscale-specific deviations inline.
 
+## Enrollment Mailbox: connecting a Drone you cannot reach at all
+
+A different problem from Tailscale sharing above: sharing gets a *paired*
+peer onto the same tailnet. This solves enrolling a Drone that has **no
+existing network path to you whatsoever** — shipped to a location with no
+physical access and no port-forward, so its admin UI is unreachable and it
+has never been paired with anything. `app/device/enrollment_mailbox.py`.
+
+- **No secret ever reaches the device.** The primitive this is built on is
+  `tailnet_service.tailnet_enroll_interactive()` — runs `tailscale up` with
+  no `--authkey`, which makes tailscaled print a one-time
+  `https://login.tailscale.com/...` URL a human approves from *any*
+  browser. Approval happens entirely on Tailscale's side; nothing sensitive
+  is transmitted to the Drone for this to work. (Contrast with
+  `tailnet_enroll()` above, which *does* receive a secret over the mTLS
+  peer channel — this is the passwordless sibling, deliberately with no
+  `--timeout` flag so tailscaled keeps the pending login alive regardless
+  of the short-lived CLI process's own lifetime.)
+- **Getting the URL out uses a channel every Drone already has**: outbound
+  HTTPS to github.com, the same one used for release self-checks. A private
+  GitHub repo (created once by the fleet owner) acts as a mailbox; a
+  narrowly-scoped token (Issues read/write on that one repo, nothing else)
+  lets an unenrolled Drone open an issue containing the login URL — GitHub's
+  own notifications do the "tell a human" step, no SMTP required (deliberately
+  independent of `drone-smtp-notifications`, which cannot be assumed
+  configured on a freshly-shipped Drone).
+- **The token is fleet-wide, not per-device** — configured the same way as
+  VPN/SMTP/Tailscale credentials (entered once while still reachable,
+  typically before a Drone ships anywhere) and follows the identical
+  single-hop peer-sharing model as those three (`set_sharing_enabled`/
+  `export_payload`/`import_from_peer`/`bootstrap_mailbox_from_swarm`) so a
+  batch of Drones set up together can propagate it without retyping.
+- **One open issue per device, tracked locally** (`tracked_issue_number`),
+  re-verified against GitHub each poll rather than trusted forever — a user
+  manually closing the issue (to ask for a refreshed link, e.g. if the old
+  one expired) is the deliberate way to force a fresh URL on the next
+  check, not an error state.
+- `run_mailbox_poller` (background thread, default 15 min) is the only
+  thing that actually posts/refreshes/closes issues; `check_and_notify_if_needed`
+  is also exposed as an on-demand admin "Check Now" action for immediate
+  feedback after configuring.
+
 ## Common failure patterns
 
 - Designing anything that assumes a central coordinator, a fleet-wide view, or a

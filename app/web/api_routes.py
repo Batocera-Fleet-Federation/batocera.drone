@@ -142,6 +142,10 @@ class ApiRoutesMixin:
                 self._handle_peer_tailnet_config()
                 return
 
+            if len(parts) == 3 and parts[0] == "peer" and parts[1] == "mailbox" and parts[2] == "config":
+                self._handle_peer_mailbox_config()
+                return
+
             # Public: the SPA shell and its own "am I logged in" probe must be
             # reachable with no session cookie yet, or a browser could never
             # load the login form in the first place. Everything else below
@@ -623,6 +627,10 @@ class ApiRoutesMixin:
                 self._handle_admin_tailnet_status()
                 return
 
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "mailbox" and parts[2] == "status":
+                self._handle_admin_mailbox_status()
+                return
+
             if len(parts) == 5 and parts[0] == "admin" and parts[1] == "local-network" and parts[2] == "peers" and parts[4] == "assets":
                 self._handle_admin_local_peer_assets(parts[3], query_params)
                 return
@@ -780,6 +788,25 @@ class ApiRoutesMixin:
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "tailnet" and parts[2] == "pull-from-peer":
                 payload = self._read_json_body()
                 self._handle_admin_tailnet_pull_from_peer(payload)
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "mailbox" and parts[2] == "config":
+                payload = self._read_json_body()
+                self._handle_admin_mailbox_config_update(payload)
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "mailbox" and parts[2] == "sharing":
+                payload = self._read_json_body()
+                self._handle_admin_mailbox_sharing(payload)
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "mailbox" and parts[2] == "pull-from-peer":
+                payload = self._read_json_body()
+                self._handle_admin_mailbox_pull_from_peer(payload)
+                return
+
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "mailbox" and parts[2] == "check-now":
+                self._handle_admin_mailbox_check_now()
                 return
 
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "network-shares" and parts[3] == "enable":

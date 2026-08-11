@@ -1176,6 +1176,63 @@ def _schemas() -> Dict[str, Schema]:
             ("host", "port"),
             description="This drone's SMTP settings as served to a paired peer -- only returned when sharing is on (see /admin/smtp/sharing).",
         ),
+        "MailboxStatusResponse": _object(
+            {
+                "has_config": _boolean(),
+                "github_repo": _string("owner/repo of the private GitHub repo used as the enrollment mailbox"),
+                "has_token": _boolean("Whether a GitHub token is stored -- the token itself is never returned"),
+                "sharing_enabled": _boolean("Whether paired peers may pull this config; always false for an imported config"),
+                "source_peer_id": _string("Peer this config was imported from, empty if self-configured"),
+                "source_peer_name": _string(),
+                "revoked_reason": _string(),
+                "revoked_at": _string(fmt="date-time", nullable=True),
+                "tracked_issue_number": _integer(nullable=True, description="Currently-open GitHub issue awaiting enrollment approval, if any"),
+                "tracked_issue_url": _string(),
+                "last_login_url": _string("Most recent Tailscale interactive login URL posted, for reference"),
+                "last_notified_at": _string(fmt="date-time", nullable=True),
+                "last_check_status": _string(),
+                "last_check_error": _string(),
+                "last_check_at": _string(fmt="date-time", nullable=True),
+            },
+            ("has_config", "sharing_enabled"),
+            description="Enrollment-mailbox configuration + sharing status snapshot.",
+        ),
+        "MailboxConfigUpdateRequest": _object(
+            {
+                "github_repo": _string("owner/repo of a private repo this token can open issues in"),
+                "github_token": _string("Optional on update -- blank keeps the existing stored token"),
+            },
+            ("github_repo",),
+        ),
+        "MailboxSharingRequest": _object({"enabled": _boolean()}, ("enabled",)),
+        "MailboxSharingResponse": _object({"sharing_enabled": _boolean()}, ("sharing_enabled",)),
+        "MailboxPullFromPeerRequest": _object(
+            {"peer_id": _string("drone_id of a paired peer that has mailbox sharing turned on")},
+            ("peer_id",),
+        ),
+        "MailboxPullFromPeerResponse": _object(
+            {"has_config": _boolean(), "github_repo": _string()},
+            ("has_config",),
+            description="Result of importing a peer's shared mailbox configuration -- same shape as MailboxStatusResponse.",
+            additional_properties=True,
+        ),
+        "MailboxCheckNowResponse": _object(
+            {
+                "status": _enum(("skipped", "already_enrolled", "already_pending", "notified", "error")),
+                "issue_number": _integer(nullable=True),
+                "error": _string(nullable=True),
+            },
+            ("status",),
+            description="Result of an on-demand mailbox check -- posts/refreshes a GitHub issue if this drone is not yet tailnet-enrolled.",
+        ),
+        "MailboxPeerConfigResponse": _object(
+            {
+                "github_repo": _string(),
+                "github_token": _string("Only ever served over this mTLS peer channel, never through any /admin/* response"),
+            },
+            ("github_repo", "github_token"),
+            description="This drone's enrollment-mailbox config as served to a paired peer -- only returned when sharing is on (see /admin/mailbox/sharing).",
+        ),
         "NotificationEntry": _object(
             {
                 "id": _integer(),
@@ -2309,6 +2366,19 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             "/admin/smtp/test": {
                 "post": _operation("Send a test email using the saved settings", {"200": _json_response("SmtpTestResponse"), "502": _json_response("SmtpTestResponse", "Send failed")}, tags=["admin", "smtp"], error_codes=("401", "403", "429", "500", "503"))
             },
+            "/admin/mailbox/status": {"get": _operation("Get enrollment-mailbox configuration and sharing status", {"200": _json_response("MailboxStatusResponse")}, tags=["admin", "mailbox"], error_codes=("401", "403", "429", "500", "503"))},
+            "/admin/mailbox/config": {
+                "post": _operation("Save the GitHub repo/token used as this drone's enrollment mailbox", {"200": _json_response("MailboxStatusResponse"), "400": _json_response("ErrorResponse", "Missing/invalid repo, or no token on file yet")}, request_body=_json_request("MailboxConfigUpdateRequest"), tags=["admin", "mailbox"], error_codes=("400", "401", "403", "429", "500", "503"))
+            },
+            "/admin/mailbox/sharing": {
+                "post": _operation("Toggle allowing paired peers to pull this mailbox config; rejected if this config was itself imported from a peer", {"200": _json_response("MailboxSharingResponse"), "400": _json_response("ErrorResponse", "This config was imported from a peer and cannot be re-shared")}, request_body=_json_request("MailboxSharingRequest"), tags=["admin", "mailbox"], error_codes=("400", "401", "403", "429", "500", "503"))
+            },
+            "/admin/mailbox/pull-from-peer": {
+                "post": _operation("Pull mailbox config from a paired peer and adopt it", {"200": _json_response("MailboxPullFromPeerResponse"), "404": _json_response("ErrorResponse", "Unknown peer, or that peer has sharing off / no config"), "502": _json_response("ErrorResponse", "Could not reach that peer")}, request_body=_json_request("MailboxPullFromPeerRequest"), tags=["admin", "mailbox"], error_codes=("400", "401", "403", "404", "429", "500", "502", "503"))
+            },
+            "/admin/mailbox/check-now": {
+                "post": _operation("Check now instead of waiting for the next poll: posts/refreshes a GitHub issue with a fresh Tailscale approval link if this drone is not yet enrolled", {"200": _json_response("MailboxCheckNowResponse"), "502": _json_response("MailboxCheckNowResponse", "GitHub or Tailscale call failed")}, tags=["admin", "mailbox"], error_codes=("401", "403", "429", "500", "502", "503"))
+            },
             "/admin/notifications": {
                 "get": _operation("List notifications, newest first (keyset-paginated)", {"200": _json_response("NotificationsListResponse")}, parameters=[_query_param("before_id", _integer(), "Return items with id less than this"), _query_param("limit", _integer(), "Page size"), _query_param("unread_only", _string(), "1/true to return only unread items")], tags=["admin", "notifications"])
             },
@@ -2556,6 +2626,15 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
                     "Get this drone's shared SMTP settings -- only when sharing is on",
                     {"200": _json_response("SmtpPeerConfigResponse"), "404": _json_response("ErrorResponse", "Sharing is off, or no config has been set up")},
                     tags=["peer", "smtp"],
+                    security=peer_security,
+                    error_codes=("403", "404", "429", "500"),
+                )
+            },
+            "/peer/mailbox/config": {
+                "get": _operation(
+                    "Get this drone's shared enrollment-mailbox config -- only when sharing is on",
+                    {"200": _json_response("MailboxPeerConfigResponse"), "404": _json_response("ErrorResponse", "Sharing is off, or no config has been set up")},
+                    tags=["peer", "mailbox"],
                     security=peer_security,
                     error_codes=("403", "404", "429", "500"),
                 )

@@ -750,6 +750,14 @@ except ImportError:
 
 
 try:
+    from .device import enrollment_mailbox as _enrollment_mailbox
+except ImportError:
+    if __package__ not in (None, ""):
+        raise
+    from device import enrollment_mailbox as _enrollment_mailbox  # type: ignore
+
+
+try:
     from .transfer.peer_download import (
         _cached_rom_fingerprint_exists,
         _download_artwork_from_peer,
@@ -932,6 +940,9 @@ _SMTP_SHARING_POLLER_STARTED = False
 _AUDIT_EMAIL_POLLER_STARTED = False
 _TAILNET_BOOTSTRAP_ATTEMPTED = False
 _TAILNET_SHARING_POLLER_STARTED = False
+_MAILBOX_BOOTSTRAP_ATTEMPTED = False
+_MAILBOX_SHARING_POLLER_STARTED = False
+_MAILBOX_POLLER_STARTED = False
 # _PERFORMANCE_METRICS_LAST_SAMPLE moved to device/system_metrics.py.
 # LAUNCHBOX_API_BASE / LAUNCHBOX_IMAGE_BASE / SCRAPER_USER_AGENT moved to scrapers.py.
 try:  # ARTWORK_FIELDS now lives in roms/gamelist.py (re-exported for back-compat)
@@ -1262,6 +1273,14 @@ except ImportError:
 
 
 try:
+    from .web.handlers_mailbox import HandlersMailboxMixin
+except ImportError:
+    if __package__ not in (None, ""):
+        raise
+    from web.handlers_mailbox import HandlersMailboxMixin  # type: ignore
+
+
+try:
     from .web.handlers_notifications import HandlersNotificationsMixin
 except ImportError:
     if __package__ not in (None, ""):
@@ -1317,7 +1336,7 @@ except ImportError:
     from web.handlers_music import HandlersMusicMixin  # type: ignore
 
 
-class RomRequestHandler(HandlersAuthMixin, HandlersSystemMixin, HandlersDownloadsMixin, HandlersTorrentsMixin, HandlersVpnMixin, HandlersConfigBackupMixin, HandlersSmtpMixin, HandlersNotificationsMixin, HandlersDiagnosticsMixin, HandlersConfigMixin, HandlersNetworkMixin, HandlersArtworkMixin, HandlersContentMixin, HandlersMoviesMixin, HandlersMusicMixin, ThemeMetaMixin, HandlersEsCollectionsMixin, HandlersPeerMixin, HandlersNetworkShareMixin, ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
+class RomRequestHandler(HandlersAuthMixin, HandlersSystemMixin, HandlersDownloadsMixin, HandlersTorrentsMixin, HandlersVpnMixin, HandlersConfigBackupMixin, HandlersSmtpMixin, HandlersMailboxMixin, HandlersNotificationsMixin, HandlersDiagnosticsMixin, HandlersConfigMixin, HandlersNetworkMixin, HandlersArtworkMixin, HandlersContentMixin, HandlersMoviesMixin, HandlersMusicMixin, ThemeMetaMixin, HandlersEsCollectionsMixin, HandlersPeerMixin, HandlersNetworkShareMixin, ApiRoutesMixin, UiRoutesMixin, BaseHTTPRequestHandler):
     server_version = "DroneApp/4.0"
     openapi_spec = OPENAPI_SPEC
     # Per-connection idle timeout (applied to the socket in BaseHTTPRequestHandler.setup).
@@ -2404,7 +2423,7 @@ def _build_cast_http_handler(settings: Settings):
 
 
 def create_server(settings: Settings) -> ThreadingHTTPServer:
-    global _ROM_METADATA_POLLER_STARTED, _ROM_METADATA_WATCHER_STARTED, _LOCAL_NETWORK_WORKERS_STARTED, _GAME_PROCESS_MONITOR_STARTED, _GAME_PROCESS_MONITOR, _DOWNLOAD_MANAGER, _TORRENT_MANAGER, _AUTOMATION_POLLER_STARTED, _VPN_AUTO_CONNECT_ATTEMPTED, _VPN_SHARING_POLLER_STARTED, _VPN_SELF_HEAL_POLLER_STARTED, _SMTP_BOOTSTRAP_ATTEMPTED, _SMTP_SHARING_POLLER_STARTED, _AUDIT_EMAIL_POLLER_STARTED, _NETWORK_SHARE_BOOT_REPLAY_ATTEMPTED, _NETWORK_SHARE_WATCHDOG_STARTED, _NFS_EXPORT_BOOT_REPLAY_ATTEMPTED, _TAILNET_BOOTSTRAP_ATTEMPTED, _TAILNET_SHARING_POLLER_STARTED
+    global _ROM_METADATA_POLLER_STARTED, _ROM_METADATA_WATCHER_STARTED, _LOCAL_NETWORK_WORKERS_STARTED, _GAME_PROCESS_MONITOR_STARTED, _GAME_PROCESS_MONITOR, _DOWNLOAD_MANAGER, _TORRENT_MANAGER, _AUTOMATION_POLLER_STARTED, _VPN_AUTO_CONNECT_ATTEMPTED, _VPN_SHARING_POLLER_STARTED, _VPN_SELF_HEAL_POLLER_STARTED, _SMTP_BOOTSTRAP_ATTEMPTED, _SMTP_SHARING_POLLER_STARTED, _AUDIT_EMAIL_POLLER_STARTED, _NETWORK_SHARE_BOOT_REPLAY_ATTEMPTED, _NETWORK_SHARE_WATCHDOG_STARTED, _NFS_EXPORT_BOOT_REPLAY_ATTEMPTED, _TAILNET_BOOTSTRAP_ATTEMPTED, _TAILNET_SHARING_POLLER_STARTED, _MAILBOX_BOOTSTRAP_ATTEMPTED, _MAILBOX_SHARING_POLLER_STARTED, _MAILBOX_POLLER_STARTED
     roms_root, bios_root = _real_data_roots(settings)
     repository = RomRepository(
         roms_root,
@@ -2506,6 +2525,24 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
         # no push channel, so revocation can only be learned by periodically
         # asking.
         Thread(target=_tailnet_service.run_tailnet_sharing_revocation_poller, args=(settings,), name="drone-tailnet-sharing-revocation", daemon=True).start()
+    if not _MAILBOX_BOOTSTRAP_ATTEMPTED:
+        _MAILBOX_BOOTSTRAP_ATTEMPTED = True
+        # Backgrounded for the same reason as SMTP's bootstrap above: a peer
+        # fetch must never delay the server accepting its first request.
+        Thread(target=_enrollment_mailbox.maybe_bootstrap_mailbox, args=(settings,), name="drone-mailbox-bootstrap", daemon=True).start()
+    if not _MAILBOX_SHARING_POLLER_STARTED:
+        _MAILBOX_SHARING_POLLER_STARTED = True
+        # Same reasoning as VPN/SMTP/Tailnet's sharing-revocation pollers:
+        # outbound-only, no push channel, so revocation can only be learned
+        # by periodically asking.
+        Thread(target=_enrollment_mailbox.run_sharing_revocation_poller, args=(settings,), name="drone-mailbox-sharing-revocation", daemon=True).start()
+    if not _MAILBOX_POLLER_STARTED:
+        _MAILBOX_POLLER_STARTED = True
+        # The actual "tell the owner this drone needs Tailscale approval"
+        # loop -- posts/refreshes/closes a GitHub issue depending on
+        # enrollment state. Backgrounded because it can shell out to
+        # tailscale and make outbound GitHub API calls.
+        Thread(target=_enrollment_mailbox.run_mailbox_poller, args=(settings,), name="drone-mailbox-poller", daemon=True).start()
     _ensure_game_event_spool(settings)
     if not _GAME_PROCESS_MONITOR_STARTED:
         poll_seconds = max(0.25, float(os.environ.get("GAME_PROCESS_POLL_SECONDS", "2")))

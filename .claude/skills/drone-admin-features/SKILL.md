@@ -49,6 +49,9 @@ app/web/
                           # backs onto device/vpn_manager.py)
   handlers_smtp.py        # SMTP admin routes (see drone-smtp-notifications
                           # skill; backs onto device/smtp_manager.py)
+  handlers_mailbox.py     # GitHub-Issues enrollment-mailbox admin routes (see
+                          # drone-architecture-overview skill's "Enrollment
+                          # Mailbox" section; backs onto device/enrollment_mailbox.py)
   handlers_notifications.py # notifications-inbox admin routes (see
                           # drone-smtp-notifications skill; backs onto
                           # storage/audit_store.py)
@@ -304,6 +307,18 @@ reached via this tab bar instead of a separate navbar item now).
   without them configured, same as before this existed.
 - **Pairing card** — the rotating local pairing code
   (`POST /admin/local-network/pairing-code/rotate`) used for same-LAN pairing.
+- **Enrollment Mailbox card** — `GET /admin/mailbox/status` +
+  `POST /admin/mailbox/{config,sharing,pull-from-peer,check-now}`
+  (`device/enrollment_mailbox.py` backs this): for a Drone with **no
+  reachable admin UI at all** (shipped somewhere with no physical access and
+  no existing network path), not the already-paired-peer case the Tailnet
+  card's own sharing handles. Configure a private GitHub repo + a
+  narrowly-scoped token once; an unenrolled Drone then runs Tailscale's
+  passwordless `tailscale up` (no secret involved) and posts the resulting
+  one-time approval URL as a GitHub issue, so the owner's existing GitHub
+  notifications do the "tell a human" step. See the
+  `drone-architecture-overview` skill's "Enrollment Mailbox" section for the
+  full design and its relationship to Tailnet sharing above.
 - **Nearby Drones card** — LAN-discovered candidates (`POST /admin/local-network/discover`)
   with per-peer pair/forget actions. Routes:
   `/admin/local-network/{status,discover,pairing-code/rotate,peers/{id}/{pair,forget,assets}}`.

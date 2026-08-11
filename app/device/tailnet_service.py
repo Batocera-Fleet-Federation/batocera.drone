@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import select
 import socket
 import subprocess
 import sys
@@ -434,6 +436,106 @@ def tailnet_rotate_auth_key(auth_key: str, settings: Optional[Any] = None) -> di
         raise RuntimeError(
             "Tailnet auth token rotation disconnected this Drone but re-enrollment failed: " + str(error).replace(key, "[redacted]")
         ) from error
+
+
+_LOGIN_URL_PATTERN = re.compile(rb"https://login\.tailscale\.com/\S+")
+
+
+def tailnet_enroll_interactive(wait_seconds: float = 20.0) -> str:
+    """Start passwordless enrollment and return the one-time login URL
+    Tailscale prints, without waiting for a human to actually approve it.
+
+    Unlike ``tailnet_enroll()``, no secret is received or transmitted here:
+    running ``tailscale up`` with no ``--authkey`` makes tailscaled contact
+    Tailscale's own coordination servers and print an interactive
+    ``https://login.tailscale.com/a/...`` URL for a human to open in *any*
+    browser, anywhere -- approval happens entirely on Tailscale's side, not
+    by handing this device anything sensitive. This is the primitive the
+    GitHub-mailbox enrollment flow (``device/enrollment_mailbox.py``) is
+    built on: it lets a Drone with no reachable admin UI ask to join the
+    tailnet without a secret ever having to reach it.
+
+    Deliberately no ``--timeout`` flag (unlike ``tailnet_enroll()``'s
+    ``--timeout=45s``): that flag would make the CLI give up and tear down
+    the pending login after N seconds, but approval can genuinely take
+    anywhere from seconds to days. tailscaled keeps the pending request
+    alive on its own regardless of whether this short-lived CLI process is
+    still attached, so the process is deliberately **not** waited on to
+    completion here -- only read from just long enough (``wait_seconds``)
+    to capture the URL it prints, then left to exit on its own once the
+    login resolves (approved, expired, or superseded by a later attempt).
+    Detached via ``start_new_session=True``, the same self-daemonizing
+    pattern ``vpn_manager`` uses for the ``openvpn`` process.
+
+    Raises RuntimeError (mirrors ``tailnet_enroll()``'s error contract) if
+    Tailscale is not installed/running, or no URL appears within
+    ``wait_seconds`` -- e.g. because this device is already enrolled, in
+    which case there is nothing to approve and no URL is ever printed.
+    """
+    if not TAILSCALE_CLI.exists():
+        raise RuntimeError(
+            "Tailscale is not installed on this Drone. Re-run the Drone installer "
+            "(batocera_install.sh) once to add it, then try again."
+        )
+    daemon_error = _start_daemon_if_needed()
+    if daemon_error:
+        raise RuntimeError(daemon_error)
+    hostname = socket.gethostname().lower()
+    try:
+        process = subprocess.Popen(
+            [
+                str(TAILSCALE_CLI),
+                f"--socket={TAILSCALE_SOCKET}",
+                "up",
+                f"--hostname={hostname}",
+                "--accept-dns=false",
+                "--netfilter-mode=off",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    except OSError as error:
+        raise RuntimeError(f"Tailnet interactive enrollment could not start: {error}") from error
+    buffer = b""
+    url = ""
+    deadline = time.monotonic() + max(1.0, wait_seconds)
+    # select() + read1() (not readline()) deliberately -- a text-mode
+    # readline() can block past the deadline waiting for a newline that
+    # tailscale hasn't flushed yet; read1() returns as soon as any bytes at
+    # all are available, so the deadline is actually honored.
+    while time.monotonic() < deadline:
+        remaining = deadline - time.monotonic()
+        try:
+            ready, _, _ = select.select([process.stdout], [], [], max(0.0, min(1.0, remaining)))
+        except (OSError, ValueError):
+            break
+        if not ready:
+            if process.poll() is not None:
+                break
+            continue
+        chunk = process.stdout.read1(4096)
+        if not chunk:
+            if process.poll() is not None:
+                break
+            continue
+        buffer += chunk
+        match = _LOGIN_URL_PATTERN.search(buffer)
+        if match:
+            url = match.group(0).decode("utf-8", errors="replace")
+            break
+    if url:
+        return url
+    exit_code = process.poll()
+    if exit_code not in (None, 0):
+        detail = buffer.decode("utf-8", errors="replace").strip().splitlines()
+        raise RuntimeError(
+            "Tailnet interactive enrollment failed: " + (detail[-1] if detail else f"exit code {exit_code}")
+        )
+    raise RuntimeError(
+        "Tailnet did not print a login URL in time; it may already be enrolled, "
+        "or the tailnet daemon is unresponsive."
+    )
 
 
 # ------------------------------------------------------------ peer sharing
