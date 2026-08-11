@@ -2722,10 +2722,10 @@ async function renderArtistDetailsPage(artist, albumParam) {
             <h2 class="movie-detail-title" title="${escapeHtml(artist)}">${escapeHtml(artist)} &middot; ${escapeHtml(albumLabel)}</h2>
             ${genres.length ? `<div class="mb-2">${genres.map((g) => `<span class="badge movie-genre-badge">${escapeHtml(g)}</span>`).join(" ")}</div>` : ""}
             <div class="d-flex flex-wrap gap-2 mt-2">
-              <button class="btn btn-primary btn-sm" type="button" onclick="playMusicAlbum(${jsAttr(artist)}, ${jsAttr(selectedAlbum)})"><i class="bi bi-play-circle me-1"></i>Play Album</button>
+              <button class="btn btn-primary btn-sm" type="button" title="Play Album" onclick="playMusicAlbum(${jsAttr(artist)}, ${jsAttr(selectedAlbum)})"><i class="bi bi-play-circle"></i></button>
               ${
                 adminEnabled
-                  ? `<button class="btn btn-outline-light btn-sm" type="button" title="Upload a cover image for this album -- applies to every track" onclick="openMusicAlbumArtPicker(${jsAttr(representative.entry_key)}, ${jsAttr(artist)}, ${jsAttr(selectedAlbum)})"><i class="bi bi-image me-1"></i>Upload Cover</button>`
+                  ? `<button class="btn btn-outline-light btn-sm" type="button" title="Upload a cover image for this album -- applies to every track" onclick="openMusicAlbumArtPicker(${jsAttr(representative.entry_key)}, ${jsAttr(artist)}, ${jsAttr(selectedAlbum)})"><i class="bi bi-image"></i></button>`
                   : ""
               }
             </div>
@@ -2772,9 +2772,11 @@ function renderArtistDetailTrackRow(track, artist, album) {
     </div>
   `;
 }
-// Shared like-button markup for both the track-row (icon-only, btn-sm) and
-// track-detail-page (icon+text) call sites, so toggleMusicLike has one
-// consistent shape to rebuild after a toggle instead of two.
+// Shared like-button markup for every entry_key-scoped like control (track
+// rows, both detail pages, the player bar), so toggleMusicLike has one
+// consistent shape to rebuild after a toggle instead of several. "text" is
+// unused today (every call site is icon-only) but kept as a real branch --
+// data-variant round-trips through toggleMusicLike's rebuild either way.
 function musicLikeButtonHtml(entryKey, liked, variant) {
   const sizeClass = variant === "icon" ? " btn-sm" : "";
   const iconClass = liked ? "bi-hand-thumbs-up-fill" : "bi-hand-thumbs-up";
@@ -2851,21 +2853,21 @@ function renderMusicDetailShell(track) {
           ${metaBits.length ? `<div class="text-muted small mb-2">${metaBits.map((bit) => escapeHtml(bit)).join(" &middot; ")}</div>` : ""}
           ${genres.length ? `<div class="mb-3">${genres.map((g) => `<span class="badge movie-genre-badge">${escapeHtml(g)}</span>`).join(" ")}</div>` : ""}
           <div class="d-flex flex-wrap gap-2 mb-2">
-            <button class="btn btn-primary" type="button" onclick="playMusicTrack(${jsAttr(entryKey)}, ${jsAttr(title)}, ${jsAttr(artistLabel)}, ${!!track.liked})"><i class="bi bi-play-circle me-1"></i>Play</button>
-            ${musicLikeButtonHtml(entryKey, !!track.liked, "text")}
+            <button class="btn btn-primary btn-sm" type="button" title="Play" onclick="playMusicTrack(${jsAttr(entryKey)}, ${jsAttr(title)}, ${jsAttr(artistLabel)}, ${!!track.liked})"><i class="bi bi-play-circle"></i></button>
+            ${musicLikeButtonHtml(entryKey, !!track.liked, "icon")}
             ${
               track.is_downloadable === false
-                ? `<button class="btn btn-outline-secondary" type="button" disabled><i class="bi bi-slash-circle me-1"></i>Downloads disabled</button>`
-                : `<a class="btn btn-outline-primary" href="${musicDownloadUrl(entryKey)}"><i class="bi bi-download me-1"></i>Download</a>`
+                ? `<button class="btn btn-outline-secondary btn-sm" type="button" title="Downloads disabled" disabled><i class="bi bi-slash-circle"></i></button>`
+                : `<a class="btn btn-outline-primary btn-sm" title="Download" href="${musicDownloadUrl(entryKey)}"><i class="bi bi-download"></i></a>`
             }
             ${
               adminEnabled
-                ? `<button class="btn btn-outline-light" type="button" title="Upload a cover image for this album -- applies to every track" onclick="openMusicAlbumArtPicker(${jsAttr(entryKey)}, ${jsAttr(artistLabel)}, ${jsAttr(albumLabel)})"><i class="bi bi-image me-1"></i>Upload Cover</button>`
+                ? `<button class="btn btn-outline-light btn-sm" type="button" title="Upload a cover image for this album -- applies to every track" onclick="openMusicAlbumArtPicker(${jsAttr(entryKey)}, ${jsAttr(artistLabel)}, ${jsAttr(albumLabel)})"><i class="bi bi-image"></i></button>`
                 : ""
             }
             ${
               adminEnabled
-                ? `<button class="btn btn-outline-danger" type="button" onclick="deleteMusicFromDetailPage(${jsAttr(entryKey)}, ${jsAttr(title)})"><i class="bi bi-trash me-1"></i>Delete</button>`
+                ? `<button class="btn btn-outline-danger btn-sm" type="button" title="Delete" onclick="deleteMusicFromDetailPage(${jsAttr(entryKey)}, ${jsAttr(title)})"><i class="bi bi-trash"></i></button>`
                 : ""
             }
           </div>
