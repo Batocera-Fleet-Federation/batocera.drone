@@ -727,6 +727,52 @@ class BulkScrapeTests(unittest.TestCase):
             # now-deleted SQLite file after this block exits.
             _wait_for_bulk_scrape_status(settings)
 
+    def test_stop_mid_run_halts_before_remaining_candidates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Movie A.mp4")
+            _write_movie(root, "Movie B.mp4")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+
+            # A real background thread (matching how this is actually
+            # triggered from the admin UI, not a direct synchronous call) --
+            # the delay on the first candidate's search gives the test
+            # thread a reliable window to call request_stop before the loop
+            # reaches its second candidate's stop-check.
+            fake = FakeBulkTmdbClient(match_queries={"Movie A", "Movie B"}, search_delay_seconds=0.3)
+            result = metadata_manager.start_bulk_scrape(settings, client=fake)
+            self.assertEqual(result["status"], "ok")
+            job_id = result["job"]["id"]
+
+            time.sleep(0.05)
+            movie_scrape_jobs.request_stop(settings, job_id)
+
+            job = _wait_for_bulk_scrape_status(settings)
+            self.assertEqual(job["status"], "stopped")
+            # Only the first (already in-flight) candidate was ever searched
+            # -- the second was never attempted once the stop was seen.
+            self.assertEqual(len(fake.search_calls), 1)
+            self.assertEqual(job["matched_count"], 1)
+
+    def test_stop_requested_before_the_job_starts_processing_anything(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Movie A.mp4")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+            candidates = movies_store.list_movies(settings.movies_root)
+            job = movie_scrape_jobs.create_running(settings, rescan_all=True, total=len(candidates))
+            movie_scrape_jobs.request_stop(settings, job["id"])
+
+            fake = FakeBulkTmdbClient(match_queries={"Movie A"})
+            metadata_manager._run_bulk_scrape_job(settings, job["id"], candidates, fake)
+
+            status = movie_scrape_jobs.latest(settings)
+            self.assertEqual(status["status"], "stopped")
+            self.assertEqual(status["processed"], 0)
+            self.assertEqual(fake.search_calls, [])
+
     def test_no_api_key_returns_error_without_creating_a_job(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

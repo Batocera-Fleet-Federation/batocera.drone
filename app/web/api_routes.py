@@ -1106,6 +1106,10 @@ class ApiRoutesMixin:
                 self._handle_admin_movie_scrape_bulk_retry(payload)
                 return
 
+            if len(parts) == 5 and parts[0] == "admin" and parts[1] == "movies" and parts[2] == "scrape" and parts[3] == "bulk" and parts[4] == "stop":
+                self._handle_admin_movie_scrape_bulk_stop()
+                return
+
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "music" and parts[2] == "scrape" and parts[3] == "bulk":
                 payload = self._read_json_body()
                 self._handle_admin_music_scrape_bulk_start(payload)
@@ -1114,6 +1118,10 @@ class ApiRoutesMixin:
             if len(parts) == 5 and parts[0] == "admin" and parts[1] == "music" and parts[2] == "scrape" and parts[3] == "bulk" and parts[4] == "retry":
                 payload = self._read_json_body()
                 self._handle_admin_music_scrape_bulk_retry(payload)
+                return
+
+            if len(parts) == 5 and parts[0] == "admin" and parts[1] == "music" and parts[2] == "scrape" and parts[3] == "bulk" and parts[4] == "stop":
+                self._handle_admin_music_scrape_bulk_stop()
                 return
 
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "artwork" and parts[2] == "launchbox" and parts[3] == "apply":

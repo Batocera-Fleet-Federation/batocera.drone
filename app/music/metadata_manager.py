@@ -365,7 +365,18 @@ def _run_bulk_scrape_job(settings: Settings, job_id: int, groups: list, singles:
             matched_count=matched, skipped_count=skipped, failed_count=failed,
         )
 
+    def _stop_if_requested() -> bool:
+        # A user-requested stop -- not a failure, so nothing from here on is
+        # recorded in job_items (they were simply never reached).
+        if not _jobs.is_stop_requested(settings, job_id):
+            return False
+        _tick("")
+        _jobs.mark_stopped(settings, job_id)
+        return True
+
     for group in groups:
+        if _stop_if_requested():
+            return
         _tick(f"{group['artist']} – {group['album']}")
         rows = group["rows"]
         try:
@@ -432,6 +443,8 @@ def _run_bulk_scrape_job(settings: Settings, job_id: int, groups: list, singles:
         processed += 1
 
     for row in singles:
+        if _stop_if_requested():
+            return
         _tick(row.get("track_name") or "")
         try:
             location = _filename_parser.classify_location(row["file_path"])
@@ -558,6 +571,19 @@ def retry_bulk_scrape_items(
 
 def get_bulk_scrape_status(settings: Settings) -> Optional[dict]:
     return _jobs.latest(settings)
+
+
+def stop_bulk_scrape(settings: Settings) -> dict:
+    """Request the currently-running bulk scrape job stop at its next
+    per-(group/single) check. A no-op (not an error) if nothing is running
+    -- same "idempotent, already in the desired state" convention the rest
+    of this module uses rather than treating a late/duplicate stop click as
+    a failure."""
+    job = _jobs.latest(settings)
+    if not job or job.get("status") != _jobs.STATUS_RUNNING:
+        return {"status": "not_running"}
+    _jobs.request_stop(settings, job["id"])
+    return {"status": "ok", "job": job}
 
 
 def get_bulk_scrape_items(settings: Settings, status: str, *, limit: int = 200, offset: int = 0) -> dict:

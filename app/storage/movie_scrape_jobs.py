@@ -28,10 +28,17 @@ except ImportError:  # pragma: no cover - direct script execution fallback
 STATUS_RUNNING = "running"
 STATUS_COMPLETE = "complete"
 STATUS_ERROR = "error"
+STATUS_STOPPED = "stopped"
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _ensure_column(connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+    if column not in columns:
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
 def _open(userdata_root) -> sqlite3.Connection:
@@ -56,13 +63,17 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
         "started_at TEXT NOT NULL, "
         "completed_at TEXT)"
     )
+    # Added after the initial release -- _ensure_column so an already-deployed
+    # Drone upgrades in place (see the drone-db-management skill: never bump
+    # applied schema in place, add columns idempotently).
+    _ensure_column(connection, "movie_scrape_jobs", "stop_requested", "INTEGER NOT NULL DEFAULT 0")
     connection.execute("CREATE INDEX IF NOT EXISTS idx_movie_scrape_jobs_status ON movie_scrape_jobs(status)")
     connection.commit()
 
 
 _COLUMNS = (
     "id, status, rescan_all, total, processed, matched_count, skipped_count, "
-    "failed_count, current_movie, error_message, started_at, completed_at"
+    "failed_count, current_movie, error_message, started_at, completed_at, stop_requested"
 )
 
 
@@ -80,6 +91,7 @@ def _row_to_dict(row: tuple) -> dict:
         "error_message": row[9],
         "started_at": row[10],
         "completed_at": row[11],
+        "stop_requested": bool(row[12]),
     }
 
 
@@ -105,6 +117,7 @@ def create_running(settings: Any, *, rescan_all: bool, total: int) -> dict:
         "error_message": None,
         "started_at": started_at,
         "completed_at": None,
+        "stop_requested": False,
     }
 
 
@@ -140,6 +153,35 @@ def mark_error(settings: Any, job_id: int, message: str) -> None:
             "UPDATE movie_scrape_jobs SET status = ?, error_message = ?, completed_at = ? WHERE id = ?",
             (STATUS_ERROR, str(message or "scrape failed"), _now(), job_id),
         )
+
+
+def mark_stopped(settings: Any, job_id: int) -> None:
+    """A user-requested stop, not a failure -- the run simply ends early with
+    whatever it had matched/skipped/failed so far; everything not yet reached
+    is left untouched (no job_items recorded for it), unlike the
+    provider-unavailable early-stop path which marks every remaining
+    candidate failed since those genuinely can't succeed."""
+    with _open(settings.userdata_root) as connection:
+        connection.execute(
+            "UPDATE movie_scrape_jobs SET status = ?, current_movie = '', completed_at = ? WHERE id = ?",
+            (STATUS_STOPPED, _now(), job_id),
+        )
+
+
+def request_stop(settings: Any, job_id: int) -> None:
+    """Flag a running job to stop at its next per-candidate check
+    (``is_stop_requested``) -- the SQLite row is the signal, not an
+    in-process flag/Event, so it works the same whether the request lands on
+    the thread that's actually running the job or a different request
+    handler thread entirely."""
+    with _open(settings.userdata_root) as connection:
+        connection.execute("UPDATE movie_scrape_jobs SET stop_requested = 1 WHERE id = ?", (job_id,))
+
+
+def is_stop_requested(settings: Any, job_id: int) -> bool:
+    with _open(settings.userdata_root) as connection:
+        row = connection.execute("SELECT stop_requested FROM movie_scrape_jobs WHERE id = ?", (job_id,)).fetchone()
+    return bool(row and row[0])
 
 
 def latest(settings: Any) -> Optional[dict]:

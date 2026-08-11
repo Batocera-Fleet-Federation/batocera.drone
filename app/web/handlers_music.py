@@ -528,6 +528,10 @@ class HandlersMusicMixin:
         )
         self._send_json(status_code, result)
 
+    def _handle_admin_music_scrape_bulk_stop(self) -> None:
+        result = _music_metadata.stop_bulk_scrape(self.settings)
+        self._send_json(200, result)
+
     _BULK_ITEM_STATUSES = {"matched", "skipped", "failed"}
 
     def _handle_admin_music_scrape_bulk_items(self, status: str, limit: Optional[int], offset: int) -> None:

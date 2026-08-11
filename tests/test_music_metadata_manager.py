@@ -453,6 +453,69 @@ class BulkScrapeJobTests(unittest.TestCase):
             self.assertEqual(status["matched_count"], 2)
             self.assertEqual(client.lookup_calls, ["release-1"])
 
+    def test_stop_requested_before_the_job_starts_processing_anything(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_track(root, "Sample Artist/Sample Album/01 - Track One.mp3")
+            settings = _build_settings(root)
+            music_store.sync_music_cache(settings.music_root)
+            rows = music_store.list_music(settings.music_root)
+            groups, singles, _orphans = metadata_manager._group_bulk_candidates(rows)
+            job = music_scrape_jobs.create_running(settings, rescan_all=True, total=len(groups) + len(singles))
+            music_scrape_jobs.request_stop(settings, job["id"])
+
+            client = FakeMusicBrainzClient(
+                release_search_results=[{"release_mbid": "release-1"}], releases={"release-1": _ALBUM_RELEASE},
+            )
+            metadata_manager._run_bulk_scrape_job(settings, job["id"], groups, singles, client, FakeCoverArtClient())
+
+            status = music_scrape_jobs.latest(settings)
+            self.assertEqual(status["status"], "stopped")
+            self.assertEqual(status["processed"], 0)
+            self.assertEqual(status["matched_count"], 0)
+            self.assertEqual(client.lookup_calls, [])
+
+    def test_stop_requested_during_groups_halts_before_singles(self):
+        # The groups loop and the singles loop are two separate `for`
+        # statements in _run_bulk_scrape_job -- this exercises the second
+        # loop's own stop-check, not just the first's.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # Filenames whose parsed titles literally equal _ALBUM_RELEASE's
+            # track titles -- same title-match path
+            # test_full_album_matches_every_track_with_one_release_lookup
+            # relies on (there's no disc folder here, so the disc/track
+            # number branch in _match_track_in_release never applies).
+            _write_track(root, "Band A/Album A/01 - Track One.mp3")
+            _write_track(root, "Band B/Single Track.mp3")
+            settings = _build_settings(root)
+            music_store.sync_music_cache(settings.music_root)
+            rows = music_store.list_music(settings.music_root)
+            groups, singles, _orphans = metadata_manager._group_bulk_candidates(rows)
+            self.assertEqual(len(groups), 1)
+            self.assertEqual(len(singles), 1)
+            job = music_scrape_jobs.create_running(settings, rescan_all=True, total=len(groups) + len(singles))
+
+            class _StopAfterGroupClient(FakeMusicBrainzClient):
+                def release_lookup(self, release_mbid):
+                    result = super().release_lookup(release_mbid)
+                    music_scrape_jobs.request_stop(settings, job["id"])
+                    return result
+
+            client = _StopAfterGroupClient(
+                release_search_results=[{"release_mbid": "release-1"}], releases={"release-1": _ALBUM_RELEASE},
+            )
+            metadata_manager._run_bulk_scrape_job(settings, job["id"], groups, singles, client, FakeCoverArtClient())
+
+            status = music_scrape_jobs.latest(settings)
+            self.assertEqual(status["status"], "stopped")
+            # The group's own track (matching _ALBUM_RELEASE's track 1 by
+            # track number) was matched before the stop took effect; the
+            # single, reached only by the second loop, was never attempted.
+            self.assertEqual(status["matched_count"], 1)
+            self.assertEqual(status["skipped_count"], 0)
+            self.assertEqual(status["failed_count"], 0)
+
     def test_release_not_found_only_fails_that_group(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

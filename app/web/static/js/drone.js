@@ -211,12 +211,19 @@ let movieBulkScrapeWasRunning = false;
 let movieBulkScrapeBreakdownStatus = null;
 let movieBulkScrapeBreakdownOffset = 0;
 const MOVIE_BULK_SCRAPE_BREAKDOWN_PAGE_SIZE = 50;
+// True from the moment "Stop" is clicked until the job's status actually
+// leaves "running" -- keeps the Stop button showing "Stopping..." across
+// the 2s poll ticks that land before the running job reaches its next
+// per-candidate stop-check, instead of flickering back to a clickable
+// "Stop" state on every tick in between (see patchMovieBulkScrapeLive).
+let movieBulkScrapeStopRequested = false;
 let musicBulkScrapeTimer = null;
 let musicBulkScrapeInFlight = false;
 let musicBulkScrapeWasRunning = false;
 let musicBulkScrapeBreakdownStatus = null;
 let musicBulkScrapeBreakdownOffset = 0;
 const MUSIC_BULK_SCRAPE_BREAKDOWN_PAGE_SIZE = 50;
+let musicBulkScrapeStopRequested = false;
 let swarmDronesById = {};
 const SWARM_DATA_CACHE_TTL_MS = 30000;
 let swarmOverviewCache = null;
@@ -3853,7 +3860,7 @@ function startMovieBulkScrapeAutoRefreshIfNeeded(job) {
 }
 function movieBulkScrapeStatusBadge(job) {
   const status = String(job.status || "running");
-  const cls = status === "error" ? "danger" : status === "complete" ? "success" : "info";
+  const cls = status === "error" ? "danger" : status === "complete" ? "success" : status === "stopped" ? "secondary" : "info";
   const title = status === "error" ? escapeHtml(job.error_message || "") : "";
   return `<span class="badge text-bg-${cls}" title="${title}">${escapeHtml(status)}</span>`;
 }
@@ -3870,7 +3877,7 @@ function renderMovieBulkScrapeStatus(job) {
       <div>${movieBulkScrapeStatusBadge(job)} <span class="small text-muted">${job.rescan_all ? "Rescanning all movies" : "Scraping movies missing artwork"}</span></div>
       <div class="small text-muted">${processed.toLocaleString()} / ${total.toLocaleString()}</div>
     </div>
-    ${total > 0 ? `<div class="progress mb-2" style="height:0.5rem;"><div class="progress-bar${running ? " progress-bar-striped progress-bar-animated" : ""} bg-${job.status === "error" ? "danger" : "primary"}" style="width:${pct}%"></div></div>` : ""}
+    ${total > 0 ? `<div class="progress mb-2" style="height:0.5rem;"><div class="progress-bar${running ? " progress-bar-striped progress-bar-animated" : ""} bg-${job.status === "error" ? "danger" : job.status === "stopped" ? "secondary" : "primary"}" style="width:${pct}%"></div></div>` : ""}
     ${running && job.current_movie ? `<div class="small text-muted mb-2"><span class="spinner-border spinner-border-sm me-1"></span>Scraping: ${escapeHtml(job.current_movie)}</div>` : ""}
     <div class="small text-muted">
       ${movieBulkScrapeCountLink("matched", job.matched_count)}
@@ -3895,6 +3902,15 @@ function patchMovieBulkScrapeLive(job) {
     startBtn.innerHTML = running
       ? `<span class="spinner-border spinner-border-sm me-1"></span>Scraping...`
       : `<i class="bi bi-play-fill me-1"></i>Start Scraping`;
+  }
+  const stopBtn = document.getElementById("movieBulkScrapeStopBtn");
+  if (stopBtn) {
+    stopBtn.classList.toggle("d-none", !running);
+    if (!running) movieBulkScrapeStopRequested = false;
+    if (!movieBulkScrapeStopRequested) {
+      stopBtn.disabled = false;
+      stopBtn.innerHTML = `<i class="bi bi-stop-fill me-1"></i>Stop`;
+    }
   }
   const checkbox = document.getElementById("movieBulkScrapeRescanAll");
   if (checkbox) checkbox.disabled = running;
@@ -3953,6 +3969,9 @@ function renderMovieAdminBulkScrapeCard(job) {
         <button id="movieBulkScrapeStartBtn" class="btn btn-primary" type="button" onclick="startMovieBulkScrape()" ${running ? "disabled" : ""}>
           ${running ? `<span class="spinner-border spinner-border-sm me-1"></span>Scraping...` : `<i class="bi bi-play-fill me-1"></i>Start Scraping`}
         </button>
+        <button id="movieBulkScrapeStopBtn" class="btn btn-outline-danger ${running ? "" : "d-none"}" type="button" onclick="cancelMovieBulkScrape()">
+          <i class="bi bi-stop-fill me-1"></i>Stop
+        </button>
         <div id="movieBulkScrapeStatus" class="mt-3">${renderMovieBulkScrapeStatus(job)}</div>
         <div id="movieBulkScrapeBreakdown" class="mt-3"></div>
       </div>
@@ -3979,6 +3998,39 @@ async function startMovieBulkScrape() {
   }
   if (window.location.hash === "#admin/movies") {
     await renderAdminMoviesArtworkPage();
+  }
+}
+// Not a full re-render (unlike startMovieBulkScrape) -- the running job's
+// own poll loop (startMovieBulkScrapeAutoRefreshIfNeeded) is already
+// patching the status card live every 2s, so this just needs to flip the
+// button into a "Stopping..." state and let the next poll tick reflect the
+// real outcome once the job actually reaches its next stop-check.
+async function cancelMovieBulkScrape() {
+  movieBulkScrapeStopRequested = true;
+  const stopBtn = document.getElementById("movieBulkScrapeStopBtn");
+  if (stopBtn) {
+    stopBtn.disabled = true;
+    stopBtn.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span>Stopping...`;
+  }
+  try {
+    const result = await apiPost("/admin/movies/scrape/bulk/stop", {});
+    if (result.status === "not_running") {
+      showToast("No bulk scrape is currently running.", "warning");
+      movieBulkScrapeStopRequested = false;
+      if (stopBtn) {
+        stopBtn.disabled = false;
+        stopBtn.innerHTML = `<i class="bi bi-stop-fill me-1"></i>Stop`;
+      }
+    } else {
+      showToast("Stopping bulk scrape...", "success");
+    }
+  } catch (err) {
+    showToast(`Could not stop scraping: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    movieBulkScrapeStopRequested = false;
+    if (stopBtn) {
+      stopBtn.disabled = false;
+      stopBtn.innerHTML = `<i class="bi bi-stop-fill me-1"></i>Stop`;
+    }
   }
 }
 async function toggleMovieBulkScrapeBreakdown(status) {
@@ -4142,7 +4194,7 @@ function startMusicBulkScrapeAutoRefreshIfNeeded(job) {
 }
 function musicBulkScrapeStatusBadge(job) {
   const status = String(job.status || "running");
-  const cls = status === "error" ? "danger" : status === "complete" ? "success" : "info";
+  const cls = status === "error" ? "danger" : status === "complete" ? "success" : status === "stopped" ? "secondary" : "info";
   const title = status === "error" ? escapeHtml(job.error_message || "") : "";
   return `<span class="badge text-bg-${cls}" title="${title}">${escapeHtml(status)}</span>`;
 }
@@ -4159,7 +4211,7 @@ function renderMusicBulkScrapeStatus(job) {
       <div>${musicBulkScrapeStatusBadge(job)} <span class="small text-muted">${job.rescan_all ? "Rescanning all music" : "Scraping tracks missing artwork"}</span></div>
       <div class="small text-muted">${processed.toLocaleString()} / ${total.toLocaleString()}</div>
     </div>
-    ${total > 0 ? `<div class="progress mb-2" style="height:0.5rem;"><div class="progress-bar${running ? " progress-bar-striped progress-bar-animated" : ""} bg-${job.status === "error" ? "danger" : "primary"}" style="width:${pct}%"></div></div>` : ""}
+    ${total > 0 ? `<div class="progress mb-2" style="height:0.5rem;"><div class="progress-bar${running ? " progress-bar-striped progress-bar-animated" : ""} bg-${job.status === "error" ? "danger" : job.status === "stopped" ? "secondary" : "primary"}" style="width:${pct}%"></div></div>` : ""}
     ${running && job.current_music ? `<div class="small text-muted mb-2"><span class="spinner-border spinner-border-sm me-1"></span>Scraping: ${escapeHtml(job.current_music)}</div>` : ""}
     <div class="small text-muted">
       ${musicBulkScrapeCountLink("matched", job.matched_count)}
@@ -4185,6 +4237,15 @@ function patchMusicBulkScrapeLive(job) {
       ? `<span class="spinner-border spinner-border-sm me-1"></span>Scraping...`
       : `<i class="bi bi-play-fill me-1"></i>Start Scraping`;
   }
+  const stopBtn = document.getElementById("musicBulkScrapeStopBtn");
+  if (stopBtn) {
+    stopBtn.classList.toggle("d-none", !running);
+    if (!running) musicBulkScrapeStopRequested = false;
+    if (!musicBulkScrapeStopRequested) {
+      stopBtn.disabled = false;
+      stopBtn.innerHTML = `<i class="bi bi-stop-fill me-1"></i>Stop`;
+    }
+  }
   const checkbox = document.getElementById("musicBulkScrapeRescanAll");
   if (checkbox) checkbox.disabled = running;
   if (musicBulkScrapeWasRunning && !running && musicBulkScrapeBreakdownStatus) {
@@ -4205,6 +4266,9 @@ function renderMusicAdminBulkScrapeCard(job) {
         </div>
         <button id="musicBulkScrapeStartBtn" class="btn btn-primary" type="button" onclick="startMusicBulkScrape()" ${running ? "disabled" : ""}>
           ${running ? `<span class="spinner-border spinner-border-sm me-1"></span>Scraping...` : `<i class="bi bi-play-fill me-1"></i>Start Scraping`}
+        </button>
+        <button id="musicBulkScrapeStopBtn" class="btn btn-outline-danger ${running ? "" : "d-none"}" type="button" onclick="cancelMusicBulkScrape()">
+          <i class="bi bi-stop-fill me-1"></i>Stop
         </button>
         <div id="musicBulkScrapeStatus" class="mt-3">${renderMusicBulkScrapeStatus(job)}</div>
         <div id="musicBulkScrapeBreakdown" class="mt-3"></div>
@@ -4232,6 +4296,36 @@ async function startMusicBulkScrape() {
   }
   if (window.location.hash === "#admin/music") {
     await renderAdminMusicArtworkPage();
+  }
+}
+// See cancelMovieBulkScrape's comment -- same shape, the running job's own
+// poll loop patches the status card live, this just flips the button state.
+async function cancelMusicBulkScrape() {
+  musicBulkScrapeStopRequested = true;
+  const stopBtn = document.getElementById("musicBulkScrapeStopBtn");
+  if (stopBtn) {
+    stopBtn.disabled = true;
+    stopBtn.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span>Stopping...`;
+  }
+  try {
+    const result = await apiPost("/admin/music/scrape/bulk/stop", {});
+    if (result.status === "not_running") {
+      showToast("No bulk scrape is currently running.", "warning");
+      musicBulkScrapeStopRequested = false;
+      if (stopBtn) {
+        stopBtn.disabled = false;
+        stopBtn.innerHTML = `<i class="bi bi-stop-fill me-1"></i>Stop`;
+      }
+    } else {
+      showToast("Stopping bulk scrape...", "success");
+    }
+  } catch (err) {
+    showToast(`Could not stop scraping: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    musicBulkScrapeStopRequested = false;
+    if (stopBtn) {
+      stopBtn.disabled = false;
+      stopBtn.innerHTML = `<i class="bi bi-stop-fill me-1"></i>Stop`;
+    }
   }
 }
 async function toggleMusicBulkScrapeBreakdown(status) {

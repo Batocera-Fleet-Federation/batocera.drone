@@ -520,6 +520,18 @@ def _run_bulk_scrape_job(settings: Settings, job_id: int, candidates: list, clie
     show_details_by_id: dict = {}
     season_details_by_key: dict = {}
     for index, movie in enumerate(candidates):
+        if _jobs.is_stop_requested(settings, job_id):
+            # A user-requested stop -- not a failure, so nothing from here on
+            # is recorded in job_items (they were simply never reached), and
+            # the final progress update reports what was actually processed
+            # (index), not the full candidate count.
+            _jobs.update_progress(
+                settings, job_id,
+                processed=index, current_movie="",
+                matched_count=matched, skipped_count=skipped, failed_count=failed,
+            )
+            _jobs.mark_stopped(settings, job_id)
+            return
         _jobs.update_progress(
             settings, job_id,
             processed=index, current_movie=movie.get("movie_name") or "",
@@ -714,6 +726,19 @@ def retry_bulk_scrape_items(
 
 def get_bulk_scrape_status(settings: Settings) -> Optional[dict]:
     return _jobs.latest(settings)
+
+
+def stop_bulk_scrape(settings: Settings) -> dict:
+    """Request the currently-running bulk scrape job stop at its next
+    per-candidate check. A no-op (not an error) if nothing is running --
+    same "idempotent, already in the desired state" convention the rest of
+    this module uses rather than treating a late/duplicate stop click as a
+    failure."""
+    job = _jobs.latest(settings)
+    if not job or job.get("status") != _jobs.STATUS_RUNNING:
+        return {"status": "not_running"}
+    _jobs.request_stop(settings, job["id"])
+    return {"status": "ok", "job": job}
 
 
 def get_bulk_scrape_items(settings: Settings, status: str, *, limit: int = 200, offset: int = 0) -> dict:

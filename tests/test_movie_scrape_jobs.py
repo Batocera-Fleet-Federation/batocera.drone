@@ -77,6 +77,45 @@ class MovieScrapeJobsStoreTests(unittest.TestCase):
             self.assertEqual(latest["error_message"], "No TMDb API key is configured")
             self.assertFalse(jobs.any_running(settings))
 
+    def test_stop_requested_defaults_to_false(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            row = jobs.create_running(settings, rescan_all=False, total=1)
+            self.assertFalse(row["stop_requested"])
+            self.assertFalse(jobs.is_stop_requested(settings, row["id"]))
+            self.assertFalse(jobs.latest(settings)["stop_requested"])
+
+    def test_request_stop_sets_the_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            row = jobs.create_running(settings, rescan_all=False, total=1)
+            jobs.request_stop(settings, row["id"])
+            self.assertTrue(jobs.is_stop_requested(settings, row["id"]))
+            self.assertTrue(jobs.latest(settings)["stop_requested"])
+
+    def test_is_stop_requested_false_for_unknown_job_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            self.assertFalse(jobs.is_stop_requested(settings, 99999))
+
+    def test_mark_stopped_sets_status_and_clears_current_movie(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            row = jobs.create_running(settings, rescan_all=False, total=5)
+            jobs.update_progress(
+                settings, row["id"], processed=2, current_movie="Some Movie.mp4",
+                matched_count=1, skipped_count=1, failed_count=0,
+            )
+            jobs.request_stop(settings, row["id"])
+            jobs.mark_stopped(settings, row["id"])
+            latest = jobs.latest(settings)
+            self.assertEqual(latest["status"], jobs.STATUS_STOPPED)
+            self.assertEqual(latest["current_movie"], "")
+            self.assertIsNotNone(latest["completed_at"])
+            self.assertFalse(jobs.any_running(settings))
+            self.assertEqual(latest["matched_count"], 1)
+            self.assertEqual(latest["skipped_count"], 1)
+
     def test_latest_returns_most_recent_of_multiple_jobs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(Path(tmp))

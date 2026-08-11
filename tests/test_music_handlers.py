@@ -1171,6 +1171,27 @@ class MusicBulkScrapeHandlerTests(unittest.TestCase):
                 handler._handle_admin_music_scrape_bulk_start(None)
             start_fn.assert_called_once_with(settings, rescan_all=False)
 
+    def test_stop_delegates_to_metadata_manager(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            handler = _handler(settings)
+            with mock.patch.object(music_metadata, "stop_bulk_scrape", return_value={"status": "ok", "job": {"id": 1}}) as stop_fn:
+                handler._handle_admin_music_scrape_bulk_stop()
+            stop_fn.assert_called_once_with(settings)
+            status, payload = handler.json_response
+            self.assertEqual(status, 200)
+            self.assertEqual(payload, {"status": "ok", "job": {"id": 1}})
+
+    def test_stop_when_nothing_running_still_200s(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            handler = _handler(settings)
+            with mock.patch.object(music_metadata, "stop_bulk_scrape", return_value={"status": "not_running"}):
+                handler._handle_admin_music_scrape_bulk_stop()
+            status, payload = handler.json_response
+            self.assertEqual(status, 200)
+            self.assertEqual(payload, {"status": "not_running"})
+
 
 class MusicBulkScrapeItemsHandlerTests(unittest.TestCase):
     def test_lists_items_for_a_valid_status(self) -> None:
