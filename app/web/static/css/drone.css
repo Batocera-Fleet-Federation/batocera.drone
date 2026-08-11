@@ -1726,6 +1726,16 @@
       font-size: 2.5rem;
       color: var(--admin-border);
     }
+    /* Music artwork is conventionally square (a CD/vinyl cover), unlike a
+       movie poster's 2:3 portrait ratio -- a modifier added alongside the
+       shared .movie-detail-poster/.movie-explorer-card-poster classes
+       rather than a parallel .music-* class set, matching this app's
+       existing reuse-by-composition convention for Music's UI (see the
+       drone-music-feature skill). */
+    .music-cover-square.movie-detail-poster {
+      width: 200px;
+      height: 200px;
+    }
     .movie-detail-info { flex: 1; }
     .movie-detail-title {
       color: var(--admin-text);
@@ -1937,6 +1947,10 @@
       border: 1px solid var(--admin-border);
       border-radius: 0.4rem;
       overflow: hidden;
+    }
+    /* See the .music-cover-square modifier note near .movie-detail-poster. */
+    .music-cover-square.movie-explorer-card-poster {
+      aspect-ratio: 1 / 1;
     }
     .movie-explorer-card-poster img {
       width: 100%;

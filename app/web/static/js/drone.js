@@ -2590,7 +2590,7 @@ function renderMusicExplorerCard(entry) {
     : musicDetailHash(entry.entry_key);
   return `
     <button type="button" class="movie-explorer-card" title="${escapeHtml(title)}" onclick="setHash(${jsAttr(navigateHash)})">
-      <div class="movie-explorer-card-poster">
+      <div class="movie-explorer-card-poster music-cover-square">
         <img src="${escapeHtml(artUrl)}" alt="" loading="lazy" onerror="this.style.display='none'; this.nextElementSibling.classList.remove('d-none');">
         <div class="movie-explorer-card-poster-fallback d-none"><i class="bi bi-music-note-beamed"></i></div>
       </div>
@@ -2708,8 +2708,8 @@ async function renderArtistDetailsPage(artist, albumParam) {
       <button class="btn btn-outline-secondary btn-sm mb-3" type="button" onclick="setHash('#music')"><i class="bi bi-arrow-left me-1"></i>Back to Music</button>
       <div class="movie-detail-hero">
         <div class="movie-detail-hero-body">
-          <img class="movie-detail-poster" src="${escapeHtml(artUrl)}" alt="" onerror="this.style.display='none'; this.nextElementSibling.classList.remove('d-none');">
-          <div class="movie-detail-poster movie-detail-poster-placeholder d-none"><i class="bi bi-music-note-beamed"></i></div>
+          <img class="movie-detail-poster music-cover-square" src="${escapeHtml(artUrl)}" alt="" onerror="this.style.display='none'; this.nextElementSibling.classList.remove('d-none');">
+          <div class="movie-detail-poster music-cover-square movie-detail-poster-placeholder d-none"><i class="bi bi-music-note-beamed"></i></div>
           <div class="movie-detail-info min-width-0">
             <div class="small text-muted mb-1"><span class="badge text-bg-info me-2">Artist</span>${albumTracks.length} track${albumTracks.length === 1 ? "" : "s"}</div>
             <h2 class="movie-detail-title" title="${escapeHtml(artist)}">${escapeHtml(artist)} &middot; ${escapeHtml(albumLabel)}</h2>
@@ -2837,8 +2837,8 @@ function renderMusicDetailShell(track) {
     <button class="btn btn-outline-secondary btn-sm mb-3" type="button" onclick="setHash('#music')"><i class="bi bi-arrow-left me-1"></i>Back to Music</button>
     <div class="movie-detail-hero">
       <div class="movie-detail-hero-body">
-        <img class="movie-detail-poster" src="${escapeHtml(artUrl)}" alt="" onerror="this.style.display='none'; this.nextElementSibling.classList.remove('d-none');">
-        <div class="movie-detail-poster movie-detail-poster-placeholder d-none"><i class="bi bi-music-note-beamed"></i></div>
+        <img class="movie-detail-poster music-cover-square" src="${escapeHtml(artUrl)}" alt="" onerror="this.style.display='none'; this.nextElementSibling.classList.remove('d-none');">
+        <div class="movie-detail-poster music-cover-square movie-detail-poster-placeholder d-none"><i class="bi bi-music-note-beamed"></i></div>
         <div class="movie-detail-info min-width-0">
           <h2 class="movie-detail-title" title="${escapeHtml(title)}">${escapeHtml(title)}</h2>
           ${metaBits.length ? `<div class="text-muted small mb-2">${metaBits.map((bit) => escapeHtml(bit)).join(" &middot; ")}</div>` : ""}
