@@ -13,6 +13,7 @@ one front-cover image per release.
 from __future__ import annotations
 
 import json
+import re
 from typing import Optional, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -61,7 +62,18 @@ class CoverArtClient:
             return None
         for image in images:
             if isinstance(image, dict) and image.get("front") and image.get("image"):
-                return str(image["image"])
+                # Cover Art Archive's own JSON sometimes reports a plain
+                # http:// URL for an image that's equally servable over
+                # https (same path, same archive.org-backed host) -- real
+                # live bug caught manually testing this against Radiohead's
+                # "OK Computer": front_cover_url returned an http:// URL,
+                # download_image's own https-only safety check (a real
+                # guard against something genuinely unsafe, not relaxed
+                # here) rejected it as a ValueError, and the caller's
+                # must-never-fail-the-apply handling swallowed that into a
+                # silent "no art" -- so upgrade the scheme here, at the
+                # source, rather than loosening the safety check.
+                return re.sub(r"^http://", "https://", str(image["image"]), count=1)
         return None
 
     def download_image(self, url: str) -> Tuple[bytes, str]:

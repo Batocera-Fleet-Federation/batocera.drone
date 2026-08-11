@@ -454,11 +454,16 @@ class HandlersMusicMixin:
 
     def _handle_admin_music_scrape_search(self, entry_key: str, query: Optional[str]) -> None:
         """A custom ``query`` is searched verbatim (release search, one plain
-        MusicBrainz call). With no custom query, this runs the same
-        candidate ladder the bulk scraper trusts
-        (``search_track_default_query`` -- release query first, recording
-        query as fallback) so a first search finds the right album/track
-        without the human needing to hand-clean anything. Mirrors
+        MusicBrainz call). With no custom query, this searches by this
+        track's on-disk (artist, album) -- release-only
+        (``search_album_default_query``), since applying a match always
+        applies a whole release to the whole album group now, never a
+        single-track recording match -- so a first search finds the right
+        album without the human needing to hand-clean anything. This is the
+        album page's search action (``entry_key`` is just an anchor track
+        used to resolve which album it belongs to -- see
+        ``_album_group_entry_keys``), reached from the bottom of the
+        artist/album detail page, not the track detail page. Mirrors
         ``handlers_movies._handle_admin_movie_scrape_search``."""
         track = _music_store.get_music_by_key(self.settings.music_root, entry_key)
         if not track:
@@ -471,9 +476,8 @@ class HandlersMusicMixin:
                 results = _music_metadata.search(self.settings, search_query)
             else:
                 location = _music_filename_parser.classify_location(track.get("file_path") or "")
-                track_info = _music_filename_parser.parse_track_filename(track.get("track_name") or "")
-                outcome = _music_metadata.search_track_default_query(
-                    self.settings, location.artist, location.album, track_info.title,
+                outcome = _music_metadata.search_album_default_query(
+                    self.settings, location.artist, location.album,
                 )
                 search_query = outcome["query"]
                 results = outcome["results"]
@@ -483,25 +487,28 @@ class HandlersMusicMixin:
         self._send_json(200, {"query": search_query, "results": results})
 
     def _handle_admin_music_scrape_apply(self, entry_key: str, payload: dict) -> None:
-        """``release_mbid`` is required; ``recording_mbid`` is an optional
-        hint (present when the chosen search result was a specific
-        recording, not a whole release) used to pick which track within the
-        release corresponds to this file -- see
-        ``metadata_manager._match_track_in_release``."""
+        """Applies a chosen MusicBrainz release's art + release-level
+        metadata to every track sharing ``entry_key``'s on-disk (artist,
+        album) folder (``_album_group_entry_keys``) -- the album page's
+        manual apply action. ``release_mbid`` is required; there is no
+        ``recording_mbid`` hint anymore since a whole release is always
+        applied to the whole group now, never one track matched to one
+        recording (see ``metadata_manager.apply_album``). No upfront track
+        lookup here -- ``_album_group_entry_keys`` degrades gracefully for
+        an unknown ``entry_key`` (just itself, no group), and
+        ``apply_album`` raises ``MusicNotFoundError`` when nothing in that
+        set actually resolves, so an unknown track still surfaces as 404
+        without a redundant lookup here first."""
         payload = payload if isinstance(payload, dict) else {}
         release_mbid = payload.get("release_mbid")
         if not release_mbid:
             self._send_json(400, {"error": "release_mbid is required"})
             return
+        entry_keys = self._album_group_entry_keys(entry_key)
         try:
-            result = _music_metadata.apply(
-                self.settings, entry_key, release_mbid, recording_mbid=payload.get("recording_mbid"),
-            )
+            result = _music_metadata.apply_album(self.settings, entry_keys, release_mbid)
         except _music_metadata.MusicNotFoundError:
             self._send_json(404, {"error": "unknown track"})
-            return
-        except _music_metadata.MusicMatchError as error:
-            self._send_json(400, {"error": str(error)})
             return
         except _MusicBrainzUnavailableError as error:
             self._send_json(502, {"error": str(error)})
@@ -509,10 +516,12 @@ class HandlersMusicMixin:
         self._send_json(200, result)
 
     def _handle_admin_music_scrape_delete(self, entry_key: str) -> None:
-        """Clears a scraped track's MusicBrainz metadata + artwork -- for
-        when a scrape matched the wrong track/album and a human needs a
-        clean slate before retrying."""
-        result = _music_metadata.delete_metadata(self.settings, entry_key)
+        """Clears scraped MusicBrainz metadata + artwork for every track
+        sharing ``entry_key``'s on-disk (artist, album) folder -- for when a
+        scrape matched the wrong release and a human needs a clean slate
+        before retrying."""
+        entry_keys = self._album_group_entry_keys(entry_key)
+        result = _music_metadata.delete_album_metadata(self.settings, entry_keys)
         self._send_json(200, result)
 
     # ------------------------------------------------------- bulk scrape

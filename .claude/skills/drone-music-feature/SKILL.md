@@ -292,6 +292,84 @@ Real changes made after initial launch, not reflected in the sections above:
   attempts the URL and uses `onerror` to swap to the placeholder icon, same
   pattern the Explorer card already used.
 
+- **Scraping went from per-track matching to album-only, and the manual
+  scraper UI moved from the track page to the bottom of the album page.**
+  The bulk scraper (and the manual "search and apply" card) used to match
+  each local mp3/flac file to a specific track within a resolved release's
+  tracklist and write that track's title/track-number/disc-number/recording
+  MBID -- real bugs kept coming from exactly that per-file matching (an
+  11-track folder collapsing onto a single-track "Broadcast" release;
+  numbering mismatches assigning the wrong title to the wrong file). Since
+  Cover Art Archive art and the useful MusicBrainz metadata (genres,
+  canonical album name, release date) are release-level anyway, the scraper
+  now resolves **one release per album** and applies its art + release-level
+  metadata to every track in the group -- it never writes a track's title
+  or any per-recording id; a track's own display title always stays
+  whatever's parsed from its filename. `metadata_manager.py`:
+  `_match_track_in_release`/`_apply_matched_track`/`apply()`/
+  `search_track_default_query`/`MusicMatchError` are gone, replaced by
+  `_apply_release_to_group`/`apply_album`/`search_album_default_query`/
+  `delete_album_metadata`. Artwork is saved **once per group** now, at a
+  fixed `images/album-cover.jpg` filename (matching the manual-upload
+  convention exactly, so a scraped and a manually-uploaded cover share one
+  slot) rather than once per track at a per-stem filename. The frontend's
+  `renderMusicScraperCard`/`renderMusicScraperSearchUi`/friends (track-page,
+  per-track) were replaced by `renderMusicAlbumScraperCard`/friends
+  (`renderArtistDetailsPage`, bottom of the album page, hidden for the
+  "Singles" pseudo-group since there's no one release to search for a
+  collection of unrelated standalone tracks) -- `entry_key` in every
+  `/admin/music/{key}/scrape/*` route is now just an anchor track used to
+  resolve the album group server-side (`_album_group_entry_keys`), not the
+  target of the write. The manual "Upload Cover" button was removed from the
+  track detail page for the same reason (tracks inherit art from their
+  album, per `_find_album_sibling_art`) -- it now only exists on the album
+  page, where it already lived alongside the new scraper card.
+
+- **Artist photos, keyless (not the deferred TheAudioDB follow-up from
+  design decision #1 -- a different, real mechanism instead).** MusicBrainz
+  itself hosts no images, but an artist lookup with `inc=url-rels`
+  (`MusicBrainzClient.artist_lookup`) can surface a relation of type
+  `"image"` pointing at a Wikimedia Commons file page -- most artists have
+  none, which is the normal case, not a failure. `app/music/
+  wikimedia_client.py` (new file) resolves that Commons page URL to a real
+  downloadable image via Wikimedia's own public MediaWiki Action API (also
+  keyless). `_apply_release_to_group` fetches this best-effort, cached per
+  `artist_mbid` across a bulk run the same way album art is cached per
+  `release_mbid` (`artist_bytes_cache`, parallel to `cover_bytes_cache`),
+  and writes it to `images/artist-photo.jpg` alongside the album cover
+  (same "one shared file per apply call" reasoning as
+  `_album_artwork_path`, just a different fixed filename) -- populating
+  `artist_art_relative_path`, which `handlers_music._handle_music_artwork`
+  already served (`field=artist`) since the schema was first designed, just
+  never had data before now. Shown as a small round avatar next to the
+  artist name on the album detail page (`.music-artist-avatar`,
+  `renderArtistDetailsPage`) -- absent for most artists, so its `onerror`
+  just removes the `<img>` entirely rather than falling back to a
+  placeholder icon the way the big album-cover poster does.
+
+- **The album detail page no longer shows a row of buttons for every other
+  album by the same artist.** `renderArtistDetailsPage(artist, album)`
+  still groups the whole artist's tracks internally (to validate/fall back
+  the requested `album` param), but the page itself only ever renders the
+  one selected album's tracklist now -- no artist-wide album switcher.
+  Navigating between an artist's different albums goes back through the
+  Music Explorer grid (each album already has its own card there) rather
+  than a tab row on this page.
+
+- **`CoverArtClient.front_cover_url` upgrades a plain `http://` image URL to
+  `https://` before returning it.** Real live bug caught manually testing
+  the album-only redesign above against a real release (Radiohead's "OK
+  Computer"): Cover Art Archive's own JSON sometimes reports a front-cover
+  image URL as `http://`, not `https://`, even though the same path is
+  equally servable over https. `download_image`'s own https-only check (a
+  genuine safety guard, not relaxed) then rejected it with a `ValueError`,
+  which `_apply_release_to_group`'s must-never-fail-the-apply handling
+  swallowed into a silent "no art" -- so a real, popular album with real
+  cover art on file ended up with no artwork and no error anywhere. Also
+  exposed that `coverart_client.py` had **zero** dedicated unit tests before
+  this (only ever exercised through `FakeCoverArtClient` in
+  `metadata_manager` tests) -- see the new `tests/test_coverart_client.py`.
+
 ## Common failure patterns to avoid (learned from Movies, apply here too)
 
 - Using a scraped artist/album name as the grouping key instead of the

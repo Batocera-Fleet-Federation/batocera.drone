@@ -969,7 +969,7 @@ class MusicScrapeSearchHandlerTests(unittest.TestCase):
             status, _payload = handler.json_response
             self.assertEqual(status, 404)
 
-    def test_defaults_query_to_the_search_ladder(self) -> None:
+    def test_defaults_query_to_the_album_search(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             _write_track(root, "Sample Artist/Sample Album/01 - Track One.mp3", b"x")
@@ -978,11 +978,11 @@ class MusicScrapeSearchHandlerTests(unittest.TestCase):
             entry_key = music_store.list_music(settings.music_root)[0]["entry_key"]
             handler = _handler(settings)
             with mock.patch.object(
-                music_metadata, "search_track_default_query",
+                music_metadata, "search_album_default_query",
                 return_value={"query": "Sample Artist Sample Album", "results": [{"release_mbid": "release-1", "kind": "release"}]},
             ) as ladder_search:
                 handler._handle_admin_music_scrape_search(entry_key, None)
-            ladder_search.assert_called_once_with(settings, "Sample Artist", "Sample Album", "Track One")
+            ladder_search.assert_called_once_with(settings, "Sample Artist", "Sample Album")
             status, payload = handler.json_response
             self.assertEqual(status, 200)
             self.assertEqual(payload["query"], "Sample Artist Sample Album")
@@ -1035,20 +1035,6 @@ class MusicScrapeApplyHandlerTests(unittest.TestCase):
             status, _payload = handler.json_response
             self.assertEqual(status, 404)
 
-    def test_match_error_is_400(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            _write_track(root, "Artist/Track.mp3", b"x")
-            settings = _build_settings(root)
-            music_store.sync_music_cache(settings.music_root)
-            entry_key = music_store.list_music(settings.music_root)[0]["entry_key"]
-            handler = _handler(settings)
-            with mock.patch.object(music_metadata, "apply", side_effect=music_metadata.MusicMatchError("no match")):
-                handler._handle_admin_music_scrape_apply(entry_key, {"release_mbid": "release-1"})
-            status, payload = handler.json_response
-            self.assertEqual(status, 400)
-            self.assertIn("no match", payload["error"])
-
     def test_musicbrainz_unavailable_is_502(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1057,26 +1043,32 @@ class MusicScrapeApplyHandlerTests(unittest.TestCase):
             music_store.sync_music_cache(settings.music_root)
             entry_key = music_store.list_music(settings.music_root)[0]["entry_key"]
             handler = _handler(settings)
-            with mock.patch.object(music_metadata, "apply", side_effect=MusicBrainzUnavailableError("down")):
+            with mock.patch.object(music_metadata, "apply_album", side_effect=MusicBrainzUnavailableError("down")):
                 handler._handle_admin_music_scrape_apply(entry_key, {"release_mbid": "release-1"})
             status, payload = handler.json_response
             self.assertEqual(status, 502)
             self.assertIn("down", payload["error"])
 
-    def test_successful_apply_passes_through_recording_mbid_hint(self) -> None:
+    def test_successful_apply_expands_to_the_whole_album_group(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            _write_track(root, "Artist/Track.mp3", b"x")
+            _write_track(root, "Artist/Album/01 - A.mp3", b"x")
+            _write_track(root, "Artist/Album/02 - B.mp3", b"x")
             settings = _build_settings(root)
             music_store.sync_music_cache(settings.music_root)
-            entry_key = music_store.list_music(settings.music_root)[0]["entry_key"]
+            rows = music_store.list_music(settings.music_root)
+            entry_key = rows[0]["entry_key"]
+            all_keys = sorted(row["entry_key"] for row in rows)
             handler = _handler(settings)
-            with mock.patch.object(music_metadata, "apply", return_value={"title": "Matched Track"}) as apply_fn:
-                handler._handle_admin_music_scrape_apply(entry_key, {"release_mbid": "release-1", "recording_mbid": "rec-1"})
-            apply_fn.assert_called_once_with(settings, entry_key, "release-1", recording_mbid="rec-1")
+            with mock.patch.object(music_metadata, "apply_album", return_value={"updated": 2}) as apply_fn:
+                handler._handle_admin_music_scrape_apply(entry_key, {"release_mbid": "release-1"})
+            called_args = apply_fn.call_args.args
+            self.assertEqual(called_args[0], settings)
+            self.assertEqual(sorted(called_args[1]), all_keys)
+            self.assertEqual(called_args[2], "release-1")
             status, payload = handler.json_response
             self.assertEqual(status, 200)
-            self.assertEqual(payload["title"], "Matched Track")
+            self.assertEqual(payload["updated"], 2)
 
 
 class MusicScrapeDeleteHandlerTests(unittest.TestCase):
@@ -1088,24 +1080,45 @@ class MusicScrapeDeleteHandlerTests(unittest.TestCase):
             music_store.sync_music_cache(settings.music_root)
             entry_key = music_store.list_music(settings.music_root)[0]["entry_key"]
             music_store.save_music_metadata(
-                settings.music_root, entry_key, provider="musicbrainz", provider_id="1", title="Track",
+                settings.music_root, entry_key, provider="musicbrainz", provider_id="1", title="",
                 art_relative_path=None, artist_art_relative_path=None, extra={},
             )
             handler = _handler(settings)
             handler._handle_admin_music_scrape_delete(entry_key)
             status, payload = handler.json_response
             self.assertEqual(status, 200)
-            self.assertEqual(payload, {"deleted": True})
+            self.assertEqual(payload, {"deleted": 1})
             self.assertIsNone(music_store.get_music_metadata(settings.music_root, entry_key))
 
-    def test_never_scraped_still_returns_200_with_deleted_false(self) -> None:
+    def test_deletes_every_track_in_the_album_group(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_track(root, "Artist/Album/01 - A.mp3", b"x")
+            _write_track(root, "Artist/Album/02 - B.mp3", b"x")
+            settings = _build_settings(root)
+            music_store.sync_music_cache(settings.music_root)
+            rows = music_store.list_music(settings.music_root)
+            for row in rows:
+                music_store.save_music_metadata(
+                    settings.music_root, row["entry_key"], provider="musicbrainz", provider_id="1", title="",
+                    art_relative_path=None, artist_art_relative_path=None, extra={},
+                )
+            handler = _handler(settings)
+            handler._handle_admin_music_scrape_delete(rows[0]["entry_key"])
+            status, payload = handler.json_response
+            self.assertEqual(status, 200)
+            self.assertEqual(payload, {"deleted": 2})
+            for row in rows:
+                self.assertIsNone(music_store.get_music_metadata(settings.music_root, row["entry_key"]))
+
+    def test_never_scraped_still_returns_200_with_deleted_zero(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(Path(tmp))
             handler = _handler(settings)
             handler._handle_admin_music_scrape_delete("deadbeef")
             status, payload = handler.json_response
             self.assertEqual(status, 200)
-            self.assertEqual(payload, {"deleted": False})
+            self.assertEqual(payload, {"deleted": 0})
 
 
 class MusicBulkScrapeHandlerTests(unittest.TestCase):

@@ -134,6 +134,21 @@ class MusicBrainzClient:
                 names.append(str(credit["name"]))
         return " ".join(names)
 
+    @staticmethod
+    def _primary_artist_mbid(payload: dict) -> str:
+        """The first credited artist's own MBID (distinct from
+        ``_artist_credit_name``, which joins every credited artist's
+        *name* -- a "feat." credit has multiple names but this only needs
+        one artist id to look up a photo for). Empty string if the
+        artist-credit block is missing/malformed, same "absent, not an
+        error" convention as the rest of this client's optional fields."""
+        credits_list = payload.get("artist-credit") if isinstance(payload, dict) else None
+        if not isinstance(credits_list, list) or not credits_list:
+            return ""
+        first = credits_list[0]
+        artist = first.get("artist") if isinstance(first, dict) else None
+        return str(artist.get("id")) if isinstance(artist, dict) and artist.get("id") else ""
+
     def search_release(self, query: str, limit: int = 10) -> List[dict]:
         """Release (album) search -- the primary entry point for the bulk
         scraper, which resolves one release per on-disk album rather than
@@ -234,8 +249,32 @@ class MusicBrainzClient:
             "release_mbid": payload.get("id"),
             "title": payload.get("title") or "",
             "artist": self._artist_credit_name(payload),
+            "artist_mbid": self._primary_artist_mbid(payload),
             "date": payload.get("date") or None,
             "genres": genres,
             "release_group_mbid": release_group.get("id") or "",
             "tracks": tracks,
         }
+
+    def artist_lookup(self, artist_mbid: str) -> dict:
+        """Artist detail, including URL relationships -- the sole purpose
+        here is checking for a MusicBrainz "image" relation, typically a
+        link to a Wikimedia Commons file page (MusicBrainz itself hosts no
+        images of any kind, unlike Cover Art Archive for releases). Most
+        artists have no such relation at all -- a ``None``
+        ``image_commons_url`` is the normal, common case, not a failure.
+        See ``music/wikimedia_client.py`` for turning that page URL into an
+        actual downloadable image."""
+        safe_id = str(artist_mbid or "").strip()
+        if not safe_id:
+            raise ValueError("artist_mbid is required")
+        payload = self._get_json(f"/artist/{safe_id}", {"inc": "url-rels"})
+        image_commons_url = None
+        for relation in payload.get("relations") or []:
+            if not isinstance(relation, dict) or relation.get("type") != "image":
+                continue
+            url_info = relation.get("url")
+            if isinstance(url_info, dict) and url_info.get("resource"):
+                image_commons_url = str(url_info["resource"])
+                break
+        return {"artist_mbid": payload.get("id") or safe_id, "image_commons_url": image_commons_url}

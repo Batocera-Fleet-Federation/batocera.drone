@@ -1795,11 +1795,7 @@ async function uploadMusicAlbumArt(entryKey, file, artist, album) {
     (responsePayload.entry_keys || []).forEach((key) => musicArtCacheBust.set(key, bustToken));
     musicAllRows = []; // invalidate the client-side inventory cache so every view re-fetches fresh liked/genre/art state
     showToast(`Album cover updated for ${responsePayload.updated} track${responsePayload.updated === 1 ? "" : "s"}.`, "success");
-    if (String(location.hash || "").startsWith("#music/artist/")) {
-      await renderArtistDetailsPage(artist, album);
-    } else {
-      await renderMusicDetailsPage(entryKey);
-    }
+    await renderArtistDetailsPage(artist, album);
   } catch (err) {
     showToast(`Album cover upload failed: ${escapeHtml(err.message || "unknown error")}`, "danger", 8000);
   } finally {
@@ -2726,7 +2722,10 @@ async function renderArtistDetailsPage(artist, albumParam) {
           <div class="movie-detail-poster music-cover-square movie-detail-poster-placeholder d-none"><i class="bi bi-music-note-beamed"></i></div>
           <div class="movie-detail-info min-width-0">
             <div class="small text-muted mb-1"><span class="badge text-bg-info me-2">Artist</span>${albumTracks.length} track${albumTracks.length === 1 ? "" : "s"}</div>
-            <h2 class="movie-detail-title" title="${escapeHtml(artist)}">${escapeHtml(artist)} &middot; ${escapeHtml(albumLabel)}</h2>
+            <div class="d-flex align-items-center gap-2">
+              <img class="music-artist-avatar" src="${escapeHtml(musicArtworkUrl(representative.entry_key, "artist"))}" alt="" onerror="this.remove();">
+              <h2 class="movie-detail-title mb-0" title="${escapeHtml(artist)}">${escapeHtml(artist)} &middot; ${escapeHtml(albumLabel)}</h2>
+            </div>
             ${genres.length ? `<div class="mb-2">${genres.map((g) => `<span class="badge movie-genre-badge">${escapeHtml(g)}</span>`).join(" ")}</div>` : ""}
             <div class="d-flex flex-wrap gap-2 mt-2">
               <button class="btn btn-primary btn-sm" type="button" title="Play Album" onclick="playMusicAlbum(${jsAttr(artist)}, ${jsAttr(selectedAlbum)})"><i class="bi bi-play-circle"></i></button>
@@ -2740,14 +2739,10 @@ async function renderArtistDetailsPage(artist, albumParam) {
         </div>
       </div>
       <div class="movie-detail-body">
-        <div class="d-flex flex-wrap gap-2 my-3">
-          ${albumNames.map((name) => `
-            <button type="button" class="btn btn-sm ${name === selectedAlbum ? "btn-primary" : "btn-outline-primary"}" onclick="setHash(${jsAttr(artistDetailHash(artist, name))})">${escapeHtml(name || "Singles")}</button>
-          `).join("")}
-        </div>
         <div class="list-group">
           ${albumTracks.map((t) => renderArtistDetailTrackRow(t, artist, selectedAlbum)).join("")}
         </div>
+        ${renderMusicAlbumScraperCard(representative.entry_key, artist, selectedAlbum, !!meta)}
       </div>
     `;
   } catch (err) {
@@ -2792,8 +2787,8 @@ function musicLikeButtonHtml(entryKey, liked, variant) {
 }
 // Toggles a track's liked flag and patches the DOM in place (no full
 // re-render) -- mirrors the lightweight optimistic-update shape used
-// elsewhere in this file (e.g. deleteMusicScraperMetadata re-renders the
-// whole card, but a single icon toggle doesn't need that). Also patches
+// elsewhere in this file (e.g. deleteMusicAlbumScraperMetadata re-renders
+// the whole page, but a single icon toggle doesn't need that). Also patches
 // musicAllRows in place so the Likes sidebar filter/count reflects the
 // change immediately without a re-fetch.
 //
@@ -2826,7 +2821,6 @@ async function renderMusicDetailsPage(entryKey) {
   try {
     const track = await api(`/music/${encodeURIComponent(entryKey)}`);
     content.innerHTML = renderMusicDetailShell(track);
-    await renderMusicScraperCard(entryKey, track);
   } catch (err) {
     content.innerHTML = `
       <button class="btn btn-outline-secondary btn-sm mb-3" type="button" onclick="setHash('#music')"><i class="bi bi-arrow-left me-1"></i>Back to Music</button>
@@ -2869,11 +2863,6 @@ function renderMusicDetailShell(track) {
             }
             ${
               adminEnabled
-                ? `<button class="btn btn-outline-light btn-sm" type="button" title="Upload a cover image for this album -- applies to every track" onclick="openMusicAlbumArtPicker(${jsAttr(entryKey)}, ${jsAttr(artistLabel)}, ${jsAttr(albumLabel)})"><i class="bi bi-image"></i></button>`
-                : ""
-            }
-            ${
-              adminEnabled
                 ? `<button class="btn btn-outline-danger btn-sm" type="button" title="Delete" onclick="deleteMusicFromDetailPage(${jsAttr(entryKey)}, ${jsAttr(title)})"><i class="bi bi-trash"></i></button>`
                 : ""
             }
@@ -2884,7 +2873,6 @@ function renderMusicDetailShell(track) {
     <div class="movie-detail-body">
       <div class="text-muted small">${escapeHtml(track.file_path || rawName)} &middot; ${escapeHtml(formatBytes(track.byte_count ?? track.file_size))}</div>
     </div>
-    <div id="music-scraper-card" class="mt-4"></div>
   `;
 }
 // Track files are gone from disk after this -- invalidate the whole
@@ -2915,62 +2903,58 @@ function deleteMusicFromDetailPage(entryKey, title) {
     },
   });
 }
-// Mirrors renderMovieScraperCard's shape closely -- the one structural
-// difference is there is no API-key gate at all (MusicBrainz + Cover Art
-// Archive are both keyless, see music/musicbrainz_client.py's module
-// docstring), so this always renders the search UI directly instead of
-// branching on a has_api_key check.
-async function renderMusicScraperCard(entryKey, track) {
-  const container = document.getElementById("music-scraper-card");
-  if (!container) return;
-  if (!adminEnabled) {
-    container.innerHTML = "";
-    return;
-  }
-  container.innerHTML = renderMusicScraperSearchUi(entryKey, track);
-}
-function renderMusicScraperSearchUi(entryKey, track) {
-  // Deliberately blank, not the raw filename -- an empty query tells the
-  // backend to search using its own artist/album candidate ladder (the same
-  // one the bulk scraper uses), same convention as the Movies scraper card.
-  const hasMetadata = !!(track && track.metadata);
+// Lives at the bottom of the artist/album detail page, not the track detail
+// page -- scraping is album-level now (one release's art + release-level
+// metadata applied to every track in the group, see
+// music/metadata_manager.apply_album), so there's no per-track scraper UI
+// anymore. entryKey is any one representative track in the album (the
+// backend expands it to the whole group server-side, see
+// handlers_music._album_group_entry_keys); artist/album are only needed
+// here to know which page to re-render afterward. Not shown for the
+// "Singles" pseudo-group (album === "") -- there's no one release to search
+// for a collection of unrelated standalone tracks. Mirrors the old
+// per-track card's shape closely (no API-key gate, same as before --
+// MusicBrainz + Cover Art Archive are both keyless).
+function renderMusicAlbumScraperCard(entryKey, artist, album, hasMetadata) {
+  if (!adminEnabled || album === "") return "";
   return `
-    <div class="card">
+    <div class="card mt-4">
       <div class="card-header d-flex align-items-center justify-content-between gap-2">
         <span><i class="bi bi-cloud-download me-1"></i>Artwork &amp; Metadata (MusicBrainz)</span>
         ${
           hasMetadata
-            ? `<button class="btn btn-outline-danger btn-sm" type="button" onclick="deleteMusicScraperMetadata(${jsAttr(entryKey)})"><i class="bi bi-trash me-1"></i>Remove scraped data</button>`
+            ? `<button class="btn btn-outline-danger btn-sm" type="button" onclick="deleteMusicAlbumScraperMetadata(${jsAttr(entryKey)}, ${jsAttr(artist)}, ${jsAttr(album)})"><i class="bi bi-trash me-1"></i>Remove scraped data</button>`
             : ""
         }
       </div>
       <div class="card-body">
         <div class="input-group mb-3">
-          <input id="musicScraperQuery" type="text" class="form-control" value="" placeholder="Leave blank to search by artist/album">
-          <button class="btn btn-primary" type="button" onclick="searchMusicScraper(${jsAttr(entryKey)})"><i class="bi bi-search me-1"></i>Search</button>
+          <input id="musicAlbumScraperQuery" type="text" class="form-control" value="" placeholder="Leave blank to search by artist/album">
+          <button class="btn btn-primary" type="button" onclick="searchMusicAlbumScraper(${jsAttr(entryKey)}, ${jsAttr(artist)}, ${jsAttr(album)})"><i class="bi bi-search me-1"></i>Search</button>
         </div>
-        <div id="music-scraper-results" class="mb-3"></div>
+        <div id="music-album-scraper-results" class="mb-3"></div>
       </div>
     </div>
   `;
 }
-async function deleteMusicScraperMetadata(entryKey) {
-  if (!window.confirm("Remove the scraped MusicBrainz metadata and artwork for this track? This cannot be undone, but you can re-scrape it afterward.")) return;
+async function deleteMusicAlbumScraperMetadata(entryKey, artist, album) {
+  if (!window.confirm("Remove the scraped MusicBrainz metadata and artwork for this album? This cannot be undone, but you can re-scrape it afterward.")) return;
   setLoading(true, "Removing scraped metadata...");
   try {
     await apiPost(`/admin/music/${encodeURIComponent(entryKey)}/scrape/delete`, {});
+    musicAllRows = []; // invalidate the client-side inventory cache, same as uploadMusicAlbumArt
     showToast("Scraped metadata removed.", "success");
-    await renderMusicDetailsPage(entryKey);
+    await renderArtistDetailsPage(artist, album);
   } catch (err) {
     showToast(`Failed to remove scraped metadata: ${escapeHtml(err.message || "unknown error")}`, "danger");
   } finally {
     setLoading(false);
   }
 }
-async function searchMusicScraper(entryKey) {
-  const resultsEl = document.getElementById("music-scraper-results");
+async function searchMusicAlbumScraper(entryKey, artist, album) {
+  const resultsEl = document.getElementById("music-album-scraper-results");
   if (!resultsEl) return;
-  const queryInput = document.getElementById("musicScraperQuery");
+  const queryInput = document.getElementById("musicAlbumScraperQuery");
   const query = queryInput ? queryInput.value.trim() : "";
   resultsEl.innerHTML = `<div class="text-muted small"><span class="spinner-border spinner-border-sm me-2"></span>Searching MusicBrainz...</div>`;
   try {
@@ -2978,27 +2962,23 @@ async function searchMusicScraper(entryKey) {
     if (queryInput && !query && data.query) queryInput.value = data.query;
     const results = data.results || [];
     resultsEl.innerHTML = results.length
-      ? `<div class="list-group">${results.map((r) => renderMusicScraperResult(entryKey, r)).join("")}</div>`
+      ? `<div class="list-group">${results.map((r) => renderMusicAlbumScraperResult(entryKey, artist, album, r)).join("")}</div>`
       : `<div class="text-muted small">No MusicBrainz matches found${data.query ? ` for "${escapeHtml(data.query)}"` : ""}.</div>`;
   } catch (err) {
     resultsEl.innerHTML = `<div class="alert alert-warning small mb-0">Search failed: ${escapeHtml(err.message || "unknown error")}</div>`;
   }
 }
-// Search results come in two shapes -- a "release" (an album match: title/
-// artist/date/track_count) or a "recording" (a single-track match: title/
-// artist/release_title, used for the singles/no-album fallback rung -- see
-// music/metadata_manager.search_track_default_query) -- rendered with the
-// same list-group-item look as Movies' results but different subtext.
-function renderMusicScraperResult(entryKey, result) {
+// Only ever "release" results now (see
+// music/metadata_manager.search_album_default_query) -- no more "recording"
+// shape/subtitle branch to handle, since applying always applies a whole
+// release to the whole album group.
+function renderMusicAlbumScraperResult(entryKey, artist, album, result) {
   const year = result.date ? String(result.date).slice(0, 4) : "";
-  const isRelease = result.kind !== "recording";
-  const subtitle = isRelease
-    ? [result.artist, result.track_count ? `${result.track_count} tracks` : ""].filter(Boolean).join(" · ")
-    : [result.artist, result.release_title ? `from "${result.release_title}"` : ""].filter(Boolean).join(" · ");
+  const subtitle = [result.artist, result.track_count ? `${result.track_count} tracks` : ""].filter(Boolean).join(" · ");
   return `
-    <button type="button" class="list-group-item list-group-item-action" onclick="applyMusicScraperResult(${jsAttr(entryKey)}, ${jsAttr(result.release_mbid || "")}, ${jsAttr(result.recording_mbid || "")}, this)">
+    <button type="button" class="list-group-item list-group-item-action" onclick="applyMusicAlbumScraperResult(${jsAttr(entryKey)}, ${jsAttr(artist)}, ${jsAttr(album)}, ${jsAttr(result.release_mbid || "")}, this)">
       <div class="d-flex gap-3 align-items-center">
-        <div class="match-thumb-placeholder"><i class="bi ${isRelease ? "bi-disc" : "bi-music-note-beamed"}"></i></div>
+        <div class="match-thumb-placeholder"><i class="bi bi-disc"></i></div>
         <div class="min-width-0">
           <div class="fw-semibold">${escapeHtml(result.title || "")}${year ? ` <span class="text-muted">(${escapeHtml(year)})</span>` : ""}</div>
           ${subtitle ? `<div class="text-muted small text-truncate-2">${escapeHtml(subtitle)}</div>` : ""}
@@ -3007,7 +2987,7 @@ function renderMusicScraperResult(entryKey, result) {
     </button>
   `;
 }
-async function applyMusicScraperResult(entryKey, releaseMbid, recordingMbid, button) {
+async function applyMusicAlbumScraperResult(entryKey, artist, album, releaseMbid, button) {
   if (!releaseMbid) {
     showToast("That result has no associated release to scrape from.", "warning");
     return;
@@ -3019,11 +2999,12 @@ async function applyMusicScraperResult(entryKey, releaseMbid, recordingMbid, but
   }
   setLoading(true, "Downloading artwork and metadata from MusicBrainz...");
   try {
-    const payload = { release_mbid: releaseMbid };
-    if (recordingMbid) payload.recording_mbid = recordingMbid;
-    await apiPost(`/admin/music/${encodeURIComponent(entryKey)}/scrape/apply`, payload);
-    showToast("Track artwork and metadata updated.", "success");
-    await renderMusicDetailsPage(entryKey);
+    const result = await apiPost(`/admin/music/${encodeURIComponent(entryKey)}/scrape/apply`, { release_mbid: releaseMbid });
+    const bustToken = Date.now();
+    (result.entry_keys || []).forEach((key) => musicArtCacheBust.set(key, bustToken));
+    musicAllRows = []; // invalidate the client-side inventory cache, same as uploadMusicAlbumArt
+    showToast(`Album artwork and metadata updated for ${result.updated} track${result.updated === 1 ? "" : "s"}.`, "success");
+    await renderArtistDetailsPage(artist, album);
   } catch (err) {
     showToast(`Failed to apply MusicBrainz match: ${escapeHtml(err.message || "unknown error")}`, "danger");
     if (button) {
@@ -4439,7 +4420,7 @@ async function renderAdminMusicArtworkPage() {
     const statusPayload = await api("/admin/music/scrape/bulk");
     content.innerHTML = `
       ${renderArtworkTabBar("music")}
-      <div class="text-muted small mb-3">Scrape MusicBrainz + Cover Art Archive for album art and metadata (artist, album, genres, track titles) -- the same scraper available on each track's own details page, run here in bulk across your whole library. No account or API key needed.</div>
+      <div class="text-muted small mb-3">Scrape MusicBrainz + Cover Art Archive for album cover art and release-level metadata (artist, album, genres) -- the same album-level scraper available at the bottom of each album's own details page, run here in bulk across your whole library. Track titles are always taken from your own filenames, never overwritten. No account or API key needed.</div>
       <div id="musicAdminScraperCard">${renderMusicAdminBulkScrapeCard(statusPayload.job)}</div>
     `;
     startMusicBulkScrapeAutoRefreshIfNeeded(statusPayload.job);

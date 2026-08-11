@@ -37,6 +37,7 @@ _ALBUM_RELEASE = {
     "release_mbid": "release-1",
     "title": "Sample Album",
     "artist": "Sample Artist",
+    "artist_mbid": "artist-1",
     "date": "2001-05-01",
     "genres": ["Rock"],
     "release_group_mbid": "rg-1",
@@ -49,6 +50,7 @@ _SINGLE_TRACK_RELEASE = {
     "release_mbid": "release-2",
     "title": "Single",
     "artist": "Solo Singer",
+    "artist_mbid": "artist-2",
     "date": "2010-01-01",
     "genres": [],
     "release_group_mbid": "rg-2",
@@ -59,12 +61,17 @@ _SINGLE_TRACK_RELEASE = {
 
 
 class FakeMusicBrainzClient:
-    def __init__(self, *, release_search_results=None, recording_search_results=None, releases=None, raise_on_lookup=None):
+    def __init__(
+        self, *, release_search_results=None, recording_search_results=None, releases=None,
+        raise_on_lookup=None, artist_lookups=None,
+    ):
         self._release_search_results = release_search_results or []
         self._recording_search_results = recording_search_results or []
         self._releases = releases or {}
         self._raise_on_lookup = raise_on_lookup or {}
+        self._artist_lookups = artist_lookups or {}
         self.lookup_calls = []
+        self.artist_lookup_calls = []
 
     def search_release(self, query, limit=10):
         return self._release_search_results
@@ -77,6 +84,12 @@ class FakeMusicBrainzClient:
         if release_mbid in self._raise_on_lookup:
             raise self._raise_on_lookup[release_mbid]
         return self._releases[release_mbid]
+
+    def artist_lookup(self, artist_mbid):
+        self.artist_lookup_calls.append(artist_mbid)
+        if artist_mbid in self._raise_on_lookup:
+            raise self._raise_on_lookup[artist_mbid]
+        return self._artist_lookups.get(artist_mbid, {"artist_mbid": artist_mbid, "image_commons_url": None})
 
 
 class FakeCoverArtClient:
@@ -95,88 +108,43 @@ class FakeCoverArtClient:
         return (f"bytes-for-{url}".encode(), "image/jpeg")
 
 
-class ApplyTests(unittest.TestCase):
-    def test_matches_by_disc_and_track_number(self):
+class ApplyAlbumTests(unittest.TestCase):
+    def test_applies_release_art_and_metadata_to_every_track_in_the_group(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            _write_track(root, "Sample Artist/Sample Album/01 - Track One.mp3")
             _write_track(root, "Sample Artist/Sample Album/02 - Track Two.mp3")
             settings = _build_settings(root)
             music_store.sync_music_cache(settings.music_root)
-            entry_key = music_store.list_music(settings.music_root)[0]["entry_key"]
+            entry_keys = [row["entry_key"] for row in music_store.list_music(settings.music_root)]
 
             client = FakeMusicBrainzClient(releases={"release-1": _ALBUM_RELEASE})
             cover_client = FakeCoverArtClient()
-            result = metadata_manager.apply(settings, entry_key, "release-1", client=client, cover_client=cover_client)
+            result = metadata_manager.apply_album(settings, entry_keys, "release-1", client=client, cover_client=cover_client)
 
-            self.assertEqual(result["title"], "Track Two")
-            self.assertEqual(result["provider"], "musicbrainz")
-            self.assertEqual(result["provider_id"], "rec-2")
-            self.assertEqual(result["artist"], "Sample Artist")
-            self.assertEqual(result["album"], "Sample Album")
-            self.assertEqual(result["track_number"], 2)
-            self.assertEqual(result["genres"], ["Rock"])
-            self.assertTrue(result["art_relative_path"])
+            self.assertEqual(result["updated"], 2)
+            self.assertTrue(result["has_art"])
+            self.assertEqual(sorted(result["entry_keys"]), sorted(entry_keys))
+            # One release -> one shared download, not one per track.
             self.assertEqual(len(cover_client.downloaded_urls), 1)
 
-    def test_single_track_release_matches_regardless_of_filename(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            _write_track(root, "Solo Singer/Weirdly Named File.mp3")
-            settings = _build_settings(root)
-            music_store.sync_music_cache(settings.music_root)
-            entry_key = music_store.list_music(settings.music_root)[0]["entry_key"]
+            metas = [music_store.get_music_metadata(settings.music_root, key) for key in entry_keys]
+            for metadata in metas:
+                # Never overwrites a track's own filename-derived title.
+                self.assertEqual(metadata["title"], "")
+                self.assertEqual(metadata["provider"], "musicbrainz")
+                self.assertEqual(metadata["provider_id"], "release-1")
+                self.assertEqual(metadata["artist"], "Sample Artist")
+                self.assertEqual(metadata["album"], "Sample Album")
+                self.assertEqual(metadata["genres"], ["Rock"])
+                self.assertTrue(metadata["art_relative_path"])
+            self.assertEqual(metas[0]["art_relative_path"], metas[1]["art_relative_path"])
 
-            client = FakeMusicBrainzClient(releases={"release-2": _SINGLE_TRACK_RELEASE})
-            result = metadata_manager.apply(settings, entry_key, "release-2", client=client, cover_client=FakeCoverArtClient())
-
-            self.assertEqual(result["title"], "The Only Song")
-
-    def test_title_match_fallback(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            # No leading track number to match on, but the parsed (whole-stem)
-            # title matches a track title in the release exactly.
-            _write_track(root, "Sample Artist/Sample Album/Track One.mp3")
-            settings = _build_settings(root)
-            music_store.sync_music_cache(settings.music_root)
-            entry_key = music_store.list_music(settings.music_root)[0]["entry_key"]
-
-            client = FakeMusicBrainzClient(releases={"release-1": _ALBUM_RELEASE})
-            result = metadata_manager.apply(settings, entry_key, "release-1", client=client, cover_client=FakeCoverArtClient())
-
-            self.assertEqual(result["provider_id"], "rec-1")
-
-    def test_recording_mbid_hint_matches_exactly(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            _write_track(root, "Sample Artist/Sample Album/99 - Mislabeled.mp3")
-            settings = _build_settings(root)
-            music_store.sync_music_cache(settings.music_root)
-            entry_key = music_store.list_music(settings.music_root)[0]["entry_key"]
-
-            client = FakeMusicBrainzClient(releases={"release-1": _ALBUM_RELEASE})
-            result = metadata_manager.apply(
-                settings, entry_key, "release-1", recording_mbid="rec-2", client=client, cover_client=FakeCoverArtClient(),
-            )
-            self.assertEqual(result["provider_id"], "rec-2")
-
-    def test_no_match_raises_music_match_error(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            _write_track(root, "Sample Artist/Sample Album/Completely Unrelated Name.mp3")
-            settings = _build_settings(root)
-            music_store.sync_music_cache(settings.music_root)
-            entry_key = music_store.list_music(settings.music_root)[0]["entry_key"]
-
-            client = FakeMusicBrainzClient(releases={"release-1": _ALBUM_RELEASE})
-            with self.assertRaises(metadata_manager.MusicMatchError):
-                metadata_manager.apply(settings, entry_key, "release-1", client=client, cover_client=FakeCoverArtClient())
-
-    def test_unknown_entry_key_raises_music_not_found_error(self):
+    def test_unknown_entry_keys_raise_music_not_found_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(Path(tmp))
             with self.assertRaises(metadata_manager.MusicNotFoundError):
-                metadata_manager.apply(settings, "deadbeef", "release-1", client=FakeMusicBrainzClient())
+                metadata_manager.apply_album(settings, ["deadbeef"], "release-1", client=FakeMusicBrainzClient())
 
     def test_missing_cover_art_does_not_fail_the_apply(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -188,8 +156,125 @@ class ApplyTests(unittest.TestCase):
 
             client = FakeMusicBrainzClient(releases={"release-1": _ALBUM_RELEASE})
             cover_client = FakeCoverArtClient(front_url=None)
-            result = metadata_manager.apply(settings, entry_key, "release-1", client=client, cover_client=cover_client)
-            self.assertIsNone(result["art_relative_path"])
+            result = metadata_manager.apply_album(settings, [entry_key], "release-1", client=client, cover_client=cover_client)
+            self.assertFalse(result["has_art"])
+            metadata = music_store.get_music_metadata(settings.music_root, entry_key)
+            self.assertIsNone(metadata["art_relative_path"])
+
+
+class ArtistArtTests(unittest.TestCase):
+    def test_applies_artist_photo_when_musicbrainz_has_an_image_relation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_track(root, "Sample Artist/Sample Album/01 - Track One.mp3")
+            settings = _build_settings(root)
+            music_store.sync_music_cache(settings.music_root)
+            entry_key = music_store.list_music(settings.music_root)[0]["entry_key"]
+
+            client = FakeMusicBrainzClient(
+                releases={"release-1": _ALBUM_RELEASE},
+                artist_lookups={
+                    "artist-1": {
+                        "artist_mbid": "artist-1",
+                        "image_commons_url": "https://commons.wikimedia.org/wiki/File:Sample_Artist.jpg",
+                    },
+                },
+            )
+            with mock.patch(
+                "app.music.metadata_manager._wikimedia_client.resolve_image_url",
+                return_value="https://upload.wikimedia.org/x/Sample_Artist.jpg",
+            ) as resolve_mock:
+                result = metadata_manager.apply_album(settings, [entry_key], "release-1", client=client, cover_client=FakeCoverArtClient())
+
+            self.assertTrue(result["has_artist_art"])
+            resolve_mock.assert_called_once_with("https://commons.wikimedia.org/wiki/File:Sample_Artist.jpg")
+            metadata = music_store.get_music_metadata(settings.music_root, entry_key)
+            self.assertTrue(metadata["artist_art_relative_path"])
+            self.assertNotEqual(metadata["artist_art_relative_path"], metadata["art_relative_path"])
+            self.assertEqual(client.artist_lookup_calls, ["artist-1"])
+
+    def test_no_image_relation_leaves_artist_art_empty_without_calling_wikimedia(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_track(root, "Sample Artist/Sample Album/01 - Track One.mp3")
+            settings = _build_settings(root)
+            music_store.sync_music_cache(settings.music_root)
+            entry_key = music_store.list_music(settings.music_root)[0]["entry_key"]
+
+            client = FakeMusicBrainzClient(releases={"release-1": _ALBUM_RELEASE})  # no artist_lookups configured
+            with mock.patch("app.music.metadata_manager._wikimedia_client.resolve_image_url") as resolve_mock:
+                result = metadata_manager.apply_album(settings, [entry_key], "release-1", client=client, cover_client=FakeCoverArtClient())
+            self.assertFalse(result["has_artist_art"])
+            resolve_mock.assert_not_called()
+            metadata = music_store.get_music_metadata(settings.music_root, entry_key)
+            self.assertIsNone(metadata["artist_art_relative_path"])
+
+    def test_artist_lookup_failure_does_not_fail_the_apply(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_track(root, "Sample Artist/Sample Album/01 - Track One.mp3")
+            settings = _build_settings(root)
+            music_store.sync_music_cache(settings.music_root)
+            entry_key = music_store.list_music(settings.music_root)[0]["entry_key"]
+
+            client = FakeMusicBrainzClient(
+                releases={"release-1": _ALBUM_RELEASE},
+                raise_on_lookup={"artist-1": MusicBrainzUnavailableError("boom")},
+            )
+            result = metadata_manager.apply_album(settings, [entry_key], "release-1", client=client, cover_client=FakeCoverArtClient())
+            self.assertFalse(result["has_artist_art"])
+            self.assertTrue(result["has_art"])  # album art still succeeded regardless
+
+    def test_unresolvable_commons_url_leaves_artist_art_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_track(root, "Sample Artist/Sample Album/01 - Track One.mp3")
+            settings = _build_settings(root)
+            music_store.sync_music_cache(settings.music_root)
+            entry_key = music_store.list_music(settings.music_root)[0]["entry_key"]
+
+            client = FakeMusicBrainzClient(
+                releases={"release-1": _ALBUM_RELEASE},
+                artist_lookups={"artist-1": {"artist_mbid": "artist-1", "image_commons_url": "https://commons.wikimedia.org/wiki/File:Gone.jpg"}},
+            )
+            with mock.patch("app.music.metadata_manager._wikimedia_client.resolve_image_url", return_value=None):
+                result = metadata_manager.apply_album(settings, [entry_key], "release-1", client=client, cover_client=FakeCoverArtClient())
+            self.assertFalse(result["has_artist_art"])
+
+    def test_artist_art_is_fetched_once_per_bulk_run_across_multiple_groups_by_the_same_artist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_track(root, "Sample Artist/Album One/01 - Track One.mp3")
+            _write_track(root, "Sample Artist/Album Two/01 - Other Track.mp3")
+            settings = _build_settings(root)
+            music_store.sync_music_cache(settings.music_root)
+            rows = music_store.list_music(settings.music_root)
+
+            release_a = dict(_ALBUM_RELEASE, release_mbid="release-a", title="Album One")
+            release_b = dict(_ALBUM_RELEASE, release_mbid="release-b", title="Album Two")
+
+            class _ByQueryClient(FakeMusicBrainzClient):
+                def search_release(self, query, limit=10):
+                    if "Album One" in query:
+                        return [{"release_mbid": "release-a"}]
+                    if "Album Two" in query:
+                        return [{"release_mbid": "release-b"}]
+                    return []
+
+            client = _ByQueryClient(
+                releases={"release-a": release_a, "release-b": release_b},
+                artist_lookups={"artist-1": {"artist_mbid": "artist-1", "image_commons_url": "https://commons.wikimedia.org/wiki/File:X.jpg"}},
+            )
+            with mock.patch("app.music.metadata_manager._wikimedia_client.resolve_image_url", return_value="https://upload.wikimedia.org/x.jpg"):
+                groups, singles, _orphans = metadata_manager._group_bulk_candidates(rows)
+                self.assertEqual(len(groups), 2)
+                job = music_scrape_jobs.create_running(settings, rescan_all=True, total=len(groups) + len(singles))
+                metadata_manager._run_bulk_scrape_job(settings, job["id"], groups, singles, client, FakeCoverArtClient())
+
+            status = music_scrape_jobs.latest(settings)
+            self.assertEqual(status["matched_count"], 2)
+            # Cached across both groups -- one artist, one lookup for the run.
+            self.assertEqual(client.artist_lookup_calls, ["artist-1"])
 
 
 class DeleteTests(unittest.TestCase):
@@ -200,8 +285,8 @@ class DeleteTests(unittest.TestCase):
             settings = _build_settings(root)
             music_store.sync_music_cache(settings.music_root)
             entry_key = music_store.list_music(settings.music_root)[0]["entry_key"]
-            metadata_manager.apply(
-                settings, entry_key, "release-1",
+            metadata_manager.apply_album(
+                settings, [entry_key], "release-1",
                 client=FakeMusicBrainzClient(releases={"release-1": _ALBUM_RELEASE}),
                 cover_client=FakeCoverArtClient(),
             )
@@ -227,57 +312,60 @@ class DeleteTests(unittest.TestCase):
             self.assertFalse(path.exists())
 
 
-class SearchDefaultQueryTests(unittest.TestCase):
-    def test_tries_release_query_before_recording_query(self):
+class DeleteAlbumMetadataTests(unittest.TestCase):
+    def test_removes_metadata_for_every_track_and_unlinks_the_shared_art_file_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_track(root, "Sample Artist/Sample Album/01 - Track One.mp3")
+            _write_track(root, "Sample Artist/Sample Album/02 - Track Two.mp3")
+            settings = _build_settings(root)
+            music_store.sync_music_cache(settings.music_root)
+            entry_keys = [row["entry_key"] for row in music_store.list_music(settings.music_root)]
+            metadata_manager.apply_album(
+                settings, entry_keys, "release-1",
+                client=FakeMusicBrainzClient(releases={"release-1": _ALBUM_RELEASE}),
+                cover_client=FakeCoverArtClient(),
+            )
+            metadata = music_store.get_music_metadata(settings.music_root, entry_keys[0])
+            art_path = Path(settings.music_root) / metadata["art_relative_path"]
+            self.assertTrue(art_path.exists())
+
+            result = metadata_manager.delete_album_metadata(settings, entry_keys)
+            self.assertEqual(result, {"deleted": 2})
+            self.assertFalse(art_path.exists())
+            for entry_key in entry_keys:
+                self.assertIsNone(music_store.get_music_metadata(settings.music_root, entry_key))
+
+    def test_unknown_entry_keys_are_a_no_op(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            result = metadata_manager.delete_album_metadata(settings, ["deadbeef"])
+            self.assertEqual(result, {"deleted": 0})
+
+
+class SearchAlbumDefaultQueryTests(unittest.TestCase):
+    def test_release_only_query(self):
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(Path(tmp))
             client = FakeMusicBrainzClient(release_search_results=[{"release_mbid": "release-1", "title": "Sample Album"}])
-            outcome = metadata_manager.search_track_default_query(settings, "Sample Artist", "Sample Album", "Track One", client=client)
+            outcome = metadata_manager.search_album_default_query(settings, "Sample Artist", "Sample Album", client=client)
             self.assertEqual(outcome["results"][0]["kind"], "release")
 
-    def test_falls_back_to_recording_query_when_no_album(self):
+    def test_no_album_returns_no_results_without_calling_musicbrainz(self):
+        # search_candidates(artist, "", "") yields no candidates at all when
+        # there's no album to search by -- confirms the album page's search
+        # card never makes a pointless call for the "Singles" pseudo-group.
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(Path(tmp))
-            client = FakeMusicBrainzClient(recording_search_results=[{"recording_mbid": "rec-9", "title": "The Only Song"}])
-            outcome = metadata_manager.search_track_default_query(settings, "Solo Singer", "", "The Only Song", client=client)
-            self.assertEqual(outcome["results"][0]["kind"], "recording")
+            client = FakeMusicBrainzClient(release_search_results=[{"release_mbid": "should-not-be-used"}])
+            outcome = metadata_manager.search_album_default_query(settings, "Solo Singer", "", client=client)
+            self.assertEqual(outcome["results"], [])
 
     def test_no_results_anywhere_returns_empty(self):
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(Path(tmp))
-            outcome = metadata_manager.search_track_default_query(settings, "Nobody", "Nothing", "Untitled", client=FakeMusicBrainzClient())
+            outcome = metadata_manager.search_album_default_query(settings, "Nobody", "Nothing", client=FakeMusicBrainzClient())
             self.assertEqual(outcome["results"], [])
-
-
-class MatchTrackInReleaseTests(unittest.TestCase):
-    def test_single_track_release_fallback_matches_when_allowed(self):
-        matched = metadata_manager._match_track_in_release(
-            _SINGLE_TRACK_RELEASE, recording_mbid=None, disc_number=None, track_number=None, parsed_title="",
-        )
-        self.assertEqual(matched["recording_mbid"], "rec-9")
-
-    def test_single_track_release_fallback_is_suppressed_when_disallowed(self):
-        # The bulk scraper's groups loop disables this for a multi-track
-        # local group -- see the docstring on allow_single_track_fallback.
-        matched = metadata_manager._match_track_in_release(
-            _SINGLE_TRACK_RELEASE, recording_mbid=None, disc_number=None, track_number=None, parsed_title="",
-            allow_single_track_fallback=False,
-        )
-        self.assertIsNone(matched)
-
-    def test_disc_and_track_number_match_still_works_regardless_of_the_fallback_flag(self):
-        matched = metadata_manager._match_track_in_release(
-            _ALBUM_RELEASE, recording_mbid=None, disc_number=1, track_number=2, parsed_title="",
-            allow_single_track_fallback=False,
-        )
-        self.assertEqual(matched["recording_mbid"], "rec-2")
-
-    def test_title_match_still_works_when_the_fallback_is_disallowed(self):
-        matched = metadata_manager._match_track_in_release(
-            _SINGLE_TRACK_RELEASE, recording_mbid=None, disc_number=None, track_number=None,
-            parsed_title="The Only Song", allow_single_track_fallback=False,
-        )
-        self.assertEqual(matched["recording_mbid"], "rec-9")
 
 
 class SelectReleaseCandidateTests(unittest.TestCase):
@@ -352,6 +440,9 @@ class BulkScrapeJobTests(unittest.TestCase):
             # One release lookup serves both tracks -- the whole point of
             # grouping by (artist, album) instead of iterating per track.
             self.assertEqual(client.lookup_calls, ["release-1"])
+            for row in rows:
+                metadata = music_store.get_music_metadata(settings.music_root, row["entry_key"])
+                self.assertEqual(metadata["title"], "")
 
     def test_not_found_release_search_result_skips_the_group_not_the_whole_run(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -394,14 +485,14 @@ class BulkScrapeJobTests(unittest.TestCase):
             failed_items = music_scrape_job_items.list_by_status(settings, "failed")
             self.assertEqual(failed_items["total"], 2)
 
-    def test_a_multi_track_group_matched_to_a_single_track_release_fails_safely_instead_of_duplicating(self):
-        # Reproduces a real live bug: an 11-track local compilation folder's
-        # top MusicBrainz search hit was a "Broadcast" release with exactly
-        # one track (a DJ radio set) -- every one of the 11 distinct local
-        # files silently received that one track's identical scraped title.
-        # Untagged filenames (no leading track number) here deliberately
-        # isolate the single-track fallback from genuine disc/track-number
-        # matching -- see MatchTrackInReleaseTests for that distinction.
+    def test_a_multi_track_group_matched_to_a_single_track_release_no_longer_corrupts_titles(self):
+        # The real live bug this album-only redesign eliminates entirely: an
+        # 11-track local compilation folder's top MusicBrainz search hit was
+        # a "Broadcast" release with exactly one track (a DJ radio set) --
+        # every one of the 11 distinct local files used to silently receive
+        # that one track's identical scraped *title*. Track titles are never
+        # scraped at all anymore -- even a "wrong" release pick only ever
+        # affects the shared album art/genres, never any track's title.
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             _write_track(root, "Paul Oakenfold/Perfecto On Tour 2000/Dope Smugglaz - Double Double Dutch.mp3")
@@ -419,17 +510,18 @@ class BulkScrapeJobTests(unittest.TestCase):
             metadata_manager._run_bulk_scrape_job(settings, job["id"], groups, singles, client, FakeCoverArtClient())
 
             status = music_scrape_jobs.latest(settings)
-            self.assertEqual(status["matched_count"], 0)
-            self.assertEqual(status["failed_count"], 2)
-            for row in rows:
-                self.assertIsNone(music_store.get_music_metadata(settings.music_root, row["entry_key"]))
+            self.assertEqual(status["matched_count"], 2)
+            self.assertEqual(status["failed_count"], 0)
+            metas = [music_store.get_music_metadata(settings.music_root, row["entry_key"]) for row in rows]
+            for metadata in metas:
+                self.assertEqual(metadata["title"], "")
+            self.assertEqual(metas[0]["art_relative_path"], metas[1]["art_relative_path"])
 
     def test_prefers_a_track_count_matching_candidate_over_the_top_search_hit(self):
-        # The fix's other half: given a *choice* of candidates, prefer the
-        # one whose track_count actually fits the local group instead of
-        # blindly trusting the top search result -- avoids the bad pick
-        # (and therefore the safe-failure above) entirely when a better
-        # candidate is available.
+        # Given a *choice* of candidates, prefer the one whose track_count
+        # actually fits the local group instead of blindly trusting the top
+        # search result -- avoids using a single-track release's cover art
+        # for a real multi-track album when a better candidate exists.
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             _write_track(root, "Paul Oakenfold/Perfecto On Tour 2000/01 - Track One.mp3")
@@ -481,12 +573,7 @@ class BulkScrapeJobTests(unittest.TestCase):
         # loop's own stop-check, not just the first's.
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            # Filenames whose parsed titles literally equal _ALBUM_RELEASE's
-            # track titles -- same title-match path
-            # test_full_album_matches_every_track_with_one_release_lookup
-            # relies on (there's no disc folder here, so the disc/track
-            # number branch in _match_track_in_release never applies).
-            _write_track(root, "Band A/Album A/01 - Track One.mp3")
+            _write_track(root, "Band A/Album A/01 - A.mp3")
             _write_track(root, "Band B/Single Track.mp3")
             settings = _build_settings(root)
             music_store.sync_music_cache(settings.music_root)
@@ -509,9 +596,8 @@ class BulkScrapeJobTests(unittest.TestCase):
 
             status = music_scrape_jobs.latest(settings)
             self.assertEqual(status["status"], "stopped")
-            # The group's own track (matching _ALBUM_RELEASE's track 1 by
-            # track number) was matched before the stop took effect; the
-            # single, reached only by the second loop, was never attempted.
+            # The group was matched before the stop took effect; the single,
+            # reached only by the second loop, was never attempted.
             self.assertEqual(status["matched_count"], 1)
             self.assertEqual(status["skipped_count"], 0)
             self.assertEqual(status["failed_count"], 0)

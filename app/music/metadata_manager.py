@@ -13,14 +13,29 @@ no per-group result-caching layer is needed the way movies caches show/
 season lookups across many episode files: each (artist, album) group is
 already unique within one run, so it never repeats a release lookup.
 
-Artwork lands in the same sibling-``images/``-folder convention movies uses
-(``<track's own folder>/images/<safe-stem>-mb-art.jpg``), for the identical
-same-basename-different-folder collision-avoidance reason.
+**Album-level only -- deliberately no per-track/per-file matching.** Earlier
+versions tried to match each local mp3/flac file to a specific track within
+the resolved release's tracklist (title, track/disc number, MusicBrainz
+recording id). That was a real source of live bugs: an 11-track folder
+matched against a release that turned out to have a single track, silently
+collapsing every distinct local file's scraped title onto the same one; more
+generally, any mismatch between local file numbering and the release's real
+tracklist could assign the wrong title to the wrong file. Since Cover Art
+Archive art and the useful metadata (genres, canonical album name, release
+date) are release-level, not track-level, anyway, the scraper now only ever
+resolves *one release per album* and applies its art + release-level
+metadata to every track in the group (``_apply_release_to_group``) -- it
+never writes a track's title, track/disc number, or a per-recording
+MusicBrainz id. A track's own display title always stays whatever's parsed
+from its filename (see ``handlers_music._apply_music_display_titles``).
+Artwork is saved **once per group**, not once per track (see
+``_album_artwork_path``), both because there's only ever one real file now
+and to naturally match the on-disk convention the manual "Upload Cover"
+feature already uses (``images/album-cover.<ext>``).
 """
 
 from __future__ import annotations
 
-import re
 import threading
 from pathlib import Path
 from typing import Optional
@@ -33,6 +48,7 @@ try:
     from . import filename_parser as _filename_parser
     from .musicbrainz_client import MusicBrainzClient, MusicBrainzNotFoundError, MusicBrainzUnavailableError
     from .coverart_client import CoverArtClient, CoverArtUnavailableError
+    from . import wikimedia_client as _wikimedia_client
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.settings import Settings  # type: ignore
     from storage import music_store as _music_store  # type: ignore
@@ -41,6 +57,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from music import filename_parser as _filename_parser  # type: ignore
     from music.musicbrainz_client import MusicBrainzClient, MusicBrainzNotFoundError, MusicBrainzUnavailableError  # type: ignore
     from music.coverart_client import CoverArtClient, CoverArtUnavailableError  # type: ignore
+    from music import wikimedia_client as _wikimedia_client  # type: ignore
 
 # Cover Art Archive can serve PNG or JPEG; the extension is cosmetic only
 # (the browser reads Content-Type when serving it back), so a fixed one
@@ -51,11 +68,6 @@ MUSIC_ART_EXTENSION = ".jpg"
 
 class MusicNotFoundError(LookupError):
     """Raised when entry_key doesn't resolve to a known track file."""
-
-
-class MusicMatchError(ValueError):
-    """Raised when a chosen release's tracklist has no track that plausibly
-    corresponds to the target file (see ``_match_track_in_release``)."""
 
 
 def _client() -> MusicBrainzClient:
@@ -75,75 +87,66 @@ def search(settings: Settings, query: str, *, client: Optional[MusicBrainzClient
     return results
 
 
-def _safe_track_stem(track_path: Path) -> str:
-    return re.sub(r"[^a-zA-Z0-9._-]+", "-", track_path.stem) or "track"
+def _album_artwork_path(a_track_absolute_path: Path) -> Path:
+    """``<that track's own folder>/images/album-cover.jpg`` -- one shared
+    file for the whole group, saved next to whichever track happens to be
+    ``rows[0]`` for the group being applied (every row in a group normally
+    shares that exact folder; the rare multi-disc case where a group spans
+    ``CD1``/``CD2`` subfolders just means the file physically lives under
+    one of them -- every row's stored ``art_relative_path`` still points at
+    it correctly regardless). Fixed filename, matching the manual "Upload
+    Cover" convention (``handlers_music._handle_admin_music_album_art_upload``)
+    exactly, so a scraped cover and a manually-uploaded one occupy the same
+    slot rather than accumulating as separate orphaned files."""
+    return a_track_absolute_path.parent / "images" / f"album-cover{MUSIC_ART_EXTENSION}"
 
 
-def _artwork_path(track_absolute_path: Path) -> Path:
-    """``<track's own folder>/images/<safe-stem>-mb-art.jpg`` -- a sibling of
-    the track file at whatever depth it lives, mirroring the ROM/Movies
-    convention of an images/ folder next to the content it decorates."""
-    stem = _safe_track_stem(track_absolute_path)
-    return track_absolute_path.parent / "images" / f"{stem}-mb-art{MUSIC_ART_EXTENSION}"
+def _artist_artwork_path(a_track_absolute_path: Path) -> Path:
+    """``<that track's own folder>/images/artist-photo.jpg`` -- same
+    shared-file-per-apply-call convention as ``_album_artwork_path``, just a
+    different fixed filename so both coexist in the same ``images/``
+    folder. Written once per (artist, album) group being applied, same as
+    album art -- an artist with several albums in the library ends up with
+    one small photo copied into each album's own ``images/`` folder rather
+    than one canonical per-artist location, trading a little redundant disk
+    space for not having to resolve a true "artist root folder" path (which
+    ``classify_location`` does not expose -- only parsed artist/album name
+    strings, not filesystem path segments)."""
+    return a_track_absolute_path.parent / "images" / f"artist-photo{MUSIC_ART_EXTENSION}"
+
+
+def _fetch_artist_art_bytes(
+    client: MusicBrainzClient, cover_client: CoverArtClient, artist_mbid: str,
+) -> Optional[bytes]:
+    """Best-effort artist photo lookup: an artist lookup for a MusicBrainz
+    "image" relation (most artists have none -- that's the normal case, not
+    a failure), then Wikimedia Commons to resolve that relation's file-page
+    URL into a real downloadable image. Every failure mode here -- no
+    relation, an unrecognized/unresolvable Commons URL, MusicBrainz being
+    unavailable, a bad image response -- returns ``None`` rather than
+    raising, since this rides along with the album-art apply and must never
+    fail it (mirrors the existing Cover Art Archive fetch's own
+    never-fail-the-caller convention right above this function)."""
+    if not artist_mbid:
+        return None
+    try:
+        artist = client.artist_lookup(artist_mbid)
+    except MusicBrainzUnavailableError:
+        return None
+    image_commons_url = artist.get("image_commons_url")
+    if not image_commons_url:
+        return None
+    resolved_url = _wikimedia_client.resolve_image_url(image_commons_url)
+    if not resolved_url:
+        return None
+    try:
+        return cover_client.download_image(resolved_url)[0]
+    except (CoverArtUnavailableError, ValueError):
+        return None
 
 
 def _relative_to_music_root(music_root: Path, path: Path) -> str:
     return path.resolve().relative_to(music_root.resolve()).as_posix()
-
-
-def _match_track_in_release(
-    release: dict, *, recording_mbid: Optional[str], disc_number: Optional[int],
-    track_number: Optional[int], parsed_title: str, allow_single_track_fallback: bool = True,
-) -> Optional[dict]:
-    """Pick which of a release's tracks corresponds to one on-disk file, in
-    priority order:
-
-    1. An explicit ``recording_mbid`` (the human/bulk-job already knows
-       exactly which recording -- e.g. picked from a recording search
-       result) -- exact, no ambiguity.
-    2. (disc_number, track_number) parsed from the file's own folder/name --
-       the common case, since most libraries number their files to match
-       the album's real tracklist.
-    3. The release has exactly one track (a single) -- unambiguous
-       regardless of what the file's own name says, **but only when
-       ``allow_single_track_fallback`` is true**. The bulk scraper's groups
-       loop calls this once per *local* file against the *same* resolved
-       release; if the release genuinely (or wrongly) has only one track,
-       this fallback would otherwise match every distinct local file in a
-       multi-track album to that identical one track -- a real bug caught
-       live: an 11-track compilation folder got matched to a MusicBrainz
-       release that turned out to be a single-track live-broadcast
-       recording, and every track in the folder silently received the
-       exact same scraped title. The caller disables this fallback whenever
-       there's more than one local file being matched against the same
-       release (see ``_run_bulk_scrape_job``); it stays enabled for a
-       genuine one-file-one-release match (the singles loop, a manual
-       per-track apply, or a group that only has one local file).
-    4. Closest case-insensitive title match against the file's parsed
-       title.
-
-    Returns ``None`` if nothing plausible matches -- the caller treats that
-    as this candidate failing, not a crash.
-    """
-    tracks = release.get("tracks") or []
-    if recording_mbid:
-        for track in tracks:
-            if track.get("recording_mbid") == recording_mbid:
-                return track
-        return None
-    if disc_number is not None and track_number is not None:
-        for track in tracks:
-            track_disc = track.get("disc_number") or 1
-            if track_disc == disc_number and track.get("track_number") == track_number:
-                return track
-    if allow_single_track_fallback and len(tracks) == 1:
-        return tracks[0]
-    if parsed_title:
-        needle = parsed_title.strip().lower()
-        for track in tracks:
-            if str(track.get("title") or "").strip().lower() == needle:
-                return track
-    return None
 
 
 def _select_release_candidate(results: list, local_count: int) -> dict:
@@ -156,13 +159,11 @@ def _select_release_candidate(results: list, local_count: int) -> dict:
 
     Exists because of a real bug caught live: the top search hit for an
     11-track local compilation folder was a MusicBrainz "Broadcast" release
-    (a DJ radio set) with exactly one track -- picking it meant every one of
-    the 11 distinct local files got matched against that same single track
-    (see ``_match_track_in_release``'s ``allow_single_track_fallback``,
-    which stops that collision even if a bad candidate is still picked, but
-    preferring a track-count-plausible candidate here avoids the bad pick in
-    the first place, so the group actually gets real per-track metadata
-    instead of just failing safely).
+    (a DJ radio set) with exactly one track -- picking a track-count-plausible
+    candidate here avoids using that single-track release's cover art (which
+    would still be *wrong*, just no longer capable of corrupting per-track
+    titles the way it could back when this module still matched individual
+    tracks -- see the module docstring).
     """
     for candidate in results:
         track_count = candidate.get("track_count")
@@ -171,27 +172,32 @@ def _select_release_candidate(results: list, local_count: int) -> dict:
     return results[0]
 
 
-def _apply_matched_track(
+def _apply_release_to_group(
     settings: Settings,
-    entry_key: str,
-    track_row: dict,
+    rows: list,
     release: dict,
-    matched_track: dict,
     *,
     cover_client: Optional[CoverArtClient],
+    client: Optional[MusicBrainzClient] = None,
     cover_bytes_cache: Optional[dict] = None,
+    artist_bytes_cache: Optional[dict] = None,
 ) -> dict:
-    """Download art (once per release_mbid if ``cover_bytes_cache`` is
-    provided -- the bulk job's optimization, since every track in a group
-    shares the same release art; the per-track manual apply path always
-    re-fetches, mirroring ``movies.metadata_manager.apply``'s simplicity)
-    and save the matched track's metadata."""
+    """Save one release's art + release-level metadata to every row in
+    ``rows`` (an (artist, album) group, or a single-row list for a
+    standalone single). Downloads art once per ``release_mbid`` (shared via
+    ``cover_bytes_cache`` across the whole bulk run, same optimization the
+    old per-track path used) and writes it to **one** shared file rather
+    than one copy per track (see ``_album_artwork_path``). Also attempts an
+    artist photo (``_fetch_artist_art_bytes``, cached per ``artist_mbid``
+    the same way) -- best-effort, absent for most artists, never fails this
+    call. Deliberately writes ``title=""`` on every row -- see the module
+    docstring for why a track's own filename-derived title is never
+    overwritten here."""
     music_root = Path(settings.music_root).resolve()
-    track_path = Path(track_row["absolute_path"]).resolve()
     cover_client = cover_client or _cover_client()
+    release_mbid = release.get("release_mbid") or ""
 
     art_relative_path: Optional[str] = None
-    release_mbid = release.get("release_mbid") or ""
     cached = cover_bytes_cache.get(release_mbid) if cover_bytes_cache is not None else None
     if cached is None:
         try:
@@ -209,71 +215,80 @@ def _apply_matched_track(
             cover_bytes_cache[release_mbid] = data
     else:
         data = cached
-    if data:
-        target = _artwork_path(track_path)
+    if data and rows:
+        target = _album_artwork_path(Path(rows[0]["absolute_path"]).resolve())
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
         art_relative_path = _relative_to_music_root(music_root, target)
+
+    artist_mbid = release.get("artist_mbid") or ""
+    artist_art_relative_path: Optional[str] = None
+    if artist_mbid:
+        cached_artist = artist_bytes_cache.get(artist_mbid) if artist_bytes_cache is not None else None
+        if cached_artist is None:
+            artist_data = _fetch_artist_art_bytes(client or _client(), cover_client, artist_mbid)
+            if artist_bytes_cache is not None:
+                artist_bytes_cache[artist_mbid] = artist_data
+        else:
+            artist_data = cached_artist
+        if artist_data and rows:
+            artist_target = _artist_artwork_path(Path(rows[0]["absolute_path"]).resolve())
+            artist_target.parent.mkdir(parents=True, exist_ok=True)
+            artist_target.write_bytes(artist_data)
+            artist_art_relative_path = _relative_to_music_root(music_root, artist_target)
 
     extra = {
         "artist": release.get("artist") or "",
         "album": release.get("title") or "",
         "genres": release.get("genres") or [],
         "release_date": release.get("date"),
-        "track_number": matched_track.get("track_number"),
-        "disc_number": matched_track.get("disc_number"),
-        "duration_ms": matched_track.get("length_ms"),
         "release_mbid": release_mbid,
         "release_group_mbid": release.get("release_group_mbid") or "",
-        "recording_mbid": matched_track.get("recording_mbid") or "",
+        "artist_mbid": artist_mbid,
     }
-    return _music_store.save_music_metadata(
-        settings.music_root,
-        entry_key,
-        provider="musicbrainz",
-        provider_id=matched_track.get("recording_mbid") or release_mbid,
-        title=matched_track.get("title") or "",
-        art_relative_path=art_relative_path,
-        artist_art_relative_path=None,  # always empty in v1 -- see the drone-music-feature skill
-        extra=extra,
-    )
+    saved = {}
+    for row in rows:
+        saved = _music_store.save_music_metadata(
+            settings.music_root,
+            row["entry_key"],
+            provider="musicbrainz",
+            provider_id=release_mbid,
+            title="",
+            art_relative_path=art_relative_path,
+            artist_art_relative_path=artist_art_relative_path,
+            extra=extra,
+        )
+    return {
+        "updated": len(rows),
+        "has_art": art_relative_path is not None,
+        "has_artist_art": artist_art_relative_path is not None,
+        "metadata": saved,
+    }
 
 
-def apply(
+def apply_album(
     settings: Settings,
-    entry_key: str,
+    entry_keys: list,
     release_mbid: str,
     *,
-    recording_mbid: Optional[str] = None,
     client: Optional[MusicBrainzClient] = None,
     cover_client: Optional[CoverArtClient] = None,
 ) -> dict:
-    """Look up a release (its full tracklist in one call), match this
-    specific track within it, download art, and save the result. Raises
-    ``MusicNotFoundError`` for an unknown entry_key, ``MusicMatchError`` if
-    the release's tracklist has nothing plausibly corresponding to this
-    file, ``MusicBrainzUnavailableError``/``MusicBrainzNotFoundError`` for
-    scraper failures -- callers map these to the right HTTP status (see
-    ``handlers_music.py``). ``client``/``cover_client`` are injectable for
+    """Look up one release and apply its art + release-level metadata to
+    every track in ``entry_keys`` -- the album detail page's manual "search
+    and apply" action (see ``handlers_music._handle_admin_music_scrape_apply``,
+    which expands a single clicked track to its whole album group before
+    calling this). Raises ``MusicNotFoundError`` if none of ``entry_keys``
+    resolve to a known track. ``client``/``cover_client`` are injectable for
     tests."""
-    track_row = _music_store.get_music_by_key(settings.music_root, entry_key)
-    if not track_row:
-        raise MusicNotFoundError(entry_key)
+    rows = [row for row in (_music_store.get_music_by_key(settings.music_root, key) for key in entry_keys) if row]
+    if not rows:
+        raise MusicNotFoundError(",".join(entry_keys))
     client = client or _client()
     release = client.release_lookup(release_mbid)
-
-    location = _filename_parser.classify_location(track_row["file_path"])
-    track_info = _filename_parser.parse_track_filename(track_row["track_name"])
-    matched_track = _match_track_in_release(
-        release,
-        recording_mbid=recording_mbid,
-        disc_number=location.disc_number or track_info.disc_number,
-        track_number=track_info.track_number,
-        parsed_title=track_info.title,
-    )
-    if not matched_track:
-        raise MusicMatchError("Could not match this track to a specific song on the selected release")
-    return _apply_matched_track(settings, entry_key, track_row, release, matched_track, cover_client=cover_client)
+    result = _apply_release_to_group(settings, rows, release, cover_client=cover_client, client=client)
+    result["entry_keys"] = [row["entry_key"] for row in rows]
+    return result
 
 
 def delete_metadata(settings: Settings, entry_key: str) -> dict:
@@ -290,6 +305,28 @@ def delete_metadata(settings: Settings, entry_key: str) -> dict:
     return {"deleted": True}
 
 
+def delete_album_metadata(settings: Settings, entry_keys: list) -> dict:
+    """Batch version of ``delete_metadata`` for the album page's "Remove
+    scraped data" action -- every track in a group shares the exact same
+    ``art_relative_path`` (see ``_apply_release_to_group``), so the art file
+    is only ever unlinked once even though every row references it."""
+    music_root = Path(settings.music_root).resolve()
+    deleted = 0
+    art_paths_to_unlink: set = set()
+    for entry_key in entry_keys:
+        removed = _music_store.delete_music_metadata(settings.music_root, entry_key)
+        if not removed:
+            continue
+        deleted += 1
+        for column in ("art_relative_path", "artist_art_relative_path"):
+            relative_path = removed.get(column)
+            if relative_path:
+                art_paths_to_unlink.add(relative_path)
+    for relative_path in art_paths_to_unlink:
+        (music_root / relative_path).unlink(missing_ok=True)
+    return {"deleted": deleted}
+
+
 def delete_music(settings: Settings, entry_key: str) -> dict:
     """Permanently delete a track's underlying file plus any scraped
     metadata/artwork -- mirrors ``movies.metadata_manager.delete_movie``."""
@@ -304,26 +341,27 @@ def _has_artwork(settings: Settings, entry_key: str) -> bool:
     return bool(metadata and metadata.get("art_relative_path"))
 
 
-def search_track_default_query(
-    settings: Settings, artist: str, album: str, track_title: str, *, client: Optional[MusicBrainzClient] = None,
+def search_album_default_query(
+    settings: Settings, artist: str, album: str, *, client: Optional[MusicBrainzClient] = None,
 ) -> dict:
-    """Per-track manual search's default (no custom query typed yet) case:
-    tries ``filename_parser.search_candidates``'s ladder (release queries
-    first, recording queries as fallback), stopping at the first rung that
-    returns anything. Returns ``{"query", "results"}`` -- mirrors
-    ``movies.metadata_manager.search_movie_default_query``."""
+    """The album page's manual search's default (no custom query typed yet)
+    case: release-only candidates from ``filename_parser.search_candidates``
+    (an empty ``track_title`` means its recording-query rungs are never
+    generated -- see that function), stopping at the first rung that returns
+    anything. Returns ``{"query", "results"}`` -- mirrors
+    ``movies.metadata_manager.search_movie_default_query``. Deliberately no
+    recording-search fallback (unlike the old per-track version this
+    replaces): a "recording" result identifies one song, not an album, and
+    ``apply_album`` only ever applies a whole release."""
     client = client or _client()
-    label = track_title or album or artist
-    for query_type, query_text in _filename_parser.search_candidates(artist, album, track_title):
+    label = album or artist
+    for query_type, query_text in _filename_parser.search_candidates(artist, album, ""):
+        if query_type != "release":
+            continue
         label = query_text
-        if query_type == "release":
-            results = client.search_release(query_text)
-            for item in results:
-                item["kind"] = "release"
-        else:
-            results = client.search_recording(query_text)
-            for item in results:
-                item["kind"] = "recording"
+        results = client.search_release(query_text)
+        for item in results:
+            item["kind"] = "release"
         if results:
             return {"query": label, "results": results}
     return {"query": label, "results": []}
@@ -357,6 +395,7 @@ def _run_bulk_scrape_job(settings: Settings, job_id: int, groups: list, singles:
     total = len(groups) + len(singles)
     processed = 0
     cover_bytes_cache: dict = {}
+    artist_bytes_cache: dict = {}
 
     def _tick(current_label: str) -> None:
         _jobs.update_progress(
@@ -394,22 +433,12 @@ def _run_bulk_scrape_job(settings: Settings, job_id: int, groups: list, singles:
                 processed += 1
                 continue
             release = client.release_lookup(_select_release_candidate(results, len(rows))["release_mbid"])
-            allow_single_track_fallback = len(rows) == 1
+            _apply_release_to_group(
+                settings, rows, release, cover_client=cover_client, client=client,
+                cover_bytes_cache=cover_bytes_cache, artist_bytes_cache=artist_bytes_cache,
+            )
+            matched += len(rows)
             for row in rows:
-                location = _filename_parser.classify_location(row["file_path"])
-                track_info = _filename_parser.parse_track_filename(row["track_name"])
-                matched_track = _match_track_in_release(
-                    release, recording_mbid=None,
-                    disc_number=location.disc_number or track_info.disc_number,
-                    track_number=track_info.track_number, parsed_title=track_info.title,
-                    allow_single_track_fallback=allow_single_track_fallback,
-                )
-                if not matched_track:
-                    failed += 1
-                    _record_item(settings, row, _job_items.STATUS_FAILED, "could not match this track within the resolved release")
-                    continue
-                _apply_matched_track(settings, row["entry_key"], row, release, matched_track, cover_client=cover_client, cover_bytes_cache=cover_bytes_cache)
-                matched += 1
                 _record_item(settings, row, _job_items.STATUS_MATCHED)
         except MusicBrainzNotFoundError as error:
             failed += len(rows)
@@ -464,16 +493,10 @@ def _run_bulk_scrape_job(settings: Settings, job_id: int, groups: list, singles:
                 processed += 1
                 continue
             release = client.release_lookup(recording_result["release_mbid"])
-            matched_track = _match_track_in_release(
-                release, recording_mbid=recording_result.get("recording_mbid"),
-                disc_number=None, track_number=None, parsed_title=track_info.title,
+            _apply_release_to_group(
+                settings, [row], release, cover_client=cover_client, client=client,
+                cover_bytes_cache=cover_bytes_cache, artist_bytes_cache=artist_bytes_cache,
             )
-            if not matched_track:
-                failed += 1
-                _record_item(settings, row, _job_items.STATUS_FAILED, "could not match this track within the resolved release")
-                processed += 1
-                continue
-            _apply_matched_track(settings, row["entry_key"], row, release, matched_track, cover_client=cover_client, cover_bytes_cache=cover_bytes_cache)
             matched += 1
             _record_item(settings, row, _job_items.STATUS_MATCHED)
         except MusicBrainzNotFoundError as error:

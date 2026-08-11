@@ -1736,6 +1736,19 @@
       width: 200px;
       height: 200px;
     }
+    /* Small round artist-photo thumbnail beside the artist name on the
+       album detail page -- opportunistic (see metadata_manager's
+       _fetch_artist_art_bytes), so most artists simply never render one;
+       the <img>'s own onerror removes it entirely rather than falling back
+       to a placeholder icon, unlike the big poster above. */
+    .music-artist-avatar {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      object-fit: cover;
+      border: 1px solid var(--admin-border);
+      flex-shrink: 0;
+    }
     .movie-detail-info { flex: 1; }
     .movie-detail-title {
       color: var(--admin-text);
