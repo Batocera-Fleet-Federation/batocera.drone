@@ -10618,7 +10618,10 @@ async function renderSwarmPage() {
         <div class="col-12 col-lg-6">${renderSwarmTailnetCard(tailnet)}</div>
         <div class="col-12 col-lg-6"><div class="card log-card h-100">
           <div class="card-header d-flex justify-content-between align-items-center"><span><i class="bi bi-key me-2" aria-hidden="true"></i>Pairing</span><button class="btn btn-sm btn-outline-primary" id="localPairCodeRotateBtn">Rotate Code</button></div>
-          <div class="card-body" id="localPairingBody"><div class="text-muted">Loading pairing...</div></div>
+          <div class="card-body">
+            <div class="small text-muted mb-2"><i class="bi bi-info-circle me-1"></i>This code proves you have access to this Drone. To pair it with another Drone on the same network, pick this Drone from that Drone's Nearby Drones list and enter this code when prompted (or enter that Drone's own code here, if pairing from this side instead). It rotates periodically for security -- once paired, the two Drones stay linked until you unpair them.</div>
+            <div id="localPairingBody"><div class="text-muted">Loading pairing...</div></div>
+          </div>
         </div></div>
       </div>
       <div class="card log-card mb-3">
