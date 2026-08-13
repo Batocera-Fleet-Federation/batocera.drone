@@ -2,6 +2,7 @@
 
 import json
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -30,6 +31,16 @@ except ImportError:  # pragma: no cover - flat (no `app.` prefix) package mode
 
 DRONE_LATEST_ARCHIVE_URL = "https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/drone-app.tar.gz"
 DRONE_LATEST_RELEASE_URL = "https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest"
+# Ports client (ports-client/) bundles are attached to the *same* GitHub
+# release as drone-app.tar.gz (see .github/workflows/release.yml's "Build
+# Ports client bundles" step), one per CPU arch it's built for -- so
+# "latest" here always means the exact release that was just installed for
+# the main app too. Arches match scripts/batocera_install.sh's own mapping.
+DRONE_PORTS_CLIENT_ARCHIVE_URL_TEMPLATE = (
+    "https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/"
+    "batocera-drone-client-{arch}.tar.gz"
+)
+DRONE_PORTS_CLIENT_SUPPORTED_ARCHES = ("x86_64", "aarch64")
 DRONE_RELEASE_TAG_URL_TEMPLATE = "https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/tag/{version}"
 DRONE_COMPARE_API_URL_TEMPLATE = "https://api.github.com/repos/Batocera-Fleet-Federation/batocera.drone/compare/{base}...{head}"
 DRONE_SELF_UPDATE_EXIT_CODE = 75
@@ -43,6 +54,12 @@ DRONE_SERVICE_PID_FILE = Path("/tmp/drone-server.pid")
 RELEASE_NOTES_MAX_COMMITS = 50
 
 _DRONE_UPDATE_LOCK = Lock()
+# Separate from _DRONE_UPDATE_LOCK: the Ports client update touches a
+# completely different directory (roms/ports, not the Drone app's own work
+# dir), so it doesn't need to serialize against app updates -- only against
+# a second concurrent Ports client update (the poller and a manual "Update
+# Drone" click racing).
+_PORTS_CLIENT_UPDATE_LOCK = Lock()
 _SEMANTIC_VERSION_PATTERN = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$")
 
 
@@ -185,6 +202,17 @@ def _overlay_drone_release_tree(source: Path, target: Path) -> int:
     return copied
 
 
+def _resolve_within_stage(stage_dir: Path, relative_path: Path, *, member_name: str) -> Path:
+    """Reject a tar member whose resolved path would escape stage_dir (a
+    "tar-slip" via a ``..`` component) -- shared by both archive extractors
+    below so there is exactly one implementation of this security check to
+    keep tested and correct, not two copies that could silently drift."""
+    target = (stage_dir / relative_path).resolve()
+    if stage_dir not in target.parents and target != stage_dir:
+        raise ValueError(f"archive member escapes stage directory: {member_name}")
+    return target
+
+
 def _download_latest_drone_app_unlocked(settings: Settings) -> dict:
     archive_url = os.environ.get("DRONE_APP_ARCHIVE_URL", DRONE_LATEST_ARCHIVE_URL)
     work_dir = _drone_work_dir(settings)
@@ -215,9 +243,7 @@ def _download_latest_drone_app_unlocked(settings: Settings) -> dict:
                 relative_path = Path(relative)
                 if "__pycache__" in relative_path.parts:
                     continue
-                target = (stage_dir / relative_path).resolve()
-                if stage_dir not in target.parents and target != stage_dir:
-                    raise ValueError(f"archive member escapes stage directory: {member.name}")
+                target = _resolve_within_stage(stage_dir, relative_path, member_name=member.name)
                 extracted_roots.add(parts[0])
                 if member.isdir():
                     target.mkdir(parents=True, exist_ok=True)
@@ -246,10 +272,101 @@ def _download_latest_drone_app_unlocked(settings: Settings) -> dict:
     }
 
 
+def _ports_client_bundle_arch() -> Optional[str]:
+    machine = platform.machine()
+    return machine if machine in DRONE_PORTS_CLIENT_SUPPORTED_ARCHES else None
+
+
+def _ports_client_dir(settings: Settings) -> Path:
+    return settings.roms_root / "ports"
+
+
+def _download_latest_ports_client_unlocked(settings: Settings) -> dict:
+    """Downloads and installs the Ports client bundle matching this device's
+    CPU arch into <roms_root>/ports -- the same tarball layout (a top-level
+    launcher script + .data/batocera-drone-client/, see
+    ports-client/scripts/build_release_bundle.sh) that
+    batocera_install.sh's install_ports_client() extracts there directly.
+
+    Deliberately best-effort at the call site (_download_latest_ports_client
+    below): an unsupported arch, an unreachable release asset, or any other
+    failure here must never fail or skip the Drone app's own update -- the
+    Ports client is a secondary, independently-versioned artifact riding
+    along on the same release, not a required part of it.
+    """
+    arch = _ports_client_bundle_arch()
+    if arch is None:
+        return {"status": "unsupported_arch", "arch": platform.machine()}
+
+    archive_url = os.environ.get(
+        "DRONE_PORTS_CLIENT_ARCHIVE_URL", DRONE_PORTS_CLIENT_ARCHIVE_URL_TEMPLATE.format(arch=arch)
+    )
+    ports_dir = _ports_client_dir(settings)
+    ports_dir.mkdir(parents=True, exist_ok=True)
+    started_at = time.monotonic()
+    with tempfile.TemporaryDirectory(prefix="drone-ports-client-update-", dir=str(ports_dir)) as temp_dir_name:
+        temp_dir = Path(temp_dir_name).resolve()
+        archive_path = temp_dir / "batocera-drone-client.tar.gz"
+        request = Request(archive_url, headers={"User-Agent": "batocera-drone-self-update"})
+        with urlopen(request, timeout=120) as response:
+            with archive_path.open("wb") as output:
+                shutil.copyfileobj(response, output)
+        if not archive_path.exists() or archive_path.stat().st_size <= 0:
+            raise ValueError("downloaded Ports client archive was empty")
+
+        stage_dir = temp_dir / "stage"
+        stage_dir.mkdir()
+        with tarfile.open(archive_path, "r:gz") as archive:
+            for member in archive.getmembers():
+                relative_path = Path(member.name.lstrip("/"))
+                target = _resolve_within_stage(stage_dir, relative_path, member_name=member.name)
+                if member.isdir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                source = archive.extractfile(member)
+                if source is None:
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with source, target.open("wb") as output:
+                    shutil.copyfileobj(source, output)
+
+        copied_files = _overlay_drone_release_tree(stage_dir, ports_dir)
+        # _overlay_drone_release_tree chmods every copied file 0o664 (right
+        # for the app's own tree, which is never executed directly) -- the
+        # Ports launcher is exec'd straight by EmulationStation and needs
+        # its executable bit restored.
+        launcher = ports_dir / "batocera-drone-client.sh"
+        if launcher.is_file():
+            try:
+                launcher.chmod(0o755)
+            except OSError:
+                pass
+
+    return {
+        "status": "updated",
+        "arch": arch,
+        "archive_url": archive_url,
+        "ports_dir": str(ports_dir),
+        "copied_files": copied_files,
+        "duration_ms": int((time.monotonic() - started_at) * 1000),
+    }
+
+
+def _download_latest_ports_client(settings: Settings) -> dict:
+    try:
+        with _PORTS_CLIENT_UPDATE_LOCK:
+            return _download_latest_ports_client_unlocked(settings)
+    except Exception as error:  # noqa: BLE001 - best-effort, see docstring above
+        message = f"{error.__class__.__name__}: {error}"
+        print(f"Ports client update failed (Drone app update unaffected): {message}", file=sys.stderr, flush=True)
+        return {"status": "error", "error": message}
+
+
 def _download_latest_drone_app(settings: Settings) -> dict:
     previous_version = _installed_drone_version(settings)
     with _DRONE_UPDATE_LOCK:
         result = _download_latest_drone_app_unlocked(settings)
+    result["ports_client"] = _download_latest_ports_client(settings)
     new_version = _installed_drone_version(settings)
     release_url = _release_url_for_version(new_version) if new_version else ""
     release_notes = _fetch_commit_notes(previous_version, new_version)

@@ -6058,7 +6058,11 @@ async function updateDroneApp() {
   try {
     const payload = await apiPost("/admin/system/update-drone", {});
     dismissToast(toast);
-    showToast(`Drone update downloaded. Restarting app process... (${Math.round((payload.duration_ms || 0) / 1000)}s). Reloading shortly.`, "success", 10000);
+    let message = `Drone update downloaded. Restarting app process... (${Math.round((payload.duration_ms || 0) / 1000)}s). Reloading shortly.`;
+    if (payload.ports_client && payload.ports_client.status === "error") {
+      message += " (The Ports client bundle could not be refreshed this time -- it'll retry on the next update.)";
+    }
+    showToast(message, "success", 10000);
     setTimeout(() => {
       window.location.href = `${window.location.pathname}${window.location.search}#home`;
       window.location.reload();
