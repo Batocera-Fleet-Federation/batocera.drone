@@ -50,6 +50,16 @@ class AppShell(Screen):
 
     def draw(self, navigator) -> None:
         self._draw_top_bar()
+        # Quick tab-switch bonus -- D-pad/stick nav can already reach these
+        # same top-bar buttons directly once ui/gamepad.py's HasGamepad fix
+        # is live, so this is polish, not a functional gap. gamepad_l1/r1
+        # only exist as ImGui keys because ui/gamepad.py's
+        # handle_shoulder_button feeds them in -- the vendored SDL2 backend
+        # doesn't translate shoulder buttons at all.
+        if imgui.is_key_pressed(imgui.Key.gamepad_l1):
+            self._cycle_section(-1)
+        elif imgui.is_key_pressed(imgui.Key.gamepad_r1):
+            self._cycle_section(1)
         imgui.separator()
         imgui.spacing()
         self._content[self.section].draw(navigator)
@@ -71,3 +81,8 @@ class AppShell(Screen):
     def _select_section(self, section: str) -> None:
         self.section = section
         self._ensure_entered(section)
+
+    def _cycle_section(self, direction: int) -> None:
+        keys = [key for key, _label in _SECTIONS]
+        next_index = (keys.index(self.section) + direction) % len(keys)
+        self._select_section(keys[next_index])

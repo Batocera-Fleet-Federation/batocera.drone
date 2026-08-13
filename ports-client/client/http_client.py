@@ -11,6 +11,7 @@ import json
 import ssl
 import urllib.error
 import urllib.request
+import uuid
 from http.cookiejar import LWPCookieJar
 from typing import Any, Optional
 
@@ -70,12 +71,7 @@ class DroneApiClient:
     def has_session_cookie(self) -> bool:
         return any(cookie.name == SESSION_COOKIE_NAME for cookie in self.cookie_jar)
 
-    def _request(self, method: str, path: str, *, body: Optional[dict] = None) -> Any:
-        url = f"{self.config.base_url}{path}"
-        data = json.dumps(body).encode("utf-8") if body is not None else None
-        request = urllib.request.Request(url, data=data, method=method)
-        if data is not None:
-            request.add_header("Content-Type", "application/json")
+    def _send(self, request: urllib.request.Request, *, method: str, path: str) -> Any:
         try:
             with self._opener.open(request, timeout=_TIMEOUT_SECONDS) as response:
                 raw = response.read()
@@ -94,11 +90,37 @@ class DroneApiClient:
             return None
         return _try_parse_json(raw)
 
+    def _request(self, method: str, path: str, *, body: Optional[dict] = None) -> Any:
+        url = f"{self.config.base_url}{path}"
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+        request = urllib.request.Request(url, data=data, method=method)
+        if data is not None:
+            request.add_header("Content-Type", "application/json")
+        return self._send(request, method=method, path=path)
+
     def get(self, path: str) -> Any:
         return self._request("GET", path)
 
     def post(self, path: str, body: Optional[dict] = None) -> Any:
         return self._request("POST", path, body=body or {})
+
+    def post_multipart(self, path: str, field_name: str, filename: str, content: bytes) -> Any:
+        """POST a single file as multipart/form-data -- stdlib-only, hand-built
+        (no third-party HTTP library, per the repo-wide rule). Framed exactly
+        as app/common/multipart.py's parse_multipart_files expects: the
+        field name isn't actually checked server-side, but "config" is used
+        here for consistency with drone.js's own upload convention.
+        """
+        url = f"{self.config.base_url}{path}"
+        boundary = uuid.uuid4().hex
+        body = (
+            f'--{boundary}\r\n'
+            f'Content-Disposition: form-data; name="{field_name}"; filename="{filename}"\r\n'
+            f'Content-Type: application/octet-stream\r\n\r\n'
+        ).encode("utf-8") + content + f"\r\n--{boundary}--\r\n".encode("utf-8")
+        request = urllib.request.Request(url, data=body, method="POST")
+        request.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
+        return self._send(request, method="POST", path=path)
 
     # --- auth -----------------------------------------------------------
 

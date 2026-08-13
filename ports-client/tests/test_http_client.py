@@ -23,6 +23,11 @@ VALID_TOKEN = "test-session-token"
 
 
 class _FakeDroneHandler(BaseHTTPRequestHandler):
+    # Set by tests that need to inspect exactly what post_multipart() put
+    # on the wire -- a class attribute so the test can read it after the
+    # request completes, since a new handler instance is built per request.
+    captured_multipart = None
+
     def log_message(self, format, *args):  # noqa: A002 - silence test server logging
         pass
 
@@ -46,8 +51,16 @@ class _FakeDroneHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(length) if length else b"{}"
-        payload = json.loads(raw or b"{}")
+        content_type = self.headers.get("Content-Type", "")
         authenticated = self._cookie_token() == VALID_TOKEN
+
+        if self.path == "/v1/api/admin/vpn/upload" and authenticated:
+            # Not JSON -- must not go through json.loads below.
+            _FakeDroneHandler.captured_multipart = (content_type, raw)
+            self._send_json(200, {"status": "ok", "config_filename": "captured.ovpn", "remotes": []})
+            return
+
+        payload = json.loads(raw or b"{}")
 
         if self.path == "/v1/api/auth/login":
             if payload.get("username") == VALID_USERNAME and payload.get("password") == VALID_PASSWORD:
@@ -160,6 +173,28 @@ class DroneApiClientTests(unittest.TestCase):
             client.post("/admin/vpn/connect")
         self.assertIn("no config uploaded", str(ctx.exception))
         self.assertIn("no credentials saved", str(ctx.exception))
+
+    def test_post_multipart_produces_a_body_the_real_server_parser_accepts(self) -> None:
+        # Captures the raw bytes DroneApiClient actually put on the wire,
+        # then parses them with app/common/multipart.py's real parser (not
+        # a hand-rolled fake one) -- proves wire-format compatibility with
+        # the actual server, not just this test file's own assumptions.
+        # conftest.py puts the repo root on sys.path so `app` is importable.
+        from app.common.multipart import boundary_from_content_type, parse_multipart_files
+
+        client = DroneApiClient(self._make_config())
+        client.login(VALID_USERNAME, VALID_PASSWORD)
+
+        # Content deliberately includes a CRLF sequence and non-ASCII bytes
+        # -- a naive newline-normalizing bug would corrupt this silently.
+        content = b"remote example.com 1194\r\nauth-user-pass\r\n\x00\xffbinary junk\r\n"
+        result = client.post_multipart("/admin/vpn/upload", "config", "provider.ovpn", content)
+        self.assertEqual(result["config_filename"], "captured.ovpn")
+
+        content_type, raw_body = _FakeDroneHandler.captured_multipart
+        boundary = boundary_from_content_type(content_type)
+        files = parse_multipart_files(raw_body, boundary)
+        self.assertEqual(files, [("provider.ovpn", content)])
 
     def test_unreachable_server_raises_drone_api_error(self) -> None:
         config = ClientConfig(

@@ -7,6 +7,7 @@ way the drone does.
 
 from imgui_bundle import imgui
 
+from . import virtual_keyboard
 from .theme import ACCENT, hex_color
 
 _ACTIVE_BUTTON_COLOR = imgui.ImVec4(0, 194 / 255, 1.0, 0.32)
@@ -31,7 +32,7 @@ def search_box(widget_id: str, current_query: str):
     (Enter, Search click, or Clear) -- so the displayed text stays in sync
     with typing without firing a request on every keystroke."""
     imgui.set_next_item_width(_SEARCH_WIDTH)
-    enter_pressed, new_value = imgui.input_text(
+    enter_pressed, new_value = virtual_keyboard.input_text(
         f"##{widget_id}", current_query, imgui.InputTextFlags_.enter_returns_true.value
     )
     imgui.same_line()

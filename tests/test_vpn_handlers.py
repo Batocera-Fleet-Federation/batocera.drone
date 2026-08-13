@@ -328,6 +328,63 @@ class VpnPullFromPeerHandlerTests(unittest.TestCase):
             self.assertEqual(vpn_manager.auth_path(settings).read_text(), "peeruser\npeerpass123\n")
 
 
+class VpnImportFolderListHandlerTests(unittest.TestCase):
+    def test_returns_directory_and_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            directory = vpn_manager.vpn_import_dir(settings)
+            directory.mkdir(parents=True)
+            (directory / "provider.ovpn").write_bytes(SAMPLE_OVPN)
+            handler = _handler(settings)
+            handler._handle_admin_vpn_import_folder_list()
+            status, payload = handler.response
+            self.assertEqual(status, 200)
+            self.assertEqual(payload["files"], ["provider.ovpn"])
+            self.assertEqual(payload["directory"], str(directory))
+
+
+class VpnImportFolderApplyHandlerTests(unittest.TestCase):
+    def test_requires_filename(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            handler = _handler(settings)
+            with self.assertRaises(ValueError):
+                handler._handle_admin_vpn_import_folder_apply({})
+
+    def test_happy_path_is_200(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            directory = vpn_manager.vpn_import_dir(settings)
+            directory.mkdir(parents=True)
+            (directory / "provider.ovpn").write_bytes(SAMPLE_OVPN)
+            handler = _handler(settings)
+            handler._handle_admin_vpn_import_folder_apply({"filename": "provider.ovpn"})
+            status, payload = handler.response
+            self.assertEqual(status, 200)
+            self.assertEqual(payload["config_filename"], "provider.ovpn")
+
+    def test_unknown_filename_is_404_not_500(self) -> None:
+        # The load-bearing regression case: api_routes.py's generic POST
+        # exception mapping only auto-maps ValueError -> 400, not
+        # FileNotFoundError -> 404 (that's GET-only) -- the handler must
+        # catch it explicitly, or this would come back as a 500.
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            handler = _handler(settings)
+            handler._handle_admin_vpn_import_folder_apply({"filename": "does-not-exist.ovpn"})
+            status, payload = handler.response
+            self.assertEqual(status, 404)
+            self.assertIn("error", payload)
+
+    def test_traversal_filename_is_404_not_500(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            handler = _handler(settings)
+            handler._handle_admin_vpn_import_folder_apply({"filename": "../../etc/passwd"})
+            status, _payload = handler.response
+            self.assertEqual(status, 404)
+
+
 class _FakePeerHandler:
     """Minimal stand-in for RomRequestHandler's peer-serving surface, mirroring
     the _FakePeerHandler pattern in test_movies_transfer.py."""

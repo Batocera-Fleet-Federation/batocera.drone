@@ -33,10 +33,12 @@ from imgui_bundle.python_backends.sdl2_backend import SDL2Renderer
 
 from client.http_client import DroneApiClient
 
+from . import gamepad
 from .nav import Navigator
 from .screens.login import LoginScreen
 from .shell import AppShell
 from .theme import apply_drone_theme
+from .virtual_keyboard import draw_if_open as _draw_virtual_keyboard_if_open
 
 _FORCE_EXIT_GRACE_SECONDS = 3
 _FALLBACK_WINDOW_SIZE = (1280, 720)
@@ -91,7 +93,7 @@ class PortsClientApp:
         io.set_ini_filename(None)
         apply_drone_theme()
         renderer = SDL2Renderer(window)
-        self._open_connected_game_controllers()
+        gamepad.open_all_connected(io)
 
         try:
             self._run_loop(window, renderer)
@@ -103,12 +105,17 @@ class PortsClientApp:
 
     def _run_loop(self, window, renderer: SDL2Renderer) -> None:
         event = sdl2.SDL_Event()
+        io = imgui.get_io()
         while not self._exit_requested:
             while sdl2.SDL_PollEvent(ctypes.byref(event)) != 0:
                 if event.type == sdl2.SDL_QUIT:
                     self._exit_requested = True
                 elif event.type == sdl2.SDL_CONTROLLERDEVICEADDED:
-                    sdl2.SDL_GameControllerOpen(event.cdevice.which)
+                    gamepad.handle_device_added(event, io)
+                elif event.type == sdl2.SDL_CONTROLLERDEVICEREMOVED:
+                    gamepad.handle_device_removed(event, io)
+                elif event.type in (sdl2.SDL_CONTROLLERBUTTONDOWN, sdl2.SDL_CONTROLLERBUTTONUP):
+                    gamepad.handle_shoulder_button(event, io)
                 renderer.process_event(event)
             renderer.process_inputs()
             # SDL2Renderer.process_inputs() (imgui_bundle's own code, not ours)
@@ -119,7 +126,13 @@ class PortsClientApp:
             # fraction of the real framebuffer -- the UI renders into a
             # corner of the window. Batocera's own TV/monitor outputs are
             # effectively always 1x, which is why this never shows up there.
-            _fix_hidpi_framebuffer_scale(window, imgui.get_io())
+            _fix_hidpi_framebuffer_scale(window, io)
+            # Neither this vendored backend nor any other one shipped in
+            # imgui_bundle sets ImGui's HasGamepad flag or polls the analog
+            # stick -- see ui/gamepad.py's module docstring for why both are
+            # real gaps, not redundant with the button/D-pad events the
+            # backend already translates.
+            gamepad.poll_left_stick_nav(io)
 
             imgui.new_frame()
             # Every screen calls widget functions (imgui.text/button/...)
@@ -149,18 +162,17 @@ class PortsClientApp:
             if is_expanded:
                 self.navigator.draw()
             imgui.end()
+            # After every screen has drawn -- a screen's own input_text call
+            # (via virtual_keyboard.input_text) may have just opened a
+            # session this same frame; same-frame open_popup() ->
+            # begin_popup_modal() is a supported ImGui pattern.
+            _draw_virtual_keyboard_if_open()
             imgui.render()
 
             gl.glClearColor(0, 0, 0, 1)
             gl.glClear(gl.GL_COLOR_BUFFER_BIT)
             renderer.render(imgui.get_draw_data())
             sdl2.SDL_GL_SwapWindow(window)
-
-    @staticmethod
-    def _open_connected_game_controllers() -> None:
-        for index in range(sdl2.SDL_NumJoysticks()):
-            if sdl2.SDL_IsGameController(index):
-                sdl2.SDL_GameControllerOpen(index)
 
     @staticmethod
     def _init_sdl_window():

@@ -434,6 +434,146 @@ class VpnScreenTests(unittest.TestCase):
         self.assertEqual(client.post_calls, [("/admin/vpn/disconnect", None)])
         self.assertEqual(screen.action_message, "Result: disconnected")
 
+    # --- Credentials -------------------------------------------------------
+
+    def test_save_credentials_success_clears_password_and_reloads(self) -> None:
+        client = _FakeApiClient(
+            get_responses={"/admin/vpn": {"status": "disconnected", "installed": True, "has_config": True}},
+            post_responses={"/admin/vpn/credentials": {"status": "ok", "username": "alice"}},
+        )
+        screen = VpnScreen(client)
+        screen.username_input = "alice"
+        screen.password_input = "hunter2"
+        screen._save_credentials()
+        self.assertEqual(
+            client.post_calls, [("/admin/vpn/credentials", {"username": "alice", "password": "hunter2"})]
+        )
+        self.assertEqual(screen.credentials_message, "Saved credentials for alice.")
+        self.assertEqual(screen.password_input, "")
+
+    def test_save_credentials_failure_still_clears_password(self) -> None:
+        client = _FakeApiClient(
+            get_responses={"/admin/vpn": {"status": "disconnected", "installed": True, "has_config": True}},
+            post_error=DroneApiError("password is required"),
+        )
+        screen = VpnScreen(client)
+        screen.password_input = "hunter2"
+        screen._save_credentials()
+        self.assertEqual(screen.credentials_message, "password is required")
+        self.assertEqual(screen.password_input, "")
+
+    # --- Sharing -------------------------------------------------------------
+
+    def test_set_sharing_success(self) -> None:
+        client = _FakeApiClient(
+            get_responses={"/admin/vpn": {"status": "disconnected", "installed": True, "has_config": True}},
+            post_responses={"/admin/vpn/sharing": {"status": "ok", "sharing_enabled": True}},
+        )
+        screen = VpnScreen(client)
+        screen._set_sharing(True)
+        self.assertEqual(client.post_calls, [("/admin/vpn/sharing", {"enabled": True})])
+        self.assertEqual(screen.sharing_message, "VPN sharing enabled.")
+
+    def test_set_sharing_never_calls_the_endpoint_when_config_was_imported(self) -> None:
+        # The single-hop-only rule: an imported config can never be
+        # re-shared. This must be enforced here, not just hidden behind a
+        # draw()-time conditional -- state-level, no live imgui frame needed.
+        client = _FakeApiClient(
+            get_responses={
+                "/admin/vpn": {
+                    "status": "disconnected", "installed": True, "has_config": True,
+                    "source_peer_id": "peer-1", "source_peer_name": "Living Room",
+                }
+            },
+        )
+        screen = VpnScreen(client)
+        screen.on_enter()
+        screen._set_sharing(True)
+        self.assertEqual(client.post_calls, [])
+        self.assertIsNone(screen.sharing_message)
+
+    # --- Get a config: pull from a paired peer --------------------------------
+
+    def test_reload_pull_peers_excludes_self_and_offline(self) -> None:
+        client = _FakeApiClient(get_responses={
+            "/admin/swarm/overview": {"drones": [
+                {"drone_id": "self", "is_self": True, "online": True},
+                {"drone_id": "peer1", "name": "Arcade", "online": True},
+                {"drone_id": "peer2", "name": "Offline Peer", "online": False},
+            ]}
+        })
+        screen = VpnScreen(client)
+        screen._reload_pull_peers()
+        self.assertEqual(len(screen.pull_peers), 1)
+        self.assertEqual(screen.pull_peers[0]["drone_id"], "peer1")
+
+    def test_pull_from_peer_success_with_credentials(self) -> None:
+        client = _FakeApiClient(
+            get_responses={"/admin/vpn": {"status": "disconnected", "installed": True, "has_config": True}},
+            post_responses={
+                "/admin/vpn/pull-from-peer": {"status": "ok", "config_filename": "provider.ovpn", "credentials_imported": True}
+            },
+        )
+        screen = VpnScreen(client)
+        screen._pull_from_peer("peer1", "Arcade")
+        self.assertEqual(client.post_calls, [("/admin/vpn/pull-from-peer", {"peer_id": "peer1"})])
+        self.assertEqual(screen.pull_message, "Pulled config and credentials from Arcade.")
+
+    def test_pull_from_peer_failure_surfaces_message(self) -> None:
+        client = _FakeApiClient(post_error=DroneApiError("That drone is not a paired peer."))
+        screen = VpnScreen(client)
+        screen._pull_from_peer("peer1", "Arcade")
+        self.assertEqual(screen.pull_message, "That drone is not a paired peer.")
+
+    # --- Get a config: import from the local drop folder ----------------------
+
+    def test_reload_import_files_populates_files_and_directory(self) -> None:
+        client = _FakeApiClient(get_responses={
+            "/admin/vpn/import-folder": {"directory": "/userdata/vpn-import", "files": ["provider.ovpn"]}
+        })
+        screen = VpnScreen(client)
+        screen._reload_import_files()
+        self.assertEqual(screen.import_files, ["provider.ovpn"])
+        self.assertEqual(screen.import_directory, "/userdata/vpn-import")
+        self.assertIsNone(screen.import_files_error)
+
+    def test_reload_import_files_surfaces_error(self) -> None:
+        client = _FakeApiClient(get_error=DroneApiError("boom"))
+        screen = VpnScreen(client)
+        screen._reload_import_files()
+        self.assertEqual(screen.import_files_error, "boom")
+
+    def test_import_from_folder_success(self) -> None:
+        client = _FakeApiClient(
+            get_responses={"/admin/vpn": {"status": "disconnected", "installed": True, "has_config": True}},
+            post_responses={
+                "/admin/vpn/import-folder/apply": {"status": "ok", "config_filename": "provider.ovpn", "remotes": []}
+            },
+        )
+        screen = VpnScreen(client)
+        screen._import_from_folder("provider.ovpn")
+        self.assertEqual(
+            client.post_calls, [("/admin/vpn/import-folder/apply", {"filename": "provider.ovpn"})]
+        )
+        self.assertEqual(screen.import_message, "Imported provider.ovpn.")
+
+    def test_import_from_folder_failure_surfaces_backend_error(self) -> None:
+        client = _FakeApiClient(post_error=DroneApiError("File not found in the drop folder"))
+        screen = VpnScreen(client)
+        screen._import_from_folder("missing.ovpn")
+        self.assertEqual(screen.import_message, "File not found in the drop folder")
+
+    def test_select_get_config_mode_loads_each_mode_exactly_once(self) -> None:
+        client = _FakeApiClient(get_responses={
+            "/admin/swarm/overview": {"drones": []},
+            "/admin/vpn/import-folder": {"directory": "/userdata/vpn-import", "files": []},
+        })
+        screen = VpnScreen(client)
+        screen._select_get_config_mode("peer")
+        screen._select_get_config_mode("folder")
+        screen._select_get_config_mode("peer")  # re-selecting shouldn't reload
+        self.assertEqual(screen._get_config_loaded, {"peer", "folder"})
+
 
 class BackupsScreenTests(unittest.TestCase):
     def test_on_enter_populates_backups(self) -> None:

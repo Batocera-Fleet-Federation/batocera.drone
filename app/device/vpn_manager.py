@@ -69,6 +69,7 @@ OPENVPN_CONFIG_FILENAME = "client.ovpn"
 OPENVPN_AUTH_FILENAME = "auth.txt"
 OPENVPN_LOG_FILENAME = "vpn.log"
 VPN_UPLOAD_MAX_BYTES = 5 * 1024 * 1024
+VPN_IMPORT_DIRNAME = "vpn-import"
 VPN_CONNECT_TIMEOUT_SECONDS = float(os.environ.get("DRONE_VPN_CONNECT_TIMEOUT_SECONDS", "15"))
 VPN_AUTO_CONNECT_MAX_ATTEMPTS = int(os.environ.get("DRONE_VPN_AUTO_CONNECT_MAX_ATTEMPTS", "4"))
 VPN_AUTO_CONNECT_RETRY_DELAY_SECONDS = float(os.environ.get("DRONE_VPN_AUTO_CONNECT_RETRY_DELAY_SECONDS", "15"))
@@ -140,6 +141,27 @@ def auth_path(settings: Settings) -> Path:
 
 def log_path(settings: Settings) -> Path:
     return vpn_dir(settings) / OPENVPN_LOG_FILENAME
+
+
+def vpn_import_dir(settings: Settings) -> Path:
+    """A drop folder a PC can reach over Batocera's own default guest SMB
+    share (\\\\<device>\\share -- confirmed the same stock export
+    network_share_manager.py already relies on as a peer-side transport --
+    maps to <userdata_root>, so this folder is reachable at
+    \\\\<device>\\share\\vpn-import) without any new server-side setup.
+
+    Deliberately anchored at settings.userdata_root, NOT
+    _drone_install_root() like every other Drone-managed working directory
+    (vpn_dir(), torrent_manager's watch folder, network-shares) -- the
+    whole point of this folder is a human typing/navigating a network path
+    by hand, so a short path wins over directory-layout consistency here.
+    DRONE_VPN_IMPORT_DIR mirrors DRONE_VPN_DIR's escape-hatch pattern for
+    tests/ops.
+    """
+    configured = os.environ.get("DRONE_VPN_IMPORT_DIR")
+    if configured:
+        return Path(configured).resolve()
+    return settings.userdata_root / VPN_IMPORT_DIRNAME
 
 
 def _load_state(settings: Settings) -> dict:
@@ -256,6 +278,45 @@ def save_uploaded_config(settings: Settings, filename: str, raw_bytes: bytes) ->
         source_peer_id="", source_peer_name="", revoked_reason="", revoked_at=None,
     )
     return {"status": "ok", "config_filename": state["config_filename"], "remotes": remotes}
+
+
+def list_import_files(settings: Settings) -> dict:
+    """.ovpn files a PC has dropped into vpn_import_dir() over Batocera's
+    own SMB share -- for the "browse a local drop folder" Get Config flow.
+    Auto-creates the directory so it's immediately browsable/writable over
+    SMB even before anything has ever been dropped into it.
+    """
+    directory = vpn_import_dir(settings)
+    directory.mkdir(parents=True, exist_ok=True)
+    files = sorted(
+        entry.name for entry in directory.iterdir() if entry.is_file() and entry.name.lower().endswith(".ovpn")
+    )
+    return {"directory": str(directory), "files": files}
+
+
+def import_from_folder(settings: Settings, filename: str) -> dict:
+    """Import a named .ovpn file already sitting in vpn_import_dir() -- the
+    same validation/rewrite save_uploaded_config() applies to a browser
+    upload or a peer-pulled config, just read from disk instead. Never
+    duplicates that validation logic; delegates to it directly.
+
+    Path-traversal safety mirrors device/emulator_configs.py's
+    read_emulator_config_file(): reject anything that isn't a bare
+    filename before touching the filesystem, then require the resolved
+    path to still be inside the directory.
+    """
+    name = str(filename or "").strip()
+    if not name or Path(name).name != name:
+        raise FileNotFoundError(f"File not found in the drop folder: {filename!r}")
+    directory = vpn_import_dir(settings)
+    candidate = (directory / name).resolve()
+    try:
+        candidate.relative_to(directory.resolve())
+    except ValueError:
+        raise FileNotFoundError(f"File not found in the drop folder: {filename!r}")
+    if not candidate.is_file():
+        raise FileNotFoundError(f"File not found in the drop folder: {filename!r}")
+    return save_uploaded_config(settings, name, candidate.read_bytes())
 
 
 def save_credentials(settings: Settings, username: str, password: str) -> dict:

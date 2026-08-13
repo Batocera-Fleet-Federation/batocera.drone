@@ -113,3 +113,25 @@ class HandlersVpnMixin:
         if not path.is_file():
             raise FileNotFoundError()
         self._stream_file(path, "text/plain", as_attachment=True)
+
+    def _handle_admin_vpn_import_folder_list(self) -> None:
+        self._send_json(200, _vpn.list_import_files(self.settings))
+
+    def _handle_admin_vpn_import_folder_apply(self, payload: dict) -> None:
+        payload = payload if isinstance(payload, dict) else {}
+        filename = str(payload.get("filename") or "").strip()
+        if not filename:
+            raise ValueError("filename is required")
+        # api_routes.py's generic exception-to-status mapping only catches
+        # FileNotFoundError -> 404 on the GET dispatch path, not POST (POST
+        # only auto-maps ValueError -> 400) -- confirmed reading both
+        # try/except blocks directly. _handle_admin_vpn_pull_from_peer above
+        # already follows this same explicit-404 pattern for the same
+        # reason; letting import_from_folder's FileNotFoundError propagate
+        # bare here would produce a wrong 500, not a 404.
+        try:
+            result = _vpn.import_from_folder(self.settings, filename)
+        except FileNotFoundError as error:
+            self._send_json(404, {"error": str(error) or "File not found in the drop folder"})
+            return
+        self._send_json(200, result)

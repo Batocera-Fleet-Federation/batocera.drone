@@ -1061,6 +1061,18 @@ def _schemas() -> Dict[str, Schema]:
             ("status", "config_filename", "credentials_imported"),
             description="Result of importing a peer's shared VPN config (+ credentials, if included).",
         ),
+        "VpnImportFolderListResponse": _object(
+            {
+                "directory": _string("Real filesystem path -- reachable over Batocera's default guest SMB share"),
+                "files": _array(_string(".ovpn filename found directly in the drop folder")),
+            },
+            ("directory", "files"),
+            description="What's currently sitting in the local VPN-config drop folder, sorted.",
+        ),
+        "VpnImportFolderApplyRequest": _object(
+            {"filename": _string("A bare filename already listed by GET /admin/vpn/import-folder")},
+            ("filename",),
+        ),
         "VpnPeerConfigResponse": _object(
             {
                 "config_filename": _string(),
@@ -2286,6 +2298,12 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             },
             "/admin/vpn/log/download": {
                 "get": _operation("Download the raw openvpn log", {"200": _media_response("Log file", ["text/plain"])}, tags=["admin", "vpn"], error_codes=("401", "403", "404", "429", "500"))
+            },
+            "/admin/vpn/import-folder": {
+                "get": _operation("List .ovpn files found in the local drop folder (auto-created if missing)", {"200": _json_response("VpnImportFolderListResponse")}, tags=["admin", "vpn"], error_codes=("401", "403", "429", "500", "503"))
+            },
+            "/admin/vpn/import-folder/apply": {
+                "post": _operation("Import a named .ovpn file already sitting in the drop folder -- same validation/rewrite as a browser upload", {"200": _json_response("VpnUploadResponse"), "400": _json_response("ErrorResponse", "Not a valid OpenVPN config"), "404": _json_response("ErrorResponse", "File not found in the drop folder")}, request_body=_json_request("VpnImportFolderApplyRequest"), tags=["admin", "vpn"], error_codes=("400", "401", "403", "404", "429", "500", "503"))
             },
             "/admin/smtp": {"get": _operation("Get SMTP configuration and sharing status", {"200": _json_response("SmtpStatusResponse")}, tags=["admin", "smtp"], error_codes=("401", "403", "429", "500", "503"))},
             "/admin/smtp/settings": {

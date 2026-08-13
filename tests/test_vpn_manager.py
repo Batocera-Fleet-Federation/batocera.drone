@@ -138,6 +138,96 @@ class SaveUploadedConfigTests(unittest.TestCase):
             self.assertEqual(state["config_filename"], "ProtonVPN-US.ovpn")
 
 
+class VpnImportDirTests(unittest.TestCase):
+    def test_resolves_under_userdata_root_distinct_from_vpn_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            import_dir = vpn_manager.vpn_import_dir(settings)
+            self.assertEqual(import_dir, Path(tmp) / "vpn-import")
+            self.assertNotEqual(import_dir, vpn_manager.vpn_dir(settings))
+
+    def test_env_override_is_honored(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            custom = Path(tmp) / "custom-import-dir"
+            with mock.patch.dict("os.environ", {"DRONE_VPN_IMPORT_DIR": str(custom)}):
+                self.assertEqual(vpn_manager.vpn_import_dir(settings), custom.resolve())
+
+
+class ListImportFilesTests(unittest.TestCase):
+    def test_auto_creates_the_directory_when_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            self.assertFalse(vpn_manager.vpn_import_dir(settings).exists())
+            result = vpn_manager.list_import_files(settings)
+            self.assertTrue(vpn_manager.vpn_import_dir(settings).is_dir())
+            self.assertEqual(result["files"], [])
+
+    def test_only_returns_ovpn_files_sorted_ignoring_subdirs_and_others(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            directory = vpn_manager.vpn_import_dir(settings)
+            directory.mkdir(parents=True)
+            (directory / "zprovider.OVPN").write_text("remote a 1194\n")
+            (directory / "aprovider.ovpn").write_text("remote b 1194\n")
+            (directory / "readme.txt").write_text("not a config\n")
+            (directory / "subdir").mkdir()
+            result = vpn_manager.list_import_files(settings)
+            self.assertEqual(result["files"], ["aprovider.ovpn", "zprovider.OVPN"])
+            self.assertEqual(result["directory"], str(directory))
+
+
+class ImportFromFolderTests(unittest.TestCase):
+    def test_happy_path_matches_a_direct_save_uploaded_config_call(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            directory = vpn_manager.vpn_import_dir(settings)
+            directory.mkdir(parents=True)
+            (directory / "provider.ovpn").write_bytes(SAMPLE_OVPN.encode())
+
+            result = vpn_manager.import_from_folder(settings, "provider.ovpn")
+
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(result["config_filename"], "provider.ovpn")
+            self.assertEqual(result["remotes"], ["vpn.example.net 1194"])
+            written = vpn_manager.config_path(settings).read_text()
+            self.assertIn(f"auth-user-pass {vpn_manager.auth_path(settings)}", written)
+            state = vpn_manager._load_state(settings)
+            self.assertTrue(state["has_config"])
+
+    def test_rejects_a_traversal_filename_and_touches_nothing_outside_the_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            directory = vpn_manager.vpn_import_dir(settings)
+            directory.mkdir(parents=True)
+            outside_secret = Path(tmp) / "outside-secret.ovpn"
+            outside_secret.write_bytes(SAMPLE_OVPN.encode())
+
+            with self.assertRaises(FileNotFoundError):
+                vpn_manager.import_from_folder(settings, "../outside-secret.ovpn")
+            with self.assertRaises(FileNotFoundError):
+                vpn_manager.import_from_folder(settings, "/etc/passwd")
+
+            state = vpn_manager._load_state(settings)
+            self.assertFalse(state["has_config"])
+            self.assertFalse(vpn_manager.config_path(settings).exists())
+
+    def test_unknown_filename_raises_file_not_found(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            with self.assertRaises(FileNotFoundError):
+                vpn_manager.import_from_folder(settings, "does-not-exist.ovpn")
+
+    def test_propagates_the_no_remote_directive_error_same_as_a_bad_upload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            directory = vpn_manager.vpn_import_dir(settings)
+            directory.mkdir(parents=True)
+            (directory / "bad.ovpn").write_text("client\ndev tun\n")
+            with self.assertRaises(ValueError):
+                vpn_manager.import_from_folder(settings, "bad.ovpn")
+
+
 class SaveCredentialsTests(unittest.TestCase):
     def test_rejects_empty_username_or_password(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

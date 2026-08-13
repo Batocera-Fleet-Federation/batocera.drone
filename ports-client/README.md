@@ -25,16 +25,66 @@ an auth key; Local Network: this drone's own pairing code + discover/pair
 with a nearby drone; Reference ROMs: mount a paired peer's ROM/BIOS library
 over the network instead of copying it, with Reference/Unreference per
 peer; Request Assets: pick a paired peer, browse their Systems+ROMs or
-Movies with a search box, and pull an individual item), VPN (status +
-Connect/Disconnect), and Backups (list + Create). Deliberately **not**
-built anywhere a gamepad-only console UI has no good answer: VPN config
-upload/credentials/sharing (needs a file picker + typed secrets), Backups
+Movies with a search box, and pull an individual item), VPN (status,
+Connect/Disconnect, credentials, sharing, and getting a config onto the
+device -- see "Full controller navigation" below), and Backups (list +
+Create). Deliberately **not** built anywhere a gamepad-only console UI
+still has no good answer: VPN config upload via a file-picker dialog (the
+two Get Config flows below cover this without one), Backups
 download/delete/apply (nowhere on the console to save a downloaded file
 to, and destructive actions are safer left to the browser's confirmation
 flow), Tailnet/Local Network peer *management* -- rotate-auth-key, sharing
 toggles, pull-from-peer, forget/dismiss -- and Request Assets' Music
 (peer inventory has no music type at all) or bulk "sync everything" (see
 `client/endpoints.py`'s module comments for the full list and reasoning).
+
+## Full controller navigation + virtual keyboard (2026-08-13)
+
+**The vendored SDL2/ImGui backend had three real gaps, not zero** (found
+reading `imgui_bundle.python_backends.sdl2_backend` directly -- confirmed
+no other vendored backend in the package, sdl2/sdl3/glfw/pygame/pyglet,
+covers any of them either): it never set ImGui's `HasGamepad` flag (which
+the nav system checks before gamepad nav activates *at all* -- confirmed
+live, a simulated gamepad button press was silently ignored until this
+flag was set), had zero analog left-stick support, and never translated
+shoulder buttons (L1/R1) to any `imgui.Key`. `ui/gamepad.py` patches all
+three -- plain functions called from `ui/app.py`'s render loop, mirroring
+the existing `_fix_hidpi_framebuffer_scale` pattern for patching a
+vendored-backend gap, not a `SDL2Renderer` subclass. The analog stick is
+**polled every frame**, not event-driven off `SDL_CONTROLLERAXISMOTION` --
+that event only fires on change, and ImGui's nav-repeat timer needs the
+*current* held value every frame, the same way a held D-pad button
+repeats. L1/R1 drive a small bonus: quick Swarm/VPN/Backups tab-cycling
+in `ui/shell.py` (polish, not a functional gap -- D-pad/stick nav can
+already reach those same top-bar buttons directly).
+
+**`ui/virtual_keyboard.py`** is a custom on-screen QWERTY keyboard (Dear
+ImGui has none built in) that auto-opens when a text field is activated
+via gamepad specifically -- never via mouse, so mouse+keyboard users keep
+typing directly through the real `imgui.input_text` widget, completely
+unaffected. Detection uses `imgui.get_current_context().active_id_source == imgui.internal.InputSource.gamepad`,
+checked right after `imgui.is_item_activated()`. A single module-level
+session (not a per-field dict -- a popup modal blocks everything else
+while open, so at most one can ever be active) is matched by the exact
+ImGui label string a call site passes in. `virtual_keyboard.input_text()`
+is a drop-in replacement for `imgui.input_text` -- every existing text
+field (login form, Tailnet auth key, LAN pairing codes, both search
+boxes) plus the two new VPN credential fields now go through it.
+
+Now that typed secrets are gamepad-enterable, **VPN credentials/sharing
+are back in scope** (previously excluded specifically for lack of a
+keyboard). Getting the actual `.ovpn` **config file** onto the device is a
+separate problem the virtual keyboard doesn't solve, so the VPN screen's
+"Get a VPN Config" flow offers two gamepad-native paths: pulling one from
+an already-configured paired peer (reuses the existing
+`POST /admin/vpn/pull-from-peer`, zero typing or file picker at all), or
+importing one a PC dropped into a new local drop folder
+(`<userdata_root>/vpn-import`, reachable at `\\<device-ip>\share\vpn-import`
+over Batocera's own default guest SMB export -- new backend endpoints,
+`GET/POST /admin/vpn/import-folder*` in `app/device/vpn_manager.py` +
+`app/web/handlers_vpn.py`, delegating to the existing
+`save_uploaded_config()` so the `.ovpn`/`remote`-directive validation and
+rewrite logic isn't duplicated).
 
 ## Code separation
 
@@ -287,6 +337,31 @@ GUI app's correctness isn't provable from code review alone:
   directly, not from a live two-drone pairing). Real frames driven through
   the full Request Assets flow: peer picker -> Systems -> select system ->
   ROM list -> Request -> Movies -> Request -> back to peer list.
+- **Gamepad nav infrastructure + virtual keyboard (2026-08-13):** confirmed
+  live that `imgui.is_key_pressed` for a gamepad key genuinely does
+  nothing until `io.backend_flags` has `HasGamepad` set -- a simulated
+  R1 press was silently ignored before the fix, correctly triggered
+  `AppShell`'s quick-tab-switch after it, proving Gap 1 was a real
+  functional blocker, not just theoretically incomplete. The virtual
+  keyboard's full round trip was driven through real frames end-to-end:
+  simulated a gamepad-sourced activation on a real field (Tailnet auth
+  key), typed characters via the actual `_draw_key_rows` button logic in
+  a live frame, pressed Done, and confirmed the committed value flowed
+  back into the screen's own state on the next frame via the real
+  `input_text()` label-matching path -- not just the isolated state-machine
+  unit tests. The redesigned VPN screen (Get Config peer-pull and
+  folder-import sub-flows, credentials fields, sharing checkbox, the
+  source_peer_id guard state) was driven through real frames against both
+  the mock server and the real backend with no exceptions. The new
+  `/admin/vpn/import-folder*` backend endpoints were verified twice over,
+  independently: raw HTTP against a real live server (404 for an unknown
+  filename, 200 with correctly-parsed remotes for a real dropped file),
+  and again through ports-client's own `endpoints.py` wrappers against
+  that same real server. Also re-deployed the full bundle to the real
+  `batocera.local` device (isolated scratch dir, matching the existing
+  cp312-ABI/cert-path incidents' verification pattern) with all of this
+  session's new code loaded -- confirmed a clean boot and a stable,
+  actively-rendering process (10% CPU, zero tracebacks).
 
 **Not verified -- needs real Batocera hardware or a Linux dev box, per the
 plan's Phase 1:**
@@ -296,9 +371,21 @@ plan's Phase 1:**
   3.3 core** (what imgui_bundle's bundled Python GL3 renderer requires,
   GLSL `#version 330`) rather than GLES-only -- a real risk for some of the
   fleet's ARM boards/handhelds, unverified either way.
-- Actual gamepad button-to-nav feel (event wiring is in place and modeled
-  on imgui_bundle's own reference example, but no physical controller was
-  available to test with here).
+- **Real physical gamepad feel** -- everything above proves the plumbing is
+  genuinely wired correctly (not just "should work"), but a real button
+  press/stick tilt on real hardware, and whether `active_id_source` really
+  reports `gamepad` (not `keyboard`) for a real controller's activation,
+  are both still unconfirmed; no physical controller was available in this
+  environment. See `ui/virtual_keyboard.py`'s docstring for the concrete
+  fallback (`is_item_activated() and not is_mouse_clicked(0)`) if the
+  `active_id_source` check misbehaves on real hardware.
+- Whether a popup modal (the virtual keyboard) cleanly receives D-pad/stick
+  nav focus with no extra glue code on real hardware -- standard documented
+  ImGui behavior, no counter-evidence found reading the vendored backend,
+  but unconfirmed live.
+- The `_DEADZONE = 0.25` analog-stick constant in `ui/gamepad.py` is a
+  defensible default, not a validated value -- may need tuning (0.15-0.35)
+  once tested against real, possibly-worn analog sticks.
 - The theme's actual visual appearance against a real display (colors were
   taken directly from `app/web/static/css/drone.css`'s `:root` values, not
   eyeballed against a running Drone UI side-by-side).

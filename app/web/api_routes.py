@@ -451,6 +451,10 @@ class ApiRoutesMixin:
                 self._handle_admin_vpn_log_download()
                 return
 
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "vpn" and parts[2] == "import-folder":
+                self._handle_admin_vpn_import_folder_list()
+                return
+
             if len(parts) == 2 and parts[0] == "admin" and parts[1] == "smtp":
                 self._handle_admin_smtp_status()
                 return
@@ -1010,6 +1014,17 @@ class ApiRoutesMixin:
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "vpn" and parts[2] == "self-heal":
                 payload = self._read_json_body()
                 self._handle_admin_vpn_self_heal(payload)
+                return
+
+            if (
+                len(parts) == 4
+                and parts[0] == "admin"
+                and parts[1] == "vpn"
+                and parts[2] == "import-folder"
+                and parts[3] == "apply"
+            ):
+                payload = self._read_json_body()
+                self._handle_admin_vpn_import_folder_apply(payload)
                 return
 
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "smtp" and parts[2] == "settings":

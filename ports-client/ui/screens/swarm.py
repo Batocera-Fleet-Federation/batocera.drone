@@ -17,6 +17,7 @@ from imgui_bundle import imgui
 from client import endpoints
 from client.errors import DroneApiError
 
+from .. import virtual_keyboard
 from ..theme import ERROR_COLOR, SUCCESS_COLOR, WARNING_COLOR
 from ..widgets import search_box, tab_button
 from .base import Screen
@@ -241,7 +242,7 @@ class SwarmScreen(Screen):
                 "drone to an existing tailnet."
             )
             imgui.set_next_item_width(400)
-            _, self.tailnet_auth_key = imgui.input_text(
+            _, self.tailnet_auth_key = virtual_keyboard.input_text(
                 "Auth key", self.tailnet_auth_key, imgui.InputTextFlags_.password.value
             )
             if imgui.button("Enroll") and self.tailnet_auth_key.strip():
@@ -325,7 +326,7 @@ class SwarmScreen(Screen):
 
         current_code = self.pairing_code_inputs.get(peer_id, "")
         imgui.set_next_item_width(150)
-        _, current_code = imgui.input_text(f"Their code##{peer_id}", current_code)
+        _, current_code = virtual_keyboard.input_text(f"Their code##{peer_id}", current_code)
         self.pairing_code_inputs[peer_id] = current_code
 
         imgui.same_line()

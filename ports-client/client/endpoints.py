@@ -100,9 +100,13 @@ def request_asset(client: DroneApiClient, peer_id: str, asset_type: str, item: d
 
 
 # --- VPN ---------------------------------------------------------------
-# Upload/credentials/sharing/pull-from-peer are deliberately not wrapped:
-# they're form-heavy admin actions with no practical gamepad-only UI (a
-# .ovpn file picker, typed credentials) -- see the VPN screen's docstring.
+# Credentials/sharing/pull-from-peer/local-folder-import are wrapped now
+# that ports-client's virtual keyboard makes typed secrets enterable via
+# gamepad -- see the VPN screen's docstring for the two ways it now offers
+# to actually get a .ovpn config onto the device (peer-pull, no typing or
+# file picker at all; or a local drop-folder browse, see Part 4's new
+# backend endpoints). vpn_upload exists for API completeness/testability;
+# the screen itself never calls it -- no file-picker UI, by design.
 
 def vpn_status(client: DroneApiClient) -> dict:
     return client.get("/admin/vpn")
@@ -114,6 +118,30 @@ def vpn_connect(client: DroneApiClient) -> dict:
 
 def vpn_disconnect(client: DroneApiClient) -> dict:
     return client.post("/admin/vpn/disconnect")
+
+
+def vpn_upload(client: DroneApiClient, filename: str, content: bytes) -> dict:
+    return client.post_multipart("/admin/vpn/upload", "config", filename, content)
+
+
+def vpn_credentials(client: DroneApiClient, username: str, password: str) -> dict:
+    return client.post("/admin/vpn/credentials", {"username": username, "password": password})
+
+
+def vpn_sharing(client: DroneApiClient, enabled: bool) -> dict:
+    return client.post("/admin/vpn/sharing", {"enabled": enabled})
+
+
+def vpn_pull_from_peer(client: DroneApiClient, peer_id: str) -> dict:
+    return client.post("/admin/vpn/pull-from-peer", {"peer_id": peer_id})
+
+
+def vpn_list_import_files(client: DroneApiClient) -> dict:
+    return client.get("/admin/vpn/import-folder")
+
+
+def vpn_import_from_folder(client: DroneApiClient, filename: str) -> dict:
+    return client.post("/admin/vpn/import-folder/apply", {"filename": filename})
 
 
 # --- Backups -------------------------------------------------------------

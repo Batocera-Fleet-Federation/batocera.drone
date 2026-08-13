@@ -18,6 +18,7 @@ from imgui_bundle import imgui
 
 from client.errors import AuthenticationError, DroneApiError
 
+from .. import virtual_keyboard
 from ..theme import ERROR_COLOR
 from .base import Screen
 
@@ -64,9 +65,9 @@ class LoginScreen(Screen):
         # Reachable, but genuinely not authenticated -- only expected when
         # DRONE_PORTS_CLIENT_HOST points somewhere other than loopback.
         imgui.set_next_item_width(320)
-        _, self.username = imgui.input_text("Username", self.username)
+        _, self.username = virtual_keyboard.input_text("Username", self.username)
         imgui.set_next_item_width(320)
-        _, self.password = imgui.input_text(
+        _, self.password = virtual_keyboard.input_text(
             "Password", self.password, imgui.InputTextFlags_.password.value
         )
 
