@@ -19,7 +19,10 @@ state is left to the browser UI. `ui/shell.py`'s top nav is now a flat
 Swarm/VPN/Backups (no "Admin" wrapper -- with Debug and Automation gone, an
 Admin grouping around just VPN+Backups was pure overhead).
 
-**Status:** every top-level section is built and tested. Swarm (Overview:
+**Status:** every top-level section is built and tested. About (the landing
+tab -- what this app is, why it exists as a Ports-menu companion, and the
+HTTPS URL for the full web dashboard, sourced live from this drone's own
+`swarm/overview` self-entry rather than hardcoded), Swarm (Overview:
 read-only federation/peer list; Tailnet: join an existing swarm by pasting
 an auth key; Local Network: this drone's own pairing code + discover/pair
 with a nearby drone; Reference ROMs: mount a paired peer's ROM/BIOS library
@@ -27,16 +30,88 @@ over the network instead of copying it, with Reference/Unreference per
 peer; Request Assets: pick a paired peer, browse their Systems+ROMs or
 Movies with a search box, and pull an individual item), VPN (status,
 Connect/Disconnect, credentials, sharing, and getting a config onto the
-device -- see "Full controller navigation" below), and Backups (list +
-Create). Deliberately **not** built anywhere a gamepad-only console UI
-still has no good answer: VPN config upload via a file-picker dialog (the
-two Get Config flows below cover this without one), Backups
-download/delete/apply (nowhere on the console to save a downloaded file
-to, and destructive actions are safer left to the browser's confirmation
-flow), Tailnet/Local Network peer *management* -- rotate-auth-key, sharing
-toggles, pull-from-peer, forget/dismiss -- and Request Assets' Music
-(peer inventory has no music type at all) or bulk "sync everything" (see
-`client/endpoints.py`'s module comments for the full list and reasoning).
+device -- see "Full controller navigation" below), and Backups (list,
+Create, and Apply/restore -- see "Backup restore" below). Deliberately
+**not** built anywhere a gamepad-only console UI still has no good answer:
+VPN config upload via a file-picker dialog (the two Get Config flows below
+cover this without one), Backups download/delete/email (nowhere on the
+console to save a downloaded file to, and delete/email are lower-value
+from a controller), Tailnet/Local Network peer *management* --
+rotate-auth-key, sharing toggles, pull-from-peer, forget/dismiss -- and
+Request Assets' Music (peer inventory has no music type at all) or bulk
+"sync everything" (see `client/endpoints.py`'s module comments for the
+full list and reasoning).
+
+## Backup restore + About landing page + visual theme pass (2026-08-13)
+
+**Backups: Apply (restore) added.** `ui/screens/backups.py`'s original
+"apply is destructive, better left to the browser" reasoning was revisited
+once the virtual keyboard made a real gamepad-navigable confirmation
+possible -- each complete backup now gets an "Apply this Backup" button
+that opens a `begin_popup_modal` confirmation mirroring the browser's own
+ack-checkbox-gated warning (overlay semantics, EmulationStation restart,
+cannot be undone) almost word-for-word, B-button-cancelable like the
+virtual keyboard's own popup. The actual `POST /admin/config-backups/{id}/apply`
+call can legitimately take much longer than the client's normal 15s
+default (it stops EmulationStation, copies files, restarts it), so
+`DroneApiClient.post()`/`_send()` gained an optional per-call `timeout`
+override (180s for this one call) rather than risk the exact "could not
+reach Drone... read operation timed out" failure mode described below --
+the operation would have kept running server-side and succeeded, just
+past the client's patience. Applying is still synchronous (no threading
+anywhere in ports-client), so the confirm click is a two-phase deferred
+call: phase one sets an "Applying..." flag and returns, letting that frame
+actually present before phase two makes the blocking call on the next
+frame -- otherwise the click that starts a multi-second freeze would
+freeze on the very frame that should explain why.
+
+**About: a new landing tab.** `ui/screens/about.py`, now the shell's
+default section, mirrors drone.js's own landing page (`renderHelpPage`,
+the `#home`/`#help` route) in tone: what this app is, why it exists
+specifically as a gamepad-navigable Ports-menu companion rather than "the
+same thing as the browser," and the HTTPS URL for the full dashboard for
+everything this console app doesn't cover (library browsing, Torrents,
+System Info, Automation, notifications). The URL is sourced live from
+`GET /admin/swarm/overview`'s self-entry `reachable_url` field (the same
+value the backend computes for its own peer-discovery announcements) --
+never hardcoded or built from a Host header.
+
+**A real logo, not just text.** `ui/assets.py` loads
+`ui/assets/logo.png` (the Batocera Fleet Federation marquee built earlier
+this session, reused rather than duplicated) as a GPU texture via
+`hello_imgui.image_and_size_from_encoded_data`, cached after first load.
+**This must never be called from `on_enter()`** -- uploading a texture
+needs a live GL context, which only exists once `ui/app.py`'s real render
+loop is running; `on_enter()` is also reachable from plain unit tests with
+no window/context at all, where the call doesn't raise a catchable Python
+exception but hard-crashes the process (confirmed the hard way while
+building this). Both `about.py` and `shell.py` only ever touch it from
+inside `draw()`, which no committed test calls directly, matching this
+codebase's existing test-vs-render split. The About page crops the image
+to its wordmark's actual content band via UV coordinates (the source PNG
+has large transparent margins built for EmulationStation's wide marquee
+slot -- showing the full square left an odd empty gap here); the shell's
+top bar shows a small uncropped version next to the app name.
+
+**Visual theme pass.** `ui/theme.py` already reproduced drone.css's exact
+color palette, but a flat ImGui look with no page texture, no card
+elevation, and tight default spacing still read as "plain" next to the
+browser UI's grid-textured, gradient, drop-shadowed cards. Closed most of
+that gap with pure ImGui draw-list work, no new dependencies: a faint 42px
+grid drawn on the background draw list every frame
+(`draw_background_grid`, reproducing drone.css's own `body` background
+exactly), the root window switched to `WindowFlags_.no_background` so that
+grid shows through instead of being painted over by the window's own
+opaque fill (child windows/frames keep their real backgrounds, so they now
+read as cards sitting on the grid), a left-to-right gradient behind the
+shell's top bar matching `.sidebar`'s CSS gradient, more generous window/
+frame padding and rounding, and the previously-unused `ACCENT_HOT` (pink,
+`--admin-accent-hot` in drone.css) now used for the app name in the top
+bar and the About page's kicker text. Deliberately not attempted: an icon
+font (Bootstrap Icons is what actually carries a lot of the web UI's visual
+interest) -- no icon font is vendored, and picking/bundling/mapping one is
+a meaningfully bigger, separate piece of work, not a same-session polish
+item.
 
 ## Full controller navigation + virtual keyboard (2026-08-13)
 
@@ -362,6 +437,22 @@ GUI app's correctness isn't provable from code review alone:
   cp312-ABI/cert-path incidents' verification pattern) with all of this
   session's new code loaded -- confirmed a clean boot and a stable,
   actively-rendering process (10% CPU, zero tracebacks).
+- **Backup restore, the About page, and the theme pass (2026-08-13):**
+  the full Apply-backup confirm-then-restore flow driven through real
+  frames -- opened the confirmation popup, checked the ack box, confirmed,
+  and verified the deferred two-phase call actually fired
+  `POST /admin/config-backups/{id}/apply` with the longer 180s timeout and
+  surfaced the real `restored_file_count`/`restarted_emulationstation`
+  result text. The About screen's real GPU texture load (`hello_imgui.
+  image_and_size_from_encoded_data`) driven through real frames against a
+  real SDL2/GL context -- confirmed it crashes the process (not a catchable
+  exception) when attempted without a live context, which is exactly why
+  it's called from `draw()` and not `on_enter()`. The whole shell (About/
+  Swarm/VPN/Backups) re-verified rendering cleanly across 8 real frames
+  with the new gradient top bar, background grid, and logo texture all
+  active together, plus visual review of actual captured framebuffer
+  screenshots (`glReadPixels`) for all four sections -- not just "no
+  exception," actually looked at.
 
 **Not verified -- needs real Batocera hardware or a Linux dev box, per the
 plan's Phase 1:**

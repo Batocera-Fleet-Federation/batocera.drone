@@ -4,27 +4,33 @@ Deliberately mirrors drone.js's own flow rather than a stack of full-screen
 menus with "Back" buttons: an always-visible nav bar highlights the active
 section and switches the content pane in place.
 
-Scoped to swarm-related activities only (see ports-client/README.md): show
-the swarm, connect to it, reference a peer's ROMs, download ROMs/Movies from
-a peer (all under Swarm's own tabs -- see swarm.py), VPN, and Backups. Local
-Assets browsing and the Debug/Automation admin tiles were removed. VPN and
-Backups are flat top-level sections rather than nested under an "Admin"
-grouping -- with Debug and Automation gone, an Admin wrapper around just
-two items was pure overhead.
+Scoped to swarm-related activities only (see ports-client/README.md): About
+(the landing tab -- what this app is and a pointer to the full web UI for
+everything it doesn't cover), the swarm, connect to it, reference a peer's
+ROMs, download ROMs/Movies from a peer (all under Swarm's own tabs -- see
+swarm.py), VPN, and Backups. Local Assets browsing and the Debug/Automation
+admin tiles were removed. VPN and Backups are flat top-level sections rather
+than nested under an "Admin" grouping -- with Debug and Automation gone, an
+Admin wrapper around just two items was pure overhead.
 """
 
 from imgui_bundle import imgui
 
 from client.http_client import DroneApiClient
 
+from . import assets
+from .screens.about import AboutScreen
 from .screens.backups import BackupsScreen
 from .screens.base import Screen
 from .screens.swarm import SwarmScreen
 from .screens.vpn import VpnScreen
+from .theme import ACCENT_HOT, ADMIN_SIDEBAR, ADMIN_SIDEBAR_GRADIENT_START, hex_color
 from .widgets import tab_button
 
-_SECTIONS = (("swarm", "Swarm"), ("vpn", "VPN"), ("backups", "Backups"))
+_SECTIONS = (("about", "About"), ("swarm", "Swarm"), ("vpn", "VPN"), ("backups", "Backups"))
 _QUIT_AREA_WIDTH = 90.0
+_TOP_BAR_HEIGHT = 44.0
+_LOGO_ICON_HEIGHT = 26.0
 
 
 class AppShell(Screen):
@@ -32,8 +38,9 @@ class AppShell(Screen):
         self.api_client = api_client
         self.username = username
         self.on_quit = on_quit
-        self.section = "swarm"
+        self.section = "about"
         self._content = {
+            "about": AboutScreen(api_client),
             "swarm": SwarmScreen(api_client),
             "vpn": VpnScreen(api_client),
             "backups": BackupsScreen(api_client),
@@ -65,7 +72,16 @@ class AppShell(Screen):
         self._content[self.section].draw(navigator)
 
     def _draw_top_bar(self) -> None:
-        imgui.text("Batocera Drone")
+        self._draw_top_bar_background()
+
+        logo = assets.logo_texture()
+        if logo is not None:
+            texture_id, size = logo
+            scale = _LOGO_ICON_HEIGHT / size.y if size.y > 0 else 0.0
+            imgui.image(imgui.ImTextureRef(texture_id), imgui.ImVec2(size.x * scale, size.y * scale))
+            imgui.same_line()
+
+        imgui.text_colored(hex_color(ACCENT_HOT), "Batocera Drone")
         imgui.same_line()
         imgui.text_disabled(f"-- {self.username}")
         imgui.same_line(0, 40)
@@ -77,6 +93,19 @@ class AppShell(Screen):
         imgui.same_line(max(0.0, imgui.get_window_width() - _QUIT_AREA_WIDTH))
         if imgui.button("Quit"):
             self.on_quit()
+
+    @staticmethod
+    def _draw_top_bar_background() -> None:
+        # drone.css's .sidebar: linear-gradient(90deg, #111936 0%, var(--admin-sidebar)
+        # 100%) -- reproduced left-to-right across the top bar's own row so the
+        # shell doesn't sit on the same flat window_bg as everything else.
+        draw_list = imgui.get_window_draw_list()
+        top_left = imgui.get_cursor_screen_pos()
+        width = imgui.get_window_width()
+        bottom_right = imgui.ImVec2(top_left.x + width, top_left.y + _TOP_BAR_HEIGHT)
+        start_color = imgui.get_color_u32(hex_color(ADMIN_SIDEBAR_GRADIENT_START))
+        end_color = imgui.get_color_u32(hex_color(ADMIN_SIDEBAR))
+        draw_list.add_rect_filled_multi_color(top_left, bottom_right, start_color, end_color, end_color, start_color)
 
     def _select_section(self, section: str) -> None:
         self.section = section

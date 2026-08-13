@@ -7,6 +7,7 @@ See test_http_client.py / test_http_client_integration.py for the HTTP layer.
 import unittest
 
 from client.errors import AuthenticationError, DroneApiError
+from ui.screens.about import AboutScreen
 from ui.screens.backups import BackupsScreen
 from ui.screens.login import LoginScreen
 from ui.screens.swarm import SwarmScreen
@@ -43,7 +44,7 @@ class _FakeApiClient:
             raise self._get_error
         return self._get_responses.get(path, {})
 
-    def post(self, path, body=None):
+    def post(self, path, body=None, *, timeout=None):
         self.post_calls.append((path, body))
         if self._post_error is not None:
             raise self._post_error
@@ -615,14 +616,92 @@ class BackupsScreenTests(unittest.TestCase):
         self.assertEqual(_format_size(500), "500B")
         self.assertEqual(_format_size(2048), "2.0KB")
 
+    def test_open_apply_confirmation_sets_pending_state_and_resets_ack(self) -> None:
+        screen = BackupsScreen(_FakeApiClient())
+        screen.apply_ack = True
+        screen._open_apply_confirmation(7, "nightly-backup")
+        self.assertEqual(screen.pending_apply_id, 7)
+        self.assertEqual(screen.pending_apply_name, "nightly-backup")
+        self.assertFalse(screen.apply_ack)
+        self.assertTrue(screen._apply_popup_just_opened)
+
+    def test_apply_backup_success_reports_restored_count_and_es_restart(self) -> None:
+        client = _FakeApiClient(
+            get_responses={"/admin/config-backups": {"backups": []}},
+            post_responses={"/admin/config-backups/7/apply": {
+                "status": "ok", "restored_file_count": 12, "restarted_emulationstation": True,
+            }},
+        )
+        screen = BackupsScreen(client)
+        screen._apply_backup(7)
+        self.assertIn("12 file(s) restored", screen.apply_message)
+        self.assertIn("EmulationStation was restarted", screen.apply_message)
+        self.assertEqual(client.post_calls, [("/admin/config-backups/7/apply", {})])
+
+    def test_apply_backup_not_found(self) -> None:
+        client = _FakeApiClient(
+            get_responses={"/admin/config-backups": {"backups": []}},
+            post_responses={"/admin/config-backups/7/apply": {"status": "not_found"}},
+        )
+        screen = BackupsScreen(client)
+        screen._apply_backup(7)
+        self.assertEqual(screen.apply_message, "That backup no longer exists.")
+
+    def test_apply_backup_server_error(self) -> None:
+        client = _FakeApiClient(
+            get_responses={"/admin/config-backups": {"backups": []}},
+            post_responses={"/admin/config-backups/7/apply": {"status": "error", "error": "helper unreachable"}},
+        )
+        screen = BackupsScreen(client)
+        screen._apply_backup(7)
+        self.assertIn("helper unreachable", screen.apply_message)
+
+    def test_apply_backup_transport_error(self) -> None:
+        client = _FakeApiClient(
+            get_responses={"/admin/config-backups": {"backups": []}},
+            post_error=DroneApiError("could not reach Drone"),
+        )
+        screen = BackupsScreen(client)
+        screen._apply_backup(7)
+        self.assertIn("could not reach Drone", screen.apply_message)
+
+
+class AboutScreenTests(unittest.TestCase):
+    def test_reload_url_uses_the_self_row_reachable_url(self) -> None:
+        client = _FakeApiClient(get_responses={"/admin/swarm/overview": {
+            "drones": [
+                {"drone_id": "peer-1", "is_self": False, "reachable_url": "https://peer-1.local"},
+                {"drone_id": "self", "is_self": True, "reachable_url": "https://batocera.local"},
+            ]
+        }})
+        screen = AboutScreen(client)
+        screen._reload_url()
+        self.assertEqual(screen.web_url, "https://batocera.local")
+        self.assertIsNone(screen.error)
+
+    def test_reload_url_surfaces_error(self) -> None:
+        client = _FakeApiClient(get_error=DroneApiError("could not reach Drone"))
+        screen = AboutScreen(client)
+        screen._reload_url()
+        self.assertEqual(screen.error, "could not reach Drone")
+        self.assertEqual(screen.web_url, "")
+
+    def test_reload_url_handles_missing_self_row(self) -> None:
+        client = _FakeApiClient(get_responses={"/admin/swarm/overview": {"drones": []}})
+        screen = AboutScreen(client)
+        screen._reload_url()
+        self.assertEqual(screen.web_url, "")
+        self.assertIsNone(screen.error)
+
 
 class AppShellTests(unittest.TestCase):
-    def test_starts_on_swarm_and_enters_it_lazily(self) -> None:
+    def test_starts_on_about_and_enters_it_lazily(self) -> None:
         client = _FakeApiClient(get_responses={"/admin/swarm/overview": {"active": False, "drones": []}})
         shell = AppShell(client, "batocera", on_quit=lambda: None)
-        self.assertEqual(shell.section, "swarm")
+        self.assertEqual(shell.section, "about")
         shell.on_enter()
-        self.assertIn("swarm", shell._entered_keys)
+        self.assertIn("about", shell._entered_keys)
+        self.assertNotIn("swarm", shell._entered_keys)
         self.assertNotIn("vpn", shell._entered_keys)
 
     def test_selecting_vpn_enters_it_lazily(self) -> None:
@@ -642,11 +721,12 @@ class AppShellTests(unittest.TestCase):
             "/admin/config-backups": {"backups": []},
         })
         shell = AppShell(client, "batocera", on_quit=lambda: None)
-        shell.on_enter()  # swarm, default section
+        shell.on_enter()  # about, default section
+        shell._select_section("swarm")
         shell._select_section("vpn")
         shell._select_section("backups")
         shell._select_section("backups")  # re-selecting shouldn't re-enter
-        self.assertEqual(shell._entered_keys, {"swarm", "vpn", "backups"})
+        self.assertEqual(shell._entered_keys, {"about", "swarm", "vpn", "backups"})
 
     def test_quit_button_logic_calls_callback(self) -> None:
         client = _FakeApiClient()

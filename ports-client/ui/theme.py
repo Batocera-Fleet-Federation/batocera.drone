@@ -12,11 +12,18 @@ ADMIN_SURFACE = "#151f32"
 ADMIN_SURFACE_MUTED = "#1f2a44"
 ADMIN_BORDER = "#31405f"
 ADMIN_SIDEBAR = "#0b1020"
+ADMIN_SIDEBAR_GRADIENT_START = "#111936"  # drone.css .sidebar: linear-gradient(90deg, #111936 0%, var(--admin-sidebar) 100%)
 ACCENT = "#00c2ff"
+ACCENT_HOT = "#ff3ea5"
 ACCENT_GREEN = "#34d399"
 ACCENT_COIN = "#ffbf3f"
 TEXT = "#ecf6ff"
 MUTED = "#9fb0c9"
+# body's 42px repeating 1px-line grid, drawn faint over the window background
+# (drone.css's own `linear-gradient(rgba(255,255,255,0.035) 1px, transparent
+# 1px)`, twice, one per axis) -- same alpha, same spacing.
+_GRID_SPACING = 42.0
+_GRID_LINE_ALPHA = 0.035
 
 
 def hex_color(hex_value: str, alpha: float = 1.0) -> "imgui.ImVec4":
@@ -32,12 +39,19 @@ def apply_drone_theme() -> None:
     style = imgui.get_style()
     Col = imgui.Col_
 
-    style.window_rounding = 6.0
-    style.frame_rounding = 4.0
-    style.grab_rounding = 4.0
-    style.tab_rounding = 4.0
+    style.window_rounding = 8.0
+    style.frame_rounding = 6.0
+    style.grab_rounding = 6.0
+    style.tab_rounding = 6.0
+    style.popup_rounding = 8.0
+    style.child_rounding = 8.0
     style.window_border_size = 1.0
     style.frame_border_size = 1.0
+    # A little roomier than ImGui's cramped defaults -- closer to Bootstrap's
+    # own card/button padding, part of what makes the web UI not feel flat.
+    style.window_padding = imgui.ImVec2(14.0, 14.0)
+    style.frame_padding = imgui.ImVec2(10.0, 6.0)
+    style.item_spacing = imgui.ImVec2(10.0, 8.0)
 
     style.set_color_(Col.window_bg.value, _color(ADMIN_BG))
     style.set_color_(Col.child_bg.value, _color(ADMIN_SURFACE))
@@ -79,6 +93,32 @@ def apply_drone_theme() -> None:
 
     style.set_color_(Col.separator.value, _color(ADMIN_BORDER))
     style.set_color_(Col.text_selected_bg.value, _color(ACCENT, 0.35))
+
+
+def draw_background_grid(io: "imgui.IO") -> None:
+    """Call once per frame, before drawing any screen content. Reproduces
+    drone.css's ``body`` background (a solid fill plus its own two faint
+    42px ``linear-gradient(...1px, transparent 1px)`` grid layers) on
+    ImGui's background draw list -- this was the single biggest "looks
+    plain" gap versus the web UI, since ImGui has no page background/
+    texture concept of its own. Only visible where ``ui/app.py``'s root
+    window uses ``WindowFlags_.no_background`` -- otherwise the root
+    window's own opaque fill paints over this entirely, the same way a
+    solid-background page element would hide the body behind it."""
+    draw_list = imgui.get_background_draw_list()
+    width, height = io.display_size.x, io.display_size.y
+    draw_list.add_rect_filled(imgui.ImVec2(0.0, 0.0), imgui.ImVec2(width, height), imgui.get_color_u32(_color(ADMIN_BG)))
+
+    line_color = imgui.get_color_u32(_color(TEXT, _GRID_LINE_ALPHA))
+    x = 0.0
+    while x <= width:
+        draw_list.add_line(imgui.ImVec2(x, 0.0), imgui.ImVec2(x, height), line_color)
+        x += _GRID_SPACING
+
+    y = 0.0
+    while y <= height:
+        draw_list.add_line(imgui.ImVec2(0.0, y), imgui.ImVec2(width, y), line_color)
+        y += _GRID_SPACING
 
 
 # Status colors shared by every screen that reports an API error or an

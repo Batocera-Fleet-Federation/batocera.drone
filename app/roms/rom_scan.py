@@ -12,6 +12,7 @@ from typing import List, Optional, Tuple
 
 try:
     from ..common.http_cache import valid_segment
+    from ..common.logging_setup import _drone_log
     from .gamelist import (
         ARTWORK_FIELDS,
         _gamelist_details,
@@ -22,6 +23,7 @@ try:
     from .rom_transfer_unit import gamelist_folder_entry_counts, resolve_transfer_unit
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.http_cache import valid_segment  # type: ignore
+    from common.logging_setup import _drone_log  # type: ignore
     from roms.gamelist import (  # type: ignore
         ARTWORK_FIELDS,
         _gamelist_details,
@@ -167,43 +169,54 @@ class RomScanMixin:
 
     def _count_rom_items(self, system: str, asset_dir: Path) -> int:
         system_lower = system.lower()
-        if not asset_dir.exists() or not asset_dir.is_dir():
-            return 0
+        try:
+            if not asset_dir.exists() or not asset_dir.is_dir():
+                return 0
 
-        if system_lower in ("ps3", "ps4"):
+            if system_lower in ("ps3", "ps4"):
+                count = 0
+                for entry in sorted(asset_dir.iterdir(), key=lambda p: p.name.lower()):
+                    if entry.is_file():
+                        if system_lower == "steam" and entry.suffix.lower() == ".sh":
+                            continue
+                        if self.should_ignore_rom_file(entry.name, system=system):
+                            continue
+                        count += 1
+                        continue
+
+                    if not entry.is_dir():
+                        continue
+
+                    if system_lower == "ps3":
+                        if entry.name.lower().endswith(".ps3"):
+                            count += 1
+                        continue
+
+                    for child in sorted(entry.iterdir(), key=lambda p: p.name.lower()):
+                        if child.is_file() and child.name.lower().endswith(".ps4"):
+                            count += 1
+                            break
+                return count
+
             count = 0
-            for entry in sorted(asset_dir.iterdir(), key=lambda p: p.name.lower()):
-                if entry.is_file():
-                    if system_lower == "steam" and entry.suffix.lower() == ".sh":
-                        continue
-                    if self.should_ignore_rom_file(entry.name, system=system):
-                        continue
-                    count += 1
+            for entry in sorted(asset_dir.rglob("*"), key=lambda p: p.relative_to(asset_dir).as_posix().lower()):
+                if not entry.is_file():
                     continue
-
-                if not entry.is_dir():
+                relative_path = entry.relative_to(asset_dir).as_posix()
+                if self.should_ignore_rom_path(Path(relative_path)):
                     continue
-
-                if system_lower == "ps3":
-                    if entry.name.lower().endswith(".ps3"):
-                        count += 1
-                    continue
-
-                for child in sorted(entry.iterdir(), key=lambda p: p.name.lower()):
-                    if child.is_file() and child.name.lower().endswith(".ps4"):
-                        count += 1
-                        break
+                count += 1
             return count
-
-        count = 0
-        for entry in sorted(asset_dir.rglob("*"), key=lambda p: p.relative_to(asset_dir).as_posix().lower()):
-            if not entry.is_file():
-                continue
-            relative_path = entry.relative_to(asset_dir).as_posix()
-            if self.should_ignore_rom_path(Path(relative_path)):
-                continue
-            count += 1
-        return count
+        except OSError as error:
+            # A single system's storage (a failing/degraded external mount,
+            # e.g. a fuseblk drive throwing Input/output error mid-scan) must
+            # not take down callers like the swarm-overview summary, which
+            # counts every local system in one pass -- one bad mount would
+            # otherwise 500 the whole response instead of just under-counting
+            # this one system. Matches the same degrade-not-crash philosophy
+            # _handle_admin_swarm_overview already applies to offline peers.
+            _drone_log(f"ROM count skipped for system={system!r} dir={asset_dir}: {error.__class__.__name__}: {error}")
+            return 0
 
     def _attach_gamelist_to_rom_items(self, system_dir: Path, items: List[dict]) -> List[dict]:
         try:

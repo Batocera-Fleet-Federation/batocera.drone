@@ -152,3 +152,15 @@ def config_backups(client: DroneApiClient) -> dict:
 
 def create_config_backup(client: DroneApiClient, *, name: str = "", description: str = "") -> dict:
     return client.post("/admin/config-backups", {"name": name, "description": description})
+
+
+_APPLY_CONFIG_BACKUP_TIMEOUT_SECONDS = 180
+
+
+def apply_config_backup(client: DroneApiClient, backup_id: int) -> dict:
+    # Stops EmulationStation, copies the backup's files, then restarts it --
+    # comfortably past the client's normal 15s default on real hardware, so
+    # this needs its own generous budget or a slow-but-successful apply would
+    # surface as a client-side "could not reach Drone" timeout instead of the
+    # real result.
+    return client.post(f"/admin/config-backups/{backup_id}/apply", {}, timeout=_APPLY_CONFIG_BACKUP_TIMEOUT_SECONDS)

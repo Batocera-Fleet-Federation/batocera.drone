@@ -71,9 +71,9 @@ class DroneApiClient:
     def has_session_cookie(self) -> bool:
         return any(cookie.name == SESSION_COOKIE_NAME for cookie in self.cookie_jar)
 
-    def _send(self, request: urllib.request.Request, *, method: str, path: str) -> Any:
+    def _send(self, request: urllib.request.Request, *, method: str, path: str, timeout: float = _TIMEOUT_SECONDS) -> Any:
         try:
-            with self._opener.open(request, timeout=_TIMEOUT_SECONDS) as response:
+            with self._opener.open(request, timeout=timeout) as response:
                 raw = response.read()
                 self._save_session()
         except urllib.error.HTTPError as error:
@@ -90,19 +90,19 @@ class DroneApiClient:
             return None
         return _try_parse_json(raw)
 
-    def _request(self, method: str, path: str, *, body: Optional[dict] = None) -> Any:
+    def _request(self, method: str, path: str, *, body: Optional[dict] = None, timeout: float = _TIMEOUT_SECONDS) -> Any:
         url = f"{self.config.base_url}{path}"
         data = json.dumps(body).encode("utf-8") if body is not None else None
         request = urllib.request.Request(url, data=data, method=method)
         if data is not None:
             request.add_header("Content-Type", "application/json")
-        return self._send(request, method=method, path=path)
+        return self._send(request, method=method, path=path, timeout=timeout)
 
     def get(self, path: str) -> Any:
         return self._request("GET", path)
 
-    def post(self, path: str, body: Optional[dict] = None) -> Any:
-        return self._request("POST", path, body=body or {})
+    def post(self, path: str, body: Optional[dict] = None, *, timeout: float = _TIMEOUT_SECONDS) -> Any:
+        return self._request("POST", path, body=body or {}, timeout=timeout)
 
     def post_multipart(self, path: str, field_name: str, filename: str, content: bytes) -> Any:
         """POST a single file as multipart/form-data -- stdlib-only, hand-built

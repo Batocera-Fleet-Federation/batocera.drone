@@ -37,7 +37,7 @@ from . import gamepad
 from .nav import Navigator
 from .screens.login import LoginScreen
 from .shell import AppShell
-from .theme import apply_drone_theme
+from .theme import apply_drone_theme, draw_background_grid
 from .virtual_keyboard import draw_if_open as _draw_virtual_keyboard_if_open
 
 _FORCE_EXIT_GRACE_SECONDS = 3
@@ -135,6 +135,7 @@ class PortsClientApp:
             gamepad.poll_left_stick_nav(io)
 
             imgui.new_frame()
+            draw_background_grid(io)
             # Every screen calls widget functions (imgui.text/button/...)
             # without ever opening an explicit imgui.begin() window. Left
             # alone, Dear ImGui silently redirects those calls into its
@@ -157,6 +158,13 @@ class PortsClientApp:
                 | imgui.WindowFlags_.no_saved_settings.value
                 | imgui.WindowFlags_.no_bring_to_front_on_focus.value
                 | imgui.WindowFlags_.no_nav_focus.value
+                # Lets draw_background_grid()'s fill+grid (drawn on the
+                # background draw list, i.e. behind this window) show through
+                # instead of being painted over by the root window's own
+                # opaque Col.window_bg fill -- child windows/frames still
+                # have their own real backgrounds, so they read as cards
+                # sitting on the grid rather than the whole screen going flat.
+                | imgui.WindowFlags_.no_background.value
             )
             is_expanded, _ = imgui.begin("##root", flags=root_flags)
             if is_expanded:

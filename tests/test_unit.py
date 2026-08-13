@@ -3847,6 +3847,35 @@ class RepositoryTests(unittest.TestCase):
 
             self.assertEqual(systems, [{"name": "snes", "rom_count": 1}])
 
+    def test_list_systems_skips_a_system_whose_storage_raises_oserror(self) -> None:
+        # Reproduces a live incident: a degraded external mount (fuseblk drive)
+        # threw "Input/output error" listing one system's images/ subdirectory.
+        # That OSError used to propagate out of list_systems() uncaught,
+        # 500-ing every caller (including the swarm-overview self-summary) --
+        # a single bad system's storage must not take down the whole scan.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            (root / "roms" / "snes").mkdir(parents=True)
+            (root / "roms" / "snes" / "Game.zip").write_bytes(b"rom")
+            (root / "roms" / "exaarcadia").mkdir(parents=True)
+            (root / "roms" / "exaarcadia" / "images").mkdir(parents=True)
+            (root / "bios").mkdir(parents=True)
+            repo = RomRepository(root / "roms", root / "bios")
+
+            real_rglob = Path.rglob
+
+            def flaky_rglob(self_path: Path, pattern: str):
+                if self_path.name == "exaarcadia":
+                    raise OSError(5, "Input/output error")
+                return real_rglob(self_path, pattern)
+
+            with mock.patch.object(Path, "rglob", flaky_rglob):
+                systems = repo.list_systems()
+
+            names = {item["name"] for item in systems}
+            self.assertIn("snes", names)
+            self.assertNotIn("exaarcadia", names)
+
     def test_list_systems_uses_sqlite_system_counts_without_loading_rom_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
