@@ -107,6 +107,33 @@ class SessionAuthTests(unittest.TestCase):
             self.assertIsNone(auth.authenticate_request({}))
             self.assertIsNone(auth.authenticate_request({"Cookie": "drone_session=not-a-real-token"}))
 
+    def test_authenticate_request_trusts_loopback_with_no_cookie(self) -> None:
+        # On-device tooling (the Ports client) always talks to 127.0.0.1 and
+        # is never expected to log in -- physical/on-device access is already
+        # this codebase's root of trust. See app/common/auth.py's docstring.
+        with tempfile.TemporaryDirectory() as tmp:
+            auth = self._auth(tmp)
+            for loopback_ip in ("127.0.0.1", "::1"):
+                session = auth.authenticate_request({}, loopback_ip)
+                self.assertIsNotNone(session)
+                self.assertEqual(session["username"], "batocera")  # DroneCredentialStore's default
+                self.assertIsNone(session["token"])
+
+    def test_authenticate_request_does_not_trust_non_loopback_with_no_cookie(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            auth = self._auth(tmp)
+            self.assertIsNone(auth.authenticate_request({}, "203.0.113.9"))
+
+    def test_authenticate_request_prefers_a_valid_cookie_over_loopback(self) -> None:
+        # A real logged-in session's username should win over the generic
+        # loopback fallback identity, even from 127.0.0.1.
+        with tempfile.TemporaryDirectory() as tmp:
+            auth = self._auth(tmp)
+            token = auth.login("batocera", "linux")
+            auth.credential_store.update("someone-else", "a-real-password")
+            session = auth.authenticate_request({"Cookie": f"drone_session={token}"}, "127.0.0.1")
+            self.assertEqual(session["username"], "batocera")
+
     def test_default_drone_credentials_and_hashed_update(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             auth = self._auth(tmp)
@@ -2755,7 +2782,7 @@ class SettingsTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         installer = root.joinpath("scripts/batocera_install.sh").read_text(encoding="utf-8")
         uninstaller = root.joinpath("scripts/batocera_uninstall.sh").read_text(encoding="utf-8")
-        run_now = root.joinpath("scripts/run_now.sh").read_text(encoding="utf-8")
+        run_web_now = root.joinpath("scripts/run_web_now.sh").read_text(encoding="utf-8")
         drone_source = root.joinpath("app/drone_api.py").read_text(encoding="utf-8") + root.joinpath("app/device/system_info.py").read_text(encoding="utf-8")
         # Service-side logic lives in the versioned bundle (app/service_bootstrap.sh) so new
         # Drone releases apply it automatically; the installed DRONE_SERVER is a thin shim.
@@ -2833,23 +2860,23 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("DRONE_UNAUTH_RATE_LIMIT_ENABLED='${DRONE_UNAUTH_RATE_LIMIT_ENABLED:-1}'", bootstrap)
         self.assertIn("DRONE_UNAUTH_RATE_LIMIT_REQUESTS='${DRONE_UNAUTH_RATE_LIMIT_REQUESTS:-60}'", bootstrap)
         self.assertIn("DRONE_UNAUTH_RATE_LIMIT_WINDOW_SECONDS='${DRONE_UNAUTH_RATE_LIMIT_WINDOW_SECONDS:-60}'", bootstrap)
-        self.assertIn('DRONE_UNAUTH_RATE_LIMIT_ENABLED="${DRONE_UNAUTH_RATE_LIMIT_ENABLED:-1}"', run_now)
-        self.assertIn('DRONE_UNAUTH_RATE_LIMIT_REQUESTS="${DRONE_UNAUTH_RATE_LIMIT_REQUESTS:-60}"', run_now)
-        self.assertIn('DRONE_UNAUTH_RATE_LIMIT_WINDOW_SECONDS="${DRONE_UNAUTH_RATE_LIMIT_WINDOW_SECONDS:-60}"', run_now)
+        self.assertIn('DRONE_UNAUTH_RATE_LIMIT_ENABLED="${DRONE_UNAUTH_RATE_LIMIT_ENABLED:-1}"', run_web_now)
+        self.assertIn('DRONE_UNAUTH_RATE_LIMIT_REQUESTS="${DRONE_UNAUTH_RATE_LIMIT_REQUESTS:-60}"', run_web_now)
+        self.assertIn('DRONE_UNAUTH_RATE_LIMIT_WINDOW_SECONDS="${DRONE_UNAUTH_RATE_LIMIT_WINDOW_SECONDS:-60}"', run_web_now)
         self.assertIn("ROM_METADATA_HASH_ROMS_ENABLED='${ROM_METADATA_HASH_ROMS_ENABLED:-1}'", bootstrap)
-        self.assertIn('ROM_METADATA_HASH_ROMS_ENABLED="${ROM_METADATA_HASH_ROMS_ENABLED:-1}"', run_now)
+        self.assertIn('ROM_METADATA_HASH_ROMS_ENABLED="${ROM_METADATA_HASH_ROMS_ENABLED:-1}"', run_web_now)
         self.assertIn("ROM_METADATA_UPLOAD_CHUNK_SIZE='${ROM_METADATA_UPLOAD_CHUNK_SIZE:-250}'", bootstrap)
-        self.assertIn('ROM_METADATA_UPLOAD_CHUNK_SIZE="${ROM_METADATA_UPLOAD_CHUNK_SIZE:-250}"', run_now)
+        self.assertIn('ROM_METADATA_UPLOAD_CHUNK_SIZE="${ROM_METADATA_UPLOAD_CHUNK_SIZE:-250}"', run_web_now)
         self.assertIn("DRONE_LOG_UNAUTHORIZED_REQUESTS='${DRONE_LOG_UNAUTHORIZED_REQUESTS:-0}'", bootstrap)
-        self.assertIn('DRONE_LOG_UNAUTHORIZED_REQUESTS="${DRONE_LOG_UNAUTHORIZED_REQUESTS:-0}"', run_now)
+        self.assertIn('DRONE_LOG_UNAUTHORIZED_REQUESTS="${DRONE_LOG_UNAUTHORIZED_REQUESTS:-0}"', run_web_now)
         self.assertIn('echo "[drone-service] Downloading and launching Drone app..."\n  wait_for_network', bootstrap)
         self.assertNotIn("ensure_permissions\n    wait_for_network\n\n    supervise_drone", bootstrap)
-        self.assertIn("Missing or empty required file", run_now)
-        self.assertIn("Downloaded Drone App failed import validation", run_now)
-        self.assertIn('"app.web.api_routes": "ApiRoutesMixin"', run_now)
-        self.assertIn("import shutil", run_now)
-        self.assertIn("Drone App staged successfully", run_now)
-        self.assertEqual(run_now.count("source = archive.extractfile(member)"), 1)
+        self.assertIn("Missing or empty required file", run_web_now)
+        self.assertIn("Downloaded Drone App failed import validation", run_web_now)
+        self.assertIn('"app.web.api_routes": "ApiRoutesMixin"', run_web_now)
+        self.assertIn("import shutil", run_web_now)
+        self.assertIn("Drone App staged successfully", run_web_now)
+        self.assertEqual(run_web_now.count("source = archive.extractfile(member)"), 1)
         self.assertIn("/userdata/system/services/DRONE_SERVER", uninstaller)
         self.assertIn("/userdata/system/services/DRONE_APP", uninstaller)
         self.assertIn("/userdata/system/custom.sh", uninstaller)
@@ -8219,6 +8246,82 @@ class InstallerTailscaleTests(unittest.TestCase):
         self.assertIn("logout", self.uninstall)
         self.assertIn('rm -rf "$TS_DIR"', self.uninstall)
         self.assertIn("DRONE_KEEP_TAILSCALE", self.uninstall)
+
+
+class InstallerPortsClientTests(unittest.TestCase):
+    """batocera_install.sh places the Ports client (ports-client/, a native
+    companion app installed into Batocera's Ports menu) into
+    /userdata/roms/ports -- a local pre-built bundle (or DRONE_PORTS_CLIENT_BUNDLE
+    override) wins if present, matching a release-asset download otherwise, the
+    same pattern install_tailscale_mesh() already uses for its own binaries."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        root = Path(__file__).resolve().parents[1]
+        cls.install = root.joinpath("scripts/batocera_install.sh").read_text(encoding="utf-8")
+
+    def test_scripts_parse_cleanly(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        result = subprocess.run(
+            ["sh", "-n", str(root / "scripts/batocera_install.sh")], capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_arch_mapping_matches_the_bundles_ci_actually_builds(self) -> None:
+        # Must match the two arches ports-client/scripts/vendor_deps.sh is
+        # actually run for in .github/workflows/release.yml, or a bundle
+        # this installer looks for would never exist.
+        self.assertIn('x86_64) BUNDLE_ARCH="x86_64" ;;', self.install)
+        self.assertIn('aarch64) BUNDLE_ARCH="aarch64" ;;', self.install)
+
+    def test_local_bundle_and_override_win_over_a_download(self) -> None:
+        self.assertIn("DRONE_PORTS_CLIENT_BUNDLE", self.install)
+        self.assertIn('if [ -f "$BUNDLE_TARBALL" ]; then', self.install)
+        self.assertIn("Using local Ports client bundle", self.install)
+
+    def test_download_url_matches_the_release_asset_naming_ci_builds(self) -> None:
+        # Must match dist/batocera-drone-client-<arch>.tar.gz, exactly what
+        # ports-client/scripts/build_release_bundle.sh names its output and
+        # what release.yml's `files:` list attaches to the GitHub release.
+        self.assertIn(
+            "https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/"
+            'download/batocera-drone-client-$BUNDLE_ARCH.tar.gz"',
+            self.install,
+        )
+
+    def test_download_failure_is_recoverable_not_fatal(self) -> None:
+        # A failed Ports client download must not fail the Drone install.
+        self.assertIn("if ! install_ports_client; then", self.install)
+        self.assertIn("re-run the installer to retry", self.install)
+
+    def test_skip_path_exists(self) -> None:
+        self.assertIn("DRONE_SKIP_PORTS_CLIENT", self.install)
+
+    def test_extracts_into_the_ports_directory_and_makes_launcher_executable(self) -> None:
+        self.assertIn('PORTS_DIR="/userdata/roms/ports"', self.install)
+        self.assertIn('tar -xzf "$BUNDLE_TARBALL" -C "$PORTS_DIR"', self.install)
+        self.assertIn('chmod +x "$PORTS_DIR/batocera-drone-client.sh"', self.install)
+
+
+class ReleaseWorkflowPortsClientTests(unittest.TestCase):
+    """The release CI (.github/workflows/release.yml) builds both arch bundles
+    ports-client's own scripts produce and attaches them as release assets --
+    what batocera_install.sh's install_ports_client() downloads."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        root = Path(__file__).resolve().parents[1]
+        cls.workflow = root.joinpath(".github/workflows/release.yml").read_text(encoding="utf-8")
+
+    def test_builds_both_arches_via_ports_clients_own_scripts(self) -> None:
+        self.assertIn("ports-client/scripts/vendor_deps.sh 311 x86_64  manylinux_2_28_x86_64", self.workflow)
+        self.assertIn("ports-client/scripts/build_release_bundle.sh x86_64 dist", self.workflow)
+        self.assertIn("ports-client/scripts/vendor_deps.sh 311 aarch64 manylinux_2_28_aarch64", self.workflow)
+        self.assertIn("ports-client/scripts/build_release_bundle.sh aarch64 dist", self.workflow)
+
+    def test_attaches_both_bundles_to_the_release(self) -> None:
+        self.assertIn("dist/batocera-drone-client-x86_64.tar.gz", self.workflow)
+        self.assertIn("dist/batocera-drone-client-aarch64.tar.gz", self.workflow)
 
 
 class NavRestructureTests(unittest.TestCase):

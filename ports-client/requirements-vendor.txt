@@ -1,0 +1,14 @@
+# vendor/common (pure-Python/ctypes, arch-independent py3-none-any wheels):
+PySDL2
+PyOpenGL
+
+# vendor/<arch> (compiled, per-arch+per-Python-version wheels):
+# imgui_bundle    -- verified: the published wheel has no SDL2 backend
+#                    compiled in (GLFW only), so ui/app.py talks to imgui_bundle
+#                    at the low level (core ImGui + its GL3 render backend)
+#                    and does its own windowing via PySDL2 above.
+# numpy           -- verified required at runtime for imgui_bundle's texture
+#                    upload path even though it's listed as an optional
+#                    "extra" in imgui_bundle's own metadata -- don't drop it.
+imgui_bundle
+numpy

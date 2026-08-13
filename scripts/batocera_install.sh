@@ -59,7 +59,7 @@ WORK_DIR="/userdata/system/drone-app"
 ACTION="$1"
 STARTUP_LOG="/userdata/system/logs/drone-app/startup.log"
 BOOTSTRAP="$WORK_DIR/app/service_bootstrap.sh"
-RUN_NOW_URL="https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/run_now.sh"
+RUN_WEB_NOW_URL="https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/run_web_now.sh"
 ARCHIVE_URL="https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/drone-app.tar.gz"
 
 ensure_bundle() {
@@ -67,7 +67,7 @@ ensure_bundle() {
   mkdir -p "$(dirname "$STARTUP_LOG")"
   echo "[drone-service] Service bootstrap missing; downloading Drone app bundle..." | tee -a "$STARTUP_LOG"
   runner="/tmp/drone-bootstrap-fetch.$$"
-  if curl -fsSL --connect-timeout 10 --max-time 120 -o "$runner" "$RUN_NOW_URL"; then
+  if curl -fsSL --connect-timeout 10 --max-time 120 -o "$runner" "$RUN_WEB_NOW_URL"; then
     chmod 755 "$runner" 2>/dev/null || true
     DRONE_APP_STAGE_ONLY=1 DRONE_APP_WORK_DIR="$WORK_DIR" DRONE_APP_ARCHIVE_URL="$ARCHIVE_URL" bash "$runner" >> "$STARTUP_LOG" 2>&1 || true
     rm -f "$runner"
@@ -97,8 +97,8 @@ SERVICEBLOCK
 
   echo ""
   echo "Downloading latest Drone app bundle..."
-  RUNNER="/tmp/drone-run-now-install.$$"
-  if curl -fsSL --connect-timeout 10 --max-time 120 -o "$RUNNER" https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/run_now.sh; then
+  RUNNER="/tmp/drone-run-web-now-install.$$"
+  if curl -fsSL --connect-timeout 10 --max-time 120 -o "$RUNNER" https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/run_web_now.sh; then
     chmod 755 "$RUNNER" 2>/dev/null || true
     "$SERVICE_FILE" stop >/dev/null 2>&1 || true
     DRONE_APP_STAGE_ONLY=1 \
@@ -173,7 +173,7 @@ else
     sleep 5
   done
 
-  curl -fsSL --connect-timeout 10 --max-time 120 https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/run_now.sh | bash
+  curl -fsSL --connect-timeout 10 --max-time 120 https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/run_web_now.sh | bash
 ) &
 
 SERVICEBLOCK
@@ -376,6 +376,65 @@ TAILNETSTART
   fi
   return 0
 }
+
+install_ports_client() {
+  if [ "${DRONE_SKIP_PORTS_CLIENT:-0}" = "1" ]; then
+    echo "Skipping the Ports client install (DRONE_SKIP_PORTS_CLIENT=1)."
+    return 0
+  fi
+
+  case "$(uname -m)" in
+    x86_64) BUNDLE_ARCH="x86_64" ;;
+    aarch64) BUNDLE_ARCH="aarch64" ;;
+    *)
+      echo "No Ports client bundle for this architecture ($(uname -m)) yet; skipping."
+      return 0
+      ;;
+  esac
+
+  # A DRONE_PORTS_CLIENT_BUNDLE override or a bundle pre-built by
+  # ports-client/scripts/build_release_bundle.sh and left next to the
+  # installer both win over a download, mainly so local testing (e.g.
+  # ports-client/scripts/run_client_now.sh's own dev loop, or a one-off
+  # `DRONE_PORTS_CLIENT_BUNDLE=... bash batocera_install.sh` against a
+  # locally-built tarball) never needs network access. Otherwise this pulls
+  # the matching release asset, mirroring install_tailscale_mesh()'s
+  # download-with-a-clear-retry-message pattern above.
+  INSTALLER_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
+  BUNDLE_TARBALL="${DRONE_PORTS_CLIENT_BUNDLE:-$INSTALLER_DIR/../ports-client/dist/batocera-drone-client-$BUNDLE_ARCH.tar.gz}"
+  PC_DOWNLOADED_TMP=""
+
+  if [ -f "$BUNDLE_TARBALL" ]; then
+    echo "Using local Ports client bundle at $BUNDLE_TARBALL."
+  else
+    PC_URL="https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/batocera-drone-client-$BUNDLE_ARCH.tar.gz"
+    PC_DOWNLOADED_TMP="/tmp/drone-ports-client-install.$$.tar.gz"
+    echo "Downloading the Ports client bundle for $BUNDLE_ARCH ..."
+    if ! curl -fsSL --connect-timeout 10 --max-time 300 -o "$PC_DOWNLOADED_TMP" "$PC_URL"; then
+      rm -f "$PC_DOWNLOADED_TMP"
+      echo "Could not download the Ports client bundle ($PC_URL); skipping (re-run the installer to retry)."
+      echo "  (or build one locally with ports-client/scripts/build_release_bundle.sh $BUNDLE_ARCH, or set DRONE_PORTS_CLIENT_BUNDLE=/path/to/bundle.tar.gz)"
+      return 1
+    fi
+    BUNDLE_TARBALL="$PC_DOWNLOADED_TMP"
+  fi
+
+  PORTS_DIR="/userdata/roms/ports"
+  mkdir -p "$PORTS_DIR"
+  if ! tar -xzf "$BUNDLE_TARBALL" -C "$PORTS_DIR"; then
+    echo "Failed to extract the Ports client bundle."
+    [ -n "$PC_DOWNLOADED_TMP" ] && rm -f "$PC_DOWNLOADED_TMP"
+    return 1
+  fi
+  [ -n "$PC_DOWNLOADED_TMP" ] && rm -f "$PC_DOWNLOADED_TMP"
+  chmod +x "$PORTS_DIR/batocera-drone-client.sh"
+  echo "✓ Installed the Drone Ports client to $PORTS_DIR (rescan Ports in EmulationStation to see it)"
+  return 0
+}
+
+if ! install_ports_client; then
+  echo "Ports client install did not complete; the Drone install itself is unaffected."
+fi
 
 CUSTOM_SH="${CUSTOM_SH:-/userdata/system/custom.sh}"
 if ! install_tailscale_mesh; then

@@ -155,7 +155,9 @@ class ApiRoutesMixin:
                 return
 
             self.session_token = None
-            session = self.auth.authenticate_request(self.headers)
+            session = self.auth.authenticate_request(
+                self.headers, self.client_address[0] if self.client_address else None
+            )
             if session is None:
                 self._send_unauthorized()
                 return
@@ -720,7 +722,9 @@ class ApiRoutesMixin:
                 return
 
             self.session_token = None
-            session = self.auth.authenticate_request(self.headers)
+            session = self.auth.authenticate_request(
+                self.headers, self.client_address[0] if self.client_address else None
+            )
             if session is None:
                 self._send_unauthorized()
                 return

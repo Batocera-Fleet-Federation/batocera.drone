@@ -254,15 +254,28 @@ class SessionAuth:
         morsel = jar.get(SESSION_COOKIE_NAME)
         return morsel.value if morsel else None
 
-    def authenticate_request(self, headers) -> Optional[dict]:
-        """Return ``{"token", "username"}`` if ``headers`` carries a live session cookie."""
+    def authenticate_request(self, headers, client_ip: Optional[str] = None) -> Optional[dict]:
+        """Return ``{"token", "username"}`` if ``headers`` carries a live session cookie,
+        or if ``client_ip`` is loopback.
+
+        Physical/on-device access is already this codebase's root of trust (Drone
+        runs as root; the top-level README says outright "only run it on machines
+        and networks you trust"). On-device tooling that can only ever reach Drone
+        via 127.0.0.1 -- the Ports client (``ports-client/``), which runs on the
+        same device by design -- is implicitly pre-authenticated the same way a
+        person already sitting at the console is, so it never needs its own login
+        screen. Reuses ``_auth_block_exempt_ip``, the same loopback exemption the
+        brute-force blocker already applies below, here at the actual auth gate
+        instead of just its abuse protection.
+        """
         token = self.token_from_headers(headers)
-        if token is None:
-            return None
-        username = self.session_store.validate(token)
-        if username is None:
-            return None
-        return {"token": token, "username": username}
+        if token is not None:
+            username = self.session_store.validate(token)
+            if username is not None:
+                return {"token": token, "username": username}
+        if client_ip and _auth_block_exempt_ip(client_ip):
+            return {"token": None, "username": self.credential_store.load().get("username") or "local"}
+        return None
 
     def login(self, username: str, password: str) -> Optional[str]:
         """Verify credentials against the credential store; on success, start and

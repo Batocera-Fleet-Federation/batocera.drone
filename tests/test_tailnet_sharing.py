@@ -12,7 +12,9 @@ side effect inside tailnet_enroll() -- which sharing depends on entirely --
 is exercised for real, not assumed.
 """
 
+import importlib
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -318,6 +320,63 @@ class BootstrapTailnetFromSwarmTests(unittest.TestCase):
             settings = _build_settings(Path(tmp))
             with mock.patch("app.transfer.local_network.paired_peers", return_value=[]):
                 self.assertFalse(tailnet_service.bootstrap_tailnet_from_swarm(settings))
+
+
+class TailscaleDirEnvOverrideTests(unittest.TestCase):
+    """DRONE_TAILSCALE_DIR / DRONE_TAILSCALE_SOCKET are test/ops escape
+    hatches (mirroring DRONE_VPN_DIR) so local dev off a real device -- e.g.
+    a Mac, where /userdata/system/tailscale can't exist -- can point at a
+    real, locally-installed tailscale CLI. TAILSCALE_DIR/TAILSCALE_CLI/
+    TAILSCALE_SOCKET are derived once at module-import time, so exercising
+    the override means reimporting the module with the env var set, then
+    restoring the untouched default afterward.
+    """
+
+    def test_dir_env_var_overrides_default_and_derives_cli_path(self) -> None:
+        with mock.patch.dict("os.environ", {"DRONE_TAILSCALE_DIR": "/tmp/fake-tailscale"}):
+            importlib.reload(tailnet_service)
+        try:
+            self.assertEqual(tailnet_service.TAILSCALE_DIR, Path("/tmp/fake-tailscale"))
+            self.assertEqual(tailnet_service.TAILSCALE_CLI, Path("/tmp/fake-tailscale/bin/tailscale"))
+        finally:
+            importlib.reload(tailnet_service)
+            self.assertEqual(tailnet_service.TAILSCALE_DIR, Path("/userdata/system/tailscale"))
+
+    def test_socket_env_var_overrides_default(self) -> None:
+        with mock.patch.dict("os.environ", {"DRONE_TAILSCALE_SOCKET": "/tmp/fake.sock"}):
+            importlib.reload(tailnet_service)
+        try:
+            self.assertEqual(tailnet_service.TAILSCALE_SOCKET, "/tmp/fake.sock")
+        finally:
+            importlib.reload(tailnet_service)
+            self.assertEqual(tailnet_service.TAILSCALE_SOCKET, "/var/run/tailscale/tailscaled.sock")
+
+    def test_unset_env_vars_keep_the_real_device_defaults(self) -> None:
+        with mock.patch.dict("os.environ", {}, clear=False):
+            for key in ("DRONE_TAILSCALE_DIR", "DRONE_TAILSCALE_SOCKET"):
+                os.environ.pop(key, None)
+            importlib.reload(tailnet_service)
+        self.assertEqual(tailnet_service.TAILSCALE_DIR, Path("/userdata/system/tailscale"))
+        self.assertEqual(tailnet_service.TAILSCALE_SOCKET, "/var/run/tailscale/tailscaled.sock")
+
+    def test_empty_socket_env_var_omits_the_socket_flag_entirely(self) -> None:
+        # Required for macOS: Tailscale.app doesn't run a Linux-style
+        # tailscaled with a socket at a fixed path (it talks to the OS via
+        # NetworkExtension), so passing --socket at all breaks even a
+        # running, enrolled macOS install -- confirmed by shelling out to a
+        # real local install with and without the flag.
+        with mock.patch.dict("os.environ", {"DRONE_TAILSCALE_SOCKET": ""}):
+            importlib.reload(tailnet_service)
+        try:
+            self.assertEqual(tailnet_service.TAILSCALE_SOCKET, "")
+            with mock.patch.object(tailnet_service, "TAILSCALE_CLI", _fake_tailscale_cli()), \
+                    mock.patch.object(tailnet_service.subprocess, "run", side_effect=_fake_subprocess_run) as run:
+                tailnet_service.tailnet_status()
+            cli_args = run.call_args.args[0]
+            self.assertNotIn("--socket=", " ".join(cli_args))
+        finally:
+            importlib.reload(tailnet_service)
+            self.assertEqual(tailnet_service.TAILSCALE_SOCKET, "/var/run/tailscale/tailscaled.sock")
 
 
 if __name__ == "__main__":

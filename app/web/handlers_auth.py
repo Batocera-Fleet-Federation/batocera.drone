@@ -16,7 +16,9 @@ except ImportError:  # pragma: no cover - direct script execution fallback
 
 class HandlersAuthMixin:
     def _handle_auth_session(self) -> None:
-        session = self.auth.authenticate_request(self.headers)
+        session = self.auth.authenticate_request(
+            self.headers, self.client_address[0] if self.client_address else None
+        )
         if session is None:
             self._send_json(200, {"authenticated": False})
             return
@@ -36,7 +38,9 @@ class HandlersAuthMixin:
         self._send_json(200, {"status": "ok", "username": username}, extra_headers={"Set-Cookie": cookie})
 
     def _handle_auth_logout(self) -> None:
-        session = self.auth.authenticate_request(self.headers)
+        session = self.auth.authenticate_request(
+            self.headers, self.client_address[0] if self.client_address else None
+        )
         if session is not None:
             self.auth.session_store.revoke(session["token"])
         cookie = clear_session_cookie(secure=not self.settings.http_only)

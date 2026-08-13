@@ -122,8 +122,36 @@ jobs:
           for asset in \
             scripts/batocera_install.sh \
             scripts/batocera_uninstall.sh \
-            scripts/run_now.sh \
+            scripts/run_web_now.sh \
             dist/drone-app.tar.gz; do
+            test -s "$asset"
+          done
+
+      - name: Set up Python for the Ports client bundle build
+        if: steps.version.outputs.skip != 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Build Ports client bundles
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          # Both target arches are pure wheel *downloads* (pip's
+          # --platform/--python-version/--implementation/--abi flags fetch
+          # prebuilt manylinux wheels for imgui_bundle/numpy without
+          # compiling or executing anything) -- no QEMU/cross-compilation
+          # needed, unlike the multi-arch Docker image build below. See
+          # ports-client/scripts/vendor_deps.sh.
+          ports-client/scripts/vendor_deps.sh 311 x86_64  manylinux_2_28_x86_64
+          ports-client/scripts/build_release_bundle.sh x86_64 dist
+
+          ports-client/scripts/vendor_deps.sh 311 aarch64 manylinux_2_28_aarch64
+          ports-client/scripts/build_release_bundle.sh aarch64 dist
+
+          for asset in \
+            dist/batocera-drone-client-x86_64.tar.gz \
+            dist/batocera-drone-client-aarch64.tar.gz; do
             test -s "$asset"
           done
 
@@ -184,8 +212,10 @@ jobs:
           files: |
             scripts/batocera_install.sh
             scripts/batocera_uninstall.sh
-            scripts/run_now.sh
+            scripts/run_web_now.sh
             dist/drone-app.tar.gz
+            dist/batocera-drone-client-x86_64.tar.gz
+            dist/batocera-drone-client-aarch64.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

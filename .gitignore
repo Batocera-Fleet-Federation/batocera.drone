@@ -30,3 +30,16 @@ server.crt
 server.key
 *.crt
 *.key
+
+# Vendored/built artifacts (produced locally by scripts/vendor_deps.sh and
+# ports-client/scripts/{vendor_deps,build_release_bundle}.sh -- never checked in)
+/app/vendor/
+/ports-client/vendor/
+/ports-client/dist/
+/ports-client/.dev-venv/
+
+# ImGui's own default runtime window-state files (io.set_ini_filename(None)
+# disables writing these going forward -- ignored too as a defense-in-depth
+# in case that regresses, or a pre-fix run already dropped one locally)
+/ports-client/imgui.ini
+/ports-client/Batocera_Drone.ini

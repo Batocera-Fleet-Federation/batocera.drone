@@ -11,7 +11,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 RELEASE_ASSETS=(
   "scripts/batocera_install.sh"
   "scripts/batocera_uninstall.sh"
-  "scripts/run_now.sh"
+  "scripts/run_web_now.sh"
   "dist/drone-app.tar.gz"
 )
 

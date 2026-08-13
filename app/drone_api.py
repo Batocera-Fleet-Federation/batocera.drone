@@ -1452,7 +1452,8 @@ class RomRequestHandler(HandlersAuthMixin, HandlersSystemMixin, HandlersDownload
         self.wfile.write(json_bytes({"error": "rate_limited"}))
 
     def _rate_limit_unauthenticated_external_request(self) -> bool:
-        if self.auth.authenticate_request(self.headers) is not None:
+        client_ip = self.client_address[0] if self.client_address else "-"
+        if self.auth.authenticate_request(self.headers, client_ip) is not None:
             return False
         try:
             cert = self.connection.getpeercert() if hasattr(self.connection, "getpeercert") else None
@@ -1460,7 +1461,6 @@ class RomRequestHandler(HandlersAuthMixin, HandlersSystemMixin, HandlersDownload
             cert = None
         if cert:
             return False
-        client_ip = self.client_address[0] if self.client_address else "-"
         if _unauthenticated_request_allowed(client_ip):
             return False
         self._send_rate_limited()

@@ -16,8 +16,8 @@ DRONE_APP_BASE_URL="${DRONE_APP_BASE_URL:-${1:-https://raw.githubusercontent.com
 
 if [[ -z "$DRONE_APP_URL" && -z "$DRONE_APP_BASE_URL" ]]; then
   echo "Usage:"
-  echo "  DRONE_APP_BASE_URL=<raw-base-url> ./run_now.sh"
-  echo "  ./run_now.sh <raw-base-url>"
+  echo "  DRONE_APP_BASE_URL=<raw-base-url> ./run_web_now.sh"
+  echo "  ./run_web_now.sh <raw-base-url>"
   echo "  or set all required file URLs directly"
   exit 1
 fi

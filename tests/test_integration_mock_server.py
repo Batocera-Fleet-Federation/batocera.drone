@@ -122,6 +122,17 @@ class MockServerIntegrationTests(unittest.TestCase):
         names = {item["name"] for item in payload["systems"]}
         self.assertIn("snes", names)
 
+    def test_protected_endpoint_reachable_from_loopback_with_no_cookie(self) -> None:
+        # On-device tooling (the Ports client) never logs in -- confirms the
+        # real server, not just the SessionAuth object in isolation, treats a
+        # loopback connection as pre-authenticated even with zero cookies.
+        url = f"http://127.0.0.1:{self.port}/v1/api/systems"
+        with urllib.request.urlopen(urllib.request.Request(url), timeout=5) as resp:
+            self.assertEqual(resp.status, 200)
+            payload = json.loads(resp.read().decode("utf-8"))
+        names = {item["name"] for item in payload["systems"]}
+        self.assertIn("snes", names)
+
     def test_rom_download_by_unique_id(self) -> None:
         payload = self._get_json("/v1/api/systems/snes")
         rom = next(item for item in payload["roms"] if item["rom_file"] == "Chrono Trigger (USA).zip")

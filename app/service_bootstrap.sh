@@ -127,7 +127,7 @@ stage_latest_app_once() {
   runner="/tmp/drone-startup-update.$$"
   echo "[drone-service] Checking for the latest Drone app bundle..."
   wait_for_network
-  if ! curl -fsSL --connect-timeout 10 --max-time 45 -o "$runner" https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/run_now.sh; then
+  if ! curl -fsSL --connect-timeout 10 --max-time 45 -o "$runner" https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/run_web_now.sh; then
     rm -f "$runner"
     echo "[drone-service] Latest bundle check failed; continuing with the validated local app."
     return 0
@@ -162,10 +162,10 @@ launch_drone() {
     echo "[drone-service] Local Drone app import check failed; downloading a fresh app bundle."
   fi
 
-  runner="/tmp/drone-run-now.$$"
+  runner="/tmp/drone-run-web-now.$$"
   echo "[drone-service] Downloading and launching Drone app..."
   wait_for_network
-  if ! curl -fsSL --connect-timeout 10 --max-time 120 -o "$runner" https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/run_now.sh; then
+  if ! curl -fsSL --connect-timeout 10 --max-time 120 -o "$runner" https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/run_web_now.sh; then
     rm -f "$runner"
     echo "[drone-service] Failed to download Drone launcher"
     return 1

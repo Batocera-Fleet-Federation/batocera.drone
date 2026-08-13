@@ -99,15 +99,15 @@ an AST undefined-name check (watch `global`-declared module vars) and, if you lo
 function body mid-edit, recover it from `git show HEAD:app/drone_api.py`. Verify BOTH
 import modes (`import app.drone_api` **and** `PYTHONPATH=app python3 -c "import
 drone_api"`) + the full suite after each move. Files referenced **by path** in
-`app/service_bootstrap.sh` / `scripts/run_now.sh` (main, drone_api,
+`app/service_bootstrap.sh` / `scripts/run_web_now.sh` (main, drone_api,
 web/{api_routes,ui_routes,route_config}, set_screen_mode, set_volume,
 input_activity_monitor) require updating those scripts in lockstep.
 
 **Deploy staging (important now that `app/` is ~87 modules):** the device path is safe —
-`service_bootstrap.sh` sets `DRONE_APP_ARCHIVE_URL=drone-app.tar.gz` and `run_now.sh` stages
+`service_bootstrap.sh` sets `DRONE_APP_ARCHIVE_URL=drone-app.tar.gz` and `run_web_now.sh` stages
 the **whole `app/` tree** from that archive (or from a `file://` `DRONE_APP_BASE_URL` via
 `copytree`). Both cover every module automatically — **no per-file list to maintain.** The
-**legacy individual-file fallback** in `run_now.sh` (the `else` branch when
+**legacy individual-file fallback** in `run_web_now.sh` (the `else` branch when
 `DRONE_APP_BASE_URL` is unset) only downloads `drone_api.py` + `web/{api_routes,ui_routes,
 route_config}.py` and therefore **cannot stage the multi-module app** — it has been
 incomplete since the first extractions and is not used by the device. Don't rely on it; use

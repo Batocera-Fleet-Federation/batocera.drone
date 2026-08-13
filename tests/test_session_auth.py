@@ -186,6 +186,16 @@ class HandlersAuthMixinTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertFalse(payload["authenticated"])
 
+    def test_session_endpoint_authenticated_from_loopback_with_no_cookie(self) -> None:
+        # The Ports client always talks to 127.0.0.1 and never logs in.
+        handler = _handler(self.settings, self.auth)
+        handler.client_address = ("127.0.0.1", 51000)
+        handler._handle_auth_session()
+        status, payload, _ = handler.response
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["authenticated"])
+        self.assertEqual(payload["username"], "batocera")
+
     def test_session_endpoint_authenticated_with_valid_cookie(self) -> None:
         token = self.auth.session_store.create("batocera")
         handler = _handler(self.settings, self.auth, headers={"Cookie": f"{SESSION_COOKIE_NAME}={token}"})

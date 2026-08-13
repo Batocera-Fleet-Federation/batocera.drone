@@ -153,7 +153,7 @@ Commit-message prefixes can select a larger version change:
 - `increment major version` advances the first component and resets the others, such as `v0.1.50` to `v1.0.0`.
 - `incremenet patch version` or `increment patch version` advances the middle component and resets the final component, such as `v1.3.10` to `v1.4.0`.
 
-The workflow builds and uploads `batocera_install.sh`, `batocera_uninstall.sh`, `run_now.sh`, and the version-stamped `drone-app.tar.gz`. Manual releases remain available through the Release workflow and `scripts/create-release.sh`.
+The workflow builds and uploads `batocera_install.sh`, `batocera_uninstall.sh`, `run_web_now.sh`, and the version-stamped `drone-app.tar.gz`. Manual releases remain available through the Release workflow and `scripts/create-release.sh`.
 
 ## Docker
 
@@ -190,7 +190,7 @@ DRONE_APP_USERNAME="admin"
 DRONE_APP_PASSWORD="change-this-password"
 ```
 
-The installer and `run_now.sh` use these if they are already set. If they are not set, the scripts prompt you.
+The installer and `run_web_now.sh` use these if they are already set. If they are not set, the scripts prompt you.
 
 ### Disable Admin Features
 
@@ -256,6 +256,13 @@ Default mock login:
 
 ```text
 admin / changeme
+```
+
+To test the native Ports client (`ports-client/`, see its own README) against
+this same mock server instead of a browser:
+
+```bash
+scripts/run_client_now.sh
 ```
 
 ## Uninstall

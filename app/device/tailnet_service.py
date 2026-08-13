@@ -50,10 +50,29 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from storage.state_store import save_payload as _save_state_payload  # type: ignore
     from transport.tailnet import get_tailnet_ip  # type: ignore
 
-TAILSCALE_DIR = Path("/userdata/system/tailscale")
+# DRONE_TAILSCALE_DIR / DRONE_TAILSCALE_SOCKET are escape hatches for
+# tests/ops, matching DRONE_VPN_DIR's precedent in vpn_manager.py -- never
+# exposed in the admin UI. On a real device TAILSCALE_DIR is always
+# /userdata/system/tailscale (where batocera_install.sh vendors the static
+# binaries) and TAILSCALE_SOCKET is always the daemon socket path the
+# installer's tailscaled uses. The overrides exist purely so local dev
+# (e.g. on a Mac, where that /userdata path can't exist) can point at a
+# real locally-installed `tailscale` CLI for testing.
+#
+# DRONE_TAILSCALE_SOCKET defaults to unset -> the real device's fixed
+# tailscaled.sock path, same as before. Set it to a real path to point at a
+# different daemon socket, or to the *empty string* to omit --socket
+# entirely -- required on macOS: the Tailscale.app GUI client doesn't run a
+# Linux-style tailscaled with a socket at a fixed path at all (it talks to
+# the OS via NetworkExtension), so passing any --socket value makes even a
+# running, enrolled macOS Tailscale answer "failed to connect to local
+# Tailscale service" -- confirmed by running the exact CLI invocation this
+# module makes, with and without --socket, against a real local install.
+TAILSCALE_DIR = Path(os.environ.get("DRONE_TAILSCALE_DIR") or "/userdata/system/tailscale")
 TAILSCALE_CLI = TAILSCALE_DIR / "bin" / "tailscale"
 TAILNET_SERVICE = Path("/userdata/system/services/DRONE_TAILNET")
-TAILSCALE_SOCKET = "/var/run/tailscale/tailscaled.sock"
+_TAILSCALE_SOCKET_ENV = os.environ.get("DRONE_TAILSCALE_SOCKET")
+TAILSCALE_SOCKET = "/var/run/tailscale/tailscaled.sock" if _TAILSCALE_SOCKET_ENV is None else _TAILSCALE_SOCKET_ENV
 
 # Tailscale's admin API, used only to disable key expiry for this device (see
 # disable_key_expiry() below) -- never for anything else, and only when an
@@ -63,12 +82,11 @@ TAILSCALE_API_TIMEOUT_SECONDS = 15.0
 
 
 def _run_cli(args: list, timeout: float) -> "subprocess.CompletedProcess[str]":
-    return subprocess.run(
-        [str(TAILSCALE_CLI), f"--socket={TAILSCALE_SOCKET}", *args],
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    cli_args = [str(TAILSCALE_CLI)]
+    if TAILSCALE_SOCKET:
+        cli_args.append(f"--socket={TAILSCALE_SOCKET}")
+    cli_args.extend(args)
+    return subprocess.run(cli_args, capture_output=True, text=True, timeout=timeout)
 
 
 def _first_address(addresses: Iterable[object], *, ipv4: bool = True) -> str:
