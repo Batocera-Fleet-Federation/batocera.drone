@@ -110,11 +110,25 @@ this correction just fixes *how* the two are wired together.
 ## Vendoring (on-device has no pip)
 
 ```bash
-scripts/vendor_deps.sh 311 x86_64  manylinux_2_28_x86_64
-scripts/vendor_deps.sh 311 aarch64 manylinux_2_28_aarch64
+scripts/vendor_deps.sh 312 x86_64  manylinux_2_28_x86_64
+scripts/vendor_deps.sh 312 aarch64 manylinux_2_28_aarch64
 scripts/build_release_bundle.sh x86_64
 scripts/build_release_bundle.sh aarch64
 ```
+
+**The Python tag (`312`) must match the real device's `python3`.** A CI
+build initially targeted `311`, which produced a compiled
+`_imgui_bundle*.so` that a real Python-3.12.8 Batocera unit's import
+machinery silently refused to load (`ModuleNotFoundError: No module named
+'imgui_bundle._imgui_bundle'` -- a mismatched ABI tag in the compiled
+extension's filename means CPython's finder doesn't recognize it as the
+module at all, not a normal ImportError). Found and fixed 2026-08-13 via
+live debugging against a real device (see `drone-live-debugging` skill).
+If a future Batocera release ships a different Python version, this needs
+re-verifying against real hardware -- `python3 -c "import sys;
+print(sys.implementation.cache_tag)"` on the device is the source of
+truth, not an assumption carried over from the main app's own
+`vendor_deps.sh` precedent (which is how `311` ended up here originally).
 
 See `requirements-vendor.txt` for exactly what's vendored and why --
 notably `numpy`, despite being listed as an optional "extra" in

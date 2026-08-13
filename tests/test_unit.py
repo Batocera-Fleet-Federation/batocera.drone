@@ -8314,9 +8314,16 @@ class ReleaseWorkflowPortsClientTests(unittest.TestCase):
         cls.workflow = root.joinpath(".github/workflows/release.yml").read_text(encoding="utf-8")
 
     def test_builds_both_arches_via_ports_clients_own_scripts(self) -> None:
-        self.assertIn("ports-client/scripts/vendor_deps.sh 311 x86_64  manylinux_2_28_x86_64", self.workflow)
+        # The Python tag (312) must match real device hardware, not be
+        # assumed -- see the "live debugging incident" note in
+        # ports-client/README.md's Vendoring section and
+        # ports-client/scripts/vendor_deps.sh's own header comment: an
+        # earlier 311 build was silently unloadable on a real Python-3.12.8
+        # Batocera unit (ModuleNotFoundError, not ImportError, from the
+        # compiled extension's ABI-tagged filename not matching).
+        self.assertIn("ports-client/scripts/vendor_deps.sh 312 x86_64  manylinux_2_28_x86_64", self.workflow)
         self.assertIn("ports-client/scripts/build_release_bundle.sh x86_64 dist", self.workflow)
-        self.assertIn("ports-client/scripts/vendor_deps.sh 311 aarch64 manylinux_2_28_aarch64", self.workflow)
+        self.assertIn("ports-client/scripts/vendor_deps.sh 312 aarch64 manylinux_2_28_aarch64", self.workflow)
         self.assertIn("ports-client/scripts/build_release_bundle.sh aarch64 dist", self.workflow)
 
     def test_attaches_both_bundles_to_the_release(self) -> None:

@@ -31,10 +31,13 @@ def _build_ssl_context(config: ClientConfig) -> Optional[ssl.SSLContext]:
         )
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     context.load_verify_locations(cafile=str(config.ca_cert_file))
-    # Drone's self-signed cert is issued as CN=localhost with no SAN (server_tls.py),
-    # so strict hostname checking would fail even though we've already pinned the
-    # exact cert file Drone itself generated — the same trust model the codebase
-    # already uses for peer-to-peer mTLS (pin the cert, not the hostname).
+    # Whichever cert Drone actually presents here (the reused device-identity
+    # drone.crt in the common case, or a CN=localhost self-signed server.crt
+    # as a last-resort fallback -- see config.py) has no SAN for 127.0.0.1,
+    # so strict hostname checking would fail even though we've already
+    # pinned the exact cert file Drone itself generated — the same trust
+    # model the codebase already uses for peer-to-peer mTLS (pin the cert,
+    # not the hostname).
     context.check_hostname = False
     context.verify_mode = ssl.CERT_REQUIRED
     return context

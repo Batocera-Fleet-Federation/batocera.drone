@@ -131,7 +131,7 @@ jobs:
         if: steps.version.outputs.skip != 'true'
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'
 
       - name: Build Ports client bundles
         if: steps.version.outputs.skip != 'true'
@@ -143,10 +143,20 @@ jobs:
           # compiling or executing anything) -- no QEMU/cross-compilation
           # needed, unlike the multi-arch Docker image build below. See
           # ports-client/scripts/vendor_deps.sh.
-          ports-client/scripts/vendor_deps.sh 311 x86_64  manylinux_2_28_x86_64
+          #
+          # The Python tag (312) MUST match the real device's python3 --
+          # confirmed via live debugging (2026-08-13) against a real
+          # x86_64 Batocera unit running Python 3.12.8: an earlier 311
+          # build produced a compiled _imgui_bundle*.so CPython's import
+          # machinery silently would not load under 3.12 (ModuleNotFoundError,
+          # not an ImportError -- the mismatched ABI tag in the filename
+          # means Python's finder doesn't even recognize it as the module).
+          # If a future Batocera release ships a different Python version,
+          # this needs to be re-verified on real hardware, not assumed.
+          ports-client/scripts/vendor_deps.sh 312 x86_64  manylinux_2_28_x86_64
           ports-client/scripts/build_release_bundle.sh x86_64 dist
 
-          ports-client/scripts/vendor_deps.sh 311 aarch64 manylinux_2_28_aarch64
+          ports-client/scripts/vendor_deps.sh 312 aarch64 manylinux_2_28_aarch64
           ports-client/scripts/build_release_bundle.sh aarch64 dist
 
           for asset in \

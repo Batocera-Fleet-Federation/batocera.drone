@@ -8,15 +8,23 @@
 # -- notably numpy, despite being an "extra" in imgui_bundle's own metadata,
 # is a verified hard runtime requirement for its texture-upload path).
 #
-# You MUST target the device's exact Python + arch + libc. Determine them on
-# a Batocera box:
+# You MUST target the device's exact Python + arch + libc -- get this
+# wrong and the compiled imgui_bundle extension's ABI-tagged filename
+# won't match what the device's CPython import machinery looks for, which
+# fails as ModuleNotFoundError, not a normal ImportError (confirmed live
+# 2026-08-13: a 311 build was silently unloadable on a real Python-3.12.8
+# device -- see the drone-live-debugging skill for how that was found, and
+# ports-client/README.md's "Vendoring" section for the incident). Determine
+# them on a Batocera box, don't assume:
 #   python3 -c "import sys,platform; print(sys.version_info, platform.machine())"; ldd --version | head -1
 #
 # Usage:
 #   scripts/vendor_deps.sh <py_tag> <arch> <platform_tag>
-# Examples (run on a dev/CI machine, once per target arch):
-#   scripts/vendor_deps.sh 311 x86_64  manylinux_2_28_x86_64
-#   scripts/vendor_deps.sh 311 aarch64 manylinux_2_28_aarch64
+# Examples (run on a dev/CI machine, once per target arch -- 312 is what
+# release.yml currently uses, verified against real hardware; re-verify
+# before changing it):
+#   scripts/vendor_deps.sh 312 x86_64  manylinux_2_28_x86_64
+#   scripts/vendor_deps.sh 312 aarch64 manylinux_2_28_aarch64
 set -euo pipefail
 
 PY_TAG="${1:?python tag, e.g. 311}"
