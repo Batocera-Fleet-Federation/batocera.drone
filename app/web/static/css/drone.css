@@ -2148,6 +2148,26 @@
       .music-player-bar-info { flex-basis: 100%; order: 1; }
       .music-player-bar-controls { order: 2; width: 100%; }
     }
+    /* The bar is position:fixed (see above) so it sits on top of the page
+       rather than pushing it -- without this, its own height covers
+       whatever content happens to be at the bottom of whichever page is
+       open, since the bar persists across router navigation. Toggled by
+       _playMusicPlayerEntry/closeMusicPlayerBar (document.body.classList),
+       not unconditionally, so pages render at full height when nothing is
+       playing. Sized taller on the same <=768px breakpoint the bar itself
+       wraps to two rows on above.
+       !important is required: .layout-shell also carries Bootstrap's
+       py-3/py-lg-4 utility classes, which Bootstrap itself ships as
+       `padding-bottom: ... !important` -- same reason the
+       body.movie-explorer-active #systemInfoBar rule above needs it. */
+    body.music-player-bar-active .layout-shell {
+      padding-bottom: 4.75rem !important;
+    }
+    @media (max-width: 768px) {
+      body.music-player-bar-active .layout-shell {
+        padding-bottom: 8rem !important;
+      }
+    }
     .marquee-source-grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));

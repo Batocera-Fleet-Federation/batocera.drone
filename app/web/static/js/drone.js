@@ -2589,7 +2589,12 @@ function filterMusicExplorer(queryValue, opts = {}) {
       || (m.album || "").toLowerCase().includes(filter)
     );
   }
-  const cards = groupMusicForExplorer(rows);
+  // The Liked filter is a flat list of the songs you liked, not the albums
+  // they happen to live on -- grouping into album cards here would show a
+  // whole album (including tracks you never liked) for every one liked
+  // song, which isn't what "Liked" means. Every other filter combination
+  // still groups into album cards as usual.
+  const cards = musicExplorerLikedFilter ? rows.slice() : groupMusicForExplorer(rows);
   const sorted = [...cards].sort((a, b) => musicSortableGroupKey(a).localeCompare(musicSortableGroupKey(b)));
   const visible = sorted.slice(0, musicExploreDisplayLimit);
   grid.innerHTML = visible.length
@@ -3094,6 +3099,7 @@ function closeMusicPlayerBar() {
     audio.load();
   }
   bar?.classList.add("d-none");
+  document.body.classList.remove("music-player-bar-active");
   musicPlayerQueue = [];
   musicPlayerQueueIndex = -1;
   musicPlayerCurrentEntryKey = null;
@@ -3215,6 +3221,10 @@ function _playMusicPlayerEntry(entryKey, title, artist, liked, album) {
   updateMusicPlayerBarLikeButton(entryKey, !!liked);
   audio.src = musicStreamUrl(entryKey);
   bar.classList.remove("d-none");
+  // Reserves bottom space on every page (see the body.music-player-bar-active
+  // rule in drone.css) so the fixed bar never covers the last row of
+  // on-screen content -- removed again in closeMusicPlayerBar.
+  document.body.classList.add("music-player-bar-active");
   audio.play().catch(() => {});
 }
 // Clicking the player bar's album art navigates back to that track's
