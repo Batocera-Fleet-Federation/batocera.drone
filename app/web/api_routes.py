@@ -1096,10 +1096,6 @@ class ApiRoutesMixin:
                 self._handle_movie_cast_token_create(parts[1])
                 return
 
-            if len(parts) == 3 and parts[0] == "music" and parts[2] == "cast-token":
-                self._handle_music_cast_token_create(parts[1])
-                return
-
             if len(parts) == 3 and parts[0] == "music" and parts[2] == "like":
                 payload = self._read_json_body()
                 self._handle_music_like(parts[1], payload)

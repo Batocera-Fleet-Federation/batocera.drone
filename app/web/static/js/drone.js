@@ -3066,11 +3066,6 @@ let musicPlayerShuffle = false;
 let musicPlayerShuffleHistory = [];
 function ensureMusicPlayerBar() {
   if (document.getElementById("musicPlayerBar")) return;
-  // Feature-detected once at bar-creation time (mirrors the movie player
-  // modal's identical check) rather than assumed from the AirPlay-capable
-  // Safari/iOS/macOS family -- everywhere else just gets no button instead
-  // of one that would silently do nothing when clicked.
-  const airplaySupported = typeof HTMLAudioElement !== "undefined" && !!HTMLAudioElement.prototype.webkitShowPlaybackTargetPicker;
   const bar = document.createElement("div");
   bar.id = "musicPlayerBar";
   bar.className = "music-player-bar d-none";
@@ -3089,7 +3084,6 @@ function ensureMusicPlayerBar() {
       <button type="button" class="btn btn-outline-light btn-sm" title="Previous" onclick="playMusicPlayerPrevious()"><i class="bi bi-skip-start-fill"></i></button>
       <audio id="musicPlayerBarAudio" controls></audio>
       <button type="button" class="btn btn-outline-light btn-sm" title="Next" onclick="playMusicPlayerNext()"><i class="bi bi-skip-end-fill"></i></button>
-      ${airplaySupported ? `<button type="button" id="musicPlayerBarAirPlay" class="btn btn-outline-light btn-sm" title="AirPlay" onclick="castMusicAirPlay(musicPlayerCurrentEntryKey)"><i class="bi bi-airplay"></i></button>` : ""}
       <button type="button" class="btn btn-outline-light btn-sm" title="Close" onclick="closeMusicPlayerBar()"><i class="bi bi-x-lg"></i></button>
     </div>
   `;
@@ -3300,62 +3294,6 @@ async function castMovieAirPlay(entryKey) {
   if (button) {
     button.disabled = false;
     button.innerHTML = `<i class="bi bi-airplay me-1"></i>AirPlay`;
-  }
-  if (!castInfo) {
-    airplayWindow.close();
-    return;
-  }
-  try {
-    if (!castInfo.airplay_url) throw new Error("AirPlay controller URL is missing");
-    airplayWindow.location.replace(castInfo.airplay_url);
-    showToast("AirPlay is prepared in the new window. Tap Choose AirPlay device there.", "info", 10000);
-  } catch (error) {
-    airplayWindow.close();
-    console.warn("Safari AirPlay controller failed", error);
-    showToast("Safari could not open the AirPlay controller. Allow pop-ups for this Drone and try again.", "danger", 12000);
-  }
-}
-// Music AirPlay -- same reasoning and same window-opened-synchronously
-// shape as castMovieAirPlay above (see that function's comment), just
-// against POST /music/{entryKey}/cast-token (handlers_music.py) instead.
-// No Google Cast/Chromecast equivalent for music: it exists on the movie
-// player because a Chromecast can be a useful target even though Fire TV
-// isn't reachable through it, but music's only real request has been
-// Fire TV/AirPlay, so Chromecast-for-music stays unbuilt until someone
-// actually asks for it.
-async function mintMusicCastToken(entryKey) {
-  try {
-    return await apiPost(`/music/${encodeURIComponent(entryKey)}/cast-token`, {});
-  } catch (err) {
-    showToast(`Could not prepare casting: ${escapeHtml(err.message || "unknown error")}`, "danger");
-    return null;
-  }
-}
-async function castMusicAirPlay(entryKey) {
-  if (!entryKey) return;
-  // Open synchronously while the click still carries user activation --
-  // same reason castMovieAirPlay does this before its own await.
-  const airplayWindow = window.open("", "_blank");
-  if (!airplayWindow) {
-    showToast("Safari blocked the AirPlay window. Allow pop-ups for this Drone and try again.", "warning", 12000);
-    return;
-  }
-  try {
-    airplayWindow.document.title = "Preparing Drone AirPlay";
-    airplayWindow.document.body.innerHTML = '<p style="font: 1rem system-ui; padding: 2rem">Preparing the track…</p>';
-  } catch (_) {
-    // A browser may restrict even the initial about:blank document; the
-    // navigation below can still succeed.
-  }
-  const button = document.getElementById("musicPlayerBarAirPlay");
-  if (button) {
-    button.disabled = true;
-    button.innerHTML = `<span class="spinner-border spinner-border-sm" aria-hidden="true"></span>`;
-  }
-  const castInfo = await mintMusicCastToken(entryKey);
-  if (button) {
-    button.disabled = false;
-    button.innerHTML = `<i class="bi bi-airplay"></i>`;
   }
   if (!castInfo) {
     airplayWindow.close();

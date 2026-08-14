@@ -27,7 +27,6 @@ try:
     from ..common.multipart import boundary_from_content_type as _boundary_from_content_type
     from ..common.multipart import parse_multipart_files as _parse_multipart_files
     from ..storage import music_store as _music_store
-    from ..storage import music_cast_tokens as _music_cast_tokens
     from ..music import filename_parser as _music_filename_parser
     from ..music import metadata_manager as _music_metadata
     from ..music.musicbrainz_client import MusicBrainzUnavailableError as _MusicBrainzUnavailableError
@@ -36,7 +35,6 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from common.multipart import boundary_from_content_type as _boundary_from_content_type  # type: ignore
     from common.multipart import parse_multipart_files as _parse_multipart_files  # type: ignore
     from storage import music_store as _music_store  # type: ignore
-    from storage import music_cast_tokens as _music_cast_tokens  # type: ignore
     from music import filename_parser as _music_filename_parser  # type: ignore
     from music import metadata_manager as _music_metadata  # type: ignore
     from music.musicbrainz_client import MusicBrainzUnavailableError as _MusicBrainzUnavailableError  # type: ignore
@@ -177,41 +175,6 @@ class HandlersMusicMixin:
         stays inside ``music_root`` -- mirrors
         ``handlers_movies._resolve_movie_path``."""
         return _music_store.resolve_music_stream_path(self.settings.music_root, entry_key)
-
-    def _handle_music_cast_token_create(self, entry_key: str) -> None:
-        """Mint a short-lived, single-track-scoped token that lets an
-        AirPlay receiver stream this track directly, with no session cookie
-        -- see ``storage/music_cast_tokens.py`` for why that's needed at
-        all. Session-gated like every other music route, not admin-only --
-        casting your own library isn't an admin action any more than
-        listening to it in-browser is.
-
-        Unlike ``_handle_movie_cast_token_create``, there is no FFmpeg
-        compatibility-transcode branch here: AirPlay/Safari's `<audio>`
-        element plays every format this app already scans as music
-        (``music_store.py``'s allowlist) natively, so delivery is always
-        "direct" -- one less moving part, and one less way for casting to
-        fail, than Movies needs for its much wider video-container/codec
-        surface.
-
-        400s (via the standard ``ValueError`` -> 400 mapping) when casting
-        isn't enabled on this Drone at all -- there would be no plain-HTTP
-        listener running to ever accept the token this would mint.
-        """
-        if not self.settings.cast_enabled:
-            raise ValueError("casting is not enabled on this Drone")
-        self._resolve_music_path(entry_key)  # 404s via FileNotFoundError if entry_key is unknown
-        result = _music_cast_tokens.create(self.settings, entry_key)
-        port_suffix = "" if self.settings.cast_http_port == 80 else f":{self.settings.cast_http_port}"
-        cast_base_url = f"http://{self._cast_stream_host()}{port_suffix}"
-        cast_url = f"{cast_base_url}/public/music/{entry_key}/cast-stream?token={result['token']}"
-        airplay_url = f"{cast_base_url}/public/music/{entry_key}/airplay?token={result['token']}"
-        self._send_json(200, {
-            "token": result["token"],
-            "expires_at": result["expires_at"],
-            "cast_url": cast_url,
-            "airplay_url": airplay_url,
-        })
 
     def _handle_music_download(self, entry_key: str) -> None:
         if not self.settings.downloads_enabled:

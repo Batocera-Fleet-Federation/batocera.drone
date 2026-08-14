@@ -91,8 +91,6 @@ try:
     from .storage import movies_store as _movies_store
     from .storage import movie_cast_tokens as _movie_cast_tokens
     from .movies import cast_stream as _movie_cast_stream
-    from .storage import music_store as _music_store
-    from .storage import music_cast_tokens as _music_cast_tokens
     from .common import http_range as _http_range
     from .storage.state_store import (
         append_event as _append_state_event,
@@ -173,8 +171,6 @@ except ImportError:
     from storage import movies_store as _movies_store  # type: ignore
     from storage import movie_cast_tokens as _movie_cast_tokens  # type: ignore
     from movies import cast_stream as _movie_cast_stream  # type: ignore
-    from storage import music_store as _music_store  # type: ignore
-    from storage import music_cast_tokens as _music_cast_tokens  # type: ignore
     from common import http_range as _http_range  # type: ignore
     from storage.state_store import (  # type: ignore
         append_event as _append_state_event,
@@ -2057,43 +2053,31 @@ _CAST_VIDEO_CONTENT_TYPES = {
     ".ts": "video/mp2t", ".3gp": "video/3gpp",
 }
 
-# Audio suffixes this app scans as music (see storage/music_store.py's
-# extension allowlist) mapped to a Content-Type -- same self-contained,
-# duplicated-not-imported reasoning as _CAST_VIDEO_CONTENT_TYPES above.
-_CAST_AUDIO_CONTENT_TYPES = {
-    ".mp3": "audio/mpeg", ".flac": "audio/flac", ".ogg": "audio/ogg",
-    ".opus": "audio/opus", ".m4a": "audio/mp4", ".wav": "audio/wav",
-    ".wma": "audio/x-ms-wma", ".aac": "audio/aac", ".aiff": "audio/aiff",
-    ".ape": "audio/x-ape",
-}
-
 
 class _CastHttpHandler(BaseHTTPRequestHandler):
     """A second, deliberately separate plain-HTTP listener
     (``settings.cast_http_port``, bound whenever ``settings.cast_enabled``
     is true -- on by default, see that field's docstring in
-    ``common/settings.py``) that serves exactly two stream surfaces -- one
-    movie, one music -- each gated by its own single-entry-scoped token
-    (``storage/movie_cast_tokens.py`` / ``storage/music_cast_tokens.py``):
-    a Range-aware direct-file route for both, plus the playlist/segments of
-    an FFmpeg compatibility stream for movies specifically, when the source
-    container or codecs cannot play on the receiver (music never needs
-    this -- see ``handlers_music._handle_music_cast_token_create``). Every
-    other path (and there is no admin surface, no movie/music list, no
-    artwork, nothing else at all here) gets a bare 404.
+    ``common/settings.py``) that serves *exactly one* movie-stream surface,
+    gated by a single-movie-scoped token from
+    ``storage/movie_cast_tokens.py``: a Range-aware direct-file route plus
+    the playlist/segments of an FFmpeg compatibility stream when the source
+    container or codecs cannot play on the receiver. Every other path (and
+    there is no admin surface, no movie list, no artwork, nothing else at all
+    here) gets a bare 404.
 
-    This exists because a Chromecast or AirPlay receiver fetches the media
+    This exists because a Chromecast or AirPlay receiver fetches the video
     file itself, directly -- no browser, no session cookie, and it can't
     click through this Drone's self-signed HTTPS certificate either. A
     deliberately separate, minimal class -- not ``RomRequestHandler`` --
     same reasoning as ``_HttpRedirectHandler`` above: the real app surface
     (session-gated browsing, admin actions, every other file this Drone
     holds) must never become reachable over an unencrypted connection just
-    because this one narrow exception exists for it. The narrowness (two
-    narrow surfaces, each gated by a token only an already-authenticated
-    request could have minted) is what makes "on by default" an acceptable
-    default here, the same way ``_HttpRedirectHandler`` (which serves no
-    real content at all) already is.
+    because this one narrow exception exists for it. The narrowness (a
+    single narrow surface, gated by a token only an already-authenticated request
+    could have minted) is what makes "on by default" an acceptable default
+    here, the same way ``_HttpRedirectHandler`` (which serves no real
+    content at all) already is.
     """
 
     # HTTP/1.1, unlike every other listener in this app (which all inherit
@@ -2139,9 +2123,6 @@ class _CastHttpHandler(BaseHTTPRequestHandler):
         try:
             raw_path, _, raw_query = self.path.partition("?")
             parts = [part for part in raw_path.split("/") if part]
-            if len(parts) >= 2 and parts[0] == "public" and parts[1] == "music":
-                self._handle_music_cast_get(parts, raw_query)
-                return
             direct_stream = (
                 len(parts) == 4
                 and parts[0] == "public"
@@ -2204,147 +2185,6 @@ class _CastHttpHandler(BaseHTTPRequestHandler):
             self._send_404()
 
     do_HEAD = do_GET
-
-    def _handle_music_cast_get(self, parts: list, raw_query: str) -> None:
-        """The music half of ``do_GET`` -- a direct-file route plus its
-        AirPlay controller page, same shape as the movie branch above but
-        without the HLS/FFmpeg complexity (see
-        ``handlers_music._handle_music_cast_token_create`` for why music
-        never needs a transcode branch). Split out into its own method
-        rather than interleaved with the movie branch's ``if``/``elif``
-        chain so neither surface has to reason about the other's path
-        shapes.
-        """
-        direct_stream = len(parts) == 4 and parts[2] and parts[3] == "cast-stream"
-        airplay_page = len(parts) == 4 and parts[2] and parts[3] == "airplay"
-        if not direct_stream and not airplay_page:
-            self._send_404()
-            return
-        entry_key = parts[2]
-        query = parse_qs(raw_query)
-        token = query.get("token", [""])[0]
-        if not _music_cast_tokens.verify(self.settings, entry_key, token):
-            # Worth a log line: this is what a receiver hits when a token
-            # has expired, and it is otherwise indistinguishable (from the
-            # TV's side) from the track simply not playing.
-            self._log_cast(f"404 rejected music token for {entry_key}")
-            self._send_404()
-            return
-        try:
-            target = _music_store.resolve_music_stream_path(self.settings.music_root, entry_key)
-        except FileNotFoundError:
-            self._log_cast(f"404 unknown track {entry_key}")
-            self._send_404()
-            return
-        if airplay_page:
-            self._send_music_airplay_page(entry_key, token, target)
-        else:
-            self._stream_range(
-                target,
-                content_type=_CAST_AUDIO_CONTENT_TYPES.get(target.suffix.lower(), "application/octet-stream"),
-            )
-
-    def _send_music_airplay_page(self, entry_key: str, token: str, target: Path) -> None:
-        """Serve a minimal HTTP-origin AirPlay controller for one track --
-        audio-flavored twin of ``_send_airplay_page``. Safari 18+ upgrades
-        HTTP media embedded by an HTTPS page to HTTPS, and the cast
-        listener cannot use HTTPS (a TV cannot trust Drone's private
-        ``.local`` certificate), so this controller must itself be the
-        top-level HTTP document -- same reason Movies opens a whole new
-        window rather than just pointing the existing player bar's
-        ``<audio>`` at a plain-HTTP URL from the HTTPS-served app page. The
-        same track-scoped token gates both this page and the one media
-        request it can issue.
-        """
-        media_path = f"/public/music/{entry_key}/cast-stream?token={token}"
-        media_type = _CAST_AUDIO_CONTENT_TYPES.get(target.suffix.lower(), "application/octet-stream")
-        safe_media_path = html.escape(media_path, quote=True)
-        safe_media_type = html.escape(media_type, quote=True)
-        safe_title = html.escape(target.stem, quote=True)
-        body = f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Drone AirPlay</title>
-  <style>
-    :root {{ color-scheme: dark; font-family: system-ui, sans-serif; }}
-    body {{ margin: 0; min-height: 100vh; display: grid; place-items: center; background: #10151d; color: #f8f9fa; }}
-    main {{ width: min(92vw, 500px); text-align: center; }}
-    audio {{ width: 100%; margin-top: .5rem; }}
-    button {{ margin-top: 1rem; padding: .8rem 1.2rem; border: 0; border-radius: .45rem; font: inherit; font-weight: 650; }}
-    button:not(:disabled) {{ cursor: pointer; background: #0d6efd; color: white; }}
-    #status {{ min-height: 1.5rem; color: #b8c0cc; }}
-  </style>
-</head>
-<body>
-  <main>
-    <h1>Drone AirPlay</h1>
-    <p>{safe_title}</p>
-    <p id="status">Loading the track…</p>
-    <audio id="airplayAudio" controls preload="auto" x-webkit-airplay="allow">
-      <source src="{safe_media_path}" type="{safe_media_type}">
-    </audio>
-    <button id="airplayButton" type="button" disabled>Preparing audio…</button>
-  </main>
-  <script>
-    const audio = document.getElementById("airplayAudio");
-    const button = document.getElementById("airplayButton");
-    const status = document.getElementById("status");
-    const ready = () => {{
-      button.disabled = false;
-      button.textContent = "Choose AirPlay device";
-      status.textContent = "The track is ready.";
-    }};
-    audio.addEventListener("loadedmetadata", ready, {{ once: true }});
-    audio.addEventListener("canplay", ready, {{ once: true }});
-    audio.addEventListener("error", () => {{
-      button.disabled = true;
-      button.textContent = "Stream unavailable";
-      status.textContent = "Safari could not load the prepared track. Return to Drone and try again.";
-    }});
-    audio.addEventListener("webkitcurrentplaybacktargetiswirelesschanged", () => {{
-      if (!audio.webkitCurrentPlaybackTargetIsWireless) {{
-        status.textContent = "AirPlay disconnected.";
-        return;
-      }}
-      status.textContent = "AirPlay connected. Starting playback on the TV/speaker…";
-      const playback = audio.play();
-      if (playback && typeof playback.catch === "function") {{
-        playback.catch(() => {{
-          status.textContent = "AirPlay connected. Press Play in the audio controls to begin.";
-        }});
-      }}
-    }});
-    button.addEventListener("click", () => {{
-      if (typeof audio.webkitShowPlaybackTargetPicker !== "function") {{
-        status.textContent = "Open this page in Safari to use AirPlay.";
-        return;
-      }}
-      audio.webkitShowPlaybackTargetPicker();
-    }});
-    if (audio.readyState >= 1) ready();
-  </script>
-</body>
-</html>
-""".encode("utf-8")
-        self._response_started = True
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Referrer-Policy", "no-referrer")
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("X-Frame-Options", "DENY")
-        self.send_header(
-            "Content-Security-Policy",
-            "default-src 'none'; media-src 'self'; script-src 'unsafe-inline'; "
-            "style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
-        )
-        self.end_headers()
-        self._log_cast(f"200 AirPlay controller {entry_key}")
-        if self.command != "HEAD":
-            self.wfile.write(body)
 
     def _send_cast_cors_headers(self) -> None:
         """Google's default media receiver runs the playback page on Google's
@@ -2783,7 +2623,7 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
             cast_http_thread.start()
             cast_http_server.thread = cast_http_thread  # type: ignore[attr-defined]
             print(
-                f"Serving cast-stream listener on http://0.0.0.0:{settings.cast_http_port} (token-gated, movies+music only)",
+                f"Serving cast-stream listener on http://0.0.0.0:{settings.cast_http_port} (token-gated, movies only)",
                 flush=True,
             )
     server.cast_http_server = cast_http_server  # type: ignore[attr-defined]

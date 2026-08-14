@@ -407,43 +407,6 @@ Real changes made after initial launch, not reflected in the sections above:
   `ROM_METADATA_INITIAL_DELAY_SECONDS=0` to skip its 60s startup poll delay
   since the mock userdata seeder doesn't seed any `music/` fixtures itself).
 
-- **AirPlay casting, added after the "no Chromecast/AirPlay casting in v1"
-  call below.** No Chromecast/Google Cast for music -- it exists for Movies
-  because a Chromecast is still a plausible target even when the TV isn't
-  reachable through it, but the actual ask that drove this was Fire TV via
-  AirPlay 2, so Chromecast-for-music stays unbuilt until someone asks.
-  AirPlay mirrors the Movies mechanism (`app/movies/cast_stream.py` +
-  `_CastHttpHandler` in `drone_api.py`) but skips its FFmpeg
-  compatibility-transcode branch entirely: Safari's `<audio>` plays every
-  format `music_store.py`'s scan allowlist admits natively, so delivery is
-  always "direct" -- one fewer moving part than Movies needs for its much
-  wider video container/codec surface. New files: `storage/
-  music_cast_tokens.py` (a mirror of `movie_cast_tokens.py`, separate
-  `music_cast_tokens` table -- same "mirror, don't share" convention as
-  every other movies/music pair here). `_CastHttpHandler.do_GET` dispatches
-  `public/music/...` to a new `_handle_music_cast_get` method (kept
-  separate from the movie `if`/`elif` chain rather than interleaved, so
-  neither surface reasons about the other's path shapes) and
-  `_send_music_airplay_page` (an audio-flavored twin of
-  `_send_airplay_page`, `<audio>` instead of `<video>`, no HLS-delivery
-  branch). Frontend: `mintMusicCastToken`/`castMusicAirPlay` mirror the
-  movie pair, and an AirPlay button is spliced into `ensureMusicPlayerBar`'s
-  HTML, gated behind the same `HTMLAudioElement.prototype.
-  webkitShowPlaybackTargetPicker` feature-detect the movie player modal
-  already uses for `<video>` (so it silently doesn't render outside
-  Safari/iOS/macOS rather than rendering a button that does nothing).
-  **Root cause of the bug this fixed:** the player bar's plain
-  `<audio controls>` element has *no* custom AirPlay code of its own --
-  picking a Fire TV from Safari's native AirPlay picker handed the receiver
-  the session-cookie-gated, self-signed-HTTPS `/music/{key}/stream` URL
-  directly, which it can neither authenticate nor trust the cert for, so it
-  showed a permanent loading spinner with no audio ever arriving (see the
-  "no browser in the loop" reasoning in `drone-movies-feature`'s Casting
-  section, which applies identically here). Verified live: minted a token
-  through the running mock server and confirmed with `curl` (no session
-  auth) that both the plain-HTTP airplay page and the direct Range-aware
-  stream serve correctly, and that an invalid token 404s.
-
 ## Common failure patterns to avoid (learned from Movies, apply here too)
 
 - Using a scraped artist/album name as the grouping key instead of the
@@ -462,8 +425,7 @@ Real changes made after initial launch, not reflected in the sections above:
 
 Copy the Movies pattern by default for anything not explicitly called out
 above as different (keyless scraper, folder-primary grouping, persistent
-player bar, AirPlay-only casting -- no Chromecast/Google Cast, see "Shipped
-deviations" above -- no P2P sync in v1). Where
+player bar, no Chromecast/AirPlay casting in v1, no P2P sync in v1). Where
 this skill and `drone-movies-feature` disagree on a shared convention
 (schema shape, scan wiring, allowlist discipline, error-subclass ordering),
 treat `drone-movies-feature` as authoritative — it describes shipped code,
