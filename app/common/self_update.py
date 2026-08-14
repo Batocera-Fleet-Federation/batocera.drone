@@ -1,5 +1,6 @@
 """Drone self-update: poll releases, download updates, and re-exec in place."""
 
+import http.client
 import json
 import os
 import platform
@@ -354,6 +355,33 @@ def _ports_client_dir(settings: Settings) -> Path:
     return settings.roms_root / "ports"
 
 
+def _reload_emulationstation_gamelists(timeout_seconds: float = 5.0) -> dict:
+    """Ask the local Batocera EmulationStation process to reload gamelists.
+
+    EmulationStation keeps gamelist metadata in memory after startup. Its
+    localhost-only service exposes /reloadgames specifically for applying
+    external gamelist edits without killing a running game or restarting the
+    frontend. An unavailable ES process is non-fatal: the metadata remains on
+    disk and will be loaded on its next start.
+    """
+    connection = http.client.HTTPConnection("127.0.0.1", 1234, timeout=timeout_seconds)
+    try:
+        connection.request("GET", "/reloadgames")
+        response = connection.getresponse()
+        response.read()
+        if 200 <= response.status < 300:
+            return {"status": "requested", "http_status": response.status}
+        return {
+            "status": "error",
+            "http_status": response.status,
+            "error": str(response.reason or f"HTTP {response.status}"),
+        }
+    except (OSError, http.client.HTTPException) as error:
+        return {"status": "unavailable", "error": f"{error.__class__.__name__}: {error}"}
+    finally:
+        connection.close()
+
+
 def _refresh_installed_ports_client_gamelist(settings: Settings) -> dict:
     """Run the bundled, idempotent ES metadata integration after install/start.
 
@@ -382,7 +410,12 @@ def _refresh_installed_ports_client_gamelist(settings: Settings) -> dict:
                 payload = json.loads(completed.stdout.strip())
             except ValueError:
                 payload = {"status": "updated"}
-            return payload if isinstance(payload, dict) else {"status": "updated"}
+            result = dict(payload) if isinstance(payload, dict) else {"status": "updated"}
+            # Reload even when the helper reports "current". This covers the
+            # first API start after an older updater installed the new Ports
+            # bundle and edited gamelist.xml before the new API code existed.
+            result["emulationstation_reload"] = _reload_emulationstation_gamelists()
+            return result
         detail = (completed.stderr or completed.stdout or "unknown error").strip()
         print(f"Ports artwork gamelist refresh failed: {detail}", file=sys.stderr, flush=True)
         return {"status": "error", "error": detail[:500]}

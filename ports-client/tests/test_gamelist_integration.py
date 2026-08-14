@@ -3,7 +3,12 @@ import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from client.gamelist_integration import IMAGE_RELATIVE_PATH, MARQUEE_RELATIVE_PATH, ensure_ports_gamelist
+from client.gamelist_integration import (
+    IMAGE_RELATIVE_PATH,
+    MARQUEE_RELATIVE_PATH,
+    THUMBNAIL_RELATIVE_PATH,
+    ensure_ports_gamelist,
+)
 
 
 class PortsGamelistIntegrationTests(unittest.TestCase):
@@ -30,14 +35,17 @@ class PortsGamelistIntegrationTests(unittest.TestCase):
         self.assertEqual(entry.findtext("name"), "Batocera Drone")
         self.assertEqual(entry.findtext("marquee"), MARQUEE_RELATIVE_PATH)
         self.assertEqual(entry.findtext("image"), IMAGE_RELATIVE_PATH)
+        self.assertEqual(entry.findtext("thumbnail"), THUMBNAIL_RELATIVE_PATH)
 
     def test_updates_only_drone_artwork_and_preserves_other_ports_metadata(self) -> None:
         (self.ports / "gamelist.xml").write_text(
             "<gameList>"
             "<game><path>./other.sh</path><name>Other Port</name>"
-            "<image>./images/other.jpg</image><marquee>./images/other.png</marquee></game>"
+            "<image>./images/other.jpg</image><thumbnail>./images/other-thumb.jpg</thumbnail>"
+            "<marquee>./images/other.png</marquee></game>"
             "<game><path>./batocera-drone-client.sh</path><name>My Drone Name</name>"
             "<favorite>true</favorite><image>./images/old.jpg</image>"
+            "<thumbnail>./images/old-thumb.jpg</thumbnail>"
             "<marquee>./images/old.png</marquee></game>"
             "</gameList>",
             encoding="utf-8",
@@ -49,10 +57,12 @@ class PortsGamelistIntegrationTests(unittest.TestCase):
         other = self._entry("./other.sh")
         drone = self._entry("./batocera-drone-client.sh")
         self.assertEqual(other.findtext("image"), "./images/other.jpg")
+        self.assertEqual(other.findtext("thumbnail"), "./images/other-thumb.jpg")
         self.assertEqual(other.findtext("marquee"), "./images/other.png")
         self.assertEqual(drone.findtext("name"), "My Drone Name")
         self.assertEqual(drone.findtext("favorite"), "true")
         self.assertEqual(drone.findtext("image"), IMAGE_RELATIVE_PATH)
+        self.assertEqual(drone.findtext("thumbnail"), THUMBNAIL_RELATIVE_PATH)
         self.assertEqual(drone.findtext("marquee"), MARQUEE_RELATIVE_PATH)
 
     def test_second_run_is_idempotent(self) -> None:

@@ -372,8 +372,12 @@ The Ports bundle contains the in-app logo plus the separate
 `images/batocera-drone_marquee.png` and `images/main.jpg` files consumed by
 EmulationStation.
 After extraction, `client/gamelist_integration.py` safely updates only the
-Drone launcher's `<marquee>` and `<image>` fields in the existing Ports `gamelist.xml`,
-preserving unrelated games and metadata. The Drone API's update worker now
+Drone launcher's `<marquee>`, `<image>`, and `<thumbnail>` fields in the existing
+Ports `gamelist.xml`, preserving unrelated games and metadata. Both image fields
+point to `main.jpg`, since carousel themes such as Hypermax-Plus-PixN display the
+thumbnail alongside the marquee instead of the primary image. The API worker
+then requests EmulationStation's localhost `/reloadgames` service so the running
+frontend applies the metadata without a restart. The Drone API's update worker now
 installs the architecture-matched Ports
 bundle as a required part of each supported-device update before advancing
 the web/API version. Both the web button and periodic checks merely queue

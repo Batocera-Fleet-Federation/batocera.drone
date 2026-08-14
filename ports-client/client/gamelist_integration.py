@@ -18,6 +18,7 @@ LAUNCHER_FILE = "batocera-drone-client.sh"
 DISPLAY_NAME = "Batocera Drone"
 MARQUEE_RELATIVE_PATH = "./images/batocera-drone_marquee.png"
 IMAGE_RELATIVE_PATH = "./images/main.jpg"
+THUMBNAIL_RELATIVE_PATH = IMAGE_RELATIVE_PATH
 
 
 def _normalized_launcher_path(value: str) -> str:
@@ -75,6 +76,17 @@ def ensure_ports_gamelist(ports_dir: Path) -> dict:
         image_node = ET.SubElement(game, "image")
     image_node.text = IMAGE_RELATIVE_PATH
 
+    # Several Batocera themes, including Hypermax-Plus-PixN's default
+    # gamecarousel view, render {game:thumbnail} beside md_marquee instead of
+    # rendering md_image. Point both metadata roles at the same complete Drone
+    # artwork so it is visible across detailed, grid, and carousel themes.
+    thumbnail_node = game.find("thumbnail")
+    previous_thumbnail = str(thumbnail_node.text or "") if thumbnail_node is not None else ""
+    changed = changed or previous_thumbnail != THUMBNAIL_RELATIVE_PATH
+    if thumbnail_node is None:
+        thumbnail_node = ET.SubElement(game, "thumbnail")
+    thumbnail_node.text = THUMBNAIL_RELATIVE_PATH
+
     if changed:
         try:
             ET.indent(tree, space="  ")
@@ -95,6 +107,7 @@ def ensure_ports_gamelist(ports_dir: Path) -> dict:
         "gamelist": str(gamelist),
         "marquee": MARQUEE_RELATIVE_PATH,
         "image": IMAGE_RELATIVE_PATH,
+        "thumbnail": THUMBNAIL_RELATIVE_PATH,
         "entry_created": created,
     }
 

@@ -8424,6 +8424,7 @@ class InstallerPortsClientTests(unittest.TestCase):
         self.assertIn('chmod +x "$PORTS_DIR/batocera-drone-client.sh"', self.install)
         self.assertIn("gamelist_integration.py", self.install)
         self.assertIn('python3 "$PORTS_GAMELIST_HELPER" "$PORTS_DIR"', self.install)
+        self.assertIn("http://127.0.0.1:1234/reloadgames", self.install)
 
 
 class ReleaseWorkflowPortsClientTests(unittest.TestCase):

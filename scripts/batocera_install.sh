@@ -430,7 +430,14 @@ install_ports_client() {
   chmod +x "$PORTS_DIR/batocera-drone-client.sh"
   PORTS_GAMELIST_HELPER="$PORTS_DIR/.data/batocera-drone-client/client/gamelist_integration.py"
   if [ -f "$PORTS_GAMELIST_HELPER" ]; then
-    if ! python3 "$PORTS_GAMELIST_HELPER" "$PORTS_DIR"; then
+    if python3 "$PORTS_GAMELIST_HELPER" "$PORTS_DIR"; then
+      # ES caches gamelist metadata in memory. Its localhost-only service
+      # applies this external edit without restarting the frontend or ending
+      # a running game. If ES is not running yet, it will read the file later.
+      if ! curl -fsS --connect-timeout 2 --max-time 5 http://127.0.0.1:1234/reloadgames >/dev/null 2>&1; then
+        echo "Ports artwork is installed; EmulationStation will load it on its next start."
+      fi
+    else
       echo "Ports client installed, but its EmulationStation artwork metadata could not be refreshed."
     fi
   fi

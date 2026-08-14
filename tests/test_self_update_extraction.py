@@ -276,6 +276,33 @@ class DownloadLatestDroneAppNotificationTests(unittest.TestCase):
         self.assertEqual(history[0]["release_notes"], "")
 
 
+class ReloadEmulationStationGamelistsTests(unittest.TestCase):
+    def test_requests_the_local_emulationstation_reload_endpoint(self):
+        response = mock.Mock(status=200, reason="OK")
+        connection = mock.Mock()
+        connection.getresponse.return_value = response
+
+        with mock.patch.object(self_update.http.client, "HTTPConnection", return_value=connection) as constructor:
+            result = self_update._reload_emulationstation_gamelists(timeout_seconds=2.5)
+
+        constructor.assert_called_once_with("127.0.0.1", 1234, timeout=2.5)
+        connection.request.assert_called_once_with("GET", "/reloadgames")
+        response.read.assert_called_once_with()
+        connection.close.assert_called_once_with()
+        self.assertEqual(result, {"status": "requested", "http_status": 200})
+
+    def test_unavailable_emulationstation_is_non_fatal(self):
+        connection = mock.Mock()
+        connection.request.side_effect = ConnectionRefusedError("ES is not running")
+
+        with mock.patch.object(self_update.http.client, "HTTPConnection", return_value=connection):
+            result = self_update._reload_emulationstation_gamelists()
+
+        self.assertEqual(result["status"], "unavailable")
+        self.assertIn("ES is not running", result["error"])
+        connection.close.assert_called_once_with()
+
+
 class DownloadLatestPortsClientTests(unittest.TestCase):
     """The API worker installs the Ports bundle as a required part of the
     same release as the web/API app. Both manual and periodic UI actions use
@@ -319,7 +346,12 @@ class DownloadLatestPortsClientTests(unittest.TestCase):
         # the wrapper deliberately swallows it (see
         # test_wrapper_never_raises_and_reports_the_error).
         with mock.patch.object(self_update.platform, "machine", return_value=arch), \
-             mock.patch.object(self_update, "urlopen", lambda request, timeout=None: io.BytesIO(archive_bytes)):
+             mock.patch.object(self_update, "urlopen", lambda request, timeout=None: io.BytesIO(archive_bytes)), \
+             mock.patch.object(
+                 self_update,
+                 "_reload_emulationstation_gamelists",
+                 return_value={"status": "requested", "http_status": 200},
+             ):
             return self_update._download_latest_ports_client_unlocked(self.settings)
 
     def test_extracts_launcher_and_app_tree_and_restores_launcher_executable_bit(self):
@@ -349,10 +381,12 @@ class DownloadLatestPortsClientTests(unittest.TestCase):
         self.assertEqual((ports_dir / "images" / "batocera-drone_marquee.png").read_bytes(), b"marquee-png")
         self.assertEqual((ports_dir / "images" / "main.jpg").read_bytes(), b"main-jpg")
         self.assertEqual(result["gamelist"]["status"], "updated")
+        self.assertEqual(result["gamelist"]["emulationstation_reload"]["status"], "requested")
         gamelist = (ports_dir / "gamelist.xml").read_text(encoding="utf-8")
         self.assertIn("./batocera-drone-client.sh", gamelist)
         self.assertIn("./images/batocera-drone_marquee.png", gamelist)
         self.assertIn("./images/main.jpg", gamelist)
+        self.assertIn("<thumbnail>./images/main.jpg</thumbnail>", gamelist)
 
     def test_uses_the_per_arch_release_asset_url(self):
         archive = self._bundle([("batocera-drone-client.sh", b"x")])
@@ -742,12 +776,19 @@ class DroneAutoUpdatePollerTests(unittest.TestCase):
         (ports_dir / "batocera-drone-client.sh").write_text("#!/bin/sh\n", encoding="utf-8")
         self.settings.roms_root = self.root / "roms"
 
-        thread = self_update._start_drone_auto_update_poller(self.settings, poll_seconds=0)
+        with mock.patch.object(
+            self_update,
+            "_reload_emulationstation_gamelists",
+            return_value={"status": "requested", "http_status": 200},
+        ) as reload_gamelists:
+            thread = self_update._start_drone_auto_update_poller(self.settings, poll_seconds=0)
 
         self.assertIsNone(thread)
+        reload_gamelists.assert_called_once_with()
         gamelist = (ports_dir / "gamelist.xml").read_text(encoding="utf-8")
         self.assertIn("./images/batocera-drone_marquee.png", gamelist)
         self.assertIn("./images/main.jpg", gamelist)
+        self.assertIn("<thumbnail>./images/main.jpg</thumbnail>", gamelist)
 
     def test_manual_request_runs_check_on_named_api_worker_and_persists_status(self):
         completed = threading.Event()
