@@ -94,3 +94,8 @@ def loading_panel(text: str = "Loading...") -> None:
     imgui.text(str(text or "Loading..."))
     imgui.end_child()
     imgui.set_cursor_pos(previous)
+    # Dear ImGui 1.92 asserts at End() when SetCursorPos() is the final
+    # layout operation in a window. Submit a zero-size item after restoring
+    # the caller's cursor so the parent window's layout state is finalized
+    # without adding visible content.
+    imgui.dummy(imgui.ImVec2(0.0, 0.0))
