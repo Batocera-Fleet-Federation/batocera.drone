@@ -28,6 +28,7 @@ class _FakeApiClient:
         self._post_responses = post_responses or {}
         self._post_error = post_error
         self.login_calls = []
+        self.get_calls = []
         self.post_calls = []
 
     def session_status(self):
@@ -40,9 +41,13 @@ class _FakeApiClient:
         return self._login_result or username
 
     def get(self, path):
+        self.get_calls.append(path)
         if self._get_error is not None:
             raise self._get_error
-        return self._get_responses.get(path, {})
+        response = self._get_responses.get(path, {})
+        if isinstance(response, list):
+            return response.pop(0) if response else {}
+        return response
 
     def post(self, path, body=None, *, timeout=None):
         self.post_calls.append((path, body))
@@ -402,6 +407,99 @@ class SwarmScreenTests(unittest.TestCase):
         screen._do_request_item("movies", {"movie_name": "Alien"}, "Alien", "")
         self.assertEqual(screen.request_message, "peer offline")
 
+    def test_ignore_existing_games_defaults_checked(self) -> None:
+        screen = SwarmScreen(_FakeApiClient())
+        self.assertTrue(screen.ignore_existing_games)
+
+    def test_unchecked_ignore_existing_requests_overwrite(self) -> None:
+        client = _FakeApiClient(post_responses={
+            "/admin/local-network/sync": {
+                "status": "queued",
+                "jobs": [{"job_id": "job-1", "file_type": "ROM", "status": "queued"}],
+            }
+        })
+        screen = SwarmScreen(client)
+        screen.request_peer_id = "peer1"
+        screen.ignore_existing_games = False
+        screen._do_request_item("roms", {"name": "Zelda"}, "Zelda", "snes")
+        self.assertEqual(client.post_calls[0][1]["overwrite_files"], True)
+
+    def test_download_progress_updates_row_and_marks_completion(self) -> None:
+        screen = SwarmScreen(_FakeApiClient())
+        row = {"name": "Zelda", "relative_path": "Zelda.zip"}
+        screen.request_roms = [row]
+        key = ("roms", "Zelda.zip")
+        screen._track_download(
+            key,
+            "Zelda",
+            [{"job_id": "job-1", "file_type": "ROM", "status": "queued", "total_bytes": 100}],
+        )
+        screen._apply_download_snapshot({
+            "downloads": [{
+                "job_id": "job-1", "file_type": "ROM", "status": "downloading",
+                "downloaded_bytes": 40, "total_bytes": 100,
+            }]
+        })
+        self.assertEqual(screen.request_downloads[key]["status"], "downloading")
+        self.assertEqual(screen.request_downloads[key]["percentage"], 40.0)
+
+        screen._apply_download_snapshot({
+            "downloads": [{
+                "job_id": "job-1", "file_type": "ROM", "status": "completed",
+                "downloaded_bytes": 100, "total_bytes": 100,
+            }]
+        })
+        self.assertEqual(screen.request_downloads[key]["message"], "Downloaded")
+        self.assertTrue(row["exists_locally"])
+        self.assertTrue(row["_downloaded"])
+
+    def test_download_all_uses_bulk_endpoint_and_tracks_new_jobs(self) -> None:
+        before = {"downloads": [{"job_id": "old-job", "source_drone_id": "peer1", "file_type": "ROM"}]}
+        # The new job is intentionally absent here: it completed quickly and
+        # aged out of the bounded recent queue before the bulk call returned.
+        # queued_jobs in the response still gives the client an exact mapping.
+        after = {"downloads": [
+            {"job_id": "old-job", "source_drone_id": "peer1", "file_type": "ROM"},
+        ]}
+        client = _FakeApiClient(
+            get_responses={"/admin/downloads": [before, after]},
+            post_responses={"/admin/local-network/sync-bulk": {
+                "status": "queued", "queued_assets": 1, "queued_artwork": 0,
+                "queued_job_ids": ["new-job"],
+                "queued_jobs": [{
+                    "job_id": "new-job", "source_drone_id": "peer1", "file_type": "ROM",
+                    "relative_path": "Zelda.zip", "file_name": "Zelda.zip", "status": "queued",
+                }],
+                "skipped_existing": 2, "total_available": 3,
+            }},
+        )
+        screen = SwarmScreen(client)
+        screen.request_peer_id = "peer1"
+        screen.request_selected_system = "snes"
+        screen._download_all()
+        self.assertEqual(
+            client.post_calls,
+            [("/admin/local-network/sync-bulk", {
+                "peer_id": "peer1", "asset_type": "roms", "system": "snes",
+            })],
+        )
+        self.assertEqual(screen.request_batch["job_ids"], ["new-job"])
+        self.assertIn(("roms", "Zelda.zip"), screen.request_downloads)
+        self.assertEqual(screen.request_downloads[("roms", "Zelda.zip")]["status"], "completed")
+        self.assertIn("ignored 2", screen.request_message)
+
+    def test_download_all_unchecked_existing_enables_overwrite(self) -> None:
+        client = _FakeApiClient(
+            get_responses={"/admin/downloads": [{"downloads": []}, {"downloads": []}]},
+            post_responses={"/admin/local-network/sync-bulk": {"queued_assets": 0}},
+        )
+        screen = SwarmScreen(client)
+        screen.request_peer_id = "peer1"
+        screen.request_selected_system = "snes"
+        screen.ignore_existing_games = False
+        screen._download_all()
+        self.assertTrue(client.post_calls[0][1]["overwrite_files"])
+
 
 class VpnScreenTests(unittest.TestCase):
     def test_on_enter_loads_status(self) -> None:
@@ -747,6 +845,20 @@ class AppShellTests(unittest.TestCase):
         shell = AppShell(client, "batocera", on_quit=lambda: calls.append("quit"))
         shell.on_quit()
         self.assertEqual(calls, ["quit"])
+
+    def test_queued_section_load_exposes_loading_before_network_call(self) -> None:
+        client = _FakeApiClient(get_responses={
+            "/admin/swarm/overview": {"active": False, "drones": []},
+        })
+        shell = AppShell(client, "batocera", on_quit=lambda: None)
+        shell.on_enter()
+        calls_before = list(client.get_calls)
+        shell._queue_section("swarm", "Swarm")
+        self.assertEqual(client.get_calls, calls_before)
+        self.assertEqual(shell.deferred_action_label, "Loading Swarm...")
+        shell.run_deferred_action()
+        self.assertIn("/admin/swarm/overview", client.get_calls[len(calls_before):])
+        self.assertIsNone(shell.deferred_action_label)
 
 
 if __name__ == "__main__":

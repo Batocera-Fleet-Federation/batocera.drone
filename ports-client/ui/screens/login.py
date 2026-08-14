@@ -59,7 +59,7 @@ class LoginScreen(Screen):
             imgui.text_colored(ERROR_COLOR, f"Could not reach Drone: {self.connection_error}")
             imgui.spacing()
             if imgui.button("Retry"):
-                self.on_enter()
+                self.defer_action("Connecting to Drone...", self.on_enter)
             return
 
         # Reachable, but genuinely not authenticated -- only expected when
@@ -77,7 +77,7 @@ class LoginScreen(Screen):
 
         imgui.spacing()
         if imgui.button("Log in") and self.username and self.password:
-            self._attempt_login()
+            self.defer_action("Signing in...", self._attempt_login)
 
     def _attempt_login(self) -> None:
         try:

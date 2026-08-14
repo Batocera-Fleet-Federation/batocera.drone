@@ -25,7 +25,7 @@ from .screens.base import Screen
 from .screens.swarm import SwarmScreen
 from .screens.vpn import VpnScreen
 from .theme import ACCENT_HOT, ADMIN_SIDEBAR, ADMIN_SIDEBAR_GRADIENT_START, hex_color
-from .widgets import tab_button
+from .widgets import loading_panel, tab_button
 
 _SECTIONS = (("about", "About"), ("swarm", "Swarm"), ("vpn", "VPN"), ("backups", "Backups"))
 _QUIT_AREA_WIDTH = 90.0
@@ -56,6 +56,8 @@ class AppShell(Screen):
         self._ensure_entered(self.section)
 
     def draw(self, navigator) -> None:
+        current = self._content[self.section]
+        current.run_deferred_action()
         self._draw_top_bar()
         # Quick tab-switch bonus -- D-pad/stick nav can already reach these
         # same top-bar buttons directly once ui/gamepad.py's HasGamepad fix
@@ -69,7 +71,9 @@ class AppShell(Screen):
             self._cycle_section(1)
         imgui.separator()
         imgui.spacing()
-        self._content[self.section].draw(navigator)
+        current.draw(navigator)
+        if current.deferred_action_label:
+            loading_panel(current.deferred_action_label)
 
     def _draw_top_bar(self) -> None:
         self._draw_top_bar_background()
@@ -87,7 +91,7 @@ class AppShell(Screen):
         imgui.same_line(0, 40)
 
         for key, label in _SECTIONS:
-            tab_button(label, active=self.section == key, on_click=lambda k=key: self._select_section(k))
+            tab_button(label, active=self.section == key, on_click=lambda k=key, value=label: self._queue_section(k, value))
             imgui.same_line()
 
         imgui.same_line(max(0.0, imgui.get_window_width() - _QUIT_AREA_WIDTH))
@@ -111,7 +115,15 @@ class AppShell(Screen):
         self.section = section
         self._ensure_entered(section)
 
+    def _queue_section(self, section: str, label: str) -> None:
+        self.section = section
+        if section in self._entered_keys:
+            return
+        self.defer_action(f"Loading {label}...", lambda: self._ensure_entered(section))
+
     def _cycle_section(self, direction: int) -> None:
         keys = [key for key, _label in _SECTIONS]
         next_index = (keys.index(self.section) + direction) % len(keys)
-        self._select_section(keys[next_index])
+        next_key = keys[next_index]
+        next_label = dict(_SECTIONS)[next_key]
+        self._queue_section(next_key, next_label)

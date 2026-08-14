@@ -28,7 +28,8 @@ an auth key; Local Network: this drone's own pairing code + discover/pair
 with a nearby drone; Reference ROMs: mount a paired peer's ROM/BIOS library
 over the network instead of copying it, with Reference/Unreference per
 peer; Request Assets: pick a paired peer, browse their Systems+ROMs or
-Movies with a search box, and pull an individual item), VPN (status,
+Movies with a search box, pull an individual item, or Download All for the
+current system/filter with live queue progress), VPN (status,
 Connect/Disconnect, credentials, sharing, and getting a config onto the
 device -- see "Full controller navigation" below), and Backups (list,
 Create, and Apply/restore -- see "Backup restore" below). Deliberately
@@ -38,9 +39,25 @@ cover this without one), Backups download/delete/email (nowhere on the
 console to save a downloaded file to, and delete/email are lower-value
 from a controller), Tailnet/Local Network peer *management* --
 rotate-auth-key, sharing toggles, pull-from-peer, forget/dismiss -- and
-Request Assets' Music (peer inventory has no music type at all) or bulk
-"sync everything" (see `client/endpoints.py`'s module comments for the
-full list and reasoning).
+Request Assets' Music (peer inventory has no music type at all).
+
+## Download progress, Download All, and global loading state (2026-08-13)
+
+Request Assets now follows the actual background transfer queue after the
+initial sync POST. Each game/movie row moves through Queued, a determinate
+percentage bar, Downloaded, or a terminal error; completed rows update in
+place. An aggregate progress bar covers Download All for the selected system
+or current movie/search filter. The bulk response returns the exact primary
+job IDs and job/path mapping it queued, so a fast transfer cannot disappear
+between pre/post queue snapshots. "Ignore existing games" defaults on and
+maps to the backend's non-overwrite behavior; turning it off exposes Download
+Again and sends `overwrite_files=true`.
+
+All network-backed navigation and action buttons now use `Screen.defer_action`.
+The click frame presents a shared loading panel and only the following frame
+runs the synchronous API call, ensuring the loading state actually reaches the
+display before a slow call blocks the single-threaded renderer. Per-download
+and backup-apply spinners retain their more specific row-level status.
 
 ## Backup restore + About landing page + visual theme pass (2026-08-13)
 
@@ -143,15 +160,13 @@ duration of the block. Applied to both `ui/screens/backups.py` (renamed
 arms `_pending_request`; `_do_request_item` is the actual blocking call,
 executed from the top of `draw()`).
 
-**The spinner:** `ui/widgets.spinner()` -- a small rotating arc drawn with
+**The original spinner:** `ui/widgets.spinner()` -- a small rotating arc drawn with
 `ImDrawList.add_polyline` against `imgui.get_time()`, no image asset, no
 animation-frame bookkeeping. Paired with the deferral fix above wherever a
 blocking call is now genuinely visible-before-it-blocks: Backups' Apply
-row and Request Assets' per-item Request row. Deliberately not added
-to every screen's initial `on_enter()` load -- those complete fast enough
-in practice (and the worst offender, `swarm/overview` under a failing
-storage mount, was a separate real bug fixed in the main Drone app, not a
-"needs a spinner" problem) that a spinner there would mostly just flash.
+row and Request Assets' per-item Request row. The later global loading-state
+work described above extends the same correct frame-boundary pattern to page
+navigation and all other network-backed actions.
 
 **Request Assets: same false-negative-timeout bug, different endpoint.**
 Live investigation (`drone-live-debugging` skill) of a user report --
@@ -461,7 +476,7 @@ GUI app's correctness isn't provable from code review alone:
 - Reference ROMs (`GET /admin/network-shares`,
   `POST /admin/network-shares/{id}/{enable,disable}`) and Request Assets
   (`GET /admin/local-network/peers/{id}/assets?type={summary,roms,movies}`,
-  `POST /admin/local-network/sync`) against the real server, including the
+  `POST /admin/local-network/{sync,sync-bulk}`, `GET /admin/downloads`) against the real server, including the
   real error text for every "not a paired peer" / "paired peer not found"
   case (no real second paired drone was available to test the success
   path against, so those specific error branches are what's actually

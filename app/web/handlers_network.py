@@ -1048,6 +1048,8 @@ class HandlersNetworkMixin:
         page_size = 500
         queued_assets = 0
         queued_artwork = 0
+        queued_job_ids: List[str] = []
+        queued_jobs: List[dict] = []
         skipped_existing = 0
         total = 0
         local_index_cache: dict = {}
@@ -1094,6 +1096,27 @@ class HandlersNetworkMixin:
                     asset_jobs = [job for job in jobs if job.get("file_type") != "ARTWORK"]
                     queued_assets += len(asset_jobs)
                     queued_artwork += len(jobs) - len(asset_jobs)
+                    queued_job_ids.extend(
+                        str(job.get("job_id") or job.get("id") or "")
+                        for job in asset_jobs
+                        if job.get("job_id") or job.get("id")
+                    )
+                    # Return only the fields a queue-following client needs.
+                    # A full public DownloadJob carries many timestamps and
+                    # compatibility aliases; multiplying that by a large ROM
+                    # library would make Download All's acknowledgement much
+                    # larger than necessary.
+                    queued_jobs.extend({
+                        "job_id": str(job.get("job_id") or job.get("id") or ""),
+                        "file_type": job.get("file_type"),
+                        "asset_type": job.get("asset_type"),
+                        "relative_path": job.get("relative_path") or job.get("file_path"),
+                        "file_name": job.get("file_name"),
+                        "source_drone_id": job.get("source_drone_id"),
+                        "status": job.get("status"),
+                        "percentage": job.get("percentage") or 0,
+                        "total_bytes": job.get("total_bytes") or job.get("file_size"),
+                    } for job in asset_jobs)
                     if asset_type == "roms" and include_roms and not asset_jobs:
                         skipped_existing += 1
                 offset += len(items)
@@ -1129,6 +1152,8 @@ class HandlersNetworkMixin:
             "systems": systems,
             "queued_assets": queued_assets,
             "queued_artwork": queued_artwork,
+            "queued_job_ids": queued_job_ids,
+            "queued_jobs": queued_jobs,
             "skipped_existing": skipped_existing,
             "total_available": total,
         })

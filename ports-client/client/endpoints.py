@@ -95,7 +95,15 @@ def peer_movies(client: DroneApiClient, peer_id: str, *, limit: int = 200, offse
 _REQUEST_ASSET_TIMEOUT_SECONDS = 30
 
 
-def request_asset(client: DroneApiClient, peer_id: str, asset_type: str, item: dict, *, system: str = "") -> dict:
+def request_asset(
+    client: DroneApiClient,
+    peer_id: str,
+    asset_type: str,
+    item: dict,
+    *,
+    system: str = "",
+    ignore_existing: bool = True,
+) -> dict:
     # This is a queue-only call (202, near-instant in principle -- the real
     # transfer runs later in the background over Drone-to-Drone P2P, not
     # through this request at all), but a real incident showed it can still
@@ -105,9 +113,40 @@ def request_asset(client: DroneApiClient, peer_id: str, asset_type: str, item: d
     # client gave up and reported "could not reach Drone". A longer budget
     # here is cheap insurance against that same false-negative.
     body = {"peer_id": peer_id, "asset_type": asset_type, "item": item}
+    if not ignore_existing:
+        body["overwrite_files"] = True
     if system:
         body["system"] = system
     return client.post("/admin/local-network/sync", body, timeout=_REQUEST_ASSET_TIMEOUT_SECONDS)
+
+
+_REQUEST_ASSET_BULK_TIMEOUT_SECONDS = 180
+
+
+def request_assets_bulk(
+    client: DroneApiClient,
+    peer_id: str,
+    asset_type: str,
+    *,
+    system: str = "",
+    query: str = "",
+    ignore_existing: bool = True,
+) -> dict:
+    body = {
+        "peer_id": peer_id,
+        "asset_type": asset_type,
+    }
+    if not ignore_existing:
+        body["overwrite_files"] = True
+    if system:
+        body["system"] = system
+    if query:
+        body["q"] = query
+    return client.post("/admin/local-network/sync-bulk", body, timeout=_REQUEST_ASSET_BULK_TIMEOUT_SECONDS)
+
+
+def downloads(client: DroneApiClient) -> dict:
+    return client.get("/admin/downloads")
 
 
 # --- VPN ---------------------------------------------------------------

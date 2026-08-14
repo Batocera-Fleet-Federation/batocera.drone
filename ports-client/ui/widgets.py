@@ -74,3 +74,23 @@ def spinner(radius: float = 7.0, thickness: float = 3.0) -> None:
         for i in range(_SPINNER_SEGMENTS)
     ]
     draw_list.add_polyline(points, imgui.get_color_u32(_SPINNER_COLOR), thickness, 0)
+
+
+def loading_panel(text: str = "Loading...") -> None:
+    """Draw a prominent, controller-safe loading panel over page content.
+
+    It is emitted after the page has drawn, so it sits above existing widgets
+    and is the last frame the user sees while the deferred network call runs.
+    """
+    previous = imgui.get_cursor_pos()
+    width = min(420.0, max(260.0, imgui.get_window_width() - 80.0))
+    x = max(20.0, (imgui.get_window_width() - width) / 2.0)
+    imgui.set_cursor_pos(imgui.ImVec2(x, 72.0))
+    imgui.begin_child("##global_loading_panel", imgui.ImVec2(width, 64.0), True)
+    imgui.set_cursor_pos_y(20.0)
+    imgui.set_cursor_pos_x(22.0)
+    spinner(radius=10.0, thickness=3.5)
+    imgui.same_line()
+    imgui.text(str(text or "Loading..."))
+    imgui.end_child()
+    imgui.set_cursor_pos(previous)

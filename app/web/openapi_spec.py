@@ -246,6 +246,7 @@ def _schemas() -> Dict[str, Schema]:
             "asset_type": _string("Machine-readable asset type"),
             "system": _string("Batocera system key"),
             "name": _string("Display name"),
+            "file_name": _string("Display file name"),
             "relative_path": _string("Source or target relative path"),
             "target_path": _string("Local target path"),
             "source_drone_id": _string("Peer Drone identifier"),
@@ -254,7 +255,12 @@ def _schemas() -> Dict[str, Schema]:
             "completed_at": _string(fmt="date-time"),
             "bytes_total": _integer(),
             "bytes_downloaded": _integer(),
+            "total_bytes": _integer(nullable=True),
+            "downloaded_bytes": _integer(),
+            "percentage": _number(),
+            "queue_position": _integer(nullable=True),
             "error": _string(),
+            "error_message": _string(nullable=True),
         },
         description="Local Network peer-to-peer download job.",
     )
@@ -1602,8 +1608,8 @@ def _schemas() -> Dict[str, Schema]:
             ("peer_id", "asset_type"),
         ),
         "LocalBulkSyncResponse": _object(
-            {"status": _enum(["queued"]), "asset_type": _string(), "system": _string(nullable=True), "systems": _array(_string()), "queued_assets": _integer(), "queued_artwork": _integer(), "skipped_existing": _integer(), "total_available": _integer()},
-            ("status", "asset_type", "systems", "queued_assets", "queued_artwork", "skipped_existing", "total_available"),
+            {"status": _enum(["queued"]), "asset_type": _string(), "system": _string(nullable=True), "systems": _array(_string()), "queued_assets": _integer(), "queued_artwork": _integer(), "queued_job_ids": _array(_string()), "queued_jobs": _array(_ref("DownloadJob")), "skipped_existing": _integer(), "total_available": _integer()},
+            ("status", "asset_type", "systems", "queued_assets", "queued_artwork", "queued_job_ids", "queued_jobs", "skipped_existing", "total_available"),
         ),
         "PeerPairRequest": _object(
             {

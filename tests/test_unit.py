@@ -6201,6 +6201,40 @@ class LocalNetworkAssetCopyTests(unittest.TestCase):
             self.assertFalse(resumed["paused"])
 
 
+    def test_bulk_sync_response_includes_exact_primary_job_ids_and_rows(self):
+        from app.web import handlers_network
+
+        handler = object.__new__(drone_api.RomRequestHandler)
+        handler.settings = mock.Mock(device_id="target-a")
+        handler.repository = mock.Mock()
+        handler._fetch_peer_inventory = mock.Mock(return_value={
+            "items": [{"file_path": "Alien.mkv", "file_size": 100}],
+            "total": 1,
+        })
+        queued_job = {
+            "job_id": "movie-job-1",
+            "file_type": "Movie",
+            "asset_type": "movies",
+            "relative_path": "Alien.mkv",
+            "source_drone_id": "peer-a",
+            "status": "queued",
+        }
+        handler._enqueue_local_asset = mock.Mock(return_value=[queued_job])
+        handler._send_json = mock.Mock()
+
+        with mock.patch.object(handlers_network._local_network, "is_local_mode", return_value=True), \
+                mock.patch.object(handlers_network._local_network, "get_paired_peer", return_value={"drone_id": "peer-a"}), \
+                mock.patch.object(handlers_network, "_get_download_manager", return_value=mock.Mock()):
+            handler._handle_admin_local_sync_bulk({"peer_id": "peer-a", "asset_type": "movies"})
+
+        status_code, payload = handler._send_json.call_args.args
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["queued_job_ids"], ["movie-job-1"])
+        self.assertEqual(len(payload["queued_jobs"]), 1)
+        self.assertEqual(payload["queued_jobs"][0]["job_id"], "movie-job-1")
+        self.assertEqual(payload["queued_jobs"][0]["relative_path"], "Alien.mkv")
+
+
 class RomGenreFacetAndBrowseTests(unittest.TestCase):
     """The Systems Browse page's Category facet: genre indexed at scan time
     (roms/gamelist.py's _database_rom_metadata_fields) into the normalized

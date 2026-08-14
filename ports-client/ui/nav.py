@@ -10,6 +10,7 @@ from typing import Optional
 from client.http_client import DroneApiClient
 
 from .screens.base import Screen
+from .widgets import loading_panel
 
 
 class Navigator:
@@ -23,4 +24,7 @@ class Navigator:
 
     def draw(self) -> None:
         if self._screen is not None:
+            self._screen.run_deferred_action()
             self._screen.draw(self)
+            if self._screen.deferred_action_label:
+                loading_panel(self._screen.deferred_action_label)

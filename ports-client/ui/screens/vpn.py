@@ -159,7 +159,7 @@ class VpnScreen(Screen):
 
     def draw(self, navigator) -> None:
         if imgui.button("Refresh"):
-            self._reload()
+            self.defer_action("Loading VPN status...", self._reload)
         imgui.spacing()
 
         if self.error:
@@ -214,10 +214,10 @@ class VpnScreen(Screen):
         imgui.spacing()
         if status_value == "connected":
             if imgui.button("Disconnect"):
-                self._disconnect()
+                self.defer_action("Disconnecting VPN...", self._disconnect)
         else:
             if imgui.button("Connect"):
-                self._connect()
+                self.defer_action("Connecting VPN...", self._connect)
 
         if self.action_message:
             imgui.spacing()
@@ -227,10 +227,16 @@ class VpnScreen(Screen):
         imgui.text_disabled("No VPN config uploaded yet.")
         imgui.spacing()
         if imgui.button("Pull from a Paired Drone"):
-            self._select_get_config_mode("peer")
+            self.get_config_mode = "peer"
+            if "peer" not in self._get_config_loaded:
+                self._get_config_loaded.add("peer")
+                self.defer_action("Loading paired Drones...", self._reload_pull_peers)
         imgui.same_line()
         if imgui.button("Import from Drop Folder"):
-            self._select_get_config_mode("folder")
+            self.get_config_mode = "folder"
+            if "folder" not in self._get_config_loaded:
+                self._get_config_loaded.add("folder")
+                self.defer_action("Loading VPN import files...", self._reload_import_files)
 
         imgui.spacing()
         if self.get_config_mode == "peer":
@@ -240,7 +246,7 @@ class VpnScreen(Screen):
 
     def _draw_pull_from_peer(self) -> None:
         if imgui.button("Refresh##pull_peers"):
-            self._reload_pull_peers()
+            self.defer_action("Refreshing paired Drones...", self._reload_pull_peers)
         imgui.spacing()
 
         if self.pull_peers_error:
@@ -253,7 +259,10 @@ class VpnScreen(Screen):
             peer_id = str(peer.get("drone_id") or "")
             name = peer.get("name") or peer.get("hostname") or peer_id
             if imgui.button(f"Pull##{peer_id}"):
-                self._pull_from_peer(peer_id, name)
+                self.defer_action(
+                    f"Pulling VPN config from {name}...",
+                    lambda peer=peer_id, label=name: self._pull_from_peer(peer, label),
+                )
             imgui.same_line()
             imgui.text(name)
 
@@ -263,7 +272,7 @@ class VpnScreen(Screen):
 
     def _draw_import_from_folder(self) -> None:
         if imgui.button("Refresh##import_files"):
-            self._reload_import_files()
+            self.defer_action("Refreshing VPN import files...", self._reload_import_files)
         imgui.spacing()
 
         if self.import_directory:
@@ -279,7 +288,10 @@ class VpnScreen(Screen):
             imgui.text_disabled("No .ovpn files found.")
         for filename in self.import_files:
             if imgui.button(f"Import##{filename}"):
-                self._import_from_folder(filename)
+                self.defer_action(
+                    f"Importing {filename}...",
+                    lambda value=filename: self._import_from_folder(value),
+                )
             imgui.same_line()
             imgui.text(filename)
 
@@ -296,7 +308,7 @@ class VpnScreen(Screen):
             "VPN Password", self.password_input, imgui.InputTextFlags_.password.value
         )
         if imgui.button("Save Credentials"):
-            self._save_credentials()
+            self.defer_action("Saving VPN credentials...", self._save_credentials)
         if self.credentials_message:
             imgui.spacing()
             imgui.text_disabled(self.credentials_message)
@@ -310,7 +322,10 @@ class VpnScreen(Screen):
         sharing_enabled = bool(self.status.get("sharing_enabled"))
         changed, new_value = imgui.checkbox("Share with Swarm", sharing_enabled)
         if changed:
-            self._set_sharing(new_value)
+            self.defer_action(
+                f"{'Enabling' if new_value else 'Disabling'} VPN sharing...",
+                lambda enabled=new_value: self._set_sharing(enabled),
+            )
         if self.sharing_message:
             imgui.spacing()
             imgui.text_disabled(self.sharing_message)
