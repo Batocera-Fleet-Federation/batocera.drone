@@ -10,6 +10,7 @@ import http.client
 import json
 import ssl
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -51,6 +52,7 @@ class DroneApiClient:
 
     def __init__(self, config: ClientConfig):
         self.config = config
+        self._session_lock = threading.RLock()
         self.cookie_jar = LWPCookieJar(str(config.session_cookie_path))
         self._load_session()
         ssl_context = _build_ssl_context(config)
@@ -66,8 +68,12 @@ class DroneApiClient:
             pass
 
     def _save_session(self) -> None:
-        self.config.session_cookie_path.parent.mkdir(parents=True, exist_ok=True)
-        self.cookie_jar.save(ignore_discard=True, ignore_expires=True)
+        # Background UI actions and the live download poll can complete at
+        # nearly the same time. Serialize the shared cookie-file write so two
+        # successful requests cannot truncate/interleave the persisted jar.
+        with self._session_lock:
+            self.config.session_cookie_path.parent.mkdir(parents=True, exist_ok=True)
+            self.cookie_jar.save(ignore_discard=True, ignore_expires=True)
 
     @property
     def has_session_cookie(self) -> bool:

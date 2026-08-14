@@ -7,6 +7,8 @@ uses for its own hash-based routing (see the plan's UX-parity note).
 
 from typing import Optional
 
+from imgui_bundle import imgui
+
 from client.http_client import DroneApiClient
 
 from .screens.base import Screen
@@ -23,8 +25,12 @@ class Navigator:
         screen.on_enter()
 
     def draw(self) -> None:
-        if self._screen is not None:
-            self._screen.run_deferred_action()
-            self._screen.draw(self)
-            if self._screen.deferred_action_label:
-                loading_panel(self._screen.deferred_action_label)
+        screen = self._screen
+        if screen is not None:
+            screen.run_deferred_action()
+            busy = screen.deferred_action_label is not None
+            imgui.begin_disabled(busy)
+            screen.draw(self)
+            imgui.end_disabled()
+            if screen.deferred_action_label:
+                loading_panel(screen.deferred_action_label)

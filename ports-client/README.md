@@ -50,14 +50,23 @@ place. An aggregate progress bar covers Download All for the selected system
 or current movie/search filter. The bulk response returns the exact primary
 job IDs and job/path mapping it queued, so a fast transfer cannot disappear
 between pre/post queue snapshots. "Ignore existing games" defaults on and
-maps to the backend's non-overwrite behavior; turning it off exposes Download
-Again and sends `overwrite_files=true`.
+both hides locally downloaded ROMs and maps to the backend's non-overwrite
+behavior; turning it off exposes those rows, Download Again, and sends
+`overwrite_files=true`.
+
+A Download Queue panel below Request Assets mirrors the web Drone's transfer
+view: Active, Queued, and Recent counts plus a scrollable, clipped list with
+each asset's status, queue position, percentage, transferred/total bytes, and
+speed. `GET /admin/downloads` runs on a dedicated daemon polling thread every
+second and only applies completed snapshots from the render thread, so progress
+continues updating without blocking controller input or rebuilding the page.
 
 All network-backed navigation and action buttons now use `Screen.defer_action`.
-The click frame presents a shared loading panel and only the following frame
-runs the synchronous API call, ensuring the loading state actually reaches the
-display before a slow call blocks the single-threaded renderer. Per-download
-and backup-apply spinners retain their more specific row-level status.
+It starts the API operation on a daemon worker while the ImGui/SDL render loop
+continues producing frames. The shared `imgui.get_time()` spinner therefore
+rotates for the full operation instead of showing one frozen frame, and slow
+peer/API calls no longer freeze navigation. Controls are disabled while their
+screen's action is active to prevent duplicate work.
 
 ## Backup restore + About landing page + visual theme pass (2026-08-13)
 
@@ -75,11 +84,10 @@ default (it stops EmulationStation, copies files, restarts it), so
 override (180s for this one call) rather than risk the exact "could not
 reach Drone... read operation timed out" failure mode described below --
 the operation would have kept running server-side and succeeded, just
-past the client's patience. Applying is still synchronous (no threading
-anywhere in ports-client), so the confirm click defers the call to the
-**next** frame, not "later in this same `draw()` call" -- see "Loading
-spinner + a same-frame deferral bug" below, which corrects an initial,
-subtly wrong version of this that shipped earlier the same day.
+past the client's patience. The request now runs through the shared
+background-action worker, keeping the confirmation/loading UI animated while
+EmulationStation is stopped and restored; see "Loading spinner + a same-frame
+deferral bug" below for the history of that execution path.
 
 **About: a new landing tab.** `ui/screens/about.py`, now the shell's
 default section, mirrors drone.js's own landing page (`renderHelpPage`,
@@ -147,26 +155,19 @@ assert zero POSTs on frame 2, assert exactly one POST on frame 3) --
 the earlier "no exception across 4 frames" smoke test could never have
 caught this, since same-frame-vs-next-frame timing isn't an exception.
 
-**The fix:** the pending-id check now runs at the *very top* of `draw()`,
-before anything later in that same call (the confirmation popup, in
-Backups' case) can arm a new one. A `backup_id`/request landing in the
-pending slot can therefore only ever be picked up on the frame *after* the
-one that set it -- by which point the "Applying..."/"Requesting..." row
-was already rendered, swapped, and genuinely on screen for the whole
-duration of the block. Applied to both `ui/screens/backups.py` (renamed
-`_apply_in_flight_id` -> `_apply_pending_id` to make the semantics --
-"armed, not yet started" -- clearer) and the same pattern newly added to
-`ui/screens/swarm.py`'s Request Assets pull (`_request_item` now only
-arms `_pending_request`; `_do_request_item` is the actual blocking call,
-executed from the top of `draw()`).
+**The current fix:** the original next-frame pending-id approach ensured a
+status frame appeared, but the following synchronous request still froze the
+spinner on that frame. `Screen.defer_action` now starts the blocking operation
+on a daemon worker and retains its loading label while it runs; the render loop
+continues normally and retires the worker after completion. Request Assets'
+individual download path uses this same mechanism rather than a special
+`_pending_request` branch.
 
 **The original spinner:** `ui/widgets.spinner()` -- a small rotating arc drawn with
 `ImDrawList.add_polyline` against `imgui.get_time()`, no image asset, no
-animation-frame bookkeeping. Paired with the deferral fix above wherever a
-blocking call is now genuinely visible-before-it-blocks: Backups' Apply
-row and Request Assets' per-item Request row. The later global loading-state
-work described above extends the same correct frame-boundary pattern to page
-navigation and all other network-backed actions.
+animation-frame bookkeeping. The background-action change lets that time value
+advance continuously during Backups, Request Assets, page navigation, and all
+other network-backed actions.
 
 **Request Assets: same false-negative-timeout bug, different endpoint.**
 Live investigation (`drone-live-debugging` skill) of a user report --

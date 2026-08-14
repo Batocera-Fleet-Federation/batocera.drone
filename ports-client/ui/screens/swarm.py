@@ -14,6 +14,7 @@ client/endpoints.py). Download state comes from the local Drone's actual
 transfer queue rather than treating the initial queue request as completion.
 """
 
+import threading
 import time
 
 from imgui_bundle import imgui
@@ -30,7 +31,8 @@ _LIST_HEIGHT = 260.0
 _STATUS_COLUMN_X = 340.0
 _SYSTEMS_PANE_WIDTH = 280.0
 _DOWNLOAD_PROGRESS_WIDTH = 190.0
-_DOWNLOAD_POLL_SECONDS = 0.75
+_DOWNLOAD_QUEUE_HEIGHT = 190.0
+_DOWNLOAD_POLL_SECONDS = 1.0
 _DOWNLOAD_TERMINAL_STATUSES = {"completed", "failed", "cancelled", "skipped"}
 
 _TAB_OVERVIEW = "overview"
@@ -63,6 +65,18 @@ def _request_item_key(item: dict) -> str:
         or item.get("name")
         or ""
     )
+
+
+def _format_bytes(value) -> str:
+    try:
+        size = float(value or 0)
+    except (TypeError, ValueError):
+        size = 0.0
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024.0 or unit == "TB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024.0
+    return "0 B"
 
 
 class SwarmScreen(Screen):
@@ -114,13 +128,11 @@ class SwarmScreen(Screen):
         self.request_downloads = {}
         self.request_batch = None
         self.request_download_error = None
+        self.request_queue_snapshot = {"active": [], "queued": [], "recent": [], "downloads": []}
         self._next_download_poll_at = 0.0
-        # (asset_type, item, label, system) for a request armed this frame,
-        # executed at the top of *next* frame's draw() -- not this same
-        # draw() call, or the "Downloading..." spinner drawn below would
-        # never actually get presented before the blocking POST freezes the
-        # UI (see backups.py's _apply_pending_id for the full reasoning).
-        self._pending_request = None
+        self._download_poll_thread = None
+        self._download_poll_result = None
+        self._download_poll_error = None
         self._pending_request_key = None
 
     def on_enter(self) -> None:
@@ -146,9 +158,11 @@ class SwarmScreen(Screen):
         self._ensure_loaded(tab)
 
     def _queue_tab(self, tab: str, label: str) -> None:
-        self.tab = tab
-        if tab not in self._loaded_tabs:
-            self.defer_action(f"Loading {label}...", lambda: self._ensure_loaded(tab))
+        if tab in self._loaded_tabs:
+            self.tab = tab
+            return
+        if self.defer_action(f"Loading {label}...", lambda: self._ensure_loaded(tab)):
+            self.tab = tab
 
     # --- Overview ------------------------------------------------------
 
@@ -493,6 +507,8 @@ class SwarmScreen(Screen):
         self._reload_request_summary()
 
     def _queue_request_peer(self, peer_id: str, name: str) -> None:
+        if not self.defer_action(f"Loading assets from {name}...", self._reload_request_summary):
+            return
         self.request_peer_id = peer_id
         self.request_peer_name = name
         self.request_kind = _REQUEST_KIND_SYSTEMS
@@ -504,7 +520,6 @@ class SwarmScreen(Screen):
         self.request_message = None
         self.request_downloads = {}
         self.request_batch = None
-        self.defer_action(f"Loading assets from {name}...", self._reload_request_summary)
 
     def _leave_request_peer(self) -> None:
         self.request_peer_id = None
@@ -523,9 +538,12 @@ class SwarmScreen(Screen):
             self._reload_request_movies()
 
     def _queue_request_kind(self, kind: str, label: str) -> None:
+        needs_load = kind == _REQUEST_KIND_MOVIES and not self.request_movies and not self.request_movies_error
+        if needs_load and not self.defer_action(
+            f"Loading {label.lower()}...", self._reload_request_movies
+        ):
+            return
         self.request_kind = kind
-        if kind == _REQUEST_KIND_MOVIES and not self.request_movies and not self.request_movies_error:
-            self.defer_action(f"Loading {label.lower()}...", self._reload_request_movies)
 
     def _select_request_system(self, system: str) -> None:
         self.request_selected_system = system
@@ -533,9 +551,10 @@ class SwarmScreen(Screen):
         self._reload_request_roms()
 
     def _queue_request_system(self, system: str) -> None:
+        if not self.defer_action(f"Loading {system} games...", self._reload_request_roms):
+            return
         self.request_selected_system = system
         self.request_roms_query = ""
-        self.defer_action(f"Loading {system} games...", self._reload_request_roms)
 
     def _reload_request_roms(self) -> None:
         try:
@@ -561,9 +580,17 @@ class SwarmScreen(Screen):
             self.request_movies_error = str(error)
 
     def _request_item(self, asset_type: str, item: dict, label: str, *, system: str = "") -> None:
-        self._pending_request = (asset_type, item, label, system)
-        self._pending_request_key = (asset_type, _request_item_key(item))
-        self.request_message = None
+        key = (asset_type, _request_item_key(item))
+
+        def request_in_background() -> None:
+            try:
+                self._do_request_item(asset_type, item, label, system)
+            finally:
+                self._pending_request_key = None
+
+        if self.defer_action(f"Starting download: {label}...", request_in_background):
+            self._pending_request_key = key
+            self.request_message = None
 
     def _do_request_item(self, asset_type: str, item: dict, label: str, system: str) -> None:
         try:
@@ -744,13 +771,25 @@ class SwarmScreen(Screen):
             self._mark_inventory_item_downloaded(key)
 
     def _refresh_download_progress(self) -> None:
+        """Synchronous refresh retained for direct callers and unit tests."""
         try:
-            self._apply_download_snapshot(endpoints.downloads(self.api_client))
+            snapshot = endpoints.downloads(self.api_client)
+            self.request_queue_snapshot = snapshot if isinstance(snapshot, dict) else {}
+            self._apply_download_snapshot(self.request_queue_snapshot)
             self.request_download_error = None
         except DroneApiError as error:
             self.request_download_error = str(error)
         finally:
             self._next_download_poll_at = time.monotonic() + _DOWNLOAD_POLL_SECONDS
+
+    def _fetch_download_snapshot(self) -> None:
+        try:
+            result = endpoints.downloads(self.api_client)
+            self._download_poll_result = result if isinstance(result, dict) else {}
+            self._download_poll_error = None
+        except DroneApiError as error:
+            self._download_poll_result = None
+            self._download_poll_error = str(error)
 
     def _apply_download_snapshot(self, snapshot: dict) -> None:
         current_jobs = {
@@ -758,7 +797,7 @@ class SwarmScreen(Screen):
             for job in (snapshot.get("downloads") or [])
             if isinstance(job, dict) and (job.get("job_id") or job.get("id"))
         }
-        for key, tracked in self.request_downloads.items():
+        for key, tracked in list(self.request_downloads.items()):
             for job_id in tracked.get("job_ids") or []:
                 if job_id in current_jobs:
                     tracked["jobs"][job_id] = dict(current_jobs[job_id])
@@ -797,7 +836,7 @@ class SwarmScreen(Screen):
                 self.request_batch["status"] = "downloading"
 
     def _job_from_tracking(self, job_id: str):
-        for tracked in self.request_downloads.values():
+        for tracked in list(self.request_downloads.values()):
             job = (tracked.get("jobs") or {}).get(job_id)
             if job:
                 return job
@@ -834,12 +873,36 @@ class SwarmScreen(Screen):
     def _has_active_downloads(self) -> bool:
         return any(
             str(state.get("status") or "") not in _DOWNLOAD_TERMINAL_STATUSES
-            for state in self.request_downloads.values()
+            for state in list(self.request_downloads.values())
         )
 
     def _maybe_poll_downloads(self) -> None:
-        if self._has_active_downloads() and time.monotonic() >= self._next_download_poll_at:
-            self._refresh_download_progress()
+        """Advance non-blocking download polling from the render thread."""
+        poll = self._download_poll_thread
+        if poll is not None:
+            if poll.is_alive():
+                return
+            self._download_poll_thread = None
+            if self._download_poll_result is not None:
+                self.request_queue_snapshot = self._download_poll_result
+                self._apply_download_snapshot(self.request_queue_snapshot)
+                self.request_download_error = None
+            elif self._download_poll_error:
+                self.request_download_error = self._download_poll_error
+            self._download_poll_result = None
+            self._download_poll_error = None
+            self._next_download_poll_at = time.monotonic() + _DOWNLOAD_POLL_SECONDS
+            return
+        if time.monotonic() < self._next_download_poll_at:
+            return
+        self._download_poll_result = None
+        self._download_poll_error = None
+        self._download_poll_thread = threading.Thread(
+            target=self._fetch_download_snapshot,
+            name="drone-ports-download-poll",
+            daemon=True,
+        )
+        self._download_poll_thread.start()
 
     def _draw_download_controls(self) -> None:
         _changed, self.ignore_existing_games = imgui.checkbox(
@@ -913,10 +976,134 @@ class SwarmScreen(Screen):
             return True
         return False
 
+    def _visible_request_roms(self):
+        rows = list(self.request_roms)
+        if not self.ignore_existing_games:
+            return rows
+        return [
+            row
+            for row in rows
+            if not (row.get("exists_locally") or row.get("_downloaded"))
+        ]
+
+    def _download_queue_rows(self):
+        snapshot = self.request_queue_snapshot or {}
+        rows = []
+        for group, key in (("Active", "active"), ("Queued", "queued"), ("Recent", "recent")):
+            rows.extend(
+                (group, job)
+                for job in (snapshot.get(key) or [])
+                if isinstance(job, dict)
+            )
+        if rows:
+            return rows
+        return [
+            ("Download", job)
+            for job in (snapshot.get("downloads") or [])
+            if isinstance(job, dict)
+        ]
+
+    def _draw_download_queue_panel(self) -> None:
+        snapshot = self.request_queue_snapshot or {}
+        active_count = len(snapshot.get("active") or [])
+        queued_count = len(snapshot.get("queued") or [])
+        recent_count = len(snapshot.get("recent") or [])
+        polling = self._download_poll_thread is not None and self._download_poll_thread.is_alive()
+
+        imgui.spacing()
+        imgui.separator()
+        imgui.spacing()
+        imgui.text("Download Queue")
+        imgui.same_line()
+        imgui.text_disabled(
+            f"Active {active_count}  |  Queued {queued_count}  |  Recent {recent_count}"
+        )
+        if polling:
+            imgui.same_line()
+            widgets.spinner(radius=6.0, thickness=2.5)
+            imgui.same_line()
+            imgui.text_disabled("Updating...")
+
+        if self.request_download_error:
+            imgui.text_colored(
+                WARNING_COLOR,
+                f"Download status unavailable: {self.request_download_error}",
+            )
+
+        rows = self._download_queue_rows()
+        imgui.begin_child(
+            "request_download_queue",
+            imgui.ImVec2(0, _DOWNLOAD_QUEUE_HEIGHT),
+            True,
+        )
+        if not rows:
+            if polling:
+                imgui.text_disabled("Refreshing download queue...")
+            else:
+                imgui.text_disabled("No queued, active, or recent downloads.")
+        else:
+            clipper = imgui.ListClipper()
+            clipper.begin(len(rows))
+            while clipper.step():
+                for index in range(clipper.display_start, clipper.display_end):
+                    group, job = rows[index]
+                    self._draw_download_queue_row(group, job)
+        imgui.end_child()
+
+    def _draw_download_queue_row(self, group: str, job: dict) -> None:
+        status = str(job.get("status") or "queued").lower()
+        label = str(
+            job.get("file_name")
+            or job.get("relative_path")
+            or job.get("file_path")
+            or job.get("rom_name")
+            or "Unnamed asset"
+        )
+        system = str(job.get("system") or "")
+        display_label = f"{label} ({system})" if system else label
+        imgui.text(f"{group}: {display_label[:100]}")
+        imgui.same_line()
+        if status in {"failed", "cancelled"}:
+            imgui.text_colored(ERROR_COLOR, status.title())
+        elif status in {"completed", "skipped"}:
+            imgui.text_colored(SUCCESS_COLOR, "Completed" if status == "completed" else "Skipped")
+        elif status in {"queued", "pending", "paused"}:
+            position = job.get("queue_position")
+            suffix = f" #{position}" if position else ""
+            imgui.text_colored(WARNING_COLOR, f"{status.title()}{suffix}")
+        else:
+            imgui.text(status.title())
+
+        percentage = 100.0 if status in {"completed", "skipped"} else self._job_percentage(job)
+        downloaded = job.get("downloaded_bytes") or job.get("bytes_transferred") or 0
+        total = job.get("total_bytes") or job.get("file_size") or 0
+        overlay = f"{percentage:.1f}%"
+        progress_width = min(520.0, max(160.0, imgui.get_content_region_avail().x - 220.0))
+        imgui.progress_bar(
+            percentage / 100.0,
+            imgui.ImVec2(progress_width, 0),
+            overlay,
+        )
+        imgui.same_line()
+        if total:
+            detail = f"{_format_bytes(downloaded)} / {_format_bytes(total)}"
+        else:
+            detail = _format_bytes(downloaded)
+        speed = job.get("transfer_speed_bps")
+        if speed:
+            detail += f"  {_format_bytes(speed)}/s"
+        if status in {"failed", "cancelled"}:
+            error = str(job.get("error_message") or job.get("failure_reason") or "")
+            if error:
+                detail = error[:100]
+        imgui.text_disabled(detail)
+        imgui.separator()
+
     def _draw_request(self) -> None:
         self._maybe_poll_downloads()
         if self.request_peer_id is None:
             self._draw_request_peer_picker()
+            self._draw_download_queue_panel()
             return
 
         if imgui.button("Back to peer list"):
@@ -944,6 +1131,7 @@ class SwarmScreen(Screen):
         if self.request_message:
             imgui.spacing()
             imgui.text_disabled(self.request_message)
+        self._draw_download_queue_panel()
 
     def _draw_request_peer_picker(self) -> None:
         if imgui.button("Refresh"):
@@ -992,9 +1180,18 @@ class SwarmScreen(Screen):
             if self.request_roms_error:
                 imgui.text_colored(ERROR_COLOR, self.request_roms_error)
             else:
-                imgui.text(f"{self.request_selected_system} -- {self.request_roms_total} games")
+                visible_roms = self._visible_request_roms()
+                hidden_count = len(self.request_roms) - len(visible_roms)
+                summary = f"{self.request_selected_system} -- {self.request_roms_total} games"
+                if hidden_count:
+                    summary += f" ({hidden_count} downloaded hidden)"
+                imgui.text(summary)
                 imgui.begin_child("request_roms_list", imgui.ImVec2(0, _LIST_HEIGHT - 40), True)
-                for index, rom in enumerate(self.request_roms):
+                if not visible_roms:
+                    imgui.text_disabled(
+                        "No games to download. Uncheck Ignore existing games to show downloaded ROMs."
+                    )
+                for index, rom in enumerate(visible_roms):
                     self._draw_request_rom_row(index, rom)
                 imgui.end_child()
         imgui.end_group()
@@ -1070,14 +1267,6 @@ class SwarmScreen(Screen):
     # --- draw ------------------------------------------------------------
 
     def draw(self, navigator) -> None:
-        # Must run before anything below can arm a new pending request this
-        # same frame -- see _pending_request's comment in __init__.
-        if self._pending_request is not None:
-            asset_type, item, label, system = self._pending_request
-            self._pending_request = None
-            self._pending_request_key = None
-            self._do_request_item(asset_type, item, label, system)
-
         for key, label in _TABS:
             tab_button(label, active=self.tab == key, on_click=lambda k=key, value=label: self._queue_tab(k, value))
             imgui.same_line()

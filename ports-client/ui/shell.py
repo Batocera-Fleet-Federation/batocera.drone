@@ -58,6 +58,8 @@ class AppShell(Screen):
     def draw(self, navigator) -> None:
         current = self._content[self.section]
         current.run_deferred_action()
+        busy = self.deferred_action_label is not None or current.deferred_action_label is not None
+        imgui.begin_disabled(busy)
         self._draw_top_bar()
         # Quick tab-switch bonus -- D-pad/stick nav can already reach these
         # same top-bar buttons directly once ui/gamepad.py's HasGamepad fix
@@ -72,6 +74,7 @@ class AppShell(Screen):
         imgui.separator()
         imgui.spacing()
         current.draw(navigator)
+        imgui.end_disabled()
         if current.deferred_action_label:
             loading_panel(current.deferred_action_label)
 
@@ -116,10 +119,11 @@ class AppShell(Screen):
         self._ensure_entered(section)
 
     def _queue_section(self, section: str, label: str) -> None:
-        self.section = section
         if section in self._entered_keys:
+            self.section = section
             return
-        self.defer_action(f"Loading {label}...", lambda: self._ensure_entered(section))
+        if self.defer_action(f"Loading {label}...", lambda: self._ensure_entered(section)):
+            self.section = section
 
     def _cycle_section(self, direction: int) -> None:
         keys = [key for key, _label in _SECTIONS]

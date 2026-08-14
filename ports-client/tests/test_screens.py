@@ -4,11 +4,13 @@ drawing functions, which need a live render frame this suite doesn't set up.
 See test_http_client.py / test_http_client_integration.py for the HTTP layer.
 """
 
+import threading
 import unittest
 
 from client.errors import AuthenticationError, DroneApiError
 from ui.screens.about import AboutScreen
 from ui.screens.backups import BackupsScreen
+from ui.screens.base import Screen
 from ui.screens.login import LoginScreen
 from ui.screens.swarm import SwarmScreen
 from ui.screens.vpn import VpnScreen
@@ -366,18 +368,66 @@ class SwarmScreenTests(unittest.TestCase):
         screen._select_request_kind("movies")  # already loaded -- shouldn't refetch
         self.assertEqual(screen.request_movies, [{"movie_name": "Alien"}])
 
-    def test_request_item_arms_a_pending_request_not_an_immediate_call(self) -> None:
-        # _request_item only arms the deferred call (see swarm.py's
-        # _pending_request comment) -- it must not itself POST, or the
-        # "Requesting..." spinner drawn from this same click's frame would
-        # never actually reach the screen before the blocking call.
+    def test_request_item_runs_in_background_not_in_click_frame(self) -> None:
         client = _FakeApiClient(post_responses={"/admin/local-network/sync": {"status": "queued"}})
         screen = SwarmScreen(client)
         screen.request_peer_id = "peer1"
         screen._request_item("roms", {"name": "Zelda"}, "Zelda", system="snes")
         self.assertEqual(client.post_calls, [])
-        self.assertEqual(screen._pending_request, ("roms", {"name": "Zelda"}, "Zelda", "snes"))
         self.assertEqual(screen._pending_request_key, ("roms", "Zelda"))
+        self.assertEqual(screen.deferred_action_label, "Starting download: Zelda...")
+        screen.wait_for_deferred_action()
+        self.assertEqual(len(client.post_calls), 1)
+        self.assertIsNone(screen._pending_request_key)
+
+    def test_ignore_existing_games_filters_downloaded_roms(self) -> None:
+        screen = SwarmScreen(_FakeApiClient())
+        screen.request_roms = [
+            {"name": "Local", "exists_locally": True},
+            {"name": "Remote", "exists_locally": False},
+            {"name": "Just finished", "_downloaded": True},
+        ]
+        self.assertEqual(
+            [row["name"] for row in screen._visible_request_roms()],
+            ["Remote"],
+        )
+        screen.ignore_existing_games = False
+        self.assertEqual(len(screen._visible_request_roms()), 3)
+
+    def test_download_poll_updates_queue_snapshot_asynchronously(self) -> None:
+        client = _FakeApiClient(get_responses={
+            "/admin/downloads": {
+                "active": [{
+                    "job_id": "job-1", "status": "downloading",
+                    "file_name": "Zelda.zip", "downloaded_bytes": 25,
+                    "total_bytes": 100, "percentage": 25,
+                }],
+                "queued": [{"job_id": "job-2", "status": "queued"}],
+                "recent": [],
+                "downloads": [],
+            }
+        })
+        screen = SwarmScreen(client)
+        screen._maybe_poll_downloads()
+        poll = screen._download_poll_thread
+        self.assertIsNotNone(poll)
+        poll.join(1)
+        screen._maybe_poll_downloads()
+        self.assertEqual(len(screen.request_queue_snapshot["active"]), 1)
+        self.assertEqual(len(screen.request_queue_snapshot["queued"]), 1)
+        self.assertIsNone(screen._download_poll_thread)
+
+    def test_download_queue_rows_group_active_queued_and_recent(self) -> None:
+        screen = SwarmScreen(_FakeApiClient())
+        screen.request_queue_snapshot = {
+            "active": [{"job_id": "active"}],
+            "queued": [{"job_id": "queued"}],
+            "recent": [{"job_id": "recent"}],
+        }
+        self.assertEqual(
+            [(group, job["job_id"]) for group, job in screen._download_queue_rows()],
+            [("Active", "active"), ("Queued", "queued"), ("Recent", "recent")],
+        )
 
     def test_do_request_item_roms_posts_expected_payload(self) -> None:
         client = _FakeApiClient(post_responses={"/admin/local-network/sync": {"status": "queued"}})
@@ -856,9 +906,30 @@ class AppShellTests(unittest.TestCase):
         shell._queue_section("swarm", "Swarm")
         self.assertEqual(client.get_calls, calls_before)
         self.assertEqual(shell.deferred_action_label, "Loading Swarm...")
-        shell.run_deferred_action()
+        shell.wait_for_deferred_action()
         self.assertIn("/admin/swarm/overview", client.get_calls[len(calls_before):])
         self.assertIsNone(shell.deferred_action_label)
+
+
+class BackgroundActionTests(unittest.TestCase):
+    def test_running_action_does_not_block_render_thread(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+        screen = Screen()
+
+        def slow_action() -> None:
+            started.set()
+            release.wait(2)
+
+        screen.defer_action("Loading...", slow_action)
+        screen.run_deferred_action()
+        self.assertTrue(started.wait(1))
+        self.assertEqual(screen.deferred_action_label, "Loading...")
+        self.assertIsNotNone(screen._deferred_action.thread)
+        self.assertTrue(screen._deferred_action.thread.is_alive())
+        release.set()
+        screen.wait_for_deferred_action()
+        self.assertIsNone(screen.deferred_action_label)
 
 
 if __name__ == "__main__":
