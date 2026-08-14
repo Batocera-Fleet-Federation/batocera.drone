@@ -13,12 +13,15 @@ import os
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from typing import Optional
 
 LAUNCHER_FILE = "batocera-drone-client.sh"
 DISPLAY_NAME = "Batocera Drone"
 MARQUEE_RELATIVE_PATH = "./images/batocera-drone_marquee.png"
 IMAGE_RELATIVE_PATH = "./images/main.jpg"
 THUMBNAIL_RELATIVE_PATH = IMAGE_RELATIVE_PATH
+PORTS_VIDEO_MODE_KEY = f'ports["{LAUNCHER_FILE}"].videomode'
+PORTS_VIDEO_MODE_VALUE = "default"
 
 
 def _normalized_launcher_path(value: str) -> str:
@@ -33,7 +36,70 @@ def _is_drone_entry(game: ET.Element) -> bool:
     return path == LAUNCHER_FILE or path.endswith(f"/{LAUNCHER_FILE}")
 
 
-def ensure_ports_gamelist(ports_dir: Path) -> dict:
+def _default_batocera_conf_path(ports_dir: Path) -> Path:
+    explicit = str(os.environ.get("BATOCERA_CONF_FILE") or "").strip()
+    if explicit:
+        return Path(explicit).resolve()
+    if ports_dir.parent.name == "roms":
+        return ports_dir.parent.parent / "system" / "batocera.conf"
+    return Path("/userdata/system/batocera.conf")
+
+
+def ensure_ports_video_mode(batocera_conf: Path) -> dict:
+    """Keep the Drone launcher from inheriting a forced global video mode.
+
+    Batocera configgen runs before every Ports shell script. If Drone merely
+    inherits a forced global video mode, configgen may perform an unnecessary
+    display transition before our launcher is ever executed. Add a game-specific
+    adaptive override only when the user has not already configured one.
+    """
+    batocera_conf = Path(batocera_conf).resolve()
+    try:
+        original = batocera_conf.read_text(encoding="utf-8", errors="surrogateescape")
+    except FileNotFoundError:
+        original = ""
+
+    for line in original.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        if key.strip() == PORTS_VIDEO_MODE_KEY:
+            return {
+                "status": "current",
+                "path": str(batocera_conf),
+                "key": PORTS_VIDEO_MODE_KEY,
+                "value": value.strip(),
+                "preserved_existing": True,
+            }
+
+    separator = "" if not original or original.endswith("\n") else "\n"
+    addition = (
+        f"{separator}\n# Batocera Drone: keep the Ports client on the active frontend display mode.\n"
+        f"{PORTS_VIDEO_MODE_KEY}={PORTS_VIDEO_MODE_VALUE}\n"
+    )
+    batocera_conf.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = batocera_conf.with_name(f".{batocera_conf.name}.drone-{os.getpid()}.tmp")
+    try:
+        temp_path.write_text(original + addition, encoding="utf-8", errors="surrogateescape")
+        if batocera_conf.exists():
+            temp_path.chmod(batocera_conf.stat().st_mode)
+        temp_path.replace(batocera_conf)
+    finally:
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
+    return {
+        "status": "updated",
+        "path": str(batocera_conf),
+        "key": PORTS_VIDEO_MODE_KEY,
+        "value": PORTS_VIDEO_MODE_VALUE,
+        "preserved_existing": False,
+    }
+
+
+def ensure_ports_gamelist(ports_dir: Path, batocera_conf_file: Optional[Path] = None) -> dict:
     ports_dir = Path(ports_dir).resolve()
     launcher = ports_dir / LAUNCHER_FILE
     marquee = ports_dir / MARQUEE_RELATIVE_PATH.removeprefix("./")
@@ -102,12 +168,23 @@ def ensure_ports_gamelist(ports_dir: Path) -> dict:
             except FileNotFoundError:
                 pass
 
+    try:
+        launcher_config = ensure_ports_video_mode(
+            batocera_conf_file or _default_batocera_conf_path(ports_dir)
+        )
+    except OSError as error:
+        # Artwork installation remains useful even on an unusual read-only
+        # configuration. Surface the failure without making the whole Ports
+        # bundle update retry forever.
+        launcher_config = {"status": "error", "error": f"{error.__class__.__name__}: {error}"}
+
     return {
         "status": "updated" if changed else "current",
         "gamelist": str(gamelist),
         "marquee": MARQUEE_RELATIVE_PATH,
         "image": IMAGE_RELATIVE_PATH,
         "thumbnail": THUMBNAIL_RELATIVE_PATH,
+        "launcher_config": launcher_config,
         "entry_created": created,
     }
 

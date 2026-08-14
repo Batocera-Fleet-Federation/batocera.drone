@@ -377,7 +377,12 @@ Ports `gamelist.xml`, preserving unrelated games and metadata. Both image fields
 point to `main.jpg`, since carousel themes such as Hypermax-Plus-PixN display the
 thumbnail alongside the marquee instead of the primary image. The API worker
 then requests EmulationStation's localhost `/reloadgames` service so the running
-frontend applies the metadata without a restart. The Drone API's update worker now
+frontend applies the metadata without a restart. The integration also adds a
+game-specific `ports["batocera-drone-client.sh"].videomode=default` setting when
+the user has not already configured one. This prevents the client from inheriting
+a forced global mode and avoids an unnecessary display transition before the
+launcher script executes; explicit user settings are never overwritten. The Drone
+API's update worker now
 installs the architecture-matched Ports
 bundle as a required part of each supported-device update before advancing
 the web/API version. Both the web button and periodic checks merely queue

@@ -387,6 +387,8 @@ class DownloadLatestPortsClientTests(unittest.TestCase):
         self.assertIn("./images/batocera-drone_marquee.png", gamelist)
         self.assertIn("./images/main.jpg", gamelist)
         self.assertIn("<thumbnail>./images/main.jpg</thumbnail>", gamelist)
+        launcher_config = (self.root / "system" / "batocera.conf").read_text(encoding="utf-8")
+        self.assertIn('ports["batocera-drone-client.sh"].videomode=default', launcher_config)
 
     def test_uses_the_per_arch_release_asset_url(self):
         archive = self._bundle([("batocera-drone-client.sh", b"x")])
