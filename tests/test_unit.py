@@ -8422,6 +8422,8 @@ class InstallerPortsClientTests(unittest.TestCase):
         self.assertIn('PORTS_DIR="/userdata/roms/ports"', self.install)
         self.assertIn('tar -xzf "$BUNDLE_TARBALL" -C "$PORTS_DIR"', self.install)
         self.assertIn('chmod +x "$PORTS_DIR/batocera-drone-client.sh"', self.install)
+        self.assertIn("gamelist_integration.py", self.install)
+        self.assertIn('python3 "$PORTS_GAMELIST_HELPER" "$PORTS_DIR"', self.install)
 
 
 class ReleaseWorkflowPortsClientTests(unittest.TestCase):
@@ -8470,8 +8472,10 @@ class ReleaseWorkflowPortsClientTests(unittest.TestCase):
             "$STAGE/batocera-drone-client.sh",
             "$APP_DIR/main.py",
             "$APP_DIR/client/endpoints.py",
+            "$APP_DIR/client/gamelist_integration.py",
             "$APP_DIR/ui/app.py",
             "$APP_DIR/ui/assets/logo.png",
+            "$STAGE/images/batocera-drone_marquee.png",
         ):
             self.assertIn(required, self.bundle_script)
         self.assertGreater(self.ports_logo.stat().st_size, 0)

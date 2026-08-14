@@ -3,6 +3,7 @@
 # (see launcher/batocera-drone-client.sh) into a tarball for one arch:
 #
 #   batocera-drone-client.sh                 <- top-level launcher ES execs
+#   images/batocera-drone_marquee.png        <- ES gamelist marquee
 #   .data/batocera-drone-client/
 #     main.py, client/, ui/                  <- app code
 #     vendor/<arch>/                         <- imgui_bundle, from vendor_deps.sh
@@ -41,6 +42,8 @@ cp -R "$VENDOR_COMMON_DIR" "$APP_DIR/vendor/common"
 find "$APP_DIR" -name "__pycache__" -type d -prune -exec rm -rf {} +
 cp "$ROOT/launcher/batocera-drone-client.sh" "$STAGE/batocera-drone-client.sh"
 chmod +x "$STAGE/batocera-drone-client.sh"
+mkdir -p "$STAGE/images"
+cp "$ROOT/launcher/images/batocera-drone_marquee.png" "$STAGE/images/"
 
 # Fail the release build instead of publishing a code-only/incomplete Ports
 # client. The API update worker treats this bundle as required on supported
@@ -49,8 +52,10 @@ for required_file in \
   "$STAGE/batocera-drone-client.sh" \
   "$APP_DIR/main.py" \
   "$APP_DIR/client/endpoints.py" \
+  "$APP_DIR/client/gamelist_integration.py" \
   "$APP_DIR/ui/app.py" \
-  "$APP_DIR/ui/assets/logo.png"; do
+  "$APP_DIR/ui/assets/logo.png" \
+  "$STAGE/images/batocera-drone_marquee.png"; do
   if [ ! -s "$required_file" ]; then
     echo "Incomplete Ports client bundle: missing or empty $required_file" >&2
     exit 1

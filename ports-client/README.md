@@ -101,8 +101,8 @@ value the backend computes for its own peer-discovery announcements) --
 never hardcoded or built from a Host header.
 
 **A real logo, not just text.** `ui/assets.py` loads
-`ui/assets/logo.png` (the Batocera Fleet Federation marquee built earlier
-this session, reused rather than duplicated) as a GPU texture via
+`ui/assets/logo.png` (the Batocera Fleet Federation artwork also used by
+the EmulationStation marquee) as a GPU texture via
 `hello_imgui.image_and_size_from_encoded_data`, cached after first load.
 **This must never be called from `on_enter()`** -- uploading a texture
 needs a live GL context, which only exists once `ui/app.py`'s real render
@@ -368,7 +368,12 @@ asset, confirming the URL construction and the clean-failure path both
 work as designed -- extraction and download-fallback verified against a
 real bundle/real network call, not just read from source).
 
-The Drone API's update worker now installs the architecture-matched Ports
+The Ports bundle contains both the in-app logo and the separate
+`images/batocera-drone_marquee.png` file consumed by EmulationStation.
+After extraction, `client/gamelist_integration.py` safely updates only the
+Drone launcher's `<marquee>` field in the existing Ports `gamelist.xml`,
+preserving unrelated games and metadata. The Drone API's update worker now
+installs the architecture-matched Ports
 bundle as a required part of each supported-device update before advancing
 the web/API version. Both the web button and periodic checks merely queue
 that backend job. A missing or incomplete Ports code/image payload fails the

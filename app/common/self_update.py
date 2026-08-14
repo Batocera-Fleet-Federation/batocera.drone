@@ -354,6 +354,43 @@ def _ports_client_dir(settings: Settings) -> Path:
     return settings.roms_root / "ports"
 
 
+def _refresh_installed_ports_client_gamelist(settings: Settings) -> dict:
+    """Run the bundled, idempotent ES metadata integration after install/start.
+
+    The startup call is important for the first upgrade from a release whose
+    old updater could copy the newly fixed bundle but did not yet know to run
+    its helper. Once the API restarts into the new code, this reconciles the
+    marquee without waiting for another Drone release.
+    """
+    try:
+        ports_dir = _ports_client_dir(settings)
+    except AttributeError:  # lightweight settings doubles in unit tests
+        return {"status": "unavailable"}
+    gamelist_helper = ports_dir / ".data" / "batocera-drone-client" / "client" / "gamelist_integration.py"
+    if not gamelist_helper.is_file():
+        return {"status": "unavailable"}
+    try:
+        completed = subprocess.run(
+            [sys.executable, str(gamelist_helper), str(ports_dir)],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        if completed.returncode == 0:
+            try:
+                payload = json.loads(completed.stdout.strip())
+            except ValueError:
+                payload = {"status": "updated"}
+            return payload if isinstance(payload, dict) else {"status": "updated"}
+        detail = (completed.stderr or completed.stdout or "unknown error").strip()
+        print(f"Ports marquee gamelist refresh failed: {detail}", file=sys.stderr, flush=True)
+        return {"status": "error", "error": detail[:500]}
+    except (OSError, subprocess.SubprocessError) as error:
+        print(f"Ports marquee gamelist refresh failed: {error}", file=sys.stderr, flush=True)
+        return {"status": "error", "error": f"{error.__class__.__name__}: {error}"}
+
+
 def _download_latest_ports_client_unlocked(settings: Settings, *, release_version: Optional[str] = None) -> dict:
     """Downloads and installs the Ports client bundle matching this device's
     CPU arch into <roms_root>/ports -- the same tarball layout (a top-level
@@ -406,8 +443,10 @@ def _download_latest_ports_client_unlocked(settings: Settings, *, release_versio
 
         required_files = (
             Path("batocera-drone-client.sh"),
+            Path("images/batocera-drone_marquee.png"),
             Path(".data/batocera-drone-client/main.py"),
             Path(".data/batocera-drone-client/client/endpoints.py"),
+            Path(".data/batocera-drone-client/client/gamelist_integration.py"),
             Path(".data/batocera-drone-client/ui/app.py"),
             Path(".data/batocera-drone-client/ui/assets/logo.png"),
         )
@@ -431,6 +470,8 @@ def _download_latest_ports_client_unlocked(settings: Settings, *, release_versio
             except OSError:
                 pass
 
+        gamelist_result = _refresh_installed_ports_client_gamelist(settings)
+
     return {
         "status": "updated",
         "arch": arch,
@@ -438,6 +479,7 @@ def _download_latest_ports_client_unlocked(settings: Settings, *, release_versio
         "ports_dir": str(ports_dir),
         "copied_files": copied_files,
         "duration_ms": int((time.monotonic() - started_at) * 1000),
+        "gamelist": gamelist_result,
     }
 
 
@@ -684,6 +726,10 @@ def _start_drone_auto_update_poller(
     poll_seconds: Optional[float] = None,
     stop_event: Optional[Event] = None,
 ) -> Optional[Thread]:
+    # Reconcile versioned Ports metadata on every API start. This is cheap and
+    # idempotent, and makes the first upgrade from the previously incomplete
+    # bundle refresh its EmulationStation marquee immediately after restart.
+    _refresh_installed_ports_client_gamelist(settings)
     if poll_seconds is None:
         poll_seconds = float(os.environ.get("DRONE_AUTO_UPDATE_POLL_SECONDS", str(DRONE_AUTO_UPDATE_POLL_SECONDS)))
         if poll_seconds > 0:
