@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Keep the native Drone launcher's EmulationStation marquee metadata valid.
+"""Keep the native Drone launcher's EmulationStation artwork metadata valid.
 
-The Ports release bundle owns one launcher and one marquee image, but the
+The Ports release bundle owns one launcher and its artwork images, but the
 surrounding gamelist.xml belongs to the user and may contain many unrelated
 Ports entries.  This helper updates only the Drone entry and writes the file
 atomically.  It is usable both as an imported helper in tests and as a small
@@ -17,6 +17,7 @@ from pathlib import Path
 LAUNCHER_FILE = "batocera-drone-client.sh"
 DISPLAY_NAME = "Batocera Drone"
 MARQUEE_RELATIVE_PATH = "./images/batocera-drone_marquee.png"
+IMAGE_RELATIVE_PATH = "./images/main.jpg"
 
 
 def _normalized_launcher_path(value: str) -> str:
@@ -35,10 +36,13 @@ def ensure_ports_gamelist(ports_dir: Path) -> dict:
     ports_dir = Path(ports_dir).resolve()
     launcher = ports_dir / LAUNCHER_FILE
     marquee = ports_dir / MARQUEE_RELATIVE_PATH.removeprefix("./")
+    image = ports_dir / IMAGE_RELATIVE_PATH.removeprefix("./")
     if not launcher.is_file():
         raise FileNotFoundError(f"Ports launcher is missing: {launcher}")
     if not marquee.is_file() or marquee.stat().st_size <= 0:
         raise FileNotFoundError(f"Ports marquee is missing or empty: {marquee}")
+    if not image.is_file() or image.stat().st_size <= 0:
+        raise FileNotFoundError(f"Ports image is missing or empty: {image}")
 
     gamelist = ports_dir / "gamelist.xml"
     if gamelist.exists():
@@ -64,6 +68,13 @@ def ensure_ports_gamelist(ports_dir: Path) -> dict:
         marquee_node = ET.SubElement(game, "marquee")
     marquee_node.text = MARQUEE_RELATIVE_PATH
 
+    image_node = game.find("image")
+    previous_image = str(image_node.text or "") if image_node is not None else ""
+    changed = changed or previous_image != IMAGE_RELATIVE_PATH
+    if image_node is None:
+        image_node = ET.SubElement(game, "image")
+    image_node.text = IMAGE_RELATIVE_PATH
+
     if changed:
         try:
             ET.indent(tree, space="  ")
@@ -83,6 +94,7 @@ def ensure_ports_gamelist(ports_dir: Path) -> dict:
         "status": "updated" if changed else "current",
         "gamelist": str(gamelist),
         "marquee": MARQUEE_RELATIVE_PATH,
+        "image": IMAGE_RELATIVE_PATH,
         "entry_created": created,
     }
 

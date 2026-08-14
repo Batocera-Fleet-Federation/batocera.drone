@@ -3,7 +3,7 @@ import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from client.gamelist_integration import MARQUEE_RELATIVE_PATH, ensure_ports_gamelist
+from client.gamelist_integration import IMAGE_RELATIVE_PATH, MARQUEE_RELATIVE_PATH, ensure_ports_gamelist
 
 
 class PortsGamelistIntegrationTests(unittest.TestCase):
@@ -13,6 +13,7 @@ class PortsGamelistIntegrationTests(unittest.TestCase):
         (self.ports / "images").mkdir(parents=True)
         (self.ports / "batocera-drone-client.sh").write_text("#!/bin/sh\n", encoding="utf-8")
         (self.ports / "images" / "batocera-drone_marquee.png").write_bytes(b"png")
+        (self.ports / "images" / "main.jpg").write_bytes(b"jpg")
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -21,20 +22,23 @@ class PortsGamelistIntegrationTests(unittest.TestCase):
         root = ET.parse(self.ports / "gamelist.xml").getroot()
         return next(game for game in root.findall("game") if game.findtext("path") == path)
 
-    def test_creates_drone_entry_with_marquee_for_a_new_gamelist(self) -> None:
+    def test_creates_drone_entry_with_artwork_for_a_new_gamelist(self) -> None:
         result = ensure_ports_gamelist(self.ports)
 
         self.assertEqual(result["status"], "updated")
         entry = self._entry("./batocera-drone-client.sh")
         self.assertEqual(entry.findtext("name"), "Batocera Drone")
         self.assertEqual(entry.findtext("marquee"), MARQUEE_RELATIVE_PATH)
+        self.assertEqual(entry.findtext("image"), IMAGE_RELATIVE_PATH)
 
-    def test_updates_only_drone_marquee_and_preserves_other_ports_metadata(self) -> None:
+    def test_updates_only_drone_artwork_and_preserves_other_ports_metadata(self) -> None:
         (self.ports / "gamelist.xml").write_text(
             "<gameList>"
-            "<game><path>./other.sh</path><name>Other Port</name><marquee>./images/other.png</marquee></game>"
+            "<game><path>./other.sh</path><name>Other Port</name>"
+            "<image>./images/other.jpg</image><marquee>./images/other.png</marquee></game>"
             "<game><path>./batocera-drone-client.sh</path><name>My Drone Name</name>"
-            "<favorite>true</favorite><marquee>./images/old.png</marquee></game>"
+            "<favorite>true</favorite><image>./images/old.jpg</image>"
+            "<marquee>./images/old.png</marquee></game>"
             "</gameList>",
             encoding="utf-8",
         )
@@ -44,9 +48,11 @@ class PortsGamelistIntegrationTests(unittest.TestCase):
         self.assertEqual(result["status"], "updated")
         other = self._entry("./other.sh")
         drone = self._entry("./batocera-drone-client.sh")
+        self.assertEqual(other.findtext("image"), "./images/other.jpg")
         self.assertEqual(other.findtext("marquee"), "./images/other.png")
         self.assertEqual(drone.findtext("name"), "My Drone Name")
         self.assertEqual(drone.findtext("favorite"), "true")
+        self.assertEqual(drone.findtext("image"), IMAGE_RELATIVE_PATH)
         self.assertEqual(drone.findtext("marquee"), MARQUEE_RELATIVE_PATH)
 
     def test_second_run_is_idempotent(self) -> None:
@@ -60,6 +66,13 @@ class PortsGamelistIntegrationTests(unittest.TestCase):
 
     def test_refuses_to_write_metadata_when_marquee_is_missing(self) -> None:
         (self.ports / "images" / "batocera-drone_marquee.png").unlink()
+
+        with self.assertRaises(FileNotFoundError):
+            ensure_ports_gamelist(self.ports)
+        self.assertFalse((self.ports / "gamelist.xml").exists())
+
+    def test_refuses_to_write_metadata_when_image_is_missing(self) -> None:
+        (self.ports / "images" / "main.jpg").unlink()
 
         with self.assertRaises(FileNotFoundError):
             ensure_ports_gamelist(self.ports)

@@ -297,6 +297,7 @@ class DownloadLatestPortsClientTests(unittest.TestCase):
         complete = {
             "batocera-drone-client.sh": b"#!/bin/sh\n",
             "images/batocera-drone_marquee.png": b"marquee-png",
+            "images/main.jpg": b"main-jpg",
             ".data/batocera-drone-client/main.py": b"main",
             ".data/batocera-drone-client/client/endpoints.py": b"endpoints",
             ".data/batocera-drone-client/client/gamelist_integration.py": (
@@ -330,7 +331,7 @@ class DownloadLatestPortsClientTests(unittest.TestCase):
         result = self._run_unlocked(archive)
         self.assertEqual(result["status"], "updated")
         self.assertEqual(result["arch"], "x86_64")
-        self.assertEqual(result["copied_files"], 8)
+        self.assertEqual(result["copied_files"], 9)
 
         ports_dir = self.root / "roms" / "ports"
         launcher = ports_dir / "batocera-drone-client.sh"
@@ -346,10 +347,12 @@ class DownloadLatestPortsClientTests(unittest.TestCase):
             b"png",
         )
         self.assertEqual((ports_dir / "images" / "batocera-drone_marquee.png").read_bytes(), b"marquee-png")
+        self.assertEqual((ports_dir / "images" / "main.jpg").read_bytes(), b"main-jpg")
         self.assertEqual(result["gamelist"]["status"], "updated")
         gamelist = (ports_dir / "gamelist.xml").read_text(encoding="utf-8")
         self.assertIn("./batocera-drone-client.sh", gamelist)
         self.assertIn("./images/batocera-drone_marquee.png", gamelist)
+        self.assertIn("./images/main.jpg", gamelist)
 
     def test_uses_the_per_arch_release_asset_url(self):
         archive = self._bundle([("batocera-drone-client.sh", b"x")])
@@ -406,6 +409,7 @@ class DownloadLatestPortsClientTests(unittest.TestCase):
         self.assertIn("Ports client archive is incomplete", str(ctx.exception))
         self.assertIn("ui/assets/logo.png", str(ctx.exception))
         self.assertIn("images/batocera-drone_marquee.png", str(ctx.exception))
+        self.assertIn("images/main.jpg", str(ctx.exception))
         self.assertFalse((self.root / "roms" / "ports" / "batocera-drone-client.sh").exists())
 
     # --- the wrapper the actual update flow calls -------------------------
@@ -721,7 +725,7 @@ class DroneAutoUpdatePollerTests(unittest.TestCase):
             self.assertIsNotNone(worker)
             worker.join(timeout=1)
 
-    def test_api_start_reconciles_marquee_from_bundle_installed_by_the_previous_updater(self):
+    def test_api_start_reconciles_artwork_from_bundle_installed_by_the_previous_updater(self):
         ports_dir = self.root / "roms" / "ports"
         helper_source = (
             Path(__file__).resolve().parents[1]
@@ -734,6 +738,7 @@ class DroneAutoUpdatePollerTests(unittest.TestCase):
         helper_target.write_bytes(helper_source.read_bytes())
         (ports_dir / "images").mkdir(parents=True)
         (ports_dir / "images" / "batocera-drone_marquee.png").write_bytes(b"png")
+        (ports_dir / "images" / "main.jpg").write_bytes(b"jpg")
         (ports_dir / "batocera-drone-client.sh").write_text("#!/bin/sh\n", encoding="utf-8")
         self.settings.roms_root = self.root / "roms"
 
@@ -742,6 +747,7 @@ class DroneAutoUpdatePollerTests(unittest.TestCase):
         self.assertIsNone(thread)
         gamelist = (ports_dir / "gamelist.xml").read_text(encoding="utf-8")
         self.assertIn("./images/batocera-drone_marquee.png", gamelist)
+        self.assertIn("./images/main.jpg", gamelist)
 
     def test_manual_request_runs_check_on_named_api_worker_and_persists_status(self):
         completed = threading.Event()

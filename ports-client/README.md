@@ -368,10 +368,11 @@ asset, confirming the URL construction and the clean-failure path both
 work as designed -- extraction and download-fallback verified against a
 real bundle/real network call, not just read from source).
 
-The Ports bundle contains both the in-app logo and the separate
-`images/batocera-drone_marquee.png` file consumed by EmulationStation.
+The Ports bundle contains the in-app logo plus the separate
+`images/batocera-drone_marquee.png` and `images/main.jpg` files consumed by
+EmulationStation.
 After extraction, `client/gamelist_integration.py` safely updates only the
-Drone launcher's `<marquee>` field in the existing Ports `gamelist.xml`,
+Drone launcher's `<marquee>` and `<image>` fields in the existing Ports `gamelist.xml`,
 preserving unrelated games and metadata. The Drone API's update worker now
 installs the architecture-matched Ports
 bundle as a required part of each supported-device update before advancing

@@ -8438,6 +8438,7 @@ class ReleaseWorkflowPortsClientTests(unittest.TestCase):
         cls.bundle_script = root.joinpath("ports-client/scripts/build_release_bundle.sh").read_text(encoding="utf-8")
         cls.ports_logo = root.joinpath("ports-client/ui/assets/logo.png")
         cls.marquee = root.joinpath("ports-client/launcher/images/batocera-drone_marquee.png")
+        cls.main_image = root.joinpath("main.jpg")
 
     def test_builds_both_arches_via_ports_clients_own_scripts(self) -> None:
         # The Python tag (312) must match real device hardware, not be
@@ -8476,9 +8477,11 @@ class ReleaseWorkflowPortsClientTests(unittest.TestCase):
             "$APP_DIR/ui/app.py",
             "$APP_DIR/ui/assets/logo.png",
             "$STAGE/images/batocera-drone_marquee.png",
+            "$STAGE/images/main.jpg",
         ):
             self.assertIn(required, self.bundle_script)
         self.assertGreater(self.ports_logo.stat().st_size, 0)
+        self.assertGreater(self.main_image.stat().st_size, 0)
         self.assertEqual(self.ports_logo.read_bytes(), self.marquee.read_bytes())
 
 

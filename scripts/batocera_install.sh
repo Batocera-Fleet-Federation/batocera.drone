@@ -431,7 +431,7 @@ install_ports_client() {
   PORTS_GAMELIST_HELPER="$PORTS_DIR/.data/batocera-drone-client/client/gamelist_integration.py"
   if [ -f "$PORTS_GAMELIST_HELPER" ]; then
     if ! python3 "$PORTS_GAMELIST_HELPER" "$PORTS_DIR"; then
-      echo "Ports client installed, but its EmulationStation marquee metadata could not be refreshed."
+      echo "Ports client installed, but its EmulationStation artwork metadata could not be refreshed."
     fi
   fi
   echo "✓ Installed the Drone Ports client to $PORTS_DIR (rescan Ports in EmulationStation to see it)"
