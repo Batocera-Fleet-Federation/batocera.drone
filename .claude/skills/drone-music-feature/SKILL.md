@@ -88,7 +88,8 @@ and the scraper (keyless, unlike TMDb).
      app-shell level so it survives router navigation — the one genuinely
      new UI pattern here, since music listening is continuous-across-
      browsing unlike Movies' one-video-at-a-time modal). Simple next/prev
-     within the currently-open album's queue; no shuffle/repeat in v1.
+     within the currently-open album's queue; no repeat in v1 (shuffle
+     added later, see "Shipped deviations" below).
    - **Phase 3** — scraper client + admin bulk-scrape job + genres.
    - **Phase 4 (explicit follow-up, out of scope for the initial build)** —
      P2P peer-sync route parity (`/peer/music/...`, mirroring the `movies`
@@ -383,6 +384,28 @@ Real changes made after initial launch, not reflected in the sections above:
   after a track's own art, sibling album art, and a local cover image file
   have all failed -- so an album with no cover of its own shows the artist's
   photo instead of a bare placeholder icon, wherever art is requested.
+
+- **Shuffle, added after the "no shuffle/repeat in v1" call above.** A
+  toggle button (`#musicPlayerBarShuffle`, bi-shuffle icon) sits in the
+  persistent player bar between the like button and Previous -- so it's
+  only visible while a track is actually playing, same as the rest of the
+  bar. It's a global-library shuffle, not a within-queue shuffle: `let
+  musicPlayerShuffle` + `let musicPlayerShuffleHistory` (`drone.js`) are
+  independent of `musicPlayerQueue`/`musicPlayerQueueIndex` -- toggling it
+  on doesn't touch the underlying album queue at all, it just makes
+  `playMusicPlayerNext()` (and therefore the `<audio>` `ended` handler,
+  since that already called `playMusicPlayerNext()`) branch to
+  `playRandomMusicTrack()`, which picks uniformly from all of `musicAllRows`
+  (excluding the currently-playing track when more than one exists) instead
+  of stepping the queue index. `playMusicPlayerPrevious()` branches the same
+  way, popping `musicPlayerShuffleHistory` (pushed to on every shuffle pick)
+  since there's no sequential index to step backward through in that mode.
+  Turning shuffle off (or closing the bar, which also resets shuffle)
+  leaves the original queue/index untouched, so sequential next/prev
+  resumes exactly where it would have if shuffle had never been toggled on
+  -- verified live against the mock server (`scripts/run_mock_server.py`,
+  `ROM_METADATA_INITIAL_DELAY_SECONDS=0` to skip its 60s startup poll delay
+  since the mock userdata seeder doesn't seed any `music/` fixtures itself).
 
 ## Common failure patterns to avoid (learned from Movies, apply here too)
 

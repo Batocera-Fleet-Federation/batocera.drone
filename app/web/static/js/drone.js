@@ -3051,6 +3051,14 @@ let musicPlayerCurrentEntryKey = null;
 // destination page would come up empty.
 let musicPlayerCurrentArtist = null;
 let musicPlayerCurrentAlbum = null;
+// Shuffle plays a random track from the whole library instead of stepping
+// through the current queue (single track/album). It's independent of
+// which queue is loaded and persists across track changes until explicitly
+// turned off or the bar is closed. musicPlayerShuffleHistory backs the
+// Previous button while shuffle is on, since there's no sequential queue
+// index to step backward through in that mode.
+let musicPlayerShuffle = false;
+let musicPlayerShuffleHistory = [];
 function ensureMusicPlayerBar() {
   if (document.getElementById("musicPlayerBar")) return;
   const bar = document.createElement("div");
@@ -3067,6 +3075,7 @@ function ensureMusicPlayerBar() {
     </div>
     <div class="music-player-bar-controls d-flex align-items-center gap-2">
       <span id="musicPlayerBarLike"></span>
+      <button type="button" id="musicPlayerBarShuffle" class="btn btn-outline-light btn-sm" title="Shuffle" aria-pressed="false" onclick="toggleMusicPlayerShuffle()"><i class="bi bi-shuffle"></i></button>
       <button type="button" class="btn btn-outline-light btn-sm" title="Previous" onclick="playMusicPlayerPrevious()"><i class="bi bi-skip-start-fill"></i></button>
       <audio id="musicPlayerBarAudio" controls></audio>
       <button type="button" class="btn btn-outline-light btn-sm" title="Next" onclick="playMusicPlayerNext()"><i class="bi bi-skip-end-fill"></i></button>
@@ -3090,6 +3099,36 @@ function closeMusicPlayerBar() {
   musicPlayerCurrentEntryKey = null;
   musicPlayerCurrentArtist = null;
   musicPlayerCurrentAlbum = null;
+  musicPlayerShuffle = false;
+  musicPlayerShuffleHistory = [];
+  updateMusicPlayerBarShuffleButton();
+}
+// Flips shuffle mode and refreshes the toggle button's pressed styling.
+// Turning shuffle off drops the shuffle-only history, same as closing the
+// bar, since it only makes sense as a Previous stack while shuffle is on.
+function toggleMusicPlayerShuffle() {
+  musicPlayerShuffle = !musicPlayerShuffle;
+  if (!musicPlayerShuffle) musicPlayerShuffleHistory = [];
+  updateMusicPlayerBarShuffleButton();
+}
+function updateMusicPlayerBarShuffleButton() {
+  const button = document.getElementById("musicPlayerBarShuffle");
+  if (!button) return;
+  button.classList.toggle("btn-primary", musicPlayerShuffle);
+  button.classList.toggle("btn-outline-light", !musicPlayerShuffle);
+  button.setAttribute("aria-pressed", String(musicPlayerShuffle));
+}
+// Picks a uniformly random track from the whole library (musicAllRows),
+// excluding the currently playing one when more than one track exists so
+// shuffle doesn't immediately repeat, and records the outgoing track in
+// musicPlayerShuffleHistory so Previous can step back through shuffle picks.
+function playRandomMusicTrack() {
+  const candidates = musicAllRows.filter((m) => m.entry_key !== musicPlayerCurrentEntryKey);
+  const pool = candidates.length ? candidates : musicAllRows;
+  if (!pool.length) return;
+  const next = pool[Math.floor(Math.random() * pool.length)];
+  if (musicPlayerCurrentEntryKey) musicPlayerShuffleHistory.push(musicPlayerCurrentEntryKey);
+  _playMusicPlayerEntry(next.entry_key, next.display_title || next.track_name, next.artist, !!next.liked, next.album);
 }
 // Plays one track with no album queue context (e.g. the plain track detail
 // page's Play button) -- next/previous are no-ops until a real queue is set
@@ -3132,11 +3171,22 @@ function musicAlbumTracksSorted(artist, album) {
     .sort(compareMusicGroupMembers);
 }
 function playMusicPlayerNext() {
+  if (musicPlayerShuffle) {
+    playRandomMusicTrack();
+    return;
+  }
   if (musicPlayerQueueIndex < 0 || musicPlayerQueueIndex >= musicPlayerQueue.length - 1) return;
   musicPlayerQueueIndex += 1;
   _playMusicPlayerEntryFromQueue();
 }
 function playMusicPlayerPrevious() {
+  if (musicPlayerShuffle) {
+    if (!musicPlayerShuffleHistory.length) return;
+    const entryKey = musicPlayerShuffleHistory.pop();
+    const row = musicAllRows.find((m) => m.entry_key === entryKey);
+    if (row) _playMusicPlayerEntry(row.entry_key, row.display_title || row.track_name, row.artist, !!row.liked, row.album);
+    return;
+  }
   if (musicPlayerQueueIndex <= 0) return;
   musicPlayerQueueIndex -= 1;
   _playMusicPlayerEntryFromQueue();
