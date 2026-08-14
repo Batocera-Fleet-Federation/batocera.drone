@@ -12,7 +12,7 @@ from ui.screens.about import AboutScreen
 from ui.screens.backups import BackupsScreen
 from ui.screens.base import Screen
 from ui.screens.login import LoginScreen
-from ui.screens.swarm import SwarmScreen
+from ui.screens.swarm import SwarmScreen, _download_job_label
 from ui.screens.vpn import VpnScreen
 from ui.shell import AppShell
 
@@ -427,6 +427,28 @@ class SwarmScreenTests(unittest.TestCase):
         self.assertEqual(
             [(group, job["job_id"]) for group, job in screen._download_queue_rows()],
             [("Active", "active"), ("Queued", "queued"), ("Recent", "recent")],
+        )
+
+    def test_download_queue_labels_distinguish_game_and_artwork_jobs(self) -> None:
+        self.assertEqual(
+            _download_job_label({"file_type": "ROM", "file_name": "Zelda.zip"}),
+            "[Game] Zelda.zip",
+        )
+        self.assertEqual(
+            _download_job_label({
+                "file_type": "ARTWORK",
+                "file_name": "Zelda.zip",
+                "artwork_type": "image",
+            }),
+            "[Image artwork] Zelda.zip",
+        )
+        self.assertEqual(
+            _download_job_label({
+                "file_type": "ARTWORK",
+                "rom_name": "Zelda.zip",
+                "artwork_type": "box_front",
+            }),
+            "[Box Front artwork] Zelda.zip",
         )
 
     def test_do_request_item_roms_posts_expected_payload(self) -> None:

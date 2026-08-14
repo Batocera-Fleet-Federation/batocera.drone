@@ -79,6 +79,36 @@ def _format_bytes(value) -> str:
     return "0 B"
 
 
+def _download_job_label(job: dict) -> str:
+    """Describe what a queue job is actually transferring.
+
+    Artwork jobs use the parent ROM name as ``file_name`` because the server
+    fetches artwork by ROM identity. Without the job type, a ROM plus its image
+    and marquee therefore look like three identical ZIP downloads in the UI.
+    """
+    subject = str(
+        job.get("file_name")
+        or job.get("rom_name")
+        or job.get("rom_path")
+        or job.get("relative_path")
+        or job.get("file_path")
+        or "Unnamed asset"
+    )
+    file_type = str(job.get("file_type") or "").strip().upper()
+    if file_type == "ARTWORK":
+        artwork_type = str(job.get("artwork_type") or "").strip().replace("_", " ").replace("-", " ")
+        role = f"{artwork_type.title()} artwork" if artwork_type else "Artwork"
+        return f"[{role}] {subject}"
+    role = {
+        "ROM": "Game",
+        "MOVIE": "Movie",
+        "BIOS": "BIOS",
+        "SAVE": "Save",
+        "CONFIG_BACKUP": "Config backup",
+    }.get(file_type)
+    return f"[{role}] {subject}" if role else subject
+
+
 class SwarmScreen(Screen):
     def __init__(self, api_client):
         self.api_client = api_client
@@ -1008,7 +1038,6 @@ class SwarmScreen(Screen):
         active_count = len(snapshot.get("active") or [])
         queued_count = len(snapshot.get("queued") or [])
         recent_count = len(snapshot.get("recent") or [])
-        polling = self._download_poll_thread is not None and self._download_poll_thread.is_alive()
 
         imgui.spacing()
         imgui.separator()
@@ -1018,11 +1047,6 @@ class SwarmScreen(Screen):
         imgui.text_disabled(
             f"Active {active_count}  |  Queued {queued_count}  |  Recent {recent_count}"
         )
-        if polling:
-            imgui.same_line()
-            widgets.spinner(radius=6.0, thickness=2.5)
-            imgui.same_line()
-            imgui.text_disabled("Updating...")
 
         if self.request_download_error:
             imgui.text_colored(
@@ -1037,10 +1061,7 @@ class SwarmScreen(Screen):
             True,
         )
         if not rows:
-            if polling:
-                imgui.text_disabled("Refreshing download queue...")
-            else:
-                imgui.text_disabled("No queued, active, or recent downloads.")
+            imgui.text_disabled("No queued, active, or recent downloads.")
         else:
             clipper = imgui.ListClipper()
             clipper.begin(len(rows))
@@ -1052,13 +1073,7 @@ class SwarmScreen(Screen):
 
     def _draw_download_queue_row(self, group: str, job: dict) -> None:
         status = str(job.get("status") or "queued").lower()
-        label = str(
-            job.get("file_name")
-            or job.get("relative_path")
-            or job.get("file_path")
-            or job.get("rom_name")
-            or "Unnamed asset"
-        )
+        label = _download_job_label(job)
         system = str(job.get("system") or "")
         display_label = f"{label} ({system})" if system else label
         imgui.text(f"{group}: {display_label[:100]}")
