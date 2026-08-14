@@ -383,7 +383,7 @@ class SwarmScreenTests(unittest.TestCase):
             client.post_calls,
             [("/admin/local-network/sync", {"peer_id": "peer1", "asset_type": "roms", "item": {"name": "Zelda"}, "system": "snes"})],
         )
-        self.assertEqual(screen.request_message, "Requested Zelda.")
+        self.assertEqual(screen.request_message, "Download started: Zelda.")
 
     def test_do_request_item_movies_omits_system(self) -> None:
         client = _FakeApiClient(post_responses={"/admin/local-network/sync": {"status": "queued"}})

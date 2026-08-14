@@ -6,10 +6,12 @@ behavior that lets a relaunch of the app skip login (mirroring Drone's
 See test_http_client_integration.py for a test against the real thing.
 """
 
+import io
 import json
 import tempfile
 import threading
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -207,6 +209,34 @@ class DroneApiClientTests(unittest.TestCase):
         client = DroneApiClient(config)
         with self.assertRaises(DroneApiError):
             client.get("/admin/system-info")
+
+    def test_every_request_logs_a_start_and_success_line(self) -> None:
+        # This is the actual debugging value requested after a live timeout
+        # was hard to diagnose: every request's path, timeout budget, and
+        # elapsed time must be visible from the log file alone.
+        client = DroneApiClient(self._make_config())
+        client.login(VALID_USERNAME, VALID_PASSWORD)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            client.get("/admin/system-info")
+        lines = out.getvalue()
+        self.assertRegex(lines, r"-> GET /admin/system-info timeout=15s")
+        self.assertRegex(lines, r"<- GET /admin/system-info 200 in \d+\.\d+s")
+
+    def test_unreachable_server_logs_the_failure_with_elapsed_time_and_budget(self) -> None:
+        config = ClientConfig(
+            host="127.0.0.1",
+            https_port=1,
+            http_only=True,
+            ca_cert_file=Path("/unused"),
+            session_cookie_path=self.session_file,
+        )
+        client = DroneApiClient(config)
+        err = io.StringIO()
+        with redirect_stderr(err):
+            with self.assertRaises(DroneApiError):
+                client.get("/admin/system-info", timeout=5)
+        self.assertRegex(err.getvalue(), r"<- GET /admin/system-info FAILED after \d+\.\d+s \(timeout budget 5s\)")
 
 
 if __name__ == "__main__":

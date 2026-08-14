@@ -100,7 +100,7 @@ class SwarmScreen(Screen):
         self.request_message = None
         # (asset_type, item, label, system) for a request armed this frame,
         # executed at the top of *next* frame's draw() -- not this same
-        # draw() call, or the "Requesting..." spinner drawn below would
+        # draw() call, or the "Downloading..." spinner drawn below would
         # never actually get presented before the blocking POST freezes the
         # UI (see backups.py's _apply_pending_id for the full reasoning).
         self._pending_request = None
@@ -505,7 +505,7 @@ class SwarmScreen(Screen):
     def _do_request_item(self, asset_type: str, item: dict, label: str, system: str) -> None:
         try:
             endpoints.request_asset(self.api_client, self.request_peer_id, asset_type, item, system=system)
-            self.request_message = f"Requested {label}."
+            self.request_message = f"Download started: {label}."
         except DroneApiError as error:
             self.request_message = str(error)
 
@@ -599,10 +599,10 @@ class SwarmScreen(Screen):
         if self._pending_request_key == ("roms", _request_item_key(rom)):
             widgets.spinner()
             imgui.same_line()
-            imgui.text_disabled("Requesting...")
+            imgui.text_disabled("Downloading...")
         elif rom.get("exists_locally"):
             imgui.text_disabled("(already have)")
-        elif imgui.button(f"Request##request_rom_{index}"):
+        elif imgui.button(f"Download##request_rom_{index}"):
             self._request_item("roms", rom, name, system=self.request_selected_system)
 
     def _draw_request_movies(self) -> None:
@@ -624,8 +624,8 @@ class SwarmScreen(Screen):
             if self._pending_request_key == ("movies", _request_item_key(movie)):
                 widgets.spinner()
                 imgui.same_line()
-                imgui.text_disabled("Requesting...")
-            elif imgui.button(f"Request##request_movie_{index}"):
+                imgui.text_disabled("Downloading...")
+            elif imgui.button(f"Download##request_movie_{index}"):
                 self._request_item("movies", movie, label)
         imgui.end_child()
 

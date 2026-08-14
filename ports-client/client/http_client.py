@@ -9,6 +9,8 @@ This keeps ports-client's only vendored dependency the UI toolkit itself
 import http.client
 import json
 import ssl
+import sys
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -72,20 +74,34 @@ class DroneApiClient:
         return any(cookie.name == SESSION_COOKIE_NAME for cookie in self.cookie_jar)
 
     def _send(self, request: urllib.request.Request, *, method: str, path: str, timeout: float = _TIMEOUT_SECONDS) -> Any:
+        # Every request is logged with its own elapsed time so a timeout can
+        # be told apart from a fast failure after the fact, from the shared
+        # log file alone -- this was genuinely hard to debug without it (see
+        # ports-client/README.md's "Request Assets: same false-negative..."
+        # section, root-caused only by cross-referencing the Drone's own
+        # server-side log at the same timestamp, not from ports-client at all).
+        print(f"-> {method} {path} timeout={timeout}s")
+        started_at = time.monotonic()
         try:
             with self._opener.open(request, timeout=timeout) as response:
                 raw = response.read()
                 self._save_session()
         except urllib.error.HTTPError as error:
+            elapsed = time.monotonic() - started_at
             raw = error.read()
             payload = _try_parse_json(raw)
             message = _extract_error_message(payload)
+            print(f"<- {method} {path} HTTP {error.code} in {elapsed:.2f}s: {message or raw[:200]!r}", file=sys.stderr)
             if error.code == 401:
                 raise AuthenticationError(message or "not authenticated", status=401) from None
             raise DroneApiError(message or f"{method} {path} failed: HTTP {error.code}", status=error.code) from None
         except (urllib.error.URLError, http.client.HTTPException, ConnectionError, TimeoutError, OSError) as error:
+            elapsed = time.monotonic() - started_at
+            print(f"<- {method} {path} FAILED after {elapsed:.2f}s (timeout budget {timeout}s): {error.__class__.__name__}: {error}", file=sys.stderr)
             raise DroneApiError(f"could not reach Drone at {self.config.base_url}: {error}") from None
 
+        elapsed = time.monotonic() - started_at
+        print(f"<- {method} {path} 200 in {elapsed:.2f}s")
         if not raw:
             return None
         return _try_parse_json(raw)
@@ -98,8 +114,8 @@ class DroneApiClient:
             request.add_header("Content-Type", "application/json")
         return self._send(request, method=method, path=path, timeout=timeout)
 
-    def get(self, path: str) -> Any:
-        return self._request("GET", path)
+    def get(self, path: str, *, timeout: float = _TIMEOUT_SECONDS) -> Any:
+        return self._request("GET", path, timeout=timeout)
 
     def post(self, path: str, body: Optional[dict] = None, *, timeout: float = _TIMEOUT_SECONDS) -> Any:
         return self._request("POST", path, body=body or {}, timeout=timeout)
