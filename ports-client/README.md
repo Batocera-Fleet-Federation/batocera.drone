@@ -59,11 +59,10 @@ override (180s for this one call) rather than risk the exact "could not
 reach Drone... read operation timed out" failure mode described below --
 the operation would have kept running server-side and succeeded, just
 past the client's patience. Applying is still synchronous (no threading
-anywhere in ports-client), so the confirm click is a two-phase deferred
-call: phase one sets an "Applying..." flag and returns, letting that frame
-actually present before phase two makes the blocking call on the next
-frame -- otherwise the click that starts a multi-second freeze would
-freeze on the very frame that should explain why.
+anywhere in ports-client), so the confirm click defers the call to the
+**next** frame, not "later in this same `draw()` call" -- see "Loading
+spinner + a same-frame deferral bug" below, which corrects an initial,
+subtly wrong version of this that shipped earlier the same day.
 
 **About: a new landing tab.** `ui/screens/about.py`, now the shell's
 default section, mirrors drone.js's own landing page (`renderHelpPage`,
@@ -112,6 +111,65 @@ font (Bootstrap Icons is what actually carries a lot of the web UI's visual
 interest) -- no icon font is vendored, and picking/bundling/mapping one is
 a meaningfully bigger, separate piece of work, not a same-session polish
 item.
+
+## Loading spinner + a same-frame deferral bug (2026-08-13, later same day)
+
+**The bug:** Backups' original "Applying..." deferral (described above)
+checked and executed the blocking call from the tail end of the *same*
+`draw()` invocation that first armed it -- later in the function body, but
+still before that frame's `imgui.render()`/SDL buffer swap ever happens.
+Dear ImGui draw commands only reach the screen once a frame's `draw()`
+returns and `ui/app.py`'s loop calls `render()` + `SDL_GL_SwapWindow()`;
+until then the *previous* frame is still the one actually on screen. So
+the blocking call was running before the frame containing "Applying..."
+was ever presented -- the UI still visibly froze first, exactly the
+failure this was supposed to prevent, just with an extra unused flag.
+Caught by writing a real regression test that asserts *which frame number*
+the POST fires on (`smoke_spinner_deferral.py`-style: arm on frame 2,
+assert zero POSTs on frame 2, assert exactly one POST on frame 3) --
+the earlier "no exception across 4 frames" smoke test could never have
+caught this, since same-frame-vs-next-frame timing isn't an exception.
+
+**The fix:** the pending-id check now runs at the *very top* of `draw()`,
+before anything later in that same call (the confirmation popup, in
+Backups' case) can arm a new one. A `backup_id`/request landing in the
+pending slot can therefore only ever be picked up on the frame *after* the
+one that set it -- by which point the "Applying..."/"Requesting..." row
+was already rendered, swapped, and genuinely on screen for the whole
+duration of the block. Applied to both `ui/screens/backups.py` (renamed
+`_apply_in_flight_id` -> `_apply_pending_id` to make the semantics --
+"armed, not yet started" -- clearer) and the same pattern newly added to
+`ui/screens/swarm.py`'s Request Assets pull (`_request_item` now only
+arms `_pending_request`; `_do_request_item` is the actual blocking call,
+executed from the top of `draw()`).
+
+**The spinner:** `ui/widgets.spinner()` -- a small rotating arc drawn with
+`ImDrawList.add_polyline` against `imgui.get_time()`, no image asset, no
+animation-frame bookkeeping. Paired with the deferral fix above wherever a
+blocking call is now genuinely visible-before-it-blocks: Backups' Apply
+row and Request Assets' per-item Request row. Deliberately not added
+to every screen's initial `on_enter()` load -- those complete fast enough
+in practice (and the worst offender, `swarm/overview` under a failing
+storage mount, was a separate real bug fixed in the main Drone app, not a
+"needs a spinner" problem) that a spinner there would mostly just flash.
+
+**Request Assets: same false-negative-timeout bug, different endpoint.**
+Live investigation (`drone-live-debugging` skill) of a user report --
+"same api timeout error" downloading a game from a paired peer --
+found `127.0.0.1 - 500 internal error "/v1/api/admin/local-network/sync":
+SSLError: [SYS] unknown error (_ssl.c:2417)` in this Drone's own log at
+the same moment the peer's own log showed the artwork+ROM transfer
+completing successfully seconds later. `POST /admin/local-network/sync`
+only *queues* a job (202, near-instant by design -- the real transfer runs
+later over Drone-to-Drone P2P, never through this request) but the local
+Drone was mid poll-cycle (concurrent ROM/BIOS metadata scanning, visible
+interleaved in the same log window) at the time, plausibly enough to push
+an otherwise-fast request past the client's 15s budget; the SSLError is
+consistent with the client giving up and closing the loopback socket
+before the (still-successful) response could be written back. Same
+mitigation as Backups apply: `endpoints.request_asset` now sends its own
+longer timeout (30s -- generous for what should be a near-instant queue
+call, still short enough not to mask a genuinely offline peer for long).
 
 ## Full controller navigation + virtual keyboard (2026-08-13)
 

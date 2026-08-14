@@ -17,7 +17,7 @@ from imgui_bundle import imgui
 from client import endpoints
 from client.errors import DroneApiError
 
-from .. import virtual_keyboard
+from .. import virtual_keyboard, widgets
 from ..theme import ERROR_COLOR, SUCCESS_COLOR, WARNING_COLOR
 from ..widgets import search_box, tab_button
 from .base import Screen
@@ -42,6 +42,15 @@ _TABS = (
 _REQUEST_KIND_SYSTEMS = "systems"
 _REQUEST_KIND_MOVIES = "movies"
 _REQUEST_KINDS = ((_REQUEST_KIND_SYSTEMS, "Systems"), (_REQUEST_KIND_MOVIES, "Movies"))
+
+
+def _request_item_key(item: dict) -> str:
+    """A stable-enough identifier for matching a rom/movie dict back to a
+    pending request across frames -- same fields _enqueue_local_asset itself
+    treats as identity server-side, just used here for UI matching only."""
+    return str(
+        item.get("relative_path") or item.get("rom_path") or item.get("file_path") or item.get("name") or ""
+    )
 
 
 class SwarmScreen(Screen):
@@ -89,6 +98,13 @@ class SwarmScreen(Screen):
         self.request_movies_error = None
         self.request_movies_query = ""
         self.request_message = None
+        # (asset_type, item, label, system) for a request armed this frame,
+        # executed at the top of *next* frame's draw() -- not this same
+        # draw() call, or the "Requesting..." spinner drawn below would
+        # never actually get presented before the blocking POST freezes the
+        # UI (see backups.py's _apply_pending_id for the full reasoning).
+        self._pending_request = None
+        self._pending_request_key = None
 
     def on_enter(self) -> None:
         self._ensure_loaded(self.tab)
@@ -482,6 +498,11 @@ class SwarmScreen(Screen):
             self.request_movies_error = str(error)
 
     def _request_item(self, asset_type: str, item: dict, label: str, *, system: str = "") -> None:
+        self._pending_request = (asset_type, item, label, system)
+        self._pending_request_key = (asset_type, _request_item_key(item))
+        self.request_message = None
+
+    def _do_request_item(self, asset_type: str, item: dict, label: str, system: str) -> None:
         try:
             endpoints.request_asset(self.api_client, self.request_peer_id, asset_type, item, system=system)
             self.request_message = f"Requested {label}."
@@ -575,7 +596,11 @@ class SwarmScreen(Screen):
         name = rom.get("name") or rom.get("rom_file") or ""
         imgui.text(name)
         imgui.same_line()
-        if rom.get("exists_locally"):
+        if self._pending_request_key == ("roms", _request_item_key(rom)):
+            widgets.spinner()
+            imgui.same_line()
+            imgui.text_disabled("Requesting...")
+        elif rom.get("exists_locally"):
             imgui.text_disabled("(already have)")
         elif imgui.button(f"Request##request_rom_{index}"):
             self._request_item("roms", rom, name, system=self.request_selected_system)
@@ -596,13 +621,25 @@ class SwarmScreen(Screen):
             label = movie.get("display_title") or movie.get("movie_name") or ""
             imgui.text(label)
             imgui.same_line()
-            if imgui.button(f"Request##request_movie_{index}"):
+            if self._pending_request_key == ("movies", _request_item_key(movie)):
+                widgets.spinner()
+                imgui.same_line()
+                imgui.text_disabled("Requesting...")
+            elif imgui.button(f"Request##request_movie_{index}"):
                 self._request_item("movies", movie, label)
         imgui.end_child()
 
     # --- draw ------------------------------------------------------------
 
     def draw(self, navigator) -> None:
+        # Must run before anything below can arm a new pending request this
+        # same frame -- see _pending_request's comment in __init__.
+        if self._pending_request is not None:
+            asset_type, item, label, system = self._pending_request
+            self._pending_request = None
+            self._pending_request_key = None
+            self._do_request_item(asset_type, item, label, system)
+
         for key, label in _TABS:
             tab_button(label, active=self.tab == key, on_click=lambda k=key: self._select_tab(k))
             imgui.same_line()

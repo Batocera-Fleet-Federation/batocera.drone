@@ -92,11 +92,22 @@ def peer_movies(client: DroneApiClient, peer_id: str, *, limit: int = 200, offse
     )
 
 
+_REQUEST_ASSET_TIMEOUT_SECONDS = 30
+
+
 def request_asset(client: DroneApiClient, peer_id: str, asset_type: str, item: dict, *, system: str = "") -> dict:
+    # This is a queue-only call (202, near-instant in principle -- the real
+    # transfer runs later in the background over Drone-to-Drone P2P, not
+    # through this request at all), but a real incident showed it can still
+    # occasionally outrun the client's normal 15s budget when the local
+    # Drone is mid poll-cycle (concurrent ROM/BIOS metadata scanning) --
+    # the transfer itself had already succeeded server-side by the time the
+    # client gave up and reported "could not reach Drone". A longer budget
+    # here is cheap insurance against that same false-negative.
     body = {"peer_id": peer_id, "asset_type": asset_type, "item": item}
     if system:
         body["system"] = system
-    return client.post("/admin/local-network/sync", body)
+    return client.post("/admin/local-network/sync", body, timeout=_REQUEST_ASSET_TIMEOUT_SECONDS)
 
 
 # --- VPN ---------------------------------------------------------------

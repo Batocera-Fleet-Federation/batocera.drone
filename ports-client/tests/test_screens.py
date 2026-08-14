@@ -361,32 +361,45 @@ class SwarmScreenTests(unittest.TestCase):
         screen._select_request_kind("movies")  # already loaded -- shouldn't refetch
         self.assertEqual(screen.request_movies, [{"movie_name": "Alien"}])
 
-    def test_request_item_roms_posts_expected_payload(self) -> None:
+    def test_request_item_arms_a_pending_request_not_an_immediate_call(self) -> None:
+        # _request_item only arms the deferred call (see swarm.py's
+        # _pending_request comment) -- it must not itself POST, or the
+        # "Requesting..." spinner drawn from this same click's frame would
+        # never actually reach the screen before the blocking call.
         client = _FakeApiClient(post_responses={"/admin/local-network/sync": {"status": "queued"}})
         screen = SwarmScreen(client)
         screen.request_peer_id = "peer1"
         screen._request_item("roms", {"name": "Zelda"}, "Zelda", system="snes")
+        self.assertEqual(client.post_calls, [])
+        self.assertEqual(screen._pending_request, ("roms", {"name": "Zelda"}, "Zelda", "snes"))
+        self.assertEqual(screen._pending_request_key, ("roms", "Zelda"))
+
+    def test_do_request_item_roms_posts_expected_payload(self) -> None:
+        client = _FakeApiClient(post_responses={"/admin/local-network/sync": {"status": "queued"}})
+        screen = SwarmScreen(client)
+        screen.request_peer_id = "peer1"
+        screen._do_request_item("roms", {"name": "Zelda"}, "Zelda", "snes")
         self.assertEqual(
             client.post_calls,
             [("/admin/local-network/sync", {"peer_id": "peer1", "asset_type": "roms", "item": {"name": "Zelda"}, "system": "snes"})],
         )
         self.assertEqual(screen.request_message, "Requested Zelda.")
 
-    def test_request_item_movies_omits_system(self) -> None:
+    def test_do_request_item_movies_omits_system(self) -> None:
         client = _FakeApiClient(post_responses={"/admin/local-network/sync": {"status": "queued"}})
         screen = SwarmScreen(client)
         screen.request_peer_id = "peer1"
-        screen._request_item("movies", {"movie_name": "Alien"}, "Alien")
+        screen._do_request_item("movies", {"movie_name": "Alien"}, "Alien", "")
         self.assertEqual(
             client.post_calls,
             [("/admin/local-network/sync", {"peer_id": "peer1", "asset_type": "movies", "item": {"movie_name": "Alien"}})],
         )
 
-    def test_request_item_failure_surfaces_message(self) -> None:
+    def test_do_request_item_failure_surfaces_message(self) -> None:
         client = _FakeApiClient(post_error=DroneApiError("peer offline"))
         screen = SwarmScreen(client)
         screen.request_peer_id = "peer1"
-        screen._request_item("movies", {"movie_name": "Alien"}, "Alien")
+        screen._do_request_item("movies", {"movie_name": "Alien"}, "Alien", "")
         self.assertEqual(screen.request_message, "peer offline")
 
 

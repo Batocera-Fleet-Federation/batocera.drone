@@ -16,6 +16,7 @@ from imgui_bundle import imgui
 from client import endpoints
 from client.errors import DroneApiError
 
+from .. import widgets
 from ..theme import ERROR_COLOR, MUTED_COLOR, SUCCESS_COLOR, WARNING_COLOR
 from .base import Screen
 
@@ -35,13 +36,18 @@ class BackupsScreen(Screen):
         self.pending_apply_name = ""
         self.apply_ack = False
         self._apply_popup_just_opened = False
-        # Two-phase so the confirm click's own "Applying..." text is actually
-        # drawn and presented (a real frame) before the blocking POST -- this
-        # call can legitimately take many seconds (EmulationStation stop/
-        # copy/restart) and there is no threading in ports-client, so the
-        # click that starts it would otherwise freeze the UI on the very
-        # frame that should be telling the user why it's frozen.
-        self._apply_in_flight_id = None
+        # Genuinely deferred to the *next* frame, not just "later in this
+        # same draw() call": ImGui draw commands recorded during draw() only
+        # reach the screen once this frame's draw()/imgui.render()/SDL swap
+        # all finish -- calling the blocking apply POST later in the *same*
+        # draw() that first shows "Applying..." would still freeze before
+        # that frame is ever presented, defeating the point. draw() checks
+        # this flag first thing, before anything this frame could set it, so
+        # a backup_id landing here only ever gets executed on the frame
+        # *after* the one that armed it -- by which point "Applying..." was
+        # already rendered, swapped, and is genuinely on screen while this
+        # blocks (there is no threading anywhere in ports-client).
+        self._apply_pending_id = None
 
     def on_enter(self) -> None:
         self._reload()
@@ -87,6 +93,15 @@ class BackupsScreen(Screen):
         self._reload()
 
     def draw(self, navigator) -> None:
+        # Must run before anything below can arm a new pending id -- see the
+        # constructor comment on _apply_pending_id for why this is what
+        # actually makes "Applying..." visible before the freeze, not just a
+        # same-frame check-then-call that never gets presented in between.
+        if self._apply_pending_id is not None:
+            backup_id = self._apply_pending_id
+            self._apply_pending_id = None
+            self._apply_backup(backup_id)
+
         if imgui.button("Create Backup"):
             self._create_backup()
         imgui.same_line()
@@ -111,14 +126,6 @@ class BackupsScreen(Screen):
         for backup in self.backups:
             self._draw_backup_row(backup)
         imgui.end_child()
-
-        # Phase 2 of the deferred apply: the "Applying..." text above (drawn
-        # from _draw_backup_row on the frame the button was pressed) has now
-        # been presented at least once -- safe to make the blocking call.
-        if self._apply_in_flight_id is not None:
-            backup_id = self._apply_in_flight_id
-            self._apply_in_flight_id = None
-            self._apply_backup(backup_id)
 
     def _draw_backup_row(self, backup: dict) -> None:
         backup_id = backup.get("id")
@@ -148,8 +155,10 @@ class BackupsScreen(Screen):
             imgui.text_colored(ERROR_COLOR, f"   {backup['error_message']}")
 
         if status == "complete":
-            if self._apply_in_flight_id == backup_id:
-                imgui.text_colored(WARNING_COLOR, "   Applying... EmulationStation will restart.")
+            if self._apply_pending_id == backup_id:
+                widgets.spinner()
+                imgui.same_line()
+                imgui.text_colored(WARNING_COLOR, "Applying... EmulationStation will restart.")
             elif imgui.button(f"Apply this Backup##apply_{backup_id}"):
                 self._open_apply_confirmation(backup_id, str(label))
 
@@ -192,7 +201,7 @@ class BackupsScreen(Screen):
             self.pending_apply_id = None
             imgui.close_current_popup()
         elif confirm_pressed and self.apply_ack:
-            self._apply_in_flight_id = self.pending_apply_id
+            self._apply_pending_id = self.pending_apply_id
             self.pending_apply_id = None
             imgui.close_current_popup()
 
