@@ -487,6 +487,10 @@ class ApiRoutesMixin:
                 self._handle_admin_drone_auto_update_get()
                 return
 
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "system" and parts[2] == "update-drone":
+                self._handle_admin_drone_update_status()
+                return
+
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "system" and parts[2] == "update-history":
                 self._handle_admin_drone_update_history()
                 return
@@ -713,6 +717,16 @@ class ApiRoutesMixin:
                 if parts[3] == "revoke":
                     self._handle_peer_nfs_revoke(payload)
                     return
+
+            if len(parts) == 3 and parts == ["peer", "smtp", "notifications"]:
+                payload = self._read_json_body()
+                self._handle_peer_smtp_notifications(payload)
+                return
+
+            if len(parts) == 3 and parts == ["peer", "smtp", "mail"]:
+                payload = self._read_json_body()
+                self._handle_peer_smtp_mail(payload)
+                return
 
             # Public: must be reachable with no (or an already-invalid) session
             # cookie -- that's the whole point of a login endpoint.

@@ -108,6 +108,7 @@ _STATE_LOCK = threading.RLock()
 _PEER_OPERATION_LOCKS_GUARD = threading.Lock()
 _PEER_OPERATION_LOCKS = {}
 _BACKGROUND_JOBS_LOCK = threading.Lock()
+_ACTIVE_ENABLE_JOBS = set()
 _ACTIVE_DISABLE_JOBS = set()
 _ACTIVE_BIOS_JOBS = set()
 
@@ -1055,6 +1056,77 @@ def enable(settings: Settings, peer_id: str) -> dict:
     peer_id = str(peer_id or "").strip()
     with _peer_operation_lock(settings, peer_id):
         return _enable_locked(settings, peer_id)
+
+
+def request_enable(settings: Settings, peer_id: str) -> dict:
+    """Persist reference intent and perform all mount/link work on a worker.
+
+    Both the web and Ports clients call the same API route and may disappear
+    immediately after the response.  The durable ``enabling`` record plus this
+    daemon worker make the operation owned by Drone, not by either UI process;
+    boot replay finishes it if the machine restarts mid-operation.
+    """
+    peer_id = str(peer_id or "").strip()
+    key = _operation_key(settings, peer_id)
+    with _peer_operation_lock(settings, peer_id):
+        target = resolve_peer_target(settings, peer_id)
+        prior = _get_peer_record(settings, peer_id)
+        if prior and prior.get("enabled", True) and prior.get("status") == "mounted":
+            return public_record(prior)
+        if prior and (not prior.get("enabled", True) or prior.get("status") == "detaching"):
+            raise ValueError("network reference detach is still in progress")
+        record = _upsert_peer_record(
+            settings,
+            peer_id,
+            peer_name=target["peer_name"],
+            tailnet_ip=target["tailnet_ip"],
+            mount_point=str(peer_mount_point(settings, peer_id)),
+            enabled=True,
+            status="enabling",
+            status_detail="Reference accepted; mounting the peer ROM library in the background",
+            systems=(prior or {}).get("systems") or [],
+            bios=(prior or {}).get("bios") or [],
+            bios_status=str((prior or {}).get("bios_status") or "pending"),
+            protocol=str((prior or {}).get("protocol") or ""),
+            last_checked_at=_now_iso(),
+        )
+        with _BACKGROUND_JOBS_LOCK:
+            if key in _ACTIVE_ENABLE_JOBS:
+                return public_record(record)
+            _ACTIVE_ENABLE_JOBS.add(key)
+
+    def finish() -> None:
+        try:
+            result = enable(settings, peer_id)
+            if result.get("status") == "mounted" and result.get("_refresh_required"):
+                _refresh_emulationstation_after_share_change()
+        except Exception as error:
+            with _peer_operation_lock(settings, peer_id):
+                current = _get_peer_record(settings, peer_id)
+                if current and current.get("enabled", True) and current.get("status") != "detaching":
+                    _upsert_peer_record(
+                        settings,
+                        peer_id,
+                        enabled=True,
+                        status="error",
+                        status_detail=f"Reference failed and will be retried after restart: {error}",
+                        last_checked_at=_now_iso(),
+                    )
+        finally:
+            with _BACKGROUND_JOBS_LOCK:
+                _ACTIVE_ENABLE_JOBS.discard(key)
+
+    try:
+        threading.Thread(
+            target=finish,
+            name=f"drone-network-share-enable-{_safe_dirname(peer_id)}",
+            daemon=True,
+        ).start()
+    except Exception:
+        with _BACKGROUND_JOBS_LOCK:
+            _ACTIVE_ENABLE_JOBS.discard(key)
+        raise
+    return public_record(record)
 
 
 def _enable_locked(settings: Settings, peer_id: str) -> dict:

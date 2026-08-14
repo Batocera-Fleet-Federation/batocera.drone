@@ -67,11 +67,22 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
     connection.execute(
         "CREATE TABLE IF NOT EXISTS audit_log ("
         "id INTEGER PRIMARY KEY AUTOINCREMENT, event_type TEXT NOT NULL, title TEXT NOT NULL, "
-        "message TEXT NOT NULL DEFAULT '', details TEXT, created_at TEXT NOT NULL, emailed_at TEXT)"
+        "message TEXT NOT NULL DEFAULT '', details TEXT, created_at TEXT NOT NULL, emailed_at TEXT, "
+        "source_drone_id TEXT, source_event_id TEXT)"
     )
+    audit_columns = {row[1] for row in connection.execute("PRAGMA table_info(audit_log)")}
+    if "source_drone_id" not in audit_columns:
+        connection.execute("ALTER TABLE audit_log ADD COLUMN source_drone_id TEXT")
+    if "source_event_id" not in audit_columns:
+        connection.execute("ALTER TABLE audit_log ADD COLUMN source_event_id TEXT")
     connection.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log(created_at)")
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_audit_log_pending_email ON audit_log(event_type, emailed_at)"
+    )
+    connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_log_relay_source "
+        "ON audit_log(source_drone_id, source_event_id) "
+        "WHERE source_drone_id IS NOT NULL AND source_event_id IS NOT NULL"
     )
     connection.execute(
         "CREATE TABLE IF NOT EXISTS notifications ("
@@ -152,6 +163,73 @@ def insert_event(
         "created_at": created_at,
         "read_at": None,
         "read": False,
+    }
+
+
+def insert_relayed_event(
+    settings: Any,
+    event_type: str,
+    title: str,
+    *,
+    source_drone_id: str,
+    source_event_id: str,
+    message: str = "",
+    details: Optional[dict] = None,
+    created_at: Optional[str] = None,
+) -> dict:
+    """Idempotently ingest one event relayed by a paired Drone.
+
+    A satellite retries until its SMTP-owning peer acknowledges the batch.
+    The source identifiers therefore form a durable idempotency key so a
+    lost HTTP response can never duplicate a notification or email item.
+    """
+    event_type = str(event_type or "").strip()
+    source_drone_id = str(source_drone_id or "").strip()
+    source_event_id = str(source_event_id or "").strip()
+    if not event_type:
+        raise ValueError("event_type is required")
+    if not source_drone_id or not source_event_id:
+        raise ValueError("source_drone_id and source_event_id are required")
+    title = str(title or "").strip() or event_type
+    message = str(message or "")
+    created_at = str(created_at or "").strip() or _now()
+    details_json = json.dumps(details, sort_keys=True, default=str) if details else None
+    with _open(settings.userdata_root) as connection:
+        cursor = connection.execute(
+            "INSERT OR IGNORE INTO audit_log "
+            "(event_type, title, message, details, created_at, emailed_at, source_drone_id, source_event_id) "
+            "VALUES (?, ?, ?, ?, ?, NULL, ?, ?)",
+            (
+                event_type,
+                title,
+                message,
+                details_json,
+                created_at,
+                source_drone_id,
+                source_event_id,
+            ),
+        )
+        if not cursor.rowcount:
+            existing = connection.execute(
+                "SELECT id FROM audit_log WHERE source_drone_id = ? AND source_event_id = ?",
+                (source_drone_id, source_event_id),
+            ).fetchone()
+            return {
+                "audit_log_id": int(existing[0]) if existing else None,
+                "source_event_id": source_event_id,
+                "duplicate": True,
+            }
+        audit_log_id = int(cursor.lastrowid)
+        notification_cursor = connection.execute(
+            "INSERT INTO notifications (audit_log_id, event_type, title, message, created_at, read_at) "
+            "VALUES (?, ?, ?, ?, ?, NULL)",
+            (audit_log_id, event_type, title, message, created_at),
+        )
+    return {
+        "id": int(notification_cursor.lastrowid),
+        "audit_log_id": audit_log_id,
+        "source_event_id": source_event_id,
+        "duplicate": False,
     }
 
 

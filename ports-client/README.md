@@ -368,17 +368,12 @@ asset, confirming the URL construction and the clean-failure path both
 work as designed -- extraction and download-fallback verified against a
 real bundle/real network call, not just read from source).
 
-**Deliberately not done yet:** the Ports client isn't wired into the
-Drone's own self-update poller (`app/common/self_update.py`) the way the
-web app is -- it only gets installed/refreshed when `batocera_install.sh`
-itself is (re-)run, not automatically on every push to `main`. Folding it
-into the live self-update daemon means that background process would
-start writing into `/userdata/roms/ports/` (a directory EmulationStation
-actively scans, and where this app might currently be the running
-foreground process on the very TV the Drone is attached to) -- a
-meaningfully different risk class from replacing the Drone's own `app/`
-files in place, and a decision that deserves its own discussion rather
-than folding in silently alongside this packaging work.
+The Drone API's update worker now installs the architecture-matched Ports
+bundle as a required part of each supported-device update before advancing
+the web/API version. Both the web button and periodic checks merely queue
+that backend job. A missing or incomplete Ports code/image payload fails the
+complete release and leaves it eligible for retry; the browser and Ports UI
+never download or install update files themselves.
 
 ## Verification status
 

@@ -18,14 +18,11 @@ from ..theme import ACCENT, ERROR_COLOR, MUTED_COLOR, hex_color
 from .base import Screen
 
 _LOGO_DISPLAY_WIDTH = 320.0
-# ui/assets/logo.png is a 946x946 canvas built for EmulationStation's wide
-# marquee slot -- the wordmark itself only occupies a thin horizontal band
-# (rows 309-617, measured via PIL's alpha-channel bbox), with large
-# transparent margins above/below that make sense in a wide marquee frame but
-# just look like a gap here. Crop to that band via UV coords instead of
-# displaying the full transparent square.
-_LOGO_CONTENT_UV0 = imgui.ImVec2(0.0, 0.327)
-_LOGO_CONTENT_UV1 = imgui.ImVec2(1.0, 0.652)
+# The current logo intentionally uses the full square: the mascot biting the
+# BATOCERA wordmark is part of the approved branding, not transparent marquee
+# padding to crop away.
+_LOGO_CONTENT_UV0 = imgui.ImVec2(0.0, 0.0)
+_LOGO_CONTENT_UV1 = imgui.ImVec2(1.0, 1.0)
 
 _BODY_PARAGRAPHS = (
     "This is the Ports-menu companion to the Batocera Drone service already "
@@ -38,6 +35,10 @@ _BODY_PARAGRAPHS = (
     "computer on your network. Pair machines together on the Swarm page and "
     "they act as one fleet -- encrypted peer-to-peer transfers, live health, "
     "and remote access, with no central server and no port forwarding.",
+    "Downloads started from Request Assets are handled by the Drone service. "
+    "You can close this app or return to EmulationStation while active and "
+    "queued downloads continue in the background; reopen the app at any time "
+    "to see their current progress.",
 )
 
 _SCOPE_NOTE = (

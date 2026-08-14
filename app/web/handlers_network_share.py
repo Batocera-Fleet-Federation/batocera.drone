@@ -24,11 +24,11 @@ class HandlersNetworkShareMixin:
         # are percent-encoded on the wire and must be unquoted explicitly.
         peer_id = unquote(peer_id)
         try:
-            result = _network_share.enable(self.settings, peer_id)
+            result = _network_share.request_enable(self.settings, peer_id)
         except ValueError as error:
             self._send_json(400, {"error": str(error)})
             return
-        status_code = 200 if result.get("status") == "mounted" else 502
+        status_code = 200 if result.get("status") == "mounted" else 202
         self._send_json(status_code, _network_share.public_record(result))
 
     def _handle_admin_network_share_disable(self, peer_id: str) -> None:

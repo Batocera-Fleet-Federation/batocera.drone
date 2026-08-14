@@ -73,22 +73,29 @@ def network_share_disable(client: DroneApiClient, peer_id: str) -> dict:
 # system_counts. The Request Assets screen is scoped to what the backend
 # actually supports: Systems+ROMs and Movies.
 
+_PEER_ASSET_BROWSE_TIMEOUT_SECONDS = 40
+
 def peer_asset_summary(client: DroneApiClient, peer_id: str) -> dict:
-    return client.get(f"/admin/local-network/peers/{quote(peer_id, safe='')}/assets?type=summary")
+    return client.get(
+        f"/admin/local-network/peers/{quote(peer_id, safe='')}/assets?type=summary",
+        timeout=_PEER_ASSET_BROWSE_TIMEOUT_SECONDS,
+    )
 
 
 def peer_roms(client: DroneApiClient, peer_id: str, system: str, *, limit: int = 200, offset: int = 0, query: str = "") -> dict:
     q = f"&q={quote(query)}" if query else ""
     return client.get(
         f"/admin/local-network/peers/{quote(peer_id, safe='')}/assets"
-        f"?type=roms&system={quote(system, safe='')}&limit={int(limit)}&offset={int(offset)}{q}"
+        f"?type=roms&system={quote(system, safe='')}&limit={int(limit)}&offset={int(offset)}{q}",
+        timeout=_PEER_ASSET_BROWSE_TIMEOUT_SECONDS,
     )
 
 
 def peer_movies(client: DroneApiClient, peer_id: str, *, limit: int = 200, offset: int = 0, query: str = "") -> dict:
     q = f"&q={quote(query)}" if query else ""
     return client.get(
-        f"/admin/local-network/peers/{quote(peer_id, safe='')}/assets?type=movies&limit={int(limit)}&offset={int(offset)}{q}"
+        f"/admin/local-network/peers/{quote(peer_id, safe='')}/assets?type=movies&limit={int(limit)}&offset={int(offset)}{q}",
+        timeout=_PEER_ASSET_BROWSE_TIMEOUT_SECONDS,
     )
 
 

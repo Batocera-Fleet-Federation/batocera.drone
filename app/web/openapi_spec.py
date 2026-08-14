@@ -881,13 +881,15 @@ def _schemas() -> Dict[str, Schema]:
         ),
         "ConfigBackupEmailResponse": _object(
             {
-                "status": _enum(("sent", "not_configured", "too_large", "error", "not_found")),
+                "status": _enum(("queued", "not_configured", "too_large", "error", "not_found")),
+                "job_id": _integer("Persistent outbound-mail queue ID when status is 'queued'"),
+                "queued_at": _string(fmt="date-time", nullable=True),
                 "size_bytes": _integer("Present when status is 'too_large'"),
                 "limit_bytes": _integer("Present when status is 'too_large'"),
                 "error": _string("Present when status is 'error'"),
             },
             ("status",),
-            description="'not_configured'/'too_large'/'error' are 200s (not thrown errors) so the caller can branch on the exact outcome -- e.g. show a popup pointing at Email settings for 'not_configured'.",
+            description="A successful request is persisted for asynchronous delivery by the backend mail worker (202). Validation outcomes remain synchronous so every UI can branch consistently.",
         ),
         "ConfigBackupActionResponse": _object({"status": _string()}, ("status",)),
         "ConfigBackupTreeFile": _object({"relative_path": _string(), "size": _integer()}, ("relative_path", "size")),
@@ -1116,15 +1118,17 @@ def _schemas() -> Dict[str, Schema]:
                 "source_peer_name": _string(),
                 "revoked_reason": _string(),
                 "revoked_at": _string(fmt="date-time", nullable=True),
-                "smtp_enabled": _boolean("Local master switch for sending mail from this drone -- independent of sharing"),
+                "smtp_enabled": _boolean("Owner-side master switch for automatic digest mail. Imported clients are relay-only and always keep this false."),
+                "delivery_mode": _enum(("local", "relay"), description="local sends digests from this API worker; relay forwards events to source_peer_id and never sends SMTP locally"),
                 "digest_interval_seconds": _integer(
-                    "How often the digest poller checks for new mail to send, in seconds -- 60 (1 minute) to 86400 (24 hours), default 300 (5 minutes). Local to this drone, like smtp_enabled/notify.",
+                    "Minimum time between digest attempts by the SMTP-owning API worker, in seconds -- 60 (1 minute) to 86400 (24 hours), default 300 (5 minutes).",
                     default=300, minimum=60, maximum=86400,
                 ),
                 "notify": _object(additional_properties={"type": "boolean"}, description="event_type -> whether it's included in the email digest"),
-                "last_test_result": _object(additional_properties=True, description="{status, sent_at|error} of the most recent Test Email, or absent if never tested"),
+                "last_test_result": _object(additional_properties=True, description="Latest Test Email lifecycle state: queued, relayed, sent (ok), or error"),
                 "last_test_at": _string(fmt="date-time", nullable=True),
                 "last_digest_sent_at": _string(fmt="date-time", nullable=True),
+                "last_digest_attempt_at": _string(fmt="date-time", nullable=True),
                 "last_digest_error": _string(),
             },
             ("has_config", "smtp_enabled", "sharing_enabled"),
@@ -1173,12 +1177,13 @@ def _schemas() -> Dict[str, Schema]:
         ),
         "SmtpTestResponse": _object(
             {
-                "status": _enum(("ok", "error")),
-                "sent_at": _string(fmt="date-time", nullable=True),
+                "status": _enum(("queued", "not_configured", "error")),
+                "job_id": _integer("Persistent outbound-mail queue ID when status is 'queued'"),
+                "queued_at": _string(fmt="date-time", nullable=True),
                 "error": _string(nullable=True),
             },
             ("status",),
-            description="Result of the Test Email button.",
+            description="Queue result for the Test Email button. SMTP delivery is asynchronous and owned by the backend worker.",
         ),
         "SmtpPeerConfigResponse": _object(
             {
@@ -1193,6 +1198,61 @@ def _schemas() -> Dict[str, Schema]:
             },
             ("host", "port"),
             description="This drone's SMTP settings as served to a paired peer -- only returned when sharing is on (see /admin/smtp/sharing).",
+        ),
+        "SmtpRelayedNotification": _object(
+            {
+                "source_event_id": _string("Stable audit ID on the source Drone; used as the idempotency key"),
+                "event_type": _string(),
+                "title": _string(),
+                "message": _string(),
+                "details": {**_object(additional_properties=True), "nullable": True},
+                "created_at": _string(fmt="date-time"),
+            },
+            ("source_event_id", "event_type", "title", "created_at"),
+        ),
+        "SmtpNotificationRelayRequest": _object(
+            {
+                "source_drone_id": _string("Must match the paired mTLS client certificate"),
+                "events": _array(_ref("SmtpRelayedNotification")),
+            },
+            ("source_drone_id", "events"),
+        ),
+        "SmtpNotificationRelayResponse": _object(
+            {
+                "status": _enum(("accepted",)),
+                "accepted_event_ids": _array(_string()),
+                "accepted_count": _integer(),
+                "rejected_event_ids": _array(_string()),
+            },
+            ("status", "accepted_event_ids", "accepted_count", "rejected_event_ids"),
+        ),
+        "SmtpRelayedMailJob": _object(
+            {
+                "source_job_id": _string("Stable queue ID on the source Drone; used as the idempotency key"),
+                "kind": _enum(("test", "config_backup")),
+                "subject": _string(),
+                "body": _string(),
+                "attachment_filename": _string("For config backups, fetched from the source Drone by the owner worker over mTLS"),
+                "metadata": {**_object(additional_properties=True), "nullable": True},
+                "created_at": _string(fmt="date-time"),
+            },
+            ("source_job_id", "kind", "subject", "body"),
+        ),
+        "SmtpMailRelayRequest": _object(
+            {
+                "source_drone_id": _string("Must match the paired mTLS client certificate"),
+                "jobs": _array(_ref("SmtpRelayedMailJob")),
+            },
+            ("source_drone_id", "jobs"),
+        ),
+        "SmtpMailRelayResponse": _object(
+            {
+                "status": _enum(("accepted",)),
+                "accepted_job_ids": _array(_string()),
+                "accepted_count": _integer(),
+                "rejected_job_ids": _array(_string()),
+            },
+            ("status", "accepted_job_ids", "accepted_count", "rejected_job_ids"),
         ),
         "NotificationEntry": _object(
             {
@@ -1386,7 +1446,24 @@ def _schemas() -> Dict[str, Schema]:
             description="Gamelist mutation result.",
         ),
         "CertificateRotateResponse": _object({"status": _enum(["rotated", "failed"]), "error": _string(), "certificate": _ref("CertificateMetadata")}, ("status", "certificate")),
-        "DroneUpdateResponse": _object({"status": _string(), "version": _string(), "archive_url": _string(fmt="uri"), "elapsed_seconds": _number(), "restart": freeform}, description="Self-update result plus restart metadata."),
+        "DroneUpdateResponse": _object(
+            {
+                "status": _enum(("idle", "queued", "checking", "downloading", "current", "restart_scheduled", "error", "disabled", "skipped")),
+                "owner": _enum(("api_worker",)),
+                "source": _string(),
+                "accepted": _boolean(),
+                "already_running": _boolean(),
+                "current_version": _string(),
+                "latest_version": _string(),
+                "requested_at": _string(fmt="date-time"),
+                "updated_at": _string(fmt="date-time"),
+                "detail": _string(),
+                "error": _string(),
+                "ports_client": freeform,
+            },
+            ("status", "owner"),
+            description="Persistent status for the API-owned worker that checks and installs the complete Drone release.",
+        ),
         "DroneAutoUpdateRequest": _object({"enabled": _boolean()}, ("enabled",)),
         "DroneAutoUpdateResponse": _object({"enabled": _boolean()}, ("enabled",)),
         "DroneUpdateHistoryEntry": _object(
@@ -1455,6 +1532,7 @@ def _schemas() -> Dict[str, Schema]:
                 "dns_name": _string(description="Peer's Tailnet MagicDNS FQDN (e.g. drone.tailnet-name.ts.net), empty until a Tailnet discovery sync has seen this peer"),
                 "ui_url": _string(description="Best URL for the viewer's browser to open this drone's UI; empty for the drone serving the page"),
                 "error": _string(nullable=True),
+                "summary_error": _string(description="Inventory-summary error when the peer health check succeeded; the peer remains online", nullable=True),
                 "latency_ms": _integer(nullable=True),
                 "summary": freeform,
             },
@@ -2249,7 +2327,7 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
                 "post": _operation("Delete a config-backup tarball and its metadata", {"200": _json_response("ConfigBackupActionResponse"), "404": _json_response("ConfigBackupActionResponse", "Backup not found")}, parameters=[_path_param("backup_id")], tags=["admin", "config-backups"], error_codes=("401", "403", "429", "500"))
             },
             "/admin/config-backups/{backup_id}/email": {
-                "post": _operation("Email a completed config-backup tarball as an attachment (SMTP must be configured)", {"200": _json_response("ConfigBackupEmailResponse"), "404": _json_response("ConfigBackupEmailResponse", "Backup not found or not yet complete")}, parameters=[_path_param("backup_id")], tags=["admin", "config-backups"], error_codes=("401", "403", "429", "500"))
+                "post": _operation("Queue a completed config-backup tarball for asynchronous email delivery by the backend worker", {"202": _json_response("ConfigBackupEmailResponse", "Queued"), "200": _json_response("ConfigBackupEmailResponse", "Synchronous validation outcome"), "404": _json_response("ConfigBackupEmailResponse", "Backup not found or not yet complete")}, parameters=[_path_param("backup_id")], tags=["admin", "config-backups"], error_codes=("401", "403", "429", "500"))
             },
             "/peer/config-backups/{file_name}": {
                 "get": _operation("mTLS: download a completed config-backup tarball from a paired peer", {"200": {"description": "The tar.gz file", "content": {"application/gzip": {"schema": {"type": "string", "format": "binary"}}}}, "400": _json_response("ConfigBackupActionResponse", "Invalid file name"), "404": _json_response("ConfigBackupActionResponse", "Backup not found or not yet complete")}, parameters=[_path_param("file_name")], tags=["peer", "config-backups"], error_codes=("401", "403", "429", "500"))
@@ -2316,7 +2394,7 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
                 "post": _operation("Save SMTP settings (host/port/auth/from/recipient)", {"200": _json_response("SmtpStatusResponse"), "400": _json_response("ErrorResponse", "Missing/invalid host, from address, recipient, or port")}, request_body=_json_request("SmtpSettingsUpdateRequest"), tags=["admin", "smtp"], error_codes=("400", "401", "403", "429", "500", "503"))
             },
             "/admin/smtp/enabled": {
-                "post": _operation("Toggle whether this drone sends mail (Test Email + the digest poller) -- independent of sharing", {"200": _json_response("SmtpEnabledResponse")}, request_body=_json_request("SmtpEnabledRequest"), tags=["admin", "smtp"], error_codes=("401", "403", "429", "500", "503"))
+                "post": _operation("Toggle the SMTP owner's automatic digest worker. Imported clients remain relay-only and return smtp_enabled=false", {"200": _json_response("SmtpEnabledResponse")}, request_body=_json_request("SmtpEnabledRequest"), tags=["admin", "smtp"], error_codes=("401", "403", "429", "500", "503"))
             },
             "/admin/smtp/notifications": {
                 "post": _operation("Update which event types are included in the email digest", {"200": _json_response("SmtpNotificationTogglesResponse")}, request_body=_json_request("SmtpNotificationTogglesRequest"), tags=["admin", "smtp"], error_codes=("401", "403", "429", "500", "503"))
@@ -2331,7 +2409,7 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
                 "post": _operation("Pull SMTP settings from a paired peer and adopt them", {"200": _json_response("SmtpPullFromPeerResponse"), "404": _json_response("ErrorResponse", "Unknown peer, or that peer has sharing off / no config"), "502": _json_response("ErrorResponse", "Could not reach that peer")}, request_body=_json_request("SmtpPullFromPeerRequest"), tags=["admin", "smtp"], error_codes=("400", "401", "403", "404", "429", "500", "502", "503"))
             },
             "/admin/smtp/test": {
-                "post": _operation("Send a test email using the saved settings", {"200": _json_response("SmtpTestResponse"), "502": _json_response("SmtpTestResponse", "Send failed")}, tags=["admin", "smtp"], error_codes=("401", "403", "429", "500", "503"))
+                "post": _operation("Queue a test email for asynchronous delivery by the centralized backend mail worker", {"202": _json_response("SmtpTestResponse", "Queued"), "400": _json_response("SmtpTestResponse", "SMTP is not configured")}, tags=["admin", "smtp"], error_codes=("401", "403", "429", "500", "503"))
             },
             "/admin/notifications": {
                 "get": _operation("List notifications, newest first (keyset-paginated)", {"200": _json_response("NotificationsListResponse")}, parameters=[_query_param("before_id", _integer(), "Return items with id less than this"), _query_param("limit", _integer(), "Page size"), _query_param("unread_only", _string(), "1/true to return only unread items")], tags=["admin", "notifications"])
@@ -2361,13 +2439,21 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             "/admin/automation/idle-volume": {"post": _operation("Update idle-volume automation", {"200": _json_response("IdleVolumeResponse")}, request_body=_json_request("IdleVolumeUpdateRequest"), tags=["admin"])},
             "/admin/automation/idle-game-exit": {"post": _operation("Update idle-game-exit automation", {"200": _json_response("IdleGameExitResponse")}, request_body=_json_request("IdleGameExitUpdateRequest"), tags=["admin"])},
             "/admin/automation/wifi-recovery": {"post": _operation("Update Wi-Fi recovery automation", {"200": _json_response("WifiRecoveryResponse")}, request_body=_json_request("WifiRecoveryUpdateRequest"), tags=["admin"])},
-            "/admin/system/update-drone": {"post": _operation("Download and stage the latest Drone app release", {"200": _json_response("DroneUpdateResponse")}, tags=["admin"], error_codes=("400", "401", "403", "429", "500", "502"))},
+            "/admin/system/update-drone": {
+                "get": _operation("Get the API worker's current or most recent Drone update job", {"200": _json_response("DroneUpdateResponse")}, tags=["admin"]),
+                "post": _operation(
+                    "Queue a complete Drone release check on the API worker",
+                    {"202": _json_response("DroneUpdateResponse", "Update check accepted by the backend worker")},
+                    tags=["admin"],
+                    error_codes=("400", "401", "403", "429", "500", "502"),
+                ),
+            },
             "/admin/system/update-history": {
                 "get": _operation("List past Drone app self-updates (version, GitHub release link, commit notes)", {"200": _json_response("DroneUpdateHistoryResponse")}, tags=["admin"]),
             },
             "/admin/system/auto-update": {
                 "get": _operation("Get automatic Drone update setting", {"200": _json_response("DroneAutoUpdateResponse")}, tags=["admin"]),
-                "post": _operation("Enable or disable the startup Drone update check", {"200": _json_response("DroneAutoUpdateResponse")}, request_body=_json_request("DroneAutoUpdateRequest"), tags=["admin"]),
+                "post": _operation("Enable or disable periodic release checks by the API update worker", {"200": _json_response("DroneAutoUpdateResponse")}, request_body=_json_request("DroneAutoUpdateRequest"), tags=["admin"]),
             },
             "/admin/system/run-pixn-update": {"post": _operation("Run the installed PixN upgrade script", {"200": _json_response("PixnUpdateResponse")}, tags=["admin"], error_codes=("400", "401", "403", "404", "429", "500"))},
             "/admin/system/restart-emulationstation": {"post": _operation("Restart EmulationStation", {"200": _json_response("RestartEmulationStationResponse"), "502": _json_response("RestartEmulationStationResponse", "Restart failed")}, tags=["admin"], error_codes=("400", "401", "403", "429", "500"))},
@@ -2408,11 +2494,11 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             "/admin/network-shares": {"get": _operation("List this Drone's configured peer ROM references and their live NFS/SMB mount status", {"200": _json_response("NetworkShareListResponse")}, tags=["admin", "local-network"])},
             "/admin/network-shares/{peer_id}/enable": {
                 "post": _operation(
-                    "Reference a paired peer's whole ROM library, preferring a private read-only NFSv4 export and falling back to SMB while preserving local ROM/BIOS collisions",
-                    {"200": _json_response("NetworkShareRecord")},
+                    "Durably begin referencing a paired peer's whole ROM library in a background worker, preferring a private read-only NFSv4 export and falling back to SMB while preserving local ROM/BIOS collisions",
+                    {"200": _json_response("NetworkShareRecord"), "202": _json_response("NetworkShareRecord")},
                     parameters=[_path_param("peer_id", "A paired peer's drone_id")],
                     tags=["admin", "local-network"],
-                    error_codes=("400", "401", "403", "429", "500", "502"),
+                    error_codes=("400", "401", "403", "429", "500"),
                 )
             },
             "/admin/network-shares/{peer_id}/disable": {
@@ -2582,6 +2668,26 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
                     tags=["peer", "smtp"],
                     security=peer_security,
                     error_codes=("403", "404", "429", "500"),
+                )
+            },
+            "/peer/smtp/notifications": {
+                "post": _operation(
+                    "Relay local audit events to the paired Drone that owns and shares this SMTP configuration",
+                    {"202": _json_response("SmtpNotificationRelayResponse"), "403": _json_response("ErrorResponse", "Not paired, source mismatch, or this Drone is not an SMTP owner accepting relays")},
+                    request_body=_json_request("SmtpNotificationRelayRequest"),
+                    tags=["peer", "smtp", "notifications"],
+                    security=peer_security,
+                    error_codes=("400", "403", "429", "500"),
+                )
+            },
+            "/peer/smtp/mail": {
+                "post": _operation(
+                    "Relay explicit email jobs to the paired SMTP owner for centralized worker delivery",
+                    {"202": _json_response("SmtpMailRelayResponse"), "403": _json_response("ErrorResponse", "Not paired, source mismatch, or this Drone is not an SMTP owner accepting relays")},
+                    request_body=_json_request("SmtpMailRelayRequest"),
+                    tags=["peer", "smtp"],
+                    security=peer_security,
+                    error_codes=("400", "403", "429", "500"),
                 )
             },
         },

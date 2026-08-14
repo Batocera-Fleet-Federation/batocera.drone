@@ -488,11 +488,12 @@ def _drone_hostname() -> str:
 
 
 def email_backup(settings: Any, backup_id: int) -> dict:
-    """Email a completed backup as an attachment. Checks configuration and
-    size before ever touching smtplib, so the caller (the admin UI) can
-    distinguish "SMTP isn't set up" (show a popup pointing at the Email tile)
-    from "too large" from a genuine send failure, rather than one generic
-    error for all three."""
+    """Queue a completed backup for the centralized mail worker.
+
+    Validation remains synchronous so the API can report missing config,
+    missing files, or an oversized attachment immediately. SMTP delivery is
+    persistent and asynchronous, independent of the initiating UI request.
+    """
     row = _store.get(settings, backup_id)
     if row is None or row.get("status") != "complete":
         return {"status": "not_found"}
@@ -522,13 +523,17 @@ def email_backup(settings: Any, backup_id: int) -> dict:
         f"Hostname: {hostname or 'unknown'}",
         f"Device ID: {device_id or 'unknown'}",
         f"Batocera version: {batocera_version}",
-        f"Sent at: {datetime.now(timezone.utc).replace(microsecond=0).isoformat()}",
+        f"Queued at: {datetime.now(timezone.utc).replace(microsecond=0).isoformat()}",
     ]
     if row.get("source_drone_name") or row.get("source_drone_id"):
         lines.insert(2, f"Originally created on: {row.get('source_drone_name') or row.get('source_drone_id')}")
     body = "\n".join(lines)
-    try:
-        _smtp.send_mail_with_attachment(settings, subject, body, file_path, row["file_name"])
-    except _smtp.SmtpSendError as error:
-        return {"status": "error", "error": str(error)}
-    return {"status": "sent"}
+    return _smtp.queue_mail(
+        settings,
+        kind="config_backup",
+        subject=subject,
+        body=body,
+        attachment_path=file_path,
+        attachment_filename=row["file_name"],
+        metadata={"backup_id": row["id"], "backup_name": display_name},
+    )

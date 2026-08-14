@@ -31,9 +31,9 @@ _LIST_HEIGHT = 260.0
 _STATUS_COLUMN_X = 340.0
 _SYSTEMS_PANE_WIDTH = 280.0
 _DOWNLOAD_PROGRESS_WIDTH = 190.0
-_DOWNLOAD_QUEUE_HEIGHT = 190.0
 _DOWNLOAD_POLL_SECONDS = 1.0
 _DOWNLOAD_TERMINAL_STATUSES = {"completed", "failed", "cancelled", "skipped"}
+_REFERENCE_POPUP_NAME = "Reference Network ROMs"
 
 _TAB_OVERVIEW = "overview"
 _TAB_TAILNET = "tailnet"
@@ -136,6 +136,9 @@ class SwarmScreen(Screen):
         self.reference_peers = []  # list of (peer_dict, share_dict_or_None)
         self.reference_error = None
         self.reference_message = None
+        self.pending_reference_peer_id = None
+        self.pending_reference_peer_name = ""
+        self._reference_popup_just_opened = False
 
         # Request Assets
         self.request_peers = []
@@ -242,6 +245,10 @@ class SwarmScreen(Screen):
         if error:
             imgui.same_line()
             imgui.text_disabled(f"-- {error}")
+
+        summary_error = drone.get("summary_error")
+        if drone.get("online") and summary_error:
+            imgui.text_colored(WARNING_COLOR, f"   Inventory delayed -- {summary_error}")
 
         summary = drone.get("summary") or {}
         counts = summary.get("counts")
@@ -437,11 +444,25 @@ class SwarmScreen(Screen):
 
     def _enable_reference(self, peer_id: str, name: str) -> None:
         try:
-            endpoints.network_share_enable(self.api_client, peer_id)
-            self.reference_message = f"Referencing {name} -- this can take a moment."
+            result = endpoints.network_share_enable(self.api_client, peer_id)
+            status = str(result.get("status") or "") if isinstance(result, dict) else ""
+            if status in {"enabling", "pending"}:
+                self.reference_message = (
+                    f"Reference accepted for {name}. Drone is mounting it in the background; "
+                    "the operation continues if this client closes."
+                )
+            elif status == "mounted":
+                self.reference_message = f"Now referencing {name}."
+            else:
+                self.reference_message = str((result or {}).get("status_detail") or status or f"Could not reference {name}.")
         except DroneApiError as error:
             self.reference_message = str(error)
         self._reload_reference()
+
+    def _open_reference_confirmation(self, peer_id: str, name: str) -> None:
+        self.pending_reference_peer_id = str(peer_id)
+        self.pending_reference_peer_name = str(name)
+        self._reference_popup_just_opened = True
 
     def _disable_reference(self, peer_id: str, name: str) -> None:
         try:
@@ -470,6 +491,8 @@ class SwarmScreen(Screen):
             imgui.text_disabled("No paired drones yet.")
         for peer, share in self.reference_peers:
             self._draw_reference_row(peer, share)
+
+        self._draw_reference_confirmation_popup()
 
         if self.reference_message:
             imgui.spacing()
@@ -501,16 +524,64 @@ class SwarmScreen(Screen):
                 )
         else:
             if imgui.button(f"Reference##{peer_id}"):
-                self.defer_action(
-                    f"Referencing {name}...",
-                    lambda selected_peer=peer_id, selected_name=name: self._enable_reference(
-                        selected_peer, selected_name
-                    ),
-                )
+                self._open_reference_confirmation(peer_id, name)
 
         if share and share.get("status_detail"):
             imgui.text_disabled(f"   {share['status_detail']}")
         imgui.separator()
+
+    def _draw_reference_confirmation_popup(self) -> None:
+        if self._reference_popup_just_opened:
+            imgui.open_popup(_REFERENCE_POPUP_NAME)
+            self._reference_popup_just_opened = False
+
+        if self.pending_reference_peer_id is None:
+            return
+
+        opened, _ = imgui.begin_popup_modal(
+            _REFERENCE_POPUP_NAME,
+            flags=imgui.WindowFlags_.always_auto_resize.value,
+        )
+        if not opened:
+            return
+
+        name = self.pending_reference_peer_name or "this Drone"
+        imgui.text_colored(WARNING_COLOR, f"Reference {name}'s ROMs and BIOS?")
+        imgui.spacing()
+        imgui.text_wrapped(
+            f"Games and emulators will stream ROM bytes live from {name} over the network; "
+            "the ROMs are not downloaded to this machine."
+        )
+        imgui.text_wrapped(
+            "This does not delete local ROMs. If a ROM system already exists locally, "
+            "Drone renames it with an '.old' suffix and restores it when the reference "
+            "is disabled. Existing local BIOS files stay in place; the network supplies "
+            "only missing BIOS files."
+        )
+        imgui.spacing()
+
+        cancel_pressed = imgui.button("Cancel") or imgui.is_key_pressed(imgui.Key.gamepad_face_right)
+        imgui.same_line()
+        confirm_pressed = imgui.button("Reference ROMs")
+
+        if cancel_pressed:
+            self.pending_reference_peer_id = None
+            self.pending_reference_peer_name = ""
+            imgui.close_current_popup()
+        elif confirm_pressed:
+            peer_id = self.pending_reference_peer_id
+            peer_name = self.pending_reference_peer_name
+            self.pending_reference_peer_id = None
+            self.pending_reference_peer_name = ""
+            imgui.close_current_popup()
+            self.defer_action(
+                f"Requesting reference to {peer_name}...",
+                lambda selected_peer=peer_id, selected_name=peer_name: self._enable_reference(
+                    selected_peer, selected_name
+                ),
+            )
+
+        imgui.end_popup()
 
     # --- Request Assets --------------------------------------------------
 
@@ -1026,12 +1097,19 @@ class SwarmScreen(Screen):
                 if isinstance(job, dict)
             )
         if rows:
+            # The service groups its snapshot by status. Re-sort those groups
+            # so a newly created transfer is always the first row a user sees.
+            # Python's stable sort preserves the service order for legacy jobs
+            # that do not have a creation timestamp.
+            rows.sort(key=lambda row: str(row[1].get("created_at") or ""), reverse=True)
             return rows
-        return [
+        rows = [
             ("Download", job)
             for job in (snapshot.get("downloads") or [])
             if isinstance(job, dict)
         ]
+        rows.sort(key=lambda row: str(row[1].get("created_at") or ""), reverse=True)
+        return rows
 
     def _draw_download_queue_panel(self) -> None:
         snapshot = self.request_queue_snapshot or {}
@@ -1047,6 +1125,7 @@ class SwarmScreen(Screen):
         imgui.text_disabled(
             f"Active {active_count}  |  Queued {queued_count}  |  Recent {recent_count}"
         )
+        imgui.text_disabled("Downloads continue in the background after this app is closed.")
 
         if self.request_download_error:
             imgui.text_colored(
@@ -1057,7 +1136,9 @@ class SwarmScreen(Screen):
         rows = self._download_queue_rows()
         imgui.begin_child(
             "request_download_queue",
-            imgui.ImVec2(0, _DOWNLOAD_QUEUE_HEIGHT),
+            # A zero height tells ImGui to use all vertical space remaining
+            # below the Request Assets controls and inventory browser.
+            imgui.ImVec2(0, 0),
             True,
         )
         if not rows:

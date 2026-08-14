@@ -41,6 +41,21 @@ def _targz(members):
     return buf.getvalue()
 
 
+def _complete_drone_members(members=(), *, prefix=""):
+    required = {
+        "app/main.py": b"main",
+        "app/drone_api.py": b"api",
+        "app/VERSION": b"v1.0.0\n",
+        "app/web/templates/index.html": b"html",
+        "app/web/static/js/drone.js": b"js",
+        "app/web/static/css/drone.css": b"css",
+        "content/batocera-swarm-mascot.jpg": b"jpg",
+        "content/drone.png": b"png",
+    }
+    required.update(dict(members))
+    return [(f"{prefix}{name}", content) for name, content in required.items()]
+
+
 class DownloadLatestDroneAppTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -65,17 +80,17 @@ class DownloadLatestDroneAppTests(unittest.TestCase):
 
     # --- happy path ------------------------------------------------------
     def test_extracts_app_and_content_skipping_pycache_and_other_roots(self):
-        archive = _targz([
+        archive = _targz(_complete_drone_members([
             ("app/main.py", b"m"),
             ("app/pkg/mod.py", b"p"),
             ("content/theme.css", b"c"),
             ("app/__pycache__/main.cpython-39.pyc", b"junk"),  # skipped
             ("docs/readme.md", b"d"),                          # outside {app,content}
-        ])
+        ]))
         result = self._run(archive)
         self.assertEqual(result["status"], "downloaded")
         self.assertTrue(result["restart_required"])
-        self.assertEqual(result["copied_files"], 3)
+        self.assertEqual(result["copied_files"], 10)
         self.assertEqual((self.work_dir / "app" / "main.py").read_bytes(), b"m")
         self.assertEqual((self.work_dir / "app" / "pkg" / "mod.py").read_bytes(), b"p")
         self.assertEqual((self.work_dir / "content" / "theme.css").read_bytes(), b"c")
@@ -84,12 +99,12 @@ class DownloadLatestDroneAppTests(unittest.TestCase):
 
     def test_rehomes_leading_release_directory(self):
         # GitHub release tarballs wrap everything in a top-level dir; it is stripped.
-        archive = _targz([
-            ("batocera.drone/app/main.py", b"m"),
-            ("batocera.drone/content/x.css", b"c"),
-        ])
+        archive = _targz(_complete_drone_members(
+            [("app/main.py", b"m"), ("content/x.css", b"c")],
+            prefix="batocera.drone/",
+        ))
         result = self._run(archive)
-        self.assertEqual(result["copied_files"], 2)
+        self.assertEqual(result["copied_files"], 9)
         self.assertEqual((self.work_dir / "app" / "main.py").read_bytes(), b"m")
         self.assertEqual((self.work_dir / "content" / "x.css").read_bytes(), b"c")
 
@@ -122,6 +137,32 @@ class DownloadLatestDroneAppTests(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             self._run(archive)
         self.assertIn("missing required directories", str(ctx.exception))
+
+    def test_rejects_incomplete_web_api_or_image_payload(self):
+        archive = _targz([
+            ("app/main.py", b"m"),
+            ("app/drone_api.py", b"api"),
+            ("content/placeholder.txt", b"not-the-required-image"),
+        ])
+        with self.assertRaises(ValueError) as ctx:
+            self._run(archive)
+        self.assertIn("incomplete", str(ctx.exception))
+        self.assertIn("app/web/templates/index.html", str(ctx.exception))
+        self.assertIn("content/drone.png", str(ctx.exception))
+        self.assertFalse((self.work_dir / "app").exists())
+
+    def test_rejects_archive_whose_version_does_not_match_the_checked_release(self):
+        archive = _targz(_complete_drone_members([("app/VERSION", b"v1.2.2\n")]))
+        env = {
+            "DRONE_APP_WORK_DIR": str(self.work_dir),
+            "DRONE_APP_ARCHIVE_URL": "http://test.invalid/drone-app.tar.gz",
+        }
+        with mock.patch.dict("os.environ", env), \
+             mock.patch.object(self_update, "urlopen", lambda request, timeout=None: io.BytesIO(archive)):
+            with self.assertRaises(ValueError) as ctx:
+                self_update._download_latest_drone_app_unlocked(self.settings, release_version="v1.2.3")
+        self.assertIn("version mismatch", str(ctx.exception))
+        self.assertFalse((self.work_dir / "app").exists())
 
     def test_empty_download_raises(self):
         with self.assertRaises(ValueError) as ctx:
@@ -170,11 +211,11 @@ class DownloadLatestDroneAppNotificationTests(unittest.TestCase):
     def test_successful_update_records_a_drone_updated_notification(self):
         (self.work_dir / "app").mkdir(parents=True)
         (self.work_dir / "app" / "VERSION").write_text("v1.0.0\n", encoding="utf-8")
-        archive = _targz([
+        archive = _targz(_complete_drone_members([
             ("app/main.py", b"m"),
             ("app/VERSION", b"v1.0.1\n"),
             ("content/theme.css", b"c"),
-        ])
+        ]))
         with mock.patch.object(self_update, "urlopen", lambda request, timeout=None: io.BytesIO(archive)):
             self_update._download_latest_drone_app(self.settings)
 
@@ -195,11 +236,11 @@ class DownloadLatestDroneAppNotificationTests(unittest.TestCase):
     def test_successful_update_records_history_and_includes_notes_in_notification(self):
         (self.work_dir / "app").mkdir(parents=True)
         (self.work_dir / "app" / "VERSION").write_text("v1.0.0\n", encoding="utf-8")
-        archive = _targz([
+        archive = _targz(_complete_drone_members([
             ("app/main.py", b"m"),
             ("app/VERSION", b"v1.0.1\n"),
             ("content/theme.css", b"c"),
-        ])
+        ]))
         with mock.patch.object(self_update, "urlopen", lambda request, timeout=None: io.BytesIO(archive)), \
              mock.patch.object(self_update, "_fetch_commit_notes", return_value="- did a thing (abc1234)"):
             self_update._download_latest_drone_app(self.settings)
@@ -220,7 +261,11 @@ class DownloadLatestDroneAppNotificationTests(unittest.TestCase):
     def test_notification_message_has_no_notes_block_when_notes_are_unavailable(self):
         (self.work_dir / "app").mkdir(parents=True)
         (self.work_dir / "app" / "VERSION").write_text("v1.0.0\n", encoding="utf-8")
-        archive = _targz([("app/main.py", b"m"), ("app/VERSION", b"v1.0.1\n"), ("content/theme.css", b"c")])
+        archive = _targz(_complete_drone_members([
+            ("app/main.py", b"m"),
+            ("app/VERSION", b"v1.0.1\n"),
+            ("content/theme.css", b"c"),
+        ]))
         with mock.patch.object(self_update, "urlopen", lambda request, timeout=None: io.BytesIO(archive)), \
              mock.patch.object(self_update, "_fetch_commit_notes", return_value=""):
             self_update._download_latest_drone_app(self.settings)
@@ -232,14 +277,9 @@ class DownloadLatestDroneAppNotificationTests(unittest.TestCase):
 
 
 class DownloadLatestPortsClientTests(unittest.TestCase):
-    """The Ports client (ports-client/) bundle rides along on the Drone
-    app's own self-update (see _download_latest_drone_app's
-    result["ports_client"] = _download_latest_ports_client(settings) call)
-    -- covers the poller ("I want the web drone poller ... to update
-    everything ... including the thick client app") and the manual "Update
-    Drone" button (both call _download_latest_drone_app; see
-    _handle_admin_drone_update in handlers_system.py), since that's their
-    one shared choke point.
+    """The API worker installs the Ports bundle as a required part of the
+    same release as the web/API app. Both manual and periodic UI actions use
+    that worker; neither UI owns this download or extraction path.
     """
 
     def setUp(self):
@@ -254,7 +294,15 @@ class DownloadLatestPortsClientTests(unittest.TestCase):
         # ports-client/scripts/build_release_bundle.sh's own tar invocation
         # (tar -C "$STAGE" -czf "$TARBALL" .) prefixes every member with
         # "./" -- real bundles look like this, not bare paths.
-        return _targz([(f"./{name}", content) for name, content in members])
+        complete = {
+            "batocera-drone-client.sh": b"#!/bin/sh\n",
+            ".data/batocera-drone-client/main.py": b"main",
+            ".data/batocera-drone-client/client/endpoints.py": b"endpoints",
+            ".data/batocera-drone-client/ui/app.py": b"app",
+            ".data/batocera-drone-client/ui/assets/logo.png": b"png",
+        }
+        complete.update(dict(members))
+        return _targz([(f"./{name}", content) for name, content in complete.items()])
 
     def _run_unlocked(self, archive_bytes, *, arch="x86_64"):
         # Exercises _download_latest_ports_client_unlocked directly (not the
@@ -275,7 +323,7 @@ class DownloadLatestPortsClientTests(unittest.TestCase):
         result = self._run_unlocked(archive)
         self.assertEqual(result["status"], "updated")
         self.assertEqual(result["arch"], "x86_64")
-        self.assertEqual(result["copied_files"], 3)
+        self.assertEqual(result["copied_files"], 6)
 
         ports_dir = self.root / "roms" / "ports"
         launcher = ports_dir / "batocera-drone-client.sh"
@@ -286,6 +334,10 @@ class DownloadLatestPortsClientTests(unittest.TestCase):
             (ports_dir / ".data" / "batocera-drone-client" / "vendor" / "x86_64" / "imgui_bundle" / "__init__.py").read_bytes(),
             b"v",
         )
+        self.assertEqual(
+            (ports_dir / ".data" / "batocera-drone-client" / "ui" / "assets" / "logo.png").read_bytes(),
+            b"png",
+        )
 
     def test_uses_the_per_arch_release_asset_url(self):
         archive = self._bundle([("batocera-drone-client.sh", b"x")])
@@ -294,6 +346,20 @@ class DownloadLatestPortsClientTests(unittest.TestCase):
             result["archive_url"],
             "https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/"
             "download/batocera-drone-client-aarch64.tar.gz",
+        )
+
+    def test_pins_ports_bundle_to_the_release_selected_by_the_worker(self):
+        archive = self._bundle([])
+        with mock.patch.object(self_update.platform, "machine", return_value="x86_64"), \
+             mock.patch.object(self_update, "urlopen", lambda request, timeout=None: io.BytesIO(archive)):
+            result = self_update._download_latest_ports_client_unlocked(
+                self.settings,
+                release_version="v2.3.4",
+            )
+        self.assertEqual(
+            result["archive_url"],
+            "https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/download/"
+            "v2.3.4/batocera-drone-client-x86_64.tar.gz",
         )
 
     def test_unsupported_arch_skips_without_touching_the_network(self):
@@ -318,6 +384,17 @@ class DownloadLatestPortsClientTests(unittest.TestCase):
             self._run_unlocked(b"")
         self.assertIn("empty", str(ctx.exception))
 
+    def test_rejects_bundle_missing_runtime_code_or_logo(self):
+        archive = _targz([
+            ("./batocera-drone-client.sh", b"#!/bin/sh\n"),
+            ("./.data/batocera-drone-client/main.py", b"main"),
+        ])
+        with self.assertRaises(ValueError) as ctx:
+            self._run_unlocked(archive)
+        self.assertIn("Ports client archive is incomplete", str(ctx.exception))
+        self.assertIn("ui/assets/logo.png", str(ctx.exception))
+        self.assertFalse((self.root / "roms" / "ports" / "batocera-drone-client.sh").exists())
+
     # --- the wrapper the actual update flow calls -------------------------
     # (_download_latest_ports_client, not _download_latest_ports_client_unlocked)
 
@@ -328,10 +405,9 @@ class DownloadLatestPortsClientTests(unittest.TestCase):
         self.assertEqual(result["status"], "error")
         self.assertIn("no network", result["error"])
 
-    def test_a_ports_client_failure_does_not_block_the_drone_app_update(self):
-        # The critical invariant: a broken Ports client download/extraction
-        # must never prevent the (far more important) Drone app update from
-        # completing, recording history, or sending its notification.
+    def test_a_ports_client_failure_keeps_the_app_version_retryable(self):
+        # A complete release includes both UIs. If the Ports asset is missing,
+        # abort before app/VERSION advances so the next worker poll retries.
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             work_dir = root / "work"
@@ -362,12 +438,13 @@ class DownloadLatestPortsClientTests(unittest.TestCase):
                 settings = Settings.from_env()
                 with mock.patch.object(self_update, "urlopen", side_effect=fake_urlopen), \
                      mock.patch.object(self_update.platform, "machine", return_value="x86_64"):
-                    result = self_update._download_latest_drone_app(settings)
+                    with self.assertRaises(RuntimeError) as error:
+                        self_update._download_latest_drone_app(settings)
 
-                self.assertEqual(result["status"], "downloaded")
-                self.assertEqual(result["ports_client"]["status"], "error")
+                self.assertIn("Ports client bundle is required", str(error.exception))
+                self.assertFalse((work_dir / "app" / "VERSION").exists())
                 events = audit_store.list_unsent_events(settings, event_types=["drone_updated"])
-                self.assertEqual(len(events), 1)
+                self.assertEqual(events, [])
 
 
 class FetchCommitNotesTests(unittest.TestCase):
@@ -465,14 +542,7 @@ class DroneUpdateHistoryAdminHandlerTests(unittest.TestCase):
 
 
 class DroneManualUpdateAdminHandlerTests(unittest.TestCase):
-    """The manual "Update Drone" button (POST /admin/drone/update ->
-    _handle_admin_drone_update) has no prior test coverage at all. Added
-    alongside the Ports client update work specifically to confirm the
-    button calls the *same* _download_latest_drone_app choke point the
-    auto-update poller does -- so "update everything, including the thick
-    client app" via the button falls out of that shared call, not a
-    second, separately-maintained code path.
-    """
+    """The manual button submits work; it never downloads in the HTTP thread."""
 
     class _FakeHandler:
         def __init__(self, settings) -> None:
@@ -490,40 +560,31 @@ class DroneManualUpdateAdminHandlerTests(unittest.TestCase):
 
         return FakeHandler(settings)
 
-    def test_calls_the_shared_download_function_and_includes_its_full_result(self) -> None:
+    def test_submits_to_the_api_worker_and_returns_immediately(self) -> None:
         from app.web import handlers_system
 
         settings = types.SimpleNamespace()
         handler = self._handler(settings)
-        fake_result = {"status": "downloaded", "copied_files": 5, "ports_client": {"status": "updated", "arch": "x86_64"}}
-        with mock.patch.object(handlers_system, "_download_latest_drone_app", return_value=dict(fake_result)) as download, \
-             mock.patch.object(handlers_system, "_restart_drone_process_soon") as restart:
+        queued = {"status": "queued", "owner": "api_worker", "accepted": True}
+        with mock.patch.object(handlers_system, "request_drone_update_check", return_value=queued) as request:
             handler._handle_admin_drone_update()
 
-        download.assert_called_once_with(settings)
+        request.assert_called_once_with(settings, source="manual")
         status_code, payload = handler.response
-        self.assertEqual(status_code, 200)
-        self.assertEqual(payload["ports_client"], {"status": "updated", "arch": "x86_64"})
-        self.assertEqual(payload["restart"]["scheduled"], True)
-        restart.assert_called_once_with()
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload, queued)
 
-    def test_a_ports_client_error_in_the_result_still_returns_200_and_still_restarts(self) -> None:
-        # The button's response must surface a Ports client failure for
-        # visibility, but must not treat it as the request itself failing --
-        # the Drone app update it actually asked for still succeeded.
+    def test_status_route_only_reads_worker_state(self) -> None:
         from app.web import handlers_system
 
         settings = types.SimpleNamespace()
         handler = self._handler(settings)
-        fake_result = {"status": "downloaded", "ports_client": {"status": "error", "error": "OSError: no network"}}
-        with mock.patch.object(handlers_system, "_download_latest_drone_app", return_value=dict(fake_result)), \
-             mock.patch.object(handlers_system, "_restart_drone_process_soon") as restart:
-            handler._handle_admin_drone_update()
+        state = {"status": "downloading", "owner": "api_worker"}
+        with mock.patch.object(handlers_system, "get_drone_update_status", return_value=state) as get_status:
+            handler._handle_admin_drone_update_status()
 
-        status_code, payload = handler.response
-        self.assertEqual(status_code, 200)
-        self.assertEqual(payload["ports_client"]["status"], "error")
-        restart.assert_called_once_with()
+        get_status.assert_called_once_with(settings)
+        self.assertEqual(handler.response, (200, state))
 
 
 class DroneAutoUpdateSettingTests(unittest.TestCase):
@@ -624,14 +685,15 @@ class DroneAutoUpdatePollerTests(unittest.TestCase):
             result = self_update._run_drone_auto_update_check_once(self.settings)
         self.assertEqual(result["status"], "updated")
         self.assertEqual(result["latest_version"], "v1.2.4")
-        download.assert_called_once_with(self.settings)
+        download.assert_called_once_with(self.settings, release_version="v1.2.4")
         restart.assert_called_once_with()
 
     def test_poller_runs_on_daemon_thread_without_blocking_caller(self):
         stopped = threading.Event()
         checked = threading.Event()
 
-        def check_once(settings):
+        def check_once(settings, **kwargs):
+            self.assertTrue(kwargs["respect_auto_update_setting"])
             checked.set()
             stopped.set()
             return {"status": "current"}
@@ -642,6 +704,30 @@ class DroneAutoUpdatePollerTests(unittest.TestCase):
             self.assertTrue(thread.daemon)
             self.assertTrue(checked.wait(1))
             thread.join(timeout=1)
+            worker = self_update._DRONE_UPDATE_WORKERS.get(str(self.work_dir.resolve()))
+            self.assertIsNotNone(worker)
+            worker.join(timeout=1)
+
+    def test_manual_request_runs_check_on_named_api_worker_and_persists_status(self):
+        completed = threading.Event()
+
+        def check_once(settings, **kwargs):
+            self.assertFalse(kwargs["respect_auto_update_setting"])
+            kwargs["progress_callback"]("checking", "checking now")
+            completed.set()
+            return {"status": "current", "current_version": "v1.2.3", "latest_version": "v1.2.3"}
+
+        with mock.patch.object(self_update, "_run_drone_auto_update_check_once", side_effect=check_once):
+            queued = self_update.request_drone_update_check(self.settings, source="manual")
+            self.assertTrue(completed.wait(1))
+            for thread in list(self_update._DRONE_UPDATE_WORKERS.values()):
+                thread.join(timeout=1)
+
+        self.assertEqual(queued["status"], "queued")
+        self.assertEqual(queued["owner"], "api_worker")
+        status = self_update.get_drone_update_status(self.settings)
+        self.assertEqual(status["status"], "current")
+        self.assertEqual(status["owner"], "api_worker")
 
 
 class OverlayReleaseTreeTests(unittest.TestCase):
@@ -687,16 +773,19 @@ class UpdateHistoryUiContentTests(unittest.TestCase):
         page_end = self.js.index("\nasync function renderAdminControlsPage()")
         self.assertIn("renderUpdateHistorySection(updateHistory)", self.js[page_start:page_end])
 
-    def test_update_drone_button_surfaces_a_ports_client_refresh_failure(self) -> None:
-        # _handle_admin_drone_update's response now always includes
-        # payload.ports_client (see app/common/self_update.py); the button's
-        # own toast should call that out when it failed, without treating a
-        # Ports client hiccup as the whole request having failed.
+    def test_update_drone_button_only_submits_and_monitors_the_backend_worker(self) -> None:
         page_start = self.js.index("async function updateDroneApp()")
         page_end = self.js.index("\nasync function setDroneAutoUpdate(")
         section = self.js[page_start:page_end]
-        self.assertIn('payload.ports_client && payload.ports_client.status === "error"', section)
-        self.assertIn("Ports client bundle could not be refreshed", section)
+        self.assertIn('apiPost("/admin/system/update-drone", {})', section)
+        self.assertIn("API worker owns the download and install", section)
+        self.assertIn("void monitorDroneUpdateWorker()", section)
+        monitor = self.js[
+            self.js.index("async function monitorDroneUpdateWorker()"):
+            page_start
+        ]
+        self.assertIn('api("/admin/system/update-drone")', monitor)
+        self.assertIn("Web/API code, images, and the Ports client are installed", monitor)
 
 
 if __name__ == "__main__":

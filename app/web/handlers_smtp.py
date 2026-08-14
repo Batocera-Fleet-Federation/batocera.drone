@@ -100,5 +100,5 @@ class HandlersSmtpMixin:
         self._send_json(200, result)
 
     def _handle_admin_smtp_test(self) -> None:
-        result = _smtp.send_test_email(self.settings)
-        self._send_json(200 if result.get("status") == "ok" else 502, result)
+        result = _smtp.queue_test_email(self.settings)
+        self._send_json(202 if result.get("status") == "queued" else 400, result)

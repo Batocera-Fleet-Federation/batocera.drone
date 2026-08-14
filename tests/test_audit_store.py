@@ -53,6 +53,37 @@ class InsertEventTests(unittest.TestCase):
                 row = connection.execute("SELECT details FROM audit_log").fetchone()
             self.assertIn('"asset_type": "rom"', row[0])
 
+    def test_relayed_event_is_idempotent_by_source_and_event_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(Path(tmp))
+            first = audit_store.insert_relayed_event(
+                settings,
+                "asset_downloaded",
+                "Asset downloaded",
+                source_drone_id="satellite-1",
+                source_event_id="42",
+                message="Zelda.zip",
+                details={"source_drone_name": "Living Room"},
+                created_at="2026-08-14T12:00:00+00:00",
+            )
+            duplicate = audit_store.insert_relayed_event(
+                settings,
+                "asset_downloaded",
+                "Asset downloaded again",
+                source_drone_id="satellite-1",
+                source_event_id="42",
+            )
+            self.assertFalse(first["duplicate"])
+            self.assertTrue(duplicate["duplicate"])
+            self.assertEqual(first["audit_log_id"], duplicate["audit_log_id"])
+            with audit_store._open(settings.userdata_root) as connection:
+                audit_count = connection.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0]
+                notification_count = connection.execute("SELECT COUNT(*) FROM notifications").fetchone()[0]
+                created_at = connection.execute("SELECT created_at FROM audit_log").fetchone()[0]
+            self.assertEqual(audit_count, 1)
+            self.assertEqual(notification_count, 1)
+            self.assertEqual(created_at, "2026-08-14T12:00:00+00:00")
+
 
 class DigestQueryTests(unittest.TestCase):
     def test_list_unsent_events_filters_by_type_and_excludes_emailed(self) -> None:

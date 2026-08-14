@@ -1,14 +1,14 @@
-"""SMTP email configuration: send notification-digest and test emails
-from the Drone admin UI, with the same peer-to-peer credential sharing model
-VPN uses (see ``device/vpn_manager.py``) -- configure once, share opt-in,
-single-hop provenance, auto-revoke if the sharing peer turns it off, and a
-default-on auto-pull for a freshly-set-up drone with no config of its own.
+"""Central SMTP configuration, durable mail queue, and backend dispatcher.
 
-Unlike VPN there is no persistent connection to manage (no process, no PID,
-no self-heal) -- sending mail is a one-shot ``smtplib`` call made on demand
-(the Test Email button) or from the digest poller, which checks on a
-user-configurable interval (``digest_interval_seconds``, 1 minute-24 hours,
-default 5 minutes). Settings,
+Every producer—including API actions initiated by the Web or Ports UI—only
+persists an outbound-mail job. The SMTP-owning worker is the sole consumer and
+the only runtime path that opens ``smtplib``. Imported satellites relay jobs
+and audit events to that owner over the existing paired mTLS channel, so UI
+lifetime and client implementation cannot alter delivery behavior.
+
+The peer credential-sharing model mirrors VPN (see ``device/vpn_manager.py``):
+configure once, share opt-in, single-hop provenance, auto-revoke if the sharing
+peer turns it off, and default-on auto-pull for a newly set up drone. Settings,
 *including the password*, live entirely in one JSON blob via the same
 ``storage/state_store.py`` mechanism VPN's whole state dict already uses --
 there is no OpenVPN-style ``auth-user-pass <file>`` requirement forcing a
@@ -17,10 +17,11 @@ crypto library available either way (stdlib-only), so this is the same
 plaintext-on-disk tradeoff VPN already makes and documents.
 
 Notification-type toggles and the master ``smtp_enabled`` switch are
-local-only and never travel with the shared/exported payload: each drone
-runs its own digest poller against its own ``audit_log`` using its own
-(possibly-adopted) credentials, so "which of *my* events get emailed" is
-inherently per-drone, unlike the connection settings themselves.
+local-only and never travel with the shared/exported payload. They are
+enforced by the drone that owns the SMTP configuration. An imported client
+keeps its local switch off and relays audit events regardless of that switch;
+the owner's worker combines the whole fleet into its normal digest cadence.
+UI processes never own delivery timing or SMTP credentials.
 
 Every outgoing email identifies the sending drone (hostname + the same
 unique ``device_id`` shown as "Machine ID" in the Debug tile) in the From
@@ -35,6 +36,7 @@ import os
 import smtplib
 import socket
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from email import encoders
@@ -43,8 +45,10 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formataddr
 from pathlib import Path
+from threading import Lock
 from typing import Optional
 from urllib.error import HTTPError
+from urllib.parse import quote
 
 try:
     from ..common.settings import Settings
@@ -52,6 +56,7 @@ try:
     from ..storage.state_store import load_payload as _load_state_payload
     from ..storage.state_store import save_payload as _save_state_payload
     from ..storage import audit_store as _audit_store
+    from ..storage import mail_queue_store as _mail_store
     from . import notifications as _notifications
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.settings import Settings  # type: ignore
@@ -59,6 +64,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from storage.state_store import load_payload as _load_state_payload  # type: ignore
     from storage.state_store import save_payload as _save_state_payload  # type: ignore
     from storage import audit_store as _audit_store  # type: ignore
+    from storage import mail_queue_store as _mail_store  # type: ignore
     from device import notifications as _notifications  # type: ignore
 
 SMTP_STATE_NAMESPACE = "smtp_manager.json"
@@ -79,8 +85,14 @@ DIGEST_INTERVAL_MAX_SECONDS = 86400
 # interval has elapsed -- independent of that interval itself, so a change
 # saved in the admin UI takes effect within one tick instead of waiting out
 # whatever (possibly much longer) interval was previously in effect.
-DIGEST_POLLER_TICK_SECONDS = 30.0
+DIGEST_POLLER_TICK_SECONDS = 5.0
 AUDIT_EMAIL_MAX_ITEMS_PER_DIGEST = 200
+AUDIT_EMAIL_RELAY_MAX_ITEMS = 200
+OUTBOUND_MAIL_RELAY_MAX_ITEMS = 20
+OUTBOUND_MAIL_ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024
+
+_DIGEST_SEND_LOCK = Lock()
+_OUTBOUND_MAIL_LOCK = Lock()
 
 # Fields carried in the shared/exported payload (peer-to-peer, mirrors VPN's
 # config+credentials). Local-only fields (smtp_enabled, notify.*, last_*) are
@@ -92,8 +104,7 @@ _SHARED_FIELDS = (
 
 
 class SmtpSendError(Exception):
-    """Raised by send_mail() on delivery failure -- callers turn this into a
-    user-facing error string; never silently swallowed at that layer."""
+    """Raised by low-level delivery; the worker persists it for retry/status."""
 
 
 def _now_iso() -> str:
@@ -139,6 +150,7 @@ def _load_state(settings: Settings) -> dict:
         "last_test_result": stored.get("last_test_result"),
         "last_test_at": stored.get("last_test_at"),
         "last_digest_sent_at": stored.get("last_digest_sent_at"),
+        "last_digest_attempt_at": stored.get("last_digest_attempt_at"),
         "last_digest_error": str(stored.get("last_digest_error") or ""),
     }
 
@@ -155,6 +167,7 @@ def _sanitized(state: dict) -> dict:
     mirrors the VPN rule that the password never returns to a browser."""
     sanitized = dict(state)
     sanitized["has_password"] = bool(sanitized.pop("password", ""))
+    sanitized["delivery_mode"] = "relay" if sanitized.get("source_peer_id") else "local"
     return sanitized
 
 
@@ -208,7 +221,12 @@ def update_settings(settings: Settings, payload: dict) -> dict:
 
 
 def set_smtp_enabled(settings: Settings, enabled: bool) -> dict:
-    state = _save_state(settings, smtp_enabled=bool(enabled))
+    current = _load_state(settings)
+    # A satellite is permanently relay-only while its SMTP configuration is
+    # imported. Keeping this false also prevents an older/misleading UI from
+    # suggesting that it can re-enable a second digest sender.
+    effective = False if current["source_peer_id"] else bool(enabled)
+    state = _save_state(settings, smtp_enabled=effective)
     return {"smtp_enabled": state["smtp_enabled"]}
 
 
@@ -223,10 +241,13 @@ def update_notification_toggles(settings: Settings, payload: dict) -> dict:
 
 
 def update_digest_interval(settings: Settings, seconds) -> dict:
-    """How often the activity-digest poller checks for new mail to send --
-    local-only, like ``smtp_enabled``/``notify`` (each drone runs its own
-    poller against its own audit_log), 1 minute to 24 hours, default 5
-    minutes (``AUDIT_EMAIL_POLL_INTERVAL_SECONDS``)."""
+    """Minimum interval between digest attempts by an SMTP-owning worker.
+
+    Satellites relay their events promptly; this owner-side setting is what
+    controls when the combined fleet digest is sent. It is local-only, 1
+    minute to 24 hours, and defaults to 5 minutes
+    (``AUDIT_EMAIL_POLL_INTERVAL_SECONDS``).
+    """
     try:
         value = int(seconds)
     except (TypeError, ValueError):
@@ -284,9 +305,16 @@ def import_from_peer(settings: Settings, payload: dict, *, source_peer_id: str, 
         raise ValueError("source_peer_id is required to import a peer's SMTP configuration")
     payload = payload if isinstance(payload, dict) else {}
     update_payload = {field: payload.get(field) for field in _SHARED_FIELDS if payload.get(field) not in (None, "")}
-    result = update_settings(settings, update_payload)
-    _save_state(settings, source_peer_id=source_peer_id, source_peer_name=str(source_peer_name or "").strip())
-    return result
+    update_settings(settings, update_payload)
+    state = _save_state(
+        settings,
+        source_peer_id=source_peer_id,
+        source_peer_name=str(source_peer_name or "").strip(),
+        # Imported clients never send notification digests themselves. The
+        # relay path intentionally does not consult this owner-only switch.
+        smtp_enabled=False,
+    )
+    return _sanitized(state)
 
 
 def bootstrap_smtp_from_swarm(settings: Settings) -> bool:
@@ -339,7 +367,13 @@ def maybe_bootstrap_smtp(settings: Settings) -> None:
     """Best-effort, called once from ``create_server()`` startup, mirroring
     ``vpn_manager.maybe_auto_connect()``'s own bootstrap step. Never raises."""
     try:
-        if not _load_state(settings)["has_config"]:
+        state = _load_state(settings)
+        if state["source_peer_id"] and state["smtp_enabled"]:
+            # One-time migration for imported configurations created by an
+            # older release, where every satellite still ran its own SMTP
+            # sender. Relay does not depend on this owner-only switch.
+            _save_state(settings, smtp_enabled=False)
+        elif not state["has_config"]:
             bootstrap_smtp_from_swarm(settings)
     except Exception as error:
         print(f"SMTP swarm bootstrap failed: {error.__class__.__name__}: {error}", file=sys.stderr, flush=True)
@@ -430,9 +464,7 @@ def _drone_label(settings: Settings) -> str:
 
 
 def send_mail(settings: Settings, subject: str, body: str) -> None:
-    """Stdlib-only send via ``smtplib`` -- raises ``SmtpSendError`` on any
-    failure; callers decide how to surface it (a 4xx to the admin UI for
-    Test Email, a log line for the digest poller)."""
+    """Low-level SMTP delivery used only by the outbound-mail worker."""
     state = _load_state(settings)
     if not state["has_config"]:
         raise SmtpSendError("SMTP is not configured on this drone.")
@@ -458,10 +490,7 @@ def send_mail(settings: Settings, subject: str, body: str) -> None:
 def send_mail_with_attachment(settings: Settings, subject: str, body: str, attachment_path: Path, attachment_filename: str) -> None:
     """Same stdlib-only ``smtplib`` send as ``send_mail``, plus one file
     attachment (``email.mime.multipart``/``email.mime.base``, both stdlib --
-    no new dependency). Used only for config-backup tarballs today; the
-    caller is responsible for any size cap (this function will happily try
-    to send whatever it's given, and let the SMTP server itself reject an
-    oversized message rather than guessing every provider's limit here)."""
+    no new dependency). Called only by the outbound-mail worker."""
     state = _load_state(settings)
     if not state["has_config"]:
         raise SmtpSendError("SMTP is not configured on this drone.")
@@ -491,17 +520,46 @@ def send_mail_with_attachment(settings: Settings, subject: str, body: str, attac
         raise SmtpSendError(f"{error.__class__.__name__}: {error}") from error
 
 
-def send_test_email(settings: Settings) -> dict:
+def queue_test_email(settings: Settings) -> dict:
+    """Persist a test-email request for the centralized worker.
+
+    The API response confirms queueing, never SMTP delivery. Closing either
+    UI immediately after this returns cannot cancel the email.
+    """
+    if not _load_state(settings)["has_config"]:
+        return {"status": "not_configured", "error": "SMTP is not configured on this drone."}
     label = _drone_label(settings)
     subject = f"Batocera Drone [{label}]: test email"
-    body = f"This is a test email from your Batocera Drone's SMTP settings.\n\nDrone: {label}\nSent at {_now_iso()}."
-    try:
-        send_mail(settings, subject, body)
-        result = {"status": "ok", "sent_at": _now_iso()}
-    except SmtpSendError as error:
-        result = {"status": "error", "error": str(error)}
+    body = f"This is a test email queued through your Batocera Drone API.\n\nDrone: {label}\nQueued at {_now_iso()}."
+    job = _mail_store.enqueue(settings, kind="test", subject=subject, body=body)
+    result = {"status": "queued", "job_id": job["id"], "queued_at": job["created_at"]}
     _save_state(settings, last_test_result=result, last_test_at=_now_iso())
     return result
+
+
+def queue_mail(
+    settings: Settings,
+    *,
+    kind: str,
+    subject: str,
+    body: str,
+    attachment_path: Optional[Path] = None,
+    attachment_filename: str = "",
+    metadata: Optional[dict] = None,
+) -> dict:
+    """Queue a non-digest email from another backend feature."""
+    if not _load_state(settings)["has_config"]:
+        return {"status": "not_configured"}
+    job = _mail_store.enqueue(
+        settings,
+        kind=kind,
+        subject=subject,
+        body=body,
+        attachment_path=attachment_path,
+        attachment_filename=attachment_filename,
+        metadata=metadata,
+    )
+    return {"status": "queued", "job_id": job["id"], "queued_at": job["created_at"]}
 
 
 def _compose_digest(items: list, settings: Settings) -> tuple:
@@ -510,7 +568,10 @@ def _compose_digest(items: list, settings: Settings) -> tuple:
     lines = [f"Drone: {drone_label}", "", f"{len(items)} new item(s) since the last digest:", ""]
     for item in items:
         label = _notifications.EVENT_TYPE_LABELS.get(item["event_type"], item["event_type"])
-        lines.append(f"- [{item['created_at']}] {label}: {item['title']}")
+        details = item.get("details") if isinstance(item.get("details"), dict) else {}
+        source_name = str(details.get("source_drone_name") or "").strip()
+        source_suffix = f" on {source_name}" if source_name else ""
+        lines.append(f"- [{item['created_at']}] {label}{source_suffix}: {item['title']}")
         # Indent every line of the message, not just the first -- a
         # drone_updated item's message can carry embedded newlines (the
         # release notes commit list), and only indenting the first line
@@ -520,60 +581,463 @@ def _compose_digest(items: list, settings: Settings) -> tuple:
     return subject, "\n".join(lines)
 
 
-def send_digest_if_needed(settings: Settings) -> dict:
-    """No-op unless ``smtp_enabled`` + configured + at least one unsent,
-    enabled-type audit item exists. Never raises -- intended to run
-    unattended on a background poller, same convention as
-    ``check_sharing_revocation``/``vpn_manager.check_and_self_heal``.
+def _digest_interval_elapsed(state: dict) -> bool:
+    """True when this owner may attempt another digest delivery.
+
+    The persisted attempt timestamp makes the cadence authoritative in the
+    API worker itself, rather than in a UI or a particular poller-thread
+    lifetime. It also prevents overlapping callers from sending the same
+    audit rows more than once inside the configured interval.
+    """
+    anchor = state.get("last_digest_attempt_at") or state.get("last_digest_sent_at")
+    if not anchor:
+        return True
+    try:
+        parsed = datetime.fromisoformat(str(anchor).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        elapsed = (datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds()
+    except (TypeError, ValueError):
+        return True
+    return elapsed >= int(state.get("digest_interval_seconds") or AUDIT_EMAIL_POLL_INTERVAL_SECONDS)
+
+
+def ingest_relayed_notifications(
+    settings: Settings,
+    events: list,
+    *,
+    source_drone_id: str,
+    source_drone_name: str = "",
+) -> dict:
+    """Accept an idempotent event batch from a paired SMTP client.
+
+    Only the self-owned, explicitly shared SMTP configuration is a valid
+    aggregation target. Pair/mTLS authorization is enforced by the HTTP
+    handler before this business-logic layer is called.
+    """
+    state = _load_state(settings)
+    if not state["has_config"] or not state["sharing_enabled"] or state["source_peer_id"]:
+        raise PermissionError("This drone is not accepting SMTP notification relays")
+    source_drone_id = str(source_drone_id or "").strip()
+    source_drone_name = str(source_drone_name or source_drone_id).strip()
+    if not source_drone_id:
+        raise ValueError("source_drone_id is required")
+    if not isinstance(events, list):
+        raise ValueError("events must be a list")
+    if len(events) > AUDIT_EMAIL_RELAY_MAX_ITEMS:
+        raise ValueError(f"A relay batch may contain at most {AUDIT_EMAIL_RELAY_MAX_ITEMS} events")
+
+    accepted = []
+    rejected = []
+    for raw in events:
+        if not isinstance(raw, dict):
+            continue
+        source_event_id = str(raw.get("source_event_id") or raw.get("id") or "").strip()
+        event_type = str(raw.get("event_type") or "").strip()
+        if not source_event_id or event_type not in _notifications.EVENT_TYPES:
+            if source_event_id:
+                rejected.append(source_event_id)
+            continue
+        details = dict(raw.get("details")) if isinstance(raw.get("details"), dict) else {}
+        details.update({
+            "source_drone_id": source_drone_id,
+            "source_drone_name": source_drone_name,
+            "relayed": True,
+        })
+        _audit_store.insert_relayed_event(
+            settings,
+            event_type,
+            str(raw.get("title") or event_type)[:240],
+            source_drone_id=source_drone_id,
+            source_event_id=source_event_id,
+            message=str(raw.get("message") or "")[:8000],
+            details=details,
+            created_at=str(raw.get("created_at") or "").strip() or None,
+        )
+        accepted.append(source_event_id)
+    return {
+        "status": "accepted",
+        "accepted_event_ids": accepted,
+        "accepted_count": len(accepted),
+        "rejected_event_ids": rejected,
+    }
+
+
+def relay_notifications_to_source(settings: Settings) -> dict:
+    """Relay this satellite's pending audit events to its SMTP owner.
+
+    Successful acknowledgement marks local rows handled so retries are
+    bounded. A failed/offline owner leaves them unsent for the next worker
+    tick. This function never raises because it runs unattended.
     """
     try:
         state = _load_state(settings)
-        if not state["smtp_enabled"] or not state["has_config"]:
-            return {"status": "skipped", "reason": "smtp not enabled or not configured"}
-        enabled_types = [event_type for event_type, on in state["notify"].items() if on]
-        if not enabled_types:
-            return {"status": "skipped", "reason": "no notification types enabled"}
-        items = _audit_store.list_unsent_events(settings, enabled_types, limit=AUDIT_EMAIL_MAX_ITEMS_PER_DIGEST)
-        prune_result = _audit_store.prune_old_events(settings)
+        source_peer_id = str(state.get("source_peer_id") or "").strip()
+        if not source_peer_id:
+            return {"status": "skipped", "reason": "SMTP configuration is self-owned"}
+        if not state["has_config"]:
+            return {"status": "skipped", "reason": "SMTP relay is not configured"}
+        items = _audit_store.list_unsent_events(
+            settings,
+            _notifications.EVENT_TYPES,
+            limit=AUDIT_EMAIL_RELAY_MAX_ITEMS,
+        )
         if not items:
-            return {"status": "skipped", "reason": "nothing new", **prune_result}
-        subject, body = _compose_digest(items, settings)
+            return {"status": "skipped", "reason": "nothing new"}
+
         try:
-            send_mail(settings, subject, body)
-        except SmtpSendError as error:
-            _save_state(settings, last_digest_error=str(error))
-            print(f"SMTP digest send failed: {error}", file=sys.stderr, flush=True)
-            return {"status": "error", "error": str(error), "item_count": len(items)}
-        _audit_store.mark_events_emailed(settings, [item["id"] for item in items])
-        _save_state(settings, last_digest_sent_at=_now_iso(), last_digest_error="")
-        return {"status": "sent", "item_count": len(items), **prune_result}
+            from ..transfer import local_network as _local_network
+            from ..transfer.peer_connectivity import _peer_post_json_for_peer
+        except ImportError:  # pragma: no cover - direct script execution fallback
+            from transfer import local_network as _local_network  # type: ignore
+            from transfer.peer_connectivity import _peer_post_json_for_peer  # type: ignore
+        peer = _local_network.get_paired_peer(settings, source_peer_id)
+        if not peer:
+            return {"status": "error", "error": "SMTP owner is no longer a paired peer"}
+        payload = {
+            "source_drone_id": settings.device_id,
+            "events": [
+                {
+                    "source_event_id": str(item["id"]),
+                    "event_type": item["event_type"],
+                    "title": item["title"],
+                    "message": item.get("message") or "",
+                    "details": item.get("details"),
+                    "created_at": item.get("created_at"),
+                }
+                for item in items
+            ],
+        }
+        response, _address = _peer_post_json_for_peer(
+            peer,
+            "/v1/api/peer/smtp/notifications",
+            payload,
+            settings,
+            peer_id=source_peer_id,
+        )
+        accepted = {str(value) for value in (response.get("accepted_event_ids") or [])}
+        handled_ids = [item["id"] for item in items if str(item["id"]) in accepted]
+        _audit_store.mark_events_emailed(settings, handled_ids)
+        return {
+            "status": "relayed",
+            "item_count": len(handled_ids),
+            "pending_count": len(items) - len(handled_ids),
+        }
     except Exception as error:
-        print(f"Audit email digest check failed: {error.__class__.__name__}: {error}", file=sys.stderr, flush=True)
+        print(
+            f"SMTP notification relay failed: {error.__class__.__name__}: {error}",
+            file=sys.stderr,
+            flush=True,
+        )
         return {"status": "error", "error": str(error)}
 
 
+def ingest_relayed_mail_jobs(
+    settings: Settings,
+    jobs: list,
+    *,
+    source_drone_id: str,
+    source_drone_name: str = "",
+) -> dict:
+    """Idempotently accept test/attachment mail jobs from a satellite."""
+    state = _load_state(settings)
+    if not state["has_config"] or not state["sharing_enabled"] or state["source_peer_id"]:
+        raise PermissionError("This drone is not accepting outbound mail relays")
+    source_drone_id = str(source_drone_id or "").strip()
+    source_drone_name = str(source_drone_name or source_drone_id).strip()
+    if not source_drone_id:
+        raise ValueError("source_drone_id is required")
+    if not isinstance(jobs, list):
+        raise ValueError("jobs must be a list")
+    if len(jobs) > OUTBOUND_MAIL_RELAY_MAX_ITEMS:
+        raise ValueError(f"A mail relay batch may contain at most {OUTBOUND_MAIL_RELAY_MAX_ITEMS} jobs")
+
+    accepted = []
+    rejected = []
+    for raw in jobs:
+        if not isinstance(raw, dict):
+            continue
+        source_job_id = str(raw.get("source_job_id") or raw.get("id") or "").strip()
+        kind = str(raw.get("kind") or "").strip()
+        attachment_filename = str(raw.get("attachment_filename") or "").strip()
+        valid_attachment = (
+            kind == "test" and not attachment_filename
+        ) or (
+            kind == "config_backup"
+            and bool(attachment_filename)
+            and len(attachment_filename) <= 255
+            and "/" not in attachment_filename
+            and "\\" not in attachment_filename
+            and "\r" not in attachment_filename
+            and "\n" not in attachment_filename
+            and not attachment_filename.startswith(".")
+        )
+        if not source_job_id or kind not in {"test", "config_backup"} or not valid_attachment:
+            if source_job_id:
+                rejected.append(source_job_id)
+            continue
+        metadata = dict(raw.get("metadata")) if isinstance(raw.get("metadata"), dict) else {}
+        metadata.update({
+            "source_drone_id": source_drone_id,
+            "source_drone_name": source_drone_name,
+            "remote_attachment": bool(attachment_filename),
+        })
+        _mail_store.enqueue(
+            settings,
+            kind=kind,
+            subject=str(raw.get("subject") or "").replace("\r", " ").replace("\n", " ")[:1000],
+            body=str(raw.get("body") or "")[:100000],
+            source_drone_id=source_drone_id,
+            source_job_id=source_job_id,
+            attachment_filename=attachment_filename,
+            metadata=metadata,
+        )
+        accepted.append(source_job_id)
+    return {
+        "status": "accepted",
+        "accepted_job_ids": accepted,
+        "accepted_count": len(accepted),
+        "rejected_job_ids": rejected,
+    }
+
+
+def relay_mail_jobs_to_source(settings: Settings) -> dict:
+    """Relay queued non-digest mail to the SMTP owner without opening SMTP."""
+    try:
+        state = _load_state(settings)
+        source_peer_id = str(state.get("source_peer_id") or "").strip()
+        if not source_peer_id:
+            return {"status": "skipped", "reason": "SMTP configuration is self-owned"}
+        jobs = [
+            job for job in _mail_store.pending(settings, OUTBOUND_MAIL_RELAY_MAX_ITEMS)
+            if job.get("kind") in {"test", "config_backup"}
+        ]
+        if not jobs:
+            return {"status": "skipped", "reason": "nothing new"}
+        try:
+            from ..transfer import local_network as _local_network
+            from ..transfer.peer_connectivity import _peer_post_json_for_peer
+        except ImportError:  # pragma: no cover - direct script execution fallback
+            from transfer import local_network as _local_network  # type: ignore
+            from transfer.peer_connectivity import _peer_post_json_for_peer  # type: ignore
+        peer = _local_network.get_paired_peer(settings, source_peer_id)
+        if not peer:
+            return {"status": "error", "error": "SMTP owner is no longer a paired peer"}
+        payload = {
+            "source_drone_id": settings.device_id,
+            "jobs": [
+                {
+                    "source_job_id": str(job["id"]),
+                    "kind": job["kind"],
+                    "subject": job["subject"],
+                    "body": job["body"],
+                    "attachment_filename": job.get("attachment_filename") or "",
+                    "metadata": job.get("metadata") or {},
+                    "created_at": job.get("created_at"),
+                }
+                for job in jobs
+            ],
+        }
+        response, _address = _peer_post_json_for_peer(
+            peer,
+            "/v1/api/peer/smtp/mail",
+            payload,
+            settings,
+            peer_id=source_peer_id,
+        )
+        accepted = {str(value) for value in (response.get("accepted_job_ids") or [])}
+        handled_ids = [job["id"] for job in jobs if str(job["id"]) in accepted]
+        _mail_store.mark_relayed(settings, handled_ids)
+        if any(job.get("kind") == "test" and job["id"] in handled_ids for job in jobs):
+            relayed_at = _now_iso()
+            _save_state(
+                settings,
+                last_test_result={"status": "relayed", "relayed_at": relayed_at},
+                last_test_at=relayed_at,
+            )
+        return {
+            "status": "relayed",
+            "item_count": len(handled_ids),
+            "pending_count": len(jobs) - len(handled_ids),
+        }
+    except Exception as error:
+        print(
+            f"SMTP mail-job relay failed: {error.__class__.__name__}: {error}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return {"status": "error", "error": str(error)}
+
+
+def _remote_attachment_for_job(settings: Settings, job: dict) -> Optional[Path]:
+    attachment_filename = str(job.get("attachment_filename") or "").strip()
+    if not attachment_filename:
+        return None
+    local_path = Path(str(job.get("attachment_path") or ""))
+    if str(job.get("attachment_path") or "") and local_path.is_file():
+        return local_path
+
+    source_drone_id = str(job.get("source_drone_id") or "").strip()
+    if not source_drone_id or source_drone_id == settings.device_id:
+        raise FileNotFoundError(f"Queued attachment no longer exists: {attachment_filename}")
+    try:
+        from ..transfer import local_network as _local_network
+        from ..transfer.peer_connectivity import _peer_download_file_for_peer
+    except ImportError:  # pragma: no cover - direct script execution fallback
+        from transfer import local_network as _local_network  # type: ignore
+        from transfer.peer_connectivity import _peer_download_file_for_peer  # type: ignore
+    peer = _local_network.get_paired_peer(settings, source_drone_id)
+    if not peer:
+        raise FileNotFoundError("The Drone providing this email attachment is no longer paired")
+    spool = settings.userdata_root / "system" / "drone-app" / "mail-spool"
+    spool.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(prefix="mail-", suffix=".attachment", dir=str(spool))
+    os.close(descriptor)
+    temporary_path = Path(temporary_name)
+    try:
+        _peer_download_file_for_peer(
+            peer,
+            f"/v1/api/peer/config-backups/{quote(attachment_filename, safe='')}",
+            temporary_path,
+            settings,
+            peer_id=source_drone_id,
+            timeout=SMTP_ATTACHMENT_SEND_TIMEOUT_SECONDS,
+            max_bytes=OUTBOUND_MAIL_ATTACHMENT_MAX_BYTES,
+        )
+        return temporary_path
+    except Exception:
+        temporary_path.unlink(missing_ok=True)
+        raise
+
+
+def _process_outbound_mail_queue_unlocked(settings: Settings) -> dict:
+    """Worker implementation; caller owns ``_OUTBOUND_MAIL_LOCK``."""
+    state = _load_state(settings)
+    if state.get("source_peer_id"):
+        return {"status": "skipped", "reason": "mail is relayed to the SMTP owner"}
+    if not state["has_config"]:
+        return {"status": "skipped", "reason": "SMTP is not configured"}
+    sent = 0
+    failed = 0
+    for job in _mail_store.ready(settings, limit=10):
+        if job.get("kind") == "digest" and not _load_state(settings)["smtp_enabled"]:
+            continue
+        attachment_path: Optional[Path] = None
+        remove_attachment = False
+        try:
+            attachment_path = _remote_attachment_for_job(settings, job)
+            remove_attachment = bool(
+                attachment_path
+                and not str(job.get("attachment_path") or "")
+            )
+            if attachment_path:
+                send_mail_with_attachment(
+                    settings,
+                    job["subject"],
+                    job["body"],
+                    attachment_path,
+                    job.get("attachment_filename") or attachment_path.name,
+                )
+            else:
+                send_mail(settings, job["subject"], job["body"])
+            metadata = job.get("metadata") if isinstance(job.get("metadata"), dict) else {}
+            if job.get("kind") == "digest":
+                event_ids = [int(value) for value in (metadata.get("audit_event_ids") or [])]
+                _audit_store.mark_events_emailed(settings, event_ids)
+                sent_at = _now_iso()
+                _save_state(
+                    settings,
+                    last_digest_sent_at=sent_at,
+                    last_digest_attempt_at=sent_at,
+                    last_digest_error="",
+                )
+            elif job.get("kind") == "test" and job.get("source_drone_id") == settings.device_id:
+                result = {"status": "ok", "sent_at": _now_iso(), "job_id": job["id"]}
+                _save_state(settings, last_test_result=result, last_test_at=result["sent_at"])
+            _mail_store.mark_sent(settings, job["id"])
+            sent += 1
+        except Exception as error:
+            message = f"{error.__class__.__name__}: {error}"
+            _mail_store.mark_failed(settings, job["id"], message)
+            if job.get("kind") == "digest":
+                _save_state(settings, last_digest_error=message)
+            elif job.get("kind") == "test" and job.get("source_drone_id") == settings.device_id:
+                _save_state(
+                    settings,
+                    last_test_result={"status": "error", "error": message, "job_id": job["id"]},
+                    last_test_at=_now_iso(),
+                )
+            print(f"Outbound mail worker failed job {job['id']}: {message}", file=sys.stderr, flush=True)
+            failed += 1
+        finally:
+            if remove_attachment and attachment_path:
+                attachment_path.unlink(missing_ok=True)
+    return {"status": "processed", "sent_count": sent, "failed_count": failed}
+
+
+def process_outbound_mail_queue(settings: Settings) -> dict:
+    """Deliver queued email from the sole SMTP-owning backend consumer."""
+    with _OUTBOUND_MAIL_LOCK:
+        return _process_outbound_mail_queue_unlocked(settings)
+
+
+def send_digest_if_needed(settings: Settings) -> dict:
+    """Queue one digest when due; never opens SMTP in this call.
+
+    Kept under its historical name for internal compatibility. The dedicated
+    outbound-mail consumer performs delivery and marks the audit rows only
+    after SMTP succeeds.
+    """
+    with _DIGEST_SEND_LOCK:
+        try:
+            state = _load_state(settings)
+            if state.get("source_peer_id"):
+                return {"status": "skipped", "reason": "notifications are relayed to the SMTP owner"}
+            if not state["smtp_enabled"] or not state["has_config"]:
+                return {"status": "skipped", "reason": "smtp not enabled or not configured"}
+            if _mail_store.has_pending_kind(settings, "digest"):
+                return {"status": "skipped", "reason": "a digest is already queued"}
+            if not _digest_interval_elapsed(state):
+                return {"status": "skipped", "reason": "digest interval has not elapsed"}
+            enabled_types = [event_type for event_type, on in state["notify"].items() if on]
+            if not enabled_types:
+                return {"status": "skipped", "reason": "no notification types enabled"}
+            items = _audit_store.list_unsent_events(settings, enabled_types, limit=AUDIT_EMAIL_MAX_ITEMS_PER_DIGEST)
+            prune_result = _audit_store.prune_old_events(settings)
+            if not items:
+                return {"status": "skipped", "reason": "nothing new", **prune_result}
+            subject, body = _compose_digest(items, settings)
+            attempt_at = _now_iso()
+            _save_state(settings, last_digest_attempt_at=attempt_at)
+            job = _mail_store.enqueue(
+                settings,
+                kind="digest",
+                subject=subject,
+                body=body,
+                metadata={"audit_event_ids": [item["id"] for item in items]},
+            )
+            return {"status": "queued", "job_id": job["id"], "item_count": len(items), **prune_result}
+        except Exception as error:
+            print(f"Audit email digest check failed: {error.__class__.__name__}: {error}", file=sys.stderr, flush=True)
+            return {"status": "error", "error": str(error)}
+
+
 def run_audit_email_digest_poller(settings: Settings) -> None:
-    """Forever-loop -- the codebase's 'cron style job every ~5 minutes'.
+    """Single backend loop for every outbound email and peer relay.
     There is no OS cron anywhere in this app; every periodic feature is an
     in-process daemon thread on this exact shape (see
     ``run_sharing_revocation_poller`` above, or ``vpn_manager``'s own
     pollers, all started once from ``create_server()``).
 
-    Unlike the other pollers, the check interval here is user-configurable
-    (the Email Notifications "check every" control, ``digest_interval_seconds``,
-    1 minute-24 hours, default 5 minutes) and can change at any time while
-    this thread is already sleeping. So this wakes on a short fixed tick
-    (``DIGEST_POLLER_TICK_SECONDS``) and only actually calls
-    ``send_digest_if_needed`` once the *current* configured interval has
-    elapsed since the last check -- re-read fresh from state every tick, so
-    a change saved in the admin UI takes effect within one tick instead of
-    waiting out a stale (possibly much longer) previous interval.
+    Imported clients relay audit events plus explicit mail jobs to the owner
+    and never touch ``smtplib``. The owner queues due digests, then the sole
+    outbound-mail consumer delivers digests, tests, and attachments.
     """
-    last_check = time.monotonic()
     while True:
         time.sleep(DIGEST_POLLER_TICK_SECONDS)
-        interval = _load_state(settings)["digest_interval_seconds"]
-        if time.monotonic() - last_check < interval:
-            continue
-        last_check = time.monotonic()
-        send_digest_if_needed(settings)
+        if _load_state(settings).get("source_peer_id"):
+            relay_notifications_to_source(settings)
+            relay_mail_jobs_to_source(settings)
+        else:
+            send_digest_if_needed(settings)
+            process_outbound_mail_queue(settings)

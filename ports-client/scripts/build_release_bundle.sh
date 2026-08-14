@@ -39,9 +39,23 @@ cp -R "$ROOT/ui" "$APP_DIR/ui"
 cp -R "$VENDOR_ARCH_DIR" "$APP_DIR/vendor/$ARCH"
 cp -R "$VENDOR_COMMON_DIR" "$APP_DIR/vendor/common"
 find "$APP_DIR" -name "__pycache__" -type d -prune -exec rm -rf {} +
-
 cp "$ROOT/launcher/batocera-drone-client.sh" "$STAGE/batocera-drone-client.sh"
 chmod +x "$STAGE/batocera-drone-client.sh"
+
+# Fail the release build instead of publishing a code-only/incomplete Ports
+# client. The API update worker treats this bundle as required on supported
+# Batocera architectures, including the image assets used by the actual UI.
+for required_file in \
+  "$STAGE/batocera-drone-client.sh" \
+  "$APP_DIR/main.py" \
+  "$APP_DIR/client/endpoints.py" \
+  "$APP_DIR/ui/app.py" \
+  "$APP_DIR/ui/assets/logo.png"; do
+  if [ ! -s "$required_file" ]; then
+    echo "Incomplete Ports client bundle: missing or empty $required_file" >&2
+    exit 1
+  fi
+done
 
 mkdir -p "$OUTPUT_DIR"
 TARBALL="$OUTPUT_DIR/batocera-drone-client-$ARCH.tar.gz"

@@ -401,9 +401,41 @@ class MockServerIntegrationTests(unittest.TestCase):
         # seed_mock_userdata pre-seeds another paired peer, so find the call
         # for this test's own peer rather than assuming it's the only one.
         calls = [call for call in probe.call_args_list if call.kwargs.get("peer_id") == "slow-drone"]
-        self.assertEqual(len(calls), 1)
-        self.assertIn("overall_deadline", calls[0].kwargs)
-        self.assertIsInstance(calls[0].kwargs["overall_deadline"], float)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(
+            [call.args[1] for call in calls],
+            ["/v1/api/peer/inventory/summary", "/v1/api/peer/health"],
+        )
+        for call in calls:
+            self.assertIn("overall_deadline", call.kwargs)
+            self.assertIsInstance(call.kwargs["overall_deadline"], float)
+
+    def test_swarm_overview_keeps_peer_online_when_only_inventory_times_out(self) -> None:
+        self._post_json("/v1/api/admin/network-mode", {"mode": "local_network"})
+        local_network.save_paired_peer(
+            self.settings,
+            {
+                "drone_id": "busy-drone",
+                "name": "Busy Cabinet",
+                "tailnet_ip": "100.64.0.19",
+                "reachable_url": "https://192.168.1.79",
+                "scheme": "https",
+                "api_port": 443,
+            },
+        )
+
+        def probe(_peer, endpoint, *_args, **_kwargs):
+            if endpoint == "/v1/api/peer/inventory/summary":
+                raise TimeoutError("the read operation timed out")
+            return ({"status": "ok"}, "https://100.64.0.19")
+
+        with mock.patch("app.web.handlers_network._peer_get_json_for_peer", side_effect=probe):
+            overview = self._get_json("/v1/api/admin/swarm/overview")
+        busy = {row["drone_id"]: row for row in overview["drones"]}["busy-drone"]
+        self.assertTrue(busy["online"])
+        self.assertIsNone(busy["error"])
+        self.assertIsNone(busy["summary"])
+        self.assertIn("read operation timed out", busy["summary_error"])
 
     def test_network_mode_and_local_network_admin_endpoints(self) -> None:
         # Fresh drones come up local-only; there is no other mode to fall back to.
@@ -485,6 +517,50 @@ class MockServerIntegrationTests(unittest.TestCase):
         self.assertEqual(payload["asset_type"], "roms")
         self.assertEqual(len(payload["items"]), 1)
         self.assertNotIn("absolute_path", payload["items"][0])
+
+    def test_peer_download_does_not_reexport_a_network_referenced_rom(self) -> None:
+        share_root = self._root / "system" / "drone-app" / "network-shares"
+        remote_system = share_root / "source-peer" / "roms" / "loop-system"
+        remote_system.mkdir(parents=True)
+        (remote_system / "Loop.zip").write_bytes(b"network-owned-rom")
+        (self._root / "roms" / "loop-system").symlink_to(remote_system, target_is_directory=True)
+
+        with mock.patch("app.roms.rom_systems.network_reference_root", return_value=share_root):
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                self._get_bytes("/v1/api/peer/roms/loop-system/Loop.zip")
+        self.assertEqual(error.exception.code, 404)
+
+    def test_peer_inventory_does_not_advertise_a_network_referenced_rom(self) -> None:
+        share_root = self._root / "system" / "drone-app" / "network-shares"
+        remote_system = share_root / "source-peer" / "roms" / "loop-system"
+        remote_system.mkdir(parents=True)
+        (remote_system / "Loop.zip").write_bytes(b"network-owned-rom")
+        (self._root / "roms" / "loop-system").symlink_to(remote_system, target_is_directory=True)
+        stale_page = {
+            "total": 1,
+            "limit": 200,
+            "offset": 0,
+            "items": [{"system": "loop-system", "relative_path": "Loop.zip"}],
+        }
+
+        with mock.patch("app.roms.rom_systems.network_reference_root", return_value=share_root), \
+                mock.patch.object(RomRepository, "list_rom_assets_page", return_value=stale_page) as page:
+            payload = self._get_json("/v1/api/peer/inventory/roms?system=loop-system")
+        self.assertEqual(payload["total"], 0)
+        self.assertEqual(payload["items"], [])
+        page.assert_not_called()
+
+    def test_peer_download_does_not_reexport_a_network_referenced_bios(self) -> None:
+        share_root = self._root / "system" / "drone-app" / "network-shares"
+        remote_bios = share_root / "source-peer" / "bios"
+        remote_bios.mkdir(parents=True)
+        (remote_bios / "loop.bin").write_bytes(b"network-owned-bios")
+        (self._root / "bios" / "loop.bin").symlink_to(remote_bios / "loop.bin")
+
+        with mock.patch("app.roms.rom_asset_bios.network_reference_root", return_value=share_root):
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                self._get_bytes("/v1/api/peer/bios/loop.bin")
+        self.assertEqual(error.exception.code, 404)
 
     def test_peer_inventory_exposes_read_only_config_and_gameplay_records(self) -> None:
         configs = self._get_json("/v1/api/peer/inventory/emulator_configs?limit=5")

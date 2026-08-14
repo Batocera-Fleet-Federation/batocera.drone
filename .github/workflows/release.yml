@@ -113,6 +113,20 @@ jobs:
 
           printf '%s\n' "$RELEASE_VERSION" > app/VERSION
           mkdir -p dist
+          # The API worker treats this as the complete web/API payload. Fail
+          # the release before publishing if its executable code, browser UI,
+          # or shared image content is absent.
+          for required_file in \
+            app/main.py \
+            app/drone_api.py \
+            app/VERSION \
+            app/web/templates/index.html \
+            app/web/static/js/drone.js \
+            app/web/static/css/drone.css \
+            content/batocera-swarm-mascot.jpg \
+            content/drone.png; do
+            test -s "$required_file"
+          done
           tar \
             --exclude='*/__pycache__' \
             --exclude='*.pyc' \

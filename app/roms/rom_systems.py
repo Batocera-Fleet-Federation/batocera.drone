@@ -40,6 +40,24 @@ class RomSystemsSearchMixin:
 
         return system_dir
 
+    def get_local_system_dir(self, system: str) -> Path:
+        """Resolve a system only when its bytes are owned by this Drone.
+
+        ``get_system_dir`` intentionally follows network-reference symlinks so
+        EmulationStation and the local browse UI can play streamed ROMs.  Peer
+        download endpoints must use this stricter variant: re-exporting a
+        referenced system can create a transfer loop (A downloads from B while
+        B reads the same bytes from an NFS reference back to A).
+
+        The ownership check is lexical and therefore remains safe when the
+        network mount is slow or unavailable.
+        """
+        system = valid_segment(system)
+        system_link = self.roms_root / system
+        if system_link.is_symlink() and is_network_reference(system_link, network_reference_root()):
+            raise FileNotFoundError(system)
+        return self.get_system_dir(system)
+
     def list_system_names(self, *, include_network_references: bool = True) -> List[str]:
         """List ROM systems without statting Drone-managed network targets.
 

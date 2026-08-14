@@ -84,11 +84,12 @@ class HandlersConfigBackupMixin:
             self._send_json(404, {"status": "not_found"})
             return
         result = _config_backup.email_backup(self.settings, backup_id)
-        # "not_configured"/"too_large"/"error" are expected, meaningful
-        # outcomes the frontend branches on directly (e.g. a popup explaining
-        # how to set up email) -- they stay 200 so apiPost() doesn't collapse
-        # them into a generic thrown Error and lose that distinction. Only a
-        # genuinely unexpected case (the backup vanished between page load
-        # and the click) gets a real 404.
-        status_code = 404 if result.get("status") == "not_found" else 200
+        # Validation outcomes stay synchronous, while successful requests use
+        # 202 to make clear that SMTP delivery belongs to the backend worker.
+        if result.get("status") == "not_found":
+            status_code = 404
+        elif result.get("status") == "queued":
+            status_code = 202
+        else:
+            status_code = 200
         self._send_json(status_code, result)

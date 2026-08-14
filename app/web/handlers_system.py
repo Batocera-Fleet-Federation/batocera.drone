@@ -10,10 +10,9 @@ import time
 try:
     from .route_config import api_url
     from ..common.self_update import (
-        DRONE_SELF_UPDATE_EXIT_CODE,
-        _download_latest_drone_app,
-        _restart_drone_process_soon,
+        get_drone_update_status,
         is_drone_auto_update_enabled,
+        request_drone_update_check,
         set_drone_auto_update_enabled,
     )
     from ..device.automation import (
@@ -33,10 +32,9 @@ try:
     from ..transfer.drone_tls import DroneCertificateManager
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common.self_update import (  # type: ignore
-        DRONE_SELF_UPDATE_EXIT_CODE,
-        _download_latest_drone_app,
-        _restart_drone_process_soon,
+        get_drone_update_status,
         is_drone_auto_update_enabled,
+        request_drone_update_check,
         set_drone_auto_update_enabled,
     )
     from device.automation import (  # type: ignore
@@ -59,18 +57,13 @@ except ImportError:  # pragma: no cover - direct script execution fallback
 
 class HandlersSystemMixin:
     def _handle_admin_drone_update(self) -> None:
-        result = _download_latest_drone_app(self.settings)
-        result["restart"] = {
-            "scheduled": True,
-            "exit_code": DRONE_SELF_UPDATE_EXIT_CODE,
-            "note": "The Drone app process will restart so the downloaded version is loaded. Batocera itself is not restarted.",
-        }
-        self._send_json(200, result)
-        try:
-            self.wfile.flush()
-        except Exception:
-            pass
-        _restart_drone_process_soon()
+        # This route only submits intent. The API-owned worker checks GitHub,
+        # downloads both UI bundles, overlays them, and restarts the service.
+        # A browser disconnect or closed Ports client cannot interrupt it.
+        self._send_json(202, request_drone_update_check(self.settings, source="manual"))
+
+    def _handle_admin_drone_update_status(self) -> None:
+        self._send_json(200, get_drone_update_status(self.settings))
 
     def _handle_admin_drone_update_history(self) -> None:
         self._send_json(200, {"updates": _update_history_store.list_updates(self.settings)})

@@ -42,7 +42,7 @@ class _FakeApiClient:
             raise self._login_error
         return self._login_result or username
 
-    def get(self, path):
+    def get(self, path, *, timeout=None):
         self.get_calls.append(path)
         if self._get_error is not None:
             raise self._get_error
@@ -272,7 +272,25 @@ class SwarmScreenTests(unittest.TestCase):
         screen = SwarmScreen(client)
         screen._enable_reference("peer1", "Arcade")
         self.assertEqual(client.post_calls, [("/admin/network-shares/peer1/enable", None)])
-        self.assertIn("Referencing Arcade", screen.reference_message)
+        self.assertIn("referencing Arcade", screen.reference_message)
+
+    def test_reference_button_opens_confirmation_without_calling_api(self) -> None:
+        client = _FakeApiClient()
+        screen = SwarmScreen(client)
+        screen._open_reference_confirmation("peer1", "Arcade")
+        self.assertEqual(screen.pending_reference_peer_id, "peer1")
+        self.assertEqual(screen.pending_reference_peer_name, "Arcade")
+        self.assertTrue(screen._reference_popup_just_opened)
+        self.assertEqual(client.post_calls, [])
+
+    def test_enable_reference_reports_backend_owned_background_operation(self) -> None:
+        client = _FakeApiClient(
+            get_responses={"/admin/swarm/overview": {"drones": []}, "/admin/network-shares": {"shares": []}},
+            post_responses={"/admin/network-shares/peer1/enable": {"status": "enabling"}},
+        )
+        screen = SwarmScreen(client)
+        screen._enable_reference("peer1", "Arcade")
+        self.assertIn("continues if this client closes", screen.reference_message)
 
     def test_disable_reference_posts_and_reloads(self) -> None:
         client = _FakeApiClient(
@@ -427,6 +445,22 @@ class SwarmScreenTests(unittest.TestCase):
         self.assertEqual(
             [(group, job["job_id"]) for group, job in screen._download_queue_rows()],
             [("Active", "active"), ("Queued", "queued"), ("Recent", "recent")],
+        )
+
+    def test_download_queue_rows_put_newest_download_first_across_statuses(self) -> None:
+        screen = SwarmScreen(_FakeApiClient())
+        screen.request_queue_snapshot = {
+            "active": [{"job_id": "old-active", "created_at": "2026-08-14T10:00:00+00:00"}],
+            "queued": [{"job_id": "new-queued", "created_at": "2026-08-14T10:02:00+00:00"}],
+            "recent": [{"job_id": "middle-recent", "created_at": "2026-08-14T10:01:00+00:00"}],
+        }
+        self.assertEqual(
+            [(group, job["job_id"]) for group, job in screen._download_queue_rows()],
+            [
+                ("Queued", "new-queued"),
+                ("Recent", "middle-recent"),
+                ("Active", "old-active"),
+            ],
         )
 
     def test_download_queue_labels_distinguish_game_and_artwork_jobs(self) -> None:

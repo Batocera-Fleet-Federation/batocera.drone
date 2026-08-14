@@ -510,27 +510,11 @@ except ImportError:
 
 
 try:
-    from .common.self_update import (
-        DRONE_LATEST_ARCHIVE_URL,
-        DRONE_SELF_UPDATE_EXIT_CODE,
-        _download_latest_drone_app,
-        _drone_work_dir,
-        _overlay_drone_release_tree,
-        _restart_drone_process_soon,
-        _start_drone_auto_update_poller,
-    )
+    from .common.self_update import _start_drone_auto_update_poller
 except ImportError:
     if __package__ not in (None, ""):
         raise
-    from common.self_update import (  # type: ignore
-        DRONE_LATEST_ARCHIVE_URL,
-        DRONE_SELF_UPDATE_EXIT_CODE,
-        _download_latest_drone_app,
-        _drone_work_dir,
-        _overlay_drone_release_tree,
-        _restart_drone_process_soon,
-        _start_drone_auto_update_poller,
-    )
+    from common.self_update import _start_drone_auto_update_poller  # type: ignore
 
 
 try:
@@ -2490,10 +2474,9 @@ def create_server(settings: Settings) -> ThreadingHTTPServer:
         Thread(target=_smtp_manager.run_sharing_revocation_poller, args=(settings,), name="drone-smtp-sharing-revocation", daemon=True).start()
     if not _AUDIT_EMAIL_POLLER_STARTED:
         _AUDIT_EMAIL_POLLER_STARTED = True
-        # The "cron style job every ~5 minutes" -- there is no OS cron
-        # anywhere in this app; every periodic feature is an in-process
-        # thread on this exact shape (see the VPN pollers just above).
-        Thread(target=_smtp_manager.run_audit_email_digest_poller, args=(settings,), name="drone-audit-email-digest", daemon=True).start()
+        # One API-owned worker handles all outbound mail and satellite relay;
+        # browsers/native clients only enqueue jobs through request handlers.
+        Thread(target=_smtp_manager.run_audit_email_digest_poller, args=(settings,), name="drone-outbound-mail-worker", daemon=True).start()
     if not _TAILNET_BOOTSTRAP_ATTEMPTED:
         _TAILNET_BOOTSTRAP_ATTEMPTED = True
         # Backgrounded for the same reason as VPN's auto-connect above: a

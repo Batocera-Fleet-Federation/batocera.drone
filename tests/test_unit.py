@@ -1863,6 +1863,35 @@ class SettingsTests(unittest.TestCase):
             self.assertGreater(restored["reconnect_after_epoch"], time.time())
             self.assertIn("reconnecting", restored["resume_reason"])
 
+    def test_download_completion_notification_is_created_by_backend_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = self._make_download_manager(Path(tmp) / "userdata")
+            queued = manager.enqueue_rom(
+                {}, {"drone_id": "source-a"}, "snes", "Game.zip", expected_size=123
+            )
+            with manager._lock:
+                job = manager._jobs[queued["job_id"]]
+                job["status"] = "downloading"
+                job["started_at"] = datetime.now(timezone.utc).isoformat()
+                job["_started_mono"] = time.monotonic()
+
+            completed = {
+                "status": "completed",
+                "relative_path": "Game.zip",
+                "asset_type": "rom",
+                "downloaded_bytes": 123,
+                "bytes_transferred": 123,
+                "total_bytes": 123,
+            }
+            with mock.patch.object(manager._selector, "fetch", return_value=completed), \
+                    mock.patch("app.transfer.download_manager._notifications.record_event") as record_event, \
+                    mock.patch("app.transfer.download_manager._kick_asset_metadata_sync_after_download"):
+                manager._run_job(queued["job_id"])
+
+            record_event.assert_called_once()
+            self.assertEqual(record_event.call_args.args[1], "asset_downloaded")
+            self.assertEqual(record_event.call_args.args[3], "Game.zip")
+
     def test_download_manager_refreshes_paired_peer_route_before_running_job(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
@@ -2698,6 +2727,8 @@ class SettingsTests(unittest.TestCase):
         self.assertIn('"run-pixn-update", "run-pixen-update"', api_routes)
         self.assertIn('parts[2] == "restart-emulationstation"', api_routes)
         self.assertIn("async function updateDroneApp()", js_source)
+        self.assertIn("async function monitorDroneUpdateWorker()", js_source)
+        self.assertIn('api("/admin/system/update-drone")', js_source)
         self.assertIn('apiPost("/admin/system/update-drone"', js_source)
         self.assertIn('apiPost("/admin/system/auto-update"', js_source)
         self.assertIn('apiPost("/admin/system/restart-emulationstation"', js_source)
@@ -2709,6 +2740,10 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("droneAutoUpdateCheckbox", controls_source)
         self.assertIn('role="switch" id="droneAutoUpdateCheckbox"', controls_source)
         self.assertIn("DRONE_LATEST_ARCHIVE_URL", drone_source)
+        self.assertIn("request_drone_update_check", drone_source)
+        self.assertIn('name="drone-self-update-worker"', drone_source)
+        self.assertIn('"owner": "api_worker"', drone_source)
+        self.assertIn('request_drone_update_check(settings, source="automatic")', drone_source)
         self.assertIn("_schedule_supervised_service_restart", drone_source)
         self.assertIn("start_new_session=True", drone_source)
         self.assertIn("os.execv(sys.executable, [sys.executable, *sys.argv])", drone_source)
@@ -2821,11 +2856,12 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("for mode in full kiosk kid", bootstrap)
         self.assertIn("set_volume_as_root()", bootstrap)
         self.assertIn("set-volume.request", bootstrap)
-        self.assertIn("stage_latest_app_once()", bootstrap)
-        self.assertIn("DRONE_UPDATE_ON_STARTUP", bootstrap)
-        self.assertIn("auto-update.enabled", bootstrap)
-        self.assertIn('if [ -f "$AUTO_UPDATE_FILE" ]', bootstrap)
-        self.assertIn("DRONE_APP_STAGE_ONLY=1", bootstrap)
+        self.assertNotIn("stage_latest_app_once()", bootstrap)
+        self.assertNotIn("DRONE_UPDATE_ON_STARTUP", bootstrap)
+        self.assertNotIn("auto-update.enabled", bootstrap)
+        self.assertNotIn('if [ -f "$AUTO_UPDATE_FILE" ]', bootstrap)
+        self.assertNotIn("DRONE_APP_STAGE_ONLY=1", bootstrap)
+        self.assertIn("Routine release checks belong exclusively to the API's background", bootstrap)
         self.assertIn('nohup sh "$WORK_DIR/app/service_bootstrap.sh" supervisor', bootstrap)
         self.assertIn("run_supervisor()", bootstrap)
         self.assertIn("service_status()", bootstrap)
@@ -3833,6 +3869,25 @@ class RepositoryTests(unittest.TestCase):
 
             self.assertTrue(remote_link.is_symlink())
             self.assertFalse(remote_link.exists())  # target was deliberately never mounted
+
+    def test_network_system_cannot_be_resolved_as_peer_owned_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "userdata"
+            (root / "roms").mkdir(parents=True)
+            (root / "bios").mkdir(parents=True)
+            share_root = root / "drone-app" / "network-shares"
+            remote_system = share_root / "peer-1" / "roms" / "snes"
+            remote_system.mkdir(parents=True)
+            (remote_system / "Loop.zip").write_bytes(b"remote")
+            (root / "roms" / "snes").symlink_to(remote_system, target_is_directory=True)
+            repo = RomRepository(root / "roms", root / "bios")
+
+            with mock.patch("app.roms.rom_systems.network_reference_root", return_value=share_root):
+                # Local playback still follows the reference.
+                self.assertEqual(repo.get_system_dir("snes"), remote_system.resolve())
+                # Peer serving must never export those same network bytes.
+                with self.assertRaises(FileNotFoundError):
+                    repo.get_local_system_dir("snes")
 
     def test_list_systems_does_not_hash_rom_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -5384,6 +5439,8 @@ class LocalNetworkAssetCopyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
             settings = self._settings(root)
+            for system in ("snes", "gba", "genesis"):
+                (settings.roms_root / system).mkdir(parents=True, exist_ok=True)
             entries = {
                 f"{system}:game-{index}.zip": {
                     "system": system,
@@ -5449,6 +5506,8 @@ class LocalNetworkAssetCopyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
             settings = self._settings(root)
+            for system in ("snes", "gba"):
+                (settings.roms_root / system).mkdir(parents=True, exist_ok=True)
             bios = {
                 "bios:a": {"file_path": "ps2/a.bin", "name": "A BIOS", "md5": "a" * 32, "systems": ["ps2"]},
                 "bios:b": {"file_path": "root.bin", "name": "B BIOS", "md5": "b" * 32, "systems": []},
@@ -7870,7 +7929,8 @@ class NetworkSharePageTests(unittest.TestCase):
         self.assertIn("window.confirm(", fn_body)
         self.assertIn("/admin/network-shares/${encodeURIComponent(peerId)}/enable", fn_body)
         self.assertIn("await renderSwarmPage();", fn_body)
-        self.assertIn("offerNetworkShareUiRefresh", fn_body)
+        self.assertNotIn("offerNetworkShareUiRefresh", fn_body)
+        self.assertIn("operation continues if this browser closes", fn_body)
         # The confirm dialog and toasts must mention BIOS, not just ROMs --
         # this button references both in one call.
         self.assertIn("BIOS", fn_body)
@@ -7883,13 +7943,11 @@ class NetworkSharePageTests(unittest.TestCase):
         self.assertIn('api("/admin/network-shares")', fn_body)
         self.assertIn("detach is still running in the background", fn_body)
 
-    def test_reference_refresh_prompt_restarts_emulationstation_only_after_confirmation(self) -> None:
-        fn_start = self.js.index("async function offerNetworkShareUiRefresh(")
-        fn_end = self.js.index("async function swarmReferencePeerRoms(", fn_start)
-        fn_body = self.js[fn_start:fn_end]
-        self.assertIn("window.confirm", fn_body)
-        self.assertIn('apiPost("/admin/system/restart-emulationstation", {})', fn_body)
-        self.assertIn("rebuilds its game list", fn_body)
+    def test_reference_refresh_is_owned_by_backend_worker(self) -> None:
+        self.assertNotIn("offerNetworkShareUiRefresh", self.js)
+        fn_start = self.js.index("async function swarmReferencePeerRoms(")
+        fn_body = self.js[fn_start:self.js.index("\nasync function swarmUnreferencePeerRoms(", fn_start)]
+        self.assertNotIn('apiPost("/admin/system/restart-emulationstation", {})', fn_body)
 
     def test_referencing_pill_shown_next_to_email_pill(self) -> None:
         bar_start = self.js.index("async function loadSystemInfoBar()")
@@ -8375,6 +8433,9 @@ class ReleaseWorkflowPortsClientTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
         cls.workflow = root.joinpath(".github/workflows/release.yml").read_text(encoding="utf-8")
+        cls.bundle_script = root.joinpath("ports-client/scripts/build_release_bundle.sh").read_text(encoding="utf-8")
+        cls.ports_logo = root.joinpath("ports-client/ui/assets/logo.png")
+        cls.marquee = root.joinpath("ports-client/launcher/images/batocera-drone_marquee.png")
 
     def test_builds_both_arches_via_ports_clients_own_scripts(self) -> None:
         # The Python tag (312) must match real device hardware, not be
@@ -8392,6 +8453,29 @@ class ReleaseWorkflowPortsClientTests(unittest.TestCase):
     def test_attaches_both_bundles_to_the_release(self) -> None:
         self.assertIn("dist/batocera-drone-client-x86_64.tar.gz", self.workflow)
         self.assertIn("dist/batocera-drone-client-aarch64.tar.gz", self.workflow)
+
+    def test_release_builds_fail_when_either_ui_code_or_images_are_missing(self) -> None:
+        for required in (
+            "app/main.py",
+            "app/drone_api.py",
+            "app/VERSION",
+            "app/web/templates/index.html",
+            "app/web/static/js/drone.js",
+            "app/web/static/css/drone.css",
+            "content/batocera-swarm-mascot.jpg",
+            "content/drone.png",
+        ):
+            self.assertIn(required, self.workflow)
+        for required in (
+            "$STAGE/batocera-drone-client.sh",
+            "$APP_DIR/main.py",
+            "$APP_DIR/client/endpoints.py",
+            "$APP_DIR/ui/app.py",
+            "$APP_DIR/ui/assets/logo.png",
+        ):
+            self.assertIn(required, self.bundle_script)
+        self.assertGreater(self.ports_logo.stat().st_size, 0)
+        self.assertEqual(self.ports_logo.read_bytes(), self.marquee.read_bytes())
 
 
 class NavRestructureTests(unittest.TestCase):
@@ -8508,6 +8592,31 @@ class NavRestructureTests(unittest.TestCase):
         self.assertNotIn("localAssetArtworkOnly", body)
         self.assertIn('class="btn btn-sm btn-primary" id="localAssetLoadBtn"', body)
         self.assertIn('class="btn btn-sm btn-success" id="localAssetCopyAllBtn"', body)
+
+    def test_web_and_ports_clients_share_the_same_backend_download_queue(self) -> None:
+        single_start = self.js.index("async function copyLocalPeerAsset(index)")
+        single_end = self.js.index("async function copyAllLocalAssets()", single_start)
+        self.assertIn('apiPost("/admin/local-network/sync", {', self.js[single_start:single_end])
+
+        bulk_start = self.js.index("async function queueLocalBulkCopy(body)")
+        bulk_end = self.js.index("// The Overmind Integration panel", bulk_start)
+        self.assertIn('apiPost("/admin/local-network/sync-bulk", body)', self.js[bulk_start:bulk_end])
+
+        ports_endpoints = Path(__file__).resolve().parents[1].joinpath(
+            "ports-client/client/endpoints.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn('client.post("/admin/local-network/sync", body', ports_endpoints)
+        self.assertIn('client.post("/admin/local-network/sync-bulk", body', ports_endpoints)
+
+    def test_web_email_page_explains_owner_worker_and_relay_only_modes(self) -> None:
+        smtp_start = self.js.index("async function renderSmtpPage()")
+        smtp_end = self.js.index("async function refreshSmtpLive()", smtp_start)
+        body = self.js[smtp_start:smtp_end]
+        self.assertIn('payload.delivery_mode === "relay"', body)
+        self.assertIn("Relay-only notification delivery", body)
+        self.assertIn("All email—including digests, tests, and backup attachments—uses one persistent Drone API queue", body)
+        self.assertIn("The backend worker owns SMTP delivery", body)
+        self.assertIn("Web and Ports UIs only submit actions and display status", body)
 
     def test_legacy_hash_redirects_point_at_new_pages(self) -> None:
         downloads_start = self.js.index('hash === "#admin/downloads"')

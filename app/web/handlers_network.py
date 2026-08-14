@@ -67,6 +67,13 @@ except ImportError:  # pragma: no cover - direct script execution fallback
 
 # Local copy (drone_api keeps its own; same env). Not test-patched.
 PEER_INVENTORY_TIMEOUT_SECONDS = float(os.environ.get("DRONE_PEER_INVENTORY_TIMEOUT_SECONDS", "120"))
+# Admin/UI inventory requests need a total route-failover budget as well as a
+# per-route socket timeout.  Otherwise a congested cached route plus several
+# stale fallbacks can outlive the UI request by minutes even though a useful
+# error (or a recovered route) should be available promptly.
+PEER_INVENTORY_ROUTE_BUDGET_SECONDS = float(
+    os.environ.get("DRONE_PEER_INVENTORY_ROUTE_BUDGET_SECONDS", "30")
+)
 
 # Per-peer budget for the Swarm-overview fan-out. Deliberately short: an
 # offline drone should read as "Offline" quickly, not stall the whole page for
@@ -442,11 +449,12 @@ class HandlersNetworkMixin:
             "dns_name": str(peer.get("dns_name") or ""),
             "ui_url": self._swarm_peer_ui_url(peer),
             "error": None,
+            "summary_error": None,
             "latency_ms": None,
             "summary": None,
         }
+        started = time.monotonic()
         try:
-            started = time.monotonic()
             if self.settings.use_fake_data and peer.get("fake_data"):
                 summary = self._collect_peer_inventory("summary", {})
             else:
@@ -467,8 +475,33 @@ class HandlersNetworkMixin:
             entry["latency_ms"] = int((time.monotonic() - started) * 1000)
             entry["summary"] = {key: summary.get(key) for key in ("systems", "system_counts", "counts", "updated_at")}
             entry["online"] = True
-        except Exception as error:
-            entry["error"] = str(error) or error.__class__.__name__
+        except Exception as summary_error:
+            # Inventory is intentionally richer (and more expensive) than
+            # liveness. During a large transfer, metadata refresh, or slow
+            # network mount it can miss the short overview budget even while
+            # the peer's API is perfectly healthy. Fall back to the tiny
+            # health endpoint so the UI reports "Online, inventory delayed"
+            # instead of the false "Offline -- read operation timed out".
+            if self.settings.use_fake_data and peer.get("fake_data"):
+                entry["error"] = str(summary_error) or summary_error.__class__.__name__
+                return entry
+            health_started = time.monotonic()
+            try:
+                _health, address = _peer_get_json_for_peer(
+                    peer,
+                    "/v1/api/peer/health",
+                    self.settings,
+                    peer_id=entry["drone_id"],
+                    config={"network_mode": "local_network"},
+                    timeout=SWARM_PEER_TIMEOUT_SECONDS,
+                    overall_deadline=health_started + SWARM_PEER_TIMEOUT_SECONDS,
+                )
+                entry["reachable_url"] = address
+                entry["latency_ms"] = int((time.monotonic() - started) * 1000)
+                entry["online"] = True
+                entry["summary_error"] = str(summary_error) or summary_error.__class__.__name__
+            except Exception as health_error:
+                entry["error"] = str(health_error) or health_error.__class__.__name__
         return entry
 
     def _handle_admin_tailnet_status(self) -> None:
@@ -653,6 +686,7 @@ class HandlersNetworkMixin:
                 peer_id=peer_id,
                 config={"network_mode": "local_network"},
                 timeout=PEER_INVENTORY_TIMEOUT_SECONDS,
+                overall_deadline=time.monotonic() + PEER_INVENTORY_ROUTE_BUDGET_SECONDS,
             )
         if asset_type == "roms" and isinstance(result, dict):
             self._annotate_roms_exist_locally(result.get("items") or [])
@@ -1176,5 +1210,6 @@ class HandlersNetworkMixin:
             peer_id=peer_id,
             config={"network_mode": "local_network"},
             timeout=PEER_INVENTORY_TIMEOUT_SECONDS,
+            overall_deadline=time.monotonic() + PEER_INVENTORY_ROUTE_BUDGET_SECONDS,
         )
         return result

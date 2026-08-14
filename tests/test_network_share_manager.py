@@ -787,6 +787,24 @@ class DisableTests(unittest.TestCase):
             # Best-effort cleanup of the now-empty per-emulator subfolder Drone created.
             self.assertFalse((settings.bios_root / "dc").exists())
 
+    def test_request_enable_persists_intent_before_background_thread_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+
+            with mock.patch.object(network_share_manager._local_network, "get_paired_peer", return_value=_PEER), \
+                    mock.patch.object(threading.Thread, "start", return_value=None):
+                result = network_share_manager.request_enable(settings, "peer-1")
+
+            record = network_share_manager.get_share(settings, "peer-1")
+            self.assertEqual(result["status"], "enabling")
+            self.assertIsNotNone(record)
+            self.assertTrue(record["enabled"])
+            self.assertEqual(record["status"], "enabling")
+            with network_share_manager._BACKGROUND_JOBS_LOCK:
+                network_share_manager._ACTIVE_ENABLE_JOBS.discard(
+                    network_share_manager._operation_key(settings, "peer-1")
+                )
+
     def test_request_disable_persists_intent_before_background_thread_runs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = self._enabled_share(tmp, with_rom_collision=True)

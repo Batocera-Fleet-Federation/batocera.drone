@@ -279,7 +279,7 @@ class HandlersPeerMixin:
                         if not isinstance(row, dict):
                             continue
                         relative_path = str(row.get("relative_path") or row.get("file_path") or row.get("path") or "").strip()
-                        if relative_path:
+                        if relative_path and self.repository.is_local_bios_path(relative_path):
                             bios_paths.append(relative_path)
                     offset += len(items)
                     if not items or offset >= int(page.get("total") or 0):
@@ -304,6 +304,32 @@ class HandlersPeerMixin:
                     if isinstance(row, dict)
                 ],
             }
+
+        # Relational metadata can briefly retain rows from before a network
+        # reference was enabled.  Filter the requested system set against the
+        # current lexical filesystem ownership before consulting that cache.
+        # This prevents a Drone from advertising an upstream peer's ROMs or
+        # artwork and creating A -> B -> A transfer loops.
+        local_system_names = None
+        if normalized in {"roms", "artwork"}:
+            local_by_key = {
+                name.strip().lower(): name
+                for name in self.repository.list_local_system_names()
+                if name.strip()
+            }
+            if system:
+                selected_systems = [local_by_key[system.lower()]] if system.lower() in local_by_key else []
+            elif systems:
+                selected_systems = [
+                    local_by_key[key]
+                    for key in sorted(systems)
+                    if key in local_by_key
+                ]
+            else:
+                selected_systems = sorted(local_by_key.values(), key=str.lower)
+            local_system_names = set(selected_systems)
+            if not selected_systems:
+                return paged_response({"total": 0, "limit": limit, "offset": offset, "items": []})
 
         # Normal operation reads authoritative relational caches. Filtering,
         # counting, ordering, and pagination remain inside SQLite; the legacy
@@ -435,11 +461,11 @@ class HandlersPeerMixin:
             # surfacing as a silent "Failed to fetch". An empty target list means
             # "no filter" -> the whole library.
             if system:
-                target_systems = [system]
+                target_systems = list(local_system_names or [])
             elif systems:
-                target_systems = [name for name in self.repository.list_system_names() if name.strip().lower() in systems]
+                target_systems = sorted(local_system_names or [], key=str.lower)
             else:
-                target_systems = list(self.repository.list_system_names())
+                target_systems = sorted(local_system_names or [], key=str.lower)
             per_system_rows = []
             for system_name in target_systems:
                 try:
@@ -470,8 +496,10 @@ class HandlersPeerMixin:
             rows = self.repository.list_bios_entries()
         elif normalized == "artwork":
             rows = self.repository.list_artwork_metadata()
-            if system:
-                rows = [row for row in rows if str(row.get("system") or "").lower() == system.lower()]
+            rows = [
+                row for row in rows
+                if str(row.get("system") or "") in (local_system_names or set())
+            ]
         elif normalized == "saves":
             if self.settings.use_fake_data:
                 _saves_store.sync_saves_cache(self.settings.saves_root)
@@ -547,7 +575,11 @@ class HandlersPeerMixin:
     def _handle_peer_rom_download(self, system: str, relative_path: str) -> None:
         if not self._peer_request_authorized():
             return
-        system_dir = self.repository.get_system_dir(system).resolve()
+        try:
+            system_dir = self.repository.get_local_system_dir(system).resolve()
+        except (FileNotFoundError, ValueError):
+            self._send_json(404, {"error": "not found"})
+            return
         rel = unquote(relative_path or "").replace("\\", "/").lstrip("/")
         if not rel or ".." in Path(rel).parts:
             self._send_json(400, {"error": "invalid rom path"})
@@ -577,6 +609,13 @@ class HandlersPeerMixin:
         gid = unquote(gamelist_id or "").strip()
         if not gid:
             self._send_json(400, {"error": "invalid gamelist id"})
+            return
+        try:
+            # Do not let the normal resolver follow a Drone-managed NFS/SMB
+            # reference and advertise another peer's bytes as local content.
+            self.repository.get_local_system_dir(system)
+        except (FileNotFoundError, ValueError):
+            self._send_json(404, {"error": "not found"})
             return
         try:
             target, relative_path, entry_type, marker_relative_path = self.repository.resolve_rom_file_by_gamelist_id(system, gid)
@@ -613,7 +652,7 @@ class HandlersPeerMixin:
             # Folder-unit ROMs keep the marker file as the identity: fingerprint the
             # marker so the receiver's present-check matches its own scan. True
             # directory entries (marker == the folder itself) carry no fingerprint.
-            marker_target = (self.repository.get_system_dir(system).resolve() / marker_relative_path).resolve()
+            marker_target = (self.repository.get_local_system_dir(system).resolve() / marker_relative_path).resolve()
             if marker_relative_path != relative_path and marker_target.is_file():
                 try:
                     response["rom_fingerprint"] = self.repository.build_fingerprint(marker_target)
@@ -633,7 +672,11 @@ class HandlersPeerMixin:
     def _handle_peer_rom_manifest(self, system: str, relative_path: str) -> None:
         if not self._peer_request_authorized():
             return
-        system_dir = self.repository.get_system_dir(system).resolve()
+        try:
+            system_dir = self.repository.get_local_system_dir(system).resolve()
+        except (FileNotFoundError, ValueError):
+            self._send_json(404, {"error": "not found"})
+            return
         rel = unquote(relative_path or "").replace("\\", "/").lstrip("/")
         if not rel or ".." in Path(rel).parts:
             self._send_json(400, {"error": "invalid rom path"})
@@ -656,6 +699,9 @@ class HandlersPeerMixin:
         rel = unquote(relative_path or "").replace("\\", "/").lstrip("/")
         if not rel or ".." in Path(rel).parts:
             self._send_json(400, {"error": "invalid bios path"})
+            return
+        if not self.repository.is_local_bios_path(rel):
+            self._send_json(404, {"error": "not found"})
             return
         target = (bios_root / rel).resolve()
         if not target.exists() or not target.is_file() or (target != bios_root and bios_root not in target.parents):
@@ -747,6 +793,11 @@ class HandlersPeerMixin:
         if not self._peer_request_authorized():
             return
         try:
+            self.repository.get_local_system_dir(system)
+        except (FileNotFoundError, ValueError):
+            self._send_json(404, {"error": "not found"})
+            return
+        try:
             target, relative_path, gamelist_ref = self.repository.resolve_artwork_file(system, unquote(rom_path or ""), unquote(artwork_type or ""))
         except ValueError as error:
             self._send_json(400, {"error": str(error)})
@@ -800,6 +851,74 @@ class HandlersPeerMixin:
             return
         self.log_message("peer smtp config served host=%s", payload.get("host"))
         self._send_json(200, payload)
+
+    def _handle_peer_smtp_notifications(self, payload: dict) -> None:
+        """Ingest audit events from a Drone using this SMTP configuration.
+
+        The client certificate is the source identity; a payload may repeat
+        that ID for diagnostics, but it cannot impersonate another paired
+        Drone. The SMTP owner performs the idempotent database insert and its
+        independent digest worker controls actual mail delivery.
+        """
+        if not self._peer_request_authorized():
+            return
+        payload = payload if isinstance(payload, dict) else {}
+        certificate_peer_id = self._peer_requester_device_id()
+        claimed_peer_id = str(payload.get("source_drone_id") or "").strip()
+        if certificate_peer_id and claimed_peer_id and certificate_peer_id != claimed_peer_id:
+            self._send_json(403, {"error": "source_drone_id does not match the paired client certificate"})
+            return
+        source_peer_id = str(certificate_peer_id or claimed_peer_id).strip()
+        peer = _local_network.get_paired_peer(self.settings, source_peer_id) if source_peer_id else None
+        if not source_peer_id or not peer:
+            self._send_json(403, {"error": "notification relay requires a paired source drone"})
+            return
+        source_peer_name = str(peer.get("name") or peer.get("hostname") or source_peer_id)
+        try:
+            result = _smtp.ingest_relayed_notifications(
+                self.settings,
+                payload.get("events"),
+                source_drone_id=source_peer_id,
+                source_drone_name=source_peer_name,
+            )
+        except PermissionError as error:
+            self._send_json(403, {"error": str(error)})
+            return
+        except ValueError as error:
+            self._send_json(400, {"error": str(error)})
+            return
+        self._send_json(202, result)
+
+    def _handle_peer_smtp_mail(self, payload: dict) -> None:
+        """Queue explicit mail jobs relayed by a paired satellite."""
+        if not self._peer_request_authorized():
+            return
+        payload = payload if isinstance(payload, dict) else {}
+        certificate_peer_id = self._peer_requester_device_id()
+        claimed_peer_id = str(payload.get("source_drone_id") or "").strip()
+        if certificate_peer_id and claimed_peer_id and certificate_peer_id != claimed_peer_id:
+            self._send_json(403, {"error": "source_drone_id does not match the paired client certificate"})
+            return
+        source_peer_id = str(certificate_peer_id or claimed_peer_id).strip()
+        peer = _local_network.get_paired_peer(self.settings, source_peer_id) if source_peer_id else None
+        if not source_peer_id or not peer:
+            self._send_json(403, {"error": "mail relay requires a paired source drone"})
+            return
+        source_peer_name = str(peer.get("name") or peer.get("hostname") or source_peer_id)
+        try:
+            result = _smtp.ingest_relayed_mail_jobs(
+                self.settings,
+                payload.get("jobs"),
+                source_drone_id=source_peer_id,
+                source_drone_name=source_peer_name,
+            )
+        except PermissionError as error:
+            self._send_json(403, {"error": str(error)})
+            return
+        except ValueError as error:
+            self._send_json(400, {"error": str(error)})
+            return
+        self._send_json(202, result)
 
     def _handle_peer_tailnet_config(self) -> None:
         """Serve this drone's Tailscale auth key to a paired peer.

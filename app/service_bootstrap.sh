@@ -17,8 +17,6 @@ INPUT_MONITOR_PID_FILE="/tmp/drone-input-activity-monitor.pid"
 CONTROL_DIR="/userdata/system/drone-app/control"
 INPUT_ACTIVITY_FILE="/userdata/system/drone-app/control/last-input-activity"
 STARTUP_LOG="/userdata/system/logs/drone-app/startup.log"
-AUTO_UPDATE_FILE="$WORK_DIR/auto-update.enabled"
-STARTUP_UPDATE_ATTEMPTED=0
 
 ensure_rom_write_access_all() {
   echo "[drone-service] Drone runs as root; ROM permission repair is not required."
@@ -115,49 +113,16 @@ importlib.import_module("app.drone_api")
 PY
 }
 
-stage_latest_app_once() {
-  auto_update_enabled="${DRONE_UPDATE_ON_STARTUP:-1}"
-  if [ -f "$AUTO_UPDATE_FILE" ]; then
-    auto_update_enabled="$(head -n 1 "$AUTO_UPDATE_FILE" 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
-  fi
-  case "$auto_update_enabled" in
-    1|true|yes|on|enabled) ;;
-    *) echo "[drone-service] Automatic Drone update check disabled."; return 0 ;;
-  esac
-  runner="/tmp/drone-startup-update.$$"
-  echo "[drone-service] Checking for the latest Drone app bundle..."
-  wait_for_network
-  if ! curl -fsSL --connect-timeout 10 --max-time 45 -o "$runner" https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/run_web_now.sh; then
-    rm -f "$runner"
-    echo "[drone-service] Latest bundle check failed; continuing with the validated local app."
-    return 0
-  fi
-  chmod 755 "$runner" 2>/dev/null || true
-  if DRONE_APP_STAGE_ONLY=1 \
-      DRONE_APP_WORK_DIR="$WORK_DIR" \
-      DRONE_APP_ARCHIVE_URL="${DRONE_APP_ARCHIVE_URL:-https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/drone-app.tar.gz}" \
-      bash "$runner"; then
-    echo "[drone-service] Latest Drone app bundle staged."
-  else
-    echo "[drone-service] Latest bundle staging failed; validating the local app before launch."
-  fi
-  rm -f "$runner"
-}
-
 launch_drone() {
   if [ -f "$WORK_DIR/app/main.py" ] && [ -f "$WORK_DIR/app/drone_api.py" ]; then
     if validate_local_app; then
-      if [ "$STARTUP_UPDATE_ATTEMPTED" -eq 0 ]; then
-        STARTUP_UPDATE_ATTEMPTED=1
-        stage_latest_app_once
-      fi
-      if ! validate_local_app; then
-        echo "[drone-service] Staged Drone app failed validation; downloading a clean bundle."
-      else
-        echo "[drone-service] Launching local Drone app from ${WORK_DIR}..."
-        run_as_root_shell "cd '$WORK_DIR' && env PYTHONPATH='$WORK_DIR' HTTPS_PORT='${HTTPS_PORT:-443}' DRONE_COMPAT_HTTPS_PORTS='${DRONE_COMPAT_HTTPS_PORTS:-8443}' DRONE_PEER_MTLS_PORT='${DRONE_PEER_MTLS_PORT:-8543}' ROMS_ROOT='${ROMS_ROOT:-/userdata/roms}' BIOS_ROOT='${BIOS_ROOT:-/userdata/bios}' TLS_SELF_SIGNED_DIR='${TLS_SELF_SIGNED_DIR:-/userdata/system/certs}' LOG_DIR='${LOG_DIR:-/userdata/system/logs/drone-app}' LOG_MAX_BYTES='${LOG_MAX_BYTES:-5242880}' LOG_BACKUP_COUNT='${LOG_BACKUP_COUNT:-5}' DRONE_LOG_UNAUTHORIZED_REQUESTS='${DRONE_LOG_UNAUTHORIZED_REQUESTS:-0}' DRONE_UNAUTH_RATE_LIMIT_ENABLED='${DRONE_UNAUTH_RATE_LIMIT_ENABLED:-1}' DRONE_UNAUTH_RATE_LIMIT_REQUESTS='${DRONE_UNAUTH_RATE_LIMIT_REQUESTS:-60}' DRONE_UNAUTH_RATE_LIMIT_WINDOW_SECONDS='${DRONE_UNAUTH_RATE_LIMIT_WINDOW_SECONDS:-60}' ROM_METADATA_POLL_SECONDS='${ROM_METADATA_POLL_SECONDS:-900}' ROM_METADATA_INITIAL_DELAY_SECONDS='${ROM_METADATA_INITIAL_DELAY_SECONDS:-60}' ROM_METADATA_PROGRESS_SECONDS='${ROM_METADATA_PROGRESS_SECONDS:-30}' ROM_METADATA_PROGRESS_FILES='${ROM_METADATA_PROGRESS_FILES:-250}' ROM_METADATA_UPLOAD_CHUNK_SIZE='${ROM_METADATA_UPLOAD_CHUNK_SIZE:-250}' ROM_METADATA_HASH_IO_YIELD_SECONDS='${ROM_METADATA_HASH_IO_YIELD_SECONDS:-0.05}' ROM_METADATA_HASH_ROMS_ENABLED='${ROM_METADATA_HASH_ROMS_ENABLED:-1}' IMAGE_CACHE_TTL_SECONDS='${IMAGE_CACHE_TTL_SECONDS:-3600}' IMAGE_MISS_CACHE_TTL_SECONDS='${IMAGE_MISS_CACHE_TTL_SECONDS:-300}' IMAGE_CACHE_MAX_ITEMS='${IMAGE_CACHE_MAX_ITEMS:-1000}' IMAGE_CACHE_MAX_BYTES='${IMAGE_CACHE_MAX_BYTES:-134217728}' JSON_CACHE_TTL_SECONDS='${JSON_CACHE_TTL_SECONDS:-3600}' JSON_CACHE_MAX_ITEMS='${JSON_CACHE_MAX_ITEMS:-1000}' JSON_CACHE_MAX_BYTES='${JSON_CACHE_MAX_BYTES:-33554432}' OVERMIND_DRONE_TOKEN='${OVERMIND_DRONE_TOKEN:-}' OVERMIND_POLL_SECONDS='${OVERMIND_POLL_SECONDS:-60}' OVERMIND_SPEED_SAMPLE_SECONDS='${OVERMIND_SPEED_SAMPLE_SECONDS:-600}' python3 -m app.main"
-        return "$?"
-      fi
+      # Routine release checks belong exclusively to the API's background
+      # update worker. The supervisor only launches a validated local tree;
+      # its network download path below is disaster recovery for a missing or
+      # corrupt installation, not an update mechanism.
+      echo "[drone-service] Launching local Drone app from ${WORK_DIR}..."
+      run_as_root_shell "cd '$WORK_DIR' && env PYTHONPATH='$WORK_DIR' HTTPS_PORT='${HTTPS_PORT:-443}' DRONE_COMPAT_HTTPS_PORTS='${DRONE_COMPAT_HTTPS_PORTS:-8443}' DRONE_PEER_MTLS_PORT='${DRONE_PEER_MTLS_PORT:-8543}' ROMS_ROOT='${ROMS_ROOT:-/userdata/roms}' BIOS_ROOT='${BIOS_ROOT:-/userdata/bios}' TLS_SELF_SIGNED_DIR='${TLS_SELF_SIGNED_DIR:-/userdata/system/certs}' LOG_DIR='${LOG_DIR:-/userdata/system/logs/drone-app}' LOG_MAX_BYTES='${LOG_MAX_BYTES:-5242880}' LOG_BACKUP_COUNT='${LOG_BACKUP_COUNT:-5}' DRONE_LOG_UNAUTHORIZED_REQUESTS='${DRONE_LOG_UNAUTHORIZED_REQUESTS:-0}' DRONE_UNAUTH_RATE_LIMIT_ENABLED='${DRONE_UNAUTH_RATE_LIMIT_ENABLED:-1}' DRONE_UNAUTH_RATE_LIMIT_REQUESTS='${DRONE_UNAUTH_RATE_LIMIT_REQUESTS:-60}' DRONE_UNAUTH_RATE_LIMIT_WINDOW_SECONDS='${DRONE_UNAUTH_RATE_LIMIT_WINDOW_SECONDS:-60}' ROM_METADATA_POLL_SECONDS='${ROM_METADATA_POLL_SECONDS:-900}' ROM_METADATA_INITIAL_DELAY_SECONDS='${ROM_METADATA_INITIAL_DELAY_SECONDS:-60}' ROM_METADATA_PROGRESS_SECONDS='${ROM_METADATA_PROGRESS_SECONDS:-30}' ROM_METADATA_PROGRESS_FILES='${ROM_METADATA_PROGRESS_FILES:-250}' ROM_METADATA_UPLOAD_CHUNK_SIZE='${ROM_METADATA_UPLOAD_CHUNK_SIZE:-250}' ROM_METADATA_HASH_IO_YIELD_SECONDS='${ROM_METADATA_HASH_IO_YIELD_SECONDS:-0.05}' ROM_METADATA_HASH_ROMS_ENABLED='${ROM_METADATA_HASH_ROMS_ENABLED:-1}' IMAGE_CACHE_TTL_SECONDS='${IMAGE_CACHE_TTL_SECONDS:-3600}' IMAGE_MISS_CACHE_TTL_SECONDS='${IMAGE_MISS_CACHE_TTL_SECONDS:-300}' IMAGE_CACHE_MAX_ITEMS='${IMAGE_CACHE_MAX_ITEMS:-1000}' IMAGE_CACHE_MAX_BYTES='${IMAGE_CACHE_MAX_BYTES:-134217728}' JSON_CACHE_TTL_SECONDS='${JSON_CACHE_TTL_SECONDS:-3600}' JSON_CACHE_MAX_ITEMS='${JSON_CACHE_MAX_ITEMS:-1000}' JSON_CACHE_MAX_BYTES='${JSON_CACHE_MAX_BYTES:-33554432}' OVERMIND_DRONE_TOKEN='${OVERMIND_DRONE_TOKEN:-}' OVERMIND_POLL_SECONDS='${OVERMIND_POLL_SECONDS:-60}' OVERMIND_SPEED_SAMPLE_SECONDS='${OVERMIND_SPEED_SAMPLE_SECONDS:-600}' python3 -m app.main"
+      return "$?"
     fi
     echo "[drone-service] Local Drone app import check failed; downloading a fresh app bundle."
   fi

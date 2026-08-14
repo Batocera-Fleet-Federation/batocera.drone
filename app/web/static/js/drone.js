@@ -1148,16 +1148,20 @@ async function emailConfigBackup(backupId) {
       return;
     }
     if (result.status === "error") {
-      showToast(`Failed to send email: ${escapeHtml(result.error || "unknown error")}`, "danger");
+      showToast(`Failed to queue email: ${escapeHtml(result.error || "unknown error")}`, "danger");
       return;
     }
     if (result.status === "not_found") {
       showToast("That backup no longer exists.", "warning");
       return;
     }
-    showToast("Backup emailed.", "success");
+    if (result.status === "queued") {
+      showToast("Backup email queued. The backend mail worker will send it even if you close this page.", "success", 7000);
+      return;
+    }
+    showToast("The backup email could not be queued.", "danger");
   } catch (err) {
-    showToast(`Failed to send email: ${escapeHtml(err.message || "unknown error")}`, "danger");
+    showToast(`Failed to queue email: ${escapeHtml(err.message || "unknown error")}`, "danger");
   }
 }
 
@@ -6052,24 +6056,63 @@ async function renderAdminMenu() {
   `;
 }
 
+async function monitorDroneUpdateWorker() {
+  let observedActiveWorker = false;
+  for (let attempt = 0; attempt < 180; attempt += 1) {
+    await new Promise((resolve) => window.setTimeout(resolve, 1000));
+    let job;
+    try {
+      job = await api("/admin/system/update-drone");
+    } catch (error) {
+      if (observedActiveWorker) {
+        showToast("The Drone API is restarting to load the update. Reloading shortly...", "success", 8000);
+        window.setTimeout(() => window.location.reload(), 5000);
+        return;
+      }
+      showToast(`Could not read backend update status: ${escapeHtml(error.message || "unknown error")}`, "warning", 10000);
+      return;
+    }
+    const status = String(job.status || "idle");
+    if (["queued", "checking", "downloading"].includes(status)) {
+      observedActiveWorker = true;
+      continue;
+    }
+    if (status === "restart_scheduled") {
+      showToast("Web/API code, images, and the Ports client are installed. The Drone API is restarting...", "success", 10000);
+      window.setTimeout(() => window.location.reload(), 5000);
+      return;
+    }
+    if (status === "current") {
+      showToast("The backend worker confirmed that this Drone is already current.", "success", 7000);
+      return;
+    }
+    if (status === "error") {
+      showToast(`Backend update failed: ${escapeHtml(job.detail || job.error || "unknown error")}`, "danger", 12000);
+      return;
+    }
+    showToast(`Backend update check finished: ${escapeHtml(job.detail || status)}.`, "info", 8000);
+    return;
+  }
+  showToast("The backend update is still running. It will continue even if this browser closes.", "info", 10000);
+}
+
 async function updateDroneApp() {
-  if (!window.confirm("Download the latest Drone release and restart the Drone app process? Batocera will keep running.")) return;
-  const toast = showToast('<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Downloading Drone update...', "info", null);
+  if (!window.confirm("Ask the Drone API worker to check for and install the latest complete release? It will update web/API code, images, and the Ports client, then restart only the Drone service.")) return;
+  const toast = showToast('<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Submitting update check to the Drone API worker...', "info", null);
   try {
     const payload = await apiPost("/admin/system/update-drone", {});
     dismissToast(toast);
-    let message = `Drone update downloaded. Restarting app process... (${Math.round((payload.duration_ms || 0) / 1000)}s). Reloading shortly.`;
-    if (payload.ports_client && payload.ports_client.status === "error") {
-      message += " (The Ports client bundle could not be refreshed this time -- it'll retry on the next update.)";
-    }
-    showToast(message, "success", 10000);
-    setTimeout(() => {
-      window.location.href = `${window.location.pathname}${window.location.search}#home`;
-      window.location.reload();
-    }, 8000);
+    showToast(
+      payload.already_running
+        ? "The Drone API worker is already checking for an update. This page is only displaying its status."
+        : "Update check accepted. The Drone API worker owns the download and install; it continues if this browser closes.",
+      "info",
+      10000,
+    );
+    void monitorDroneUpdateWorker();
   } catch (error) {
     dismissToast(toast);
-    showToast(`Drone update request ended unexpectedly: ${escapeHtml(error.message || "unknown error")}. If the service restarted, reload this page in a few seconds.`, "warning", 12000);
+    showToast(`Could not submit the backend update check: ${escapeHtml(error.message || "unknown error")}.`, "warning", 12000);
   }
 }
 
@@ -8013,10 +8056,19 @@ function renderSmtpTestNote(payload) {
   if (result.status === "ok") {
     return `<div class="small text-success mb-3"><i class="bi bi-check-circle me-1"></i>Test email sent successfully${when ? ` (${when})` : ""}.</div>`;
   }
+  if (result.status === "queued") {
+    return `<div class="small text-muted mb-3"><i class="bi bi-hourglass-split me-1"></i>Test email is queued for the backend mail worker${when ? ` (${when})` : ""}.</div>`;
+  }
+  if (result.status === "relayed") {
+    return `<div class="small text-muted mb-3"><i class="bi bi-diagram-3 me-1"></i>Test email was relayed to the SMTP owner's backend worker${when ? ` (${when})` : ""}.</div>`;
+  }
   return `<div class="small text-danger mb-3"><i class="bi bi-exclamation-triangle me-1"></i>Last test email failed${when ? ` (${when})` : ""}: ${escapeHtml(result.error || "unknown error")}</div>`;
 }
 
 function renderSmtpDigestNote(payload) {
+  if (payload.delivery_mode === "relay" || payload.source_peer_id) {
+    return `<div class="small text-muted mb-3"><i class="bi bi-diagram-3 me-1"></i>Automatic notifications are relayed by this Drone API worker to <strong>${escapeHtml(payload.source_peer_name || payload.source_peer_id || "the SMTP owner")}</strong>; no digest email is sent locally.</div>`;
+  }
   if (payload.last_digest_error) {
     return `<div class="small text-danger mb-3"><i class="bi bi-exclamation-triangle me-1"></i>Last digest email failed: ${escapeHtml(payload.last_digest_error)}</div>`;
   }
@@ -8060,11 +8112,13 @@ async function renderSmtpPage() {
     setLoading(false);
   }
   const notify = payload.notify || {};
+  const isRelay = payload.delivery_mode === "relay" || Boolean(payload.source_peer_id);
+  const smtpOwner = escapeHtml(payload.source_peer_name || payload.source_peer_id || "the SMTP owner");
   content.innerHTML = `
     <div class="card mb-3">
       <div class="card-header"><i class="bi bi-envelope-gear me-2"></i>SMTP Settings</div>
       <div class="card-body">
-        <p class="text-muted small">Used to send the activity digest and the Test Email below.</p>
+        <p class="text-muted small">Used by the backend worker for activity digests, test messages, and backup attachments.</p>
         <div class="row g-2 mb-2">
           <div class="col-sm-6 col-lg-4">
             <label class="form-label mb-1" for="smtpHost">Host</label>
@@ -8097,7 +8151,7 @@ async function renderSmtpPage() {
             <input class="form-control form-control-sm" type="email" id="smtpFromAddress" value="${escapeHtml(payload.from_address || "")}">
           </div>
           <div class="col-sm-6 col-lg-4">
-            <label class="form-label mb-1" for="smtpRecipientEmail">Send digest/test mail to</label>
+            <label class="form-label mb-1" for="smtpRecipientEmail">Send all mail to</label>
             <input class="form-control form-control-sm" type="email" id="smtpRecipientEmail" value="${escapeHtml(payload.recipient_email || "")}">
           </div>
         </div>
@@ -8109,17 +8163,31 @@ async function renderSmtpPage() {
     </div>
     <div class="card mb-3">
       <div class="card-body">
+        ${isRelay ? `
+        <div class="d-flex gap-2 align-items-start">
+          <i class="bi bi-diagram-3 text-primary mt-1"></i>
+          <div>
+            <div class="fw-semibold">Relay-only notification delivery</div>
+            <p class="text-muted small mb-0 mt-1">This Drone's API worker forwards notification events to <strong>${smtpOwner}</strong>. It never sends automatic digest mail itself, and the owner controls the delivery interval.</p>
+          </div>
+        </div>
+        ` : `
         <div class="form-check form-switch">
           <input class="form-check-input" type="checkbox" role="switch" id="smtpEnabled" ${payload.smtp_enabled ? "checked" : ""} onchange="setSmtpEnabled(this.checked)">
-          <label class="form-check-label" for="smtpEnabled">Send mail from this drone</label>
+          <label class="form-check-label" for="smtpEnabled">Send automatic digest mail from this SMTP owner</label>
         </div>
-        <p class="text-muted small mb-0 mt-1">Controls the Test Email button and the activity-digest job below. Independent of sharing below -- a drone can use settings shared by a peer but still keep this off, or vice versa.</p>
+        <p class="text-muted small mb-0 mt-1">Controls the API worker's automatic digest job. Test Email remains an explicit API action.</p>
+        `}
       </div>
     </div>
     <div class="card mb-3">
       <div class="card-header"><i class="bi bi-bell me-2"></i>Email Notifications</div>
       <div class="card-body">
-        <p class="text-muted small mb-2">How often this drone checks for new activity and sends a digest email if anything qualifies.</p>
+        <div class="alert alert-info py-2 small"><i class="bi bi-hdd-network me-1"></i>All email—including digests, tests, and backup attachments—uses one persistent Drone API queue. The backend worker owns SMTP delivery; Web and Ports UIs only submit actions and display status.</div>
+        ${isRelay ? `
+        <p class="text-muted small mb-0">Digest frequency and event filters are managed on <strong>${smtpOwner}</strong>. This Drone relays every eligible backend event so the owner can apply those settings once for the combined fleet digest.</p>
+        ` : `
+        <p class="text-muted small mb-2">How often this SMTP owner's API worker checks for new local or relayed activity and sends one combined digest when anything qualifies.</p>
         <div class="row g-2 align-items-end mb-3">
           <div class="col-sm-4 col-lg-3">
             <label class="form-label mb-1" for="smtpDigestIntervalMinutes">Check every</label>
@@ -8145,6 +8213,7 @@ async function renderSmtpPage() {
             </div>
           `).join("")}
         </div>
+        `}
       </div>
     </div>
     <div class="card mb-3">
@@ -8216,13 +8285,13 @@ async function saveSmtpSettings() {
 
 async function sendSmtpTestEmail() {
   const button = document.getElementById("smtpTestBtn");
-  if (button) { button.disabled = true; button.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Sending...'; }
+  if (button) { button.disabled = true; button.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Queueing...'; }
   try {
     const result = await apiPost("/admin/smtp/test", {});
-    if (result.status === "ok") {
-      showToast("Test email sent.", "success");
+    if (result.status === "queued") {
+      showToast("Test email queued. The backend mail worker will send it even if you leave this page.", "success", 7000);
     } else {
-      showToast(`Test email failed: ${escapeHtml(result.error || "unknown error")}`, "danger", 8000);
+      showToast(`Test email could not be queued: ${escapeHtml(result.error || "unknown error")}`, "danger", 8000);
     }
   } catch (err) {
     showToast(`Test email failed: ${escapeHtml(err.message || "unknown error")}`, "danger", 8000);
@@ -8236,7 +8305,7 @@ async function setSmtpEnabled(enabled) {
   const checkbox = document.getElementById("smtpEnabled");
   try {
     await apiPost("/admin/smtp/enabled", { enabled });
-    showToast(`Sending mail from this drone ${enabled ? "enabled" : "disabled"}.`, "success");
+    showToast(`Automatic digest mail ${enabled ? "enabled" : "disabled"}.`, "success");
   } catch (err) {
     if (checkbox) checkbox.checked = !enabled;
     showToast(`Failed to save setting: ${escapeHtml(err.message || "unknown error")}`, "danger");
@@ -10209,6 +10278,8 @@ function renderSwarmDroneCard(drone) {
         <span><strong>${Number(counts.artwork || 0)}</strong> artwork</span>
         <span><strong>${systems.length}</strong> systems</span>
       </div>`
+    : drone.online && drone.summary_error
+      ? `<div class="small text-warning mt-2"><i class="bi bi-hourglass-split me-1" aria-hidden="true"></i>Online; inventory is delayed: ${escapeHtml(drone.summary_error)}</div>`
     : drone.error
       ? `<div class="small text-warning mt-2"><i class="bi bi-exclamation-triangle me-1" aria-hidden="true"></i>${escapeHtml(drone.error)}</div>`
       : "";
@@ -10241,22 +10312,6 @@ function swarmBrowsePeerAssets(peerId) {
   setHash("#admin/transfers");
 }
 
-async function offerNetworkShareUiRefresh(actionLabel) {
-  if (!window.confirm(`${actionLabel}\n\nRestart EmulationStation now so Batocera rebuilds its game list? The Batocera UI will briefly reload.`)) {
-    showToast("Restart EmulationStation from Controls when you are ready to refresh the Batocera game list.", "info", 8000);
-    return;
-  }
-  setLoading(true, "Refreshing the Batocera game list...");
-  try {
-    await apiPost("/admin/system/restart-emulationstation", {});
-    showToast("EmulationStation restarted; Batocera is rebuilding the game list.", "success", 8000);
-  } catch (err) {
-    showToast(`The network reference is saved, but EmulationStation could not be restarted: ${escapeHtml(err.message || "unknown error")}`, "warning", 10000);
-  } finally {
-    setLoading(false);
-  }
-}
-
 async function swarmReferencePeerRoms(peerId, peerName) {
   const confirmed = window.confirm(
     `Reference ${peerName}'s whole ROM library and BIOS folder over the network?\n\n` +
@@ -10270,12 +10325,17 @@ async function swarmReferencePeerRoms(peerId, peerName) {
   try {
     setLoading(true, `Referencing ${peerName}'s ROMs and BIOS...`);
     const result = await apiPost(`/admin/network-shares/${encodeURIComponent(peerId)}/enable`, {});
-    if (result.status !== "mounted") {
+    if (result.status === "enabling" || result.status === "pending") {
+      showToast(
+        `Reference accepted for ${escapeHtml(peerName)}. Drone is mounting it in the background; the operation continues if this browser closes.`,
+        "info",
+        10000,
+      );
+    } else if (result.status !== "mounted") {
       showToast(`Could not reference ${escapeHtml(peerName)}: ${escapeHtml(result.status_detail || "mount failed")}`, "danger");
     } else {
       const transport = String(result.protocol || "network").toUpperCase();
       showToast(`Now referencing ${escapeHtml(peerName)}'s ROMs and BIOS via ${escapeHtml(transport)}`, "success");
-      await offerNetworkShareUiRefresh(`${peerName}'s network library is ready.`);
     }
   } catch (err) {
     showToast(`Could not reference ${escapeHtml(peerName)}: ${escapeHtml(err.message || "unknown error")}`, "danger");
@@ -12350,7 +12410,7 @@ async function renderAdminControlsPage() {
           <button class="btn btn-outline-primary" onclick="setHash('#admin/controls')"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>
           <div class="form-check form-switch mb-0 px-2 d-flex align-items-center">
             <input class="form-check-input ms-0 me-2" type="checkbox" role="switch" id="droneAutoUpdateCheckbox" ${autoUpdate.enabled ? "checked" : ""} onchange="setDroneAutoUpdate(this)">
-            <label class="form-check-label text-nowrap" for="droneAutoUpdateCheckbox" title="Check for a newer Drone release every 60 seconds and update in the background">Auto-update Drone</label>
+            <label class="form-check-label text-nowrap" for="droneAutoUpdateCheckbox" title="The Drone API worker checks every 60 seconds and installs both UI bundles in the background">Auto-update Drone</label>
           </div>
           <button class="btn btn-outline-warning" onclick="updateDroneApp()"><i class="bi bi-cloud-download me-1"></i>Update Drone</button>
           <button class="btn btn-outline-danger" id="restartEsBtn" onclick="restartEmulationStation()"><i class="bi bi-arrow-clockwise me-1"></i>Restart EmulationStation</button>

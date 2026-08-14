@@ -60,26 +60,27 @@ class NetworkShareEnableHandlerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(self, Path(tmp))
             handler = _handler(settings)
-            with mock.patch.object(network_share_manager, "enable", return_value={"status": "mounted", "peer_id": "p1"}):
+            with mock.patch.object(network_share_manager, "request_enable", return_value={"status": "mounted", "peer_id": "p1"}):
                 handler._handle_admin_network_share_enable("p1")
             status, payload = handler.response
             self.assertEqual(status, 200)
             self.assertEqual(payload["status"], "mounted")
 
-    def test_enable_returns_502_on_mount_error(self) -> None:
+    def test_enable_returns_202_when_background_mount_is_accepted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(self, Path(tmp))
             handler = _handler(settings)
-            with mock.patch.object(network_share_manager, "enable", return_value={"status": "error", "status_detail": "mount failed"}):
+            with mock.patch.object(network_share_manager, "request_enable", return_value={"status": "enabling", "status_detail": "mount queued"}):
                 handler._handle_admin_network_share_enable("p1")
             status, payload = handler.response
-            self.assertEqual(status, 502)
+            self.assertEqual(status, 202)
+            self.assertEqual(payload["status"], "enabling")
 
     def test_enable_returns_400_when_peer_not_paired(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(self, Path(tmp))
             handler = _handler(settings)
-            with mock.patch.object(network_share_manager, "enable", side_effect=ValueError("not a paired peer")):
+            with mock.patch.object(network_share_manager, "request_enable", side_effect=ValueError("not a paired peer")):
                 handler._handle_admin_network_share_enable("unknown")
             status, payload = handler.response
             self.assertEqual(status, 400)
@@ -94,7 +95,7 @@ class NetworkShareEnableHandlerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             settings = _build_settings(self, Path(tmp))
             handler = _handler(settings)
-            with mock.patch.object(network_share_manager, "enable", return_value={"status": "mounted", "peer_id": "58:47:ca:7e:38:57"}) as enable:
+            with mock.patch.object(network_share_manager, "request_enable", return_value={"status": "mounted", "peer_id": "58:47:ca:7e:38:57"}) as enable:
                 handler._handle_admin_network_share_enable("58%3A47%3Aca%3A7e%3A38%3A57")
             enable.assert_called_once_with(settings, "58:47:ca:7e:38:57")
 

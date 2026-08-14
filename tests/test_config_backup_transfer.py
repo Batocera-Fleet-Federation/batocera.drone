@@ -21,6 +21,7 @@ from app.storage import config_backup_store
 from app.transfer.download_manager import DownloadManager
 from app.transfer.peer_download import _download_config_backup_from_peer
 from app.web import handlers_peer
+from app.web import handlers_config_backup
 
 
 def _settings(root: Path) -> Settings:
@@ -311,7 +312,7 @@ class EmailBackupTests(unittest.TestCase):
             result = config_backup.email_backup(settings, row["id"])
             self.assertEqual(result["status"], "not_found")
 
-    def test_sends_with_metadata_in_body(self) -> None:
+    def test_queues_with_metadata_and_attachment(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
             settings = _settings(root)
@@ -323,17 +324,24 @@ class EmailBackupTests(unittest.TestCase):
             )
             calls = []
 
-            def fake_send(settings, subject, body, attachment_path, attachment_filename):
-                calls.append((subject, body, attachment_path, attachment_filename))
+            def fake_queue(settings, **job):
+                calls.append(job)
+                return {"status": "queued", "job_id": 7, "queued_at": "2026-08-14T12:00:00+00:00"}
 
             with mock.patch("app.device.config_backup._smtp.get_settings", return_value={"has_config": True}), mock.patch(
-                "app.device.config_backup._smtp.send_mail_with_attachment", side_effect=fake_send
-            ):
+                "app.device.config_backup._smtp.queue_mail", side_effect=fake_queue
+            ), mock.patch(
+                "app.device.config_backup._smtp.send_mail_with_attachment"
+            ) as direct_send:
                 result = config_backup.email_backup(settings, row["id"])
 
-            self.assertEqual(result["status"], "sent")
+            direct_send.assert_not_called()
+            self.assertEqual(result["status"], "queued")
             self.assertEqual(len(calls), 1)
-            subject, body, attachment_path, attachment_filename = calls[0]
+            subject = calls[0]["subject"]
+            body = calls[0]["body"]
+            attachment_path = calls[0]["attachment_path"]
+            attachment_filename = calls[0]["attachment_filename"]
             self.assertIn("Weekly", subject)
             self.assertIn("Weekly", body)
             self.assertIn("desc", body)
@@ -341,7 +349,7 @@ class EmailBackupTests(unittest.TestCase):
             self.assertEqual(attachment_filename, "a.tar.gz")
             self.assertEqual(attachment_path, directory / "a.tar.gz")
 
-    def test_send_failure_surfaces_smtp_error(self) -> None:
+    def test_queue_result_is_returned_without_opening_smtp(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "userdata"
             settings = _settings(root)
@@ -351,14 +359,48 @@ class EmailBackupTests(unittest.TestCase):
             config_backup_store.mark_complete(
                 settings, row["id"], size_bytes=13, included_file_count=1, skipped_file_count=0, skipped_bytes=0
             )
-            from app.device.smtp_manager import SmtpSendError
-
             with mock.patch("app.device.config_backup._smtp.get_settings", return_value={"has_config": True}), mock.patch(
-                "app.device.config_backup._smtp.send_mail_with_attachment", side_effect=SmtpSendError("connection refused")
-            ):
+                "app.device.config_backup._smtp.queue_mail",
+                return_value={"status": "queued", "job_id": 9, "queued_at": "2026-08-14T12:00:00+00:00"},
+            ), mock.patch("app.device.config_backup._smtp.send_mail_with_attachment") as direct_send:
                 result = config_backup.email_backup(settings, row["id"])
-            self.assertEqual(result["status"], "error")
-            self.assertIn("connection refused", result["error"])
+            direct_send.assert_not_called()
+            self.assertEqual(result["status"], "queued")
+            self.assertEqual(result["job_id"], 9)
+
+
+class EmailBackupHandlerTests(unittest.TestCase):
+    class Handler(handlers_config_backup.HandlersConfigBackupMixin):
+        def __init__(self, settings):
+            self.settings = settings
+            self.response = None
+
+        def _send_json(self, status_code, payload):
+            self.response = (status_code, payload)
+
+    def test_queued_backup_email_returns_202(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _settings(Path(tmp) / "userdata")
+            handler = self.Handler(settings)
+            with mock.patch.object(
+                config_backup,
+                "email_backup",
+                return_value={"status": "queued", "job_id": 11},
+            ):
+                handler._handle_admin_config_backup_email("5")
+            self.assertEqual(handler.response, (202, {"status": "queued", "job_id": 11}))
+
+    def test_validation_outcome_remains_synchronous(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _settings(Path(tmp) / "userdata")
+            handler = self.Handler(settings)
+            with mock.patch.object(
+                config_backup,
+                "email_backup",
+                return_value={"status": "not_configured"},
+            ):
+                handler._handle_admin_config_backup_email("5")
+            self.assertEqual(handler.response, (200, {"status": "not_configured"}))
 
 
 if __name__ == "__main__":

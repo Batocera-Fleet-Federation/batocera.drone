@@ -664,6 +664,77 @@ def _peer_post_json_for_peer(
     raise ValueError("no peer address available")
 
 
+def _peer_download_file_for_peer(
+    peer: dict,
+    endpoint: str,
+    destination: Path,
+    settings: Settings,
+    *,
+    peer_id: Optional[str] = None,
+    timeout: float = 120,
+    max_bytes: Optional[int] = None,
+) -> tuple[int, str]:
+    """Download a cert-pinned peer file using the normal route failover.
+
+    This is intentionally worker-facing rather than browser-facing.  The
+    centralized mail dispatcher uses it to retrieve a satellite's queued
+    config-backup attachment before opening the owner's SMTP connection.
+    """
+    path = str(endpoint or "").strip()
+    if not path.startswith("/"):
+        raise ValueError("peer endpoint must start with /")
+    normalized_peer_id = str(
+        peer_id or peer.get("drone_id") or peer.get("device_id") or peer.get("id") or ""
+    ).strip()
+    addresses = _peer_address_candidates(peer, settings=settings, peer_id=normalized_peer_id)
+    if not addresses:
+        raise ValueError("no peer address available")
+    last_error: Optional[Exception] = None
+    for index, address in enumerate(addresses):
+        attempt_timeout = float(timeout)
+        if index < len(addresses) - 1:
+            attempt_timeout = min(attempt_timeout, PEER_CHECK_TIMEOUT_SECONDS)
+        url = f"{address}{path}"
+        cafile = _peer_trust_cafile(settings, peer_id=normalized_peer_id)
+        if url.startswith("https://") and normalized_peer_id and not cafile:
+            raise ssl.SSLError(f"no trusted certificate cached for peer {normalized_peer_id}")
+        request = Request(url, headers={"Accept": "application/octet-stream", "User-Agent": "batocera-drone-peer/1.0"})
+        try:
+            total = 0
+            with urlopen(
+                request,
+                timeout=attempt_timeout,
+                context=_drone_client_ssl_context(settings, url, verify=bool(cafile), cafile=cafile),
+            ) as response, open(destination, "wb") as output:
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if max_bytes is not None and total > int(max_bytes):
+                        raise ValueError(f"peer attachment exceeds {int(max_bytes)} bytes")
+                    output.write(chunk)
+            _remember_successful_peer_route(settings, normalized_peer_id, address)
+            return total, address
+        except HTTPError:
+            raise
+        except ValueError:
+            try:
+                destination.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+        except (OSError, URLError, ssl.SSLError) as error:
+            last_error = error
+            try:
+                destination.unlink(missing_ok=True)
+            except OSError:
+                pass
+    if last_error is not None:
+        raise last_error
+    raise ValueError("no peer address available")
+
+
 def _check_peer(settings: Settings, peer: dict, config: Optional[dict] = None) -> dict:
     target_id = str(peer.get("drone_id") or peer.get("device_id") or peer.get("id") or "")
     peer_id = target_id

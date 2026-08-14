@@ -10,9 +10,10 @@ import sys
 import tarfile
 import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import Event, Lock, Thread
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.parse import unquote, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
@@ -30,6 +31,9 @@ except ImportError:  # pragma: no cover - flat (no `app.` prefix) package mode
     from storage import update_history_store as _update_history_store  # type: ignore
 
 DRONE_LATEST_ARCHIVE_URL = "https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/drone-app.tar.gz"
+DRONE_RELEASE_ARCHIVE_URL_TEMPLATE = (
+    "https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/download/{version}/drone-app.tar.gz"
+)
 DRONE_LATEST_RELEASE_URL = "https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest"
 # Ports client (ports-client/) bundles are attached to the *same* GitHub
 # release as drone-app.tar.gz (see .github/workflows/release.yml's "Build
@@ -40,11 +44,16 @@ DRONE_PORTS_CLIENT_ARCHIVE_URL_TEMPLATE = (
     "https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/latest/download/"
     "batocera-drone-client-{arch}.tar.gz"
 )
+DRONE_PORTS_CLIENT_RELEASE_ARCHIVE_URL_TEMPLATE = (
+    "https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/download/{version}/"
+    "batocera-drone-client-{arch}.tar.gz"
+)
 DRONE_PORTS_CLIENT_SUPPORTED_ARCHES = ("x86_64", "aarch64")
 DRONE_RELEASE_TAG_URL_TEMPLATE = "https://github.com/Batocera-Fleet-Federation/batocera.drone/releases/tag/{version}"
 DRONE_COMPARE_API_URL_TEMPLATE = "https://api.github.com/repos/Batocera-Fleet-Federation/batocera.drone/compare/{base}...{head}"
 DRONE_SELF_UPDATE_EXIT_CODE = 75
 DRONE_AUTO_UPDATE_FILE = "auto-update.enabled"
+DRONE_UPDATE_STATUS_FILE = "self-update-status.json"
 DRONE_AUTO_UPDATE_POLL_SECONDS = 60
 DRONE_SERVICE_BOOTSTRAP = Path(__file__).resolve().parents[1] / "service_bootstrap.sh"
 DRONE_SERVICE_PID_FILE = Path("/tmp/drone-server.pid")
@@ -56,10 +65,11 @@ RELEASE_NOTES_MAX_COMMITS = 50
 _DRONE_UPDATE_LOCK = Lock()
 # Separate from _DRONE_UPDATE_LOCK: the Ports client update touches a
 # completely different directory (roms/ports, not the Drone app's own work
-# dir), so it doesn't need to serialize against app updates -- only against
-# a second concurrent Ports client update (the poller and a manual "Update
-# Drone" click racing).
+# dir). The API worker installs it before taking the app-tree lock, while this
+# lock prevents two Ports bundle overlays from racing each other.
 _PORTS_CLIENT_UPDATE_LOCK = Lock()
+_DRONE_UPDATE_WORKERS_LOCK = Lock()
+_DRONE_UPDATE_WORKERS = {}
 _SEMANTIC_VERSION_PATTERN = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$")
 
 
@@ -94,6 +104,42 @@ def set_drone_auto_update_enabled(settings: Settings, enabled: bool) -> bool:
     temp_path.write_text("1\n" if enabled else "0\n", encoding="utf-8")
     temp_path.replace(path)
     return bool(enabled)
+
+
+def _drone_update_status_path(settings: Settings) -> Path:
+    return _drone_work_dir(settings) / DRONE_UPDATE_STATUS_FILE
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _write_drone_update_status(settings: Settings, payload: dict) -> dict:
+    """Atomically persist worker progress so either UI can reconnect later."""
+    path = _drone_update_status_path(settings)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    public = {
+        **payload,
+        "owner": "api_worker",
+        "updated_at": _now_iso(),
+    }
+    temp_path = path.with_suffix(".tmp")
+    temp_path.write_text(json.dumps(public, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    temp_path.replace(path)
+    return public
+
+
+def get_drone_update_status(settings: Settings) -> dict:
+    path = _drone_update_status_path(settings)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, ValueError):
+        payload = {"status": "idle"}
+    if not isinstance(payload, dict):
+        payload = {"status": "idle"}
+    payload["owner"] = "api_worker"
+    payload["current_version"] = _installed_drone_version(settings)
+    return payload
 
 
 def _semantic_version(value: str) -> Optional[Tuple[int, int, int]]:
@@ -213,8 +259,13 @@ def _resolve_within_stage(stage_dir: Path, relative_path: Path, *, member_name: 
     return target
 
 
-def _download_latest_drone_app_unlocked(settings: Settings) -> dict:
-    archive_url = os.environ.get("DRONE_APP_ARCHIVE_URL", DRONE_LATEST_ARCHIVE_URL)
+def _download_latest_drone_app_unlocked(settings: Settings, *, release_version: Optional[str] = None) -> dict:
+    default_archive_url = (
+        DRONE_RELEASE_ARCHIVE_URL_TEMPLATE.format(version=release_version)
+        if release_version
+        else DRONE_LATEST_ARCHIVE_URL
+    )
+    archive_url = os.environ.get("DRONE_APP_ARCHIVE_URL", default_archive_url)
     work_dir = _drone_work_dir(settings)
     work_dir.mkdir(parents=True, exist_ok=True)
     started_at = time.monotonic()
@@ -257,6 +308,28 @@ def _download_latest_drone_app_unlocked(settings: Settings) -> dict:
         missing = wanted_roots - extracted_roots
         if missing:
             raise ValueError(f"Drone archive is missing required directories: {', '.join(sorted(missing))}")
+        required_files = (
+            Path("app/main.py"),
+            Path("app/drone_api.py"),
+            Path("app/VERSION"),
+            Path("app/web/templates/index.html"),
+            Path("app/web/static/js/drone.js"),
+            Path("app/web/static/css/drone.css"),
+            Path("content/batocera-swarm-mascot.jpg"),
+            Path("content/drone.png"),
+        )
+        missing_files = [
+            str(path)
+            for path in required_files
+            if not (stage_dir / path).is_file() or (stage_dir / path).stat().st_size <= 0
+        ]
+        if missing_files:
+            raise ValueError(f"Drone archive is incomplete; missing web/API payload: {', '.join(missing_files)}")
+        archive_version = (stage_dir / "app" / "VERSION").read_text(encoding="utf-8", errors="ignore").splitlines()[0].strip()
+        if release_version and archive_version != release_version:
+            raise ValueError(
+                f"Drone archive version mismatch: expected {release_version}, found {archive_version or 'empty'}"
+            )
         copied_files = 0
         for name in sorted(wanted_roots):
             source = stage_dir / name
@@ -281,26 +354,27 @@ def _ports_client_dir(settings: Settings) -> Path:
     return settings.roms_root / "ports"
 
 
-def _download_latest_ports_client_unlocked(settings: Settings) -> dict:
+def _download_latest_ports_client_unlocked(settings: Settings, *, release_version: Optional[str] = None) -> dict:
     """Downloads and installs the Ports client bundle matching this device's
     CPU arch into <roms_root>/ports -- the same tarball layout (a top-level
     launcher script + .data/batocera-drone-client/, see
     ports-client/scripts/build_release_bundle.sh) that
     batocera_install.sh's install_ports_client() extracts there directly.
 
-    Deliberately best-effort at the call site (_download_latest_ports_client
-    below): an unsupported arch, an unreachable release asset, or any other
-    failure here must never fail or skip the Drone app's own update -- the
-    Ports client is a secondary, independently-versioned artifact riding
-    along on the same release, not a required part of it.
+    On a supported architecture this is a required part of a complete Drone
+    release. The caller installs it before advancing the web/API app version,
+    ensuring a missing or incomplete Ports asset leaves the release retryable.
     """
     arch = _ports_client_bundle_arch()
     if arch is None:
         return {"status": "unsupported_arch", "arch": platform.machine()}
 
-    archive_url = os.environ.get(
-        "DRONE_PORTS_CLIENT_ARCHIVE_URL", DRONE_PORTS_CLIENT_ARCHIVE_URL_TEMPLATE.format(arch=arch)
+    default_archive_url = (
+        DRONE_PORTS_CLIENT_RELEASE_ARCHIVE_URL_TEMPLATE.format(version=release_version, arch=arch)
+        if release_version
+        else DRONE_PORTS_CLIENT_ARCHIVE_URL_TEMPLATE.format(arch=arch)
     )
+    archive_url = os.environ.get("DRONE_PORTS_CLIENT_ARCHIVE_URL", default_archive_url)
     ports_dir = _ports_client_dir(settings)
     ports_dir.mkdir(parents=True, exist_ok=True)
     started_at = time.monotonic()
@@ -330,6 +404,21 @@ def _download_latest_ports_client_unlocked(settings: Settings) -> dict:
                 with source, target.open("wb") as output:
                     shutil.copyfileobj(source, output)
 
+        required_files = (
+            Path("batocera-drone-client.sh"),
+            Path(".data/batocera-drone-client/main.py"),
+            Path(".data/batocera-drone-client/client/endpoints.py"),
+            Path(".data/batocera-drone-client/ui/app.py"),
+            Path(".data/batocera-drone-client/ui/assets/logo.png"),
+        )
+        missing_files = [
+            str(path)
+            for path in required_files
+            if not (stage_dir / path).is_file() or (stage_dir / path).stat().st_size <= 0
+        ]
+        if missing_files:
+            raise ValueError(f"Ports client archive is incomplete; missing: {', '.join(missing_files)}")
+
         copied_files = _overlay_drone_release_tree(stage_dir, ports_dir)
         # _overlay_drone_release_tree chmods every copied file 0o664 (right
         # for the app's own tree, which is never executed directly) -- the
@@ -352,21 +441,32 @@ def _download_latest_ports_client_unlocked(settings: Settings) -> dict:
     }
 
 
-def _download_latest_ports_client(settings: Settings) -> dict:
+def _download_latest_ports_client(settings: Settings, *, release_version: Optional[str] = None) -> dict:
     try:
         with _PORTS_CLIENT_UPDATE_LOCK:
-            return _download_latest_ports_client_unlocked(settings)
-    except Exception as error:  # noqa: BLE001 - best-effort, see docstring above
+            return _download_latest_ports_client_unlocked(settings, release_version=release_version)
+    except Exception as error:  # noqa: BLE001 - convert worker failure to structured status
         message = f"{error.__class__.__name__}: {error}"
-        print(f"Ports client update failed (Drone app update unaffected): {message}", file=sys.stderr, flush=True)
+        print(
+            f"Ports client update failed; complete Drone release will be retried: {message}",
+            file=sys.stderr,
+            flush=True,
+        )
         return {"status": "error", "error": message}
 
 
-def _download_latest_drone_app(settings: Settings) -> dict:
+def _download_latest_drone_app(settings: Settings, *, release_version: Optional[str] = None) -> dict:
     previous_version = _installed_drone_version(settings)
+    # Install the architecture-matched Ports runtime first. On supported
+    # Batocera architectures an error aborts the overall update before the
+    # app VERSION changes, so the API worker retries the whole release on its
+    # next check instead of declaring the web UI current while Ports is stale.
+    ports_client = _download_latest_ports_client(settings, release_version=release_version)
+    if ports_client.get("status") == "error":
+        raise RuntimeError(f"Ports client bundle is required: {ports_client.get('error') or 'update failed'}")
     with _DRONE_UPDATE_LOCK:
-        result = _download_latest_drone_app_unlocked(settings)
-    result["ports_client"] = _download_latest_ports_client(settings)
+        result = _download_latest_drone_app_unlocked(settings, release_version=release_version)
+    result["ports_client"] = ports_client
     new_version = _installed_drone_version(settings)
     release_url = _release_url_for_version(new_version) if new_version else ""
     release_notes = _fetch_commit_notes(previous_version, new_version)
@@ -441,8 +541,13 @@ def _restart_drone_process_soon(delay_seconds: float = 1.0) -> None:
     Thread(target=restart, name="drone-self-update-restart", daemon=True).start()
 
 
-def _run_drone_auto_update_check_once(settings: Settings) -> dict:
-    if not is_drone_auto_update_enabled(settings):
+def _run_drone_auto_update_check_once(
+    settings: Settings,
+    *,
+    respect_auto_update_setting: bool = True,
+    progress_callback: Optional[Callable[..., None]] = None,
+) -> dict:
+    if respect_auto_update_setting and not is_drone_auto_update_enabled(settings):
         return {"status": "disabled"}
 
     current_version = _installed_drone_version(settings)
@@ -450,29 +555,128 @@ def _run_drone_auto_update_check_once(settings: Settings) -> dict:
     if current_semantic_version is None:
         return {"status": "skipped", "reason": "installed version is not semantic", "current_version": current_version}
 
+    if progress_callback:
+        progress_callback("checking", "Checking GitHub for the latest complete Drone release", current_version=current_version)
     latest_version = _latest_drone_release_version()
     latest_semantic_version = _semantic_version(latest_version)
     if latest_semantic_version is None or latest_semantic_version <= current_semantic_version:
         return {"status": "current", "current_version": current_version, "latest_version": latest_version}
 
     # The checkbox may have been cleared while the network check was in flight.
-    if not is_drone_auto_update_enabled(settings):
+    if respect_auto_update_setting and not is_drone_auto_update_enabled(settings):
         return {"status": "disabled"}
 
     print(
-        f"Automatic Drone update found: installed={current_version} latest={latest_version}; downloading...",
+        f"Drone update worker found: installed={current_version} latest={latest_version}; downloading...",
         file=sys.stdout,
         flush=True,
     )
-    result = _download_latest_drone_app(settings)
+    if progress_callback:
+        progress_callback(
+            "downloading",
+            "Downloading and installing web/API code, web images, and the Ports client bundle",
+            current_version=current_version,
+            latest_version=latest_version,
+        )
+    # Pin every artifact to the version discovered by the check. This avoids
+    # mixing Ports and web/API files if GitHub's "latest" release changes
+    # between the HEAD request and the two downloads.
+    result = _download_latest_drone_app(settings, release_version=latest_version)
     result.update({"status": "updated", "current_version": current_version, "latest_version": latest_version})
     print(
-        f"Automatic Drone update downloaded: {current_version} -> {latest_version}; restarting app process.",
+        f"Drone update worker downloaded: {current_version} -> {latest_version}; restarting app process.",
         file=sys.stdout,
         flush=True,
     )
+    if progress_callback:
+        progress_callback(
+            "restart_scheduled",
+            "Both UI bundles are installed; restarting the Drone API service",
+            current_version=current_version,
+            latest_version=latest_version,
+            ports_client=result.get("ports_client"),
+        )
     _restart_drone_process_soon()
     return result
+
+
+def request_drone_update_check(settings: Settings, *, source: str = "manual") -> dict:
+    """Queue a complete update check on an API-owned background worker.
+
+    Web and Ports clients are intentionally limited to this submission API
+    and the read-only status API. They never contact GitHub, extract release
+    archives, modify the installed tree, or restart the service themselves.
+    """
+    normalized_source = "automatic" if source == "automatic" else "manual"
+    key = str(_drone_work_dir(settings))
+    with _DRONE_UPDATE_WORKERS_LOCK:
+        existing = _DRONE_UPDATE_WORKERS.get(key)
+        if existing is not None and existing.is_alive():
+            return {**get_drone_update_status(settings), "accepted": False, "already_running": True}
+
+        queued = _write_drone_update_status(
+            settings,
+            {
+                "status": "queued",
+                "source": normalized_source,
+                "accepted": True,
+                "requested_at": _now_iso(),
+                "detail": "Update check accepted by the Drone API worker",
+            },
+        )
+
+        def progress(status: str, detail: str, **extra) -> None:
+            _write_drone_update_status(
+                settings,
+                {
+                    "status": status,
+                    "source": normalized_source,
+                    "requested_at": queued["requested_at"],
+                    "detail": detail,
+                    **extra,
+                },
+            )
+
+        def run() -> None:
+            try:
+                result = _run_drone_auto_update_check_once(
+                    settings,
+                    respect_auto_update_setting=normalized_source == "automatic",
+                    progress_callback=progress,
+                )
+                status = "restart_scheduled" if result.get("status") == "updated" else str(result.get("status") or "complete")
+                _write_drone_update_status(
+                    settings,
+                    {
+                        **result,
+                        "status": status,
+                        "source": normalized_source,
+                        "requested_at": queued["requested_at"],
+                        "detail": (
+                            "Both UI bundles are installed; the Drone API service is restarting"
+                            if status == "restart_scheduled"
+                            else "The installed Drone release is already current"
+                            if status == "current"
+                            else str(result.get("reason") or "Update check completed")
+                        ),
+                    },
+                )
+            except Exception as error:  # noqa: BLE001 - worker must report failures instead of dying silently
+                _write_drone_update_status(
+                    settings,
+                    {
+                        "status": "error",
+                        "source": normalized_source,
+                        "requested_at": queued["requested_at"],
+                        "detail": f"{error.__class__.__name__}: {error}",
+                        "error": str(error),
+                    },
+                )
+
+        thread = Thread(target=run, name="drone-self-update-worker", daemon=True)
+        _DRONE_UPDATE_WORKERS[key] = thread
+        thread.start()
+        return queued
 
 
 def _start_drone_auto_update_poller(
@@ -491,19 +695,13 @@ def _start_drone_auto_update_poller(
     stopped = stop_event or Event()
 
     def poll() -> None:
-        last_error = ""
         while not stopped.wait(poll_seconds):
-            try:
-                result = _run_drone_auto_update_check_once(settings)
-                last_error = ""
-            except Exception as error:  # Best effort: an offline Drone must keep serving requests.
-                message = f"{error.__class__.__name__}: {error}"
-                if message != last_error:
-                    print(f"Automatic Drone update check failed: {message}", file=sys.stderr, flush=True)
-                    last_error = message
+            if not is_drone_auto_update_enabled(settings):
                 continue
-            if result.get("status") == "updated":
-                return
+            # The poller only schedules work. The same named API worker used
+            # by the manual endpoint owns GitHub I/O, validation, installation,
+            # persistent status, and restart scheduling for automatic checks.
+            request_drone_update_check(settings, source="automatic")
 
     thread = Thread(target=poll, name="drone-auto-update-poller", daemon=True)
     thread.start()

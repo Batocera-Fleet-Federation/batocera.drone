@@ -287,6 +287,30 @@ class RomAssetBiosMixin:
             raise FileNotFoundError()
         return self.bios_root.resolve()
 
+    def is_local_bios_path(self, relative_path: str) -> bool:
+        """Return whether a BIOS path is owned locally rather than referenced.
+
+        This check is deliberately lexical: following a symlink into an
+        unavailable network mount just to determine ownership could block the
+        peer API.  Parent checks also cover a future layout that references a
+        BIOS subdirectory instead of individual files.
+        """
+        relative = Path(str(relative_path or "").replace("\\", "/"))
+        if relative.is_absolute() or not relative.parts or ".." in relative.parts:
+            return False
+        bios_root = self.get_bios_root()
+        candidate = bios_root / relative
+        share_root = network_reference_root()
+        current = candidate
+        while current != bios_root:
+            if current.is_symlink() and is_network_reference(current, share_root):
+                return False
+            parent = current.parent
+            if parent == current or bios_root not in parent.parents and parent != bios_root:
+                return False
+            current = parent
+        return True
+
     def list_bios_entries(self) -> List[dict]:
         bios_root = self.get_bios_root()
         files: List[Tuple[Path, int]] = []
