@@ -7563,7 +7563,11 @@ async function addMagnetLink() {
   if (!magnetUri) return;
   try {
     const result = await apiPost("/admin/torrents/magnet", { magnet_uri: magnetUri });
-    showToast(`Added ${escapeHtml(result.name || "magnet link")} to the queue.`, "success");
+    if (result.status === "already_exists") {
+      showToast(`${escapeHtml(result.name || "Magnet link")} is already in the torrent list.`, "info");
+    } else {
+      showToast(`Added ${escapeHtml(result.name || "magnet link")} to the queue.`, "success");
+    }
     if (input) input.value = "";
     setTimeout(refreshTorrentsLive, 700);
   } catch (err) {

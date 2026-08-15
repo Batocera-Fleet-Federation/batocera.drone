@@ -1387,6 +1387,81 @@ class TorrentAria2ReconciliationTests(unittest.TestCase):
 
             self.assertEqual(manager.snapshot()["torrents"], [])
 
+    def test_does_not_adopt_content_gid_while_tracked_metadata_parent_is_handing_off(self) -> None:
+        """A magnet's content GID can appear in tellActive one poll before
+        tellStatus exposes it in the tracked metadata GID's followedBy list.
+        The reverse `following` link must keep reconciliation from adopting a
+        second registry row during that gap.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            added = manager.add_magnet(_MAGNET_URI)
+            manager._tick()
+            with manager._lock:
+                metadata_gid = manager._torrents[added["id"]]["gid"]
+
+            rpc.statuses["content-gid"] = {
+                "gid": "content-gid",
+                "status": "active",
+                "totalLength": "9000000000",
+                "completedLength": "468000000",
+                "downloadSpeed": "2700000",
+                "numSeeders": "8",
+                "connections": "24",
+                "following": metadata_gid,
+                "bittorrent": {"info": {"name": "Single download"}},
+            }
+            rpc.active = [rpc.statuses["content-gid"]]
+
+            # The child is visible, but the parent's tellStatus response has
+            # not caught up with a followedBy value yet.
+            manager._tick()
+            self.assertEqual(len(manager.snapshot()["torrents"]), 1)
+            with manager._lock:
+                self.assertEqual(manager._torrents[added["id"]]["gid"], metadata_gid)
+
+            # Once followedBy arrives, the existing row moves to the content
+            # GID instead of a second row having already adopted it.
+            rpc.statuses[metadata_gid]["status"] = "complete"
+            rpc.statuses[metadata_gid]["followedBy"] = ["content-gid"]
+            manager._tick()
+            self.assertEqual(len(manager.snapshot()["torrents"]), 1)
+            with manager._lock:
+                self.assertEqual(manager._torrents[added["id"]]["gid"], "content-gid")
+
+    def test_collapses_existing_adopted_row_that_shares_a_source_rows_gid(self) -> None:
+        """Self-heal duplicate rows produced by the old handoff race without
+        removing or restarting their one shared aria2 download.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            added = manager.add_magnet(_MAGNET_URI)
+            manager._tick()
+            with manager._lock:
+                original = manager._torrents[added["id"]]
+                shared_gid = original["gid"]
+                adopted = dict(original)
+                adopted.update(
+                    {
+                        "id": "adopted-copy",
+                        "torrent_file": "",
+                        "magnet_uri": "",
+                        "added_at": "2099-01-01T00:00:00+00:00",
+                        "queue_position": original["queue_position"] + 1,
+                    }
+                )
+                manager._torrents[adopted["id"]] = adopted
+
+            manager._tick()
+
+            rows = manager.snapshot()["torrents"]
+            self.assertEqual([row["id"] for row in rows], [added["id"]])
+            self.assertNotIn([shared_gid], rpc.method_calls("aria2.forceRemove"))
+
 
 _MAGNET_URI = (
     "magnet:?xt=urn:btih:c12fe1c06bba254a9dc9f519b335aa7c1367a88a&dn=Some+Test+File"
@@ -1531,6 +1606,20 @@ class TorrentMagnetTests(unittest.TestCase):
             self.assertTrue(entries[0]["is_magnet"])
             self.assertEqual(entries[0]["magnet_uri"], _MAGNET_URI)
             self.assertEqual(entries[0]["status"], "queued")
+
+    def test_add_magnet_is_idempotent_by_info_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = self._manager(Path(tmp), FakeRpc())
+            first = manager.add_magnet(_MAGNET_URI)
+            same_torrent_different_name = (
+                "magnet:?dn=Renamed+Copy&xt=urn:btih:C12FE1C06BBA254A9DC9F519B335AA7C1367A88A"
+            )
+
+            duplicate = manager.add_magnet(same_torrent_different_name)
+
+            self.assertEqual(duplicate["status"], "already_exists")
+            self.assertEqual(duplicate["id"], first["id"])
+            self.assertEqual(len(manager.snapshot()["torrents"]), 1)
 
     def test_tick_adds_magnet_via_add_uri_paused(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

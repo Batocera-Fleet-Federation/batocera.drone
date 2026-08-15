@@ -114,6 +114,7 @@ _TELL_STATUS_KEYS = [
     "bittorrent",
     "files",
     "followedBy",
+    "following",
     "dir",
 ]
 
@@ -344,6 +345,31 @@ def _magnet_display_name(magnet_uri: str) -> str:
     return "Magnet link"
 
 
+def _magnet_info_hash(magnet_uri: str) -> str:
+    """Return a canonical BitTorrent info-hash for duplicate detection.
+
+    Magnet links may spell the same hash with upper/lower-case hexadecimal or
+    the older 32-character base32 form. aria2 treats those as one torrent, so
+    Drone must do the same before allocating a second registry row.
+    """
+    query = magnet_uri.split("?", 1)[1] if "?" in magnet_uri else ""
+    params = parse_qs(query)
+    for topic in params.get("xt", []):
+        prefix = "urn:btih:"
+        if not topic.lower().startswith(prefix):
+            continue
+        raw_hash = topic[len(prefix) :].strip()
+        if re.fullmatch(r"[0-9a-fA-F]{40}", raw_hash):
+            return raw_hash.lower()
+        if re.fullmatch(r"[A-Za-z2-7]{32}", raw_hash):
+            try:
+                return base64.b32decode(raw_hash.upper()).hex()
+            except (ValueError, TypeError):
+                pass
+        return raw_hash.lower()
+    return ""
+
+
 class TorrentManager:
     """Watched-folder torrent queue backed by a local aria2c daemon."""
 
@@ -477,6 +503,87 @@ class TorrentManager:
                 entry.get("id") or "",
             ),
         )
+
+    def _deduplicate_shared_gid_entries_locked(self) -> bool:
+        """Collapse registry rows that provably own the same aria2 download.
+
+        The magnet metadata/content handoff race used to let reconciliation
+        adopt the content GID just before the original row learned about it.
+        On the next poll both rows pointed at the same GID, producing two UI
+        records with identical progress/rate/peer counts. Keep the real source
+        row and discard only source-less adopted copies (or duplicate magnet
+        rows with the same info-hash); never remove their shared aria2 GID.
+        """
+        by_gid: Dict[str, List[dict]] = {}
+        for entry in self._torrents.values():
+            gid = str(entry.get("gid") or "")
+            if gid:
+                by_gid.setdefault(gid, []).append(entry)
+
+        dirty = False
+        for entries in by_gid.values():
+            if len(entries) < 2:
+                continue
+            ordered = sorted(entries, key=lambda entry: (entry.get("added_at") or "", entry.get("id") or ""))
+            source_rows = [entry for entry in ordered if entry.get("torrent_file") or entry.get("magnet_uri")]
+            adopted_rows = [entry for entry in ordered if not entry.get("torrent_file") and not entry.get("magnet_uri")]
+
+            removals: List[dict] = []
+            if source_rows and adopted_rows:
+                keeper = source_rows[0]
+                removals = [entry for entry in ordered if entry is not keeper and entry in adopted_rows]
+            elif not source_rows:
+                keeper = ordered[0]
+                removals = ordered[1:]
+            else:
+                magnet_hashes = [_magnet_info_hash(str(entry.get("magnet_uri") or "")) for entry in source_rows]
+                if not magnet_hashes[0] or any(info_hash != magnet_hashes[0] for info_hash in magnet_hashes):
+                    # Separate watched .torrent files can be rediscovered if
+                    # their rows are removed, so only collapse source rows we
+                    # can prove are duplicate magnet submissions.
+                    continue
+                keeper = source_rows[0]
+                removals = source_rows[1:]
+
+            if not removals:
+                continue
+            freshest = max(
+                [keeper, *removals],
+                key=lambda entry: (
+                    int(entry.get("total_bytes") or 0),
+                    int(entry.get("completed_bytes") or 0),
+                    bool(entry.get("name")),
+                ),
+            )
+            if freshest is not keeper:
+                for field in (
+                    "name",
+                    "status",
+                    "message",
+                    "completed_at",
+                    "total_bytes",
+                    "completed_bytes",
+                    "progress_percent",
+                    "files",
+                    "download_dir",
+                    "retry_count",
+                    "retry_at",
+                    "last_error",
+                    "force_started",
+                    "seeding",
+                    "download_speed_bps",
+                    "upload_speed_bps",
+                    "num_seeders",
+                    "connections",
+                    "eta_seconds",
+                    "_pending_complete_gid",
+                ):
+                    if field in freshest:
+                        keeper[field] = freshest[field]
+            for duplicate in removals:
+                self._torrents.pop(str(duplicate.get("id") or ""), None)
+                dirty = True
+        return dirty
 
     def _schedule_retry_locked(self, entry: dict, message: str) -> Optional[str]:
         """Keep a real failure visible, then retry it at the back of the queue."""
@@ -669,6 +776,8 @@ class TorrentManager:
                 retry_gid = self._apply_aria2_status_locked(entry, result)
                 if retry_gid:
                     orphaned_gids.append(retry_gid)
+            if self._deduplicate_shared_gid_entries_locked():
+                dirty = True
             if rpc is None:
                 aria2_missing = find_aria2c(self.settings) is None
                 for entry in self._torrents.values():
@@ -1445,6 +1554,13 @@ class TorrentManager:
                 gid = str(result.get("gid") or "")
                 if not gid or gid in known_gids:
                     continue
+                following = str(result.get("following") or "")
+                if following and following in known_gids:
+                    # This is the content GID generated by a tracked magnet
+                    # metadata GID. Its parent's next tellStatus poll will
+                    # expose it through followedBy and retarget the existing
+                    # row; adopting it here would create a duplicate row.
+                    continue
                 if result.get("followedBy"):
                     # A magnet's metadata-only gid, about to hand off to the
                     # real content gid (see _apply_aria2_status_locked's
@@ -1568,7 +1684,16 @@ class TorrentManager:
         if not magnet_uri.startswith("magnet:?") or "xt=urn:btih:" not in magnet_uri:
             raise ValueError("That doesn't look like a valid magnet link.")
         name = _magnet_display_name(magnet_uri)
+        info_hash = _magnet_info_hash(magnet_uri)
         with self._lock:
+            for existing in self._sorted_entries_locked():
+                existing_uri = str(existing.get("magnet_uri") or "")
+                if info_hash and _magnet_info_hash(existing_uri) == info_hash:
+                    return {
+                        "status": "already_exists",
+                        "id": existing["id"],
+                        "name": existing.get("name") or name,
+                    }
             config = dict(self._config)
             entry_id = uuid.uuid4().hex[:12]
             self._torrents[entry_id] = {
