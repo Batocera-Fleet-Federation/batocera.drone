@@ -6590,6 +6590,26 @@ function torrentStatusBadge(row) {
   return `<span class="badge text-bg-${cls}" title="${escapeHtml(row.message || "")}">${escapeHtml(status)}</span>${seedNote}`;
 }
 
+// "Move Downloaded Files" now runs as a background job (see move_files() /
+// _move_tick() in torrent_manager.py) tracked entirely through this same 3s
+// snapshot poll -- no separate polling loop needed. A compact badge next to
+// the status badge is enough; a queued/moving job also disables the row's
+// own Move-files button (see canMoveFiles below) so a second click can't
+// pile another job on top mid-run.
+function torrentMoveJobBadge(row) {
+  const job = row.move_job;
+  if (!job) return "";
+  if (job.status === "queued" || job.status === "moving") {
+    const label = `Moving ${Number(job.moved_count) || 0}/${Number(job.total_files) || 0}`;
+    const dest = escapeHtml(job.destination || "");
+    return ` <span class="badge text-bg-info" title="${dest ? `To ${dest}` : ""}"><span class="spinner-border spinner-border-sm me-1" style="width:0.6rem;height:0.6rem;" role="status" aria-hidden="true"></span>${escapeHtml(label)}</span>`;
+  }
+  if (job.status === "failed") {
+    return ' <span class="badge text-bg-danger" title="See the notifications bell for details">Move failed</span>';
+  }
+  return "";
+}
+
 // Each row always renders all 4 action slots in the same fixed order
 // (Force start / Cancel / Move files / Delete), hiding inapplicable ones with
 // `invisible` (visibility:hidden, not display:none) rather than omitting them
@@ -6615,7 +6635,10 @@ function renderTorrentRowMarkup(row) {
   const canCancel = canRequeue || canStopSeeding;
   const cancelTitle = canStopSeeding ? "Stop seeding" : "Send to queue";
   const cancelIcon = canStopSeeding ? "bi-stop-circle" : "bi-hourglass-split";
-  const canMoveFiles = status === "complete";
+  const moveJob = row.move_job;
+  const moveJobActive = !!moveJob && (moveJob.status === "queued" || moveJob.status === "moving");
+  const canMoveFiles = status === "complete" && !moveJobActive;
+  const moveFilesTitle = moveJobActive ? "Move in progress" : "Move files";
   const progressText = row.total_bytes
     ? `${pct.toFixed(1)}% (${formatBytes(row.completed_bytes)} / ${formatBytes(row.total_bytes)})`
     : (status === "complete" ? "100%" : "0%");
@@ -6637,12 +6660,12 @@ function renderTorrentRowMarkup(row) {
   const actions = [
     actionSlot(canForceStart, "btn-outline-success", "Force start", `forceStartTorrent('${id}')`, "bi-lightning-charge"),
     actionSlot(canCancel, "btn-outline-warning", cancelTitle, `cancelTorrent('${id}')`, cancelIcon),
-    actionSlot(canMoveFiles, "btn-outline-info", "Move files", `openMoveFilesModal('${id}')`, "bi-folder-symlink"),
+    actionSlot(canMoveFiles, "btn-outline-info", moveFilesTitle, `openMoveFilesModal('${id}')`, "bi-folder-symlink"),
     actionSlot(true, "btn-outline-danger", "Delete torrent", `deleteTorrent('${id}')`, "bi-trash"),
   ].join(" ");
   return `<tr>
     <td class="download-file" title="${escapeHtml(row.torrent_file || "")}">${escapeHtml(row.name || "")}</td>
-    <td>${torrentStatusBadge(row)}</td>
+    <td>${torrentStatusBadge(row)}${torrentMoveJobBadge(row)}</td>
     <td class="torrent-progress-cell" title="${escapeHtml(progressText)}">
       <div class="torrent-progress-wrap">
         <div class="progress"><div class="progress-bar torrent-progress-bar-${escapeHtml(status)}" style="width:${pct}%"></div></div>
@@ -7242,15 +7265,19 @@ async function confirmMoveFiles(torrentId) {
     btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Moving...';
   }
   try {
+    // move_files() now only enqueues a background move_job (see
+    // torrent_manager.py) -- the actual shutil.move work happens on its own
+    // worker thread and is tracked from here on purely through the normal
+    // 3s live-refresh poll (row.move_job), not this response.
     const result = await apiPost(`/admin/torrents/${encodeURIComponent(torrentId)}/move`, { files: checked, destination, cleanup, preserve_structure: preserveStructure });
-    const moved = (result.moved || []).length;
-    const errors = (result.errors || []).length;
-    if (result.status === "ok") {
-      showToast(`Moved ${moved} file${moved === 1 ? "" : "s"}${result.removed_from_list ? " and removed the torrent from the list." : result.cleanup_performed ? " and cleaned up the download folder." : "."}`, "success");
+    if (result.status === "queued") {
+      showToast(`Move started in the background (${Number(result.move_job?.total_files) || checked.length} file${checked.length === 1 ? "" : "s"}).`, "success");
       const modal = document.getElementById("moveFilesModal");
       if (modal && window.bootstrap?.Modal) window.bootstrap.Modal.getOrCreateInstance(modal).hide();
+    } else if (result.status === "already_in_progress") {
+      showToast("A move is already running for this torrent -- wait for it to finish before starting another.", "warning");
     } else {
-      showToast(`Moved ${moved} of ${checked.length} file(s); ${errors} failed.`, "warning", 8000);
+      showToast(`Move failed to start: ${escapeHtml(result.message || result.status || "unknown error")}`, "danger");
     }
     await refreshTorrentsLive();
   } catch (err) {
@@ -8105,6 +8132,10 @@ const SMTP_EVENT_TYPES = [
   ["torrent_completed", "Torrent download completed"],
   ["drone_updated", "Drone app updated"],
   ["config_backup_applied", "Config backup applied to this machine"],
+  ["torrent_move_started", "Moving downloaded torrent files started"],
+  ["torrent_move_resuming", "Moving downloaded torrent files resumed after interruption"],
+  ["torrent_move_failed", "Moving downloaded torrent files failed"],
+  ["torrent_move_finished", "Moving downloaded torrent files finished"],
 ];
 
 function renderSmtpRevokedNotice(payload) {

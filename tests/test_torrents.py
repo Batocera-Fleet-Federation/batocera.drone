@@ -1,5 +1,6 @@
 import contextlib
 import io
+import shutil
 import tempfile
 import unittest
 import zipfile
@@ -1950,35 +1951,54 @@ class TorrentBrowseTests(unittest.TestCase):
                 manager.browse_directories(str(Path(tmp) / "missing"))
 
 
-class TorrentFileManagementTests(unittest.TestCase):
-    def _completed_manager(self, root: Path, rpc: FakeRpc, files_by_name: dict):
-        """Build a manager with one .torrent per name in ``files_by_name``,
-        tick it to completion, and stamp aria2's reported ``files`` for each."""
-        manager = TorrentManager(_build_settings(root), start_worker=False)
-        manager._daemon = FakeDaemon(rpc)
-        watch = root / "watch"
-        manager.update_settings({"directory": str(watch)})
-        for name in files_by_name:
-            _write_torrent(watch, name)
-        manager._tick()
+def _completed_torrent_manager(root: Path, rpc: FakeRpc, files_by_name: dict):
+    """Build a manager with one .torrent per name in ``files_by_name``,
+    tick it to completion, and stamp aria2's reported ``files`` for each.
+    Shared by TorrentFileManagementTests and TorrentMoveJobAsyncTests."""
+    manager = TorrentManager(_build_settings(root), start_worker=False)
+    manager._daemon = FakeDaemon(rpc)
+    watch = root / "watch"
+    manager.update_settings({"directory": str(watch)})
+    for name in files_by_name:
+        _write_torrent(watch, name)
+    manager._tick()
+    with manager._lock:
+        gid_by_name = {entry["name"]: entry["gid"] for entry in manager._torrents.values()}
+    for name, paths in files_by_name.items():
+        total = 0
+        for p in paths:
+            try:
+                total += len(Path(p).read_bytes())
+            except OSError:
+                pass
+        rpc.statuses[gid_by_name[name]].update(
+            {
+                "totalLength": str(total),
+                "completedLength": str(total),
+                "files": [{"path": str(p)} for p in paths],
+            }
+        )
+    manager._tick()
+    return manager, watch
+
+
+def _drain_move_jobs(manager: TorrentManager, max_ticks: int = 200) -> None:
+    """Run the move worker's own tick to completion synchronously, the
+    test-side equivalent of _move_worker's background loop -- move_files()
+    itself only enqueues now (see torrent_manager.py), the actual
+    shutil.move work happens in _move_tick()."""
+
+    for _ in range(max_ticks):
         with manager._lock:
-            gid_by_name = {entry["name"]: entry["gid"] for entry in manager._torrents.values()}
-        for name, paths in files_by_name.items():
-            total = 0
-            for p in paths:
-                try:
-                    total += len(Path(p).read_bytes())
-                except OSError:
-                    pass
-            rpc.statuses[gid_by_name[name]].update(
-                {
-                    "totalLength": str(total),
-                    "completedLength": str(total),
-                    "files": [{"path": str(p)} for p in paths],
-                }
-            )
-        manager._tick()
-        return manager, watch
+            if manager._next_move_job_entry_locked() is None:
+                return
+        manager._move_tick()
+    raise AssertionError("move job(s) did not drain within max_ticks -- possible infinite loop")
+
+
+class TorrentFileManagementTests(unittest.TestCase):
+    _completed_manager = staticmethod(_completed_torrent_manager)
+    _drain_move_jobs = staticmethod(_drain_move_jobs)
 
     def test_list_files_not_applicable_before_completion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2109,13 +2129,16 @@ class TorrentFileManagementTests(unittest.TestCase):
             entry_a = next(e for e in manager.snapshot()["torrents"] if e["name"] == "a")
             dest = root / "moved"
             result = manager.move_files(entry_a["id"], [str(payload_a)], str(dest), cleanup=True)
-            self.assertEqual(result["status"], "ok")
-            self.assertTrue(result["cleanup_performed"])
+            self.assertEqual(result["status"], "queued")
+            self._drain_move_jobs(manager)
             self.assertTrue((dest / "a.bin").exists())
             self.assertFalse(payload_a.exists())
             # The shared download dir (and the sibling torrent's own file) is
             # never wholesale-deleted -- only the specifically known file(s).
             self.assertTrue(payload_b.exists())
+            # cleanup=True + full success also removes the torrent entirely
+            # (matching the original synchronous behavior).
+            self.assertNotIn(entry_a["id"], manager._torrents)
             self.assertIn(str(dest.resolve()), manager.snapshot()["recent_move_locations"])
 
     def test_move_files_cleanup_removes_dedicated_subfolder_when_all_moved(self) -> None:
@@ -2132,8 +2155,8 @@ class TorrentFileManagementTests(unittest.TestCase):
             entry = manager.snapshot()["torrents"][0]
             dest = root / "moved"
             result = manager.move_files(entry["id"], [str(file1), str(file2)], str(dest), cleanup=True)
-            self.assertEqual(result["status"], "ok")
-            self.assertTrue(result["cleanup_performed"])
+            self.assertEqual(result["status"], "queued")
+            self._drain_move_jobs(manager)
             self.assertTrue((dest / "one.bin").exists())
             self.assertTrue((dest / "two.bin").exists())
             self.assertFalse(subfolder.exists())
@@ -2155,9 +2178,8 @@ class TorrentFileManagementTests(unittest.TestCase):
             self.assertTrue(torrent_file.exists())
             dest = root / "moved"
             result = manager.move_files(entry["id"], [str(file1)], str(dest), cleanup=True)
-            self.assertEqual(result["status"], "ok")
-            self.assertTrue(result["cleanup_performed"])
-            self.assertTrue(result["removed_from_list"])
+            self.assertEqual(result["status"], "queued")
+            self._drain_move_jobs(manager)
             self.assertEqual(manager.snapshot()["torrents"], [])
             self.assertFalse(torrent_file.exists())
             self.assertIn(gid, [params[0] for params in rpc.method_calls("aria2.forceRemove")])
@@ -2178,10 +2200,16 @@ class TorrentFileManagementTests(unittest.TestCase):
             entry = manager.snapshot()["torrents"][0]
             dest = root / "moved"
             result = manager.move_files(entry["id"], [str(file1), str(missing)], str(dest), cleanup=True)
-            self.assertEqual(result["status"], "partial")
-            self.assertFalse(result["cleanup_performed"])
-            self.assertFalse(result["removed_from_list"])
-            self.assertEqual(len(manager.snapshot()["torrents"]), 1)
+            self.assertEqual(result["status"], "queued")
+            self._drain_move_jobs(manager)
+            with manager._lock:
+                move_job = manager._torrents[entry["id"]]["move_job"]
+            # One file succeeded, so the job as a whole still finishes
+            # (not "failed") -- but cleanup never fires on anything less
+            # than a fully-clean batch, and the torrent stays in the list.
+            self.assertEqual(move_job["status"], "complete")
+            self.assertEqual(len(move_job["errors"]), 1)
+            self.assertIn(entry["id"], manager._torrents)
 
     def test_move_files_partial_failure_skips_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2195,10 +2223,38 @@ class TorrentFileManagementTests(unittest.TestCase):
             entry = manager.snapshot()["torrents"][0]
             dest = root / "moved"
             result = manager.move_files(entry["id"], [str(payload), str(missing)], str(dest), cleanup=True)
-            self.assertEqual(result["status"], "partial")
-            self.assertFalse(result["cleanup_performed"])
+            self.assertEqual(result["status"], "queued")
+            self._drain_move_jobs(manager)
+            with manager._lock:
+                move_job = manager._torrents[entry["id"]]["move_job"]
             self.assertTrue((dest / "a.bin").exists())
-            self.assertEqual(len(result["errors"]), 1)
+            self.assertEqual(len(move_job["errors"]), 1)
+            self.assertEqual(len(move_job["moved_files"]), 1)  # a.bin succeeded; cleanup itself never ran
+            self.assertIn(entry["id"], manager._torrents)
+
+    def test_move_files_all_selected_missing_marks_job_failed(self) -> None:
+        # Distinct from the mixed-success "partial" case above: zero progress
+        # at all is a real failure, not a quiet "finished with errors". Use a
+        # real file so the torrent legitimately reaches "complete" (non-zero
+        # total), then remove it before the move to simulate "known but
+        # vanished by move time" without hitting a zero-total edge case.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            watch = root / "watch"
+            watch.mkdir(parents=True)
+            payload = watch / "a.bin"
+            payload.write_bytes(b"data")
+            manager, _ = self._completed_manager(root, FakeRpc(), {"a": [payload]})
+            entry = manager.snapshot()["torrents"][0]
+            self.assertEqual(entry["status"], "complete")
+            payload.unlink()
+            dest = root / "moved"
+            manager.move_files(entry["id"], [str(payload)], str(dest), cleanup=False)
+            self._drain_move_jobs(manager)
+            with manager._lock:
+                move_job = manager._torrents[entry["id"]]["move_job"]
+            self.assertEqual(move_job["status"], "failed")
+            self.assertEqual(len(move_job["errors"]), 1)
 
     def test_move_files_default_flattens_nested_layout(self) -> None:
         # preserve_structure defaults to False -- unchanged historical
@@ -2213,8 +2269,8 @@ class TorrentFileManagementTests(unittest.TestCase):
             manager, _ = self._completed_manager(root, FakeRpc(), {"Pack": [file1]})
             entry = manager.snapshot()["torrents"][0]
             dest = root / "moved"
-            result = manager.move_files(entry["id"], [str(file1)], str(dest), cleanup=False)
-            self.assertEqual(result["status"], "ok")
+            manager.move_files(entry["id"], [str(file1)], str(dest), cleanup=False)
+            self._drain_move_jobs(manager)
             self.assertTrue((dest / "one.bin").exists())
             self.assertFalse((dest / "Pack").exists())
 
@@ -2233,10 +2289,10 @@ class TorrentFileManagementTests(unittest.TestCase):
             manager, _ = self._completed_manager(root, FakeRpc(), {"Show Pack": [file1, file2]})
             entry = manager.snapshot()["torrents"][0]
             dest = root / "moved"
-            result = manager.move_files(
+            manager.move_files(
                 entry["id"], [str(file1), str(file2)], str(dest), cleanup=False, preserve_structure=True
             )
-            self.assertEqual(result["status"], "ok")
+            self._drain_move_jobs(manager)
             self.assertTrue((dest / "Show Pack" / "Season 1" / "e01.mkv").exists())
             self.assertTrue((dest / "Show Pack" / "Season 2" / "e01.mkv").exists())
             self.assertFalse(file1.exists())
@@ -2259,10 +2315,10 @@ class TorrentFileManagementTests(unittest.TestCase):
             manager, _ = self._completed_manager(root, FakeRpc(), {"Show Pack": [file1, file2]})
             entry = manager.snapshot()["torrents"][0]
             dest = root / "moved"
-            result = manager.move_files(
+            manager.move_files(
                 entry["id"], [str(file1)], str(dest), cleanup=False, preserve_structure=True
             )
-            self.assertEqual(result["status"], "ok")
+            self._drain_move_jobs(manager)
             self.assertTrue((dest / "Show Pack" / "Season 1" / "e01.mkv").exists())
             self.assertFalse((dest / "Show Pack" / "Season 2").exists())
 
@@ -2280,10 +2336,10 @@ class TorrentFileManagementTests(unittest.TestCase):
             existing = dest / "Pack" / "Sub" / "one.bin"
             existing.parent.mkdir(parents=True)
             existing.write_bytes(b"already there")
-            result = manager.move_files(
+            manager.move_files(
                 entry["id"], [str(file1)], str(dest), cleanup=False, preserve_structure=True
             )
-            self.assertEqual(result["status"], "ok")
+            self._drain_move_jobs(manager)
             # A collision at the destination renames the incoming file --
             # it must stay in the same recreated subfolder, not fall back to
             # the destination root.
@@ -2307,9 +2363,287 @@ class TorrentFileManagementTests(unittest.TestCase):
             dest1 = root / "one"
             dest2 = root / "two"
             manager.move_files(entries["a"]["id"], [str(payload_a)], str(dest1), cleanup=False)
+            self._drain_move_jobs(manager)
             manager.move_files(entries["b"]["id"], [str(payload_b)], str(dest2), cleanup=False)
+            self._drain_move_jobs(manager)
             recent = manager.snapshot()["recent_move_locations"]
             self.assertEqual(recent[:2], [str(dest2.resolve()), str(dest1.resolve())])
+
+
+class TorrentMoveJobAsyncTests(unittest.TestCase):
+    """The async/resumable/notified redesign of "Move Downloaded Files" --
+    enqueue-only move_files(), the single global _move_tick() mover, restart
+    resume via _restore_state(), and the 4 notification types. See
+    TorrentFileManagementTests for the file-manipulation-outcome coverage
+    (collision suffixing, preserve_structure, cleanup) -- this class covers
+    the scheduling/persistence/notification behavior layered on top."""
+
+    def test_enqueue_does_not_move_synchronously(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            watch = root / "watch"
+            watch.mkdir(parents=True)
+            payload = watch / "a.bin"
+            payload.write_bytes(b"hello")
+            manager, _ = _completed_torrent_manager(root, FakeRpc(), {"a": [payload]})
+            entry = manager.snapshot()["torrents"][0]
+            dest = root / "moved"
+            result = manager.move_files(entry["id"], [str(payload)], str(dest), cleanup=False)
+            self.assertEqual(result["status"], "queued")
+            self.assertEqual(result["move_job"]["status"], "queued")
+            self.assertEqual(result["move_job"]["total_files"], 1)
+            # Only _move_tick() (the background worker) does the actual
+            # filesystem work -- move_files() itself must return immediately.
+            self.assertTrue(payload.exists())
+            self.assertFalse((dest / "a.bin").exists())
+
+    def test_already_in_progress_rejects_a_second_enqueue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            watch = root / "watch"
+            watch.mkdir(parents=True)
+            payload = watch / "a.bin"
+            payload.write_bytes(b"hello")
+            manager, _ = _completed_torrent_manager(root, FakeRpc(), {"a": [payload]})
+            entry = manager.snapshot()["torrents"][0]
+            dest = root / "moved"
+            first = manager.move_files(entry["id"], [str(payload)], str(dest), cleanup=False)
+            self.assertEqual(first["status"], "queued")
+            second = manager.move_files(entry["id"], [str(payload)], str(dest), cleanup=False)
+            self.assertEqual(second["status"], "already_in_progress")
+            # Draining still only ever sees the one real job/file.
+            _drain_move_jobs(manager)
+            with manager._lock:
+                move_job = manager._torrents[entry["id"]]["move_job"]
+            self.assertEqual(len(move_job["moved_files"]), 1)
+
+    def test_torrent_move_started_fires_at_enqueue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            watch = root / "watch"
+            watch.mkdir(parents=True)
+            payload = watch / "a.bin"
+            payload.write_bytes(b"hello")
+            manager, _ = _completed_torrent_manager(root, FakeRpc(), {"a": [payload]})
+            entry = manager.snapshot()["torrents"][0]
+            dest = root / "moved"
+            with mock.patch.object(torrent_manager, "_notifications") as fake_notifications:
+                manager.move_files(entry["id"], [str(payload)], str(dest), cleanup=False)
+                fake_notifications.record_event.assert_called_once()
+                self.assertEqual(fake_notifications.record_event.call_args[0][1], "torrent_move_started")
+
+    def test_torrent_move_finished_and_failed_notifications(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            watch = root / "watch"
+            watch.mkdir(parents=True)
+            good = watch / "good.bin"
+            good.write_bytes(b"data")
+            manager, _ = _completed_torrent_manager(root, FakeRpc(), {"a": [good]})
+            entry = manager.snapshot()["torrents"][0]
+            dest = root / "moved"
+            with mock.patch.object(torrent_manager, "_notifications") as fake_notifications:
+                manager.move_files(entry["id"], [str(good)], str(dest), cleanup=False)
+                _drain_move_jobs(manager)
+                fired = [call.args[1] for call in fake_notifications.record_event.call_args_list]
+            self.assertEqual(fired, ["torrent_move_started", "torrent_move_finished"])
+
+        with tempfile.TemporaryDirectory() as tmp2:
+            root2 = Path(tmp2)
+            watch2 = root2 / "watch"
+            watch2.mkdir(parents=True)
+            payload2 = watch2 / "a.bin"
+            payload2.write_bytes(b"data")
+            manager2, _ = _completed_torrent_manager(root2, FakeRpc(), {"a": [payload2]})
+            entry2 = manager2.snapshot()["torrents"][0]
+            payload2.unlink()  # known to aria2, gone by move time -- zero real progress
+            dest2 = root2 / "moved"
+            with mock.patch.object(torrent_manager, "_notifications") as fake_notifications:
+                manager2.move_files(entry2["id"], [str(payload2)], str(dest2), cleanup=False)
+                _drain_move_jobs(manager2)
+                fired2 = [call.args[1] for call in fake_notifications.record_event.call_args_list]
+            self.assertEqual(fired2, ["torrent_move_started", "torrent_move_failed"])
+
+    def test_single_global_mover_processes_one_file_at_a_time_across_torrents(self) -> None:
+        # Per explicit instruction: even with multiple torrents' moves
+        # queued, only one file moves at a time -- one shared worker loop
+        # picking the globally-oldest job's next file, not one thread/slot
+        # per torrent.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            watch = root / "watch"
+            watch.mkdir(parents=True)
+            a1, a2 = watch / "a1.bin", watch / "a2.bin"
+            b1, b2 = watch / "b1.bin", watch / "b2.bin"
+            for p in (a1, a2, b1, b2):
+                p.write_bytes(b"x")
+            manager, _ = _completed_torrent_manager(root, FakeRpc(), {"a": [a1, a2], "b": [b1, b2]})
+            entries = {e["name"]: e for e in manager.snapshot()["torrents"]}
+            dest = root / "moved"
+            result_a = manager.move_files(entries["a"]["id"], [str(a1), str(a2)], str(dest), cleanup=False)
+            result_b = manager.move_files(entries["b"]["id"], [str(b1), str(b2)], str(dest), cleanup=False)
+            self.assertEqual(result_a["status"], "queued")
+            self.assertEqual(result_b["status"], "queued")
+
+            manager._move_tick()
+            with manager._lock:
+                job_a = manager._torrents[entries["a"]["id"]]["move_job"]
+                job_b = manager._torrents[entries["b"]["id"]]["move_job"]
+            # "a" was enqueued first, so exactly one of its two files moved;
+            # "b" (enqueued later) hasn't been touched at all yet.
+            self.assertEqual(len(job_a["moved_files"]), 1)
+            self.assertEqual(len(job_b["moved_files"]), 0)
+
+            manager._move_tick()
+            with manager._lock:
+                job_a = manager._torrents[entries["a"]["id"]]["move_job"]
+                job_b = manager._torrents[entries["b"]["id"]]["move_job"]
+            # "a" fully drains before "b" gets its first file -- simple
+            # FIFO-per-job, not round-robin-per-file.
+            self.assertEqual(len(job_a["moved_files"]), 2)
+            self.assertEqual(job_a["status"], "complete")
+            self.assertEqual(len(job_b["moved_files"]), 0)
+
+            _drain_move_jobs(manager)
+            with manager._lock:
+                job_b = manager._torrents[entries["b"]["id"]]["move_job"]
+            self.assertEqual(len(job_b["moved_files"]), 2)
+
+    def test_destination_unavailable_mid_job_fails_without_losing_remaining_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            watch = root / "watch"
+            watch.mkdir(parents=True)
+            file1, file2 = watch / "one.bin", watch / "two.bin"
+            file1.write_bytes(b"one")
+            file2.write_bytes(b"two")
+            manager, _ = _completed_torrent_manager(root, FakeRpc(), {"a": [file1, file2]})
+            entry = manager.snapshot()["torrents"][0]
+            dest = root / "moved"
+            with mock.patch.object(torrent_manager, "_notifications") as fake_notifications:
+                manager.move_files(entry["id"], [str(file1), str(file2)], str(dest), cleanup=False)
+                manager._move_tick()  # moves file1 successfully
+                shutil.rmtree(dest)  # simulate the destination mount vanishing
+                manager._move_tick()  # attempts file2, finds the destination gone
+                fired = [call.args[1] for call in fake_notifications.record_event.call_args_list]
+            self.assertEqual(fired, ["torrent_move_started", "torrent_move_failed"])
+            with manager._lock:
+                move_job = manager._torrents[entry["id"]]["move_job"]
+            self.assertEqual(move_job["status"], "failed")
+            # file2 was never attempted -- still sitting exactly where it
+            # started, and still recorded as remaining for a future retry.
+            self.assertTrue(file2.exists())
+            self.assertEqual(move_job["remaining_files"], [str(file2)])
+
+    def test_list_files_excludes_already_moved_files_mid_job(self) -> None:
+        # Direct regression test for the live-confirmed bug: the old
+        # synchronous move_files() only trimmed entry["files"] once, at the
+        # very end of its whole (often very slow) batch, so reopening the
+        # file picker while an earlier move was still running re-offered
+        # files that had already been relocated -- reselecting them produced
+        # a "(2)"-suffixed duplicate at the destination.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            watch = root / "watch"
+            watch.mkdir(parents=True)
+            file1, file2 = watch / "one.bin", watch / "two.bin"
+            file1.write_bytes(b"one")
+            file2.write_bytes(b"two")
+            manager, _ = _completed_torrent_manager(root, FakeRpc(), {"a": [file1, file2]})
+            entry = manager.snapshot()["torrents"][0]
+            dest = root / "moved"
+            manager.move_files(entry["id"], [str(file1), str(file2)], str(dest), cleanup=False)
+            manager._move_tick()  # moves file1 only
+            result = manager.list_files(entry["id"])
+            names = [f["name"] for f in result["files"]]
+            self.assertEqual(names, ["two.bin"])
+
+    def test_restart_mid_move_resumes_from_checkpoint_and_notifies(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            watch = root / "watch"
+            watch.mkdir(parents=True)
+            file1, file2 = watch / "one.bin", watch / "two.bin"
+            file1.write_bytes(b"one")
+            file2.write_bytes(b"two")
+            manager, _ = _completed_torrent_manager(root, FakeRpc(), {"a": [file1, file2]})
+            entry_id = manager.snapshot()["torrents"][0]["id"]
+            dest = root / "moved"
+            manager.move_files(entry_id, [str(file1), str(file2)], str(dest), cleanup=False)
+            manager._move_tick()  # moves file1; file2 still queued -- simulates a live drone mid-job
+            with manager._lock:
+                move_job_before = dict(manager._torrents[entry_id]["move_job"])
+            self.assertEqual(move_job_before["remaining_files"], [str(file2)])
+
+            # Simulate a Drone process restart: a brand new manager sharing
+            # the same state DB, never having run a single tick of its own.
+            restarted = TorrentManager(_build_settings(root), start_worker=False)
+            with restarted._lock:
+                restarted_job = restarted._torrents[entry_id]["move_job"]
+            self.assertTrue(restarted_job["interrupted"])
+            self.assertEqual(restarted_job["remaining_files"], [str(file2)])
+
+            with mock.patch.object(torrent_manager, "_notifications") as fake_notifications:
+                restarted._move_tick()
+                fired = [call.args[1] for call in fake_notifications.record_event.call_args_list]
+            # file2 was the only file left, so this single tick both resumes
+            # and (since remaining_files goes empty right after) finishes
+            # the job -- both notifications fire, in order.
+            self.assertEqual(fired, ["torrent_move_resuming", "torrent_move_finished"])
+            with restarted._lock:
+                final_job = restarted._torrents[entry_id]["move_job"]
+            self.assertEqual(final_job["status"], "complete")
+            self.assertEqual(len(final_job["moved_files"]), 2)
+            self.assertTrue((dest / "one.bin").exists())
+            self.assertTrue((dest / "two.bin").exists())
+
+    def test_resume_overwrites_partial_leftover_of_the_interrupted_file_only(self) -> None:
+        # A crash mid-copy of the *current* file can leave a truncated
+        # write at its target (cross-filesystem shutil.move is copy-then-
+        # delete, not atomic). Resuming must overwrite that specific
+        # leftover directly, not run it through the normal collision-suffix
+        # loop (which would otherwise mistake it for a real, separate file
+        # and produce a spurious "(2)" duplicate instead of replacing it).
+        # A second, untouched remaining file must still collision-suffix
+        # normally against something unrelated already at its target.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            watch = root / "watch"
+            watch.mkdir(parents=True)
+            crashed_file = watch / "crashed.bin"
+            untouched_file = watch / "untouched.bin"
+            crashed_file.write_bytes(b"the real full content")
+            untouched_file.write_bytes(b"real")
+            manager, _ = _completed_torrent_manager(
+                root, FakeRpc(), {"a": [crashed_file, untouched_file]}
+            )
+            entry_id = manager.snapshot()["torrents"][0]["id"]
+            dest = root / "moved"
+            dest.mkdir(parents=True)
+            # A truncated leftover at crashed.bin's target, as if a prior
+            # attempt died partway through writing it.
+            (dest / "crashed.bin").write_bytes(b"trunc")
+            # An unrelated pre-existing file at untouched.bin's target --
+            # this one must still collision-suffix normally.
+            (dest / "untouched.bin").write_bytes(b"pre-existing, unrelated")
+
+            manager.move_files(entry_id, [str(crashed_file), str(untouched_file)], str(dest), cleanup=False)
+            with manager._lock:
+                move_job = manager._torrents[entry_id]["move_job"]
+                # Hand-simulate _restore_state()'s interrupted-mid-copy marking
+                # without a real process restart: current_file == remaining[0].
+                move_job["current_file"] = str(crashed_file)
+                move_job["interrupted"] = True
+                manager._persist_locked()
+
+            _drain_move_jobs(manager)
+
+            self.assertEqual((dest / "crashed.bin").read_bytes(), b"the real full content")
+            self.assertFalse((dest / "crashed (2).bin").exists())
+            # untouched.bin's unrelated pre-existing file is left alone; the
+            # real one lands alongside it with a collision suffix.
+            self.assertEqual((dest / "untouched.bin").read_bytes(), b"pre-existing, unrelated")
+            self.assertEqual((dest / "untouched (2).bin").read_bytes(), b"real")
 
 
 class TorrentQueueControlTests(unittest.TestCase):

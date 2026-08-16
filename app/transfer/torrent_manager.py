@@ -199,6 +199,14 @@ _ENTRY_PERSISTED_FIELDS = (
     "retry_at",
     "last_error",
     "info_hash",
+    # The in-progress/last "Move Downloaded Files" job for this entry, or
+    # None if one was never requested. Deliberately NOT in
+    # _ENTRY_LIVE_DEFAULTS below -- unlike gid/force_started/etc, this must
+    # survive a restart intact (that's the whole point: _restore_state()
+    # flags a mid-flight job `interrupted` and _move_worker resumes it from
+    # its own `remaining_files` checkpoint rather than restarting the whole
+    # selection). See move_files()/_move_tick() for the dict shape.
+    "move_job",
 )
 
 _ENTRY_LIVE_DEFAULTS = {
@@ -257,6 +265,21 @@ def _resolve_known_files(entry: dict) -> List[Path]:
         except OSError:
             return []
     return []
+
+
+def _move_job_summary(move_job: dict) -> dict:
+    """Curated subset of a move_job for API responses/snapshot() -- never
+    the full remaining_files/moved_files path lists, no reason to ship those
+    to the browser every 3s poll."""
+
+    return {
+        "status": move_job.get("status"),
+        "destination": move_job.get("destination") or "",
+        "total_files": int(move_job.get("total_files") or 0),
+        "moved_count": len(move_job.get("moved_sources") or []),
+        "error_count": len(move_job.get("errors") or []),
+        "current_file": move_job.get("current_file") or "",
+    }
 
 
 def _relative_known_file_path(candidate: Path, download_dir_resolved: Optional[Path]) -> str:
@@ -395,6 +418,11 @@ class TorrentManager:
         self._config: dict = _normalize_torrent_settings({}, settings)
         self._torrents: Dict[str, dict] = {}
         self._next_queue_position: int = 1
+        # Move-job ordering can't rely on move_job["started_at"] alone --
+        # _now_iso() has 1-second resolution, so two "Move" clicks in the
+        # same second would tie-break on random entry-id ordering instead
+        # of enqueue order. Same fix shape as _next_queue_position above.
+        self._next_move_sequence: int = 1
         self._paused: bool = False
         self._recent_move_locations: List[str] = []
         # gids we've told the UI are gone (delete/cancel/clear) but aria2
@@ -411,10 +439,18 @@ class TorrentManager:
         # process legitimately re-arms per entry via each entry's own
         # completed_at/_pending_complete_gid state, which IS persisted.
         self._notified_info_hashes: Set[str] = set()
+        # Wakes the dedicated move-files worker (see _move_worker) -- a
+        # separate thread/wake from self._wake/_worker's aria2 tick, because
+        # a single shutil.move() of a multi-GB file can run for many minutes
+        # and must never block aria2 bookkeeping (or any other torrent's
+        # move) for that long.
+        self._move_wake = Event()
         self._restore_state()
         if start_worker:
             thread = Thread(target=self._worker, name="drone-torrent-manager", daemon=True)
             thread.start()
+            move_thread = Thread(target=self._move_worker, name="drone-torrent-mover", daemon=True)
+            move_thread.start()
 
     # ------------------------------------------------------------------ state
 
@@ -492,6 +528,27 @@ class TorrentManager:
             # canceled by the user.
             if entry["status"] == "error" and entry["message"] != "Canceled" and entry["retry_at"] <= 0:
                 entry["retry_at"] = time.time()
+            move_job = entry.get("move_job")
+            if isinstance(move_job, dict):
+                try:
+                    sequence = int(move_job.get("sequence") or 0)
+                except (TypeError, ValueError):
+                    sequence = 0
+                # A future new move_job's sequence must never collide with
+                # (or sort before) one that's just been restored.
+                self._next_move_sequence = max(self._next_move_sequence, sequence + 1)
+                if move_job.get("status") in ("queued", "moving") and move_job.get("remaining_files"):
+                    # Left mid-flight by a restart/crash -- _move_worker
+                    # resumes it from remaining_files on its next pass
+                    # rather than restarting the whole selection, and fires
+                    # torrent_move_resuming once. current_file is
+                    # deliberately left as-is (not cleared): if it still
+                    # matches remaining_files[0], that's the one file that
+                    # may have a partial/truncated write at its target from
+                    # an interrupted cross-filesystem copy -- see
+                    # _move_tick()'s overwrite_leftover handling.
+                    move_job["interrupted"] = True
+                    move_job["status"] = "queued"
             self._torrents[entry_id] = entry
 
     def _persist_locked(self) -> None:
@@ -518,6 +575,11 @@ class TorrentManager:
         position = self._next_queue_position
         self._next_queue_position += 1
         return position
+
+    def _take_move_sequence_locked(self) -> int:
+        sequence = self._next_move_sequence
+        self._next_move_sequence += 1
+        return sequence
 
     def _scheduler_entries_locked(self) -> List[dict]:
         """Queue order, independent from the user-visible original add time."""
@@ -1433,7 +1495,18 @@ class TorrentManager:
             if entry.get("status") != "complete":
                 return {"status": "not_applicable", "message": "torrent has not completed yet"}
             entry_copy = dict(entry)
-        known_files = _resolve_known_files(entry_copy)
+            move_job = entry.get("move_job")
+            already_moved = set(move_job.get("moved_sources") or []) if isinstance(move_job, dict) else set()
+        # Excludes files a move_job has already relocated -- updated
+        # incrementally per file (_move_tick), not just once at the end, so
+        # reopening this picker mid-job (or after it finishes) never
+        # re-offers a file that's already at its destination. This is the
+        # direct fix for a live-confirmed bug: the old synchronous
+        # move_files() only trimmed entry["files"] once, at the very end of
+        # its whole (often very slow) batch, so reselecting an
+        # already-relocated file while an earlier move was still running
+        # silently produced a "(2)"-suffixed duplicate at the destination.
+        known_files = [p for p in _resolve_known_files(entry_copy) if str(p) not in already_moved]
         download_dir = entry_copy.get("download_dir") or ""
         try:
             download_dir_resolved = Path(download_dir).resolve() if download_dir else None
@@ -1470,12 +1543,21 @@ class TorrentManager:
         cleanup: bool,
         preserve_structure: bool = False,
     ) -> dict:
+        """Validate the request and enqueue a background move_job -- the
+        actual per-file shutil.move work happens on _move_worker's own
+        thread, never in this (request-handling) thread. See _move_tick()
+        for the worker side; ``_ENTRY_PERSISTED_FIELDS``'s ``move_job``
+        comment for why this is safe across a restart."""
+
         with self._lock:
             entry = self._torrents.get(entry_id)
             if entry is None:
                 return {"status": "not_found"}
             if entry.get("status") != "complete":
                 return {"status": "not_applicable", "message": "torrent has not completed yet"}
+            existing_job = entry.get("move_job")
+            if isinstance(existing_job, dict) and existing_job.get("status") in ("queued", "moving"):
+                return {"status": "already_in_progress", "move_job": _move_job_summary(existing_job)}
             entry_copy = dict(entry)
 
         known_by_str = {str(candidate): candidate for candidate in _resolve_known_files(entry_copy)}
@@ -1499,77 +1581,266 @@ class TorrentManager:
         except OSError as error:
             return {"status": "invalid_destination", "message": f"destination is not writable: {error}"}
 
-        download_dir = entry_copy.get("download_dir") or ""
+        now = _now_iso()
+        move_job = {
+            "status": "queued",
+            "destination": str(destination_path),
+            "cleanup": bool(cleanup),
+            "preserve_structure": bool(preserve_structure),
+            "remaining_files": [str(p) for p in selected],
+            "moved_sources": [],
+            "moved_files": [],
+            "errors": [],
+            "total_files": len(selected),
+            "current_file": "",
+            "started_at": now,
+            "updated_at": now,
+            "completed_at": None,
+            "interrupted": False,
+        }
+        with self._lock:
+            live_entry = self._torrents.get(entry_id)
+            if live_entry is None:
+                return {"status": "not_found"}
+            # The tie-break _next_move_job_entry_locked needs when two jobs'
+            # started_at land in the same second (_now_iso() only has
+            # 1-second resolution) -- assigned under the lock, unlike
+            # started_at above, since it must be strictly ordered.
+            move_job["sequence"] = self._take_move_sequence_locked()
+            live_entry["move_job"] = move_job
+            entry_name = str(live_entry.get("name") or "")
+            self._persist_locked()
+        # Fired here (enqueue time), not lazily in the worker, so it's
+        # immediate regardless of whether the single global mover is
+        # currently busy with a different torrent's file.
+        _notifications.record_event(
+            self.settings,
+            "torrent_move_started",
+            "Moving downloaded torrent files started",
+            entry_name,
+            details={"destination": str(destination_path), "total_files": len(selected)},
+        )
+        self._move_wake.set()
+        return {"status": "queued", "move_job": _move_job_summary(move_job)}
+
+    def _move_worker(self) -> None:
+        while True:
+            try:
+                self._move_tick()
+            except Exception as error:  # Watchdog loop must never die.
+                print(f"Torrent move worker tick failed: {error.__class__.__name__}: {error}", file=sys.stderr, flush=True)
+            if self._move_wake.wait(timeout=2.0):
+                self._move_wake.clear()
+
+    def _next_move_job_entry_locked(self) -> Optional[dict]:
+        """The oldest (by move_job sequence) entry with move work left to
+        do. Deliberately a single global pick, not one per torrent -- this
+        is what makes the mover process exactly one file at a time across
+        every queued/active move_job, not just within one torrent, so a
+        batch of several "Move" clicks can never pile concurrent disk I/O on
+        top of each other. Ordered by ``sequence`` (assigned under the lock,
+        strictly monotonic), not ``started_at`` -- ``_now_iso()`` only has
+        1-second resolution, so two jobs enqueued in the same second would
+        otherwise tie-break on random entry-id ordering instead of actual
+        enqueue order."""
+
+        candidates = [
+            entry
+            for entry in self._torrents.values()
+            if isinstance(entry.get("move_job"), dict)
+            and entry["move_job"].get("status") in ("queued", "moving")
+            and entry["move_job"].get("remaining_files")
+        ]
+        if not candidates:
+            return None
+        candidates.sort(key=lambda entry: (int(entry["move_job"].get("sequence") or 0), entry.get("id") or ""))
+        return candidates[0]
+
+    def _move_tick(self) -> None:
+        with self._lock:
+            entry = self._next_move_job_entry_locked()
+            if entry is None:
+                return
+            entry_id = entry["id"]
+            entry_name = str(entry.get("name") or "")
+            move_job = entry["move_job"]
+            remaining = move_job.get("remaining_files") or []
+            if not remaining:
+                return
+            source_str = remaining[0]
+            # If this exact path was already `current_file` before this
+            # tick touched anything, it was mid-copy when the process died
+            # (see _restore_state()'s `interrupted` handling) -- its target
+            # may already hold a partial/truncated write from that attempt,
+            # so it must be overwritten directly rather than run through the
+            # normal collision-suffix loop below (which would otherwise
+            # mistake that leftover for a real, separate file and rename the
+            # retried good copy to "name (2).ext" instead of replacing it).
+            overwrite_leftover = bool(source_str) and move_job.get("current_file") == source_str
+            was_interrupted = bool(move_job.get("interrupted"))
+            move_job["interrupted"] = False
+            move_job["current_file"] = source_str
+            move_job["status"] = "moving"
+            move_job["updated_at"] = _now_iso()
+            destination = move_job.get("destination") or ""
+            preserve_structure = bool(move_job.get("preserve_structure"))
+            download_dir = entry.get("download_dir") or ""
+            self._persist_locked()
+
+        if was_interrupted:
+            _notifications.record_event(
+                self.settings,
+                "torrent_move_resuming",
+                "Moving downloaded torrent files resumed after interruption",
+                entry_name,
+            )
+
+        # ---- outside the lock: the actual (possibly slow) filesystem work ----
+        destination_path = Path(destination)
+        if not destination_path.is_dir():
+            # Systemic, not this-file's fault (e.g. an external drive got
+            # unplugged mid-job) -- fail the whole job but leave
+            # remaining_files untouched so a later retry (once the
+            # destination is back) picks up cleanly rather than re-deciding
+            # what's left from scratch.
+            with self._lock:
+                live_entry = self._torrents.get(entry_id)
+                if live_entry is not None and live_entry.get("move_job") is move_job:
+                    move_job["status"] = "failed"
+                    move_job["current_file"] = ""
+                    move_job["completed_at"] = _now_iso()
+                    move_job["updated_at"] = _now_iso()
+                    self._persist_locked()
+            _notifications.record_event(
+                self.settings,
+                "torrent_move_failed",
+                "Moving downloaded torrent files failed",
+                entry_name,
+                details={"reason": "destination is no longer available"},
+            )
+            return
+
+        source = Path(source_str)
         try:
             download_dir_resolved = Path(download_dir).resolve() if download_dir else None
         except OSError:
             download_dir_resolved = None
-
-        moved: List[str] = []
-        moved_sources: List[Path] = []
-        errors: List[dict] = []
-        for source in selected:
-            if preserve_structure:
-                relative = _relative_known_file_path(source, download_dir_resolved)
-                target = destination_path / relative
-            else:
-                target = destination_path / source.name
+        if preserve_structure:
+            relative = _relative_known_file_path(source, download_dir_resolved)
+            target = destination_path / relative
+        else:
+            target = destination_path / source.name
+        if not overwrite_leftover:
             counter = 1
             while target.exists():
                 counter += 1
                 target = target.with_name(f"{target.stem} ({counter}){target.suffix}")
-            try:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(source), str(target))
-                moved.append(str(target))
-                moved_sources.append(source)
-            except OSError as error:
-                errors.append({"file": str(source), "error": str(error)})
+        error_message = None
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(source), str(target))
+        except OSError as error:
+            error_message = str(error)
 
-        all_succeeded = not errors and len(moved) == len(selected)
+        finalize_result = None
+        with self._lock:
+            live_entry = self._torrents.get(entry_id)
+            if live_entry is None or live_entry.get("move_job") is not move_job:
+                # Deleted/replaced while this file was moving -- nothing left
+                # to record it against.
+                return
+            remaining_now = move_job.get("remaining_files") or []
+            if remaining_now and remaining_now[0] == source_str:
+                remaining_now.pop(0)
+            move_job["current_file"] = ""
+            move_job["updated_at"] = _now_iso()
+            if error_message is None:
+                move_job["moved_files"].append(str(target))
+                move_job["moved_sources"].append(source_str)
+            else:
+                move_job["errors"].append({"file": source_str, "error": error_message})
+            if not remaining_now:
+                finalize_result = self._finalize_move_job_locked(live_entry, move_job)
+            self._persist_locked()
+
+        if finalize_result is not None:
+            if finalize_result["removed_from_list"]:
+                self._remove_from_aria2(finalize_result["removed_gid"])
+                if finalize_result["removed_torrent_file"]:
+                    try:
+                        Path(finalize_result["removed_torrent_file"]).unlink(missing_ok=True)
+                    except OSError as error:
+                        print(f"Torrent file delete failed after move+cleanup: {error}", file=sys.stderr, flush=True)
+                self.wake()
+            _notifications.record_event(
+                self.settings,
+                finalize_result["notification_type"],
+                finalize_result["notification_title"],
+                entry_name,
+                details=finalize_result["notification_details"],
+            )
+
+        self._move_wake.set()
+
+    def _finalize_move_job_locked(self, entry: dict, move_job: dict) -> dict:
+        """Called once move_job.remaining_files has just gone empty. Mirrors
+        the original synchronous move_files()'s end-of-batch cleanup/
+        entry-removal decision, plus decides the terminal status/
+        notification. Returns what the caller needs to do outside the lock
+        (aria2 removal, torrent-file unlink, and which notification to
+        fire) -- kept out of this locked method the same way move_files()
+        always kept those two RPC/filesystem side effects out of its own
+        locked block."""
+
+        moved_sources = move_job.get("moved_sources") or []
+        errors = move_job.get("errors") or []
+        all_succeeded = not errors
         cleanup_performed = False
-        if cleanup and all_succeeded:
-            cleanup_performed = _remove_downloaded_payload(entry_copy)
+        if move_job.get("cleanup") and all_succeeded:
+            cleanup_performed = _remove_downloaded_payload(entry)
 
         removed_from_list = False
         removed_gid = None
         removed_torrent_file = None
-        with self._lock:
-            live_entry = self._torrents.get(entry_id)
-            if live_entry is not None:
-                if cleanup_performed:
-                    # Move + cleanup succeeded and swept up everything left
-                    # behind -- nothing remains to track, so drop the
-                    # torrent from the list too (matching Delete's
-                    # full-removal semantics) rather than leaving a
-                    # "complete" entry with an empty file list whose
-                    # .torrent file would just get rescanned as new.
-                    removed_gid = live_entry.get("gid")
-                    removed_torrent_file = live_entry.get("torrent_file")
-                    self._torrents.pop(entry_id, None)
-                    removed_from_list = True
-                elif moved_sources:
-                    moved_set = {str(source) for source in moved_sources}
-                    live_entry["files"] = [p for p in (live_entry.get("files") or []) if p not in moved_set]
-                if all_succeeded:
-                    self._remember_recent_location_locked(str(destination_path))
-            self._persist_locked()
+        if cleanup_performed:
+            removed_gid = entry.get("gid")
+            removed_torrent_file = entry.get("torrent_file")
+            self._torrents.pop(str(entry.get("id") or ""), None)
+            removed_from_list = True
+        elif moved_sources:
+            moved_set = set(moved_sources)
+            entry["files"] = [p for p in (entry.get("files") or []) if p not in moved_set]
+        if all_succeeded:
+            self._remember_recent_location_locked(str(move_job.get("destination") or ""))
 
-        if removed_from_list:
-            self._remove_from_aria2(removed_gid)
-            if removed_torrent_file:
-                try:
-                    Path(removed_torrent_file).unlink(missing_ok=True)
-                except OSError as error:
-                    print(f"Torrent file delete failed after move+cleanup: {error}", file=sys.stderr, flush=True)
-            self.wake()
+        move_job["current_file"] = ""
+        move_job["completed_at"] = _now_iso()
+        move_job["updated_at"] = _now_iso()
+        # Matches move_files()'s original "partial" philosophy: some
+        # progress (even mixed with errors) is still a real finish, not a
+        # failure -- "failed" is reserved for a job that made zero progress
+        # at all (every remaining file errored) or the systemic
+        # destination-unavailable path in _move_tick above.
+        if moved_sources:
+            move_job["status"] = "complete"
+            notification_type = "torrent_move_finished"
+            notification_title = "Moving downloaded torrent files finished"
+        else:
+            move_job["status"] = "failed"
+            notification_type = "torrent_move_failed"
+            notification_title = "Moving downloaded torrent files failed"
 
         return {
-            "status": "ok" if all_succeeded else "partial",
-            "moved": moved,
-            "errors": errors,
-            "cleanup_performed": cleanup_performed,
             "removed_from_list": removed_from_list,
+            "removed_gid": removed_gid,
+            "removed_torrent_file": removed_torrent_file,
+            "notification_type": notification_type,
+            "notification_title": notification_title,
+            "notification_details": {
+                "moved": len(moved_sources),
+                "errors": len(errors),
+                "cleanup_performed": cleanup_performed,
+            },
         }
 
     def _remember_recent_location_locked(self, path: str) -> None:
@@ -1909,6 +2180,7 @@ class TorrentManager:
         for entry in entries:
             status = entry.get("status") or "queued"
             counts[status] = counts.get(status, 0) + 1
+            move_job = entry.get("move_job")
             torrents.append(
                 {
                     "id": entry.get("id"),
@@ -1930,6 +2202,7 @@ class TorrentManager:
                     "download_dir": entry.get("download_dir"),
                     "added_at": entry.get("added_at"),
                     "completed_at": entry.get("completed_at"),
+                    "move_job": _move_job_summary(move_job) if isinstance(move_job, dict) else None,
                 }
             )
         # Display order only: actively-downloading torrents surface first,

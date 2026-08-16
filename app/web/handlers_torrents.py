@@ -147,7 +147,11 @@ class HandlersTorrentsMixin:
             "not_applicable": 409,
             "no_files_selected": 400,
             "invalid_destination": 400,
+            "already_in_progress": 409,
         }
+        # "queued" (the normal success path -- move_files() now only
+        # enqueues a background move_job, see torrent_manager.py) falls
+        # through to the 200 default.
         self._send_json(status_map.get(result.get("status"), 200), result)
 
     def _handle_admin_torrents_pause(self) -> None:
