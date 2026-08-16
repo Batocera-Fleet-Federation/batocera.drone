@@ -29,7 +29,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Event, Lock, Thread
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 from urllib.parse import parse_qs
 
 try:
@@ -116,6 +116,7 @@ _TELL_STATUS_KEYS = [
     "followedBy",
     "following",
     "dir",
+    "infoHash",
 ]
 
 
@@ -197,6 +198,7 @@ _ENTRY_PERSISTED_FIELDS = (
     "retry_count",
     "retry_at",
     "last_error",
+    "info_hash",
 )
 
 _ENTRY_LIVE_DEFAULTS = {
@@ -208,6 +210,18 @@ _ENTRY_LIVE_DEFAULTS = {
     "num_seeders": 0,
     "connections": 0,
     "eta_seconds": None,
+    # BitTorrent info-hash, the one identity that's stable across a GID's
+    # entire lifecycle (metadata GID -> content GID -> a restart's fresh
+    # GID) -- unlike `gid` itself, which churns on every one of those.
+    # Populated from aria2's own report (`_apply_aria2_status_locked`) or,
+    # for a magnet, synchronously at add time (`add_magnet` already parses
+    # it out of the URI for its own duplicate-submission check). Used to
+    # stop `_adopt_orphaned_gids` from creating a source-less duplicate row
+    # for a GID we already have an entry for, and as a fallback merge key
+    # in `_deduplicate_shared_gid_entries_locked` for when that guard is
+    # bypassed by timing (e.g. the real entry hasn't polled a status update
+    # yet) or the duplicate's `gid` has since gone stale.
+    "info_hash": "",
 }
 
 _STATUS_DISPLAY_PRIORITY = {"downloading": 0, "queued": 1, "error": 2, "complete": 3}
@@ -389,6 +403,14 @@ class TorrentManager:
         # aria2 confirms, so a removal can never silently strand a still-
         # running download that nothing in the UI can see or control anymore.
         self._pending_removal_gids: List[str] = []
+        # Info-hashes we've already fired a torrent_completed notification
+        # for this process's lifetime -- belt-and-suspenders against a
+        # source-less duplicate entry (see _deduplicate_shared_gid_entries_
+        # locked) independently reaching "finished" and sending its own
+        # email for the same underlying download. Not persisted: a fresh
+        # process legitimately re-arms per entry via each entry's own
+        # completed_at/_pending_complete_gid state, which IS persisted.
+        self._notified_info_hashes: Set[str] = set()
         self._restore_state()
         if start_worker:
             thread = Thread(target=self._worker, name="drone-torrent-manager", daemon=True)
@@ -429,7 +451,12 @@ class TorrentManager:
             if not entry_id or not (torrent_file or magnet_uri) or entry_id in self._torrents:
                 continue
             entry = {field: raw.get(field) for field in _ENTRY_PERSISTED_FIELDS}
+            persisted_info_hash = str(entry.get("info_hash") or "")
             entry.update(dict(_ENTRY_LIVE_DEFAULTS))
+            # info_hash IS persisted (unlike the rest of _ENTRY_LIVE_DEFAULTS,
+            # e.g. `gid`) -- the blanket update above would otherwise wipe it
+            # back to "" on every restart, right after pulling it from disk.
+            entry["info_hash"] = persisted_info_hash
             status = str(entry.get("status") or "queued")
             # aria2 GIDs do not survive a daemon restart: anything that was
             # mid-flight resumes from its .aria2 control file after a fresh
@@ -545,45 +572,85 @@ class TorrentManager:
                 keeper = source_rows[0]
                 removals = source_rows[1:]
 
-            if not removals:
-                continue
-            freshest = max(
-                [keeper, *removals],
-                key=lambda entry: (
-                    int(entry.get("total_bytes") or 0),
-                    int(entry.get("completed_bytes") or 0),
-                    bool(entry.get("name")),
-                ),
-            )
-            if freshest is not keeper:
-                for field in (
-                    "name",
-                    "status",
-                    "message",
-                    "completed_at",
-                    "total_bytes",
-                    "completed_bytes",
-                    "progress_percent",
-                    "files",
-                    "download_dir",
-                    "retry_count",
-                    "retry_at",
-                    "last_error",
-                    "force_started",
-                    "seeding",
-                    "download_speed_bps",
-                    "upload_speed_bps",
-                    "num_seeders",
-                    "connections",
-                    "eta_seconds",
-                    "_pending_complete_gid",
-                ):
-                    if field in freshest:
-                        keeper[field] = freshest[field]
-            for duplicate in removals:
-                self._torrents.pop(str(duplicate.get("id") or ""), None)
+            if self._merge_and_remove_duplicates_locked(keeper, removals):
                 dirty = True
+
+        # Second pass: collapse a source-less orphan row against a source row
+        # sharing its BitTorrent info-hash, even when their `gid` values no
+        # longer match. `gid` is churny by design (a fresh download gets a
+        # new one on every restart, and `_schedule_retry_locked` clears it
+        # back to `None` on any error) -- the pass above alone can permanently
+        # miss a duplicate that already drifted onto a different/lost `gid`
+        # before it ran. `info_hash` is intrinsic to the torrent's content,
+        # so it's the identity that survives all of that. Confirmed live: on
+        # a real drone, exactly this shape (a source-less "Adopted download"
+        # twin whose `gid` had already errored back to `None`) left 3 of 4
+        # duplicate torrents permanently stuck as an extra `error` row the
+        # gid-keyed pass could never reach. Only ever removes the
+        # source-less side, for the same "can be rediscovered from disk"
+        # reason the gid-keyed pass above stays off genuine second
+        # .torrent-file rows.
+        by_info_hash: Dict[str, List[dict]] = {}
+        for entry in self._torrents.values():
+            info_hash = str(entry.get("info_hash") or "")
+            if info_hash:
+                by_info_hash.setdefault(info_hash, []).append(entry)
+        for entries in by_info_hash.values():
+            if len(entries) < 2:
+                continue
+            ordered = sorted(entries, key=lambda entry: (entry.get("added_at") or "", entry.get("id") or ""))
+            source_rows = [entry for entry in ordered if entry.get("torrent_file") or entry.get("magnet_uri")]
+            orphan_rows = [entry for entry in ordered if not entry.get("torrent_file") and not entry.get("magnet_uri")]
+            if not source_rows or not orphan_rows:
+                continue
+            if self._merge_and_remove_duplicates_locked(source_rows[0], orphan_rows):
+                dirty = True
+
         return dirty
+
+    def _merge_and_remove_duplicates_locked(self, keeper: dict, removals: List[dict]) -> bool:
+        """Fold whichever of `keeper`/`removals` has the most progress into
+        `keeper`, then drop `removals` from the registry. Shared by both
+        `_deduplicate_shared_gid_entries_locked` passes."""
+
+        if not removals:
+            return False
+        freshest = max(
+            [keeper, *removals],
+            key=lambda entry: (
+                int(entry.get("total_bytes") or 0),
+                int(entry.get("completed_bytes") or 0),
+                bool(entry.get("name")),
+            ),
+        )
+        if freshest is not keeper:
+            for field in (
+                "name",
+                "status",
+                "message",
+                "completed_at",
+                "total_bytes",
+                "completed_bytes",
+                "progress_percent",
+                "files",
+                "download_dir",
+                "retry_count",
+                "retry_at",
+                "last_error",
+                "force_started",
+                "seeding",
+                "download_speed_bps",
+                "upload_speed_bps",
+                "num_seeders",
+                "connections",
+                "eta_seconds",
+                "_pending_complete_gid",
+            ):
+                if field in freshest:
+                    keeper[field] = freshest[field]
+        for duplicate in removals:
+            self._torrents.pop(str(duplicate.get("id") or ""), None)
+        return True
 
     def _schedule_retry_locked(self, entry: dict, message: str) -> Optional[str]:
         """Keep a real failure visible, then retry it at the back of the queue."""
@@ -985,6 +1052,15 @@ class TorrentManager:
             entry["retry_at"] = 0.0
             return doomed_gid
         result = outcome.get("result") or {}
+        info_hash = str(result.get("infoHash") or "")
+        if info_hash:
+            # Stable across the metadata-GID -> content-GID handoff below
+            # (and across a restart's fresh GID) -- captured before the
+            # early-return so the metadata GID's own poll already tags the
+            # entry with it, closing the identity gap `_adopt_orphaned_gids`
+            # would otherwise hit for the brief window before the content
+            # GID's own status is first polled.
+            entry["info_hash"] = info_hash
         followed_by = result.get("followedBy")
         if followed_by:
             # A magnet-added GID first only fetches the BitTorrent metadata
@@ -1089,9 +1165,27 @@ class TorrentManager:
         if entry.get("_pending_complete_gid") == gid:
             if not entry.get("completed_at"):
                 entry["completed_at"] = _now_iso()
-                _notifications.record_event(
-                    self.settings, "torrent_completed", "Torrent download completed", str(entry.get("name") or "")
-                )
+                # Defense in depth on top of the dedup passes above: even if
+                # a source-less duplicate of this same torrent somehow still
+                # exists and reaches "finished" independently, don't send a
+                # second "download completed" email for the same underlying
+                # content. Confirmed live: two registry rows sharing one
+                # aria2 download each independently satisfied this method's
+                # own "finished twice in a row" check and each sent their
+                # own notification. Entries predating this field (no
+                # info_hash yet) fall back to always notifying, same as
+                # before.
+                info_hash = str(entry.get("info_hash") or "")
+                already_notified = bool(info_hash) and info_hash in self._notified_info_hashes
+                if info_hash:
+                    self._notified_info_hashes.add(info_hash)
+                if not already_notified:
+                    _notifications.record_event(
+                        self.settings,
+                        "torrent_completed",
+                        "Torrent download completed",
+                        str(entry.get("name") or ""),
+                    )
         else:
             entry["_pending_complete_gid"] = gid
 
@@ -1549,6 +1643,9 @@ class TorrentManager:
             return
         with self._lock:
             known_gids = {entry.get("gid") for entry in self._torrents.values() if entry.get("gid")}
+            known_info_hashes = {
+                entry.get("info_hash") for entry in self._torrents.values() if entry.get("info_hash")
+            }
             dirty = False
             for result in [*active, *waiting]:
                 gid = str(result.get("gid") or "")
@@ -1566,6 +1663,23 @@ class TorrentManager:
                     # real content gid (see _apply_aria2_status_locked's
                     # followedBy handling) -- that gid will surface in its
                     # own right on this same sweep once aria2 reports it.
+                    continue
+                result_info_hash = str(result.get("infoHash") or "")
+                if result_info_hash and result_info_hash in known_info_hashes:
+                    # Belt-and-suspenders on top of the `following`/
+                    # `followedBy` checks above: those key off the specific
+                    # GID chain and can miss a real-world timing gap (a
+                    # tracked entry's own status poll hasn't run yet this
+                    # tick, or its stale metadata GID already dropped out of
+                    # aria2's active/waiting lists before its parent's `gid`
+                    # field got retargeted) -- confirmed live on a real
+                    # drone: 4 of 6 magnet torrents each grew a source-less
+                    # "Adopted download" twin of themselves this way, and the
+                    # older ones calcified into permanent duplicate `error`
+                    # rows once their orphan twin's gid was lost (nothing to
+                    # re-add it from). The info-hash is intrinsic to the
+                    # torrent's content, not to a particular GID, so it holds
+                    # even when the GID-based checks race.
                     continue
                 entry_id = uuid.uuid4().hex[:12]
                 entry = {
@@ -1594,6 +1708,8 @@ class TorrentManager:
                     entry["name"] = f"Adopted download {gid[:8]}"
                 self._torrents[entry_id] = entry
                 known_gids.add(gid)
+                if result_info_hash:
+                    known_info_hashes.add(result_info_hash)
                 dirty = True
             if dirty:
                 self._persist_locked()
@@ -1715,6 +1831,7 @@ class TorrentManager:
                 "retry_at": 0.0,
                 "last_error": "",
                 **dict(_ENTRY_LIVE_DEFAULTS),
+                "info_hash": info_hash,
             }
             self._persist_locked()
         self.wake()

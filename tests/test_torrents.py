@@ -1462,6 +1462,82 @@ class TorrentAria2ReconciliationTests(unittest.TestCase):
             self.assertEqual([row["id"] for row in rows], [added["id"]])
             self.assertNotIn([shared_gid], rpc.method_calls("aria2.forceRemove"))
 
+    def test_does_not_adopt_orphaned_gid_sharing_a_known_info_hash_even_when_following_is_unknown(self) -> None:
+        """Belt-and-suspenders on top of the `following`-chain guard: even if
+        the metadata GID has already dropped out of tellActive/tellWaiting
+        (so `following` can't be matched against `known_gids` at all), a
+        matching BitTorrent info-hash alone must still block adoption --
+        confirmed live on a real drone: this exact gap let 4 of 6 magnet
+        torrents each grow a source-less duplicate row that eventually
+        calcified into a permanent extra `error` entry.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            added = manager.add_magnet(_MAGNET_URI)
+            manager._tick()
+            with manager._lock:
+                info_hash = manager._torrents[added["id"]]["info_hash"]
+            self.assertTrue(info_hash)
+
+            rpc.statuses["content-gid"] = {
+                "gid": "content-gid",
+                "status": "active",
+                "totalLength": "9000000000",
+                "completedLength": "468000000",
+                "downloadSpeed": "2700000",
+                # Points at a metadata gid this manager never tracked/has
+                # already forgotten -- the `following in known_gids` guard
+                # alone cannot catch this.
+                "following": "long-gone-metadata-gid",
+                "infoHash": info_hash,
+                "bittorrent": {"info": {"name": "Some Test File"}},
+            }
+            rpc.active = [rpc.statuses["content-gid"]]
+
+            manager._tick()
+
+            self.assertEqual(len(manager.snapshot()["torrents"]), 1)
+
+    def test_collapses_orphan_row_sharing_info_hash_after_its_gid_has_gone_stale(self) -> None:
+        """The gid-keyed dedup pass alone can permanently miss a duplicate
+        whose gid has since diverged from the real entry's -- e.g. it already
+        errored, which resets `gid` back to `None` (`_schedule_retry_locked`)
+        -- confirmed live: 3 of 4 duplicate torrents on a real drone were
+        stuck in exactly this shape, forever, since a source-less row has
+        nothing to ever re-add itself from. info_hash survives that.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            added = manager.add_magnet(_MAGNET_URI)
+            manager._tick()
+            with manager._lock:
+                original = manager._torrents[added["id"]]
+                info_hash = original["info_hash"]
+                self.assertTrue(info_hash)
+                orphan = dict(original)
+                orphan.update(
+                    {
+                        "id": "stale-orphan-copy",
+                        "torrent_file": "",
+                        "magnet_uri": "",
+                        "gid": None,
+                        "status": "error",
+                        "retry_at": 0.0,
+                        "added_at": "2099-01-01T00:00:00+00:00",
+                        "queue_position": original["queue_position"] + 1,
+                    }
+                )
+                manager._torrents[orphan["id"]] = orphan
+
+            manager._tick()
+
+            rows = manager.snapshot()["torrents"]
+            self.assertEqual([row["id"] for row in rows], [added["id"]])
+
 
 _MAGNET_URI = (
     "magnet:?xt=urn:btih:c12fe1c06bba254a9dc9f519b335aa7c1367a88a&dn=Some+Test+File"
@@ -1579,6 +1655,45 @@ class TorrentCompletedNotificationTests(unittest.TestCase):
                 manager._tick()  # already notified -- no re-fire
                 fake_notifications.record_event.assert_called_once()
             self.assertIsNotNone(manager.snapshot()["torrents"][0]["completed_at"])
+
+    def test_does_not_double_notify_two_entries_sharing_the_same_info_hash(self) -> None:
+        """Defense in depth for when a duplicate registry row (see
+        TorrentAria2ReconciliationTests) slips past both dedup passes and
+        independently reaches "finished" under its own gid -- confirmed
+        live: two registry rows that both ended up tracking one real aria2
+        download each independently sent their own "Torrent download
+        completed" email for the same torrent. Each entry still gets its
+        own completed_at (so its row stops looking stuck), only the second
+        notification is suppressed.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = self._manager(root, rpc)
+            shared_info_hash = "deadbeef" * 5
+            with mock.patch.object(torrent_manager, "_notifications") as fake_notifications:
+                with manager._lock:
+                    manager._torrents["entry-a"] = {
+                        "id": "entry-a",
+                        "name": "Duplicate Torrent",
+                        "gid": "gid-a",
+                        "info_hash": shared_info_hash,
+                        "_pending_complete_gid": "gid-a",
+                        "completed_at": None,
+                    }
+                    manager._confirm_finished_and_notify_locked(manager._torrents["entry-a"])
+                    manager._torrents["entry-b"] = {
+                        "id": "entry-b",
+                        "name": "Duplicate Torrent",
+                        "gid": "gid-b",
+                        "info_hash": shared_info_hash,
+                        "_pending_complete_gid": "gid-b",
+                        "completed_at": None,
+                    }
+                    manager._confirm_finished_and_notify_locked(manager._torrents["entry-b"])
+                fake_notifications.record_event.assert_called_once()
+            self.assertIsNotNone(manager._torrents["entry-a"]["completed_at"])
+            self.assertIsNotNone(manager._torrents["entry-b"]["completed_at"])
 
 
 class TorrentMagnetTests(unittest.TestCase):
