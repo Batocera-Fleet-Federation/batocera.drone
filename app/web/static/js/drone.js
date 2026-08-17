@@ -1720,6 +1720,9 @@ function parseMoviesHash(hash) {
   if (rest.startsWith("show/")) {
     const parts = rest.split("/");
     const showTitle = decodeURIComponent(parts[1] || "");
+    if (parts[2] === SHOW_EXTRAS_SEASON_KEY) {
+      return { view: "show", showTitle, seasonNumber: SHOW_EXTRAS_SEASON_KEY };
+    }
     const seasonNumber = parts[2] ? parseInt(parts[2], 10) : null;
     return { view: "show", showTitle, seasonNumber: Number.isFinite(seasonNumber) ? seasonNumber : null };
   }
@@ -1976,15 +1979,32 @@ function setMovieExplorerGenreFilter(value) {
   renderMovieExplorerSidebar();
   filterMovieExplorer(document.getElementById("movieExplorerSearch")?.value || "");
 }
-// A row belongs to a show/season group if it's a real episode, or an
-// "extra" (Featurette/deleted-scene/etc.) that classify() managed to
-// resolve a show_title/season_number for from its directory structure --
-// its own filename essentially never carries that indicator the way a real
-// episode's does (see HandlersMoviesMixin._apply_movie_kind_and_genres).
-// An extra with no resolvable show/season stays ungrouped (its own orphan
-// card), same as before this existed, rather than guessing.
+// A row belongs to a show group if it's a real episode, or an "extra"
+// (Featurette/deleted-scene/etc.) that classify() managed to resolve a
+// show_title for from its directory structure -- its own filename
+// essentially never carries that indicator the way a real episode's does
+// (see HandlersMoviesMixin._apply_movie_kind_and_genres). An extra with no
+// resolvable show at all stays ungrouped (its own orphan card), same as
+// before this existed, rather than guessing. season_number is NOT required
+// here even though it drives which season tab a row lands under
+// (SHOW_EXTRAS_SEASON_KEY below covers a resolved-show-but-no-season
+// extra) -- real reported gap: an extras folder sitting directly under the
+// show with no season subdivision at all ("Shows/<Show>/Featurettes/.../
+// clip.mkv") resolves a show_title fine but has no season folder to infer
+// a season from, and requiring one here made the row silently fall out of
+// its show's grouping entirely instead of showing up under an "Extras" tab.
 function isShowGroupableRow(row) {
-  return row.kind === "episode" || (row.kind === "extra" && !!row.show_title && row.season_number != null);
+  return row.kind === "episode" || (row.kind === "extra" && !!row.show_title);
+}
+// Sentinel season-tab key for a groupable extra with no resolvable season
+// (see isShowGroupableRow) -- deliberately a string, never collides with a
+// real (numeric) season number, sorts after every real season in
+// renderShowDetailsPage's tab strip, and round-trips through the URL hash
+// unlike `null` would (parseMoviesHash needs to keep it, not parseInt it
+// away).
+const SHOW_EXTRAS_SEASON_KEY = "extras";
+function seasonTabLabel(seasonKey) {
+  return seasonKey === SHOW_EXTRAS_SEASON_KEY ? "Extras" : `Season ${seasonKey}`;
 }
 // Sorts a season's members with real episodes first (by episode_number),
 // extras afterward (alphabetically, since they have no reliable ordering
@@ -2037,8 +2057,10 @@ function groupMoviesForExplorer(rows) {
     members.sort(compareShowGroupMembers);
     // Prefer a real episode as the representative (its entry_key drives the
     // show card's poster lookup and the show-detail page's first-ever
-    // metadata fetch) -- an extra is never scraped, so it'd never have
-    // artwork of its own to offer either way.
+    // metadata fetch) -- a real episode's artwork is more specific/reliable
+    // than an extra's (apply_tv_extra applies the show's own poster/
+    // backdrop as a fallback when an extra's show resolves on TMDb, but an
+    // episode's own poster/backdrop cascade is preferred when one exists).
     const representative = members.find((m) => m.scraped_show_title)
       || members.find((m) => m.kind === "episode")
       || members[0];
@@ -2254,10 +2276,23 @@ async function renderShowDetailsPage(showTitle, seasonNumber) {
     }
     const seasonsMap = new Map();
     episodes.forEach((ep) => {
-      if (!seasonsMap.has(ep.season_number)) seasonsMap.set(ep.season_number, []);
-      seasonsMap.get(ep.season_number).push(ep);
+      // A groupable extra with no resolvable season (isShowGroupableRow)
+      // lands in the sentinel "Extras" bucket rather than being dropped --
+      // real episodes always have a real season_number (classify() never
+      // returns KIND_EPISODE without one).
+      const seasonKey = ep.season_number == null ? SHOW_EXTRAS_SEASON_KEY : ep.season_number;
+      if (!seasonsMap.has(seasonKey)) seasonsMap.set(seasonKey, []);
+      seasonsMap.get(seasonKey).push(ep);
     });
-    const seasonNumbers = [...seasonsMap.keys()].sort((a, b) => a - b);
+    // Numeric seasons first (ascending), the "Extras" bucket always last --
+    // a plain `(a, b) => a - b` breaks the moment a string key is mixed in
+    // (NaN from the subtraction), and conceptually "Extras" isn't a season
+    // number to interleave with real ones anyway.
+    const seasonNumbers = [...seasonsMap.keys()].sort((a, b) => {
+      if (a === SHOW_EXTRAS_SEASON_KEY) return 1;
+      if (b === SHOW_EXTRAS_SEASON_KEY) return -1;
+      return a - b;
+    });
     const selectedSeason = seasonNumbers.includes(seasonNumber) ? seasonNumber : seasonNumbers[0];
     const seasonEpisodes = (seasonsMap.get(selectedSeason) || []).slice().sort(compareShowGroupMembers);
     const representative = seasonEpisodes.find((e) => e.scraped_show_title)
@@ -2290,7 +2325,7 @@ async function renderShowDetailsPage(showTitle, seasonNumber) {
           }
           <div class="movie-detail-info min-width-0">
             <div class="small text-muted mb-1"><span class="badge text-bg-info me-2">TV Show</span>${realEpisodeCount} episode${realEpisodeCount === 1 ? "" : "s"}${extraCount ? `, ${extraCount} extra${extraCount === 1 ? "" : "s"}` : ""}</div>
-            <h2 class="movie-detail-title" title="${escapeHtml(displayShowTitle)}">${escapeHtml(displayShowTitle)} &middot; Season ${selectedSeason}</h2>
+            <h2 class="movie-detail-title" title="${escapeHtml(displayShowTitle)}">${escapeHtml(displayShowTitle)} &middot; ${seasonTabLabel(selectedSeason)}</h2>
             ${genres.length ? `<div class="mb-2">${genres.map((g) => `<span class="badge movie-genre-badge">${escapeHtml(g)}</span>`).join(" ")}</div>` : ""}
             ${
               adminEnabled
@@ -2304,7 +2339,7 @@ async function renderShowDetailsPage(showTitle, seasonNumber) {
         ${overview ? `<p>${escapeHtml(overview)}</p>` : `<p class="text-muted small">No description yet -- scrape an episode of this season to fetch one from TMDb.</p>`}
         <div class="d-flex flex-wrap gap-2 my-3">
           ${seasonNumbers.map((n) => `
-            <button type="button" class="btn btn-sm ${n === selectedSeason ? "btn-primary" : "btn-outline-primary"}" onclick="setHash(${jsAttr(showDetailHash(showTitle, n))})">Season ${n}</button>
+            <button type="button" class="btn btn-sm ${n === selectedSeason ? "btn-primary" : "btn-outline-primary"}" onclick="setHash(${jsAttr(showDetailHash(showTitle, n))})">${seasonTabLabel(n)}</button>
           `).join("")}
         </div>
         <div class="list-group">
