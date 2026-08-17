@@ -207,6 +207,17 @@ class MockServerIntegrationTests(unittest.TestCase):
         self.assertEqual(headers.get("X-Frame-Options"), "DENY")
         self.assertIn("frame-ancestors 'none'", headers.get("Content-Security-Policy", ""))
 
+    def test_default_csp_allows_youtube_trailer_embeds(self) -> None:
+        # Regression test: the movie/show detail page's trailer <iframe>
+        # (drone.js: src="https://www.youtube.com/embed/<key>") was
+        # silently blocked by the browser -- frame-src had no entry at all,
+        # so it fell back to default-src 'self'. frame-ancestors (who may
+        # embed *this* page) is unrelated and must stay 'none'.
+        _, headers, _ = self._get_with_headers("/static/css/drone.css")
+        csp = headers.get("Content-Security-Policy", "")
+        self.assertIn("frame-src https://www.youtube.com", csp)
+        self.assertIn("frame-ancestors 'none'", csp)
+
     def test_api_admin_status_and_openapi_mtls_guidance(self) -> None:
         payload = self._get_json("/v1/api/admin/api/status")
         self.assertIn("/v1/api/swagger", payload["swagger_url"])

@@ -1484,11 +1484,17 @@ class RomRequestHandler(HandlersAuthMixin, HandlersSystemMixin, HandlersDownload
         # movie player modal's Chromecast button loads -- see drone.js's loadCastSenderSdk.
         # Harmless to always allow even when casting is disabled (settings.cast_enabled):
         # the SDK is only ever fetched client-side when the movie player modal opens.
+        # frame-src allows the movie/show detail page's YouTube trailer <iframe>
+        # (drone.js renders src="https://www.youtube.com/embed/<key>") --
+        # without it, frame-src falls back to default-src 'self' and the
+        # browser silently blocks the embed, rendering "This content is
+        # blocked" inside the iframe instead of the trailer.
         self.send_header(
             "Content-Security-Policy",
             f"default-src 'self'; img-src {' '.join(image_sources)}; style-src 'self' 'unsafe-inline' https://unpkg.com https://cdn.jsdelivr.net https://fonts.googleapis.com; "
             "script-src 'self' 'unsafe-inline' https://unpkg.com https://cdn.jsdelivr.net https://www.gstatic.com; "
-            "font-src 'self' data: https://cdn.jsdelivr.net https://fonts.gstatic.com; connect-src 'self' https://unpkg.com https://cdn.jsdelivr.net https://www.gstatic.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+            "font-src 'self' data: https://cdn.jsdelivr.net https://fonts.gstatic.com; connect-src 'self' https://unpkg.com https://cdn.jsdelivr.net https://www.gstatic.com; "
+            "frame-src https://www.youtube.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
         )
 
     def _build_fake_image_url(self, seed: str, width: int = 640, height: int = 360) -> str:
