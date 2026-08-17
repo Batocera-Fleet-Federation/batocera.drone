@@ -126,6 +126,23 @@ class ClassifyEpisodeTests(unittest.TestCase):
 
 
 class ClassifyExtraTests(unittest.TestCase):
+    def test_real_sxxeyy_marker_in_extras_folder_wins_as_a_real_episode(self) -> None:
+        # Real reported gap: a genuine, unambiguous S00E01 marker in the
+        # file's own name used to be discarded because the extras-folder
+        # check ran first and short-circuited before the filename was even
+        # looked at -- Adult Swim/Cartoon Network-style libraries commonly
+        # catalog bonus/special content as a real TMDb-numbered episode with
+        # its own artwork, not just generic bonus content that happens to
+        # share a folder with real Featurettes.
+        name = "Aqua Teen Hunger Force (2000) - S00E01 - Baffler Meal (480p DVD x265 r00t).mkv"
+        result = filename_parser.classify("Shows/Aqua Teen Hunger Force/Featurettes/Vol. 2/" + name, name)
+        self.assertEqual(result.kind, filename_parser.KIND_EPISODE)
+        self.assertEqual(result.show_title, "Aqua Teen Hunger Force")
+        self.assertEqual(result.year, "2000")
+        self.assertEqual(result.season, 0)
+        self.assertEqual(result.episode, 1)
+        self.assertEqual(result.episode_title, "Baffler Meal")
+
     def test_featurettes_folder_is_an_extra_even_without_episode_shape(self) -> None:
         result = filename_parser.classify(
             "Shows/Dexter/Dexter (2006) S01/Featurettes/Blood Splatter 101.mkv",

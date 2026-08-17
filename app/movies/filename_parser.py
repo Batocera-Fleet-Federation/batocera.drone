@@ -268,31 +268,49 @@ def _extra_show_season_from_path(file_path: str) -> Tuple[str, Optional[int]]:
 
 def classify(file_path: str, file_name: str) -> ParsedEntry:
     """Decide whether ``file_name`` (at ``file_path`` within movies_root) is a
-    movie, a TV episode, or bonus/extra content -- in that priority order:
-    the extras-folder check runs first since a stray episode-shaped name
-    inside a "Featurettes" folder (unlikely, but possible) is still extra
-    content, not something to search TMDb for.
+    movie, a TV episode, or bonus/extra content -- in that priority order,
+    with one exception: a real, unambiguous ``SxxEyy``/``NxNN`` marker in the
+    file's own name wins over the extras-folder check, not the other way
+    around. That used to be reversed (extras-folder short-circuited before
+    the filename was even looked at), on the assumption that an episode-
+    shaped name inside a "Featurettes" folder was "unlikely, but possible"
+    coincidence, still just generic bonus content. Real libraries prove that
+    assumption wrong often enough to matter: Adult Swim/Cartoon Network-
+    style shows commonly catalog bonus/special content as a real
+    TMDb-numbered ``S00Enn`` episode with its own title/artwork (confirmed
+    live: "Aqua Teen Hunger Force ... - S00E01 - Baffler Meal ..." sitting
+    under a "Featurettes/Vol. 2" folder) -- throwing that specific episode
+    number away in favor of coarse show-level fallback data loses real,
+    available TMDb data for no reason. ``_EPISODE_ONLY_RE`` (the weaker
+    "Ep. NN, no season" signal -- see its own docstring) stays *below* the
+    extras-folder check, unlike the two strict patterns: it's a fuzzier
+    inference, not an unambiguous marker, so an extras folder's own
+    directory-based show/season inference is the more trustworthy source
+    when that's all there is to go on.
 
-    Extra content also gets a best-effort ``show_title``/``season`` from the
+    Extra content gets a best-effort ``show_title``/``season`` from the
     directory structure (see ``_extra_show_season_from_path``) so the Movies
     UI can list it under the right show/season instead of leaving it as an
     orphan card with no artwork and no context -- ``episode``/
     ``episode_title`` stay empty, since a Featurette isn't a numbered
     episode."""
+    stem = _normalize_unicode(Path(file_name).stem)
+    strict_match = _EPISODE_RE.match(stem) or _ALT_EPISODE_RE.match(stem)
+    if strict_match:
+        return _episode_entry_from_match(strict_match, season_defaulted=False)
+
     path_segments = [segment.lower() for segment in Path(file_path).parts[:-1]]
     if any(segment in EXTRAS_FOLDER_NAMES for segment in path_segments):
         show_title, season = _extra_show_season_from_path(file_path)
         return ParsedEntry(kind=KIND_EXTRA, show_title=show_title, season=season)
 
-    stem = _normalize_unicode(Path(file_name).stem)
-    match = _EPISODE_RE.match(stem) or _ALT_EPISODE_RE.match(stem)
-    season_defaulted = False
-    if not match:
-        match = _EPISODE_ONLY_RE.match(stem)
-        season_defaulted = match is not None
-    if not match:
+    loose_match = _EPISODE_ONLY_RE.match(stem)
+    if not loose_match:
         return ParsedEntry(kind=KIND_MOVIE)
+    return _episode_entry_from_match(loose_match, season_defaulted=True)
 
+
+def _episode_entry_from_match(match: "re.Match[str]", *, season_defaulted: bool) -> ParsedEntry:
     fields = match.groupdict()
     tail = _BRACKETED_RE.sub("", fields.get("tail") or "")
     tail = _SCENE_TOKENS_RE.sub("", tail)
