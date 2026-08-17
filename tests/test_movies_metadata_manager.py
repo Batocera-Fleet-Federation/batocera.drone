@@ -1038,10 +1038,14 @@ class BulkScrapeTests(unittest.TestCase):
             self.assertEqual(job["skipped_count"], 0)
             self.assertEqual(fake.search_calls[0], "Alien Resurrection")
 
-    def test_extras_folder_content_is_skipped_without_a_tmdb_call(self):
+    def test_extras_folder_content_with_no_identifiable_show_is_skipped_without_a_tmdb_call(self):
+        # Genuinely ungroupable -- a flat single-bucket library with no
+        # per-show folder anywhere above the extras folder (see
+        # filename_parser's "Movies/Featurettes/RandomClip.mkv" test case).
+        # There's truly nothing to search TMDb for here.
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            _write_movie(root, "Shows/Dexter/Dexter (2006) S01/Featurettes/Blood Splatter 101.mkv")
+            _write_movie(root, "Movies/Featurettes/RandomClip.mkv")
             settings = _build_settings(root)
             movies_store.sync_movies_cache(settings.movies_root)
 
@@ -1054,6 +1058,65 @@ class BulkScrapeTests(unittest.TestCase):
             self.assertEqual(job["failed_count"], 0)
             self.assertEqual(fake.search_calls, [])
             self.assertEqual(fake.search_tv_calls, [])
+
+    def test_extras_folder_content_with_identified_show_falls_back_to_show_artwork(self):
+        # Real reported gap: a Featurette/extras clip has nothing of its own
+        # for TMDb to match, but when the directory structure identifies
+        # which show it belongs to, it should get that show's own poster/
+        # backdrop/overview instead of showing up with no scrape data at all
+        # (or, before _extra_show_season_from_path's fallback existed,
+        # un-groupable and left looking like a stray movie).
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Shows/Cowboy Bebop/Extras/Cowboy Bebop - Ein's Summer Vacation.mkv")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+            entry_key = movies_store.list_movies(settings.movies_root)[0]["entry_key"]
+
+            fake = FakeBulkTmdbClient(
+                tv_match_queries={"Cowboy Bebop"},
+                tv_details=dict(
+                    _MATRIX_DETAILS, title="Cowboy Bebop", tmdb_id=909,
+                    poster_url="https://example.test/poster.jpg", backdrop_url="https://example.test/backdrop.jpg",
+                ),
+            )
+            metadata_manager.start_bulk_scrape(settings, rescan_all=True, client=fake)
+            job = _wait_for_bulk_scrape_status(settings)
+
+            self.assertEqual(job["matched_count"], 1)
+            self.assertEqual(job["skipped_count"], 0)
+            self.assertEqual(fake.search_calls, [])
+            self.assertEqual(fake.search_tv_calls, ["Cowboy Bebop"])
+            # No episode number on an extra -- nothing episode/season-
+            # specific to look up.
+            self.assertEqual(fake.tv_season_details_calls, [])
+            self.assertEqual(fake.tv_episode_details_calls, [])
+
+            scraped = movies_store.get_movie_metadata(settings.movies_root, entry_key)
+            self.assertEqual(scraped["provider"], "tmdb_tv")
+            self.assertEqual(scraped["media_type"], "tv_extra")
+            self.assertEqual(scraped["show_title"], "Cowboy Bebop")
+            self.assertIsNotNone(scraped["poster_relative_path"])
+            self.assertIsNotNone(scraped["backdrop_relative_path"])
+
+    def test_extras_folder_content_with_unresolvable_show_is_skipped_not_failed(self):
+        # The directory structure identified a show name, but TMDb has no
+        # match for it -- still counted as skipped (nothing genuinely went
+        # wrong), same as the no-show-identified case, not failed.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_movie(root, "Shows/Some Obscure Show/Extras/Clip.mkv")
+            settings = _build_settings(root)
+            movies_store.sync_movies_cache(settings.movies_root)
+
+            fake = FakeBulkTmdbClient()  # no tv_match_queries configured -- search_tv finds nothing
+            metadata_manager.start_bulk_scrape(settings, rescan_all=True, client=fake)
+            job = _wait_for_bulk_scrape_status(settings)
+
+            self.assertEqual(job["skipped_count"], 1)
+            self.assertEqual(job["matched_count"], 0)
+            self.assertEqual(job["failed_count"], 0)
+            self.assertEqual(fake.search_tv_calls, ["Some Obscure Show"])
 
     def test_tv_episode_is_searched_via_search_tv_and_saved_as_an_episode(self):
         with tempfile.TemporaryDirectory() as tmp:

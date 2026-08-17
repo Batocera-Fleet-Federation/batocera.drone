@@ -329,6 +329,73 @@ def apply_tv_episode(
     )
 
 
+def apply_tv_extra(
+    settings: Settings,
+    entry_key: str,
+    tv_id,
+    *,
+    show_details: Optional[dict] = None,
+    client: Optional[TmdbClient] = None,
+) -> dict:
+    """Bonus/behind-the-scenes content (a Featurettes/Extras-folder clip)
+    that's been identified as belonging to a real show (see
+    ``filename_parser._extra_show_season_from_path``) but has no episode
+    number of its own -- there's nothing episode- or season-specific to look
+    up on TMDb for it, so this applies the show's own poster/backdrop/
+    overview/genres/cast directly, the same "better than nothing" cascade
+    ``apply_tv_episode`` already does per-field when TMDb has no
+    episode/season-specific value. Sibling to ``apply_tv_episode`` without
+    the season/episode TMDb calls."""
+    movie = _movies_store.get_movie_by_key(settings.movies_root, entry_key)
+    if not movie:
+        raise MovieNotFoundError(entry_key)
+    movies_root = Path(settings.movies_root).resolve()
+    movie_path = Path(movie["absolute_path"]).resolve()
+
+    client = client or _client(settings)
+    show = show_details if show_details is not None else client.tv_details(tv_id)
+
+    poster_relative_path: Optional[str] = None
+    poster_source = show.get("poster_url")
+    if poster_source:
+        target = _artwork_path(movie_path, "image")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        data, _content_type = client.download_image(poster_source)
+        target.write_bytes(data)
+        poster_relative_path = _relative_to_movies_root(movies_root, target)
+
+    backdrop_relative_path: Optional[str] = None
+    backdrop_source = show.get("backdrop_url")
+    if backdrop_source:
+        target = _artwork_path(movie_path, "fanart")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        data, _content_type = client.download_image(backdrop_source)
+        target.write_bytes(data)
+        backdrop_relative_path = _relative_to_movies_root(movies_root, target)
+
+    extra = {
+        "media_type": "tv_extra",
+        "show_title": show.get("title") or "",
+        "overview": show.get("overview") or "",
+        "tagline": show.get("tagline") or "",
+        "genres": show.get("genres") or [],
+        "cast": show.get("cast") or [],
+        "release_date": show.get("release_date"),
+        "rating": show.get("rating"),
+        "youtube_trailer_key": show.get("youtube_trailer_key"),
+    }
+    return _movies_store.save_movie_metadata(
+        settings.movies_root,
+        entry_key,
+        provider="tmdb_tv",
+        provider_id=f"{show.get('tmdb_id') or tv_id}-extra",
+        title=show.get("title") or "",
+        poster_relative_path=poster_relative_path,
+        backdrop_relative_path=backdrop_relative_path,
+        extra=extra,
+    )
+
+
 # --------------------------------------------------------------- bulk scrape
 
 def movie_folder_name(movie: dict) -> Optional[str]:
@@ -543,9 +610,32 @@ def _run_bulk_scrape_job(settings: Settings, job_id: int, candidates: list, clie
             )
             if parsed.kind == _filename_parser.KIND_EXTRA:
                 # Bonus/behind-the-scenes content living in a Plex/Kodi
-                # extras folder (Featurettes, Interviews, ...) -- never a
-                # real movie or episode, so never worth a TMDb call. Counted
-                # with the other "nothing to search for" cases, not failed.
+                # extras folder (Featurettes, Interviews, ...) is never a
+                # real movie or episode in its own right, so there's never a
+                # TMDb entry to search *for it specifically* -- but when the
+                # directory structure identified which show it belongs to
+                # (filename_parser._extra_show_season_from_path), it still
+                # deserves that show's own poster/backdrop/overview rather
+                # than showing up with no artwork at all (or, before that
+                # inference existed, un-groupable and left looking like a
+                # stray movie). Only a genuinely unassociated extra (no show
+                # folder found anywhere in the path) is skipped outright.
+                if parsed.show_title:
+                    _throttle_before_tmdb_call()
+                    tv_id, show_details = _resolve_tv_show(
+                        client, parsed.show_title, parsed.year, show_id_by_title, show_details_by_id,
+                    )
+                    if tv_id is not None:
+                        apply_tv_extra(settings, movie["entry_key"], tv_id, show_details=show_details, client=client)
+                        matched += 1
+                        _record_item(settings, movie, _job_items.STATUS_MATCHED)
+                        continue
+                    skipped += 1
+                    _record_item(
+                        settings, movie, _job_items.STATUS_SKIPPED,
+                        f"bonus/extra content -- no TMDb show match for \"{parsed.show_title}\"",
+                    )
+                    continue
                 skipped += 1
                 _record_item(settings, movie, _job_items.STATUS_SKIPPED, "bonus/extra content (Featurettes-style folder)")
                 continue

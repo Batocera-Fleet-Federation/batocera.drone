@@ -59,6 +59,24 @@ _ALT_EPISODE_RE = re.compile(
     r"(?P<season>\d{1,2})x(?P<episode>\d{2,3})"
     r"(?P<tail>.*)$"
 )
+# "Show - Ep. 04 - Episode Title (quality tags).mkv" -- an episode-number-
+# only style with no season component anywhere in the name (real example:
+# a 1980s syndicated cartoon library, "CENTURIONS - Ep. 04 - Found, One Lost
+# World (480p - DVDRip).mp4", continuously numbered rather than season-
+# subdivided -- and with no season subfolder either, so there's genuinely no
+# season signal anywhere in the path). Without this, the file fell through
+# both patterns above straight to KIND_MOVIE and got searched against TMDb's
+# *movie* endpoint, which can never match a TV show -- same failure shape as
+# the bracketed/space-separated-tags regressions above. classify() defaults
+# season to 1 for a match here (see its ``season_defaulted`` handling) --
+# almost every real-world "Ep. NN"-only library is either single-season or
+# uses one continuous numbering scheme TMDb itself files under season 1.
+_EPISODE_ONLY_RE = re.compile(
+    r"^(?P<show>.+?)\s*(?:\(?(?P<year>(?:19|20)\d{2})\)?)?\s*[-_. ]+"
+    r"Ep(?:isode)?\.?\s*(?P<episode>\d{1,3})"
+    r"(?P<tail>.*)$",
+    re.IGNORECASE,
+)
 
 # Scene-release tooling substitutes filesystem-illegal characters for
 # lookalikes (seen in the wild: "Face⁄Off" for "Face/Off") -- put back the
@@ -200,8 +218,15 @@ def _extra_show_season_from_path(file_path: str) -> Tuple[str, Optional[int]]:
     Searches from the segment closest to the file outward to the root,
     stopping at the first match, so a deeper, unrelated "... S3" style
     sub-featurette folder can't be mistaken for the real season folder
-    above it. Returns ``("", None)`` if nothing matches anywhere in the
-    path -- callers should leave the entry ungrouped rather than guess."""
+    above it. Falls back to the extras folder's own immediate parent (no
+    season) when nothing season-shaped exists anywhere in the path -- a
+    real-library layout ("Shows/<Show>/Extras/<file>", no season
+    subdivision at all) that none of the season-folder patterns above can
+    match, which used to leave the entry with an empty show_title and no
+    way to group it with the show's own episodes or fall back to the show's
+    artwork. Returns ``("", None)`` only when there's truly no folder
+    structure to go on at all (e.g. an extras file sitting directly under
+    the movies root)."""
     segments = Path(file_path).parts[:-1]
     for index in range(len(segments) - 1, -1, -1):
         segment = segments[index]
@@ -223,6 +248,21 @@ def _extra_show_season_from_path(file_path: str) -> Tuple[str, Optional[int]]:
         combined_show, combined_season = _season_and_show_from_combined_folder(segment)
         if combined_show:
             return combined_show, combined_season
+    for index in range(len(segments) - 1, -1, -1):
+        # index > 1, not just > 0: the extras folder's immediate parent must
+        # itself not be the top-level segment, or a flat single-bucket
+        # library ("Movies/Featurettes/RandomClip.mkv", no per-show folder
+        # at all) would get its generic top-level folder name ("Movies")
+        # mistaken for a show. "Shows/<Show>/Extras/<file>" clears this
+        # (Extras at index 2, its parent "<Show>" at index 1 > 1); a bucket
+        # sitting directly under the root doesn't (Extras at index 1, its
+        # parent is index 0, the root category itself).
+        if segments[index].lower() in EXTRAS_FOLDER_NAMES and index > 1:
+            parent = segments[index - 1]
+            folder_candidate = folder_title_candidate(parent)
+            show_title = folder_candidate[0] if folder_candidate else _collapse(parent)
+            if show_title:
+                return show_title, None
     return "", None
 
 
@@ -246,6 +286,10 @@ def classify(file_path: str, file_name: str) -> ParsedEntry:
 
     stem = _normalize_unicode(Path(file_name).stem)
     match = _EPISODE_RE.match(stem) or _ALT_EPISODE_RE.match(stem)
+    season_defaulted = False
+    if not match:
+        match = _EPISODE_ONLY_RE.match(stem)
+        season_defaulted = match is not None
     if not match:
         return ParsedEntry(kind=KIND_MOVIE)
 
@@ -257,7 +301,7 @@ def classify(file_path: str, file_name: str) -> ParsedEntry:
         kind=KIND_EPISODE,
         show_title=_collapse(fields["show"]),
         year=fields.get("year"),
-        season=int(fields["season"]),
+        season=1 if season_defaulted else int(fields["season"]),
         episode=int(fields["episode"]),
         episode_title=episode_title,
     )

@@ -92,6 +92,38 @@ class ClassifyEpisodeTests(unittest.TestCase):
         self.assertEqual(result.season, 2)
         self.assertEqual(result.episode, 10)
 
+    def test_ep_only_style_with_no_season_defaults_to_season_one(self) -> None:
+        # Real-library regression: a continuously-numbered show (no SxxEyy,
+        # no NxNN, and -- unlike the extras-folder case -- no season
+        # subfolder either) fell all the way through to KIND_MOVIE and was
+        # searched against TMDb's movie endpoint, which can never match a
+        # TV show. "CENTURIONS - Ep. 04 - Found, One Lost World (480p -
+        # DVDRip).mp4" verified live against TMDb's own "The Centurions"
+        # entry, which files this exact episode under season 1.
+        name = "CENTURIONS - Ep. 04 - Found, One Lost World (480p - DVDRip).mp4"
+        result = filename_parser.classify("Shows/The CENTURIONS/" + name, name)
+        self.assertEqual(result.kind, filename_parser.KIND_EPISODE)
+        self.assertEqual(result.show_title, "CENTURIONS")
+        self.assertEqual(result.season, 1)
+        self.assertEqual(result.episode, 4)
+        self.assertEqual(result.episode_title, "Found, One Lost World")
+
+    def test_ep_only_style_spelled_out_episode_word(self) -> None:
+        name = "Some Show - Episode 12 - Title.mkv"
+        result = filename_parser.classify(name, name)
+        self.assertEqual(result.kind, filename_parser.KIND_EPISODE)
+        self.assertEqual(result.show_title, "Some Show")
+        self.assertEqual(result.season, 1)
+        self.assertEqual(result.episode, 12)
+
+    def test_ep_only_style_does_not_shadow_real_season_episode_markers(self) -> None:
+        # SxxEyy must still win when it's actually present -- _EPISODE_ONLY_RE
+        # is only ever tried as a fallback after both stricter patterns fail.
+        name = "Dexter (2006) - S01E04 - Let's Give the Boy a Hand.mkv"
+        result = filename_parser.classify(name, name)
+        self.assertEqual(result.season, 1)
+        self.assertEqual(result.episode, 4)
+
 
 class ClassifyExtraTests(unittest.TestCase):
     def test_featurettes_folder_is_an_extra_even_without_episode_shape(self) -> None:
