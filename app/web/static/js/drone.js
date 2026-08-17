@@ -1637,7 +1637,13 @@ function systemThemeImageCandidates(system) {
   });
   return candidates;
 }
-function loadRomCardImage(img) {
+// Shared by every lazy-loaded card grid (Systems/ROMs, Movies, Music) --
+// reads data-src (the real URL) and data-fallbacks (a JSON array of
+// alternate URLs to try in order, [] when there's only one real source, as
+// for Movies/Music) off `img`, tries them in order, and reveals a sibling
+// placeholder element once every candidate has failed. Only called once
+// `img` is actually near the viewport -- see setupLazyImages.
+function loadLazyCardImage(img) {
   if (!img || img.dataset.loaded === "1") return;
   const primarySrc = img.dataset.src;
   let fallbackCandidates = [];
@@ -1655,16 +1661,29 @@ function loadRomCardImage(img) {
       return;
     }
     this.onerror = null;
-    // Reveal a sibling fallback element (e.g. a placeholder icon), same
-    // convention the Movies Explorer's inline onerror uses -- a no-op for
-    // callers with no such sibling (classList.remove on an element lacking
-    // the class is harmless), so this is safe for every existing caller.
+    // Reveal a sibling fallback element (e.g. a placeholder icon) -- a
+    // no-op for callers with no such sibling (classList.remove on an
+    // element lacking the class is harmless), so this is safe for every
+    // caller regardless of whether it has one.
     this.style.display = "none";
     this.nextElementSibling?.classList.remove("d-none");
   };
   img.src = primarySrc;
   img.dataset.loaded = "1";
 }
+// Explicit IntersectionObserver-driven lazy loading (200px rootMargin) for
+// every <img data-src> currently in the DOM -- deliberately not left to the
+// native loading="lazy" attribute alone (still set on these <img>s as a
+// no-JS fallback). Confirmed live: native lazy-loading's own look-ahead
+// distance is connection-speed-adaptive, not a fixed margin -- on a fast
+// LAN connection to the Drone, Chrome fetched roughly half of a 200-card
+// batch immediately (112 requests) even though only ~30 cards were ever
+// on screen, since the browser judges prefetching further ahead as cheap
+// on a fast connection. The Systems/ROMs grid already needed this explicit
+// mechanism for its own reasons (multi-URL fallback chains); Movies and
+// Music now go through the same one so "only load what's actually in the
+// viewport" isn't left to a heuristic that varies by network speed.
+// Call this after replacing any grid's innerHTML with data-src images.
 function setupLazyImages() {
   if (imageObserver) {
     imageObserver.disconnect();
@@ -1675,7 +1694,7 @@ function setupLazyImages() {
   if (!lazyImages.length) return;
 
   if (!("IntersectionObserver" in window)) {
-    lazyImages.forEach(loadRomCardImage);
+    lazyImages.forEach(loadLazyCardImage);
     return;
   }
 
@@ -1683,7 +1702,7 @@ function setupLazyImages() {
     entries.forEach((entry) => {
       if (!entry.isIntersecting) return;
       const img = entry.target;
-      loadRomCardImage(img);
+      loadLazyCardImage(img);
       observer.unobserve(img);
     });
   }, { rootMargin: "200px 0px" });
@@ -2218,6 +2237,7 @@ function filterMovieExplorer(queryValue, opts = {}) {
     ? visible.map(renderMovieExplorerCard).join("")
     : `<div class="text-muted p-4">No movies match the current filters.</div>`;
   renderMovieExplorerMoreButton(visible.length, sorted.length, queryValue);
+  setupLazyImages();
 }
 function renderMovieExplorerMoreButton(shown, total, queryValue) {
   const wrap = document.getElementById("movie-explorer-more");
@@ -2241,7 +2261,7 @@ function renderMovieExplorerCard(entry) {
   return `
     <button type="button" class="movie-explorer-card" title="${escapeHtml(title)}" onclick="setHash(${jsAttr(navigateHash)})">
       <div class="movie-explorer-card-poster">
-        <img src="${escapeHtml(posterUrl)}" alt="" loading="lazy" onerror="this.style.display='none'; this.nextElementSibling.classList.remove('d-none');">
+        <img src="" data-src="${escapeHtml(posterUrl)}" data-fallbacks='[]' alt="" loading="lazy">
         <div class="movie-explorer-card-poster-fallback d-none"><i class="bi bi-film"></i></div>
       </div>
       <div class="movie-explorer-card-title">${escapeHtml(title)}</div>
@@ -2636,6 +2656,7 @@ function filterMusicExplorer(queryValue, opts = {}) {
     ? visible.map(renderMusicExplorerCard).join("")
     : `<div class="text-muted p-4">No music matches the current filters.</div>`;
   renderMusicExplorerMoreButton(visible.length, sorted.length, queryValue);
+  setupLazyImages();
 }
 function renderMusicExplorerMoreButton(shown, total, queryValue) {
   const wrap = document.getElementById("music-explorer-more");
@@ -2660,7 +2681,7 @@ function renderMusicExplorerCard(entry) {
   return `
     <button type="button" class="movie-explorer-card" title="${escapeHtml(title)}" onclick="setHash(${jsAttr(navigateHash)})">
       <div class="movie-explorer-card-poster music-cover-square">
-        <img src="${escapeHtml(artUrl)}" alt="" loading="lazy" onerror="this.style.display='none'; this.nextElementSibling.classList.remove('d-none');">
+        <img src="" data-src="${escapeHtml(artUrl)}" data-fallbacks='[]' alt="" loading="lazy">
         <div class="movie-explorer-card-poster-fallback d-none"><i class="bi bi-music-note-beamed"></i></div>
       </div>
       <div class="movie-explorer-card-title">${escapeHtml(title)}</div>
