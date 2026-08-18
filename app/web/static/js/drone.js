@@ -12893,7 +12893,17 @@ async function redirectRouterHash(hash) {
   history.replaceState(null, "", hash);
   await router();
 }
-async function router() {
+// retryDepth: bounds the stale-token self-heal below (see its own comment)
+// so two or more router() calls that keep invalidating each other's "am I
+// still the latest?" check can never retry one another forever. Confirmed
+// live before this cap existed: exactly two overlapping calls landing on
+// the same hash right on top of each other was enough to livelock --
+// thousands of req/s hammering /movies, CPU pegged, never settling until a
+// hard refresh (see redirectRouterHash's docstring for the one specific
+// trigger of that shape that's since been fixed at the source; this cap is
+// the backstop for any other pair of overlapping triggers hitting the same
+// underlying race, not a fix for one specific trigger).
+async function router(retryDepth = 0) {
   const myNavToken = ++routerNavToken;
   clearError();
   const outgoingScrollBucket = movieListScrollBucket(lastRenderedHash);
@@ -13152,9 +13162,13 @@ async function router() {
     // render function above) is now stale and possibly still on screen.
     // Re-run the router for whatever hash is current *now* so the page
     // self-corrects immediately rather than sitting on the wrong content
-    // until another nav click or manual refresh.
-    if (myNavToken !== routerNavToken) {
-      await router();
+    // until another nav click or manual refresh. Capped at 3 retries (see
+    // the retryDepth comment above router()'s own declaration) -- past that,
+    // whatever router() call is still in flight owns settling the page; one
+    // more recursive call here would just be another contender in the same
+    // race, not a fix for it.
+    if (myNavToken !== routerNavToken && retryDepth < 3) {
+      await router(retryDepth + 1);
       return;
     }
   } catch (err) {
@@ -13196,7 +13210,13 @@ adminMenuBtn.addEventListener("click", (event) => {
   if (!adminEnabled) return;
   setHash("#admin");
 });
-window.addEventListener("hashchange", router);
+// Not `addEventListener("hashchange", router)` directly -- that would pass
+// the hashchange Event object as router()'s first argument, which is now
+// retryDepth (see router()'s own declaration). An Event compared with `< 3`
+// coerces to NaN, which is never true, silently disabling the bounded
+// stale-token retry for every ordinary hashchange-triggered navigation --
+// the single most common way router() actually gets called.
+window.addEventListener("hashchange", () => router());
 async function startApp() {
   document.querySelector(".nav-actions")?.classList.remove("d-none");
   document.getElementById("logoutBtn")?.classList.remove("d-none");
