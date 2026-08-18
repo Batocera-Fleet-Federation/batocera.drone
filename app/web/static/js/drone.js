@@ -13167,9 +13167,18 @@ async function router(retryDepth = 0) {
     // whatever router() call is still in flight owns settling the page; one
     // more recursive call here would just be another contender in the same
     // race, not a fix for it.
-    if (myNavToken !== routerNavToken && retryDepth < 3) {
-      await router(retryDepth + 1);
-      return;
+    if (myNavToken !== routerNavToken) {
+      if (retryDepth < 3) {
+        await router(retryDepth + 1);
+        return;
+      }
+      // Retry budget exhausted while navigation was still actively
+      // changing out from under us -- with the hashchange debounce above,
+      // this should now be rare in practice, but a stuck "Loading X..."
+      // toast forever is a worse outcome than one that closes a beat early
+      // on an unusually long burst. Whichever hash is current renders
+      // correctly on the next real navigation regardless.
+      setLoading(false);
     }
   } catch (err) {
     setLoading(false);
@@ -13216,7 +13225,29 @@ adminMenuBtn.addEventListener("click", (event) => {
 // coerces to NaN, which is never true, silently disabling the bounded
 // stale-token retry for every ordinary hashchange-triggered navigation --
 // the single most common way router() actually gets called.
-window.addEventListener("hashchange", () => router());
+// Debounced, not a direct call: the retryDepth cap above only bounds
+// router()'s own recursive self-heal *chain* -- it does nothing to stop
+// several genuinely separate hashchange events (e.g. a burst of rapid
+// clicks/taps) from each independently starting their own full, concurrent
+// router() invocation. Those all share the same DOM (content.innerHTML,
+// the loading toast, titleNode) with no cancellation of an in-flight one
+// when a newer one starts, so whichever happens to finish last "wins" --
+// confirmed live: rapid-clicking through several pages left a "Loading
+// controls..." toast stuck on screen forever over stale home-page content,
+// with none of the ~5 concurrent renders for that hash ever being the one
+// to settle it. 50ms is far below normal click-to-click timing (so a
+// single real navigation still feels instant) but comfortably coalesces a
+// rapid-click burst down to one router() call for whatever hash is current
+// once it settles, which is what should have happened as this specific
+// symptom was reproduced.
+let hashchangeDebounceTimer = null;
+window.addEventListener("hashchange", () => {
+  if (hashchangeDebounceTimer) clearTimeout(hashchangeDebounceTimer);
+  hashchangeDebounceTimer = setTimeout(() => {
+    hashchangeDebounceTimer = null;
+    router();
+  }, 50);
+});
 async function startApp() {
   document.querySelector(".nav-actions")?.classList.remove("d-none");
   document.getElementById("logoutBtn")?.classList.remove("d-none");
