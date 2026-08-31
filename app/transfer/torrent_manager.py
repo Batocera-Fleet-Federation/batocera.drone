@@ -219,6 +219,7 @@ _ENTRY_PERSISTED_FIELDS = (
     # its own `remaining_files` checkpoint rather than restarting the whole
     # selection). See move_files()/_move_tick() for the dict shape.
     "move_job",
+    "migration_job",
 )
 
 _ENTRY_LIVE_DEFAULTS = {
@@ -262,6 +263,15 @@ def _resolve_known_files(entry: dict) -> List[Path]:
     caller can move).
     """
     paths = [Path(p) for p in (entry.get("files") or []) if p]
+    migration_job = entry.get("migration_job")
+    if isinstance(migration_job, dict):
+        # A failed cross-device migration can have payload on both disks.
+        # Keep cleanup/delete aware of every successfully moved target.
+        paths.extend(
+            Path(item["target"])
+            for item in (migration_job.get("moved_files") or [])
+            if isinstance(item, dict) and item.get("target")
+        )
     if paths:
         return paths
     download_dir = entry.get("download_dir")
@@ -291,6 +301,16 @@ def _move_job_summary(move_job: dict) -> dict:
         "moved_count": len(move_job.get("moved_sources") or []),
         "error_count": len(move_job.get("errors") or []),
         "current_file": move_job.get("current_file") or "",
+    }
+
+
+def _migration_job_summary(job: dict) -> dict:
+    return {
+        "status": job.get("status"),
+        "destination": job.get("destination") or "",
+        "total_files": int(job.get("total_files") or 0),
+        "moved_count": len(job.get("moved_files") or []),
+        "error": job.get("error") or "",
     }
 
 
@@ -561,6 +581,13 @@ class TorrentManager:
                     # _move_tick()'s overwrite_leftover handling.
                     move_job["interrupted"] = True
                     move_job["status"] = "queued"
+            migration_job = entry.get("migration_job")
+            if isinstance(migration_job, dict) and migration_job.get("status") in ("stopping", "queued", "moving"):
+                # aria2 GIDs do not survive a daemon restart, while the
+                # per-file migration checkpoint does.
+                migration_job["gid"] = None
+                migration_job["status"] = "queued"
+                migration_job["interrupted"] = True
             self._torrents[entry_id] = entry
 
     def _persist_locked(self) -> None:
@@ -597,13 +624,23 @@ class TorrentManager:
         """Queue order, independent from the user-visible original add time."""
 
         return sorted(
-            self._torrents.values(),
+            (entry for entry in self._torrents.values() if not self._migration_blocks_download(entry)),
             key=lambda entry: (
                 int(entry.get("queue_position") or 0),
                 entry.get("added_at") or "",
                 entry.get("id") or "",
             ),
         )
+
+    @staticmethod
+    def _migration_active(entry: dict) -> bool:
+        job = entry.get("migration_job")
+        return isinstance(job, dict) and job.get("status") in ("stopping", "queued", "moving")
+
+    @staticmethod
+    def _migration_blocks_download(entry: dict) -> bool:
+        job = entry.get("migration_job")
+        return isinstance(job, dict) and job.get("status") in ("stopping", "queued", "moving", "failed") and bool(job.get("remaining_files"))
 
     def _deduplicate_shared_gid_entries_locked(self) -> bool:
         """Collapse registry rows that provably own the same aria2 download.
@@ -886,7 +923,7 @@ class TorrentManager:
             to_query = [
                 dict(entry)
                 for entry in self._sorted_entries_locked()
-                if entry.get("gid") and entry.get("status") != "error"
+                if entry.get("gid") and entry.get("status") != "error" and not self._migration_blocks_download(entry)
             ]
             if vpn_blocked:
                 for entry in self._torrents.values():
@@ -1371,6 +1408,8 @@ class TorrentManager:
             if entry is None:
                 return {"status": "not_found"}
             status = entry.get("status")
+            if self._migration_blocks_download(entry):
+                return {"status": "not_applicable", "message": "partial download migration is in progress"}
             if status == "complete":
                 return {"status": "not_applicable", "message": "torrent already completed"}
             if status == "downloading":
@@ -1466,11 +1505,104 @@ class TorrentManager:
         self.wake()
         return {"status": result_status}
 
-    def delete(self, entry_id: str) -> dict:
+    def migrate_partial(self, entry_id: str) -> dict:
+        """Relocate an incomplete torrent to the current Download location
+        and retain its aria2 resume metadata."""
         with self._lock:
-            entry = self._torrents.pop(entry_id, None)
+            entry = self._torrents.get(entry_id)
             if entry is None:
                 return {"status": "not_found"}
+            destination = Path(effective_download_directory(self._config))
+            source_dir = Path(str(entry.get("download_dir") or ""))
+            existing_job = entry.get("migration_job")
+            if isinstance(existing_job, dict) and existing_job.get("status") in ("stopping", "queued", "moving"):
+                return {"status": "already_in_progress", "migration_job": _migration_job_summary(existing_job)}
+            if isinstance(existing_job, dict) and existing_job.get("status") == "failed" and existing_job.get("remaining_files"):
+                return {"status": "not_applicable", "message": "retry the failed migration instead of starting a new one"}
+            if entry.get("status") == "complete":
+                return {"status": "not_applicable", "message": "torrent already completed"}
+            if int(entry.get("completed_bytes") or 0) <= 0:
+                return {"status": "not_applicable", "message": "torrent has no partial data to migrate"}
+            try:
+                if source_dir.resolve() == destination.resolve():
+                    return {"status": "not_applicable", "message": "torrent is already at the current Download location"}
+                destination.mkdir(parents=True, exist_ok=True)
+                source_resolved = source_dir.resolve()
+                destination_resolved = destination.resolve()
+            except OSError as error:
+                return {"status": "invalid_destination", "message": str(error)}
+
+            sources: List[Path] = []
+            for candidate in _resolve_known_files(entry):
+                try:
+                    candidate.resolve().relative_to(source_resolved)
+                except (OSError, ValueError):
+                    continue
+                if candidate.is_file():
+                    sources.append(candidate)
+            # aria2 uses either a torrent-name sidecar or a payload-name
+            # sidecar depending on the torrent layout/version.
+            sidecars = [source_dir / f"{entry.get('name')}.aria2"]
+            sidecars.extend(Path(f"{path}.aria2") for path in sources)
+            for sidecar in sidecars:
+                if sidecar.is_file() and sidecar not in sources:
+                    sources.append(sidecar)
+            if not sources:
+                return {"status": "not_applicable", "message": "partial files were not found at the original location"}
+
+            items = []
+            for source in sources:
+                relative = source.resolve().relative_to(source_resolved)
+                target = destination_resolved / relative
+                if target.exists():
+                    return {"status": "destination_conflict", "message": f"destination already contains {relative}"}
+                items.append({"source": str(source), "target": str(target)})
+            job = {
+                "status": "stopping" if entry.get("gid") else "queued",
+                "source": str(source_resolved),
+                "destination": str(destination_resolved),
+                "gid": entry.get("gid"),
+                "remaining_files": items,
+                "moved_files": [],
+                "total_files": len(items),
+                "current_source": "",
+                "error": "",
+                "started_at": _now_iso(),
+                "updated_at": _now_iso(),
+            }
+            entry["migration_job"] = job
+            entry["status"] = "queued"
+            entry["message"] = "Preparing to migrate partial download"
+            entry["download_speed_bps"] = 0
+            entry["eta_seconds"] = None
+            self._persist_locked()
+        self._move_wake.set()
+        return {"status": "queued", "migration_job": _migration_job_summary(job)}
+
+    def retry_partial_migration(self, entry_id: str) -> dict:
+        with self._lock:
+            entry = self._torrents.get(entry_id)
+            job = entry.get("migration_job") if entry else None
+            if entry is None:
+                return {"status": "not_found"}
+            if not isinstance(job, dict) or job.get("status") != "failed" or not job.get("remaining_files"):
+                return {"status": "not_applicable", "message": "migration is not retryable"}
+            job["status"] = "queued"
+            job["error"] = ""
+            job["updated_at"] = _now_iso()
+            entry["message"] = "Retrying partial download migration"
+            self._persist_locked()
+        self._move_wake.set()
+        return {"status": "queued", "migration_job": _migration_job_summary(job)}
+
+    def delete(self, entry_id: str) -> dict:
+        with self._lock:
+            entry = self._torrents.get(entry_id)
+            if entry is None:
+                return {"status": "not_found"}
+            if self._migration_active(entry):
+                return {"status": "migration_in_progress", "message": "wait for the current file move to finish"}
+            self._torrents.pop(entry_id, None)
             self._persist_locked()
         if not self._remove_from_aria2(entry.get("gid")):
             self._queue_pending_removal(entry.get("gid"))
@@ -1720,11 +1852,109 @@ class TorrentManager:
     def _move_worker(self) -> None:
         while True:
             try:
-                self._move_tick()
+                if not self._migration_tick():
+                    self._move_tick()
             except Exception as error:  # Watchdog loop must never die.
                 print(f"Torrent move worker tick failed: {error.__class__.__name__}: {error}", file=sys.stderr, flush=True)
             if self._move_wake.wait(timeout=2.0):
                 self._move_wake.clear()
+
+    def _migration_tick(self) -> bool:
+        """Advance one partial-download migration item."""
+        with self._lock:
+            candidates = [entry for entry in self._torrents.values() if self._migration_active(entry)]
+            if not candidates:
+                return False
+            candidates.sort(key=lambda entry: (entry["migration_job"].get("started_at") or "", entry.get("id") or ""))
+            entry = candidates[0]
+            entry_id = entry["id"]
+            job = entry["migration_job"]
+            gid = job.get("gid")
+
+        if gid:
+            if not self._remove_from_aria2(gid):
+                return True
+            with self._lock:
+                live = self._torrents.get(entry_id)
+                if live is None or live.get("migration_job") is not job:
+                    return True
+                live["gid"] = None
+                job["gid"] = None
+                job["status"] = "queued"
+                job["updated_at"] = _now_iso()
+                self._persist_locked()
+
+        with self._lock:
+            live = self._torrents.get(entry_id)
+            if live is None or live.get("migration_job") is not job:
+                return True
+            remaining = job.get("remaining_files") or []
+            if not remaining:
+                return True
+            item = remaining[0]
+            source = Path(item["source"])
+            target = Path(item["target"])
+            overwrite_interrupted = job.get("current_source") == str(source)
+            job["current_source"] = str(source)
+            job["status"] = "moving"
+            job["updated_at"] = _now_iso()
+            live["message"] = f"Migrating partial download ({len(job.get('moved_files') or [])}/{job.get('total_files')})"
+            self._persist_locked()
+
+        error_message = ""
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            # A crash can land in either half of shutil.move's checkpoint:
+            # target partial + source still present (retry the copy), or the
+            # move fully finished but state was not persisted (accept the
+            # target; deleting it here would destroy the only good copy).
+            recovered_completed_move = overwrite_interrupted and not source.exists() and target.is_file()
+            if recovered_completed_move:
+                pass
+            elif overwrite_interrupted and target.exists():
+                target.unlink()
+            elif target.exists():
+                raise FileExistsError(f"destination already contains {target}")
+            if not recovered_completed_move:
+                shutil.move(str(source), str(target))
+        except OSError as error:
+            error_message = str(error)
+
+        completed = False
+        with self._lock:
+            live = self._torrents.get(entry_id)
+            if live is None or live.get("migration_job") is not job:
+                return True
+            if error_message:
+                job["status"] = "failed"
+                job["error"] = error_message
+                live["message"] = f"Migration failed: {error_message}"
+            else:
+                if job.get("remaining_files") and job["remaining_files"][0] == item:
+                    job["remaining_files"].pop(0)
+                job["moved_files"].append(item)
+                job["current_source"] = ""
+                if not job.get("remaining_files"):
+                    moved_map = {m["source"]: m["target"] for m in job.get("moved_files") or []}
+                    live["files"] = [moved_map.get(path, path) for path in (live.get("files") or [])]
+                    live["download_dir"] = job["destination"]
+                    live["status"] = "queued"
+                    live["message"] = "Migration complete; waiting to resume"
+                    live["queue_position"] = self._take_queue_position_locked()
+                    live["retry_count"] = 0
+                    live["retry_at"] = 0.0
+                    live["last_error"] = ""
+                    job["status"] = "complete"
+                    job["completed_at"] = _now_iso()
+                    completed = True
+                else:
+                    job["status"] = "queued"
+            job["updated_at"] = _now_iso()
+            self._persist_locked()
+        if completed:
+            self.wake()
+        self._move_wake.set()
+        return True
 
     def _next_move_job_entry_locked(self) -> Optional[dict]:
         """The oldest (by move_job sequence) entry with move work left to
@@ -2287,6 +2517,7 @@ class TorrentManager:
             status = entry.get("status") or "queued"
             counts[status] = counts.get(status, 0) + 1
             move_job = entry.get("move_job")
+            migration_job = entry.get("migration_job")
             torrents.append(
                 {
                     "id": entry.get("id"),
@@ -2309,6 +2540,7 @@ class TorrentManager:
                     "added_at": entry.get("added_at"),
                     "completed_at": entry.get("completed_at"),
                     "move_job": _move_job_summary(move_job) if isinstance(move_job, dict) else None,
+                    "migration_job": _migration_job_summary(migration_job) if isinstance(migration_job, dict) else None,
                 }
             )
         # Display order only: actively-downloading torrents surface first,

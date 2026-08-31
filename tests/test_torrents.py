@@ -3039,6 +3039,116 @@ class Aria2RuntimeTests(unittest.TestCase):
             self.assertFalse(aria2_runtime.managed_aria2c_path(settings).exists())
 
 
+class PartialTorrentMigrationTests(unittest.TestCase):
+    def _partial_manager(self, root: Path):
+        rpc = FakeRpc()
+        manager = TorrentManager(_build_settings(root), start_worker=False)
+        manager._daemon = FakeDaemon(rpc)
+        watch = root / "watch"
+        old_downloads = root / "old"
+        new_downloads = root / "new"
+        manager.update_settings({"directory": str(watch), "download_directory": str(old_downloads)})
+        _write_torrent(watch, "game")
+        manager._tick()
+        entry = manager.snapshot()["torrents"][0]
+        payload = old_downloads / "game.bin"
+        payload.parent.mkdir(parents=True, exist_ok=True)
+        payload.write_bytes(b"partial payload")
+        sidecar = old_downloads / "game.bin.aria2"
+        sidecar.write_bytes(b"resume state")
+        with manager._lock:
+            live = manager._torrents[entry["id"]]
+            live["files"] = [str(payload)]
+            live["completed_bytes"] = 7
+            live["total_bytes"] = 20
+            live["progress_percent"] = 35.0
+            manager._persist_locked()
+        manager.update_settings({"download_directory": str(new_downloads)})
+        return manager, rpc, entry["id"], payload, sidecar, new_downloads
+
+    def test_moves_payload_and_resume_sidecar_then_readds_at_new_location(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manager, rpc, entry_id, payload, sidecar, destination = self._partial_manager(Path(tmp))
+            with manager._lock:
+                old_gid = manager._torrents[entry_id]["gid"]
+
+            result = manager.migrate_partial(entry_id)
+            self.assertEqual(result["status"], "queued")
+            manager._migration_tick()
+            manager._migration_tick()
+
+            self.assertFalse(payload.exists())
+            self.assertFalse(sidecar.exists())
+            self.assertEqual((destination / payload.name).read_bytes(), b"partial payload")
+            self.assertEqual((destination / sidecar.name).read_bytes(), b"resume state")
+            with manager._lock:
+                migrated = manager._torrents[entry_id]
+                self.assertEqual(migrated["download_dir"], str(destination.resolve()))
+                self.assertEqual(migrated["migration_job"]["status"], "complete")
+                self.assertIsNone(migrated["gid"])
+            self.assertIn(old_gid, [params[0] for params in rpc.method_calls("aria2.forceRemove")])
+
+            manager._tick()
+            adds = rpc.method_calls("aria2.addTorrent")
+            self.assertEqual(adds[-1][2]["dir"], str(destination.resolve()))
+
+    def test_rejects_destination_conflict_without_stopping_download(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manager, rpc, entry_id, payload, _sidecar, destination = self._partial_manager(Path(tmp))
+            destination.mkdir(parents=True, exist_ok=True)
+            (destination / payload.name).write_bytes(b"existing")
+
+            result = manager.migrate_partial(entry_id)
+
+            self.assertEqual(result["status"], "destination_conflict")
+            self.assertEqual(rpc.method_calls("aria2.forceRemove"), [])
+            self.assertTrue(payload.exists())
+
+    def test_rejects_torrent_without_downloaded_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manager, _rpc, entry_id, _payload, _sidecar, _destination = self._partial_manager(Path(tmp))
+            with manager._lock:
+                manager._torrents[entry_id]["completed_bytes"] = 0
+            result = manager.migrate_partial(entry_id)
+            self.assertEqual(result["status"], "not_applicable")
+
+    def test_failed_move_stays_stopped_until_user_retries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manager, rpc, entry_id, _payload, _sidecar, _destination = self._partial_manager(Path(tmp))
+            self.assertEqual(manager.migrate_partial(entry_id)["status"], "queued")
+            with mock.patch.object(torrent_manager.shutil, "move", side_effect=OSError("drive unavailable")):
+                manager._migration_tick()
+            with manager._lock:
+                self.assertEqual(manager._torrents[entry_id]["migration_job"]["status"], "failed")
+
+            add_count = len(rpc.method_calls("aria2.addTorrent"))
+            manager._tick()
+            self.assertEqual(len(rpc.method_calls("aria2.addTorrent")), add_count)
+            self.assertEqual(manager.retry_partial_migration(entry_id)["status"], "queued")
+
+    def test_crash_after_move_does_not_delete_the_only_completed_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manager, _rpc, entry_id, payload, _sidecar, _destination = self._partial_manager(Path(tmp))
+            self.assertEqual(manager.migrate_partial(entry_id)["status"], "queued")
+            with manager._lock:
+                job = manager._torrents[entry_id]["migration_job"]
+                item = job["remaining_files"][0]
+                job["gid"] = None
+                job["status"] = "queued"
+                job["current_source"] = item["source"]
+                manager._torrents[entry_id]["gid"] = None
+                manager._persist_locked()
+            target = Path(item["target"])
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(payload), str(target))
+
+            manager._migration_tick()
+
+            self.assertEqual(target.read_bytes(), b"partial payload")
+            with manager._lock:
+                self.assertEqual(len(manager._torrents[entry_id]["migration_job"]["moved_files"]), 1)
+
+
 class TorrentSettingsHandlerTests(unittest.TestCase):
     """The watched folder ("directory") is no longer settable through the
     admin HTTP API -- only TorrentManager.update_settings() itself (used

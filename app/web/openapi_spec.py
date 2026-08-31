@@ -798,6 +798,13 @@ def _schemas() -> Dict[str, Schema]:
                 "download_dir": _string(),
                 "added_at": _string(fmt="date-time", nullable=True),
                 "completed_at": _string(fmt="date-time", nullable=True),
+                "migration_job": _object({
+                    "status": _string(),
+                    "destination": _string(),
+                    "total_files": _integer(),
+                    "moved_count": _integer(),
+                    "error": _string(),
+                }),
             },
         ),
         "AdminTorrentsResponse": _object(
@@ -2346,6 +2353,9 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             },
             "/admin/torrents/{torrent_id}/delete": {
                 "post": _operation("Delete a torrent: remove it from the list, delete its .torrent file, and delete its downloaded files", {"200": _json_response("TorrentActionResponse"), "404": _json_response("TorrentActionResponse", "Torrent not found")}, parameters=[_path_param("torrent_id")], tags=["admin", "torrents"], error_codes=("400", "401", "403", "429", "500", "503"))
+            },
+            "/admin/torrents/{torrent_id}/migrate": {
+                "post": _operation("Move an incomplete torrent and its aria2 resume data to the current Download location", {"200": _json_response("TorrentActionResponse"), "404": _json_response("TorrentActionResponse", "Torrent not found"), "409": _json_response("TorrentActionResponse", "Torrent cannot be migrated")}, parameters=[_path_param("torrent_id")], tags=["admin", "torrents"], error_codes=("400", "401", "403", "429", "500", "503"))
             },
             "/admin/torrents/{torrent_id}/files": {
                 "get": _operation("List the files a completed torrent downloaded", {"200": _json_response("TorrentFilesResponse"), "404": _json_response("TorrentFilesResponse", "Torrent not found"), "409": _json_response("TorrentFilesResponse", "Torrent has not completed yet")}, parameters=[_path_param("torrent_id")], tags=["admin", "torrents"], error_codes=("400", "401", "403", "429", "500", "503"))

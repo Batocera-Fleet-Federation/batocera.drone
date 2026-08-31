@@ -959,6 +959,11 @@ class ApiRoutesMixin:
                 self._handle_admin_torrent_delete(parts[2])
                 return
 
+            if len(parts) == 4 and parts[0] == "admin" and parts[1] == "torrents" and parts[3] == "migrate":
+                payload = self._read_json_body()
+                self._handle_admin_torrent_migrate(parts[2], payload)
+                return
+
             if len(parts) == 4 and parts[0] == "admin" and parts[1] == "torrents" and parts[3] == "move":
                 payload = self._read_json_body()
                 self._handle_admin_torrent_move(parts[2], payload)

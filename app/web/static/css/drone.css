@@ -672,7 +672,7 @@
     .torrents-table td.download-actions .btn + .btn {
       margin-left: 0.2rem;
     }
-    /* Every row always renders all 4 action buttons (see
+    /* Every row always renders all action buttons (see
        renderTorrentRowMarkup); ones that don't apply to the current status
        are `disabled` rather than removed, so the row's available actions
        stay visible at a glance. Bootstrap's default :disabled state on an

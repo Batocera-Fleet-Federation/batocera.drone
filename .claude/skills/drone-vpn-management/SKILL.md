@@ -366,6 +366,32 @@ cannot detect a revocation nobody is actively looking for.
   command from the original feature spec rather than an ioctl-based approach,
   since it's simpler and exactly what a human would run by hand to check.
 
+## `tunnel_is_up()` — the fail-closed check the torrent kill switch depends on
+
+`tunnel_is_up(settings, interface="tun0")` is a **separate, deliberately
+log-independent** predicate from `status()` (added with the Torrents "Require
+VPN" mode, commit `5007cdb`). It returns `True` only if: the openvpn binary
+exists, `_find_running_openvpn_pid(config_path(settings))` finds the exact
+managed process, **and** `_tunnel_ip(interface)` reports an IPv4 address.
+
+It exists because `status()`'s log-tail classification is not safe to gate a
+kill switch on — a flood of harmless decrypt/replay warnings can push the
+`_SUCCESS_MARKER` line out of the tail window and flip `status()` to
+`connecting`/`error` on a tunnel that is actually fine. `tunnel_is_up` checks
+process + interface reality only, so it stays stable through log spam and
+**fails closed** (any doubt → `False` → torrents blocked).
+
+**Load-bearing consumers** — do not weaken this to trust log wording, and keep
+it fail-closed:
+- `transfer/torrent_manager.py`: `_tick()` (per-poll gate → stop aria2),
+  `force_start()`, `resume()`, `snapshot()`'s `vpn_ready` field.
+- `transfer/aria2_runtime.py`: indirectly — when `tunnel_is_up` is the gate,
+  `_ensure_rpc` launches `Aria2Daemon` bound to `--interface=tun0`.
+
+Full kill-switch behavior lives in the **`drone-torrents-management`** skill's
+"Require VPN" section. A change to `tunnel_is_up`, `_find_running_openvpn_pid`,
+or `_tunnel_ip` must be checked against that consumer, not just `status()`.
+
 ## Public-IP verification is on-demand only
 
 `check_public_ip()` (`curl -4 -s https://ipinfo.io/ip`) is wired to a
@@ -695,7 +721,11 @@ Do not:
   the rolling-window cap) — both exist specifically to stop a background loop
   from hammering the user's VPN provider,
 - default `self_heal_enabled` to off — this feature was explicitly requested
-  as default-on, opt-out.
+  as default-on, opt-out,
+- make `tunnel_is_up()` depend on log-tail wording, or let it return `True`
+  on any doubt — it must stay fail-closed (the Torrents "Require VPN" kill
+  switch gates on it; see the `tunnel_is_up()` section and
+  `drone-torrents-management`).
 
 ## Default bias
 

@@ -6666,8 +6666,20 @@ function torrentMoveJobBadge(row) {
   return "";
 }
 
-// Each row always renders all 4 action slots in the same fixed order
-// (Force start / Cancel / Move files / Delete), hiding inapplicable ones with
+function torrentMigrationBadge(row) {
+  const job = row.migration_job;
+  if (!job) return "";
+  if (["stopping", "queued", "moving"].includes(job.status)) {
+    return ` <span class="badge text-bg-info" title="To ${escapeHtml(job.destination || "")}"><span class="spinner-border spinner-border-sm me-1" style="width:0.6rem;height:0.6rem" role="status" aria-hidden="true"></span>Migrating ${Number(job.moved_count) || 0}/${Number(job.total_files) || 0}</span>`;
+  }
+  if (job.status === "failed") {
+    return ` <span class="badge text-bg-danger" title="${escapeHtml(job.error || "Migration failed")}">Migration failed</span>`;
+  }
+  return "";
+}
+
+// Each row always renders all action slots in the same fixed order,
+// hiding inapplicable ones with
 // `invisible` (visibility:hidden, not display:none) rather than omitting them
 // from the markup. This keeps every button in the exact same physical
 // position on every row regardless of status -- the previous
@@ -6679,7 +6691,7 @@ function renderTorrentRowMarkup(row) {
   const id = escapeHtml(row.id || "");
   const status = String(row.status || "queued");
   const pct = Number(row.progress_percent || 0);
-  const canForceStart = ["queued", "error"].includes(status);
+  let canForceStart = ["queued", "error"].includes(status);
   // "Cancel" now covers two distinct outcomes depending on status: a
   // downloading or errored torrent gets stopped/retried and sent to the back
   // of the queue (see torrent_manager.py's cancel(), which requeues rather
@@ -6693,6 +6705,13 @@ function renderTorrentRowMarkup(row) {
   const cancelIcon = canStopSeeding ? "bi-stop-circle" : "bi-hourglass-split";
   const moveJob = row.move_job;
   const moveJobActive = !!moveJob && (moveJob.status === "queued" || moveJob.status === "moving");
+  const migrationJob = row.migration_job;
+  const migrationActive = !!migrationJob && ["stopping", "queued", "moving"].includes(migrationJob.status);
+  const migrationFailed = !!migrationJob && migrationJob.status === "failed";
+  canForceStart = canForceStart && !migrationActive && !migrationFailed;
+  const currentDownloadDir = String((torrentsLastPayload || {}).effective_download_directory || "");
+  const canMigrate = migrationFailed || (!migrationActive && status !== "complete" && Number(row.completed_bytes || 0) > 0 && String(row.download_dir || "") !== currentDownloadDir);
+  const migrateTitle = migrationFailed ? "Retry migration" : migrationActive ? "Migration in progress" : "Move partial download to current Download location";
   const canMoveFiles = status === "complete" && !moveJobActive;
   const moveFilesTitle = moveJobActive ? "Move in progress" : "Move files";
   const progressText = row.total_bytes
@@ -6716,12 +6735,13 @@ function renderTorrentRowMarkup(row) {
   const actions = [
     actionSlot(canForceStart, "btn-outline-success", "Force start", `forceStartTorrent('${id}')`, "bi-lightning-charge"),
     actionSlot(canCancel, "btn-outline-warning", cancelTitle, `cancelTorrent('${id}')`, cancelIcon),
+    actionSlot(canMigrate, "btn-outline-primary", migrateTitle, `migratePartialTorrent('${id}', ${migrationFailed ? "true" : "false"})`, "bi-device-ssd"),
     actionSlot(canMoveFiles, "btn-outline-info", moveFilesTitle, `openMoveFilesModal('${id}')`, "bi-folder-symlink"),
-    actionSlot(true, "btn-outline-danger", "Delete torrent", `deleteTorrent('${id}')`, "bi-trash"),
+    actionSlot(!migrationActive, "btn-outline-danger", migrationActive ? "Migration in progress" : "Delete torrent", `deleteTorrent('${id}')`, "bi-trash"),
   ].join(" ");
   return `<tr>
     <td class="download-file" title="${escapeHtml(row.torrent_file || "")}">${escapeHtml(row.name || "")}</td>
-    <td>${torrentStatusBadge(row)}${torrentMoveJobBadge(row)}</td>
+    <td>${torrentStatusBadge(row)}${torrentMoveJobBadge(row)}${torrentMigrationBadge(row)}</td>
     <td class="torrent-progress-cell" title="${escapeHtml(progressText)}">
       <div class="torrent-progress-wrap">
         <div class="progress"><div class="progress-bar torrent-progress-bar-${escapeHtml(status)}" style="width:${pct}%"></div></div>
@@ -6901,7 +6921,7 @@ async function renderTorrentsPage() {
               <input class="form-control" type="text" id="torrentDownloadDir" placeholder="${escapeHtml(payload.effective_download_directory || settings.directory || "")}" value="${escapeHtml(settings.download_directory || "")}">
               <button class="btn btn-outline-secondary" type="button" onclick="openTorrentDirBrowser('torrentDownloadDir', 'Choose download location')"><i class="bi bi-folder2-open me-1"></i>Browse</button>
             </div>
-            <div class="form-text">Where downloads land (can differ from the watched folder, e.g. an external drive) -- leave blank to match it; applies until a torrent starts, not to ones already in progress.</div>
+            <div class="form-text">Where downloads land (can differ from the watched folder, e.g. an external drive) -- leave blank to match it. In-progress torrents can be moved here with their per-row migrate button.</div>
           </div>
         </div>
         <div class="row g-2 mb-2">
@@ -7031,6 +7051,19 @@ async function cancelTorrent(torrentId) {
     await refreshTorrentsLive();
   } catch (err) {
     showToast(`Action failed: ${escapeHtml(err.message || "unknown error")}`, "danger");
+  }
+}
+
+async function migratePartialTorrent(torrentId, retry = false) {
+  if (!torrentId) return;
+  const destination = String((torrentsLastPayload || {}).effective_download_directory || "");
+  if (!retry && !window.confirm(`Move this torrent's partial download to ${destination} and continue downloading there?`)) return;
+  try {
+    await apiPost(`/admin/torrents/${encodeURIComponent(torrentId)}/migrate`, { retry });
+    showToast(retry ? "Migration retry queued." : "Partial download migration queued.", "success");
+    await refreshTorrentsLive();
+  } catch (err) {
+    showToast(`Migration failed: ${escapeHtml(err.message || "unknown error")}`, "danger", 10000);
   }
 }
 
