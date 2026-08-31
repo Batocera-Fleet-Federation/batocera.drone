@@ -292,12 +292,31 @@ class Aria2VpnBindingTests(unittest.TestCase):
         process.poll.return_value = None
         daemon = aria2_runtime.Aria2Daemon("/fake/aria2c", Path("/tmp"))
         daemon.process = process
-        with mock.patch.object(aria2_runtime.os, "killpg") as killpg:
+        rpc = mock.Mock()
+        daemon.rpc = rpc
+        daemon.port = 555
+        with mock.patch.object(aria2_runtime.os, "killpg") as killpg, \
+                mock.patch.object(aria2_runtime, "_terminate_aria2_port_processes") as terminate_descendants:
             daemon.stop()
+        rpc.call.assert_called_once_with("aria2.forceShutdown", timeout=1.0)
         self.assertEqual(
             killpg.call_args_list,
             [mock.call(456, aria2_runtime.signal.SIGTERM), mock.call(456, aria2_runtime.signal.SIGKILL)],
         )
+        terminate_descendants.assert_called_once_with(555)
+
+    def test_stop_uses_rpc_and_cleans_descendants_when_wrapper_already_exited(self) -> None:
+        process = mock.Mock()
+        process.poll.return_value = 0
+        rpc = mock.Mock()
+        daemon = aria2_runtime.Aria2Daemon("/fake/aria2c", Path("/tmp"))
+        daemon.process = process
+        daemon.rpc = rpc
+        daemon.port = 777
+        with mock.patch.object(aria2_runtime, "_terminate_aria2_port_processes") as terminate_descendants:
+            daemon.stop()
+        rpc.call.assert_called_once_with("aria2.forceShutdown", timeout=1.0)
+        terminate_descendants.assert_called_once_with(777)
 
 
 class TorrentWatchScanTests(unittest.TestCase):

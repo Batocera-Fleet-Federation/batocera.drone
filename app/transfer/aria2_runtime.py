@@ -229,6 +229,53 @@ def _free_localhost_port() -> int:
         return probe.getsockname()[1]
 
 
+def _aria2_pids_for_rpc_port(port: Optional[int]) -> set[int]:
+    """Find every Linux process belonging to one managed aria2 instance.
+
+    Some AppImage runtimes fork an AppRun shell and the real aria2 process into
+    a second session, outside the launcher's process group.  The private RPC
+    port is unique per daemon and remains in every descendant's command line,
+    making it a precise cleanup key without matching unrelated aria2 jobs.
+    """
+    if not port:
+        return set()
+    marker = f"--rpc-listen-port={int(port)}".encode()
+    found = set()
+    try:
+        entries = list(Path("/proc").iterdir())
+    except OSError:
+        return found
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            command = (entry / "cmdline").read_bytes()
+        except OSError:
+            continue
+        if marker in command and b"aria2c" in command.lower():
+            found.add(int(entry.name))
+    return found
+
+
+def _terminate_aria2_port_processes(port: Optional[int]) -> None:
+    """Terminate AppImage descendants that escaped the wrapper's group."""
+    pids = _aria2_pids_for_rpc_port(port)
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    if pids:
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline and _aria2_pids_for_rpc_port(port):
+            time.sleep(0.05)
+    for pid in _aria2_pids_for_rpc_port(port):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+
 class Aria2Daemon:
     """One app-lifetime aria2c daemon: spawn, health-check, expose its RPC."""
 
@@ -344,34 +391,43 @@ class Aria2Daemon:
 
     def stop(self) -> None:
         process = self.process
+        rpc = self.rpc
+        port = self.port
         self.process = None
         self.rpc = None
         self.port = None
-        if process is None or process.poll() is not None:
-            return
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
+        if rpc is not None:
             try:
-                process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
+                rpc.call("aria2.forceShutdown", timeout=1.0)
+            except Aria2RpcError:
                 pass
-            # Belt-and-suspenders for launchers whose wrapper exits before a
-            # stubborn child.  The group ID remains the original wrapper PID.
+        if process is not None and process.poll() is None:
             try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            try:
-                process.wait(timeout=1)
-            except subprocess.TimeoutExpired:
-                pass
-        except OSError:
-            # Fallback for a platform/runtime without POSIX process groups.
-            try:
-                process.terminate()
-                process.wait(timeout=3)
-            except (OSError, subprocess.TimeoutExpired):
+                os.killpg(process.pid, signal.SIGTERM)
                 try:
-                    process.kill()
-                except OSError:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
                     pass
+                # Belt-and-suspenders for launchers whose wrapper exits before
+                # a stubborn child.  The group ID remains the wrapper PID.
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                try:
+                    process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    pass
+            except OSError:
+                # Fallback for a platform/runtime without POSIX groups.
+                try:
+                    process.terminate()
+                    process.wait(timeout=3)
+                except (OSError, subprocess.TimeoutExpired):
+                    try:
+                        process.kill()
+                    except OSError:
+                        pass
+        # Must run even when the wrapper is already gone: that is precisely
+        # when an AppImage child used to escape and keep transferring.
+        _terminate_aria2_port_processes(port)
