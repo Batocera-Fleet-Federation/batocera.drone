@@ -113,6 +113,7 @@ class VpnUploadHandlerTests(unittest.TestCase):
             status, payload = handler.response
             self.assertEqual(status, 200)
             self.assertEqual(payload["config_filename"], "ProtonVPN.ovpn")
+            self.assertEqual(payload["protocol"], "UDP")
             self.assertTrue(vpn_manager.config_path(settings).is_file())
 
     def test_upload_with_no_files_raises(self) -> None:
@@ -180,6 +181,23 @@ class VpnConnectDisconnectHandlerTests(unittest.TestCase):
                 handler = _handler(settings)
                 handler._handle_admin_vpn_disconnect()
             self.assertEqual(handler.response[0], 500)
+
+    def test_reconnect_delegates_to_manager(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            with mock.patch.object(vpn_manager, "reconnect", return_value={"status": "connecting"}) as reconnect:
+                handler = _handler(settings)
+                handler._handle_admin_vpn_reconnect()
+            reconnect.assert_called_once_with(settings)
+            self.assertEqual(handler.response[0], 200)
+
+    def test_reconnect_not_ready_is_400(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            with mock.patch.object(vpn_manager, "reconnect", return_value={"status": "error", "errors": ["not ready"]}):
+                handler = _handler(settings)
+                handler._handle_admin_vpn_reconnect()
+            self.assertEqual(handler.response[0], 400)
 
 
 class VpnVerifyIpHandlerTests(unittest.TestCase):

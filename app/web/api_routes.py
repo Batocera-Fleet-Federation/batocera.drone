@@ -1011,6 +1011,10 @@ class ApiRoutesMixin:
                 self._handle_admin_vpn_disconnect()
                 return
 
+            if len(parts) == 3 and parts[0] == "admin" and parts[1] == "vpn" and parts[2] == "reconnect":
+                self._handle_admin_vpn_reconnect()
+                return
+
             if len(parts) == 3 and parts[0] == "admin" and parts[1] == "vpn" and parts[2] == "verify-ip":
                 self._handle_admin_vpn_verify_ip()
                 return

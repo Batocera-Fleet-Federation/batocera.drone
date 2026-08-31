@@ -6792,7 +6792,9 @@ function renderTorrentAlerts(payload) {
   // watch folder -- otherwise the one above already covers it.
   const downloadDirWarning = payload.download_directory_exists === false && downloadDir !== dir
     ? `<div class="alert alert-warning py-2 mb-3">The download location <code>${escapeHtml(downloadDir)}</code> does not exist yet. Save the settings to create it.</div>` : "";
-  return `${daemonError}${dirWarning}${downloadDirWarning}`;
+  const vpnWarning = payload.vpn_required && !payload.vpn_ready
+    ? `<div class="alert alert-warning py-2 mb-3"><i class="bi bi-shield-lock me-2"></i>VPN-required mode is active. Torrent downloads and uploads are blocked until the VPN reconnects.</div>` : "";
+  return `${vpnWarning}${daemonError}${dirWarning}${downloadDirWarning}`;
 }
 
 function renderTorrentSummaryCards(counts) {
@@ -6925,6 +6927,13 @@ async function renderTorrentsPage() {
               <label class="form-check-label" for="torrentFileAllocation" title="On pre-allocates file space up front (steadier writes, slower start). Off (file-allocation=none) allocates as data arrives.">File allocation</label>
             </div>
           </div>
+          <div class="col-12 col-xl-4 d-flex align-items-end">
+            <div class="form-check form-switch mb-0">
+              <input class="form-check-input" type="checkbox" role="switch" id="torrentVpnRequired" ${settings.vpn_required ? "checked" : ""}>
+              <label class="form-check-label" for="torrentVpnRequired" title="Fail closed: bind aria2 to tun0 and block all torrent downloads and uploads whenever the VPN is unavailable.">Require VPN</label>
+              <div class="form-text">Prevents torrent download and upload outside the VPN.</div>
+            </div>
+          </div>
         </div>
         <div class="small text-muted mb-2">Seed and allocation settings apply to torrents added after saving.</div>
         <button class="btn btn-primary btn-sm" id="torrentSettingsSaveBtn" onclick="saveTorrentSettings()"><i class="bi bi-save me-1"></i>Save</button>
@@ -6953,6 +6962,7 @@ async function saveTorrentSettings() {
   const stallTimeout = parseInt(document.getElementById("torrentBtStopTimeout").value, 10);
   const fileAllocation = document.getElementById("torrentFileAllocation").checked ? "prealloc" : "none";
   const maxConcurrent = parseInt(document.getElementById("torrentMaxConcurrent").value, 10);
+  const vpnRequired = document.getElementById("torrentVpnRequired").checked;
   if (!Number.isFinite(seedTime) || seedTime < 0) { showToast("Seed time must be 0 or more minutes.", "warning"); return; }
   if (!Number.isFinite(seedRatio) || seedRatio < 0) { showToast("Seed ratio must be 0 or more.", "warning"); return; }
   if (!Number.isFinite(stallTimeout) || stallTimeout < 0) { showToast("Stall timeout must be 0 or more seconds.", "warning"); return; }
@@ -6966,6 +6976,7 @@ async function saveTorrentSettings() {
       bt_stop_timeout: stallTimeout,
       file_allocation: fileAllocation,
       max_concurrent_downloads: maxConcurrent,
+      vpn_required: vpnRequired,
     });
     showToast("Torrent settings saved.", "success");
     await renderTorrentsPage();
@@ -7852,9 +7863,11 @@ async function renderVpnPage() {
       <div class="card-body">
         <p class="text-muted small">Upload the .ovpn file from your VPN provider (Proton VPN, NordVPN, Private Internet Access, or any other OpenVPN provider). It is automatically adjusted to use the credentials saved below.</p>
         <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
-          <button class="btn btn-outline-primary" type="button" onclick="openVpnConfigPicker()"><i class="bi bi-upload me-1"></i>Upload .ovpn File</button>
-          <span class="small ${payload.has_config ? "text-success" : "text-muted"}">${payload.has_config ? `<i class="bi bi-check-circle me-1"></i>${escapeHtml(payload.config_filename)}` : "No configuration uploaded yet."}</span>
+          <button class="btn btn-primary" type="button" onclick="openVpnConfigPicker(true)"><i class="bi bi-arrow-repeat me-1"></i>Upload and Reconnect</button>
+          <button class="btn btn-outline-primary" type="button" onclick="openVpnConfigPicker(false)"><i class="bi bi-upload me-1"></i>Upload Only</button>
+          <span class="small ${payload.has_config ? "text-success" : "text-muted"}">${payload.has_config ? `<i class="bi bi-check-circle me-1"></i>${escapeHtml(payload.config_filename)}${payload.protocol ? ` <span class="badge text-bg-secondary ms-1">${escapeHtml(payload.protocol)}</span>` : ""}` : "No configuration uploaded yet."}</span>
         </div>
+        <p class="form-text mb-0">Upload and Reconnect immediately switches the running VPN to the new profile. Upload Only saves it for the next reconnect or restart.</p>
       </div>
     </div>
     <div class="card mb-3">
@@ -7923,7 +7936,7 @@ async function refreshVpnLive() {
   }
 }
 
-function openVpnConfigPicker() {
+function openVpnConfigPicker(reconnectAfterUpload = false) {
   let input = document.getElementById("vpnConfigUploadInput");
   if (!input) {
     input = document.createElement("input");
@@ -7934,14 +7947,16 @@ function openVpnConfigPicker() {
     document.body.appendChild(input);
     input.addEventListener("change", async () => {
       const file = input.files && input.files[0];
+      const shouldReconnect = input.dataset.reconnectAfterUpload === "true";
       input.value = "";
-      if (file) await uploadVpnConfig(file);
+      if (file) await uploadVpnConfig(file, shouldReconnect);
     });
   }
+  input.dataset.reconnectAfterUpload = reconnectAfterUpload ? "true" : "false";
   input.click();
 }
 
-async function uploadVpnConfig(file) {
+async function uploadVpnConfig(file, reconnectAfterUpload = false) {
   const formData = new FormData();
   formData.append("config", file, file.name);
   setLoading(true, "Uploading OpenVPN configuration...");
@@ -7950,7 +7965,18 @@ async function uploadVpnConfig(file) {
     let responsePayload = {};
     try { responsePayload = await res.json(); } catch (_) {}
     if (!res.ok) throw new Error(responsePayload.error || `Upload failed: ${res.status}`);
-    showToast(`Uploaded ${escapeHtml(responsePayload.config_filename || file.name)}.`, "success");
+    const uploadedName = escapeHtml(responsePayload.config_filename || file.name);
+    const protocol = responsePayload.protocol ? ` (${escapeHtml(responsePayload.protocol)})` : "";
+    if (reconnectAfterUpload) {
+      setLoading(true, `Uploaded ${responsePayload.config_filename || file.name}. Reconnecting VPN...`);
+      const reconnectResult = await apiPost("/admin/vpn/reconnect", {});
+      if (reconnectResult.status === "error") {
+        throw new Error((reconnectResult.errors || []).join(" ") || "The VPN could not reconnect.");
+      }
+      showToast(`Uploaded ${uploadedName}${protocol}. Reconnecting with the new profile...`, "success", 6000);
+    } else {
+      showToast(`Uploaded ${uploadedName}${protocol}. It will be used on the next reconnect.`, "success", 6000);
+    }
     await renderVpnPage();
   } catch (err) {
     showToast(`OpenVPN config upload failed: ${escapeHtml(err.message || "unknown error")}`, "danger", 8000);

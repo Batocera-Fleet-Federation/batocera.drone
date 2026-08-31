@@ -36,6 +36,7 @@ try:
     from ..common.install_paths import drone_install_root as _drone_install_root
     from ..common.settings import Settings
     from ..device import notifications as _notifications
+    from ..device import vpn_manager as _vpn
     from ..storage.state_store import database_path as _state_database_path
     from ..storage.state_store import load_payload as _load_state_payload
     from ..storage.state_store import save_payload as _save_state_payload
@@ -50,6 +51,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from common.install_paths import drone_install_root as _drone_install_root  # type: ignore
     from common.settings import Settings  # type: ignore
     from device import notifications as _notifications  # type: ignore
+    from device import vpn_manager as _vpn  # type: ignore
     from storage.state_store import database_path as _state_database_path  # type: ignore
     from storage.state_store import load_payload as _load_state_payload  # type: ignore
     from storage.state_store import save_payload as _save_state_payload  # type: ignore
@@ -134,6 +136,12 @@ def _normalize_torrent_settings(raw, settings: Settings) -> dict:
             value = default
         return max(minimum, min(maximum, value))
 
+    def _bool_value(key: str, default: bool = False) -> bool:
+        value = raw.get(key, default)
+        if isinstance(value, str):
+            return value.strip().lower() in ("1", "true", "yes", "on")
+        return bool(value)
+
     try:
         seed_ratio = float(raw.get("seed_ratio", 1.0))
     except (TypeError, ValueError):
@@ -167,6 +175,10 @@ def _normalize_torrent_settings(raw, settings: Settings) -> dict:
         "bt_stop_timeout": _int_value("bt_stop_timeout", 0, 0, 24 * 3600),
         "file_allocation": file_allocation,
         "max_concurrent_downloads": _int_value("max_concurrent_downloads", 3, 1, 16),
+        # Fail-closed torrent networking.  When enabled, aria2 is launched
+        # with all sockets bound to tun0 and is not allowed to run unless the
+        # Drone-managed OpenVPN process and tunnel address both exist.
+        "vpn_required": _bool_value("vpn_required"),
     }
 
 
@@ -773,17 +785,25 @@ class TorrentManager:
         except OSError:
             return None
 
-    def _ensure_rpc(self, needs_daemon: bool, directory: str):
+    def _ensure_rpc(self, needs_daemon: bool, directory: str, vpn_required: bool = False):
         daemon = self._daemon
-        if daemon is not None and daemon.running:
+        desired_interface = "tun0" if vpn_required else None
+        if daemon is not None and daemon.running and getattr(daemon, "bind_interface", None) == desired_interface:
             return daemon.rpc
         if not needs_daemon:
             return None
         found = find_aria2c(self.settings)
         if not found:
             return None
-        if daemon is None or daemon.binary_path != found["path"]:
-            daemon = Aria2Daemon(found["path"], Path(directory), log_file=self._aria2_log_path())
+        if daemon is None or daemon.binary_path != found["path"] or getattr(daemon, "bind_interface", None) != desired_interface:
+            if daemon is not None:
+                daemon.stop()
+            daemon = Aria2Daemon(
+                found["path"],
+                Path(directory),
+                log_file=self._aria2_log_path(),
+                bind_interface=desired_interface,
+            )
             self._daemon = daemon
         if daemon.start():
             return daemon.rpc
@@ -832,6 +852,17 @@ class TorrentManager:
         return stale_gids
 
     def _tick(self) -> None:
+        # Check before doing any aria2 RPC work.  The interface bind on the
+        # daemon is the no-leak boundary during the small interval between an
+        # OpenVPN/tun0 loss and this poll; this branch then terminates aria2
+        # completely and converts its process-local GIDs back into resumable
+        # queued entries.
+        with self._lock:
+            vpn_required = bool(self._config.get("vpn_required"))
+        vpn_blocked = vpn_required and not _vpn.tunnel_is_up(self.settings)
+        if vpn_blocked:
+            self._stop_daemon_for_network_policy("Waiting for VPN connection")
+
         # Phase A (locked): scan the watched folder, register new .torrent
         # files, and collect the RPC work to do outside the lock.
         with self._lock:
@@ -857,9 +888,26 @@ class TorrentManager:
                 for entry in self._sorted_entries_locked()
                 if entry.get("gid") and entry.get("status") != "error"
             ]
+            if vpn_blocked:
+                for entry in self._torrents.values():
+                    if entry.get("status") == "queued" and entry.get("message") != "Waiting for VPN connection":
+                        entry["message"] = "Waiting for VPN connection"
+                        dirty = True
+                if dirty:
+                    self._persist_locked()
+
+        # Scanning and persistence are local-only and still happen while
+        # blocked, so newly dropped torrents appear as queued in the UI.  No
+        # daemon or network RPC is allowed beyond this point without tun0.
+        if vpn_blocked:
+            return
 
         # Phase B (unlocked): talk to aria2.
-        rpc = self._ensure_rpc(bool(to_add or to_query or stale_gids or has_pending_removals), config["directory"])
+        rpc = self._ensure_rpc(
+            bool(to_add or to_query or stale_gids or has_pending_removals),
+            config["directory"],
+            bool(config.get("vpn_required")),
+        )
         for gid in stale_gids:
             if rpc is None or not self._remove_from_aria2(gid, rpc):
                 self._queue_pending_removal(gid)
@@ -1276,7 +1324,48 @@ class TorrentManager:
             return daemon.rpc
         return None
 
+    def _reset_daemon_state_locked(self, message: str) -> bool:
+        """Forget process-local GIDs after deliberately stopping aria2."""
+        dirty = bool(self._pending_removal_gids)
+        self._pending_removal_gids = []
+        for entry in self._torrents.values():
+            gid = entry.get("gid")
+            status = entry.get("status")
+            seeding = bool(entry.get("seeding"))
+            if not gid and status != "downloading" and not seeding:
+                continue
+            dirty = True
+            entry["gid"] = None
+            entry["force_started"] = False
+            entry["download_speed_bps"] = 0
+            entry["upload_speed_bps"] = 0
+            entry["connections"] = 0
+            entry["eta_seconds"] = None
+            if status == "downloading":
+                entry["status"] = "queued"
+                entry["message"] = message
+            elif status == "queued":
+                entry["message"] = message
+            if seeding:
+                entry["seeding"] = False
+                entry["message"] = message
+        return dirty
+
+    def _stop_daemon_for_network_policy(self, message: str) -> None:
+        daemon = self._daemon
+        if daemon is not None:
+            # Also stop a process that is still in its RPC-startup window;
+            # ``running`` deliberately remains false until RPC is ready.
+            daemon.stop()
+        with self._lock:
+            if self._reset_daemon_state_locked(message):
+                self._persist_locked()
+
     def force_start(self, entry_id: str) -> dict:
+        with self._lock:
+            vpn_required = bool(self._config.get("vpn_required"))
+        if vpn_required and not _vpn.tunnel_is_up(self.settings):
+            return {"status": "vpn_required", "message": "VPN connection is required for torrent traffic"}
         with self._lock:
             entry = self._torrents.get(entry_id)
             if entry is None:
@@ -1423,6 +1512,11 @@ class TorrentManager:
         # configured limit). Queued entries stay paused here and get picked
         # up by the normal scheduler on the next tick (_pick_startable_gids_locked),
         # exactly like a freshly-added torrent waiting for a free slot.
+        with self._lock:
+            vpn_required = bool(self._config.get("vpn_required"))
+        if vpn_required and not _vpn.tunnel_is_up(self.settings):
+            self._stop_daemon_for_network_policy("Waiting for VPN connection")
+            return self.snapshot()
         with self._lock:
             self._paused = False
             resume_gids = [
@@ -1990,10 +2084,22 @@ class TorrentManager:
     def update_settings(self, payload) -> dict:
         payload = payload if isinstance(payload, dict) else {}
         with self._lock:
+            old_vpn_required = bool(self._config.get("vpn_required"))
             merged = {**self._config, **payload}
             self._config = _normalize_torrent_settings(merged, self.settings)
             config = dict(self._config)
+            vpn_mode_changed = old_vpn_required != bool(config.get("vpn_required"))
+            if vpn_mode_changed:
+                self._reset_daemon_state_locked("Torrent VPN policy changed; waiting to resume")
             self._persist_locked()
+        if vpn_mode_changed:
+            # A daemon launched without --interface must never survive the
+            # moment VPN-only mode becomes active (and vice versa).  A fresh
+            # daemon with the correct socket policy is created on the next
+            # worker tick.
+            daemon = self._daemon
+            if daemon is not None:
+                daemon.stop()
         try:
             Path(config["directory"]).mkdir(parents=True, exist_ok=True)
         except OSError as error:
@@ -2211,6 +2317,8 @@ class TorrentManager:
         # allocation -- this re-sort touches only the response payload.
         torrents.sort(key=lambda t: (_STATUS_DISPLAY_PRIORITY.get(t["status"], 9), t.get("added_at") or "", t.get("id") or ""))
         download_dir = effective_download_directory(config)
+        vpn_required = bool(config.get("vpn_required"))
+        vpn_ready = _vpn.tunnel_is_up(self.settings) if vpn_required else True
         return {
             "target_drone_id": self.settings.device_id,
             "settings": config,
@@ -2221,5 +2329,7 @@ class TorrentManager:
             "counts": counts,
             "torrents": torrents,
             "paused": paused,
+            "vpn_required": vpn_required,
+            "vpn_ready": vpn_ready,
             "recent_move_locations": recent_move_locations,
         }

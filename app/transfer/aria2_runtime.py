@@ -231,10 +231,17 @@ def _free_localhost_port() -> int:
 class Aria2Daemon:
     """One app-lifetime aria2c daemon: spawn, health-check, expose its RPC."""
 
-    def __init__(self, binary_path: str, download_dir: Path, log_file: Optional[Path] = None) -> None:
+    def __init__(
+        self,
+        binary_path: str,
+        download_dir: Path,
+        log_file: Optional[Path] = None,
+        bind_interface: Optional[str] = None,
+    ) -> None:
         self.binary_path = binary_path
         self.download_dir = download_dir
         self.log_file = log_file
+        self.bind_interface = str(bind_interface or "").strip() or None
         self.process: Optional[subprocess.Popen] = None
         self.rpc: Optional[Aria2Rpc] = None
         self.port: Optional[int] = None
@@ -276,6 +283,21 @@ class Aria2Daemon:
             "--summary-interval=0",
             "--quiet=true",
         ]
+        if self.bind_interface:
+            # This is the actual torrent kill switch.  aria2 applies
+            # --interface to its sockets, so loss of tun0 cannot make an
+            # established or newly-created peer/tracker connection fall back
+            # to wlan0/eth0.  Batocera's OpenVPN setup is IPv4-only; disabling
+            # IPv6 closes that independent escape path.  LPD is explicitly
+            # disabled as well so no BitTorrent discovery traffic is emitted
+            # onto the physical LAN while VPN-only mode is selected.
+            args.extend(
+                [
+                    f"--interface={self.bind_interface}",
+                    "--disable-ipv6=true",
+                    "--bt-enable-lpd=false",
+                ]
+            )
         if self.log_file is not None:
             try:
                 self.log_file.parent.mkdir(parents=True, exist_ok=True)

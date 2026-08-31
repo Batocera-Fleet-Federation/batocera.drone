@@ -764,6 +764,7 @@ def _schemas() -> Dict[str, Schema]:
                 "bt_stop_timeout": _integer("Stop a torrent stalled at 0 B/s for this many seconds; 0 disables", minimum=0),
                 "file_allocation": _enum(("none", "prealloc", "trunc", "falloc"), "aria2 file allocation mode"),
                 "max_concurrent_downloads": _integer("Torrents downloading at once; Force Start bypasses this", minimum=1, maximum=16),
+                "vpn_required": _boolean("Bind all aria2 torrent sockets to tun0 and refuse torrent download/upload unless the managed VPN tunnel is up"),
             },
             ("directory",),
             description="Watched-folder torrent settings.",
@@ -810,6 +811,8 @@ def _schemas() -> Dict[str, Schema]:
                 "counts": _object({status: _integer() for status in ("queued", "downloading", "complete", "error")}),
                 "torrents": _array(_ref("TorrentEntry")),
                 "paused": _boolean("Whether the global torrent queue is paused (aria2.pauseAll)"),
+                "vpn_required": _boolean("Whether fail-closed VPN-only torrent networking is enabled"),
+                "vpn_ready": _boolean("Whether the required managed VPN tunnel is currently available"),
                 "recent_move_locations": _array(_string("Recently-used Move Files destination")),
             },
             description="Torrent queue snapshot: settings, aria2c status, and per-torrent progress.",
@@ -823,6 +826,7 @@ def _schemas() -> Dict[str, Schema]:
                 "bt_stop_timeout": _integer(minimum=0),
                 "file_allocation": _enum(("none", "prealloc", "trunc", "falloc")),
                 "max_concurrent_downloads": _integer(minimum=1, maximum=16),
+                "vpn_required": _boolean("Enable or disable fail-closed VPN-only torrent networking"),
             },
             description="Partial torrent settings update; omitted fields keep their current values.",
         ),
@@ -1010,6 +1014,7 @@ def _schemas() -> Dict[str, Schema]:
                 "has_config": _boolean(),
                 "config_filename": _string("Original uploaded filename, for display"),
                 "remotes": _array(_string()),
+                "protocol": _string("Configured OpenVPN transport: TCP, UDP, or TCP / UDP"),
                 "has_credentials": _boolean(),
                 "username": _string("VPN username, for display -- the password is never returned"),
                 "sharing_enabled": _boolean("Whether paired peers may pull this config; always false for an imported config"),
@@ -1037,6 +1042,7 @@ def _schemas() -> Dict[str, Schema]:
                 "status": _string(),
                 "config_filename": _string(),
                 "remotes": _array(_string()),
+                "protocol": _string("Configured OpenVPN transport: TCP, UDP, or TCP / UDP"),
             },
             ("status", "config_filename"),
             description="Result of uploading and rewriting a provider .ovpn file.",
@@ -2367,6 +2373,9 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
             },
             "/admin/vpn/disconnect": {
                 "post": _operation("Disconnect the VPN", {"200": _json_response("VpnActionResponse")}, tags=["admin", "vpn"], error_codes=("401", "403", "429", "500", "503"))
+            },
+            "/admin/vpn/reconnect": {
+                "post": _operation("Disconnect and reconnect the VPN so the saved profile is loaded", {"200": _json_response("VpnActionResponse"), "400": _json_response("VpnActionResponse", "Not ready to connect (see errors)")}, tags=["admin", "vpn"], error_codes=("401", "403", "429", "500", "503"))
             },
             "/admin/vpn/verify-ip": {
                 "post": _operation("On-demand public-IP check to confirm the tunnel is actually routing traffic", {"200": _json_response("VpnVerifyIpResponse"), "502": _json_response("VpnVerifyIpResponse", "Could not determine the public IP")}, tags=["admin", "vpn"], error_codes=("401", "403", "429", "500", "503"))

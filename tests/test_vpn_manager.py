@@ -91,6 +91,16 @@ class RewriteConfigTests(unittest.TestCase):
         text = "remote a.example.net 1194\nremote b.example.net 443\nauth-user-pass\n"
         self.assertEqual(vpn_manager.parsed_remotes(text), ["a.example.net 1194", "b.example.net 443"])
 
+    def test_parsed_protocol_reads_top_level_proto(self) -> None:
+        self.assertEqual(vpn_manager.parsed_protocol("proto tcp-client\nremote vpn.example.net 443\n"), "TCP")
+
+    def test_parsed_protocol_reads_remote_protocols(self) -> None:
+        text = "remote a.example.net 443 tcp4-client\nremote b.example.net 1194 udp4\n"
+        self.assertEqual(vpn_manager.parsed_protocol(text), "TCP / UDP")
+
+    def test_parsed_protocol_uses_openvpn_udp_default(self) -> None:
+        self.assertEqual(vpn_manager.parsed_protocol("remote vpn.example.net 1194\n"), "UDP")
+
 
 class SaveUploadedConfigTests(unittest.TestCase):
     def test_rejects_non_ovpn_extension(self) -> None:
@@ -131,6 +141,7 @@ class SaveUploadedConfigTests(unittest.TestCase):
             self.assertEqual(result["status"], "ok")
             self.assertEqual(result["config_filename"], "ProtonVPN-US.ovpn")
             self.assertEqual(result["remotes"], ["vpn.example.net 1194"])
+            self.assertEqual(result["protocol"], "UDP")
             written = vpn_manager.config_path(settings).read_text()
             self.assertIn(f"auth-user-pass {vpn_manager.auth_path(settings)}", written)
             state = vpn_manager._load_state(settings)
@@ -561,6 +572,36 @@ class StatusTests(unittest.TestCase):
                 result = vpn_manager.status(settings)
             self.assertEqual(result["status"], "disconnected")
             self.assertIsNone(result["connected_at"])
+
+    def test_status_reports_saved_profile_protocol(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            tcp_profile = SAMPLE_OVPN.replace("proto udp", "proto tcp-client")
+            vpn_manager.save_uploaded_config(settings, "proton-tcp.ovpn", tcp_profile.encode())
+            with mock.patch.object(vpn_manager, "find_openvpn_binary", return_value="/usr/sbin/openvpn"), \
+                    mock.patch.object(vpn_manager, "_find_running_openvpn_pid", return_value=None):
+                result = vpn_manager.status(settings)
+            self.assertEqual(result["protocol"], "TCP")
+
+    def test_tunnel_is_up_requires_managed_process_and_interface_address(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            with mock.patch.object(vpn_manager, "find_openvpn_binary", return_value="/usr/sbin/openvpn"), \
+                    mock.patch.object(vpn_manager, "_find_running_openvpn_pid", return_value=999), \
+                    mock.patch.object(vpn_manager, "_tunnel_ip", return_value="10.8.0.2"):
+                self.assertTrue(vpn_manager.tunnel_is_up(settings))
+
+    def test_tunnel_is_up_fails_closed_without_process_or_address(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            with mock.patch.object(vpn_manager, "find_openvpn_binary", return_value="/usr/sbin/openvpn"), \
+                    mock.patch.object(vpn_manager, "_find_running_openvpn_pid", return_value=None), \
+                    mock.patch.object(vpn_manager, "_tunnel_ip", return_value="10.8.0.2"):
+                self.assertFalse(vpn_manager.tunnel_is_up(settings))
+            with mock.patch.object(vpn_manager, "find_openvpn_binary", return_value="/usr/sbin/openvpn"), \
+                    mock.patch.object(vpn_manager, "_find_running_openvpn_pid", return_value=999), \
+                    mock.patch.object(vpn_manager, "_tunnel_ip", return_value=None):
+                self.assertFalse(vpn_manager.tunnel_is_up(settings))
 
     def test_connecting_when_process_running_but_not_yet_complete(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

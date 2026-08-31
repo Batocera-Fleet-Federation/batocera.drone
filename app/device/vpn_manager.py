@@ -214,6 +214,31 @@ def parsed_remotes(config_text: str) -> List[str]:
     return remotes
 
 
+def parsed_protocol(config_text: str) -> str:
+    """Return the profile transport as ``TCP``, ``UDP``, or ``TCP / UDP``.
+
+    OpenVPN permits the transport on either a top-level ``proto`` directive
+    or as the optional protocol on individual ``remote`` lines.  Profiles
+    without either use OpenVPN's UDP default.
+    """
+    protocols = []
+    for line in config_text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("#", ";")):
+            continue
+        fields = stripped.split()
+        candidate = ""
+        if fields[0] == "proto" and len(fields) >= 2:
+            candidate = fields[1]
+        elif fields[0] == "remote" and len(fields) >= 4:
+            candidate = fields[3]
+        normalized = candidate.lower()
+        label = "TCP" if normalized.startswith("tcp") else "UDP" if normalized.startswith("udp") else ""
+        if label and label not in protocols:
+            protocols.append(label)
+    return " / ".join(protocols) if protocols else "UDP"
+
+
 def rewrite_ovpn_config(raw_text: str, auth_file_path: Path) -> str:
     """Apply the Drone-managed rewrites to an uploaded provider .ovpn:
 
@@ -269,6 +294,7 @@ def save_uploaded_config(settings: Settings, filename: str, raw_bytes: bytes) ->
     rewritten = rewrite_ovpn_config(raw_text, auth_path(settings))
     config_path(settings).write_text(rewritten, encoding="utf-8")
     remotes = parsed_remotes(rewritten)
+    protocol = parsed_protocol(rewritten)
     # A fresh config write is always "self-owned, clean slate" -- any prior
     # peer-import provenance and any stale revocation notice no longer apply.
     # import_from_peer() calls this function first, then re-applies its own
@@ -277,7 +303,7 @@ def save_uploaded_config(settings: Settings, filename: str, raw_bytes: bytes) ->
         settings, has_config=True, config_filename=name, remotes=remotes,
         source_peer_id="", source_peer_name="", revoked_reason="", revoked_at=None,
     )
-    return {"status": "ok", "config_filename": state["config_filename"], "remotes": remotes}
+    return {"status": "ok", "config_filename": state["config_filename"], "remotes": remotes, "protocol": protocol}
 
 
 def list_import_files(settings: Settings) -> dict:
@@ -579,6 +605,22 @@ def _tunnel_ip(interface: str = "tun0") -> Optional[str]:
     return match.group(1) if match else None
 
 
+def tunnel_is_up(settings: Settings, interface: str = "tun0") -> bool:
+    """Whether this Drone's managed OpenVPN process owns a live tunnel.
+
+    This intentionally does not depend on log-tail classification.  Consumers
+    such as the torrent kill switch need a fail-closed answer that remains
+    stable even when harmless replay warnings push the original success marker
+    out of the log window: the exact managed process must still exist and the
+    tunnel interface must still have an IPv4 address.
+    """
+    if find_openvpn_binary() is None:
+        return False
+    if _find_running_openvpn_pid(config_path(settings)) is None:
+        return False
+    return _tunnel_ip(interface) is not None
+
+
 def check_public_ip() -> dict:
     """On-demand outbound check (not polled automatically) -- see module docstring."""
     tool = shutil.which("curl")
@@ -652,6 +694,13 @@ def status(settings: Settings) -> dict:
         except ValueError:
             connected_duration_seconds = None
 
+    protocol = ""
+    if state["has_config"]:
+        try:
+            protocol = parsed_protocol(config_path(settings).read_text(encoding="utf-8"))
+        except OSError:
+            pass
+
     return {
         "status": connection_state,
         "message": message,
@@ -661,6 +710,7 @@ def status(settings: Settings) -> dict:
         "has_config": state["has_config"],
         "config_filename": state["config_filename"],
         "remotes": state["remotes"],
+        "protocol": protocol,
         "has_credentials": state["has_credentials"],
         "username": state["username"],
         "sharing_enabled": state["sharing_enabled"],

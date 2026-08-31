@@ -99,7 +99,7 @@ class HandlersTorrentsMixin:
             self._send_json(503, {"error": "torrent manager unavailable"})
             return
         result = manager.force_start(torrent_id)
-        status_code = 404 if result.get("status") == "not_found" else 409 if result.get("status") == "not_applicable" else 200
+        status_code = 404 if result.get("status") == "not_found" else 409 if result.get("status") in ("not_applicable", "vpn_required") else 200
         self._send_json(status_code, result)
 
     def _handle_admin_torrent_cancel(self, torrent_id: str) -> None:

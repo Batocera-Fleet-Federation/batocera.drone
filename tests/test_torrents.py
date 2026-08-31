@@ -122,10 +122,15 @@ class FakeDaemon:
         self.rpc = rpc
         self.binary_path = "/fake/aria2c"
         self.last_error = ""
+        self.bind_interface = None
+        self.stopped = False
 
     @property
     def running(self):
-        return True
+        return not self.stopped
+
+    def stop(self):
+        self.stopped = True
 
 
 def _write_torrent(directory: Path, name: str) -> Path:
@@ -149,6 +154,7 @@ class TorrentSettingsTests(unittest.TestCase):
             self.assertEqual(config["bt_stop_timeout"], 0)
             self.assertEqual(config["file_allocation"], "prealloc")
             self.assertEqual(config["max_concurrent_downloads"], 3)
+            self.assertFalse(config["vpn_required"])
 
     def test_clamps_and_garbage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -161,6 +167,7 @@ class TorrentSettingsTests(unittest.TestCase):
                     "bt_stop_timeout": "abc",
                     "file_allocation": "bogus",
                     "max_concurrent_downloads": 99,
+                    "vpn_required": "true",
                 },
                 settings,
             )
@@ -170,6 +177,15 @@ class TorrentSettingsTests(unittest.TestCase):
             self.assertEqual(config["bt_stop_timeout"], 0)
             self.assertEqual(config["file_allocation"], "prealloc")
             self.assertEqual(config["max_concurrent_downloads"], 16)
+            self.assertTrue(config["vpn_required"])
+
+    def test_vpn_required_setting_is_persisted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = TorrentManager(_build_settings(root), start_worker=False)
+            manager.update_settings({"vpn_required": True})
+            restarted = TorrentManager(_build_settings(root), start_worker=False)
+            self.assertTrue(restarted.snapshot()["settings"]["vpn_required"])
 
     def test_update_settings_merges_partial_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -193,6 +209,81 @@ class TorrentSettingsTests(unittest.TestCase):
 
             restarted = TorrentManager(_build_settings(root), start_worker=False)
             self.assertEqual(restarted._config["directory"], str(default_torrent_directory(settings)))
+
+
+class TorrentVpnRequirementTests(unittest.TestCase):
+    def test_vpn_down_stops_daemon_and_keeps_torrents_queued(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rpc = FakeRpc()
+            manager = TorrentManager(_build_settings(root), start_worker=False)
+            daemon = FakeDaemon(rpc)
+            manager._daemon = daemon
+            watch = root / "watch"
+            manager.update_settings({"directory": str(watch)})
+            _write_torrent(watch, "blocked")
+            with mock.patch.object(torrent_manager._vpn, "tunnel_is_up", return_value=False):
+                manager.update_settings({"vpn_required": True})
+                manager._tick()
+                snapshot = manager.snapshot()
+            self.assertTrue(daemon.stopped)
+            self.assertEqual(rpc.calls, [])
+            self.assertTrue(snapshot["vpn_required"])
+            self.assertFalse(snapshot["vpn_ready"])
+            self.assertEqual(snapshot["torrents"][0]["status"], "queued")
+            self.assertEqual(snapshot["torrents"][0]["message"], "Waiting for VPN connection")
+
+    def test_vpn_up_launches_daemon_bound_to_tun0(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = TorrentManager(_build_settings(root), start_worker=False)
+            watch = root / "watch"
+            manager.update_settings({"directory": str(watch), "vpn_required": True})
+            _write_torrent(watch, "protected")
+            fake_rpc = FakeRpc()
+            fake_daemon = mock.Mock()
+            fake_daemon.binary_path = "/fake/aria2c"
+            fake_daemon.bind_interface = "tun0"
+            fake_daemon.running = False
+            fake_daemon.start.return_value = True
+            fake_daemon.rpc = fake_rpc
+            with mock.patch.object(torrent_manager._vpn, "tunnel_is_up", return_value=True), \
+                    mock.patch.object(torrent_manager, "find_aria2c", return_value={"path": "/fake/aria2c"}), \
+                    mock.patch.object(torrent_manager, "Aria2Daemon", return_value=fake_daemon) as daemon_cls:
+                manager._tick()
+            self.assertEqual(daemon_cls.call_args.kwargs["bind_interface"], "tun0")
+            self.assertEqual(len(fake_rpc.method_calls("aria2.addTorrent")), 1)
+
+    def test_force_start_cannot_bypass_missing_vpn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = TorrentManager(_build_settings(root), start_worker=False)
+            watch = root / "watch"
+            manager.update_settings({"directory": str(watch), "vpn_required": True})
+            _write_torrent(watch, "blocked")
+            with mock.patch.object(torrent_manager._vpn, "tunnel_is_up", return_value=False):
+                manager._tick()
+                entry = manager.snapshot()["torrents"][0]
+                result = manager.force_start(entry["id"])
+            self.assertEqual(result["status"], "vpn_required")
+
+
+class Aria2VpnBindingTests(unittest.TestCase):
+    def test_daemon_command_binds_to_tun0_and_disables_ipv6_and_lpd(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            process = mock.Mock()
+            process.pid = 123
+            process.poll.return_value = None
+            rpc = mock.Mock()
+            rpc.call.return_value = {"version": "test"}
+            with mock.patch.object(aria2_runtime.subprocess, "Popen", return_value=process) as popen, \
+                    mock.patch.object(aria2_runtime, "Aria2Rpc", return_value=rpc):
+                daemon = aria2_runtime.Aria2Daemon("/fake/aria2c", Path(tmp), bind_interface="tun0")
+                self.assertTrue(daemon.start())
+            args = popen.call_args.args[0]
+            self.assertIn("--interface=tun0", args)
+            self.assertIn("--disable-ipv6=true", args)
+            self.assertIn("--bt-enable-lpd=false", args)
 
 
 class TorrentWatchScanTests(unittest.TestCase):

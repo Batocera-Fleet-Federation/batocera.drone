@@ -62,6 +62,11 @@ class HandlersVpnMixin:
         status_code = 500 if result.get("status") == "error" else 200
         self._send_json(status_code, result)
 
+    def _handle_admin_vpn_reconnect(self) -> None:
+        result = _vpn.reconnect(self.settings)
+        status_code = 400 if result.get("status") == "error" else 200
+        self._send_json(status_code, result)
+
     def _handle_admin_vpn_verify_ip(self) -> None:
         result = _vpn.check_public_ip()
         self._send_json(200 if "ip" in result else 502, result)
