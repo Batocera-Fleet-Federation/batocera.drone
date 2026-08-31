@@ -281,9 +281,23 @@ class Aria2VpnBindingTests(unittest.TestCase):
                 daemon = aria2_runtime.Aria2Daemon("/fake/aria2c", Path(tmp), bind_interface="tun0")
                 self.assertTrue(daemon.start())
             args = popen.call_args.args[0]
+            self.assertTrue(popen.call_args.kwargs["start_new_session"])
             self.assertIn("--interface=tun0", args)
             self.assertIn("--disable-ipv6=true", args)
             self.assertIn("--bt-enable-lpd=false", args)
+
+    def test_stop_terminates_the_entire_appimage_process_group(self) -> None:
+        process = mock.Mock()
+        process.pid = 456
+        process.poll.return_value = None
+        daemon = aria2_runtime.Aria2Daemon("/fake/aria2c", Path("/tmp"))
+        daemon.process = process
+        with mock.patch.object(aria2_runtime.os, "killpg") as killpg:
+            daemon.stop()
+        self.assertEqual(
+            killpg.call_args_list,
+            [mock.call(456, aria2_runtime.signal.SIGTERM), mock.call(456, aria2_runtime.signal.SIGKILL)],
+        )
 
 
 class TorrentWatchScanTests(unittest.TestCase):

@@ -2387,7 +2387,7 @@ def build_openapi_spec(version: str, api_prefix: str = "/v1/api") -> Dict[str, A
                 "post": _operation("Pull VPN config (+ credentials, if shared) from a paired peer and adopt it", {"200": _json_response("VpnPullFromPeerResponse"), "404": _json_response("ErrorResponse", "Unknown peer, or that peer has sharing off / no config"), "502": _json_response("ErrorResponse", "Could not reach that peer")}, request_body=_json_request("VpnPullFromPeerRequest"), tags=["admin", "vpn"], error_codes=("400", "401", "403", "404", "429", "500", "502", "503"))
             },
             "/admin/vpn/self-heal": {
-                "post": _operation("Toggle automatically reconnecting when the VPN connection fails (decrypt/replay errors or an explicit connection error); on by default", {"200": _json_response("VpnSelfHealResponse")}, request_body=_json_request("VpnSelfHealRequest"), tags=["admin", "vpn"], error_codes=("400", "401", "403", "429", "500", "503"))
+                "post": _operation("Toggle automatically reconnecting when the VPN connection fails; replay/decrypt warnings do not interrupt a live tunnel; on by default", {"200": _json_response("VpnSelfHealResponse")}, request_body=_json_request("VpnSelfHealRequest"), tags=["admin", "vpn"], error_codes=("400", "401", "403", "429", "500", "503"))
             },
             "/admin/vpn/log/download": {
                 "get": _operation("Download the raw openvpn log", {"200": _media_response("Log file", ["text/plain"])}, tags=["admin", "vpn"], error_codes=("401", "403", "404", "429", "500"))

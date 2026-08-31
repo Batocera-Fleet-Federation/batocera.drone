@@ -16,6 +16,7 @@ import os
 import platform
 import re
 import secrets
+import signal
 import shutil
 import socket
 import subprocess
@@ -310,6 +311,11 @@ class Aria2Daemon:
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                # AppImage launches aria2 through a wrapper and child process.
+                # A dedicated process group lets stop() terminate the entire
+                # tree; killing only the wrapper can otherwise leave an
+                # unbound aria2 child transferring after VPN-only mode changes.
+                start_new_session=True,
             )
         except OSError as error:
             self.last_error = f"failed to launch aria2c: {error}"
@@ -344,10 +350,28 @@ class Aria2Daemon:
         if process is None or process.poll() is not None:
             return
         try:
-            process.terminate()
+            os.killpg(process.pid, signal.SIGTERM)
             try:
                 process.wait(timeout=3)
             except subprocess.TimeoutExpired:
-                process.kill()
+                pass
+            # Belt-and-suspenders for launchers whose wrapper exits before a
+            # stubborn child.  The group ID remains the original wrapper PID.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                pass
         except OSError:
-            pass
+            # Fallback for a platform/runtime without POSIX process groups.
+            try:
+                process.terminate()
+                process.wait(timeout=3)
+            except (OSError, subprocess.TimeoutExpired):
+                try:
+                    process.kill()
+                except OSError:
+                    pass

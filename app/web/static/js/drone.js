@@ -7893,7 +7893,7 @@ async function renderVpnPage() {
           <input class="form-check-input" type="checkbox" role="switch" id="vpnSelfHeal" ${payload.self_heal_enabled ? "checked" : ""} onchange="setVpnSelfHeal(this.checked)">
           <label class="form-check-label" for="vpnSelfHeal">Automatically reconnect if the VPN connection fails</label>
         </div>
-        <p class="text-muted small mb-0 mt-1">Watches for connection errors and decrypt/replay-error floods and reconnects on its own, rate-limited so a persistent problem can't loop forever. On by default.</p>
+        <p class="text-muted small mb-0 mt-1">Watches for connection errors and reconnects on its own. Replay/decrypt warnings never interrupt a tunnel that is still up. Reconnects are rate-limited so a persistent problem can't loop forever. On by default.</p>
       </div>
     </div>
     <div class="card mb-3">

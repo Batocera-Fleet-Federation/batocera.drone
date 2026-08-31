@@ -655,6 +655,7 @@ def status(settings: Settings) -> dict:
     pid = _find_running_openvpn_pid(config_path(settings)) if installed else None
     detection_lines = _log_lines(settings, VPN_LOG_TAIL_LINES_FOR_DETECTION) if pid is not None else []
     detection_text = "\n".join(detection_lines)
+    live_tunnel_ip = _tunnel_ip() if pid is not None else None
 
     connected_at = state["connected_at"]
     message = ""
@@ -673,6 +674,15 @@ def status(settings: Settings) -> dict:
         if failure_line:
             connection_state = "error"
             message = failure_line.strip()
+        elif live_tunnel_ip:
+            # A long run of harmless replay warnings can push the one-time
+            # success marker out of the bounded log tail.  The managed process
+            # plus a live tunnel address is stronger current-state evidence
+            # than the absence of that old marker.
+            connection_state = "connected"
+            if connected_at is None:
+                connected_at = _now_iso()
+                state = _save_state(settings, connected_at=connected_at)
         else:
             connection_state = "connecting"
 
@@ -685,7 +695,7 @@ def status(settings: Settings) -> dict:
             _notifications.record_event(settings, "vpn_disconnected", "VPN disconnected", message)
         state = _save_state(settings, last_status=connection_state)
 
-    tunnel_ip = _tunnel_ip() if connection_state == "connected" else None
+    tunnel_ip = live_tunnel_ip if connection_state == "connected" else None
     connected_duration_seconds = None
     if connection_state == "connected" and connected_at:
         try:
@@ -944,10 +954,11 @@ def _self_heal_reason(snapshot: dict, settings: Settings) -> Optional[str]:
     disconnected on purpose, or the sharing-revocation poller's own intentional
     disconnect after credentials were wiped (see check_sharing_revocation);
     self-heal must not fight either of those. "connecting"/"connected" are
-    both checked for the log-flood pattern because the real incident that
-    prompted this feature showed as "connecting" (the flood had pushed the
-    success marker out of the status detector's own tail window) rather than
-    the "error" status a human might expect.
+    both checked for the log-flood pattern, but replay/decrypt warnings alone
+    never justify disrupting a tunnel that still has its managed process and
+    interface address.  OpenVPN explicitly labels many of these as possible
+    replays, and the incident that prompted this guard showed the data path was
+    still alive while the old behavior repeatedly tore it down.
     """
     status_value = snapshot.get("status")
     if status_value == "disconnected":
@@ -955,7 +966,10 @@ def _self_heal_reason(snapshot: dict, settings: Settings) -> Optional[str]:
     if status_value == "error":
         return str(snapshot.get("message") or "connection error")
     if status_value in ("connecting", "connected") and snapshot.get("pid"):
-        return _recent_log_flood(settings)
+        flood = _recent_log_flood(settings)
+        if flood and tunnel_is_up(settings):
+            return None
+        return flood
     return None
 
 

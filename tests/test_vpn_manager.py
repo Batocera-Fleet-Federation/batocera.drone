@@ -630,6 +630,19 @@ class StatusTests(unittest.TestCase):
                 second = vpn_manager.status(settings)
             self.assertEqual(second["connected_at"], first_connected_at)
 
+    def test_live_tunnel_remains_connected_after_success_marker_scrolls_out(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            replay_flood = "\n".join(
+                f"AEAD Decrypt error: bad packet ID (may be a replay): [ #{i} ]" for i in range(500)
+            )
+            settings = self._settings_with_running_process(tmp, replay_flood)
+            with mock.patch.object(vpn_manager, "find_openvpn_binary", return_value="/usr/sbin/openvpn"), \
+                    mock.patch.object(vpn_manager, "_find_running_openvpn_pid", return_value=999), \
+                    mock.patch.object(vpn_manager, "_tunnel_ip", return_value="10.8.0.2"):
+                result = vpn_manager.status(settings)
+            self.assertEqual(result["status"], "connected")
+            self.assertEqual(result["tunnel_ip"], "10.8.0.2")
+
     def test_error_when_log_shows_auth_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = self._settings_with_running_process(tmp, "AUTH_FAILED\nExiting due to fatal error\n")
@@ -1155,6 +1168,16 @@ class SelfHealReasonTests(unittest.TestCase):
             vpn_manager.log_path(settings).write_text(log, encoding="utf-8")
             snapshot = {"status": "connecting", "message": "", "pid": 123}
             self.assertIsNotNone(vpn_manager._self_heal_reason(snapshot, settings))
+
+    def test_replay_flood_does_not_restart_a_live_tunnel(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = _build_settings(self, Path(tmp))
+            vpn_manager.vpn_dir(settings).mkdir(parents=True, exist_ok=True)
+            log = "\n".join(f"AEAD Decrypt error: bad packet ID: [ #{i} ]" for i in range(20))
+            vpn_manager.log_path(settings).write_text(log, encoding="utf-8")
+            snapshot = {"status": "connecting", "message": "", "pid": 123}
+            with mock.patch.object(vpn_manager, "tunnel_is_up", return_value=True):
+                self.assertIsNone(vpn_manager._self_heal_reason(snapshot, settings))
 
     def test_none_when_connected_and_healthy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
