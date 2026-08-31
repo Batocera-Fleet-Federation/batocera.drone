@@ -19,7 +19,12 @@ app/transfer/
                         # scheduler, settings, snapshot -- the whole feature's
                         # state machine
   aria2_runtime.py      # find/install the aria2c binary, Aria2Daemon (spawn +
-                        # health-check the RPC daemon), Aria2Rpc (JSON-RPC client)
+                        # health-check the RPC daemon; tun0 socket bind for the
+                        # "Require VPN" kill switch; process-tree teardown),
+                        # Aria2Rpc (JSON-RPC client)
+app/device/
+  vpn_manager.py        # tunnel_is_up() -- the fail-closed "is the managed
+                        # OpenVPN tunnel live" check the kill switch gates on
 app/web/
   handlers_torrents.py  # admin route handlers (HandlersTorrentsMixin);
                          # delegates all real logic to torrent_manager.py
@@ -211,6 +216,102 @@ permanently-errored entry for every real torrent. This was only caught by a
 live smoke test against a real aria2c binary; the mocked-RPC unit tests can't
 surface it because the fake RPC never actually writes a mirrored file.
 
+## "Require VPN" — the fail-closed torrent kill switch (`vpn_required`)
+
+Added 2026-08-31 (commit `5007cdb`, hardened by `467d7cc` + `0e47794`). The
+Torrents settings tile has a **"Require VPN"** toggle — persisted config key
+`vpn_required` (`_normalize_torrent_settings`, `_bool_value("vpn_required")`,
+default off). When on, **no torrent byte moves unless this Drone's own managed
+OpenVPN tunnel is up**, and all aria2 traffic is bound to `tun0`. It is
+enforced at two independent layers:
+
+**Layer 1 — aria2 socket binding (`aria2_runtime.py`, `Aria2Daemon.start()`).**
+The daemon is constructed with `bind_interface="tun0"` (via
+`_ensure_rpc(..., vpn_required=True)`, whose `desired_interface = "tun0" if
+vpn_required else None`) and launches with three extra args:
+
+- `--interface=tun0` — every peer/tracker/download socket binds to the tunnel
+  interface, so loss of `tun0` cannot let an established or new connection fall
+  back to `wlan0`/`eth0`. **This is the actual kill switch.**
+- `--disable-ipv6=true` — Batocera's OpenVPN is IPv4-only; this closes the
+  independent IPv6 escape path.
+- `--bt-enable-lpd=false` — no BitTorrent Local Peer Discovery broadcast onto
+  the physical LAN while VPN-only mode is selected.
+
+`_ensure_rpc` compares `getattr(daemon, "bind_interface", None)` against the
+desired value and **tears down + relaunches** the daemon if they differ, so a
+daemon started without `--interface` can never keep serving after the mode is
+switched on (and vice versa). `update_settings()` also calls
+`_reset_daemon_state_locked(...)` + `daemon.stop()` inline the moment
+`vpn_required` changes, not waiting for the next tick.
+
+**Layer 2 — the scheduler gate (`torrent_manager.py`, `_tick()`).** Every poll
+(default 3s) `_tick` first reads `vpn_required` and computes
+`vpn_blocked = vpn_required and not _vpn.tunnel_is_up(self.settings)`. If
+blocked it calls `_stop_daemon_for_network_policy("Waiting for VPN
+connection")` (full `daemon.stop()` + convert every process-local GID back to a
+resumable `queued` entry) and **returns before Phase B** — the watched-folder
+scan and persistence still run (new `.torrent` files show up as `queued` with
+message `"Waiting for VPN connection"`), but `_ensure_rpc` and every aria2 RPC
+are unreachable. `_ensure_rpc` has exactly one caller, `_tick` Phase B, so
+there is no other path that can start the daemon while blocked.
+`save_uploaded_torrents()` / `add_magnet()` only register an entry + `wake()`;
+the actual aria2 add always flows through the gated `_tick`.
+
+`force_start()` and `resume()` **also re-check** `_vpn.tunnel_is_up()` directly:
+`force_start` returns `{"status": "vpn_required"}` (HTTP 409 in
+`handlers_torrents.py`) — **"force" overrides the concurrency limit and the
+global pause, but NOT the VPN gate**. `resume()` stops the daemon and returns
+the snapshot unchanged if the tunnel is down.
+
+`_vpn.tunnel_is_up(settings)` (`device/vpn_manager.py`) is deliberately
+**fail-closed and log-independent**: it returns `True` only if the openvpn
+binary exists, the exact managed `--config <path>` process PID is running, AND
+`ip -4 addr show tun0` reports an address. Harmless replay-warning log spam
+pushing the success marker out of the tail window does not flip it.
+
+The snapshot (`GET /admin/torrents`) exposes `vpn_required` (bool) and
+`vpn_ready` (`tunnel_is_up` result, or `True` when not required) so the UI can
+render the "VPN-required mode is active…" warning banner
+(`renderTorrentAlerts`) and the toggle state without recomputing.
+
+**Daemon teardown must kill the whole process tree, not just the wrapper.**
+aria2 is normally never killed except at Drone shutdown, but the kill switch
+kills it on every tunnel loss — and an AppImage aria2c forks an AppRun wrapper
++ real aria2 child into a **separate session** that escapes the launcher's
+process group. So `Aria2Daemon`: launches with `start_new_session=True`;
+`stop()` does `aria2.forceShutdown` RPC, then `os.killpg(SIGTERM/SIGKILL)`,
+**then** `_terminate_aria2_port_processes(port)` which scans `/proc/*/cmdline`
+for any process carrying this daemon's unique `--rpc-listen-port=<port>` marker
++ `aria2c` and SIGTERM/SIGKILLs it. That last sweep is load-bearing: it runs
+*even when the wrapper is already gone*, which is exactly when a detached child
+used to keep transferring unbound after VPN-only mode engaged. Tests:
+`Aria2VpnBindingTests`, `test_stop_terminates_the_entire_appimage_process_group`
+in `tests/test_torrents.py`.
+
+**Residual gaps (known, documented — do not "fix" without deciding):**
+
+1. **~1 poll cycle (≤3s) startup race.** If `tun0` drops between `_tick`'s
+   `tunnel_is_up` check passing and `Aria2Daemon.start()` spawning the process,
+   aria2 launches with `--interface=tun0` pointing at a now-missing interface;
+   aria2 logs a warning and proceeds *unbound* until the next tick kills it.
+   The interface bind is the only mitigation and it does not cover
+   "interface already gone at spawn". Self-corrects within
+   `TORRENT_POLL_SECONDS`.
+2. **DHT / UDP on a split-tunnel `.ovpn`.** DHT is left enabled (no
+   `--enable-dht=false`). `--interface` binds aria2's sockets broadly, but a
+   split-tunnel profile (no `redirect-gateway`) has not been verified to route
+   DHT UDP through `tun0`. Moot for a normal full-tunnel profile (the common
+   case, and what swarm VPN sharing propagates).
+3. It is an **aria2-level** kill switch (trusts aria2 to honor `--interface`),
+   **not** a kernel `iptables`/`nftables` killswitch. Reasonable for a
+   stdlib-only Drone; weaker than a kernel-enforced rule.
+
+Tests: `TorrentVpnRequirementTests` (daemon stop + torrents stay queued, daemon
+binds to `tun0` when up, `force_start` cannot bypass) and `Aria2VpnBindingTests`
+in `tests/test_torrents.py`. See also `drone-vpn-management`'s note that
+`tunnel_is_up` is a load-bearing consumer.
+
 ## Magnet metadata hand-off (`followedBy`/`following`)
 
 A magnet-added GID initially only fetches the BitTorrent **metadata** (the
@@ -305,10 +406,13 @@ branch matches a `GID ... is not found` RPC error, not just process-startup).
 `cancel()` deliberately does **not** use `killall`/broad process signals --
 disconnect-equivalent operations here are pure RPC (`aria2.forceRemove` +
 `aria2.removeDownloadResult` on the specific GID), since aria2 itself is a
-single shared daemon process the whole manager depends on; it is never killed
-except implicitly via `Aria2Daemon.stop()` at Drone shutdown
-(`--stop-with-process=<drone-pid>` ties its lifetime to the Drone process so
-nothing is ever orphaned).
+single shared daemon process the whole manager depends on. It is killed
+(`Aria2Daemon.stop()` — process-group + `/proc` port-marker sweep, see the
+"Require VPN" section) at Drone shutdown (`--stop-with-process=<drone-pid>`
+ties its lifetime to the Drone process) **and** on every VPN-tunnel loss while
+`vpn_required` is on (`_stop_daemon_for_network_policy`) or when the
+`vpn_required` / `bind_interface` policy changes — each time, its
+process-local GIDs are converted back to resumable `queued` entries first.
 
 ## Moving downloaded files out (`list_files`/`move_files`)
 
@@ -438,6 +542,17 @@ re-`innerHTML` the whole tile, on every 3s poll tick.
   moves the un-overridden default" behavior.
 - Forgetting `--rpc-save-upload-metadata=false` if `Aria2Daemon`'s launch args
   are ever touched -- silently duplicates every torrent (see above).
+- Touching `Aria2Daemon.start()`'s VPN args (`--interface=tun0`,
+  `--disable-ipv6=true`, `--bt-enable-lpd=false`) or `stop()`'s process-tree
+  teardown without re-verifying the "Require VPN" kill switch -- these are the
+  no-leak boundary, not cosmetic. See the "Require VPN" section.
+- Adding any new torrent code path that reaches aria2 (a new RPC caller, a new
+  entry point) without routing it through the gated `_tick` / without an
+  `_vpn.tunnel_is_up()` re-check -- `force_start()` and `resume()` re-check for
+  a reason; a path that skips the gate is a leak while `vpn_required` is on.
+- Assuming `_ensure_rpc` will refuse to start a daemon when the VPN is down --
+  it won't; the gate is `_tick` returning *before* Phase B ever calls
+  `_ensure_rpc`. Don't move the `vpn_blocked` early-return.
 - Using `killall openvpn`-style broad process signals against aria2c --
   there's one shared daemon for the whole manager; use RPC calls against a
   specific GID instead.
@@ -539,7 +654,14 @@ Do not:
   directly,
 - `rmtree` a torrent's `download_dir` itself in cleanup logic -- only remove a
   genuine dedicated per-torrent subfolder (`_torrent_root_dir()`), since the
-  dir can be shared across torrents.
+  dir can be shared across torrents,
+- weaken the "Require VPN" kill switch: don't remove `--interface=tun0` /
+  `--disable-ipv6=true` / `--bt-enable-lpd=false`, don't drop the `_tick`
+  `vpn_blocked` early-return or the `force_start`/`resume` `tunnel_is_up`
+  re-checks, don't loosen `_vpn.tunnel_is_up` to trust log-tail wording, and
+  don't add an aria2-reaching code path that bypasses the gated `_tick`. Any
+  change here needs a live check against a real aria2c + a real tunnel drop,
+  not just mocked-RPC tests.
 
 ## Default bias
 

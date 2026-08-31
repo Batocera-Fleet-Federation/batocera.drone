@@ -168,9 +168,13 @@ unset). A completed torrent can have its downloaded files moved elsewhere on
 disk (with an optional cleanup of what's left behind); Delete removes
 downloaded files too now; a global Pause/Resume toggle and a scoped bulk Clear
 sit left of the Refresh button; the table always surfaces actively-downloading
-torrents first. See the dedicated **drone-torrents-management** skill for the
-aria2 RPC lifecycle, restart/PID-recovery behavior, upload mechanics, and all
-of the above in depth.
+torrents first. A **"Require VPN"** settings toggle (`vpn_required`) is a
+fail-closed kill switch: when on, aria2's sockets are bound to `tun0`
+(IPv6/LPD off) and every download/upload is blocked — including Force Start —
+unless this Drone's own managed OpenVPN tunnel is up (`_vpn.tunnel_is_up`,
+re-checked every 3s poll). See the dedicated **drone-torrents-management**
+skill for the aria2 RPC lifecycle, restart/PID-recovery behavior, upload
+mechanics, the "Require VPN" kill switch, and all of the above in depth.
 
 ### VPN
 

@@ -117,8 +117,23 @@ class HandlersTorrentsMixin:
             self._send_json(503, {"error": "torrent manager unavailable"})
             return
         result = manager.delete(torrent_id)
-        status_code = 404 if result.get("status") == "not_found" else 200
+        status_code = 404 if result.get("status") == "not_found" else 409 if result.get("status") == "migration_in_progress" else 200
         self._send_json(status_code, result)
+
+    def _handle_admin_torrent_migrate(self, torrent_id: str, payload: dict) -> None:
+        manager = _get_torrent_manager()
+        if manager is None:
+            self._send_json(503, {"error": "torrent manager unavailable"})
+            return
+        result = manager.retry_partial_migration(torrent_id) if bool((payload or {}).get("retry")) else manager.migrate_partial(torrent_id)
+        status_map = {
+            "not_found": 404,
+            "not_applicable": 409,
+            "already_in_progress": 409,
+            "invalid_destination": 400,
+            "destination_conflict": 409,
+        }
+        self._send_json(status_map.get(result.get("status"), 200), result)
 
     def _handle_admin_torrent_files(self, torrent_id: str) -> None:
         manager = _get_torrent_manager()
