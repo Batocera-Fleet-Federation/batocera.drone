@@ -19,6 +19,7 @@ Pure stdlib.
 """
 
 import base64
+import errno
 import math
 import os
 import re
@@ -314,6 +315,95 @@ def _migration_job_summary(job: dict) -> dict:
     }
 
 
+def _migration_source_files(entry: dict, source_dir: Path) -> List[Path]:
+    """Return every payload/control file needed to resume ``entry``.
+
+    aria2's last reported file list is useful but is not authoritative during
+    a partial download: it can be stale after a metadata-GID handoff and it
+    does not include the root ``.aria2`` control file.  Walk a genuine
+    per-torrent directory when one exists, merge the reported paths, and add
+    both aria2 control-file layouts explicitly.
+    """
+
+    try:
+        source_resolved = source_dir.resolve()
+    except OSError:
+        return []
+    candidates: Set[Path] = set()
+    name = str(entry.get("name") or "")
+    guessed_root = source_resolved / name if name else None
+    if guessed_root is not None and guessed_root.is_dir():
+        try:
+            candidates.update(path.resolve() for path in guessed_root.rglob("*") if path.is_file())
+        except OSError:
+            pass
+    elif guessed_root is not None and guessed_root.is_file():
+        candidates.add(guessed_root.resolve())
+    for path in _resolve_known_files(entry):
+        try:
+            path.resolve().relative_to(source_resolved)
+        except (OSError, ValueError):
+            continue
+        if path.is_file():
+            candidates.add(path.resolve())
+    sidecars = [source_resolved / f"{name}.aria2"] if name else []
+    sidecars.extend(Path(f"{path}.aria2") for path in list(candidates))
+    candidates.update(path.resolve() for path in sidecars if path.is_file())
+    return sorted(candidates, key=lambda path: str(path))
+
+
+def _copy_migration_file(source: Path, target: Path) -> None:
+    """Copy one migration file while preserving sparse extents when possible.
+
+    ``shutil.move`` falls back to ``copy2`` across devices and can turn an
+    ext4 sparse partial torrent into hundreds of GiB of allocated zeroes on a
+    FUSE destination. SEEK_DATA/SEEK_HOLE copies only allocated source
+    extents; unsupported filesystems fall back to the normal copy path.
+    """
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    seek_data = getattr(os, "SEEK_DATA", None)
+    seek_hole = getattr(os, "SEEK_HOLE", None)
+    if seek_data is None or seek_hole is None:
+        shutil.copy2(source, target)
+        return
+    size = source.stat().st_size
+    try:
+        with source.open("rb", buffering=0) as source_file, target.open("wb", buffering=0) as target_file:
+            target_file.truncate(size)
+            offset = 0
+            while offset < size:
+                try:
+                    data_offset = os.lseek(source_file.fileno(), offset, seek_data)
+                except OSError as error:
+                    if error.errno == errno.ENXIO:
+                        break
+                    raise
+                hole_offset = os.lseek(source_file.fileno(), data_offset, seek_hole)
+                source_file.seek(data_offset)
+                target_file.seek(data_offset)
+                remaining = min(hole_offset, size) - data_offset
+                while remaining > 0:
+                    chunk = source_file.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        raise OSError(f"unexpected EOF while copying {source}")
+                    target_file.write(chunk)
+                    remaining -= len(chunk)
+                offset = hole_offset
+        try:
+            shutil.copystat(source, target)
+        except OSError:
+            # Resume correctness depends on bytes/extents, not ownership or
+            # timestamps; FUSE targets commonly reject some metadata writes.
+            pass
+    except OSError as error:
+        # EINVAL/ENOTSUP are normal for filesystems without extent seeking.
+        if error.errno not in (errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP):
+            raise
+        target.unlink(missing_ok=True)
+        shutil.copy2(source, target)
+
+
 def _relative_known_file_path(candidate: Path, download_dir_resolved: Optional[Path]) -> str:
     """``candidate``'s path relative to the torrent's ``download_dir``, falling
     back to just its filename when it isn't resolvable underneath it. This is
@@ -376,13 +466,16 @@ def _remove_downloaded_payload(entry: dict) -> bool:
         except OSError as error:
             print(f"Torrent payload cleanup failed for {torrent_root}: {error}", file=sys.stderr, flush=True)
             removed_ok = False
-    else:
-        for candidate in known_files:
-            try:
-                candidate.unlink(missing_ok=True)
-            except OSError as error:
-                print(f"Torrent payload file delete failed for {candidate}: {error}", file=sys.stderr, flush=True)
-                removed_ok = False
+    # Always sweep the individual paths too. During a failed staged
+    # migration ``known_files`` can span both source and destination; a
+    # dedicated root cleanup on one disk must not strand the staged copy on
+    # the other.
+    for candidate in known_files:
+        try:
+            candidate.unlink(missing_ok=True)
+        except OSError as error:
+            print(f"Torrent payload file delete failed for {candidate}: {error}", file=sys.stderr, flush=True)
+            removed_ok = False
     download_dir = entry.get("download_dir")
     name = entry.get("name")
     if download_dir and name:
@@ -582,11 +675,12 @@ class TorrentManager:
                     move_job["interrupted"] = True
                     move_job["status"] = "queued"
             migration_job = entry.get("migration_job")
-            if isinstance(migration_job, dict) and migration_job.get("status") in ("stopping", "queued", "moving"):
+            if isinstance(migration_job, dict) and migration_job.get("status") in ("stopping", "queued", "moving", "verifying"):
                 # aria2 GIDs do not survive a daemon restart, while the
                 # per-file migration checkpoint does.
                 migration_job["gid"] = None
-                migration_job["status"] = "queued"
+                if migration_job.get("status") != "verifying":
+                    migration_job["status"] = "queued"
                 migration_job["interrupted"] = True
             self._torrents[entry_id] = entry
 
@@ -635,12 +729,19 @@ class TorrentManager:
     @staticmethod
     def _migration_active(entry: dict) -> bool:
         job = entry.get("migration_job")
-        return isinstance(job, dict) and job.get("status") in ("stopping", "queued", "moving")
+        return isinstance(job, dict) and job.get("status") in ("stopping", "queued", "moving", "verifying", "cleanup")
 
     @staticmethod
     def _migration_blocks_download(entry: dict) -> bool:
         job = entry.get("migration_job")
-        return isinstance(job, dict) and job.get("status") in ("stopping", "queued", "moving", "failed") and bool(job.get("remaining_files"))
+        if not isinstance(job, dict):
+            return False
+        status = job.get("status")
+        # Verification must be allowed through the scheduler so aria2 can
+        # re-add/query the staged download. Every other non-terminal phase is
+        # held out of normal scheduling, as is a failed migration until the
+        # user explicitly retries it.
+        return status in ("stopping", "queued", "moving", "cleanup", "failed")
 
     def _deduplicate_shared_gid_entries_locked(self) -> bool:
         """Collapse registry rows that provably own the same aria2 download.
@@ -880,6 +981,14 @@ class TorrentManager:
                 continue
             if entry.get("download_dir") == current:
                 continue
+            old_dir = Path(str(entry.get("download_dir") or ""))
+            if _migration_source_files(entry, old_dir):
+                # A transient zero counter (notably during a magnet metadata
+                # handoff/retry) is not proof that no download exists. Keep
+                # the original location whenever payload or resume metadata
+                # is present; the explicit migration workflow is the only
+                # path allowed to relocate it.
+                continue
             entry["download_dir"] = current
             if entry.get("status") == "queued":
                 gid = entry.get("gid")
@@ -988,6 +1097,19 @@ class TorrentManager:
                 if entry is None:
                     continue
                 retry_gid = self._apply_aria2_status_locked(entry, result)
+                migration_job = entry.get("migration_job")
+                observed = result.get("result") if isinstance(result.get("result"), dict) else {}
+                observed_gid = str(observed.get("gid") or "")
+                if (
+                    isinstance(migration_job, dict)
+                    and migration_job.get("status") == "verifying"
+                    and observed_gid
+                    and observed_gid == str(entry.get("gid") or "")
+                ):
+                    # The verifier must never trust baseline values left on
+                    # the entry before the newly-added destination GID has
+                    # actually answered tellStatus at least once.
+                    migration_job["verification_observed_gid"] = observed_gid
                 if retry_gid:
                     orphaned_gids.append(retry_gid)
             if self._deduplicate_shared_gid_entries_locked():
@@ -1343,6 +1465,12 @@ class TorrentManager:
         for entry in self._scheduler_entries_locked():
             if slots <= 0:
                 break
+            migration_job = entry.get("migration_job")
+            if isinstance(migration_job, dict) and migration_job.get("status") == "verifying":
+                # A paused aria2 GID already exposes the restored
+                # total/completed lengths. Do not download any new bytes at
+                # the destination until that resume state is verified.
+                continue
             if entry.get("status") == "queued" and entry.get("gid"):
                 picked.append(entry["gid"])
                 # Optimistic: aria2.unpause activates immediately (its own
@@ -1408,7 +1536,7 @@ class TorrentManager:
             if entry is None:
                 return {"status": "not_found"}
             status = entry.get("status")
-            if self._migration_blocks_download(entry):
+            if self._migration_active(entry) or self._migration_blocks_download(entry):
                 return {"status": "not_applicable", "message": "partial download migration is in progress"}
             if status == "complete":
                 return {"status": "not_applicable", "message": "torrent already completed"}
@@ -1418,7 +1546,8 @@ class TorrentManager:
             stale_gid = None
             if status == "queued" and gid and int(entry.get("completed_bytes") or 0) == 0:
                 current_dir = effective_download_directory(self._config)
-                if entry.get("download_dir") != current_dir:
+                existing_dir = Path(str(entry.get("download_dir") or ""))
+                if entry.get("download_dir") != current_dir and not _migration_source_files(entry, existing_dir):
                     # aria2 does not honor a `dir` change via
                     # aria2.changeOption for an already-added BitTorrent
                     # download (confirmed against a real aria2c -- the
@@ -1515,14 +1644,12 @@ class TorrentManager:
             destination = Path(effective_download_directory(self._config))
             source_dir = Path(str(entry.get("download_dir") or ""))
             existing_job = entry.get("migration_job")
-            if isinstance(existing_job, dict) and existing_job.get("status") in ("stopping", "queued", "moving"):
+            if self._migration_active(entry):
                 return {"status": "already_in_progress", "migration_job": _migration_job_summary(existing_job)}
-            if isinstance(existing_job, dict) and existing_job.get("status") == "failed" and existing_job.get("remaining_files"):
+            if isinstance(existing_job, dict) and existing_job.get("status") == "failed":
                 return {"status": "not_applicable", "message": "retry the failed migration instead of starting a new one"}
             if entry.get("status") == "complete":
                 return {"status": "not_applicable", "message": "torrent already completed"}
-            if int(entry.get("completed_bytes") or 0) <= 0:
-                return {"status": "not_applicable", "message": "torrent has no partial data to migrate"}
             try:
                 if source_dir.resolve() == destination.resolve():
                     return {"status": "not_applicable", "message": "torrent is already at the current Download location"}
@@ -1532,23 +1659,9 @@ class TorrentManager:
             except OSError as error:
                 return {"status": "invalid_destination", "message": str(error)}
 
-            sources: List[Path] = []
-            for candidate in _resolve_known_files(entry):
-                try:
-                    candidate.resolve().relative_to(source_resolved)
-                except (OSError, ValueError):
-                    continue
-                if candidate.is_file():
-                    sources.append(candidate)
-            # aria2 uses either a torrent-name sidecar or a payload-name
-            # sidecar depending on the torrent layout/version.
-            sidecars = [source_dir / f"{entry.get('name')}.aria2"]
-            sidecars.extend(Path(f"{path}.aria2") for path in sources)
-            for sidecar in sidecars:
-                if sidecar.is_file() and sidecar not in sources:
-                    sources.append(sidecar)
+            sources = _migration_source_files(entry, source_resolved)
             if not sources:
-                return {"status": "not_applicable", "message": "partial files were not found at the original location"}
+                return {"status": "not_applicable", "message": "partial payload and resume metadata were not found at the original location"}
 
             items = []
             for source in sources:
@@ -1564,9 +1677,17 @@ class TorrentManager:
                 "gid": entry.get("gid"),
                 "remaining_files": items,
                 "moved_files": [],
+                "cleanup_files": [],
                 "total_files": len(items),
                 "current_source": "",
                 "error": "",
+                "phase": "copying",
+                "baseline_completed_bytes": int(entry.get("completed_bytes") or 0),
+                "baseline_total_bytes": int(entry.get("total_bytes") or 0),
+                "expected_info_hash": str(entry.get("info_hash") or _magnet_info_hash(str(entry.get("magnet_uri") or ""))),
+                "original_files": list(entry.get("files") or []),
+                "verification_observations": 0,
+                "verification_observed_gid": "",
                 "started_at": _now_iso(),
                 "updated_at": _now_iso(),
             }
@@ -1585,9 +1706,25 @@ class TorrentManager:
             job = entry.get("migration_job") if entry else None
             if entry is None:
                 return {"status": "not_found"}
-            if not isinstance(job, dict) or job.get("status") != "failed" or not job.get("remaining_files"):
+            if not isinstance(job, dict) or job.get("status") != "failed":
                 return {"status": "not_applicable", "message": "migration is not retryable"}
-            job["status"] = "queued"
+            phase = str(job.get("phase") or "copying")
+            if phase == "verifying":
+                job["status"] = "verifying"
+                entry["download_dir"] = job["destination"]
+                moved_map = {item["source"]: item["target"] for item in (job.get("moved_files") or [])}
+                entry["files"] = [moved_map.get(path, path) for path in (job.get("original_files") or [])]
+                entry["gid"] = None
+                entry["status"] = "queued"
+                job["verification_observations"] = 0
+                job["verification_observed_gid"] = ""
+                self.wake()
+            elif phase == "cleanup":
+                job["status"] = "cleanup"
+            elif job.get("remaining_files"):
+                job["status"] = "queued"
+            else:
+                return {"status": "not_applicable", "message": "migration is not retryable"}
             job["error"] = ""
             job["updated_at"] = _now_iso()
             entry["message"] = "Retrying partial download migration"
@@ -1860,7 +1997,12 @@ class TorrentManager:
                 self._move_wake.clear()
 
     def _migration_tick(self) -> bool:
-        """Advance one partial-download migration item."""
+        """Advance one staged partial-download migration item.
+
+        Source files are copied, never moved, until aria2 has re-added the
+        torrent at the destination and reported the same content/progress.
+        Only that verification unlocks source cleanup.
+        """
         with self._lock:
             candidates = [entry for entry in self._torrents.values() if self._migration_active(entry)]
             if not candidates:
@@ -1870,8 +2012,9 @@ class TorrentManager:
             entry_id = entry["id"]
             job = entry["migration_job"]
             gid = job.get("gid")
+            job_status = str(job.get("status") or "queued")
 
-        if gid:
+        if gid and job_status in ("stopping", "queued", "moving"):
             if not self._remove_from_aria2(gid):
                 return True
             with self._lock:
@@ -1883,6 +2026,11 @@ class TorrentManager:
                 job["status"] = "queued"
                 job["updated_at"] = _now_iso()
                 self._persist_locked()
+
+        if job_status == "verifying":
+            return self._migration_verify_tick(entry_id, job)
+        if job_status == "cleanup":
+            return self._migration_cleanup_tick(entry_id, job)
 
         with self._lock:
             live = self._torrents.get(entry_id)
@@ -1904,19 +2052,14 @@ class TorrentManager:
         error_message = ""
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
-            # A crash can land in either half of shutil.move's checkpoint:
-            # target partial + source still present (retry the copy), or the
-            # move fully finished but state was not persisted (accept the
-            # target; deleting it here would destroy the only good copy).
-            recovered_completed_move = overwrite_interrupted and not source.exists() and target.is_file()
-            if recovered_completed_move:
-                pass
-            elif overwrite_interrupted and target.exists():
+            # The source is deliberately retained through verification, so a
+            # crash-interrupted target is always disposable and can be
+            # recopied from the authoritative source.
+            if overwrite_interrupted and target.exists():
                 target.unlink()
             elif target.exists():
                 raise FileExistsError(f"destination already contains {target}")
-            if not recovered_completed_move:
-                shutil.move(str(source), str(target))
+            _copy_migration_file(source, target)
         except OSError as error:
             error_message = str(error)
 
@@ -1939,13 +2082,17 @@ class TorrentManager:
                     live["files"] = [moved_map.get(path, path) for path in (live.get("files") or [])]
                     live["download_dir"] = job["destination"]
                     live["status"] = "queued"
-                    live["message"] = "Migration complete; waiting to resume"
+                    live["message"] = "Migration staged; verifying aria2 resume state"
+                    live["gid"] = None
                     live["queue_position"] = self._take_queue_position_locked()
                     live["retry_count"] = 0
                     live["retry_at"] = 0.0
                     live["last_error"] = ""
-                    job["status"] = "complete"
-                    job["completed_at"] = _now_iso()
+                    job["status"] = "verifying"
+                    job["phase"] = "verifying"
+                    job["verification_observations"] = 0
+                    job["verification_observed_gid"] = ""
+                    job["cleanup_files"] = [item["source"] for item in (job.get("moved_files") or [])]
                     completed = True
                 else:
                     job["status"] = "queued"
@@ -1953,6 +2100,121 @@ class TorrentManager:
             self._persist_locked()
         if completed:
             self.wake()
+        self._move_wake.set()
+        return True
+
+    def _migration_verify_tick(self, entry_id: str, job: dict) -> bool:
+        """Require aria2 to prove the staged copy retained its resume state."""
+
+        failed_gid = None
+        with self._lock:
+            live = self._torrents.get(entry_id)
+            if live is None or live.get("migration_job") is not job:
+                return True
+            gid = live.get("gid")
+            if not gid:
+                self.wake()
+                return True
+            if str(job.get("verification_observed_gid") or "") != str(gid):
+                return True
+            expected_hash = str(job.get("expected_info_hash") or "")
+            live_hash = str(live.get("info_hash") or "")
+            baseline_total = int(job.get("baseline_total_bytes") or 0)
+            baseline_completed = int(job.get("baseline_completed_bytes") or 0)
+            current_total = int(live.get("total_bytes") or 0)
+            current_completed = int(live.get("completed_bytes") or 0)
+            comparable_total = current_total > 0 and (baseline_total <= 0 or current_total == baseline_total)
+            tolerance = min(baseline_completed // 100, 16 * 1024 * 1024)
+            progress_retained = (
+                current_completed > 0
+                if baseline_completed <= 0
+                else current_completed >= baseline_completed - tolerance
+            )
+            error = ""
+            if expected_hash and live_hash and expected_hash != live_hash:
+                error = "destination resolved to a different torrent info hash"
+            elif comparable_total and progress_retained:
+                job["status"] = "cleanup"
+                job["phase"] = "cleanup"
+                job["verified_completed_bytes"] = current_completed
+                job["verified_at"] = _now_iso()
+                job["updated_at"] = _now_iso()
+                live["message"] = "Resume state verified; cleaning original files"
+                self._persist_locked()
+                self._move_wake.set()
+                return True
+            elif comparable_total:
+                observations = int(job.get("verification_observations") or 0) + 1
+                job["verification_observations"] = observations
+                if observations >= 3:
+                    error = (
+                        f"resume verification lost progress: expected about {baseline_completed} bytes, "
+                        f"aria2 reported {current_completed}"
+                    )
+            if error:
+                failed_gid = gid
+                live["gid"] = None
+                live["download_dir"] = job["source"]
+                live["files"] = list(job.get("original_files") or [])
+                live["status"] = "queued"
+                live["message"] = f"Migration failed: {error}"
+                job["status"] = "failed"
+                job["phase"] = "verifying"
+                job["error"] = error
+            job["updated_at"] = _now_iso()
+            self._persist_locked()
+        if failed_gid is not None and not self._remove_from_aria2(failed_gid):
+            self._queue_pending_removal(failed_gid)
+        return True
+
+    def _migration_cleanup_tick(self, entry_id: str, job: dict) -> bool:
+        """Remove one verified source file and checkpoint the cleanup."""
+
+        with self._lock:
+            live = self._torrents.get(entry_id)
+            if live is None or live.get("migration_job") is not job:
+                return True
+            cleanup_files = job.get("cleanup_files") or []
+            if not cleanup_files:
+                job["status"] = "complete"
+                job["phase"] = "complete"
+                job["completed_at"] = _now_iso()
+                job["updated_at"] = _now_iso()
+                cleanup_errors = job.get("cleanup_errors") or []
+                live["message"] = (
+                    f"Migration complete; {len(cleanup_errors)} original file(s) could not be removed"
+                    if cleanup_errors else "Migration complete"
+                )
+                self._persist_locked()
+                return True
+            source_str = cleanup_files[0]
+
+        cleanup_error = ""
+        source = Path(source_str)
+        try:
+            source.unlink(missing_ok=True)
+            source_root = Path(str(job.get("source") or "")).resolve()
+            parent = source.parent
+            while parent != source_root:
+                try:
+                    parent.rmdir()
+                except OSError:
+                    break
+                parent = parent.parent
+        except OSError as error:
+            cleanup_error = str(error)
+
+        with self._lock:
+            live = self._torrents.get(entry_id)
+            if live is None or live.get("migration_job") is not job:
+                return True
+            cleanup_files = job.get("cleanup_files") or []
+            if cleanup_files and cleanup_files[0] == source_str:
+                cleanup_files.pop(0)
+            if cleanup_error:
+                job.setdefault("cleanup_errors", []).append({"file": source_str, "error": cleanup_error})
+            job["updated_at"] = _now_iso()
+            self._persist_locked()
         self._move_wake.set()
         return True
 

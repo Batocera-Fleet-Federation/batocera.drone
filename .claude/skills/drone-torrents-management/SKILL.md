@@ -160,7 +160,7 @@ and `download_directory_exists` (in addition to the pre-existing `directory`/
 placeholder without recomputing the fallback logic client-side, and warn about
 a not-yet-created download folder independently of the watch folder.
 
-### `download_dir` keeps following the setting until a torrent actually starts
+### `download_dir` follows the setting only while no local torrent state exists
 
 The `.torrent` file itself never moves once scanned (`torrent_file` is fixed
 at scan time, permanently). `download_dir` used to be equally fixed at scan
@@ -168,13 +168,18 @@ time, but that surprised users: changing the download location and saving had
 no effect on torrents that were already registered, even ones still sitting
 in the queue with zero bytes downloaded. It now instead keeps tracking
 whatever `effective_download_directory(config)` currently resolves to, for as
-long as the torrent has never actually received data
+long as the torrent has never actually created payload or resume state
 (`_refresh_pending_download_dirs_locked`, called every tick and from
-`force_start()`): status `queued` or `error` **and** `completed_bytes == 0`.
-The instant a torrent has any real progress (including a torrent that's
+`force_start()`): status `queued` or `error`, `completed_bytes == 0`, **and**
+`_migration_source_files()` finds neither a payload file nor an `.aria2`
+control file at the existing location. The filesystem check is load-bearing:
+magnet metadata handoffs/retries can transiently overwrite the manager's live
+counter with zero even though a large partial download and its resume map are
+still on disk. The instant a torrent has any local state (including one that's
 `queued` only because it's globally paused mid-download,
 [[drone-torrent-vpn-ui-polish-and-bootstrap-collision]]'s pause feature), it
-is frozen at wherever it already is and never retargeted again.
+is frozen at wherever it already is and only the explicit migration workflow
+may relocate it.
 
 **The gotcha that actually bit here**: the obvious-looking fix —
 `aria2.changeOption(gid, {"dir": new_dir})` on an already-added (paused,
@@ -192,6 +197,43 @@ exact recovery path that already exists for a stale post-restart GID, rather
 than inventing new machinery. `force_start()` does the equivalent inline
 (drop the stale GID, let the immediate re-add carry `force_started` through
 to an unpaused fresh add) since it doesn't go through `_tick()` at all.
+
+### Partial-download migration is staged and verified
+
+`migrate_partial()` does not merely move the paths from the last aria2 status
+response. `_migration_source_files()` merges that reported list with a full
+walk of the dedicated per-torrent source folder and both aria2 control-file
+layouts (`<torrent-name>.aria2` and `<payload>.aria2`). The watched `.torrent`
+definition deliberately remains in the watched folder; magnet definitions
+remain in the persisted registry. Those are inputs used to re-add the staged
+download, not payload that belongs under the Download location.
+
+Migration is a persisted, crash-resumable transaction:
+
+1. Stop/remove the old GID and checkpoint its info hash, total, completed
+   bytes, original file list, and every source→target mapping.
+2. **Copy** one item at a time to the new Download location, retaining the
+   source as the rollback copy. `_copy_migration_file()` uses
+   `SEEK_DATA`/`SEEK_HOLE` where supported so a cross-device copy does not
+   inflate sparse partial files into physically allocated zeroes; unsupported
+   filesystems fall back to a normal copy.
+3. Re-add the torrent paused at the destination. The verifier waits for an
+   actual `tellStatus` response from that new GID (never the baseline values
+   still cached on the entry), checks the same info hash/total, and requires
+   completed bytes to remain within 1%/16 MiB of the pre-migration value. A
+   baseline zero counter still requires the destination to report non-zero
+   progress before it can pass.
+4. Only after verification succeeds does the worker delete the original
+   payload/control files. aria2 remains paused during verification and source
+   cleanup, then the normal scheduler resumes it.
+
+A failed copy or failed verification is retryable and leaves the authoritative
+source untouched. Verification failure stops the destination GID and restores
+the registry's original paths; staged targets remain visible to delete/cleanup
+through `migration_job.moved_files`. `verifying` and `cleanup` are active UI
+states, so Force Start/Delete cannot race the transaction. Tests live in
+`PartialTorrentMigrationTests` and cover staging, resume proof, rollback,
+crash recopy, zero-counter protection, and unreported nested files.
 
 ## aria2c install
 

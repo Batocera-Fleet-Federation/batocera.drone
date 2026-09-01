@@ -3066,7 +3066,7 @@ class PartialTorrentMigrationTests(unittest.TestCase):
         manager.update_settings({"download_directory": str(new_downloads)})
         return manager, rpc, entry["id"], payload, sidecar, new_downloads
 
-    def test_moves_payload_and_resume_sidecar_then_readds_at_new_location(self) -> None:
+    def test_stages_payload_and_resume_sidecar_verifies_then_removes_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             manager, rpc, entry_id, payload, sidecar, destination = self._partial_manager(Path(tmp))
             with manager._lock:
@@ -3077,20 +3077,39 @@ class PartialTorrentMigrationTests(unittest.TestCase):
             manager._migration_tick()
             manager._migration_tick()
 
-            self.assertFalse(payload.exists())
-            self.assertFalse(sidecar.exists())
+            # Staging is deliberately non-destructive until aria2 proves the
+            # destination sidecar retained the prior progress.
+            self.assertTrue(payload.exists())
+            self.assertTrue(sidecar.exists())
             self.assertEqual((destination / payload.name).read_bytes(), b"partial payload")
             self.assertEqual((destination / sidecar.name).read_bytes(), b"resume state")
             with manager._lock:
                 migrated = manager._torrents[entry_id]
                 self.assertEqual(migrated["download_dir"], str(destination.resolve()))
-                self.assertEqual(migrated["migration_job"]["status"], "complete")
+                self.assertEqual(migrated["migration_job"]["status"], "verifying")
                 self.assertIsNone(migrated["gid"])
             self.assertIn(old_gid, [params[0] for params in rpc.method_calls("aria2.forceRemove")])
 
             manager._tick()
             adds = rpc.method_calls("aria2.addTorrent")
             self.assertEqual(adds[-1][2]["dir"], str(destination.resolve()))
+            with manager._lock:
+                new_gid = manager._torrents[entry_id]["gid"]
+            self.assertNotIn(new_gid, [params[0] for params in rpc.method_calls("aria2.unpause")])
+            manager._migration_tick()
+            with manager._lock:
+                self.assertEqual(manager._torrents[entry_id]["migration_job"]["status"], "verifying")
+            rpc.statuses[new_gid].update({"totalLength": "20", "completedLength": "7", "infoHash": "hash"})
+            manager._tick()
+            manager._migration_tick()
+            manager._migration_tick()
+            manager._migration_tick()
+            manager._migration_tick()
+
+            self.assertFalse(payload.exists())
+            self.assertFalse(sidecar.exists())
+            with manager._lock:
+                self.assertEqual(manager._torrents[entry_id]["migration_job"]["status"], "complete")
 
     def test_rejects_destination_conflict_without_stopping_download(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3104,19 +3123,19 @@ class PartialTorrentMigrationTests(unittest.TestCase):
             self.assertEqual(rpc.method_calls("aria2.forceRemove"), [])
             self.assertTrue(payload.exists())
 
-    def test_rejects_torrent_without_downloaded_bytes(self) -> None:
+    def test_zero_counter_can_migrate_when_resume_files_exist(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             manager, _rpc, entry_id, _payload, _sidecar, _destination = self._partial_manager(Path(tmp))
             with manager._lock:
                 manager._torrents[entry_id]["completed_bytes"] = 0
             result = manager.migrate_partial(entry_id)
-            self.assertEqual(result["status"], "not_applicable")
+            self.assertEqual(result["status"], "queued")
 
     def test_failed_move_stays_stopped_until_user_retries(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             manager, rpc, entry_id, _payload, _sidecar, _destination = self._partial_manager(Path(tmp))
             self.assertEqual(manager.migrate_partial(entry_id)["status"], "queued")
-            with mock.patch.object(torrent_manager.shutil, "move", side_effect=OSError("drive unavailable")):
+            with mock.patch.object(torrent_manager, "_copy_migration_file", side_effect=OSError("drive unavailable")):
                 manager._migration_tick()
             with manager._lock:
                 self.assertEqual(manager._torrents[entry_id]["migration_job"]["status"], "failed")
@@ -3126,7 +3145,7 @@ class PartialTorrentMigrationTests(unittest.TestCase):
             self.assertEqual(len(rpc.method_calls("aria2.addTorrent")), add_count)
             self.assertEqual(manager.retry_partial_migration(entry_id)["status"], "queued")
 
-    def test_crash_after_move_does_not_delete_the_only_completed_copy(self) -> None:
+    def test_crash_during_copy_discards_partial_target_and_recopies_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             manager, _rpc, entry_id, payload, _sidecar, _destination = self._partial_manager(Path(tmp))
             self.assertEqual(manager.migrate_partial(entry_id)["status"], "queued")
@@ -3140,13 +3159,120 @@ class PartialTorrentMigrationTests(unittest.TestCase):
                 manager._persist_locked()
             target = Path(item["target"])
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(payload), str(target))
+            target.write_bytes(b"truncated")
 
             manager._migration_tick()
 
             self.assertEqual(target.read_bytes(), b"partial payload")
+            self.assertEqual(payload.read_bytes(), b"partial payload")
             with manager._lock:
                 self.assertEqual(len(manager._torrents[entry_id]["migration_job"]["moved_files"]), 1)
+
+    def test_resume_verification_failure_keeps_original_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manager, rpc, entry_id, payload, sidecar, destination = self._partial_manager(Path(tmp))
+            self.assertEqual(manager.migrate_partial(entry_id)["status"], "queued")
+            manager._migration_tick()
+            manager._migration_tick()
+            manager._tick()
+            with manager._lock:
+                new_gid = manager._torrents[entry_id]["gid"]
+            rpc.statuses[new_gid].update({"totalLength": "20", "completedLength": "0", "infoHash": "hash"})
+            for _ in range(3):
+                manager._tick()
+                manager._migration_tick()
+
+            self.assertTrue(payload.exists())
+            self.assertTrue(sidecar.exists())
+            self.assertTrue((destination / payload.name).exists())
+            with manager._lock:
+                entry = manager._torrents[entry_id]
+                self.assertEqual(entry["download_dir"], str(payload.parent.resolve()))
+                self.assertEqual(entry["migration_job"]["status"], "failed")
+                self.assertIn("lost progress", entry["migration_job"]["error"])
+
+            retry_as_new = manager.migrate_partial(entry_id)
+            self.assertEqual(retry_as_new["status"], "not_applicable")
+            self.assertIn("retry", retry_as_new["message"])
+
+    def test_verification_phase_rejects_a_second_migration_request(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manager, _rpc, entry_id, payload, sidecar, _destination = self._partial_manager(Path(tmp))
+            self.assertEqual(manager.migrate_partial(entry_id)["status"], "queued")
+            manager._migration_tick()
+            manager._migration_tick()
+
+            result = manager.migrate_partial(entry_id)
+
+            self.assertEqual(result["status"], "already_in_progress")
+            self.assertEqual(result["migration_job"]["status"], "verifying")
+            self.assertTrue(payload.exists())
+            self.assertTrue(sidecar.exists())
+
+    def test_verification_resumes_after_manager_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager, _rpc, entry_id, payload, sidecar, destination = self._partial_manager(root)
+            self.assertEqual(manager.migrate_partial(entry_id)["status"], "queued")
+            manager._migration_tick()
+            manager._migration_tick()
+
+            restarted_rpc = FakeRpc()
+            restarted = TorrentManager(_build_settings(root), start_worker=False)
+            restarted._daemon = FakeDaemon(restarted_rpc)
+            with restarted._lock:
+                restored = restarted._torrents[entry_id]
+                self.assertEqual(restored["migration_job"]["status"], "verifying")
+                self.assertIsNone(restored["gid"])
+
+            restarted._tick()
+            with restarted._lock:
+                new_gid = restarted._torrents[entry_id]["gid"]
+            restarted_rpc.statuses[new_gid].update({"totalLength": "20", "completedLength": "7", "infoHash": "hash"})
+            restarted._tick()
+            restarted._migration_tick()
+            restarted._migration_tick()
+            restarted._migration_tick()
+            restarted._migration_tick()
+
+            self.assertFalse(payload.exists())
+            self.assertFalse(sidecar.exists())
+            self.assertEqual((destination / payload.name).read_bytes(), b"partial payload")
+            with restarted._lock:
+                self.assertEqual(restarted._torrents[entry_id]["migration_job"]["status"], "complete")
+
+    def test_zero_counter_does_not_silently_retarget_existing_resume_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manager, _rpc, entry_id, payload, _sidecar, destination = self._partial_manager(Path(tmp))
+            with manager._lock:
+                entry = manager._torrents[entry_id]
+                entry["completed_bytes"] = 0
+                entry["status"] = "queued"
+                entry["download_dir"] = str(payload.parent.resolve())
+                manager._refresh_pending_download_dirs_locked(dict(manager._config))
+                self.assertEqual(entry["download_dir"], str(payload.parent.resolve()))
+                self.assertNotEqual(entry["download_dir"], str(destination.resolve()))
+            self.assertEqual(manager.force_start(entry_id)["status"], "ok")
+            with manager._lock:
+                self.assertEqual(manager._torrents[entry_id]["download_dir"], str(payload.parent.resolve()))
+
+    def test_migration_includes_unreported_files_inside_torrent_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manager, _rpc, entry_id, _payload, _sidecar, destination = self._partial_manager(Path(tmp))
+            with manager._lock:
+                source_dir = Path(manager._torrents[entry_id]["download_dir"])
+            unreported = source_dir / "game" / "nested" / "unreported.bin"
+            unreported.parent.mkdir(parents=True)
+            unreported.write_bytes(b"also required")
+
+            self.assertEqual(manager.migrate_partial(entry_id)["status"], "queued")
+            with manager._lock:
+                job = manager._torrents[entry_id]["migration_job"]
+                mappings = {item["source"]: item["target"] for item in job["remaining_files"]}
+            self.assertEqual(
+                mappings[str(unreported.resolve())],
+                str(destination.resolve() / "game" / "nested" / "unreported.bin"),
+            )
 
 
 class TorrentSettingsHandlerTests(unittest.TestCase):

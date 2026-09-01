@@ -6669,7 +6669,7 @@ function torrentMoveJobBadge(row) {
 function torrentMigrationBadge(row) {
   const job = row.migration_job;
   if (!job) return "";
-  if (["stopping", "queued", "moving"].includes(job.status)) {
+  if (["stopping", "queued", "moving", "verifying", "cleanup"].includes(job.status)) {
     return ` <span class="badge text-bg-info" title="To ${escapeHtml(job.destination || "")}"><span class="spinner-border spinner-border-sm me-1" style="width:0.6rem;height:0.6rem" role="status" aria-hidden="true"></span>Migrating ${Number(job.moved_count) || 0}/${Number(job.total_files) || 0}</span>`;
   }
   if (job.status === "failed") {
@@ -6706,11 +6706,11 @@ function renderTorrentRowMarkup(row) {
   const moveJob = row.move_job;
   const moveJobActive = !!moveJob && (moveJob.status === "queued" || moveJob.status === "moving");
   const migrationJob = row.migration_job;
-  const migrationActive = !!migrationJob && ["stopping", "queued", "moving"].includes(migrationJob.status);
+  const migrationActive = !!migrationJob && ["stopping", "queued", "moving", "verifying", "cleanup"].includes(migrationJob.status);
   const migrationFailed = !!migrationJob && migrationJob.status === "failed";
   canForceStart = canForceStart && !migrationActive && !migrationFailed;
   const currentDownloadDir = String((torrentsLastPayload || {}).effective_download_directory || "");
-  const canMigrate = migrationFailed || (!migrationActive && status !== "complete" && Number(row.completed_bytes || 0) > 0 && String(row.download_dir || "") !== currentDownloadDir);
+  const canMigrate = migrationFailed || (!migrationActive && status !== "complete" && String(row.download_dir || "") !== currentDownloadDir);
   const migrateTitle = migrationFailed ? "Retry migration" : migrationActive ? "Migration in progress" : "Move partial download to current Download location";
   const canMoveFiles = status === "complete" && !moveJobActive;
   const moveFilesTitle = moveJobActive ? "Move in progress" : "Move files";
